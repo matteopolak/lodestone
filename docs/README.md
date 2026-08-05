@@ -1187,6 +1187,18 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   values computed, fewer times — verified bit-identical against the existing
   JVM-oracle parity tests (`tests/surface_parity.rs`, `tests/overworld_gen.rs`), not a
   new algorithm.
+- [Proving vegetation reaches blocks: the vegetal-decoration census](./worldgen-vegetation-census.md) —
+  The instrumentation and the two gates that answer "did vegetal decoration actually
+  put grass, flowers and trees into a served chunk, and *how many*?" —
+  `lodestone_worldgen::feature::vegetation::census` plus
+  `plains_grass_patch_attempt_count_matches_the_placement_json` and
+  `vegetation_reaches_real_blocks_over_a_production_sweep` in
+  `crates/lodestone-server/src/worldgen_data.rs`. It exists because the vegetation
+  placer's blanket rule is "an unmodelled feature type degrades to a silent no-op",
+  which makes *every* quantity of vegetation — including zero — look identical
+  from the outside. This is issue #478's other half: the diagnosis was that vegetation
+  was missing, and the finding was that it is not, but that nothing in the tree could
+  have told you either way.
 - [Vegetal decoration: grass, flowers and trees](./worldgen-vegetation.md) —
   `crates/lodestone-worldgen/src/feature/vegetation.rs` is the engine that places
   grass, flowers and trees (oak, birch, spruce, plus spruce's own `pine` sibling)

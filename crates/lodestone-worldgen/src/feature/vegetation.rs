@@ -44,21 +44,38 @@
 //! beyond its own neighbourhood" for the ore engine's identical, already-
 //! named instance of this same shape).
 //!
-//! **No oracle validates this against a real vanilla dump.**
-//! `docs/worldgen-parity.md`'s "what could not be isolated" section already
-//! recorded, before this issue, that vegetation is "not composed into
-//! `ComposedChunkOracle.java` and not built anywhere in this crate's Rust
-//! ... no isolated oracle for it exists yet in `scripts/worldgen-oracle/`
-//! either." That remains true after this module — building one (an 8-more-
-//! real-chunk composed dump, or a single-biome isolated `VegetationOracle
-//! .java` analogous to `FeatureOracle.java`) is real, separate work, not
-//! attempted here. Every count this module's tests assert is derived
-//! **from the embedded placement-modifier JSON itself** (`expected_value()`
-//! on the outer `count` provider, `noise_threshold_count`'s two constants,
-//! etc.) plus a hand-computation of what the *engine* should produce from
-//! those inputs — an internal-consistency check, not a live-vanilla parity
-//! number. Per CLAUDE.md's evidence standard: this is **not** parity
-//! evidence, and this module's own report does not claim it is.
+//! ## Evidence: an oracle *does* validate this now (this paragraph used to say
+//! the opposite)
+//!
+//! Up to `074b5e9` this doc opened with "**No oracle validates this against a
+//! real vanilla dump**", and that was true when written — but
+//! `scripts/worldgen-oracle/VegetationOracle.java` and
+//! `crates/lodestone-worldgen/tests/vegetation_parity.rs` both exist now, and
+//! the latter diffs this module block-for-block against a real 26.2 server dump
+//! at four fixtures (two plains, two savanna). Issue #478's investigation found
+//! the stale paragraph still here, steering readers away from the evidence that
+//! had already landed. Corrected rather than deleted, because *which* claim went
+//! stale is itself the useful record — CLAUDE.md's rule 2.
+//!
+//! Two live limits on that evidence, both real:
+//!
+//! * `vegetation_parity.rs` resolves against a **fixture directory**
+//!   (`tests/support/worldgen_data`), not the bundled server assets, so it
+//!   validates the *engine* and not the shipped data path. The production seam is
+//!   covered separately, by
+//!   `lodestone_server::worldgen_data::tests::vegetation_reaches_real_blocks_over_a_production_sweep`.
+//! * `VegetationOracle.java` is self-authored, so agreement with it is weaker
+//!   evidence than a captured vanilla byte stream — and it has already been wrong
+//!   in a way that produced *plausible* output: see that test file's own
+//!   "A real bug in the oracle itself" section, where a missing
+//!   `isStateAtPosition` case made `TreeFeature.validTreePos` always false, so no
+//!   trunk placer had ever written a block through it.
+//!
+//! Counts asserted *inside* this crate remain derived **from the embedded
+//! placement-modifier JSON itself** (`expected_value()` on the outer `count`
+//! provider, `noise_threshold_count`'s two constants, etc.) — an
+//! internal-consistency check. That is not parity evidence and is not claimed as
+//! any; the parity claim rests on the two files named above.
 //!
 //! **Unsupported feature/trunk/foliage/state-provider kinds degrade to a
 //! silent no-op, never a panic** — [`ConfiguredFeature::Unsupported`],
@@ -771,7 +788,9 @@ impl VegPlacement {
                 }]
             }
             VegPlacement::BlockPredicateFilter(pred) => {
+                census_bump(|c| c.block_predicate_filter_in += 1);
                 if pred.test(grid, tags, pos) {
+                    census_bump(|c| c.block_predicate_filter_out += 1);
                     vec![pos]
                 } else {
                     Vec::new()
@@ -1785,14 +1804,24 @@ pub struct VegGrid {
     /// a `0..16` bound that was almost always false — every placement
     /// attempt for any chunk other than `(0, 0)` failed `in_bounds`/`get`'s
     /// implicit "must already be local" assumption, so vegetation composed,
-    /// ran, and reached zero blocks in every real served chunk. Caught by
-    /// `lodestone_server::worldgen_data::tests::diagnostic_vegetation_counts_over_plains_sweep`
-    /// measuring **zero** grass/flowers/logs/leaves over a 64-chunk plains
-    /// sweep — this module's own hermetic unit tests never caught it because
-    /// every one of them happened to place at `origin = BlockPos { x: 8, ...
-    /// z: 8 }`, which is coincidentally already "local" (chunk (0,0)'s own
+    /// ran, and reached zero blocks in every real served chunk. Caught by a
+    /// sweep gate measuring **zero** grass/flowers/logs/leaves over a plains
+    /// neighbourhood — this module's own hermetic unit tests never caught it
+    /// because every one of them happened to place at `origin = BlockPos { x: 8,
+    /// ... z: 8 }`, which is coincidentally already "local" (chunk (0,0)'s own
     /// footprint), the exact island CLAUDE.md's rule 1 describes: a unit
     /// test can be green while the real integration seam is broken.
+    ///
+    /// **That gate was then deleted, and this comment kept naming it** — it read
+    /// `lodestone_server::worldgen_data::tests::diagnostic_vegetation_counts_over_plains_sweep`
+    /// up to `074b5e9`, by which point no such test existed anywhere in the tree
+    /// (issue #478). So for an unknown span the repo held a written record of a
+    /// regression with nothing watching for its return, and the reference read as
+    /// coverage on inspection. The live gate is now
+    /// `lodestone_server::worldgen_data::tests::vegetation_reaches_real_blocks_over_a_production_sweep`,
+    /// with `plains_grass_patch_attempt_count_matches_the_placement_json` carrying
+    /// the predicted magnitude — but treat *this sentence* as a claim like any
+    /// other and grep for the name before trusting it.
     blocks: HashMap<(i32, i32, i32), String>,
     /// Positions actually written by `set_if_in_bounds`, **local** (see
     /// `blocks`' doc), in write order — a `Vec`, not a re-iterated
@@ -1936,10 +1965,12 @@ impl VegGrid {
     pub fn set_if_in_bounds(&mut self, x: i32, y: i32, z: i32, state: String) -> bool {
         let (lx, lz) = self.to_local_exact(x, z);
         if self.in_bounds_local(lx, lz) && y >= self.min_y && y < self.min_y + self.height {
+            census_bump(|c| c.writes += 1);
             self.blocks.insert((lx, y, lz), state);
             self.dirty.push((lx, y, lz));
             true
         } else {
+            census_bump(|c| c.writes_rejected += 1);
             false
         }
     }
@@ -1982,6 +2013,152 @@ impl VegGrid {
 /// [`super::compose::build_biome_ores`]'s "preserve raw position" convention
 /// so `setFeatureSeed`'s index is the JSON array position, not a filtered
 /// count.
+/// Per-thread census of what the vegetal-decoration placer actually *did* —
+/// issue #478's "make absence loud" half.
+///
+/// # Why this exists, and why the existing gate was not enough
+///
+/// This module's blanket rule is "an unmodelled feature/trunk/foliage/provider
+/// kind degrades to a silent no-op, never a panic" (see the module doc). That
+/// rule is right — a datapack naming a feature we don't implement must still
+/// produce a world — but on its own it makes *every* quantity of vegetation,
+/// including zero, look identical from the outside. Issue #478 was filed
+/// against exactly that shape, and the previous instance of the same shape
+/// (the absolute-vs-local `VegGrid` coordinate bug recorded in
+/// [`VegGrid`]'s own doc comment) reached **zero** blocks in every served
+/// chunk with the whole suite green.
+///
+/// [`collect_unsupported`] plus `lodestone_server::worldgen_data`'s
+/// `KNOWN_VEGETATION_GAPS` already make absence loud at **resolve** time: they
+/// answer "does this biome's declared step name a placer we don't implement?"
+/// They structurally cannot answer "did the placer that *is* implemented reach
+/// a block?", because they never run it. This census answers the second
+/// question — the one that separates a fully-connected wire carrying real
+/// blocks from a fully-connected wire carrying nothing.
+///
+/// # Thread-local, not global
+///
+/// `OverworldGenerator` is shared across threads by
+/// `lodestone_server::chunk::generate_columns_parallel`, and `cargo test` runs
+/// test binaries multi-threaded. A process-global counter would make any gate
+/// built on it read another test's work, which is the *duration* species of
+/// vacuous test (a counter accumulating past the gate's own lifetime). Each
+/// thread sees only its own placements, so a gate resets, generates, and reads
+/// back on one thread and measures exactly what it caused.
+pub mod census {
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    /// Terminal-dispatch and write tallies for one thread's placements.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct VegCensus {
+        /// [`super::ConfiguredFeature::SimpleBlock`] terminal dispatches — one
+        /// per position that survived the whole placement pipeline.
+        pub simple_block: usize,
+        /// [`super::ConfiguredFeature::Tree`] terminal dispatches.
+        pub tree: usize,
+        /// [`super::ConfiguredFeature::BlockColumn`] terminal dispatches.
+        pub block_column: usize,
+        /// [`super::ConfiguredFeature::RandomSelector`] traversals (not
+        /// terminals — each recurses into a branch).
+        pub random_selector: usize,
+        /// [`super::ConfiguredFeature::SimpleRandomSelector`] traversals.
+        pub simple_random_selector: usize,
+        /// Unmodelled terminal dispatches, **keyed by the reason string**
+        /// [`super::ConfiguredFeature::Unsupported`] carries. This is the loud
+        /// part: a new unimplemented feature type shows up here as a named,
+        /// counted row instead of as a slightly emptier world.
+        pub unsupported: BTreeMap<String, usize>,
+        /// `SimpleBlock` dispatches dropped because the state provider
+        /// produced nothing.
+        pub simple_block_no_state: usize,
+        /// `SimpleBlock` dispatches dropped because the block below is not in
+        /// `#minecraft:supports_vegetation` (`VegetationBlock.canSurvive`).
+        /// Legitimately the majority — `random_offset` scatters positions off
+        /// the heightmap column — so this is a diagnostic, not a defect count.
+        pub simple_block_unsupported_ground: usize,
+        /// Positions handed to a [`super::VegPlacement::BlockPredicateFilter`].
+        ///
+        /// This is the **last exactly-predictable boundary** in a vanilla
+        /// vegetal-decoration pipeline, and the reason it is counted separately
+        /// from everything else here. Every 26.2 overworld vegetation
+        /// `placed_feature` ends in at least one filter whose outcome depends on
+        /// terrain (measured: of 262 bundled placed features, the only three
+        /// with no filter at all are `end_spike`, `freeze_top_layer` and
+        /// `void_start_platform`), so no *terminal* count can be predicted from
+        /// the JSON alone. Everything upstream of the filter can:
+        /// `count`/`noise_threshold_count` multiply by a JSON constant,
+        /// `in_square`/`biome`/`random_offset` are each exactly
+        /// position-preserving, and `heightmap` yields exactly one position for
+        /// any column that is not entirely air. So for a single-source run of a
+        /// single placed feature this number is a product of JSON constants —
+        /// which is what lets a gate *predict* it instead of asserting a sign.
+        /// See `lodestone_server::worldgen_data`'s
+        /// `plains_grass_patch_attempt_count_matches_the_placement_json`.
+        pub block_predicate_filter_in: usize,
+        /// Positions that passed a [`super::VegPlacement::BlockPredicateFilter`].
+        pub block_predicate_filter_out: usize,
+        /// Grid writes that landed.
+        pub writes: usize,
+        /// Grid writes dropped as outside the grid's own footprint (spill into
+        /// a chunk this grid does not cover — expected, see
+        /// [`super::VegGrid::set_if_in_bounds`]).
+        pub writes_rejected: usize,
+    }
+
+    impl VegCensus {
+        /// Total unmodelled terminal dispatches across every reason.
+        #[must_use]
+        pub fn unsupported_total(&self) -> usize {
+            self.unsupported.values().sum()
+        }
+
+        /// Terminal dispatches that reached a placer this engine implements.
+        #[must_use]
+        pub fn modelled_terminals(&self) -> usize {
+            self.simple_block + self.tree + self.block_column
+        }
+    }
+
+    thread_local! {
+        static CENSUS: RefCell<VegCensus> = RefCell::new(VegCensus::default());
+    }
+
+    /// Whether an unmodelled terminal dispatch should panic instead of being
+    /// counted — `LODESTONE_VEG_STRICT=1`. Read once per process.
+    ///
+    /// Off by default on purpose: the module's degrade-don't-crash rule is what
+    /// lets a trimmed datapack generate at all, and 26.2's own vanilla data
+    /// reaches unmodelled types in nearly every biome (`multiface_growth` alone
+    /// is in 55 of them), so strict mode is a *debugging* switch for "which
+    /// type am I missing here", not a mode anything ships in.
+    #[must_use]
+    pub fn strict() -> bool {
+        static STRICT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *STRICT.get_or_init(|| {
+            std::env::var("LODESTONE_VEG_STRICT").is_ok_and(|v| v != "0" && !v.is_empty())
+        })
+    }
+
+    /// Zeroes this thread's census. Call immediately before the generation a
+    /// gate intends to measure.
+    pub fn reset() {
+        CENSUS.with(|c| *c.borrow_mut() = VegCensus::default());
+    }
+
+    /// This thread's census so far.
+    #[must_use]
+    pub fn snapshot() -> VegCensus {
+        CENSUS.with(|c| c.borrow().clone())
+    }
+
+    pub(super) fn bump(f: impl FnOnce(&mut VegCensus)) {
+        CENSUS.with(|c| f(&mut c.borrow_mut()));
+    }
+}
+
+use census::bump as census_bump;
+
 pub fn apply_vegetal_decoration_step<R: RandomSource>(
     random: &mut WorldgenRandom<R>,
     seed: i64,
@@ -2099,10 +2276,20 @@ fn place_configured_feature<R: RandomSource>(
     tags: &VegTags,
 ) {
     match feature {
-        ConfiguredFeature::SimpleBlock(provider) => place_simple_block(random, pos, provider, grid, tags),
-        ConfiguredFeature::Tree(cfg) => place_tree(random, pos, cfg, grid, tags),
-        ConfiguredFeature::BlockColumn(cfg) => place_block_column(random, pos, cfg, grid, tags),
+        ConfiguredFeature::SimpleBlock(provider) => {
+            census_bump(|c| c.simple_block += 1);
+            place_simple_block(random, pos, provider, grid, tags)
+        }
+        ConfiguredFeature::Tree(cfg) => {
+            census_bump(|c| c.tree += 1);
+            place_tree(random, pos, cfg, grid, tags)
+        }
+        ConfiguredFeature::BlockColumn(cfg) => {
+            census_bump(|c| c.block_column += 1);
+            place_block_column(random, pos, cfg, grid, tags)
+        }
         ConfiguredFeature::RandomSelector { default, options } => {
+            census_bump(|c| c.random_selector += 1);
             for (chance, option) in options {
                 if random.next_float() < *chance {
                     place_placed_feature(random, pos, option, grid, tags);
@@ -2112,13 +2299,25 @@ fn place_configured_feature<R: RandomSource>(
             place_placed_feature(random, pos, default, grid, tags);
         }
         ConfiguredFeature::SimpleRandomSelector(list) => {
+            census_bump(|c| c.simple_random_selector += 1);
             if list.is_empty() {
                 return;
             }
             let idx = random.next_int_bounded(list.len() as i32) as usize;
             place_placed_feature(random, pos, &list[idx], grid, tags);
         }
-        ConfiguredFeature::Unsupported(_) => {}
+        // Issue #478: still a no-op — the module's degrade-don't-crash rule —
+        // but a *counted, named* one. `LODESTONE_VEG_STRICT=1` turns it into a
+        // panic naming the reason, for answering "which type is missing here"
+        // without adding a print to a hot loop.
+        ConfiguredFeature::Unsupported(reason) => {
+            assert!(
+                !census::strict(),
+                "LODESTONE_VEG_STRICT: unmodelled vegetal-decoration feature reached a \
+                 placement at {pos:?}: {reason}"
+            );
+            census_bump(|c| *c.unsupported.entry(reason.clone()).or_default() += 1);
+        }
     }
 }
 
@@ -2130,12 +2329,14 @@ fn place_simple_block<R: RandomSource>(
     tags: &VegTags,
 ) {
     let Some(state) = provider.get_state(grid, tags, random, pos) else {
+        census_bump(|c| c.simple_block_no_state += 1);
         return;
     };
     // `VegetationBlock.canSurvive`: the block below must support vegetation
     // — see module doc on why this is applied uniformly.
     let below = base_id(grid.get(pos.x, pos.y - 1, pos.z));
     if !tags.supports_vegetation.contains(below) {
+        census_bump(|c| c.simple_block_unsupported_ground += 1);
         return;
     }
     grid.set_if_in_bounds(pos.x, pos.y, pos.z, state);

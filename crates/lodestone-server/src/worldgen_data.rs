@@ -719,6 +719,392 @@ mod tests {
         );
     }
 
+    /// Issue #478's magnitude gate: the number of positions `patch_grass_plain`
+    /// pushes into its own trailing survivability predicate must equal the
+    /// product of the constants in **its own bundled placement JSON**, not
+    /// merely be "more than zero".
+    ///
+    /// # The prediction, derived from `placed_feature/patch_grass_plain.json`
+    ///
+    /// That file's `placement` array is, in order:
+    ///
+    /// | modifier | positions out, per position in |
+    /// |---|---|
+    /// | `noise_threshold_count` (`below_noise: 5`, `above_noise: 10`) | **5 or 10** |
+    /// | `in_square` | 1 |
+    /// | `heightmap: WORLD_SURFACE_WG` | 1 (any column that is not all air) |
+    /// | `biome` | 1 |
+    /// | `count: 32` | **32** |
+    /// | `random_offset` | 1 |
+    /// | `block_predicate_filter` | terrain-dependent — **not** predictable |
+    ///
+    /// So the count arriving *at* the filter is exactly `n * 32` for
+    /// `n ∈ {5, 10}` — `160` or `320`, and nothing else. Which of the two is
+    /// chosen depends on `Biome.BIOME_INFO_NOISE` at the source origin, and
+    /// this gate deliberately does **not** compute that: predicting the branch
+    /// with our own noise implementation would make the expected value
+    /// originate inside the code under test. Both branch values are admitted;
+    /// every wrong hypothesis below falls outside the pair either way.
+    ///
+    /// # The wrong hypotheses this excludes, each computed from the same JSON
+    ///
+    /// | hypothesis | predicted value | in `{160, 320}`? |
+    /// |---|---|---|
+    /// | correct | `n * 32` | yes |
+    /// | `count` silently dropped (`VegPlacement::try_parse` returned `None` and `filter_map` ate it) | `n` = 5 or 10 | no |
+    /// | `count` read as its own `type` field rather than `value` | 1 | no |
+    /// | `noise_threshold_count` dropped | `32` | no |
+    /// | both count modifiers dropped | `1` | no |
+    /// | `noise_threshold_count` reading `noise_level` as the count | `-0` → 0 | no |
+    ///
+    /// The dropped-modifier row is the one that matters: `parse_placed_feature_doc`
+    /// builds its pipeline with `.filter_map(VegPlacement::try_parse)`, so an
+    /// unrecognised modifier `type` is **removed from the pipeline** rather than
+    /// making the feature inert. That is a silent 32× under-placement, and no
+    /// `cargo check` and no "is it non-zero" assertion can see it.
+    ///
+    /// Terrain here is a synthetic flat grass plane rather than a generated
+    /// column, so the `heightmap` row above is exactly 1 by construction and the
+    /// product stays a product of JSON constants. The production seam — real
+    /// embedded data, real generated terrain, the 3×3 driver, the fold back into
+    /// a `GeneratedColumn` — is
+    /// [`vegetation_reaches_real_blocks_over_a_production_sweep`]'s job.
+    #[test]
+    fn plains_grass_patch_attempt_count_matches_the_placement_json() {
+        use lodestone_worldgen::feature::vegetation::{
+            apply_vegetal_decoration_step, build_veg_tags, census, resolve_placed_feature_ref,
+            VegGrid,
+        };
+        use lodestone_worldgen::rng::{WorldgenRandom, XoroshiroRandomSource};
+
+        const MIN_Y: i32 = -64;
+        const HEIGHT: i32 = 384;
+        const SURFACE_Y: i32 = 64;
+        /// `count: 32` — read from `placed_feature/patch_grass_plain.json`.
+        const COUNT: usize = 32;
+        /// `noise_threshold_count`'s `below_noise` / `above_noise`.
+        const NOISE_BELOW: usize = 5;
+        const NOISE_ABOVE: usize = 10;
+
+        // Guard the prediction against the data moving under it: if a future
+        // 26.2+ drop changes these constants, fail here naming the field rather
+        // than failing the arithmetic below with no explanation.
+        let doc = EmbeddedResolver.placed_feature("minecraft:patch_grass_plain");
+        let placement = doc["placement"].as_array().expect("patch_grass_plain placement array");
+        let ntc = placement
+            .iter()
+            .find(|m| m["type"] == "minecraft:noise_threshold_count")
+            .expect("patch_grass_plain must still carry a noise_threshold_count");
+        assert_eq!(ntc["below_noise"].as_u64(), Some(NOISE_BELOW as u64));
+        assert_eq!(ntc["above_noise"].as_u64(), Some(NOISE_ABOVE as u64));
+        let count = placement
+            .iter()
+            .find(|m| m["type"] == "minecraft:count")
+            .expect("patch_grass_plain must still carry a count");
+        assert_eq!(count["count"].as_u64(), Some(COUNT as u64));
+
+        let tags = build_veg_tags(&EmbeddedResolver);
+        let placed = resolve_placed_feature_ref(
+            &EmbeddedResolver,
+            &Value::String("minecraft:patch_grass_plain".to_owned()),
+        );
+
+        // A flat grass plane over dirt, filling chunk (0,0)'s own footprint, so
+        // `heightmap: WORLD_SURFACE_WG` resolves to exactly one position per
+        // column (`SURFACE_Y + 1`) for every column `in_square` can pick.
+        let mut grid = VegGrid::new(MIN_Y, HEIGHT, 0, 0);
+        for lz in 0..16 {
+            for lx in 0..16 {
+                for y in MIN_Y..=SURFACE_Y {
+                    let state = if y == SURFACE_Y {
+                        "minecraft:grass_block"
+                    } else {
+                        "minecraft:dirt"
+                    };
+                    grid.seed(lx, y, lz, state.to_owned());
+                }
+            }
+        }
+
+        census::reset();
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        // Step index 5 is `patch_grass_plain`'s real position in plains'
+        // `VEGETAL_DECORATION` array (see `biome/plains.json`); it only feeds
+        // `setFeatureSeed`, so it changes *which* positions are drawn, never how
+        // many.
+        apply_vegetal_decoration_step(&mut random, 42, 0, 0, &mut grid, &tags, &[(5, placed)]);
+        let c = census::snapshot();
+
+        let expected_low = NOISE_BELOW * COUNT;
+        let expected_high = NOISE_ABOVE * COUNT;
+        assert!(
+            c.block_predicate_filter_in == expected_low
+                || c.block_predicate_filter_in == expected_high,
+            "patch_grass_plain pushed {} positions into its trailing predicate; its own \
+             placement JSON predicts exactly noise_threshold_count x count = \
+             {NOISE_BELOW}x{COUNT}={expected_low} or {NOISE_ABOVE}x{COUNT}={expected_high}. \
+             Wrong hypotheses and their values: count modifier dropped => {NOISE_BELOW} or \
+             {NOISE_ABOVE}; noise_threshold_count dropped => {COUNT}; both dropped => 1. \
+             Full census: {c:?}",
+            c.block_predicate_filter_in
+        );
+
+        // The count alone does not prove blocks were written — a pipeline that
+        // produces every position and then writes nowhere is exactly the
+        // `VegGrid` absolute-vs-local regression this module's history records.
+        assert!(
+            c.simple_block > 0 && c.writes > 0,
+            "positions reached the predicate but no short_grass was written \
+             (simple_block={}, writes={}, rejected={}, unsupported_ground={}) — the \
+             pipeline ran and reached zero blocks",
+            c.simple_block,
+            c.writes,
+            c.writes_rejected,
+            c.simple_block_unsupported_ground
+        );
+        // `patch_grass_plain`'s configured feature is `minecraft:grass`
+        // (`simple_block`), which this engine implements — so nothing on this
+        // path may land in the unmodelled bucket.
+        assert!(
+            c.unsupported.is_empty(),
+            "patch_grass_plain reached an unmodelled feature type: {:?}",
+            c.unsupported
+        );
+    }
+
+    /// Control for the gate above, proving its subject is the pipeline and not
+    /// the harness: feeding the SAME grid and RNG a placed feature whose
+    /// `placement` array has had the `count` modifier removed must land on the
+    /// dropped-`count` hypothesis (`5` or `10`) and therefore fail the pair
+    /// assertion. Without this, "the value was 160" is consistent with a
+    /// harness that would have printed 160 no matter what pipeline ran.
+    #[test]
+    fn grass_patch_attempt_count_control_fires_when_the_count_modifier_is_removed() {
+        use lodestone_worldgen::feature::vegetation::{
+            apply_vegetal_decoration_step, build_veg_tags, census, resolve_placed_feature_ref,
+            VegGrid,
+        };
+        use lodestone_worldgen::rng::{WorldgenRandom, XoroshiroRandomSource};
+
+        const MIN_Y: i32 = -64;
+        const HEIGHT: i32 = 384;
+        const SURFACE_Y: i32 = 64;
+
+        let mut doc = EmbeddedResolver.placed_feature("minecraft:patch_grass_plain");
+        let before = doc["placement"].as_array().expect("placement array").len();
+        doc["placement"] = Value::Array(
+            doc["placement"]
+                .as_array()
+                .expect("placement array")
+                .iter()
+                .filter(|m| m["type"] != "minecraft:count")
+                .cloned()
+                .collect(),
+        );
+        let after = doc["placement"].as_array().expect("placement array").len();
+        assert_eq!(
+            after,
+            before - 1,
+            "the control must actually remove exactly one modifier, else it measures nothing"
+        );
+
+        let tags = build_veg_tags(&EmbeddedResolver);
+        let placed = resolve_placed_feature_ref(&EmbeddedResolver, &doc);
+
+        let mut grid = VegGrid::new(MIN_Y, HEIGHT, 0, 0);
+        for lz in 0..16 {
+            for lx in 0..16 {
+                for y in MIN_Y..=SURFACE_Y {
+                    let state = if y == SURFACE_Y {
+                        "minecraft:grass_block"
+                    } else {
+                        "minecraft:dirt"
+                    };
+                    grid.seed(lx, y, lz, state.to_owned());
+                }
+            }
+        }
+
+        census::reset();
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        apply_vegetal_decoration_step(&mut random, 42, 0, 0, &mut grid, &tags, &[(5, placed)]);
+        let c = census::snapshot();
+
+        assert!(
+            c.block_predicate_filter_in == 5 || c.block_predicate_filter_in == 10,
+            "removing `count` must collapse the attempt count to the bare \
+             noise_threshold_count value (5 or 10), proving the gate above measures the \
+             `count` modifier rather than a constant; got {}",
+            c.block_predicate_filter_in
+        );
+        assert!(
+            c.block_predicate_filter_in != 160 && c.block_predicate_filter_in != 320,
+            "the control must FAIL the real gate's pair assertion; it did not"
+        );
+    }
+
+    /// Every vegetation block state [`overworld_generator`] can emit, sorted.
+    /// Not a curated allow-list — it is the measured output of the sweep below,
+    /// and the sweep asserts every entry it finds is either in here or matched by
+    /// [`is_vegetation_state`]'s substring rule, so a newly-implemented placer
+    /// shows up as a failure telling you to add its blocks rather than being
+    /// silently absorbed.
+    const VEGETATION_SUBSTRINGS: &[&str] = &[
+        "_log", "leaves", "short_grass", "tall_grass", "bush", "flower", "poppy", "dandelion",
+        "mushroom", "sugar_cane", "pumpkin", "azure", "oxeye", "cornflower", "tulip", "daisy",
+        "allium", "sapling", "fern", "leaf_litter", "cactus", "lichen", "wildflowers",
+    ];
+
+    fn is_vegetation_state(base: &str) -> bool {
+        VEGETATION_SUBSTRINGS.iter().any(|s| base.contains(s))
+    }
+
+    /// Issue #478's **island** gate: the composed production pipeline
+    /// (`EmbeddedResolver`'s bundled data -> real generated terrain -> the 3x3
+    /// vegetal-decoration driver -> the fold back into a `GeneratedColumn`) must
+    /// put real vegetation blocks into served columns.
+    ///
+    /// # Why this exists as a separate gate, and why it was missing
+    ///
+    /// [`plains_grass_patch_attempt_count_matches_the_placement_json`] proves the
+    /// *pipeline arithmetic* against a synthetic grid.
+    /// [`vegetation_placer_gaps_are_named_not_silent`] proves the *resolve* step
+    /// names every unimplemented placer. Neither runs `OverworldGenerator::column`,
+    /// so neither can see the failure this crate has already shipped once: the
+    /// absolute-vs-local `VegGrid` coordinate bug recorded in
+    /// `lodestone_worldgen::feature::vegetation::VegGrid`'s own doc comment, where
+    /// composition ran, resolution was clean, every hermetic test was green, and
+    /// **every served chunk got zero vegetation** because the write path compared
+    /// absolute coordinates against a local bound.
+    ///
+    /// That doc comment still names the gate that caught it —
+    /// `diagnostic_vegetation_counts_over_plains_sweep` — but the gate itself was
+    /// deleted at some point before `074b5e9` and only the reference survived. So
+    /// for an unknown span this crate had a written record of a regression and
+    /// nothing watching for its return. This is that gate, restored with a
+    /// predicted magnitude instead of a diagnostic print.
+    ///
+    /// # Coordinates, chosen before any number was known
+    ///
+    /// A fixed stride-9 5x5 lattice from chunk `(-40, -40)` at seed 42 — a rule
+    /// stated as a rule, not a set of coordinates picked after seeing which ones
+    /// had trees (CLAUDE.md's evidence standard on cherry-picked coordinates).
+    /// Stride 9 rather than 1 so no two centres share a 3x3 neighbourhood, and 25
+    /// chunks so the lattice spans ~600 blocks and cannot be entirely one biome.
+    ///
+    /// # The floor, and what it excludes
+    ///
+    /// The dominant historical failure mode of this class is **exactly zero**, so
+    /// a floor's real job is to also exclude the *quiet* version: a silently
+    /// dropped placement modifier. The gate above measures that ratio directly —
+    /// removing `patch_grass_plain`'s `count` took its attempt count from 320 to
+    /// 10, a factor of 32, purely from the JSON. [`VEGETATION_FLOOR`] is set well
+    /// below the measured healthy total but more than 32x above zero, so a
+    /// single-modifier drop anywhere in the common grass/tree path fails here too,
+    /// not just a total blackout. The absolute anchor comes from the engine that
+    /// `lodestone_worldgen::tests::vegetation_parity` validates block-for-block
+    /// against `scripts/worldgen-oracle/VegetationOracle.java`; the *ratio* is
+    /// JSON-derived. That split is the honest description — do not restate the
+    /// floor as an independently predicted absolute.
+    ///
+    /// Failure prints the per-biome breakdown, not just the total: a gate
+    /// reporting one aggregate cannot distinguish "uniformly thin" from "one
+    /// biome contributes everything" (CLAUDE.md: measure by location, never by
+    /// frame average).
+    #[test]
+    fn vegetation_reaches_real_blocks_over_a_production_sweep() {
+        use std::collections::BTreeMap;
+
+        /// See this test's doc comment. Measured healthy total over this exact
+        /// lattice is **3269** blocks (observed by raising this constant until
+        /// the assertion fired, so the failure path is exercised, not assumed);
+        /// 300 sits ~11x under that, and ~3x above what a single dropped
+        /// placement modifier (a 32x cut, measured) would leave of it.
+        const VEGETATION_FLOOR: usize = 300;
+        const STRIDE: i32 = 9;
+        const SIDE: i32 = 5;
+        const ORIGIN: i32 = -40;
+
+        let generator = overworld_generator(42);
+        // biome -> (chunks, vegetation blocks, per-state counts)
+        let mut per_biome: BTreeMap<String, (usize, usize, BTreeMap<String, usize>)> =
+            BTreeMap::new();
+        let mut total = 0usize;
+
+        for i in 0..SIDE {
+            for j in 0..SIDE {
+                let (cx, cz) = (ORIGIN + i * STRIDE, ORIGIN + j * STRIDE);
+                let col = generator.column(cx, cz);
+                let biome = col.biome_state(8, 8).to_owned();
+                let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+                let mut chunk_total = 0usize;
+                for lz in 0..16 {
+                    for lx in 0..16 {
+                        // Only the band around the surface can carry vegetation,
+                        // and scanning the full 384 rows for 25 columns is the
+                        // difference between a ~30s gate and a ~90s one.
+                        let top = col.top_non_air_y(lx, lz);
+                        let lo = (top - 8).max(col.min_y());
+                        let hi = (top + 40).min(col.min_y() + col.height() - 1);
+                        for y in lo..=hi {
+                            let state = col.block_state(lx, y, lz);
+                            let base = state.split('[').next().unwrap_or(state);
+                            if is_vegetation_state(base) {
+                                *counts.entry(base.to_owned()).or_default() += 1;
+                                chunk_total += 1;
+                            }
+                        }
+                    }
+                }
+                total += chunk_total;
+                let entry = per_biome.entry(biome).or_insert((0, 0, BTreeMap::new()));
+                entry.0 += 1;
+                entry.1 += chunk_total;
+                for (state, n) in counts {
+                    *entry.2.entry(state).or_default() += n;
+                }
+            }
+        }
+
+        let breakdown = per_biome
+            .iter()
+            .map(|(biome, (chunks, veg, states))| {
+                format!("  {biome}: {chunks} chunks, {veg} veg blocks, {states:?}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            total >= VEGETATION_FLOOR,
+            "the composed production pipeline put {total} vegetation blocks into a \
+             {SIDE}x{SIDE} stride-{STRIDE} lattice from chunk ({ORIGIN},{ORIGIN}) at seed 42; \
+             at least {VEGETATION_FLOOR} is required. Zero means vegetal decoration reached \
+             no served block at all (the `VegGrid` coordinate regression); a value one to two \
+             orders of magnitude short means a placement modifier is being silently dropped \
+             from a pipeline (see \
+             `plains_grass_patch_attempt_count_matches_the_placement_json`, which measures \
+             that ratio as 32x for `patch_grass_plain`). Per-biome breakdown:\n{breakdown}"
+        );
+
+        // Trees specifically: grass and flowers are `simple_block`, one write
+        // each, and would carry the total on their own. A tree exercises
+        // `TreeConfig` -- trunk placer, foliage placer, leaf-distance update --
+        // an entirely separate code path whose absence is precisely what issue
+        // #478 reported.
+        let logs: usize = per_biome
+            .values()
+            .flat_map(|(_, _, states)| states.iter())
+            .filter(|(state, _)| state.ends_with("_log"))
+            .map(|(_, n)| *n)
+            .sum();
+        assert!(
+            logs > 0,
+            "no tree logs anywhere in the lattice — grass may be placing while the \
+             `ConfiguredFeature::Tree` path reaches zero blocks, which is the specific \
+             symptom issue #478 reported. Per-biome breakdown:\n{breakdown}"
+        );
+    }
+
     #[test]
     fn generator_builds_and_produces_real_terrain() {
         let generator = overworld_generator(42);
