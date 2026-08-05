@@ -892,6 +892,18 @@ transform cannot produce. Ask *where*, not *what*.
 ## Data sources, in order
 
 1. **Mojang's own generator** (`packets.json`, `registries.json`, `blocks.json`) — authoritative.
+
+   **But `registries.json` is authoritative about registry *contents*, not about which registries are
+   *sent to the client*, and issue #275's body makes exactly that mistake.** It names `registries.json`
+   as the verification source for the Configuration-phase `registry_data` set — and that file **omits
+   `dimension_type` and `world_clock`**, so following it literally builds a set missing the registry the
+   client needs most. The real list is **`RegistryDataLoader.SYNCHRONIZED_REGISTRIES` (29 entries)** in
+   the jar. Two different questions, one file, and the wrong answer looks complete.
+
+   The reason this survives review is worth keeping too: **our own client is deliberately tolerant of a
+   short registry set**, so a wrong list produces no error here — only against a real vanilla client. An
+   authoritative source answering a *neighbouring* question is harder to catch than a stale one, because
+   nothing about it looks out of date.
 2. **Decompiled source** under `.cache/mc/26.2/{src,client-src}` — reference for behaviour only,
    never transliterated. 26.2 ships de-obfuscated, so names are real.
 3. **minecraft-data** — bootstrap and cross-check for **1.8–1.21.11 only**; it has no 26.x data, and
