@@ -341,6 +341,41 @@ impl BrewingStand {
         Self::default()
     }
 
+    /// Rebuilds a brewing stand from persisted state — see
+    /// [`crate::furnace::Furnace::restore`] for why this is one total
+    /// constructor rather than a setter per field.
+    ///
+    /// `locked_ingredient` is the ingredient captured when the current brew
+    /// started, and it is **not** redundant with the live ingredient slot:
+    /// [`tick`](Self::tick) compares the two to detect a mid-brew swap, so a
+    /// load that dropped it would let a player swap the ingredient across a
+    /// save/load boundary and keep the original brew's progress.
+    #[must_use]
+    pub fn restore(
+        bottles: [Option<Bottle>; 3],
+        ingredient: Option<(String, u32)>,
+        fuel_item: Option<(String, u32)>,
+        fuel_charges: i32,
+        brew_time: i32,
+        locked_ingredient: Option<String>,
+    ) -> Self {
+        Self {
+            bottles,
+            ingredient,
+            fuel_item,
+            fuel_charges,
+            brew_time,
+            locked_ingredient,
+        }
+    }
+
+    /// The ingredient captured when the running brew started, for
+    /// persistence. See [`restore`](Self::restore) for why it matters.
+    #[must_use]
+    pub fn locked_ingredient(&self) -> Option<&str> {
+        self.locked_ingredient.as_deref()
+    }
+
     #[must_use]
     pub fn bottle(&self, slot: usize) -> Option<&Bottle> {
         self.bottles.get(slot).and_then(Option::as_ref)

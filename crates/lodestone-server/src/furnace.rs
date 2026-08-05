@@ -649,6 +649,72 @@ impl Furnace {
         }
     }
 
+    /// Rebuilds a furnace from persisted state — every field at once,
+    /// deliberately, rather than a family of setters.
+    ///
+    /// The totality is the point: this is the only constructor world loading
+    /// uses, so adding a field to [`Furnace`] breaks it at compile time and
+    /// forces the save schema to be updated with it. A setter-based restore
+    /// would silently drop the new field and a world would come back subtly
+    /// wrong with every test still green.
+    ///
+    /// `recipes_used` is the banked, not-yet-collected experience map (see
+    /// [`take_recipes_used`](Self::take_recipes_used)); its keys are this
+    /// crate's own `"kind:ingredient"` strings, not vanilla recipe ids, which
+    /// is why [`crate::chunk_nbt`] writes it under a namespaced field of its
+    /// own rather than into vanilla's `RecipesUsed`.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore(
+        kind: FurnaceKind,
+        input: Option<ItemStack>,
+        fuel: Option<ItemStack>,
+        output: Option<ItemStack>,
+        lit_time_remaining: i32,
+        lit_total_time: i32,
+        cooking_time_spent: i32,
+        cooking_total_time: i32,
+        recipes_used: HashMap<String, u32>,
+    ) -> Self {
+        Self {
+            kind,
+            input,
+            fuel,
+            output,
+            lit_time_remaining,
+            lit_total_time,
+            cooking_timer: cooking_time_spent,
+            cooking_total_time,
+            recipes_used,
+        }
+    }
+
+    /// The four burn/cook timers in vanilla's own `AbstractFurnaceBlockEntity`
+    /// field order: `lit_time_remaining`, `lit_total_time`,
+    /// `cooking_time_spent`, `cooking_total_time`.
+    ///
+    /// Distinct from [`container_data`](Self::container_data), which answers
+    /// the same four numbers *in menu-property order* for the wire. This one
+    /// is named after the on-disk fields so a save site cannot pair a value
+    /// with the wrong key by reading the indices in the wrong order.
+    #[must_use]
+    pub fn burn_state(&self) -> (i32, i32, i32, i32) {
+        (
+            self.lit_time_remaining,
+            self.lit_total_time,
+            self.cooking_timer,
+            self.cooking_total_time,
+        )
+    }
+
+    /// The banked recipe-use counts, for persistence. Read-only: collection
+    /// still goes through [`take_recipes_used`](Self::take_recipes_used),
+    /// which is what actually pays the experience out.
+    #[must_use]
+    pub fn recipes_used(&self) -> &HashMap<String, u32> {
+        &self.recipes_used
+    }
+
     #[must_use]
     pub fn kind(&self) -> FurnaceKind {
         self.kind

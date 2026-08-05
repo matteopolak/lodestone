@@ -67,19 +67,57 @@
 //!   [`column_from_nbt`] takes the extent from its caller rather than inferring
 //!   it from the section list, which would inflate the column by 32 rows.
 //!
+//! # Block entities and scheduled ticks
+//!
+//! [`ChunkExtras`] carries the two lists this module wrote empty until issue
+//! [#468](https://github.com/matteopolak/lodestone/issues/468) — so a saved
+//! container came back empty and a pending tick was lost. Both halves were
+//! read off real 26.2 worlds with an independent stdlib parser (22,488 chunks
+//! across `.cache/mc/{survival,creative,26.2,terrain}`), and the measurement
+//! contradicted the obvious reading of the decompiled source twice:
+//!
+//! | measured | consequence |
+//! |---|---|
+//! | `p` is `Int(0)` on all 133,051 saved ticks | [`tick_priority_value`] writes the **value**, not the ordinal — `Normal` is value `0` and ordinal `3` |
+//! | `t` is negative on 1,584 of them, down to `-1046` | [`SavedTick::delay`] is `i32`; loading is `game_time + delay` |
+//! | items are `{Slot: Byte, id: String, count: Int}` | `count` is an `Int`, not the pre-1.20.5 `Count: Byte` |
+//! | every entry carries `keepPacked: Byte` and `components: Compound` | written unconditionally, matching vanilla |
+//!
+//! Both tick traps fail *silently* under a round trip through our own writer,
+//! because the writer and the reader would share the mistake — which is why
+//! `tests/chunk_extras_vanilla_oracle.rs` reads bytes Mojang wrote.
+//!
+//! Two of the four block-entity kinds this crate simulates are written under
+//! **namespaced** ids or fields, and each has a reason recorded at its own
+//! definition: [`COMPOSTER_ID`] (vanilla has no composter block entity at all)
+//! and [`RECIPES_USED_FIELD`] (our keys are not vanilla recipe ids). The
+//! furnace family, the hopper and the brewing stand are written under their
+//! real vanilla ids with vanilla's own fields.
+//!
 //! # Configuration
 //!
 //! None. [`DATA_VERSION`] is a constant, not a setting.
 //!
 //! # Dependencies
 //!
-//! `lodestone-core` for the `Nbt` tree, and [`crate::chunk::ChunkColumn`]. No
-//! filesystem access — this module is pure tree-to-struct, which is what lets
-//! it be tested against bytes a real server wrote without any I/O harness.
+//! `lodestone-core` for the `Nbt` tree, [`crate::chunk::ChunkColumn`], and —
+//! for the block-entity half — [`crate::block_entities`] and the four
+//! simulations behind it. No filesystem access: this module is pure
+//! tree-to-struct, which is what lets it be tested against bytes a real server
+//! wrote without any I/O harness.
+
+use std::collections::HashMap;
 
 use lodestone_core::{Nbt, NbtTag};
+use lodestone_model::{BlockPos, ItemStack};
 
+use crate::block_entities::BlockEntity;
+use crate::brewing::{Bottle, BottleKind, BrewingStand};
 use crate::chunk::ChunkColumn;
+use crate::composter::Composter;
+use crate::furnace::{Furnace, FurnaceKind};
+use crate::hopper::Hopper;
+use crate::scheduled_tick::TickPriority;
 
 /// The `DataVersion` a 26.2 server stamps on every chunk it writes, read
 /// directly off `.cache/mc/survival/world`'s `r.0.0.mca` rather than from any
@@ -281,13 +319,29 @@ pub fn palette_entry_to_state(entry: &Nbt, path: &str) -> Result<String, Error> 
     Ok(out)
 }
 
+/// Encodes a column as the chunk NBT tree a 26.2 region file holds, with
+/// empty `block_entities`/`block_ticks`/`fluid_ticks`.
+///
+/// Callers that have a world's live block entities and pending ticks to write
+/// want [`column_to_nbt_with`] — this is the terrain-only shortcut, kept for
+/// the tests and oracles that only ever had terrain.
+#[must_use]
+pub fn column_to_nbt(cx: i32, cz: i32, column: &ChunkColumn) -> Nbt {
+    column_to_nbt_with(cx, cz, column, &ChunkExtras::default())
+}
+
 /// Encodes a column as the chunk NBT tree a 26.2 region file holds.
 ///
 /// Writes `Status = "minecraft:full"` (the one field vanilla treats as
 /// mandatory) and omits `Heightmaps` so vanilla re-primes them — see this
 /// module's doc comment for why writing them would be worse than omitting them.
+///
+/// `extras` supplies the chunk's block entities and its pending block/fluid
+/// ticks; see [`ChunkExtras`] for the two schema traps in the tick half.
+/// Nothing here filters by chunk — the caller is expected to have grouped
+/// already, matching vanilla's own `SavedTick.filterTickListForChunk`.
 #[must_use]
-pub fn column_to_nbt(cx: i32, cz: i32, column: &ChunkColumn) -> Nbt {
+pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &ChunkExtras) -> Nbt {
     let min_section = column.min_y.div_euclid(16);
     let section_count = (column.height as usize).div_ceil(SECTION_EDGE);
     let palette = column.raw_palette();
@@ -392,24 +446,21 @@ pub fn column_to_nbt(cx: i32, cz: i32, column: &ChunkColumn) -> Nbt {
         ),
         (
             "block_entities".to_owned(),
-            Nbt::List {
-                element_type: NbtTag::End,
-                elements: Vec::new(),
-            },
+            nbt_list(
+                extras
+                    .block_entities
+                    .iter()
+                    .map(|(pos, entity)| block_entity_to_nbt(*pos, entity))
+                    .collect(),
+            ),
         ),
         (
             "block_ticks".to_owned(),
-            Nbt::List {
-                element_type: NbtTag::End,
-                elements: Vec::new(),
-            },
+            nbt_list(extras.block_ticks.iter().map(saved_tick_to_nbt).collect()),
         ),
         (
             "fluid_ticks".to_owned(),
-            Nbt::List {
-                element_type: NbtTag::End,
-                elements: Vec::new(),
-            },
+            nbt_list(extras.fluid_ticks.iter().map(saved_tick_to_nbt).collect()),
         ),
         (
             "structures".to_owned(),
@@ -546,4 +597,585 @@ pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn
     }
 
     Ok(column)
+}
+
+// ---------------------------------------------------------------------------
+// Block entities and scheduled ticks (issue #468's remaining half)
+// ---------------------------------------------------------------------------
+
+/// One pending scheduled tick as it sits **on disk**, mirroring vanilla's
+/// `net.minecraft.world.ticks.SavedTick` record
+/// (`SavedTick.java:13`, `record SavedTick<T>(T type, BlockPos pos, int delay,
+/// TickPriority priority)`).
+///
+/// Deliberately a different type from [`crate::scheduled_tick::ScheduledTick`],
+/// exactly as it is in the jar, because the two disagree about the one field
+/// that matters: a live tick carries an **absolute** `trigger_tick`, a saved
+/// one carries a **relative, signed** `delay`. Vanilla converts with
+/// `SavedTick::unpack` (`SavedTick.java:52`):
+///
+/// ```text
+/// return new ScheduledTick<>(this.type, this.pos, currentTick + this.delay, this.priority, currentSubTick);
+/// ```
+///
+/// so a load is `trigger_tick = game_time_at_load + delay` and **`delay` is
+/// routinely negative** — see [`Self::delay`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedTick {
+    /// Absolute block position.
+    pub pos: (i32, i32, i32),
+    /// The block or fluid id being ticked — vanilla's `i` field.
+    pub kind: String,
+    /// Ticks from the game time **at save** until this tick is due, vanilla's
+    /// `t`.
+    ///
+    /// **Signed, and negative in real worlds.** Measured across 22,488 real
+    /// vanilla chunks with an independent parser: 1,584 of 133,051 saved ticks
+    /// carry a negative delay, the extreme being `-1046` for an overdue birch
+    /// leaves decay and `-33` for an overdue lava tick. A world is saved
+    /// mid-tick with a backlog and vanilla simply records how overdue each
+    /// entry already was, so an unsigned field here panics or wraps on an
+    /// ordinary survival world.
+    pub delay: i32,
+    /// Vanilla's `p`. See [`tick_priority_value`] for the trap.
+    pub priority: TickPriority,
+}
+
+/// A chunk's contents that are not blocks: its block entities, and the block
+/// and fluid ticks pending inside it.
+///
+/// Before this existed [`column_to_nbt`] wrote all three lists empty for every
+/// chunk, so a saved container came back empty and a pending redstone or fluid
+/// tick was lost outright (issue #468).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChunkExtras {
+    /// Every block entity in the chunk, at its **absolute** position.
+    pub block_entities: Vec<(BlockPos, BlockEntity)>,
+    /// Pending entries of `ServerLevel.blockTicks` inside this chunk.
+    pub block_ticks: Vec<SavedTick>,
+    /// Pending entries of `ServerLevel.fluidTicks` inside this chunk.
+    pub fluid_ticks: Vec<SavedTick>,
+}
+
+impl ChunkExtras {
+    /// `true` when there is nothing at all to write — the common case, and
+    /// what lets a caller skip building the lists for most chunks.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.block_entities.is_empty() && self.block_ticks.is_empty() && self.fluid_ticks.is_empty()
+    }
+}
+
+/// Vanilla's `-3..3` [`TickPriority`] **value**, which is what `p` holds on
+/// disk — **not** the ordinal.
+///
+/// # The trap, and why it is invisible without an outside oracle
+///
+/// `TickPriority.CODEC` is `Codec.INT.xmap(TickPriority::byValue,
+/// TickPriority::getValue)` (`TickPriority.java:14`), so the int written is
+/// `getValue()`. Our [`TickPriority`] is declared in vanilla's order *on
+/// purpose*, so that `#[derive(Ord)]` reproduces Java's ordinal-based
+/// `compareTo` for free — which makes `Normal`'s **ordinal 3** and its
+/// **value 0**. Writing the ordinal would therefore turn every ordinary tick
+/// in the world into `EXTREMELY_LOW`, and a round-trip gate against our own
+/// writer could never see it because the reader would make the same mistake.
+///
+/// The independent measurement that settles it: all 133,051 saved ticks across
+/// 22,488 real vanilla chunks carry `p: Int(0)`, and leaf decay — the
+/// overwhelming majority of them — is scheduled at `NORMAL`.
+#[must_use]
+pub fn tick_priority_value(priority: TickPriority) -> i32 {
+    match priority {
+        TickPriority::ExtremelyHigh => -3,
+        TickPriority::VeryHigh => -2,
+        TickPriority::High => -1,
+        TickPriority::Normal => 0,
+        TickPriority::Low => 1,
+        TickPriority::VeryLow => 2,
+        TickPriority::ExtremelyLow => 3,
+    }
+}
+
+/// The inverse of [`tick_priority_value`], clamping out-of-range values
+/// exactly as `TickPriority.byValue` does (`TickPriority.java:21-29`: below
+/// `-3` saturates to `EXTREMELY_HIGH`, anything else out of range to
+/// `EXTREMELY_LOW`) rather than erroring — a corrupt `p` should cost a
+/// mis-ordered tick, never a chunk that will not load.
+#[must_use]
+pub fn tick_priority_from_value(value: i32) -> TickPriority {
+    match value {
+        -3 => TickPriority::ExtremelyHigh,
+        -2 => TickPriority::VeryHigh,
+        -1 => TickPriority::High,
+        0 => TickPriority::Normal,
+        1 => TickPriority::Low,
+        2 => TickPriority::VeryLow,
+        3 => TickPriority::ExtremelyLow,
+        v if v < -3 => TickPriority::ExtremelyHigh,
+        _ => TickPriority::ExtremelyLow,
+    }
+}
+
+/// Vanilla writes an *empty* list with element type `End`, and a populated one
+/// with `Compound`. Reproduced rather than always writing `Compound`, because
+/// every real file this repo has read does it this way.
+fn nbt_list(elements: Vec<Nbt>) -> Nbt {
+    Nbt::List {
+        element_type: if elements.is_empty() {
+            NbtTag::End
+        } else {
+            NbtTag::Compound
+        },
+        elements,
+    }
+}
+
+fn int_field(compound: &Nbt, key: &str) -> Option<i32> {
+    match field(compound, key)? {
+        Nbt::Int(v) => Some(*v),
+        Nbt::Short(v) => Some(i32::from(*v)),
+        Nbt::Byte(v) => Some(i32::from(*v)),
+        _ => None,
+    }
+}
+
+fn string_field<'a>(compound: &'a Nbt, key: &str) -> Option<&'a str> {
+    match field(compound, key)? {
+        Nbt::String(s) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// Encodes one [`SavedTick`] as vanilla's `{i, x, y, z, t, p}` compound.
+#[must_use]
+fn saved_tick_to_nbt(tick: &SavedTick) -> Nbt {
+    Nbt::Compound(vec![
+        ("i".to_owned(), Nbt::String(tick.kind.clone())),
+        ("x".to_owned(), Nbt::Int(tick.pos.0)),
+        ("y".to_owned(), Nbt::Int(tick.pos.1)),
+        ("z".to_owned(), Nbt::Int(tick.pos.2)),
+        ("t".to_owned(), Nbt::Int(tick.delay)),
+        (
+            "p".to_owned(),
+            Nbt::Int(tick_priority_value(tick.priority)),
+        ),
+    ])
+}
+
+/// Decodes one saved tick, or `None` if the compound is missing a field the
+/// record has no default for (`i`/`x`/`y`/`z`).
+///
+/// `t` and `p` both default to `0`, matching `SavedTick.probe`'s own
+/// `(0, TickPriority.NORMAL)` — and note `0` is the correct default for `p`
+/// precisely *because* it is a value rather than an ordinal.
+fn saved_tick_from_nbt(nbt: &Nbt) -> Option<SavedTick> {
+    Some(SavedTick {
+        pos: (
+            int_field(nbt, "x")?,
+            int_field(nbt, "y")?,
+            int_field(nbt, "z")?,
+        ),
+        kind: string_field(nbt, "i")?.to_owned(),
+        delay: int_field(nbt, "t").unwrap_or(0),
+        priority: tick_priority_from_value(int_field(nbt, "p").unwrap_or(0)),
+    })
+}
+
+/// Encodes a container's slots as vanilla's `Items` list: one compound per
+/// **occupied** slot, `{Slot: Byte, id: String, count: Int}`.
+///
+/// Empty slots are omitted rather than written as air, which is why `Slot` is
+/// carried explicitly. The `count: Int` is 1.20.5-and-later shaped (it was a
+/// `Byte` named `Count` before the component rewrite); read off real 26.2
+/// dispenser and hopper entries rather than from any table.
+///
+/// **Item components are not persisted.** A stack's
+/// [`lodestone_model::ItemComponents`] is the wire's decoded patch and has no
+/// encoder in this crate; writing a partial one would be worse than writing
+/// none, on the same argument this module's doc comment makes about
+/// heightmaps. A saved iron sword comes back as an undamaged, unnamed iron
+/// sword.
+fn items_to_nbt(slots: &[Option<ItemStack>]) -> Nbt {
+    let elements: Vec<Nbt> = slots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| {
+            let stack = slot.as_ref()?;
+            Some(Nbt::Compound(vec![
+                ("Slot".to_owned(), Nbt::Byte(index as i8)),
+                ("id".to_owned(), Nbt::String(stack.item.to_string())),
+                (
+                    "count".to_owned(),
+                    Nbt::Int(i32::try_from(stack.count).unwrap_or(i32::MAX)),
+                ),
+            ]))
+        })
+        .collect();
+    nbt_list(elements)
+}
+
+/// Decodes an `Items` list into a `len`-slot array. Entries whose `Slot` is
+/// out of range, or whose `id` is not a parseable resource key, are dropped —
+/// one unreadable stack must not cost the whole container.
+fn items_from_nbt(nbt: Option<&Nbt>, len: usize) -> Vec<Option<ItemStack>> {
+    let mut out = vec![None; len];
+    let Some(Nbt::List { elements, .. }) = nbt else {
+        return out;
+    };
+    for entry in elements {
+        let Some(slot) = int_field(entry, "Slot") else {
+            continue;
+        };
+        let Ok(slot) = usize::try_from(slot) else {
+            continue;
+        };
+        if slot >= len {
+            continue;
+        }
+        let Some(id) = string_field(entry, "id") else {
+            continue;
+        };
+        let Ok(key) = id.parse() else {
+            continue;
+        };
+        let count = int_field(entry, "count").unwrap_or(1).max(0) as u32;
+        out[slot] = Some(ItemStack::new(key, count));
+    }
+    out
+}
+
+/// This crate's own id for a composter block entity.
+///
+/// **Namespaced, because vanilla has no composter block entity at all.** A
+/// vanilla composter keeps its fill level in the block state
+/// (`minecraft:composter[level=0..8]`) and its ready delay as a scheduled
+/// block tick; this crate models it as a block entity instead
+/// ([`crate::block_entities`]), and that model has no vanilla field to live
+/// in. Writing it under `minecraft:composter` would be a claim vanilla
+/// disagrees with the moment Mojang adds a real one; under this id, a real
+/// server does what it does with any unrecognised id — logs a skip and drops
+/// it — and our own reader gets the level back exactly.
+const COMPOSTER_ID: &str = "lodestone:composter";
+
+/// Our furnace's banked recipe-use counts, namespaced.
+///
+/// Vanilla's `RecipesUsed` is keyed by **recipe id**; this crate's
+/// [`Furnace`] banks by its own `"kind:ingredient"` string
+/// ([`Furnace::recipes_used`]), which is not a recipe id and would not
+/// resolve. A namespaced field carries it losslessly for us and is ignored by
+/// vanilla's codec, which reads only the keys it knows.
+const RECIPES_USED_FIELD: &str = "lodestone:recipes_used";
+
+/// Encodes one block entity as the chunk NBT list element vanilla holds.
+///
+/// The `x`/`y`/`z` are **absolute** and `keepPacked` is `0`, both matching
+/// every real entry measured. `components` is written as an empty compound
+/// because vanilla writes one unconditionally and this crate models no
+/// block-entity components.
+#[must_use]
+fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
+    let (id, mut extra): (&str, Vec<(String, Nbt)>) = match entity {
+        BlockEntity::Furnace(f) => {
+            let (lit_remaining, lit_total, cooking_spent, cooking_total) = f.burn_state();
+            let recipes: Vec<(String, Nbt)> = {
+                let mut pairs: Vec<(String, Nbt)> = f
+                    .recipes_used()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Nbt::Int(i32::try_from(*v).unwrap_or(i32::MAX))))
+                    .collect();
+                // A `HashMap` iterated straight into a file is a
+                // nondeterministic byte stream, which makes any
+                // byte-comparison gate flap. Sorted, so identical state
+                // always encodes identically.
+                pairs.sort_by(|a, b| a.0.cmp(&b.0));
+                pairs
+            };
+            (
+                match f.kind() {
+                    FurnaceKind::Furnace => "minecraft:furnace",
+                    FurnaceKind::Smoker => "minecraft:smoker",
+                    FurnaceKind::BlastFurnace => "minecraft:blast_furnace",
+                },
+                vec![
+                    (
+                        "lit_time_remaining".to_owned(),
+                        Nbt::Short(lit_remaining as i16),
+                    ),
+                    ("lit_total_time".to_owned(), Nbt::Short(lit_total as i16)),
+                    (
+                        "cooking_time_spent".to_owned(),
+                        Nbt::Short(cooking_spent as i16),
+                    ),
+                    (
+                        "cooking_total_time".to_owned(),
+                        Nbt::Short(cooking_total as i16),
+                    ),
+                    (
+                        "Items".to_owned(),
+                        items_to_nbt(&[f.input().cloned(), f.fuel().cloned(), f.output().cloned()]),
+                    ),
+                    ("RecipesUsed".to_owned(), Nbt::Compound(Vec::new())),
+                    (RECIPES_USED_FIELD.to_owned(), Nbt::Compound(recipes)),
+                ],
+            )
+        }
+        BlockEntity::Hopper(h) => (
+            "minecraft:hopper",
+            vec![
+                ("TransferCooldown".to_owned(), Nbt::Int(h.cooldown())),
+                ("Items".to_owned(), items_to_nbt(h.slots())),
+            ],
+        ),
+        BlockEntity::Composter(c) => (
+            COMPOSTER_ID,
+            vec![
+                ("level".to_owned(), Nbt::Byte(c.level() as i8)),
+                (
+                    "ticks_until_ready".to_owned(),
+                    // `-1` for "no delay running", so the field is always
+                    // present and a missing one is unambiguously an old file
+                    // rather than a composter that is not counting down.
+                    Nbt::Byte(c.ticks_until_ready().map_or(-1, |t| t as i8)),
+                ),
+            ],
+        ),
+        BlockEntity::BrewingStand(b) => {
+            // Vanilla's 5-slot `BrewingStandMenu` order: 3 bottles, then the
+            // ingredient, then the fuel (`BrewingStandBlockEntity`'s own
+            // `items` list). Bottles become real potion items, which is what
+            // makes this entry vanilla-readable rather than namespaced like
+            // the composter above.
+            let mut slots: Vec<Option<ItemStack>> = Vec::with_capacity(5);
+            for index in 0..3 {
+                slots.push(b.bottle(index).map(|bottle| {
+                    ItemStack::new(
+                        bottle_item_id(bottle.kind)
+                            .parse()
+                            .expect("bottle item ids are literal, valid resource keys"),
+                        1,
+                    )
+                }));
+            }
+            slots.push(
+                b.ingredient()
+                    .and_then(|(id, count)| Some(ItemStack::new(id.parse().ok()?, count))),
+            );
+            slots.push(
+                b.fuel_item()
+                    .and_then(|(id, count)| Some(ItemStack::new(id.parse().ok()?, count))),
+            );
+            // The potion *identity* each bottle holds is a data component
+            // (`minecraft:potion_contents`) that `items_to_nbt` deliberately
+            // does not write, so it is carried alongside as three strings.
+            let potions: Vec<Nbt> = (0..3)
+                .map(|index| {
+                    Nbt::String(
+                        b.bottle(index)
+                            .map(|bottle| bottle.potion.clone())
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect();
+            (
+                "minecraft:brewing_stand",
+                vec![
+                    ("BrewTime".to_owned(), Nbt::Short(b.brew_progress() as i16)),
+                    ("Fuel".to_owned(), Nbt::Byte(b.fuel_charges() as i8)),
+                    ("Items".to_owned(), items_to_nbt(&slots)),
+                    (
+                        "lodestone:potions".to_owned(),
+                        Nbt::List {
+                            element_type: NbtTag::String,
+                            elements: potions,
+                        },
+                    ),
+                ],
+            )
+        }
+    };
+
+    let mut fields = vec![
+        ("id".to_owned(), Nbt::String(id.to_owned())),
+        ("x".to_owned(), Nbt::Int(pos.x)),
+        ("y".to_owned(), Nbt::Int(pos.y)),
+        ("z".to_owned(), Nbt::Int(pos.z)),
+        ("keepPacked".to_owned(), Nbt::Byte(0)),
+        ("components".to_owned(), Nbt::Compound(Vec::new())),
+    ];
+    fields.append(&mut extra);
+    Nbt::Compound(fields)
+}
+
+/// The vanilla item id a [`BottleKind`] is stored as.
+#[must_use]
+fn bottle_item_id(kind: BottleKind) -> &'static str {
+    match kind {
+        BottleKind::Potion => "minecraft:potion",
+        BottleKind::Splash => "minecraft:splash_potion",
+        BottleKind::Lingering => "minecraft:lingering_potion",
+    }
+}
+
+/// The inverse of [`bottle_item_id`], or `None` for any other item.
+#[must_use]
+fn bottle_kind_for_item(id: &str) -> Option<BottleKind> {
+    match id {
+        "minecraft:potion" => Some(BottleKind::Potion),
+        "minecraft:splash_potion" => Some(BottleKind::Splash),
+        "minecraft:lingering_potion" => Some(BottleKind::Lingering),
+        _ => None,
+    }
+}
+
+/// Decodes one block entity, or `None` for any id this crate does not
+/// simulate.
+///
+/// **Returning `None` is the normal case, not an error.** A real world is full
+/// of chests, vaults, spawners and decorated pots this crate has no model for
+/// — 1,608 of the 1,613 block entities measured across `.cache/mc`'s worlds
+/// are kinds we do not simulate. Dropping them silently is what vanilla itself
+/// does with an id it cannot resolve, and it is why loading a real vanilla
+/// region never fails on this path.
+///
+/// It is also a **real, named gap**: a chest in a world Lodestone opens and
+/// re-saves loses its contents, because we drop it here and then write a chunk
+/// without it. Closing that needs a passthrough for unmodelled entries, not a
+/// change to this function.
+fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)> {
+    let id = string_field(nbt, "id")?;
+    let pos = BlockPos::new(
+        int_field(nbt, "x")?,
+        int_field(nbt, "y")?,
+        int_field(nbt, "z")?,
+    );
+
+    let entity = match id {
+        "minecraft:furnace" | "minecraft:smoker" | "minecraft:blast_furnace" => {
+            let kind = match id {
+                "minecraft:smoker" => FurnaceKind::Smoker,
+                "minecraft:blast_furnace" => FurnaceKind::BlastFurnace,
+                _ => FurnaceKind::Furnace,
+            };
+            let items = items_from_nbt(field(nbt, "Items"), 3);
+            let mut recipes: HashMap<String, u32> = HashMap::new();
+            if let Some(Nbt::Compound(pairs)) = field(nbt, RECIPES_USED_FIELD) {
+                for (key, value) in pairs {
+                    if let Nbt::Int(count) = value {
+                        recipes.insert(key.clone(), (*count).max(0) as u32);
+                    }
+                }
+            }
+            BlockEntity::Furnace(Furnace::restore(
+                kind,
+                items[0].clone(),
+                items[1].clone(),
+                items[2].clone(),
+                int_field(nbt, "lit_time_remaining").unwrap_or(0),
+                int_field(nbt, "lit_total_time").unwrap_or(0),
+                int_field(nbt, "cooking_time_spent").unwrap_or(0),
+                int_field(nbt, "cooking_total_time").unwrap_or(0),
+                recipes,
+            ))
+        }
+        "minecraft:hopper" => {
+            let items = items_from_nbt(field(nbt, "Items"), 5);
+            let mut slots: [Option<ItemStack>; 5] = [const { None }; 5];
+            for (slot, item) in slots.iter_mut().zip(items) {
+                *slot = item;
+            }
+            BlockEntity::Hopper(Hopper::restore(
+                slots,
+                int_field(nbt, "TransferCooldown").unwrap_or(0),
+            ))
+        }
+        COMPOSTER_ID => {
+            let level = int_field(nbt, "level").unwrap_or(0).clamp(0, 8) as u8;
+            let until = match int_field(nbt, "ticks_until_ready") {
+                Some(t) if t >= 0 => Some(t as u8),
+                _ => None,
+            };
+            BlockEntity::Composter(Composter::restore(level, until))
+        }
+        "minecraft:brewing_stand" => {
+            let items = items_from_nbt(field(nbt, "Items"), 5);
+            let potions: Vec<String> = match field(nbt, "lodestone:potions") {
+                Some(Nbt::List { elements, .. }) => elements
+                    .iter()
+                    .map(|e| match e {
+                        Nbt::String(s) => s.clone(),
+                        _ => String::new(),
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let mut bottles: [Option<Bottle>; 3] = [const { None }; 3];
+            for (index, bottle) in bottles.iter_mut().enumerate() {
+                let Some(stack) = items.get(index).and_then(Option::as_ref) else {
+                    continue;
+                };
+                let Some(kind) = bottle_kind_for_item(&stack.item.to_string()) else {
+                    continue;
+                };
+                *bottle = Some(Bottle::new(
+                    kind,
+                    potions.get(index).cloned().unwrap_or_default(),
+                ));
+            }
+            let ingredient = items[3]
+                .as_ref()
+                .map(|s| (s.item.to_string(), s.count));
+            let fuel_item = items[4].as_ref().map(|s| (s.item.to_string(), s.count));
+            let brew_time = int_field(nbt, "BrewTime").unwrap_or(0);
+            // Vanilla reconstructs the in-flight ingredient from slot 3
+            // rather than persisting it (`BrewingStandBlockEntity.
+            // loadAdditional:200-202`, `if (this.brewTime > 0) this.ingredient
+            // = this.items.get(3).getItem();`). Reproduced exactly, including
+            // its consequence: an ingredient swapped while the world was
+            // closed is *not* detected as a mid-brew swap, in vanilla either.
+            let locked = if brew_time > 0 {
+                ingredient.as_ref().map(|(id, _)| id.clone())
+            } else {
+                None
+            };
+            BlockEntity::BrewingStand(BrewingStand::restore(
+                bottles,
+                ingredient,
+                fuel_item,
+                int_field(nbt, "Fuel").unwrap_or(0),
+                brew_time,
+                locked,
+            ))
+        }
+        _ => return None,
+    };
+    Some((pos, entity))
+}
+
+/// Reads a chunk's block entities and pending ticks back out of its NBT tree.
+///
+/// Total and non-failing by design: an entry this crate cannot understand is
+/// skipped, never an error, so a chunk written by a real server always loads.
+/// See [`block_entity_from_nbt`] for what that costs and what would close it.
+#[must_use]
+pub fn extras_from_nbt(nbt: &Nbt) -> ChunkExtras {
+    let list = |key: &str| -> &[Nbt] {
+        match field(nbt, key) {
+            Some(Nbt::List { elements, .. }) => elements.as_slice(),
+            _ => &[],
+        }
+    };
+    ChunkExtras {
+        block_entities: list("block_entities")
+            .iter()
+            .filter_map(block_entity_from_nbt)
+            .collect(),
+        block_ticks: list("block_ticks")
+            .iter()
+            .filter_map(saved_tick_from_nbt)
+            .collect(),
+        fluid_ticks: list("fluid_ticks")
+            .iter()
+            .filter_map(saved_tick_from_nbt)
+            .collect(),
+    }
 }
