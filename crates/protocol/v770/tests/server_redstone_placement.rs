@@ -441,16 +441,22 @@ async fn placing_dust_into_a_gap_powers_the_whole_run_in_the_servers_own_world()
 /// cascade coordinates. That is a fully-connected wire carrying the wrong
 /// value, which `cargo xtask connectedness` structurally cannot see.
 ///
-/// The fix is a subset match in `resolve_state_id` — prefer the lowest-id
-/// state agreeing on every property the caller *did* specify, before falling
-/// back to the same-name default. That file belongs to the v770 landing, not
-/// this one, so this gate is left ignored and named rather than deleted.
+/// **That blocker is fixed and this gate is live.** `resolve_state_id` now has
+/// a subset tier — the lowest-id state agreeing on every property the caller
+/// *did* specify, tried before the same-name default. This test was written
+/// `#[ignore]`d and named rather than deleted, which is what made un-ignoring
+/// it the one-line proof that the fix reaches a player rather than only the
+/// server's own state.
+///
+/// Note what remains cosmetically wrong and is deliberately not asserted here:
+/// lowest-id is not the marked default for 661 of 797 multi-state blocks, so
+/// dust resolves with its four connection properties `up` rather than `none`
+/// and renders climbing rather than flat. `power` — the load-bearing half, and
+/// the only thing this gate reads — is exact.
 ///
 /// `x = PLACE_X` is skipped: the client predicts its own placement there, so
 /// that one cell cannot distinguish "a packet arrived" from "nothing arrived".
 #[tokio::test]
-#[ignore = "blocked on v770 resolve_state_id: an exact property-set match degrades every \
-            partial dust state to power=0 (see this test's doc comment)"]
 async fn the_powered_run_reaches_the_client() {
     let (computed, delivered) = place_one_dust_into_the_gap().await;
 
