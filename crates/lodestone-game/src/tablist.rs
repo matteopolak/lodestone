@@ -240,10 +240,23 @@ impl TabList {
                 true
             }
             // The header/footer text, from `ClientboundTabListPacket`. This was
-            // a genuine island: `header`/`footer` have existed on this struct
-            // and been read downstream by `hud.rs`'s snapshot since before this
-            // arm existed, but nothing ever fed them outside of a test directly
-            // mutating the fields — no fold ran for the event that carries them.
+            // a genuine island, and it stayed one for longer than this comment
+            // used to admit. The old wording — "read downstream by `hud.rs`'s
+            // snapshot" — was *literally* true and *practically* wrong, which is
+            // why it survived review: the reader it named is this crate's own
+            // `hud.rs` (`HudSnapshot::assemble`'s `tab_header`/`tab_footer`),
+            // and **`HudSnapshot` has no consumer in `lodestone-shell` at all**.
+            // The shell builds its own `HudFrame`, so both fields terminated in
+            // a read model only tests exercise. Two hops, one of them dead.
+            //
+            // Closed on the shell side by `lodestone_shell::sim::Sim::tab_banner`
+            // → `HudFrame::tab_header`/`tab_footer` → `hud.rs`'s tab-overlay
+            // block, which draws them centred above and below the player rows.
+            // `HudSnapshot` itself is still unwired to any renderer.
+            //
+            // The lesson, not the fact: naming a reader by *file* across a
+            // workspace with two `hud.rs` files is how a true sentence hides a
+            // dead wire. Name the crate.
             ClientEvent::TabListChanged { header, footer } => {
                 self.header = Some(header.clone());
                 self.footer = Some(footer.clone());
