@@ -23,6 +23,14 @@ use lodestone_model::{Identifier, ItemEnchantment, Text, ToolPatch};
 /// default of 64.
 pub const DEFAULT_MAX_STACK_SIZE: i32 = 64;
 
+/// The namespace the vanilla item registry owns.
+///
+/// Load-bearing in two opposite directions for [`crate::custom_item`]: a
+/// plugin's *own* item id may not be in it (that would collide with the vanilla
+/// registry), while a custom item's **base** item must be, because only a
+/// `minecraft:` item has a wire encoding at all.
+pub const VANILLA_ITEM_NAMESPACE: &str = "minecraft";
+
 /// Well-known component identifier for the maximum stack size.
 pub const MAX_STACK_SIZE_COMPONENT: &str = "minecraft:max_stack_size";
 /// Well-known component identifier for accumulated item damage.
@@ -50,6 +58,27 @@ pub const EQUIPPABLE_COMPONENT: &str = "minecraft:equippable";
 /// the raw wire int, low 24 bits RGB — see
 /// [`lodestone_model::ItemComponents::dyed_color`] for why it is not pre-split.
 pub const DYED_COLOR_COMPONENT: &str = "minecraft:dyed_color";
+/// Well-known component identifier for `minecraft:custom_model_data`.
+///
+/// Vanilla's own "make this item look different" channel, and half of how real
+/// Paper plugins ship custom items. Carried as [`ComponentValue::Int`] — only the
+/// first `floats`/`flags`/`strings`/`colors` entry vanilla's record holds is
+/// modelled, because that is the field resource packs actually select on.
+pub const CUSTOM_MODEL_DATA_COMPONENT: &str = "minecraft:custom_model_data";
+/// The component a plugin's *own* item identity lives under (issue #147).
+///
+/// **Deliberately in the `lodestone:` namespace, not `minecraft:`.** It is not a
+/// vanilla component and must never be mistaken for one: a real server would
+/// reject it, and a future decoder must not try to resolve it against
+/// `lodestone-data`'s 111-entry component registry. The value is
+/// [`ComponentValue::Str`] holding the custom item's namespaced id.
+///
+/// This is the typed equivalent of the `PersistentDataContainer` tag every
+/// Bukkit/Paper custom-item plugin attaches to a vanilla item id, and it exists
+/// for the same reason theirs does: the wire has a **fixed item-id space**, so a
+/// genuinely novel item id is not representable, exactly as a novel entity type
+/// is not (#140). A custom item is a vanilla item plus this tag, and nothing else.
+pub const PLUGIN_ITEM_ID_COMPONENT: &str = "lodestone:item_id";
 
 /// A canonical, version-free component value.
 ///
@@ -440,6 +469,48 @@ impl ItemStack {
     pub fn set_tool(&mut self, patch: ToolPatch) {
         let value = (!matches!(patch, ToolPatch::Inherited)).then(|| ComponentValue::Tool(patch));
         self.write_component(TOOL_COMPONENT, value);
+    }
+
+    /// The stack's `minecraft:custom_model_data` selector, if any (issue #147).
+    #[must_use]
+    pub fn custom_model_data(&self) -> Option<i32> {
+        self.components
+            .get_int(CUSTOM_MODEL_DATA_COMPONENT)
+            .and_then(|v| i32::try_from(v).ok())
+    }
+
+    /// Sets or clears `minecraft:custom_model_data`.
+    pub fn set_custom_model_data(&mut self, value: Option<i32>) {
+        self.write_component(
+            CUSTOM_MODEL_DATA_COMPONENT,
+            value.map(|v| ComponentValue::Int(i64::from(v))),
+        );
+    }
+
+    /// The plugin-defined item identity this stack carries, if any — the
+    /// `lodestone:item_id` tag (issue #147).
+    ///
+    /// `None` for every vanilla stack, which is what makes this a usable
+    /// discriminator: a plugin asking "is this one of mine?" gets a definite no
+    /// for anything the server sent that it did not itself tag.
+    #[must_use]
+    pub fn plugin_item_id(&self) -> Option<Identifier> {
+        match self.components.get_str(PLUGIN_ITEM_ID_COMPONENT)? {
+            ComponentValue::Str(raw) => raw.parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// Sets or clears the plugin-defined item identity.
+    ///
+    /// Prefer building stacks through [`crate::custom_item::CustomItem::stack`],
+    /// which sets this together with the rest of the definition; this is the
+    /// escape hatch for retagging a stack that already exists.
+    pub fn set_plugin_item_id(&mut self, id: Option<&Identifier>) {
+        self.write_component(
+            PLUGIN_ITEM_ID_COMPONENT,
+            id.map(|id| ComponentValue::Str(id.to_string())),
+        );
     }
 
     /// Inserts `value` under `key`, or removes the component when `value` is

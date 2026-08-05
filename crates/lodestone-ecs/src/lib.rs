@@ -134,6 +134,7 @@ pub mod entity;
 pub mod events;
 mod handle;
 pub mod ingest;
+pub mod items;
 pub mod permissions;
 pub mod player;
 mod plugin;
@@ -176,6 +177,7 @@ pub use events::{GameEvent, GameEventBus, GameEventBusPlugin};
 pub use handle::{
     EcsHandle, HoldStats, LockHolds, hold_read, hold_write, new_handle, new_ingest_handle,
 };
+pub use items::{CustomItems, CustomItemsExt, CustomItemsPlugin};
 pub use permissions::{
     DEFAULT_PERMISSION, Grant, GrantSet, Group, LevelBasedPermissionSet, Permission,
     PermissionDefault, PermissionLevel, PermissionQuery, PermissionRegistry, PermissionResolver,

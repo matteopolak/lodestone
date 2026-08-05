@@ -267,6 +267,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   heard of the publisher. `lodestone_ecs::plugin_message` carries the one piece of
   machinery it needs, and three toy crates under `crates/plugins/` prove it end to
   end. Issue #107.
+- [Custom items](./custom-items.md) — The API a plugin uses to define an item the
+  vanilla registry does not have (issue
+  [#147](https://github.com/matteopolak/lodestone/issues/147)): its own namespaced id,
+  a vanilla **base item** it is actually made of on the wire, and the components that
+  make it look and behave like something new.
 - [Damage types and tags](./damage-types.md) — The authoritative
   `minecraft:damage_type` registry for Minecraft 26.2 — 51 damage types and their 35
   tags — generated from vanilla's own datapack JSON and consumed by
@@ -445,6 +450,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Sprint food gate, toggle sneak/sprint, and mouse feel](./input-options.md) —
   Three small, related fixes to `lodestone-controller`'s input model and the settings
   screen's mouse/controls pages:
+- [Item component read/write for plugins](./item-component-access.md) — The typed
+  surface a plugin uses to read and write an item stack's data components (issue
+  [#143](https://github.com/matteopolak/lodestone/issues/143)) — custom name,
+  damage, dye, enchantments, tool patch — plus the game → model lowering that lets
+  a mutated stack reach a consumer keyed on the other stack type.
 - [Item GUI geometry (3-D block items in a slot)](./item-gui-geometry.md) — The
   **geometry half** of drawing a block item as an isometric mini-block in a
   hotbar/inventory slot. It bakes every item whose inventory icon is a 3-D model into

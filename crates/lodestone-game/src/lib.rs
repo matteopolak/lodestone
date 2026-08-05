@@ -47,6 +47,7 @@ pub mod chat;
 pub mod chat_ack;
 pub mod click;
 pub mod container;
+pub mod custom_item;
 pub mod effect;
 pub mod hud;
 pub mod item;
