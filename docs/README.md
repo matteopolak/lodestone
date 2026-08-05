@@ -1368,9 +1368,10 @@ of these caught the *brief* being wrong rather than the code.
   children #344–#358): family-per-wire-era with range extension inside an era, a
   shared canonicalisation crate every legacy family maps through, a capture-once
   oracle strategy, and the join-versus-host split stated per version with the hosting
-  blockers located in the tree. Re-verified 2026-08-05 at `d197d555`; every "X exists
-  / X is missing" claim below was re-checked against the tree that day, not copied
-  forward from the previous revision.
+  blockers located in the tree. Re-verified 2026-08-05 at `d197d555`, and again the
+  same day at `e2508e3` — by which point **units U1, U2 and U3 had already landed**
+  (`3ba959a`, `02b8053`, `fa75f38`); every "X exists / X is missing" claim below was
+  re-checked rather than copied forward.
 - [Backing Paper's NMS calls with Rust: census and feasibility](./plans/paper-nms-bridge.md) —
   The feasibility census issue
   [#341](https://github.com/matteopolak/lodestone/issues/341) asked for before any
