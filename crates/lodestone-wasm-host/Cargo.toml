@@ -59,10 +59,20 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 # The vocabulary the ABI mirrors. Version-free, exactly as the plan requires of
 # this crate: `ClientEvent`/`ClientAction`/`Text`/`BlockPos`, no protocol family.
-#
-# Note what is deliberately *not* here yet: `lodestone-ecs`, `bevy_app` and
-# `bevy_ecs`, which the conductor (`src/conductor.rs`) needs. They arrive with it,
-# in the commit that closes issue #173 — the scaffold in this commit has no ECS
-# involvement at all, and keeping the edge out until something uses it is what let
-# this crate compile while `lodestone-ecs` was mid-refactor by another author.
 lodestone-model = { workspace = true }
+# `GameEvent`, `GameEventBusPlugin`, `ActionQueue`, `GameTick`, `TickSet` — the seam
+# `src/conductor.rs` plugs into. Note the *shape* of this edge: the conductor
+# depends on the ECS, and nothing in the ECS depends on the host. A wasm plugin is
+# therefore invisible to every crate below this one, which is what keeps the tier
+# additive rather than a second API.
+lodestone-ecs = { workspace = true }
+bevy_app = { workspace = true }
+bevy_ecs = { workspace = true }
+
+[dev-dependencies]
+# The integration gate composes the *real* client `App` and asserts a guest's action
+# reaches the real `ActionQueue`. Deliberately not a hand-rolled `World`: a harness
+# that built its own schedules could not tell a correctly-wired conductor from one
+# anchored in a set the shipped client does not run.
+lodestone-app = { workspace = true }
+lodestone-physics = { workspace = true }

@@ -43,10 +43,9 @@
 //! | [`host`] | [#172](https://github.com/matteopolak/lodestone/issues/172) | the embedding: engine, per-guest `Store`, the gated `Linker`, fuel preemption |
 //! | [`capability`] | #172/#175 | the capability vocabulary and the two enforcement mechanisms |
 //! | `wit/lodestone-plugin.wit` | [#173](https://github.com/matteopolak/lodestone/issues/173) | the ABI surface — the WIT world, vendored as the single source of truth |
+//! | [`abi`] | #173 | the lift from `ClientEvent` and the lower to `ClientAction`, each capability-gated |
+//! | [`conductor`] | #173 | [`WasmHostPlugin`]: the one native system that drives every guest and is the single writer of `ActionQueue` on their behalf |
 //! | `manifest` | [#175](https://github.com/matteopolak/lodestone/issues/175) | `plugin.toml`: name, version, ABI world, priority, declared capabilities |
-//!
-//! The last two rows land in follow-up commits on this same crate; this commit is
-//! the scaffold and the world it loads.
 //!
 //! # Why the ABI is the intent doctrine, not a new vocabulary
 //!
@@ -102,11 +101,15 @@
 //! See [`docs/wasm-plugin-host.md`](https://github.com/matteopolak/lodestone/blob/main/docs/wasm-plugin-host.md)
 //! for the measured numbers, the capability probe, and the pending wires.
 
+pub mod abi;
 mod bindings;
 pub mod capability;
+pub mod conductor;
 pub mod host;
 
+pub use abi::{capability_for, lift_event, lower_action};
 pub use capability::{Capability, CapabilitySet};
+pub use conductor::{WasmHostPlugin, WasmPlugins, drive_wasm_plugins};
 pub use host::{
     ABI_WORLD, Action, BlockOffset, ChatKind, ChatMessage, DEFAULT_FUEL_PER_TICK,
     DEFAULT_MEMORY_LIMIT, Event, Hand, Health, HostError, LoadedPlugin, LogLevel, PluginHost,
