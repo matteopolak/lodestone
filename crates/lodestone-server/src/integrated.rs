@@ -216,6 +216,15 @@ pub struct IntegratedServer {
     /// cannot outlive this handle.
     #[cfg(not(target_arch = "wasm32"))]
     autosave_task: Option<Task>,
+    /// The world's `level.dat` (issue #468's gap list), `Some` alongside
+    /// `save`.
+    ///
+    /// Stamped with `Time` and `LastPlayed` on every save and at shutdown, so
+    /// a world's age accumulates across sessions instead of restarting. See
+    /// [`crate::region_source::LevelDatHandle`] for why the base tick count
+    /// lives there rather than in [`TickClock`].
+    #[cfg(not(target_arch = "wasm32"))]
+    level_dat: Option<std::sync::Arc<crate::region_source::LevelDatHandle>>,
 }
 
 impl IntegratedServer {
@@ -317,6 +326,8 @@ impl IntegratedServer {
                 save: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 autosave_task: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                level_dat: None,
             },
             client_end,
         )
@@ -569,6 +580,8 @@ impl IntegratedServer {
                 save: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 autosave_task: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                level_dat: None,
             },
             client_end,
         )
@@ -641,6 +654,23 @@ impl IntegratedServer {
         let persistent =
             crate::region_source::RegionChunkSource::new(source, world_dir, min_y, height)?;
         let save = persistent.save_handle();
+        // Before any task spawns, and before the first chunk is written: a
+        // world directory that has region files but no `level.dat` is not a
+        // world any other tool — vanilla included — will open. Creating it
+        // here also means a world that is opened and immediately closed still
+        // leaves something loadable behind.
+        //
+        // Spawn defaults to the mob centre at y=64 rather than taking another
+        // parameter: that coordinate is already this constructor's notion of
+        // where the world is centred, and a caller that wants a different one
+        // can rewrite the field through `lodestone_anvil::level_dat`.
+        let spawn = lodestone_anvil::level_dat::Spawn {
+            pos: [mob_center.0, 64, mob_center.1],
+            ..lodestone_anvil::level_dat::Spawn::default()
+        };
+        let level_dat = std::sync::Arc::new(crate::region_source::LevelDatHandle::open_or_create(
+            world_dir, &spawn, 0,
+        )?);
         // A second handle to the *same* world, returned to the caller. This is
         // what anything outside the connection loop (a `/setblock`, a gate)
         // mutates through, and it is the identical object the `ChunkStore`
@@ -657,6 +687,11 @@ impl IntegratedServer {
         );
 
         let autosave_handle = save.clone();
+        let autosave_level_dat = std::sync::Arc::clone(&level_dat);
+        // Cloned before the `Self` literal for the same reason `tick_clock` is
+        // in the constructor above: an `Arc::clone` inside the `async move`
+        // would move the binding into the coroutine.
+        let autosave_clock = server.clock.clone();
         let autosave_task = spawn_tick_task(&server.shutdown, async move {
             let mut ticker = tokio::time::interval(autosave);
             // The first tick of a tokio interval completes immediately; a save
@@ -671,9 +706,24 @@ impl IntegratedServer {
                 if let Ok(Err(err)) = result {
                     tracing::warn!("autosave failed, chunks stay dirty for the next attempt: {err}");
                 }
+                // `level.dat` rides the same blocking pool and the same
+                // interval. It is a few hundred bytes, so unlike a region
+                // write it is not the reason this is off-thread — it is here
+                // because a `Time` that only advanced at shutdown would be
+                // lost by a crash, which is precisely when a world's age
+                // matters.
+                let ticks = autosave_clock
+                    .as_ref()
+                    .map_or(0, |clock| clock.tick_count());
+                let level = std::sync::Arc::clone(&autosave_level_dat);
+                let result = tokio::task::spawn_blocking(move || level.write(ticks)).await;
+                if let Ok(Err(err)) = result {
+                    tracing::warn!("autosave could not stamp level.dat: {err}");
+                }
             }
         });
         server.save = Some(save);
+        server.level_dat = Some(level_dat);
         // Replaces the mob-seeding task slot only if it is free; seeding owns
         // it for `open_in_memory_with_mobs`, so the autosave task is kept
         // alive by racing the same `shutdown` notify and is dropped with the
@@ -696,10 +746,27 @@ impl IntegratedServer {
     /// written. The affected chunks stay dirty, so the next save retries them.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_now(&self) -> Result<usize, crate::region_source::Error> {
+        // `level.dat` first, and its failure is *not* allowed to swallow the
+        // chunk save: metadata is worth less than blocks, so a metadata error
+        // is logged and the region write still happens. The reverse ordering
+        // would let a failed chunk save skip the stamp for no benefit.
+        if let Some(level) = &self.level_dat {
+            let ticks = self.clock.as_ref().map_or(0, |clock| clock.tick_count());
+            if let Err(err) = level.write(ticks) {
+                tracing::warn!("could not stamp level.dat: {err}");
+            }
+        }
         match &self.save {
             Some(handle) => handle.save(),
             None => Ok(0),
         }
+    }
+
+    /// The world's `level.dat` handle, or `None` for a non-persistent server.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn level_dat(&self) -> Option<&crate::region_source::LevelDatHandle> {
+        self.level_dat.as_deref()
     }
 
     /// How many chunk columns are waiting to be written, or `None` for a
@@ -961,6 +1028,8 @@ impl IntegratedServer {
             save: None,
             #[cfg(not(target_arch = "wasm32"))]
             autosave_task: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            level_dat: None,
         })
     }
 
@@ -1062,6 +1131,18 @@ impl IntegratedServer {
         // that mutates a block between the write and the shutdown, and that
         // block would be lost with no error anywhere. Nothing can mark a chunk
         // dirty once both tasks are joined.
+        // The world's age, stamped **before** the region flush and after both
+        // tasks have stopped, so the number written is the tick count this
+        // session actually reached rather than one sampled mid-tick.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(level) = self.level_dat.take() {
+            let ticks = self.clock.as_ref().map_or(0, |clock| clock.tick_count());
+            match tokio::task::spawn_blocking(move || level.write(ticks)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => tracing::warn!("level.dat stamp on shutdown failed: {err}"),
+                Err(err) => tracing::warn!("level.dat stamp on shutdown panicked: {err}"),
+            }
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(handle) = self.save.take() {
             // `spawn_blocking` rather than a direct call: `shutdown` is an

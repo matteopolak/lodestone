@@ -213,6 +213,149 @@ pub fn resolve_world_seed(world_dir: &Path, requested: i64) -> Result<ResolvedSe
     })
 }
 
+/// The world's `level.dat`, opened once per session and stamped on every save.
+///
+/// # Why a world needs one at all
+///
+/// Region files alone are not a world. **Vanilla will not open a directory
+/// with no `level.dat`** — `LevelStorageSource` reads it before anything else
+/// and a missing one is not a world it can list, let alone load. Until this
+/// existed, a Lodestone save was a folder of `.mca` files that only Lodestone
+/// could make sense of, which is a strange thing for a format whose entire
+/// value is that it is *the* format.
+///
+/// # What it stores, and the two things it does not
+///
+/// See [`lodestone_anvil::level_dat`] for the measured 14-field schema. The
+/// two traps, both of which have already cost an issue each:
+///
+/// - **The seed is not here.** It lives in `world_gen_settings.dat`, resolved
+///   separately by [`resolve_world_seed`]. Do not add it.
+/// - **`Time` is the world's total age, not the time of day.** The sky clock
+///   is `world_clocks.dat`, a file 26.2 keeps beside this one and nothing here
+///   writes yet.
+///
+/// # Why the tick base lives here rather than in `TickClock`
+///
+/// [`crate::tick::TickClock`] counts **this session's** ticks and is right to:
+/// its `tick_count` is what `mspt` and overrun accounting are measured
+/// against, and a clock pre-loaded with a previous session's total would make
+/// every one of those numbers meaningless. So the persisted total is
+/// `base_ticks + clock.tick_count()`, with the base captured here at open.
+/// That also keeps the whole feature inside this module — no other file's
+/// notion of a tick changes.
+#[derive(Debug)]
+pub struct LevelDatHandle {
+    path: PathBuf,
+    level: Mutex<lodestone_anvil::level_dat::LevelDat>,
+    /// Ticks this world had already run before the current session opened.
+    base_ticks: i64,
+    /// `true` when this open created the file — i.e. a brand-new world.
+    created: bool,
+    writes: AtomicU64,
+}
+
+impl LevelDatHandle {
+    /// Reads `<world_dir>/level.dat`, or writes a fresh one if the world is
+    /// new.
+    ///
+    /// The world's name is taken from the directory's own file name, so a
+    /// caller that already chose `saves/<name>` does not have to say it twice.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Anvil`] if a `level.dat` exists but cannot be decoded, or if a
+    /// new one cannot be written. An existing-but-unreadable file is an error
+    /// rather than a silent overwrite for the same reason
+    /// [`resolve_world_seed`] treats one that way: quietly replacing a world's
+    /// metadata is how a world stops being the world it was.
+    pub fn open_or_create(
+        world_dir: &Path,
+        spawn: &lodestone_anvil::level_dat::Spawn,
+        game_type: i32,
+    ) -> Result<Self, Error> {
+        let path = lodestone_anvil::level_dat::path_in(world_dir);
+        if path.exists() {
+            let level = lodestone_anvil::level_dat::read_from_file(&path).map_err(Error::Anvil)?;
+            let base_ticks = level.time().unwrap_or(0);
+            return Ok(Self {
+                path,
+                level: Mutex::new(level),
+                base_ticks,
+                created: false,
+                writes: AtomicU64::new(0),
+            });
+        }
+        let name = world_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("world");
+        let level = lodestone_anvil::level_dat::LevelDat::for_new_world(name, spawn, game_type);
+        lodestone_anvil::level_dat::write_to_file(&level, &path).map_err(Error::Anvil)?;
+        Ok(Self {
+            path,
+            level: Mutex::new(level),
+            base_ticks: 0,
+            created: true,
+            writes: AtomicU64::new(1),
+        })
+    }
+
+    /// Ticks this world had run before the current session opened.
+    #[must_use]
+    pub fn base_ticks(&self) -> i64 {
+        self.base_ticks
+    }
+
+    /// `true` when this open created the world.
+    #[must_use]
+    pub fn created(&self) -> bool {
+        self.created
+    }
+
+    /// How many times this handle has written the file, including the write
+    /// that created it. A **count**, for the same reason
+    /// [`PersistenceStats`] are counts.
+    #[must_use]
+    pub fn writes(&self) -> u64 {
+        self.writes.load(Ordering::Relaxed)
+    }
+
+    /// Stamps `Time` and `LastPlayed` and writes the file back.
+    ///
+    /// `session_ticks` is [`crate::tick::TickClock::tick_count`] — this
+    /// session's own ticks, which this adds to the base captured at open.
+    ///
+    /// Blocking, like [`WorldSaveHandle::save`]: it is called from the same
+    /// `spawn_blocking` the region write uses, never from the tick loop.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Anvil`] if the file cannot be encoded or written.
+    pub fn write(&self, session_ticks: u64) -> Result<(), Error> {
+        let mut level = self.level.lock().expect("level.dat lock poisoned");
+        let total = self
+            .base_ticks
+            .saturating_add(i64::try_from(session_ticks).unwrap_or(i64::MAX));
+        level.set_time(total).map_err(Error::Anvil)?;
+        level
+            .set_last_played(now_millis())
+            .map_err(Error::Anvil)?;
+        lodestone_anvil::level_dat::write_to_file(&level, &self.path).map_err(Error::Anvil)?;
+        self.writes.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+/// Wall-clock milliseconds since the epoch, saturating rather than panicking
+/// on a system clock set before 1970.
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
 /// Counters for what the save/load path actually did.
 ///
 /// Deliberately counters and not timings: a duration measured while five other
