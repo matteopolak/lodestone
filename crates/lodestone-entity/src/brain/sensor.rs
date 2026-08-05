@@ -10,7 +10,14 @@ use super::memory::{Memories, MemoryModuleType, MemoryValue};
 use super::mob::BrainMob;
 
 /// The perception units a brain ticks each frame.
-pub trait Sensor {
+///
+/// `Send` is required for the same reason [`Goal`](crate::ai::Goal) requires it:
+/// a [`Brain`](super::Brain) reaches production inside a
+/// [`BrainGoal`](super::BrainGoal), which a `MobSim` stores as a
+/// `Box<dyn Goal>` behind an `Arc<Mutex<…>>` and hands to the integrated
+/// server's `tokio::spawn`ed connection task. Every sensor here is a plain state
+/// machine over owned fields, so the bound costs nothing.
+pub trait Sensor: Send {
     /// Updates memory from the mob's current perception.
     fn tick(&mut self, mem: &mut Memories, mob: &mut dyn BrainMob);
 

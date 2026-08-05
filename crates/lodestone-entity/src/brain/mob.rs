@@ -10,6 +10,34 @@
 use lodestone_model::Vec3;
 
 /// The mob-facing operations a brain behaviour or sensor may perform.
+///
+/// # This trait deliberately overlaps [`MobController`], and that has a cost
+///
+/// `NavigatingMob` implements **both** (issue #209), and the two declare
+/// same-named methods: `position`, `next_i32`, `next_f32`, `in_water`, `move_to`,
+/// `navigation_done`, `stop_navigation`, `look_at`. On a type implementing both,
+/// every call to one of those is `E0034 multiple applicable items in scope` and
+/// must be spelled `MobController::in_water(self)` or
+/// `BrainMob::move_to(self, …)`. Three call sites in `navigating_mob.rs`'s tests
+/// pay that tax today.
+///
+/// **Worse, the two `move_to`s differ in float width** — `MobController`'s speed is
+/// `f64`, this one's is `f32` — so a disambiguation that picks the wrong trait
+/// changes the literal's type rather than failing to compile. The split is
+/// pre-existing and faithful (vanilla's `WalkTarget.speedModifier` is a `float`
+/// while the goal system's speeds are doubles), but it means the ambiguity cannot
+/// be resolved by inference and never will be.
+///
+/// **Making this trait `BrainMob: MobController` would remove the ambiguity
+/// permanently, and was considered and rejected.** It would force every
+/// implementor — including the brain's own hermetic `TestMob` — to supply all ~35
+/// `MobController` methods, most of which no behaviour ever calls; and it would
+/// make the Brain system *depend on* the goal system's seam rather than sit beside
+/// it, which is a layering inversion for two architectures vanilla treats as
+/// peers. Revisit if a third implementor appears, or if the disambiguation tax
+/// spreads beyond test code.
+///
+/// [`MobController`]: crate::ai::MobController
 pub trait BrainMob {
     /// A uniform random `i32` in `[0, bound)` (vanilla's `random.nextInt`).
     fn next_i32(&mut self, bound: i32) -> i32;

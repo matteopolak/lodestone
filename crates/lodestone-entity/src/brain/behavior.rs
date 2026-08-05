@@ -34,7 +34,11 @@ pub const DEFAULT_DURATION: i32 = 60;
 ///
 /// Both leaf behaviours (via [`Leaf`]) and composite gates
 /// ([`GateBehavior`](super::gate::GateBehavior)) implement this.
-pub trait BehaviorControl {
+///
+/// `Send` is required for the same reason [`Sensor`](super::Sensor) is — see that
+/// trait's note. It propagates to [`Behavior`] because [`Leaf`] stores one by
+/// value.
+pub trait BehaviorControl: Send {
     /// The current run state.
     fn status(&self) -> Status;
 
@@ -58,7 +62,7 @@ pub trait BehaviorControl {
 ///
 /// A concrete behaviour implements this; [`Leaf`] wraps it with the fixed
 /// lifecycle. Every hook may mutate both the memory map and the mob.
-pub trait Behavior {
+pub trait Behavior: Send {
     /// The `(memory, status)` requirements that must all hold to start (and, by
     /// registration, the memories this behaviour depends on).
     fn entry_condition(&self) -> &[(MemoryModuleType, MemoryStatus)];

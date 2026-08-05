@@ -40,17 +40,21 @@
 mod activity;
 mod behavior;
 mod behaviors;
+mod driver;
 mod gate;
 mod memory;
 mod mob;
+pub mod roster;
 mod sensor;
 
 pub use activity::Activity;
 pub use behavior::{Behavior, BehaviorControl, DEFAULT_DURATION, Leaf, Status};
 pub use behaviors::{LookAtTargetSink, MoveToTargetSink, RandomStroll, SetPlayerLookTarget};
+pub use driver::BrainGoal;
 pub use gate::{GateBehavior, OrderPolicy, RunningPolicy};
 pub use memory::{Memories, MemoryModuleType, MemoryStatus, MemoryValue, WalkTarget};
 pub use mob::BrainMob;
+pub use roster::{BRAIN_SPECIES, brain_for, is_brain_species, scaffold};
 pub use sensor::{NearestPlayerSensor, Sensor};
 
 use std::collections::HashMap;

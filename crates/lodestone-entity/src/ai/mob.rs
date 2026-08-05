@@ -11,6 +11,7 @@
 
 use lodestone_model::Vec3;
 
+use crate::brain::BrainMob;
 use crate::pathfinding::BlockCues;
 
 /// The mob-facing operations a [`Goal`](crate::ai::Goal) may perform.
@@ -317,6 +318,40 @@ pub trait MobController {
     /// say so.
     fn launch_projectile(&mut self, launch: ProjectileLaunch) {
         let _ = launch;
+    }
+
+    /// This controller viewed as a [`BrainMob`], if it can drive vanilla's *other*
+    /// AI architecture (issue #209). `None` — the default — means it cannot.
+    ///
+    /// # Why the two architectures meet here
+    ///
+    /// 26.2 ships both AI systems and vanilla's `Mob` carries **both** fields:
+    /// `goalSelector` and `brain`, ticked in the same `customServerAiStep`. This
+    /// repo had only half of that: [`GoalSelector`](crate::ai::GoalSelector)
+    /// reached production through [`NavigatingMob`](crate::ai::NavigatingMob) and
+    /// `MobSim`, while [`Brain`](crate::brain::Brain) had no production caller at
+    /// all — the [`Sensor`](crate::brain::Sensor)/`BehaviorControl` machinery was
+    /// individually complete and reached zero mobs.
+    ///
+    /// This method is the join, and it is deliberately **on the existing seam**
+    /// rather than a second parallel one. A [`BrainGoal`](crate::brain::BrainGoal)
+    /// is an ordinary [`Goal`](crate::ai::Goal), so every host that already ticks
+    /// a `GoalSelector` ticks a brain too, with no host change whatsoever. The
+    /// alternative — a second `tick_brain` entry point every driver must learn to
+    /// call — is how the first island was built.
+    ///
+    /// # The default is `None` on purpose, and that is load-bearing
+    ///
+    /// A test fake that overrides every perception method (`ScriptMob`,
+    /// `ai::roster::probe`) is exactly how issues #441 and #455 stayed hidden: the
+    /// goal had a green unit test while its `can_use` was constant-`false` in
+    /// production. Returning `None` by default means a brain installed on a fake
+    /// mob does **nothing at all**, loudly — so a brain behaviour cannot be
+    /// "proven" against a double. The only way to observe one is to drive the real
+    /// [`NavigatingMob`](crate::ai::NavigatingMob), which is the sole implementor
+    /// that answers `Some`.
+    fn brain_mob(&mut self) -> Option<&mut dyn BrainMob> {
+        None
     }
 }
 
