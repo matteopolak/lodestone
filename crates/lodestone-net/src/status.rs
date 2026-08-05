@@ -33,6 +33,15 @@ use crate::error::{NetError, Result};
 /// [`crate::ping`], but base64 expands ~4:3 and this keeps the intent explicit.
 pub const MAX_FAVICON_BYTES: usize = 1 << 20;
 
+/// One entry from `players.sample[]` — a player the server reports as online.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlayerSample {
+    /// The player's display name.
+    pub name: String,
+    /// The player's profile id (a UUID), when the server sent one.
+    pub id: Option<String>,
+}
+
 /// A status response decoded into the fields a server list renders.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServerStatus {
@@ -56,6 +65,13 @@ pub struct ServerStatus {
     pub online: Option<u32>,
     /// Player slots, when the server reports it.
     pub max: Option<u32>,
+    /// Online players' names, from `players.sample[]`, in server order.
+    ///
+    /// Vanilla shows these in the row's "who's online" tooltip
+    /// (`ServerSelectionList.java:410,430`). A server that omits the sample —
+    /// which is legal and common — leaves this empty rather than failing the
+    /// status, the same tolerance as every other field here.
+    pub sample: Vec<PlayerSample>,
     /// Human-readable version name (e.g. `"26.2"`, `"Paper 1.21.4"`).
     pub version: Option<String>,
     /// Protocol number the server speaks, when reported.
@@ -111,6 +127,11 @@ pub fn parse_status_json(json: &str, latency_ms: Option<u64>) -> Result<ServerSt
             .and_then(serde_json::Value::as_u64)
             .and_then(|v| u32::try_from(v).ok())
     };
+    let sample = players
+        .and_then(|p| p.get("sample"))
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| arr.iter().filter_map(player_sample).collect())
+        .unwrap_or_default();
 
     let version_obj = obj.get("version").and_then(|v| v.as_object());
     let version = version_obj
@@ -132,10 +153,36 @@ pub fn parse_status_json(json: &str, latency_ms: Option<u64>) -> Result<ServerSt
         motd_spans,
         online: count("online"),
         max: count("max"),
+        sample,
         version,
         protocol,
         favicon_png,
         latency_ms,
+    })
+}
+
+/// Decodes one `players.sample[]` entry, or `None` if it is unusable.
+///
+/// Vanilla's `NameAndId` codec demands both `id` and `name`
+/// (`server/players/NameAndId.java:11-13`); real servers are looser, and one
+/// malformed entry must not blank a whole row any more than a broken favicon
+/// does, so an entry missing either field is skipped, not fatal. The `id` is
+/// kept as the raw string rather than parsed to a UUID: the list only ever
+/// displays names, and comparing an id against the all-zero anonymous profile
+/// (`MinecraftServer.ANONYMOUS_PLAYER_PROFILE`) is tooltip shaping, not decode.
+#[must_use]
+fn player_sample(v: &serde_json::Value) -> Option<PlayerSample> {
+    let obj = v.as_object()?;
+    let name = obj.get("name")?.as_str()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(PlayerSample {
+        name: name.to_string(),
+        id: obj
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -279,8 +326,49 @@ mod tests {
         assert_eq!(s.protocol, Some(776));
         assert_eq!(s.latency_ms, Some(7));
         assert_eq!(s.players_line(), "3/20");
+        // The fixture's sample is empty, so the decode must yield an empty one.
+        assert!(s.sample.is_empty());
         // `iVBORw0KGgo=` is exactly the 8-byte PNG signature.
         assert_eq!(s.favicon_png.as_deref(), Some(&PNG_MAGIC[..]));
+    }
+
+    #[test]
+    fn players_sample_decodes_names_in_server_order() {
+        let json = r#"{"players":{"max":100,"online":3,"sample":[
+            {"name":"Notch","id":"069a79f4-44e9-4726-a5be-fca90e38aaf5"},
+            {"name":"jeb_","id":"853c80ef-3c37-49fd-aa49-938b674adae6"},
+            {"name":""},
+            {"name":"   "},
+            {"name":42}
+        ]}}"#;
+        let s = parse_status_json(json, None).unwrap();
+        assert_eq!(s.sample.len(), 2, "blank or non-string names must be skipped");
+        assert_eq!(s.sample[0].name, "Notch");
+        assert_eq!(
+            s.sample[0].id.as_deref(),
+            Some("069a79f4-44e9-4726-a5be-fca90e38aaf5")
+        );
+        assert_eq!(s.sample[1].name, "jeb_");
+        assert_eq!(
+            s.sample[1].id.as_deref(),
+            Some("853c80ef-3c37-49fd-aa49-938b674adae6")
+        );
+    }
+
+    #[test]
+    fn players_sample_may_be_absent_or_plain_objects() {
+        // Both shapes real servers send: the key missing entirely, and a sample
+        // entry without an `id` (some proxies only list names).
+        let absent = parse_status_json(r#"{"players":{"online":1,"max":1}}"#, None).unwrap();
+        assert!(absent.sample.is_empty());
+        let no_ids = parse_status_json(
+            r#"{"players":{"sample":[{"name":"only"},{"name":"names"}]}}"#,
+            None,
+        )
+        .unwrap();
+        assert_eq!(no_ids.sample.len(), 2);
+        assert_eq!(no_ids.sample[1].name, "names");
+        assert_eq!(no_ids.sample[1].id, None);
     }
 
     #[test]
@@ -307,6 +395,7 @@ mod tests {
         assert_eq!(s.motd, "");
         assert_eq!(s.online, None);
         assert_eq!(s.max, None);
+        assert!(s.sample.is_empty());
         assert_eq!(s.favicon_png, None);
         assert_eq!(s.players_line(), "?/?");
     }

@@ -347,6 +347,7 @@ fn the_server_list_shows_the_motd_players_and_latency_from_a_status() {
             // identically to before the styled path existed.
             motd_spans: Vec::new(),
             players: "3/20".into(),
+            sample: Vec::new(),
             version: "26.2".into(),
             // Our own protocol, so the row resolves to
             // `ServerState::Successful` and shows a player count rather than

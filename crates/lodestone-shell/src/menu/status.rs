@@ -67,6 +67,16 @@ pub struct ServerStatus {
     pub motd_spans: Vec<lodestone_model::text::TextSpan>,
     /// Player count, pre-rendered as `online/max`.
     pub players: String,
+    /// Online players' names, from the status `sample`, in server order.
+    ///
+    /// This is what a "who's online" tooltip reads (vanilla
+    /// `ServerSelectionList.java:410,430`). Plain names rather than the full
+    /// `(id, name)` pairs the net layer decodes, because the row only displays
+    /// names — the anonymous-profile and "and N more" shaping vanilla applies
+    /// (`ServerStatusPinger.java:90-110`) is tooltip work, not model work, and
+    /// wants the numeric `online` count this display model deliberately does
+    /// not carry.
+    pub sample: Vec<String>,
     /// Server version name, e.g. `"26.2"`.
     pub version: String,
     /// The protocol number the server reported, when it reported one.
@@ -301,6 +311,7 @@ pub fn net_probe(protocol: i32) -> Probe {
             motd: s.motd,
             motd_spans: s.motd_spans,
             players,
+            sample: s.sample.iter().map(|p| p.name.clone()).collect(),
             version: s.version.unwrap_or_default(),
             protocol: s.protocol,
             favicon_png: s.favicon_png,

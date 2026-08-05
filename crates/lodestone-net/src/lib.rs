@@ -38,7 +38,9 @@ pub use ping::{
 pub use resolve::{
     DEFAULT_PORT, ResolvedAddress, choose_address, should_query_srv, srv_query_name,
 };
-pub use status::{MAX_FAVICON_BYTES, ServerStatus, decode_base64, decode_favicon, parse_status_json};
+pub use status::{
+    MAX_FAVICON_BYTES, PlayerSample, ServerStatus, decode_base64, decode_favicon, parse_status_json,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use status::server_status;
 #[cfg(not(target_arch = "wasm32"))]

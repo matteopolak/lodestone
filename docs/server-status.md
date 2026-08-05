@@ -188,12 +188,16 @@ above will be visible when someone checks.
 
 - `docs/main-menu.md` — the client side of the same wire format: our multiplayer
   list already *queries* other servers' status.
-- Issue #421 — our client does not decode `players.sample`, so it cannot show the
-  player list a status document carries. The server half now emits `sample`
-  correctly (`a_player_sample_entry_uses_nameandids_keys_and_hyphenated_uuid`
-  pins the keys and the hyphenated-uuid form against vanilla's own capture), so
-  #421 needs only the client-side field: parse `players.sample[]` in
-  `lodestone_net::status::parse_status_json` into `ServerStatus`, and render it.
+- Issue #421 — our client did not decode `players.sample`, so the list could not
+  show who was online. The server half emits `sample` correctly
+  (`a_player_sample_entry_uses_nameandids_keys_and_hyphenated_uuid` pins the keys
+  and the hyphenated-uuid form against vanilla's own capture), and the client now
+  decodes it: `lodestone_net::status::parse_status_json` fills
+  `ServerStatus.sample` (a `Vec<PlayerSample>` of `name` + raw `id`, malformed
+  entries skipped), and `lodestone-shell`'s `menu::status::net_probe` threads the
+  names into its display `ServerStatus.sample`. What remains is rendering: the
+  "who's online" row tooltip (`ServerSelectionList.java:410,430`) does not exist
+  in the shell yet.
 - Issue #280 — the keep-alive timeout, which is Play's version of the same
   "never hold a connection open forever" concern this phase handles with its
   disconnect-after-answer.
