@@ -430,6 +430,7 @@ fn live_zombie_detours_around_wall() {
         Vec3::new(0.5, -60.0, 0.5),
         0.25,
         8000,
+        0,
     );
     goal_mob.set_attack_target(Some(Vec3::new(10.5, -60.0, 0.5)));
     let mut ai = GoalSelector::new();

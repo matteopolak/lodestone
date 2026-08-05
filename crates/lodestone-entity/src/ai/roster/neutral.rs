@@ -899,8 +899,8 @@ mod tests {
             Vec3::new(0.5, 0.0, 0.5),
             speed,
             560,
-        )
-        .with_seed(0xB4_2333);
+            0xB4_2333,
+        );
 
         let mut ai = GoalSelector::new();
         let ctx = SpeciesContext::new(speed);

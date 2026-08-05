@@ -73,7 +73,7 @@ use lodestone_entity::ai::roster::{self, SpeciesContext};
 use lodestone_entity::ai::navigating_mob::{
     BABY_START_AGE, DEFAULT_FOLLOW_RANGE, PARENT_AGE_AFTER_BREEDING,
 };
-use lodestone_entity::ai::mob::EatenBlock;
+use lodestone_entity::ai::mob::{EatenBlock, ProjectileLaunch};
 use lodestone_entity::ai::{Goal, GoalSelector, MobController, NavigatingMob};
 use lodestone_entity::attribute::default_attributes;
 use lodestone_entity::explosion::Aabb as ExplosionAabb;
@@ -1636,7 +1636,7 @@ impl<'w> MobSim<'w> {
             combat_defaults(&entity_type);
         self.mobs.push(SimMob {
             id,
-            mob: NavigatingMob::new(self.world, shape, pos, step_per_tick, visited_budget),
+            mob: NavigatingMob::new(self.world, shape, pos, step_per_tick, visited_budget, id as u64),
             goals: GoalSelector::new(),
             category: MobCategory::Monster,
             no_action_time: 0,
@@ -1895,6 +1895,7 @@ impl<'w> MobSim<'w> {
         // mutably borrowed by `&mut self.mobs` for the whole loop, exactly as it
         // is for `hits`/`detonations`/`bred`.
         let mut grazes: Vec<(BlockPos, EatenBlock)> = Vec::new();
+        let mut launches: Vec<ProjectileLaunch> = Vec::new();
         for m in &mut self.mobs {
             // Vanilla ages `invulnerableTime`/`hurtTime` every tick regardless
             // of whether the mob was hit this tick.
@@ -1931,8 +1932,20 @@ impl<'w> MobSim<'w> {
             for what in m.mob.take_new_eaten() {
                 grazes.push((m.mob.block_position(), what));
             }
+            launches.extend(m.mob.take_new_launches());
         }
         self.pending_grazes.extend(grazes);
+        for launch in launches {
+            use lodestone_entity::ai::roster::ranged::{integrates_as_arrow, projectile_entity_type};
+            let projectile = if integrates_as_arrow(launch.kind) {
+                Projectile::arrow(launch.origin, launch.velocity)
+            } else {
+                Projectile::throwable(launch.origin, launch.velocity)
+            };
+            let key = ResourceKey::from_str(&format!("minecraft:{}", projectile_entity_type(launch.kind)))
+                .expect("static projectile key");
+            self.spawn_projectile(key, projectile);
+        }
         for (target_id, raw_damage, attacker_pos) in hits {
             if let Some(target_id) = target_id
                 && let Some(target) = self.mobs.iter_mut().find(|m| m.id == target_id)
