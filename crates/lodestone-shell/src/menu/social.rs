@@ -132,6 +132,17 @@ impl SocialControl {
 
 /// Where one [`SocialControl`] sits, mirroring [`super::key_binds::KeyPlacement`]'s
 /// shape: every content-list variant shares `{row, first}`, only the x differs.
+///
+/// **Still a row index, and issue #445 records why.** Converting it to a pixel
+/// offset is blocked on a `ListSpec` change, not on this screen: this list's
+/// rows are **full-width and left-anchored** (`name_x` is a flat
+/// `NAME_LEFT_INSET`, the buttons hang off `width - RIGHT_MARGIN`), while
+/// `ListSpec::row_left` is `floor(width / 2) - floor(row_w / 2)` — a *centred,
+/// fixed-width* row. There is no constant `row_w` that makes `row_right` land
+/// in this screen's right margin at every canvas width, so the scrollbar the
+/// spec exists to place cannot be positioned from it. The primitive needs a
+/// canvas-relative row edge before this screen, `key_binds` or `language` can
+/// adopt it honestly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SocialPlacement {
     Name { row: u16, first: u16 },
