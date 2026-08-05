@@ -378,15 +378,56 @@ impl IntegratedServer {
         P: ServerProtocol + 'static,
         S: ChunkSource + 'static,
     {
+        // A private registry, because an in-memory world has nothing to
+        // persist into. A *persistent* world must not take this path — see
+        // [`Self::open_in_memory_with_mobs_using`].
+        Self::open_in_memory_with_mobs_using(
+            protocol,
+            source,
+            mob_area,
+            mob_center,
+            mob_count,
+            view_radius,
+            BlockEntityHandle::default(),
+        )
+    }
+
+    /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs) with the
+    /// block-entity registry supplied by the caller.
+    ///
+    /// # Why this exists at all
+    ///
+    /// Because a registry the server creates privately is a registry the save
+    /// path can never read, and that is the exact shape of the island issue
+    /// #468 was: `chunk_nbt` wrote an empty `block_entities` list for every
+    /// chunk and a saved container came back empty. The world's containers
+    /// have to live in **one** registry that both the tick loop and
+    /// [`crate::region_source::WorldSaveHandle`] can see, so
+    /// [`Self::open_persistent_with_mobs`] takes it from the
+    /// `RegionChunkSource` and hands it in here.
+    ///
+    /// Private on purpose: the choice is between "in-memory, private registry"
+    /// and "persistent, the world's registry", and both public constructors
+    /// already make it correctly. A third caller passing an unrelated handle
+    /// would recreate the island.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    fn open_in_memory_with_mobs_using<P, S>(
+        protocol: P,
+        source: S,
+        mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
+        mob_center: (i32, i32),
+        mob_count: usize,
+        view_radius: i32,
+        block_entities: BlockEntityHandle,
+    ) -> (Self, DuplexStream)
+    where
+        P: ServerProtocol + 'static,
+        S: ChunkSource + 'static,
+    {
         let (client_end, server_end) = memory_pair();
         let shutdown = Arc::new(Notify::new());
         let live_mobs = LiveMobSource::default();
-        // Shared with the tick task spawned below, the same way `live_mobs`
-        // is — this is the constructor `docs/block-entities.md` named as the
-        // one with somewhere to hang the unified tick loop's block-entity work
-        // off of (issue #284; before that, a separate
-        // `run_block_entity_tick_loop`).
-        let block_entities = BlockEntityHandle::default();
         // Issues #307/#308: shared with the tick task the same way
         // `block_entities` is, above — see [`BlockTickFeed`]'s own doc
         // comment for why this is safe with exactly one connection (this
@@ -677,13 +718,21 @@ impl IntegratedServer {
         // below wraps — not a second copy, which is the mistake issue #454
         // caught in the mob-pathing source.
         let world = persistent.clone();
-        let (mut server, client_end) = Self::open_in_memory_with_mobs(
+        // **The world's own registry, not a fresh one.** This is the join that
+        // makes block entities persist at all: the tick loop advances the
+        // containers in this registry and `WorldSaveHandle::save` reads the
+        // same one. Passing `BlockEntityHandle::default()` here compiles, ticks
+        // correctly, and writes an empty `block_entities` list forever — the
+        // island #468 names.
+        let block_entities = persistent.block_entities();
+        let (mut server, client_end) = Self::open_in_memory_with_mobs_using(
             protocol,
             persistent,
             mob_area,
             mob_center,
             mob_count,
             view_radius,
+            block_entities,
         );
 
         let autosave_handle = save.clone();

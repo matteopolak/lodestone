@@ -107,9 +107,11 @@ use std::sync::{Arc, Mutex};
 use lodestone_anvil::CompressionScheme;
 use lodestone_anvil::region::{ChunkToWrite, RegionFile, build_region, region_and_local};
 use lodestone_core::{Reader, Writer, read_named_nbt, write_named_nbt};
+use lodestone_model::BlockPos;
 
+use crate::block_entities::BlockEntityHandle;
 use crate::chunk::{ChunkColumn, ChunkSource};
-use crate::chunk_nbt;
+use crate::chunk_nbt::{self, ChunkExtras};
 
 /// Vanilla's `RegionFileVersion.DEFAULT`, and the only scheme any real file
 /// this repo has read actually uses.
@@ -379,6 +381,13 @@ pub struct PersistenceStats {
     /// Calls to [`WorldSaveHandle::save`] that found nothing dirty and did no
     /// filesystem work at all.
     pub empty_saves: AtomicU64,
+    /// Block entities restored from disk into the live registry across all
+    /// loads. The counter that says the block-entity read path is reaching
+    /// anything at all — a saved container coming back empty was #468's
+    /// symptom, and this is the number that would have been `0`.
+    pub block_entities_loaded: AtomicU64,
+    /// Block entities encoded into a chunk across all saves.
+    pub block_entities_written: AtomicU64,
 }
 
 /// The state a save needs, shared between the source and its save handle.
@@ -399,7 +408,27 @@ struct WorldState {
     /// [`Self::edits`] once they are safely on disk. See
     /// [`WorldSaveHandle::save`]'s unload sweep.
     pending_unload: Mutex<HashSet<(i32, i32)>>,
+    /// The world's live block entities — the same registry the tick loop and
+    /// the connection task hold, not a copy.
+    ///
+    /// Reading it non-destructively is what #468 was blocked on:
+    /// [`crate::BlockEntityRegistry`]'s only other routes are `remove` and
+    /// `tick_all`, so saving through them would have desynchronised the
+    /// running server from what landed on disk.
+    block_entities: BlockEntityHandle,
     stats: PersistenceStats,
+}
+
+/// The chunk a block position belongs to.
+///
+/// `>> 4` rather than `/ 16`: an arithmetic shift floors, and truncating
+/// division would map `x = -1` to chunk `0` instead of `-1`, putting every
+/// block entity on the negative side of the origin in the wrong chunk. Same
+/// arithmetic as `lodestone_anvil::region::region_and_local`'s `>> 5`, one
+/// level down.
+#[must_use]
+fn chunk_of(pos: BlockPos) -> (i32, i32) {
+    (pos.x >> 4, pos.z >> 4)
 }
 
 /// A [`ChunkSource`] that loads columns from Anvil region files and retains
@@ -446,9 +475,24 @@ impl<S: ChunkSource> RegionChunkSource<S> {
                 edits: Mutex::new(HashMap::new()),
                 dirty: Mutex::new(HashSet::new()),
                 pending_unload: Mutex::new(HashSet::new()),
+                block_entities: BlockEntityHandle::default(),
                 stats: PersistenceStats::default(),
             }),
         })
+    }
+
+    /// The world's block-entity registry, for the server to tick and for
+    /// connections to insert into on placement.
+    ///
+    /// **A persistent world's registry is created here, not by
+    /// [`crate::IntegratedServer`]**, and that direction matters: the save
+    /// path has to be able to read the registry, and a registry the server
+    /// made privately is one persistence can never see — which is exactly the
+    /// shape of the island #468 was. Handing it *out* means there is only one,
+    /// by construction.
+    #[must_use]
+    pub fn block_entities(&self) -> BlockEntityHandle {
+        self.state.block_entities.clone()
     }
 
     /// How many columns the edit map is holding.
@@ -482,7 +526,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
     /// itself treats "file doesn't exist yet" as a legal chunk-less region
     /// (see `lodestone_anvil::region::RegionFile::parse`), and a world's very
     /// first open has no files at all.
-    fn load(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+    fn load(&self, cx: i32, cz: i32) -> Option<LoadedChunk> {
         let (rx, rz, local_x, local_z) = region_and_local(cx, cz);
         let path = self.state.region_dir.join(format!("r.{rx}.{rz}.mca"));
         let bytes = std::fs::read(&path).ok()?;
@@ -498,8 +542,58 @@ impl<S: ChunkSource> RegionChunkSource<S> {
             .ok()??;
         let mut reader = Reader::new(&raw);
         let (_, nbt) = read_named_nbt(&mut reader).ok()?;
-        chunk_nbt::column_from_nbt(&nbt, self.state.min_y, self.state.height).ok()
+        let column =
+            chunk_nbt::column_from_nbt(&nbt, self.state.min_y, self.state.height).ok()?;
+        let extras = chunk_nbt::extras_from_nbt(&nbt);
+        let restored = self.restore_block_entities(&extras);
+        Some(LoadedChunk {
+            column,
+            holds_block_entities: restored > 0,
+        })
     }
+
+    /// Puts a loaded chunk's block entities back into the live registry,
+    /// returning how many were inserted.
+    ///
+    /// **Absent-only.** A position the registry already holds is left alone,
+    /// because the live value is by definition newer than the disk one: a
+    /// column can be released from the edit map and re-loaded while its
+    /// furnace has been ticking the whole time (the registry has no eviction),
+    /// and overwriting it would rewind the world every time a chunk left the
+    /// cache.
+    ///
+    /// Cheap enough for the caller's thread — which is the tick or serving
+    /// thread — because it is a `Mutex` and a `HashMap` insert per entity, no
+    /// I/O, and a chunk with any block entities at all is rare.
+    fn restore_block_entities(&self, extras: &ChunkExtras) -> u64 {
+        if extras.block_entities.is_empty() {
+            return 0;
+        }
+        let restored = self.state.block_entities.with(|registry| {
+            let mut count = 0u64;
+            for (pos, entity) in &extras.block_entities {
+                if registry.get(*pos).is_none() {
+                    registry.insert(*pos, entity.clone());
+                    count += 1;
+                }
+            }
+            count
+        });
+        self.state
+            .stats
+            .block_entities_loaded
+            .fetch_add(restored, Ordering::Relaxed);
+        restored
+    }
+}
+
+/// What [`RegionChunkSource::load`] found on disk.
+struct LoadedChunk {
+    column: ChunkColumn,
+    /// Whether this chunk put anything into the block-entity registry — the
+    /// cue for [`ChunkSource::column`] to retain it. See that method for why
+    /// retention is required rather than an optimisation.
+    holds_block_entities: bool,
 }
 
 impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
@@ -515,7 +609,22 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
                 .stats
                 .loaded_from_disk
                 .fetch_add(1, Ordering::Relaxed);
-            return loaded;
+            // **A chunk that holds block entities is retained in `edits` from
+            // the moment it loads**, which is the one exception to "only
+            // `set_block` populates the edit map".
+            //
+            // It has to be. A furnace's contents change through the container
+            // menu, which never touches a block, so such a chunk can be
+            // *stale on disk while nothing marks it dirty*. `save_region`
+            // carries a chunk it has no edit entry for across as its original
+            // compressed bytes — so without this, smelting into a furnace that
+            // was loaded rather than placed this session would write the old
+            // contents straight back over the new ones, silently.
+            if loaded.holds_block_entities {
+                let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
+                edits.entry((cx, cz)).or_insert_with(|| loaded.column.clone());
+            }
+            return loaded.column;
         }
         self.state.stats.generated.fetch_add(1, Ordering::Relaxed);
         self.inner.column(cx, cz)
@@ -608,6 +717,48 @@ impl WorldSaveHandle {
         &self.state.stats
     }
 
+    /// The set of chunks that currently hold at least one block entity.
+    ///
+    /// Reads the live registry through
+    /// [`crate::BlockEntityRegistry::iter`], the non-destructive iterator
+    /// added for this: `drain_due`-style consumption here would have removed
+    /// the world's furnaces as the price of saving them.
+    fn block_entity_chunks(&self) -> HashSet<(i32, i32)> {
+        self.state.block_entities.with(|registry| {
+            registry
+                .iter()
+                .map(|(pos, _)| chunk_of(*pos))
+                .collect::<HashSet<_>>()
+        })
+    }
+
+    /// Every block entity inside chunk `(cx, cz)`, as the chunk schema wants
+    /// them.
+    ///
+    /// Grouping happens here rather than in [`chunk_nbt`] for the reason
+    /// vanilla groups in `SavedTick.filterTickListForChunk` rather than in the
+    /// codec: the writer of a single chunk should be handed exactly that
+    /// chunk's contents, so an entry landing in the wrong file is a bug in one
+    /// place instead of two.
+    fn extras_for(&self, cx: i32, cz: i32) -> ChunkExtras {
+        let block_entities = self.state.block_entities.with(|registry| {
+            registry
+                .iter()
+                .filter(|(pos, _)| chunk_of(**pos) == (cx, cz))
+                .map(|(pos, entity)| (*pos, entity.clone()))
+                .collect::<Vec<_>>()
+        });
+        ChunkExtras {
+            block_entities,
+            // Scheduled ticks are not reachable from here yet: the queues are
+            // locals inside `tick::run_tick_loop` rather than a shared handle,
+            // so nothing outside that function can see them. The schema half
+            // is done (`chunk_nbt::SavedTick`) and this is where they plug in.
+            block_ticks: Vec::new(),
+            fluid_ticks: Vec::new(),
+        }
+    }
+
     /// Writes every dirty chunk, grouped into as few region rewrites as
     /// possible. Returns the number of chunk columns written.
     ///
@@ -617,10 +768,26 @@ impl WorldSaveHandle {
     /// On failure the affected chunks are put **back** into the dirty set, so
     /// a transient disk error costs a retry rather than the player's work.
     pub fn save(&self) -> Result<usize, Error> {
-        let taken: Vec<(i32, i32)> = {
+        let mut pending: HashSet<(i32, i32)> = {
             let mut dirty = self.state.dirty.lock().expect("world dirty lock poisoned");
             dirty.drain().collect()
         };
+        // **Every chunk holding a block entity is written on every save**, on
+        // top of the dirty set.
+        //
+        // It is not a `set_block` that changes a furnace's contents or a
+        // hopper's cooldown — those move through the container menu and the
+        // tick loop, neither of which touches a block — so nothing marks such
+        // a chunk dirty and a dirty-only save would persist a container's
+        // state exactly once, at placement, and never again.
+        //
+        // This is still **mutation**-proportional rather than
+        // residency-proportional, which is the property `docs/world-save-load.md`
+        // and #437's cost gate care about: it is bounded by the number of
+        // block entities in the world, not by the 512-column store. A world
+        // with no containers pays nothing.
+        pending.extend(self.block_entity_chunks());
+        let taken: Vec<(i32, i32)> = pending.into_iter().collect();
         if taken.is_empty() {
             self.state.stats.empty_saves.fetch_add(1, Ordering::Relaxed);
             // Still sweep: a world nobody is building in is exactly the world
@@ -699,12 +866,32 @@ impl WorldSaveHandle {
             pending.drain().collect()
         };
 
+        // Taken before `edits`, for the lock-order reason `save_region`
+        // documents.
+        let holds_block_entities = self.block_entity_chunks();
+
         let mut released = 0u64;
         let mut deferred: Vec<(i32, i32)> = Vec::new();
         {
             let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
             let dirty = self.state.dirty.lock().expect("world dirty lock poisoned");
             for key in candidates {
+                // **A chunk holding a block entity is never released**, and
+                // this is a correctness rule rather than a heuristic. The
+                // invariant that makes releasing lossless is "a column in
+                // `edits` but not in `dirty` is already on disk in its current
+                // form" — and that is false for a container, whose contents go
+                // on changing through the menu and the tick loop without ever
+                // marking the chunk dirty. Releasing one would leave the next
+                // save to carry the chunk across as its old compressed bytes.
+                //
+                // Bounded by the number of block entities in the world, not by
+                // residency, so the memory ceiling unload-driven saving exists
+                // to impose still holds.
+                if holds_block_entities.contains(&key) {
+                    deferred.push(key);
+                    continue;
+                }
                 if dirty.contains(&key) {
                     // Mutated again since the eviction, so it is not on disk in
                     // its current form. Dropping it now would lose that edit.
@@ -817,13 +1004,30 @@ impl WorldSaveHandle {
         )
         .unwrap_or(u32::MAX);
         let mut count = 0usize;
+        // Snapshotted **before** the `edits` lock is taken, never underneath
+        // it. The connection task takes the block-entity registry lock and
+        // then writes a block through `ChunkSource::set_block` (placing a
+        // furnace does exactly that), which is `block_entities` → `edits`;
+        // taking them the other way round here would be a lock-order
+        // inversion, and a deadlock that only appears when a player places a
+        // container during an autosave is not one any test would find.
+        let extras_by_chunk: HashMap<(i32, i32), ChunkExtras> = chunks
+            .iter()
+            .map(|&(cx, cz)| ((cx, cz), self.extras_for(cx, cz)))
+            .collect();
         {
             let edits = self.state.edits.lock().expect("world edit lock poisoned");
             for &(cx, cz) in chunks {
                 let Some(column) = edits.get(&(cx, cz)) else {
                     continue;
                 };
-                let nbt = chunk_nbt::column_to_nbt(cx, cz, column);
+                let empty = ChunkExtras::default();
+                let extras = extras_by_chunk.get(&(cx, cz)).unwrap_or(&empty);
+                self.state
+                    .stats
+                    .block_entities_written
+                    .fetch_add(extras.block_entities.len() as u64, Ordering::Relaxed);
+                let nbt = chunk_nbt::column_to_nbt_with(cx, cz, column, extras);
                 let mut writer = Writer::default();
                 write_named_nbt(&mut writer, "", &nbt).map_err(Error::Nbt)?;
                 let compressed = SCHEME.compress(&writer.into_vec()).map_err(Error::Anvil)?;
