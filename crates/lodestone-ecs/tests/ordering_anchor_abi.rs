@@ -113,7 +113,7 @@ const EXPECTED_COUNTS: &[(&str, usize)] = &[
 /// `every_declared_anchor_is_chained_or_a_known_gap` fails**, which is the
 /// point: the gap is measured and named rather than sitting silently inside a
 /// snapshot that looks authoritative.
-const KNOWN_UNCHAINED: &[&str] = &["TickSet::Intent", "ExtractSet::Debug"];
+const KNOWN_UNCHAINED: &[&str] = &[];
 
 fn crate_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

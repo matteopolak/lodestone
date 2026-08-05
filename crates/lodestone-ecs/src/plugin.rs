@@ -78,6 +78,7 @@ impl Plugin for CorePlugin {
             GameTick,
             (
                 TickSet::Input,
+                TickSet::Intent,
                 TickSet::Physics,
                 TickSet::Predict,
                 TickSet::Animate,
@@ -105,7 +106,13 @@ impl Plugin for CorePlugin {
         app.init_schedule(Extract);
         app.configure_sets(
             Extract,
-            (ExtractSet::Terrain, ExtractSet::Entities, ExtractSet::Hud).chain(),
+            (
+                ExtractSet::Terrain,
+                ExtractSet::Entities,
+                ExtractSet::Debug,
+                ExtractSet::Hud,
+            )
+                .chain(),
         );
         app.configure_sets(Extract, event_priority_chain!());
     }
