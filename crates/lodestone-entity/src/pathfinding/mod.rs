@@ -24,4 +24,4 @@ pub mod world;
 pub use navigation::PathNavigator;
 pub use node::{Node, PathType};
 pub use search::{Path, PathFinder, PathNode, PathParams, PathStart};
-pub use world::{Aabb, MobShape, PathWorld};
+pub use world::{Aabb, BlockCues, MobShape, PathWorld};
