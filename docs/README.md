@@ -580,6 +580,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   Eight of thirteen implemented goals could not act, and every one of them had a
   *green* unit test. This doc records what each method reads, who feeds it, and why
   the whole thing was invisible to the test suite.
+- [Mob ranged attacks](./mob-ranged-attacks.md) — The goal family that makes a mob
+  shoot: a bow goal, vanilla's generic `RangedAttackGoal`, and the blaze's
+  three-fireball burst, plus the `ProjectileLaunch` intent that carries a shot from
+  the AI layer out to whoever owns entity ids. Issue
+  [#227](https://github.com/matteopolak/lodestone/issues/227) unit B3a. Before it,
+  `RangedAttackGoal` and `BowAttack` were zero hits tree-wide and no mob in this repo
+  could throw anything.
 - [Species-aware mob spawning (issue #205)](./mob-species-spawning.md) —
   `MobSim::spawn_species` (`crates/lodestone-server/src/mobs.rs`), a spawn entry point
   that resolves a mob's body, combat stats, and baseline goal set from its real
@@ -977,6 +984,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `WorldSelectButton::Create`, now live — issue #397 left it present-and-disabled
   deliberately for this issue). Collects a world name, seed, game mode, difficulty,
   and three toggles (generate structures, bonus chest, allow cheats).
+- [World-open latency in singleplayer](./world-open-latency.md) — The two orderings
+  that made opening a singleplayer world feel broken — *"it takes forever to load
+  and the chunks generated are not close to me"* — and how they were fixed. Mob
+  seeding used to generate the whole tick area **inside the constructor** from a
+  second, independent generator (issue #454), and the join used to generate all 361
+  columns of the view before encoding any, in raster order from the far corner (issue
+  #453). Both live in `lodestone-server`; both are about *ordering*, not throughput.
+  They are the tail of the same report the [`ChunkStore`](./chunk-store.md) fix (#289
+  U3) opened.
 - [World persistence: `lodestone-anvil`](./world-persistence.md) — `lodestone-anvil`
   (`crates/lodestone-anvil/`) reads and writes Minecraft's on-disk world formats: the
   Anvil region file (`.mca`, issue
