@@ -402,6 +402,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   flashes and jitters around a health change, the hunger row wobbles while saturation
   is empty, and a hotbar item "pops" (squashes then settles) when a stack lands in a
   slot. Issue #30.
+- [HUD heart regeneration wave](./hud-heart-regen-wave.md) — Vanilla's travelling
+  heart "bounce" — a **−2 px** vertical offset that moves along the heart row one
+  container per tick while the player has the Regeneration effect. It is the one heart
+  animation still missing from our HUD, and this doc exists mainly to correct a
+  plausible-sounding but wrong model of *what triggers* the heart and hunger offsets.
+- [HUD text scale](./hud-text-scale.md) — The pose scale applied to the three
+  server-driven HUD text surfaces — the title, the subtitle and the action bar
+  (vanilla's "overlay message") — and why all three currently draw at exactly **2×
+  vanilla**. It also records the answer to a recurring design question: vanilla
+  exposes **no** size option for any of them, and we should not invent one.
 - [Sprint food gate, toggle sneak/sprint, and mouse feel](./input-options.md) —
   Three small, related fixes to `lodestone-controller`'s input model and the settings
   screen's mouse/controls pages:
@@ -532,8 +542,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   was **unfilled**: `NavigatingMob`'s `impl MobController` left eight perception
   methods at their trait defaults, so six goals had a `can_use` that was
   constant-`false` in the running game and two more read fields nothing ever wrote.
-  Eight of thirteen implemented goals could not act. This doc records what each method
-  reads, who feeds it, and the two that still have no production producer.
+  Eight of thirteen implemented goals could not act, and every one of them had a
+  *green* unit test. This doc records what each method reads, who feeds it, and why
+  the whole thing was invisible to the test suite.
 - [Species-aware mob spawning (issue #205)](./mob-species-spawning.md) —
   `MobSim::spawn_species` (`crates/lodestone-server/src/mobs.rs`), a spawn entry point
   that resolves a mob's body, combat stats, and baseline goal set from its real
