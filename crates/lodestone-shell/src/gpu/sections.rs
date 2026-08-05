@@ -63,8 +63,8 @@ impl RenderState {
         // PERF INSTRUMENT: log when the first section reaches the GPU
         if !FIRST_SECTION_UPLOADED.swap(true, Ordering::Relaxed) {
             tracing::info!(
-                "first section uploaded to GPU: ({}, {}, {}), {:?} quads",
-                key.x, key.y, key.z,
+                "first section uploaded to GPU: cx={} cz={} si={} min_y={}, {:?} quads",
+                key.cx, key.cz, key.si, key.min_y,
                 mesh.quad_count(),
             );
         }

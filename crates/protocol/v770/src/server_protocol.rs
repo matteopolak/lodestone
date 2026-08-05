@@ -2140,7 +2140,7 @@ impl ServerProtocol for V770ServerProtocol {
                 // and is deliberately dropped: who is waking up comes from the
                 // connection's own player id, not the wire.
                 match decode_full::<PlayerCommand>(payload) {
-                    Ok(PlayerCommand { action: 0, .. }) => {
+                    Some(PlayerCommand { action: 0, .. }) => {
                         ServerBound::PlayerCommand { action: 0 }
                     }
                     _ => ServerBound::Ignored,
