@@ -21,13 +21,25 @@
 //! order:
 //!
 //! 1. **Block data** — for each present section, 4096 entries of a **16-bit
-//!    little-endian** value `(blockId << 4) | meta`. That packed value *is* the
-//!    natural block-state id, so it maps straight onto a version-free
-//!    [`PalettedContainer`] with no palette on the wire at all. The
-//!    little-endianness is a genuine 1.8 trap: Minecraft shorts are otherwise
-//!    big-endian, and a big-endian misread scrambles every id while still
-//!    consuming the right number of bytes — invisible to a length check, caught
-//!    only by the known-block-at-known-Y assertion.
+//!    little-endian** value `(blockId << 4) | meta`, and there is no palette on
+//!    the wire at all. The little-endianness is a genuine 1.8 trap: Minecraft
+//!    shorts are otherwise big-endian, and a big-endian misread scrambles every
+//!    id while still consuming the right number of bytes — invisible to a
+//!    length check, caught only by the known-block-at-known-Y assertion.
+//!
+//!    **That packed value is *not* a block-state id.** This module's header
+//!    used to claim it "*is* the natural block-state id" and stored it raw in
+//!    the [`PalettedContainer`]; that was wrong in a way nothing in this crate
+//!    could see, because the container is version-free and accepts any `u32`.
+//!    Its consumers — the mesher's atlas and collision — are built from the
+//!    **canonical 26.2** `lodestone_data::block_states` space, in which `112`
+//!    (1.8's bedrock, `7 << 4`) is a *pumpkin stem*, not bedrock. Every value
+//!    is therefore translated through
+//!    [`lodestone_canonical::canonical::resolve_or_air`] — the 1.13.2 jar's own
+//!    `DataFixerUpper` flattening table plus the rename/property bridge — before
+//!    it reaches a container. Unresolvable values become a **counted** air
+//!    substitution ([`ChunkData::fallback`]), logged once per column rather than
+//!    once per block or not at all. See GitHub epic #343 unit U3.
 //! 2. **Block light** — for each present section, a 2048-byte nibble array.
 //! 3. **Sky light** — for each present section, a 2048-byte nibble array,
 //!    present only in dimensions with sky light (the overworld). `map_chunk`
@@ -67,6 +79,7 @@
 //! format without a third framing case being needed. That is the headline
 //! result: the seam held.
 
+use lodestone_canonical::canonical::{self, FallbackTally};
 use lodestone_core::Reader;
 use lodestone_macros::Packet;
 use lodestone_world::{
@@ -102,7 +115,11 @@ pub struct ChunkShape {
     pub block_kind: PaletteKind,
     /// Palette configuration for the (fabricated) biome containers.
     pub biome_kind: PaletteKind,
-    /// Block-state id treated as air (1.8 block id 0, meta 0 → state 0).
+    /// Block-state id treated as air — the **canonical 26.2**
+    /// [`canonical::air_state_id`], not the legacy `(0, 0)` composite value.
+    /// Every wire value has already passed through
+    /// [`canonical::resolve_or_air`] by the time it reaches a container, so
+    /// section-emptiness must be judged in the same space.
     pub air_id: u32,
     /// Default biome id for sections/columns without biome data.
     pub biome_id: u32,
@@ -116,7 +133,7 @@ impl ChunkShape {
             has_skylight: true,
             block_kind: PaletteKind::block_states(),
             biome_kind: PaletteKind::biomes(),
-            air_id: 0,
+            air_id: canonical::air_state_id(),
             biome_id: 0,
         }
     }
@@ -148,6 +165,12 @@ pub struct ChunkData {
     pub column: ChunkColumn,
     /// Sky and block light.
     pub light: ColumnLight,
+    /// Count of wire values that could not be resolved to a canonical 26.2
+    /// state and were substituted with air, broken down by outcome. Zero for
+    /// the overwhelming majority of columns; surfaced (rather than silently
+    /// swallowed) so a table gap is visible. See
+    /// [`canonical::resolve_or_air`].
+    pub fallback: FallbackTally,
 }
 
 /// The `minecraft:map_chunk` packet (clientbound play, id 33).
@@ -195,6 +218,7 @@ impl MapChunk {
         // The declared blob length must exactly match the geometry; any slack is
         // a misparse (or a layout assumption that is wrong for this dimension).
         blob.ensure_empty()?;
+        report_fallback(&data);
         Ok(data)
     }
 }
@@ -233,7 +257,9 @@ impl MapChunkBulk {
         let mut columns = Vec::with_capacity(column_count);
         for (x, z, bitmask) in metas {
             // Bulk columns are always full (ground-up) and thus carry biomes.
-            columns.push(decode_column(r, &bulk_shape, x, z, true, bitmask)?);
+            let data = decode_column(r, &bulk_shape, x, z, true, bitmask)?;
+            report_fallback(&data);
+            columns.push(data);
         }
         Ok(columns)
     }
@@ -257,6 +283,8 @@ fn decode_column(
         .filter(|i| bitmask & (1 << i) != 0)
         .collect();
 
+    let fallback = &mut FallbackTally::default();
+
     let mut column = ChunkColumn::new(
         0,
         SECTION_COUNT,
@@ -267,8 +295,17 @@ fn decode_column(
     );
     let mut light = ColumnLight::new(SECTION_COUNT);
 
-    // 1. Block data: 4096 little-endian shorts per present section. The packed
-    //    (blockId << 4) | meta value is the block-state id directly.
+    // 1. Block data: 4096 little-endian shorts per present section, each a
+    //    legacy `(blockId << 4) | meta` composite — *not* a block-state id.
+    //    Translate every one into the canonical 26.2 space the mesher and
+    //    collision actually consume (see the module docs).
+    //
+    //    Unlike v340 there is no palette on the wire to translate once, so
+    //    this resolves per cell — deliberately, and it is not a hot path
+    //    problem: `resolve` is an index into a lazily-built 4096-entry array
+    //    after the first call in the process. Per cell is also what makes the
+    //    tally exact, counting *blocks* substituted rather than distinct
+    //    values, which is what its log line claims.
     let mut section_blocks: Vec<(usize, PalettedContainer)> = Vec::with_capacity(present.len());
     for &index in &present {
         let raw = blob.bytes(BLOCK_BYTES)?;
@@ -276,7 +313,11 @@ fn decode_column(
         for (i, value) in values.iter_mut().enumerate() {
             let lo = u32::from(raw[2 * i]);
             let hi = u32::from(raw[2 * i + 1]);
-            *value = lo | (hi << 8);
+            // A 16-bit wire value can name a block id past 255, which no
+            // vanilla 1.8 server sends; `resolve_composite_or_air` counts that
+            // as a fallback rather than failing the packet, because a single
+            // out-of-range cell must not cost the whole column.
+            *value = canonical::resolve_composite_or_air(lo | (hi << 8), fallback);
         }
         section_blocks.push((
             index,
@@ -326,7 +367,35 @@ fn decode_column(
         ground_up,
         column,
         light,
+        fallback: *fallback,
     })
+}
+
+/// Logs a column's canonicalisation fallbacks, if any.
+///
+/// The chosen substitution for every non-`Resolved` outcome is a **visible,
+/// counted** air block rather than a silent one: once per column with the
+/// breakdown, not once per block and not never. Silent for the overwhelming
+/// majority of columns, which need no fallback at all. Mirrors v340's
+/// treatment so the two pre-Flattening families report identically.
+fn report_fallback(data: &ChunkData) {
+    if data.fallback.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        target: "v47::chunk",
+        x = data.x,
+        z = data.z,
+        no_table_entry = data.fallback.no_table_entry,
+        requires_additional_context = data.fallback.requires_additional_context,
+        out_of_bounds = data.fallback.out_of_bounds,
+        unmapped = data.fallback.unmapped,
+        "substituted air for {} block(s) that could not be resolved to a canonical 26.2 state",
+        data.fallback.no_table_entry
+            + data.fallback.requires_additional_context
+            + data.fallback.out_of_bounds
+            + data.fallback.unmapped,
+    );
 }
 
 /// Maps a block-section index (`0` lowest) to its light-section index.

@@ -118,6 +118,29 @@ pub fn resolve(old_block_id: u8, meta: u8) -> CanonicalBlockState {
     slot_table()[index]
 }
 
+/// Splits a wire-format legacy **composite** block value — the
+/// `(old_block_id << 4) | meta` form every pre-Flattening wire carries — into
+/// its `(old_block_id, meta)` halves, returning [`None`] for anything past
+/// `old_block_id in 0..=255, meta in 0..16` (i.e. `raw > 0x0FFF`).
+///
+/// Out-of-range is [`None`] rather than a silent truncation: every real
+/// vanilla block value fits in 12 bits by construction, so a larger one means
+/// desync, a modded id space, or a hostile sender — not a block any caller
+/// should render as *something*. Callers turn it into whatever rejection
+/// their own error type spells (`v340`'s chunk decode fails the packet).
+///
+/// This lives here rather than in a family crate because the 12-bit rule is a
+/// property of the *era*, not of one protocol: 1.7.10 through 1.12.2 all pack
+/// the same way, and a second copy is a second chance to get the shift wrong.
+#[must_use]
+pub fn split_composite(raw: u32) -> Option<(u8, u8)> {
+    if raw > 0x0FFF {
+        return None;
+    }
+    // `raw <= 0x0FFF` is checked above, so both halves fit in `u8`.
+    Some(((raw >> 4) as u8, (raw & 0x0F) as u8))
+}
+
 /// The canonical 26.2 `minecraft:air` state id (looked up once, not
 /// hardcoded to `0`, so a future registry regeneration that reorders states
 /// cannot silently point this at the wrong block).
@@ -433,8 +456,11 @@ pub struct FallbackTally {
     /// `lodestone_v340::packets::chunk`, for why block entities are consumed
     /// but not retained there).
     pub requires_additional_context: u32,
-    /// Blocks substituted because the pair is the one structurally
-    /// out-of-bounds slot (`old_block_id=255, meta=15`).
+    /// Blocks substituted because the pair is out of the table's bounds:
+    /// either the one structurally out-of-bounds slot (`old_block_id=255,
+    /// meta=15`), or — via [`resolve_composite_or_air`] — a wire composite
+    /// naming a block id past 255, which no vanilla server of any
+    /// pre-Flattening version sends.
     pub out_of_bounds: u32,
     /// Blocks substituted because [`bridge_name`]/[`bridge_properties`]
     /// could not bridge this pair's resolved name/properties to any 26.2
@@ -483,6 +509,31 @@ pub fn resolve_or_air(old_block_id: u8, meta: u8, tally: &mut FallbackTally) -> 
         | CanonicalBlockState::RequiresAdditionalContext
         | CanonicalBlockState::OutOfBounds
         | CanonicalBlockState::Unmapped { .. } => air_state_id(),
+    }
+}
+
+/// Resolves a wire **composite** `(old_block_id << 4) | meta` value straight
+/// to a canonical 26.2 state id, substituting [`air_state_id`] and recording
+/// into `tally` for every outcome that is not a clean
+/// [`CanonicalBlockState::Resolved`] — including a composite past the 12-bit
+/// range [`split_composite`] accepts, which counts as
+/// [`FallbackTally::out_of_bounds`].
+///
+/// This is the entry point for wires that carry the composite **per cell**
+/// with no palette (1.8's `map_chunk`), where a single out-of-range value must
+/// not cost the whole column. A wire that carries composites in a *palette*
+/// (1.9–1.12.2) should instead reject the packet, because a bad palette entry
+/// means the index stream itself is suspect — see `lodestone_v340`'s
+/// `packets::chunk::legacy_id_meta`, which calls [`split_composite`] directly
+/// and fails on [`None`].
+#[must_use]
+pub fn resolve_composite_or_air(raw: u32, tally: &mut FallbackTally) -> u32 {
+    match split_composite(raw) {
+        Some((old_block_id, meta)) => resolve_or_air(old_block_id, meta, tally),
+        None => {
+            tally.record(CanonicalBlockState::OutOfBounds);
+            air_state_id()
+        }
     }
 }
 

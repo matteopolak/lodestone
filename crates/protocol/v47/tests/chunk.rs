@@ -11,11 +11,41 @@
 //!   this assertion catches it.
 
 use lodestone_core::{Reader, Writer};
+use lodestone_data::block_states;
 use lodestone_v47::packets::chunk::{ChunkShape, MapChunk, MapChunkBulk};
 
-const AIR: u32 = 0;
-const BEDROCK: u32 = 7 << 4; // block id 7, meta 0 → state 112
-const STONE: u32 = 1 << 4; // block id 1, meta 0 → state 16
+// The wire composites 1.8 actually sends: `(blockId << 4) | meta`. These are
+// what the golden blobs below are *built* from.
+const WIRE_AIR: u32 = 0; // block id 0, meta 0
+const WIRE_BEDROCK: u32 = 7 << 4; // block id 7, meta 0 → composite 112
+const WIRE_STONE: u32 = 1 << 4; // block id 1, meta 0 → composite 16
+
+/// The canonical 26.2 block-state id of a property-less block, looked up **by
+/// name** in the jar-derived registry.
+///
+/// The assertions below deliberately do not compare against the wire
+/// composite, and equally deliberately do not call the decoder's own
+/// canonicalisation to compute what they expect — either would make them
+/// vacuous. The registry is an anchor outside this crate entirely; see
+/// `canonicalisation.rs` for the gate that gives the mapping itself external
+/// provenance.
+fn canonical_state(name: &str) -> u32 {
+    (0..block_states::STATE_COUNT)
+        .find(|&id| {
+            block_states::block_name(id) == Some(name) && block_states::properties(id) == Some(&[])
+        })
+        .unwrap_or_else(|| panic!("26.2 registry defines a property-less {name}"))
+}
+
+fn air() -> u32 {
+    canonical_state("minecraft:air")
+}
+fn bedrock() -> u32 {
+    canonical_state("minecraft:bedrock")
+}
+fn stone() -> u32 {
+    canonical_state("minecraft:stone")
+}
 
 /// Section-local flat index in 1.8 YZX order.
 fn idx(x: usize, y: usize, z: usize) -> usize {
@@ -42,9 +72,9 @@ fn section_block_bytes(mut value_at: impl FnMut(usize, usize, usize) -> u32) -> 
 /// bedrock at y=0, stone at y=1, air above; biome footer filled with `biome`.
 fn build_map_chunk(x: i32, z: i32, skylight: bool, biome: u8) -> Vec<u8> {
     let blocks = section_block_bytes(|_, y, _| match y {
-        0 => BEDROCK,
-        1 => STONE,
-        _ => AIR,
+        0 => WIRE_BEDROCK,
+        1 => WIRE_STONE,
+        _ => WIRE_AIR,
     });
 
     let mut blob = Vec::new();
@@ -91,13 +121,13 @@ fn known_blocks_land_at_known_y() {
     let col = &chunk.column;
     for x in 0..16 {
         for z in 0..16 {
-            assert_eq!(col.get_block(x, 0, z), BEDROCK, "bedrock at y=0 ({x},{z})");
-            assert_eq!(col.get_block(x, 1, z), STONE, "stone at y=1 ({x},{z})");
-            assert_eq!(col.get_block(x, 2, z), AIR, "air at y=2 ({x},{z})");
+            assert_eq!(col.get_block(x, 0, z), bedrock(), "bedrock at y=0 ({x},{z})");
+            assert_eq!(col.get_block(x, 1, z), stone(), "stone at y=1 ({x},{z})");
+            assert_eq!(col.get_block(x, 2, z), air(), "air at y=2 ({x},{z})");
         }
     }
     // Air far above the single present section is elided (absent) → air.
-    assert_eq!(col.get_block(0, 200, 0), AIR);
+    assert_eq!(col.get_block(0, 200, 0), air());
 }
 
 #[test]
@@ -129,7 +159,7 @@ fn biome_footer_downsampled_into_container() {
 fn no_skylight_shape_omits_sky_arrays() {
     // In a skyless dimension the sky-light arrays are absent from the blob; the
     // decoder must not try to read them, and the buffer must still be exact.
-    let blocks = section_block_bytes(|_, y, _| if y == 0 { BEDROCK } else { AIR });
+    let blocks = section_block_bytes(|_, y, _| if y == 0 { WIRE_BEDROCK } else { WIRE_AIR });
     let mut blob = Vec::new();
     blob.extend_from_slice(&blocks);
     blob.extend_from_slice(&[0u8; 2048]); // block light only
@@ -148,7 +178,7 @@ fn no_skylight_shape_omits_sky_arrays() {
     let chunk = MapChunk::decode(&mut r, &ChunkShape::no_skylight()).expect("decode");
     r.ensure_empty()
         .expect("skyless decode consumes the whole packet");
-    assert_eq!(chunk.column.get_block(0, 0, 0), BEDROCK);
+    assert_eq!(chunk.column.get_block(0, 0, 0), bedrock());
     // No sky light present → the section stays Missing.
     assert_eq!(chunk.light.sky(1).get(0), None);
 }
@@ -157,8 +187,8 @@ fn no_skylight_shape_omits_sky_arrays() {
 fn multiple_present_sections_decode() {
     // Sections 0 and 2 present (bitmask 0b101): section 0 bedrock at its y=0,
     // section 2 stone at its y=0 (world y=32).
-    let s0 = section_block_bytes(|_, y, _| if y == 0 { BEDROCK } else { AIR });
-    let s2 = section_block_bytes(|_, y, _| if y == 0 { STONE } else { AIR });
+    let s0 = section_block_bytes(|_, y, _| if y == 0 { WIRE_BEDROCK } else { WIRE_AIR });
+    let s2 = section_block_bytes(|_, y, _| if y == 0 { WIRE_STONE } else { WIRE_AIR });
 
     let mut blob = Vec::new();
     blob.extend_from_slice(&s0);
@@ -182,15 +212,15 @@ fn multiple_present_sections_decode() {
     let chunk = MapChunk::decode(&mut r, &ChunkShape::overworld()).expect("decode");
     r.ensure_empty().expect("aligned");
 
-    assert_eq!(chunk.column.get_block(0, 0, 0), BEDROCK); // section 0
-    assert_eq!(chunk.column.get_block(0, 32, 0), STONE); // section 2 (world y=32)
-    assert_eq!(chunk.column.get_block(0, 16, 0), AIR); // section 1 elided
+    assert_eq!(chunk.column.get_block(0, 0, 0), bedrock()); // section 0
+    assert_eq!(chunk.column.get_block(0, 32, 0), stone()); // section 2 (world y=32)
+    assert_eq!(chunk.column.get_block(0, 16, 0), air()); // section 1 elided
 }
 
 #[test]
 fn map_chunk_bulk_decodes_each_column() {
     // Two columns, sky light sent. Each: one section (index 0), bedrock at y=0.
-    let blocks = section_block_bytes(|_, y, _| if y == 0 { BEDROCK } else { AIR });
+    let blocks = section_block_bytes(|_, y, _| if y == 0 { WIRE_BEDROCK } else { WIRE_AIR });
     let one_column_data = |blob: &mut Vec<u8>| {
         blob.extend_from_slice(&blocks);
         blob.extend_from_slice(&[0u8; 2048]); // block light
@@ -223,8 +253,8 @@ fn map_chunk_bulk_decodes_each_column() {
     assert_eq!(columns[0].x, 10);
     assert_eq!(columns[0].z, 20);
     assert_eq!(columns[1].x, 11);
-    assert_eq!(columns[0].column.get_block(0, 0, 0), BEDROCK);
-    assert_eq!(columns[1].column.get_block(0, 0, 0), BEDROCK);
+    assert_eq!(columns[0].column.get_block(0, 0, 0), bedrock());
+    assert_eq!(columns[1].column.get_block(0, 0, 0), bedrock());
 }
 
 #[test]
@@ -249,7 +279,7 @@ fn wrong_blob_length_leaves_trailing_bytes() {
     // A blob padded with extra bytes decodes the geometry but fails the
     // zero-trailing-bytes detector — the check that guards against a layout
     // assumption being wrong.
-    let blocks = section_block_bytes(|_, y, _| if y == 0 { BEDROCK } else { AIR });
+    let blocks = section_block_bytes(|_, y, _| if y == 0 { WIRE_BEDROCK } else { WIRE_AIR });
     let mut blob = Vec::new();
     blob.extend_from_slice(&blocks);
     blob.extend_from_slice(&[0u8; 2048]);
