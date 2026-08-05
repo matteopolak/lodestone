@@ -253,6 +253,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   [`UiState::quit_to_title`](../crates/lodestone-shell/src/menu.rs) — the same
   teardown the pause menu's Disconnect and the death screen's Title Screen button
   already use, not a fourth copy of "clear session state and go to the title".
+- [Cross-plugin custom messages](./cross-plugin-messages.md) — The pattern a plugin
+  uses to publish its own message type so an unrelated plugin can subscribe **without
+  depending on the publisher's crate** — Bukkit's
+  `pluginManager.callEvent(MyOwnEvent)` plus a listener in a plugin that has never
+  heard of the publisher. `lodestone_ecs::plugin_message` carries the one piece of
+  machinery it needs, and three toy crates under `crates/plugins/` prove it end to
+  end. Issue #107.
 - [Damage types and tags](./damage-types.md) — The authoritative
   `minecraft:damage_type` registry for Minecraft 26.2 — 51 damage types and their 35
   tags — generated from vanilla's own datapack JSON and consumed by

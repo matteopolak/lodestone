@@ -1,0 +1,29 @@
+# The **public message crate** for the toy `shop` plugin family (issue #107):
+# the one thing a third-party plugin depends on in order to talk to the shop,
+# containing a message type and its registration and no logic at all.
+#
+# This crate is the point of the exercise. `lodestone-shop-stats` subscribes to
+# `ShopPurchase` by depending on *this*, never on `lodestone-shop` — see
+# `docs/cross-plugin-messages.md`.
+[package]
+name = "lodestone-shop-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `PluginMessageAppExt::add_plugin_message`, the idempotent registration every
+# party to a shared message type calls. Re-exports `bevy_app`/`bevy_ecs` as
+# `lodestone_ecs::{app, ecs}`.
+lodestone-ecs = { workspace = true }
+# Direct, in addition to `lodestone-ecs`'s re-export: `#[derive(Message)]` emits
+# absolute `bevy_ecs::` paths, which only resolve if this crate has `bevy_ecs`
+# as a direct dependency under that exact name. Same `[workspace.dependencies]`
+# pin `lodestone-ecs` builds against, so there is only ever one `bevy_ecs` in
+# the graph. `docs/plugin-api.md`'s "how to change it" documents this trap;
+# `crates/plugins/lodestone-autopilot/Cargo.toml` hit it for `Resource`.
+bevy_ecs = { workspace = true }
+bevy_app = { workspace = true }

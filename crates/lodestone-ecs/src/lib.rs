@@ -135,6 +135,7 @@ pub mod ingest;
 pub mod permissions;
 pub mod player;
 mod plugin;
+pub mod plugin_message;
 mod resources;
 pub mod riding;
 mod runner;
@@ -179,6 +180,7 @@ pub use player::{
     reset_local_player, spawn_local_player, tick_attack_strength,
 };
 pub use plugin::CorePlugin;
+pub use plugin_message::{PluginMessageAppExt, PluginMessagePlugin};
 pub use resources::{
     FrameClock, MAX_CATCH_UP_SECS, MAX_CATCH_UP_TICKS, TICK_PERIOD, VersionData, WorldTime,
 };
