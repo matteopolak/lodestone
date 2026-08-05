@@ -12,22 +12,22 @@ use bevy_ecs::resource::Resource;
 use bevy_ecs::world::World as EcsWorld;
 use lodestone_assets::{Language, ResourceLocation};
 use lodestone_client::{BlockPos, ClientAction, Hand, OpenMenuSnapshot, Rotation};
-use lodestone_controller::{ControllerPlugin, InputState, RawInput, apply_look_inverted};
+// `ControllerPlugin` is no longer named here: composition moved to
+// `Sim::client_app`, which reaches it through `lodestone_app::client_app` along
+// with `CorePlugin`, `LocalPlayerPlugin` and `SessionHudPlugin`.
+use lodestone_controller::{InputState, RawInput, apply_look_inverted};
 pub use lodestone_ecs::SessionPhase;
 use lodestone_ecs::entity::{Attributes, EntityIndex, EntityKind, MinecraftEntityId, Position};
 use lodestone_ecs::player::{
-    ActionQueue, AttackStrengthTicker, CollisionSource, Dead, Egress, LocalPlayerPlugin,
-    MovementIntent, NearbyEntities, PhysicsState, PlayerCollision, PrevPosition, Profile,
-    SelectedSlot, Submersion, reset_local_player, spawn_local_player,
+    ActionQueue, AttackStrengthTicker, CollisionSource, Dead, Egress, MovementIntent,
+    NearbyEntities, PhysicsState, PlayerCollision, PrevPosition, Profile, SelectedSlot, Submersion,
+    reset_local_player,
 };
 use lodestone_ecs::session::{
     ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerDifficulty, ServerEntityId,
-    SessionBlockDestruction, SessionChat, SessionHudPlugin, TitleOverlay, Vitals, Xp,
-    insert_hud_components,
+    SessionBlockDestruction, SessionChat, TitleOverlay, Vitals, Xp,
 };
-use lodestone_ecs::{
-    ChunkWorld, CorePlugin, EcsHandle, Extract, FrameClock, GameTick, Update, VersionData,
-};
+use lodestone_ecs::{ChunkWorld, EcsHandle, Extract, FrameClock, GameTick, Update, VersionData};
 use lodestone_entity::attribute::attribute_value;
 use lodestone_entity::pose::EntityPose;
 use lodestone_game::menu::Menu;

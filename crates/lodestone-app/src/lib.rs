@@ -137,11 +137,48 @@ pub fn client_app() -> App {
 /// Call it *after* every `add_plugins`, for the same reason `Sim` does: a plugin
 /// may install a resource a spawn hook reads.
 pub fn spawn_session(app: &mut App, player: PlayerState) -> Entity {
-    let world = app.world_mut();
+    spawn_session_in(app.world_mut(), player)
+}
+
+/// [`spawn_session`] against a bare `World`, for a runner that has already taken
+/// the `World` out of its `App`.
+///
+/// `lodestone_shell::sim::Sim` is exactly that: it adopts an `App`, takes the
+/// `World`, inserts the session-scoped resources it had to build itself, and only
+/// then spawns. It calls this rather than the three underlying inserts so the
+/// rendered client and every headless consumer spawn the *same* entity shape — a
+/// divergence would stay invisible until an ingest fold wrote a component nothing
+/// had.
+pub fn spawn_session_in(
+    world: &mut lodestone_ecs::ecs::world::World,
+    player: PlayerState,
+) -> Entity {
     let entity = lodestone_ecs::player::spawn_local_player(world, player);
+    insert_session_component_sets(world, entity);
+    entity
+}
+
+/// The two *session-scoped* component sets — HUD and shared-fold — on an entity
+/// that already exists.
+///
+/// Split out of [`spawn_session_in`] because there are two callers and the list
+/// must not drift between them: a fresh spawn, and a **reconnect**, where
+/// `lodestone_shell::sim::Sim::end_session` re-inserts both sets rather than
+/// resetting field by field. That choice is deliberate — a component added to the
+/// spawn path and missed on reset leaks the old session into the new one, and the
+/// stale `ServerEntityId` in particular would misattribute the next session's mob
+/// effects to whichever entity the new server assigns that id to first. Keeping
+/// one list is what makes "add it to the spawn path" sufficient.
+///
+/// Two separate inserts inside, not one, because the sets belong to two different
+/// plugins: a harness that installs only one must not be left holding components
+/// no system reads.
+pub fn insert_session_component_sets(
+    world: &mut lodestone_ecs::ecs::world::World,
+    entity: Entity,
+) {
     lodestone_ecs::session::insert_hud_components(world, entity);
     lodestone_ecs::session::insert_session_components(world, entity);
-    entity
 }
 
 #[cfg(test)]

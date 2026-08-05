@@ -22,6 +22,15 @@ workspace = true
 # Library seams the shell is a thin client over.
 lodestone-client = { workspace = true }
 lodestone-ecs = { workspace = true }
+# The composed client `App` (`docs/plugin-registration.md`). `Sim::client_app()`
+# is `lodestone_app::client_app()` plus this crate's own three plugins, and
+# `Sim::new` is that plus `Sim::from_app` — so the shell registers `CorePlugin`
+# through the identical function an external consumer calls, and there is no
+# private composition path left to drift. Before this edge existed the plugin set
+# was closed at compile time (`sim/build.rs` took the `World` and dropped the
+# `App`), which is what milestone zero of
+# `docs/plans/runtime-plugin-loading.md` exists to fix.
+lodestone-app = { workspace = true }
 # Direct, in addition to `lodestone-ecs`'s re-export, because bevy's derive
 # macros (`#[derive(Component)]`, `#[derive(Resource)]`) emit absolute
 # `bevy_ecs::` paths and therefore need the crate name in scope here. Same

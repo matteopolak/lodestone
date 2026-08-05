@@ -38,6 +38,11 @@
 
 use super::*;
 
+/// The `App` a caller composes and [`Sim::from_app`] adopts. Re-exported from
+/// `lodestone-app` rather than named through `lodestone_ecs::app` so the type a
+/// consumer sees comes from the same crate as the function that builds it.
+pub use lodestone_app::App;
+
 impl Sim {
     /// Build the simulation for a **real client session**: no offline world.
     ///
@@ -90,10 +95,90 @@ impl Sim {
         Self::build(config, true)
     }
 
+    /// The rendered client's plugin set, composed into an [`App`] that is **not**
+    /// finalised — `add_plugins` on the result, then hand it to
+    /// [`Sim::from_app`].
+    ///
+    /// This is the seam milestone zero of `docs/plans/runtime-plugin-loading.md`
+    /// exists to create, and the paragraph that used to sit at the bottom of
+    /// `build` explaining why there wasn't one is deleted rather than amended.
+    ///
+    /// It is [`lodestone_app::client_app`] — the six version-free plugins, shared
+    /// with every headless consumer — plus the shell's own three, added through
+    /// the identical `add_plugins` call a consumer makes. There is no privileged
+    /// composition path: `Sim::new` is literally `client_app()` + `from_app`, so
+    /// the shell cannot drift away from what it hands out.
+    ///
+    /// **Why the shell's three do not live in `lodestone-app`.** Not because they
+    /// are render-shaped — none of `mesher.rs`, `interact.rs` or `entities.rs`
+    /// names a `wgpu` type, and the dependency arrow already points render→sim
+    /// (`sim/render_sources.rs` is "what the renderer pulls out of `Sim` each
+    /// frame"). They stay because of *shell-internal* coupling: `mesher.rs` needs
+    /// `crate::blocks` and `crate::net`, and `interact.rs` imports fourteen items
+    /// from `crate::sim` — a cycle with this very type. `EntityInterpPlugin` alone
+    /// is movable and stays only because moving it in isolation buys no gate.
+    ///
+    /// A headless consumer therefore gets no terrain mesher, no pick target and
+    /// no render-side interpolation, which is correct: all three exist to feed a
+    /// renderer.
+    #[must_use]
+    pub fn client_app() -> App {
+        let mut app = lodestone_app::client_app();
+        app.add_plugins((
+            // §4.1(c). The render-side entity interpolation, which used to own a
+            // second `World` and therefore a second 20 Hz accumulator.
+            crate::entities::EntityInterpPlugin,
+            // Stage 4: the chunk store and the terrain-mesh queues become
+            // resources, and `heal_dirty_columns` becomes an `Update` system in
+            // `FrameSet::Terrain`.
+            TerrainPlugin,
+            // Stage 5: the pick target, the two interaction predictors and the
+            // particle emitter become resources, and the sprint edge and the
+            // hold-to-mine loop become `TickSet::Send` systems. Added *after*
+            // `ControllerPlugin` — which `lodestone_app::client_app` installs —
+            // because it asserts that plugin is present rather than adding it
+            // itself, and `add_systems` does not deduplicate.
+            InteractPlugin,
+        ));
+        app
+    }
+
+    /// Build a simulation **around an [`App`] the caller composed**, so a
+    /// downstream crate can register its own plugins into the *rendered* client.
+    ///
+    /// ```no_run
+    /// # use lodestone::{config::Config, sim::Sim};
+    /// let mut app = Sim::client_app();
+    /// // app.add_plugins(lodestone_autopilot::AutopilotPlugin);
+    /// let sim = Sim::from_app(app, Config::default());
+    /// ```
+    ///
+    /// The `App` must carry at least what [`Sim::client_app`] installs; the
+    /// straightforward way to guarantee that is to start from it. Everything the
+    /// shell adds after this point is *resources* and one entity, neither of
+    /// which needs `Plugin::build` — which is why adoption can happen this late
+    /// and why a consumer's plugins are built before any of it.
+    ///
+    /// Honours `config.mode` exactly as [`Sim::new`] does — `Mode::Headless` gets
+    /// the offline demo world, everything else gets the live one — so this is a
+    /// drop-in for `new` and not a third construction path with its own rules.
+    #[must_use]
+    pub fn from_app(app: App, config: Config) -> Self {
+        let demo_world = config.mode == Mode::Headless;
+        Self::adopt(app, config, demo_world)
+    }
+
     /// The shared constructor. `demo_world` picks between the two mutually
     /// exclusive block-id worlds *and* whether any offline terrain exists at all;
     /// the two must agree, which is why this is one function and not two.
     fn build(config: Config, demo_world: bool) -> Self {
+        Self::adopt(Self::client_app(), config, demo_world)
+    }
+
+    /// The body of the constructor, given an already-composed [`App`]: build the
+    /// session-scoped resources, take the `World`, insert them, spawn the one
+    /// entity everything hangs off.
+    fn adopt(mut app: App, config: Config, demo_world: bool) -> Self {
         let (world, feet) = if demo_world {
             let radius = (config.render_distance as i32).clamp(1, MAX_WORLD_RADIUS);
             (worldgen::generate(radius), worldgen::spawn_feet())
@@ -178,47 +263,15 @@ impl Sim {
         // second to perform it would not be.
         let version_data = lodestone_registry::adapter_for_protocol(config.protocol);
 
-        // The local player's `World`. Built through an `App` because `Plugin::build`
-        // is the only way to register schedules and systems, then the `World` is
-        // taken and the `App` dropped — azalea's own shape
-        // (`azalea-client/src/client.rs:143`), and `crate::entities` does the same,
-        // which is why nothing here ever calls `App::update`.
+        // Take the `World` and drop the `App` — azalea's own shape
+        // (`azalea-client/src/client.rs:143`), and why nothing here ever calls
+        // `App::update`. **This used to be where the plugin boundary closed**, and
+        // is not any more: composition moved up into [`Sim::client_app`], so every
+        // plugin is already built by the time this line runs and a caller who
+        // wants their own has already added it. `Sim` still stores only an
+        // `EcsHandle`, which is fine — the `App` was never the thing that needed
+        // to survive, only the thing that needed to be *reachable*.
         //
-        // `LocalPlayerPlugin` owns `TickSet::Physics`; `ControllerPlugin` owns
-        // `TickSet::Input` and `TickSet::Send`; `SessionHudPlugin` owns
-        // `TickSet::Animate` (ageing the title/action-bar/effect overlays at the
-        // fixed 20 Hz their durations are counted in). All three are needed for a
-        // player that is driven, reported *and* drawn, and they are separate
-        // plugins so a harness can take one without the others.
-        let mut app = lodestone_ecs::app::App::new();
-        app.add_plugins((
-            CorePlugin,
-            LocalPlayerPlugin,
-            ControllerPlugin,
-            SessionHudPlugin,
-            // §4.1(c). `IngestPlugin` + `SessionPlugin` are the *net thread's*
-            // folds — the systems `lodestone_client::state::SharedState` runs — and
-            // they are installed here because there is now one `World` and this is
-            // it. Exactly once: `SessionPlugin` guards the shared
-            // `drain_ingest_queue` with `is_plugin_added`, because `add_systems`
-            // does not deduplicate and a second copy blanks every batch the first
-            // one filled (Stage 3 shipped that as a total ingest blackout).
-            lodestone_ecs::ingest::IngestPlugin,
-            lodestone_ecs::SessionPlugin,
-            // §4.1(c). The render-side entity interpolation, which used to own a
-            // second `World` and therefore a second 20 Hz accumulator.
-            crate::entities::EntityInterpPlugin,
-            // Stage 4: the chunk store and the terrain-mesh queues become
-            // resources, and `heal_dirty_columns` becomes an `Update` system in
-            // `FrameSet::Terrain`.
-            TerrainPlugin,
-            // Stage 5: the pick target, the two interaction predictors and the
-            // particle emitter become resources, and the sprint edge and the
-            // hold-to-mine loop become `TickSet::Send` systems. Added *after*
-            // `ControllerPlugin` because it asserts that plugin is present rather
-            // than adding it itself — `add_systems` does not deduplicate.
-            InteractPlugin,
-        ));
         // **`lodestone_autopilot::AutopilotPlugin` used to be the last entry in
         // that tuple and was removed on purpose** (issue #38, and #77's plugin
         // boundary). The shipped client does not navigate itself: the autopilot is
@@ -226,17 +279,9 @@ impl Sim {
         // at all — not even optionally behind a feature. `Cargo.toml`'s own note
         // where the dependency line was says the same thing, and
         // `docs/autonomous-navigation.md`'s "Not wired into the shell" section
-        // carries the two routes a user has to get it back.
-        //
-        // **This tuple is the only place a plugin can be installed, and that is a
-        // real constraint on the boundary, not an incidental one.** The line below
-        // takes the `World` and drops the `App`, and `Sim` stores only an
-        // `EcsHandle` (`Arc<RwLock<World>>`) — while `Plugin::build` needs
-        // `&mut App`. So the shell's plugin set is closed at compile time: no
-        // downstream crate holding a `Sim` can add one afterwards, even though
-        // `Sim::ecs()` is public and hands out `&mut World`. A user wanting the
-        // autopilot therefore builds their own `App` on `lodestone-ecs` and hands
-        // its `World` to `ClientBuilder::ecs`, rather than reaching into a `Sim`.
+        // carries the routes a user has to get it back — which now include
+        // `Sim::client_app()` + `add_plugins` + `Sim::from_app`, on the rendered
+        // client, rather than headless only.
         let mut ecs = std::mem::take(app.world_mut());
         ecs.insert_resource(Profile(PhysicsProfile::mc_1_21()));
         // Stage 5. `ParticleSim` cannot come from `InteractPlugin`: like the mesh
@@ -262,17 +307,20 @@ impl Sim {
         // `Sim::tick_collision`), so the player stands on the server's ground.
         // While a column is still streaming in, `PlayerCollision::Pending` holds
         // the player in place rather than letting them fall.
-        let local = spawn_local_player(&mut ecs, player);
-        // Stage 3's session/HUD half goes on the same entity. Separate from
-        // `spawn_local_player` because the two component sets belong to different
-        // plugins, and a plugin a harness leaves out must not leave a component
-        // its systems never look at behind.
-        insert_hud_components(&mut ecs, local);
-        // §4.1(c): the shared-fold half goes on the *same* entity too, instead of
+        // The one entity everything hangs off: local-player, HUD and session
+        // component sets, three separate inserts because they belong to three
+        // different plugins and a plugin a harness leaves out must not leave a
+        // component its systems never look at behind. §4.1(c) is why the
+        // shared-fold half goes on the *same* entity rather than
         // `lodestone_client::state::SharedState::default` spawning a second
-        // `LocalPlayer` in a `World` of its own. This is the entity
-        // `attach_net` names to `ClientBuilder::ecs`.
-        lodestone_ecs::session::insert_session_components(&mut ecs, local);
+        // `LocalPlayer` in a `World` of its own; this is the entity `attach_net`
+        // names to `ClientBuilder::ecs`.
+        //
+        // Through `lodestone_app` rather than the three calls inline, so the
+        // rendered client and every headless consumer spawn the *same* entity
+        // shape — a divergence here would be invisible until a fold wrote a
+        // component nothing had.
+        let local = lodestone_app::spawn_session_in(&mut ecs, player);
 
         let mut sim = Self {
             config,
