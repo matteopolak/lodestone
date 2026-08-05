@@ -1135,6 +1135,12 @@ of these caught the *brief* being wrong rather than the code.
   against a verified tree; two of the four issue bodies contain claims that are false
   against 26.2 or against the current tree, and those corrections are the first
   section rather than a footnote.
+- [Issue batching: ~250 open issues as agent-sized, file-disjoint dispatch batches](./plans/issue-batching.md) —
+  A dispatch plan that clusters the 255 open issues (surveyed 2026-08-04) into batches
+  one agent can close in one sitting, scheduled into waves whose file sets are
+  disjoint. Verified against `git log` and the current tree, not against issue bodies
+  — roughly 28 open issues already have their substance landed, and several
+  "blocked" labels are stale.
 - [Mob AI roster: per-species goal-sets and brains](./plans/mob-ai-roster.md) — The
   implementation plan for GitHub epic
   [#225](https://github.com/matteopolak/lodestone/issues/225) and its children
@@ -1159,6 +1165,16 @@ of these caught the *brief* being wrong rather than the code.
   tier needs is a seam the public bevy-plugin API must expose anyway, none of those
   seams is reachable today, and the JVM tier itself should not start until the
   adjudication window and player registry exist.
+- [Plan: runtime plugin loading — wasm components, and the same plugin compiled in](./plans/runtime-plugin-loading.md) —
+  The design for loading plugins at runtime (Java-style, drop a file in a folder)
+  using WebAssembly components, while keeping the existing compiled-in bevy-plugin
+  path — including the milestone-zero refactor that makes the library expose the
+  composed `App` so a consumer can register plugins at all, and how one plugin can be
+  authored once and shipped either way. Read-only plan against the tree as of
+  2026-08-04; nothing here is implemented, and every `file:line` is a sample taken
+  that day, not a durable coordinate — several cited files were being edited by
+  other agents *while this was written*, and one citation went stale between two greps
+  minutes apart (noted inline where it happened).
 - [Plan: migrating `lodestone-server` onto its own `bevy_ecs::World` (issue #433)](./plans/server-ecs-migration.md) —
   The phased migration plan that turns [`docs/server-ecs.md`](../server-ecs.md)'s
   decision record into dispatchable work: how today's
