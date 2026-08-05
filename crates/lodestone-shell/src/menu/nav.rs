@@ -1204,6 +1204,18 @@ impl MenuNav {
         self.options.toggle_sprint
     }
 
+    /// Vanilla's `options.sensitivity` (issue #443) — see
+    /// [`crate::config::Options::sensitivity`]. Pushed into `Sim` once per
+    /// frame by `app/redraw.rs`, the same way [`Self::invert_mouse_x`] is,
+    /// so a change in Options → Mouse applies on the very next tick rather
+    /// than at the next launch. Without this accessor `apply_mouse` had no
+    /// route to the *persisted* option at all and read the argv-derived
+    /// `Config::sensitivity`, which is fixed for the process's lifetime.
+    #[must_use]
+    pub fn sensitivity(&self) -> f32 {
+        self.options.sensitivity
+    }
+
     /// Vanilla's `options.invertMouseX` (issue #203) — see
     /// [`crate::config::Options::invert_mouse_x`]. Read per look-integration
     /// call and handed to `apply_look_inverted`.
