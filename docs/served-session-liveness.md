@@ -25,7 +25,8 @@ implement the new encoders simply emits nothing (see `Configuration` below).
 ### Where it lives
 
 * `crates/lodestone-server/src/protocol.rs` — two new [`ServerBound`]
-  variants (`KeepAlive { id }`, `PlayerMoved { x, y, z }`) and four new
+  variants (`KeepAlive { id }`, `PlayerMoved { x, y, z, rotation, on_ground }`
+  — the latter two fields added after this pass) and four new
   [`ServerProtocol`] methods (`encode_keep_alive`, `encode_set_time`,
   `encode_chunk_cache_center`, `encode_forget_chunk`), each defaulted to emit
   nothing.
@@ -110,10 +111,12 @@ never sent.
 
 `ViewTracker` (in `server.rs`) tracks which `(cx, cz)` columns a connection
 has been sent and around which center. Every inbound
-`ServerBound::PlayerMoved { x, y, z }` (produced only by `move_player_pos`
-and `move_player_pos_rot` — the only two serverbound movement packets that
-carry a position; look-only and status-only movement stay `Ignored`, see
-`ServerBound::PlayerMoved`'s doc comment) is converted to a chunk column via
+`ServerBound::PlayerMoved` (produced only by `move_player_pos` and
+`move_player_pos_rot` — the only two serverbound movement packets that carry a
+position; the look-only and status-only siblings now lift into
+`PlayerRotated`/`PlayerStatusOnly` instead, which deliberately do **not**
+recenter the view, since a packet with no position cannot have changed the
+chunk column) is converted to a chunk column via
 `floor(x / 16)` / `floor(z / 16)` and handed to `ViewTracker::recenter`.
 
 If the column did not change, nothing is sent — mirroring vanilla's own

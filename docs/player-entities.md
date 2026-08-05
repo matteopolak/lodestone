@@ -96,12 +96,22 @@ allocator once the server-ECS migration (#433) gives both a common owner.
 
 ### Gotchas
 
-* **Rotation is not streamed, and cannot be yet.**
-  `ServerBound::PlayerMoved` carries `(x, y, z, on_ground)` and no angles:
-  `v770`'s decoder discards the rotation from `move_player_pos_rot` and maps
-  `move_player_rot`/`move_player_status_only` to `Ignored`. Every other player
-  therefore faces yaw 0. Fixing it means growing that variant, which changes
-  every one of its match sites — a separate unit.
+* **Rotation is streamed as of issue #262, and it arrives on *four* packets,
+  not one.** Vanilla's `LocalPlayer.sendPosition` sends exactly one movement
+  packet per tick, picked by which of position/look is dirty, so the four
+  *partition* the stream rather than overlapping:
+  `move_player_pos` (position only) → `PlayerMoved { rotation: None }`,
+  `move_player_pos_rot` (both) → `PlayerMoved { rotation: Some(..) }`,
+  `move_player_rot` (look only) → `PlayerRotated`, and
+  `move_player_status_only` (neither) → `PlayerStatusOnly`.
+  `PlayerRegistry::set_rotation` receives it and `view` lowers it into the
+  snapshot, with `head_yaw` equal to the body yaw (they diverge only for mobs,
+  whose AI aims the head separately).
+  **The gotcha, if you add another per-player wire field:** work out which of
+  the four packets actually carries it before wiring one arm and assuming the
+  rest follow. Handling only `move_player_rot` looks right in a test where the
+  subject stands still and leaves every *walking* player frozen — the failure
+  is silent and only shows up in the case a stationary test cannot reach.
 * **Cadence is packet-driven.** A player's movement reaches another connection
   on that connection's *next inbound packet*, not on a timer. Adequate in
   practice (a real client sends a movement or status packet every tick) and
