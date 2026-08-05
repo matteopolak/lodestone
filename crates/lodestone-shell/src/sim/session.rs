@@ -283,10 +283,11 @@ impl Sim {
         // than a field-by-field reset, for the same reason `reset_local_player` is
         // one: a component added to a spawn path and missed here leaks the old
         // session into the new one.
-        self.write(|w| {
-            insert_hud_components(w, local);
-            lodestone_ecs::insert_session_components(w, local);
-        });
+        // Through `lodestone_app` rather than the two calls inline: this list and
+        // the spawn path's list must never diverge, and routing both through one
+        // function is what makes "add it to the spawn path" sufficient. See
+        // `lodestone_app::insert_session_component_sets`.
+        self.write(|w| lodestone_app::insert_session_component_sets(w, local));
         self.set_target(None);
         self.input_mut(InputState::release_all);
 
