@@ -207,7 +207,8 @@ that reach a player: the scrollbar draw called `server_scroll_list` **by name**
 screen could adopt `ScrollList`, be correct, be green, and show nothing.
 
 `ListSpec` is a screen's **canvas-independent declaration** of its list — `row_h`,
-`top`, `footer_h`, `len`, optional per-entry `heights`, `scroll`, `row_w — and
+`top`, `footer_h`, `len`, optional per-entry `heights`, `scroll`, and a `band`
+(`RowBand::Centred` or `RowBand::Inset`, see below) — and
 `ListSpec::model(canvas_height)` turns it into the live `ScrollList`. There is now
 exactly one declaration point and two readers:
 
@@ -285,19 +286,25 @@ measures band-bottom to the *button row's* own arranged `y`.
 
 ## Adoption audit — the other list screens
 
-Measured, not guessed. Two screens now draw a scrollbar and respond to the wheel
-(the server list and the accounts screen), through one `MouseWheel` arm rather than
-one arm each. The five below still scroll only by keyboard cursor-follow, and the
-reason is uniform: each holds a `first: usize` **entry index**, so it cannot report a
-pixel offset to `active_list` without converting the field.
+Measured, not guessed. **Five screens** now draw a scrollbar and respond to the
+wheel — the server list, the accounts screen, statistics, key binds, language and
+social interactions — through one `MouseWheel` arm rather than one arm each. Only
+`options.rs` still holds a `first: usize` **entry index**, which is what stops a
+screen reporting a pixel offset to `active_list`.
+
+Each adopted screen's notch is `floor(ROW_H / 2)`, predicted from its **own**
+`ROW_H` and then measured. The row height differing per screen is the point: a
+screen that borrowed `options::WIDGET_H` (20) when its real pitch is 18 reports 10
+where it should report 9, which is a plausible-looking wrong answer, so each gate
+names the wrong value as an excluded hypothesis.
 
 | screen | offset | hover vs selection | verdict |
 |---|---|---|---|
-| `key_binds.rs` | `first: usize` | hover sets the cursor | **easy** — the canonical shape, ~60-70 lines, nearly all deletions |
-| `social.rs` | `first: usize` | hover sets the cursor | **BLOCKED on the primitive, not "easy"** — see below. Its rows are full-width and left-anchored |
-| `stats.rs` | **`scroll: f32`** | none at all | **ADOPTED** (issue #445). One notch = `floor(ROW_H / 2)` = `floor(20 / 2)` = **10 px**, measured; the row-index answer (20) and the page answer (`LIST_WINDOW_PX`) are both asserted excluded |
-| `language.rs` | `first: usize` into a *filtered* list | hover sets the cursor | **medium** — content length is derived per call, and the search-box row offset lives in `nav.rs` |
-| `options.rs` | `first: usize`, **variable** row heights | hover sets the cursor | **medium, and it decides the shape** — cannot adopt a uniform-pitch list |
+| `stats.rs` | **`scroll: f32`** | none at all | **ADOPTED** (#445). `ROW_H` 20 → notch **10 px**, predicted and measured; row-index (20) and page (`LIST_WINDOW_PX`) both asserted excluded |
+| `key_binds.rs` | **`scroll: f32`** | hover sets the cursor | **ADOPTED** (#445). `ROW_H` 20 → notch **10 px**. Control observed: with `scroll_by`/`scroll_to_cursor` snapped to whole rows, both notch gates fail |
+| `language.rs` | **`scroll: f32`** into a *filtered* list | hover sets the cursor | **ADOPTED** (#445). `ROW_H` **18** → notch **9 px**. `active_list` reports the post-filter count, so the search box shortens the bar. 10 is asserted excluded — it is `floor(WIDGET_H / 2)` |
+| `social.rs` | **`scroll: f32`** | hover sets the cursor | **ADOPTED** (#445), and the **only user of `RowBand::Inset`**. `ROW_H` 20 → notch **10 px**. `RIGHT_MARGIN` grew 10 → 14 to reserve the bar's gutter |
+| `options.rs` | `first: usize`, **variable** row heights | hover sets the cursor | **the one left** — needs `ListSpec::with_heights`, which exists; see "What `options.rs` still needs" |
 | `packs.rs` | none | hover sets the cursor | **not applicable** — adopting means *adding* scroll, a feature not a refactor |
 | `telemetry.rs` | none | hover sets the cursor | **not applicable** — four fixed controls, no list |
 | `world_select.rs` | none | **genuinely separate** (`hovered` + `FocusSet`) | **not a scroll candidate — but it is the hover reference** |
@@ -320,27 +327,60 @@ own `Origin`, and on a two-column screen like this one the value column sits on
 the far side of the canvas centre; clipping horizontally to `row_w` would crop
 it. The band is what must be clipped, and the band is vertical.
 
-**2. `social.rs` is NOT "easy", and the audit above was wrong about it.** It is
-the one screen of the five that cannot adopt `ListSpec` as the primitive stands.
-`ListSpec::row_left` is `floor(width / 2) - floor(row_w / 2)` — a **centred,
-fixed-width** row — and `row_right` (hence the scrollbar's x) is derived from it.
-`social.rs`'s rows are **full-width and left-anchored**: `name_x` is a flat
-`NAME_LEFT_INSET` of 4 and the Hide/Report buttons hang off `width -
-RIGHT_MARGIN`. No *constant* `row_w` makes `row_right` land in that right margin
-at every canvas width, so the bar the spec exists to place cannot be positioned
-from it — and there is no gutter reserved for one either.
+**2. `social.rs` was NOT "easy", and the audit above was wrong about it.** It was
+the one screen of the five that could not adopt `ListSpec` as the primitive then
+stood, and **the primitive was changed first rather than the screen special-cased**.
 
-Checked against the other three so this is a claim about `social.rs` and not a
-guess about all of them: `key_binds.rs` (`ROW_WIDTH` 340), `language.rs` (270)
-and `options.rs` (310, via `ROW_LEFT_INSET` 155) all compute `row_left` as
-`width * 0.5 - ROW_WIDTH * 0.5` or its integer twin, so all three match the
-spec's model and remain unblocked.
+The blocker, for the record: `ListSpec::row_left` was
+`floor(width / 2) - floor(row_w / 2)` — a **centred, fixed-width** row — and
+`row_right` (hence the scrollbar's x) derived from it. `social.rs`'s rows are
+**full-width and left-anchored**: `name_x` is a flat `NAME_LEFT_INSET` of 4 and
+the Hide/Report buttons hang off `width - RIGHT_MARGIN`. No *constant* `row_w`
+makes `row_right` land in that right margin at every canvas width.
 
-**What `social.rs` needs first** is a canvas-relative row edge on `ListSpec` — a
-`row_right` the screen supplies as a function of width, rather than one derived
-from a centred constant. That is a primitive change and belongs ahead of the
-conversion, for the same reason growing variable row heights did: converting a
-screen against a primitive that is about to change is converting it twice.
+**That paragraph was prose, and it is now arithmetic.**
+`widget::tests::no_constant_row_width_can_express_a_full_width_row` states two
+hypotheses and computes both from outside the type: the inset band, and
+`Centred { row_w }` for the `row_w` that is *exactly right at 854 px* — the most
+favourable constant a tuner could pick, asserted exact at 854 so it is not a straw
+man. A centred right edge is `w/2 + row_w/2`, so it moves at **half** the canvas
+edge's rate, and the error is predicted as `(854 - w) / 2` rather than merely
+asserted non-zero: **107 px at 640, 213 at 1280, 533 at 1920**. Wrong shape, not a
+mistuned value.
+
+### `RowBand`, the canvas-relative row edge (issue #445)
+
+`ListSpec`'s `row_w: f32` became `band: RowBand`:
+
+| variant | `row_left` | `row_right` | used by |
+|---|---|---|---|
+| `Centred { row_w }` | `floor(w/2) - floor(row_w/2)` | `row_left + row_w` | multiplayer 340, accounts 305, key binds 340, language 270, stats 300 |
+| `Inset { left, right }` | `left` | `w - right` | **social only** |
+
+`ListSpec::uniform` keeps its exact signature and still builds `Centred`, so the
+five centred lists are untouched; `.spanning(left, right)` is the opt-in. `row_w`
+became a **method taking the canvas width**, because for `Inset` the row width
+genuinely is a function of the canvas — a bare field could only ever have been the
+centred answer.
+
+**The gutter rule is the trap `Inset` introduces, and it is gated.**
+`AbstractSelectionList` overrides `scrollBarX()` to
+`getRowRight() + scrollbarWidth() + 2`, so the bar lives **outside** the row and
+nothing clamps it to the canvas: an inset that reserves only the row's own margin
+pushes the bar off-screen *silently*, because a rect off the canvas simply does not
+draw. The required reservation is `SCROLLBAR_WIDTH + 2 + SCROLLBAR_WIDTH` = **14
+px**, and `widget::tests::an_inset_rows_right_gutter_must_reserve_room_for_the_scrollbar`
+observes social's existing 10 px **failing** (the bar ended at 858 on an 854
+canvas) before pinning 14 as the boundary — exact at 854, and 13 already overflows.
+That is why `social::RIGHT_MARGIN` is now `SCROLLBAR_WIDTH + 2 + SCROLLBAR_WIDTH`
+rather than a flat 10, and why its Hide/Report buttons moved 4 px left. A centred
+list gets that gutter free from the canvas margin either side; a full-width one has
+to declare it.
+
+The property no centred `row_w` could have is gated on the screen too:
+`social::tests::the_declared_band_tracks_this_screens_own_right_anchored_buttons`
+requires `spec.row_right(w) == report_button_x(w) + REPORT_BUTTON_W` at 640, 854,
+1280 and 1920, with no tolerance.
 
 Two things fall out and both are decisions, not details:
 

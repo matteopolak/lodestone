@@ -1471,6 +1471,13 @@ impl MenuNav {
                     lang.scroll(),
                 ))
             }
+            // Social Interactions (#445's fourth and last adoption, and the only
+            // user of `RowBand::Inset` — its rows are full-width, so no constant
+            // `row_w` could place its scrollbar; see `social::list_spec`).
+            super::Screen::Social => Some(super::social::list_spec(
+                self.social.entries().len(),
+                self.social.scroll(),
+            )),
             _ => None,
         }
     }
@@ -1528,6 +1535,12 @@ impl MenuNav {
                 let before = lang.scroll();
                 lang.scroll_by(notches, canvas_height);
                 lang.scroll() != before
+            }
+            // Social Interactions (#445). Same screen as `active_list`'s arm.
+            super::Screen::Social => {
+                let before = self.social.scroll();
+                self.social.scroll_by(notches, canvas_height);
+                self.social.scroll() != before
             }
             _ => false,
         }
