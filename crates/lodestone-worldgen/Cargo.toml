@@ -24,6 +24,11 @@ serde_json = { workspace = true }
 # off. Dev-only: does not affect the wasm build of this crate's lib (`gpu`/wasm
 # concerns live in `lodestone-server`/`lodestone-shell`, not here).
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# Issue #87's peak-RSS half. In-process resident-set sampling: reads the same OS
+# counter `/usr/bin/time -l` reports, but per-radius inside one run rather than
+# once per process, and with no output parsing. Already in the lockfile via
+# `lodestone-shell`. Dev-only.
+memory-stats = "1"
 
 [[bench]]
 name = "generation"

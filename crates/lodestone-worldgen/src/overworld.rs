@@ -1178,37 +1178,46 @@ impl OverworldGenerator {
         let base_x = cx * 16;
         let base_z = cz * 16;
 
-        let t0 = std::time::Instant::now();
+        let t_aquifer_start = std::time::Instant::now();
         let aquifer = self.build_aquifer(cx, cz);
+        let t_shape_start = std::time::Instant::now();
         let field = self.fill_stage(&aquifer, base_x, base_z);
         let heights = self.heights_from_field(&field);
-        let t1 = std::time::Instant::now();
+        let t_biome_start = std::time::Instant::now();
         let biome_quarts = self.biome_stage(&heights, base_x, base_z);
-        let t2 = std::time::Instant::now();
+        let t_surface_start = std::time::Instant::now();
         let surface_diff = self.surface_stage(&field, &heights, &biome_quarts, base_x, base_z);
-        let t3 = std::time::Instant::now();
+        let t_materialize_start = std::time::Instant::now();
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
+        let t_carve_start = std::time::Instant::now();
         let world = self.carve_stage(cx, cz, &aquifer, &heights, &biome_quarts, base_x, base_z, world);
+        let t_ore_start = std::time::Instant::now();
         let world = self.ore_stage(cx, cz, world, &heights);
+        let t_vegetation_start = std::time::Instant::now();
         let world = self.vegetation_stage(cx, cz, world);
-        let t4 = std::time::Instant::now();
+        let t_top_layer_start = std::time::Instant::now();
         // Issue #404's U2. This call is why `StageTimes` grew a field rather
         // than folding another stage into `intern`: `top_layer_stage` is the
         // first stage cheap enough that its cost had to be *measured* to be
         // believed, and `docs/plans/worldgen-parity.md` §6 predicts <5% for it.
         let (world, _) = self.top_layer_stage(cx, cz, world, &biome_quarts);
-        let t5 = std::time::Instant::now();
+        let t_intern_start = std::time::Instant::now();
         let col = self.intern_from_dense(world, biome_quarts);
-        let t6 = std::time::Instant::now();
+        let t_end = std::time::Instant::now();
 
         (
             col,
             StageTimes {
-                shape: t1 - t0,
-                fluid_heightmap: t2 - t1,
-                surface: t3 - t2,
-                intern: (t4 - t3) + (t6 - t5),
-                top_layer: t5 - t4,
+                aquifer: t_shape_start - t_aquifer_start,
+                shape: t_biome_start - t_shape_start,
+                biome: t_surface_start - t_biome_start,
+                surface: t_materialize_start - t_surface_start,
+                materialize: t_carve_start - t_materialize_start,
+                carve: t_ore_start - t_carve_start,
+                ore: t_vegetation_start - t_ore_start,
+                vegetation: t_top_layer_start - t_vegetation_start,
+                top_layer: t_intern_start - t_top_layer_start,
+                intern: t_end - t_intern_start,
             },
         )
     }
@@ -1536,37 +1545,97 @@ impl OverworldGenerator {
     }
 }
 
-/// Per-stage wall-clock cost of one [`OverworldGenerator::column_timed`] call.
-/// Stage boundaries match the doc comment on [`OverworldGenerator`]: `shape`
-/// covers fill (shape + the real aquifer, issue #295); `fluid_heightmap`
-/// covers the heightmap + biome sampling (issue #405's
-/// [`OverworldGenerator::biome_stage`]); `surface` covers surface rules;
-/// `intern` now also covers carve + ore-feature composition + vegetal-
-/// decoration composition + palette interning (issues #295, #406) — folded
-/// into this bucket rather than earning new fields every existing caller of
-/// this struct would need to learn about.
+/// Per-stage wall-clock cost of one [`OverworldGenerator::column_timed`] call:
+/// **one field per stage the pipeline actually has**, which is what issue #85
+/// asks for.
+///
+/// # What changed here, and why the old field names were misleading
+///
+/// This struct previously had four buckets — `shape` / `fluid_heightmap` /
+/// `surface` / `intern` — and two of the four did not measure what their name
+/// said:
+///
+/// * **`fluid_heightmap` measured the biome stage and nothing else.** The
+///   heightmap (`heights_from_field`) is computed inside the `shape` window, so
+///   the bucket between the two timestamps contained exactly
+///   [`OverworldGenerator::biome_stage`]. It is now called `biome`.
+/// * **`intern` measured materialize + carve + ore + vegetation + interning.**
+///   The old doc comment did admit the folding, but the recorded benchmark
+///   metric was named `stage_intern_pct`, so the persisted number attributed
+///   carvers, ore features and vegetal decoration to "interning" — the precise
+///   rot #85 exists to stop. Those four now have their own fields.
+///
+/// So a `stage_intern_pct` figure in `bench-results/generation.jsonl` recorded
+/// before this change is **not** interning cost and must not be compared
+/// against `stage_intern_pct` recorded after it. The scene strings differ, which
+/// is what stops `cargo xtask bench-compare` from silently pairing them.
+///
+/// # These are cache-cold stage costs, deliberately
+///
+/// [`OverworldGenerator::column`] reaches its stages through two memo caches
+/// ([`OverworldGenerator::pre_ore_stage`] and `post_ore_world`).
+/// `column_timed` calls the same stage functions *without* those caches, on
+/// purpose: a cache hit costs almost nothing, so a per-stage split taken over
+/// memoised calls would attribute ~0% to whichever stage happened to be warm
+/// and is not a split of anything. The stage functions, their order and their
+/// inputs are identical to `column`'s, so the *output* is identical too —
+/// `benches/generation.rs` asserts exactly that against a pair of freshly
+/// constructed generators, which is the anti-drift control the "do not create a
+/// second pipeline" half of #85 asks for.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy)]
 pub struct StageTimes {
+    /// Building the per-chunk [`crate::aquifer::AquiferSystem`] (issue #295) —
+    /// split out of `shape` because #85 names the aquifer as a stage whose cost
+    /// should be visible on its own terms.
+    pub aquifer: std::time::Duration,
+    /// The noise router: `fill_stage` (density field, aquifer-participating
+    /// fill) plus `heights_from_field`.
     pub shape: std::time::Duration,
-    pub fluid_heightmap: std::time::Duration,
+    /// Biome sampling (issue #405's [`OverworldGenerator::biome_stage`]).
+    /// Previously, and misleadingly, called `fluid_heightmap`.
+    pub biome: std::time::Duration,
+    /// Surface rules.
     pub surface: std::time::Duration,
-    pub intern: std::time::Duration,
+    /// Turning the density field plus the surface diff into a dense block grid.
+    pub materialize: std::time::Duration,
+    /// Carvers (`crate::carver::apply_carvers`, issue #295).
+    pub carve: std::time::Duration,
+    /// The `UNDERGROUND_ORES` 3×3 neighbourhood driver (issue #295).
+    pub ore: std::time::Duration,
+    /// Vegetal decoration (issue #406).
+    pub vegetation: std::time::Duration,
     /// `TOP_LAYER_MODIFICATION` — `freeze_top_layer`'s snow and ice (issue
     /// #404's U2). The first stage to earn its own field rather than being
     /// folded into `intern`, because `docs/plans/worldgen-parity.md` §6 makes a
     /// *quantitative* prediction about it (<5% of composed column cost) that
     /// something has to be able to check.
     pub top_layer: std::time::Duration,
+    /// Palette interning only — nothing else, now.
+    pub intern: std::time::Duration,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl StageTimes {
     /// Total of every stage (wall-clock, so approximately equal to but not
     /// exactly the same instant range as timing the whole `column()` call).
+    ///
+    /// Every field is included, so this covers the same span it did when the
+    /// struct had four buckets — splitting a bucket does not move the total, and
+    /// existing callers that divide one stage by `total()` (e.g.
+    /// `lodestone-server`'s `top_layer` share assertion) keep the same meaning.
     #[must_use]
     pub fn total(&self) -> std::time::Duration {
-        self.shape + self.fluid_heightmap + self.surface + self.intern + self.top_layer
+        self.aquifer
+            + self.shape
+            + self.biome
+            + self.surface
+            + self.materialize
+            + self.carve
+            + self.ore
+            + self.vegetation
+            + self.top_layer
+            + self.intern
     }
 }
 
