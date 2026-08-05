@@ -255,7 +255,11 @@ invalidate and nothing to clone. The rule is gone, not obeyed.
 - **Adding a read of the store? Take the guard into a `let` binding.**
   `WorldCollision::new(&store.read())` compiles nowhere useful — the guard is a
   temporary dropped at the end of the statement while the view still borrows it.
-  Three call sites in `sim.rs` bind `let world = store.read();` first.
+  Five call sites across `crates/lodestone-shell/src/sim/` bind
+  `let world = store.read();` first — `actions.rs`, `camera.rs`, `meshing.rs`,
+  `render_sources.rs` and `step.rs`. (This said "three call sites in `sim.rs`",
+  which the seam extractions falsified twice over: the count grew and the file
+  is now a directory. Grep the binding, not a remembered location.)
 - **`heal_dirty_columns` runs only because `Sim::step` calls
   `run_schedule(Update)`.** That call is new in Stage 4 — `Sim`'s `World` had no
   `Update` systems before — and it is the one thing between this stage and being
