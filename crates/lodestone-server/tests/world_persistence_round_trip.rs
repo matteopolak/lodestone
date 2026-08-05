@@ -45,7 +45,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use lodestone_core::State;
-use lodestone_server::region_source::RegionChunkSource;
+use lodestone_server::region_source::{PersistenceStats, RegionChunkSource};
 use lodestone_server::{ChunkColumn, ChunkSource, ServerBound, ServerDirective, ServerProtocol};
 use uuid::Uuid;
 
@@ -301,53 +301,100 @@ async fn a_save_writes_one_column_per_mutated_chunk_and_nothing_else() {
 /// is deterministic per seed — a completely broken load path that silently fell
 /// through to the generator would produce identical terrain everywhere except
 /// the edited cells.
+///
+/// # Why the counters are read off a quiescent handle (issue #473)
+///
+/// This gate was red **8 of 12 runs**, and the race was in the *gate*, not in
+/// the save path. [`lodestone_server::region_source::PersistenceStats`] are
+/// per-**world** accumulators, never per-call results, so reading one as a delta
+/// around a call measures that call only while nothing else touches the same
+/// world. A live [`lodestone_server::IntegratedServer`] always does:
+/// `open_in_memory_with_mobs` spawns a mob-seeding task *and* a tick loop that
+/// each read every column of `mob_area` through the shared `ChunkStore` — chunk
+/// (0,0) here, the same column this gate probes — so the server's own entirely
+/// correct disk load landed inside the observation window and the delta read
+/// **2**. Every one of those four failures read `left: 2`; none read 0, and none
+/// was a missing or wrong block.
+///
+/// That diagnosis is not an inference from the code alone. Moving `mob_area` to
+/// chunk (9,9) — where the server's own read cannot *be* a disk load, because
+/// nothing saved that column — took the identical assertion to **12 of 12**.
+/// The pollution moved with the server's reads, which is what a harness race
+/// does and what a save/load race would not.
+///
+/// So session two observes through a second [`RegionChunkSource`] over the same
+/// directory with **no server attached**, and therefore exactly one caller. Its
+/// counters start at zero and every increment is one this test caused, which is
+/// what lets the assertions below be absolute values rather than deltas — an
+/// exclusive observation instead of a sampled one. The production reopen is
+/// still exercised at the end, for the claim the counters cannot make.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reopened_world_reads_from_disk_instead_of_regenerating() {
     let dir = tempdir("load_counter");
 
+    // --- session one: written through the production path -------------------
     let (server, world) = open(&dir).await;
     world.set_block(5, 70, 5, MARKER);
     server.save_now().expect("save");
     server.shutdown().await;
 
-    let (server, reopened) = open(&dir).await;
-    let stats_before = disk_loads(&server);
-    let _ = reopened.column(0, 0);
-    let stats_after = disk_loads(&server);
+    // --- session two: an exclusive observer over the same directory ---------
+    let observer = RegionChunkSource::new(world_source(SEED), &dir, MIN_Y, HEIGHT)
+        .expect("reopen the saved world");
+    let observer_handle = observer.save_handle();
+    let stats = observer_handle.stats();
     assert_eq!(
-        stats_after - stats_before,
-        1,
+        (disk_loads(stats), generator_falls(stats)),
+        (0, 0),
+        "a freshly constructed source must not have touched anything yet"
+    );
+
+    let saved = observer.column(0, 0);
+    assert_eq!(
+        (disk_loads(stats), generator_falls(stats)),
+        (1, 0),
         "reading a saved column must come off disk exactly once, not from the generator"
+    );
+    // The counter alone cannot tell a load of the *right* column from a load of
+    // some other one, so the marker is checked on the very column that was
+    // counted rather than on a second read.
+    assert_eq!(
+        saved.block_state(5, 70, 5),
+        MARKER,
+        "the column the disk-load counter counted is not the one that was saved"
     );
 
     // A column that was never saved must still fall through to the generator,
     // which is the control for the counter above: if `loaded_from_disk`
     // incremented here too, it would be counting calls rather than loads.
-    let generated_before = generator_falls(&server);
-    let _ = reopened.column(40, 40);
+    let _ = observer.column(40, 40);
     assert_eq!(
-        generator_falls(&server) - generated_before,
-        1,
+        (disk_loads(stats), generator_falls(stats)),
+        (1, 1),
         "an unsaved column must be generated, not claimed as a disk load"
     );
 
+    // --- and the production reopen still has to work ------------------------
+    // The counters above live on a handle no server owns, so this is the half
+    // that keeps `open_persistent_with_mobs` itself in the gate. It asserts a
+    // block value, which is the one thing immune to who else is reading.
+    let (server, reopened) = open(&dir).await;
+    assert_eq!(
+        reopened.block_state(5, 70, 5),
+        MARKER,
+        "the production reopen path did not see the saved mutation"
+    );
     server.shutdown().await;
 }
 
-fn disk_loads(server: &lodestone_server::IntegratedServer) -> u64 {
-    server
-        .persistence_stats()
-        .expect("persistent")
+fn disk_loads(stats: &PersistenceStats) -> u64 {
+    stats
         .loaded_from_disk
         .load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn generator_falls(server: &lodestone_server::IntegratedServer) -> u64 {
-    server
-        .persistence_stats()
-        .expect("persistent")
-        .generated
-        .load(std::sync::atomic::Ordering::Relaxed)
+fn generator_falls(stats: &PersistenceStats) -> u64 {
+    stats.generated.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A unique scratch directory. `std::env::temp_dir` plus the test name and a
