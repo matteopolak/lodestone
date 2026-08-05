@@ -27,40 +27,48 @@
 //!   distinct item and the server's `tempt_food` feed covers only the food tag.
 //! * **A rabbit's `AvoidEntityGoal` is modelled but inert**, because the server's
 //!   `avoided_species` feed has no rabbit arm — see [`rabbit_avoid_player`].
-//! * **Three rows across two species are unmodelled for one single reason**, next.
+//! * **Two rabbit rows are unmodelled for block-perception-adjacent reasons**, next.
 //!
-//! # The one reason three rows here are `Missing`: no block access in the seam
+//! # Block perception: the sheep's row is closed, two rabbit rows are not
 //!
-//! Sheep grazing (`Sheep.eatBlockGoal`, issue [#238]), a rabbit's
-//! `ClimbOnTopOfPowderSnowGoal` and its `RaidGardenGoal` are all
-//! [`Coverage::Missing`], and they fail on the *same* thing:
-//! [`MobController`](crate::ai::MobController) declares 33 methods and **not one
-//! of them reads a block**. There is no "what am I standing on", no "what is at
-//! my feet", no world handle. A goal that eats grass cannot ask whether there is
-//! grass.
+//! Sheep grazing (`Sheep.eatBlockGoal`, issue [#238]) used to be
+//! [`Coverage::Missing`] because [`MobController`](crate::ai::MobController)
+//! could not read a block at all — a goal that eats grass could not ask whether
+//! there was grass. That seam landed as issue [#456] (`bdf7120`, `b50255a`):
+//! `PathWorld::block_cues` answers block *identity* on the world seam,
+//! `MobController::block_cues_at_feet`/`_below` are overridden on
+//! [`NavigatingMob`](crate::ai::navigating_mob::NavigatingMob) from the
+//! [`PathWorld`](crate::pathfinding::PathWorld) it already borrows, and the goal
+//! reports each eat back as an `ate(EatenBlock)` intent for the host to apply.
+//! [`eat_block`] is installed by the [`SHEEP`] table below.
 //!
-//! This is worth stating in the roster rather than in an issue, because it is not
-//! a passive-family problem: `RestrictSunGoal`, `FleeSunGoal`,
-//! `ZombieAttackTurtleEggGoal` and `MoveThroughVillageGoal` are `Missing` in
-//! [`hostile_melee`](super::hostile_melee) for the identical reason. **Seven
-//! unmodelled registrations across two families are one missing seam
-//! capability**, not seven missing goals, and implementing block perception once
-//! closes all seven.
+//! **What that achieves, and what it does not.** The goal is installed on a real
+//! mob and reads the seam. **A sheep in a running game still does not graze**:
+//! the host half is `ChunkWorld::block_cues` — the classification, which
+//! `base_path_type` deliberately erases, since `grass_block`, `dirt` and `stone`
+//! are one `Blocked` — plus a `pending_grazes` handoff drained where mutable
+//! chunk access lives. `MobSim` borrows the world immutably, so the mutation must
+//! take the `pending_detonations` route through the tick driver rather than
+//! happening in `MobSim::tick`. Until that lands the cue feed answers
+//! `BlockCues::NONE`, which leaves this row inert rather than wrong. Wool
+//! regrowth — `Sheep.ate()`'s `setSheared(false)` plus `ageUp(60)`
+//! (`animal/sheep/Sheep.java:292-297`) — is entity metadata on the wire and is
+//! still to come. `docs/mob-block-perception.md` is the doc.
 //!
-//! **A stale claim not to inherit.** #228 says grazing is blocked on random
-//! ticks, and the epic's plan then corrects that to "unblocked, because
+//! **A generalisation not to inherit.** #456's body grouped seven `Missing` rows
+//! across two families as one seam capability. Measured against the jar it closes
+//! **one**: a rabbit's `ClimbOnTopOfPowderSnowGoal` needs powder-snow physics
+//! nothing here models, its `RaidGardenGoal` needs a host-computed candidate
+//! block position (`MoveToBlockGoal`'s spiral) plus a block-state *property*, and
+//! [`hostile_melee`](super::hostile_melee)'s `RestrictSunGoal` reads no block at
+//! all. Anyone planning off the original table would expect the rest to be free.
+//!
+//! **A stale claim not to inherit either.** #228 says grazing is blocked on
+//! random ticks, and the epic's plan then corrects that to "unblocked, because
 //! `random_tick.rs` exists and runs in the production tick loop". The correction
-//! is true and it is *not sufficient*: `random_tick.rs` being real makes the
+//! is true and it was *not sufficient*: `random_tick.rs` being real makes a
 //! grass→dirt **world mutation** available, which was never the binding
-//! constraint. Grazing needs, in order: a block-perception method on
-//! `MobController`, an override on `NavigatingMob` (which already holds a
-//! [`PathWorld`](crate::pathfinding::PathWorld) and so can answer it), an eat
-//! request drained by `MobSim::tick` into that grass→dirt mutation, and
-//! `Sheep.ate()`'s wool regrowth — `setSheared(false)` plus `ageUp(60)`
-//! (`animal/sheep/Sheep.java:292-297`) — which is entity metadata on the wire.
-//! Four files in two crates. So #238 is a seam unit, not a table row, and the
-//! row below stays `Missing` until that lands rather than shipping a goal whose
-//! `can_use` cannot be satisfied.
+//! constraint — the seam above was.
 //!
 //! # What consumes these tables — and the honest limit on it
 //!
@@ -77,11 +85,12 @@
 //!
 //! [#228]: https://github.com/matteopolak/lodestone/issues/228
 //! [#238]: https://github.com/matteopolak/lodestone/issues/238
+//! [#456]: https://github.com/matteopolak/lodestone/issues/456
 
 use crate::ai::goal::Goal;
 use crate::ai::goals::{
-    AvoidEntityGoal, BreedGoal, FollowParentGoal, LookAtPlayerGoal, PanicGoal, RandomStrollGoal,
-    TemptGoal,
+    AvoidEntityGoal, BreedGoal, EatBlockGoal, FollowParentGoal, LookAtPlayerGoal, PanicGoal,
+    RandomStrollGoal, TemptGoal,
 };
 
 use super::{
@@ -132,17 +141,11 @@ pub const SHEEP: &[Registration] = &[
     Registration::goal(2, "BreedGoal", breed_1_0),
     Registration::goal(3, "TemptGoal(SHEEP_FOOD)", tempt_1_1),
     Registration::goal(4, "FollowParentGoal", follow_parent_1_1),
-    // `this.eatBlockGoal` (`:81`, assigned at `:75`) — grazing, issue #238.
-    //
-    // This comment used to say the gap was nearly closed, because
-    // `crates/lodestone-server/src/random_tick.rs` models grass→dirt and runs in
-    // the production tick loop. That is true and it is the wrong dependency: the
-    // binding constraint is that `MobController` cannot read a block at all, so
-    // `EatBlockGoal::can_use` — `IS_EDIBLE.test(state at pos) || grass_block
-    // below` (`ai/goal/EatBlockGoal.java:33-35`) — is not expressible. See this
-    // module's header for the four-file patch #238 actually needs, and for the
-    // six sibling rows blocked on the same one thing.
-    Registration::missing(Selector::Goal, 5, "EatBlockGoal"),
+    // The seam gap this row waited on is closed (#456, `bdf7120`): the goal reads
+    // the block below through `MobController::block_cues_below`. Grazing still
+    // needs the host's drain of `take_new_eaten` to see grass turn to dirt — see
+    // `docs/mob-block-perception.md`.
+    Registration::goal(5, "EatBlockGoal", eat_block),
     Registration::goal(6, "WaterAvoidingRandomStrollGoal", stroll),
     Registration::goal(7, "LookAtPlayerGoal(Player)", look_at_player_6),
     Registration::goal(8, "RandomLookAroundGoal", random_look_around),
@@ -363,6 +366,14 @@ fn follow_parent_1_1(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(FollowParentGoal::new(ctx.speed * 1.1))
 }
 
+/// `EatBlockGoal(this)` — sheep only (`animal/sheep/Sheep.java`), no arguments.
+/// Its predicate reads the block at and below the mob through
+/// `MobController::block_cues_*` (#456); a host whose `PathWorld` does not
+/// classify blocks leaves it inert rather than wrong.
+fn eat_block(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(EatBlockGoal::new())
+}
+
 #[cfg(test)]
 mod tests {
     use lodestone_model::Vec3;
@@ -371,7 +382,7 @@ mod tests {
     use crate::ai::goal::GoalSelector;
     use crate::ai::navigating_mob::NavigatingMob;
     use crate::ai::roster::Coverage;
-    use crate::pathfinding::{Aabb, MobShape, PathType, PathWorld};
+    use crate::pathfinding::{Aabb, BlockCues, MobShape, PathType, PathWorld};
 
     /// A cow's table is the roster's completeness benchmark: vanilla registers
     /// eight goals and every one has an equivalent here. If a gap ever appears in
@@ -701,6 +712,113 @@ mod tests {
              also reached {f_after} blocks from the player. Then the rabbit's \
              approach is not evidence about its TemptGoal row, and this gate is \
              measuring nothing more than that mobs wander"
+        );
+    }
+
+    /// [`Flat`], with the floor classified as `minecraft:grass_block`.
+    ///
+    /// A separate world rather than a cue arm on [`Flat`] on purpose: `Flat`
+    /// answers [`BlockCues::NONE`], which is what keeps the tempt gate above free
+    /// of a sheep that stops to graze mid-approach. Note the cue is the *only*
+    /// difference — a host that classifies nothing leaves [`eat_block`] inert
+    /// rather than wrong, which is exactly the state production is in until
+    /// `ChunkWorld::block_cues` lands.
+    struct Grass;
+
+    impl PathWorld for Grass {
+        fn min_y(&self) -> i32 {
+            -8
+        }
+        fn base_path_type(&self, _x: i32, y: i32, _z: i32) -> PathType {
+            if y <= -1 {
+                PathType::Blocked
+            } else {
+                PathType::Open
+            }
+        }
+        fn collision_top(&self, _x: i32, y: i32, _z: i32) -> f64 {
+            if y <= -1 { 1.0 } else { 0.0 }
+        }
+        fn collides(&self, aabb: Aabb) -> bool {
+            aabb.min_y < 0.0
+        }
+        fn block_cues(&self, _x: i32, y: i32, _z: i32) -> BlockCues {
+            if y <= -1 {
+                BlockCues { grass_block: true, ..BlockCues::NONE }
+            } else {
+                BlockCues::NONE
+            }
+        }
+    }
+
+    /// Ticks a baby `species` on [`Grass`] with **no `add` call of this test's
+    /// own** and returns how many eat intents reached the host.
+    ///
+    /// A baby because [`EatBlockGoal::BABY_INTERVAL`] is 25 ticks against an
+    /// adult's 500, so reachability is observable in a short run. The world never
+    /// mutates, so nothing depletes the supply — the failure mode that made the
+    /// seam's first interval measurement read grass scarcity instead of the eat
+    /// interval.
+    fn grazes(species: &str, ticks: usize) -> usize {
+        let world = Grass;
+        let mut mob = NavigatingMob::new(
+            &world,
+            MobShape::land(0.9, 1.3),
+            Vec3::new(0.5, 0.0, 0.5),
+            WALK,
+            256,
+        );
+        mob.set_age(crate::ai::navigating_mob::BABY_START_AGE);
+
+        let mut ai = GoalSelector::new();
+        for (p, g) in super::super::goals_for(species, &SpeciesContext::new(WALK)) {
+            ai.add(p, g);
+        }
+
+        let mut eaten = 0;
+        for _ in 0..ticks {
+            mob.tick(&mut ai);
+            eaten += mob.take_new_eaten().len();
+        }
+        eaten
+    }
+
+    /// The [`SHEEP`] table installs an `EatBlockGoal` that a real
+    /// [`NavigatingMob`] can actually reach.
+    ///
+    /// **What this asserts is installation and reachability, not grazing.** The
+    /// cue feed here belongs to this test's [`Grass`] world; production's
+    /// `ChunkWorld` does not classify blocks yet and the host does not drain
+    /// `take_new_eaten`, so a sheep in a running game grazes nothing. An
+    /// eat-*count* prediction would therefore be measuring the absent host half
+    /// rather than this row — `crates/lodestone-entity/tests/block_perception.rs`
+    /// is where the 444-vs-286 interval calibration lives.
+    ///
+    /// The control is a difference in the table alone: a cow stands on the same
+    /// grass, gets the same feed and the same ticks, and its table has no grazing
+    /// row — so a blanket install, or a goal reachable from any passive table,
+    /// fails here rather than passing as a sheep.
+    #[test]
+    fn the_sheeps_table_installs_a_reachable_eat_block_goal() {
+        const TICKS: usize = 2_000;
+
+        let sheep = grazes("sheep", TICKS);
+        assert!(
+            sheep > 0,
+            "a baby sheep built only from the roster ate nothing in {TICKS} ticks \
+             on classified grass. Either SHEEP no longer carries the EatBlockGoal \
+             row, or goals_for does not reach it: with BABY_INTERVAL = {} the \
+             chance of a genuinely installed goal never firing is vanishing",
+            EatBlockGoal::BABY_INTERVAL
+        );
+
+        let cow = grazes("cow", TICKS);
+        assert_eq!(
+            cow, 0,
+            "control: a cow on the same grass, ticked the same {TICKS} times, ate \
+             {cow} times. `AbstractCow.java:41-48` registers no EatBlockGoal, so \
+             something installs grazing regardless of the table and the sheep \
+             measurement above is not attributable to its row"
         );
     }
 }

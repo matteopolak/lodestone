@@ -28,22 +28,25 @@
 //! `block_cues_*` from a field would pass with `NavigatingMob`'s override
 //! missing entirely.
 //!
-//! # Why the goal is added here rather than coming from the roster
+//! # The goal now comes from the roster, and this file no longer stubs it
 //!
-//! The sheep's `EatBlockGoal` row is still `Coverage::Missing` in
-//! `ai/roster/passive.rs`, which belongs to another agent; flipping it is a
-//! brokered patch that ships separately. So [`graze`] installs the roster's
-//! whole set **and then adds `EatBlockGoal` at its jar priority of 5**, which is
-//! what the flipped row will do.
+//! [`graze`] used to install the roster's whole set **and then add
+//! `EatBlockGoal` at its jar priority of 5**, because the sheep's row was
+//! `Coverage::Missing` in `ai/roster/passive.rs` and flipping it was a brokered
+//! patch. That row now carries the goal, so both stub `add` calls are gone and
+//! every goal these gates observe arrives through [`goals_for`].
 //!
-//! That is deliberately *not* the closed loop that hid #441 and #455. There, the
-//! subject was a **host** and the tests supplied a working fake of it, so the
-//! defect was unobservable in principle. Here the host is the real
-//! `NavigatingMob` reading a real `PathWorld`, and what is stubbed is one line
-//! of table wiring whose absence is stated rather than hidden. What these gates
-//! cannot tell you is whether a *running game's* sheep grazes — two things are
-//! still needed for that, both in files owned elsewhere: the roster row, and the
-//! `MobSim::tick` drain.
+//! **Leaving the stub in place would have been a silent double-install, not a
+//! harmless duplicate.** Two `EatBlockGoal`s at priority 5 each draw their own
+//! `next_i32(interval)`, so grazing happens at roughly twice the rate:
+//! `the_grazing_interval_is_the_halved_delay_and_not_the_jar_literal` measured
+//! **627** eats against its predicted 444 the moment the row flipped, which is
+//! how the duplicate was caught rather than shipped.
+//!
+//! What these gates still cannot tell you is whether a *running game's* sheep
+//! grazes. That needs the host half — `ChunkWorld::block_cues` to classify the
+//! block, and the drained eat applied where mutable chunk access lives — in
+//! `lodestone-server`, owned elsewhere.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -240,11 +243,6 @@ fn graze(world: &GrassWorld, baby: bool, ticks: usize, deplete: bool) -> Graze {
     for (priority, goal) in goals_for("sheep", &ctx) {
         ai.add(priority, goal);
     }
-    // The row the brokered `passive.rs` patch flips from `Missing` to
-    // `Modelled`, at vanilla's own priority (`animal/sheep/Sheep.java`, goal 5 —
-    // above `WaterAvoidingRandomStrollGoal` at 6, which is what lets it hold
-    // MOVE for the animation). Delete this line once the roster carries it.
-    ai.add(5, Box::new(EatBlockGoal::new()));
 
     let mut eaten = Vec::new();
     let mut positions: Vec<Vec3> = Vec::new();
@@ -464,7 +462,6 @@ fn a_world_that_classifies_no_blocks_leaves_grazing_inert() {
     for (priority, goal) in goals_for("sheep", &ctx) {
         ai.add(priority, goal);
     }
-    ai.add(5, Box::new(EatBlockGoal::new()));
     // A baby, so the interval is short enough that 4000 ticks is many chances.
     mob.set_age(BABY_START_AGE);
     for _ in 0..4000 {
