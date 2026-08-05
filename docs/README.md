@@ -662,6 +662,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   resolver trait a permissions *plugin* can use to take the whole decision over. One
   resource, `lodestone_ecs::permissions::Permissions`, answering one question: does
   this subject hold this permission?
+- [Player entities](./player-entities.md) — The server-side machinery that makes a
+  connected player an **entity other connections receive** (issue #438): a shared
+  registry of connected players, a per-connection tab-list diff, and the two
+  `ServerProtocol` encoders that put both on the wire. Before it, two players on one
+  server — including over LAN — were completely invisible to one another.
 - [The plugin API](./plugin-api.md) — The surface a third-party bevy plugin uses to
   do everything native Lodestone code can do — read world/entity/player state, write
   intent, order systems against internal ones, and observe events — specified
@@ -1024,6 +1029,19 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   save-format **`DataVersion`**, and its **release date**:
 - [View bobbing, the damage tilt, and view lag](./view-bobbing.md) — Three separate
   mechanisms that a screenshot makes look like one:
+- [The WASM plugin host — runtime plugin loading](./wasm-plugin-host.md) —
+  Lodestone's second plugin tier: `crates/lodestone-wasm-host` embeds `wasmtime`,
+  loads a WebAssembly component from a **file on disk at runtime**, and drives it
+  through a capability-gated ABI defined in WIT. It is what makes "install a plugin
+  without rebuilding" true at all — the thing [`docs/plugin-api.md`](plugin-api.md)
+  is explicit the native tier categorically does not deliver, where "install a plugin"
+  means "add a dependency and rebuild". It closes issues
+  [#172](https://github.com/matteopolak/lodestone/issues/172) (scaffold),
+  [#173](https://github.com/matteopolak/lodestone/issues/173) (the queries-and-actions
+  surface) and [#175](https://github.com/matteopolak/lodestone/issues/175) (the
+  manifest), and it is **additive** — the native tier
+  (`crates/plugins/lodestone-{autopilot,nav,event-logger}`) is untouched and stays the
+  right home for anything Baritone-shaped.
 - [Weather](./weather.md) — The server owns weather entirely. It sends four
   `GAME_EVENT` codes — `START_RAINING` (1), `STOP_RAINING` (2), `RAIN_LEVEL_CHANGE`
   (7), `THUNDER_LEVEL_CHANGE` (8) — and the client turns two scalars in `0.0..=1.0`
