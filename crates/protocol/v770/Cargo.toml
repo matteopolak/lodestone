@@ -11,6 +11,11 @@ workspace = true
 lodestone-core = { workspace = true }
 lodestone-macros = { workspace = true }
 lodestone-model = { workspace = true }
+# The version-free chat-acknowledgement layer (issue #286): `MessageSignature`
+# and `MessageSignatureCache` let this adapter resolve and repopulate the packed
+# signed-chat cache ids that `PLAYER_CHAT`'s last-seen list and `delete_chat`
+# both index into.
+lodestone-game = { workspace = true }
 lodestone-world = { workspace = true }
 # The canonical 26.2 game-data censuses (issue #361): block collision, entity
 # dimensions, hardness, item prototypes, ... — everything under the old

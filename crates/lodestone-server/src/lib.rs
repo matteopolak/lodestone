@@ -226,7 +226,7 @@ pub use plugin_channels::{
 };
 pub use protocol::{
     EntitySnapshot, MetadataField, PlayerListing, ResourcePackPush, ServerBound, ServerDirective,
-    ServerProtocol,
+    ServerProtocol, WorldgenScope,
 };
 pub use random_tick::{
     DEFAULT_RANDOM_TICK_SPEED, GrassOutcome, RandomTickEvent, RandomTickScheduler,
@@ -244,7 +244,9 @@ pub use server::{
 pub use tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 pub use weather::{WeatherEvent, WeatherFeed, WeatherState};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};
-pub use worldgen_data::{overworld_chunk_source, overworld_generator};
+pub use worldgen_data::{
+    bundled_worldgen_serves, overworld_chunk_source, overworld_generator, BUNDLED_WORLDGEN_SCOPE,
+};
 
 // Re-exported so a caller (e.g. the shell's local world) can name the generator
 // and its output without depending on `lodestone-worldgen` directly.

@@ -42,6 +42,8 @@ use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::overworld::OverworldGenerator;
 use serde_json::Value;
 
+use crate::protocol::WorldgenScope;
+
 include!(concat!(env!("OUT_DIR"), "/embedded_worldgen.rs"));
 
 /// The fallback biome [`OverworldGenerator`] would use if [`EmbeddedResolver`]
@@ -52,6 +54,36 @@ include!(concat!(env!("OUT_DIR"), "/embedded_worldgen.rs"));
 /// gets. Plains has snow disabled, matching `cold_enough_to_snow == false`.
 const DEFAULT_BIOME: &str = "minecraft:plains";
 const DEFAULT_BIOME_SNOWS: bool = false;
+
+/// The worldgen data scope the embedded `assets/worldgen/` bundle satisfies
+/// (issue #407): the only data this crate embeds is 26.2 (protocol 776).
+///
+/// The version gate is [`bundled_worldgen_serves`] compared against the
+/// hosting protocol's own report
+/// ([`crate::protocol::ServerProtocol::worldgen_scope`],
+/// [`WorldgenScope`](crate::protocol::WorldgenScope)) — a family that hosts
+/// with anything other than the 26.2 bundle must not be served this data.
+/// Today the only production host is v770, which reports
+/// [`WorldgenScope::V26_2`]; a future v340-style host reports
+/// [`WorldgenScope::None`] until its own generator (plan §4's `ChunkSource`
+/// seam) exists. This is the version-free crate's *declaration* of what its
+/// data is; the protocol-side report is the other half of the same gate.
+pub const BUNDLED_WORLDGEN_SCOPE: WorldgenScope = WorldgenScope::V26_2;
+
+/// Whether the embedded worldgen bundle can serve a hosting protocol that
+/// reports `scope` — the version gate itself (issue #407).
+///
+/// True for exactly [`BUNDLED_WORLDGEN_SCOPE`]. A protocol reporting
+/// [`WorldgenScope::None`] — no worldgen, or a family whose data this crate
+/// does not embed — resolves to false: it must supply its own generator, and
+/// must never be handed the 26.2 terrain as a silent default. The consumer is
+/// the future hosting path (`integrated.rs`'s chunk source construction, which
+/// currently lives behind another agent); until it lands, the gate is pinned
+/// by [`tests::bundled_worldgen_gate_serves_v26_2_and_refuses_none`].
+#[must_use]
+pub fn bundled_worldgen_serves(scope: WorldgenScope) -> bool {
+    scope == BUNDLED_WORLDGEN_SCOPE
+}
 
 /// A [`Resolver`] backed by the embedded worldgen table.
 ///
@@ -519,6 +551,72 @@ mod tests {
                 "embedded table missing '{key}'"
             );
         }
+    }
+
+    /// Issue #407's version gate, driven end to end: a protocol reporting the
+    /// 26.2 scope is served the bundled data; a protocol reporting no scope (a
+    /// family without worldgen, or one whose data this crate does not embed)
+    /// is refused — the refused half is plan §4's load-bearing "`None` means
+    /// no world generation, surfaced never routed around".
+    #[test]
+    fn bundled_worldgen_gate_serves_v26_2_and_refuses_none() {
+        use crate::chunk::ChunkColumn;
+        use crate::protocol::{ServerBound, ServerDirective, ServerProtocol};
+        use lodestone_core::State;
+        use uuid::Uuid;
+
+        /// The production v770 declaration, mirrored here because
+        /// `lodestone-server` deliberately does not depend on the v770 crate
+        /// (that dependency would be the seam collapsing). Every other method
+        /// is inert; only `worldgen_scope` differs from the trait default.
+        struct V26_2Protocol;
+        impl ServerProtocol for V26_2Protocol {
+            fn decode(&self, _state: State, _packet_id: i32, _payload: &[u8]) -> ServerBound {
+                ServerBound::Ignored
+            }
+            fn login_success(&self, _username: &str, _uuid: Uuid) -> Vec<ServerDirective> {
+                Vec::new()
+            }
+            fn begin_configuration(&self) -> Vec<ServerDirective> {
+                Vec::new()
+            }
+            fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+                Vec::new()
+            }
+            fn begin_chunk_batch(&self) -> ServerDirective {
+                ServerDirective::None
+            }
+            fn encode_chunk(&self, _cx: i32, _cz: i32, _column: &ChunkColumn) -> ServerDirective {
+                ServerDirective::None
+            }
+            fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
+                ServerDirective::None
+            }
+            fn worldgen_scope(&self) -> WorldgenScope {
+                WorldgenScope::V26_2
+            }
+        }
+
+        // Served half: the v770-style report resolves the gate true.
+        let v26_2: Box<dyn ServerProtocol> = Box::new(V26_2Protocol);
+        assert!(
+            bundled_worldgen_serves(v26_2.worldgen_scope()),
+            "the bundled 26.2 data must serve a protocol that declares the 26.2 scope"
+        );
+
+        // Refused half, and the control: `None` — what every other
+        // `ServerProtocol` in the workspace reports today, since every test
+        // double keeps the trait default — must fail the same gate. If it
+        // passed, the gate would be vacuous and a future non-26.2 family would
+        // silently be handed 26.2 terrain. The two variants of `WorldgenScope`
+        // are exhausted by these two assertions, so the gate is proven exact,
+        // not merely "sometimes".
+        assert!(
+            !bundled_worldgen_serves(WorldgenScope::None),
+            "a protocol with no declared worldgen scope must not be served the 26.2 \
+             bundle — the version gate exists to make that a refusal, not a silent \
+             default to 26.2 terrain"
+        );
     }
 
     /// The exact, named vegetal-decoration gap surface for every biome

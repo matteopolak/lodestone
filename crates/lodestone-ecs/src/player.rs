@@ -490,6 +490,47 @@ pub enum PlaceRejection {
     Vetoed,
 }
 
+// ---------------------------------------------------------------------------
+// Select-slot intent — a plugin's wish to change the selected hotbar slot
+// ---------------------------------------------------------------------------
+
+/// A plugin's wish to change the selected hotbar slot, mirroring
+/// [`BreakIntent`]/[`PlaceIntent`]'s "express a wish, the shell owns the
+/// machine" contract — but for the *selection* rather than a block edit.
+///
+/// # Why this exists
+///
+/// [`PlaceIntent`] lets a plugin place whatever is in the **currently
+/// selected** slot, and nothing lets a plugin change which slot that is.
+/// [`SelectedSlot`] itself is a plain public component a plugin *could* write,
+/// but writing it directly moves the shell's local read without ever telling
+/// the server — the exact desync `docs/plugin-api.md` forbids, and the state
+/// [`PlaceIntent`]'s held-item resolution depends on
+/// (`lodestone_shell::sim::Sim::select_slot` writes the component *and* echoes
+/// a `ClientAction::SetCarriedItem` precisely so the server's notion of the
+/// held item keeps matching the shell's).
+///
+/// # Optional and additive, like [`LookIntent`]
+///
+/// Absent (the default — [`spawn_local_player`] does not insert it), nothing
+/// changes about human play: slot changes still run off the number keys and
+/// scroll wheel through `lodestone_shell::sim::Sim::select_slot`/`cycle_slot`.
+/// A plugin claims the selection by inserting this on the [`LocalPlayer`]
+/// entity; the shell consumes it in `lodestone_shell::interact::drive_select_slot`
+/// (`TickSet::Send`), performs the same write-plus-echo `Sim::select_slot` uses,
+/// and removes it — one insertion is one attempt, the same acknowledgement
+/// [`PlaceIntent`] documents for its own removal.
+///
+/// # Why there is no `SelectSlotOutcome`
+///
+/// [`BreakOutcome`]/[`PlaceOutcome`] exist because a block edit has legality
+/// questions the shell must answer (reach, obstruction, a dead player, a veto).
+/// Selecting a slot has none: every value `0..=8` is always selectable, and an
+/// out-of-range value is ignored exactly as `Sim::select_slot`'s own range gate
+/// ignores one — nothing to reject, and therefore nothing to report back.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectSlotIntent(pub usize);
+
 /// The **raw** sprint key, ungated by the forward-only/sneak rules
 /// [`MovementIntent`] applies.
 ///
@@ -1501,6 +1542,10 @@ pub fn reset_local_player(world: &mut World, entity: Entity, state: PlayerState)
     // that ended mid-attempt must not resolve into a placement the plugin
     // never re-confirmed under the new session.
     entity.remove::<PlaceIntent>();
+    // Same reasoning, for slot selection: a leftover `SelectSlotIntent` from a
+    // session that ended mid-change must not re-select a slot the plugin never
+    // re-confirmed under the new session.
+    entity.remove::<SelectSlotIntent>();
 }
 
 // ---------------------------------------------------------------------------

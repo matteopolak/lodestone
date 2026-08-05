@@ -581,14 +581,72 @@ fn delete_chat_decodes_full_signature() {
 }
 
 #[test]
-fn delete_chat_decodes_cached_index() {
+fn delete_chat_drops_unresolvable_cached_index() {
     let adapter = V770Adapter::new();
-    let payload = var_i32(6); // id + 1 == 6 -> cached index 5
+    let payload = var_i32(6); // id + 1 == 6 -> cached index 5, never pushed
     let directives = handle(&adapter, play::clientbound::DELETE_CHAT, &payload);
+    assert!(
+        directives.is_empty(),
+        "a cache reference this connection never pushed is dropped, got {directives:?}"
+    );
+}
+
+/// A VarInt-prefixed UTF-8 string (`FriendlyByteBuf.writeUtf`).
+fn mc_string(text: &str) -> Vec<u8> {
+    let mut out = var_i32(text.len() as i32);
+    out.extend_from_slice(text.as_bytes());
+    out
+}
+
+/// A network-NBT bare string component: `TAG_String`, big-endian u16 length,
+/// then the UTF-8 bytes.
+fn nbt_string(text: &str) -> Vec<u8> {
+    let mut out = vec![0x08];
+    out.extend_from_slice(&(text.len() as u16).to_be_bytes());
+    out.extend_from_slice(text.as_bytes());
+    out
+}
+
+/// A signed `player_chat` payload: a full 256-byte signature, an empty
+/// last-seen list, no unsigned component, pass-through filter. Feeding this
+/// through the adapter populates its signature cache with `signature` at index
+/// 0 (the issue #286 wiring), which a later `delete_chat` can reference.
+fn signed_player_chat(signature: [u8; 256]) -> Vec<u8> {
+    let mut out = var_i32(1); // global index
+    out.extend_from_slice(&[0u8; 16]); // sender UUID
+    out.extend_from_slice(&var_i32(0)); // index
+    out.push(0x01); // signature present
+    out.extend_from_slice(&signature);
+    out.extend_from_slice(&mc_string("hi")); // content
+    out.extend_from_slice(&0i64.to_be_bytes()); // timestamp
+    out.extend_from_slice(&0i64.to_be_bytes()); // salt
+    out.extend_from_slice(&var_i32(0)); // last-seen count (empty)
+    out.push(0x00); // no unsigned component
+    out.push(0x00); // filter ordinal 0 (pass-through, shown)
+    out.extend_from_slice(&var_i32(1)); // chat_type holder id 0 -> wire 1
+    out.extend_from_slice(&nbt_string("Sender")); // trusted name
+    out.push(0x00); // optional target name absent
+    out
+}
+
+#[test]
+fn delete_chat_resolves_cached_index_against_pushed_signature() {
+    let adapter = V770Adapter::new();
+    // A signed player-chat pushes its signature into the adapter's cache at
+    // index 0, so a later delete_chat referencing that index resolves to the
+    // full 256 bytes instead of being dropped.
+    let signature = [0x42u8; 256];
+    let chat = handle(
+        &adapter,
+        play::clientbound::PLAYER_CHAT,
+        &signed_player_chat(signature),
+    );
+    assert_eq!(chat.len(), 1, "signed chat still decodes to one event");
+    let directives = handle(&adapter, play::clientbound::DELETE_CHAT, &var_i32(1));
     assert_eq!(
         directives,
         vec![Directive::Emit(ClientEvent::ChatMessageDeleted {
-            signature: PackedMessageSignature::Cached(5),
+            signature: PackedMessageSignature::Full(signature.to_vec()),
         })]
     );
 }

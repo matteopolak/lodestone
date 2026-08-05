@@ -52,7 +52,7 @@ use lodestone_model::{
 use lodestone_server::{
     ABSOLUTE_MAX_SIZE, ChunkColumn as ServerChunkColumn, EntitySnapshot, HOTBAR_SIZE,
     MetadataField, PlayerListing, ResourcePackPush, ServerBound, ServerDirective, ServerProtocol,
-    WorldBorder,
+    WorldBorder, WorldgenScope,
 };
 use lodestone_world::{ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmaps};
 use uuid::Uuid;
@@ -3385,6 +3385,17 @@ impl ServerProtocol for V770ServerProtocol {
             play::clientbound::SET_BORDER_WARNING_DISTANCE,
             &SetBorderWarningDistance { warning_blocks },
         )
+    }
+
+    /// This host serves the embedded 26.2 worldgen bundle (issue #407): the
+    /// `assets/worldgen/` data `lodestone-server` embeds (its `worldgen_data`
+    /// module's version gate, `bundled_worldgen_serves`) is this version's
+    /// data, so the gate must recognise it. This is the one production
+    /// override — every other implementor (test doubles, future families)
+    /// keeps the trait default, which means "no worldgen this crate's bundle
+    /// can serve".
+    fn worldgen_scope(&self) -> WorldgenScope {
+        WorldgenScope::V26_2
     }
 }
 

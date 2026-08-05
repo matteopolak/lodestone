@@ -42,14 +42,16 @@
 //!
 //! # How it works
 //!
-//! [`InteractPlugin`] registers four systems in `TickSet::Send`, ordered after
+//! [`InteractPlugin`] registers five systems in `TickSet::Send`, ordered after
 //! `lodestone_controller::ecs::send_player_input` by virtue of being added later
 //! into the same set via an explicit `.after()`:
 //!
 //! 1. [`send_abilities`] — the flight/abilities state the server acks.
 //! 2. [`send_sprint_command`] — vanilla's `LocalPlayer.sendIsSprintingIfNeeded`.
-//! 3. [`drive_mining`] — one tick of the hold-to-mine predictor.
-//! 4. [`drive_placement`] — one tick of the placement predictor.
+//! 3. [`drive_select_slot`] — a plugin's hotbar-selection wish, the same
+//!    write-plus-echo `Sim::select_slot` uses.
+//! 4. [`drive_mining`] — one tick of the hold-to-mine predictor.
+//! 5. [`drive_placement`] — one tick of the placement predictor.
 //!
 //! **This list said "two systems" and named two while the code registered
 //! three, and `drive_placement` was registered in no schedule at all** — found
@@ -104,7 +106,7 @@ use lodestone_client::{BlockPos, ClientAction, ClientHandle, Hand, Rotation};
 use lodestone_ecs::player::{
     ActionQueue, BreakIntent, BreakOutcome, BreakRejection, BreakStatus, Dead, Egress, Flying,
     LastFlyingSent, LastSprintingSent, LocalPlayer, MovementIntent, PhysicsState, PlaceIntent,
-    PlaceOutcome, PlaceRejection, PlaceStatus, Profile, SelectedSlot, Submersion,
+    PlaceOutcome, PlaceRejection, PlaceStatus, Profile, SelectSlotIntent, SelectedSlot, Submersion,
 };
 use lodestone_ecs::session::{Abilities, ServerEntityId, SessionMenus};
 use lodestone_ecs::veto::{ActionVetoes, VerbContext, Verdict};
@@ -120,9 +122,9 @@ use crate::net::SharedHandle;
 use crate::particles::Particles;
 use crate::raycast::{PickBox, RayHit, raycast};
 use crate::sim::{
-    AudioEngine, OFFHAND_NATIVE_INDEX, bare_handed_tool_mining, block_intersects_player,
-    block_sound_seed, block_states_of, dig_break_inputs, face_from_normal, hit_cursor,
-    orientation_for_placement, particle_face, placement_facts, state_for_placement,
+    AudioEngine, HOTBAR_SLOTS, OFFHAND_NATIVE_INDEX, bare_handed_tool_mining,
+    block_intersects_player, block_sound_seed, block_states_of, dig_break_inputs, face_from_normal,
+    hit_cursor, orientation_for_placement, particle_face, placement_facts, state_for_placement,
     write_predicted_block,
 };
 
@@ -366,6 +368,58 @@ pub fn send_abilities(
         queue.0.push(ClientAction::SetFlying {
             flying: abilities.flying,
         });
+    }
+}
+
+/// `TickSet::Send`: consume a plugin's [`SelectSlotIntent`] by performing the
+/// same write-plus-echo `Sim::select_slot` uses — write [`SelectedSlot`], queue
+/// [`ClientAction::SetCarriedItem`] so the server's notion of the held item
+/// stays in sync — then remove the intent: one insertion is one attempt.
+///
+/// # Why through `ActionQueue`, never `ClientHandle::send_action`
+///
+/// The same rule [`drive_mining`]/[`drive_placement`] follow (this module's own
+/// docs spell out the reason): a system must not send directly, or its packet
+/// could overtake the movement packet queued microseconds earlier. Queueing at
+/// the end of `TickSet::Send` puts the echo in the same single ordered stream
+/// the human's own `select_slot` produces — and, when a plugin inserts both a
+/// `SelectSlotIntent` and a [`PlaceIntent`] in one tick, this system running
+/// **before** [`drive_placement`] means the `SetCarriedItem` reaches the server
+/// first, so the placement is judged against the newly selected item.
+///
+/// # Not gated on `Egress`, unlike [`send_sprint_command`]/[`send_abilities`]
+///
+/// Those two latch their edge-trackers and must not run disconnected, or the
+/// first real change after connecting would be swallowed as a redundant resend.
+/// This system latches nothing, and the local write is meaningful off a live
+/// connection too — `Sim::select_slot`'s own docs say exactly that ("No-op off
+/// a live connection beyond updating the local selection the HUD draws") — so a
+/// plugin that selects a slot before the world loads still changes what the HUD
+/// highlights. The echo simply drops: [`ActionQueue`] is only sent to the
+/// socket by `Sim::drain_action_queue` when a connection exists.
+///
+/// # No legality surface to report on
+///
+/// Unlike a block edit, any slot `0..9` is always selectable, so there is no
+/// [`BreakOutcome`]-style rejection a plugin could act on. An out-of-range
+/// value and a no-op (the slot already selected) are ignored exactly as
+/// `Sim::select_slot`'s own range/same-slot gate ignores them.
+pub fn drive_select_slot(
+    mut commands: Commands,
+    mut queue: ResMut<ActionQueue>,
+    mut players: Query<(Entity, &mut SelectedSlot, &SelectSlotIntent), With<LocalPlayer>>,
+) {
+    for (entity, mut selected, intent) in &mut players {
+        // Removed whether or not the slot changed — one insertion is one
+        // attempt, the same acknowledgement `SelectSlotIntent`'s own docs (and
+        // `PlaceIntent`'s) describe.
+        commands.entity(entity).remove::<SelectSlotIntent>();
+        let slot = intent.0;
+        if slot >= HOTBAR_SLOTS || slot == selected.0 {
+            continue;
+        }
+        selected.0 = slot;
+        queue.0.push(ClientAction::SetCarriedItem { slot: slot as i32 });
     }
 }
 
@@ -1087,6 +1141,12 @@ impl Plugin for InteractPlugin {
             (
                 send_abilities,
                 send_sprint_command,
+                // Before `drive_mining`/`drive_placement` deliberately: both
+                // resolve the held item from `SelectedSlot`, and a plugin that
+                // changes the slot and edits in one tick must edit with the
+                // *new* selection — and echo the change before the edit reaches
+                // the wire, so the server judges it against the same slot.
+                drive_select_slot,
                 drive_mining,
                 drive_placement,
             )

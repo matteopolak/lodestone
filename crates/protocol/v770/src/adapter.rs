@@ -39,6 +39,7 @@ use lodestone_model::{
 use lodestone_world::{
     BiomePatch, ChunkPos as WorldChunkPos, LightPatch, LoadedChunk, NibbleArray, PalettedContainer,
 };
+use lodestone_game::chat_ack::{MessageSignature, MessageSignatureCache};
 
 use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_data::block_states::block_type_name;
@@ -136,6 +137,12 @@ pub struct V770Adapter {
     /// time). Both fall back to `SetTime::day_clock`'s lowest-holder-id pick;
     /// see the `set_time` arm.
     clock_holder: Arc<Mutex<Option<i32>>>,
+    /// The client's 128-entry signed-chat signature cache (issue #286). Packed
+    /// ids in `PLAYER_CHAT`'s last-seen list and in `delete_chat` index into it;
+    /// every received signed body is pushed back so future ids resolve. Guarded
+    /// by a [`Mutex`] only to satisfy `Sync`, like the other per-connection
+    /// state above.
+    chat_cache: Arc<Mutex<MessageSignatureCache>>,
 }
 
 /// The client's copy of the server's overworld day clock.
@@ -266,6 +273,7 @@ impl V770Adapter {
             clock: Arc::new(Mutex::new(DayClock::default())),
             registries: Arc::new(Mutex::new(ClientRegistries::default())),
             clock_holder: Arc::new(Mutex::new(None)),
+            chat_cache: Arc::new(Mutex::new(MessageSignatureCache::vanilla())),
         }
     }
 
@@ -771,16 +779,50 @@ fn read_sound_category(reader: &mut Reader<'_>) -> Result<SoundCategory, Adapter
 /// signature is a VarInt: `0` is followed by a full 256-byte signature (a
 /// newly-seen message), and any positive value references a cached signature by
 /// index and carries no further bytes.
-fn read_last_seen_packed(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
+///
+impl V770Adapter {
+    /// Returns the resolved signature list, or `None` when a cache reference cannot
+    /// be resolved — a benign desync the caller drops rather than dying on (the
+    /// connection must survive a reference we never pushed; the next signed body's
+    /// push re-syncs the id space).
+    fn read_last_seen_packed(
+    &self,
+    reader: &mut Reader<'_>,
+) -> Result<Option<Vec<MessageSignature>>, AdapterError> {
     let count = reader.var_i32().map_err(dec_err)?;
     let count = usize::try_from(count)
         .map_err(|_| AdapterError::Decode(format!("invalid last-seen count {count}")))?;
+    let mut last_seen = Vec::with_capacity(count);
     for _ in 0..count {
-        if reader.var_i32().map_err(dec_err)? == 0 {
-            reader.bytes(256).map_err(dec_err)?;
+        let raw = reader.var_i32().map_err(dec_err)?;
+        if raw == 0 {
+            last_seen.push(MessageSignature::new(
+                reader.bytes(256).map_err(dec_err)?.to_vec(),
+            ));
+        } else {
+            match self.resolve_cached_signature(raw - 1) {
+                Some(signature) => last_seen.push(signature),
+                None => {
+                    tracing::warn!(
+                        id = raw - 1,
+                        "last-seen references an unknown cached signature; dropping chat message"
+                    );
+                    return Ok(None);
+                }
+            }
         }
     }
-    Ok(())
+    Ok(Some(last_seen))
+}
+
+/// Resolves a packed signature-cache index against this connection's
+/// [`MessageSignatureCache`]. Returns `None` when the id is out of range or the
+/// cache lock is poisoned — both benign desyncs the caller drops rather than
+/// dying on.
+fn resolve_cached_signature(&self, id: i32) -> Option<MessageSignature> {
+    let id = usize::try_from(id).ok()?;
+    self.chat_cache.lock().ok()?.unpack(id).cloned()
+    }
 }
 
 /// Reads a `FilterMask` and returns whether the message is shown to the player.
@@ -3120,7 +3162,21 @@ impl V770Adapter {
             let content = reader.string(256).map_err(dec_err)?;
             let _timestamp = reader.i64().map_err(dec_err)?;
             let _salt = reader.i64().map_err(dec_err)?;
-            read_last_seen_packed(&mut reader)?;
+            // Resolve the packed last-seen list against the signature cache and
+            // push it — plus this message's own signature — back in, mirroring
+            // vanilla's `handlePlayerChat`. The push keeps the client's cache id
+            // space aligned with the server's; pushing only the *new* signatures
+            // would drift every subsequent cache id, so the complete resolved
+            // list is pushed.
+            let Some(last_seen) = self.read_last_seen_packed(&mut reader)? else {
+                // An unresolvable cache reference is a benign desync; drop this
+                // message rather than fail the connection.
+                return Ok(vec![]);
+            };
+            let own = (!signature.is_empty()).then(|| MessageSignature::new(signature.clone()));
+            if let Ok(mut cache) = self.chat_cache.lock() {
+                cache.push(&last_seen, own.as_ref());
+            }
             let unsigned = if reader.bool().map_err(dec_err)? {
                 Some(read_network_nbt(&mut reader).map_err(dec_err)?)
             } else {
@@ -4625,14 +4681,28 @@ impl V770Adapter {
         if packet_id == play::clientbound::DELETE_CHAT {
             // `MessageSignature.Packed`: a VarInt `id + 1`; `0` is followed by
             // a full 256-byte signature, any other value is `id - 1` into the
-            // last-seen cache (which this adapter does not track — see
-            // `PackedMessageSignature`).
+            // last-seen signature cache. Cached references are resolved here
+            // against the connection's `chat_cache`; one that cannot be
+            // resolved is a benign cache desync and the event is dropped rather
+            // than disconnecting (see the `ChatMessageDeleted` route in
+            // `lodestone_model::event`).
             let mut reader = Reader::new(payload);
             let id_plus_one = reader.var_i32().map_err(dec_err)?;
             let signature = if id_plus_one == 0 {
                 PackedMessageSignature::Full(reader.bytes(256).map_err(dec_err)?.to_vec())
             } else {
-                PackedMessageSignature::Cached(id_plus_one - 1)
+                match self.resolve_cached_signature(id_plus_one - 1) {
+                    Some(signature) => {
+                        PackedMessageSignature::Full(signature.as_bytes().to_vec())
+                    }
+                    None => {
+                        tracing::warn!(
+                            id = id_plus_one - 1,
+                            "delete_chat references an unknown cached signature; dropping"
+                        );
+                        return Ok(vec![]);
+                    }
+                }
             };
             reader.ensure_empty().map_err(dec_err)?;
             return Ok(vec![Directive::Emit(ClientEvent::ChatMessageDeleted {
