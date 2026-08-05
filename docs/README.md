@@ -743,6 +743,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   polling a `PendingTask<T>` from a system or through a hand-back closure the pool
   runs with `&mut World` at a tick boundary. This is Bukkit's `runTaskAsynchronously`
   plus `runTask`. Issue #114.
+- [Plugin channels (`custom_payload`)](./plugin-channels.md) — Typed, per-channel
+  delivery of Minecraft's `custom_payload` (plugin-messaging) packet to a plugin. A
+  plugin declares a channel by implementing
+  `lodestone_ecs::plugin_channel::PluginChannel` on its own `#[derive(Message)]` type,
+  calls `add_plugin_channel::<T>()` in its `Plugin::build`, and reads decoded `T`s
+  with an ordinary `MessageReader<T>`. Issue #301.
 - [Plugin commands](./plugin-commands.md) — The extension point a third-party plugin
   uses to register its own commands: a `CommandRegistry` resource it populates in
   `Plugin::build`, an argument tree per command with built-in and custom argument
