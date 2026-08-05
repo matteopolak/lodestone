@@ -194,8 +194,9 @@ pub use player::{
 };
 pub use plugin::CorePlugin;
 pub use plugin_channel::{
+    OutboundPluginChannel, OutboundPluginChannelPlugin, OutboundPluginChannelState,
     PluginChannel, PluginChannelAppExt, PluginChannelPlugin, PluginChannelState,
-    dispatch_plugin_channel,
+    dispatch_plugin_channel, dispatch_plugin_channel_outbound,
 };
 pub use plugin_message::{PluginMessageAppExt, PluginMessagePlugin};
 pub use recipes::{RecipeRegistry, RecipeRegistryExt, RecipeRegistryPlugin};

@@ -34,6 +34,7 @@ fn chat(text: &str) -> GameEvent {
     GameEvent(ClientEvent::Chat {
         text: Text::literal(text),
         kind: lodestone_model::event::ChatKind::Chat,
+        sender: None,
         ack: None,
     })
 }

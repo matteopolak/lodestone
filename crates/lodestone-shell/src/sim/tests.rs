@@ -2211,6 +2211,7 @@ fn end_session_tears_down_and_a_fresh_connect_afterward_starts_clean() {
     feed.send(NetUpdate::Chat {
         text: lodestone_model::Text::literal("hello"),
         player: false,
+        sender: None,
     })
     .unwrap();
     ingest(
@@ -2298,6 +2299,7 @@ fn inbound_chat_is_logged_and_typed_lines_route_to_the_action_seam() {
     feed.send(NetUpdate::Chat {
         text: lodestone_model::Text::literal("hello world"),
         player: false,
+        sender: None,
     })
     .unwrap();
     sim.poll_net();
@@ -2368,6 +2370,7 @@ fn chat_lines_age_as_the_clock_advances() {
     feed.send(NetUpdate::Chat {
         text: lodestone_model::Text::literal("aged line"),
         player: false,
+        sender: None,
     })
     .unwrap();
     sim.poll_net();

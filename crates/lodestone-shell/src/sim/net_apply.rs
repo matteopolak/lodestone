@@ -192,7 +192,24 @@ impl Sim {
                     self.set_prev_position(placed);
                     self.teleport_count += 1;
                 }
-                NetUpdate::Chat { text, player } => {
+                NetUpdate::Chat { text, player, sender } => {
+                    // Issue #419: a player hidden on the Social Interactions
+                    // screen must not reach the feed. Only a signed v770 player
+                    // message carries a sender, so the set is re-read from the
+                    // file the toggle wrote (the same eager-persistence rule the
+                    // toggle itself uses) rather than held in a stale copy — and
+                    // `None` (system/disguised chat, and every legacy family's
+                    // player chat, which has no sender on the wire) always shows,
+                    // vanilla's Hide in Chat being signed-chat-only.
+                    if player
+                        && let Some(id) = sender
+                        && !crate::menu::social::should_show_message(
+                            &crate::config::HiddenPlayers::load(),
+                            Some(id),
+                        )
+                    {
+                        continue;
+                    }
                     // Resolve translate nodes (death messages, join/leave, …) to
                     // words once, at arrival, against the language table — so the
                     // stored scrollback and the log line both read as prose, not
