@@ -33,6 +33,34 @@ use crate::keybinds::Keybinds;
 /// (`.cache/mc/26.2/client-src/net/minecraft/client/Options.java:903`).
 pub const AUTO_GUI_SCALE: u32 = 0;
 
+/// Default look sensitivity — vanilla's own (`Options.java:106`,
+/// `UnitDouble`, `0.5`), and already what [`Config::default`] used before
+/// [`Options::sensitivity`] existed, so the migration in issue #443 changes
+/// nothing for an untouched install.
+pub const DEFAULT_SENSITIVITY: f32 = 0.5;
+
+/// Default render distance in chunks.
+///
+/// **This is 8, and vanilla's is 12 (`Options.java:1475`).** The difference is
+/// deliberate and predates issue #443: `Config::default().render_distance` has
+/// been 8 for this client's whole life, so making the persisted default 12 would
+/// silently hand every existing install a 2.25× larger chunk load the first time
+/// they launched a build with a settings row wired. A migration must not change
+/// behaviour it is only supposed to relocate; the *slider's range* is still
+/// vanilla's `2..=32` (see `menu::options::INT_RANGE_SLIDERS`), so a player can
+/// reach 12 or 32 — this is the starting point, not a ceiling.
+pub const DEFAULT_RENDER_DISTANCE: u32 = 8;
+
+/// Vanilla's `renderDistance` minimum (`Options.java:1475`,
+/// `IntRange(2, …)`). The clamp is load-bearing rather than cosmetic: 0 or 1
+/// reaches `sim/build.rs`'s world radius and would generate nothing.
+pub const MIN_RENDER_DISTANCE: u32 = 2;
+
+/// Vanilla's `renderDistance` maximum on the `largeDistances` branch
+/// (`Options.java:1475`). See `menu::options::LARGE_DISTANCES_MAX` for why this
+/// client takes that branch unconditionally — there is no JVM heap cap to ask.
+pub const MAX_RENDER_DISTANCE: u32 = 32;
+
 /// Vanilla clamps the auto-picked (and any manual) scale so the resulting
 /// *scaled* GUI resolution never drops below this many logical pixels wide —
 /// `Window.calculateScale`'s `>= 320` check (`Window.java:452`).
@@ -258,6 +286,34 @@ pub struct Options {
     /// (`ComponentRenderUtils.stripColor`, `ComponentRenderUtils.java:21`) —
     /// it does not affect the input line, which never carries codes.
     pub chat_colors: bool,
+    /// Vanilla's look **sensitivity** (`options.sensitivity`,
+    /// `Options.java:100-106`): `UnitDouble`, `0.0..=1.0`, default `0.5`. The
+    /// displayed label is `percentValueLabel(caption, 2.0 * value)`, so the
+    /// default reads **100%** and the maximum **200%** — the stored number is
+    /// half the percentage a player sees.
+    ///
+    /// **This field is the migration in issue #443.** It used to live only on
+    /// [`Config`], parsed from argv every run and never written back, so the
+    /// settings row for it had to stay inactive: a row that appeared to set it
+    /// would have been fabricated persistence. The consumer already existed
+    /// (`sim/step.rs`'s `apply_mouse`), which is what made this the highest-value
+    /// remaining migration rather than a new feature.
+    ///
+    /// `--sensitivity` on argv still wins for that run — see
+    /// [`Config::resolve_persisted`].
+    pub sensitivity: f32,
+    /// Vanilla's `options.renderDistance` (`Options.java:1470-1477`):
+    /// `IntRange(2, largeDistances ? 32 : 16, false)`, default `12` chunks.
+    ///
+    /// The `false` is `applyValueImmediately`, i.e. vanilla commits this one
+    /// **600 ms after the drag stops** rather than per-frame, because each
+    /// change reloads chunks. This client applies it on the next launch instead
+    /// (see [`Config::resolve_persisted`]) — a real difference from vanilla,
+    /// recorded rather than hidden.
+    ///
+    /// Same migration as [`Self::sensitivity`]; consumers already existed at
+    /// `sim/build.rs`'s world radius and `sim/camera.rs`'s fog.
+    pub render_distance: u32,
 }
 
 impl Default for Options {
@@ -279,6 +335,8 @@ impl Default for Options {
             chat_opacity: 1.0,
             chat_background_opacity: 0.5,
             chat_colors: true,
+            sensitivity: DEFAULT_SENSITIVITY,
+            render_distance: DEFAULT_RENDER_DISTANCE,
         }
     }
 }
@@ -377,6 +435,21 @@ impl Options {
             .get("chat_colors")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
+        // A `UnitDouble`, so the same `0.0..=1.0` rule as the chat sliders —
+        // reusing `unit` rather than restating the range, because a hand-written
+        // second copy is how the two would drift.
+        let sensitivity = unit("sensitivity", DEFAULT_SENSITIVITY);
+        // Clamped to vanilla's own `IntRange(2, 32)` (`Options.java:1475`) rather
+        // than merely parsed: an out-of-range value here reaches
+        // `sim/build.rs`'s world radius and `sim/camera.rs`'s fog, and a 0 would
+        // generate no chunks at all — a hand-edited file must not be able to
+        // produce a black screen.
+        let render_distance = obj
+            .get("render_distance")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| (MIN_RENDER_DISTANCE..=MAX_RENDER_DISTANCE).contains(v))
+            .unwrap_or(DEFAULT_RENDER_DISTANCE);
         Self {
             gui_scale,
             keybinds,
@@ -394,6 +467,8 @@ impl Options {
             chat_opacity,
             chat_background_opacity,
             chat_colors,
+            sensitivity,
+            render_distance,
         }
     }
 
@@ -476,8 +551,15 @@ impl Options {
             self.chat_background_opacity,
             default.chat_background_opacity,
         );
+        // Before the `chat_colors` insert below, because `put_unit` holds a
+        // mutable borrow of `obj` and its last use has to precede any direct
+        // insert.
+        put_unit("sensitivity", self.sensitivity, default.sensitivity);
         if !self.chat_colors {
             obj.insert("chat_colors".into(), false.into());
+        }
+        if self.render_distance != default.render_distance {
+            obj.insert("render_distance".into(), self.render_distance.into());
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
             .unwrap_or_else(|_| "{}".to_string());
@@ -631,6 +713,19 @@ pub struct Config {
     /// response curve in [`lodestone_controller::sensitivity_factor`]). `0.5` is the
     /// vanilla default and yields `0.15°`/pixel.
     pub sensitivity: f32,
+    /// Whether argv actually named `--sensitivity`, as opposed to
+    /// [`Self::sensitivity`] merely holding its default.
+    ///
+    /// Exactly [`Self::address_given`]'s shape and for exactly its reason: the
+    /// *value* cannot answer the question, because `--sensitivity 0.5` is
+    /// byte-identical to passing nothing. Without this flag
+    /// [`Self::resolve_persisted`] could not tell "the user asked for the default
+    /// this run" from "the user said nothing", and would overwrite an explicit
+    /// flag with `options.json`.
+    pub sensitivity_given: bool,
+    /// Whether argv actually named `--render-distance`/`--rd`. See
+    /// [`Self::sensitivity_given`].
+    pub render_distance_given: bool,
 }
 
 impl Default for Config {
@@ -640,11 +735,13 @@ impl Default for Config {
             host: "127.0.0.1".into(),
             port: 25565,
             protocol: 776,
-            render_distance: 8,
+            render_distance: DEFAULT_RENDER_DISTANCE,
             connect_in_window: false,
             address_given: false,
             connect_for: Duration::from_secs(15),
-            sensitivity: 0.5,
+            sensitivity: DEFAULT_SENSITIVITY,
+            sensitivity_given: false,
+            render_distance_given: false,
         }
     }
 }
@@ -690,6 +787,7 @@ impl Config {
                 "--render-distance" | "--rd" => {
                     if let Some(v) = it.next().and_then(|v| v.parse().ok()) {
                         cfg.render_distance = v;
+                        cfg.render_distance_given = true;
                     }
                 }
                 "--seconds" => {
@@ -700,6 +798,7 @@ impl Config {
                 "--sensitivity" => {
                     if let Some(v) = it.next().and_then(|v| v.parse().ok()) {
                         cfg.sensitivity = v;
+                        cfg.sensitivity_given = true;
                     }
                 }
                 other => {
@@ -708,6 +807,42 @@ impl Config {
             }
         }
         CliOutcome::Run(cfg)
+    }
+
+    /// Fold the persisted [`Options`] into this argv-parsed [`Config`], for
+    /// every setting that now lives in both — issue #443's migration.
+    ///
+    /// **Precedence: an explicit flag wins for that run.** `--render-distance 4`
+    /// is a debugging and benchmarking affordance, and having `options.json`
+    /// silently override it would make every measurement taken with that flag a
+    /// lie. A flag that was *not* given loses to the persisted value, which is
+    /// the whole point of the migration.
+    ///
+    /// **Why the resolution is here and not at each consumer.** `sensitivity` is
+    /// read by `sim/step.rs`'s `apply_mouse` and `render_distance` by
+    /// `sim/build.rs`'s world radius, `sim/camera.rs`'s fog and four `app/*`
+    /// call sites. Resolving once, into the fields those seven sites already
+    /// read, means the migration adds **no** new consumer and cannot produce the
+    /// island where a settings row writes a field nothing reads. The
+    /// alternative — teaching each site to consult both structs — is seven
+    /// chances to miss one, in files a settings change has no business touching.
+    ///
+    /// **Known limitation, stated rather than implied:** this runs once, at
+    /// launch, so a change made in the settings screen takes effect on the
+    /// **next** launch. For `render_distance` that is close to vanilla, which
+    /// also defers (`applyValueImmediately = false`, a 600 ms debounce, because
+    /// each change reloads chunks). For `sensitivity` it is *not* — vanilla
+    /// applies that immediately. Closing that gap means pushing the value into
+    /// `Sim` each frame the way `set_mouse_invert` already does from
+    /// `app/redraw.rs`, which is a brokered file and deliberately not touched
+    /// here.
+    pub fn resolve_persisted(&mut self, options: &Options) {
+        if !self.sensitivity_given {
+            self.sensitivity = options.sensitivity;
+        }
+        if !self.render_distance_given {
+            self.render_distance = options.render_distance;
+        }
     }
 
     /// The `--help` usage text. Kept in one place so the flag list can't drift
@@ -1360,6 +1495,144 @@ mod tests {
         let loaded = HiddenPlayers::load_from(&path);
         assert!(loaded.contains(uuid::Uuid::from_u128(1)));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // -- issue #443: the argv -> options.json migration ----------------------
+
+    /// A flag that was **given** wins over `options.json` for that run; a flag
+    /// that was **not** given loses to it.
+    ///
+    /// The second half is the migration; the first half is what stops
+    /// `--render-distance 4` from silently becoming a lie in a benchmark. Note
+    /// both directions are asserted with the *same* persisted value, so the test
+    /// cannot pass by the two happening to agree.
+    #[test]
+    fn an_explicit_flag_beats_options_json_and_an_absent_one_does_not() {
+        let mut persisted = Options::default();
+        persisted.render_distance = 16;
+        persisted.sensitivity = 0.8;
+
+        // Absent flags: the persisted values win.
+        let CliOutcome::Run(mut absent) = Config::from_args([]) else {
+            panic!("no args must parse")
+        };
+        assert!(!absent.render_distance_given && !absent.sensitivity_given);
+        assert_eq!(absent.render_distance, DEFAULT_RENDER_DISTANCE, "before");
+        absent.resolve_persisted(&persisted);
+        assert_eq!(absent.render_distance, 16, "options.json wins when unflagged");
+        assert!((absent.sensitivity - 0.8).abs() < 1e-6);
+
+        // Given flags: argv wins, against the very same persisted values.
+        let CliOutcome::Run(mut given) = Config::from_args(
+            ["--render-distance", "4", "--sensitivity", "0.25"]
+                .iter()
+                .map(|s| (*s).to_string()),
+        ) else {
+            panic!("flags must parse")
+        };
+        assert!(given.render_distance_given && given.sensitivity_given);
+        given.resolve_persisted(&persisted);
+        assert_eq!(given.render_distance, 4, "argv must win for this run");
+        assert!((given.sensitivity - 0.25).abs() < 1e-6);
+    }
+
+    /// The case the `*_given` flags exist for, and the reason the *value* cannot
+    /// answer the question — the same trap `address_given` was added for.
+    ///
+    /// Passing the default explicitly is byte-identical to passing nothing, so a
+    /// resolver that compared against `Config::default()` would overwrite it.
+    /// Run as a control: the value-comparison hypothesis is computed here and
+    /// shown to give the wrong answer.
+    #[test]
+    fn passing_the_default_explicitly_is_still_an_explicit_flag() {
+        let mut persisted = Options::default();
+        persisted.render_distance = 32;
+
+        let CliOutcome::Run(mut cfg) = Config::from_args(
+            ["--render-distance", &DEFAULT_RENDER_DISTANCE.to_string()]
+                .iter()
+                .map(|s| (*s).to_string()),
+        ) else {
+            panic!("must parse")
+        };
+        // The wrong hypothesis, executed: "was it given?" answered by comparing
+        // the value to the default.
+        let value_says_given = cfg.render_distance != Config::default().render_distance;
+        assert!(
+            !value_says_given,
+            "the value-comparison hypothesis must answer FALSE here — that is \
+             precisely its bug"
+        );
+        assert!(
+            cfg.render_distance_given,
+            "the flag must answer TRUE, because argv really did name it"
+        );
+
+        cfg.resolve_persisted(&persisted);
+        assert_eq!(
+            cfg.render_distance, DEFAULT_RENDER_DISTANCE,
+            "an explicit --render-distance 8 must survive a persisted 32; if it \
+             does not, the resolver is comparing values instead of reading the flag"
+        );
+    }
+
+    /// Both new fields survive a save/load round trip, and are omitted from the
+    /// file entirely while they hold their defaults — the same rule every other
+    /// opt-in field in `save_to` follows.
+    #[test]
+    fn the_migrated_options_round_trip_and_stay_out_of_an_untouched_file() {
+        let path = temp_options_path("migrated-443");
+        Options::default().save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("render_distance") && !text.contains("sensitivity"),
+            "an untouched install must have no key for either: {text}"
+        );
+
+        let mut opts = Options::default();
+        opts.render_distance = 24;
+        opts.sensitivity = 0.125;
+        opts.save_to(&path).unwrap();
+        let back = Options::load_from(&path);
+        assert_eq!(back.render_distance, 24);
+        assert!((back.sensitivity - 0.125).abs() < 1e-6);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A hand-edited or corrupt file must not be able to produce a black screen.
+    ///
+    /// `render_distance` reaches `sim/build.rs`'s world radius, so 0 would
+    /// generate no chunks at all. The clamp is to vanilla's own `IntRange(2, 32)`
+    /// rather than to "something positive", and each rejected value is checked to
+    /// land on the **default** rather than on a silently clamped neighbour, which
+    /// is what tells a reader the value was rejected rather than adjusted.
+    #[test]
+    fn an_out_of_range_render_distance_degrades_to_the_default() {
+        for bad in ["0", "1", "33", "999999", "-4", "\"twelve\"", "null"] {
+            let json = format!("{{\"render_distance\": {bad}}}");
+            assert_eq!(
+                Options::from_json(&json).render_distance,
+                DEFAULT_RENDER_DISTANCE,
+                "{bad} must be rejected, not clamped to a neighbour"
+            );
+        }
+        // The detector works: in-range values really do come through, including
+        // both endpoints.
+        for good in [MIN_RENDER_DISTANCE, 12, MAX_RENDER_DISTANCE] {
+            let json = format!("{{\"render_distance\": {good}}}");
+            assert_eq!(Options::from_json(&json).render_distance, good);
+        }
+        // And sensitivity, a `UnitDouble`, follows the chat sliders' rule.
+        for bad in ["-0.5", "1.5", "\"loud\""] {
+            let json = format!("{{\"sensitivity\": {bad}}}");
+            assert_eq!(
+                Options::from_json(&json).sensitivity,
+                DEFAULT_SENSITIVITY,
+                "{bad} must degrade to the default"
+            );
+        }
+        assert_eq!(Options::from_json("{\"sensitivity\": 0.0}").sensitivity, 0.0);
+        assert_eq!(Options::from_json("{\"sensitivity\": 1.0}").sensitivity, 1.0);
     }
 
     #[test]

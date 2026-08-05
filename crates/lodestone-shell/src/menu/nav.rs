@@ -2751,7 +2751,45 @@ impl MenuNav {
                 self.toggle_chat_colors();
                 MenuAction::None
             }
+            // Issue #443's two migrated options. Both persist eagerly like
+            // every arm above; unlike the chat eight, neither takes effect in
+            // the *current* session, because their consumers read
+            // `config::Config` and `Config::resolve_persisted` folds
+            // `options.json` in at launch. That is vanilla's own behaviour for
+            // `renderDistance` (`applyValueImmediately = false`) and a
+            // documented departure for `sensitivity` — see
+            // `Config::resolve_persisted`.
+            SettingsOutcome::Cycle(LiveOption::Sensitivity) => {
+                self.step_chat_option(|o| &mut o.sensitivity, 1);
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::RenderDistance) => {
+                self.step_render_distance(1);
+                MenuAction::None
+            }
         }
+    }
+
+    /// Steps `renderDistance` by one chunk and wraps, then persists.
+    ///
+    /// **Wraps rather than saturating**, matching every other live control on
+    /// this tree (`cycle_gui_scale`'s `rem_euclid`, `cycle_mouse_wheel_sensitivity`'s
+    /// period): a click is the only way to move these rows, so a value parked at
+    /// the maximum has to be able to come back down. Vanilla drags instead and
+    /// therefore needs no wrap at all — this is a consequence of departure 1, not
+    /// a transcription of `IntRangeBase::next` (`OptionInstance.java:287-289`),
+    /// which really does saturate.
+    ///
+    /// The bounds are `config`'s, which are vanilla's `IntRange(2, 32)` — the same
+    /// pair `menu::options::INT_RANGE_SLIDERS` places the handle with, so the
+    /// value a click can reach and the track it draws on cannot disagree.
+    fn step_render_distance(&mut self, delta: i32) {
+        use crate::config::{MAX_RENDER_DISTANCE, MIN_RENDER_DISTANCE};
+        let span = (MAX_RENDER_DISTANCE - MIN_RENDER_DISTANCE + 1) as i32;
+        let offset = self.options.render_distance as i32 - MIN_RENDER_DISTANCE as i32;
+        let wrapped = (offset + delta).rem_euclid(span);
+        self.options.render_distance = MIN_RENDER_DISTANCE + wrapped as u32;
+        self.persist_options();
     }
 
     /// Steps one `UnitDouble`-backed chat option and persists it eagerly.

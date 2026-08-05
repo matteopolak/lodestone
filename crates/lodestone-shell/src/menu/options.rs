@@ -23,13 +23,28 @@
 //!
 //! There is no disabled widget type in vanilla and none here — see
 //! [`super::widget`]'s module docs. [`Cell::is_live`] is what decides it, and
-//! it answers `false` for **118 or 119 of the 143** controls this module
-//! renders (the twenty-four or twenty-five live ones are seven real options —
-//! `guiScale`/`bobView` from #55, plus `toggleCrouch`/`toggleSprint`/
-//! `invertMouseX`/`invertMouseY`/`mouseWheelSensitivity` from
-//! #200/#202/#203 — nine `Done` buttons and nine or eight working nav
-//! buttons, the swing being the root's Online button: live outside a world,
-//! the inactive World Options placeholder inside one — see [`online_cell`]).
+//! it answers `false` for **101 or 102 of the 143** controls this module
+//! renders. The 42-or-41 live ones break down as:
+//!
+//! - **20 option rows**, driving **17** distinct [`LiveOption`]s — three of them
+//!   (`textBackgroundOpacity`, `chatOpacity`, `chatLineSpacing`) are placed on
+//!   two pages each, which is vanilla's own shape and why the row count exceeds
+//!   the option count. The 17 are `guiScale`/`bobView` (#55),
+//!   `toggleCrouch`/`toggleSprint`/`invertMouseX`/`invertMouseY`/
+//!   `mouseWheelSensitivity` (#200/#202/#203), the eight chat options
+//!   (`9eba2bb`), and `sensitivity`/`renderDistance` (#443).
+//! - **9 `Done` buttons**, one per page, always live.
+//! - **13 or 12 working nav buttons** — the swing is the root's Online button:
+//!   live outside a world, the inactive World Options placeholder inside one
+//!   (see [`online_cell`]), which is the whole of the 42-vs-41 difference.
+//!
+//! **These numbers are asserted, not maintained by hand** —
+//! `the_disabled_majority_is_the_point_and_it_is_measured` and
+//! `the_root_online_button_is_the_one_row_that_changes_with_in_world` fail
+//! loudly on any change, so a stale count here is a build-time failure rather
+//! than a quiet drift. (This paragraph *was* stale for a while, claiming
+//! "twenty-four or twenty-five" and "seven real options", which is what the
+//! assertions are for.)
 //! That ratio is the point of the issue: a greyed row in vanilla's own
 //! position makes the gap between this client and vanilla *visible*, where a
 //! missing row silently changes the screen's shape.
@@ -265,6 +280,21 @@ pub enum LiveOption {
     TextBackgroundOpacity,
     /// `options.chatColors` → [`crate::config::Options::chat_colors`].
     ChatColors,
+    /// `options.sensitivity` → [`crate::config::Options::sensitivity`]. A
+    /// `UnitDouble` (`Options.java:100-106`).
+    ///
+    /// Live since issue #443 moved it off the argv-only
+    /// [`crate::config::Config`]. Before that a row for it would have been
+    /// fabricated persistence — the value reverted on restart — which is why
+    /// this enum's doc used to name it as explicitly *not* here.
+    Sensitivity,
+    /// `options.renderDistance` → [`crate::config::Options::render_distance`].
+    ///
+    /// An `IntRange(2, 32)` (`Options.java:1470-1477`), so unlike every other
+    /// live slider its handle position comes from [`SliderRange`] rather than
+    /// from the stored value directly — [`LiveOption::unit_double`] answers
+    /// `None` for it on purpose.
+    RenderDistance,
 }
 
 impl LiveOption {
@@ -287,7 +317,13 @@ impl LiveOption {
             LiveOption::ChatLineSpacing => Some(options.chat_line_spacing),
             LiveOption::ChatOpacity => Some(options.chat_opacity),
             LiveOption::TextBackgroundOpacity => Some(options.chat_background_opacity),
-            LiveOption::GuiScale
+            LiveOption::Sensitivity => Some(options.sensitivity),
+            // `RenderDistance` is an `IntRange`, **not** a `UnitDouble`: its
+            // stored value is a chunk count, so returning it here would put the
+            // handle at `min(8, 1) = 1.0`, pinned to the far end of the track for
+            // every value above 1. It goes through `SliderRange` instead.
+            LiveOption::RenderDistance
+            | LiveOption::GuiScale
             | LiveOption::ViewBobbing
             | LiveOption::ToggleSneak
             | LiveOption::ToggleSprint
@@ -470,6 +506,14 @@ impl Cell {
         }
         if spec.live == Some(LiveOption::MouseWheelSensitivity) {
             return Some(mouse_wheel_slider_fraction(options.mouse_wheel_sensitivity));
+        }
+        // A live `IntRange` option: the handle comes from the **stored chunk
+        // count** run through the range, not from the table's frozen default.
+        // Without this arm the row would move the world and leave its own handle
+        // parked at 12 — the same lie the chat sliders told before their arm
+        // existed.
+        if spec.live == Some(LiveOption::RenderDistance) {
+            return Some(render_distance_slider_fraction(options.render_distance));
         }
         // A **live** `UnitDouble` option reads its handle position from the
         // real, persisted value; only an inactive one falls through to the
@@ -795,6 +839,27 @@ fn int_range_default_fraction(accessor: &str) -> Option<f32> {
         .map(|(_, range, default)| range.to_slider_value(*default))
 }
 
+/// `renderDistance`'s slider fraction from the real, persisted chunk count.
+///
+/// Reuses the same [`INT_RANGE_SLIDERS`] row the inactive version used, so the
+/// live handle and the frozen-default handle are placed by one expression and
+/// cannot drift. Falls back to the range's own minimum if the table row ever
+/// goes missing, which is a visible handle at the left rather than none at all.
+#[must_use]
+pub fn render_distance_slider_fraction(chunks: u32) -> f32 {
+    let range = INT_RANGE_SLIDERS
+        .iter()
+        .find(|(a, _, _)| *a == "renderDistance")
+        .map_or(
+            SliderRange {
+                min: crate::config::MIN_RENDER_DISTANCE as i32,
+                max: crate::config::MAX_RENDER_DISTANCE as i32,
+            },
+            |(_, r, _)| *r,
+        );
+    range.to_slider_value(i32::try_from(chunks).unwrap_or(range.min))
+}
+
 /// `mouseWheelSensitivity`'s slider fraction from the real, live config
 /// value — the one place this module inverts vanilla's own stringifier
 /// rather than restating a table.
@@ -917,6 +982,36 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         LiveOption::ChatColors => {
             if options.chat_colors { "ON" } else { "OFF" }.to_string()
         }
+        // **`2.0 * value`, and the doubling is the whole subtlety**:
+        // `value == 0.0 -> "options.sensitivity.min", value == 1.0 ->
+        // "options.sensitivity.max", else percentValueLabel(caption, 2.0 *
+        // value)` (`Options.java:100-106`). So the shipped default of `0.5`
+        // prints **100%**, not 50%, and the maximum prints 200%. Printing the
+        // stored number as a percentage directly would halve every label a
+        // player reads while the mouse behaved correctly — a wire carrying the
+        // right value with the wrong label.
+        //
+        // The two endpoint captions are `en_us.json`'s
+        // `options.sensitivity.min` = `"*yawn*"` and `.max` = `"HYPERSPEED!!!"`,
+        // read from the language file rather than remembered. Vanilla tests them
+        // with exact `== 0.0`/`== 1.0`; the `<=`/`>=` here is identical on the
+        // domain [`crate::config::Options::from_json`] already clamps to, and
+        // keeps a hand-edited file from falling through to a percentage above
+        // 200%.
+        LiveOption::Sensitivity => {
+            if options.sensitivity <= 0.0 {
+                "*yawn*".to_string()
+            } else if options.sensitivity >= 1.0 {
+                "HYPERSPEED!!!".to_string()
+            } else {
+                percent_value(options.sensitivity * 2.0)
+            }
+        }
+        // `genericValueLabel(caption, translatable("options.chunks", value))`
+        // (`Options.java:1472`). `en_us.json`'s pattern is `"%s Chunks"` — a
+        // **capital** C, which is the sort of thing that only a look at the
+        // language file gets right.
+        LiveOption::RenderDistance => format!("{} Chunks", options.render_distance),
     }
 }
 
@@ -1071,7 +1166,15 @@ static VIDEO: &[Entry] = &[
     big(slider("graphicsPreset", "Preset")),
     pair(
         slider("biomeBlendRadius", "Biome Blend"),
-        slider("renderDistance", "Render Distance"),
+        // Live since issue #443 — see `LiveOption::RenderDistance`. Its
+        // neighbour `simulationDistance` below is deliberately *not*: this
+        // client has no simulation-distance consumer at all, so wiring it would
+        // be the fabrication #443 exists to undo, one row over.
+        live_slider(
+            "renderDistance",
+            "Render Distance",
+            LiveOption::RenderDistance,
+        ),
     ),
     pair(
         cycle("prioritizeChunkUpdates", "Chunk Builder"),
@@ -1156,10 +1259,12 @@ static CONTROLS: &[Entry] = &[
 ///
 /// **Scroll Sensitivity and both inverts are live** (issue #203) —
 /// [`crate::config::Options::mouse_wheel_sensitivity`]/`invert_mouse_x`/
-/// `invert_mouse_y`. **Sensitivity (look) is not, and stays inactive
-/// deliberately**: it lives on [`crate::config::Config`], parsed from argv and
-/// never written back (see [`LiveOption`]'s doc) — a settings row that
-/// appeared to persist it would be fabricated. `discreteMouseScroll`,
+/// `invert_mouse_y`. **Sensitivity (look) is now live too** (issue #443): it
+/// used to live only on [`crate::config::Config`], parsed from argv and never
+/// written back, so a row for it would have been fabricated persistence; it is
+/// now a real [`crate::config::Options`] field that
+/// [`crate::config::Config::resolve_persisted`] folds back in at launch, and its
+/// consumer (`sim/step.rs`'s `apply_mouse`) already existed. `discreteMouseScroll`,
 /// `allowCursorChanges` and `rawMouseInput` are also still inactive: none of
 /// the three has a consumer in this shell yet (there is no discrete-vs-continuous
 /// scroll distinction, no OS cursor swap, and no raw-input toggle), so wiring
@@ -1167,7 +1272,7 @@ static CONTROLS: &[Entry] = &[
 /// exists to fix, one row over.
 static MOUSE: &[Entry] = &[
     pair(
-        slider("sensitivity", "Sensitivity"),
+        live_slider("sensitivity", "Sensitivity", LiveOption::Sensitivity),
         live_slider(
             "mouseWheelSensitivity",
             "Scroll Sensitivity",
@@ -2842,8 +2947,15 @@ mod tests {
             live_options,
             vec![
                 LiveOption::GuiScale,
+                // Video page, on the Quality & Performance grid, next to the
+                // (still inactive) Biome Blend — issue #443.
+                LiveOption::RenderDistance,
                 LiveOption::ToggleSneak,
                 LiveOption::ToggleSprint,
+                // Mouse page: look Sensitivity is the #443 migration, and it
+                // is declared *before* Scroll Sensitivity in `MOUSE`'s first
+                // `pair`, which is why it sorts here.
+                LiveOption::Sensitivity,
                 LiveOption::MouseWheelSensitivity,
                 LiveOption::InvertMouseX,
                 LiveOption::InvertMouseY,
@@ -2863,24 +2975,46 @@ mod tests {
                 LiveOption::ChatLineSpacing,
                 LiveOption::ViewBobbing,
             ],
-            "GUI Scale on Video; Sneak/Sprint toggle on Controls (#202); scroll \
-             sensitivity and both inverts on Mouse (#203); the eight chat \
+            "GUI Scale and Render Distance on Video (the latter from #443); \
+             Sneak/Sprint toggle on Controls (#202); look sensitivity (#443), \
+             scroll sensitivity and both inverts on Mouse (#203); the eight chat \
              options on Chat with three of them repeated on Accessibility; \
              View Bobbing on Accessibility — and nothing else"
         );
         // The control: an option we do not persist must report itself inactive,
         // and the detector must be able to tell the difference.
-        let render_distance = slider("renderDistance", "Render Distance");
+        //
+        // This used to use `renderDistance`, which issue #443 made live — so the
+        // control's *premise* expired, and it is worth naming that it would have
+        // kept passing anyway: `slider()` builds a cell with `live: None`
+        // regardless of what the real row on the page carries, so it was
+        // asserting a property of the constructor rather than of the tree.
+        // `simulationDistance` is a real still-inactive row (this client has no
+        // simulation-distance consumer), and going through `all_controls` is what
+        // makes it a claim about the page.
+        let sim_distance = PAGES
+            .iter()
+            .flat_map(|&p| all_controls(p, OUTSIDE_A_WORLD))
+            .find(|c| matches!(c, Cell::Option(s) if s.accessor == "simulationDistance"))
+            .expect("the Video page still carries a Simulation Distance row");
         assert!(
-            !render_distance.is_live(),
-            "renderDistance is a `Config` (argv) field, not a persisted `Options` one"
+            !sim_distance.is_live(),
+            "simulationDistance has no consumer in this shell, so its row must \
+             stay inactive — a live one would be fabricated persistence"
         );
+        // And the same predicate, read off the real tree, must answer true for a
+        // row that *is* live — otherwise `is_live` could be stuck at `false`.
+        let render_distance = PAGES
+            .iter()
+            .flat_map(|&p| all_controls(p, OUTSIDE_A_WORLD))
+            .find(|c| matches!(c, Cell::Option(s) if s.accessor == "renderDistance"))
+            .expect("the Video page carries a Render Distance row");
         assert!(
-            live_cycle("guiScale", "GUI Scale", LiveOption::GuiScale).is_live(),
-            "and the same predicate must answer true for one that is"
+            render_distance.is_live(),
+            "renderDistance is a persisted `Options` field since #443"
         );
-        // The count itself, not just the ratio's ingredients: 18 live option
-        // *rows* (15 distinct options, three of them placed twice — see above) +
+        // The count itself, not just the ratio's ingredients: 20 live option
+        // *rows* (17 distinct options, three of them placed twice — see above) +
         // 9 Done buttons (one per page, always live) + 13 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
         // **Telemetry**/**Resource Packs** from the root grid — issue #415
@@ -2888,7 +3022,7 @@ mod tests {
         // Controls -> Key Binds, and the root's own Online button, live
         // outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 40, "outside a world: {live:?}");
+        assert_eq!(live.len(), 42, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -2910,8 +3044,8 @@ mod tests {
             .flat_map(|&p| all_controls(p, true))
             .filter(|c| c.is_live())
             .collect();
-        assert_eq!(outside.len(), 40);
-        assert_eq!(inside.len(), 39, "one fewer: the root's Online button");
+        assert_eq!(outside.len(), 42);
+        assert_eq!(inside.len(), 41, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -3081,6 +3215,112 @@ mod tests {
         assert_eq!(width.slider_fraction(&o), Some(1.0));
         o.chat_width = -3.0;
         assert_eq!(width.slider_fraction(&o), Some(0.0));
+    }
+
+    // -- issue #443: the migrated options reach the screen -------------------
+
+    /// The two migrated rows draw their handle from the **persisted** value and
+    /// their label from vanilla's own stringifier.
+    ///
+    /// The frozen-default fraction is the wrong hypothesis in both cases, and it
+    /// is computed here rather than described, so a regression that dropped the
+    /// live arm would land on it and be caught.
+    #[test]
+    fn the_migrated_rows_follow_the_persisted_value_not_the_frozen_default() {
+        let mut o = crate::config::Options::default();
+
+        // -- renderDistance: an IntRange, so via SliderRange.
+        let rd = live_slider(
+            "renderDistance",
+            "Render Distance",
+            LiveOption::RenderDistance,
+        );
+        let range = SliderRange { min: 2, max: 32 };
+        o.render_distance = 8;
+        assert_eq!(
+            rd.slider_fraction(&o),
+            Some(range.to_slider_value(8)),
+            "the handle must follow the stored chunk count"
+        );
+        // The wrong hypothesis: the table's frozen default of 12.
+        assert_ne!(
+            rd.slider_fraction(&o),
+            Some(range.to_slider_value(12)),
+            "8 and 12 must be distinguishable, or this proves nothing"
+        );
+        o.render_distance = 32;
+        assert_eq!(rd.slider_fraction(&o), Some(1.0), "the max pins to the end");
+        o.render_distance = 2;
+        assert_eq!(rd.slider_fraction(&o), Some(0.0), "and the min to the start");
+
+        // The other wrong hypothesis, and the reason `unit_double` says `None`
+        // for this option: reading a chunk count as a `UnitDouble` would clamp
+        // every value above 1 to the far end of the track.
+        o.render_distance = 8;
+        assert_eq!(
+            LiveOption::RenderDistance.unit_double(&o),
+            None,
+            "a chunk count must not be readable as a 0..1 fraction"
+        );
+
+        // -- sensitivity: a UnitDouble, so the value *is* the fraction.
+        let sens = live_slider("sensitivity", "Sensitivity", LiveOption::Sensitivity);
+        o.sensitivity = 0.25;
+        assert_eq!(sens.slider_fraction(&o), Some(0.25));
+        assert_ne!(
+            sens.slider_fraction(&o),
+            Some(crate::config::DEFAULT_SENSITIVITY),
+            "must not be parked at the frozen 0.5 default"
+        );
+    }
+
+    /// `sensitivity`'s label doubles the stored value, and `renderDistance`'s
+    /// says "Chunks" with a capital C. Both come from files, not from memory.
+    #[test]
+    fn the_migrated_labels_are_vanillas_own_strings() {
+        let mut o = crate::config::Options::default();
+
+        // `percentValueLabel(caption, 2.0 * value)` (`Options.java:104`): the
+        // shipped default of 0.5 reads **100%**, and the wrong hypothesis —
+        // printing the stored number as a percentage — reads 50%.
+        o.sensitivity = 0.5;
+        assert_eq!(live_value(LiveOption::Sensitivity, &o), "100%");
+        assert_ne!(
+            live_value(LiveOption::Sensitivity, &o),
+            "50%",
+            "forgetting the 2.0 factor halves every label a player reads while \
+             the mouse behaves correctly"
+        );
+        // Binary-exact values only. `percent_value` truncates, exactly as
+        // vanilla's `(int)(value * 100.0)` does (`Options.java:1972`), but our
+        // storage is `f32` where vanilla's is `double` — so a value like 0.35,
+        // which is representable in neither, lands at 69.999... here and prints
+        // **69%** where vanilla prints 70%. That divergence is a property of the
+        // `f32` field shared by every `UnitDouble` option in
+        // `crate::config::Options`, not of this row, and asserting it here would
+        // pin an unrelated decision. 0.25/0.5/0.75 are exact in both.
+        o.sensitivity = 0.25;
+        assert_eq!(live_value(LiveOption::Sensitivity, &o), "50%");
+        o.sensitivity = 0.75;
+        assert_eq!(live_value(LiveOption::Sensitivity, &o), "150%");
+        // The two endpoint captions, verbatim from `en_us.json`'s
+        // `options.sensitivity.min` / `.max`.
+        o.sensitivity = 0.0;
+        assert_eq!(live_value(LiveOption::Sensitivity, &o), "*yawn*");
+        o.sensitivity = 1.0;
+        assert_eq!(live_value(LiveOption::Sensitivity, &o), "HYPERSPEED!!!");
+
+        // `options.chunks` is `"%s Chunks"` — capital C.
+        o.render_distance = 12;
+        assert_eq!(live_value(LiveOption::RenderDistance, &o), "12 Chunks");
+
+        // And the whole row label composes through `genericValueLabel`'s "%s: %s".
+        let rd = live_slider(
+            "renderDistance",
+            "Render Distance",
+            LiveOption::RenderDistance,
+        );
+        assert_eq!(rd.label(&o), "Render Distance: 12 Chunks");
     }
 
     // -- issue #424: the `IntRange` slider ranges ----------------------------
@@ -3374,6 +3614,10 @@ mod tests {
             LiveOption::ChatOpacity,
             LiveOption::TextBackgroundOpacity,
             LiveOption::ChatColors,
+            // Issue #443's migration: both were on argv-only `Config` and are
+            // now persisted `Options` fields with a real row.
+            LiveOption::Sensitivity,
+            LiveOption::RenderDistance,
         ];
         let placed: Vec<LiveOption> = PAGES
             .iter()
@@ -3409,10 +3653,12 @@ mod tests {
                 | LiveOption::ChatLineSpacing
                 | LiveOption::ChatOpacity
                 | LiveOption::TextBackgroundOpacity
-                | LiveOption::ChatColors => {}
+                | LiveOption::ChatColors
+                | LiveOption::Sensitivity
+                | LiveOption::RenderDistance => {}
             }
         }
-        assert_eq!(ALL.len(), 15, "fifteen distinct live options");
+        assert_eq!(ALL.len(), 17, "seventeen distinct live options");
     }
 
     /// [`crate::config::step_unit_double`]'s wrap, including the two places it
