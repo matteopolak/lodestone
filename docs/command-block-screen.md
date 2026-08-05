@@ -59,20 +59,60 @@ byte offset back by one and drop the synthetic slash's own span. See
   every other button-row screen in this shell has (see `nav.rs`'s own module
   doc).
 - **Completion domain**: `command_block::complete`/`highlight` take
-  `Option<&CommandTree>`. Every current caller passes `None` — see
-  "What is missing" below.
+  `Option<&CommandTree>`. This used to read *"every current caller passes
+  `None`"*, which was true when written and is not now — `MenuNav::
+  command_tree` carries the tree the server sent, and both the draw path and
+  the hit-test path pass it. `None` is still the honest pre-login state.
+- **The three homes an overlay screen needs.** See "#474" below before adding
+  another one: `frame_for` answering `None` is correct for this screen and is
+  *not* the whole story.
+
+## Where this screen is wired in (issue #474)
+
+`render::frame_for` deliberately has **no arm** for `Screen::CommandBlockEdit`,
+because this is an overlay — the world keeps rendering behind it, matching
+vanilla's `isInGameUi() == true`
+(`AbstractCommandBlockEditScreen.java:123-126`). That `None` is right. What it
+does *not* do is excuse the screen from the other three homes, and the screen
+was missing all three at once:
+
+| home | file | what its absence looks like |
+|---|---|---|
+| draw | `app/redraw.rs`'s overlay block | the screen opens and renders **nothing** |
+| hit-test frame | `nav::on_screen_frame` | clicks return `None` before reaching a row |
+| input routing | `nav::routes_menu_input`, read by three guards in `app/lifecycle.rs` | clicks and keys never reach the body at all |
+
+The draw and hit-test halves share **one expression**,
+`nav::command_block_overlay_frame`: `redraw.rs` draws what it returns and
+`on_screen_frame` hit-tests the same value. A second construction of the same
+geometry is a click landing on a row the draw put elsewhere, which no
+screenshot can show.
+
+`routes_menu_input` is a function rather than an expression for the same
+reason. It was written out four times — the `CursorMoved` guard, the
+`MouseInput` guard, `KeyGate::menu`, and a hand-copy inside the very test that
+was supposed to police the set. That last copy is why
+`nav::tests::every_mouse_routable_screen_has_a_frame_to_hit_test` passed
+throughout: it compared two things `nav.rs` controls and could not see the
+driver. It now calls the production function, and
+`app/tests.rs::clicking_a_command_block_row_at_its_own_coordinates_activates_
+that_row` drives `WindowApp`'s own hit-test with coordinates computed from
+`AbstractCommandBlockEditScreen.java`'s arithmetic rather than from our frame.
+
+Adding a fourth overlay screen means all three rows of that table plus a case
+in the nav gate. `Screen::Container` is the counter-example worth knowing: it
+is an overlay with clickable rows and it is deliberately **not** in
+`routes_menu_input`, because it has its own `hit_test_with_scale` path.
 
 ## What is missing (tracked on [#436](https://github.com/matteopolak/lodestone/issues/436))
 
-**One island left, and it is not the one this section used to list first.**
-
-1. **No command tree ever reaches this client.** `COMMANDS` (id 16) /
-   `COMMAND_SUGGESTIONS` (id 15) have no decode arm anywhere in
-   `crates/protocol/**` (off-limits to this crate), so `complete`/`highlight`
-   always run with `tree: None` in production and degrade to "no
-   completions, no highlighting" rather than a fabricated list. Re-measured
-   for #436: the two ids appear **only** in `v770/src/generated/packet_ids.rs`
-   — the id table, which proves the id is known and nothing more.
+**The island this section used to list first is closed.** It read: *"No command
+tree ever reaches this client. `COMMANDS` (id 16) / `COMMAND_SUGGESTIONS` (id
+15) have no decode arm anywhere in `crates/protocol/**`, so
+`complete`/`highlight` always run with `tree: None` in production."* True when
+written; #470 added the decode, #471 routed it to the shell, and #474's draw
+half passes `MenuNav::command_tree` into `render::command_block_frame`. The
+suggestion popup on this screen is now fed by the real server's tree.
 
 ### Closed: the screen is now reachable from a real right-click
 

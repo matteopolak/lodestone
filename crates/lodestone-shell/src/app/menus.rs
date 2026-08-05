@@ -170,6 +170,32 @@ impl WindowApp {
     /// off, invisible in any screenshot" bug that module warns about: it is
     /// only invisible at `gui_scale == 1`, which is why it went unnoticed.
     pub(super) fn menu_row_at(&mut self, x: f32, y: f32) -> Option<usize> {
+        let (fb_w, fb_h) = self.target.as_ref().map(RenderTarget::size)?;
+        self.menu_row_at_in(x, y, fb_w, fb_h)
+    }
+
+    /// [`Self::menu_row_at`]'s whole body, with the framebuffer size passed in
+    /// rather than read off the swapchain.
+    ///
+    /// The split exists so a gate can drive **this exact code** — the same
+    /// `on_screen_frame` call, the same scale conversion, the same `row_rect`
+    /// loop — without a GPU. `self.target` is `None` in any test that has not
+    /// brought up a real window, so `menu_row_at` returns `None` at its first
+    /// line there and a test calling it measures nothing at all: it would pass
+    /// identically against a screen with no frame, which is the vacuous-
+    /// *precondition* species. Everything the hit-test can get wrong lives
+    /// below this line, so the seam costs no coverage.
+    ///
+    /// Not `#[cfg(test)]`: `menu_row_at` is its only production caller and the
+    /// two must not be allowed to become different code, which a test-only
+    /// duplicate would invite.
+    pub(super) fn menu_row_at_in(
+        &mut self,
+        x: f32,
+        y: f32,
+        fb_w: u32,
+        fb_h: u32,
+    ) -> Option<usize> {
         let frame = crate::menu::nav::on_screen_frame(
             &self.ui,
             &self.nav,
@@ -177,7 +203,6 @@ impl WindowApp {
             &self.statuses,
             &mut self.favicons,
         )?;
-        let (fb_w, fb_h) = self.target.as_ref().map(RenderTarget::size)?;
         let (w, h) = crate::menu::render::logical_canvas(frame.gui_scale, fb_w, fb_h);
         let scale = crate::config::calculate_gui_scale(frame.gui_scale, fb_w, fb_h).max(1) as f32;
         let (lx, ly) = (x / scale, y / scale);

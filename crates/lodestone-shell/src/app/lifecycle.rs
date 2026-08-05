@@ -307,10 +307,15 @@ impl ApplicationHandler for WindowApp {
             // arm too even though it is not `owns_frame` — see `menu_row_at`'s
             // doc — because it has its own row navigation to hover just like
             // every screen this renderer owns.
+            //
+            // `routes_menu_input` and not the `owns_frame(..) || is_paused() ||
+            // is_death()` this used to spell out: that expression was copied
+            // here, into the click arm below, into `KeyGate::menu`, and a
+            // fourth time into the test that was supposed to police it, so
+            // `Screen::CommandBlockEdit` could be missing from all four at once
+            // and nothing failed (#474). See that function's doc.
             WindowEvent::CursorMoved { position, .. }
-                if crate::menu::render::owns_frame(self.ui.screen())
-                    || self.ui.is_paused()
-                    || self.ui.is_death() =>
+                if crate::menu::nav::routes_menu_input(&self.ui) =>
             {
                 self.cursor = (position.x as f32, position.y as f32);
                 if let Some(row) = self.menu_row_at(self.cursor.0, self.cursor.1) {
@@ -318,9 +323,7 @@ impl ApplicationHandler for WindowApp {
                 }
             }
             WindowEvent::MouseInput { state, button, .. }
-                if crate::menu::render::owns_frame(self.ui.screen())
-                    || self.ui.is_paused()
-                    || self.ui.is_death() =>
+                if crate::menu::nav::routes_menu_input(&self.ui) =>
             {
                 if state == ElementState::Pressed {
                     // Issue #15's other capture half: a mouse-button rebind
@@ -614,9 +617,13 @@ impl ApplicationHandler for WindowApp {
                 // be unit-tested without a window (see its docs and the tests at
                 // the bottom of this file). This match is only the effects half.
                 let gate = KeyGate {
-                    menu: crate::menu::render::owns_frame(self.ui.screen())
-                        || self.ui.is_paused()
-                        || self.ui.is_death(),
+                    // The same predicate the hover and click arms above use
+                    // (#474). It was the same *expression* before, written out
+                    // three times; a screen missing from one copy is a screen
+                    // whose clicks or keys silently vanish, and that is what
+                    // happened to `Screen::CommandBlockEdit` — the command box
+                    // could not be typed into because this copy excluded it too.
+                    menu: crate::menu::nav::routes_menu_input(&self.ui),
                     chat_open: self.ui.is_chat_open(),
                     // `active_container_menu`, **not** `ui.is_container_open()`.
                     // That flag only tracks the *locally* opened player inventory;
