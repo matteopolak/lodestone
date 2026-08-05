@@ -2131,8 +2131,20 @@ impl ServerProtocol for V770ServerProtocol {
                 ServerBound::Ignored
             }
             State::Play if packet_id == play::serverbound::PLAYER_COMMAND => {
-                let _ = decode_full::<PlayerCommand>(payload);
-                ServerBound::Ignored
+                // Issue #325: only the `STOP_SLEEPING` action (0) has a
+                // server-side consumer — the "wake up" the client sends when
+                // the player climbs out of bed or dies. The other actions
+                // (sprinting/riding/jump states) decode to Ignored, exactly
+                // like `BlockAction`'s unconsumed ordinals. Note the wire
+                // `entityId` is always the sender's own local-player id (1)
+                // and is deliberately dropped: who is waking up comes from the
+                // connection's own player id, not the wire.
+                match decode_full::<PlayerCommand>(payload) {
+                    Ok(PlayerCommand { action: 0, .. }) => {
+                        ServerBound::PlayerCommand { action: 0 }
+                    }
+                    _ => ServerBound::Ignored,
+                }
             }
             // `ServerboundSpectatorActionPacket`: a single VarInt using
             // `ByteBufCodecs.OPTIONAL_VAR_INT`'s offset encoding (`0` = no

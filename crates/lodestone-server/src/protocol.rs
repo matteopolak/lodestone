@@ -315,6 +315,25 @@ pub enum ServerBound {
         /// decoded but not yet acted on).
         sequence: i32,
     },
+    /// The client sent a player-command packet
+    /// (`ServerboundPlayerCommandPacket`, issue #325). The packet's action
+    /// ordinal is carried raw — the same shape `BlockAction` uses for its
+    /// consumed ordinals — and only the one this crate has a consumer for,
+    /// `STOP_SLEEPING` (`0`, the "wake up" a client sends when the player
+    /// climbs out of bed or dies), is surfaced as a variant by the version
+    /// crate's decoder; the other ordinals (sprinting/riding/jump states)
+    /// decode to [`Ignored`](Self::Ignored).
+    ///
+    /// Note this packet deliberately carries **no** player identity: the wire
+    /// `entityId` is always the sender's own local-player id (`1`), so the
+    /// consumer must resolve who is waking up from the connection's own player
+    /// id — see `crate::sleep::SleepVote` for why the key cannot come from the
+    /// wire.
+    PlayerCommand {
+        /// The `ServerboundPlayerCommandPacket.Action` ordinal sent by the
+        /// client.
+        action: i32,
+    },
     /// The client requested a difficulty change
     /// (`ServerboundChangeDifficultyPacket`, issue #268). This crate has no
     /// permission/operator model, so `crate::server`'s consumer always

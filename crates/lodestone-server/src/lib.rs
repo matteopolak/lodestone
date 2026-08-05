@@ -166,6 +166,7 @@ pub mod region_source;
 mod rcon;
 mod scheduled_tick;
 mod server;
+mod sleep;
 mod spawn;
 mod tick;
 mod vitals;
