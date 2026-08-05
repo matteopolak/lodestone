@@ -70,7 +70,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use lodestone_data::{block_states, collision_shapes, entity_dimensions, entity_types, path_types};
 use lodestone_entity::ai::goals::{RandomLookAroundGoal, RandomStrollGoal};
 use lodestone_entity::ai::roster::{self, SpeciesContext};
-use lodestone_entity::ai::navigating_mob::{BABY_START_AGE, PARENT_AGE_AFTER_BREEDING};
+use lodestone_entity::ai::navigating_mob::{
+    BABY_START_AGE, DEFAULT_FOLLOW_RANGE, PARENT_AGE_AFTER_BREEDING,
+};
 use lodestone_entity::ai::{Goal, GoalSelector, MobController, NavigatingMob};
 use lodestone_entity::attribute::default_attributes;
 use lodestone_entity::explosion::Aabb as ExplosionAabb;
@@ -468,6 +470,33 @@ fn attr(attrs: &AttributeMap, path: &str) -> f64 {
         .ok()
         .and_then(|id| attrs.value(&id))
         .unwrap_or(0.0)
+}
+
+/// [`attr`], but answering **`None`** when `attrs` does not actually carry the
+/// attribute, instead of silently substituting the registry default.
+///
+/// # Why this is not the same function with a different default
+///
+/// [`attr`]'s `unwrap_or(0.0)` looks like the miss case and is nearly
+/// unreachable: [`AttributeMap::value`] already falls back to
+/// `default_def(key).default` for an absent instance, so it returns `Some` for
+/// every attribute the registry knows. `attr(&AttributeMap::new(),
+/// "follow_range")` is therefore **32.0**, not `0.0` — and 32.0 is the one value
+/// `follow_range` must never take, because `Mob.createMobAttributes()` overrides
+/// it to `16.0` for *every* mob, so no living entity in the game ever carries the
+/// registry number (`ai/attributes/Attributes.java:51` vs `Mob.java:166-168`;
+/// see `DEFAULT_FOLLOW_RANGE`'s own doc).
+///
+/// So a caller that needs "the species really declares this" cannot get it by
+/// range-checking [`attr`]'s result — the wrong value is inside the plausible
+/// range. It has to ask whether the instance exists, which is what this does.
+/// `control_the_attribute_lookup_misses_to_the_registry_default_not_zero` pins
+/// both readings so this distinction cannot quietly collapse.
+fn attr_present(attrs: &AttributeMap, path: &str) -> Option<f64> {
+    Identifier::from_str(&format!("minecraft:{path}"))
+        .ok()
+        .and_then(|id| attrs.get(&id))
+        .map(lodestone_entity::attribute::AttributeInstance::value)
 }
 
 /// The health and combat-stat defaults for a mob type: `(max_health,
@@ -1507,7 +1536,29 @@ impl<'w> MobSim<'w> {
         let attrs = default_attributes(&entity_type).unwrap_or_else(AttributeMap::new);
         let shape = species_shape(&entity_type, &attrs);
         let step_per_tick = attr(&attrs, "movement_speed");
-        let visited_budget = (attr(&attrs, "follow_range") * 16.0).floor() as i32;
+        // `minecraft:follow_range`, read **once** and fed to both consumers, so
+        // target acquisition and the A* budget cannot drift apart (issue #455).
+        //
+        // `attr_present` rather than `attr`: for a species `default_attributes`
+        // has no template for, `attrs` is empty and `attr` returns the *registry*
+        // default of **32.0** — not 0.0, and not a harmless approximation. 32.0
+        // is the single value this attribute never legitimately holds, because
+        // `Mob.createMobAttributes()` overrides it to 16.0 for every mob
+        // (`Mob.java:166-168`), so nothing in the game carries the registry
+        // number. Falling back explicitly to `DEFAULT_FOLLOW_RANGE` is what makes
+        // an unlisted species behave like a plain vanilla mob instead of like
+        // nothing at all.
+        //
+        // Species that raise it do so in their own `createAttributes` — the
+        // zombie family 35.0 (`monster/zombie/Zombie.java:133`), blaze 48.0,
+        // enderman 64.0 — and `attribute.rs::type_spec` has arms for only
+        // thirteen species (issue #457). So `zombie` gets its real 35.0 here
+        // while `zombie_villager`, which vanilla also puts at 35.0, gets 16.0.
+        // That is a **known wrong value on a connected wire**, tracked by #457
+        // and gated below so it is visible rather than assumed; the fix is more
+        // `type_spec` arms, not a fallback tuned to flatter the zombie family.
+        let follow_range = attr_present(&attrs, "follow_range").unwrap_or(DEFAULT_FOLLOW_RANGE);
+        let visited_budget = (follow_range * 16.0).floor() as i32;
         let hostile = is_hostile_species(&entity_type);
 
         // Built *before* `entity_type` is moved into the spawn, so the species
@@ -1524,6 +1575,19 @@ impl<'w> MobSim<'w> {
         for (priority, goal) in goals {
             mob.add_goal(priority, goal);
         }
+        // The `FOLLOW_RANGE` attribute reaches the controller, which is what
+        // bounds target acquisition (#455). Without this every hosted mob used
+        // the seam's `DEFAULT_FOLLOW_RANGE`, so the zombie family — the only
+        // family `seed_demo_mobs` spawns — targeted at 16 blocks instead of its
+        // real 35.0. A wrong *value* on a fully connected wire, which is the
+        // failure mode `cargo xtask connectedness` structurally cannot see.
+        //
+        // Set here rather than in `feed_perception` on purpose: this is a species
+        // attribute resolved once at spawn, not per-tick perception. Putting it in
+        // the feed would mean re-reading `default_attributes` for every mob every
+        // tick, and would invite a second source of truth for a number
+        // `visited_budget` above already derives from this exact read.
+        mob.mob.set_follow_range(follow_range);
         mob
     }
 
@@ -2679,3 +2743,167 @@ pub(crate) async fn run_mob_tick_loop(handle: MobHandle, out: LiveMobSource) {
         out.publish(handle.with(|sim| sim.snapshots()));
     }
 }
+
+/// Issue #455's host half: the `follow_range` attribute reaching the controller
+/// that bounds target acquisition, and the miss case that made it wrong.
+#[cfg(test)]
+mod follow_range_tests {
+    use super::*;
+
+    /// A floor wide enough for a mob at the origin and a player out past 36
+    /// blocks, so nothing here depends on a mob standing in the void.
+    fn flat_world() -> ChunkWorld {
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=48 {
+            for z in -8..=8 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        world
+    }
+
+    /// Spawns `species` at the origin through the **production** path
+    /// ([`MobSim::spawn_species`], what `seed_demo_mobs` calls), feeds one player
+    /// `distance` blocks away on +X, and reports whether the mob ever acquires a
+    /// target within `ticks`.
+    ///
+    /// `attack_target()` is the observable, not `can_use`:
+    /// `NearestAttackableTargetGoal` throttles its own search, so this ticks a
+    /// generous bound and checks after each — a fixed single tick would measure
+    /// the throttle rather than the range.
+    fn acquires_at(species: &str, distance: f64, ticks: usize) -> bool {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str(&format!("minecraft:{species}")).expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+        sim.set_players(vec![PlayerPerception {
+            position: Vec3::new(distance, 0.0, 0.0),
+            held_item: None,
+        }]);
+        for _ in 0..ticks {
+            sim.tick();
+            if sim.get(id).expect("alive").attack_target().is_some() {
+                return true;
+            }
+        }
+        false
+    }
+
+    const TICKS: usize = 80;
+
+    /// **The control, and the reason the obvious fix is wrong.**
+    ///
+    /// The miss case for `follow_range` is **32.0**, not `0.0`. `attr`'s
+    /// `unwrap_or(0.0)` reads like the fallback and is unreachable for any
+    /// attribute the registry knows, because `AttributeMap::value` already
+    /// substitutes `default_def(key).default` for an absent instance.
+    ///
+    /// This matters because it decides what the fix can be. A guard of the shape
+    /// `if r > 0.0 { r } else { DEFAULT }` is **dead code** — it never fires, and
+    /// an unlisted species keeps the registry's 32.0, which is precisely the one
+    /// number `follow_range` never legitimately holds (`Mob.createMobAttributes()`
+    /// overrides it to 16.0 for every mob). The wrong value sits *inside* the
+    /// plausible range, so only instance presence can detect the miss.
+    ///
+    /// Predicted from `attribute.rs:341` (`"follow_range" => d(32.0, …)`) and
+    /// `AttributeMap::value`'s `else` branch, then measured. If this ever reads
+    /// 0.0, `attr` changed and the `attr_present` split is redundant.
+    #[test]
+    fn control_the_attribute_lookup_misses_to_the_registry_default_not_zero() {
+        let unlisted = Identifier::from_str("minecraft:zombie_villager").expect("valid id");
+        assert!(
+            default_attributes(&unlisted).is_none(),
+            "precondition: zombie_villager must have no type_spec arm (#457) — if it \
+             gained one, pick another unlisted species or this control is vacuous"
+        );
+
+        let empty = AttributeMap::new();
+        assert_eq!(
+            attr(&empty, "follow_range"),
+            32.0,
+            "the miss case is the registry default, so a `> 0.0` guard can never fire"
+        );
+        assert_eq!(
+            attr_present(&empty, "follow_range"),
+            None,
+            "instance presence is the only reading that can see the miss"
+        );
+
+        // And the listed case really does carry the jar's number, so the split
+        // above is not simply discarding every attribute.
+        let zombie = default_attributes(&Identifier::from_str("minecraft:zombie").unwrap())
+            .expect("zombie has a type_spec arm");
+        assert_eq!(
+            attr_present(&zombie, "follow_range"),
+            Some(35.0),
+            "Zombie.java:133 sets FOLLOW_RANGE to 35.0"
+        );
+    }
+
+    /// **The gate.** A zombie must acquire at its real 35.0, which requires
+    /// separating 35 from *both* wrong candidates rather than merely showing that
+    /// targeting works at all.
+    ///
+    /// | distance | expected | what it rules out |
+    /// |---|---|---|
+    /// | 20 | acquires | `DEFAULT_FOLLOW_RANGE` 16.0 (the pre-fix value) |
+    /// | 34 | acquires | the registry's 32.0 as well |
+    /// | 36 | **no** | an unbounded feed, and blaze/enderman's 48/64 |
+    ///
+    /// Asserting only "a zombie acquires a nearby player" passes at 16, at 32 and
+    /// at 35 alike, which is the magnitude-species vacuous test: right subject,
+    /// predicate too weak to distinguish the hypotheses.
+    #[test]
+    fn a_zombie_acquires_at_its_real_follow_range_not_16_or_32() {
+        assert!(
+            acquires_at("zombie", 20.0, TICKS),
+            "a zombie must acquire a player at 20 blocks; failing here means the \
+             controller is still on DEFAULT_FOLLOW_RANGE (16.0) and #455's host \
+             half never landed"
+        );
+        assert!(
+            acquires_at("zombie", 34.0, TICKS),
+            "a zombie must acquire at 34 blocks — inside its real 35.0 but outside \
+             both 16.0 and the registry's 32.0, so this is the assertion that pins \
+             the value rather than merely the wiring"
+        );
+        assert!(
+            !acquires_at("zombie", 36.0, TICKS),
+            "a zombie must NOT acquire at 36 blocks: the cut is real and bounded at \
+             35.0, not merely large. Without this the gate above passes for any \
+             range >= 34, including an unbounded feed"
+        );
+    }
+
+    /// The **unlisted-species** half, and the honest record of what it costs.
+    ///
+    /// `zombie_villager` has the full `ZOMBIE` goal table (so it really does own
+    /// `NearestAttackableTargetGoal`) and **no** `type_spec` arm, which is exactly
+    /// the combination the fallback governs. It must now behave like a plain
+    /// vanilla mob — acquiring at 15 and not at 17 — rather than at the registry's
+    /// 32.0, which is what it silently used before.
+    ///
+    /// **This is still a wrong value and the test says so.** Vanilla's
+    /// `ZombieVillager` extends `Zombie`, so the jar says 35.0. 16.0 is further
+    /// from 35.0 than the 32.0 it replaces, and that is accepted deliberately:
+    /// 32.0 was right for this species only by coincidence and wrong for the
+    /// majority of mobs, whose real value *is* 16.0. The fix is more `type_spec`
+    /// arms (#457), not a fallback chosen to flatter the zombie family. When #457
+    /// lands, this test should start failing at 17 — and that failure is the
+    /// signal to retire it, not to widen it.
+    #[test]
+    fn an_unlisted_species_falls_back_to_the_mob_default_not_the_registry_default() {
+        assert!(
+            acquires_at("zombie_villager", 15.0, TICKS),
+            "an unlisted species must still acquire inside DEFAULT_FOLLOW_RANGE"
+        );
+        assert!(
+            !acquires_at("zombie_villager", 17.0, TICKS),
+            "an unlisted species must fall back to Mob.createMobAttributes' 16.0, \
+             not the registry's 32.0. Acquiring here means `attr`'s registry \
+             fallback is reaching the controller — the exact defect #455's brokered \
+             patch would have left in place, since its `> 0.0` guard cannot fire"
+        );
+    }
+}
+
