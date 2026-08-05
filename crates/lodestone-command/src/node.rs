@@ -59,11 +59,25 @@ pub struct Node {
     pub(crate) argument_children: Vec<NodeId>,
     pub(crate) executable: bool,
     pub(crate) redirect: Option<NodeId>,
-    /// Deliberately unconsumed — see the crate doc. Nothing reads this field
-    /// yet; it exists purely so #122's per-node permission check has
-    /// somewhere to land without changing every node constructor's
-    /// signature.
-    pub permission: Option<NodeId>,
+    /// The permission node required to *see or use* this node and everything
+    /// beneath it (issue #122). `None` means unrestricted.
+    ///
+    /// # This field's type changed when #122 was built
+    ///
+    /// It was reserved as `Option<NodeId>` — a handle into *this tree's own
+    /// arena*, which is a command-tree node, not a permission. A permission
+    /// node is a dotted string (`myplugin.admin`), exactly as Bukkit's
+    /// `.permission("node")` takes; there is nothing in a command tree for a
+    /// `NodeId` here to have pointed at. The reserved field was the right
+    /// instinct and the wrong type, and it was never read, so nothing
+    /// depended on the mistake.
+    ///
+    /// Kept as a `String` rather than a newtype so this crate stays
+    /// dependency-free: the resolver that gives the string meaning lives in
+    /// `lodestone_ecs::permissions`, and this crate deliberately cannot see
+    /// it. Gating is applied by the caller through
+    /// [`crate::PermissionFilter`].
+    pub permission: Option<String>,
 }
 
 impl std::fmt::Debug for Node {
@@ -230,7 +244,27 @@ impl CommandTree {
         self.node_mut(id).redirect = Some(target);
     }
 
-    pub fn set_permission(&mut self, id: NodeId, permission: Option<NodeId>) {
+    /// Require a permission node to see or use `id` and its whole subtree
+    /// (issue #122). This is Bukkit's `.permission("node")`.
+    ///
+    /// Gating is **not** applied here — this only records the requirement.
+    /// [`CommandTree::parse_filtered`] and [`CommandTree::suggest_filtered`]
+    /// apply it against a [`crate::PermissionFilter`] the caller supplies,
+    /// because this crate has no way to resolve a permission and deliberately
+    /// no dependency that would give it one.
+    pub fn set_permission(&mut self, id: NodeId, permission: Option<String>) {
         self.node_mut(id).permission = permission;
+    }
+
+    /// Convenience for the common `set_permission(id, Some(node))`.
+    pub fn require_permission(&mut self, id: NodeId, permission: impl Into<String>) {
+        self.node_mut(id).permission = Some(permission.into());
+    }
+}
+
+impl Node {
+    /// The permission node required for this node, if any.
+    pub fn permission(&self) -> Option<&str> {
+        self.permission.as_deref()
     }
 }

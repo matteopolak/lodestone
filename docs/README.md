@@ -651,6 +651,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   — the teardown that lets a player leave a live session cleanly and start (or join)
   another one without carrying anything over. Landed in `c53d022` ("an in-game pause
   menu, and a way to leave a session on purpose").
+- [Permissions](./permissions.md) — The permission system plugins ask questions of:
+  dotted nodes (`myplugin.admin.reload`), wildcards (`myplugin.*`), per-node defaults,
+  per-player and per-group grants with negation, vanilla's five command levels, and a
+  resolver trait a permissions *plugin* can use to take the whole decision over. One
+  resource, `lodestone_ecs::permissions::Permissions`, answering one question: does
+  this subject hold this permission?
 - [The plugin API](./plugin-api.md) — The surface a third-party bevy plugin uses to
   do everything native Lodestone code can do — read world/entity/player state, write
   intent, order systems against internal ones, and observe events — specified
@@ -672,6 +678,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   polling a `PendingTask<T>` from a system or through a hand-back closure the pool
   runs with `&mut World` at a tick boundary. This is Bukkit's `runTaskAsynchronously`
   plus `runTask`. Issue #114.
+- [Plugin commands](./plugin-commands.md) — The extension point a third-party plugin
+  uses to register its own commands: a `CommandRegistry` resource it populates in
+  `Plugin::build`, an argument tree per command with built-in and custom argument
+  types, a permission node on any node gating it and its whole subtree, tab
+  completion, and a dispatcher that resolves an input string and runs a handler with
+  `&mut World`.
 - [Plugin registration — how a consumer gets their plugin into the client](./plugin-registration.md) —
   The seam that lets a crate outside this repo register a `bevy_app::Plugin` into
   Lodestone's client, headless *or* rendered. `lodestone-app`'s `client_app()` returns

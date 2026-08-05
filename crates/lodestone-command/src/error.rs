@@ -57,6 +57,22 @@ pub enum ParseErrorKind {
     /// cover: a custom `ArgumentType` that moves the cursor backward. See the
     /// crate doc's "known simplifications" section and `tests/brigadier_spec.rs`.
     RedirectCycle,
+    /// A token matched a node the [`crate::PermissionFilter`] denied, and
+    /// nothing else in that position could take it (issue #122).
+    ///
+    /// Deliberately distinct from [`ParseErrorKind::UnknownCommand`]: Bukkit
+    /// answers a permission-gated command with "you do not have permission",
+    /// so a caller needs to be able to tell "no such command" from "not
+    /// yours". Note this has **no** counterpart in Brigadier's
+    /// `BuiltInExceptions` — vanilla never needs it, because a node the sender
+    /// cannot use was already pruned out of the tree they were sent
+    /// (`Commands.fillUsableCommands`), so by the time text arrives the node
+    /// genuinely does not exist for them. We keep one tree and gate at parse
+    /// time, so we need the distinction upstream does not.
+    ///
+    /// [`crate::CommandTree::suggest_filtered`] is silent about the same node —
+    /// see [`crate::filter`] for why the two halves differ.
+    NoPermission { permission: String },
 
     ExpectedInt,
     InvalidInt(String),
@@ -95,6 +111,11 @@ impl fmt::Display for ParseErrorKind {
             Self::NotExecutable => write!(f, "incomplete command"),
             Self::ExpectedArgumentSeparator => write!(f, "expected whitespace to end one argument, but found trailing data"),
             Self::RedirectCycle => write!(f, "redirect cycle detected"),
+            // Bukkit's default `Command.permissionMessage`, which is
+            // "I'm sorry, but you do not have permission to perform this
+            // command." — reworded to vanilla's shorter register while keeping
+            // the node available to a caller that wants to log it.
+            Self::NoPermission { permission } => write!(f, "you do not have permission to use this command (requires '{permission}')"),
             Self::ExpectedInt => write!(f, "expected integer"),
             Self::InvalidInt(s) => write!(f, "invalid integer '{s}'"),
             Self::ExpectedLong => write!(f, "expected long"),
