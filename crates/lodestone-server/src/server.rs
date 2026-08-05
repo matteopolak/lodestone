@@ -736,9 +736,14 @@ async fn send_view_update<T: Transport>(
         return Ok(());
     }
     if *awaiting_chunk_batch_ack {
+        tracing::info!(
+            "server: chunk batch queued ({} directives), awaiting ack — {} pending total",
+            update.batch.len(), pending_chunk_batches.len() + 1,
+        );
         pending_chunk_batches.push_back(update.batch);
         return Ok(());
     }
+    tracing::info!("server: sending chunk batch ({} directives)", update.batch.len());
     *awaiting_chunk_batch_ack = true;
     for directive in update.batch {
         apply(conn, state, directive).await?;
@@ -3588,12 +3593,12 @@ where
             let cx = (x / 16.0).floor() as i32;
             let cz = (z / 16.0).floor() as i32;
             let update = view.recenter(proto, source, cx, cz).await;
-            if !update.batch.is_empty() {
-                tracing::info!(
-                    "player moved to chunk ({cx},{cz}), sending {} new chunk directives",
-                    update.batch.len(),
-                );
-            }
+            // Every recenter: log, so we can see if the server detects boundary crosses
+            tracing::info!(
+                "recenter: center=({cx},{cz}) batch_size={} immediate_forgets={}",
+                update.batch.len(),
+                update.immediate.len(),
+            );
             send_view_update(conn, state, update, awaiting_chunk_batch_ack, pending_chunk_batches).await?;
 
             if let Some(raw) = fall.on_player_moved(y, on_ground)
@@ -3754,7 +3759,9 @@ where
         }
         ServerBound::ChunkBatchAcknowledged { .. } => {
             *awaiting_chunk_batch_ack = false;
+            tracing::info!("server: chunk batch acked, {} pending batches", pending_chunk_batches.len());
             if let Some(next) = pending_chunk_batches.pop_front() {
+                tracing::info!("server: draining pending chunk batch ({} directives)", next.len());
                 *awaiting_chunk_batch_ack = true;
                 for directive in next {
                     apply(conn, state, directive).await?;

@@ -65,6 +65,20 @@ impl Sim {
             Some(net) => net.poll(),
             None => return,
         };
+        // Diagnostic: count total updates and chunk events per poll
+        let mut chunk_count: u32 = 0;
+        let update_count = updates.len();
+        for u in &updates {
+            if matches!(u, NetUpdate::Chunk { .. }) {
+                chunk_count += 1;
+            }
+        }
+        if update_count > 0 && chunk_count > 0 {
+            tracing::info!(
+                "poll_net: {} total updates, {} chunk events",
+                update_count, chunk_count,
+            );
+        }
         for update in updates {
             match update {
                 NetUpdate::Connecting => {
