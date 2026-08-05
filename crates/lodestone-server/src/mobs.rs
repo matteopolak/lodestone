@@ -1655,8 +1655,13 @@ impl<'w> MobSim<'w> {
     /// Advances every mob one tick: run its goals (which drive A\* and path
     /// following through the [`MobController`] seam), then step the follower.
     /// Each mob's `no_action_time` ages by one tick, mirroring vanilla
-    /// `serverAiStep`'s `noActionTime++`; [`despawn_pass`](MobSim::despawn_pass)
-    /// consumes and resets it.
+    /// `serverAiStep`'s `noActionTime++`, and is first cleared for any mob
+    /// vanilla's `Mob.checkDespawn` would clear it for — a persistent mob, or
+    /// one within its category's immune radius of a player from
+    /// [`set_players`](Self::set_players). See the body for why that reset lives
+    /// here rather than only in [`despawn_pass`](MobSim::despawn_pass), which
+    /// has no production caller and left the counter monotonic — permanently
+    /// disabling every idle-throttled goal five seconds into a world.
     ///
     /// A `MeleeAttackGoal` that connected this tick is resolved into a real
     /// [`SimMob::apply_damage`] call against whichever mob its
@@ -1687,7 +1692,92 @@ impl<'w> MobSim<'w> {
         // `cargo check`, and caught here only because
         // `no_action_time_crosses_the_seam_instead_of_staying_on_the_sim_record`
         // asserts the two readings are *equal* rather than merely both climbing.
+        //
+        // The reset half of vanilla `Mob.checkDespawn` runs *before* that
+        // increment, because that is where `ServerLevel` puts it: it calls
+        // `entity.checkDespawn()` every tick immediately before `entity.tick()`
+        // (`.cache/mc/26.2/src/net/minecraft/server/level/ServerLevel.java:426-431`),
+        // and `checkDespawn` is the **only** thing in vanilla that ever clears
+        // `noActionTime` (`Mob.java:704-711`). So a mob standing next to a
+        // player reads `1` here, never `2`.
+        //
+        // # Why this loop exists at all (the bug it fixes)
+        //
+        // Until now the increment above had no counterpart anywhere in
+        // production. [`despawn_pass`](Self::despawn_pass) owns the same reset,
+        // and it has **zero production callers** — `crate::tick::run_tick_loop`
+        // never calls it, because it is handed no player position (a gap that
+        // function's own doc comment discloses). So `no_action_time` was
+        // monotonic for the whole life of a world, and crossed
+        // `RandomStrollGoal`'s idle throttle of `100`
+        // (`ai/goal/RandomStrollGoal.java:43`, our `goals.rs`'s
+        // `no_action_time() >= 100` early return) after five seconds — after
+        // which **no mob could ever stroll again**, which is why demo mobs
+        // reached a connected client and then stood still forever
+        // (`crates/protocol/v770/tests/live_mob_sim.rs`).
+        //
+        // It was total rather than intermittent because the throttle closes
+        // before the goal's own `1/120` roll can succeed even once: every
+        // `NavigatingMob` shares one hardcoded RNG seed
+        // (`lodestone-entity/src/ai/navigating_mob.rs`'s
+        // `SplitMix64(0x1234_5678_9ABC_DEF0)`, and `with_seed` has no caller
+        // outside a test), and for that one stream the first draw where
+        // `next_u64() % 120 == 0` is draw **130** — past the wall at 100. So
+        // the failure was deterministic and identical for every mob in every
+        // world, not a rare unlucky roll. The shared seed is a separate defect
+        // in a crate this module does not own; this reset is what makes the
+        // throttle behave like vanilla's regardless of it.
+        //
+        // Reusing [`check_despawn`] rather than restating its 32-block immune
+        // radius: this call site wants only its `reset_timer` verdict, so it
+        // passes `rng_hit_800: false` and **ignores `discard` entirely** —
+        // removing a mob needs an RNG draw and is still `despawn_pass`'s job.
+        // With `rng_hit_800` false the only `discard` arm left is gate A
+        // (beyond `despawn_distance`), which never wants a reset either, so
+        // dropping the field here cannot mask one.
         for m in &mut self.mobs {
+            let pos = m.position();
+            let nearest = self
+                .players
+                .iter()
+                .map(|p| dist_sqr(p.position, pos))
+                .min_by(f64::total_cmp);
+            // Player proximity is the **only** reset condition here, and
+            // deliberately *not* vanilla's other one.
+            //
+            // `Mob.checkDespawn`'s `else` branch does clear the timer every tick
+            // for a mob that requires persistence (`Mob.java:710-711`), keyed on
+            // `isPersistenceRequired() || requiresCustomPersistence()`. Keying
+            // this off `SimMob::persistent` would look like a faithful port and
+            // would not be one, because that flag carries a **wider** meaning
+            // here than vanilla's: `spawn_species` sets it from `!hostile`, so
+            // every passive animal is `persistent` in this crate. Vanilla animals
+            // are not `isPersistenceRequired` — they opt out of distance
+            // despawning through `Animal.removeWhenFarAway() == false`
+            // (`animal/Animal.java:128`), which `checkDespawn` consults for
+            // *discarding* and never for the timer. Only a name-tagged or
+            // summoned mob takes vanilla's `else` branch.
+            //
+            // Including it therefore would not have been "more vanilla": it would
+            // have given every cow, pig and sheep in the world a permanently open
+            // idle throttle regardless of whether any player was near. Measured,
+            // not reasoned — the first draft did include it, and
+            // `tests/mob_sim.rs`'s
+            // `no_action_time_crosses_the_seam_instead_of_staying_on_the_sim_record`
+            // failed its own precondition, because its cow's counter could no
+            // longer climb past 100 at all. `despawn_pass` treats `persistent` the
+            // same way (an early `return true`, with no reset), so the two agree.
+            //
+            // Modelling vanilla's real persistence branch needs a flag that means
+            // `isPersistenceRequired` and nothing else; that is a separate change
+            // to what `spawn_species` records, not something to smuggle in here.
+            let reset = nearest.is_some_and(|dist_sqr| {
+                crate::mob_spawn::check_despawn(m.category, dist_sqr, m.no_action_time, false, true)
+                    .reset_timer
+            });
+            if reset {
+                m.no_action_time = 0;
+            }
             m.no_action_time = m.no_action_time.saturating_add(1);
         }
         self.feed_perception();
