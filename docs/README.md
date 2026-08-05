@@ -580,13 +580,6 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   Eight of thirteen implemented goals could not act, and every one of them had a
   *green* unit test. This doc records what each method reads, who feeds it, and why
   the whole thing was invisible to the test suite.
-- [Mob ranged attacks](./mob-ranged-attacks.md) — The goal family that makes a mob
-  shoot: a bow goal, vanilla's generic `RangedAttackGoal`, and the blaze's
-  three-fireball burst, plus the `ProjectileLaunch` intent that carries a shot from
-  the AI layer out to whoever owns entity ids. Issue
-  [#227](https://github.com/matteopolak/lodestone/issues/227) unit B3a. Before it,
-  `RangedAttackGoal` and `BowAttack` were zero hits tree-wide and no mob in this repo
-  could throw anything.
 - [Species-aware mob spawning (issue #205)](./mob-species-spawning.md) —
   `MobSim::spawn_species` (`crates/lodestone-server/src/mobs.rs`), a spawn entry point
   that resolves a mob's body, combat stats, and baseline goal set from its real
