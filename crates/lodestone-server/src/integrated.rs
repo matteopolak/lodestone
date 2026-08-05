@@ -416,10 +416,20 @@ impl IntegratedServer {
         // `MobHandle::seeded` used to run right here, synchronously, before any
         // task spawned — a serial `ChunkWorld::from_source` over the whole
         // `mob_area`. At the shell's `view_radius.clamp(1, 3)` that is 49
-        // columns, and at the 909 ms per composed column measured in release
-        // (see `crate::chunk_store`) that put roughly **45 s** inside the
+        // columns, and **measured in release at 10.86 s** inside the
         // `runtime.block_on` that opens a world, before the client could even
         // connect. Vanilla does not block world-open on mob population.
+        //
+        // Do **not** re-derive that figure from `chunk_store`'s 909 ms per
+        // column: `49 × 909 ms ≈ 45 s` is what issue #454 predicted and it is
+        // 4× too high. The 909 ms was measured across four *independently
+        // constructed* sources precisely so the generator's 512-entry memo would
+        // absorb nothing; seeding is the opposite case — one source, 49
+        // *contiguous* columns — so the memo absorbs a great deal and the real
+        // per-column cost here is about 222 ms. See
+        // `docs/world-open-latency.md`; the post-fix constructor measures
+        // 75.6 ms, and both figures are provisional (durations here spread 2.3×
+        // on machine load alone).
         //
         // So the constructor hands back a `Default` handle — empty, mobless, and
         // already documented as safe to `Attack` against (see that impl) — and
