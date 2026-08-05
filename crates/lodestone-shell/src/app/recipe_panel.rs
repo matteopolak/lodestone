@@ -261,6 +261,14 @@ pub(super) fn recipe_panel_geometry(
 ///
 /// `None` for an id the [`ResourceLocation`] parser rejects, which suppresses
 /// the whole toast rather than drawing half of one.
+///
+/// `enchanted` stays `false` deliberately: this path carries only an
+/// [`Identifier`](lodestone_model::Identifier), never an `ItemStack`, and
+/// [`crate::hud::item_icon::stack_has_foil`] needs the stack's components. The recipe
+/// toast is built from `RecipeToastQueue::displayed_entry`, which hands over
+/// ids only, so there is no foil signal to thread here today — issue #452's
+/// container/hotbar surfaces are wired through `builder::icon_record`, and the
+/// toast is the one icon site with nothing to feed the predicate.
 fn toast_icon(id: &lodestone_model::Identifier) -> Option<HotbarSlot> {
     Some(HotbarSlot {
         item: ResourceLocation::parse(&id.to_string()).ok()?,

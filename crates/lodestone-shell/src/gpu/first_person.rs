@@ -84,7 +84,12 @@ pub(super) struct HeldItemEquip {
     /// selected one across a swap. `None` is an empty hand, which draws the bare
     /// arm, so this field is also what decides the arm/item fork mid-swap: putting
     /// away a pickaxe lowers the pickaxe and *then* raises an arm.
-    visible: Option<ResourceLocation>,
+    ///
+    /// The pair's `bool` is the enchantment-foil flag (issue #452), carried
+    /// because the glint second pass is gated on it and the flag must follow the
+    /// *drawn* item — a swap that raises an enchanted sword glints the sword the
+    /// moment it appears, not the stack the player selected two ticks ago.
+    visible: Option<(ResourceLocation, bool)>,
     /// Vanilla's `mainHandHeight`, `0.0` (fully lowered) to `1.0` (fully raised).
     height: f32,
     /// Vanilla's `oMainHandHeight` — last tick's value, for the partial-tick lerp.
@@ -135,7 +140,7 @@ impl HeldItemEquip {
     /// animation takes the same wall time at 30 fps as at 240 — the
     /// frame-rate-dependence trap `Sim::step`'s note on `chest_lids.tick()`
     /// records, avoided the same way.
-    pub(super) fn advance(&mut self, expected: Option<&ResourceLocation>) {
+    pub(super) fn advance(&mut self, expected: Option<&(ResourceLocation, bool)>) {
         let now = std::time::Instant::now();
         let Some(last) = self.last.replace(now) else {
             // First observation: adopt, fully equipped. See `last`'s doc.
@@ -156,7 +161,7 @@ impl HeldItemEquip {
     /// and magnitude is the whole question here (a gate that accepts any nonzero
     /// rate is satisfied by a rate that is wrong by 2×, which is how a 70%-vs-30%
     /// shader bug shipped in this repo).
-    fn advance_by(&mut self, dt: f32, expected: Option<&ResourceLocation>) {
+    fn advance_by(&mut self, dt: f32, expected: Option<&(ResourceLocation, bool)>) {
         self.accumulator += dt;
         // A bounded catch-up. A tab-out, a breakpoint, a menu the shell returns from
         // or a slow first frame after a resource load can hand us an arbitrarily
@@ -180,20 +185,21 @@ impl HeldItemEquip {
     /// (that is what `oMainHandHeight` is for), and the visible-item exchange is
     /// checked **after** the ramp, so the item swaps on the tick the height reaches
     /// the bottom rather than the tick after.
-    fn step(&mut self, expected: Option<&ResourceLocation>) {
+    fn step(&mut self, expected: Option<&(ResourceLocation, bool)>) {
         self.previous = self.height;
         // `shouldInstantlyReplaceVisibleItem`: vanilla's `matchesIgnoringComponents`
         // plus the item model's `handAnimationOnSwap` opt-out.
         //
-        // **Reduced to an item-id comparison here, and that loses two triggers.**
-        // Vanilla compares whole `ItemStack`s, so `getCount()` and the component map
-        // both participate: eating one bread out of a stack, or a pickaxe taking a
-        // point of damage, re-triggers the dip. The shell's main-hand source is
-        // narrowed to a bare `ResourceLocation` well upstream of here (`app.rs`
-        // builds it from `HotbarSlot::item`), so a same-item change is invisible to
-        // this function and only a genuine item swap animates. That is the
-        // conservative direction: over-triggering would dip the hand on every
-        // durability tick while mining.
+        // **Reduced to an (id, foil) comparison here, and that loses two triggers.**
+        // Vanilla compares whole `ItemStack`s, so `getCount()` and the rest of the
+        // component map both participate: eating one bread out of a stack, or a
+        // pickaxe taking a point of damage, re-triggers the dip. The shell's
+        // main-hand source is narrowed to the id plus the enchantment-foil flag
+        // (`app.rs` builds it from `HotbarSlot::{item, enchanted}`), so a same-item
+        // change is invisible to this function and only a genuine item swap — or a
+        // swap of the stack's foil state — animates. That is the conservative
+        // direction: over-triggering would dip the hand on every durability tick
+        // while mining.
         //
         // The `handAnimationOnSwap` opt-out (`ItemModelResolver::shouldPlaySwapAnimation`,
         // default `true`, overridden per item-model definition) is likewise not
@@ -242,8 +248,9 @@ impl HeldItemEquip {
     }
 
     /// The item to **draw** this frame — vanilla's `mainHandItem`, not the selected
-    /// one. `None` draws the bare arm.
-    fn visible(&self) -> Option<&ResourceLocation> {
+    /// one — plus its enchantment-foil flag (the glint gate, issue #452). `None`
+    /// draws the bare arm.
+    fn visible(&self) -> Option<&(ResourceLocation, bool)> {
         self.visible.as_ref()
     }
 }
@@ -365,8 +372,11 @@ fn hand_view_proj(aspect: f32, bob: BobFrame, damage_tilt_strength: f32) -> glam
 /// `isEmpty()` branch.
 pub(super) enum FirstPersonHand<'a> {
     /// The held item, meshed camera-space and drawn through the *model* pipeline
-    /// with the model pass's own `hand_cam_bind_group`.
-    Item(GpuModelMesh),
+    /// with the model pass's own `hand_cam_bind_group`. The `bool` is the
+    /// enchantment-foil flag: when `true`, [`RenderState::draw_first_person_hand`]
+    /// re-rasterises the same mesh through the glint pipeline in the same pass
+    /// (issue #452).
+    Item(GpuModelMesh, bool),
     /// The bare arm, drawn through the *entity* pipeline.
     Arm(FirstPersonArm<'a>),
 }
@@ -470,8 +480,11 @@ impl RenderState {
 
         // Group 0 for *both* branches: `hand_projection` alone. Written before
         // either branch can return, so the arm's uniform is never left holding a
-        // stale projection from a frame that drew an item (and vice versa).
-        self.write_hand_camera(queue, camera);
+        // stale projection from a frame that drew an item (and vice versa). The
+        // returned matrix is the very `view_proj` the base item pass draws with,
+        // which the glint pass must reuse verbatim (depth-`EQUAL`); see
+        // `write_hand_camera`'s return value.
+        let view_proj = self.write_hand_camera(queue, camera);
 
         // `inverseArmHeight` for both branches (issue #366) — vanilla's own single
         // scalar, read once so the arm and the item cannot disagree about how far
@@ -503,7 +516,7 @@ impl RenderState {
         // reads the pose from, so the resolved variant and its transform cannot
         // disagree about which slot this pass is.
         let hand_ctx = ItemStateContext::new(ARM.display_slot(true));
-        if let Some(item) = self.equip.visible()
+        if let Some((item, foil)) = self.equip.visible()
             && let Some(model) = self.model.as_ref()
             && let Some(geometry) = model.items.get(item).and_then(|v| v.resolve(&hand_ctx))
         {
@@ -526,7 +539,15 @@ impl RenderState {
                 u8::try_from(self.hand_light(camera)).unwrap_or(u8::MAX),
             );
             if let Some(gpu) = GpuModelMesh::upload(device, &mesh) {
-                return Some(FirstPersonHand::Item(gpu));
+                // An enchanted held item gets the glint second pass. The uniform
+                // is written now (this is the `&self` + queue point in the frame)
+                // and consumed by the draw later in the same frame: one buffer,
+                // rewritten per glint draw. No pass installed (jar-less) is a
+                // no-op and the item still draws unglinted.
+                if *foil {
+                    self.write_glint_uniform(queue, view_proj);
+                }
+                return Some(FirstPersonHand::Item(gpu, *foil));
             }
         }
 
@@ -613,7 +634,13 @@ impl RenderState {
     /// Two buffers, one value: the entity pipeline (bare arm) and the model
     /// pipeline (held item) declare different group-0 layouts, so each needs its
     /// own. Written together here so they cannot drift.
-    fn write_hand_camera(&self, queue: &wgpu::Queue, camera: &Camera) {
+    ///
+    /// Returns the column-major `view_proj` it wrote. The caller hands it to
+    /// [`RenderState::write_glint_uniform`] for an enchanted held item: the glint
+    /// pass runs under depth-`EQUAL`, which only passes if it rasterises the
+    /// *same* clip positions as this base pass — so the glint uniform must carry
+    /// exactly this matrix, not a second copy of it.
+    fn write_hand_camera(&self, queue: &wgpu::Queue, camera: &Camera) -> [[f32; 4]; 4] {
         let view_proj = hand_view_proj(
             camera.aspect,
             self.hand_bob.value(),
@@ -661,6 +688,7 @@ impl RenderState {
                 hand_fog,
             );
         }
+        view_proj.to_cols_array_2d()
     }
 
     /// Record the first-person arm/held-item pass: its own render pass, with
@@ -713,7 +741,7 @@ impl RenderState {
             // *model* pipeline with that pipeline's four bind groups — the
             // same atlas, palette and animation slots the terrain and the
             // hotbar icons use. Only group 0 differs: the hand projection.
-            FirstPersonHand::Item(mesh) => {
+            FirstPersonHand::Item(mesh, foil) => {
                 if let Some(model) = self.model.as_ref() {
                     pass.set_pipeline(&model.pipeline.pipeline);
                     // The held item's pose is already camera-space (see
@@ -732,6 +760,26 @@ impl RenderState {
                     pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                     stats.draw_calls += 1;
+
+                    // The glint second pass, in this **same** render pass: the
+                    // glint pipeline's depth compare is `EQUAL`, which only
+                    // matches where the base draw above just wrote depth — a
+                    // later pass would find the depth buffer and EQUAL nothing.
+                    // The uniform was written by `prepare_first_person_hand`
+                    // with this frame's hand view_proj (the one `write_hand_camera`
+                    // computed), so both passes rasterise identical clip
+                    // positions and the shimmer lands exactly on the item.
+                    if *foil
+                        && let Some(glint) = self.glint.as_ref()
+                    {
+                        pass.set_pipeline(&glint.pipeline.pipeline);
+                        pass.set_bind_group(0, &glint.uniform_bind_group, &[]);
+                        pass.set_bind_group(1, &glint.texture_bind_group, &[]);
+                        pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                        pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                        stats.draw_calls += 1;
+                    }
                 }
             }
             FirstPersonHand::Arm(arm) => {
@@ -783,8 +831,8 @@ mod tests {
     fn the_first_observation_seeds_at_rest() {
         let pickaxe = item("diamond_pickaxe");
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&pickaxe));
-        assert_eq!(equip.visible(), Some(&pickaxe));
+        equip.advance(Some(&(pickaxe, false)));
+        assert_eq!(equip.visible(), Some(&(pickaxe, false)));
         assert_eq!(equip.inverse_arm_height(), 0.0);
     }
 
@@ -807,7 +855,7 @@ mod tests {
         let pickaxe = item("diamond_pickaxe");
         let sword = item("diamond_sword");
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&pickaxe));
+        equip.advance(Some(&(pickaxe, false)));
 
         equip.advance_by(TICK, Some(&sword));
         assert!(
@@ -816,7 +864,7 @@ mod tests {
             equip.height
         );
         // Still the *old* item on screen: the exchange happens at the bottom.
-        assert_eq!(equip.visible(), Some(&pickaxe));
+        assert_eq!(equip.visible(), Some(&(pickaxe, false)));
 
         equip.advance_by(TICK, Some(&sword));
         assert!(
@@ -825,7 +873,7 @@ mod tests {
              gives, nor the 0.6 a half-rate one does; got {}",
             equip.height
         );
-        assert_eq!(equip.visible(), Some(&pickaxe));
+        assert_eq!(equip.visible(), Some(&(pickaxe, false)));
     }
 
     /// The visible item is exchanged **at the bottom of the dip**, and the hand
@@ -840,7 +888,7 @@ mod tests {
         let pickaxe = item("diamond_pickaxe");
         let sword = item("diamond_sword");
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&pickaxe));
+        equip.advance(Some(&(pickaxe, false)));
 
         let mut heights = Vec::new();
         let mut swap_tick = None;
@@ -878,9 +926,9 @@ mod tests {
     fn holding_the_same_item_never_dips() {
         let pickaxe = item("diamond_pickaxe");
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&pickaxe));
+        equip.advance(Some(&(pickaxe, false)));
         for _ in 0..40 {
-            equip.advance_by(TICK, Some(&pickaxe));
+            equip.advance_by(TICK, Some(&(pickaxe, false)));
             assert_eq!(equip.inverse_arm_height(), 0.0);
         }
     }
@@ -910,7 +958,7 @@ mod tests {
         let pickaxe = item("diamond_pickaxe");
         let sword = item("diamond_sword");
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&pickaxe));
+        equip.advance(Some(&(pickaxe, false)));
 
         equip.advance_by(TICK, Some(&sword));
         assert!(
@@ -935,12 +983,12 @@ mod tests {
     fn putting_an_item_away_lowers_it_before_the_arm_appears() {
         let pickaxe = item("diamond_pickaxe");
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&pickaxe));
+        equip.advance(Some(&(pickaxe, false)));
 
         equip.advance_by(TICK, None);
         assert_eq!(
             equip.visible(),
-            Some(&pickaxe),
+            Some(&(pickaxe, false)),
             "the item must still be drawn while it lowers"
         );
         equip.advance_by(TICK * 2.0, None);
@@ -960,7 +1008,7 @@ mod tests {
         let pickaxe = item("diamond_pickaxe");
         let sword = item("diamond_sword");
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&pickaxe));
+        equip.advance(Some(&(pickaxe, false)));
         equip.advance_by(5.0, Some(&sword));
         assert_eq!(equip.visible(), Some(&sword));
         assert_eq!(equip.inverse_arm_height(), 0.0);

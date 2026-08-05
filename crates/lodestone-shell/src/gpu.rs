@@ -35,6 +35,7 @@ mod entities;
 mod entity_passes;
 mod first_person;
 mod frame;
+mod glint;
 mod nametag;
 mod outline;
 mod screen_effects;
@@ -315,6 +316,13 @@ pub struct RenderState {
     /// jar still gets a correctly darkened storm — it just gets no visible
     /// droplets, which is the honest degradation.
     weather: Option<lodestone_render::WeatherRenderer>,
+    /// The enchantment-glint pass (issue #452): the `GlintPipeline` plus an
+    /// uploaded non-sRGB `enchanted_glint_item.png` sheet and one shared group-0
+    /// uniform buffer. `None` — no `client.jar`, a headless test, or simply
+    /// before [`RenderState::install_glint`] runs — draws no second pass, so an
+    /// enchanted held item renders without its shimmer: the same "no pass
+    /// installed, nothing extra drawn" convention [`Self::sky`] uses.
+    glint: Option<glint::GlintPass>,
 }
 
 /// Per-part instance accumulation for the sheep wool layer, before upload.
