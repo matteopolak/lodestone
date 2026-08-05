@@ -137,36 +137,42 @@ impl WindowApp {
 
     /// Route a mouse position (physical pixels) to a menu row, if it is over one.
     ///
-    /// `Screen::Paused` gets its frame from [`crate::menu::render::pause_frame`]
-    /// directly rather than [`crate::menu::render::frame_for`], which returns
-    /// `None` for it by design (see that function's doc on why the pause
-    /// overlay is not an `owns_frame` screen).
+    /// The frame comes from [`crate::menu::nav::on_screen_frame`] and **not**
+    /// from [`crate::menu::render::frame_for`]. The distinction is a player
+    /// report (2026-08-04, "i cant click anything in the options menu"):
+    /// `frame_for` is the authority on which screens the menu renderer *owns* —
+    /// the ones it draws with a `Clear` pass, replacing the world — and it
+    /// answers `None` for the three that draw as an **overlay** over a live
+    /// world: `Screen::Paused`, `Screen::Death`, and `Screen::Settings` when
+    /// [`crate::menu::UiState::settings_in_world`].
     ///
-    /// Both branches convert the physical framebuffer size and cursor down to
-    /// the same logical canvas [`MenuRenderer::render`]/`render_overlay`
-    /// actually draw into (via [`crate::menu::render::logical_canvas`]) before
-    /// calling [`crate::menu::render::row_rect`] — mirroring
+    /// This function used to inline a branch per overlay screen and end with
+    /// `frame_for(…)?`. Pause and death got theirs when they became overlays;
+    /// in-world Options became the third and did not, so that screen was live to
+    /// the mouse ([`crate::menu::render::owns_frame`] stays `true` for it,
+    /// deliberately) with **no rows to hit-test** — every click returned at the
+    /// `?` before reaching one. Three `if`s in a private method here could not be
+    /// enumerated from any test, which is exactly why one could go missing
+    /// silently; `on_screen_frame` is that set in one place, and
+    /// `nav::tests::every_mouse_routable_screen_has_a_frame_to_hit_test` asserts
+    /// it covers every screen the mouse routes to.
+    ///
+    /// The physical framebuffer size and cursor are then converted down to the
+    /// same logical canvas [`MenuRenderer::render`]/`render_overlay` actually
+    /// draw into (via [`crate::menu::render::logical_canvas`]) before calling
+    /// [`crate::menu::render::row_rect`] — mirroring
     /// `container::hit_test_with_scale`'s own `x / scale` pattern. Skipping
     /// this (as this function used to) is exactly the "clicks land one slot
     /// off, invisible in any screenshot" bug that module warns about: it is
     /// only invisible at `gui_scale == 1`, which is why it went unnoticed.
     pub(super) fn menu_row_at(&mut self, x: f32, y: f32) -> Option<usize> {
-        let frame = if self.ui.is_paused() {
-            crate::menu::render::pause_frame(&self.nav)
-        } else if self.ui.is_death() {
-            // Same reasoning as the `is_paused()` branch above (issue #103):
-            // `Screen::Death` gets its frame from `death_frame` directly, not
-            // `frame_for`, which returns `None` for it by design (see
-            // `owns_frame`'s doc on why the death screen is not one).
-            crate::menu::render::death_frame(&self.nav, self.sim.death_message())
-        } else {
-            crate::menu::render::frame_for(
-                &self.ui,
-                &self.nav,
-                &self.statuses,
-                &mut self.favicons,
-            )?
-        };
+        let frame = crate::menu::nav::on_screen_frame(
+            &self.ui,
+            &self.nav,
+            self.sim.death_message(),
+            &self.statuses,
+            &mut self.favicons,
+        )?;
         let (fb_w, fb_h) = self.target.as_ref().map(RenderTarget::size)?;
         let (w, h) = crate::menu::render::logical_canvas(frame.gui_scale, fb_w, fb_h);
         let scale = crate::config::calculate_gui_scale(frame.gui_scale, fb_w, fb_h).max(1) as f32;
