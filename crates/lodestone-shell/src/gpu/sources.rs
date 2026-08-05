@@ -364,18 +364,24 @@ impl std::fmt::Debug for HandSwingSource {
 /// landed. The **only** missing link was that nothing told the renderer what the
 /// player was holding.
 ///
+/// The value is the item id **plus the enchantment-foil flag** (issue #452): the
+/// held item's glint second pass is gated on it, so the source has to carry it
+/// from the hotbar record that already computed it (`app/redraw.rs` builds it
+/// from `stack_has_foil`), rather than re-derive it here where there is no stack.
+///
 /// Unset — the default, the offline demo, every headless test that does not opt in
 /// — yields `None`, which draws the bare arm: exactly vanilla's empty-hand branch
 /// and exactly the behaviour before this existed.
 #[derive(Default)]
 pub struct MainHandSource(
     #[allow(clippy::type_complexity)]
-    pub(super) Option<Box<dyn Fn() -> Option<lodestone_assets::ResourceLocation> + Send + Sync>>,
+    pub(super)
+    Option<Box<dyn Fn() -> Option<(lodestone_assets::ResourceLocation, bool)> + Send + Sync>>,
 );
 
 impl MainHandSource {
     #[must_use]
-    pub(super) fn value(&self) -> Option<lodestone_assets::ResourceLocation> {
+    pub(super) fn value(&self) -> Option<(lodestone_assets::ResourceLocation, bool)> {
         self.0.as_ref().and_then(|f| f())
     }
 }

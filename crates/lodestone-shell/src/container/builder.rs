@@ -30,7 +30,10 @@ fn icon_record(stack: &lodestone_game::item::ItemStack) -> Option<HotbarSlot> {
         count: stack.count().max(0) as u32,
         damage,
         max_damage,
-        enchanted: false,
+        // The container surfaces share the hotbar's foil predicate — a stacked
+        // enchanted item in a chest, furnace or recipe panel must glint exactly
+        // like the one in the hotbar (issue #452).
+        enchanted: item_icon::stack_has_foil(stack),
     })
 }
 
