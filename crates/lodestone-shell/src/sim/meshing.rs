@@ -259,6 +259,15 @@ impl Sim {
     /// would reproduce the bug with a fix-shaped commit in front of it.
     pub(crate) fn on_column_unloaded(&mut self, cx: i32, cz: i32) {
         self.terrain_mut(|terrain| terrain.forget_column(cx, cz));
+        // The mirror of `on_column_arrived`'s second line, and #479's second
+        // half. An arrival re-drives the neighbours that baked their seam against
+        // air; a departure has to re-drive the neighbours that are still *waiting*
+        // on this column, because it is never coming back and a plain dirty signal
+        // would defer them again and drop the result. See
+        // `TerrainMesh::forced_columns`.
+        self.terrain_and_world(|store, terrain| {
+            terrain.force_neighbours_of_departed(store, cx, cz)
+        });
     }
 
     /// Settle any placement prediction the server has just overwritten.

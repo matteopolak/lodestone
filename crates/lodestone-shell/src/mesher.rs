@@ -1512,6 +1512,56 @@ pub struct TerrainMesh {
     /// cross-chunk AO stays wrong. Re-meshing the eight eagerly on every arrival
     /// would be 9× the work, so they coalesce here and drain on a budget.
     pub dirty_columns: BTreeSet<(i32, i32)>,
+    /// Columns that must be meshed **even if a horizontal neighbour is missing**,
+    /// because a neighbour is missing for a reason that will never resolve: it
+    /// left the tracking view.
+    ///
+    /// Issue #479's second half, and the one that survives any amount of CPU.
+    /// [`SnapshotOutcome::Deferred`] means "a neighbour column has not arrived
+    /// *yet*", and [`Self::route`] drops a deferred section that has never
+    /// reached the GPU, relying on [`Self::mark_neighbours_dirty`] to re-drive it
+    /// when the missing column lands. For a column on the **trailing** edge of the
+    /// view the missing column never lands — it already came and went — so the
+    /// deferral is permanent and nothing ever re-queues it.
+    ///
+    /// Whether that happens is a race between the heal budget and the player's
+    /// speed, which is why it presents as "chunks stop drawing the further you
+    /// go" and why it worsens with frame rate: a column that the 4-per-frame
+    /// [`DIRTY_COLUMN_BUDGET`] reaches while the column behind it is still loaded
+    /// gets uploaded and is thereafter exempt (the `uploaded_sections` clause);
+    /// one it reaches later is dropped **forever**. Measured with counts and no
+    /// timing at all in `standing_still_drains_the_heal_backlog_and_no_column_is_lost`:
+    /// walking twelve steps at the real budget left the whole trailing column
+    /// strip missing, and standing still afterwards never brought it back.
+    ///
+    /// So [`Self::forget_column`] enqueues the departing column's loaded
+    /// neighbours here, where "missing" is known *at that moment* to mean gone
+    /// rather than pending. Forcing can bake one seam against air if some *other*
+    /// neighbour is genuinely still in flight, and that is the right trade: a
+    /// wrong seam is corrected by the ordinary arrival signal, whereas invisible
+    /// terrain you can still walk into is not corrected by anything.
+    ///
+    /// Coalesced and budgeted exactly like `dirty_columns` rather than re-meshed
+    /// eagerly — an unload sweep names up to eight columns and a single step of
+    /// the player unloads a whole strip.
+    pub forced_columns: BTreeSet<(i32, i32)>,
+    /// Columns known to have **left** the view, as opposed to not having arrived
+    /// yet. The two are indistinguishable in the store — both are simply absent —
+    /// and telling them apart is what makes [`Self::forced_columns`] safe.
+    ///
+    /// Without this the force is too broad, and the harness caught it: forcing
+    /// every loaded neighbour of a departing column also drags in the
+    /// **outermost** ring of the view, whose missing neighbour is missing because
+    /// it is beyond the view entirely. That ring is exactly the buffer
+    /// singleplayer streams `render_distance + 1` to keep *off* screen
+    /// (`app/session.rs`), because a section meshed without its outer neighbour
+    /// bakes its seam against air — the "blocky water far away" report. So a
+    /// forced column is only really forced when **every** neighbour it still
+    /// lacks is in this set.
+    ///
+    /// Bounded, not a second leak: an entry is dropped as soon as it has no
+    /// loaded neighbour left, at which point it cannot affect any decision.
+    pub departed: HashSet<(i32, i32)>,
     /// Sections whose geometry vanished (all-air after an edit, or a column that
     /// unloaded) and must be dropped from the GPU. Drained by the app each frame.
     pub pending_removals: Vec<SectionKey>,
@@ -1565,6 +1615,8 @@ impl TerrainMesh {
             column_source: scheduler.column_source(),
             scheduler,
             dirty_columns: BTreeSet::new(),
+            forced_columns: BTreeSet::new(),
+            departed: HashSet::new(),
             pending_removals: Vec::new(),
             uploaded_sections: HashSet::new(),
             drops: 0,
@@ -1588,7 +1640,14 @@ impl TerrainMesh {
     /// waits — and it cannot wait forever, because [`Self::mark_neighbours_dirty`]
     /// re-drives it the moment the missing column lands.
     /// [`Self::uploaded_sections`] is our `!= UNCOMPILED`.
-    fn route(&mut self, key: SectionKey, outcome: SnapshotOutcome) -> bool {
+    ///
+    /// `force` is the third way out, added with [`Self::forced_columns`]: the
+    /// caller knows a missing neighbour is missing because it *left the view*, so
+    /// waiting for it is waiting forever. Vanilla does not need this clause
+    /// because its client tracks the view rectangle and can tell "outside the
+    /// view" from "inside it and not here yet"; we learn the same fact from the
+    /// unload signal instead.
+    fn route(&mut self, key: SectionKey, outcome: SnapshotOutcome, force: bool) -> bool {
         match outcome {
             SnapshotOutcome::Ready(snap) => {
                 self.scheduler.submit(snap);
@@ -1601,7 +1660,7 @@ impl TerrainMesh {
                 false
             }
             SnapshotOutcome::Deferred(snap) => {
-                if self.uploaded_sections.contains(&key) {
+                if force || self.uploaded_sections.contains(&key) {
                     self.scheduler.submit(snap);
                     true
                 } else {
@@ -1627,6 +1686,24 @@ impl TerrainMesh {
     /// *loaded* column that yields no geometry at all is the "invisible blocks"
     /// defect class and is counted and logged loudly.
     pub fn mesh_column(&mut self, store: &ChunkWorld, cx: i32, cz: i32) {
+        self.mesh_column_inner(store, cx, cz, false);
+    }
+
+    /// [`Self::mesh_column`], but a section whose neighbourhood is incomplete is
+    /// submitted anyway instead of held back.
+    ///
+    /// For columns drained from [`Self::forced_columns`] — those whose missing
+    /// neighbour has *left the view* and is therefore never arriving. See that
+    /// field's doc for why waiting on it is waiting forever.
+    /// Forces only when [`Self::all_absent_neighbours_departed`] agrees. A column
+    /// still genuinely waiting on an arrival falls back to the ordinary path,
+    /// which is what keeps the outermost buffer ring off screen.
+    pub fn mesh_column_forced(&mut self, store: &ChunkWorld, cx: i32, cz: i32) {
+        let force = self.all_absent_neighbours_departed(store, cx, cz);
+        self.mesh_column_inner(store, cx, cz, force);
+    }
+
+    fn mesh_column_inner(&mut self, store: &ChunkWorld, cx: i32, cz: i32, force: bool) {
         if !self.policy.id_spaces_agree {
             self.drops += 1;
             tracing::warn!(
@@ -1677,7 +1754,7 @@ impl TerrainMesh {
         let mut deferred_any = false;
         for (key, outcome) in jobs {
             deferred_any |= matches!(outcome, SnapshotOutcome::Deferred(_));
-            meshed_any |= self.route(key, outcome);
+            meshed_any |= self.route(key, outcome, force);
         }
         // A column held back for its neighbourhood is not a drop: it is the
         // frontier of a streaming load doing exactly what it should, and counting
@@ -1709,7 +1786,7 @@ impl TerrainMesh {
             )
             .with_biome_names(Arc::clone(&self.biome_names))
         };
-        self.route(key, outcome);
+        self.route(key, outcome, false);
     }
 
     /// Queue the eight **loaded** horizontal neighbours of `(cx, cz)` for a
@@ -1762,17 +1839,21 @@ impl TerrainMesh {
     /// `contains_column` cannot enumerate what to drop. The uploaded set is the
     /// only record of what this column put on the GPU.
     ///
-    /// Neighbours are **not** marked dirty. The eight columns around this one
-    /// now have a hole across one seam, but they are already on screen, so
-    /// [`Self::route`]'s `uploaded_sections` clause rebuilds them on their next
-    /// ordinary dirty signal instead of blinking them out — the same rule
-    /// vanilla's `sectionMesh.get() != UNCOMPILED` clause encodes. Dirtying
-    /// them here would re-mesh the whole trailing edge of the view on every
-    /// step the player takes.
+    /// The loaded neighbours go into [`Self::forced_columns`], **not**
+    /// [`Self::dirty_columns`], and that distinction is the whole of #479's second
+    /// half. An ordinary dirty signal re-snapshots them and then *drops the result*
+    /// unless they already reached the GPU, because a missing neighbour reads as
+    /// "not arrived yet". Here we know better: this very call is the neighbour
+    /// leaving. A column on the trailing edge of the view that has never been
+    /// uploaded would otherwise stay deferred forever, since the column it waits
+    /// on already came and went and nothing re-queues it — measured as a whole
+    /// missing column strip that standing still never recovers. See
+    /// [`Self::forced_columns`].
     pub fn forget_column(&mut self, cx: i32, cz: i32) {
-        // A queued boundary heal for a column that has left is budget spent on
-        // a `mesh_column` that will early-return anyway.
+        // A queued heal for a column that has left is budget spent on a
+        // `mesh_column` that will early-return anyway.
         self.dirty_columns.remove(&(cx, cz));
+        self.forced_columns.remove(&(cx, cz));
         let gone: Vec<SectionKey> = self
             .uploaded_sections
             .iter()
@@ -1783,6 +1864,58 @@ impl TerrainMesh {
             self.uploaded_sections.remove(&key);
             self.pending_removals.push(key);
         }
+    }
+
+    /// Queue the loaded horizontal neighbours of a **departing** column for a
+    /// forced re-mesh. Split from [`Self::forget_column`] because it needs the
+    /// store and that one deliberately does not take it — see its doc.
+    pub fn force_neighbours_of_departed(&mut self, store: &ChunkWorld, cx: i32, cz: i32) {
+        self.departed.insert((cx, cz));
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let (nx, nz) = (cx + dx, cz + dz);
+                if store.contains_column(nx, nz) {
+                    self.forced_columns.insert((nx, nz));
+                }
+            }
+        }
+        // Keep `departed` bounded: an entry with no loaded neighbour can no
+        // longer be the reason any column is forced, so it is pure growth.
+        self.departed
+            .retain(|&(dx, dz)| Self::has_loaded_neighbour(store, dx, dz));
+    }
+
+    fn has_loaded_neighbour(store: &ChunkWorld, cx: i32, cz: i32) -> bool {
+        (-1..=1).any(|dx| {
+            (-1..=1).any(|dz| {
+                (dx, dz) != (0, 0) && store.contains_column(cx + dx, cz + dz)
+            })
+        })
+    }
+
+    /// Whether every horizontal neighbour `(cx, cz)` is missing has been
+    /// confirmed to have *left*, rather than merely not arrived yet.
+    ///
+    /// The predicate that keeps the force narrow. `true` means nothing this column
+    /// waits for is ever coming, so holding its geometry back is holding it back
+    /// forever; `false` means it is an ordinary streaming frontier column and the
+    /// existing deferral is right.
+    fn all_absent_neighbours_departed(&self, store: &ChunkWorld, cx: i32, cz: i32) -> bool {
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let n = (cx + dx, cz + dz);
+                if !store.contains_column(n.0, n.1) && !self.departed.contains(&n) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Re-snapshot and re-schedule the section holding `block`, plus any
@@ -1876,6 +2009,8 @@ impl TerrainMesh {
             let _ = self.scheduler.drain_blocking(pending);
         }
         self.dirty_columns.clear();
+        self.forced_columns.clear();
+        self.departed.clear();
         self.drops = 0;
         self.deferred = 0;
         self.pending_removals.extend(self.uploaded_sections.drain());
@@ -1888,7 +2023,20 @@ impl TerrainMesh {
 /// This is the coalescing drain — the thing that stops water growing a falling
 /// wall at every chunk border. It enqueues snapshots onto the worker pool and
 /// returns; it never meshes anything itself.
+/// [`TerrainMesh::forced_columns`] is drained **first, and on its own budget**.
+/// Those columns are waiting on a neighbour that has already left the view, so
+/// unlike an ordinary boundary heal they are not merely stale — they are
+/// invisible until this runs, and a shared budget would put them behind whatever
+/// backlog the ordinary queue happens to hold. That backlog reached 45 columns in
+/// a twelve-step walk, i.e. eleven frames of latency, which is exactly the window
+/// in which the old code lost them for good.
 pub fn heal_dirty_columns(store: Res<ChunkWorld>, mut terrain: ResMut<TerrainMesh>) {
+    for _ in 0..DIRTY_COLUMN_BUDGET {
+        let Some((cx, cz)) = terrain.forced_columns.pop_first() else {
+            break;
+        };
+        terrain.mesh_column_forced(&store, cx, cz);
+    }
     for _ in 0..DIRTY_COLUMN_BUDGET {
         let Some((cx, cz)) = terrain.dirty_columns.pop_first() else {
             return;
@@ -3139,6 +3287,7 @@ mod tests {
                 store.write().unload(ChunkPos::new(cx, cz));
                 if evict {
                     terrain.forget_column(cx, cz);
+                    terrain.force_neighbours_of_departed(&store, cx, cz);
                 }
             }
             live = next;
@@ -3267,6 +3416,149 @@ mod tests {
             resident.len(),
             live.len(),
             visited.len()
+        );
+    }
+
+    /// **Is the mesh *scheduling* path lossy, or only slow?** Walks at the real
+    /// [`DIRTY_COLUMN_BUDGET`] instead of draining the heal queue, then stands
+    /// still.
+    ///
+    /// This is the discriminator between the two explanations that look identical
+    /// from outside the process — a queue that never drains, and workers that are
+    /// merely starved. It answers it with **counts of frames and columns**, never
+    /// a duration: a millisecond figure taken on a shared machine gets attributed
+    /// to the wrong cause, and this repo's record has a 585× instance of exactly
+    /// that.
+    ///
+    /// The isolation is deliberate and is what makes the result mean something:
+    /// mesh workers are drained to completion every frame, i.e. modelled as
+    /// **infinitely fast**. So worker throughput cannot influence the outcome, and
+    /// what is left under test is purely the enqueue/defer/heal *scheduling*. A
+    /// pass therefore says something quite specific: **no column is lost or
+    /// permanently deferred, so the mesh path is not lossy and any real-world
+    /// shortfall is throughput or latency** — which is a worldgen/CPU question,
+    /// not a client scheduling bug. A failure would have said the opposite.
+    #[test]
+    fn standing_still_drains_the_heal_backlog_and_no_column_is_lost() {
+        // One frame per step is deliberately the *worst* case the shell can
+        // present: a column arrives and the heal system gets a single 4-column
+        // budget before the player has moved again. If the backlog is going to
+        // diverge, it diverges here.
+        const FRAMES_PER_STEP: usize = 1;
+
+        let store = ChunkWorld::new(World::new());
+        let mut terrain = streaming_terrain();
+        let mut gpu: HashSet<SectionKey> = HashSet::new();
+        let mut max_backlog = 0usize;
+
+        let mut live = BTreeSet::new();
+        for step in 0..=WALK_STEPS {
+            let next = window(step);
+            for &(cx, cz) in next.difference(&live) {
+                store
+                    .write()
+                    .load(ChunkPos::new(cx, cz), crate::worldgen::generate_column(cx, cz));
+            }
+            for &(cx, cz) in next.difference(&live) {
+                terrain.mesh_column(&store, cx, cz);
+                terrain.mark_neighbours_dirty(&store, cx, cz);
+            }
+            for &(cx, cz) in live.difference(&next) {
+                store.write().unload(ChunkPos::new(cx, cz));
+                terrain.forget_column(cx, cz);
+                terrain.force_neighbours_of_departed(&store, cx, cz);
+            }
+            live = next;
+
+            for _ in 0..FRAMES_PER_STEP {
+                // `heal_dirty_columns`, by hand at its real budget.
+                for _ in 0..DIRTY_COLUMN_BUDGET {
+                    let Some((cx, cz)) = terrain.forced_columns.pop_first() else {
+                        break;
+                    };
+                    terrain.mesh_column_forced(&store, cx, cz);
+                }
+                for _ in 0..DIRTY_COLUMN_BUDGET {
+                    let Some((cx, cz)) = terrain.dirty_columns.pop_first() else {
+                        break;
+                    };
+                    terrain.mesh_column(&store, cx, cz);
+                }
+                for key in terrain.drain_removals() {
+                    gpu.remove(&key);
+                }
+                for meshed in terrain.drain_all_meshes() {
+                    gpu.insert(meshed.key);
+                }
+                max_backlog = max_backlog.max(terrain.dirty_columns.len());
+            }
+        }
+        let backlog_while_walking = terrain.dirty_columns.len();
+
+        // Now stand still. Nothing arrives and nothing unloads; only the heal
+        // budget runs. Bounded so a genuinely stuck queue fails instead of
+        // looping forever.
+        let mut frames_to_drain = 0usize;
+        for frame in 1..=512 {
+            if terrain.dirty_columns.is_empty() && terrain.forced_columns.is_empty() {
+                frames_to_drain = frame - 1;
+                break;
+            }
+            for _ in 0..DIRTY_COLUMN_BUDGET {
+                let Some((cx, cz)) = terrain.forced_columns.pop_first() else {
+                    break;
+                };
+                terrain.mesh_column_forced(&store, cx, cz);
+            }
+            for _ in 0..DIRTY_COLUMN_BUDGET {
+                let Some((cx, cz)) = terrain.dirty_columns.pop_first() else {
+                    break;
+                };
+                terrain.mesh_column(&store, cx, cz);
+            }
+            for key in terrain.drain_removals() {
+                gpu.remove(&key);
+            }
+            for meshed in terrain.drain_all_meshes() {
+                gpu.insert(meshed.key);
+            }
+            frames_to_drain = frame;
+        }
+
+        let resident: BTreeSet<(i32, i32)> = gpu.iter().map(|k| (k.cx, k.cz)).collect();
+        let expected: BTreeSet<(i32, i32)> = ever_interior()
+            .intersection(&window(WALK_STEPS))
+            .copied()
+            .collect();
+        eprintln!(
+            "backlog: max {max_backlog}, {backlog_while_walking} on arrival at the \
+             last step, drained in {frames_to_drain} standing frames; resident {} \
+             of {} expected",
+            resident.len(),
+            expected.len()
+        );
+
+        assert!(
+            terrain.dirty_columns.is_empty() && terrain.forced_columns.is_empty(),
+            "the heal queue never drained while standing still ({} dirty + {} forced \
+             columns left) — that is a genuine queue bug, not starvation",
+            terrain.dirty_columns.len(),
+            terrain.forced_columns.len()
+        );
+        // Not vacuous: there has to have *been* a backlog for draining it to be
+        // evidence of anything.
+        assert!(
+            max_backlog > DIRTY_COLUMN_BUDGET,
+            "the walk never built a backlog past one frame's budget (max \
+             {max_backlog}), so this test did not exercise the queue it claims to"
+        );
+        assert_eq!(
+            resident, expected,
+            "a column was lost or permanently deferred: {} resident vs {} expected. \
+             With mesh workers modelled as infinitely fast, that could only be the \
+             scheduling path itself.",
+            resident.len(),
+            expected.len()
         );
     }
 }
