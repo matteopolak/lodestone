@@ -203,17 +203,42 @@ frame, respectively.
 Per `CLAUDE.md`'s "re-verify before routing around 'X doesn't exist yet'"
 rule, checked against the actual code rather than a prior comment's summary:
 
-- **#85 (worldgen stage-cost split) is *not* fully done**, despite a prior
-  epic-comment claim that it was "verified done, same commit". Read
-  `OverworldGenerator::column_timed` (`crates/lodestone-worldgen/src/
-  overworld.rs`): its four timed boundaries are shape (incl. aquifer),
-  fluid+heightmap (actually biome), surface, and **intern — which silently
-  folds in `carve_stage` and `ore_stage` too**. The issue explicitly asks for
-  carvers/aquifer/ore features broken out on their own; they are not. Fixing
-  that needs a `StageTimes` field change in `lodestone-worldgen/src/
-  overworld.rs`, which is `crates/*/src/` (off-limits to this pass) and a
-  crate currently held by a concurrent agent doing perf work there — flagged
-  on the issue rather than attempted.
+- **#85 (worldgen stage-cost split) is now done, and closing it found something
+  worse than the missing fields.** The four-bucket `StageTimes` is now ten:
+  aquifer / shape / biome / surface / materialize / carve / ore / vegetation /
+  top_layer / intern. Two of the old four were misnamed — `fluid_heightmap` was
+  the biome stage (the heightmap is computed inside the shape window) and
+  `intern` was materialize + carve + ore + vegetation + interning, so the
+  persisted `stage_intern_pct` attributed carvers and ores to "interning".
+
+  The larger finding is that **the bench was measuring a pipeline with no
+  carvers, ores or vegetation in it at all.** `Resolver` has nine methods;
+  `benches/generation.rs`'s `FsResolver` implemented the two required ones and
+  inherited `Value::Null` for `biome_document`, `configured_carver`,
+  `configured_feature`, `placed_feature` and `block_tag`, which resolve to empty
+  carver lists and empty feature steps — every one of those stages an early
+  return. `bench_ore_composition_sweep` meanwhile asserted in its own doc comment
+  that it "actually exercises `OverworldGenerator::ore_stage`" and warned that a
+  resolver with no ore data would make it "an early-return no-op", while citing a
+  `biome/plains.json` its resolver never opened. `CLAUDE.md`'s **world species**,
+  in a file that names the trap.
+
+  With the fixture actually resolved (`make_full_generator`), the composed split
+  over 9 columns at seed 42, release, is **vegetation 61.8% / ore 18.1% / shape
+  12.8%** / surface 2.2% / aquifer 2.2% / materialize 2.1% / carve 0.95%. The old
+  "noise 40% / surface 51%" figure describes the *shape-only* generator, which is
+  kept as `make_shape_only_generator` for the raw noise-router throughput numbers
+  and now says so at every call site.
+
+  The gate that stops this recurring is a **floor, not a ceiling**: seven stages
+  must each measure >1000µs across the patch, so a re-inherited `Value::Null`
+  fails loudly instead of producing a plausible percentage table for a pipeline
+  with stages missing. `biome` and `top_layer` are excluded for stated reasons
+  (single fixed biome; no `block_freeze_facts` fixture), printed in the output.
+  `column_timed` is also asserted equal to `column()` block-for-block over a
+  **fresh generator per arm** — the 512-entry memo cache would otherwise have the
+  second arm agree with itself — with its own control proving the comparison can
+  see a difference at all.
 - **#93/#94/#95 are satisfied by `light_propagation.rs`**, which already:
   records the same functions #93 names into `support::record` (substance, not
   the literal `tests/memory.rs` conversion #93's acceptance criterion
@@ -232,10 +257,74 @@ rule, checked against the actual code rather than a prior comment's summary:
   mismatch — the RNG-determinism break #86 is actually gated on, not merely a
   speed number.
 
+### The render/entity batch (#87, #90, #91, #92, #97, #99, #106, #128, #151, #160)
+
+Three new bench sites — `lodestone-render/benches/{meshing,render_submit}.rs`,
+`lodestone-world/benches/session_rss.rs`, `lodestone-shell/benches/entity_tick.rs`
+— all CPU-only except one adapter-gated occupancy bench.
+
+**The design rule this batch settled: prefer counts, and say so when you can't.**
+Measured on this machine, two runs of the *identical* release binary minutes
+apart: `mesh_simple` 202µs then 472µs, `mesh_models` 62µs then 125µs, a cold
+21×21 build 2.38s then 4.74s. A 2.3× spread from concurrent load alone — while
+every count (256 quads, 63 sections, the 14-vs-1024 merge control) was identical
+across both runs. So:
+
+| issue | gate | shape |
+|---|---|---|
+| #90/#91 | greedy ≤ simple quads, uniform-surface merge control, culling-ran check | count |
+| #92 | job count for one arriving column identical in a 9×9 and a 21×21 world | count |
+| #106 | 3 batches and 3 instance buffers at n = 10…5000 | count |
+| #128 | draw-list sizes; `regions.len() == drawable`, `visible == drawn` | count |
+| #151 | healthy churn growth vs a deliberate-leak control | count (bytes) |
+| #160 | `live_allocations == resident_len()`, `used == 0` after unload | count |
+| #87/#97/#99/#133 | — | duration, recorded baseline only |
+
+**Which mesher is which** (#90 vs #91 are different meshers and a bench aimed at
+the wrong one measures nothing): `--headless`/demo → `mesh_simple`, live terrain →
+`mesh_models`, decided at `crates/lodestone-shell/src/mesher.rs:1349`
+(`match classifier.models()`). The shell never calls `mesh_greedy`.
+**#91's premise is wrong**: `tests/world_mesher_bench.rs` does *not* exercise
+`mesh_models` — it passes `greedy = true` into `build_batch` and lands in
+`mesh_greedy` (`src/mesher.rs:303`).
+
+**#92's premise needed correcting too.** It asks to assert the remesh does not
+touch interior sections; `dirty_jobs` deliberately does not have that property
+(its own doc at `src/mesher.rs:155` says callers re-mesh whatever loaded sections
+fall in the 9 columns). Asserting it would report a defect where there is a
+design choice, so the gate is the count-identity above instead.
+
+**Still open, with the seams named.** Bind-group binds and `write_buffer` calls
+are counted **nowhere** (179 `set_bind_group` sites, no wrapper, no `RenderStats`
+field), so #128's bind-group half needs `RenderStats::bind_group_binds` /
+`buffer_writes` in `crates/lodestone-shell/src/gpu/`. Texture-atlas occupancy
+(#160's other half) has no accessor at all — `AtlasStats` reports sprite
+*population*, `GpuAtlas` only width/height — so it needs a `used_area` /
+`slot_occupancy` method on `Atlas` or `GpuAtlas`. **#133 is not built**:
+`RenderState::render_inner` is private (`gpu/frame.rs:147`) and
+`MODEL_ORIGIN_ARENA_SLOTS` is `pub(super)` (`gpu/terrain.rs:62`). Its four public
+wrappers (`render_with_crack_and_effects`, …) and `RenderState::new` *are* public
+and shell tests already stand one up on a headless adapter, so the practical
+route is a `lodestone-shell` bench asserting `RenderStats::draw_calls ==
+sections_drawn` at two very different section counts — a count gate for the #75
+shape — with submit time recorded as a provisional baseline.
+
+**#97's `LockHolds` axis is deliberately absent rather than faked.** Driving
+`world.run_schedule(GameTick)` directly involves no guard, so a
+`LockHolds::snapshot()` there reads zero holds and a gate on it would be green,
+plausible and measuring nothing. That axis needs
+`hold_write(&handle, |w| w.run_schedule(GameTick))` against a real `EcsHandle`,
+which measures lock contention rather than per-system compute.
+
+**#99 names a function that no longer exists.** `fold_entity_snapshots` was
+deleted; the live replacement is `fold_entities`. The docs still referencing it
+(`docs/world-unification.md`, `docs/entity-components.md`) are stale.
+
 ## How to change it
 
 - **Add a bench to a crate the harness already covers** (`lodestone-worldgen`,
-  `lodestone-v770`, `lodestone-world`, `lodestone-entity`, `lodestone-physics`):
+  `lodestone-v770`, `lodestone-world`, `lodestone-entity`, `lodestone-physics`,
+  `lodestone-render`, `lodestone-shell`):
   add a `.rs` file
   under that crate's `benches/`, add a matching `[[bench]] name = "..."
   harness = false` entry to its `Cargo.toml`, and start the file with `mod
