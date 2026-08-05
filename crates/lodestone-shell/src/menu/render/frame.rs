@@ -150,12 +150,24 @@ pub struct MenuRow {
 /// field — the username is `label`, "Microsoft account" is `detail`, the
 /// "Selected" marker is `trailing`, the head icon is `head` — and duplicating any
 /// of them here is how a row and its draw end up disagreeing.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct AccountEntryView {
-    /// The row's index **in the rendered window**, not in the full account list:
-    /// the frame builder has already applied the scroll offset, so this is what
-    /// [`accounts_row_top`] multiplies and what a click hit-tests onto.
+    /// The row's index in the **full** account list.
+    ///
+    /// **This was the rendered-window index**, because the frame builder used to
+    /// slice `rows[scroll..scroll + shown]` and hand out `0..shown`. It is the
+    /// logical index now, and [`Self::scroll`] carries the offset instead — the
+    /// same shape [`ServerEntryView`] already had, and the change that lets the
+    /// list sit at a position that is not a whole multiple of the row height.
     pub index: usize,
+    /// The list's scroll offset, **in logical pixels**.
+    ///
+    /// Denormalized onto every entry for exactly [`ServerEntryView::scroll`]'s
+    /// reason: [`accounts_row_rect`] is also `app`'s hit-test, so it must resolve a
+    /// row's position from the row alone rather than needing a second plumbing path
+    /// from `AccountsNav` to the draw. It is also the number the scrollbar thumb is
+    /// placed from, so the bar and the rows cannot read different offsets.
+    pub scroll: f32,
     /// Whether the list cursor is on this row — `AccountsNav::highlighted`, which
     /// gets `AbstractSelectionList.extractItem`'s 1 px outline plus black
     /// interior.
@@ -381,6 +393,18 @@ pub struct MenuFrame<'a> {
     /// [`Self::message`], which is a single unwrapped [`TEXT_SCALE`] line and is
     /// suppressed entirely on a `vanilla` frame.
     pub notice: Option<MenuNotice>,
+    /// This screen's scrolling list, if it has one — the generic hook that replaced
+    /// [`super::draw`]'s by-name `server_scroll_list` call.
+    ///
+    /// **Stamped once for every screen** by [`frame_for`] from
+    /// [`super::nav::MenuNav::active_list`], not filled in per-arm, for the reason
+    /// [`Self::gui_scale`] is: a screen that has a list must not also have to
+    /// remember to tell the draw about it. One declaration, two consumers — the
+    /// scrollbar in [`super::draw`] and the wheel arm in `app`.
+    ///
+    /// `None` means "no scrolling list on this screen", which is most of them, and
+    /// the draw then paints no bar at all rather than a full-height stub.
+    pub list: Option<widget::ListSpec>,
 }
 
 /// Decoded favicon mosaics, keyed by the status cache's address key.

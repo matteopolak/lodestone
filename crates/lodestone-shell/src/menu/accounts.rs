@@ -189,8 +189,17 @@ struct State {
     /// — matching the server list's own letter-command buttons, which have
     /// no visual focus state at all today.
     focus: usize,
-    /// First visible logical row index of the scrolling window.
-    scroll: usize,
+    /// The list's scroll offset, in **logical pixels** — `AbstractScrollArea`'s
+    /// `scrollAmount`, exactly as [`super::nav::MenuNav::server_scroll`] carries
+    /// the multiplayer list's.
+    ///
+    /// **Was a `usize` row index**, which is why this screen jumped a whole 36 px
+    /// entry per keyboard step and could not have a continuous scrollbar thumb at
+    /// all: a row counter can only ever land on a multiple of the row height, so
+    /// no work downstream could recover an intermediate position. Every writer now
+    /// goes through [`super::widget::ScrollList`], which owns the clamp and the
+    /// `scrollRate = defaultEntryHeight / 2` notch.
+    scroll: f32,
     save_error: Option<String>,
     sign_in: SignIn,
 }
@@ -252,7 +261,7 @@ impl AccountsNav {
                 metadata: AccountsMetadata::load_from(&path),
                 highlighted: 0,
                 focus: 0,
-                scroll: 0,
+                scroll: 0.0,
                 save_error: None,
                 sign_in: SignIn::Idle,
             }),
@@ -302,10 +311,29 @@ impl AccountsNav {
         self.state.borrow().focus
     }
 
-    /// First visible row of the scrolling window.
+    /// The list's scroll offset in **logical pixels** — see the field's own doc for
+    /// why this is not a row index any more.
     #[must_use]
-    pub fn scroll(&self) -> usize {
+    pub fn scroll(&self) -> f32 {
         self.state.borrow().scroll
+    }
+
+    /// Scroll the list by `notches` of mouse wheel, at a `canvas_height`-tall
+    /// canvas — vanilla's `AbstractScrollArea::mouseScrolled`.
+    ///
+    /// Delegates to [`super::widget::ScrollList::mouse_scrolled`] through
+    /// [`super::render::accounts_list_spec`], the *same* expression the scrollbar
+    /// draw and the keyboard cursor-follow go through, so one notch lands on
+    /// `floor(36 / 2) = 18` px and the thumb cannot disagree with the rows.
+    pub fn scroll_by(&self, notches: f32, canvas_height: f32) {
+        let mut st = self.state.borrow_mut();
+        let Some(mut list) =
+            super::render::accounts_list_spec(list_len(&st), st.scroll).model(canvas_height)
+        else {
+            return;
+        };
+        list.mouse_scrolled(notches);
+        st.scroll = list.scroll();
     }
 
     /// The last save failure, if any.
@@ -351,7 +379,7 @@ impl AccountsNav {
                 st.save_error = st.metadata.save_to(&self.path).err().map(|e| e.to_string());
                 st.highlighted = 0;
                 st.focus = 0;
-                st.scroll = 0;
+                st.scroll = 0.0;
             }
         }
         st.sign_in = next;
@@ -370,10 +398,17 @@ impl AccountsNav {
         if !matches!(st.sign_in, SignIn::Idle) {
             return;
         }
-        let list_len = st.metadata.profiles.len() + 1;
-        let shown = list_len.saturating_sub(st.scroll).min(VISIBLE_ROWS);
-        if rendered_row < shown {
-            let logical = st.scroll + rendered_row;
+        let list_len = list_len(&st);
+        // **`rendered_row` *is* the logical row now, and this mapping is gone rather
+        // than converted.** `accounts_idle_frame` emits every logical row and places
+        // it by pixel offset instead of slicing `rows[scroll..scroll + shown]`, so
+        // there is no window to map back through — which also removes the class of
+        // bug that mapping could have: a `scroll` and a `shown` computed here from a
+        // different canvas than the frame used would have silently aimed the hover one
+        // row off. `render::row_rect` refuses a rect for a row outside the band, so
+        // `menu_row_at` cannot hand us an off-screen row in the first place.
+        if rendered_row < list_len {
+            let logical = rendered_row;
             // **Only `focus`.** `focus` is what draws highlighted;
             // `highlighted` is what Select/Remove act on — vanilla's `hovered`
             // (`AbstractSelectionList.java:41`) and `selected` (`:40`), which are
@@ -393,7 +428,7 @@ impl AccountsNav {
             // remembered rule: `set_hovered` has no path to `selected` at all.
             st.focus = logical;
         } else {
-            let button = rendered_row - shown;
+            let button = rendered_row - list_len;
             if button < BUTTON_COUNT {
                 st.focus = list_len + button;
             }
@@ -587,12 +622,39 @@ fn handle_key_mid_flow(st: &mut State, key: MenuKey) -> AccountsSignal {
     }
 }
 
+/// The logical row count: every account plus the trailing synthetic offline entry,
+/// i.e. `rows().len()` computed without building the `Vec`.
+///
+/// Named rather than inlined because three call sites need it while `state` is
+/// already mutably borrowed, so [`AccountsNav::rows`] is unreachable from them.
+fn list_len(st: &State) -> usize {
+    st.metadata.profiles.len() + 1
+}
+
+/// Keep [`State::highlighted`] inside the scrolled band — vanilla's
+/// `AbstractSelectionList.scrollToEntry` (`:251-261`).
+///
+/// **Delegates to [`super::widget::ScrollList::scroll_to_entry`] rather than
+/// restating the clamp**, which is what makes an arrow press move the minimum
+/// number of *pixels* rather than snapping the window to a whole row. The previous
+/// body was a two-branch row-index clamp against [`VISIBLE_ROWS`]; it is gone
+/// because a row index cannot express an intermediate offset, and keeping it
+/// alongside a pixel field would have meant two writers with different ideas of
+/// what the offset means.
+///
+/// Uses [`crate::config::MIN_SCALED_HEIGHT`] rather than a real canvas for exactly
+/// `MenuNav::scroll_server_to_show`'s reason: a keyboard press has no canvas to
+/// hand, and the smallest supported canvas is the *conservative* choice — it can
+/// only ever under-use a taller one, never scroll a row off-screen.
 fn scroll_to_show(st: &mut State) {
-    if st.highlighted < st.scroll {
-        st.scroll = st.highlighted;
-    } else if st.highlighted >= st.scroll + VISIBLE_ROWS {
-        st.scroll = st.highlighted + 1 - VISIBLE_ROWS;
-    }
+    let Some(mut list) =
+        super::render::accounts_list_spec(list_len(st), st.scroll)
+            .model(crate::config::MIN_SCALED_HEIGHT as f32)
+    else {
+        return;
+    };
+    list.scroll_to_entry(st.highlighted);
+    st.scroll = list.scroll();
 }
 
 fn wrap_next(i: usize, len: usize) -> usize {
@@ -1253,8 +1315,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
+    /// Hover takes a **logical** row index, and the offset it is read against is
+    /// pixels.
+    ///
+    /// This replaces `hover_maps_a_rendered_row_back_through_the_scroll_offset`,
+    /// whose subject no longer exists: `accounts_idle_frame` emits every logical row
+    /// rather than a `rows[scroll..scroll + VISIBLE_ROWS]` slice, so there is no
+    /// window for `hover` to map back through. Deleting the old assertion without
+    /// replacing it would have removed the only check that `hover` and the frame
+    /// agree about what a row index *means*, so the invariant is restated in the new
+    /// terms: hovering row `n` focuses row `n`, whatever the list is scrolled to.
+    ///
+    /// It is asserted on `focus`, not `highlighted` — see
+    /// `hovering_an_account_does_not_change_what_select_acts_on`. The old version of
+    /// this test read `highlighted()` and thereby locked in the reported bug: test
+    /// and code agreed because both came from the same wrong assumption.
     #[test]
-    fn hover_maps_a_rendered_row_back_through_the_scroll_offset() {
+    fn hover_takes_a_logical_row_and_the_offset_is_pixels() {
         let path = temp_path("hover-scroll");
         let mut meta = AccountsMetadata::default();
         for i in 0..8u64 {
@@ -1262,21 +1339,47 @@ mod tests {
         }
         meta.save_to(&path).unwrap();
         let nav = AccountsNav::with_path(path.clone());
-        // 8 accounts + 1 offline = 9 logical rows, VISIBLE_ROWS = 5.
+        // 8 accounts + 1 offline = 9 logical rows; the band at MIN_SCALED_HEIGHT
+        // holds five 36 px rows, so reaching row 7 must have scrolled.
         for _ in 0..7 {
             nav.handle_key(MenuKey::Down);
         }
         assert_eq!(nav.highlighted(), 7);
         let scroll = nav.scroll();
-        assert!(scroll > 0, "highlighting row 7 with only 5 visible must have scrolled");
+        assert!(
+            scroll > 0.0,
+            "highlighting row 7 with five rows of band must have scrolled, got {scroll}"
+        );
+        // A *pixel* offset, so it is expressible in units a row index cannot reach —
+        // and the value is predicted from vanilla's own arithmetic rather than read
+        // off the implementation. `scrollToEntry`'s bottom branch
+        // (`AbstractSelectionList.java:251-261`) solves
+        // `bottom() - row_top(7) - 36 - CONTENT_PADDING = 0`, i.e.
+        // `scroll = row_offset(8) + 2 * CONTENT_PADDING - band`:
+        //
+        //   band   = MIN_SCALED_HEIGHT - ACCOUNTS_FOOTER_H - content_top
+        //          = 240 - 60 - 33                                       = 147
+        //   scroll = 8 * 36 + 2 * 2 - 147                                = 145
+        //
+        // **145 is not a multiple of 36**, which is the whole claim: the old `usize`
+        // field could only ever hold 0, 36, 72, … so this position was unreachable,
+        // and a keyboard step therefore had to jump a whole entry.
+        assert_eq!(
+            scroll, 145.0,
+            "the minimum move that brings row 7 fully into a 147 px band"
+        );
+        assert_ne!(
+            scroll % 36.0,
+            0.0,
+            "a row-index offset could have expressed {scroll}, so this proves nothing"
+        );
+
+        // Hovering row 0 focuses row 0. Under the old window model this call meant
+        // "the topmost row currently drawn", which at this offset was row 3.
         nav.hover(0);
-        // The *mapping* is what this test is about: rendered row 0 is logical row
-        // `scroll`. It is asserted on `focus`, not `highlighted` — see
-        // `hovering_an_account_does_not_change_what_select_acts_on`. This
-        // assertion read `highlighted()` until the hover-vs-selection fix, and in
-        // doing so it locked in the reported bug: the test agreed with the code
-        // because both were written from the same wrong assumption.
-        assert_eq!(nav.focus(), scroll, "rendered row 0 on screen is `scroll` logically");
+        assert_eq!(nav.focus(), 0, "hover takes the logical row, not a window slot");
+        nav.hover(7);
+        assert_eq!(nav.focus(), 7, "and again at the other end of the list");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

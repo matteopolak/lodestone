@@ -540,8 +540,21 @@ impl ApplicationHandler for WindowApp {
             // `RenderTarget::size` and `gui_scale`, unlike keyboard
             // scroll-into-view which uses the canvas-independent window estimate
             // (see `MenuNav::scroll_server_list`'s doc).
+            // **One arm for every menu list, not one per screen.** This used to be
+            // gated on `self.ui.screen() == Screen::ServerList`, which meant `app/`
+            // contained exactly two `MouseWheel` arms — the hotbar's and the
+            // multiplayer list's — and every other list screen ignored the wheel
+            // completely. Not "jumped by a row": did not respond at all. The gate is
+            // now `MenuNav::scroll_active_list`'s own answer, so a screen that
+            // declares a `ListSpec` scrolls here for free and a screen that does not
+            // falls through to the arms below unchanged.
+            // Gated on `owns_frame` — the same predicate the click and hover arms
+            // above use, so "the wheel reaches this screen" and "a click reaches this
+            // screen" cannot drift apart. A screen inside that set with no list is
+            // handled by `scroll_active_list` returning `false`, not by a second
+            // predicate here.
             WindowEvent::MouseWheel { delta, .. }
-                if self.ui.screen() == crate::menu::Screen::ServerList =>
+                if crate::menu::render::owns_frame(self.ui.screen()) =>
             {
                 let dy = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
@@ -552,7 +565,8 @@ impl ApplicationHandler for WindowApp {
                 {
                     let (_, canvas_h) =
                         crate::menu::render::logical_canvas(self.nav.gui_scale(), fb_w, fb_h);
-                    self.nav.scroll_server_list(dy as f32, canvas_h);
+                    self.nav
+                        .scroll_active_list(&self.ui, dy as f32, canvas_h);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {

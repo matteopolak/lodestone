@@ -474,6 +474,12 @@ pub fn frame_for<'a>(
     // setting.
     frame.map(|mut f| {
         f.gui_scale = nav.gui_scale();
+        // Stamped for the same reason and in the same place as `gui_scale`: a screen
+        // that has a scrolling list must not also have to remember to tell the draw
+        // about it. `MenuNav::active_list` is the one place that decides, so the
+        // scrollbar the draw paints and the offset the wheel arm clamps are two
+        // readers of one declaration rather than two declarations that agree today.
+        f.list = nav.active_list(ui);
         f
     })
 }
