@@ -743,6 +743,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   translation layer — the ViaVersion shape, not sixteen parallel simulations). This
   doc settles two questions before fifteen more `crates/protocol/vNNN` crates get
   created:
+- [Runtime recipe registration](./recipe-registration.md) — The plugin-facing door
+  onto the crafting corpus (issue
+  [#148](https://github.com/matteopolak/lodestone/issues/148)) — the
+  `Bukkit.addRecipe` analogue. A plugin registers a shaped/shapeless/cooking recipe
+  from inside its own `Plugin::build`, and that recipe becomes matchable by the
+  crafting-table screen and browsable in the recipe-book panel exactly like one of the
+  1585 vanilla recipes.
 - [Redstone: dust, torches, repeaters, comparators, observers](./redstone.md) — Five
   new modules in `crates/lodestone-server/src/`, all pure query/decision functions
   with no `ChunkColumn` in scope except through a `lookup: Fn(BlockPos) -> String`
