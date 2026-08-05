@@ -40,6 +40,16 @@ pub const ENCHANTMENTS_COMPONENT: &str = "minecraft:enchantments";
 /// (`minecraft:equippable`). Only the slot name is carried; the other nine
 /// fields of vanilla's record are unmodelled.
 pub const EQUIPPABLE_COMPONENT: &str = "minecraft:equippable";
+/// Well-known component identifier for `minecraft:dyed_color`.
+///
+/// Added by issue #143. Before it, this crate defined no key for the component
+/// and [`ItemStack`]'s `From<&lodestone_model::ItemStack>` had no branch for it,
+/// so **the dye was silently dropped at the crate boundary**: armour rendered
+/// dyed (that path reads the *model* stack off `Equipment`) while the same
+/// item's GUI icon did not, because the icon reads the game stack. The value is
+/// the raw wire int, low 24 bits RGB — see
+/// [`lodestone_model::ItemComponents::dyed_color`] for why it is not pre-split.
+pub const DYED_COLOR_COMPONENT: &str = "minecraft:dyed_color";
 
 /// A canonical, version-free component value.
 ///
@@ -313,6 +323,145 @@ impl ItemStack {
     pub fn is_same_item_same_components(a: &ItemStack, b: &ItemStack) -> bool {
         a.item == b.item && a.components == b.components
     }
+
+    // -- Typed component read/write for plugins (issue #143) -----------
+    //
+    // `components_mut` has been public for a long time and had **zero
+    // production callers** — every call site was a test. That is because the
+    // component set is an opaque `BTreeMap<Identifier, ComponentValue>`: to
+    // write one correctly a caller had to know the exact key string *and* the
+    // right `ComponentValue` variant *and* the `Inherited`-is-not-absent rule
+    // for `minecraft:tool`. Getting any of the three wrong produces a component
+    // that reads back as absent, silently.
+    //
+    // These accessors are the typed surface issue #143 asks for — "a typed API,
+    // not raw NBT bytes". They are deliberately *not* a second storage: every
+    // one reads and writes the same `ItemComponents` map, so a plugin writing
+    // through them and a decoder writing through the `From` impl are
+    // indistinguishable downstream.
+
+    /// The stack's custom display name, if the component set carries one.
+    #[must_use]
+    pub fn custom_name(&self) -> Option<&Text> {
+        match self.components.get_str(CUSTOM_NAME_COMPONENT)? {
+            ComponentValue::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// Sets or clears the custom display name.
+    pub fn set_custom_name(&mut self, name: Option<Text>) {
+        self.write_component(CUSTOM_NAME_COMPONENT, name.map(ComponentValue::Text));
+    }
+
+    /// Accumulated durability damage, or `None` when the stack carries no
+    /// `minecraft:damage`.
+    #[must_use]
+    pub fn damage(&self) -> Option<i32> {
+        self.components
+            .get_int(DAMAGE_COMPONENT)
+            .and_then(|v| i32::try_from(v).ok())
+    }
+
+    /// Sets or clears accumulated durability damage.
+    pub fn set_damage(&mut self, damage: Option<i32>) {
+        self.write_component(
+            DAMAGE_COMPONENT,
+            damage.map(|d| ComponentValue::Int(i64::from(d))),
+        );
+    }
+
+    /// The stack's `minecraft:dyed_color`, low 24 bits RGB, or `None` when
+    /// undyed.
+    ///
+    /// Distinct from `Some(0)`, which is a dye that resolves to black —
+    /// vanilla treats that as undyed downstream but the two are different
+    /// states on the wire, and flattening them here would lose the difference
+    /// for a plugin that wants it.
+    #[must_use]
+    pub fn dyed_color(&self) -> Option<u32> {
+        self.components
+            .get_int(DYED_COLOR_COMPONENT)
+            .and_then(|v| u32::try_from(v).ok())
+    }
+
+    /// Sets or clears `minecraft:dyed_color`.
+    pub fn set_dyed_color(&mut self, rgb: Option<u32>) {
+        self.write_component(
+            DYED_COLOR_COMPONENT,
+            rgb.map(|c| ComponentValue::Int(i64::from(c))),
+        );
+    }
+
+    /// The stack's enchantments in wire order, or an empty slice when it has
+    /// none.
+    ///
+    /// This is the read `lodestone_render::glint::has_foil` could not do from
+    /// the shell: that function takes the *model* `ItemComponents`, whose
+    /// `enchantments` is a plain `Vec` field, and the shell's stacks are these.
+    /// `docs/enchantment-glint.md` records the split.
+    #[must_use]
+    pub fn enchantments(&self) -> &[ItemEnchantment] {
+        match self.components.get_str(ENCHANTMENTS_COMPONENT) {
+            Some(ComponentValue::Enchantments(list)) => list,
+            _ => &[],
+        }
+    }
+
+    /// Replaces the stack's enchantments. An empty list **removes** the
+    /// component rather than storing an empty one, matching what the decode
+    /// path does — an empty `minecraft:enchantments` and an absent one are the
+    /// same state, and storing the former would make two otherwise-identical
+    /// stacks refuse to merge.
+    pub fn set_enchantments(&mut self, enchantments: Vec<ItemEnchantment>) {
+        let value = (!enchantments.is_empty()).then_some(ComponentValue::Enchantments(enchantments));
+        self.write_component(ENCHANTMENTS_COMPONENT, value);
+    }
+
+    /// What the stack says about `minecraft:tool`.
+    ///
+    /// An **absent** component reads as [`ToolPatch::Inherited`], which is the
+    /// correct lift: the wire omitting the component and the wire saying
+    /// "inherit" mean the same thing, and it is `Removed` that means
+    /// explicitly bare-handed. Collapsing these the other way is the trap
+    /// `lodestone_model::ToolPatch`'s own docs describe — it makes every real
+    /// pickaxe mine at fist speed.
+    #[must_use]
+    pub fn tool(&self) -> ToolPatch {
+        match self.components.get_str(TOOL_COMPONENT) {
+            Some(ComponentValue::Tool(patch)) => patch.clone(),
+            _ => ToolPatch::Inherited,
+        }
+    }
+
+    /// Sets the `minecraft:tool` patch. [`ToolPatch::Inherited`] **removes** the
+    /// component, for the same reason [`Self::tool`] lifts an absent one to
+    /// `Inherited`.
+    pub fn set_tool(&mut self, patch: ToolPatch) {
+        let value = (!matches!(patch, ToolPatch::Inherited)).then(|| ComponentValue::Tool(patch));
+        self.write_component(TOOL_COMPONENT, value);
+    }
+
+    /// Inserts `value` under `key`, or removes the component when `value` is
+    /// `None`.
+    ///
+    /// One place where the "an unparseable key is a silent no-op" behaviour of
+    /// the underlying map lives, rather than eleven. Every well-known key in
+    /// this module is a valid identifier, so the `Err` arm is unreachable for
+    /// them; it exists so a bad key cannot panic a plugin.
+    fn write_component(&mut self, key: &str, value: Option<ComponentValue>) {
+        let Ok(key) = key.parse::<Identifier>() else {
+            return;
+        };
+        match value {
+            Some(value) => {
+                self.components.insert(key, value);
+            }
+            None => {
+                self.components.remove(&key);
+            }
+        }
+    }
 }
 
 impl From<&lodestone_model::ItemStack> for ItemStack {
@@ -371,6 +520,19 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             components.insert(key, ComponentValue::Tool(stack.components.tool.clone()));
         }
 
+        // Issue #143. Without this branch the dye was dropped at the crate
+        // boundary: `entities.rs` reads `stack.components.dyed_color` off the
+        // *model* stack for the armour layer, so dyed leather armour rendered
+        // correctly on a body while the identical item's GUI icon did not,
+        // because the icon path holds a game stack. `hud/item_icon.rs` even
+        // documented the absence ("that crate defines no `DYED_COLOR_COMPONENT`")
+        // rather than it being an oversight nobody had noticed.
+        if let Some(rgb) = stack.components.dyed_color
+            && let Ok(key) = DYED_COLOR_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::Int(i64::from(rgb)));
+        }
+
         // The three *effective* fields — prototype folded with patch by the
         // version adapter. Unlike the patch-only fields above, these are
         // present for ordinary stacks, and without them armour cannot be
@@ -405,6 +567,76 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             i32::try_from(stack.count).unwrap_or(i32::MAX),
             components,
         )
+    }
+}
+
+impl From<&ItemStack> for lodestone_model::ItemStack {
+    /// Lowers a canonical stack back into the model's wire-shaped stack — the
+    /// direction that did not exist before issue #143.
+    ///
+    /// # Why its absence mattered
+    ///
+    /// There was exactly one game -> model path in the tree,
+    /// `lodestone_shell::sim`'s `tool_mining_item`, and it reconstructed a model
+    /// stack carrying **only** `minecraft:tool`, zeroing every other component.
+    /// Its own doc claimed "the round trip is exact in both directions", which is
+    /// true for `tool` and false for everything else. So a plugin that mutated a
+    /// stack's components had nowhere to send the result: no conversion existed
+    /// to hand it to a renderer keyed on the model type
+    /// (`glint::has_foil`, `armour_layer_tint_with_dye`, `ItemTintContext`) or
+    /// back toward the wire.
+    ///
+    /// # What is and is not recoverable
+    ///
+    /// The five *patch* fields round-trip exactly. Of the rest:
+    ///
+    /// * `has_unmodeled` is **always `false`** here, and that is honest rather
+    ///   than lossy: the flag means "the wire carried a component this build
+    ///   could not decode", which is a property of a decode that this stack is
+    ///   no longer the product of. A plugin-built stack has no undecoded
+    ///   remainder. Note the consequence — a stack that came *off* the wire with
+    ///   unmodelled components and is round-tripped through here loses the
+    ///   warning, because the forward conversion never carried it in the first
+    ///   place (see that impl's doc).
+    /// * `max_stack_size` / `max_damage` / `equippable` are the *effective*
+    ///   fields, and they do round-trip, because the forward conversion stores
+    ///   them. They are prototype-derived rather than patch-derived, so a
+    ///   consumer must not treat their presence here as "the wire said so".
+    fn from(stack: &ItemStack) -> Self {
+        let components = lodestone_model::ItemComponents {
+            custom_name: stack.custom_name().cloned(),
+            damage: stack.damage().and_then(|d| u32::try_from(d).ok()),
+            enchantments: stack.enchantments().to_vec(),
+            dyed_color: stack.dyed_color(),
+            tool: stack.tool(),
+            max_stack_size: stack
+                .components
+                .get_int(MAX_STACK_SIZE_COMPONENT)
+                .and_then(|v| u32::try_from(v).ok()),
+            max_damage: stack
+                .components
+                .get_int(MAX_DAMAGE_COMPONENT)
+                .and_then(|v| u32::try_from(v).ok()),
+            // Read from the component map by *name*, not through
+            // `crate::container::equippable_slot` — that returns this crate's own
+            // `container::EquipmentSlot`, a **different type** from
+            // `lodestone_model::EquipmentSlot` with the same name and the same
+            // variants. (Yet another instance of the duplication class issue #143
+            // is about; the compiler caught this one.)
+            equippable: match stack.components.get_str(EQUIPPABLE_COMPONENT) {
+                Some(ComponentValue::Str(name)) => {
+                    lodestone_model::EquipmentSlot::from_name(name)
+                }
+                _ => None,
+            },
+            // See the doc above: not lossy, out of scope.
+            has_unmodeled: false,
+        };
+        Self {
+            item: stack.item.clone(),
+            count: u32::try_from(stack.count).unwrap_or(0),
+            components,
+        }
     }
 }
 
@@ -683,5 +915,184 @@ mod tests {
         };
         let name = styled_hover_name(&stack, &translate);
         assert!(!name.contains('\u{a7}'), "no format codes expected: {name}");
+    }
+
+    // -- Issue #143: the component read/write seam ---------------------
+
+    /// The bug the `dyed_color` branch fixes, pinned. Before it, a dyed model
+    /// stack converted to a game stack with **no** dye component at all, so the
+    /// GUI icon path could not see it while the armour path (which reads the
+    /// model stack) could.
+    #[test]
+    fn dyed_color_survives_the_model_to_game_conversion() {
+        let model = lodestone_model::ItemStack {
+            item: id("minecraft:leather_chestplate"),
+            count: 1,
+            components: ModelItemComponents {
+                dyed_color: Some(0x00_A0_40_20),
+                ..ModelItemComponents::default()
+            },
+        };
+        let game = ItemStack::from(&model);
+        assert_eq!(
+            game.dyed_color(),
+            Some(0x00_A0_40_20),
+            "the dye must cross the crate boundary"
+        );
+        assert!(
+            game.components().get_str(DYED_COLOR_COMPONENT).is_some(),
+            "and must be stored under the canonical key, not a private one"
+        );
+    }
+
+    /// The control for the above: an *undyed* leather item gets no dye
+    /// component, so the assertion above is measuring the dye rather than a
+    /// component that is always present.
+    #[test]
+    fn control_an_undyed_item_gains_no_dye_component() {
+        let model = lodestone_model::ItemStack::new(id("minecraft:leather_chestplate"), 1);
+        let game = ItemStack::from(&model);
+        assert_eq!(game.dyed_color(), None);
+        assert!(game.components().get_str(DYED_COLOR_COMPONENT).is_none());
+    }
+
+    /// The round trip that had no reverse leg before this issue.
+    ///
+    /// Deliberately populates every modelled component at once — a per-field
+    /// test would pass while the whole-struct lowering dropped a neighbour, which
+    /// is precisely how `dyed_color` went missing in the forward direction.
+    #[test]
+    fn every_modelled_component_survives_a_game_model_round_trip() {
+        let tool = ItemTool::new(
+            vec![ToolRule::new(
+                ToolBlocks::Tag(id("minecraft:mineable/pickaxe")),
+                Some(8.0),
+                Some(true),
+            )],
+            1.0,
+            1,
+            true,
+        );
+        let original = lodestone_model::ItemStack {
+            item: id("minecraft:diamond_pickaxe"),
+            count: 3,
+            components: ModelItemComponents {
+                custom_name: Some(Text::literal("Excalibur")),
+                damage: Some(37),
+                enchantments: vec![ItemEnchantment { id: 12, level: 4 }],
+                dyed_color: Some(0x00_11_22_33),
+                tool: ToolPatch::Set(tool),
+                max_stack_size: Some(1),
+                max_damage: Some(1561),
+                equippable: Some(lodestone_model::EquipmentSlot::Head),
+                has_unmodeled: false,
+            },
+        };
+
+        let game = ItemStack::from(&original);
+        let back = lodestone_model::ItemStack::from(&game);
+
+        assert_eq!(back, original, "the round trip must be exact");
+    }
+
+    /// A plugin's typed writes land in the same component map the decoder writes,
+    /// so they are indistinguishable downstream — the property that makes the
+    /// write half of #143 real rather than a parallel store.
+    #[test]
+    fn a_plugin_write_is_indistinguishable_from_a_decoded_component() {
+        let decoded = ItemStack::from(&lodestone_model::ItemStack {
+            item: id("minecraft:leather_boots"),
+            count: 1,
+            components: ModelItemComponents {
+                dyed_color: Some(0x00_DE_AD_BE),
+                custom_name: Some(Text::literal("Swift")),
+                ..ModelItemComponents::default()
+            },
+        });
+
+        let mut built = ItemStack::new(id("minecraft:leather_boots"), 1);
+        built.set_dyed_color(Some(0x00_DE_AD_BE));
+        built.set_custom_name(Some(Text::literal("Swift")));
+
+        assert_eq!(
+            built, decoded,
+            "a plugin-built stack must compare equal to the decoded one"
+        );
+        // And therefore stack with it, which is the observable consequence.
+        assert!(ItemStack::is_same_item_same_components(&built, &decoded));
+    }
+
+    /// Clearing a component removes it rather than storing a zero, so a cleared
+    /// stack merges with one that never had the component.
+    #[test]
+    fn clearing_a_component_removes_it_rather_than_zeroing_it() {
+        let mut stack = ItemStack::new(id("minecraft:leather_boots"), 1);
+        stack.set_dyed_color(Some(0x00_FF_00_00));
+        stack.set_custom_name(Some(Text::literal("temp")));
+        stack.set_enchantments(vec![ItemEnchantment { id: 22, level: 1 }]);
+        assert_eq!(stack.components().len(), 3);
+
+        stack.set_dyed_color(None);
+        stack.set_custom_name(None);
+        stack.set_enchantments(Vec::new());
+
+        assert!(
+            stack.components().is_empty(),
+            "left {:?}",
+            stack.components().iter().collect::<Vec<_>>()
+        );
+        assert_eq!(stack, ItemStack::new(id("minecraft:leather_boots"), 1));
+    }
+
+    /// `Inherited` is not a value: setting it removes the component, and an
+    /// absent component reads back as `Inherited`. Getting this backwards is what
+    /// makes every real pickaxe mine at fist speed.
+    #[test]
+    fn an_absent_tool_component_reads_as_inherited_and_back() {
+        let mut stack = ItemStack::new(id("minecraft:diamond_pickaxe"), 1);
+        assert!(matches!(stack.tool(), ToolPatch::Inherited));
+        assert!(stack.components().is_empty());
+
+        stack.set_tool(ToolPatch::Removed);
+        assert!(matches!(stack.tool(), ToolPatch::Removed));
+        assert_eq!(stack.components().len(), 1);
+
+        stack.set_tool(ToolPatch::Inherited);
+        assert!(
+            stack.components().is_empty(),
+            "Inherited must remove the component, not store a third value"
+        );
+        assert!(matches!(stack.tool(), ToolPatch::Inherited));
+    }
+
+    /// The enchantment read the shell could not previously do — the reason
+    /// `glint::has_foil_enchantments` exists as a sibling of `has_foil`.
+    #[test]
+    fn enchantments_are_readable_off_a_game_stack() {
+        let stack = ItemStack::from(&lodestone_model::ItemStack {
+            item: id("minecraft:diamond_sword"),
+            count: 1,
+            components: ModelItemComponents {
+                enchantments: vec![ItemEnchantment { id: 5, level: 5 }],
+                ..ModelItemComponents::default()
+            },
+        });
+        assert_eq!(stack.enchantments().len(), 1);
+        assert_eq!(stack.enchantments()[0].level, 5);
+        // The model-typed glint predicate is now reachable from a game stack via
+        // the lowering, which is what closes the gap the sibling function papered
+        // over.
+        let lowered = lodestone_model::ItemStack::from(&stack);
+        assert!(!lowered.components.enchantments.is_empty());
+    }
+
+    /// Control for the above: an unenchanted stack reports no enchantments, so
+    /// the assertion is not satisfied by a non-empty default.
+    #[test]
+    fn control_an_unenchanted_stack_has_no_enchantments() {
+        let stack = ItemStack::new(id("minecraft:diamond_sword"), 1);
+        assert!(stack.enchantments().is_empty());
+        let lowered = lodestone_model::ItemStack::from(&stack);
+        assert!(lowered.components.enchantments.is_empty());
     }
 }

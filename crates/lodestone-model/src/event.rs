@@ -590,6 +590,33 @@ impl EquipmentSlot {
         }
     }
 
+    /// The slot for a canonical vanilla name — the exact inverse of
+    /// [`name`](Self::name).
+    ///
+    /// Added for issue #143's game -> model lowering: `lodestone_game`'s opaque
+    /// component map stores `minecraft:equippable` as the slot *name* string
+    /// (there being no typed slot variant in a `ComponentValue`), so recovering a
+    /// typed slot from it needs this direction. `None` for an unrecognised name
+    /// rather than a guess — the same default-deny every other unknown in this
+    /// module takes.
+    ///
+    /// `equipment_slot_names_round_trip` pins this against
+    /// [`ALL`](Self::ALL), so the two matches cannot drift apart.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "mainhand" => Some(Self::MainHand),
+            "offhand" => Some(Self::OffHand),
+            "feet" => Some(Self::Feet),
+            "legs" => Some(Self::Legs),
+            "chest" => Some(Self::Chest),
+            "head" => Some(Self::Head),
+            "body" => Some(Self::Body),
+            "saddle" => Some(Self::Saddle),
+            _ => None,
+        }
+    }
+
     /// Returns this slot's vanilla `EquipmentSlot` ordinal.
     #[must_use]
     pub const fn ordinal(self) -> u8 {
@@ -2471,6 +2498,46 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::PongReceived { .. }
         | ClientEvent::ChatMessageDeleted { .. }
         | ClientEvent::PlayerLookAt { .. } => Route::NOWHERE,
+    }
+}
+
+#[cfg(test)]
+mod equipment_slot_tests {
+    use super::EquipmentSlot;
+
+    /// `from_name` is the inverse of `name` for **every** slot, checked against
+    /// `ALL` rather than against a list restated here.
+    ///
+    /// Two hand-written matches that are supposed to be inverses is exactly the
+    /// shape that drifts, and a spot-check of two or three slots would not see
+    /// it. Iterating `ALL` means adding a variant fails this test until both
+    /// matches learn about it.
+    #[test]
+    fn equipment_slot_names_round_trip() {
+        for slot in EquipmentSlot::ALL {
+            assert_eq!(
+                EquipmentSlot::from_name(slot.name()),
+                Some(slot),
+                "{slot:?} did not survive name -> from_name"
+            );
+        }
+        // The count is asserted too, so a variant added to the enum but not to
+        // `ALL` cannot make the loop above vacuously pass over a short list.
+        assert_eq!(EquipmentSlot::ALL.len(), 8);
+    }
+
+    /// The control: an unrecognised name is `None`, not a default. If this ever
+    /// returns `Some`, the loop above is measuring a function that says yes to
+    /// everything.
+    #[test]
+    fn an_unknown_equipment_slot_name_is_refused() {
+        for name in ["", "chestplate", "CHEST", "minecraft:chest", "hand"] {
+            assert_eq!(
+                EquipmentSlot::from_name(name),
+                None,
+                "{name:?} must not resolve to a slot"
+            );
+        }
     }
 }
 
