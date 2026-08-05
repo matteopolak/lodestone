@@ -15,7 +15,7 @@ pub mod roster;
 
 pub use goal::{Flag, FlagSet, Goal, GoalId, GoalSelector, MobAi};
 pub use roster::{SpeciesContext, goals_for};
-pub use mob::MobController;
+pub use mob::{MobController, ProjectileKind, ProjectileLaunch};
 pub use navigating_mob::{
     BABY_START_AGE, LOVE_TICKS, MAX_SWELL, NavigatingMob, PARENT_AGE_AFTER_BREEDING,
 };

@@ -188,7 +188,101 @@ pub trait MobController {
     fn set_swell_dir(&mut self, dir: i32) {
         let _ = dir;
     }
+
+    /// Records the intent to launch a projectile this tick — vanilla's
+    /// `RangedAttackMob.performRangedAttack`
+    /// (`monster/RangedAttackMob.java:5-7`).
+    ///
+    /// This is an **intent**, exactly like [`attack`](MobController::attack): a
+    /// goal in `lodestone-entity` has no access to a world, an entity id
+    /// allocator or a projectile registry, all of which live in the host. The
+    /// host drains the recorded launches once per tick and turns each into a real
+    /// projectile entity. Defaults to a no-op so a controller that cannot spawn
+    /// projectiles simply drops them, rather than every implementor having to
+    /// say so.
+    fn launch_projectile(&mut self, launch: ProjectileLaunch) {
+        let _ = launch;
+    }
 }
+
+/// Which projectile a [`ProjectileLaunch`] asks the host to spawn.
+///
+/// Deliberately a small closed enum rather than a `ResourceKey`: the goal knows
+/// *what kind of thing it is throwing* from the jar, and mapping that to a
+/// registry name is the host's job (it is the side that owns the registry). This
+/// also keeps `lodestone-entity`'s AI module free of any registry dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectileKind {
+    /// `minecraft:arrow` — skeleton/stray bow shots
+    /// (`monster/skeleton/AbstractSkeleton.java:160-175`).
+    Arrow,
+    /// `minecraft:small_fireball` — blaze
+    /// (`monster/Blaze.java:238-240`).
+    SmallFireball,
+    /// `minecraft:snowball` — snow golem
+    /// (`animal/golem/SnowGolem.java:118-131`).
+    Snowball,
+    /// `minecraft:splash_potion` — witch (`monster/Witch.java:222-251`).
+    SplashPotion,
+    /// `minecraft:trident` — drowned
+    /// (`monster/zombie/Drowned.java:531-534`).
+    Trident,
+}
+
+/// One projectile a goal asked the mob to launch, in world terms.
+///
+/// Carries a resolved `origin` and `velocity` rather than a target, because
+/// vanilla's aiming maths is **per species** — the skeleton adds
+/// `horizontalDistance * 0.2` to the vertical component and shoots at power
+/// `1.6` (`AbstractSkeleton.java:165-171`), the blaze normalises a
+/// triangle-jittered direction and scales by its acceleration power `0.1`
+/// (`Blaze.java:236-240`, `AbstractHurtingProjectile.java:24,180-183`). Resolving
+/// it in the goal keeps that citation next to the numbers it came from, and
+/// leaves the host with nothing to re-derive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProjectileLaunch {
+    /// Which projectile to spawn.
+    pub kind: ProjectileKind,
+    /// Where it appears, in world coordinates.
+    pub origin: Vec3,
+    /// Its initial velocity, in **blocks per tick** — already scaled by the
+    /// species' own power figure.
+    pub velocity: Vec3,
+}
+
+impl ProjectileLaunch {
+    /// A launch aimed along `(dx, dy, dz)` at `power`, mirroring vanilla
+    /// `Projectile.getMovementToShoot` (`projectile/Projectile.java:130-139`):
+    /// normalise the direction, then scale by power.
+    ///
+    /// **The inaccuracy term is not modelled.** Vanilla adds
+    /// `random.triangle(0.0, 0.0172275 * uncertainty)` on each axis before
+    /// scaling (`Projectile.java:133-137`), which for a skeleton is
+    /// `14 - difficulty * 4` (`AbstractSkeleton.java:170`) — a real spread. Ours
+    /// flies dead straight. That is a disclosed simplification, not a
+    /// transcription error: the spread needs vanilla's `RandomSource.triangle`
+    /// distribution to match, and a deterministic velocity is also what lets a
+    /// gate predict the exact value rather than assert a direction.
+    #[must_use]
+    pub fn aimed(kind: ProjectileKind, origin: Vec3, dx: f64, dy: f64, dz: f64, power: f64) -> Self {
+        let len = (dx * dx + dy * dy + dz * dz).sqrt();
+        // `Vec3.normalize` returns ZERO for a zero-length vector rather than
+        // NaN, and vanilla relies on that (`phys/Vec3.java`); reproduce it, or a
+        // mob standing exactly on its target launches a NaN projectile that
+        // poisons every later position it is integrated into.
+        let velocity = if len < 1.0e-4 {
+            Vec3::default()
+        } else {
+            Vec3::new(dx / len * power, dy / len * power, dz / len * power)
+        };
+        Self {
+            kind,
+            origin,
+            velocity,
+        }
+    }
+}
+
 
 /// Squared horizontal+vertical distance between two points.
 #[must_use]
