@@ -311,16 +311,15 @@ impl IntegratedServer {
     /// [`TickClock`] (issue #285), readable through
     /// [`tick_stats`](Self::tick_stats).
     ///
-    /// `world_source` is **ignored, and scheduled for removal** (issue #454).
-    /// It used to be a second, independent instance of whatever [`ChunkSource`]
-    /// `source` also is, backing mob pathing on the argument that a
-    /// deterministic generator produces identical terrain from two instances —
-    /// true, and it cost a **second full generation** of the whole `mob_area`
-    /// at world open, serially, before any task spawned. Mob pathing now reads
-    /// the same [`ChunkStore`] the connection does, so a column is generated
-    /// once per world. The parameter survives only so this signature does not
-    /// change under `lodestone-shell/src/net.rs`, which is a brokered choke
-    /// point here; deleting it is a behaviour-free follow-up (issue #436).
+    /// Mob pathing reads the same [`ChunkStore`] this constructor wraps `source`
+    /// in, so a singleplayer world has exactly **one** terrain source.
+    ///
+    /// This used to take a second, independent `ChunkSource` for the mob world,
+    /// on the argument that a deterministic generator produces identical terrain
+    /// from two instances — true, and it cost a full second generation of the
+    /// whole `mob_area` at world open, serially, before any task spawned. Issue
+    /// #454 pointed seeding at the shared store; issue #436 removed the
+    /// now-unread parameter.
     ///
     /// `mob_area` is the `(cx_range, cz_range)` of chunk columns loaded once
     /// into the sim's `ChunkWorld` snapshot — pick a range that covers
@@ -334,10 +333,9 @@ impl IntegratedServer {
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     #[allow(clippy::too_many_arguments)]
-    pub fn open_in_memory_with_mobs<P, S, M>(
+    pub fn open_in_memory_with_mobs<P, S>(
         protocol: P,
         source: S,
-        world_source: M,
         mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
         mob_center: (i32, i32),
         mob_count: usize,
@@ -346,7 +344,6 @@ impl IntegratedServer {
     where
         P: ServerProtocol + 'static,
         S: ChunkSource + 'static,
-        M: ChunkSource + 'static,
     {
         let (client_end, server_end) = memory_pair();
         let shutdown = Arc::new(Notify::new());
@@ -390,7 +387,7 @@ impl IntegratedServer {
         // this server actually serves rather than to an unwatched second
         // copy. **Since issue #454 mob pathing shares it too**, so this is now
         // the one and only terrain source a singleplayer world has; see the
-        // seeding task below and this function's doc comment on `world_source`.
+        // seeding task below and this function's own doc comment.
         //
         // Issue #289 / `docs/plans/chunk-lifecycle.md` U3 — **this is the
         // singleplayer starvation fix.** [`ChunkStore`] makes a column
@@ -464,14 +461,6 @@ impl IntegratedServer {
                 mob_count,
             );
         });
-
-        // `world_source` is no longer read: mob pathing shares the store above.
-        // The parameter survives only because this constructor's signature is
-        // named by `lodestone-shell/src/net.rs`, a brokered choke point in this
-        // repo — removing it is a separate, behaviour-free patch (issue #436).
-        // Dropping it here rather than binding `_world_source` in the signature
-        // keeps that patch to a pure deletion.
-        drop(world_source);
 
         let conn_signal = shutdown.clone();
         let conn_entities = live_mobs.clone();
@@ -987,12 +976,18 @@ mod tests {
     const VIEW_RADIUS: i32 = 9;
     const MOB_RADIUS: i32 = 3;
 
+    /// One `CountingSource`, because since issue #436 there is only one source to
+    /// pass. That is not a loss of coverage: the *two*-source arrangement is
+    /// still measured, by
+    /// [`control_two_independent_sources_generate_the_tick_area_twice`], which
+    /// builds its own pair deliberately rather than going through this helper —
+    /// so that control still reads 98 with every coordinate at 2, and this helper
+    /// still reads 0.
     fn open_like_the_shell_does(
         calls: &Arc<Mutex<HashMap<(i32, i32), usize>>>,
     ) -> (IntegratedServer, DuplexStream) {
         IntegratedServer::open_in_memory_with_mobs(
             Silent,
-            CountingSource::new(calls),
             CountingSource::new(calls),
             (-MOB_RADIUS..=MOB_RADIUS, -MOB_RADIUS..=MOB_RADIUS),
             (8, 8),
@@ -1233,7 +1228,6 @@ mod tests {
         let started = std::time::Instant::now();
         let (server, _client) = IntegratedServer::open_in_memory_with_mobs(
             Silent,
-            crate::overworld_chunk_source(seed),
             crate::overworld_chunk_source(seed),
             (-MOB_RADIUS..=MOB_RADIUS, -MOB_RADIUS..=MOB_RADIUS),
             (8, 8),

@@ -581,7 +581,6 @@ async fn open_in_memory_with_mobs_advances_the_unified_clock_and_reports_stats()
     let (server, _client_io) = IntegratedServer::open_in_memory_with_mobs(
         FakeProtocol,
         EmptyWorld,
-        EmptyWorld,
         (0..=0, 0..=0),
         (0, 0),
         0, // mob_count: irrelevant to this test, which only checks the clock
