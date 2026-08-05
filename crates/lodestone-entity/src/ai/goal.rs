@@ -132,7 +132,24 @@ pub trait Goal: Send {
     }
 }
 
+/// A stable handle to a goal registered with a [`GoalSelector`].
+///
+/// Returned by [`GoalSelector::add`] and consumed by
+/// [`GoalSelector::remove`]. It exists because vanilla identifies a goal for
+/// removal by *object identity* — `removeGoal(this.bowGoal)`
+/// (`ai/goal/GoalSelector.java:42-44`, `removeAllGoals(goal -> goal == toRemove)`)
+/// — and a `Box<dyn Goal>` moved into the selector has no identity the caller
+/// can still name. A positional index will not do either: [`remove`] shifts
+/// every later index down, so an index captured before a removal silently names
+/// a *different* goal afterwards. The id is allocated per selector and never
+/// reused, so a handle to a removed goal simply stops resolving.
+///
+/// [`remove`]: GoalSelector::remove
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GoalId(u64);
+
 struct WrappedGoal {
+    id: GoalId,
     priority: i32,
     goal: Box<dyn Goal>,
     running: bool,
@@ -166,6 +183,9 @@ pub struct GoalSelector {
     /// Which goal index currently owns each flag (`None` = free).
     locked: [Option<usize>; Flag::COUNT],
     disabled: FlagSet,
+    /// Monotonic allocator for [`GoalId`]s. Never decremented, so an id is
+    /// never reused after a [`remove`](GoalSelector::remove).
+    next_id: u64,
 }
 
 impl std::fmt::Debug for GoalSelector {
@@ -186,12 +206,75 @@ impl GoalSelector {
     }
 
     /// Adds a goal at the given priority (lower = higher precedence).
-    pub fn add(&mut self, priority: i32, goal: Box<dyn Goal>) {
+    ///
+    /// Returns a [`GoalId`] that stays valid until the goal is removed. Callers
+    /// that never remove anything can ignore it.
+    pub fn add(&mut self, priority: i32, goal: Box<dyn Goal>) -> GoalId {
+        let id = GoalId(self.next_id);
+        self.next_id += 1;
         self.goals.push(WrappedGoal {
+            id,
             priority,
             goal,
             running: false,
         });
+        id
+    }
+
+    /// Removes the goal `id` names, stopping it first if it is running.
+    ///
+    /// Returns whether a goal was found. Mirrors vanilla `removeGoal`
+    /// (`ai/goal/GoalSelector.java:42-44`), which delegates to `removeAllGoals`
+    /// (`:32-40`) — note that vanilla stops a *running* match **before**
+    /// dropping it, so the goal's `stop` hook always runs and the flag it held
+    /// is released. That is why this takes a `mob`: our `Goal::stop` needs the
+    /// controller vanilla's parameterless `Goal::stop` reads off the mob field.
+    ///
+    /// This exists for vanilla's runtime goal swap. `AbstractSkeleton`
+    /// removes *both* its melee and bow goals and re-adds exactly one at
+    /// priority 4 every time its weapon changes
+    /// (`monster/skeleton/AbstractSkeleton.java:132-146`,
+    /// `reassessWeaponGoal()`, re-added at `:144`/`:146`), which is
+    /// inexpressible with `add`/`disable` alone: `disable` is per-[`Flag`] and
+    /// would take out every MOVE goal the mob has, not one of them.
+    ///
+    /// Removal shifts every later goal's *index* down by one, so
+    /// [`running_indices`](Self::running_indices) and
+    /// [`is_running`](Self::is_running) describe different goals afterwards.
+    /// Prefer [`is_running_id`](Self::is_running_id) across a removal.
+    pub fn remove(&mut self, id: GoalId, mob: &mut dyn MobController) -> bool {
+        let Some(i) = self.index_of(id) else {
+            return false;
+        };
+        // No-op when the goal was not running; `WrappedGoal::stop` gates on it.
+        self.goals[i].stop(mob);
+        self.goals.remove(i);
+        for slot in &mut self.locked {
+            match *slot {
+                // `stop` above already cleared this via `cleanup`'s invariant
+                // only on the *next* tick, so clear it here too: leaving a
+                // dangling index would hand the flag to whichever goal shifts
+                // into that slot.
+                Some(owner) if owner == i => *slot = None,
+                Some(owner) if owner > i => *slot = Some(owner - 1),
+                _ => {}
+            }
+        }
+        true
+    }
+
+    fn index_of(&self, id: GoalId) -> Option<usize> {
+        self.goals.iter().position(|g| g.id == id)
+    }
+
+    /// Whether the goal `id` names is currently running.
+    ///
+    /// Returns `false` for a removed goal. Index-stable across
+    /// [`remove`](Self::remove), unlike [`is_running`](Self::is_running).
+    #[must_use]
+    pub fn is_running_id(&self, id: GoalId) -> bool {
+        self.index_of(id)
+            .is_some_and(|i| self.goals[i].running)
     }
 
     /// Number of registered goals.
@@ -304,6 +387,43 @@ impl GoalSelector {
 /// target selector first so a freshly-acquired target is visible to movement
 /// goals the same tick. The two never contend for flags — target goals only use
 /// TARGET — so they are independent schedulers, not one queue.
+///
+/// # This type has no production user, deliberately
+///
+/// `lodestone_server::mobs::SimMob` holds **one** [`GoalSelector`], and issue
+/// #225's plan unit A3 resolved that fork in favour of keeping it that way
+/// rather than adopting this type. The reasoning, because "there is an unused
+/// type modelling the thing we do by hand" reads like an island to fix and is
+/// not one:
+///
+/// * **Two selectors and one selector are observationally equivalent here, for a
+///   checkable reason.** A selector's priority number is only ever compared
+///   against another goal contending for *the same flag*
+///   (`can_replace_all_flags` consults `locked` only for the
+///   challenger's own flags). Vanilla's target goals are exactly the goals whose
+///   flag set is `{TARGET}`, and no other goal claims TARGET. So vanilla's two
+///   priority namespaces cannot collide even when flattened into one queue, and
+///   the numbers can be kept **verbatim** from the jar with no offset
+///   convention to remember or get wrong.
+/// * **That is an invariant, not a coincidence**, so it is gated rather than
+///   assumed: [`roster::target_and_goal_namespaces_cannot_contend`] asserts that
+///   every goal in every roster entry has flags either equal to `{TARGET}` (a
+///   target-selector goal) or disjoint from it. The day a goal wants MOVE *and*
+///   TARGET, that gate fails and this type becomes the answer — which is why it
+///   is kept rather than deleted.
+/// * **Tick order is preserved by insertion order.** Vanilla ticks the target
+///   selector first; [`roster::goals_for`] emits every target-selector
+///   registration ahead of every goal-selector one, and `GoalSelector`'s
+///   `update`/`tick_running` both iterate in insertion order, so a target
+///   acquired this tick is still visible to a movement goal in the same tick.
+/// * **The cost of adopting it now is paid in the wrong file.** `SimMob::goals`
+///   and `add_goal` are the only dynamic-dispatch extension point in
+///   `lodestone-server`, inside its most contended file; swapping the field type
+///   would touch every caller for no behavioural change, during an epic whose
+///   named risk is that same file serialising five units.
+///
+/// [`roster::goals_for`]: super::roster::goals_for
+/// [`roster::target_and_goal_namespaces_cannot_contend`]: super::roster
 #[derive(Debug, Default)]
 pub struct MobAi {
     /// Goals that select the attack target (TARGET flag).
@@ -330,6 +450,8 @@ impl MobAi {
 mod tests {
     use super::*;
     use lodestone_model::Vec3;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[derive(Default)]
     struct DummyMob;
@@ -472,5 +594,178 @@ mod tests {
         sel.disable(Flag::Move);
         sel.tick(&mut mob);
         assert!(sel.running_indices().is_empty());
+    }
+
+    // -- `remove` ------------------------------------------------------------
+    //
+    // These gate the capability `AbstractSkeleton.reassessWeaponGoal()`
+    // (`monster/skeleton/AbstractSkeleton.java:132-146`) needs. The weak version
+    // of this test asserts `len()` shrank, which proves nothing about the
+    // *scheduler*: a goal can be gone from the collection and still have been
+    // the last thing to hold a flag, and a goal can be present and never run.
+    // So both gates below observe scheduling, not membership.
+
+    /// A goal whose lifecycle counters live outside the `Box`, so they are still
+    /// readable after the selector has dropped the goal.
+    struct SharedRecorder {
+        flags: FlagSet,
+        started: Arc<AtomicU32>,
+        stopped: Arc<AtomicU32>,
+        ticked: Arc<AtomicU32>,
+    }
+    impl Goal for SharedRecorder {
+        fn flags(&self) -> FlagSet {
+            self.flags
+        }
+        fn can_use(&mut self, _mob: &mut dyn MobController) -> bool {
+            true
+        }
+        fn start(&mut self, _mob: &mut dyn MobController) {
+            self.started.fetch_add(1, Ordering::Relaxed);
+        }
+        fn stop(&mut self, _mob: &mut dyn MobController) {
+            self.stopped.fetch_add(1, Ordering::Relaxed);
+        }
+        fn tick(&mut self, _mob: &mut dyn MobController) {
+            self.ticked.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The load-bearing gate: removal must free the MOVE lock so the goal that
+    /// was *blocked* by the removed one finally starts. Both halves are the same
+    /// scenario; the control simply does not call `remove`, and it must show the
+    /// blocked goal never running. If the control also showed it running, the
+    /// selector was not enforcing the lock and the removal proved nothing.
+    #[test]
+    fn remove_frees_the_flag_so_the_blocked_goal_finally_runs() {
+        let mut mob = DummyMob;
+
+        // Control: priority 1 holds MOVE forever, priority 5 is starved.
+        let mut control = GoalSelector::new();
+        let winner = control.add(1, Box::new(Recorder::new(FlagSet::of(&[Flag::Move]))));
+        let blocked = control.add(5, Box::new(Recorder::new(FlagSet::of(&[Flag::Move]))));
+        for _ in 0..3 {
+            control.tick(&mut mob);
+        }
+        assert!(
+            control.is_running_id(winner),
+            "control precondition: priority 1 must hold MOVE"
+        );
+        assert!(
+            !control.is_running_id(blocked),
+            "control must fail the subject's assertion — a starved priority-5 \
+             MOVE goal that runs anyway means the flag lock is not enforced and \
+             the removal below would prove nothing"
+        );
+
+        // Subject: identical, then remove the holder.
+        let mut sel = GoalSelector::new();
+        let winner = sel.add(1, Box::new(Recorder::new(FlagSet::of(&[Flag::Move]))));
+        let blocked = sel.add(5, Box::new(Recorder::new(FlagSet::of(&[Flag::Move]))));
+        for _ in 0..3 {
+            sel.tick(&mut mob);
+        }
+        assert!(sel.remove(winner, &mut mob), "the holder must be found");
+        sel.tick(&mut mob);
+        assert!(
+            sel.is_running_id(blocked),
+            "removing the MOVE holder must let the priority-5 goal start"
+        );
+        assert!(
+            !sel.is_running_id(winner),
+            "a removed goal's handle must never report running"
+        );
+        assert_eq!(sel.len(), 1);
+    }
+
+    /// The other half: the removed goal must stop *running* — its `tick` is
+    /// never invoked again and its `stop` hook fired exactly once, as vanilla's
+    /// `removeAllGoals` guarantees (`GoalSelector.java:32-40`). Counters live
+    /// outside the box so they survive the drop.
+    #[test]
+    fn remove_stops_the_goal_and_never_ticks_it_again() {
+        let mut mob = DummyMob;
+        let mut sel = GoalSelector::new();
+
+        let gone_ticks = Arc::new(AtomicU32::new(0));
+        let gone_stops = Arc::new(AtomicU32::new(0));
+        let kept_ticks = Arc::new(AtomicU32::new(0));
+        let gone = sel.add(
+            1,
+            Box::new(SharedRecorder {
+                flags: FlagSet::of(&[Flag::Move]),
+                started: Arc::new(AtomicU32::new(0)),
+                stopped: Arc::clone(&gone_stops),
+                ticked: Arc::clone(&gone_ticks),
+            }),
+        );
+        // A LOOK goal, so it never contended with the removed MOVE goal and its
+        // continuing to run is attributable to nothing but the removal being
+        // surgical.
+        let kept = sel.add(
+            1,
+            Box::new(SharedRecorder {
+                flags: FlagSet::of(&[Flag::Look]),
+                started: Arc::new(AtomicU32::new(0)),
+                stopped: Arc::new(AtomicU32::new(0)),
+                ticked: Arc::clone(&kept_ticks),
+            }),
+        );
+
+        for _ in 0..4 {
+            sel.tick(&mut mob);
+        }
+        let gone_at_removal = gone_ticks.load(Ordering::Relaxed);
+        let kept_at_removal = kept_ticks.load(Ordering::Relaxed);
+        assert_eq!(gone_at_removal, 4, "precondition: it really was running");
+        assert_eq!(kept_at_removal, 4);
+
+        assert!(sel.remove(gone, &mut mob));
+        assert_eq!(
+            gone_stops.load(Ordering::Relaxed),
+            1,
+            "removing a running goal must fire its `stop` hook exactly once"
+        );
+
+        for _ in 0..5 {
+            sel.tick(&mut mob);
+        }
+        assert_eq!(
+            gone_ticks.load(Ordering::Relaxed),
+            gone_at_removal,
+            "the removed goal must not be ticked again"
+        );
+        assert_eq!(
+            kept_ticks.load(Ordering::Relaxed),
+            kept_at_removal + 5,
+            "the surviving goal must keep being ticked"
+        );
+        assert!(sel.is_running_id(kept));
+        assert!(!sel.remove(gone, &mut mob), "a second remove is a no-op");
+    }
+
+    /// Removal shifts indices, and the flag table stores indices. A stale
+    /// entry would hand MOVE to whichever goal slid into the removed slot — so
+    /// remove the *first* of three and check the survivors still schedule by
+    /// their own priorities.
+    #[test]
+    fn remove_rewrites_the_flag_table_indices() {
+        let mut mob = DummyMob;
+        let mut sel = GoalSelector::new();
+        let low = sel.add(9, Box::new(Recorder::new(FlagSet::of(&[Flag::Move]))));
+        let high = sel.add(1, Box::new(Recorder::new(FlagSet::of(&[Flag::Move]))));
+        let look = sel.add(1, Box::new(Recorder::new(FlagSet::of(&[Flag::Look]))));
+        sel.tick(&mut mob);
+        assert!(sel.is_running_id(high) && sel.is_running_id(look));
+        assert!(!sel.is_running_id(low));
+
+        // `low` sits at index 0; removing it slides `high` to 0 and `look` to 1.
+        assert!(sel.remove(low, &mut mob));
+        sel.tick(&mut mob);
+        assert!(
+            sel.is_running_id(high),
+            "the MOVE holder must survive an unrelated removal below it"
+        );
+        assert!(sel.is_running_id(look));
     }
 }

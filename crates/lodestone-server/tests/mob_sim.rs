@@ -1371,20 +1371,32 @@ fn a_cow_turns_to_face_a_nearby_player_and_ignores_a_distant_one() {
         Box::new(lodestone_entity::ai::goals::LookAtPlayerGoal::new(6.0, 1.0)),
     );
 
-    // Control first: no players fed at all. The goal must never fire, so the
-    // mob must never be given anything to look at.
+    let player = Vec3::new(3.0, 0.0, 0.0);
+
+    // Control first: no players fed at all. `LookAtPlayerGoal` must never pick a
+    // target, so the mob must never be pointed at where the player *will* be.
+    //
+    // This control used to assert `facing() == None`, and that premise stopped
+    // being true when the per-species roster landed: a cow now gets vanilla's
+    // real goal set, including `RandomLookAroundGoal` at priority 7
+    // (`animal/cow/AbstractCow.java:48`), which idly writes a look *direction*
+    // through `look_toward`. A blanket `None` therefore fails on a cow that is
+    // behaving correctly — the classic false-premise control, where the thing
+    // painting into the observable is not the thing under test. Asserting the
+    // absence of the *player position* specifically keeps the control
+    // discriminating: nothing but `LookAtPlayerGoal` can produce it, and the
+    // positive assertion below is the same equality.
     for _ in 0..20 {
         sim.tick();
+        assert_ne!(
+            sim.get(id).expect("alive").facing(),
+            Some(player),
+            "with no player fed, LookAtPlayerGoal must never pick a target — \
+             this is the state the whole of #441 was stuck in"
+        );
     }
-    assert_eq!(
-        sim.get(id).expect("alive").facing(),
-        None,
-        "with no player fed, LookAtPlayerGoal must never pick a target — this is \
-         the state the whole of #441 was stuck in"
-    );
 
     // Now a player 3 blocks away, inside the 6.0 look distance.
-    let player = Vec3::new(3.0, 0.0, 0.0);
     sim.set_players(vec![empty_handed(player)]);
     let mut looked = false;
     for _ in 0..20 {
@@ -1410,12 +1422,17 @@ fn a_cow_turns_to_face_a_nearby_player_and_ignores_a_distant_one() {
         6,
         Box::new(lodestone_entity::ai::goals::LookAtPlayerGoal::new(6.0, 1.0)),
     );
-    far_sim.set_players(vec![empty_handed(Vec3::new(20.0, 0.0, 0.0))]);
+    let far_player = Vec3::new(20.0, 0.0, 0.0);
+    far_sim.set_players(vec![empty_handed(far_player)]);
     for _ in 0..20 {
         far_sim.tick();
-        assert_eq!(
+        // Same false-premise repair as the first control above: a cow's own
+        // `RandomLookAroundGoal` writes an idle look direction, so `None` is the
+        // wrong absence to assert. The discriminating absence is the *player's
+        // position*, which only `LookAtPlayerGoal` can produce.
+        assert_ne!(
             far_sim.get(far_id).expect("alive").facing(),
-            None,
+            Some(far_player),
             "a player 20 blocks away is outside the 6.0 look distance"
         );
     }

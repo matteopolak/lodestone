@@ -534,6 +534,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   one production `MobController` implementor,
   [`NavigatingMob`](../crates/lodestone-entity/src/ai/navigating_mob.rs) — the same
   "goal exists, effect doesn't" shape #225's triage sweep found for all four defaults.
+- [Mob goal roster](./mob-goal-roster.md) — The per-species goal-set seam: a pure,
+  world-free lookup from a species path (`"cow"`, `"creeper"`) to the list of `Goal`s
+  vanilla's own `registerGoals()` installs for it, at vanilla's own priority numbers.
+  `MobSim::spawn_species` consults it with one loop, so no per-species behaviour data
+  lives in `lodestone-server` any more, and five parallel roster units can each own
+  one file without touching a shared one.
 - [Mob perception: what a goal is allowed to know](./mob-perception.md) — The seam
   that lets a goal ask questions about the world — *am I in water, who hurt me,
   where is the nearest player, is there a threat nearby* — and the server-side feed
