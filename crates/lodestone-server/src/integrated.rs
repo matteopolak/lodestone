@@ -50,6 +50,7 @@ use crate::chunk_store::ChunkStore;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::mobs::ChunkWorld;
 use crate::mobs::{LiveMobSource, MobHandle};
+use crate::players::{PlayerAwareSource, PlayerRegistry};
 use crate::protocol::ServerProtocol;
 use crate::server::{
     EntitySource, NoEntities, serve_connection_shared, serve_connection_with_mob_events_shared,
@@ -683,6 +684,12 @@ impl IntegratedServer {
         let relay_block_ticks = hub_block_ticks.clone();
         let relay_explosions = hub_explosions.clone();
         let relay_mobs = live_mobs.clone();
+        // Issue #438: **one** registry for every connection this listener
+        // accepts, created out here for the same reason the tick loop above is
+        // spawned out here. A registry per connection would make each player
+        // the sole inhabitant of their own world — the bug this fixes, wearing
+        // a different hat.
+        let relay_players = PlayerRegistry::new();
         let task = spawn(async move {
             // Issue #439's fan-out. `BlockTickFeed`/`ExplosionFeed` are
             // append-and-**drain-all**: the first consumer takes everything
@@ -730,7 +737,14 @@ impl IntegratedServer {
                         let source = source.clone();
                         let block_entities = block_entities.clone();
                         let mobs = mobs.clone();
-                        let entities = relay_mobs.clone();
+                        // Issue #438: the mob source and the shared player
+                        // registry, composed. `PlayerAwareSource::snapshots`
+                        // still returns only the mobs — the players travel
+                        // through `EntitySource::players()`, which is what
+                        // hands `serve_connection` a *viewer* id to exclude.
+                        // See `crate::players`' own module docs.
+                        let entities =
+                            PlayerAwareSource::new(relay_mobs.clone(), relay_players.clone());
                         let subscriber = LanSubscriber::default();
                         let conn_block_ticks = subscriber.block_ticks.clone();
                         let conn_explosions = subscriber.explosions.clone();
