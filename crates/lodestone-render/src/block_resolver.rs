@@ -696,6 +696,20 @@ impl DefaultTints {
             TintKind::RedstonePower(power) => Some(tint::redstone_power_color(power)),
         }
     }
+
+    /// The pack's `textures/colormap/grass.png`, or `None` when the pack shipped
+    /// none.
+    ///
+    /// [`Self::color`] above samples this at the fixed *plains* climate, because
+    /// a block's default tint is the plains one. An **item**'s
+    /// `minecraft:grass` tint names its own `temperature`/`downfall` in the item
+    /// definition (`GrassColorSource.java:14-19`) — vanilla's six files all say
+    /// plains, so the two agree today, but the item path must sample the climate
+    /// the JSON asked for rather than assume it. Hence the raw map, not a
+    /// pre-sampled colour.
+    pub(crate) fn grass(&self) -> Option<&Colormap> {
+        self.grass.as_ref()
+    }
 }
 
 #[cfg(test)]

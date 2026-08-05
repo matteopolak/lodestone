@@ -113,14 +113,53 @@ pub struct RangeEntry {
     pub model: ItemModelNode,
 }
 
-/// A tint source on a `model` leaf. Only the discriminant and constant default
-/// are captured; the game evaluates the live value.
+/// A tint source on a `model` leaf: the discriminant plus every JSON field
+/// vanilla's own tint sources read. Evaluate one with
+/// [`item_tint::resolve`](crate::item_tint::resolve), which needs runtime state
+/// (the stack's components, the pack's grass colormap) this parser does not own.
+///
+/// Faithful to `net.minecraft.client.color.item.ItemTintSources`'s eight
+/// registrations (`ItemTintSources.java:12-21`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TintSource {
     /// The tint type id (e.g. `minecraft:dye`, `minecraft:grass`).
     pub kind: String,
-    /// The packed ARGB `default` colour, when the type provides one.
+    /// The packed ARGB fallback colour, when the type provides one.
+    ///
+    /// # This is `default` **or** `value`, and conflating them dropped 12 files
+    ///
+    /// Seven of vanilla's eight tint sources name this field `default`;
+    /// `minecraft:constant` alone names it **`value`** (`Constant.java:22`, the
+    /// record component is `value`). This parser read only `default`, so every
+    /// `minecraft:constant` tint in the game parsed to `None` and its colour was
+    /// silently discarded — all six leaves items, `vine`, `lily_pad`,
+    /// `filled_map`'s layer 0, `firework_star`'s layer 0 and `wolf_armor`'s.
+    /// Nothing failed; the layers simply rendered untinted, which for a
+    /// greyscale leaf sprite is indistinguishable from "no tint was specified".
+    ///
+    /// Both spellings are accepted here rather than switching on `kind`, because
+    /// a source carrying neither is already handled (the tint applies nothing)
+    /// and a source carrying the wrong one is a pack bug we need not punish.
+    ///
+    /// Also accepts `ExtraCodecs.RGB_COLOR_CODEC`'s `[r, g, b]` float-triple
+    /// alternative (`ExtraCodecs.java:140`), converted by
+    /// [`item_tint::color_from_float`](crate::item_tint::color_from_float). No
+    /// vanilla file uses that form; resource packs may.
     pub default: Option<i32>,
+    /// `minecraft:grass`'s climate inputs, `[temperature, downfall]`, which index
+    /// the grass colormap (`GrassColorSource.java:26-27`). Both are required
+    /// fields on that source; `None` means the JSON omitted them, and
+    /// `item_tint` then substitutes `GrassColorSource`'s own no-argument default
+    /// of `[0.5, 1.0]` (`GrassColorSource.java:21-23`) — which is also the value
+    /// all six vanilla `grass` item definitions carry.
+    ///
+    /// Meaningless for the other seven sources, and `None` for them.
+    pub grass: Option<[f32; 2]>,
+    /// `minecraft:custom_model_data`'s `index` into that component's `colors`
+    /// list (`CustomModelDataSource.java:24`, optional, default `0`).
+    ///
+    /// Meaningless for the other seven sources, and `0` for them.
+    pub index: u32,
 }
 
 /// One resolved output of [`ItemModel::resolve`]: either a model to render or a
@@ -373,11 +412,52 @@ fn parse_tint(value: &Value) -> TintSource {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    // `default` for seven of the eight sources, `value` for `minecraft:constant`
+    // — see `TintSource::default`'s doc for what reading only the first cost.
     let default = value
         .get("default")
-        .and_then(Value::as_i64)
-        .map(|v| v as i32);
-    TintSource { kind, default }
+        .or_else(|| value.get("value"))
+        .and_then(parse_rgb_color);
+    let grass = parse_grass_climate(value);
+    let index = value
+        .get("index")
+        .and_then(Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0);
+    TintSource {
+        kind,
+        default,
+        grass,
+        index,
+    }
+}
+
+/// `ExtraCodecs.RGB_COLOR_CODEC` (`ExtraCodecs.java:140`):
+/// `Codec.withAlternative(Codec.INT, VECTOR3F, …)` — a signed int, or an
+/// `[r, g, b]` float triple folded through
+/// `ARGB.colorFromFloat(1.0F, r, g, b)`.
+fn parse_rgb_color(value: &Value) -> Option<i32> {
+    if let Some(i) = value.as_i64() {
+        return Some(i as i32);
+    }
+    let [r, g, b] = value.as_array()?.as_slice() else {
+        return None;
+    };
+    Some(crate::item_tint::color_from_float(
+        r.as_f64()? as f32,
+        g.as_f64()? as f32,
+        b.as_f64()? as f32,
+    ))
+}
+
+/// `minecraft:grass`'s two required climate fields
+/// (`GrassColorSource.java:14-19`). Both must be present to be usable — a
+/// half-specified source falls back to vanilla's own default pair rather than
+/// mixing one authored value with one invented one.
+fn parse_grass_climate(value: &Value) -> Option<[f32; 2]> {
+    let temperature = value.get("temperature")?.as_f64()? as f32;
+    let downfall = value.get("downfall")?.as_f64()? as f32;
+    Some([temperature, downfall])
 }
 
 fn strip_ns(kind: &str) -> &str {

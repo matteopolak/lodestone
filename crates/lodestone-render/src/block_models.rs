@@ -91,7 +91,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use lodestone_assets::fluid::{FluidState, SpriteUv};
-use lodestone_assets::tint::{TintKind, vanilla_particle_tint_kind, vanilla_tint_kind};
+use lodestone_assets::item_tint::{self, ItemTintContext};
+use lodestone_assets::tint::{Colormap, TintKind, vanilla_particle_tint_kind, vanilla_tint_kind};
 use lodestone_assets::{
     AnimTable, Atlas, AtlasBuilder, AtlasError, AtlasSprite, BakeOptions, BakedQuad, BlockBaker,
     BlockStates, Direction, DisplayTransform, DisplayTransforms, Element, Face, FirstWeight,
@@ -1244,17 +1245,37 @@ fn sprite_layer_elements(atlas: &Atlas, sprite: &AtlasSprite) -> Vec<Element> {
 ///
 /// # Tint
 ///
-/// Every quad comes out **untinted**, and that is a deliberate narrowing rather
-/// than an oversight. Vanilla stamps `tintIndex = layerIndex` on these quads and
-/// resolves the colour from the item's own `TintSource` list (leather dye, potion
-/// colour, spawn-egg shell, map marker). A `BakedQuad::tint_index` here indexes
-/// `BlockModels::tint_palette` — the *block* tint palette — so writing a layer
-/// index into it would look up an unrelated grass or foliage green. Untinted
-/// white is correct for the overwhelming majority of items and wrong only in the
-/// dyed minority, whereas the alternative is wrong loudly and everywhere.
-fn extruded_sprite_geometry(atlas: &Atlas, layers: &[SpriteLayer]) -> Option<Vec<BakedQuad>> {
+/// `layer_slots[i]` is the palette slot layer `i`'s quads carry, or `None` to
+/// leave that layer untinted — parallel to `layers`, and produced by
+/// [`item_layer_tint_slots`] from the item definition's own `tints` list.
+///
+/// Vanilla stamps `tintIndex = layerIndex` on these quads and resolves the
+/// colour from the item's `TintSource` list at draw time
+/// (`CuboidItemModelWrapper.java:85-92`). We cannot write the layer index into
+/// `BakedQuad::tint_index`, because that field indexes
+/// `BlockModels::tint_palette` and layer `0` would collide with whatever
+/// constant happens to be interned at slot 0. So the resolution happens *here*,
+/// at bake time, and what lands in `tint_index` is the interned slot of the
+/// already-resolved colour. That is sound because every tint this build can
+/// resolve is a **constant per item** — a `default`, a fixed climate sample, or
+/// a dye read from a stack we do not have at bake time — and a constant is
+/// exactly what a frame-shared palette can hold. Per-*stack* variation (a dyed
+/// leather helmet, a custom-colour potion) would need
+/// [`ModelVertex::tint_rgb_override`](crate::models::ModelVertex::tint_rgb_override)
+/// instead; see this module's item loop for why that is not wired yet.
+///
+/// This function used to emit every quad untinted, documenting it as a
+/// deliberate narrowing. It was narrower than it read: `lily_pad`, `potion`,
+/// `splash_potion`, `lingering_potion`, `tipped_arrow`, `filled_map`,
+/// `firework_star` and the six leather items all have a non-identity item tint
+/// and all of them rendered white.
+fn extruded_sprite_geometry(
+    atlas: &Atlas,
+    layers: &[SpriteLayer],
+    layer_slots: &[Option<u8>],
+) -> Option<Vec<BakedQuad>> {
     let mut quads = Vec::new();
-    for layer in layers {
+    for (index, layer) in layers.iter().enumerate() {
         let Some(sprite) = atlas.sprite(&layer.sprite) else {
             continue;
         };
@@ -1277,16 +1298,84 @@ fn extruded_sprite_geometry(atlas: &Atlas, layers: &[SpriteLayer]) -> Option<Vec
             texture_size: [sprite.width, sprite.frame_height],
             builtin: None,
         };
-        let baked = bake_model_with(
+        let mut baked = bake_model_with(
             &model,
             atlas,
             ModelTransform::default(),
             &BakeOptions::default(),
         )
         .ok()?;
+        // The synthesised model's faces carry no `tintindex`, so every quad
+        // arrives `None`; stamping the resolved slot here is an assignment, not
+        // a rewrite, and it applies to this layer's quads only.
+        if let Some(slot) = layer_slots.get(index).copied().flatten() {
+            for quad in &mut baked {
+                quad.tint_index = Some(i32::from(slot));
+            }
+        }
         quads.extend(baked);
     }
     (!quads.is_empty()).then_some(quads)
+}
+
+/// Resolve an item definition's per-layer `tints` to palette slots, parallel to
+/// `layers`.
+///
+/// The join that makes item tints work at all: `layers[i].tint` is the
+/// `TintSource` the item definition put on layer `i`
+/// (`CuboidItemModelWrapper.java:132` parses the list, `:89` evaluates it
+/// per-layer), and this resolves each one through
+/// [`lodestone_assets::item_tint::resolve`] and interns the result.
+///
+/// # Why `intern` and not `palette_slot_for`
+///
+/// [`palette_slot_for`] routes the four biome-dependent [`TintKind`]s to their
+/// fixed reserved slots, which is right for a *block* quad whose colour varies
+/// with the biome the player is standing in. An item's `minecraft:grass` tint is
+/// not that: it is a **fixed** climate sample the definition names
+/// (`{"temperature": 0.5, "downfall": 1.0}` in all six vanilla files), because an
+/// item in your hotbar does not change colour when you walk into a swamp. So
+/// these go through [`TintPalette::intern`] like any other constant, and a
+/// grass-tinted *item* and a grass-tinted *block* correctly end up in different
+/// slots holding the same plains green.
+///
+/// `misses` collects a note for any tint this build could not resolve, for
+/// [`BlockModels::item_bake_misses`]. A source we simply do not know is worth
+/// reporting; a *known* source with nothing to apply is not, and
+/// [`is_known`](lodestone_assets::item_tint::is_known) is what separates them.
+fn item_layer_tint_slots(
+    item: &ResourceLocation,
+    layers: &[SpriteLayer],
+    grass_colormap: Option<&Colormap>,
+    palette: &mut TintPalette,
+    misses: &mut Vec<String>,
+) -> Vec<Option<u8>> {
+    let ctx = ItemTintContext {
+        // No stack at bake time, so every component-reading source takes its
+        // definition's `default` — which is vanilla's own behaviour for an
+        // uncustomised stack, and therefore correct rather than approximate for
+        // the overwhelming majority of what an inventory holds.
+        components: None,
+        grass_colormap,
+    };
+    layers
+        .iter()
+        .map(|layer| {
+            let source = layer.tint.as_ref()?;
+            match item_tint::resolve(source, &ctx) {
+                Some(resolved) => Some(palette.intern(resolved.rgb())),
+                None => {
+                    if !item_tint::is_known(&source.kind) {
+                        misses.push(format!(
+                            "{item}: unknown item tint source \"{}\"",
+                            source.kind
+                        ));
+                    }
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 /// Discovers item ids by scanning for `assets/<ns>/items/<path>.json`, mirroring
@@ -1553,7 +1642,16 @@ impl BlockModels {
         // existed each of them reached zero pixels on the dropped-item pass, which
         // skips any item with no baked geometry.
         for part in &sprite_parts {
-            let Some(quads) = extruded_sprite_geometry(&atlas, &part.layers) else {
+            // The item definition's own `tints` list, resolved and interned
+            // before the bake so each layer's quads can carry its slot.
+            let layer_slots = item_layer_tint_slots(
+                &part.item,
+                &part.layers,
+                tints.grass(),
+                &mut palette,
+                &mut item_bake_misses,
+            );
+            let Some(quads) = extruded_sprite_geometry(&atlas, &part.layers, &layer_slots) else {
                 item_bake_misses.push(format!(
                     "{} ({}): sprite variant has {} layer(s), none of which stitched into the atlas",
                     part.item,
