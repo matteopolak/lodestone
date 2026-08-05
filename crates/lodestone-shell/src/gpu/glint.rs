@@ -52,6 +52,16 @@ pub(super) struct GlintPass {
     pub(super) uniform_bind_group: wgpu::BindGroup,
 }
 
+impl std::fmt::Debug for GlintPass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The underlying pipeline (lodestone_render) and wgpu handles are not
+        // `Debug`; the sheet's dimensions are the useful part anyway.
+        f.debug_struct("GlintPass")
+            .field("sheet", &self.texture.size())
+            .finish_non_exhaustive()
+    }
+}
+
 impl GlintPass {
     /// Upload `img` (the decoded `enchanted_glint_item.png`) and build the pass.
     ///

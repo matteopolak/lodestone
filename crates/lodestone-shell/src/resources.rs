@@ -419,6 +419,43 @@ pub fn load_weather_textures() -> Option<lodestone_render::WeatherTextures> {
     }
 }
 
+/// Decode vanilla's enchantment-glint sheet
+/// (`assets/minecraft/textures/misc/enchanted_glint_item.png`) for the
+/// first-person glint second pass.
+///
+/// Same shape as [`load_weather_textures`] — fail-open, `None` on a jar-less run
+/// or a pack missing the texture — and, like it, returns the **decoded image**
+/// rather than a built renderer: `crate::gpu::RenderState::install_glint` is the
+/// only thing that knows the target colour format. The upload inside
+/// `crate::gpu::glint::GlintPass` is deliberately `Rgba8Unorm` (non-sRGB) — the
+/// mirror image of every diffuse loader — and that choice is justified in
+/// `gpu/glint.rs`'s module doc, not here.
+///
+/// A `None` here is *not* "no glint possible": it is just "no glint texture, so
+/// an enchanted held item renders without its shimmer", matching the
+/// pass-not-installed convention `RenderState::glint` documents.
+#[must_use]
+pub fn load_glint_texture() -> Option<lodestone_assets::Image> {
+    let root = asset_root()?;
+    let manager = open_client_jar(&root)?;
+    let path = "assets/minecraft/textures/misc/enchanted_glint_item.png";
+    let png = manager.read(path)?;
+    match lodestone_assets::Image::decode_png(&png) {
+        Ok(img) => {
+            tracing::info!(
+                target: "assets",
+                glint = format!("{}x{}", img.width, img.height),
+                "loaded vanilla enchantment-glint sheet"
+            );
+            Some(img)
+        }
+        Err(e) => {
+            tracing::warn!(target: "assets", "decode {path}: {e}");
+            None
+        }
+    }
+}
+
 /// The **loose** GUI textures the title screen needs, as
 /// `(lookup id, in-pack path)` pairs for
 /// [`GuiAtlas::build_with_extras`](lodestone_render::GuiAtlas::build_with_extras).

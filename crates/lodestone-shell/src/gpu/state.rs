@@ -602,12 +602,12 @@ impl RenderState {
     /// one, handed back by the site that wrote it. No-op with no pass installed
     /// (a jar-less run, or before [`install_glint`](Self::install_glint)), so a
     /// caller need not branch.
-    fn write_glint_uniform(&self, queue: &wgpu::Queue, view_proj: [[f32; 4]; 4]) {
+    pub(super) fn write_glint_uniform(&self, queue: &wgpu::Queue, view_proj: [[f32; 4]; 4]) {
         if let Some(glint) = &self.glint {
             queue.write_buffer(
                 &glint.uniform_buffer,
                 0,
-                bytemuck::bytes_of(&glint::glint_uniform(view_proj)),
+                bytemuck::bytes_of(&super::glint::glint_uniform(view_proj)),
             );
         }
     }

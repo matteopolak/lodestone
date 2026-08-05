@@ -857,7 +857,7 @@ mod tests {
         let mut equip = HeldItemEquip::default();
         equip.advance(Some(&(pickaxe, false)));
 
-        equip.advance_by(TICK, Some(&sword));
+        equip.advance_by(TICK, Some(&(sword, false)));
         assert!(
             (equip.height - 0.6).abs() < 1e-6,
             "one tick in, height must be 0.6; got {}",
@@ -866,7 +866,7 @@ mod tests {
         // Still the *old* item on screen: the exchange happens at the bottom.
         assert_eq!(equip.visible(), Some(&(pickaxe, false)));
 
-        equip.advance_by(TICK, Some(&sword));
+        equip.advance_by(TICK, Some(&(sword, false)));
         assert!(
             (equip.height - 0.2).abs() < 1e-6,
             "two ticks in, height must be 0.2 — not the 0.36 a proportional ramp \
@@ -893,9 +893,9 @@ mod tests {
         let mut heights = Vec::new();
         let mut swap_tick = None;
         for tick in 0..8 {
-            equip.advance_by(TICK, Some(&sword));
+            equip.advance_by(TICK, Some(&(sword, false)));
             heights.push(equip.height);
-            if swap_tick.is_none() && equip.visible() == Some(&sword) {
+            if swap_tick.is_none() && equip.visible() == Some(&(sword, false)) {
                 swap_tick = Some(tick);
             }
         }
@@ -960,14 +960,14 @@ mod tests {
         let mut equip = HeldItemEquip::default();
         equip.advance(Some(&(pickaxe, false)));
 
-        equip.advance_by(TICK, Some(&sword));
+        equip.advance_by(TICK, Some(&(sword, false)));
         assert!(
             equip.inverse_arm_height().abs() < 1e-6,
             "at the tick boundary the drawn hand is still at last tick's rest, so \
              the dip must be 0.0; got {}",
             equip.inverse_arm_height()
         );
-        equip.advance_by(TICK * 0.25, Some(&sword));
+        equip.advance_by(TICK * 0.25, Some(&(sword, false)));
         assert!(
             (equip.inverse_arm_height() - 0.1).abs() < 1e-6,
             "a quarter tick into the first step the dip must be 0.1 (drawn height \
@@ -1009,8 +1009,8 @@ mod tests {
         let sword = item("diamond_sword");
         let mut equip = HeldItemEquip::default();
         equip.advance(Some(&(pickaxe, false)));
-        equip.advance_by(5.0, Some(&sword));
-        assert_eq!(equip.visible(), Some(&sword));
+        equip.advance_by(5.0, Some(&(sword, false)));
+        assert_eq!(equip.visible(), Some(&(sword, false)));
         assert_eq!(equip.inverse_arm_height(), 0.0);
     }
 
