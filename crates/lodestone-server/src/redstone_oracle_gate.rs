@@ -443,47 +443,147 @@ fn a_torch_inversion_is_scheduled_at_exactly_two_ticks_not_applied_immediately()
 ///   source removed, settled: torch lit = true,  dust above = 0
 /// ```
 ///
-/// This test asserts what we do **today**: the torch is never notified, so
-/// no tick is scheduled and it stays lit forever. It is deliberately written
-/// as a passing test of current behaviour rather than an ignored aspiration,
-/// so that whoever implements the second layer sees it fail and updates it
-/// to the vanilla expectation above.
+/// **The second layer now lands, and this test asserts the live expectation.**
+///
+/// `crate::random_tick::wire_update_fan_out` implements the full seven-centre
+/// set, and `propagate_and_react` applies it to the origin as well as to a
+/// wire reached mid-cascade — the origin half being the piece a first attempt
+/// at this fix still missed, because the propagator only ever fans out one
+/// layer from whatever position it is handed.
+///
+/// # Why this rig carries its own source, and the trap that makes it necessary
+///
+/// The version of this test written while the gap was open seeded the dust at
+/// power 15 by hand with nothing feeding it. That was harmless then: the first
+/// layer alone never re-evaluated the dust. With the second layer live it is
+/// fatal in the *safe-looking* direction — the cascade reaches the dust, the
+/// dust correctly recomputes to 0 for want of a source, the attachment block
+/// stops being powered, and the torch is then correctly **not** scheduled. The
+/// test would have gone on passing while proving nothing, and its own premise
+/// check would not have caught it, because the premise was true when it was
+/// checked and false by the time it mattered.
+///
+/// So the rig here is fed by a real lit torch through a real dust run, and the
+/// dust starts at zero so the propagation under test is what powers it.
 #[test]
-fn the_second_layer_fan_out_gap_leaves_a_side_torch_unnotified() {
+fn the_second_layer_fan_out_reaches_a_side_torch_and_inverts_it() {
+    const SOURCE_X: i32 = 2;
     const ATTACH_X: i32 = 5;
     const TORCH_X: i32 = 6;
     const CURRENT_TICK: u64 = 100;
 
     let mut column = column_with_floor();
+    // Source torch on its own support, feeding a dust run along y = DUST_Y+1.
+    column.set_block(SOURCE_X, DUST_Y, ROW_Z, "minecraft:stone");
+    column.set_block(SOURCE_X, DUST_Y + 1, ROW_Z, &redstone_torch::set_standing_lit(true));
+    for x in (SOURCE_X + 1)..=ATTACH_X {
+        column.set_block(x, DUST_Y + 1, ROW_Z, &redstone_wire::set_power(0));
+    }
+    // The inverter itself: stone with dust on top and a wall torch on its side.
     column.set_block(ATTACH_X, DUST_Y, ROW_Z, "minecraft:stone");
     let torch_state = redstone_torch::set_wall_lit(crate::neighbor_update::Direction::East, true);
     column.set_block(TORCH_X, DUST_Y, ROW_Z, &torch_state);
-    column.set_block(ATTACH_X, DUST_Y + 1, ROW_Z, &redstone_wire::set_power(15));
 
-    // Premise: the torch really does see a signal, so the only reason it is
-    // not scheduled is that the notification never arrives. Without this the
-    // test would pass for the wrong reason.
-    let has_signal = {
-        let lookup = redstone::make_lookup(&column, 0, 0);
-        redstone_torch::has_neighbor_signal(
-            &lookup,
-            lodestone_model::BlockPos::new(TORCH_X, DUST_Y, ROW_Z),
-            &torch_state,
-        )
-    };
-    assert!(
-        has_signal,
-        "PREMISE FAILED: the torch sees no signal at all, so this test proves nothing about the \
-         fan-out"
-    );
-
-    // Notify from the DUST position, as a real dust power change would.
+    // Drive it exactly as production does after a torch flip.
     let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
     let _ = propagate_and_react(
         &mut column,
         0,
         0,
-        ATTACH_X,
+        SOURCE_X,
+        DUST_Y + 1,
+        ROW_Z,
+        &mut block_ticks,
+        CURRENT_TICK,
+    );
+
+    // Premise, checked AFTER propagation rather than before: the dust really
+    // did power the attachment block, so a torch that is not scheduled would
+    // be a fan-out failure and not a dead rig.
+    let dust_on_attach = redstone::wire_power(column.block_state(ATTACH_X, DUST_Y + 1, ROW_Z));
+    assert!(
+        dust_on_attach > 0,
+        "PREMISE FAILED: the dust on top of the attachment block at \
+         (x={ATTACH_X}, y={}, z={ROW_Z}) settled at power 0, so the torch has nothing to react to \
+         and this test would prove nothing about the fan-out",
+        DUST_Y + 1
+    );
+
+    let due = block_ticks.drain_due(CURRENT_TICK + 64, 64);
+    let torch_tick = due
+        .iter()
+        .find(|t| t.pos == (TORCH_X, DUST_Y, ROW_Z) && t.kind == redstone::TICK_TORCH)
+        .unwrap_or_else(|| {
+            panic!(
+                "the torch at (x={TORCH_X}, y={DUST_Y}, z={ROW_Z}) was never notified, so it can \
+                 never invert -- but the dust on its attachment block at \
+                 (x={ATTACH_X}, y={}, z={ROW_Z}) is at power {dust_on_attach} and the live 26.2 \
+                 server puts that torch out. scheduled entries: {:?}",
+                DUST_Y + 1,
+                due.iter().map(|t| (t.pos, &t.kind, t.trigger_tick)).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        torch_tick.trigger_tick,
+        CURRENT_TICK + ORACLE_TORCH_TOGGLE_DELAY,
+        "the side torch was scheduled for tick {}, but RedstoneTorchBlock.TOGGLE_DELAY = \
+         {ORACLE_TORCH_TOGGLE_DELAY} puts it at {}",
+        torch_tick.trigger_tick,
+        CURRENT_TICK + ORACLE_TORCH_TOGGLE_DELAY
+    );
+
+    // And the flip itself must put it out -- the live reading was
+    // `source present, settled: torch lit = FALSE`.
+    let state = column.block_state(TORCH_X, DUST_Y, ROW_Z).to_string();
+    let has_signal_now = {
+        let lookup = redstone::make_lookup(&column, 0, 0);
+        redstone_torch::has_neighbor_signal(
+            &lookup,
+            lodestone_model::BlockPos::new(TORCH_X, DUST_Y, ROW_Z),
+            &state,
+        )
+    };
+    let flipped = redstone_torch::run_scheduled_tick(&state, has_signal_now)
+        .expect("the scheduled tick must produce a state change");
+    assert!(
+        !redstone::torch_lit(&flipped),
+        "when its scheduled tick ran the side torch produced {flipped:?}, which is still lit; the \
+         live 26.2 server measured lit=false with the source present"
+    );
+}
+
+/// **Negative control for the gate above.** The identical inverter rig with an
+/// *unlit* source torch must leave the side torch alone: the dust never
+/// powers, the attachment block is never powered, and no torch tick is
+/// scheduled. Without this, "the torch was scheduled" could be coming from
+/// anything in the rig rather than from the source.
+#[test]
+fn the_side_torch_is_left_alone_when_the_source_is_unlit() {
+    const SOURCE_X: i32 = 2;
+    const ATTACH_X: i32 = 5;
+    const TORCH_X: i32 = 6;
+    const CURRENT_TICK: u64 = 100;
+
+    let mut column = column_with_floor();
+    column.set_block(SOURCE_X, DUST_Y, ROW_Z, "minecraft:stone");
+    column.set_block(SOURCE_X, DUST_Y + 1, ROW_Z, &redstone_torch::set_standing_lit(false));
+    for x in (SOURCE_X + 1)..=ATTACH_X {
+        column.set_block(x, DUST_Y + 1, ROW_Z, &redstone_wire::set_power(0));
+    }
+    column.set_block(ATTACH_X, DUST_Y, ROW_Z, "minecraft:stone");
+    column.set_block(
+        TORCH_X,
+        DUST_Y,
+        ROW_Z,
+        &redstone_torch::set_wall_lit(crate::neighbor_update::Direction::East, true),
+    );
+
+    let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+    let _ = propagate_and_react(
+        &mut column,
+        0,
+        0,
+        SOURCE_X,
         DUST_Y + 1,
         ROW_Z,
         &mut block_ticks,
@@ -491,16 +591,14 @@ fn the_second_layer_fan_out_gap_leaves_a_side_torch_unnotified() {
     );
 
     let due = block_ticks.drain_due(CURRENT_TICK + 64, 64);
-    let scheduled_for_torch =
-        due.iter().any(|t| t.pos == (TORCH_X, DUST_Y, ROW_Z) && t.kind == redstone::TICK_TORCH);
     assert!(
-        !scheduled_for_torch,
-        "the second-layer fan-out now reaches the torch at (x={TORCH_X}, y={DUST_Y}, z={ROW_Z}) -- \
-         that is the vanilla behaviour this deviation was blocking, so update this test to assert \
-         the live expectation (torch schedules at CURRENT_TICK + 2 and goes out)"
+        !due.iter().any(|t| t.pos == (TORCH_X, DUST_Y, ROW_Z) && t.kind == redstone::TICK_TORCH),
+        "the side torch at (x={TORCH_X}, y={DUST_Y}, z={ROW_Z}) was scheduled with an UNLIT \
+         source, so something other than the source is driving the gate above. entries: {:?}",
+        due.iter().map(|t| (t.pos, &t.kind, t.trigger_tick)).collect::<Vec<_>>()
     );
     assert!(
         redstone::torch_lit(column.block_state(TORCH_X, DUST_Y, ROW_Z)),
-        "the torch changed state without ever being scheduled"
+        "the side torch changed state with no source present"
     );
 }

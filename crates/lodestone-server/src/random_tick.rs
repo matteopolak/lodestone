@@ -652,6 +652,58 @@ fn settle_gravity_at(
     ]
 }
 
+/// `DefaultRedstoneWireEvaluator.updatePowerStrength`'s update set, in full
+/// (`DefaultRedstoneWireEvaluator.java:27-37`):
+///
+/// ```text
+/// Set<BlockPos> toUpdate = Sets.newHashSet();
+/// toUpdate.add(pos);
+/// for (Direction direction : Direction.values()) { toUpdate.add(pos.relative(direction)); }
+/// for (BlockPos blockPos : toUpdate) { level.updateNeighborsAt(blockPos, this.wireBlock); }
+/// ```
+///
+/// Seven *centres* — the wire's own position and each of its six neighbours —
+/// each of which gets a full six-direction `updateNeighborsAt` fan-out, so 42
+/// notifications with duplicates among them. Vanilla really does issue the
+/// duplicates; the `HashSet` dedupes the centres, not the notifications.
+///
+/// # Why the second layer is not a corner case
+///
+/// An earlier landing implemented centre 0 only and described the omission as
+/// "a diagonal-over-conductor corner update". It is not: the geometry the
+/// first layer alone cannot reach is the **standard torch-inverter** — dust
+/// sitting on top of a block with a torch on that block's side. The torch is
+/// diagonal to the dust, so it is a neighbour of a *neighbour* and only ever
+/// appears in the second layer. Measured on live vanilla 26.2, that torch
+/// inverts reliably; with the first layer alone we never notified it and it
+/// stayed lit forever.
+///
+/// # Ordering
+///
+/// Vanilla iterates a `HashSet`, so its order is unspecified and cannot be
+/// copied. This picks the one deterministic order available: centres in
+/// `[pos] ++ UPDATE_ORDER`, and within each centre the six directions in
+/// [`UPDATE_ORDER`]. Determinism is what this crate needs from it; no vanilla
+/// behaviour can depend on an order vanilla itself does not guarantee.
+fn wire_update_centres(pos: BlockPos) -> Vec<BlockPos> {
+    std::iter::once(pos).chain(UPDATE_ORDER.iter().map(|d| d.relative(pos))).collect()
+}
+
+/// [`wire_update_centres`] flattened into the notifications those seven
+/// `updateNeighborsAt` calls issue, for use as a cascade return value. The two
+/// are the same thing: the propagator resolves a returned notification and its
+/// own cascade fully before moving to the next, which is exactly what
+/// `updateNeighborsAt` does per centre.
+fn wire_update_fan_out(pos: BlockPos) -> Vec<Notification> {
+    let mut out = Vec::with_capacity(UPDATE_ORDER.len() * (UPDATE_ORDER.len() + 1));
+    for centre in wire_update_centres(pos) {
+        for d in UPDATE_ORDER {
+            out.push(Notification { pos: d.relative(centre), from: d });
+        }
+    }
+    out
+}
+
 /// Notifies the six neighbours of a just-mutated position `(x, y, z)` via
 /// `NeighborPropagator` (issue #308's own primitive) and dispatches every
 /// reaction this crate models to a neighbour notification:
@@ -662,21 +714,10 @@ fn settle_gravity_at(
 ///    depth-first. Unchanged from the #311 landing.
 /// 2. **Redstone dust (#314)** — recomputes the neighbour's target power
 ///    strength (`crate::redstone_wire::calculate_target_strength`); if it
-///    changed, writes the new power and cascades the SAME six-direction
-///    fan-out from the wire's own position, mirroring
-///    `RedStoneWireBlock.updatePowerStrength`'s own `level.updateNeighborsAt`
-///    calls on `pos` and its six neighbours (`DefaultRedstoneWireEvaluator.java:27-37`)
-///    — **named deviation**: vanilla additionally fans out from each of
-///    those six neighbours' own positions too (a second layer, for
-///    diagonal/over-a-step corner cases), collected through a `HashSet`
-///    whose iteration order vanilla itself does not guarantee. This landing
-///    implements the first layer only (the wire's own position), which is
-///    the deterministic, load-bearing part — a straight or right-angled run
-///    of dust updates correctly; a diagonal-over-conductor corner update may
-///    lag by one extra notification round versus vanilla. See
-///    `crate::redstone_wire`'s own module doc for what the read side already
-///    covers (the diagonal *read* is exact; only the eager re-notify is
-///    narrower).
+///    changed, writes the new power and re-fans-out through
+///    [`wire_update_fan_out`], which is
+///    `DefaultRedstoneWireEvaluator.updatePowerStrength`'s **complete**
+///    update set (`DefaultRedstoneWireEvaluator.java:27-37`), both layers.
 /// 3. **Redstone torches/repeaters/comparators/observers (#314/#315/#317)**
 ///    — schedule a delayed recheck into `block_ticks` when the neighbour's
 ///    steady-state condition disagrees with its current state (torch:
@@ -700,7 +741,46 @@ pub(crate) fn propagate_and_react(
 ) -> Vec<RandomTickEvent> {
     let mut events = Vec::new();
     let propagator = NeighborPropagator::default();
-    propagator.propagate(BlockPos::new(x, y, z), None, |n: Notification| -> Vec<Notification> {
+    let origin = BlockPos::new(x, y, z);
+
+    // The mutated block itself decides how wide the *outermost* fan-out is.
+    // Every mutation family except dust mirrors `setBlockAndUpdate`, which is
+    // a single `updateNeighborsAt(pos)`; a dust power change instead runs
+    // `DefaultRedstoneWireEvaluator.updatePowerStrength`'s seven-centre set —
+    // and that applies to the origin exactly as it applies to a wire reached
+    // mid-cascade, which is the half an earlier landing missed.
+    let origin_is_wire = {
+        let tlx = x - min_x;
+        let tlz = z - min_z;
+        (0..16).contains(&tlx)
+            && (0..16).contains(&tlz)
+            && y >= column.min_y
+            && y < column.min_y + column.height
+            && redstone::is_wire(column.block_state(tlx, y, tlz))
+    };
+    let centres = if origin_is_wire { wire_update_centres(origin) } else { vec![origin] };
+
+    for centre in centres {
+        propagator.propagate(centre, None, |n: Notification| -> Vec<Notification> {
+            react_to_notification(column, min_x, min_z, n, block_ticks, current_tick, &mut events)
+        });
+    }
+    events
+}
+
+/// One neighbour notification's worth of reaction dispatch — the body of
+/// [`propagate_and_react`]'s `notify` closure, named so the seven centres a
+/// dust change fans out from can share it.
+fn react_to_notification(
+    column: &mut crate::chunk::ChunkColumn,
+    min_x: i32,
+    min_z: i32,
+    n: Notification,
+    block_ticks: &mut ScheduledTickQueue<String>,
+    current_tick: u64,
+    events: &mut Vec<RandomTickEvent>,
+) -> Vec<Notification> {
+    {
         let tlx = n.pos.x - min_x;
         let tlz = n.pos.z - min_z;
         if !(0..16).contains(&tlx) || !(0..16).contains(&tlz) {
@@ -727,7 +807,7 @@ pub(crate) fn propagate_and_react(
                 let new_state = redstone_wire::set_power(new_power);
                 column.set_block(tlx, n.pos.y, tlz, &new_state);
                 events.push(RandomTickEvent { pos: (n.pos.x, n.pos.y, n.pos.z), from: state, to: new_state });
-                return UPDATE_ORDER.iter().map(|d| Notification { pos: d.relative(n.pos), from: *d }).collect();
+                return wire_update_fan_out(n.pos);
             }
             return Vec::new();
         }
@@ -815,8 +895,7 @@ pub(crate) fn propagate_and_react(
         }
 
         Vec::new()
-    });
-    events
+    }
 }
 
 /// `LevelChunkSection::isRandomlyTicking`'s boolean, computed by scanning —
