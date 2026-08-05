@@ -1,0 +1,36 @@
+# The toy **subscriber** in issue #107's cross-plugin messaging example.
+#
+# **The point of this manifest is what it does not contain.** `[dependencies]`
+# has `lodestone-shop-api` and no `lodestone-shop`: this crate reads the
+# publisher's messages with no compile-time dependency on the publisher, which is
+# exactly the Bukkit property issue #107 asks for. `tests/dependency_direction.rs`
+# asserts that as a fact about this file rather than trusting the comment.
+#
+# `lodestone-shop` appears under `[dev-dependencies]` only, because the
+# end-to-end test has to build an `App` containing both halves. A dev-dependency
+# is the test harness, not the library's dependency graph — `cargo tree` for this
+# crate's lib target does not include it.
+[package]
+name = "lodestone-shop-stats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The published contract, and the ONLY edge toward the shop family.
+lodestone-shop-api = { path = "../lodestone-shop-api" }
+# `GameTick`, `TickSet`, `EventPriority`.
+lodestone-ecs = { workspace = true }
+# Direct, for the derive macros' absolute paths — see
+# `lodestone-shop-api/Cargo.toml`'s note.
+bevy_ecs = { workspace = true }
+bevy_app = { workspace = true }
+
+[dev-dependencies]
+# Test-harness only: `tests/cross_plugin_message.rs` needs the publisher in the
+# same `App` to prove a message really crosses. Deliberately NOT a
+# `[dependencies]` entry — see this file's header.
+lodestone-shop = { path = "../lodestone-shop" }
