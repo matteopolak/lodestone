@@ -112,6 +112,21 @@ cargo run --release                       # launch the game -- no recipe; nothin
   tick-loop gate asserted a ratio and was never affected. Prefer one; when you need an absolute,
   re-measure on an idle machine and say which it was.
 
+  **But a ratio is only protected if both arms see the same load, and two *sequential* timings do
+  not.** Corrected within the hour of writing the paragraph above, which overstated it.
+  `sim::tests::extract_particles_does_not_hold_the_world_guard_across_the_per_particle_work` takes
+  `small_ns` then `large_ns` and asserts `large_ns < small_ns * HOLD_SCALING_LIMIT` — a ratio, and
+  it still failed on committed `main` under four concurrent agents, because a load spike between the
+  two calls inflates one arm and not the other. Run alone it passes.
+
+  So the real rule is the *two observations at two different moments* hazard again, one scope
+  smaller: it applies **inside a single test**, not just between a test run and a diff. A ratio
+  survives contention only when the arms are measured **concurrently**, or when the quantity is a
+  count rather than a duration. Counts are immune; sequential durations are not, however you divide
+  them. Before reporting a timing-shaped test as a regression, re-run it **alone** — and if you are
+  the one writing it, prefer a counter (that gate's companion asserts particle *volume* at both
+  ends, which is the part that never flaked).
+
 Oracles (not part of repo state — recreate them):
 
 ```bash
