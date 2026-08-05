@@ -118,14 +118,25 @@ flips, and every cascade they trigger — goes through the exact same
 gravity blocks already use, with zero changes to `server.rs`'s wire-forwarding
 arm. A circuit built entirely from blocks a client can already see (torches
 and dust; repeaters/comparators/observers are placed the same way, this
-landing did not add placement) will animate correctly end to end. This was
-**not verified against a live 26.2 oracle** in this landing — the strongest
-evidence given is exact per-tick sequence assertions in this crate's own test
-suite (see e.g. `redstone_diode.rs`'s pulse-quantization and compare-mode
-cascade tests), not a captured packet trace. A live-oracle capture of a known
-order-sensitive circuit (a T-junction, a repeater-locked latch) is the
-strongest remaining verification step, per this repo's own evidence
-standards.
+landing did not add placement) will animate correctly end to end.
+
+**Dust propagation is now verified against a live 26.2 oracle** (issue #314,
+`redstone_oracle_gate.rs`). Attenuation was measured on the real server over
+RCON — power 15 in the square adjacent to a source, decaying exactly 1 per
+block, reaching 0 at distance 16 — three times, from two different source
+blocks, agreeing exactly each time. The gate reproduces that profile at all
+15 coordinates through `propagate_and_react`, and separates it from an
+off-by-one model (which differs at every coordinate) and a no-decay model
+(14 of 15). Two controls were run and observed: removing the `-1` decay
+fails the gate at a named coordinate, and dropping the event publication
+while keeping the column write leaves every server-side assertion passing
+and fails only the client-delivery one.
+
+Repeaters, comparators and observers are **still** unverified against a live
+oracle — the evidence for those remains this crate's own per-tick sequence
+assertions (`redstone_diode.rs`'s pulse-quantization and compare-mode
+cascade tests), not a captured trace. An order-sensitive circuit (a
+T-junction, a repeater-locked latch) is the strongest remaining step.
 
 ## How to change it, and the gotchas
 
@@ -153,6 +164,44 @@ standards.
   `redstone::own_signal`/`weak_signal`/`direct_signal`/`is_signal_source`
   with the new predicate, following the same per-block-class dispatch every
   existing family uses.
+- **The first-layer-only fan-out is not a corner case.** `propagate_and_react`
+  implements only the first layer of `DefaultRedstoneWireEvaluator`'s update
+  fan-out (the wire's own position); vanilla also fans out from each of the
+  six neighbours' own positions. The geometry that omission misses is the
+  **standard torch-inverter** — dust on top of a block with a torch on that
+  block's side, where the torch is diagonal to the dust and only the second
+  layer ever reaches it. Measured live: the real server inverts that torch
+  reliably; we never notify it. Pinned by
+  `redstone_oracle_gate::the_second_layer_fan_out_gap_leaves_a_side_torch_unnotified`,
+  which asserts today's behaviour and fails loudly when the second layer lands.
+- **Nothing triggers redstone from player action.** The only callers of
+  `propagate_and_react` are a random tick that mutated a block and the
+  `block_ticks` drain. `server.rs`'s block-placement path (`apply_use_item_on`)
+  neither calls it nor schedules anything — and it writes `STONE` rather than
+  the held item, so dust cannot be placed by a player at all. Until both are
+  addressed, redstone is reachable only from a random tick that happens to
+  mutate a block adjacent to a circuit.
+
+### Oracle traps, if you build a live redstone gate
+
+Both of these cost real time and both fail in the *safe-looking* direction —
+the rig reports a plausible "nothing happened" rather than an error:
+
+- **`/setblock` does not reproduce a power source's natural update fan-out.**
+  `LeverBlock.updateNeighbours` — which notifies the attached block *and that
+  block's own neighbours* — runs from the lever's use/removal handlers, not
+  from `setBlock`. A lever flipped with `/setblock` powers its block but never
+  notifies a torch two blocks away, which sits there lit forever. Use redstone
+  **dust** as the trigger: its evaluator does that fan-out on every power
+  change, through the ordinary neighbour-update path.
+- **`/tick step N` does not advance scheduled *block* ticks** — the known
+  `tick step`/`tick sprint` trap extends past entity physics. Measured against
+  a rig *proven* to work: two seconds of real time inverted the torch every
+  time, while eight consecutive `/tick step 1` calls on the identical rig
+  never did. Settle with real time, and take delay constants from the jar.
+  Also note `/tick sprint N` returns immediately and a following `/tick
+  unfreeze` **interrupts it**, so a sprint used to settle a rig may run almost
+  no ticks at all.
 
 ## Configuration
 
