@@ -95,6 +95,7 @@ use lodestone_ecs::player::{
     PlaceOutcome, PlaceRejection, PlaceStatus, Profile, SelectedSlot, Submersion,
 };
 use lodestone_ecs::session::{Abilities, ServerEntityId, SessionMenus};
+use lodestone_ecs::veto::{ActionVetoes, VerbContext, Verdict};
 use lodestone_ecs::{ChunkWorld, FrameClock, GameTick, TickSet, VersionData};
 use lodestone_game::mining::Mining;
 use lodestone_game::placement::{Placement, UseOnContext, UseOnDecision};
@@ -506,6 +507,9 @@ pub fn drive_mining(
     mut mining: ResMut<MiningPredictor>,
     mut particles: ResMut<ParticleSim>,
     mut queue: ResMut<ActionQueue>,
+    // Issue #109's veto registry. `Option`, so this system is unchanged for a
+    // client that installed no plugin.
+    vetoes: Option<Res<ActionVetoes>>,
     mut players: Query<
         (
             &PhysicsState,
@@ -629,6 +633,29 @@ pub fn drive_mining(
         // `eye_in_water`, not `under_water()` — see "Trap 2" on `dig_break_inputs`.
         submersion.0.eye_in_water,
     );
+
+    // Issue #109's block-break veto, asked *before* `continue_` advances the dig
+    // state machine — a plugin that finds out afterward is too late, which is the
+    // whole complaint the issue opens with. A denial aborts any live dig via the
+    // same idempotent `stop()` every other early return above uses, so a
+    // protection plugin denying mid-hold sends one ABORT rather than stranding
+    // the predictor with a dig the server will never see finished.
+    //
+    // `Option<Res<..>>`: opt-in, so a client with no plugin never has the
+    // resource and pays a `None` check.
+    if let Some(vetoes) = &vetoes {
+        let verdict = vetoes.allows(&VerbContext::BlockBreak {
+            pos,
+            state_id: Some(id_value),
+        });
+        if verdict == Verdict::Deny {
+            if via_intent {
+                outcome.0 = BreakStatus::Rejected(BreakRejection::Vetoed);
+            }
+            queue.0.extend(mining.0.stop());
+            return;
+        }
+    }
 
     let was_mining = mining.0.target().is_some();
     // `continue_` delegates to `start` when no dig is live yet, so this one entry
@@ -800,6 +827,8 @@ pub fn drive_placement(
     mut terrain: ResMut<TerrainMesh>,
     mut audio: ResMut<AudioEngine>,
     mut queue: ResMut<ActionQueue>,
+    // Issue #109's veto registry -- see `drive_mining`'s own parameter.
+    vetoes: Option<Res<ActionVetoes>>,
     mut commands: Commands,
     mut players: Query<
         (
@@ -920,6 +949,18 @@ pub fn drive_placement(
     // same reason `PlacementFacts` gives — but here there is only ever one
     // guard (`placement`, already held as a system parameter), so the two
     // reads are already disjoint by construction rather than by ordering.
+    // Issue #109's block-place veto, asked *before* `use_on` -- which threads the
+    // block-prediction `sequence` counter and so cannot be called speculatively
+    // and then discarded (`docs/baritone-port.md` §3.6 forbids forking that
+    // counter outright). Denying here leaves the counter untouched.
+    if let Some(vetoes) = &vetoes
+        && vetoes.allows(&VerbContext::BlockPlace { pos: BlockPos::new(hit.block[0], hit.block[1], hit.block[2]) })
+            == Verdict::Deny
+    {
+        outcome.status = PlaceStatus::Rejected(PlaceRejection::Vetoed);
+        return;
+    }
+
     let decision = placement.0.use_on(&ctx, &facts);
     let (UseOnDecision::Interact { action }
     | UseOnDecision::Place { action, .. }

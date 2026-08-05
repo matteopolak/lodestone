@@ -141,6 +141,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   via the `--target-dir` flag, trimmed dev profiles in the root `Cargo.toml`, and a
   cleanup-on-finish policy. This doc is the record of what was measured, what was
   decided from it, and the honest limits of both.
+- [Cancelable interaction verbs](./cancelable-actions.md) — `ActionVetoes`
+  (`crates/lodestone-ecs/src/veto.rs`) is the veto point for the interaction verbs
+  every protection, anti-grief and anti-cheat plugin actually cancels. A plugin
+  registers a predicate per verb; the engine asks *before* it commits, and a `Deny`
+  stops the action before the predictor runs and before anything reaches the wire.
+  This is what separates "plugins can read state" from "plugins can be a protection
+  plugin". Issue #109.
 - [Chat](./chat.md) — The chat box: the outbound input line
   (`crate::chat::ChatInput`), the received scrollback
   (`lodestone_game::chat::ChatLog`, folded into legacy `§`-coded strings at read

@@ -26,6 +26,8 @@
 //! method on. `use_item_live`/`place_block` here call the free functions now.
 
 use super::*;
+// Issue #109's veto registry -- see `attack_entity`.
+use lodestone_ecs::veto::{ActionVetoes, VerbContext, Verdict};
 
 impl Sim {
     /// Break the currently targeted block (set it to air) and remesh. Returns
@@ -230,6 +232,25 @@ impl Sim {
     /// entity restarts the cooldown regardless of whether the server ends up
     /// applying any damage.
     fn attack_entity(&mut self, entity_id: i32) {
+        // Issue #109's entity-damage veto. This is one of the three verbs that
+        // does NOT go through `ActionQueue` (it writes the socket directly, to
+        // control wire order for a discrete click), so the outbound
+        // `EgressFilters` hook cannot see it -- the veto has to be asked here.
+        //
+        // Read through `self.read`, and the predicate is handed only the
+        // `VerbContext`: it must not re-enter the `World`, because we are
+        // inside a read guard on it (`handle.rs`'s rule 1). That constraint is
+        // why `ActionVetoes::allows` takes no `&World`.
+        let vetoed = self.read(|w| {
+            w.get_resource::<ActionVetoes>().is_some_and(|vetoes| {
+                vetoes.allows(&VerbContext::EntityDamage {
+                    target_entity_id: entity_id,
+                }) == Verdict::Deny
+            })
+        });
+        if vetoed {
+            return;
+        }
         // The same tick-driven intent `use_item_live` reads for its own
         // sneaking bit, so a sneak-attack cannot disagree with what the wire
         // already told the server this tick's crouch state is.

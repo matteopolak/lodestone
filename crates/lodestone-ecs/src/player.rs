@@ -318,6 +318,16 @@ pub enum BreakRejection {
     /// invented speed — the same "abort, never guess" contract
     /// `drive_mining`'s own docs already apply to the mouse-driven path.
     UnknownBlockState,
+    /// A registered [`crate::veto::ActionVetoes`] predicate denied
+    /// [`crate::veto::Verb::BlockBreak`] for this position (issue #109).
+    ///
+    /// The one variant here that is **not** "something the shell would have
+    /// refused from a mouse click too" — a veto applies to the human path
+    /// identically, so this is a *plugin*-imposed refusal rather than a
+    /// legality one, and a plugin seeing it should look for another plugin
+    /// rather than for a mistake in its own intent. `ActionVetoes::names`
+    /// answers "which one".
+    Vetoed,
 }
 
 // ---------------------------------------------------------------------------
@@ -471,6 +481,13 @@ pub enum PlaceRejection {
     /// The block would overlap the player's own bounding box — vanilla's own
     /// placement-legality rule, `lodestone_shell::sim::block_intersects_player`.
     IntersectsPlayer,
+    /// A registered [`crate::veto::ActionVetoes`] predicate denied
+    /// [`crate::veto::Verb::BlockPlace`] for the clicked position (issue #109).
+    ///
+    /// The mirror of [`BreakRejection::Vetoed`], and the same caveat: this is a
+    /// *plugin*-imposed refusal, not a legality one, so it is the one variant
+    /// here that a real right-click would not also have produced.
+    Vetoed,
 }
 
 /// The **raw** sprint key, ungated by the forward-only/sneak rules

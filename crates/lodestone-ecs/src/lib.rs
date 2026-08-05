@@ -146,6 +146,7 @@ mod schedules;
 pub mod scheduler;
 pub mod session;
 mod sets;
+pub mod veto;
 
 /// Re-exported so plugin authors never need to match `bevy_app`'s version by
 /// hand (azalea does the same at `azalea/src/lib.rs:63-64`).
@@ -204,6 +205,7 @@ pub use session::{
     SessionScoreboard, SessionSet, SessionTabList, TitleOverlay, Vitals, Xp,
     insert_hud_components, insert_session_components, spawn_session,
 };
+pub use veto::{ActionVetoPlugin, ActionVetoes, Verb, VerbContext, VetoStats};
 pub use sets::{
     EventPriority, ExtractSet, FrameSet, IngestSet, TickSet, assert_monitor_system_is_read_only,
 };
