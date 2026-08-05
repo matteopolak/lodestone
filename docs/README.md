@@ -522,6 +522,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   proven against a real client. The actual gap was one level up: nothing in production
   ever *constructed* a `MobSim` or *ticked* it. `IntegratedServer`'s singleplayer path
   called `open_in_memory` (no entities), never `open_in_memory_with_entities`.
+- [Plugin-opened local menus](./local-menus.md) — `Bukkit.createInventory` +
+  `Player.openInventory` for this codebase (issue
+  [#145](https://github.com/matteopolak/lodestone/issues/145)): a plugin opens an
+  arbitrary container screen to the local player with **no server container behind
+  it** — the mechanism behind shops, kit selectors and client-side settings screens
+  in the Java ecosystem.
 - [The local player as ECS components](./local-player-components.md) — The local
   player's physics state, movement intent, submersion, free-fly flag, hotbar
   selection, death state and the two outbound-movement edge-trackers, held as

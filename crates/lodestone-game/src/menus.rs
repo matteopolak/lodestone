@@ -45,6 +45,21 @@ use crate::{
 /// containers, so a generic container's content length is `container_size + 36`.
 const PLAYER_INVENTORY_PORTION: usize = 36;
 
+/// The window id every **plugin-opened**, purely local menu carries (issue
+/// #145).
+///
+/// `i32::MIN`, and the value matters. A local menu has no server-side container,
+/// so its id must be one a server can never legitimately allocate *and* one that
+/// is obviously wrong if it ever escapes onto the wire — vanilla window ids are
+/// small positives (`0` is the player's own inventory). Picking an unused small
+/// negative would have been indistinguishable from a protocol quirk in a packet
+/// log; this cannot be mistaken for anything.
+///
+/// Consumers must not branch on this value directly. Ask
+/// [`Menus::opened_is_local`], which is the authority — the id is a belt to that
+/// braces.
+pub const LOCAL_MENU_WINDOW_ID: i32 = i32::MIN;
+
 /// A currently open container screen and its server-synchronised menu.
 #[derive(Debug, Clone)]
 pub struct OpenMenu {
@@ -55,6 +70,13 @@ pub struct OpenMenu {
     /// Menu-local properties (`container_set_data`), e.g. furnace burn/cook
     /// progress, as `(property_id, value)`.
     data: Vec<(i32, i32)>,
+    /// Whether this screen was opened by a plugin rather than by a server
+    /// `open_screen` (issue #145).
+    ///
+    /// The authority for "must nothing about this reach the wire". A `bool`
+    /// rather than deriving it from `window_id` so the two can be cross-checked,
+    /// and so a future multi-local-menu change has somewhere to put a real id.
+    local: bool,
 }
 
 impl OpenMenu {
@@ -230,6 +252,85 @@ impl Menus {
     #[must_use]
     pub fn opened_data(&self) -> &[(i32, i32)] {
         self.opened.as_ref().map_or(&[], |o| o.data.as_slice())
+    }
+
+    /// Whether the open screen was opened by a plugin rather than by the server
+    /// (issue #145).
+    ///
+    /// **Every wire-facing consumer must check this before sending anything about
+    /// the open menu.** A local menu has no server-side container, so a
+    /// `ContainerClose` or `ContainerClick` naming its window id is addressed to
+    /// something that does not exist. `false` when nothing is open, which is the
+    /// safe answer for a caller that forgot to check whether one was.
+    #[must_use]
+    pub fn opened_is_local(&self) -> bool {
+        self.opened.as_ref().is_some_and(|o| o.local)
+    }
+
+    /// Opens a **local** menu — one a plugin supplied, with no server container
+    /// behind it. `Bukkit.createInventory` + `Player.openInventory` (issue #145).
+    ///
+    /// # Why this cannot go through `apply`
+    ///
+    /// Pushing a synthetic `ScreenOpened` + `ContainerContent` pair was the only
+    /// route before this method, and it does draw — but it is wrong in three ways
+    /// that are invisible until they bite:
+    ///
+    /// 1. `ScreenOpened` alone opens **nothing**. The menu is not built until a
+    ///    `ContainerContent` arrives, because the container's *size* comes from
+    ///    that packet's item-count minus 36. A plugin pushing only the open event
+    ///    gets no screen and no error.
+    /// 2. The synthetic content packet's length is what sizes the menu, and
+    ///    `build_menu` re-derives the **layout** from the menu-type key. So a
+    ///    plugin could not supply a pre-built [`Menu`] at all — only a key and a
+    ///    length, and any key outside `build_menu`'s table silently became
+    ///    `Menu::generic`.
+    /// 3. The result is indistinguishable from a server open in every downstream
+    ///    consumer, so `ContainerClose` and every `ContainerClick` went to the
+    ///    real server naming a window it had never heard of.
+    ///
+    /// This method takes the `Menu` the plugin actually built — any of
+    /// [`Menu`]'s constructors, including the `SpecialLayout` ones — and marks the
+    /// screen local so (3) cannot happen.
+    ///
+    /// # It takes the player inventory, like every other open
+    ///
+    /// Issue #373's invariant holds for local menus too: the one player inventory
+    /// moves into this menu while it is open and is reclaimed on close. That is
+    /// what makes the 27 + 9 rows drawn underneath a plugin's screen the real
+    /// inventory rather than an empty husk, and what makes shift-clicking out of a
+    /// plugin menu land in the hotbar.
+    pub fn open_local(&mut self, menu: Menu, menu_type: ResourceKey, title: Text) {
+        // Whatever was open is holding the one player inventory; take it back
+        // before dropping that menu, exactly as `ensure_open` does.
+        self.reclaim_inventory();
+        // A pending server open is *not* cleared: if its content packet arrives
+        // it legitimately supersedes this local menu, and dropping the pending
+        // here would strand that screen with unknown metadata forever.
+        self.opened = Some(OpenMenu {
+            window_id: LOCAL_MENU_WINDOW_ID,
+            menu_type: Some(menu_type),
+            title: Some(title),
+            menu: ClientMenu::new(menu),
+            data: Vec::new(),
+            local: true,
+        });
+        self.hand_inventory_to_opened();
+    }
+
+    /// Closes the open menu **only if it is local**, returning whether it closed.
+    ///
+    /// Deliberately narrower than `apply(ScreenClosed)`: a plugin closing its own
+    /// screen must not be able to close a real server container behind the
+    /// player's back, because that would desynchronise the server's own open
+    /// container with no packet explaining why.
+    pub fn close_local(&mut self) -> bool {
+        if !self.opened_is_local() {
+            return false;
+        }
+        self.reclaim_inventory();
+        self.opened = None;
+        true
     }
 
     /// Folds a container [`ClientEvent`] into the session, returning `true` if
@@ -421,7 +522,11 @@ impl Menus {
         }
         self.opened
             .as_mut()
-            .filter(|o| o.window_id == window_id)
+            // `!o.local` is belt-and-braces against the id check: a local menu's
+            // id is `i32::MIN`, which no server allocates, but a server-sourced
+            // packet must be unable to write into a plugin's screen even if one
+            // somehow arrived with that id. Issue #145.
+            .filter(|o| !o.local && o.window_id == window_id)
             .map(|o| &mut o.menu)
     }
 
@@ -454,6 +559,11 @@ impl Menus {
                 title,
                 menu: ClientMenu::new(menu),
                 data: Vec::new(),
+                // Reached only from a server `container_set_content`, so never
+                // local. A server open legitimately *supersedes* a plugin's local
+                // menu: `reclaim_inventory` above has already taken the one player
+                // inventory back out of it.
+                local: false,
             });
             // Vanilla's shape: the container's player-section slots *are* the
             // player inventory. Hand it over before the caller reconciles the

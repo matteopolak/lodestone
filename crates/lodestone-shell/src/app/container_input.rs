@@ -39,7 +39,15 @@ impl WindowApp {
     /// Silently drops the click if there is no live connection yet (matches
     /// every other best-effort send in this app, e.g. `NetClient::send_action`
     /// itself).
-    pub(super) fn send_menu_click(&self, click: Click) {
+    pub(super) fn send_menu_click(&mut self, click: Click) {
+        // Issue #145: a plugin-opened local menu has no server container, so its
+        // clicks are applied locally and **nothing is sent**. Checked before the
+        // connection check on purpose — a local menu works with no connection at
+        // all, so bailing on `net()` first would make plugin menus dead at the
+        // title screen.
+        if self.sim.click_local_menu(click) {
+            return;
+        }
         let Some(net) = self.sim.net() else { return };
         // Named separately from its `.get()` below rather than chained: the
         // `Arc<OnceLock<_>>` `shared_handle()` returns is an owned value, and
@@ -146,7 +154,7 @@ impl WindowApp {
     /// diverge from `container.rs`'s vanilla-exact click semantics, and the
     /// prediction has to see each click in order for the next one's `ctx` to be
     /// right.
-    fn auto_fill_recipe(&self, menu: &Menu, id: &lodestone_model::Identifier) {
+    fn auto_fill_recipe(&mut self, menu: &Menu, id: &lodestone_model::Identifier) {
         let Some(book) = self.recipe_book.as_ref() else {
             return;
         };
@@ -173,7 +181,7 @@ impl WindowApp {
     /// `active_container_menu` + `hit_test_with_scale` pair the mouse path uses,
     /// so the key and the mouse can never disagree about which slot is under the
     /// pointer (the layout module's own warning about that class of bug).
-    pub(super) fn send_container_swap(&self, button: i32) {
+    pub(super) fn send_container_swap(&mut self, button: i32) {
         let (Some(menu), Some((w, h))) = (
             self.active_container_menu(),
             self.target.as_ref().map(RenderTarget::size),
@@ -213,7 +221,7 @@ impl WindowApp {
     /// drift from the one `container.rs` already tests. `Click::drop_one`/
     /// `drop_stack` and `do_throw` (`lodestone-game`) were built and tested
     /// under #27 with zero producers before this; this is the first caller.
-    pub(super) fn send_container_drop(&self, ctrl: bool) {
+    pub(super) fn send_container_drop(&mut self, ctrl: bool) {
         let (Some(menu), Some((w, h))) = (
             self.active_container_menu(),
             self.target.as_ref().map(RenderTarget::size),
@@ -242,7 +250,7 @@ impl WindowApp {
     /// `Sim` yet, which matters more here than for drop, because vanilla's clone
     /// click is *creative-only*; until that lands this resolves and then produces
     /// no clicks, which is the honest degradation rather than a fabricated one.
-    pub(super) fn send_container_pick_item(&self) {
+    pub(super) fn send_container_pick_item(&mut self) {
         let (Some(menu), Some((w, h))) = (
             self.active_container_menu(),
             self.target.as_ref().map(RenderTarget::size),
