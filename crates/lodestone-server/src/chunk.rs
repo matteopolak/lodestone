@@ -262,31 +262,29 @@ pub trait ChunkSource: Send + Sync {
     /// return — including any edit already applied via
     /// [`set_block`](Self::set_block).
     ///
-    /// The default recomputes the owning column and reads one cell out of
-    /// it, so an implementor whose `column()` already consults an edit cache
-    /// (see [`OverworldChunkSource`]) gets a correct answer for free without
-    /// overriding this.
-    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
-        let cx = x.div_euclid(16);
-        let cz = z.div_euclid(16);
-        let lx = x.rem_euclid(16);
-        let lz = z.rem_euclid(16);
-        self.column(cx, cz).block_state(lx, y, lz).to_string()
-    }
+    /// This is a required method so no implementor silently inherits a
+    /// whole-column regeneration for a one-block read (the historical
+    /// default — issue #440). An implementor with a cheaper path, one that
+    /// reads a cell out of a column it already retains, must override this
+    /// to avoid regenerating on every probe: the `ChunkStore` wrapper is the
+    /// reference example. An implementor with no cheaper path implements it
+    /// as `self.column(cx, cz).block_state(..)`, which is correct if
+    /// column-sized; the point is that the choice is explicit at every
+    /// implementor rather than silently inherited.
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String;
 
     /// Overwrites a single block's state at world coordinates `(x, y, z)`,
     /// persisting the change so a later [`column`](Self::column) call for
     /// its chunk reflects it.
     ///
-    /// The default is a no-op: a source with no persistence (e.g.
-    /// [`WorldgenChunkSource`], kept only for the solidity-only transport
-    /// tests — see this module's own doc comment) silently discards edits
-    /// rather than needing its own override. [`OverworldChunkSource`] is the
-    /// one implementor that actually persists a `set_block` call; see its
-    /// doc comment for why that retention did not already exist.
-    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
-        let _ = (x, y, z, name);
-    }
+    /// This is a required method so no implementor can silently drop a
+    /// placement: the historical default was a no-op, which made "block
+    /// placement fails with no error" the default experience for any new
+    /// source that forgot to override it (issue #440). Every implementor must
+    /// now decide explicitly how edits are stored. A source with no per-column
+    /// retention must say so loudly — a `todo!()`, or an explicitly documented
+    /// discard — rather than inherit silence.
+    fn set_block(&self, x: i32, y: i32, z: i32, name: &str);
 
     /// Tells the source that the column at `(cx, cz)` is no longer resident in
     /// whatever cache sits above it, so a layer that retains state per column
@@ -527,6 +525,21 @@ impl ChunkSource for OverworldChunkSource {
         ChunkColumn::from_generated(self.generator.column(cx, cz))
     }
 
+    // There is no cheaper single-block path here: the generator only answers
+    // whole columns, so this goes through `column()`, which already consults
+    // `edits` first — so the answer reflects a `set_block` edit exactly as a
+    // `column()` read would. A source with no edits to consult could skip
+    // this and reuse the column-regenerating form; this one keeps it explicit.
+    // (`crate::chunk_store::ChunkStore`, which wraps this source, overrides
+    // `block_state` with the one-cell read that avoids the regeneration.)
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
@@ -585,6 +598,34 @@ impl ChunkSource for WorldgenChunkSource {
             }
         }
         col
+    }
+
+    // This source is solidity-only: one block is stone iff its density
+    // sample is positive, mirroring `column()`'s `set_solid` rule exactly
+    // (including air for any y outside the vertical extent). Point-sampling
+    // the density node is cheaper than `column()` and gives the same answer,
+    // so unlike the column-regenerating form this is the efficient read.
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        if !(self.min_y..self.min_y + self.height).contains(&y) {
+            return AIR.to_string();
+        }
+        if self.final_density.compute(Context::new(x, y, z)) > 0.0 {
+            STONE.to_string()
+        } else {
+            AIR.to_string()
+        }
+    }
+
+    /// This source has no per-column retention — every `column()` call
+    /// regenerates fresh from the density node — so there is nowhere for an
+    /// edit to live. That is a deliberate property of a solidity-only
+    /// transport-test source, not a gap: reach for
+    /// [`OverworldChunkSource`] (or [`crate::region_source::RegionChunkSource`])
+    /// when edits must persist. Panics loudly rather than silently discarding
+    /// the placement.
+    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        let _ = (x, y, z, name);
+        todo!("WorldgenChunkSource is a solidity-only, non-retaining source; it cannot accept a set_block edit");
     }
 }
 
@@ -769,6 +810,24 @@ mod tests {
         fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
             std::thread::sleep(self.per_column);
             ChunkColumn::new(-64, 32)
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            // The gates only ever call `column()`, so this is the plain
+            // column-regenerating form, kept for completeness.
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let lx = x.rem_euclid(16);
+            let lz = z.rem_euclid(16);
+            self.column(cx, cz).block_state(lx, y, lz).to_string()
+        }
+
+        // A wall-clock-only fixture: it exists to make `column()` take a fixed
+        // amount of blocking time, and no gate here writes blocks. Deliberately
+        // discards rather than inheriting a silent default — the point of
+        // issue #440 is that such a choice must be explicit per implementor.
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+            // No storage; edits are discarded by design for this fixture.
         }
     }
 

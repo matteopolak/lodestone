@@ -945,6 +945,24 @@ mod tests {
         fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
             crate::chunk::ChunkColumn::new(0, 16)
         }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            // The plain column-regenerating form; the clock/overrun gates only
+            // care that the loop runs, not what this reads.
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let lx = x.rem_euclid(16);
+            let lz = z.rem_euclid(16);
+            self.column(cx, cz).block_state(lx, y, lz).to_string()
+        }
+
+        // `run_tick_loop` can forward grazing/random-tick mutations to this
+        // (tick.rs's own `world.set_block`), so it must not panic; but the
+        // source has no storage, so the edit is deliberately discarded.
+        // Explicit rather than inherited (issue #440).
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+            // No storage; edits are discarded by design for this fixture.
+        }
     }
 
     /// `(world, block_tick_out, tick_area)` — the three new `run_tick_loop`
@@ -1338,6 +1356,16 @@ mod tests {
     impl ChunkSource for RecordingWorld {
         fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
             crate::chunk::ChunkColumn::new(0, 16)
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            // The plain column-regenerating form; this fixture only records
+            // `set_block` calls, nothing reads terrain back.
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let lx = x.rem_euclid(16);
+            let lz = z.rem_euclid(16);
+            self.column(cx, cz).block_state(lx, y, lz).to_string()
         }
 
         fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {

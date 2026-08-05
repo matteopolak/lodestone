@@ -57,15 +57,18 @@
 //! `is_chunk_loaded` early return, via `PlayerCollision::Pending`).
 //!
 //! The second one is the more surprising of the pair and it is not a call-site
-//! mistake: [`ChunkSource::block_state`]'s **default** implementation is
-//! `self.column(cx, cz).block_state(..)`, so reading one block regenerates a
-//! whole 16×384×16 column. It fires only once the client has sent a position,
-//! which lines up exactly with *"it seems to stop generating chunks after the
-//! first load"* — the connection task streams chunks fine during the join
-//! burst and is saturated from the first movement packet onward.
+//! mistake: until issue #440 made it a **required** method, `block_state`'s
+//! default implementation was `self.column(cx, cz).block_state(..)`, so
+//! reading one block regenerated a whole 16×384×16 column. It fires only once
+//! the client has sent a position, which lines up exactly with *"it seems to
+//! stop generating chunks after the first load"* — the connection task streams
+//! chunks fine during the join burst and is saturated from the first movement
+//! packet onward.
 //!
 //! [`ChunkStore`] therefore overrides `block_state` as well as `column`; the
-//! override reads one cell out of the retained column and clones nothing.
+//! override reads one cell out of the retained column and clones nothing, and
+//! it is the model for the post-#440 required method: a source that retains
+//! columns should read a cell from them rather than regenerate.
 //!
 //! # How it works
 //!
@@ -408,11 +411,12 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
 
     /// One block, without regenerating or cloning a column.
     ///
-    /// Overriding this is half the fix, not an optimisation:
-    /// [`ChunkSource::block_state`]'s default is
-    /// `self.column(cx, cz).block_state(..)`, and `crate::server`'s
-    /// `vitals_tick` calls it every 50 ms on the connection task. See the
-    /// module docs.
+    /// Overriding this is half the fix, not an optimisation: the
+    /// column-regenerating form (`self.column(cx, cz).block_state(..)`, once
+    /// `block_state`'s default and now each non-retaining implementor's
+    /// explicit choice) regenerates a whole column per probe, and
+    /// `crate::server`'s `vitals_tick` calls this every 50 ms on the
+    /// connection task. See the module docs.
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
@@ -445,10 +449,11 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         let stamp = cache.next_stamp();
         if let Some(entry) = cache.columns.get_mut(&(cx, cz)) {
             // A `y` outside the column's vertical extent is a no-op rather than
-            // an index panic. `ChunkColumn::set_block` indexes unguarded, and a
-            // source whose own `set_block` is a no-op (the `ChunkSource`
-            // default, e.g. `WorldgenChunkSource`) would not have rejected it
-            // above.
+            // an index panic. `ChunkColumn::set_block` indexes unguarded, and
+            // the inner source's own `set_block` may have accepted the edit (or
+            // rejected it its own way) without this retained column being able
+            // to hold it — so the store guards its own update rather than
+            // relying on the source to reject out-of-range `y`.
             if y >= entry.column.min_y && y < entry.column.min_y + entry.column.height {
                 entry.column.set_block(lx, y, lz, name);
                 entry.last_used = stamp;
@@ -550,6 +555,27 @@ mod tests {
                 .entry((cx, cz))
                 .or_insert(0) += 1;
             ChunkColumn::new(self.min_y, self.height)
+        }
+
+        // Goes through `column()` on purpose: the control half of
+        // `repeated_single_block_probes_generate_one_column_not_forty` relies
+        // on one probe costing exactly one generation. This is the explicit,
+        // column-regenerating form that used to be `block_state`'s default.
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let lx = x.rem_euclid(16);
+            let lz = z.rem_euclid(16);
+            self.column(cx, cz).block_state(lx, y, lz).to_string()
+        }
+
+        // `run_tick_loop` forwards random-tick and grazing mutations through
+        // the store to the inner source, so this must not panic; but the
+        // source has no storage (its `column()` is a fresh blank column plus a
+        // counter), so the edit is deliberately discarded. Explicit rather than
+        // inherited — the point of issue #440.
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+            // No storage; edits are discarded by design for this counting stub.
         }
     }
 
@@ -746,7 +772,8 @@ mod tests {
     fn repeated_single_block_probes_generate_one_column_not_forty() {
         const PROBES: u64 = 40;
 
-        // Control: the bare source, i.e. `block_state`'s default impl.
+        // Control: the bare source, whose `block_state` is the explicit
+        // column-regenerating form (what used to be the trait default).
         let bare = CountingSource::new();
         for _ in 0..PROBES {
             let _ = bare.block_state(5, 8, 5);
@@ -754,9 +781,10 @@ mod tests {
         assert_eq!(
             bare.calls(),
             PROBES,
-            "control: `ChunkSource::block_state`'s default regenerates a whole column per \
-             probe. If this is not {PROBES}, the default impl changed and the gate below \
-             is measuring the wrong thing."
+            "control: `CountingSource::block_state` regenerates a whole column per probe \
+             (the column-regenerating form that was `ChunkSource`'s default before issue \
+             #440). If this is not {PROBES}, the impl changed and the gate below is \
+             measuring the wrong thing."
         );
 
         // Subject: the same probes through the store.
@@ -974,6 +1002,22 @@ mod tests {
         fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
             touched_column(REAL_MIN_Y, REAL_HEIGHT)
         }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            // Only `column()` is exercised here (the RSS measurement); this is
+            // the plain column-regenerating form, kept for completeness.
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let lx = x.rem_euclid(16);
+            let lz = z.rem_euclid(16);
+            self.column(cx, cz).block_state(lx, y, lz).to_string()
+        }
+
+        // A memory-measurement fixture; nothing here writes blocks. Explicitly
+        // discards rather than inheriting a silent default (issue #440).
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+            // No storage; edits are discarded by design for this fixture.
+        }
     }
 
     /// Fills a store to `capacity` and holds it, so an external
@@ -1086,6 +1130,22 @@ mod tests {
             fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
                 std::thread::sleep(self.per_column);
                 ChunkColumn::new(0, 16)
+            }
+
+            fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+                // Only `column()` is exercised here (the lock-serialisation
+                // gate); the plain column-regenerating form, for completeness.
+                let cx = x.div_euclid(16);
+                let cz = z.div_euclid(16);
+                let lx = x.rem_euclid(16);
+                let lz = z.rem_euclid(16);
+                self.column(cx, cz).block_state(lx, y, lz).to_string()
+            }
+
+            // A wall-clock-only fixture; nothing here writes blocks. Explicitly
+            // discards rather than inheriting a silent default (issue #440).
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+                // No storage; edits are discarded by design for this fixture.
             }
         }
 
