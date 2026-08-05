@@ -819,6 +819,19 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         self.inner.column(cx, cz)
     }
 
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        // Goes through `self.column()`, which consults `edits` and disk before
+        // the inner source — so the answer reflects a `set_block` edit exactly
+        // as a `column()` read would. The wrapper above this
+        // (`crate::chunk_store::ChunkStore`) overrides this with the
+        // one-cell read that avoids the regeneration.
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
@@ -1304,6 +1317,25 @@ mod tests {
                 }
             }
             column
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            // The plain column-regenerating form; the tests drive edits
+            // through `RegionChunkSource` (which does not forward to this
+            // inner source), so this never needs to reflect a write here.
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let lx = x.rem_euclid(16);
+            let lz = z.rem_euclid(16);
+            self.column(cx, cz).block_state(lx, y, lz).to_string()
+        }
+
+        // `RegionChunkSource` owns the edit map and deliberately does not
+        // forward `set_block` to its inner source, so this is unreachable in
+        // the tests. Explicitly discards rather than inheriting a silent
+        // default (issue #440).
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+            // No storage; edits are discarded by design for this fixture.
         }
     }
 

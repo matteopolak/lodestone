@@ -1316,6 +1316,24 @@ mod tests {
                 .or_insert(0) += 1;
             ChunkColumn::new(0, 16)
         }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            // The plain column-regenerating form; this gate only counts
+            // generations, never reads terrain back for content.
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let lx = x.rem_euclid(16);
+            let lz = z.rem_euclid(16);
+            self.column(cx, cz).block_state(lx, y, lz).to_string()
+        }
+
+        // Built into `IntegratedServer` (which wraps sources in a
+        // `ChunkStore`), so a player action could reach this through the
+        // store's write-through. The source has no storage, so the edit is
+        // deliberately discarded. Explicit rather than inherited (issue #440).
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+            // No storage; edits are discarded by design for this counting stub.
+        }
     }
 
     fn total(calls: &Arc<Mutex<HashMap<(i32, i32), usize>>>) -> usize {

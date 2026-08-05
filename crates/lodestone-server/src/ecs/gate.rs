@@ -33,6 +33,25 @@ impl ChunkSource for AirWorld {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         ChunkColumn::new(0, 16)
     }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        // The plain column-regenerating form; this gate only drives a server
+        // tick, it never places blocks, so a cheap read is not needed.
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    // Built into `IntegratedServer` (which wraps sources in a `ChunkStore`),
+    // so a player action could reach this through the store's write-through.
+    // The source has no storage — `column()` is a fresh blank column — so the
+    // edit is deliberately discarded. Explicit rather than inherited (issue
+    // #440).
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+        // No storage; edits are discarded by design for this fixture.
+    }
 }
 
 /// The minimum `ServerProtocol`: the seven required methods, each answering with
