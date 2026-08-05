@@ -105,6 +105,9 @@ mod tests {
     #[tokio::test]
     async fn no_legacy_file_is_a_no_op_and_touches_no_network() {
         let path = temp_legacy_path("absent");
+        // Issue #446: without an installed rustls crypto provider `Client::new()`
+        // panics, so this line doubles as a provider canary.
+        crate::install_crypto_provider();
         let client = reqwest::Client::new();
         let secrets = MemoryStore::new();
         let mut metadata = AccountsMetadata::default();

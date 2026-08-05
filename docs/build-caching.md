@@ -110,6 +110,38 @@ being recompiled per agent.
   moves into the sccache daemon, outside the measured process tree. Compare
   wall, or the daemon's own stats.
 
+### The limit of all of the above: it is a *rustc* measurement (issue #446)
+
+Everything in this section measures `rustc` invocations, because `sccache` is
+installed as `[build] rustc-wrapper`. It says **nothing** about what a build
+script does with a C toolchain, and that gap has a name: `aws-lc-sys`, which
+vendored ~1,500 C translation units, was compiled by its own `builder/` rather
+than by `rustc`, and was therefore rebuilt **from scratch in every target
+directory**. Twenty-five concurrent copies were counted across per-agent
+`/tmp/lt-*` dirs, and 137 GB of accumulated per-agent target dirs was half of
+issue #446. Under that load a multi-minute build is indistinguishable from a
+hang, which is exactly what the owner reported.
+
+So the per-agent `--target-dir` policy above is a straight **N× multiplier** for
+any `-sys` crate with a heavy build script, with no cache to offset it. Two
+consequences worth keeping:
+
+- **Delete your per-agent target dir when you finish.** Nothing does this
+  automatically. It is the mitigation that actually recovered 81 GB.
+- **Prefer deleting a heavy `-sys` dependency over caching it.** `aws-lc-sys` was
+  removed outright — see [`tls-crypto-provider.md`](./tls-crypto-provider.md) —
+  which deletes the whole class rather than making it cheaper.
+
+One honest tension, flagged rather than resolved: the bullet above reports
+*"C/C++ inside `aws-lc-sys` etc. hit 99.6%"*, which reads as though the C side
+*was* cached. That figure came from `sccache --show-stats`' own C/C++ counters
+and was never traced back to `aws-lc-sys`'s build script specifically, and
+`.cargo/config.toml` sets only `rustc-wrapper` — it does not set `CC`, so
+nothing routes the `cc` crate's invocations through sccache. Whichever reading is
+right, it is now **moot for this repo**: the crate is gone from `Cargo.lock`
+entirely. Do not cite that 99.6% as evidence that a future `-sys` crate will be
+cached; measure it.
+
 ## Measured: dev profiles (landed in root `Cargo.toml`)
 
 Render-tests build (`cargo test -p lodestone-render --no-run`, 214-unit

@@ -109,13 +109,43 @@ num-bigint = "0.4"
 base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 # HTTP client for the MS OAuth / Xbox / XSTS / Minecraft-services chain and the
-# session-server join. `rustls` avoids a system OpenSSL dependency.
+# session-server join. rustls avoids a system OpenSSL dependency.
+#
+# `rustls-no-provider`, NOT `rustls` — deliberately, see issue #446. reqwest's
+# `rustls` feature is `["__rustls-aws-lc-rs", "dep:rustls-platform-verifier",
+# "__rustls"]`: it *hard-wires* the crypto provider to `aws-lc-rs`, and there is
+# no `rustls-ring` feature to pick instead. `aws-lc-sys` vendors ~1,500 C
+# translation units, is compiled by a build script (so `sccache`, which wraps
+# rustc, cannot cache it), and is therefore rebuilt from scratch in every target
+# directory — 25 concurrent copies were counted, and 137 GB of per-agent target
+# dirs was half the cost. `rustls-no-provider` enables the same `__rustls` and
+# `rustls-platform-verifier` and simply leaves provider selection to us; we
+# install `ring` via `lodestone_auth::install_crypto_provider()`.
+#
+# The catch, and the reason this needs the `rustls` entry below rather than just
+# a feature swap: with no provider installed, reqwest's own
+# `default_rustls_crypto_provider()` is a `panic!` under
+# `#[cfg(not(feature = "__rustls-aws-lc-rs"))]`, fired from `Client::build()`.
+# That is a RUNTIME panic, so no `cargo check` can see a missing install.
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "form",
-    "rustls",
+    "rustls-no-provider",
     "http2",
     "charset",
+] }
+# The crypto provider for the above, named directly so we can install it as the
+# process default. `default-features = false` is load-bearing twice over:
+# rustls' own `default` is `["aws_lc_rs", "logging", "prefer-post-quantum",
+# "std", "tls12"]`, and `prefer-post-quantum` *also* enables `aws_lc_rs` — so
+# either of those two features anywhere in the graph drags the C build back in
+# through feature unification. `std` + `tls12` mirror what reqwest itself asks
+# for, so the only delta from reqwest's own request is `ring` in place of
+# `aws-lc-rs`.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
 ] }
 # SRV record resolution (`_minecraft._tcp.<host>`) for real servers behind a
 # service record. Native-only (needs UDP sockets).

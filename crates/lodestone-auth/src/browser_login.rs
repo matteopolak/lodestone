@@ -849,6 +849,9 @@ mod tests {
     #[tokio::test]
     async fn poll_once_returns_none_without_blocking_when_no_browser_has_connected() {
         let mut login = LoopbackLogin::begin("cid").await.unwrap();
+        // Issue #446: `Client::new()` panics without an installed rustls crypto
+        // provider, so this line doubles as a provider canary.
+        crate::install_crypto_provider();
         let http = reqwest::Client::new();
         let polled = tokio::time::timeout(
             Duration::from_secs(2),

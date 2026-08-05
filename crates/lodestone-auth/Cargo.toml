@@ -33,6 +33,15 @@ base64 = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 keyring = { workspace = true }
+# Named directly only to install the process-default crypto provider (`tls`).
+# reqwest is built with `rustls-no-provider` (issue #446, and see the workspace
+# manifest for why), which means *nothing* selects a provider unless we do — and
+# the failure is a runtime panic inside `Client::build()`, not a compile error.
+# Target-gated for the same reason as `reqwest` above: reqwest's own rustls deps
+# are `cfg(not(wasm32))`, so a browser build has no TLS stack to configure and
+# must not grow one. `lodestone-client` is in `scripts/wasm-check.sh`'s crate
+# list and depends on this crate, so an ungated entry here breaks that guard.
+rustls = { workspace = true }
 
 # The loopback authorization-code flow (`browser_login`): PKCE needs SHA-256 and
 # base64url, and both the verifier and the CSRF `state` need a CSPRNG. Native-only
@@ -44,3 +53,5 @@ rand = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 reqwest = { workspace = true }
+# `tests/tls_provider.rs` inspects the installed provider directly (issue #446).
+rustls = { workspace = true }

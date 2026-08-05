@@ -64,6 +64,14 @@ pub mod migrate;
 pub mod paths;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod store;
+/// The process-default rustls crypto provider (issue #446). Native-only, for the
+/// same reason as the modules above: reqwest's rustls stack is itself
+/// `cfg(not(wasm32))`, so a browser build has no provider to select.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tls;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use tls::install_crypto_provider;
 
 pub use error::XstsErrorKind;
 #[cfg(not(target_arch = "wasm32"))]

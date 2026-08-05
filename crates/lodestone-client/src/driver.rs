@@ -134,6 +134,16 @@ impl<T: Transport> Driver<T> {
         server: ServerAddress,
         #[cfg(not(target_arch = "wasm32"))] auth_session: Option<lodestone_auth::Session>,
     ) -> Self {
+        // reqwest is built with `rustls-no-provider` (issue #446), which leaves
+        // the rustls crypto provider for the application to choose. The
+        // `reqwest::Client::new()` below PANICS if none is installed, and that is
+        // a *runtime* panic no `cargo check` can see — so the install sits
+        // immediately next to the construction it protects rather than in some
+        // distant `main`, which also means every test binary reaching here is
+        // covered. Idempotent; see `lodestone_auth::tls`.
+        #[cfg(not(target_arch = "wasm32"))]
+        lodestone_auth::install_crypto_provider();
+
         Self {
             conn,
             adapter,
