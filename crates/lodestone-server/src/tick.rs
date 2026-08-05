@@ -52,9 +52,33 @@ use std::time::Duration;
 use crate::block_entities::{BlockEntityHandle, BlockEntityRegistry};
 use crate::chunk::ChunkSource;
 use crate::mobs::{Detonation, LiveMobSource, MobHandle, MobSim};
+use lodestone_entity::ai::mob::EatenBlock;
 use crate::random_tick::{DEFAULT_RANDOM_TICK_SPEED, RandomTickScheduler};
 use crate::scheduled_tick::{ScheduledTickQueue, TickPriority};
 use lodestone_model::BlockPos;
+
+/// Vanilla's `mobGriefing` game rule, which gates whether a mob may change the
+/// world — here, whether a grazing sheep's eat actually removes the block
+/// (`ai/goal/EatBlockGoal.java:63,71`; `GameRules.RULE_MOBGRIEFING`, default
+/// **true**).
+///
+/// A function returning vanilla's default rather than a real rule lookup, and
+/// that is a disclosed gap, not an oversight: this crate has **no `GameRules`
+/// registry**. The nearest thing is `crate::server::WorldAdminState`'s
+/// `game_rules: HashMap<String, String>`, which is per-*connection* state owned
+/// by `serve_play` — the wrong side of the world for a tick loop that runs with
+/// no connection at all, and which that type's own doc comment already
+/// describes as a confirmation echo rather than a rule store. Wiring the real
+/// rule means a world-level `GameRules` the tick loop and every connection
+/// share; when that exists, this function is the only call site to change.
+///
+/// Returning the default is the conservative choice for the *observable*
+/// behaviour: vanilla ships `mobGriefing` on, so a sheep eating grass is what a
+/// player expects to see, and modelling it as off would hide the feature behind
+/// a rule nobody can currently turn back on.
+fn mob_griefing() -> bool {
+    true
+}
 
 /// Vanilla's tick period at normal (non-sprinting) speed — 20 TPS, matching
 /// `server.rs`'s own private `MILLIS_PER_TICK` and every one of the six
@@ -545,6 +569,42 @@ pub(crate) async fn run_tick_loop<W>(
         for detonation in mobs.with(MobSim::take_detonations) {
             explosion_out.publish(detonation);
         }
+        // Issue #456: the world half of a grazing sheep, and the same shape as
+        // the detonation drain above for the same structural reason —
+        // `MobSim::tick` holds `world: &'w ChunkWorld` **immutably**, so it can
+        // only record the eat as an intent; this loop is the one place that owns
+        // a mutable `ChunkSource` and can apply it. `EatBlockGoal` reaching this
+        // drain is what makes the grass actually disappear rather than the goal
+        // counting down against a world that never changes.
+        //
+        // Vanilla `ai/goal/EatBlockGoal.java:59-80`, and the two variants really
+        // are different operations rather than one with a different block id:
+        //
+        // * `AtFeet` is `destroyBlock(pos, false)` — the block the sheep stands
+        //   *in* becomes air, and the `false` is "no drops", so a grazed
+        //   short-grass yields nothing.
+        // * `Below` is `setBlock(below, DIRT, 2)` — the `grass_block` underfoot
+        //   is *replaced*, not destroyed, so nothing drops there either but the
+        //   cell stays solid and the sheep does not fall.
+        //
+        // Published on `block_tick_out` because that is already the wire path
+        // `serve_play` drains for random-ticked block changes, so the client
+        // sees this exactly as it sees grass spreading — no second feed needed.
+        for (pos, eaten) in mobs.with(MobSim::take_grazes) {
+            // Drained unconditionally, gated afterwards: with `mobGriefing` off
+            // the eat still *happened* (vanilla calls `mob.ate()` either way —
+            // see `MobSim::take_grazes`'s own doc comment), so swallowing the
+            // queue entry is correct and leaving it to accumulate would not be.
+            if !mob_griefing() {
+                continue;
+            }
+            let (target, state) = match eaten {
+                EatenBlock::AtFeet => (pos, "minecraft:air"),
+                EatenBlock::Below => (BlockPos::new(pos.x, pos.y - 1, pos.z), "minecraft:dirt"),
+            };
+            world.set_block(target.x, target.y, target.z, state);
+            block_tick_out.publish(target.x, target.y, target.z, state.to_owned());
+        }
         block_entities.with(BlockEntityRegistry::tick_all);
 
         game_tick += 1;
@@ -656,6 +716,8 @@ pub(crate) async fn run_tick_loop<W>(
 mod tests {
     use super::*;
     use crate::mobs::ChunkWorld;
+    // For `ResourceKey::from_str` in the issue-#456 graze gates below.
+    use std::str::FromStr;
 
     fn handles() -> (MobHandle, LiveMobSource, BlockEntityHandle) {
         (
@@ -987,5 +1049,199 @@ mod tests {
             stats.mspt_avg_ms
         );
         assert_eq!(stats.tick_count, (HISTORY_LEN * 2) as u64);
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #456: the graze drain. Before this, `MobSim::take_grazes` had no
+    // consumer anywhere — a sheep ran a real `EatBlockGoal`, recorded a real
+    // eat, and the world never changed. These gates drive the **production
+    // loop**, so they fail if the drain is removed from `run_tick_loop` rather
+    // than merely if `take_grazes` regresses.
+    // ---------------------------------------------------------------------
+
+    /// A [`ChunkSource`] that records every [`ChunkSource::set_block`] the tick
+    /// loop applies, and serves bare-air columns.
+    ///
+    /// Air, deliberately: the loop random-ticks `tick_area` against this same
+    /// source every tick, and an eligible block there would write its own
+    /// `set_block` calls into the very list these gates read — a grass block
+    /// dying to `minecraft:dirt` is *byte-identical* to the `Below` graze this
+    /// asserts. Air makes the recording unambiguous by making the graze the only
+    /// possible writer.
+    ///
+    /// The graze decision does not come from here in any case: `EatBlockGoal`
+    /// reads the *sim's* `ChunkWorld` (see `grass_world` below). Production
+    /// shares one object between the two roles; separating them here is what
+    /// lets the gate watch the mutation arrive.
+    #[derive(Default)]
+    struct RecordingWorld(Arc<Mutex<Vec<(i32, i32, i32, String)>>>);
+
+    impl ChunkSource for RecordingWorld {
+        fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
+            crate::chunk::ChunkColumn::new(0, 16)
+        }
+
+        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+            self.0
+                .lock()
+                .expect("recording world lock poisoned")
+                .push((x, y, z, name.to_owned()));
+        }
+    }
+
+    /// Grass over a wide area, with `short_grass` on top only when `at_feet`.
+    ///
+    /// **49×49, not a few cells, and that width is load-bearing.** Grazing
+    /// destroys its own supply, and the sheep also strolls; over a small patch a
+    /// gate stops measuring "does the eat reach the world" and starts measuring
+    /// how quickly the sheep runs out of grass — one earlier draft of the
+    /// interval gate read 125 eats against a predicted 444 for exactly that
+    /// reason.
+    fn grass_world(at_feet: bool) -> ChunkWorld {
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -24..=24 {
+            for z in -24..=24 {
+                world.set_block(x, -1, z, "minecraft:grass_block");
+                if at_feet {
+                    world.set_block(x, 0, z, "minecraft:short_grass");
+                }
+            }
+        }
+        world
+    }
+
+    /// Ticks the real [`run_tick_loop`] over a sheep on grass until the loop
+    /// applies a block change, and returns `(world edits, feed publications)`.
+    ///
+    /// The sheep comes from [`MobSim::spawn_species`], so its `EatBlockGoal`
+    /// comes from the per-species roster — **not** hand-installed. Installing it
+    /// by hand *as well* is a known trap: two goals at the same priority each
+    /// draw their own `next_i32(interval)`, and an interval gate built that way
+    /// measured 627 eats against a predicted 444.
+    ///
+    /// `tick_area` is a chunk the sheep is nowhere near, so the random-tick pass
+    /// cannot contribute an edit even if `RecordingWorld` were ever given
+    /// eligible terrain.
+    async fn graze_until_edit(
+        at_feet: bool,
+        baby: bool,
+        max_ticks: usize,
+    ) -> (Vec<(i32, i32, i32, String)>, Vec<(i32, i32, i32, String)>) {
+        let world = grass_world(at_feet);
+        let mobs = MobHandle::new(world);
+        mobs.with(|sim| {
+            let sheep =
+                lodestone_model::ResourceKey::from_str("minecraft:sheep").expect("static key");
+            let m = sim.spawn_species(sheep, lodestone_model::Vec3::new(0.5, 0.0, 0.5));
+            if baby {
+                m.set_age(-24_000);
+            }
+        });
+
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let source = Arc::new(RecordingWorld(Arc::clone(&recorded)));
+        let feed = BlockTickFeed::default();
+        tokio::spawn(run_tick_loop(
+            mobs,
+            LiveMobSource::default(),
+            BlockEntityHandle::default(),
+            Arc::new(TickClock::new()),
+            source,
+            feed.clone(),
+            (64..=64, 64..=64),
+            ExplosionFeed::default(),
+        ));
+        // See `ten_periods_advance_exactly_ten_ticks_with_no_overrun`: the
+        // spawned task must reach its first `Instant::now()` before any
+        // `advance`, or every tick prediction shifts by one period.
+        tokio::task::yield_now().await;
+
+        let mut published = Vec::new();
+        for _ in 0..max_ticks {
+            tokio::time::advance(TICK_PERIOD).await;
+            tokio::task::yield_now().await;
+            published.extend(feed.drain_all());
+            if !recorded.lock().expect("poisoned").is_empty() {
+                break;
+            }
+        }
+        let edits = recorded.lock().expect("poisoned").clone();
+        (edits, published)
+    }
+
+    /// The half-width of [`grass_world`]'s patch. An edit inside it is under
+    /// terrain the sheep could actually have reached and grazed.
+    const GRASS_HALF_WIDTH: i32 = 24;
+
+    /// Whether `(x, z)` is inside the grass patch.
+    ///
+    /// This replaced an `assert_eq!((x, z), (0, 0))` that asserted the sheep
+    /// grazes where it spawned — which is **false, and for a good reason**: a
+    /// sheep is persistent, so vanilla clears its idle throttle every tick and
+    /// its `WaterAvoidingRandomStrollGoal` is live, so it wanders before it eats.
+    /// Both arms observed the graze at `(-5, 4)`, not `(0, 0)`. Pinning the spawn
+    /// column would have been the same mistake as an earlier gate in this repo
+    /// that pinned a mob to `(0,0,0)` while `RandomStrollGoal` legitimately
+    /// walked it to `(-2,0,-2)`.
+    ///
+    /// `y` remains asserted exactly, because `y` is the only coordinate that
+    /// distinguishes the two `EatenBlock` branches — `x`/`z` are the mob's own
+    /// column either way and carry no information about which one ran.
+    fn in_grass_patch(x: i32, z: i32) -> bool {
+        x.abs() <= GRASS_HALF_WIDTH && z.abs() <= GRASS_HALF_WIDTH
+    }
+
+    /// How long to let the loop run before giving up. An adult's mean grazing
+    /// interval is `adjustedTickDelay(1000)` = 500 ticks
+    /// (`EatBlockGoal::ADULT_INTERVAL`), and the eat lands
+    /// `EAT_ANIMATION_TICKS - CONSUME_AT` ticks into the animation after that,
+    /// so a few thousand ticks is generous without being unbounded.
+    const GRAZE_TICK_BUDGET: usize = 4_000;
+
+    /// The `Below` case: a sheep standing on a `grass_block` with nothing edible
+    /// at its feet turns that block to **dirt**, one cell down.
+    ///
+    /// The assertion is on **`y` alone** on purpose. `x`/`z` are identical for
+    /// both `EatenBlock` variants — the mob's own column — so they carry no
+    /// information about which branch ran; `y` is the only coordinate that does.
+    #[tokio::test(start_paused = true)]
+    async fn a_grazing_sheep_turns_the_grass_block_below_it_to_dirt() {
+        let (edits, published) = graze_until_edit(false, true, GRAZE_TICK_BUDGET).await;
+
+        assert!(
+            !edits.is_empty(),
+            "no block change reached the world in {GRAZE_TICK_BUDGET} ticks — this is \
+             the pre-fix state exactly: the goal records the eat and nothing drains it"
+        );
+        let (x, y, z, ref state) = edits[0];
+        assert_eq!(y, -1, "the Below branch must edit one cell *down* from the sheep, not its own cell");
+        assert_eq!(state, "minecraft:dirt", "setBlock(below, DIRT, 2) — replaced, not destroyed");
+        assert!(in_grass_patch(x, z), "edit landed outside the grass at ({x}, {z})");
+        assert!(
+            published.contains(&(x, y, z, state.clone())),
+            "the change must also reach the wire feed, or the client never sees it: \
+             published = {published:?}"
+        );
+    }
+
+    /// The `AtFeet` case, and the control that proves the assertion above is
+    /// about the branch rather than about "some block changed": same sheep, same
+    /// loop, same world **plus** `short_grass` in the sheep's own cell, and now
+    /// the edit must land at `y = 0` as **air**. If the drain ignored
+    /// `EatenBlock` and always did one of the two, exactly one of this pair
+    /// would fail.
+    #[tokio::test(start_paused = true)]
+    async fn a_sheep_standing_in_short_grass_destroys_that_block_instead() {
+        let (edits, published) = graze_until_edit(true, true, GRAZE_TICK_BUDGET).await;
+
+        assert!(!edits.is_empty(), "no block change reached the world");
+        let (x, y, z, ref state) = edits[0];
+        assert_eq!(y, 0, "the AtFeet branch must edit the sheep's own cell");
+        assert_eq!(state, "minecraft:air", "destroyBlock(pos, false) — gone, and no drops");
+        assert!(in_grass_patch(x, z), "edit landed outside the grass at ({x}, {z})");
+        assert!(
+            published.contains(&(x, y, z, state.clone())),
+            "published = {published:?}"
+        );
     }
 }
