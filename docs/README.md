@@ -545,6 +545,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   vanilla's four-state sprite record, and therefore the **disabled render path** —
   the thing the settings tree (#55) needs so an unsupported option can be present and
   greyed out rather than absent.
+- [Mob block perception](./mob-block-perception.md) — The seam that lets a mob AI
+  goal ask what block it is standing on. `MobController` declared 33 methods and not
+  one read a block, so every vanilla goal whose predicate consults the world was
+  inexpressible — a sheep that eats grass could not ask whether there was grass
+  (issue #456). Goals now pull `BlockCues` through the controller, which the
+  production host answers from the `PathWorld` it already borrows for pathfinding.
 - [Mob breeding and aging (issues #234, #237)](./mob-breeding-and-aging.md) — The
   entity-side half of vanilla animal breeding (`Animal`/`AgeableMob`) and baby growth,
   filling four `MobController` trait-default no-ops that were previously always
@@ -580,6 +586,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   Eight of thirteen implemented goals could not act, and every one of them had a
   *green* unit test. This doc records what each method reads, who feeds it, and why
   the whole thing was invisible to the test suite.
+- [Mob ranged attacks](./mob-ranged-attacks.md) — The goal family that makes a mob
+  shoot: a bow goal, vanilla's generic `RangedAttackGoal`, and the blaze's
+  three-fireball burst, plus the `ProjectileLaunch` intent that carries a shot from
+  the AI layer out to whoever owns entity ids. Issue
+  [#227](https://github.com/matteopolak/lodestone/issues/227) unit B3a. Before it,
+  `RangedAttackGoal` and `BowAttack` were zero hits tree-wide and no mob in this repo
+  could throw anything.
 - [Species-aware mob spawning (issue #205)](./mob-species-spawning.md) —
   `MobSim::spawn_species` (`crates/lodestone-server/src/mobs.rs`), a spawn entry point
   that resolves a mob's body, combat stats, and baseline goal set from its real
