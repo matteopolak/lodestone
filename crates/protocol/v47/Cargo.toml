@@ -8,10 +8,16 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# The shared pre-Flattening canonicalisation layer (epic #343 U1/U3): 1.8's
+# wire carries `(blockId << 4) | meta` composites, which are *not* block-state
+# ids in the canonical 26.2 space the mesher and collision consume. See
+# `src/packets/chunk.rs`'s module docs.
+lodestone-canonical = { workspace = true }
 lodestone-core = { workspace = true }
 lodestone-macros = { workspace = true }
 lodestone-model = { workspace = true }
 lodestone-world = { workspace = true }
+tracing = { workspace = true }
 uuid = { workspace = true }
 
 [features]
@@ -42,6 +48,10 @@ live-entity = []
 live-interaction = []
 
 [dev-dependencies]
+# Test-only: the canonical 26.2 block-state census, used by the canonicalisation
+# gate to re-read the *name* of every state id it asserts, so the expected value
+# is anchored to the jar-derived registry rather than to a literal.
+lodestone-data = { workspace = true }
 lodestone-net = { workspace = true }
 lodestone-testsupport = { workspace = true }
 tokio = { workspace = true }

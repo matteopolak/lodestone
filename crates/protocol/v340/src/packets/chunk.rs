@@ -399,15 +399,18 @@ fn decode_section_blocks(blob: &mut Reader<'_>, fallback: &mut FallbackTally) ->
 /// every real 1.12.2 block/palette entry fits in 12 bits by construction (see
 /// the module docs), so a larger value means desync or a hostile sender, not
 /// a block this crate should render as *something*.
+/// The 12-bit rule itself lives in [`canonical::split_composite`] — it is a
+/// property of the pre-Flattening *era*, not of protocol 340, and `v47` reads
+/// the same composites off a paletteless wire. This wrapper only chooses the
+/// **policy**: here a bad value fails the packet, because it arrived in a
+/// palette and a bad palette entry means the index stream is suspect too.
 fn legacy_id_meta(raw: u32) -> Result<(u8, u8)> {
-    if raw > 0x0FFF {
-        return Err(lodestone_core::Error::Custom(format!(
+    canonical::split_composite(raw).ok_or_else(|| {
+        lodestone_core::Error::Custom(format!(
             "legacy block value {raw} exceeds the (old_block_id << 4) | meta range"
         ))
-        .into());
-    }
-    // `raw <= 0x0FFF` is checked above, so both halves fit in `u8`.
-    Ok(((raw >> 4) as u8, (raw & 0x0F) as u8))
+        .into()
+    })
 }
 
 /// Number of 64-bit longs the **old (straddling)** packing uses for `count`

@@ -239,15 +239,27 @@ async fn decodes_real_chunks_from_live_1_8_server() {
         );
     }
 
-    // Bedrock (block id 7 -> state 112) is the lowest layer of a vanilla 1.8
-    // overworld. Known-block-at-known-Y, read back out of the world store.
+    // Bedrock is the lowest layer of a vanilla 1.8 overworld.
+    // Known-block-at-known-Y, read back out of the world store.
+    //
+    // This used to assert the literal `112`, which is 1.8's *wire composite*
+    // `(7 << 4) | 0` — correct only while this crate stored composites raw.
+    // Since #343 U3 the store holds **canonical 26.2** state ids, in which 112
+    // is `minecraft:lava`. Asserting by name keeps the claim ("the bottom layer
+    // is bedrock") independent of either id space, and would have failed on the
+    // old behaviour rather than needing this comment. Note no `cargo check` can
+    // see a stale value like the old literal: this file is behind a feature
+    // *and* `#[ignore]`d.
     let bottom = layers[0].1.unwrap();
+    let bottom_name = lodestone_data::block_states::block_name(bottom);
     assert_eq!(
-        bottom, 112,
-        "lowest layer (y=0) should be bedrock (state 112), got {bottom}"
+        bottom_name,
+        Some("minecraft:bedrock"),
+        "lowest layer (y=0) should be bedrock, got state {bottom} ({bottom_name:?})"
     );
 
-    let solid = layers.iter().take_while(|(_, v)| *v != Some(0)).count();
+    let air = lodestone_v47::packets::chunk::ChunkShape::overworld().air_id;
+    let solid = layers.iter().take_while(|(_, v)| *v != Some(air)).count();
     assert!(solid >= 1, "expected solid terrain at the bottom");
     assert!(
         solid < 16,
@@ -270,9 +282,14 @@ async fn decodes_real_chunks_from_live_1_8_server() {
     eprintln!("flow control          : none (1.8 has no chunk_batch ACK; all chunks pushed)");
     eprint!("flat-world layers y0-3: ");
     for (y, value) in layers.iter().take(4) {
+        // Report the canonical *name*, not the bare id: the whole point of U3
+        // is that the id space changed, and a bare number in a report is what
+        // let the wrong space go unnoticed for so long.
         match value {
-            Some(0) => eprint!("[y{y}:air] "),
-            Some(v) => eprint!("[y{y}:{v}] "),
+            Some(v) => match lodestone_data::block_states::block_name(*v) {
+                Some(name) => eprint!("[y{y}:{name}] "),
+                None => eprint!("[y{y}:{v} NOT-A-26.2-STATE] "),
+            },
             None => eprint!("[y{y}:?] "),
         }
     }
