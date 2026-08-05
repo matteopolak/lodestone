@@ -211,6 +211,20 @@ impl WindowApp {
         ) else {
             return false;
         };
+        // Menu music. `frame_for` returning `Some` *is* the "a menu screen is up"
+        // predicate — the same expression that decides this function draws at all —
+        // so the music cannot drift out of step with the screen, which asking a
+        // second source would allow. Placed before the GPU guard below on purpose:
+        // vanilla's title-screen music plays while the window is still coming up,
+        // and gating it on a live swapchain would make music depend on rendering.
+        //
+        // `in_world: false` is what selects `musics::MENU` (20/600 ticks,
+        // `replaceCurrentMusic` set, so it interrupts rather than queues) — see
+        // `MusicSituation::situational_music`.
+        self.sim.tick_music(
+            std::time::Instant::now(),
+            &crate::audio::music::menu_situation(),
+        );
         let (Some(gpu), Some(target), Some(menu)) = (
             self.gpu.as_ref(),
             self.target.as_mut(),

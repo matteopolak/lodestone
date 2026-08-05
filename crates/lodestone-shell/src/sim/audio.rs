@@ -99,6 +99,79 @@ impl Sim {
         });
     }
 
+    /// Advance the music clock by however many 20 Hz ticks have elapsed, and start
+    /// a track if vanilla's `MusicManager` says to.
+    ///
+    /// This is the call that stopped `#135`'s selector being an island: the whole
+    /// biome table, the delay constants and the streaming resolve were built,
+    /// tested and reached nothing, because nothing called them.
+    ///
+    /// # Two resources at one instant
+    ///
+    /// The tick needs [`MusicState`](super::MusicState) *and*
+    /// [`AudioEngine`](super::AudioEngine) mutably together, which two
+    /// `World::resource_mut` borrows cannot express. So the state is moved out of
+    /// its slot for the duration and put back unconditionally — see
+    /// [`MusicState`](super::MusicState)'s own doc for why that `Option` is a
+    /// move-out slot and not a maybe.
+    ///
+    /// # The situation is the caller's
+    ///
+    /// `situation` decides everything: whether this is menu or in-world music,
+    /// which biome's three-slot record applies, and whether the player counts as
+    /// creative. Building it here would mean this method guessing at screen state
+    /// it cannot see. See [`crate::audio::music::menu_situation`] and
+    /// [`crate::audio::music::world_situation`], and note the two traps that live
+    /// on the latter: the selector's input is **not** the biome id, and `creative`
+    /// is **`instabuild && mayfly`**, not a gamemode check.
+    pub(crate) fn tick_music(
+        &mut self,
+        now: std::time::Instant,
+        situation: &lodestone_sound::music::MusicSituation<'_>,
+    ) {
+        self.write(|w| {
+            let taken = w.resource_mut::<super::MusicState>().0.take();
+            let Some(mut music) = taken else {
+                // Only reachable from inside another `tick_music` on the same
+                // world, which cannot happen — but re-entrancy silently losing
+                // the music state would be a very confusing bug, so it is a
+                // documented no-op rather than an `expect`.
+                return;
+            };
+            {
+                let mut audio = w.resource_mut::<super::AudioEngine>();
+                music.advance(now, situation, audio.0.as_mut());
+            }
+            w.resource_mut::<super::MusicState>().0 = Some(music);
+        });
+    }
+
+    /// Whether the player counts as **creative** for music selection.
+    ///
+    /// `Minecraft.java:2615` — `instabuild && mayfly`, read off `Abilities`, and
+    /// deliberately **not** a `GameMode::Creative` check. The two come apart in
+    /// both directions: a survival player granted both abilities hears creative
+    /// music in vanilla, and a creative player whose `mayfly` was revoked does not.
+    #[must_use]
+    pub(crate) fn music_creative(&self) -> bool {
+        self.read(|w| {
+            w.get::<lodestone_ecs::session::Abilities>(self.local)
+                .is_some_and(|a| a.instabuild && a.may_fly)
+        })
+    }
+
+    /// Whether the player's eye is **underwater** for music selection — the top of
+    /// `BackgroundMusic::select`'s precedence.
+    ///
+    /// `eye_in_water && in_water()`, matching `FluidState`'s own `submerged`
+    /// predicate rather than the raw eye flag: the raw flag alone is true for lava
+    /// too, and vanilla's underwater music slot is water-only.
+    #[must_use]
+    pub(crate) fn music_underwater(&self) -> bool {
+        let fluid = self.fluid_state();
+        fluid.eye_in_water && fluid.in_water()
+    }
+
     /// Play a block's break sound at the centre of `block`, the half of vanilla's
     /// `LevelEventHandler` `case 2001` this shell used to drop on the floor.
     ///

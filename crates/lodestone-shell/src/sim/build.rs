@@ -302,6 +302,17 @@ impl Sim {
         // line for this: a reconnect must not silence (or re-probe) the audio
         // device.
         ecs.insert_resource(AudioEngine(ShellAudio::from_env()));
+        // Beside the device, for the same config-scoped reason. Time-seeded to
+        // match vanilla, whose `MusicManager` draws from `RandomSource.create()`
+        // (itself time-seeded) — a fixed constant here would give every run of the
+        // client the identical sequence of gaps between songs. Determinism is not
+        // lost where it matters: every gate constructs `ShellMusic::new` with its
+        // own explicit seed rather than going through this resource.
+        ecs.insert_resource(MusicState(Some(crate::audio::music::ShellMusic::new(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos() as i64),
+        ))));
         // Physics-walk is the default everywhere, including live: the shell
         // collides against the live client-owned world (see `LiveCollision` /
         // `Sim::tick_collision`), so the player stands on the server's ground.

@@ -94,3 +94,17 @@ pub use engine::AudioEngine;
 /// device-open failure type; `PlayHandle` identifies a live voice.
 #[cfg(not(target_arch = "wasm32"))]
 pub use lodestone_audio::{AudioError, PlayHandle};
+
+/// The RNG [`music::MusicManager::tick`] and
+/// [`ambient::AmbientAdditionsSettings::fires`] draw from.
+///
+/// Re-exported because those are public APIs that take it **by `&mut`**, so a
+/// caller outside this crate could not name the type and therefore could not call
+/// them at all — an API gap rather than a convenience. Note it is not
+/// `#[cfg]`-gated like the block above: the tick/selection half of this crate is
+/// deliberately device-free and works on wasm.
+///
+/// Not to be confused with `lodestone_particle::rng::JavaRandom`, a *different*
+/// type with the same name — mixing them up desynchronises a sequence that must
+/// match the jar draw for draw.
+pub use lodestone_audio::JavaRandom;

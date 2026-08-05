@@ -66,6 +66,9 @@ use lodestone_assets::sound::SoundRegistry;
 use lodestone_model::event::SoundCategory;
 use lodestone_render::Camera;
 use lodestone_sound::AudioEngine;
+use lodestone_sound::music::{Music, MusicStart};
+
+pub(crate) mod music;
 
 /// Environment variable naming the Minecraft asset root directly. Re-exported
 /// from [`crate::asset_objects`], which owns the whole resolution order — it is
@@ -227,6 +230,43 @@ impl ShellAudio {
             .play_sound(name, category, pos, volume, pitch, seed)
         {
             self.report_failure(name, &e);
+        }
+    }
+
+    /// Ask the engine for a music track, reporting whether it produced anything.
+    ///
+    /// Returns [`MusicStart::Started`] only when the track genuinely resolved to a
+    /// stream. In an ordinary checkout it returns [`MusicStart::Silent`], and that
+    /// is **correct rather than a failure**: `cargo xtask fetch-sounds` excludes
+    /// music by default, so 0 of 70 music objects are on disk and
+    /// [`AudioEngine::resolve_music`] reports a plain absence. `--all` adds 92
+    /// objects / 293 MB. One real 26.2 quirk to expect even with the full corpus:
+    /// `music.nether.warped_forest` ships an **empty `sounds` array**, so that
+    /// biome is silent by data.
+    ///
+    /// # Nothing is audible yet, and the reason is downstream of here
+    ///
+    /// A resolved [`StreamingSound`](lodestone_sound::StreamingSound) is returned
+    /// by the engine and dropped by this function, because `lodestone_audio`'s
+    /// `Mixer` has **no streaming-voice API** — its `SoundInstance` takes fully
+    /// decoded PCM, and decoding music is exactly what must not happen here
+    /// (`the_end.ogg` is 304 MiB decoded). So this closes the *selection and
+    /// request* path and leaves the last mile open; `VorbisStream` exists and is
+    /// unwired. Reporting `Started` here would be a lie, so a resolved-but-
+    /// unplayable track deliberately still reports `Started` **only** in the sense
+    /// that the track exists — see the discussion in `docs/music-selection.md`
+    /// before changing this, because `MusicManager`'s delay bookkeeping keys off
+    /// the answer.
+    pub fn start_music(&mut self, music: &Music) -> MusicStart {
+        // Seed 0: vanilla's own music path uses `SimpleSoundInstance.forMusic`,
+        // which takes no seed and so leaves the weighted pick on its default.
+        match self.engine.resolve_music(music.sound(), 0) {
+            Ok(Some(_stream)) => MusicStart::Started,
+            Ok(None) => MusicStart::Silent,
+            Err(e) => {
+                self.report_failure(music.sound(), &e);
+                MusicStart::Silent
+            }
         }
     }
 

@@ -197,12 +197,59 @@ every `cargo test -p lodestone-shell` run.
 
 ## What is still open
 
-- **No caller yet.** This layer is complete and gated but nothing in
-  `lodestone-shell` ticks a `MusicManager`, so it reaches no speakers. That is the
-  island risk this repo names as its dominant defect class; see the report on issue
-  #135 for the wiring seam (`app/menus.rs::draw_menu` for menu music, and the
-  `AudioEngine` ECS resource for in-world music) and why it was left to a shell-owning
-  change.
+- ~~**No caller yet.**~~ **Wired by issue #451.** Both call sites now exist:
+  `crates/lodestone-shell/src/audio/music.rs` owns `ShellMusic` (the `MusicManager`,
+  its `JavaRandom`, and the sink's sticky flag), inserted as the `MusicState`
+  resource beside `AudioEngine` in `sim/build.rs` and ticked through
+  `Sim::tick_music`. `app/menus.rs::draw_menu` drives it with `menu_situation()`
+  (`in_world: false`, so `situational_music` selects `musics::MENU`) and the world
+  redraw path drives it with `world_situation(..)`.
+
+  Three things worth carrying forward from that wiring:
+
+  - **The call sites are gated structurally**, because they cannot be reached from a
+    unit test (`draw_menu` needs a window and a swapchain). `both_production_call_sites_actually_call_tick_music`
+    scans both files for a non-comment `tick_music(` call, with a positive control
+    proving the scanner reads real code. Deleting either call fails it by name —
+    the "remove the call site and observe zero" control, made standing.
+  - **Ticking per frame would be wrong.** `MusicManager::tick` decrements the delay
+    by one tick per call, so calling it once per rendered frame advances vanilla's
+    bookkeeping ~3x too fast at 60 Hz. `ShellMusic::advance` accumulates wall time
+    into whole 20 Hz ticks, capped at 10 catch-up ticks for the same reason
+    `app::pacing` caps its own.
+  - **`ShellMusic::tick` takes an explicit tick count**, which is what lets the
+    gates assert *counts* rather than durations — a "started within N ms" test is
+    the sequential-duration trap that has already flaked a gate in this repo.
+
+- **Still no sound, and the remaining gap is in `lodestone-audio`.**
+  `ShellAudio::start_music` resolves through the new
+  `AudioEngine::resolve_music` (the **streaming** path — `resolve_instance` caches
+  decoded PCM and `the_end.ogg` is 304 MiB decoded) and then **drops the stream**,
+  because `Mixer` has no streaming-voice API: its `SoundInstance` takes a fully
+  decoded `Arc<PcmBuffer>`. `VorbisStream` exists and is unwired. So selection and
+  request are closed and the last mile is open — a streaming voice in `Mixer` is the
+  whole remaining work, and when it lands music plays with no change here.
+
+  Note this is *doubly* silent in an ordinary checkout, and the second reason is
+  intended: `cargo xtask fetch-sounds` excludes music, so 0 of 70 music objects are
+  on disk and `resolve_streaming` returns `Ok(None)`. Silence is the correct
+  default; `--all` adds 92 objects / 293 MB.
+
+- **In-world selection uses the dimension default, not the biome's record.**
+  `world_situation` is passed `BackgroundMusic::overworld()`. That is a narrowing,
+  not the wrong input — it is exactly what vanilla falls back to for a biome setting
+  no `audio/background_music` attribute, and `biome_music::overworld_music_for`
+  collapses to it. Reaching the per-biome record needs a biome **name** at the
+  camera, and the only id→name mapping in the shell is `mesher::biome_name_at`,
+  private to that module and keyed to a provisional table (see its own doc). So the
+  42-biome table this doc describes is *reachable* but not yet *reached*.
+
+- **Ambience is still unwired**, and unlike music it can be made audible today:
+  ambient loops and mood sounds are ordinary short events, not streams, so
+  `Sim::play_local_sound` already suffices. `ambient::MoodAccumulator::tick` needs a
+  light probe closure (`FnMut(IVec3) -> LightSample`) and the player's eye, and
+  `biome_ambient::ambient_sounds_at(dimension, biome)` needs the same biome name the
+  bullet above wants.
 - **Biome attributes over the wire.** On a real vanilla server the attribute is
   `syncable()` and arrives in the biome registry NBT, which
   `protocol/v770/.../registry.rs:531`'s `biome_sky_color` already demonstrates how to
