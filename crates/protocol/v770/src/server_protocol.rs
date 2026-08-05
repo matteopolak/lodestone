@@ -44,7 +44,7 @@ use std::collections::HashMap;
 
 use lodestone_core::{Ctx, Decode, Encode, Nbt, NbtTag, Reader, Writer, write_network_nbt};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Text, TextContent, Vec3,
+    BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Rotation, Text, TextContent, Vec3,
 };
 use lodestone_server::{
     ChunkColumn as ServerChunkColumn, EntitySnapshot, HOTBAR_SIZE, MetadataField, PlayerListing,
@@ -1443,16 +1443,23 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // Only the two movement packets that carry a position matter to
-            // the loop (view streaming needs x/z, fall damage needs y/
-            // on_ground); rotation-only and status-only movement stay
-            // `Ignored` — see `ServerBound::PlayerMoved`'s doc comment.
+            // All four serverbound movement packets are lifted (issue #262).
+            // Vanilla's `LocalPlayer.sendPosition` sends exactly *one* of
+            // them per tick, choosing on which of position/look is dirty, so
+            // dropping any one of the four is not a redundancy — it is a
+            // hole in a partition. `MOVE_PLAYER_POS_ROT` in particular used
+            // to decode `yaw`/`pitch` and throw them away, which is why a
+            // walking, turning player's avatar stood frozen at yaw 0 for
+            // every other client.
             State::Play if packet_id == play::serverbound::MOVE_PLAYER_POS => {
                 match decode_full::<MovePlayerPos>(payload) {
                     Some(m) => ServerBound::PlayerMoved {
                         x: m.x,
                         y: m.y,
                         z: m.z,
+                        // Genuinely absent from this packet's wire body, not
+                        // merely unread — see the variant's doc comment.
+                        rotation: None,
                         on_ground: m.flags & MOVE_FLAG_ON_GROUND != 0,
                     },
                     None => ServerBound::Ignored,
@@ -1464,6 +1471,10 @@ impl ServerProtocol for V770ServerProtocol {
                         x: m.x,
                         y: m.y,
                         z: m.z,
+                        rotation: Some(Rotation {
+                            yaw: m.yaw,
+                            pitch: m.pitch,
+                        }),
                         on_ground: m.flags & MOVE_FLAG_ON_GROUND != 0,
                     },
                     None => ServerBound::Ignored,
@@ -1605,11 +1616,11 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
 
-            // Issue #262 (movement/player-state), remaining 8 of 11 — see
-            // `ServerBound::PlayerMoved`'s doc comment for why the two
-            // sibling movement packets without a position (`MOVE_PLAYER_ROT`,
-            // `MOVE_PLAYER_STATUS_ONLY`) stay `Ignored` by design. Every
-            // wire layout below is checked directly against
+            // Issue #262 (movement/player-state), remaining 6 of 11 —
+            // `MOVE_PLAYER_ROT` and `MOVE_PLAYER_STATUS_ONLY` now lift into
+            // their own variants just below, alongside the two position-
+            // carrying siblings above. Every wire layout below is checked
+            // directly against
             // `.cache/mc/26.2/src`'s `ServerboundMovePlayerPacket`/
             // `ServerboundPlayerAbilitiesPacket`/`ServerboundMoveVehiclePacket`/
             // etc. — not merely `decode(encode(x))` against this crate's own
@@ -1620,12 +1631,22 @@ impl ServerProtocol for V770ServerProtocol {
             // crate's reach) has no flight/load-timeout/tick-alignment/
             // teleport-confirmation/vehicle/boat model yet for any of them.
             State::Play if packet_id == play::serverbound::MOVE_PLAYER_ROT => {
-                let _ = decode_full::<MovePlayerRot>(payload);
-                ServerBound::Ignored
+                match decode_full::<MovePlayerRot>(payload) {
+                    Some(m) => ServerBound::PlayerRotated {
+                        yaw: m.yaw,
+                        pitch: m.pitch,
+                        on_ground: m.flags & MOVE_FLAG_ON_GROUND != 0,
+                    },
+                    None => ServerBound::Ignored,
+                }
             }
             State::Play if packet_id == play::serverbound::MOVE_PLAYER_STATUS_ONLY => {
-                let _ = decode_full::<MovePlayerStatusOnly>(payload);
-                ServerBound::Ignored
+                match decode_full::<MovePlayerStatusOnly>(payload) {
+                    Some(m) => ServerBound::PlayerStatusOnly {
+                        on_ground: m.flags & MOVE_FLAG_ON_GROUND != 0,
+                    },
+                    None => ServerBound::Ignored,
+                }
             }
             // `SERVERBOUND_ABILITY_FLAG_FLYING` is decoded so the value is
             // ready the moment a consumer exists; the flag itself is the one

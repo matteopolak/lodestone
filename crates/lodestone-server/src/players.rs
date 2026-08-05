@@ -68,14 +68,19 @@
 //!   skin properties): extend [`TrackedPlayer`], set it in [`PlayerRegistry`],
 //!   and lower it in [`PlayerRegistry::view`]. Nothing in `crate::server`
 //!   changes.
-//! * **Player rotation is deliberately absent.**
-//!   [`ServerBound::PlayerMoved`](crate::ServerBound::PlayerMoved) carries
-//!   `(x, y, z, on_ground)` and no angles: `v770`'s decoder discards the
-//!   rotation from `move_player_pos_rot` and maps the two rotation-only
-//!   movement packets to `Ignored`
-//!   (`crates/protocol/v770/src/server_protocol.rs`, the `MOVE_PLAYER_ROT`
-//!   arm). Streaming a player's facing needs that variant to grow angles
-//!   first, which changes every one of its match sites — a separate unit.
+//! * **Player rotation is live as of issue #262's wiring**, and the gotcha is
+//!   that it arrives on *four* different packets, not one.
+//!   [`ServerBound::PlayerMoved`](crate::ServerBound::PlayerMoved) carries an
+//!   `Option<Rotation>` (`Some` only for `move_player_pos_rot`),
+//!   [`PlayerRotated`](crate::ServerBound::PlayerRotated) carries angles with
+//!   no position, and [`PlayerStatusOnly`](crate::ServerBound::PlayerStatusOnly)
+//!   carries neither. Vanilla's `LocalPlayer.sendPosition` sends exactly one
+//!   of the four per tick, so they partition the movement stream rather than
+//!   overlapping: if you add a field here, work out which of the four
+//!   actually carries it before wiring one arm and assuming the rest follow.
+//!   The failure mode is silent and direction-dependent — handling only
+//!   `move_player_rot` leaves a *walking* player frozen, which is the case a
+//!   stationary test never exercises.
 //! * **Entity ids come from a second allocator**, see
 //!   [`PLAYER_ENTITY_ID_BASE`].
 //!
@@ -150,6 +155,13 @@ struct TrackedPlayer {
     username: String,
     /// World-space feet position, in blocks.
     position: Vec3,
+    /// Body/head rotation in degrees, as the client last reported it.
+    ///
+    /// Defaults to `(0, 0)` at join, which is what vanilla itself spawns a
+    /// fresh player at, and is corrected by the first movement packet that
+    /// carries angles — every client sends one within a tick or two of
+    /// entering play.
+    rotation: Rotation,
 }
 
 /// A consistent single-lock read of the registry, from one viewer's point of
@@ -212,6 +224,10 @@ impl PlayerRegistry {
                 uuid,
                 username: username.to_owned(),
                 position,
+                rotation: Rotation {
+                    yaw: 0.0,
+                    pitch: 0.0,
+                },
             });
             entity_id
         };
@@ -234,6 +250,29 @@ impl PlayerRegistry {
             .find(|p| p.entity_id == entity_id)
         {
             player.position = position;
+        }
+    }
+
+    /// Re-aims a tracked player. A no-op for an unregistered id, for exactly
+    /// the reason [`set_position`](Self::set_position) is.
+    ///
+    /// Separate from `set_position` rather than folded into it because the
+    /// two arrive on genuinely different packets: vanilla's
+    /// `LocalPlayer.sendPosition` picks one of four movement packets per tick
+    /// based on which of position/look is dirty, so a turn on the spot
+    /// (`move_player_rot`) updates rotation with no position to offer, and a
+    /// walk in a straight line (`move_player_pos`) the reverse. A combined
+    /// setter would force every caller to invent the half it did not receive
+    /// — and inventing `(0, 0)` for the yaw is precisely the bug this field
+    /// exists to fix.
+    pub fn set_rotation(&self, entity_id: i32, rotation: Rotation) {
+        if let Some(player) = self
+            .lock()
+            .players
+            .iter_mut()
+            .find(|p| p.entity_id == entity_id)
+        {
+            player.rotation = rotation;
         }
     }
 
@@ -267,14 +306,16 @@ impl PlayerRegistry {
                     uuid: p.uuid,
                     entity_type: entity_type.clone(),
                     position: p.position,
-                    // See the module docs: no server-side player rotation
-                    // exists to lower, because `ServerBound::PlayerMoved`
-                    // carries no angles.
-                    rotation: Rotation {
-                        yaw: 0.0,
-                        pitch: 0.0,
-                    },
-                    head_yaw: 0.0,
+                    rotation: p.rotation,
+                    // A player's head yaw and body yaw are the same value on
+                    // this wire: the client reports one yaw per movement
+                    // packet and vanilla's `ServerEntity` sends that same
+                    // angle in both the move-rotation and head-rotation
+                    // packets for a player. They diverge only for mobs, whose
+                    // AI aims the head independently of the body — which is
+                    // why `EntitySnapshot` keeps them as two fields even
+                    // though this producer sets them equal.
+                    head_yaw: p.rotation.yaw,
                     // Player motion is client-authoritative here: the client
                     // reports positions, never velocities, so there is no
                     // per-tick delta to publish. An absolute position update
