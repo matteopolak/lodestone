@@ -188,8 +188,22 @@ struct WorldState {
 /// and why.
 #[derive(Debug)]
 pub struct RegionChunkSource<S> {
-    inner: S,
+    inner: Arc<S>,
     state: Arc<WorldState>,
+}
+
+/// Cloning yields another handle to the **same** world — same edit map, same
+/// dirty set, same generator. That is what lets
+/// [`crate::IntegratedServer::open_persistent_with_mobs`] hand the world to its
+/// `ChunkStore` and still return a live handle to the caller, and it is why the
+/// inner source is behind an `Arc` rather than owned outright.
+impl<S> Clone for RegionChunkSource<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            state: Arc::clone(&self.state),
+        }
+    }
 }
 
 impl<S: ChunkSource> RegionChunkSource<S> {
@@ -205,7 +219,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
             .join("region");
         std::fs::create_dir_all(&region_dir).map_err(io(&region_dir))?;
         Ok(Self {
-            inner,
+            inner: Arc::new(inner),
             state: Arc::new(WorldState {
                 region_dir,
                 min_y,
