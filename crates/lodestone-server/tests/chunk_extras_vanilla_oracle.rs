@@ -207,9 +207,9 @@ fn vanilla_p_is_the_priority_value_and_the_ordinal_would_be_a_different_priority
 /// in `.cache/mc` — chest, vault, mob spawner, decorated pot, brushable block
 /// — and requires the modelled one in the same list to survive.
 ///
-/// This is a **named gap, not a success**: a chest in a world Lodestone opens
-/// and re-saves loses its contents, because it is dropped here and then not
-/// written back. The test exists to pin *which* behaviour is current.
+/// Before issue #477, every unmodelled block entity was silently dropped —
+/// a chest loaded and re-saved lost its contents. The `Opaque` variant now
+/// preserves every entry verbatim so the whole set round-trips.
 #[test]
 fn unmodelled_block_entity_ids_are_skipped_rather_than_failing_the_chunk() {
     use lodestone_core::Nbt;
@@ -240,13 +240,18 @@ fn unmodelled_block_entity_ids_are_skipped_rather_than_failing_the_chunk() {
     let extras = chunk_nbt::extras_from_nbt(&nbt);
     assert_eq!(
         extras.block_entities.len(),
-        1,
-        "exactly the one modelled kind survives"
+        6,
+        "all six entries survive — modelled and unmodelled alike"
     );
-    assert_eq!(extras.block_entities[0].0.x, 5);
+    // The hopper (modelled) is at x=5 and resolves as a concrete variant.
+    assert!(matches!(
+        extras.block_entities[5].1,
+        BlockEntity::Hopper(_)
+    ));
+    // The chest (unmodelled) is at x=0 and preserved verbatim as Opaque.
     assert!(matches!(
         extras.block_entities[0].1,
-        BlockEntity::Hopper(_)
+        BlockEntity::Opaque { .. }
     ));
 }
 
