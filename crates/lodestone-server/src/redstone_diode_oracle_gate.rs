@@ -81,7 +81,10 @@ const NOW: u64 = 1_000;
 ///   delay=3  rising ON at tick 6   falling OFF at tick 6
 ///   delay=4  rising ON at tick 8   falling OFF at tick 8
 /// ```
-const ORACLE_REPEATER_DELAY: &[(u32, u64)] = &[(1, 2), (2, 4), (3, 6), (4, 8)];
+/// `pub(crate)` so `redstone_placement_gate`, which measures the same delays
+/// end-to-end through the real tick loop, can assert its own transcription
+/// against this one rather than carrying a second unchecked copy.
+pub(crate) const ORACLE_REPEATER_DELAY: &[(u32, u64)] = &[(1, 2), (2, 4), (3, 6), (4, 8)];
 
 /// Live 26.2: a comparator's delay is **2 game ticks**, on both edges and in
 /// both modes (measured separately for `compare` and `subtract`; all four

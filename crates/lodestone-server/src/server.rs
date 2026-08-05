@@ -32,7 +32,7 @@ use crate::inventory::{ContainerMenuSlot, PlayerInventory, container_menu_slot};
 use crate::mobs::{MobHandle, PlayerPerception};
 use crate::players::{ChatLine, PlayerListStreamer, PlayerRegistry, PlayerTicket};
 use crate::protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
-use crate::scheduled_tick::ScheduledTickQueue;
+use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue};
 use crate::tick::{BlockTickFeed, ExplosionFeed};
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
 
@@ -1884,6 +1884,13 @@ async fn apply_use_item_on<T, P, S>(
     next_window_id: &mut i32,
     open_container: &mut Option<OpenContainer>,
     container_sync: &mut ContainerSync,
+    // Issue #465, the delayed half. `propagate_placement` below resolves
+    // everything synchronous (dust) against a `ScheduledTickQueue` it then
+    // discards; a torch/repeater/comparator/observer instead *schedules*, and
+    // only `tick::run_tick_loop` owns a queue those can land in. This asks the
+    // loop to redo the fan-out on its next iteration, where the schedule
+    // survives. See `BlockTickFeed`'s own doc comment.
+    block_ticks: &BlockTickFeed,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -1943,7 +1950,16 @@ where
             // scheduled tick already performs. Without this the redstone model
             // is correct but unreachable from any player action — dust placed
             // beside a powered line stays at `power=0` forever.
-            changed = propagate_placement(source, target);
+            let scheduled;
+            (changed, scheduled) = propagate_placement(source, target);
+            // Issue #465: and the delayed half, which `propagate_placement`
+            // structurally cannot host — the queue those land in belongs to the
+            // world tick loop. Handed over unconditionally rather than only
+            // when `changed` is non-empty: the delayed families are exactly the
+            // case where the fan-out rewrites *nothing* now and schedules
+            // instead, so gating on a synchronous change would drop precisely
+            // the placements this exists for.
+            block_ticks.request_scheduled_ticks(scheduled);
         }
     }
     // `pos`/`neighbour` first (the clicked face and the placed cell, which the
@@ -1989,11 +2005,39 @@ where
 /// That half is a separate landing; this one is not blocked on it, and dust —
 /// the case #465 is written about — is complete.
 ///
+/// # The delayed half now travels out with the return value (issue #465)
+///
+/// The second element is every block tick the fan-out scheduled, with
+/// `trigger_tick` holding a **relative delay** rather than an absolute tick:
+/// this function has no `game_tick` to be absolute against, and the tick loop
+/// that will host these entries does. `apply_use_item_on` publishes them on
+/// [`BlockTickFeed`] and `tick::run_tick_loop` rebases them onto its own
+/// counter.
+///
+/// **Carrying the schedules out, rather than asking the loop to redo the
+/// fan-out at this position, is not a stylistic choice — the redo does not
+/// work, and that was measured.** The originally brokered shape had the loop
+/// re-run `propagate_and_react` at `target` on its next iteration, on the
+/// stated premise that the two runs are idempotent because the fan-out "writes
+/// only on change". They are not idempotent, and the quoted reason is exactly
+/// why: the *first* run consumes the change. It settles the dust, cascades to
+/// the repeater, schedules the repeater's flip into this local queue and
+/// returns; the loop's second run then finds a fully-settled circuit, changes
+/// nothing, cascades nowhere and never reaches the repeater at all. Measured
+/// with a repeater at four delay settings: the arm with this inline call
+/// finished `powered=false` and its output dust at 0, the arm without it
+/// finished `powered=true` at 15 —
+/// `redstone_placement_gate::the_split_between_the_synchronous_and_delayed_halves_changes_no_outcome`
+/// is the gate, and it is red under the redo shape.
+///
 /// Changes are sent to *this* connection only, matching the existing
 /// `encode_block_update` loop above rather than publishing on
 /// [`BlockTickFeed`]; a second connection would not see them. That gap is
 /// pre-existing for placement itself and is not widened here.
-fn propagate_placement<S>(source: &S, target: BlockPos) -> Vec<(BlockPos, String)>
+pub(crate) fn propagate_placement<S>(
+    source: &S,
+    target: BlockPos,
+) -> (Vec<(BlockPos, String)>, Vec<ScheduledTick<String>>)
 where
     S: ChunkSource,
 {
@@ -2004,10 +2048,13 @@ where
     // contract is that it includes any edit already applied.
     let mut column = source.column(cx, cz);
     if target.y < column.min_y || target.y >= column.min_y + column.height {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-    let events = crate::random_tick::propagate_and_react(
+    // `react_at_placement`, not `propagate_and_react`: the placed block owes
+    // itself a `setPlacedBy` reaction that the neighbour pass structurally
+    // cannot deliver. See that function's own doc comment.
+    let events = crate::random_tick::react_at_placement(
         &mut column,
         min_x,
         min_z,
@@ -2015,18 +2062,25 @@ where
         target.y,
         target.z,
         &mut block_ticks,
-        // The queue is discarded, so the tick this is relative to cannot be
-        // observed by anything — see the doc comment above.
+        // Zero, so every `trigger_tick` below *is* the delay — see the doc
+        // comment above.
         0,
     );
-    events
+    // `drain_due`, not `iter`: this queue is a `BinaryHeap` and `iter` yields in
+    // unspecified order, while `drain_due` yields `DRAIN_ORDER`. The loop
+    // re-`schedule`s each entry and so assigns it a fresh `sub_tick_order`, which
+    // makes *this* order the one that decides tie-breaks later — so it has to be
+    // deterministic. `u64::MAX` drains everything regardless of delay.
+    let scheduled: Vec<ScheduledTick<String>> = block_ticks.drain_due(u64::MAX, usize::MAX);
+    let changed = events
         .into_iter()
         .map(|event| {
             let (ex, ey, ez) = event.pos;
             source.set_block(ex, ey, ez, &event.to);
             (BlockPos::new(ex, ey, ez), event.to)
         })
-        .collect()
+        .collect();
+    (changed, scheduled)
 }
 
 /// Per-connection difficulty + game-rule session state (issue #268).
@@ -2434,6 +2488,10 @@ async fn dispatch_play_packet<T, P, S>(
     // registry and this connection's username) because the caller already
     // owns both, and this function already takes 25.
     outgoing_chat: &mut Vec<String>,
+    // Issue #465. Threaded through only to reach `apply_use_item_on`, which
+    // needs to ask the world tick loop for a neighbour-update fan-out that
+    // outlives this packet — see that function's own parameter comment.
+    block_ticks: &BlockTickFeed,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -2581,6 +2639,7 @@ where
                 next_window_id,
                 open_container,
                 container_sync,
+                block_ticks,
             )
             .await?;
         }
@@ -2891,6 +2950,7 @@ where
                     &mut pending_chunk_batches,
                     &commands,
                     &mut outgoing_chat,
+                    block_ticks,
                     packet_id,
                     &payload,
                 )
@@ -3094,13 +3154,20 @@ async fn serve_play<T, P, S, E>(
     chunks_sent: usize,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
-    // Same gap as `vitals`/`container_sync` below: forwarding a random tick's
-    // block change with no packet driving it needs `container_sync_tick`, a
-    // `tokio::time::interval` this target has none of (see this function's
-    // own doc comment). Accepted for signature parity with the native
-    // definition (`serve_connection` calls whichever compiles for the
-    // target) and never read here — a real, documented gap, not a silent one.
-    _block_ticks: &BlockTickFeed,
+    // Same gap as `vitals`/`container_sync` below for the *outbound*
+    // direction: forwarding a random tick's block change with no packet
+    // driving it needs `container_sync_tick`, a `tokio::time::interval` this
+    // target has none of (see this function's own doc comment). Accepted for
+    // signature parity with the native definition (`serve_connection` calls
+    // whichever compiles for the target) — a real, documented gap, not a
+    // silent one.
+    //
+    // The **inbound** direction (issue #465) has no such gap and is wired: a
+    // placement is packet-driven, so `dispatch_play_packet` can publish the
+    // neighbour-update request here exactly as it does natively. Whether
+    // anything drains it is a property of the host, not of this loop — a
+    // browser singleplayer world runs `run_tick_loop` over the same feed.
+    block_ticks: &BlockTickFeed,
     // Issue #425: same gap, same reason — a detonation has no packet driving
     // it either, so this target simply never surfaces one.
     _explosions: &ExplosionFeed,
@@ -3181,6 +3248,7 @@ where
             &mut pending_chunk_batches,
             &commands,
             &mut outgoing_chat,
+            block_ticks,
             packet_id,
             &payload,
         )

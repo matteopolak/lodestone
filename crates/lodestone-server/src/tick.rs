@@ -54,7 +54,7 @@ use crate::chunk::ChunkSource;
 use crate::mobs::{Detonation, LiveMobSource, MobHandle, MobSim};
 use lodestone_entity::ai::mob::EatenBlock;
 use crate::random_tick::{DEFAULT_RANDOM_TICK_SPEED, RandomTickScheduler};
-use crate::scheduled_tick::{ScheduledTickQueue, TickPriority};
+use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue, TickPriority};
 use lodestone_model::BlockPos;
 
 /// Vanilla's `mobGriefing` game rule, which gates whether a mob may change the
@@ -140,8 +140,58 @@ const RANDOM_TICK_BEHAVIOR_SEED: u64 = 0x5EED_5678;
 /// recommend — the cursor is still the better shape (it needs no copy per
 /// subscriber), and it is what to build if the subscriber count ever grows
 /// past a handful.
+/// # The inbound half (issue #465)
+///
+/// Field `.1` runs the *other* way: a connection publishes the block ticks its
+/// own mutation scheduled, and [`run_tick_loop`] rebases them onto its own
+/// counter and drains them like any other. It rides on this type rather than on
+/// a new one because `BlockTickFeed` is already threaded through every
+/// `serve_connection*` wrapper **and** into `run_tick_loop`, so this needs no
+/// signature change anywhere.
+///
+/// It exists because `server::propagate_placement`'s `ScheduledTickQueue` was
+/// local and discarded. Dust is synchronous (0 ticks, measured live) and so
+/// completes there; a torch, repeater, comparator or observer instead reacts by
+/// *scheduling* a recheck 1, 2 or `2d` ticks out, and only `run_tick_loop` owns
+/// a queue those can land in. Without this channel, placing one of the delayed
+/// families beside a live circuit does nothing at all, forever.
+///
+/// ## Why schedules and not positions
+///
+/// The originally brokered shape had the connection publish a *position* and
+/// the loop re-run the fan-out there. **That does not work, and it was
+/// measured** — see `server::propagate_placement`'s own doc comment for the
+/// numbers. The inline fan-out consumes the change it propagates, so the loop's
+/// second run finds a settled circuit and never reaches the component. Carrying
+/// the schedule instead means the fan-out happens exactly once, at packet time,
+/// like vanilla.
+///
+/// `trigger_tick` on an entry in this queue is a **relative delay**, not an
+/// absolute tick: the publisher has no `game_tick` to be absolute against.
+///
+/// ## LAN is still not wired (carried forward, deliberately)
+///
+/// [`IntegratedServer::bind`] gives each connection its **own** feed pair and
+/// relays the hub's *outbound* changes into them. Nothing relays the inbound
+/// direction, so a request published on a per-connection feed is dropped and
+/// LAN placement of a delayed component still does nothing. The fix is one
+/// line in `integrated.rs`, whose owner is not this change's:
+/// build each `LanSubscriber`'s feed with
+/// [`subscriber`](BlockTickFeed::subscriber) on the hub instead of
+/// `BlockTickFeed::default()`, which shares the inbound queue while keeping
+/// the outbound one per-connection (the property the relay's drain-all
+/// depends on). That constructor is provided here so the change really is one
+/// line. Singleplayer — `open_in_memory_with_mobs`, and every gate below — is
+/// unaffected: it hands the *same* instance to the loop and to its one
+/// connection, so `Clone` already shares both halves.
 #[derive(Debug, Clone, Default)]
-pub struct BlockTickFeed(Arc<Mutex<Vec<(i32, i32, i32, String)>>>);
+pub struct BlockTickFeed(
+    Arc<Mutex<Vec<(i32, i32, i32, String)>>>,
+    /// Issue #465: block ticks a connection's own mutation scheduled, waiting
+    /// to be rebased onto the tick loop's counter and hosted in its
+    /// `block_ticks` queue. `trigger_tick` is a relative delay.
+    Arc<Mutex<Vec<ScheduledTick<String>>>>,
+);
 
 impl BlockTickFeed {
     /// Records one block change for every consumer to learn about on their
@@ -158,6 +208,43 @@ impl BlockTickFeed {
     /// consumer.
     pub fn drain_all(&self) -> Vec<(i32, i32, i32, String)> {
         std::mem::take(&mut *self.0.lock().expect("block tick feed lock poisoned"))
+    }
+
+    /// A feed with its **own** outbound queue and this one's **shared**
+    /// inbound queue — the shape a LAN per-connection subscriber needs (issue
+    /// #465). See the struct doc comment: outbound must be per-connection
+    /// because it is drain-all, inbound must be shared because the tick loop
+    /// is the only drainer.
+    // Deliberately unused in production today: its one intended caller is
+    // `IntegratedServer::bind`'s `LanSubscriber`, in `integrated.rs`, which is
+    // not this change's to edit. Kept (rather than deferred until that landing)
+    // so the LAN fix is genuinely one line, and exercised by
+    // `a_subscriber_shares_the_inbound_queue_and_splits_the_outbound_one`.
+    #[allow(dead_code)]
+    pub(crate) fn subscriber(&self) -> Self {
+        Self(Arc::default(), Arc::clone(&self.1))
+    }
+
+    /// Hands the tick loop block ticks that a connection's own mutation
+    /// scheduled, for it to rebase and host (issue #465).
+    ///
+    /// Each entry's `trigger_tick` is a **delay in ticks**, not an absolute
+    /// tick — the publisher runs outside the tick loop and has no counter to be
+    /// absolute against.
+    pub(crate) fn request_scheduled_ticks(&self, ticks: Vec<ScheduledTick<String>>) {
+        if ticks.is_empty() {
+            return;
+        }
+        self.1
+            .lock()
+            .expect("block tick feed lock poisoned")
+            .extend(ticks);
+    }
+
+    /// Drains every block tick requested since the last call.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn drain_scheduled_ticks(&self) -> Vec<ScheduledTick<String>> {
+        std::mem::take(&mut *self.1.lock().expect("block tick feed lock poisoned"))
     }
 }
 
@@ -609,6 +696,37 @@ pub(crate) async fn run_tick_loop<W>(
 
         game_tick += 1;
 
+        // Issue #465: adopt the block ticks a player's own mutation scheduled.
+        // `server::propagate_placement` runs the fan-out inline at packet time
+        // (like vanilla) and cannot host what it schedules, because the queue
+        // those land in lives here. So it hands them over with relative delays
+        // and this rebases them onto `game_tick`.
+        //
+        // Placed after `game_tick += 1` and before the `block_ticks` drain on
+        // purpose, and the ordering is the whole fidelity argument. Vanilla
+        // handles queued packets at the top of a tick
+        // (`MinecraftServer.tickServer` -> `tickConnections`) and drains
+        // `ServerLevel.blockTicks` later in that *same* tick, so a placement
+        // arriving between tick N-1 and tick N schedules against N and fires at
+        // `N + delay`. That is exactly what this does, which is why the residual
+        // deviation is **not** in the fired tick number — see
+        // `redstone_placement_gate`'s
+        // `the_delay_is_measured_from_the_tick_that_drained_the_request_not_from_tick_zero`
+        // for the measurement, and note that `has_scheduled` is consulted here
+        // for the same reason `propagate_and_react` consults it: two placements
+        // in one inter-tick window must not double-schedule one position.
+        for pending in block_tick_out.drain_scheduled_ticks() {
+            if block_ticks.has_scheduled(pending.pos, &pending.kind) {
+                continue;
+            }
+            block_ticks.schedule(
+                pending.pos,
+                pending.kind,
+                game_tick + pending.trigger_tick,
+                pending.priority,
+            );
+        }
+
         // #308, block before fluid (`ServerLevel.java:388-391`). Draining
         // (rather than iterating a live queue) is what keeps a tick
         // scheduled *by* one of these callbacks out of this same pass — see
@@ -850,6 +968,55 @@ mod tests {
     // async loop *by construction*, not by a gap in these tests. Hence
     // `resolve_overload` below: it is exactly the branch `run_tick_loop`
     // cannot exercise, tested directly with hand-built instants instead.
+
+    /// One pending block tick, built through a real `ScheduledTickQueue`
+    /// because `ScheduledTick` carries a private `sub_tick_order` and cannot be
+    /// constructed with a struct literal from here.
+    fn one_pending(pos: (i32, i32, i32)) -> Vec<ScheduledTick<String>> {
+        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        queue.schedule(pos, crate::redstone::TICK_REPEATER.to_owned(), 2, TickPriority::Normal);
+        queue.drain_due(u64::MAX, usize::MAX)
+    }
+
+    /// Issue #465's LAN shape, asserted at the type level so the remaining gap
+    /// is provably nothing more than one call site in `integrated.rs`.
+    ///
+    /// A `LanSubscriber`'s feed must split the two directions: the **outbound**
+    /// queue per-connection (it is drain-all, so a shared one would let the
+    /// first consumer starve every other player), the **inbound** queue shared
+    /// (only the tick loop drains it, and a per-connection one would silently
+    /// swallow every placement). Both halves are asserted, including the
+    /// negative direction — `Default` deliberately shares *neither*, which is
+    /// why `bind` cannot keep using it.
+    #[test]
+    fn a_subscriber_shares_the_inbound_queue_and_splits_the_outbound_one() {
+        let hub = BlockTickFeed::default();
+        let conn = hub.subscriber();
+
+        conn.request_scheduled_ticks(one_pending((7, 1, 9)));
+        assert_eq!(
+            hub.drain_scheduled_ticks().iter().map(|t| t.pos).collect::<Vec<_>>(),
+            vec![(7, 1, 9)],
+            "a subscriber's scheduled block tick must reach the hub the tick loop drains"
+        );
+
+        conn.publish(1, 2, 3, "minecraft:stone".to_owned());
+        assert!(
+            hub.drain_all().is_empty(),
+            "the outbound queues must stay separate, or one LAN player's drain-all starves the rest"
+        );
+        assert_eq!(conn.drain_all().len(), 1, "the subscriber keeps its own outbound change");
+
+        // The control: this is what `bind` does today, and why LAN placement of
+        // a delayed component is still dropped.
+        let orphan = BlockTickFeed::default();
+        orphan.request_scheduled_ticks(one_pending((7, 1, 9)));
+        assert!(
+            hub.drain_scheduled_ticks().is_empty(),
+            "CONTROL FAILED: a `default()` feed already reaches the hub, so `subscriber()` would \
+             not be needed and the LAN gap this documents would not exist"
+        );
+    }
 
     /// Predicted value: `now` built as exactly [`overload_threshold`] past
     /// `next_tick_at` — the boundary vanilla's own check is strictly `>`,
