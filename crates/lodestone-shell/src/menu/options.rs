@@ -26,14 +26,15 @@
 //! it answers `false` for **100 or 101 of the 143** controls this module
 //! renders. The 43-or-42 live ones break down as:
 //!
-//! - **21 option rows**, driving **18** distinct [`LiveOption`]s — three of them
+//! - **25 option rows**, driving **22** distinct [`LiveOption`]s — three of them
 //!   (`textBackgroundOpacity`, `chatOpacity`, `chatLineSpacing`) are placed on
 //!   two pages each, which is vanilla's own shape and why the row count exceeds
-//!   the option count. The 18 are `guiScale`/`bobView` (#55),
+//!   the option count. The 22 are `guiScale`/`bobView` (#55),
 //!   `toggleCrouch`/`toggleSprint`/`invertMouseX`/`invertMouseY`/
 //!   `mouseWheelSensitivity` (#200/#202/#203), the eight chat options
-//!   (`9eba2bb`), `sensitivity`/`renderDistance` (#443), and
-//!   `discreteMouseScroll` (#444).
+//!   (`9eba2bb`), `sensitivity`/`renderDistance` (#443), and — #444 —
+//!   `discreteMouseScroll` plus the four remaining Controls rows
+//!   (`toggleAttack`/`toggleUse`/`autoJump`/`sprintWindow`).
 //! - **9 `Done` buttons**, one per page, always live.
 //! - **13 or 12 working nav buttons** — the swing is the root's Online button:
 //!   live outside a world, the inactive World Options placeholder inside one
@@ -3130,6 +3131,11 @@ mod tests {
                 LiveOption::ToggleSprint,
                 LiveOption::ToggleAttack,
                 LiveOption::ToggleUse,
+                // #444 completes the Controls page's toggle rows: Auto-Jump,
+                // then the Sprint Window slider (both declared after the four
+                // toggles in `CONTROLS`' third `pair`).
+                LiveOption::AutoJump,
+                LiveOption::SprintWindow,
                 // Mouse page: look Sensitivity is the #443 migration, and it
                 // is declared *before* Scroll Sensitivity in `MOUSE`'s first
                 // `pair`, which is why it sorts here.
@@ -3158,10 +3164,11 @@ mod tests {
                 LiveOption::ViewBobbing,
             ],
             "GUI Scale and Render Distance on Video (the latter from #443); \
-             Sneak/Sprint toggle on Controls (#202); look sensitivity (#443), \
-             scroll sensitivity and both inverts on Mouse (#203); the eight chat \
-             options on Chat with three of them repeated on Accessibility; \
-             View Bobbing on Accessibility — and nothing else"
+             the four toggle rows and Auto-Jump/Sprint Window on Controls \
+             (#202/#444); look sensitivity (#443), scroll sensitivity and both \
+             inverts on Mouse (#203); the eight chat options on Chat with three \
+             of them repeated on Accessibility; View Bobbing on Accessibility \
+             — and nothing else"
         );
         // The control: an option we do not persist must report itself inactive,
         // and the detector must be able to tell the difference.
@@ -3195,16 +3202,16 @@ mod tests {
             render_distance.is_live(),
             "renderDistance is a persisted `Options` field since #443"
         );
-        // The count itself, not just the ratio's ingredients: 21 live option
-        // *rows* (18 distinct options, three of them placed twice — see above) +
-        // 9 Done buttons (one per page, always live) + 13 working nav buttons
+        // The count itself, not just the ratio's ingredients: 25 live option
+        // *rows* (22 distinct options, three of them placed twice — see above)
+        // + 9 Done buttons (one per page, always live) + 13 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
         // **Telemetry**/**Resource Packs** from the root grid — issue #415
         // completes the grid — Accessibility -> Controls, Controls -> Mouse,
         // Controls -> Key Binds, and the root's own Online button, live
         // outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 43, "outside a world: {live:?}");
+        assert_eq!(live.len(), 47, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -3226,8 +3233,8 @@ mod tests {
             .flat_map(|&p| all_controls(p, true))
             .filter(|c| c.is_live())
             .collect();
-        assert_eq!(outside.len(), 43);
-        assert_eq!(inside.len(), 42, "one fewer: the root's Online button");
+        assert_eq!(outside.len(), 47);
+        assert_eq!(inside.len(), 46, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -3802,9 +3809,13 @@ mod tests {
             // now persisted `Options` fields with a real row.
             LiveOption::Sensitivity,
             LiveOption::RenderDistance,
-            // Issue #444: the one row of that issue's six whose consumer this shell
-            // already had — `app`'s wheel boundary. See the variant's own doc.
+            // Issue #444: the six Controls/Mouse rows. `discreteMouseScroll` was
+            // the first, whose consumer this shell already had — `app`'s wheel
+            // boundary; the other four landed with the toggles/auto-jump/sprint
+            // window. See the variants' own docs.
             LiveOption::DiscreteMouseScroll,
+            LiveOption::AutoJump,
+            LiveOption::SprintWindow,
         ];
         let placed: Vec<LiveOption> = PAGES
             .iter()
@@ -3845,10 +3856,12 @@ mod tests {
                 | LiveOption::ChatColors
                 | LiveOption::Sensitivity
                 | LiveOption::RenderDistance
-                | LiveOption::DiscreteMouseScroll => {}
+                | LiveOption::DiscreteMouseScroll
+                | LiveOption::AutoJump
+                | LiveOption::SprintWindow => {}
             }
         }
-        assert_eq!(ALL.len(), 18, "eighteen distinct live options");
+        assert_eq!(ALL.len(), 22, "twenty-two distinct live options");
     }
 
     /// [`crate::config::step_unit_double`]'s wrap, including the two places it
