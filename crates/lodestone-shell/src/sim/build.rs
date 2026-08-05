@@ -149,6 +149,18 @@ impl Sim {
             // for correctness — it guarantees the shell can *read* the registry
             // even when no plugin registered anything.
             lodestone_ecs::RecipeRegistryPlugin,
+            // Issue #467: without this line the whole command path is an
+            // island. `CHAT_COMMAND` decodes (#464), crosses the host-installed
+            // `CommandSink` seam and reaches `dispatch` — but `dispatch` reads a
+            // `CommandRegistry` that only `PluginCommandsPlugin` inserts, so
+            // with **zero** production registrations no player could run a
+            // command however correct the wire was.
+            //
+            // It goes in `client_app()` specifically, not at the `net.rs` call
+            // site where a `World` and an `IntegratedServer` are both in scope:
+            // the `App` *value* never reaches there, being consumed by
+            // `Sim::from_app` below.
+            lodestone_ecs::commands::PluginCommandsPlugin,
         ));
         app
     }
