@@ -434,6 +434,42 @@ struct ParseWalk {
     failed: bool,
 }
 
+/// The walk to return when the token just matched runs all the way to the end
+/// of the line — i.e. the player has typed it fully but has **not** typed the
+/// space after it.
+///
+/// Such a token is still being typed, and completion must therefore be offered
+/// by its **parent**, filtered by the token as a prefix — not by the token's own
+/// children. This is not a simplification; it is what vanilla does.
+/// `CommandContextBuilder.findSuggestionContext(cursor)` takes the
+/// `range.getEnd() < cursor` branch only when the cursor is strictly *past* the
+/// parsed range; with the cursor sitting exactly on the end it falls into the
+/// loop that returns `new SuggestionContext<>(prev, nodeRange.getStart())` —
+/// `prev` being the node *before* the one containing the cursor. So `/gamemode`
+/// suggests `gamemode`, and only `/gamemode ` suggests the four game modes.
+///
+/// Getting this wrong is silent and was measured: advancing into the matched
+/// node makes the in-progress token look like an empty next token, so every
+/// fully-typed command name completes to its own arguments and no half-typed
+/// name ever completes to itself. It is the same class of defect as a
+/// `canonicalize` that `.trim()`s the line — the trailing space is load-bearing
+/// data, not whitespace to normalise away. Gated by
+/// `crates/lodestone-shell/tests/command_tree_completion.rs`'s
+/// `a_trailing_space_decides_between_finishing_a_token_and_starting_the_next`,
+/// against a tree captured from a real 26.2 server.
+///
+/// `spans` is passed through untouched, so **highlighting is unaffected**: the
+/// token was matched and has already had its span pushed by the caller. Only the
+/// completion position differs.
+fn still_typing(spans: Vec<HighlightSpan>, parent: usize, token_start: usize) -> ParseWalk {
+    ParseWalk {
+        spans,
+        node: parent,
+        next_token_start: token_start,
+        failed: false,
+    }
+}
+
 /// The shared walker behind [`highlight`] and [`complete`]. `None` when
 /// `line` is not a command (`highlight`/`complete` both treat that as
 /// "nothing to say" — this module covers commands only, not chat-message
@@ -497,6 +533,9 @@ fn parse_line(tree: &CommandTree, line: &str) -> Option<ParseWalk> {
                 end: word_end,
                 kind: HighlightKind::Literal,
             });
+            if word_end == len {
+                return Some(still_typing(spans, node, token_start));
+            }
             node = matched;
             pos = word_end;
             continue;
@@ -519,6 +558,9 @@ fn parse_line(tree: &CommandTree, line: &str) -> Option<ParseWalk> {
                     kind: HighlightKind::Argument(arg_color % 5),
                 });
                 arg_color = arg_color.wrapping_add(1);
+                if end == len {
+                    return Some(still_typing(spans, node, token_start));
+                }
                 node = idx;
                 pos = end;
                 continue;
@@ -1140,9 +1182,27 @@ mod tests {
                     kind: HighlightKind::Argument(0),
                 }
             );
-            // Nothing left to complete once a greedy argument has consumed
-            // to the end of the line.
-            assert_eq!(complete(&tree, line), Completion::None);
+            // The greedy argument runs to the cursor with no trailing space, so
+            // it is *still being typed* and completion is offered by its parent
+            // — see `still_typing`. `start: 5` is exactly where vanilla's
+            // `findSuggestionContext` puts it: it returns
+            // `SuggestionContext(prev = the "say" literal, start = 4)` in
+            // slash-stripped coordinates, which is 5 with the slash.
+            //
+            // The result is `NeedsServer`, not `None`, because `Message` has no
+            // `local_domain` entry — the same documented "never wrong, sometimes
+            // slower than vanilla" route as
+            // `an_opaque_argument_with_no_provider_still_needs_the_server`.
+            // Identical on screen: `MessageArgument` has no `listSuggestions`
+            // override, so Brigadier's default returns `Suggestions.empty()`
+            // and the server answers our round trip with an empty list.
+            //
+            // This assertion previously read `Completion::None`, which was an
+            // artefact of the walker advancing *into* the matched argument and
+            // finding it childless — the same defect that made every
+            // fully-typed command name complete to its own arguments. Both are
+            // fixed by the same change.
+            assert_eq!(complete(&tree, line), Completion::NeedsServer { start: 5 });
         }
 
         /// **The termination control this module's own doc promises.** A

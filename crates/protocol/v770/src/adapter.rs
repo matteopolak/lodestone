@@ -4,7 +4,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use lodestone_core::{Ctx, Decode, Encode, Reader, Writer, read_network_nbt};
+use lodestone_core::{
+    Ctx, Decode, Encode, Reader, Writer, plain_text_from_nbt_component, read_network_nbt,
+};
+// The wire-shaped, decode-target command tree (issue #470). Deliberately *not*
+// `lodestone-command`'s arena/`dyn ArgumentType` construction API — see #435 and
+// `lodestone_model::command_tree`'s module doc for why the two stay separate.
+use lodestone_model::command_tree::{
+    ArgumentParser, CommandSuggestionEntry, CommandSuggestionsResponse, CommandTree, NodeKind,
+    RawCommandNode, StringKind,
+};
 use lodestone_model::{
     AdapterError, AnimationAction, BlockAabb, BlockActionKind, BlockFace, BlockHardness, BlockPos,
     BossAction,
@@ -839,6 +848,326 @@ fn read_chat_type_bound(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
 fn parse_key(name: &str, what: &str) -> Result<ResourceKey, AdapterError> {
     name.parse()
         .map_err(|_| AdapterError::Decode(format!("invalid {what} key {name}")))
+}
+
+/// `ClientboundCommandsPacket`'s own node-flag bits
+/// (`.cache/mc/26.2/client-src/net/minecraft/network/protocol/game/ClientboundCommandsPacket.java:36-40`).
+mod command_node_flags {
+    /// `MASK_TYPE`: the low two bits select root / literal / argument.
+    pub(super) const MASK_TYPE: u8 = 3;
+    /// `TYPE_ROOT`.
+    pub(super) const TYPE_ROOT: u8 = 0;
+    /// `TYPE_LITERAL`.
+    pub(super) const TYPE_LITERAL: u8 = 1;
+    /// `TYPE_ARGUMENT`.
+    pub(super) const TYPE_ARGUMENT: u8 = 2;
+    /// `FLAG_EXECUTABLE`.
+    pub(super) const EXECUTABLE: u8 = 4;
+    /// `FLAG_REDIRECT`.
+    pub(super) const REDIRECT: u8 = 8;
+    /// `FLAG_CUSTOM_SUGGESTIONS`.
+    pub(super) const CUSTOM_SUGGESTIONS: u8 = 16;
+    /// `FLAG_RESTRICTED`.
+    pub(super) const RESTRICTED: u8 = 32;
+}
+
+/// A defensive cap on the node and child counts a single `commands` packet may
+/// declare, so a hostile or corrupt VarInt cannot drive a multi-gigabyte
+/// `Vec::with_capacity` before the reader runs out of bytes. Vanilla 26.2's own
+/// tree is ~1.2k nodes; four times the payload's byte length is a bound no
+/// legitimate tree can exceed, since every node costs at least two bytes on the
+/// wire.
+fn command_count(reader: &mut Reader<'_>, payload_len: usize, what: &str) -> Result<usize, AdapterError> {
+    let raw = reader.var_i32().map_err(dec_err)?;
+    let count = usize::try_from(raw)
+        .map_err(|_| AdapterError::Decode(format!("negative {what} count {raw}")))?;
+    if count > payload_len {
+        return Err(AdapterError::Decode(format!(
+            "{what} count {count} exceeds the {payload_len}-byte payload"
+        )));
+    }
+    Ok(count)
+}
+
+/// Reads one `minecraft:command_argument_type` payload into an
+/// [`ArgumentParser`], given the registry id already read off the wire.
+///
+/// Every branch mirrors that parser's own `ArgumentTypeInfo::deserializeFromNetwork`
+/// — see `lodestone_model::command_tree`'s module doc for the file list. Ids
+/// with no branch here are `SingletonArgumentInfo`s, whose
+/// `deserializeFromNetwork` consumes nothing, so falling through to
+/// [`ArgumentParser::from_registry_id_no_payload`] reads zero bytes and is
+/// correct rather than a guess.
+///
+/// Returns `None` for an id this build doesn't model, having consumed no
+/// payload for it. **This is a deliberate, documented divergence from vanilla**:
+/// `ClientboundCommandsPacket.read` bails out of the *whole* node the moment
+/// `BuiltInRegistries.COMMAND_ARGUMENT_TYPE.byId` returns `null`, without
+/// reading the payload or the custom-suggestions id, which leaves its own
+/// reader mid-node and corrupts every subsequent entry. Assuming "no payload"
+/// keeps the stream in sync for the 44-of-57 ids that genuinely have none, so a
+/// datapack or mod argument type we don't model costs one unusable node instead
+/// of the entire tree. See `lodestone_model::command_tree`'s doc on why that
+/// tolerance is load-bearing.
+fn read_argument_parser(
+    reader: &mut Reader<'_>,
+    parser_id: i32,
+) -> Result<Option<ArgumentParser>, AdapterError> {
+    // `ArgumentUtils.numberHasMin` / `numberHasMax`: bit 0 and bit 1 of a
+    // leading flags byte, an absent bound meaning the type's own extreme.
+    const HAS_MIN: u8 = 1;
+    const HAS_MAX: u8 = 2;
+
+    let parser = match parser_id {
+        1 => {
+            let flags = reader.u8().map_err(dec_err)?;
+            ArgumentParser::Float {
+                min: if flags & HAS_MIN != 0 {
+                    reader.f32().map_err(dec_err)?
+                } else {
+                    -f32::MAX
+                },
+                max: if flags & HAS_MAX != 0 {
+                    reader.f32().map_err(dec_err)?
+                } else {
+                    f32::MAX
+                },
+            }
+        }
+        2 => {
+            let flags = reader.u8().map_err(dec_err)?;
+            ArgumentParser::Double {
+                min: if flags & HAS_MIN != 0 {
+                    reader.f64().map_err(dec_err)?
+                } else {
+                    -f64::MAX
+                },
+                max: if flags & HAS_MAX != 0 {
+                    reader.f64().map_err(dec_err)?
+                } else {
+                    f64::MAX
+                },
+            }
+        }
+        3 => {
+            let flags = reader.u8().map_err(dec_err)?;
+            ArgumentParser::Integer {
+                min: if flags & HAS_MIN != 0 {
+                    reader.i32().map_err(dec_err)?
+                } else {
+                    i32::MIN
+                },
+                max: if flags & HAS_MAX != 0 {
+                    reader.i32().map_err(dec_err)?
+                } else {
+                    i32::MAX
+                },
+            }
+        }
+        4 => {
+            let flags = reader.u8().map_err(dec_err)?;
+            ArgumentParser::Long {
+                min: if flags & HAS_MIN != 0 {
+                    reader.i64().map_err(dec_err)?
+                } else {
+                    i64::MIN
+                },
+                max: if flags & HAS_MAX != 0 {
+                    reader.i64().map_err(dec_err)?
+                } else {
+                    i64::MAX
+                },
+            }
+        }
+        // `StringArgumentSerializer`: `writeEnum` is a VarInt ordinal into
+        // Brigadier's `StringType`.
+        5 => {
+            let ordinal = reader.var_i32().map_err(dec_err)?;
+            let kind = match ordinal {
+                0 => StringKind::SingleWord,
+                1 => StringKind::QuotablePhrase,
+                2 => StringKind::GreedyPhrase,
+                other => {
+                    return Err(AdapterError::Decode(format!(
+                        "brigadier:string ordinal {other} is outside StringType"
+                    )));
+                }
+            };
+            ArgumentParser::String(kind)
+        }
+        // `EntityArgument.Info`: bit 0 `single`, bit 1 `playersOnly`.
+        6 => {
+            let flags = reader.u8().map_err(dec_err)?;
+            ArgumentParser::Entity {
+                single: flags & 1 != 0,
+                players_only: flags & 2 != 0,
+            }
+        }
+        // `ScoreHolderArgument.Info`: bit 0 `multiple`.
+        31 => {
+            let flags = reader.u8().map_err(dec_err)?;
+            ArgumentParser::ScoreHolder {
+                multiple: flags & 1 != 0,
+            }
+        }
+        // `TimeArgument.Info`: a plain big-endian `int`, no flags byte.
+        43 => ArgumentParser::Time {
+            min: reader.i32().map_err(dec_err)?,
+        },
+        // The five `resource*` parsers: `FriendlyByteBuf.readRegistryKey`, which
+        // is `readIdentifier` — a VarInt-length UTF-8 string, not a
+        // namespace/path pair.
+        44..=48 => {
+            let raw = reader.string(32767).map_err(dec_err)?;
+            let registry = parse_key(&raw, "command argument registry")?;
+            match parser_id {
+                44 => ArgumentParser::ResourceOrTag { registry },
+                45 => ArgumentParser::ResourceOrTagKey { registry },
+                46 => ArgumentParser::Resource { registry },
+                47 => ArgumentParser::ResourceKeyArg { registry },
+                _ => ArgumentParser::ResourceSelector { registry },
+            }
+        }
+        other => match ArgumentParser::from_registry_id_no_payload(other) {
+            ArgumentParser::Unknown(_) => return Ok(None),
+            known => known,
+        },
+    };
+    Ok(Some(parser))
+}
+
+/// Reads one `ClientboundCommandsPacket.Entry`: `readNode`'s exact order —
+/// flags byte, VarInt child-index array, the redirect index when
+/// `FLAG_REDIRECT` is set, then the type-dependent stub.
+fn read_command_node(
+    reader: &mut Reader<'_>,
+    payload_len: usize,
+) -> Result<RawCommandNode, AdapterError> {
+    use command_node_flags as flag;
+
+    let flags = reader.u8().map_err(dec_err)?;
+    let child_count = command_count(reader, payload_len, "command node child")?;
+    let mut children = Vec::with_capacity(child_count);
+    for _ in 0..child_count {
+        let raw = reader.var_i32().map_err(dec_err)?;
+        children.push(
+            usize::try_from(raw)
+                .map_err(|_| AdapterError::Decode(format!("negative child index {raw}")))?,
+        );
+    }
+    let redirect = if flags & flag::REDIRECT != 0 {
+        let raw = reader.var_i32().map_err(dec_err)?;
+        Some(
+            usize::try_from(raw)
+                .map_err(|_| AdapterError::Decode(format!("negative redirect index {raw}")))?,
+        )
+    } else {
+        None
+    };
+
+    let kind = match flags & flag::MASK_TYPE {
+        flag::TYPE_ROOT => NodeKind::Root,
+        flag::TYPE_LITERAL => NodeKind::Literal {
+            name: reader.string(32767).map_err(dec_err)?,
+        },
+        flag::TYPE_ARGUMENT => {
+            let name = reader.string(32767).map_err(dec_err)?;
+            let parser_id = reader.var_i32().map_err(dec_err)?;
+            match read_argument_parser(reader, parser_id)? {
+                Some(parser) => {
+                    // Read *after* the parser payload, exactly as
+                    // `ArgumentNodeStub.write` emits it.
+                    let suggestions = if flags & flag::CUSTOM_SUGGESTIONS != 0 {
+                        let raw = reader.string(32767).map_err(dec_err)?;
+                        Some(parse_key(&raw, "command suggestions provider")?)
+                    } else {
+                        None
+                    };
+                    NodeKind::Argument {
+                        name,
+                        parser,
+                        suggestions,
+                    }
+                }
+                None => {
+                    // Unmodeled parser: still consume the custom-suggestions id
+                    // if the flag claims one, so the reader stays aligned for
+                    // the next entry. See `read_argument_parser`'s doc.
+                    if flags & flag::CUSTOM_SUGGESTIONS != 0 {
+                        reader.string(32767).map_err(dec_err)?;
+                    }
+                    NodeKind::Unrecognized { parser_id }
+                }
+            }
+        }
+        other => {
+            return Err(AdapterError::Decode(format!(
+                "command node type {other} is outside TYPE_ROOT/LITERAL/ARGUMENT"
+            )));
+        }
+    };
+
+    Ok(RawCommandNode {
+        kind,
+        executable: flags & flag::EXECUTABLE != 0,
+        restricted: flags & flag::RESTRICTED != 0,
+        redirect,
+        children,
+    })
+}
+
+/// Decodes a whole `minecraft:commands` payload (clientbound id 16) into a
+/// [`CommandTree`].
+///
+/// `ClientboundCommandsPacket`'s private constructor is
+/// `readList(::readNode)` then `readVarInt()` for the root index — the node
+/// list comes **first**, the root index last.
+fn decode_command_tree(payload: &[u8]) -> Result<CommandTree, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let node_count = command_count(&mut reader, payload.len(), "command node")?;
+    let mut nodes = Vec::with_capacity(node_count);
+    for _ in 0..node_count {
+        nodes.push(read_command_node(&mut reader, payload.len())?);
+    }
+    let raw_root = reader.var_i32().map_err(dec_err)?;
+    reader.ensure_empty().map_err(dec_err)?;
+    let root = usize::try_from(raw_root)
+        .map_err(|_| AdapterError::Decode(format!("negative root index {raw_root}")))?;
+    CommandTree::new(nodes, root).map_err(|err| AdapterError::Decode(err.to_string()))
+}
+
+/// Decodes a `minecraft:command_suggestions` payload (clientbound id 15) into a
+/// [`CommandSuggestionsResponse`].
+///
+/// `ClientboundCommandSuggestionsPacket.STREAM_CODEC`: three VarInts (`id`,
+/// `start`, `length`) then a list of `Entry(String text, Optional<Component>
+/// tooltip)`. The tooltip uses `TRUSTED_OPTIONAL_STREAM_CODEC` — a `bool`
+/// presence byte followed by a network-NBT component when set — and is reduced
+/// to plain text here, matching [`CommandSuggestionEntry::tooltip`]'s own doc.
+fn decode_command_suggestions(payload: &[u8]) -> Result<CommandSuggestionsResponse, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let id = reader.var_i32().map_err(dec_err)?;
+    let start = reader.var_i32().map_err(dec_err)?;
+    let length = reader.var_i32().map_err(dec_err)?;
+    let count = command_count(&mut reader, payload.len(), "command suggestion")?;
+    let mut suggestions = Vec::with_capacity(count);
+    for _ in 0..count {
+        let text = reader.string(32767).map_err(dec_err)?;
+        let tooltip = if reader.bool().map_err(dec_err)? {
+            let component = read_network_nbt(&mut reader).map_err(dec_err)?;
+            Some(plain_text_from_nbt_component(&component))
+        } else {
+            None
+        };
+        suggestions.push(CommandSuggestionEntry { text, tooltip });
+    }
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(CommandSuggestionsResponse {
+        id,
+        start,
+        length,
+        suggestions,
+    })
 }
 
 /// Outcome of decoding one clientbound item stack.
@@ -2778,6 +3107,23 @@ impl V770Adapter {
                 kind,
                 ack: None,
             })]);
+        }
+        if packet_id == play::clientbound::COMMANDS {
+            let tree = decode_command_tree(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::CommandTreeUpdated {
+                tree: Box::new(tree),
+            })]);
+        }
+        if packet_id == play::clientbound::COMMAND_SUGGESTIONS {
+            let response = decode_command_suggestions(payload)?;
+            return Ok(vec![Directive::Emit(
+                ClientEvent::CommandSuggestionsReceived {
+                    id: response.id,
+                    start: response.start,
+                    length: response.length,
+                    suggestions: response.suggestions,
+                },
+            )]);
         }
         if packet_id == play::clientbound::SET_ACTION_BAR_TEXT {
             // The action bar carries a single trusted text component and always

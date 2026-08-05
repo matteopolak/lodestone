@@ -172,6 +172,16 @@ live-item = []
 # by default and `#[ignore]`d so `cargo test -p lodestone-v770` stays hermetic.
 live-tool = []
 
+# Enables the live command-tree gate (`live_command_tree`, issue #470): joins the
+# flat creative 26.2 oracle (game :25570), captures the raw `minecraft:commands`
+# payload the *server* authored, then sends a real serverbound
+# `command_suggestion` and captures the reply. Both are checked in under
+# `tests/fixtures/` and replayed by the hermetic `command_tree` sibling here and
+# by `lodestone-shell`'s `command_tree_completion` gate — so tab completion is
+# validated against a tree vanilla built, never one our own encoder produced. Off
+# by default and `#[ignore]`d so `cargo test -p lodestone-v770` stays hermetic.
+live-commands = []
+
 # Enables the live item-entity gate (`live_item_entity_metadata`): joins the
 # real survival 26.2 server (game :25565, RCON :25566), `/summon`s a dropped
 # item, and captures the raw `set_entity_data` payload the *server* authored for
