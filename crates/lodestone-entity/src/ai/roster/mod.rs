@@ -422,8 +422,27 @@ pub fn registrations_for(species: &str) -> &'static [Registration] {
 ///
 /// Priorities are vanilla's own numbers, unshifted. Unmodelled registrations are
 /// skipped.
+///
+/// # Brain-driven species take the early return (issue #209)
+///
+/// Roughly 20 concrete 26.2 mobs have **no `registerGoals` at all** — a warden's
+/// `Warden.java` contains no `addGoal` anywhere in the file — because their AI is
+/// a [`Brain`](crate::brain::Brain) instead. Before this, those species fell
+/// through every family lookup to [`FALLBACK`] and got two generic stroll/look
+/// goals: plausible on screen, and not the mob's behaviour in any sense.
+///
+/// They now get a single [`BrainGoal`](crate::brain::BrainGoal) and **nothing
+/// else**. The `return` is not an optimisation; installing the fallback stroll
+/// alongside a brain would put two independent writers on movement, and the brain
+/// would lose arbitration on the ticks it happened to be between walk targets.
+/// This is also the join that makes the Brain system reachable at all: no host
+/// learns a new call, because `goals_for` is already the function
+/// `MobSim::spawn_species` calls.
 #[must_use]
 pub fn goals_for(species: &str, ctx: &SpeciesContext) -> Vec<(i32, Box<dyn Goal>)> {
+    if let Some(brain) = crate::brain::brain_for(species) {
+        return vec![(BRAIN_PRIORITY, Box::new(brain))];
+    }
     let table = registrations_for(species);
     let mut out = Vec::new();
     for want in [Selector::Target, Selector::Goal] {
@@ -435,6 +454,16 @@ pub fn goals_for(species: &str, ctx: &SpeciesContext) -> Vec<(i32, Box<dyn Goal>
     }
     out
 }
+
+/// The priority a [`BrainGoal`](crate::brain::BrainGoal) is installed at.
+///
+/// `0`, i.e. the highest, and it is the only goal a brain mob gets — so the number
+/// is about *insulation* rather than arbitration. If a later species needs a real
+/// goal alongside its brain (vanilla does this: a `Villager` still registers
+/// `FloatGoal` and a `TradeWithPlayerGoal` on its goal selector), that goal takes
+/// its own vanilla priority and loses `MOVE`/`LOOK` to the brain, which is the
+/// vanilla outcome.
+pub const BRAIN_PRIORITY: i32 = 0;
 
 /// Whether `table` is the shared [`FALLBACK`] rather than a species' own entry.
 ///

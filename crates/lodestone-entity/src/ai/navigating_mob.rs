@@ -29,6 +29,7 @@ use lodestone_model::{BlockPos, Vec3};
 
 use super::goal::GoalSelector;
 use super::mob::{EatenBlock, MobController, ProjectileLaunch, distance_sqr};
+use crate::brain::BrainMob;
 use crate::pathfinding::{
     BlockCues, MobShape, PathFinder, PathNavigator, PathParams, PathStart, PathType, PathWorld,
 };
@@ -1184,6 +1185,151 @@ impl MobController for NavigatingMob<'_> {
     fn set_swell_dir(&mut self, dir: i32) {
         self.swell_dir = dir;
     }
+
+    /// Yes — this is the one production type that can drive a brain (issue #209).
+    ///
+    /// Every other implementor of [`MobController`] in this workspace is a test
+    /// double, and each one inherits the `None` default. That is what forces a
+    /// brain gate to be a *behavioural* gate over a real world: the composition
+    /// simply does not run against a fake.
+    fn brain_mob(&mut self) -> Option<&mut dyn BrainMob> {
+        Some(self)
+    }
+}
+
+/// The Brain-system half of the composition (issue #209).
+///
+/// # Why this is the same struct and not a `BrainNavigatingMob`
+///
+/// Issue #209 asks for "a `BrainMob` implementation over the real
+/// navigator/world (mirroring `NavigatingMob`)". Mirroring it would have meant a
+/// second struct duplicating the pathfinder, the follower, the fluid
+/// classification and the whole host-injection field set — and, worse, a second
+/// thing for `MobSim` to know how to spawn and tick.
+///
+/// Vanilla does not do that either: `Mob` has **one** body carrying both
+/// `goalSelector` and `brain`, and a `Villager` navigates with exactly the same
+/// `PathNavigation` a `Zombie` does. So the faithful shape is one body
+/// implementing both seams, which is what this is. Both traits are narrow views
+/// of the same mob; the overlapping methods (`position`, `move_to`,
+/// `navigation_done`, `look_at`, the RNG) resolve to the same state, so a brain
+/// and a goal cannot disagree about where the mob is.
+///
+/// The consequence worth naming: a brain-driven mob gets the **real A\*** here,
+/// not a stub. `RandomStroll` writes a `WALK_TARGET`, `MoveToTargetSink` hands it
+/// to [`MobController::move_to`]'s pathfinder, and
+/// [`advance`](NavigatingMob::advance) walks the resulting path. That whole chain
+/// had never once executed before this impl existed.
+impl BrainMob for NavigatingMob<'_> {
+    fn next_i32(&mut self, bound: i32) -> i32 {
+        if bound <= 0 {
+            return 0;
+        }
+        (self.rng.next_u64() % bound as u64) as i32
+    }
+
+    fn next_f32(&mut self) -> f32 {
+        self.rng.next_unit() as f32
+    }
+
+    /// The follower's own monotonic tick counter, advanced once per
+    /// [`advance`](NavigatingMob::advance).
+    ///
+    /// Vanilla's brain compares behaviour timeouts against `level.getGameTime()`,
+    /// a world clock this crate has no access to. A per-mob counter is
+    /// interchangeable for that purpose because **every** comparison a brain makes
+    /// is a difference between two readings of this same clock — `end_timestamp =
+    /// time + duration` in [`Leaf::try_start`](crate::brain::Leaf) and
+    /// `time > end_timestamp` in `tick_or_stop`. It is the same reasoning
+    /// [`angry_target`](MobController::angry_target) uses to keep the *deadline*
+    /// on the host side: what matters is that the clock is monotonic and shared
+    /// between the two readings, not that it agrees with the world.
+    ///
+    /// It starts at `0`, so the first tick's `time` is `1`. Behaviour timeouts are
+    /// all positive spans, so nothing depends on the origin.
+    fn game_time(&self) -> i64 {
+        // Saturating rather than `as`: a wrap would make `time > end_timestamp`
+        // read as "not timed out" forever and wedge every running behaviour. It
+        // takes ~14.6 billion years of ticks to reach, but the cast is free.
+        i64::try_from(self.tick_count).unwrap_or(i64::MAX)
+    }
+
+    fn position(&self) -> Vec3 {
+        self.pos
+    }
+
+    fn in_water(&self) -> bool {
+        // Fully-qualified: `MobController` declares an `in_water` too, and both
+        // must answer from the same world read. Delegating rather than
+        // re-deriving keeps the disclosed fluid-height scope cut in one place.
+        MobController::in_water(self)
+    }
+
+    fn move_to(&mut self, target: Vec3, speed: f32) -> bool {
+        MobController::move_to(self, target, f64::from(speed))
+    }
+
+    fn navigation_done(&self) -> bool {
+        self.navigator.is_done()
+    }
+
+    /// Vanilla's `navigation.isStuck()`, which `MoveToTargetSink::stop` reads to
+    /// decide whether to arm its retry cooldown. The goal system exposes the same
+    /// state as [`NavigatingMob::is_stuck`]; leaving this at the trait's `false`
+    /// default would have made a wedged brain mob re-search A\* on every tick it
+    /// re-strolled.
+    fn navigation_stuck(&self) -> bool {
+        self.navigator.is_stuck()
+    }
+
+    fn stop_navigation(&mut self) {
+        MobController::stop_navigation(self);
+    }
+
+    fn look_at(&mut self, target: Vec3) {
+        self.last_look = Some(target);
+    }
+
+    /// The host-injected nearest player, unfiltered.
+    ///
+    /// The brain's own [`SetPlayerLookTarget`](crate::brain::SetPlayerLookTarget)
+    /// applies the distance cut (its `max_dist`), exactly as
+    /// `LookAtPlayerGoal` does on the goal side — so an over-reporting host feed
+    /// is wasteful here, not wrong. Note this is deliberately **not**
+    /// [`find_nearest_target`](MobController::find_nearest_target)'s
+    /// `follow_range`-cut answer: that one is for acquiring something to attack,
+    /// and a brain's `NEAREST_VISIBLE_PLAYER` memory is perception, not targeting.
+    fn nearest_visible_player(&self) -> Option<Vec3> {
+        self.nearest_player
+    }
+
+    /// Vanilla `LandRandomPos.getPos`: a random destination within `max_xz`
+    /// horizontally.
+    ///
+    /// **Two disclosed cuts, both in the same direction as the goal system's
+    /// existing [`random_stroll_target`](MobController::random_stroll_target),
+    /// which this mirrors on purpose.**
+    ///
+    /// * `max_y` is unused. Vanilla samples a vertical offset and then calls
+    ///   `PathfinderMob.getWalkTargetValue`/`isWalkable` to validate the result;
+    ///   this follower snaps `pos.y` to whatever floor the path resolves to, so a
+    ///   random vertical offset would only produce unreachable targets.
+    /// * The position is **not** pre-validated as land. Vanilla's `getPos` retries
+    ///   up to 10 times and returns `null` if none validate. Here an invalid pick
+    ///   is caught one step later and cheaply: `MoveToTargetSink` calls `move_to`,
+    ///   the real A\* search fails, and the sink erases `WALK_TARGET` so the next
+    ///   tick strolls again. The observable difference is a wasted search, not a
+    ///   mob walking into a wall — the follower can only ever walk a path A\*
+    ///   returned.
+    fn random_land_pos(&mut self, max_xz: i32, _max_y: i32) -> Option<Vec3> {
+        if max_xz <= 0 {
+            return None;
+        }
+        let span = f64::from(max_xz) * 2.0;
+        let dx = (self.rng.next_unit() * span - f64::from(max_xz)).round();
+        let dz = (self.rng.next_unit() * span - f64::from(max_xz)).round();
+        Some(Vec3::new(self.pos.x + dx, self.pos.y, self.pos.z + dz))
+    }
 }
 
 #[cfg(test)]
@@ -1399,7 +1545,8 @@ mod tests {
         mob.set_attack_target(Some(target));
 
         // move_to yields a (partial) path, matching vanilla best-effort behaviour.
-        let found = mob.move_to(target, 1.0);
+        // Disambiguated: `BrainMob` also defines `move_to`, with an `f32` speed.
+        let found = crate::ai::mob::MobController::move_to(&mut mob, target, 1.0);
         assert!(
             found,
             "vanilla returns a partial path toward an unreachable target"
@@ -2112,7 +2259,7 @@ mod tests {
         let mut in_lava = perception_mob(&lava, Vec3::new(0.5, 0.0, 0.5));
         assert!(in_lava.in_lava(), "lava cell must classify as in_lava");
         assert!(
-            !in_lava.in_water(),
+            !crate::ai::mob::MobController::in_water(&in_lava),
             "a lava cell must not also read as water — that would make the \
              two methods indistinguishable and the disjunction untestable"
         );
@@ -2120,7 +2267,7 @@ mod tests {
 
         let water = FluidArena::with((0, 0, 0), PathType::Water);
         let mut in_water = perception_mob(&water, Vec3::new(0.5, 0.0, 0.5));
-        assert!(in_water.in_water());
+        assert!(crate::ai::mob::MobController::in_water(&in_water));
         assert!(!in_water.in_lava());
         assert!(FloatGoal.can_use(&mut in_water), "water alone must float");
     }
