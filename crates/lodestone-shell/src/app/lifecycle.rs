@@ -752,7 +752,7 @@ impl ApplicationHandler for WindowApp {
                     Some(KeyOutcome::SwapOffhand) => self.send_offhand_swap(),
                     Some(KeyOutcome::Attack(true)) => self.sim.begin_attack(),
                     Some(KeyOutcome::Attack(false)) => self.sim.end_attack(),
-                    Some(KeyOutcome::Use(true)) => self.sim.use_item(),
+                    Some(KeyOutcome::Use(true)) => self.try_use(),
                     Some(KeyOutcome::Use(false)) => self.sim.end_use(),
                     Some(KeyOutcome::Movement(action, held)) => {
                         self.sim.input_mut(|i| i.set(action, held));

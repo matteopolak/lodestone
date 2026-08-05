@@ -46,6 +46,11 @@ lodestone-model = { workspace = true }
 lodestone-assets = { workspace = true }
 lodestone-sound = { workspace = true }
 lodestone-world = { workspace = true }
+# `Nbt`, for reading a command block's block-entity payload
+# (`command_block_source`). No crate between here and it re-exports the type —
+# `lodestone-world` holds `BlockEntity::nbt: Nbt` without re-exporting `Nbt`
+# itself — so this is a direct edge rather than a path through a neighbour.
+lodestone-core = { workspace = true }
 lodestone-registry = { workspace = true }
 lodestone-entity.workspace = true
 # Per-entity-type base hitbox height (issue #100's nametag pass): the same

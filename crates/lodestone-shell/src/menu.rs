@@ -145,13 +145,24 @@ pub enum Screen {
     /// screen's own Done (which sends [`command_block::CommandBlockState::
     /// to_action`]) or Cancel/Escape (which does not).
     ///
-    /// **Nothing yet calls [`open_command_block`](Self::open_command_block)**:
+    /// Reached from `WindowApp::try_use` — a right-click on a command block
+    /// with the crosshair on it, which is where vanilla resolves this screen
+    /// too (`CommandBlock.useWithoutItem` → `LocalPlayer.openCommandBlock`,
+    /// client-side, no packet).
+    ///
+    /// This doc used to read "**Nothing yet calls `open_command_block`**:
     /// there is no command-block-entity NBT decode anywhere in this
-    /// workspace, so there is no real right-click trigger for it — see
-    /// [`command_block`]'s module doc and
-    /// [#436](https://github.com/matteopolak/lodestone/issues/436). The
-    /// screen itself, its layout and its (currently tree-less, honestly
-    /// degraded) tab-completion are real and unit-tested.
+    /// workspace, so there is no real right-click trigger for it". True when
+    /// written, and stale as of issue #436's island sweep. The first half is
+    /// *still literally true* — there is no typed decode in `lodestone-model`
+    /// or `crates/protocol` — but the conclusion did not follow:
+    /// [`crate::command_block_source`] reads the payload straight off the
+    /// `lodestone_world::BlockEntity` the chunk already carries, exactly as
+    /// `SignText` does for signs. No protocol work was needed.
+    ///
+    /// Its tab-completion is still tree-less and honestly degraded — that half
+    /// waits on the `COMMANDS` (16) decode, which does not exist in any
+    /// family.
     CommandBlockEdit,
     /// Paused overlay: pointer released, player input frozen. The world behind
     /// keeps rendering and — on a live server — keeps ticking; pausing is a
