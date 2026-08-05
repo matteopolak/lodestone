@@ -994,6 +994,61 @@ where
     .await
 }
 
+/// [`serve_connection_with_mob_events_shared`], plus a host-installed command
+/// dispatcher (issues #48, #464).
+///
+/// The singleplayer-shaped counterpart to
+/// [`serve_connection_with_commands`]: `_shared` is the off-core-thread chunk
+/// path (issue #293) that [`crate::IntegratedServer::open_in_memory_with_mobs`]
+/// uses, and that constructor is the **only** production route a real player
+/// reaches this crate through. So this is the entry point singleplayer commands
+/// have to come in on; the borrowed-source
+/// [`serve_connection_with_commands`] cannot serve it.
+///
+/// Added *beside* `serve_connection_with_mob_events_shared` rather than by
+/// giving that function a tenth parameter, deliberately: its one caller lives
+/// in `integrated.rs`, a file this issue's ownership split does not cover, and
+/// a changed signature would break it from the outside. This way the wiring
+/// there is a purely additive constructor whenever its owner lands it.
+///
+/// # Errors
+///
+/// As [`serve_connection`].
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn serve_connection_with_mob_events_and_commands_shared<T, P, S, E>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &Arc<S>,
+    entities: &E,
+    view_radius: i32,
+    block_entities: &BlockEntityHandle,
+    mobs: &MobHandle,
+    block_ticks: &BlockTickFeed,
+    explosions: &ExplosionFeed,
+    commands: &CommandDispatch,
+) -> Result<ServeSummary, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + 'static,
+    E: EntitySource,
+{
+    serve_connection_inner(
+        conn,
+        proto,
+        SourceRef::Shared(source),
+        entities,
+        view_radius,
+        block_entities,
+        mobs,
+        block_ticks,
+        explosions,
+        commands,
+    )
+    .await
+}
+
 /// Like [`serve_connection`], but also forwards every change published on
 /// `block_ticks` (issues #307/#308: the world tick loop's random ticks) to
 /// this connection, through the same `container_sync_tick` timer arm inside
