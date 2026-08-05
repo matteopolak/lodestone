@@ -107,9 +107,23 @@ fails if that premise ever stops holding, so the reason is checkable rather than
   correctly: U3 changed *what flows through* an already-connected wire, which is the
   instrument's documented blind spot. Do not read a green connectedness run as evidence a
   decoded value is right.
-- **Regenerating the real-save fixture needs a richer world to be worth it.** If you
-  regenerate from a world containing non-zero metas, delete the premise test rather than
-  weakening arm 1 — arm 1 is what covers meta, and it should keep covering it.
+- **The fixture's generator is committed beside it**, at
+  `crates/protocol/v47/oracle/extract_real_section.py` — standard library only, no Docker,
+  no JDK, no running server, because this repo's 1.8.9 oracle is Docker-managed and started
+  by no script here. `--survey` prints the whole world's `(id, meta)` histogram (and says so
+  when every meta is zero, which is how that property was established):
+
+  ```text
+  python3 crates/protocol/v47/oracle/extract_real_section.py \
+      .cache/mc/1.8.9/world/region --survey
+  python3 crates/protocol/v47/oracle/extract_real_section.py \
+      .cache/mc/1.8.9/world/region \
+      crates/protocol/v47/tests/support/real_1_8_9_section_save.txt
+  ```
+
+- **Regenerating the fixture needs a richer world to be worth it.** If you regenerate from a
+  world containing non-zero metas, delete the premise test rather than weakening arm 1 —
+  arm 1 is what covers meta, and it should keep covering it.
 - **`tests/chunk.rs` separates the two id spaces on purpose.** It builds blobs from
   `WIRE_BEDROCK` (the composite) and asserts `bedrock()` (looked up **by name** in the 26.2
   census). Do not collapse those back into one constant; that is what let the original
