@@ -2176,6 +2176,18 @@ pub struct HudRenderer {
     recipe_panel_buffer: Option<wgpu::Buffer>,
     /// Capacity of [`Self::recipe_panel_buffer`], in floats.
     recipe_panel_capacity_floats: usize,
+    /// The recipe-book panel's **textured** stream — vanilla's real
+    /// `recipe_book/**` art, resolved against [`Self::gui`]'s atlas.
+    ///
+    /// Its own buffer rather than [`GuiHud::buffer`]: that one holds the HUD's
+    /// own sprite verts for the same frame, and although the two draws are
+    /// separately submitted (so a shared buffer would happen to work today),
+    /// sharing it makes the panel's art silently dependent on the HUD having
+    /// already been submitted this frame. One buffer per stream is the same
+    /// choice [`Self::recipe_panel_buffer`] already makes for the colour stream.
+    recipe_panel_sprite_buffer: Option<wgpu::Buffer>,
+    /// Capacity of [`Self::recipe_panel_sprite_buffer`], in floats.
+    recipe_panel_sprite_capacity_floats: usize,
 }
 
 /// The GPU resources for drawing HUD sprites from the vanilla GUI atlas: the
@@ -2270,6 +2282,8 @@ impl HudRenderer {
             hotbar_pop: anim::HotbarPop::new(),
             recipe_panel_buffer: None,
             recipe_panel_capacity_floats: 0,
+            recipe_panel_sprite_buffer: None,
+            recipe_panel_sprite_capacity_floats: 0,
         }
     }
 
@@ -2698,7 +2712,11 @@ impl HudRenderer {
         width: u32,
         height: u32,
     ) {
-        if geo.verts.is_empty() && geo.item_verts.is_empty() && geo.model_verts.is_empty() {
+        if geo.verts.is_empty()
+            && geo.item_verts.is_empty()
+            && geo.model_verts.is_empty()
+            && geo.sprites.is_empty()
+        {
             return;
         }
 
@@ -2720,6 +2738,75 @@ impl HudRenderer {
         // Same logical-canvas expression the geometry itself used, so the
         // model pass's GUI projection agrees with the vertices it is drawing.
         let (logical_w, logical_h) = crate::menu::render::logical_canvas(gui_scale, width, height);
+
+        // Resolve vanilla's real `recipe_book/**` art against whatever GUI atlas
+        // is bound. This is the whole of the texture fix: `GuiAtlas` already
+        // stitches every `gui/sprites/**` in the pack, so the sprites needed no
+        // new atlas, pipeline or bind group — only ids and destination rects,
+        // which the geometry carries (see `RecipeBookSprite`).
+        //
+        // Unknown ids resolve to nothing and are skipped, so a pack missing one
+        // sprite loses that sprite and not the panel. On a jar-less run
+        // `self.gui` is `None` and this is empty, leaving the flat-fill fallback
+        // in `verts[..chrome]` as the whole picture — which is exactly what
+        // every existing headless geometry gate measures.
+        let panel_sprite_verts: Vec<f32> = match &self.gui {
+            Some(g) => {
+                let mut out = Vec::new();
+                for s in &geo.sprites {
+                    // A `src` is a fixed sub-rect of a larger sheet (the panel
+                    // page); `None` is the ordinary whole-sprite blit, which
+                    // must go through `geometry` so the sprite's own
+                    // `GuiScaling` is honoured.
+                    match s.src {
+                        Some(src) => {
+                            if let Some(q) = g.atlas.subregion_quad(s.id, src, s.dst) {
+                                item_icon::push_sprite_quad(
+                                    &mut out,
+                                    logical_w,
+                                    logical_h,
+                                    q,
+                                    [1.0, 1.0, 1.0, 1.0],
+                                );
+                            }
+                        }
+                        None => {
+                            let [x, y, w, h] = s.dst;
+                            for q in g.atlas.geometry(s.id, x, y, w, h) {
+                                item_icon::push_sprite_quad(
+                                    &mut out,
+                                    logical_w,
+                                    logical_h,
+                                    q,
+                                    [1.0, 1.0, 1.0, 1.0],
+                                );
+                            }
+                        }
+                    }
+                }
+                out
+            }
+            None => Vec::new(),
+        };
+        if !panel_sprite_verts.is_empty() {
+            if panel_sprite_verts.len() > self.recipe_panel_sprite_capacity_floats {
+                self.recipe_panel_sprite_capacity_floats =
+                    panel_sprite_verts.len().next_power_of_two();
+                self.recipe_panel_sprite_buffer =
+                    Some(device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("hud-recipe-panel-art-verts"),
+                        size: (self.recipe_panel_sprite_capacity_floats * 4)
+                            as wgpu::BufferAddress,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
+            }
+            if let Some(buffer) = &self.recipe_panel_sprite_buffer {
+                queue.write_buffer(buffer, 0, bytemuck::cast_slice(&panel_sprite_verts));
+            }
+        }
+        let panel_art_count = (panel_sprite_verts.len() / SPRITE_FLOATS_PER_VERTEX) as u32;
+
         let (item_count, model_count) = self.icons.upload(
             device,
             queue,
@@ -2758,6 +2845,27 @@ impl HudRenderer {
             pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, buffer.slice(..));
             pass.draw(0..chrome_count, 0..1);
+        }
+        // Pass 1b: vanilla's real art, over the flat-fill fallback. The panel
+        // page is fully opaque, so with an atlas bound this hides the fallback
+        // entirely rather than blending with it — which is why the fallback
+        // palette can stay unchanged and still be the right jar-less picture.
+        if panel_art_count > 0
+            && let Some(g) = &self.gui
+            && let Some(buffer) = &self.recipe_panel_sprite_buffer
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hud-recipe-panel-art-pass"),
+                color_attachments: &[Some(item_icon::load_colour_attachment(view))],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&g.pipeline);
+            pass.set_bind_group(0, &g.bind_group, &[]);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..panel_art_count, 0..1);
         }
         // Pass 2: the 3-D block-item models, over the wells.
         self.icons.draw_models(

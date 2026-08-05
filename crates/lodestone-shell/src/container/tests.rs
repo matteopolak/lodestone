@@ -2882,3 +2882,334 @@ fn recipe_panel_split_stream_still_draws_entirely_inside_the_clip_range() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// The recipe book's real 26.2 art (owner bug report: "the recipe book and its
+// menu are completely incorrectly textured")
+// ---------------------------------------------------------------------------
+
+/// Native sizes of every recipe-book sprite, read out of `client.jar`'s own
+/// IHDR chunks. These are the jar's values, not ours, and the hermetic pack
+/// below is built at exactly these sizes so a test asserting a destination rect
+/// is asserting vanilla's blit rather than a same-sized stand-in.
+///
+/// | sprite | jar path | size |
+/// |---|---|---|
+/// | button | `gui/sprites/recipe_book/button.png` | 20x18 |
+/// | tab, tab_selected | `.../tab.png`, `.../tab_selected.png` | 35x27 |
+/// | filter_disabled | `.../filter_disabled.png` | 26x16 |
+/// | page_forward, page_backward | `.../page_forward.png`, `.../page_backward.png` | 12x17 |
+/// | slot_craftable | `.../slot_craftable.png` | 25x25 |
+/// | the panel page | `gui/recipe_book.png` (**not** under `sprites/`) | 256x256 |
+const RECIPE_SPRITE_SIZES: &[(&str, u32, u32)] = &[
+    (RECIPE_SPRITE_BUTTON, 20, 18),
+    (RECIPE_SPRITE_TAB, 35, 27),
+    (RECIPE_SPRITE_TAB_SELECTED, 35, 27),
+    (RECIPE_SPRITE_FILTER, 26, 16),
+    (RECIPE_SPRITE_FILTER_FURNACE, 26, 16),
+    (RECIPE_SPRITE_PAGE_FORWARD, 12, 17),
+    (RECIPE_SPRITE_PAGE_BACK, 12, 17),
+    (RECIPE_SPRITE_SLOT, 25, 25),
+];
+
+/// A hermetic `GuiAtlas` carrying every recipe-book sprite at its real vanilla
+/// size, plus the loose 256x256 panel sheet registered exactly the way
+/// `resources::load_gui_atlas` registers it.
+fn synthetic_recipe_gui_atlas() -> lodestone_render::GuiAtlas {
+    use lodestone_assets::{MemorySource, ResourceManager, ResourceSource};
+
+    fn solid_png(w: u32, h: u32) -> Vec<u8> {
+        let mut data = Vec::new();
+        let mut encoder = png::Encoder::new(&mut data, w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        let pixels: Vec<u8> = (0..(w * h)).flat_map(|_| [10, 20, 30, 255]).collect();
+        writer.write_image_data(&pixels).expect("png data");
+        drop(writer);
+        data
+    }
+
+    let mut src = MemorySource::default();
+    for (id, w, h) in RECIPE_SPRITE_SIZES {
+        src.insert(
+            format!("assets/minecraft/textures/gui/sprites/{id}.png"),
+            solid_png(*w, *h),
+        );
+    }
+    // The panel sheet, at the jar's own 256x256 and at the jar's own loose path.
+    src.insert(
+        crate::resources::RECIPE_BOOK_TEXTURES[0].1.to_string(),
+        solid_png(256, 256),
+    );
+    let manager = ResourceManager::new(vec![Box::new(src) as Box<dyn ResourceSource>]);
+    lodestone_render::GuiAtlas::build_with_extras(&manager, crate::resources::RECIPE_BOOK_TEXTURES)
+        .expect("synthetic recipe-book gui atlas builds")
+}
+
+/// **The bug 1 gate.** The panel page's UV window is the `147x166` sub-rect at
+/// `(1, 1)` of the `256x256` sheet, byte-exact.
+///
+/// `RecipeBookComponent.java:305` is
+/// `blit(RenderPipelines.GUI_TEXTURED, RECIPE_BOOK_LOCATION, xo, yo, 1.0F,
+/// 1.0F, 147, 166, 256, 256)` — a fixed window, `u = v = 1`. The one-pixel
+/// inset is real: decoding the PNG shows its opaque region is exactly
+/// `x 1..147, y 1..166`.
+///
+/// The **rejected hypothesis** is the whole-sheet blit, which is what
+/// `GuiAtlas::geometry` would produce for this id and what a naive wiring of a
+/// loose texture gets: all 256x256 stretched into a 147x166 rect. The control
+/// below asserts that hypothesis yields a *different*, wrong window rather than
+/// merely asserting ours is "a" window.
+#[test]
+fn recipe_panel_page_samples_the_jars_own_147x166_window_at_1_1() {
+    let atlas = synthetic_recipe_gui_atlas();
+    let (aw, ah) = (atlas.atlas().width as f32, atlas.atlas().height as f32);
+    let sheet = atlas
+        .atlas()
+        .sprite(
+            &lodestone_assets::ResourceLocation::new(
+                "lodestone",
+                format!("gui/loose/{RECIPE_SPRITE_PANEL}"),
+            )
+            .expect("valid location"),
+        )
+        .expect("the panel sheet is in the atlas");
+    assert_eq!(
+        (sheet.width, sheet.height),
+        (256, 256),
+        "the panel sheet must be stitched whole at the jar's own 256x256"
+    );
+
+    let dst = [40.0, 50.0, RECIPE_PANEL_W, RECIPE_PANEL_H];
+    let q = atlas
+        .subregion_quad(RECIPE_SPRITE_PANEL, RECIPE_PANEL_SRC, dst)
+        .expect("the panel sheet resolves");
+
+    // Derived from the atlas placement plus the jar's own u/v, never restated.
+    let want_min = [(sheet.x as f32 + 1.0) / aw, (sheet.y as f32 + 1.0) / ah];
+    let want_max = [
+        (sheet.x as f32 + 1.0 + RECIPE_PANEL_W) / aw,
+        (sheet.y as f32 + 1.0 + RECIPE_PANEL_H) / ah,
+    ];
+    assert_eq!(q.dst, dst);
+    assert_eq!(q.uv_min, want_min, "panel uv_min");
+    assert_eq!(q.uv_max, want_max, "panel uv_max");
+
+    // Control: the whole-sheet hypothesis. `geometry` stretches all 256x256 into
+    // the 147x166 rect, which is a *different* UV window -- so a wiring that
+    // reached for `geometry` here would sample the wrong region entirely, which
+    // is what "completely incorrectly textured" looks like.
+    let stretched = atlas.geometry(RECIPE_SPRITE_PANEL, dst[0], dst[1], dst[2], dst[3]);
+    assert_eq!(stretched.len(), 1, "a stretched sprite is one quad");
+    assert_ne!(
+        stretched[0].uv_max, q.uv_max,
+        "the whole-sheet control must produce a different window, or this gate \
+         cannot tell the right sampling from the wrong one"
+    );
+    // And by how much: the window is 147/256 and 166/256 of the sheet, so the
+    // wrong hypothesis oversamples by these exact factors.
+    let (got_u, got_v) = (
+        (stretched[0].uv_max[0] - stretched[0].uv_min[0]) / (q.uv_max[0] - q.uv_min[0]),
+        (stretched[0].uv_max[1] - stretched[0].uv_min[1]) / (q.uv_max[1] - q.uv_min[1]),
+    );
+    assert!(
+        (got_u - 256.0 / RECIPE_PANEL_W).abs() < 1e-4,
+        "expected the wrong hypothesis to oversample u by 256/147, got {got_u}"
+    );
+    assert!(
+        (got_v - 256.0 / RECIPE_PANEL_H).abs() < 1e-4,
+        "expected the wrong hypothesis to oversample v by 256/166, got {got_v}"
+    );
+}
+
+/// Every sprite id the panel emits exists, and is the size the jar says — so a
+/// typo cannot silently draw nothing.
+///
+/// This is the assertion that catches the class of mistake most likely here:
+/// vanilla's back-arrow file is `page_backward`, not `page_back`, and the
+/// constant this module exposes is named `RECIPE_SPRITE_PAGE_BACK`. An id that
+/// does not resolve draws nothing at all, with no error anywhere.
+#[test]
+fn every_recipe_book_sprite_id_resolves_at_its_jar_native_size() {
+    let atlas = synthetic_recipe_gui_atlas();
+    for (id, w, h) in RECIPE_SPRITE_SIZES {
+        assert!(atlas.contains(id), "sprite id {id} does not resolve");
+        assert_eq!(
+            atlas.native_size(id),
+            Some((*w, *h)),
+            "sprite {id} is not the jar's native size"
+        );
+    }
+    assert!(
+        atlas.contains(RECIPE_SPRITE_PANEL),
+        "the loose panel sheet must resolve under {RECIPE_SPRITE_PANEL}"
+    );
+}
+
+/// The emitted sprite list is the right art in the right places, in an order
+/// that cannot bury a control.
+///
+/// Every destination rect is asserted against the *layout* the draw uses, never
+/// a restated pixel. The two order assertions are the load-bearing ones: the
+/// opaque page must be first (anything before it is erased) and the toggle last
+/// (the panel is clamped and may overlap the main panel's left edge, so a page
+/// drawn over the toggle would bury a live control).
+#[test]
+fn recipe_panel_emits_vanillas_art_in_an_order_that_cannot_bury_a_control() {
+    let stack = planks(4);
+    let (layout, geo) = panel_geo_for(&[&stack]);
+
+    let ids: Vec<&str> = geo.sprites.iter().map(|s| s.id).collect();
+    assert_eq!(
+        ids.first(),
+        Some(&RECIPE_SPRITE_PANEL),
+        "the opaque page must be submitted first or it erases everything under it"
+    );
+    assert_eq!(
+        ids.last(),
+        Some(&RECIPE_SPRITE_BUTTON),
+        "the toggle must be submitted last so the page cannot bury a live control"
+    );
+
+    let find = |id: &str| -> Vec<RecipeBookSprite> {
+        geo.sprites.iter().copied().filter(|s| s.id == id).collect()
+    };
+
+    // The page: the layout's own rect, sampling the jar's window.
+    let page = find(RECIPE_SPRITE_PANEL);
+    assert_eq!(page.len(), 1);
+    assert_eq!(
+        page[0].dst,
+        [layout.panel.x, layout.panel.y, layout.panel.w, layout.panel.h]
+    );
+    assert_eq!(page[0].src, Some(RECIPE_PANEL_SRC));
+
+    // The filter button, at the layout's rect and with no sub-rect.
+    let filter = find(RECIPE_SPRITE_FILTER);
+    assert_eq!(filter.len(), 1);
+    assert_eq!(
+        filter[0].dst,
+        [
+            layout.filter_button.x,
+            layout.filter_button.y,
+            layout.filter_button.w,
+            layout.filter_button.h
+        ]
+    );
+    assert_eq!(filter[0].src, None);
+
+    // Tabs: `panel_geo_for` selects tab 0, so exactly one is the selected art
+    // and it is nudged 2 px left of its own hit rect
+    // (`RecipeBookTabButton.java:55-57`) while the rest are not.
+    let selected = find(RECIPE_SPRITE_TAB_SELECTED);
+    let plain = find(RECIPE_SPRITE_TAB);
+    assert_eq!(selected.len(), 1, "one tab is selected");
+    assert_eq!(plain.len(), layout.tabs.len() - 1);
+    assert_eq!(
+        selected[0].dst[0],
+        layout.tabs[0].x - 2.0,
+        "the selected tab's blit is nudged 2 px left of its widget rect"
+    );
+    assert_eq!(selected[0].dst[1], layout.tabs[0].y);
+    for (s, r) in plain.iter().zip(layout.tabs.iter().skip(1)) {
+        assert_eq!(s.dst[0], r.x, "an unselected tab is not nudged");
+    }
+
+    // Slot frames for populated cells only -- vanilla hides an unused
+    // `RecipeButton`, and the sheet's grid region is uniform white with no
+    // frames baked in, so emitting all 20 would draw a grid vanilla lacks.
+    let slots = find(RECIPE_SPRITE_SLOT);
+    assert_eq!(
+        slots.len(),
+        1,
+        "one result on the page means exactly one slot frame, got {}",
+        slots.len()
+    );
+    assert_eq!(
+        slots[0].dst,
+        [
+            layout.recipes[0].x,
+            layout.recipes[0].y,
+            layout.recipes[0].w,
+            layout.recipes[0].h
+        ]
+    );
+
+    // Page arrows follow `layout`'s own `Option`s: `panel_geo_for` builds with
+    // a next page and no previous one.
+    assert_eq!(find(RECIPE_SPRITE_PAGE_FORWARD).len(), 1);
+    assert_eq!(find(RECIPE_SPRITE_PAGE_BACK).len(), 0);
+}
+
+/// A **closed** panel emits the toggle's art and nothing else — the page, tabs
+/// and slots must not be drawn behind a closed book.
+#[test]
+fn recipe_panel_closed_emits_only_the_toggle_sprite() {
+    let menu = Menu::crafting(3, 3);
+    let layout = recipe_book_panel_layout(&menu, VIEW.0, VIEW.1, 4, false, true);
+    let geo = recipe_book_panel_geometry(
+        &layout,
+        false,
+        None,
+        &[],
+        crate::config::AUTO_GUI_SCALE,
+        VIEW.0,
+        VIEW.1,
+    );
+    assert_eq!(
+        geo.sprites.len(),
+        1,
+        "a closed panel draws one sprite, got {:?}",
+        geo.sprites.iter().map(|s| s.id).collect::<Vec<_>>()
+    );
+    assert_eq!(geo.sprites[0].id, RECIPE_SPRITE_BUTTON);
+    assert_eq!(
+        geo.sprites[0].dst,
+        [layout.toggle.x, layout.toggle.y, layout.toggle.w, layout.toggle.h]
+    );
+}
+
+/// Every sprite the panel emits resolves against the **real `client.jar`**, at
+/// the size the jar carries.
+///
+/// The hermetic gates above prove the arithmetic and the emission; they cannot
+/// prove the ids are the strings vanilla actually ships, because the synthetic
+/// pack is built from the same constants it checks. This one closes that loop
+/// against the real artefact — the standard this repo holds for an expected
+/// value originating outside the code under test.
+///
+/// `#[ignore]`d because it reads `client.jar`. Run with
+/// `cargo test -p lodestone-shell --lib recipe_book_sprites_resolve -- --ignored`.
+#[test]
+#[ignore = "reads the real client.jar"]
+fn recipe_book_sprites_resolve_against_the_real_client_jar() {
+    let atlas = crate::resources::load_gui_atlas().expect("client.jar and its GUI atlas");
+    for (id, w, h) in RECIPE_SPRITE_SIZES {
+        assert!(atlas.contains(id), "the real jar has no sprite {id}");
+        assert_eq!(
+            atlas.native_size(id),
+            Some((*w, *h)),
+            "sprite {id} is not the size this module expects"
+        );
+    }
+    // The loose panel sheet, and its jar-derived 256x256.
+    assert!(
+        atlas.contains(RECIPE_SPRITE_PANEL),
+        "the loose panel sheet is not registered -- \
+         resources::load_gui_atlas must pass RECIPE_BOOK_TEXTURES as extras"
+    );
+    assert_eq!(atlas.native_size(RECIPE_SPRITE_PANEL), Some((256, 256)));
+
+    // And every id the geometry actually emits, so a new sprite added to the
+    // emission cannot escape this check.
+    let stack = planks(4);
+    let (_, geo) = panel_geo_for(&[&stack]);
+    for s in &geo.sprites {
+        assert!(
+            atlas.contains(s.id),
+            "the geometry emits {} but the real jar has no such sprite",
+            s.id
+        );
+    }
+}

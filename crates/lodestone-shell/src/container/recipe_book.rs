@@ -439,6 +439,99 @@ pub fn recipe_book_panel_contents<'a>(
     RecipeBookPanelContents { tabs, all_ids, page_ids, total_pages, page }
 }
 
+// ---------------------------------------------------------------------------
+// The real 26.2 recipe-book art
+// ---------------------------------------------------------------------------
+
+/// Vanilla's own sprite ids for the recipe book, from the decompiled 26.2
+/// client. Every one of these except [`RECIPE_SPRITE_PANEL`] is a real
+/// `gui/sprites/recipe_book/**` entry and is therefore **already** in
+/// [`GuiAtlas`](lodestone_render::GuiAtlas)'s enumeration — it stitches every
+/// `assets/<ns>/textures/gui/sprites/**.png` in the pack, so wiring the book's
+/// art needed no new atlas, no new pipeline and no new bind group. This module
+/// only had to name the ids and say where they go.
+///
+/// The panel sheet is the exception: `RecipeBookComponent.java:59` declares it
+/// as a raw texture path and `:305` blits a sub-rect of it, so it is registered
+/// as a loose extra — see
+/// [`crate::resources::RECIPE_BOOK_TEXTURES`].
+pub const RECIPE_SPRITE_PANEL: &str = crate::resources::RECIPE_BOOK_PANEL_SPRITE;
+/// The toggle button — `RecipeBookComponent.RECIPE_BUTTON_SPRITES`
+/// (`RecipeBookComponent.java:56-58`), 20×18.
+pub const RECIPE_SPRITE_BUTTON: &str = "recipe_book/button";
+/// An unselected category tab — `RecipeBookTabButton.SPRITES`
+/// (`RecipeBookTabButton.java:15-17`), 35×27.
+pub const RECIPE_SPRITE_TAB: &str = "recipe_book/tab";
+/// A selected category tab. Note `RecipeBookTabButton.java:53` reads
+/// `sprites.get(true, this.selected)` — the second argument is **selected**,
+/// not hovered, so this is the selected art and hover has none of its own.
+pub const RECIPE_SPRITE_TAB_SELECTED: &str = "recipe_book/tab_selected";
+/// The filter cycle-button in its **not-filtering** state, 26×16 —
+/// `CraftingRecipeBookComponent.java:19-24`. `filter_disabled` is the "All"
+/// state (`getFilterButtonTextures().get(filtering, hovered)` with
+/// `filtering == false`, `RecipeBookComponent.java:136`), which is the only
+/// state this client has: craftable-only filtering is not modelled, so the
+/// button is drawn in its resting art rather than a state we cannot enter.
+pub const RECIPE_SPRITE_FILTER: &str = "recipe_book/filter_disabled";
+/// The furnace family's own filter art — `FurnaceRecipeBookComponent.java:15-20`.
+/// A genuinely different sheet, not a tint of the crafting one.
+pub const RECIPE_SPRITE_FILTER_FURNACE: &str = "recipe_book/furnace_filter_disabled";
+/// The page-forward arrow, 12×17 — `RecipeBookPage.java:26-28`.
+pub const RECIPE_SPRITE_PAGE_FORWARD: &str = "recipe_book/page_forward";
+/// The page-back arrow, 12×17 — `RecipeBookPage.java:29-31`. Note vanilla's
+/// file is spelled `page_backward`, not `page_back`.
+pub const RECIPE_SPRITE_PAGE_BACK: &str = "recipe_book/page_backward";
+/// A populated recipe cell's frame, 25×25 — `RecipeButton.java:23-26`.
+///
+/// Vanilla picks between four of these from `StackedItemContents`
+/// (craftable/uncraftable × single/many). Craftability is not modelled here, so
+/// the *craftable* frame is used unconditionally: this panel browses the whole
+/// corpus rather than only what the inventory can make, so drawing everything
+/// greyed-out would be the more misleading of the two.
+pub const RECIPE_SPRITE_SLOT: &str = "recipe_book/slot_craftable";
+
+/// The `147×166` window `RecipeBookComponent.java:305` samples out of the
+/// `256×256` panel sheet: `blit(..., xo, yo, 1.0F, 1.0F, 147, 166, 256, 256)`,
+/// i.e. `u = v = 1`. The one-pixel inset is real — the sheet's opaque region is
+/// exactly `x 1..147, y 1..166`, verified by decoding the PNG, so sampling from
+/// `(0, 0)` would shift every pixel of the page by one and pull in the
+/// transparent border.
+pub const RECIPE_PANEL_SRC: [f32; 4] = [1.0, 1.0, RECIPE_PANEL_W, RECIPE_PANEL_H];
+
+/// Vanilla's 2 px leftward nudge on the **selected** tab's blit —
+/// `RecipeBookTabButton.java:55-57`. It shifts only the drawn art; the widget's
+/// own rect (and so its hit region) does not move, which is why
+/// [`RecipeBookPanelLayout::tabs`] is unaffected and this offset lives here
+/// rather than in the layout.
+const RECIPE_TAB_SELECTED_NUDGE: f32 = 2.0;
+
+/// One textured quad request: a sprite id, where it goes, and optionally which
+/// sub-rect of it to sample.
+///
+/// **Ids and rects only — deliberately no UVs and no atlas.** The producer
+/// ([`recipe_book_panel_geometry`]) runs with no GPU and no
+/// [`GuiAtlas`](lodestone_render::GuiAtlas) in scope, and resolving UVs at build
+/// time would have meant threading an atlas through every caller. The renderer
+/// resolves each of these against whatever atlas it has bound, and skips any id
+/// the pack does not carry, so a resource pack missing one sprite loses that
+/// sprite rather than the panel.
+///
+/// The order of the list **is** the draw order, for the same reason the colour
+/// stream's split matters: this GUI path has no depth compare. The panel body
+/// must come first because it is opaque and would otherwise erase the widgets
+/// on top of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecipeBookSprite {
+    /// The [`GuiAtlas`](lodestone_render::GuiAtlas) sprite id.
+    pub id: &'static str,
+    /// Destination `[x, y, w, h]` in logical GUI pixels.
+    pub dst: [f32; 4],
+    /// Sub-rect `[x, y, w, h]` in the sprite's own native pixels, or `None` to
+    /// draw the whole sprite at its native size. Only the panel sheet needs
+    /// one — see [`RECIPE_PANEL_SRC`].
+    pub src: Option<[f32; 4]>,
+}
+
 /// Standalone geometry for one frame of the recipe-book panel, in the same
 /// three streams [`ContainerGeometry`] uses (colour, flat item sprite, 3-D
 /// block model) but kept as its **own** buffer rather than folded into
@@ -488,6 +581,22 @@ pub struct RecipeBookPanelGeometry {
     /// a caller that draws all of `verts` in one pass reproduces the bug
     /// exactly, whichever end it draws it from.
     pub chrome_vertex_count: usize,
+    /// Vanilla's **real** recipe-book art for this frame, in draw order — see
+    /// [`RecipeBookSprite`].
+    ///
+    /// The renderer draws these *after* the `verts[..chrome]` flat fills and
+    /// *before* the item passes, so on a run with the GUI atlas attached the
+    /// real art covers the flat fills entirely (the panel sheet is opaque) and
+    /// on a jar-less run the flat fills are all there is. That is why the
+    /// fallback palette below is unchanged rather than deleted: it is still the
+    /// whole headless picture, and every existing geometry gate still measures
+    /// it.
+    ///
+    /// This list is what made the panel stop being "completely incorrectly
+    /// textured": it had none of this art and drew flat dark rectangles, while
+    /// vanilla's page is an opaque **white** sheet — near-inverted, which is why
+    /// the report said *completely* rather than *slightly off*.
+    pub sprites: Vec<RecipeBookSprite>,
 }
 
 impl RecipeBookPanelGeometry {
@@ -599,10 +708,21 @@ fn recipe_book_panel_geometry_inner(
     // `RecipeBookComponent` (see `RecipeBookPanelHit::Toggle`'s own doc).
     let mut b = Builder::new(w, h, None);
     b.rect_px(layout.toggle.x, layout.toggle.y, layout.toggle.w, layout.toggle.h, TOGGLE_COLOUR);
+    // The real art, in draw order. Built alongside the flat fills rather than
+    // instead of them: the fills stay as the jar-less picture and the renderer
+    // draws these over the top when an atlas is bound (the panel sheet is fully
+    // opaque, so it hides them completely).
+    let mut sprites: Vec<RecipeBookSprite> = Vec::new();
+    let whole = |id: &'static str, r: Rect| RecipeBookSprite {
+        id,
+        dst: [r.x, r.y, r.w, r.h],
+        src: None,
+    };
     if !open {
         // A closed panel is chrome and nothing else, so the split point is the
         // end of the stream — the caller's second colour range is empty and its
         // icon passes draw nothing.
+        sprites.push(whole(RECIPE_SPRITE_BUTTON, layout.toggle));
         let chrome_vertex_count = b.verts.len() / FLOATS_PER_VERTEX;
         return RecipeBookPanelGeometry {
             verts: b.verts,
@@ -610,8 +730,68 @@ fn recipe_book_panel_geometry_inner(
             model_verts: b.model_verts,
             special: b.special,
             chrome_vertex_count,
+            sprites,
         };
     }
+
+    // The panel page first, and opaque: anything emitted before it would be
+    // erased, and anything that must sit on the page has to come after.
+    sprites.push(RecipeBookSprite {
+        id: RECIPE_SPRITE_PANEL,
+        dst: [layout.panel.x, layout.panel.y, layout.panel.w, layout.panel.h],
+        src: Some(RECIPE_PANEL_SRC),
+    });
+    // The search box has **no sprite of its own** — vanilla's is a plain
+    // `EditBox` (`RecipeBookComponent.java:124`) over the well that is already
+    // painted into the panel sheet, and the magnifier glyph beside it is baked
+    // into the sheet too. So there is deliberately nothing to emit here; the
+    // flat `SEARCH_BOX_COLOUR` rect underneath is jar-less-only.
+    //
+    // The filter button always uses the **crafting** art, never
+    // [`RECIPE_SPRITE_FILTER_FURNACE`]: this function is not given the `Menu`,
+    // and threading one in means changing a caller that is not this module's to
+    // change. A bounded, documented deviation — the two sheets differ only in
+    // the glyph inside the button.
+    sprites.push(whole(RECIPE_SPRITE_FILTER, layout.filter_button));
+
+    for (i, r) in layout.tabs.iter().enumerate() {
+        let selected = selected_tab == Some(i);
+        let id = if selected { RECIPE_SPRITE_TAB_SELECTED } else { RECIPE_SPRITE_TAB };
+        // `RecipeBookTabButton.java:55-57` nudges the *blit* of a selected tab
+        // 2 px left while leaving the widget's rect alone, so the drawn art and
+        // the hit region legitimately disagree by 2 px — vanilla's own
+        // behaviour, not a transcription slip.
+        let x = if selected { r.x - RECIPE_TAB_SELECTED_NUDGE } else { r.x };
+        sprites.push(RecipeBookSprite { id, dst: [x, r.y, r.w, r.h], src: None });
+    }
+
+    if let Some(r) = layout.page_forward {
+        sprites.push(whole(RECIPE_SPRITE_PAGE_FORWARD, r));
+    }
+    if let Some(r) = layout.page_back {
+        sprites.push(whole(RECIPE_SPRITE_PAGE_BACK, r));
+    }
+
+    // A slot frame for **populated cells only** — vanilla hides an unused
+    // `RecipeButton` outright (`RecipeBookPage.java`'s own visibility pass), and
+    // an empty cell therefore shows the bare page. Verified by decoding
+    // `recipe_book.png`: the whole grid region of the sheet is uniform opaque
+    // white with no slot frames baked in, so emitting all 20 would draw a grid
+    // vanilla does not have.
+    for (i, r) in layout.recipes.iter().enumerate() {
+        if page_results.get(i).is_some() {
+            sprites.push(whole(RECIPE_SPRITE_SLOT, *r));
+        }
+    }
+
+    // The toggle **last**: it is a screen widget rather than part of the book
+    // component (see `RecipeBookPanelHit::Toggle`), it lives on the main
+    // container panel's chrome, and at narrow canvases the book panel is
+    // clamped so that it may overlap the main panel's left edge. Emitting it
+    // before the page would let the page bury a live control — the "a dead
+    // control is worse than a missing one" rule this module already applies to
+    // the tab-x clamp.
+    sprites.push(whole(RECIPE_SPRITE_BUTTON, layout.toggle));
 
     b.rect_px(layout.panel.x, layout.panel.y, layout.panel.w, layout.panel.h, PANEL_COLOUR);
     b.rect_px(
@@ -672,14 +852,21 @@ fn recipe_book_panel_geometry_inner(
         model_verts: b.model_verts,
         special: b.special,
         chrome_vertex_count,
+        sprites,
     }
 }
 
-/// Flat-fill colours for the panel's chrome, in the same muted palette
-/// family the rest of this module's atlas-less fallback already uses (see
-/// `build_inner`'s own `[0.08, 0.075, 0.065, 0.88]` panel fill) — this is not
-/// vanilla's real `recipe_book.png`/`recipe_book/*` sprites, which this
-/// module does not load; see the module doc's "deliberate simplification".
+/// Flat-fill colours for the panel's chrome, in the same muted palette family
+/// the rest of this module's atlas-less fallback already uses (see
+/// `build_inner`'s own `[0.08, 0.075, 0.065, 0.88]` panel fill).
+///
+/// **These are the jar-less fallback only.** This comment used to say the module
+/// did not load vanilla's real `recipe_book.png`/`recipe_book/*` art — it now
+/// does, via [`RecipeBookPanelGeometry::sprites`], and the renderer draws that
+/// art over these fills. Keep them anyway: they are the whole picture on a
+/// headless/jar-less run and every existing geometry gate in this module
+/// measures them. Note the real page is opaque **white** where these are
+/// near-black, so with an atlas bound none of this is visible.
 const PANEL_COLOUR: [f32; 4] = [0.09, 0.08, 0.07, 0.94];
 /// See [`PANEL_COLOUR`].
 const TOGGLE_COLOUR: [f32; 4] = [0.30, 0.26, 0.20, 1.0];
