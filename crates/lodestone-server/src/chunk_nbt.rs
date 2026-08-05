@@ -875,6 +875,7 @@ const RECIPES_USED_FIELD: &str = "lodestone:recipes_used";
 #[must_use]
 fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
     let (id, mut extra): (&str, Vec<(String, Nbt)>) = match entity {
+        BlockEntity::Opaque { nbt, .. } => return nbt.clone(),
         BlockEntity::Furnace(f) => {
             let (lit_remaining, lit_total, cooking_spent, cooking_total) = f.burn_state();
             let recipes: Vec<(String, Nbt)> = {
@@ -1146,7 +1147,10 @@ fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)> {
                 locked,
             ))
         }
-        _ => return None,
+        _ => BlockEntity::Opaque {
+            id: id.to_owned(),
+            nbt: nbt.clone(),
+        },
     };
     Some((pos, entity))
 }

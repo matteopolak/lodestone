@@ -53,6 +53,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use lodestone_core::Nbt;
 use lodestone_model::{BlockPos, ItemStack};
 
 use crate::brewing::BrewingStand;
@@ -73,6 +74,10 @@ pub enum BlockEntity {
     Hopper(Hopper),
     /// `minecraft:brewing_stand`.
     BrewingStand(BrewingStand),
+    /// A block entity this crate has no simulation for (chest, spawner, vault, …).
+    /// The vanilla id and the full NBT compound are preserved verbatim so the entity
+    /// round-trips through a save/load cycle unchanged.
+    Opaque { id: String, nbt: Nbt },
 }
 
 impl BlockEntity {
@@ -83,7 +88,8 @@ impl BlockEntity {
     fn hopper_slots_mut(&mut self) -> Option<&mut [Option<ItemStack>]> {
         match self {
             BlockEntity::Hopper(h) => Some(h.slots_mut()),
-            BlockEntity::Composter(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_) => {
+            BlockEntity::Composter(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_)
+            | BlockEntity::Opaque { .. } => {
                 None
             }
         }
@@ -123,7 +129,7 @@ impl BlockEntity {
                 FurnaceKind::BlastFurnace => "minecraft:blast_furnace",
             }),
             BlockEntity::Hopper(_) => Some("minecraft:hopper"),
-            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) => None,
+            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. } => None,
         }
     }
 
@@ -139,7 +145,7 @@ impl BlockEntity {
         match self {
             BlockEntity::Furnace(f) => vec![f.input().cloned(), f.fuel().cloned(), f.output().cloned()],
             BlockEntity::Hopper(h) => h.slots().to_vec(),
-            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) => Vec::new(),
+            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. } => Vec::new(),
         }
     }
 
@@ -164,7 +170,7 @@ impl BlockEntity {
                     h.set_slot(slot, item);
                 }
             }
-            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) => {}
+            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. } => {}
         }
     }
 
@@ -180,7 +186,8 @@ impl BlockEntity {
     pub fn data_properties(&self) -> Vec<i32> {
         match self {
             BlockEntity::Furnace(f) => (0..4).map(|i| f.container_data(i)).collect(),
-            BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) => {
+            BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_)
+            | BlockEntity::Opaque { .. } => {
                 Vec::new()
             }
         }
@@ -205,6 +212,7 @@ impl BlockEntity {
             BlockEntity::Hopper(_) => {
                 debug_assert!(false, "hoppers are ticked via tick_hopper, not this path");
             }
+            BlockEntity::Opaque { .. } => {}
         }
     }
 }
