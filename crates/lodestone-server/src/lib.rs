@@ -99,6 +99,7 @@
 //! [`Transport`]: lodestone_net::Transport
 
 mod block_entities;
+mod border;
 mod brewing;
 mod chunk;
 pub mod chunk_nbt;
@@ -152,9 +153,11 @@ mod server;
 mod spawn;
 mod tick;
 mod vitals;
+mod weather;
 mod worldgen_data;
 
 pub use block_entities::{BlockEntity, BlockEntityHandle, BlockEntityRegistry, block_entity_for_item};
+pub use border::{ABSOLUTE_MAX_SIZE, MAX_CENTER_COORDINATE, MAX_SIZE, BorderFeed, WorldBorder};
 pub use brewing::{
     BREW_TIME_TICKS, Bottle, BottleKind, BrewTick, BrewingStand, FUEL_USES, has_mix, is_ingredient,
     mix_bottle,
@@ -204,9 +207,10 @@ pub use random_tick::{
 pub use scheduled_tick::{ScheduledTick, ScheduledTickQueue, TickPriority};
 pub use server::{
     EntitySource, NoEntities, ServeSummary, ServerError, serve_connection,
-    serve_connection_with_commands,
+    serve_connection_with_commands, serve_connection_with_mob_events,
 };
 pub use tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
+pub use weather::{WeatherEvent, WeatherFeed, WeatherState};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};
 pub use worldgen_data::{overworld_chunk_source, overworld_generator};
 
