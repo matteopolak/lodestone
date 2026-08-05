@@ -1993,10 +1993,13 @@ impl TerrainMesh {
     pub fn drain_meshes(&mut self) -> Vec<Meshed> {
         let meshes = self.scheduler.drain();
         let still_pending = self.scheduler.pending();
-        if still_pending > 50 {
+        // Log every drain so we can see mesh completion cadence
+        if !meshes.is_empty() || still_pending > 0 {
             tracing::info!(
-                "mesh scheduler: {} drained this frame, {} still pending in workers",
+                "mesh: drained {} sections this frame, {} still pending, {} total uploaded, {} dirty columns queued, {} forced",
                 meshes.len(), still_pending,
+                self.uploaded_sections.len() + meshes.len(),
+                self.dirty_columns.len(), self.forced_columns.len(),
             );
         }
         self.uploaded_sections.extend(meshes.iter().map(|m| m.key));
