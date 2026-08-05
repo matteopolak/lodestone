@@ -199,6 +199,23 @@ pub struct IntegratedServer {
     /// started yet). Seeding races `shutdown` like the tick task does, so it
     /// still cannot outlive this handle.
     seed_task: Option<Task>,
+    /// The world-save handle (issue #437), `Some` only for
+    /// [`open_persistent_with_mobs`](Self::open_persistent_with_mobs).
+    ///
+    /// Held here so [`shutdown`](Self::shutdown) can flush the world before the
+    /// handle goes away — a singleplayer world that only saved on an autosave
+    /// timer would lose everything since the last tick on a clean quit, which
+    /// is the common case rather than the rare one.
+    #[cfg(not(target_arch = "wasm32"))]
+    save: Option<crate::region_source::WorldSaveHandle>,
+    /// The autosave timer task (issue #437), `Some` alongside `save`.
+    ///
+    /// A fourth task rather than a step inside `run_tick_loop`, for the same
+    /// reason `seed_task` is a third: the tick loop's budget is 50 ms and a
+    /// region write is unbounded. It races `shutdown` like the others, so it
+    /// cannot outlive this handle.
+    #[cfg(not(target_arch = "wasm32"))]
+    autosave_task: Option<Task>,
 }
 
 impl IntegratedServer {
@@ -296,6 +313,10 @@ impl IntegratedServer {
                 // Nothing seeds a mob population through this constructor (see
                 // the `mobs` binding above), so there is nothing to seed.
                 seed_task: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                save: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                autosave_task: None,
             },
             client_end,
         )
@@ -544,9 +565,158 @@ impl IntegratedServer {
                 clock: Some(clock),
                 server_tick: Some(server_tick),
                 seed_task: Some(seed_task),
+                #[cfg(not(target_arch = "wasm32"))]
+                save: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                autosave_task: None,
             },
             client_end,
         )
+    }
+
+    /// The same singleplayer world as
+    /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs), but
+    /// **persistent**: columns are loaded from `world_dir`'s Anvil region files
+    /// when they exist, every mutation is retained, and the world is written
+    /// back on [`shutdown`](Self::shutdown) and on an autosave timer (issue
+    /// #437).
+    ///
+    /// # How it composes
+    ///
+    /// This wraps `source` in a [`crate::region_source::RegionChunkSource`] and
+    /// hands *that* to the ordinary constructor, which wraps it in
+    /// [`ChunkStore`] as usual. The resulting stack is
+    /// `ChunkStore → RegionChunkSource → source`, which is the only ordering
+    /// that works — see `region_source`'s module doc for why persistence has to
+    /// sit below the cache and above the generator, and in particular why it
+    /// must not forward `set_block` down.
+    ///
+    /// Because the wrap happens here, **every** existing mutation path is
+    /// carried without touching it: player edits, random ticks, and the mob
+    /// sim's grazing all reach the world through `ChunkSource::set_block`, and
+    /// that is the choke point being hooked. Nothing in `tick.rs`, `mobs.rs` or
+    /// `server.rs` changes, which also means `MobSim`'s immutable
+    /// `world: &'w ChunkWorld` borrow is untouched.
+    ///
+    /// # The autosave does not run on the tick thread
+    ///
+    /// The spawned autosave task does its filesystem work inside
+    /// `spawn_blocking`, so a full-region write never lands on the core thread
+    /// the connection task and `run_tick_loop` share. That is deliberate: the
+    /// world-open stall (10.86 s → 75.6 ms, `docs/world-open-latency.md`) was
+    /// the last large performance defect in this crate and had exactly this
+    /// shape. The only work on the mutation path itself is a `HashSet` insert.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::region_source::Error`] if `world_dir`'s region
+    /// directory cannot be created. Reading is deliberately *not* fallible —
+    /// a missing region file is a world that has never been saved, which is
+    /// every world's first open.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_persistent_with_mobs<P, S>(
+        protocol: P,
+        world_dir: &std::path::Path,
+        source: S,
+        min_y: i32,
+        height: i32,
+        mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
+        mob_center: (i32, i32),
+        mob_count: usize,
+        view_radius: i32,
+        autosave: std::time::Duration,
+    ) -> Result<
+        (
+            Self,
+            DuplexStream,
+            crate::region_source::RegionChunkSource<S>,
+        ),
+        crate::region_source::Error,
+    >
+    where
+        P: ServerProtocol + 'static,
+        S: ChunkSource + 'static,
+    {
+        let persistent =
+            crate::region_source::RegionChunkSource::new(source, world_dir, min_y, height)?;
+        let save = persistent.save_handle();
+        // A second handle to the *same* world, returned to the caller. This is
+        // what anything outside the connection loop (a `/setblock`, a gate)
+        // mutates through, and it is the identical object the `ChunkStore`
+        // below wraps — not a second copy, which is the mistake issue #454
+        // caught in the mob-pathing source.
+        let world = persistent.clone();
+        let (mut server, client_end) = Self::open_in_memory_with_mobs(
+            protocol,
+            persistent,
+            mob_area,
+            mob_center,
+            mob_count,
+            view_radius,
+        );
+
+        let autosave_handle = save.clone();
+        let autosave_task = spawn_tick_task(&server.shutdown, async move {
+            let mut ticker = tokio::time::interval(autosave);
+            // The first tick of a tokio interval completes immediately; a save
+            // at t=0 has nothing to write and would only burn a blocking-pool
+            // slot during world open, the exact window issue #454 cleared.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let handle = autosave_handle.clone();
+                // The whole point: the write happens on the blocking pool.
+                let result = tokio::task::spawn_blocking(move || handle.save()).await;
+                if let Ok(Err(err)) = result {
+                    tracing::warn!("autosave failed, chunks stay dirty for the next attempt: {err}");
+                }
+            }
+        });
+        server.save = Some(save);
+        // Replaces the mob-seeding task slot only if it is free; seeding owns
+        // it for `open_in_memory_with_mobs`, so the autosave task is kept
+        // alive by racing the same `shutdown` notify and is dropped with the
+        // handle.
+        server.autosave_task = Some(autosave_task);
+        Ok((server, client_end, world))
+    }
+
+    /// Writes every dirty chunk now, on the calling thread, returning how many
+    /// columns were written.
+    ///
+    /// `Ok(0)` when nothing has changed since the last save — and `Ok(0)` is
+    /// also what a non-persistent server returns, so a caller cannot tell those
+    /// apart; use [`dirty_chunk_count`](Self::dirty_chunk_count) if the
+    /// distinction matters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::region_source::Error`] if a region file could not be
+    /// written. The affected chunks stay dirty, so the next save retries them.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn save_now(&self) -> Result<usize, crate::region_source::Error> {
+        match &self.save {
+            Some(handle) => handle.save(),
+            None => Ok(0),
+        }
+    }
+
+    /// How many chunk columns are waiting to be written, or `None` for a
+    /// non-persistent server.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn dirty_chunk_count(&self) -> Option<usize> {
+        self.save.as_ref().map(super::region_source::WorldSaveHandle::dirty_count)
+    }
+
+    /// This world's persistence counters, or `None` for a non-persistent
+    /// server. Counts, not timings — see
+    /// [`crate::region_source::PersistenceStats`].
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn persistence_stats(&self) -> Option<&crate::region_source::PersistenceStats> {
+        self.save.as_ref().map(super::region_source::WorldSaveHandle::stats)
     }
 
     /// Binds a TCP listener and serves every accepted connection with the same
@@ -787,6 +957,10 @@ impl IntegratedServer {
             // LAN seeds no mob population (nothing calls `MobHandle::reseed`
             // here — see the `mobs` binding above), so there is nothing to seed.
             seed_task: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            save: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            autosave_task: None,
         })
     }
 
@@ -876,6 +1050,29 @@ impl IntegratedServer {
         // pool where the signal cannot reach.
         if let Some(seed_task) = self.seed_task.take() {
             seed_task.abort();
+        }
+        // Aborted, not joined: it is an infinite timer loop, so joining it
+        // would hang forever. The flush below is what actually persists.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(autosave_task) = self.autosave_task.take() {
+            autosave_task.abort();
+        }
+        // The final flush, **after** the tick and connection tasks have
+        // stopped. Ordering is load-bearing: saving first would race a tick
+        // that mutates a block between the write and the shutdown, and that
+        // block would be lost with no error anywhere. Nothing can mark a chunk
+        // dirty once both tasks are joined.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(handle) = self.save.take() {
+            // `spawn_blocking` rather than a direct call: `shutdown` is an
+            // `async fn` and may well be running on the runtime's core thread.
+            match tokio::task::spawn_blocking(move || handle.save()).await {
+                Ok(Ok(written)) => {
+                    tracing::debug!("world saved on shutdown: {written} chunk columns");
+                }
+                Ok(Err(err)) => tracing::warn!("world save on shutdown failed: {err}"),
+                Err(err) => tracing::warn!("world save on shutdown panicked: {err}"),
+            }
         }
     }
 }
