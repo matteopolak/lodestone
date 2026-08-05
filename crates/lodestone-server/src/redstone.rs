@@ -190,6 +190,56 @@ pub fn is_repeater(state: &str) -> bool {
 pub fn is_comparator(state: &str) -> bool {
     base_name(state) == COMPARATOR
 }
+#[must_use]
+pub fn is_hopper(state: &str) -> bool {
+    base_name(state) == "minecraft:hopper"
+}
+
+/// A hopper's `ENABLED` block-state property — `true` (transferring) when the
+/// hopper is **not** redstone-powered (issue #321).
+///
+/// Defaults to `true` for a state that does not name it, matching vanilla's
+/// `registerDefaultState(... ENABLED, true)` (`HopperBlock.java:55`) and giving
+/// a bare `minecraft:hopper` (which is what placement writes today — see #475)
+/// the correct unlocked initial value.
+#[must_use]
+pub fn hopper_enabled(state: &str) -> bool {
+    get_bool_property(state, "enabled").unwrap_or(true)
+}
+
+/// `state` with one property replaced, every other property preserved
+/// verbatim, and the property appended if it was absent.
+///
+/// **Replaces in place rather than rebuilding from known properties**, and that
+/// is load-bearing for delivery. `enabled` is a *real* property of
+/// `minecraft:hopper`, so a state that keeps its whole property set intact still
+/// matches `v770::resolve_state_id`'s exact tier and is delivered precisely. A
+/// rebuild that dropped `facing` would fall to the subset tier and hand the
+/// client a hopper pointing somewhere else — the same class of defect as
+/// `8f2d912` and #476. Property *order* does not matter, because that resolver
+/// sorts before comparing.
+#[must_use]
+pub(crate) fn with_property(state: &str, key: &str, value: &str) -> String {
+    let Some((name, rest)) = state.split_once('[') else {
+        return format!("{state}[{key}={value}]");
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let mut replaced = false;
+    for kv in rest.trim_end_matches(']').split(',') {
+        match kv.split_once('=') {
+            Some((k, _)) if k == key => {
+                parts.push(format!("{key}={value}"));
+                replaced = true;
+            }
+            _ => parts.push(kv.to_owned()),
+        }
+    }
+    if !replaced {
+        parts.push(format!("{key}={value}"));
+    }
+    format!("{name}[{}]", parts.join(","))
+}
+
 /// `DiodeBlock.isDiode` (`DiodeBlock.java:196-198`).
 #[must_use]
 pub fn is_diode(state: &str) -> bool {

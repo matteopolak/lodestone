@@ -49,7 +49,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::block_entities::{BlockEntityHandle, BlockEntityRegistry};
+use crate::block_entities::BlockEntityHandle;
 use crate::chunk::ChunkSource;
 use crate::mobs::{Detonation, LiveMobSource, MobHandle, MobSim};
 use lodestone_entity::ai::mob::EatenBlock;
@@ -692,7 +692,24 @@ pub(crate) async fn run_tick_loop<W>(
             world.set_block(target.x, target.y, target.z, state);
             block_tick_out.publish(target.x, target.y, target.z, state.to_owned());
         }
-        block_entities.with(BlockEntityRegistry::tick_all);
+        // Issue #321: the hopper redstone lock. `tick_all`'s unlocked shorthand
+        // would tick every hopper as `enabled: true` forever, which is what this
+        // line used to do — see `BlockEntityRegistry::tick_all_with_hopper_lock`,
+        // and note this is the **only** production caller holding both a
+        // `ChunkSource` and the registry, so it is the only place the lock can be
+        // read at all.
+        //
+        // Read off the block state rather than recomputed from neighbours here,
+        // because the block state is vanilla's own source of truth:
+        // `HopperBlock.checkPoweredState` maintains `ENABLED` on every neighbour
+        // change and on placement (`crate::random_tick`'s hopper arms), and
+        // `HopperBlockEntity` then simply obeys it. Recomputing would duplicate
+        // the signal walk and could disagree with what the client was told.
+        block_entities.with(|registry| {
+            registry.tick_all_with_hopper_lock(&|pos| {
+                crate::redstone::hopper_enabled(&world.block_state(pos.x, pos.y, pos.z))
+            });
+        });
 
         game_tick += 1;
 
