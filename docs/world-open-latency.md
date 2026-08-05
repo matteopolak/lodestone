@@ -113,8 +113,22 @@ either fix.
   generated it.
 - **The inner rings under-use the fan-out.** Rings 0 and 1 are smaller than
   `available_parallelism`, so total generation costs slightly more than one
-  361-column batch. That is the deliberate trade: a fraction of a second of
-  throughput for time-to-first-chunk falling from the whole view to one column.
+  361-column batch. Quantified at 16 workers: one batch is `ceil(361/16)` = **23**
+  serial column-times, ring-by-ring is `sum(ceil(8r/16))` = **26** — three extra,
+  about **0.67 s** at 222 ms. That is the deliberate trade, and it is the right
+  one: time-to-first-chunk falls from 23 column-times (~5 s) to **one** (~0.22 s).
+- **A negative `view_radius` must yield no rings, not ring 0.** This one bit
+  already, in the first draft: `(0..=view_radius.max(0))` reads as a harmless
+  clamp and is a behaviour change, because the raster walk it replaced built
+  `(-r..=r)` — an *empty* range for `r < 0` — so a negative radius sent zero
+  chunks. Clamping sends one, while `ViewTracker::new` still records an empty
+  loaded set for the same input, so the tracker and the wire disagree about a
+  column the client actually has. Nothing produces a negative radius today
+  (`dispatch_play_packet` clamps with `view_radius.max(0)` precisely as an
+  invariant against it), which is exactly why it went unnoticed and why it now has
+  a test rather than a reading. **The general shape: an expression can be
+  accidentally correct about an input its author never considered, and "tidying"
+  it is how that gets lost.**
 - **`MobHandle::reseed` replaces, it does not merge.** A mob spawned before the
   first reseed would vanish. Correct for the one caller (a `Default` handle has
   no population to lose) and *not* a general "load more terrain" primitive —
@@ -141,6 +155,14 @@ alone on an identical release binary while counts stayed byte-identical.
 | `integrated.rs`: `world_open_generates_no_columns_at_all` | the constructor generates **0** columns | **49** |
 | `integrated.rs`: `seeding_generates_each_tick_area_column_exactly_once` | every tick-area column generated exactly once | 2 each |
 | `serve_play.rs`: `join_streams_the_view_outward_from_the_players_own_column` | `(0, 0)` encoded first; ≤1 column generated when it was; non-decreasing Chebyshev distance | first column `(-9, -9)` |
+| `server.rs`: `join_view_rings_partitions_the_square_exactly` | ring sizes `1, 8, …, 8r` summing to `(2r+1)²`, no column on two rings | — (unit) |
+| `server.rs`: `join_view_rings_at_radius_zero_is_a_single_column`, `…_at_a_negative_radius_is_empty` | the two edge radii | — (unit) |
+
+The two unit tests are not redundant with the end-to-end gate: the end-to-end one
+only ever runs radius 9, and a ring walk that double-counted a corner or skipped
+an edge would still be non-decreasing in distance, so no ordering assertion can
+see it. The end-to-end gate does check set equality against the old square, which
+covers radius 9; the unit tests cover the edges and the ring-size arithmetic.
 
 Each has a control that was **run and observed to fail**, not described:
 
