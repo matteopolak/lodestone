@@ -246,9 +246,76 @@ Named rather than left to be discovered:
   `data/world_clocks.dat`, and `level.dat`'s `Time` is the world's total age,
   not the sky clock. See [`world-persistence.md`](./world-persistence.md) for
   the measured field list and the two issues that got this wrong.
-- **Block entities, entities and scheduled ticks are not persisted.** The chunk
-  NBT is written with empty `block_entities`, `block_ticks` and `fluid_ticks`
-  lists. A furnace keeps its position but not its contents across a reopen.
+- **Block entities are persisted** as of
+  [#468](https://github.com/matteopolak/lodestone/issues/468) — a furnace comes
+  back with its contents, its four burn/cook timers and its banked recipe uses,
+  a hopper with its five slots and its transfer cooldown. Three rules make it
+  work, and each is load-bearing rather than an optimisation:
+
+  1. **Every chunk holding a block entity is written on every save**, on top of
+     the dirty set. A container's contents change through the menu and the tick
+     loop, neither of which touches a block, so *nothing marks its chunk dirty*
+     and a dirty-only save would persist a container exactly once — at
+     placement — and never again. Still mutation-proportional: bounded by the
+     number of block entities in the world, not by the 512-column store.
+  2. **A chunk that loads block entities is retained in `edits` from that
+     moment.** This is the one exception to "only `set_block` populates the edit
+     map", and it is required: `save_region` carries a chunk it has no edit
+     entry for across as its *original compressed bytes*, so without this,
+     smelting into a furnace that was loaded rather than placed this session
+     would write the old contents straight back over the new ones with nothing
+     reporting an error.
+  3. **The release sweep never drops such a chunk**, for the same reason — the
+     invariant below (*in `edits` but not in `dirty` implies already on disk*)
+     is simply false for a container.
+
+  Restoring is **absent-only**: a position the live registry already holds is
+  left alone, because a column can be released and re-read while its furnace has
+  been ticking the whole time, and overwriting would rewind the world on every
+  cache miss.
+
+  Two kinds are not written under vanilla ids, each for a stated reason.
+  **Composter** is namespaced (`lodestone:composter`) because *vanilla has no
+  composter block entity at all* — a vanilla composter's level is a block-state
+  property and its ready delay is a scheduled block tick, and this crate models
+  it as a block entity instead. A furnace's banked recipe counts are namespaced
+  too, because they are keyed by this crate's own `"kind:ingredient"` string
+  rather than by a vanilla recipe id. Vanilla logs a skip for an unrecognised id
+  and drops it, which is the honest outcome; claiming `minecraft:composter`
+  would be a claim Mojang may later define differently.
+- **Containers this crate does not simulate still lose their contents.** A real
+  world is full of chests, barrels, vaults, spawners and decorated pots —
+  1,608 of the 1,613 block entities measured across `.cache/mc`'s worlds are
+  kinds with no model here. `chunk_nbt::block_entity_from_nbt` drops them, and
+  the chunk is then written without them, so **opening and re-saving a vanilla
+  world empties its chests**. Closing this needs a *passthrough* that carries an
+  unmodelled entry's NBT subtree verbatim, not a model for every block entity.
+- **Scheduled ticks reach disk, but nothing schedules into the persisted queues
+  yet.** The schema (`chunk_nbt::SavedTick`) and the save/load path
+  (`region_source::ScheduledTickHandle`) are done and gated; the remaining step
+  is that `tick::run_tick_loop` still keeps its `block_ticks`/`fluid_ticks` as
+  **local** `let mut` bindings rather than taking the shared handle, so the
+  queues persistence can see are empty in production. See
+  [`tick-scheduling.md`](./tick-scheduling.md) for the wiring that closes it.
+
+  Two schema traps live here, both measured against 22,488 real vanilla chunks
+  with an independent parser, and both of which a round trip through our own
+  writer **cannot** see because the writer and reader would share the mistake:
+
+  | field | trap |
+  |---|---|
+  | `p` | vanilla's `-3..3` priority **value**, not the ordinal. Our `TickPriority` is declaration-ordered so `Ord` matches Java's `compareTo`, which makes `Normal`'s ordinal `3` and its value `0` — writing the ordinal silently demotes every ordinary tick in the world to `EXTREMELY_LOW` |
+  | `t` | a **signed** delay relative to game time at save, negative on 1,584 of the 133,051 entries measured (to `-1046`). Loading is `trigger = game_tick + delay`, saturating at `0`; unsigned arithmetic wraps `0 + (-1000)` to ~18 quintillion |
+
+  The game tick the delays are measured against lives on
+  `ScheduledTickHandle`, stored by the tick loop once per tick, deliberately
+  **not** re-derived from a second clock — that is
+  [#323](https://github.com/matteopolak/lodestone/issues/323)'s bug, where
+  `SET_TIME` decoded and really did darken the sky while carrying wall-clock
+  elapsed-since-join.
+- **Entities are still not persisted.** Mobs and dropped items are reseeded on
+  every open; the chunk NBT has no `entities` list and 26.2 keeps them in a
+  separate `entities/r.<x>.<z>.mca` anyway.
 - **Unload-driven saving is in** (the edit map is no longer unbounded), but the
   release is **deferred to the next save**, never done at eviction. That is
   deliberate: `ChunkStore` evicts on its *miss* path, which is frequently the
