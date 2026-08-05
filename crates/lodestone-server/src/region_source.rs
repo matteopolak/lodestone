@@ -368,6 +368,10 @@ pub struct PersistenceStats {
     pub loaded_from_disk: AtomicU64,
     /// Columns handed to the generator because disk had nothing.
     pub generated: AtomicU64,
+    /// Columns released from the edit map after being written to disk, because
+    /// the cache above evicted them. The counter that says unload-driven
+    /// saving is actually reclaiming anything.
+    pub unloaded: AtomicU64,
     /// Chunk columns encoded and written across all saves.
     pub columns_written: AtomicU64,
     /// Region files rewritten across all saves.
@@ -391,6 +395,10 @@ struct WorldState {
     edits: Mutex<HashMap<(i32, i32), ChunkColumn>>,
     /// Chunks changed since the last successful save.
     dirty: Mutex<HashSet<(i32, i32)>>,
+    /// Chunks the cache above has evicted, which may therefore be dropped from
+    /// [`Self::edits`] once they are safely on disk. See
+    /// [`WorldSaveHandle::save`]'s unload sweep.
+    pending_unload: Mutex<HashSet<(i32, i32)>>,
     stats: PersistenceStats,
 }
 
@@ -437,9 +445,26 @@ impl<S: ChunkSource> RegionChunkSource<S> {
                 height,
                 edits: Mutex::new(HashMap::new()),
                 dirty: Mutex::new(HashSet::new()),
+                pending_unload: Mutex::new(HashSet::new()),
                 stats: PersistenceStats::default(),
             }),
         })
+    }
+
+    /// How many columns the edit map is holding.
+    ///
+    /// This is the number unload-driven saving exists to bound: before it, the
+    /// edit map only ever grew, so a long session in a heavily-built world made
+    /// *this* the process's real memory ceiling rather than `ChunkStore`'s 512.
+    /// A **count**, not a byte figure, for the reason [`PersistenceStats`]
+    /// gives.
+    #[must_use]
+    pub fn retained_columns(&self) -> usize {
+        self.state
+            .edits
+            .lock()
+            .expect("world edit lock poisoned")
+            .len()
     }
 
     /// A cheap handle that can save the world from any thread.
@@ -524,12 +549,34 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
                 .expect("checked present above, and only this lock inserts"),
         };
         column.set_block(lx, y, lz, name);
-        drop(edits);
 
+        // Marked dirty **while still holding `edits`**, and that ordering is
+        // load-bearing rather than incidental. The unload sweep in
+        // `WorldSaveHandle::save` decides whether to drop a column by checking
+        // that it is not dirty, and it takes these two locks in this same
+        // order. If this released `edits` first, the sweep could observe a
+        // column that has already been mutated but not yet marked dirty, and
+        // drop the player's edit with no error anywhere.
         self.state
             .dirty
             .lock()
             .expect("world dirty lock poisoned")
+            .insert((cx, cz));
+        drop(edits);
+    }
+
+    /// The cache above has evicted this column, so the save path may release
+    /// it once it is on disk.
+    ///
+    /// Nothing is dropped here: this runs on `ChunkStore`'s miss path, which is
+    /// frequently the tick thread, so it is a `HashSet` insert and nothing
+    /// else. The actual release happens inside [`WorldSaveHandle::save`],
+    /// which already runs on the blocking pool.
+    fn unload(&self, cx: i32, cz: i32) {
+        self.state
+            .pending_unload
+            .lock()
+            .expect("world unload lock poisoned")
             .insert((cx, cz));
     }
 }
@@ -576,6 +623,11 @@ impl WorldSaveHandle {
         };
         if taken.is_empty() {
             self.state.stats.empty_saves.fetch_add(1, Ordering::Relaxed);
+            // Still sweep: a world nobody is building in is exactly the world
+            // whose evicted columns should be released, and an early return
+            // here would mean memory is only ever reclaimed while the player
+            // is placing blocks.
+            self.release_unloaded();
             return Ok(0);
         }
 
@@ -607,7 +659,84 @@ impl WorldSaveHandle {
             .stats
             .columns_written
             .fetch_add(written as u64, Ordering::Relaxed);
+        // After the writes, never before: the sweep's whole safety argument is
+        // that anything it drops is already on disk.
+        self.release_unloaded();
         Ok(written)
+    }
+
+    /// Drops evicted columns from the edit map, once they are safely on disk.
+    ///
+    /// # Why this is lossless, stated as an invariant
+    ///
+    /// A column enters `edits` only through
+    /// [`RegionChunkSource::set_block`], and that same call marks it dirty
+    /// while still holding the `edits` lock. `dirty` is cleared only by a
+    /// **successful** region write. So:
+    ///
+    /// > every column in `edits` but not in `dirty` has been written to disk.
+    ///
+    /// which is exactly the set this releases, and re-reading one costs a disk
+    /// load rather than a wrong block. That is the same argument
+    /// `ChunkStore`'s eviction rests on, one layer down — with the difference
+    /// that the store could always regenerate, and this layer cannot, which is
+    /// why the write has to have happened first rather than merely been
+    /// queued.
+    ///
+    /// The two locks are taken in the same order as `set_block` takes them
+    /// (`edits`, then `dirty`), which is what makes the not-dirty check
+    /// exclude an edit that is mid-flight rather than merely unlikely.
+    fn release_unloaded(&self) {
+        let candidates: Vec<(i32, i32)> = {
+            let mut pending = self
+                .state
+                .pending_unload
+                .lock()
+                .expect("world unload lock poisoned");
+            if pending.is_empty() {
+                return;
+            }
+            pending.drain().collect()
+        };
+
+        let mut released = 0u64;
+        let mut deferred: Vec<(i32, i32)> = Vec::new();
+        {
+            let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
+            let dirty = self.state.dirty.lock().expect("world dirty lock poisoned");
+            for key in candidates {
+                if dirty.contains(&key) {
+                    // Mutated again since the eviction, so it is not on disk in
+                    // its current form. Dropping it now would lose that edit.
+                    deferred.push(key);
+                    continue;
+                }
+                if edits.remove(&key).is_some() {
+                    released += 1;
+                }
+            }
+        }
+
+        // Re-queued **after** both locks are released, never while holding
+        // them: the drain above takes `pending_unload` before `edits`, so
+        // taking it again underneath `edits` would invert the order against a
+        // concurrent sweep and could deadlock. Requeuing at all is what makes
+        // the skip above a deferral rather than a leak — a column skipped once
+        // would otherwise sit in the edit map until it happened to be evicted
+        // a second time.
+        if !deferred.is_empty() {
+            let mut pending = self
+                .state
+                .pending_unload
+                .lock()
+                .expect("world unload lock poisoned");
+            pending.extend(deferred);
+        }
+
+        self.state
+            .stats
+            .unloaded
+            .fetch_add(released, Ordering::Relaxed);
     }
 
     /// Rewrites one region file, carrying untouched chunks across verbatim.
@@ -728,5 +857,232 @@ impl WorldSaveHandle {
         std::fs::write(&temp, &built.bytes).map_err(io(&temp))?;
         std::fs::rename(&temp, &path).map_err(io(&path))?;
         Ok(count)
+    }
+}
+
+/// Unload-driven saving, gated over the real composition.
+///
+/// # The control, run and observed
+///
+/// `ChunkStore`'s eviction notification severed (the `self.source.unload(..)`
+/// call replaced by a discard), applied in a throwaway worktree and reverted:
+///
+/// ```text
+/// an_evicted_column_is_released_from_the_edit_map_once_it_is_on_disk ... FAILED
+///   left: (3, 0)   right: (2, 1)
+/// a_column_mutated_after_its_eviction_is_written_then_released      ... FAILED
+/// a_save_with_nothing_dirty_still_releases_evicted_columns          ... FAILED
+/// the_sweep_defers_a_column_that_is_dirty_when_it_runs              ... ok
+/// ```
+///
+/// `left: (3, 0)` is precisely the no-unload hypothesis the first gate's own
+/// message names, which is what makes it a magnitude check rather than a
+/// direction. The fourth still passes because it calls `unload` directly
+/// instead of through the store — so the failure set says *which* half broke:
+/// a severed wire fails three, a broken sweep fails all four.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk_store::ChunkStore;
+
+    const MIN_Y: i32 = -64;
+    const HEIGHT: i32 = 384;
+    const MARKER: &str = "minecraft:diamond_block";
+
+    #[derive(Debug)]
+    struct Flat;
+
+    impl ChunkSource for Flat {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
+            for z in 0..16 {
+                for x in 0..16 {
+                    column.set_block(x, 60, z, "minecraft:stone");
+                }
+            }
+            column
+        }
+    }
+
+    fn tempdir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lodestone-unload-4m8k-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch world dir");
+        dir
+    }
+
+    /// **The unload gate**, over the real composition: a [`ChunkStore`] above a
+    /// [`RegionChunkSource`], which is exactly what
+    /// `IntegratedServer::open_persistent_with_mobs` builds. Only the capacity
+    /// differs — 2 instead of 512 — so eviction is deterministic rather than
+    /// needing 513 columns of terrain.
+    ///
+    /// Testing the two halves separately would prove nothing about the join,
+    /// and the join is the whole feature: `ChunkStore` evicting without
+    /// `RegionChunkSource` hearing about it is the island this repo keeps
+    /// finding.
+    #[test]
+    fn an_evicted_column_is_released_from_the_edit_map_once_it_is_on_disk() {
+        let dir = tempdir("released");
+        let source = RegionChunkSource::new(Flat, &dir, MIN_Y, HEIGHT).expect("open world");
+        let handle = source.save_handle();
+        let store = ChunkStore::with_capacity(source.clone(), 2);
+
+        // Three edited chunks: (0,0), (1,0), (2,0).
+        for cx in 0..3 {
+            source.set_block(cx * 16 + 1, 70, 1, MARKER);
+        }
+        assert_eq!(
+            source.retained_columns(),
+            3,
+            "three edited chunks must be retained before any save"
+        );
+
+        // Make them resident in LRU order, so the victim is (0,0) and not a
+        // matter of luck.
+        for cx in 0..3 {
+            let _ = store.column(cx, 0);
+        }
+
+        let written = handle.save().expect("save");
+        assert_eq!(written, 3, "every edited chunk must be written");
+
+        // **The magnitude check.** Three edits, one eviction: exactly one
+        // column is released, so two remain. The no-unload hypothesis predicts
+        // 3 retained and 0 released, and a sweep that ignored the dirty set
+        // would predict 0 retained and 3 released. Neither is what a correct
+        // release does.
+        assert_eq!(
+            (
+                source.retained_columns(),
+                handle.stats().unloaded.load(Ordering::Relaxed)
+            ),
+            (2, 1),
+            "one evicted column must be released and the other two kept"
+        );
+
+        // And the point of the whole exercise: releasing must cost a disk read,
+        // never a block. This reads the chunk that was dropped.
+        assert_eq!(
+            source.block_state(1, 70, 1),
+            MARKER,
+            "the released column lost its edit; releasing is only sound while it is reconstructible"
+        );
+    }
+
+    /// A column evicted and then **mutated again** before the save is still
+    /// released by that save — and that is correct, not a leak: the save wrote
+    /// the mutation before sweeping, so the on-disk copy is current.
+    ///
+    /// This test exists because the first version of it asserted the opposite
+    /// and failed. Writing down which one is true is the point: the rule is
+    /// *"released only when on disk"*, **not** *"never released after a
+    /// mutation"*, and the difference decides whether a late edit costs memory
+    /// forever or nothing at all.
+    #[test]
+    fn a_column_mutated_after_its_eviction_is_written_then_released() {
+        let dir = tempdir("redirtied");
+        let source = RegionChunkSource::new(Flat, &dir, MIN_Y, HEIGHT).expect("open world");
+        let handle = source.save_handle();
+        let store = ChunkStore::with_capacity(source.clone(), 1);
+
+        source.set_block(1, 70, 1, MARKER);
+        let _ = store.column(0, 0);
+        // Evicts (0,0): capacity is 1.
+        let _ = store.column(5, 5);
+
+        // Mutated after the eviction, before the save.
+        source.set_block(2, 71, 2, "minecraft:gold_block");
+
+        handle.save().expect("save");
+        assert_eq!(
+            (
+                source.retained_columns(),
+                handle.stats().unloaded.load(Ordering::Relaxed)
+            ),
+            (0, 1),
+            "the column was written by this save, so releasing it is sound"
+        );
+        // The load-bearing half: **both** edits come back, including the one
+        // made after the eviction. If the save had written a pre-mutation
+        // snapshot and then released, this is the assertion that would fail.
+        assert_eq!(source.block_state(2, 71, 2), "minecraft:gold_block");
+        assert_eq!(source.block_state(1, 70, 1), MARKER);
+    }
+
+    /// The sweep's decision rule in isolation: a column that is **dirty at the
+    /// moment of the sweep** is deferred, not dropped.
+    ///
+    /// Reached in production only when a `set_block` lands between a save's
+    /// write and its sweep — a genuine concurrent window, which is why it is
+    /// exercised by calling [`WorldSaveHandle::release_unloaded`] directly
+    /// rather than by racing two threads and hoping. A timing-dependent gate
+    /// for this would be exactly the flake this repo just spent an issue
+    /// removing.
+    #[test]
+    fn the_sweep_defers_a_column_that_is_dirty_when_it_runs() {
+        let dir = tempdir("deferred");
+        let source = RegionChunkSource::new(Flat, &dir, MIN_Y, HEIGHT).expect("open world");
+        let handle = source.save_handle();
+
+        source.set_block(1, 70, 1, MARKER);
+        source.unload(0, 0);
+
+        // Dirty and unloaded at once: exactly the state a mutation between the
+        // write and the sweep produces.
+        handle.release_unloaded();
+        assert_eq!(
+            (
+                source.retained_columns(),
+                handle.stats().unloaded.load(Ordering::Relaxed)
+            ),
+            (1, 0),
+            "a dirty column must survive the sweep"
+        );
+
+        // Deferred rather than forgotten: once it is genuinely on disk, the
+        // next sweep releases it without needing a second eviction. Without
+        // the requeue this would read (1, 0) forever.
+        handle.save().expect("save");
+        assert_eq!(
+            (
+                source.retained_columns(),
+                handle.stats().unloaded.load(Ordering::Relaxed)
+            ),
+            (0, 1),
+            "the deferred column must be released once it is on disk"
+        );
+        assert_eq!(source.block_state(1, 70, 1), MARKER);
+    }
+
+    /// An idle world still reclaims: the sweep must not sit behind the
+    /// "nothing is dirty" early return, or memory is only ever released while
+    /// the player is placing blocks.
+    #[test]
+    fn a_save_with_nothing_dirty_still_releases_evicted_columns() {
+        let dir = tempdir("idle");
+        let source = RegionChunkSource::new(Flat, &dir, MIN_Y, HEIGHT).expect("open world");
+        let handle = source.save_handle();
+        let store = ChunkStore::with_capacity(source.clone(), 1);
+
+        source.set_block(1, 70, 1, MARKER);
+        handle.save().expect("first save writes it");
+        assert_eq!(source.retained_columns(), 1);
+
+        let _ = store.column(0, 0);
+        let _ = store.column(9, 9);
+
+        // Nothing has been mutated since the save above, so this save writes
+        // nothing at all — and must still release.
+        assert_eq!(handle.save().expect("empty save"), 0);
+        assert_eq!(
+            (
+                source.retained_columns(),
+                handle.stats().unloaded.load(Ordering::Relaxed)
+            ),
+            (0, 1),
+            "an empty save must still reclaim an evicted column"
+        );
+        assert_eq!(source.block_state(1, 70, 1), MARKER);
     }
 }
