@@ -243,9 +243,6 @@ impl RenderState {
         packed + model
     }
 
-    /// Render every section into `view` using `camera`. Writes all section
-    /// camera uniforms first, then draws. If `outline` names a block, a
-    /// wireframe box is drawn around it after the terrain.
     /// Rewrite the animated-block uniform for the current game `tick`.
     ///
     /// Call once per frame *before* [`render`](Self::render) with the live game

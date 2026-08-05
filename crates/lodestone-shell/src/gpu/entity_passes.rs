@@ -355,32 +355,6 @@ impl RenderState {
             .collect()
     }
 
-    /// Sheep wool layers (issue #53), over the same instances `prepare_entities`
-    /// resolved — same resolver, same `AnimInput`, so wool can never be posed
-    /// off a different pose than the body it grows out of. Mirrors
-    /// [`prepare_armour`](Self::prepare_armour) exactly, minus the per-slot/
-    /// per-texture grouping armour needs: wool has one mesh and one sheet, so
-    /// every attached part accumulates into a single set of per-part buffers.
-    ///
-    /// # What is deliberately not handled
-    ///
-    /// * **Sheared sheep.** `draw.wool.sheared` is checked here, not filtered
-    ///   upstream — [`EntityDraw::wool`]'s own doc explains why the data stays
-    ///   honest about what the server reported. This is vanilla's own
-    ///   `if (!state.isSheared)` gate (`SheepWoolLayer.submit`), applied at
-    ///   exactly the point that draws the mesh.
-    /// * **The pig/cow trap.** [`WoolMesh::attach`]'s `wearer_model` argument
-    ///   is `instance.model` — the *resolved* model name — never
-    ///   `wearer.family()`. `AnimFamily::Quadruped` is shared by `pig`, `cow`
-    ///   and `wolf`; gating on family alone would grow wool on a pig the way
-    ///   an ungated armour attach once drew a breastplate on one. In practice
-    ///   `EntityDraw::wool` is already `None` for every non-sheep type
-    ///   ([`crate::entities::sheep_wool`]'s own gate), so this is a second,
-    ///   independent gate rather than the only one — belt and braces, the same
-    ///   discipline `docs/entity-rendering.md` asks for.
-    /// * **Baby sheep, the `jeb_` rainbow name, and the undercoat overlay.**
-    ///   Not built — see `docs/entity-rendering.md`'s "deliberately out of
-    ///   scope" list, unchanged by this pass.
     /// Resolve this frame's on-fire entities into per-model-type flame
     /// instance buffers (issue #434 — player report: "mobs dont show flames
     /// yet"). One [`FlameBatch`] per distinct `EntityDraw::type_path` that has
@@ -456,6 +430,32 @@ impl RenderState {
             .collect()
     }
 
+    /// Sheep wool layers (issue #53), over the same instances `prepare_entities`
+    /// resolved — same resolver, same `AnimInput`, so wool can never be posed
+    /// off a different pose than the body it grows out of. Mirrors
+    /// [`prepare_armour`](Self::prepare_armour) exactly, minus the per-slot/
+    /// per-texture grouping armour needs: wool has one mesh and one sheet, so
+    /// every attached part accumulates into a single set of per-part buffers.
+    ///
+    /// # What is deliberately not handled
+    ///
+    /// * **Sheared sheep.** `draw.wool.sheared` is checked here, not filtered
+    ///   upstream — [`EntityDraw::wool`]'s own doc explains why the data stays
+    ///   honest about what the server reported. This is vanilla's own
+    ///   `if (!state.isSheared)` gate (`SheepWoolLayer.submit`), applied at
+    ///   exactly the point that draws the mesh.
+    /// * **The pig/cow trap.** [`WoolMesh::attach`]'s `wearer_model` argument
+    ///   is `instance.model` — the *resolved* model name — never
+    ///   `wearer.family()`. `AnimFamily::Quadruped` is shared by `pig`, `cow`
+    ///   and `wolf`; gating on family alone would grow wool on a pig the way
+    ///   an ungated armour attach once drew a breastplate on one. In practice
+    ///   `EntityDraw::wool` is already `None` for every non-sheep type
+    ///   ([`crate::entities::sheep_wool`]'s own gate), so this is a second,
+    ///   independent gate rather than the only one — belt and braces, the same
+    ///   discipline `docs/entity-rendering.md` asks for.
+    /// * **Baby sheep, the `jeb_` rainbow name, and the undercoat overlay.**
+    ///   Not built — see `docs/entity-rendering.md`'s "deliberately out of
+    ///   scope" list, unchanged by this pass.
     pub(super) fn prepare_wool(
         &self,
         device: &wgpu::Device,

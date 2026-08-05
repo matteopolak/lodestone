@@ -416,32 +416,6 @@ impl RenderState {
         self.entity_light = EntityLightSource(Some(Box::new(f)));
     }
 
-    /// Install the world clock mobs are darkened by at night (see
-    /// [`SkyDarkenSource`]). Install once, at connect time, next to
-    /// [`set_entity_light_source`](Self::set_entity_light_source) — `f` is polled
-    /// once per frame and may return `None` until the world clock is known, so
-    /// there is nothing to wait for.
-    ///
-    /// `f` returns the factor the **sky** half of the lightmap is scaled by.
-    /// Build it from the server's `time_of_day` with
-    /// [`sky_darken_for_time_of_day`], which is vanilla's curve:
-    ///
-    /// ```no_run
-    /// # use std::sync::{Arc, OnceLock};
-    /// # fn wire(render: &mut lodestone::gpu::RenderState, net: &lodestone::net::NetClient) {
-    /// use lodestone_render::entity::sky_darken_for_time_of_day;
-    ///
-    /// let clock = net.shared_handle();
-    /// render.set_sky_darken_source(move || {
-    ///     clock
-    ///         .get()
-    ///         .map(|h| sky_darken_for_time_of_day(h.world_time().1))
-    /// });
-    /// # }
-    /// ```
-    ///
-    /// Without this, mobs render at permanent noon: the reported
-    /// "mobs are still super bright, even at night".
     /// This frame's fog uniform with the sky-darken factor folded into its spare
     /// lane, so **terrain and mobs read the same clock**. Wiring one without the
     /// other is worse than wiring neither: at midnight it makes mobs darker than
@@ -482,6 +456,32 @@ impl RenderState {
         u
     }
 
+    /// Install the world clock mobs are darkened by at night (see
+    /// [`SkyDarkenSource`]). Install once, at connect time, next to
+    /// [`set_entity_light_source`](Self::set_entity_light_source) — `f` is polled
+    /// once per frame and may return `None` until the world clock is known, so
+    /// there is nothing to wait for.
+    ///
+    /// `f` returns the factor the **sky** half of the lightmap is scaled by.
+    /// Build it from the server's `time_of_day` with
+    /// [`sky_darken_for_time_of_day`], which is vanilla's curve:
+    ///
+    /// ```no_run
+    /// # use std::sync::{Arc, OnceLock};
+    /// # fn wire(render: &mut lodestone::gpu::RenderState, net: &lodestone::net::NetClient) {
+    /// use lodestone_render::entity::sky_darken_for_time_of_day;
+    ///
+    /// let clock = net.shared_handle();
+    /// render.set_sky_darken_source(move || {
+    ///     clock
+    ///         .get()
+    ///         .map(|h| sky_darken_for_time_of_day(h.world_time().1))
+    /// });
+    /// # }
+    /// ```
+    ///
+    /// Without this, mobs render at permanent noon: the reported
+    /// "mobs are still super bright, even at night".
     pub fn set_sky_darken_source(&mut self, f: impl Fn() -> Option<f32> + Send + Sync + 'static) {
         self.sky_darken = SkyDarkenSource(Some(Box::new(f)));
     }
