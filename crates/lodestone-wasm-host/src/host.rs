@@ -146,6 +146,18 @@ pub enum HostError {
     },
 }
 
+/// Either half of loading a plugin from a manifest can fail, and the two halves have
+/// genuinely different causes — a malformed declaration versus a module the runtime
+/// refused — so they stay separate types and this joins them rather than one
+/// swallowing the other.
+#[derive(Debug, thiserror::Error)]
+pub enum LoadError {
+    #[error(transparent)]
+    Manifest(#[from] crate::manifest::ManifestError),
+    #[error(transparent)]
+    Host(#[from] HostError),
+}
+
 /// Per-guest host state: the `T` in `Store<T>`.
 ///
 /// The three `Vec`s are not debug scaffolding — they are the **recording sink**
@@ -574,6 +586,63 @@ impl PluginHost {
             failure: None,
         });
         Ok(self.plugins.len() - 1)
+    }
+
+    /// Load a plugin from its `plugin.toml`, which names both the module and the
+    /// capabilities it requests.
+    ///
+    /// This is the route a real installation takes; [`Self::load_file`] is the one
+    /// underneath it, and stays public because a test — or a consumer embedding a
+    /// plugin it wrote itself — has no need of a manifest file on disk.
+    ///
+    /// # Which name wins, and why it is the manifest's
+    ///
+    /// A module's `init` reports a name too, and the two can disagree. **The manifest
+    /// is authoritative** and a disagreement is a warning, not a refusal. That was
+    /// not the first design: making it fatal seemed like a cheap way to catch a
+    /// `plugin.toml` copied next to the wrong `.wasm`. It also forbids installing the
+    /// *same* plugin twice under two names — two configured instances at different
+    /// priority tiers, which is an entirely reasonable thing to want and which this
+    /// crate's own load-order test needed on the first attempt. Since both strings
+    /// are equally attacker-controlled, a fatal check bought no security either; it
+    /// only removed a capability. So: the manifest names the plugin (it is what the
+    /// operator wrote and what the logs and errors use),
+    /// [`LoadedPlugin::info`]`().name` keeps the module's own claim, and the mismatch
+    /// is logged so a genuinely mis-copied manifest is still visible.
+    pub fn load_manifest(&mut self, manifest_path: &Path) -> Result<usize, LoadError> {
+        let manifest = crate::manifest::Manifest::load(manifest_path)?;
+        let module = manifest.resolved_module(manifest_path)?;
+        let requested = manifest.requested_capabilities()?;
+        let index = self.load_file(&manifest.name, &module, &requested)?;
+        let reported = &self.plugins[index].info.name;
+        if *reported != manifest.name {
+            tracing::warn!(
+                plugin = %manifest.name,
+                module_reports = %reported,
+                path = %module.display(),
+                "manifest name and module name disagree; using the manifest's. If this was not \
+                 deliberate, the plugin.toml may be sitting next to the wrong .wasm"
+            );
+        }
+        Ok(index)
+    }
+
+    /// Load every plugin under `dir` — one subdirectory per plugin, each with a
+    /// `plugin.toml` — in [`crate::manifest::scan_directory`]'s deterministic
+    /// priority-then-name order, and return one result per plugin found.
+    ///
+    /// One plugin's failure never stops another's: the operator gets every problem at
+    /// once, and a single malformed manifest in a `plugins/` directory does not take
+    /// the working plugins down with it. A missing directory is simply no plugins,
+    /// which is the normal case for a fresh install.
+    pub fn load_directory(&mut self, dir: &Path) -> Vec<Result<usize, LoadError>> {
+        crate::manifest::scan_directory(dir)
+            .into_iter()
+            .map(|found| {
+                let (path, _manifest) = found?;
+                self.load_manifest(&path)
+            })
+            .collect()
     }
 
     /// Drive every loaded guest once, in load order, concatenating their actions.
