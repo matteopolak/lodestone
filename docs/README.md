@@ -287,6 +287,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   [`entity::move_entity`](../crates/lodestone-physics/src/entity.rs) — the shared
   `Entity.move` core — and selected per entity by `MoveContext::edge_back_off:
   EdgeBackOff`.
+- [Enchantment glint](./enchantment-glint.md) — The shimmering foil overlay an
+  enchanted item carries: a scrolling, rotated, additively-blended pass over the
+  item's **own geometry**, using vanilla's `enchanted_glint_item.png`. This doc covers
+  the render substrate — `crates/lodestone-render/src/glint.rs` and
+  `crates/lodestone-render/src/shaders/glint.wgsl` — plus what still has to happen
+  in `lodestone-shell` for a player to see it.
 - [Entity state as ECS components](./entity-components.md) — Every non-player
   entity's state — position, rotation, health, equipment, the item a drop is made
   of, and the render-side interpolation that turns 20 Hz reports into per-frame
@@ -440,6 +446,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   for protocol 776 (Minecraft 26.2) — three data components that a clientbound item
   stack **never carries**, dumped from the real 26.2 server and committed as a
   generated table.
+- [Item tint pipeline](./item-tint.md) — Resolving an item model's `tints` list —
+  potion liquid colour, leather dye, map colour, foliage constants — to a concrete
+  ARGB that the item's tinted sprite layer multiplies, and carrying that colour
+  through the bake into the tint palette the model shader reads. This is the *item*
+  tint mechanism, which is unrelated to and never consults the *block* tint mechanism
+  in [`biome-tint.md`](./biome-tint.md).
 - [Arm poses (bow and crossbow)](./item-use-arm-poses.md) — The chain that turns a
   synced metadata bit into a visibly drawn bow or a winding crossbow. There are **two
   different bits, on two different bytes, and which one applies depends on what kind

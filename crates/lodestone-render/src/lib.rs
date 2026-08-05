@@ -58,6 +58,7 @@ pub mod entity_anim;
 pub mod entity_pipeline;
 pub mod fog;
 pub mod frame;
+pub mod glint;
 pub mod gui_atlas;
 pub mod item_render;
 pub mod light;
