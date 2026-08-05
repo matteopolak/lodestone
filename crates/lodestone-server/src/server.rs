@@ -32,6 +32,7 @@ use crate::inventory::{ContainerMenuSlot, PlayerInventory, container_menu_slot};
 use crate::mobs::{MobHandle, PlayerPerception};
 use crate::players::{ChatLine, PlayerListStreamer, PlayerRegistry, PlayerTicket};
 use crate::protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
+use crate::scheduled_tick::ScheduledTickQueue;
 use crate::tick::{BlockTickFeed, ExplosionFeed};
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
 
@@ -1910,6 +1911,9 @@ where
     let clicked = source.block_state(pos.x, pos.y, pos.z);
     let target = if is_air_or_fluid(&clicked) { pos } else { neighbour };
     let target_state = source.block_state(target.x, target.y, target.z);
+    // Every cell the placement's neighbour fan-out rewrote (issue #465) —
+    // empty unless a placement actually happened below.
+    let mut changed: Vec<(BlockPos, String)> = Vec::new();
     if is_air_or_fluid(&target_state) {
         let held_item = inventory.selected_item().map(|stack| stack.item.to_string());
         // The census is the gate: it decides *whether* a placement happens at
@@ -1934,14 +1938,95 @@ where
                 block_entities.with(|registry| registry.insert(target, entity));
             }
             source.set_block(target.x, target.y, target.z, block_name);
+            // Issue #465: placing a block is a mutation like any other, so it
+            // owes its neighbours the same fan-out a random tick or a drained
+            // scheduled tick already performs. Without this the redstone model
+            // is correct but unreachable from any player action — dust placed
+            // beside a powered line stays at `power=0` forever.
+            changed = propagate_placement(source, target);
         }
     }
-    for p in [pos, neighbour] {
+    // `pos`/`neighbour` first (the clicked face and the placed cell, which the
+    // client predicted), then every cell the fan-out actually rewrote. Deduped
+    // because `target` is always one of the first two.
+    let mut notify: Vec<BlockPos> = vec![pos, neighbour];
+    for (p, _) in &changed {
+        if !notify.contains(p) {
+            notify.push(*p);
+        }
+    }
+    for p in notify {
         let current = source.block_state(p.x, p.y, p.z);
         let directive = proto.encode_block_update(p.x, p.y, p.z, &current);
         apply(conn, state, directive).await?;
     }
     Ok(())
+}
+
+/// Runs the neighbour-update fan-out for a block a player just placed at
+/// `target`, persists every resulting change back through `source`, and
+/// returns them so the caller can forward them to the client (issue #465).
+///
+/// This is the same [`crate::random_tick::propagate_and_react`] call
+/// `tick::run_tick_loop` already makes after a drained scheduled tick and
+/// after a random tick mutated a block — the *third* production caller, and
+/// the first one a player can trigger. Before it existed, `propagate_and_react`
+/// had exactly two callers, both inside the tick loop, so the whole redstone
+/// subsystem was reachable only by the accident of a random tick landing next
+/// to a circuit; dust and torches are not randomly-ticking blocks, so in
+/// practice it was reachable not at all.
+///
+/// # What this deliberately does not do
+///
+/// The `ScheduledTickQueue` below is **local and discarded**. Dust is
+/// synchronous in vanilla (`setBlock` recomputes wire power inline, measured
+/// at 0 ticks against a live 26.2 oracle), so placing dust — and placing any
+/// block *beside* dust — resolves completely here. The delayed families do
+/// not: a redstone torch, repeater, comparator or observer reacts by
+/// *scheduling* a recheck 2 (or `2d`) ticks out, and only the tick loop owns
+/// the queue those land in. Placing one of those next to a live circuit
+/// therefore still does nothing until `tick.rs` grows a drain fed from here.
+/// That half is a separate landing; this one is not blocked on it, and dust —
+/// the case #465 is written about — is complete.
+///
+/// Changes are sent to *this* connection only, matching the existing
+/// `encode_block_update` loop above rather than publishing on
+/// [`BlockTickFeed`]; a second connection would not see them. That gap is
+/// pre-existing for placement itself and is not widened here.
+fn propagate_placement<S>(source: &S, target: BlockPos) -> Vec<(BlockPos, String)>
+where
+    S: ChunkSource,
+{
+    let cx = target.x.div_euclid(16);
+    let cz = target.z.div_euclid(16);
+    let (min_x, min_z) = (cx * 16, cz * 16);
+    // Reflects the `set_block` just performed — `ChunkSource::column`'s own
+    // contract is that it includes any edit already applied.
+    let mut column = source.column(cx, cz);
+    if target.y < column.min_y || target.y >= column.min_y + column.height {
+        return Vec::new();
+    }
+    let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+    let events = crate::random_tick::propagate_and_react(
+        &mut column,
+        min_x,
+        min_z,
+        target.x,
+        target.y,
+        target.z,
+        &mut block_ticks,
+        // The queue is discarded, so the tick this is relative to cannot be
+        // observed by anything — see the doc comment above.
+        0,
+    );
+    events
+        .into_iter()
+        .map(|event| {
+            let (ex, ey, ez) = event.pos;
+            source.set_block(ex, ey, ez, &event.to);
+            (BlockPos::new(ex, ey, ez), event.to)
+        })
+        .collect()
 }
 
 /// Per-connection difficulty + game-rule session state (issue #268).
