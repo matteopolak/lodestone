@@ -658,6 +658,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   paragraphs of prose.) Read this before building any of them — several requirements
   below are things a stage must deliver, and finding that out at Baritone time
   (`docs/baritone-port.md`) would mean reopening finished stages.
+- [Async plugin tasks and the World hand-back](./plugin-async-tasks.md) —
+  `AsyncTaskPool` (`crates/lodestone-ecs/src/async_task.rs`) lets a plugin run
+  blocking work off the tick thread — a database query, an HTTP call, a pathfinding
+  search — and get the result back into the `World` safely. Results arrive either by
+  polling a `PendingTask<T>` from a system or through a hand-back closure the pool
+  runs with `&mut World` at a tick boundary. This is Bukkit's `runTaskAsynchronously`
+  plus `runTask`. Issue #114.
 - [Plugin registration — how a consumer gets their plugin into the client](./plugin-registration.md) —
   The seam that lets a crate outside this repo register a `bevy_app::Plugin` into
   Lodestone's client, headless *or* rendered. `lodestone-app`'s `client_app()` returns
