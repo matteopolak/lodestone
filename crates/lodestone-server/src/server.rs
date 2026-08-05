@@ -186,24 +186,41 @@ const SPRINT_ATTACK_KNOCKBACK_POWER: f64 = 0.5;
 #[cfg(not(target_arch = "wasm32"))]
 const VITALS_TICK_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Where a joining player's entity is placed until its client sends a first
-/// movement packet (issue #438).
+/// Returns the Y level a player should stand at for a given local column
+/// position `(lx, lz)` in `[0..16)` within the supplied chunk column.
 ///
-/// This must agree with the position the version crate's
-/// [`ServerProtocol::begin_play`] teleports the client to, or every other
-/// connection sees the newcomer standing somewhere they are not for the
-/// fraction of a second before the first `PlayerMoved` arrives. `v770` uses
-/// `(8, 100, 8)` (`crates/protocol/v770/src/server_protocol.rs`'s
-/// `spawn_x`/`spawn_y`/`spawn_z`), inside chunk `(0, 0)` — the same column
-/// `ViewTracker::new((0, 0), view_radius)` centres this join on.
+/// This is vanilla's `PlayerSpawnFinder.getLevelRespawnPos`
+/// (`.cache/mc/26.2/src/net/minecraft/server/level/PlayerSpawnFinder.java:148`),
+/// simplified to the two operations the current worldgen meaningfully exercises:
 ///
-/// It is a constant here rather than a value read back from the protocol
-/// because [`ServerProtocol`] has no "where is spawn" query and inventing one
-/// for this would be a wider seam change than the problem warrants; when a real
-/// spawn position exists this, `ViewTracker::new((0, 0), …)` and `begin_play`'s
-/// own literals all move together, exactly as that call site's existing comment
-/// already says.
-const JOIN_SPAWN_POSITION: Vec3 = Vec3::new(8.0, 100.0, 8.0);
+/// 1. Scan downward from the top of the column to find the highest non-air,
+///    non-fluid block — the analogue of vanilla's `MOTION_BLOCKING` heightmap
+///    query, which this column has no persisted heightmap for.
+/// 2. Return one block above it (the standing position), exactly like vanilla's
+///    `return pos.above().immutable()` at `:177`.
+///
+/// Vanilla additionally aborts a column where a fluid block is encountered
+/// between the surface and the sky (`!blockState.getFluidState().isEmpty()`
+/// at `:171` — ocean columns, which would place a player in water); this
+/// generator produces neither surface water nor lava at chunk `(0, 0)`
+/// (plains biome), so a fluid abort would never fire in practice. The check
+/// is still expressed here: a block that `is_water` or `is_lava` is treated
+/// as non-solid and skipped, so a column whose surface IS water yields
+/// `min_y + 1` — the same fail-closed direction as the `min_y` fallback.
+///
+/// The returned Y is the **feet** position (vanilla's `pos.above()`), not
+/// the block the player stands on — the caller does not add one.
+fn spawn_surface_y(column: &ChunkColumn, lx: i32, lz: i32) -> i32 {
+    let top_y = column.min_y + column.height - 1;
+    for y in (column.min_y..=top_y).rev() {
+        let state = column.block_state(lx, y, lz);
+        if !is_air_or_fluid(state) {
+            return y + 1;
+        }
+    }
+    // No solid block at all in this column — air world or void.
+    column.min_y + 1
+}
 
 /// A read-only view of the entities in the world right now, supplied by the
 /// caller that owns the simulation and its tick.
@@ -1322,8 +1339,28 @@ where
                 }
             }
             ServerBound::ConfigurationFinished => {
+                // Issue #461: derive spawn Y from terrain at the spawn
+                // column instead of the pre-#461 hardcoded 100. The spawn
+                // X/Z stay at the centre of chunk (0, 0) — the same column
+                // vanilla's own `LevelData.RespawnData.DEFAULT`
+                // (`GlobalPos.of(Level.OVERWORLD, BlockPos.ZERO)`, i.e.
+                // `(0, 0, 0)`) centres on, and the column the ring walk
+                // below already generates first (ring 0 is the spawn
+                // column). If the surface height ever places the player
+                // outside chunk (0, 0), `spawn_cx`/`spawn_cz` below move
+                // the view centre with it.
+                //
+                // Uses vanilla's `PlayerSpawnFinder.getLevelRespawnPos`
+                // rule (`.cache/mc/26.2/src/net/minecraft/server/level/
+                // PlayerSpawnFinder.java:148`): scan downward from the top
+                // for the first solid block, stand one above it — see
+                // [`spawn_surface_y`].
+                let spawn_column = source.get().column(0, 0);
+                let spawn_y = spawn_surface_y(&spawn_column, 8, 8);
+                let spawn = Vec3::new(8.0, spawn_y as f64, 8.0);
+
                 state = State::Play;
-                for directive in proto.begin_play(view_radius) {
+                for directive in proto.begin_play_at(view_radius, spawn) {
                     apply(conn, &mut state, directive).await?;
                 }
 
@@ -1360,11 +1397,6 @@ where
                 // chunk is encoded after exactly one column of generation, and
                 // the sequence is non-decreasing in distance from the centre
                 // thereafter.
-                //
-                // The centre is `(0, 0)` because that is where this join places
-                // the player (`ViewTracker::new((0, 0), view_radius)` below, and
-                // `begin_play`'s own spawn point); when a real spawn position
-                // arrives this and that line move together.
                 //
                 // Still **one** chunk batch, not one per ring: the batch markers
                 // stay outside this loop, so the client's flow-control
@@ -1405,7 +1437,7 @@ where
                     registry.join(
                         &username,
                         login_uuid.unwrap_or_else(uuid::Uuid::nil),
-                        JOIN_SPAWN_POSITION,
+                        spawn,
                     )
                 });
 
@@ -1425,7 +1457,14 @@ where
                     apply(conn, &mut state, directive).await?;
                 }
 
-                let view = ViewTracker::new((0, 0), view_radius);
+                // Issue #461: derive view centre from the actual spawn
+                // chunk rather than assuming (0, 0). For spawn at (8, ~64,
+                // 8) both floor to 0, so the centre does not change today;
+                // the derivation is the point — when the spawn column or
+                // the X/Z offsets move, this follows automatically.
+                let spawn_cx = (spawn.x / 16.0).floor() as i32;
+                let spawn_cz = (spawn.z / 16.0).floor() as i32;
+                let view = ViewTracker::new((spawn_cx, spawn_cz), view_radius);
                 // Issues #48/#464. Built here, at the Play handoff, because
                 // this is the first point where both halves of a caller's
                 // identity are known and settled: `login_uuid` is the uuid

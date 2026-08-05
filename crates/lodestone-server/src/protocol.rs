@@ -748,6 +748,21 @@ pub trait ServerProtocol: Send + Sync {
     /// the view radius itself.
     fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective>;
 
+    /// Like [`begin_play`](Self::begin_play), but derives the spawn teleport
+    /// and default-spawn-position coordinates from `spawn` (world-space, feet
+    /// position) rather than from hardcoded version-specific literals — issue
+    /// #461: spawn Y is terrain-derived, and the server computes it; the
+    /// protocol only needs to encode it. The chunk-cache center is also
+    /// derived from `spawn` rather than assumed to be `(0, 0)`.
+    ///
+    /// The default delegates to [`begin_play`](Self::begin_play), so a family
+    /// that has not adopted terrain-derived spawn yet keeps its existing
+    /// hardcoded join behaviour unchanged.
+    fn begin_play_at(&self, view_radius: i32, spawn: Vec3) -> Vec<ServerDirective> {
+        let _ = spawn;
+        self.begin_play(view_radius)
+    }
+
     /// Marks the start of a chunk batch (vanilla's `CHUNK_BATCH_START`, an
     /// empty body in every known protocol).
     fn begin_chunk_batch(&self) -> ServerDirective;
