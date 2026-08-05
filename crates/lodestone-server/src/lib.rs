@@ -102,6 +102,7 @@ mod block_entities;
 mod brewing;
 mod chunk;
 mod composter;
+pub mod ecs;
 mod fall;
 mod furnace;
 mod gravity_tick;

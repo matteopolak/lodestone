@@ -173,6 +173,14 @@ pub struct IntegratedServer {
     /// MSPT/TPS/overrun accounting for `tick_task` (issue #285) — `Some` iff
     /// `tick_task` is, and read through [`tick_stats`](Self::tick_stats).
     clock: Option<Arc<TickClock>>,
+    /// The read-only witness for this server's own `bevy_ecs::World` (issue
+    /// #433 Phase 0), `Some` iff `tick_task` is — the `World` itself is owned
+    /// outright by that task and has no lock, so this handle is the *only*
+    /// thing about it observable from here. Read through
+    /// [`server_tick_count`](Self::server_tick_count); see
+    /// `crate::ecs::ServerTickWitness` for why it is a one-way valve rather
+    /// than an accessor.
+    server_tick: Option<crate::ecs::ServerTickWitness>,
 }
 
 impl IntegratedServer {
@@ -256,6 +264,8 @@ impl IntegratedServer {
                 task,
                 tick_task: None,
                 clock: None,
+                // No tick task, so nobody owns a server `World` (issue #433).
+                server_tick: None,
             },
             client_end,
         )
@@ -390,19 +400,45 @@ impl IntegratedServer {
         });
 
         let clock = Arc::new(TickClock::new());
-        let tick_task = spawn_tick_task(
-            &shutdown,
+        // Issue #433 Phase 0: build this server's own `bevy_ecs::World` here,
+        // synchronously, before the tick task spawns — the same reason
+        // `mob_handle` above is built here rather than inside the future, and
+        // it is also what makes the Phase 0 gate deterministic (no polling: by
+        // the time this constructor returns, `ServerBoot` has already run).
+        //
+        // `into_world()` rather than keeping the `App`: `bevy_app::App` is
+        // **not** `Send` (its `runner` field is a `Box<dyn FnOnce(App) ->
+        // AppExit>` with no `Send` bound), so it cannot cross `spawn`. `World`
+        // is, and it carries the `Schedules` resource with it. See
+        // `crate::ecs`'s module doc — Phase 1 threads `&mut World` into
+        // `run_tick_loop`, not `&mut App`.
+        let server_app = crate::ecs::ServerApp::bootstrap();
+        let server_tick = server_app.witness();
+        let server_world = server_app.into_world();
+        // Cloned out here rather than inside the `async move` below: an
+        // `Arc::clone(&x)` *inside* the block moves `x` into the coroutine, so
+        // `clock` would no longer be available for the `Self` literal further
+        // down. Before this change the calls were argument expressions,
+        // evaluated eagerly, and the distinction did not arise.
+        let tick_clock = Arc::clone(&clock);
+        let tick_source = Arc::clone(&source);
+        let tick_task = spawn_tick_task(&shutdown, async move {
+            // Owned by the tick task, with no lock, per `docs/server-ecs.md`.
+            // Phase 1 replaces this binding with a `&mut` argument to
+            // `run_tick_loop` and runs `GameTick` once per iteration.
+            let _server_world = server_world;
             run_tick_loop(
                 mob_handle,
                 live_mobs,
                 block_entities,
-                Arc::clone(&clock),
-                Arc::clone(&source),
+                tick_clock,
+                tick_source,
                 block_tick_feed,
                 tick_area,
                 explosion_feed,
-            ),
-        );
+            )
+            .await;
+        });
 
         (
             Self {
@@ -412,6 +448,7 @@ impl IntegratedServer {
                 task,
                 tick_task: Some(tick_task),
                 clock: Some(clock),
+                server_tick: Some(server_tick),
             },
             client_end,
         )
@@ -492,15 +529,38 @@ impl IntegratedServer {
         let hub_block_ticks = BlockTickFeed::default();
         let hub_explosions = ExplosionFeed::default();
         let clock = Arc::new(TickClock::new());
-        let tick_task = spawn_tick_task(
-            &shutdown,
+        // Issue #433 Phase 0, same as `open_in_memory_with_mobs` above — and for
+        // the reason that constructor's comment gives: one world, one loop, one
+        // `World`. #439 gave LAN its own tick loop, so LAN gets its own server
+        // `World` too rather than sharing singleplayer's, which would be exactly
+        // the "both entry points share one loop" mistake the comment above this
+        // block already rules out.
+        let server_app = crate::ecs::ServerApp::bootstrap();
+        let server_tick = server_app.witness();
+        let server_world = server_app.into_world();
+        // Every one of these is cloned out *here* rather than inside the
+        // `async move` below: a `.clone()` inside the block moves the original
+        // into the coroutine, and all six are still needed afterwards (`clock`
+        // for the `Self` literal, the other five for the relay arm). Before this
+        // change they were argument expressions, evaluated eagerly, and the
+        // distinction did not arise.
+        let tick_clock = Arc::clone(&clock);
+        let tick_source = Arc::clone(&source);
+        let tick_mobs = mobs.clone();
+        let tick_live_mobs = live_mobs.clone();
+        let tick_block_entities = block_entities.clone();
+        let tick_block_ticks = hub_block_ticks.clone();
+        let tick_explosions = hub_explosions.clone();
+        let tick_task = spawn_tick_task(&shutdown, async move {
+            // Owned by the tick task, with no lock, per `docs/server-ecs.md`.
+            let _server_world = server_world;
             run_tick_loop(
-                mobs.clone(),
-                live_mobs.clone(),
-                block_entities.clone(),
-                Arc::clone(&clock),
-                Arc::clone(&source),
-                hub_block_ticks.clone(),
+                tick_mobs,
+                tick_live_mobs,
+                tick_block_entities,
+                tick_clock,
+                tick_source,
+                tick_block_ticks,
                 // The same small fixed region `open_in_memory_with_mobs`
                 // threads through as `mob_area`, centred on (0, 0), because
                 // this crate still has no "loaded chunks" registry to derive
@@ -513,9 +573,10 @@ impl IntegratedServer {
                     -LAN_TICK_RADIUS..=LAN_TICK_RADIUS,
                     -LAN_TICK_RADIUS..=LAN_TICK_RADIUS,
                 ),
-                hub_explosions.clone(),
-            ),
-        );
+                tick_explosions,
+            )
+            .await;
+        });
 
         let relay_block_ticks = hub_block_ticks.clone();
         let relay_explosions = hub_explosions.clone();
@@ -606,6 +667,7 @@ impl IntegratedServer {
             task,
             tick_task: Some(tick_task),
             clock: Some(clock),
+            server_tick: Some(server_tick),
         })
     }
 
@@ -635,6 +697,34 @@ impl IntegratedServer {
     #[must_use]
     pub fn tick_stats(&self) -> Option<TickStats> {
         self.clock.as_deref().map(TickClock::stats)
+    }
+
+    /// How many times a system registered on this server's own
+    /// `bevy_ecs::World` has run (issue #433 Phase 0), or `None` for a handle
+    /// with no world-tick task — the same `Some` iff `tick_task` rule
+    /// [`tick_stats`](Self::tick_stats) follows.
+    ///
+    /// # What this is for, and what it deliberately is not
+    ///
+    /// It is the evidence that the server `World` is *live* rather than an inert
+    /// scaffold — the client's `WindowApp.ecs` (issue #37) is an `App` nothing
+    /// ever runs a schedule against, and this accessor exists so the same thing
+    /// cannot happen here unnoticed. It is **not** a way to read the `World`:
+    /// the count is mirrored out through `crate::ecs::ServerTickWitness`,
+    /// carries no simulation state, and hands out no reference. Per
+    /// `docs/server-ecs.md` the `World` has no lock precisely because nothing
+    /// outside the tick task reaches into it, and this must not become the
+    /// exception.
+    ///
+    /// After Phase 0 this reads `Some(1)` for the life of the handle (one
+    /// `ServerBoot` run). Once Phase 1 lands it advances once per world tick and
+    /// should track [`TickStats::tick_count`] — a divergence between the two is
+    /// the island detector.
+    #[must_use]
+    pub fn server_tick_count(&self) -> Option<u64> {
+        self.server_tick
+            .as_ref()
+            .map(crate::ecs::ServerTickWitness::count)
     }
 
     /// Signals the serving task to stop without awaiting it. Idempotent.
