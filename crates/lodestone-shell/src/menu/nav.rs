@@ -1457,6 +1457,20 @@ impl MenuNav {
                     self.settings.key_binds().scroll(),
                 ))
             }
+            // Language (#445's third adoption). Its length is the **post-filter**
+            // entry count, so typing in the search box shortens the bar instead of
+            // leaving a thumb sized for the full list — `LanguageNav::model` is
+            // the one expression that decides, and this arm calls the same
+            // `list_spec` it does.
+            super::Screen::Settings
+                if self.settings.page() == crate::menu::options::SettingsPage::Language =>
+            {
+                let lang = self.settings.language();
+                Some(super::language::list_spec(
+                    lang.entries().len(),
+                    lang.scroll(),
+                ))
+            }
             _ => None,
         }
     }
@@ -1505,6 +1519,15 @@ impl MenuNav {
                 let before = binds.scroll();
                 binds.scroll_by(notches, canvas_height);
                 binds.scroll() != before
+            }
+            // Language (#445). Same page guard as `active_list`'s arm.
+            super::Screen::Settings
+                if self.settings.page() == crate::menu::options::SettingsPage::Language =>
+            {
+                let lang = self.settings.language_mut();
+                let before = lang.scroll();
+                lang.scroll_by(notches, canvas_height);
+                lang.scroll() != before
             }
             _ => false,
         }

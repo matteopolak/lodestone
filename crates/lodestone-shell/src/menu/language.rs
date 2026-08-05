@@ -291,11 +291,15 @@ impl LanguageControl {
 }
 
 /// Where one widget sits — [`Origin::Language`]'s whole body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// **`Row::scroll` is pixels, not a row index (issue #445)** — see
+/// [`super::key_binds::KeyPlacement`]'s doc for the full argument. `Eq` went with
+/// the change, as it did there.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LanguagePlacement {
-    /// A row of the (possibly filtered) language list, absolute index `row`
-    /// with `first` scrolled to the window's top.
-    Row { row: u16, first: u16 },
+    /// A row of the (possibly filtered) language list, absolute index `row`,
+    /// with the list scrolled `scroll` pixels down.
+    Row { row: u16, scroll: f32 },
     /// The header's title line ("Language").
     Title,
     /// The header's search box.
@@ -311,13 +315,12 @@ pub enum LanguagePlacement {
 #[must_use]
 pub fn placement_anchor(placement: LanguagePlacement, width: f32, height: f32) -> (f32, f32) {
     match placement {
-        LanguagePlacement::Row { row, first } => {
-            // Off-canvas rather than underflowing, the same anti-island
-            // sentinel `super::key_binds::placement_anchor` uses.
-            let Some(index) = row.checked_sub(first) else {
-                return (-1000.0, -1000.0);
-            };
-            let y = first_entry_y() + f32::from(index) * ROW_H;
+        LanguagePlacement::Row { row, scroll } => {
+            // Pixel scrolling (#445): a row's y is its absolute offset minus the
+            // scroll, so there is no `checked_sub` to underflow and no off-canvas
+            // sentinel. A row above the band resolves above it and `render::draw`
+            // clips it. `scroll.floor()` is vanilla's `(int)scrollAmount`.
+            let y = first_entry_y() + f32::from(row) * ROW_H - scroll.floor();
             (width * 0.5, y)
         }
         LanguagePlacement::Title => rect_xy(&frame_widget_rects(width, height), TITLE_RECT),
@@ -345,6 +348,25 @@ pub fn visible_rows_len() -> usize {
     (window / ROW_H).floor().max(1.0) as usize
 }
 
+/// This screen's list, as the generic [`super::widget::ListSpec`] the scrollbar
+/// draw and the mouse wheel both go through (issue #445).
+///
+/// Note this screen uses **its own** [`HEADER_HEIGHT`] (36) and
+/// [`FOOTER_HEIGHT`] (53), not `options::SUB_HEADER_HEIGHT`/`FOOTER_HEIGHT`
+/// (33/33): `setFooterHeight(53)` (`:35`) makes room for the accuracy warning
+/// line, and the header carries the search box. Passing the generic pair would
+/// put the band 3 px too high and 20 px too tall, and the bar with it.
+///
+/// `top` is `HEADER_HEIGHT` un-inset, because [`super::widget::ScrollList`] adds
+/// [`super::widget::LIST_CONTENT_PADDING`] itself — the same 2 px
+/// [`first_entry_y`] adds as `options::LIST_TOP_INSET`. Adding it here as well
+/// would double it. Asserted against `first_entry_y` in this module's tests
+/// rather than left to agree by eye.
+#[must_use]
+pub fn list_spec(len: usize, scroll: f32) -> super::widget::ListSpec {
+    super::widget::ListSpec::uniform(ROW_H, HEADER_HEIGHT, FOOTER_HEIGHT, len, ROW_WIDTH).at(scroll)
+}
+
 // -- navigation ---------------------------------------------------------------
 
 /// What [`LanguageNav`] asks its caller ([`super::options::SettingsNav`]) to
@@ -364,7 +386,8 @@ pub struct LanguageNav {
     search: EditBox,
     /// Index into [`Self::visible`] (post-filter).
     cursor: usize,
-    first: usize,
+    /// Scroll offset in **pixels** (issue #445), not a row index.
+    scroll: f32,
 }
 
 impl Default for LanguageNav {
@@ -392,7 +415,7 @@ impl LanguageNav {
         Self {
             search,
             cursor: 0,
-            first: 0,
+            scroll: 0.0,
         }
     }
 
@@ -421,21 +444,42 @@ impl LanguageNav {
         self.cursor
     }
 
+    /// The scroll offset, in pixels.
     #[must_use]
-    pub fn first(&self) -> usize {
-        self.first
+    pub fn scroll(&self) -> f32 {
+        self.scroll
+    }
+
+    /// The live [`super::widget::ScrollList`] at this canvas height, or `None`
+    /// when there is nothing to scroll. Built from the **post-filter** entry
+    /// count, so typing in the search box shortens the bar rather than leaving
+    /// a thumb sized for the unfiltered list.
+    #[must_use]
+    fn model(&self, canvas_height: f32) -> Option<super::widget::ScrollList> {
+        list_spec(self.entries().len(), self.scroll).model(canvas_height)
+    }
+
+    /// One mouse-wheel notch, through the primitive. Positive scrolls **up**;
+    /// the negation lives in [`super::widget::ScrollList::mouse_scrolled`].
+    pub fn scroll_by(&mut self, notches: f32, canvas_height: f32) {
+        let Some(mut list) = self.model(canvas_height) else {
+            return;
+        };
+        list.mouse_scrolled(notches);
+        self.scroll = list.scroll();
     }
 
     /// Every focusable control: each visible (post-filter, post-scroll) row,
     /// then Font Settings and Done.
     #[must_use]
     pub fn visible(&self) -> Vec<LanguageControl> {
-        let entries = self.entries();
-        let len = entries.len();
-        let end = (self.first + visible_rows_len()).min(len);
-        let mut out: Vec<LanguageControl> = (self.first.min(len)..end)
-            .map(LanguageControl::Select)
-            .collect();
+        // **Every** row, not a `first..end` window (issue #445). The slice was
+        // the row-index model's other half; clipping to the band is
+        // `render::draw`'s job now, so a half-scrolled row draws its visible half
+        // instead of vanishing. `selected_row` matches on `Select(i)`'s absolute
+        // index and is indifferent to the change.
+        let mut out: Vec<LanguageControl> =
+            (0..self.entries().len()).map(LanguageControl::Select).collect();
         out.push(LanguageControl::FontSettings);
         out.push(LanguageControl::Done);
         out
@@ -475,21 +519,23 @@ impl LanguageNav {
         self.scroll_to_cursor();
     }
 
+    /// Bring the cursor's row into the band — vanilla's `ensureVisible`, through
+    /// [`super::widget::ScrollList::scroll_to_entry`] (issue #445).
+    ///
+    /// Was a `while self.cursor >= self.first + visible_rows_len() { self.first
+    /// += 1 }` walk, which stepped a whole [`ROW_H`] at a time; `scroll_to_entry`
+    /// moves the minimum pixels. `MIN_SCALED_HEIGHT` for the reason
+    /// `stats::step` records — a keypress has no canvas in hand.
     fn scroll_to_cursor(&mut self) {
         let len = self.entries().len();
         if self.cursor >= len {
             return; // the footer is always visible; nothing to scroll for it.
         }
-        if self.cursor < self.first {
-            self.first = self.cursor;
+        let Some(mut list) = self.model(crate::config::MIN_SCALED_HEIGHT as f32) else {
             return;
-        }
-        while self.cursor >= self.first + visible_rows_len() {
-            if self.first + 1 >= len {
-                break;
-            }
-            self.first += 1;
-        }
+        };
+        list.scroll_to_entry(self.cursor);
+        self.scroll = list.scroll();
     }
 
     /// Puts the cursor on the control at visible row `row` — the mouse's
@@ -572,7 +618,7 @@ impl LanguageNav {
 
     fn after_filter_changed(&mut self) {
         self.cursor = 0;
-        self.first = 0;
+        self.scroll = 0.0;
     }
 }
 
@@ -617,15 +663,18 @@ pub fn frame(nav: &LanguageNav) -> MenuFrame<'static> {
     }];
     // Every row pushed after this point is one past `selected_row`'s index
     // space because of the search row above.
-    let end = (nav.first() + visible_rows_len()).min(entries.len());
-    for (row, entry) in entries.iter().enumerate().take(end).skip(nav.first()) {
+    // Every row, clipped to the band by `render::draw` rather than sliced here
+    // (issue #445). These are `MenuRow`s, so they get the band's clip rect from
+    // draw.rs's per-row `with_clip` and need no `list_labels` vector the way
+    // `key_binds`'s free-text name labels do.
+    for (row, entry) in entries.iter().enumerate() {
         rows.push(MenuRow {
             label: entry.name.to_string(),
             enabled: true,
             slot: Some(Slot {
                 origin: Origin::Language(LanguagePlacement::Row {
                     row: row as u16,
-                    first: nav.first() as u16,
+                    scroll: nav.scroll(),
                 }),
                 dx: -ROW_WIDTH * 0.5,
                 dy: 0.0,
@@ -786,14 +835,149 @@ mod tests {
         assert_eq!(first_entry_y(), HEADER_HEIGHT + options::LIST_TOP_INSET);
     }
 
+    /// A row scrolled above the band resolves **above** it, not at the old
+    /// `(-1000, -1000)` sentinel — which existed only because
+    /// `row.checked_sub(first)` could underflow. With a pixel offset there is
+    /// nothing to underflow, and `render::draw` clips the negative y.
     #[test]
-    fn a_row_placement_scrolled_above_the_window_is_off_canvas() {
+    fn a_row_scrolled_above_the_band_resolves_above_it_not_at_a_sentinel() {
         let (x, y) = placement_anchor(
-            LanguagePlacement::Row { row: 0, first: 5 },
+            LanguagePlacement::Row {
+                row: 0,
+                scroll: 5.0 * ROW_H,
+            },
             480.0,
             270.0,
         );
-        assert_eq!((x, y), (-1000.0, -1000.0));
+        assert_eq!(x, 240.0, "the x is still the canvas centre");
+        assert_eq!(
+            y,
+            first_entry_y() - 5.0 * ROW_H,
+            "and the y is five rows above the band's first-entry line, exactly"
+        );
+    }
+
+    /// **One notch is `floor(ROW_H / 2)` = `floor(18 / 2)` = 9 px** (issue #445),
+    /// and the offset must coincide with no row top.
+    ///
+    /// # This screen's real table has ONE entry, so the length is synthetic
+    ///
+    /// Written first as `LanguageNav::new()` plus `scroll_by`, and the premise
+    /// assertion **fired**: `there_is_exactly_one_real_language_and_it_is_english_us`
+    /// is the neighbouring gate, this client ships one language, and a one-entry
+    /// list is not scrollable at any canvas. That is the *world* species of
+    /// vacuous test — the input data structurally cannot exercise the change —
+    /// and it would have read as a pass the moment anyone made `scroll_by`
+    /// tolerant of an unscrollable list, which it already is.
+    ///
+    /// So the arithmetic is driven at a synthetic 50 entries through **the same
+    /// `list_spec` the production path uses** (`LanguageNav::model` and
+    /// `MenuNav::active_list` both call it), and the one-entry reality is asserted
+    /// separately below as the control. What this cannot cover is a second
+    /// language actually shipping; that is a resource-pack fact, not a UI one.
+    #[test]
+    fn one_wheel_notch_is_half_a_row_and_lands_off_every_row_top() {
+        const CANVAS_H: f32 = 240.0;
+        const SYNTHETIC_LEN: usize = 50;
+
+        let mut list = list_spec(SYNTHETIC_LEN, 0.0)
+            .model(CANVAS_H)
+            .expect("a band at 240 px");
+        assert!(
+            list.scrollable(),
+            "premise: {SYNTHETIC_LEN} rows of {ROW_H} px must overflow this \
+             screen's own band, or every assertion below is vacuous"
+        );
+
+        // Negative notches scroll *down*; the sign lives in `mouse_scrolled`.
+        list.mouse_scrolled(-1.0);
+        assert_eq!(
+            list.scroll(),
+            9.0,
+            "one notch must be floor(ROW_H / 2) = floor(18 / 2) = 9"
+        );
+        assert_ne!(list.scroll(), ROW_H, "control: the row-index answer is 18");
+        assert_ne!(
+            list.scroll(),
+            10.0,
+            "control: 10 is floor(options::WIDGET_H / 2) — this screen's row \
+             height is `LanguageSelectionList`'s own 18, not the generic 20, and \
+             a mix-up would report 10 here"
+        );
+
+        list.mouse_scrolled(-2.0);
+        assert_eq!(list.scroll(), 27.0, "three notches: 27");
+        assert_ne!(
+            list.scroll() % ROW_H,
+            0.0,
+            "27 must coincide with no row top — a multiple of {ROW_H} is exactly \
+             what snap-to-row produces, so this excludes the whole row-index \
+             family rather than one member"
+        );
+    }
+
+    /// **The control for the gate above, run and observed**: the real one-entry
+    /// table does not scroll, and `scroll_by` on it is a no-op rather than a
+    /// panic or a drift.
+    ///
+    /// This is what makes the synthetic length above honest — it states the real
+    /// world rather than hiding it, and it pins the empty/short-list path the
+    /// production wheel arm actually takes today.
+    #[test]
+    fn the_real_one_entry_table_does_not_scroll_at_all() {
+        let mut nav = LanguageNav::new();
+        assert_eq!(
+            nav.entries().len(),
+            1,
+            "premise: this client ships exactly one language — if that changes, \
+             the gate above should be driven through `LanguageNav` instead"
+        );
+        assert!(
+            list_spec(1, 0.0).model(240.0).is_none_or(|l| !l.scrollable()),
+            "one row cannot overflow the band"
+        );
+        nav.scroll_by(-10.0, 240.0);
+        assert_eq!(
+            nav.scroll(),
+            0.0,
+            "and the wheel must leave an unscrollable list exactly where it was"
+        );
+    }
+
+    /// The band `list_spec` declares must put its first row where this screen's
+    /// own [`first_entry_y`] does — two expressions from two modules required to
+    /// agree.
+    ///
+    /// **Written wrong first, and the failure was the point**: it compared
+    /// `list.top()` to `first_entry_y()` and measured 36 against 38.
+    /// `ScrollList::top` is the *band* top; the first entry sits
+    /// [`super::super::widget::LIST_CONTENT_PADDING`] below it, which is
+    /// `ScrollList::first_entry_y`. So `list_spec` correctly passes the un-inset
+    /// `HEADER_HEIGHT` and the 2 px is counted exactly once — passing
+    /// `first_entry_y()` there would have doubled it. The right comparand is the
+    /// primitive's own `first_entry_y`, not its `top`.
+    #[test]
+    fn the_declared_band_puts_its_first_row_where_this_screen_draws_it() {
+        let list = list_spec(50, 0.0).model(240.0).expect("a band at 240 px");
+        assert_eq!(
+            list.top(),
+            HEADER_HEIGHT,
+            "the band starts at this screen's own header height, un-inset"
+        );
+        assert_eq!(
+            list.first_entry_y(),
+            first_entry_y(),
+            "and the first entry lands on this screen's `first_entry_y` — the \
+             2 px content padding counted once, not twice"
+        );
+        // And this screen's own header/footer, not the generic 33/33 pair.
+        assert_eq!((HEADER_HEIGHT, FOOTER_HEIGHT), (36.0, 53.0));
+        assert_ne!(
+            FOOTER_HEIGHT, options::FOOTER_HEIGHT,
+            "control: the generic footer is 33 and this screen's is 53 \
+             (`setFooterHeight(53)`), so using the generic one would be a 20 px \
+             error the band would absorb silently"
+        );
     }
 
     #[test]
