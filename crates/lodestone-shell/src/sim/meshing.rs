@@ -248,6 +248,19 @@ impl Sim {
         self.terrain_and_world(|store, terrain| terrain.mesh_column(store, cx, cz));
     }
 
+    /// Handle a [`NetUpdate::ChunkUnloaded`] signal: drop every GPU section the
+    /// column at `(cx, cz)` still owns (issue #479).
+    ///
+    /// Deliberately *not* a `terrain_and_world` call, unlike every other method
+    /// in this cluster: [`TerrainMesh::forget_column`] takes no store, because
+    /// the column has already left it. Threading a `&ChunkWorld` in here would
+    /// invite the natural-looking implementation that enumerates the column's
+    /// sections from `store.extent()` — which enumerates nothing, silently, and
+    /// would reproduce the bug with a fix-shaped commit in front of it.
+    pub(crate) fn on_column_unloaded(&mut self, cx: i32, cz: i32) {
+        self.terrain_mut(|terrain| terrain.forget_column(cx, cz));
+    }
+
     /// Settle any placement prediction the server has just overwritten.
     ///
     /// [`NetUpdate::SectionBlocks`] is the shell's view of `BLOCK_UPDATE` /

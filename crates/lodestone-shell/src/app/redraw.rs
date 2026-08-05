@@ -74,12 +74,23 @@ impl WindowApp {
         let device = gpu.device();
         let queue = gpu.queue();
 
-        // Upload any freshly-meshed sections, and drop sections emptied by edits.
-        for meshed in self.sim.drain_meshes() {
-            render.upload_section(device, queue, meshed.key, &meshed.mesh);
-        }
+        // Removals first, then uploads — the order is load-bearing since issue
+        // #479 put chunk unloads on this path. The server's `ViewTracker`
+        // recenter is a forget/**resend** cycle, so one poll can carry an unload
+        // and a re-arrival for the same column, which puts the same `SectionKey`
+        // in both drains. Uploading first would let the removal delete the mesh
+        // that just arrived, leaving a permanent hole exactly where the player
+        // is walking — the bug this fix exists to close, reintroduced by
+        // sequencing. Draining removals first is also correct for the older
+        // `SnapshotOutcome::Empty` path (a section that snapshots to nothing
+        // produces no mesh, so it can never be in both) and it lowers peak
+        // section-origin arena occupancy, since a freed slot is reusable by the
+        // uploads below in the same frame.
         for key in self.sim.drain_removals() {
             render.remove_section(&key);
+        }
+        for meshed in self.sim.drain_meshes() {
+            render.upload_section(device, queue, meshed.key, &meshed.mesh);
         }
 
         let (w, h) = target.size();

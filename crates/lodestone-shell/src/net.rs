@@ -572,6 +572,30 @@ pub enum NetUpdate {
         /// Chunk Z.
         z: i32,
     },
+    /// A chunk column left the server's tracking view (`forget_level_chunk`):
+    /// the client has **already** dropped it from the one [`lodestone_ecs::ChunkWorld`]
+    /// store, so every mesh belonging to it is now geometry for blocks the
+    /// client no longer has.
+    ///
+    /// Issue #479: this variant exists because that eviction previously reached
+    /// only collision. `LiveCollision` re-reads the store every tick, so it
+    /// tracked the unload for free, while the renderer had no signal at all —
+    /// `ClientEvent::ChunkUnloaded` had four producers and no shell consumer and
+    /// died in [`forward`]'s terminal arm, the island class `CLAUDE.md` §1 names.
+    /// The result was a session whose GPU section map, uploaded-section set and
+    /// fixed-capacity origin arena grew monotonically while the store shrank:
+    /// walk far enough in one direction and the arena is exhausted, at which
+    /// point `upload_section` drops each new section's geometry and you collide
+    /// with terrain you cannot see.
+    ///
+    /// Carries no block data, for the same §12.24 reason [`NetUpdate::Chunk`]
+    /// does not: the store is the payload, and this is a signal about it.
+    ChunkUnloaded {
+        /// Chunk X.
+        x: i32,
+        /// Chunk Z.
+        z: i32,
+    },
     /// Blocks changed inside one already-loaded section (a break, a place,
     /// another player's edits). The client has applied them to its world;
     /// `blocks` carries only the section-relative coordinates, so a consumer can
@@ -2116,6 +2140,13 @@ fn forward(
         // event to also carry `column`; we deliberately do not consume it, both
         // to honour the ruling and to stay robust if that field is reverted.
         ClientEvent::ChunkLoaded { pos, .. } => NetUpdate::Chunk { x: pos.x, z: pos.z },
+        // The eviction twin of the arm above, and it is the arm's *absence* that
+        // was issue #479: the adapter had already dropped the column through the
+        // `WorldSink`, so collision followed it and only the renderer was left
+        // holding geometry for blocks the client no longer has. A notification
+        // "with nothing left to do" is exactly what an island looks like from
+        // inside — the thing left to do was on the GPU.
+        ClientEvent::ChunkUnloaded { pos, .. } => NetUpdate::ChunkUnloaded { x: pos.x, z: pos.z },
         ClientEvent::SectionBlocksChanged { section, blocks } => NetUpdate::SectionBlocks {
             x: section.x,
             y: section.y,

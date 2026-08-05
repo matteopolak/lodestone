@@ -2405,6 +2405,21 @@ pub fn route(event: &ClientEvent) -> Route {
             client: true,
             ..Route::NOWHERE
         },
+        // The eviction twin, and this entry used to read `CLIENT` with the
+        // comment "the adapter has already dropped the column through the
+        // `WorldSink`, so the event is a notification with nothing left to do."
+        // That was true of the *world* and false of the *renderer*, which is
+        // issue #479: collision re-reads the store every tick and so tracked the
+        // unload for free, while the GPU kept every section the column ever
+        // uploaded — for the whole session, unculled, against a fixed-capacity
+        // origin arena. Kept as a worked example of the failure mode `CLAUDE.md`
+        // §2 warns about: a routing claim that is accurate about one consumer and
+        // silently wrong about another, which nothing about it looks stale.
+        ClientEvent::ChunkUnloaded { .. } => Route {
+            shell: true,
+            client: true,
+            ..Route::NOWHERE
+        },
         // Only sub-event 2001 (block-break effect) is consumed; the rest fall
         // through on purpose, so adding a consumer later is a new arm and not a
         // new packet.
@@ -2417,9 +2432,6 @@ pub fn route(event: &ClientEvent) -> Route {
         // `SharedState::apply`'s own arm, ahead of both `handles_event` calls:
         // straight into the `WorldTime` resource.
         ClientEvent::TimeChanged { .. } => CLIENT,
-        // The adapter has already dropped the column through the `WorldSink`, so
-        // the event is a notification with nothing left to do.
-        ClientEvent::ChunkUnloaded { .. } => CLIENT,
 
         // ---- world-level admin state, folded by `session` ---------------------
         //

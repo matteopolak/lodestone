@@ -89,6 +89,12 @@ impl Sim {
                     // meshes live columns through the vanilla classifier.
                     self.on_column_arrived(x, z);
                 }
+                NetUpdate::ChunkUnloaded { x, z } => {
+                    // Issue #479's missing half. The column is already out of the
+                    // store (the adapter unloads before it emits), so this drops
+                    // only what the *renderer* still holds for it.
+                    self.on_column_unloaded(x, z);
+                }
                 NetUpdate::SectionBlocks { x, y, z, blocks } => {
                     // A server-authoritative edit inside one loaded section.
                     // Re-mesh at *section* granularity, not the whole column:
