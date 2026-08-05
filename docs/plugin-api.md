@@ -259,6 +259,63 @@ the material above, and of the stage-map table further down, are a larger pass
 than this note; treat the bullets here as the authoritative current state where
 they overlap with the prose above, and the prose above as Stage-1-era history.
 
+### Intent components: what shape a producer takes, and where the wall is
+
+Re-verified for issue #436's "no plugin producer exists yet in `crates/plugins/`" ledger entry. The
+claim is **true** — the only things that construct a `BreakIntent` or `PlaceIntent` anywhere in the
+tree are `lodestone-shell`'s two test harnesses and `lodestone-ecs`' own unit tests — but the
+interesting part is *why*, because it is not that the doctrine is the wrong shape.
+
+**The install/remove shape is already proven, and needs no second mechanism.** `lodestone-autopilot`
+is a working native producer of the *other* two intents: `drive_plan` mutates `MovementIntent`
+in place through its query (the component is always present, inserted at spawn) and claims/releases
+`LookIntent` through `Commands` — `insert` while it is steering, `remove::<LookIntent>()` exactly once
+on arrival. `BreakIntent`/`PlaceIntent` are the same kind of thing with the same lifecycle, and every
+type involved lives in `lodestone-ecs`, which every plugin already depends on. **Nothing structurally
+prevents a plugin from producing them today.** So the answer to "does making intents producible require
+changing the install/remove doctrine?" is *no, not for native plugins* — the doctrine is a component
+lifecycle, and a component lifecycle is exactly what a bevy plugin is good at.
+
+Ordering is the one rule a producer must get right, and `lodestone-autopilot`'s is the idiom to copy:
+`.after(TickSet::Intent).before(TickSet::Physics)` for movement, and for break/place anything that runs
+before `TickSet::Send`, where both consumers live. Naming the *set* rather than the consuming system is
+deliberate — a producer that named `drive_mining` would version-lock itself to the shell.
+
+**Where it is genuinely blocked is the ABI, and the dependency wall — not the shape.**
+
+- *WASM guests.* `docs/wasm-plugin-host.md` records that the intent half is absent from the v0.1 ABI,
+  and this is the one place install/remove really is the wrong shape: a component handle is not a
+  value, so crossing it needs paired ABI calls the host mirrors into real inserts/removes plus an
+  outcome poll, rather than the one-crossing-per-tick world that exists. "A guest can chat and swing;
+  it cannot yet mine, place or steer." That is an ABI design problem, not an intent design problem.
+- *The dependency wall.* The consumers — `drive_mining` and `drive_placement` — live in
+  `lodestone-shell`, and **no crate under `crates/plugins/` depends on `lodestone-shell`** (verified:
+  zero matches across every plugin manifest). `sim/build.rs` explains why they are stranded there and
+  it is not render coupling: `interact.rs` imports fourteen items from `crate::sim`, a cycle with `Sim`
+  itself. A plugin can therefore *produce* an intent but cannot integration-test the effect from its
+  own crate; an end-to-end gate has to live in `crates/lodestone-shell/tests/`.
+- *The declared consumer does not exist yet.* The ledger names "future autopilot mining/bridging
+  (M4/M5)". `lodestone-nav` is M1: `MoveKind` is `{Walk, StepUp, Descend, Drop, WalkDiagonal, Climb}`
+  with **no `Break` or `Place` variant**, so the search core cannot currently express a plan edge that
+  would map to either intent. This island is correctly declared and blocked upstream of itself.
+
+**A separate, undeclared island found while verifying the above: `drive_placement` is registered in no
+schedule at all.** `InteractPlugin::build` adds `(send_abilities, send_sprint_command, drive_mining)`
+and nothing else; `drive_placement` appears exactly once in `crates/lodestone-shell/src/` — its own
+definition — and the only `add_systems` naming it anywhere is `tests/place_intent.rs`'s **hand-built**
+`Schedule`. That is the shape issue #467 had: a correct, well-gated subsystem whose gate builds its own
+schedule, so a green test suite says nothing about whether production ever runs it. `interact.rs`'s own
+module doc says "registers two systems" and lists the two, so the code and the prose agree — nothing
+looks wrong on inspection, which is why it survived.
+
+Player-facing impact is nil, and this is worth stating precisely rather than reassuringly: human
+right-click placement never went through this system. It goes through `Sim::use_item_live` →
+`placement_facts`, a `Sim` method path that `sim/placement.rs`'s module doc contrasts with
+`drive_placement` explicitly. What is dead is **only** the plugin `PlaceIntent` path — so a plugin that
+inserted a `PlaceIntent` today would watch it sit on the entity forever, unconsumed and un-acknowledged,
+while the identical `BreakIntent` worked. Registering it is behaviour-neutral for players: the system
+early-returns when no `PlaceIntent` component is present, which is every tick unless a plugin is loaded.
+
 ### The plugin event bus and cross-plugin priority ordering
 
 Issues #104/#105/#110, landed together because #105 and #110 both depend on #104's bus existing at
