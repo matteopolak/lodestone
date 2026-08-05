@@ -126,6 +126,7 @@
 //! once a shipped binary root actually depends on it — never something to
 //! suppress.
 
+pub mod async_task;
 pub mod chunks;
 pub mod entity;
 pub mod events;
@@ -155,6 +156,10 @@ pub use bevy_ecs as ecs;
 /// `RwLock`s that look identical and are not the same lock.
 pub use parking_lot;
 
+pub use async_task::{
+    AsyncTaskPool, AsyncTaskPoolPlugin, PendingTask, PoolStats, drain_completed_tasks,
+    in_async_worker,
+};
 pub use chunks::{ChunkWorld, WorldExtent};
 pub use events::{GameEvent, GameEventBus, GameEventBusPlugin};
 pub use handle::{

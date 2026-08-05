@@ -202,6 +202,13 @@ impl Ledger {
     /// that cannot make progress. See [`check`](Self::check).
     #[track_caller]
     fn enter(handle: &EcsHandle, write: bool) -> Self {
+        // Rule 2 (issue #114), checked before rule 1: a guard taken from an
+        // `AsyncTaskPool` worker thread is a different defect from a reentrant
+        // one — it is not this thread's *second* guard, it is a guard taken from
+        // a thread that must never take one at all — and it would otherwise
+        // sail past `check` below and block for a frame or hang. See
+        // `crate::async_task`'s module doc for what this is blind to.
+        crate::async_task::assert_not_in_async_worker(write);
         let entry = Held {
             handle: Arc::as_ptr(handle) as usize,
             write,
