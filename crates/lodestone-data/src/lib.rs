@@ -91,6 +91,7 @@ pub mod collision_shapes;
 pub mod damage_types;
 pub mod data_component_types;
 pub mod entity_census;
+pub mod entity_disguise;
 pub mod entity_dimensions;
 pub mod entity_types;
 pub mod hardness;

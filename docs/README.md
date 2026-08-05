@@ -267,6 +267,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   heard of the publisher. `lodestone_ecs::plugin_message` carries the one piece of
   machinery it needs, and three toy crates under `crates/plugins/` prove it end to
   end. Issue #107.
+- [Custom entity types](./custom-entity-types.md) — A registry mapping a plugin's
+  own entity kind (`myplugin:sentry`) to the vanilla entity type it is **disguised as
+  on the wire** (`minecraft:armor_stand`) — issue
+  [#140](https://github.com/matteopolak/lodestone/issues/140).
 - [Custom items](./custom-items.md) — The API a plugin uses to define an item the
   vanilla registry does not have (issue
   [#147](https://github.com/matteopolak/lodestone/issues/147)): its own namespaced id,
