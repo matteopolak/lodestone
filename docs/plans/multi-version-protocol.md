@@ -2,85 +2,194 @@
 
 ## What it is
 
-The implementation plan for epic #343 (join servers from 1.7.10 through 26.2, children
+The implementation plan for epic #343 (every major version 1.7.10 through 26.2, children
 #344–#358): family-per-wire-era with range extension inside an era, a shared canonicalisation
-crate every legacy family maps through, and a capture-once oracle strategy. Written 2026-08-04
-from a verified survey of the tree; every "X exists / X is missing" claim below was re-checked
-that day, not copied from an older document.
+crate every legacy family maps through, a capture-once oracle strategy, and the
+join-versus-host split stated per version with the hosting blockers located in the tree.
+Re-verified 2026-08-05 at `d197d555`; every "X exists / X is missing" claim below was
+re-checked against the tree that day, not copied forward from the previous revision.
 
-## Verified ground truth, 2026-08-04
+## Verified ground truth, 2026-08-05, at `d197d555`
 
-Re-verified per CLAUDE.md rule 2 — several of the epic's own premises were already stale.
+Re-verified per CLAUDE.md rule 2. The previous revision of this plan (written 2026-08-04,
+`1df63a6`) was already stale in five figures within one day — v770 clientbound 113→114,
+serverbound-connected 15→17, decode-to-`Ignored` 45→43, and two crate line counts. Nothing
+in it was wrong when written. **That is the general property of numbers in this repo, not a
+one-off: treat every figure in this document as a snapshot labelled with its sha, and re-run
+the instrument rather than citing the snapshot.**
 
 **What exists.** Four family crates under `crates/protocol/`, all implementing
 `VersionAdapter` (trait at `crates/lodestone-model/src/adapter.rs:697`), each with a
 one-liner `supports`: `protocol == PROTOCOL`.
 
-| crate | protocol | version | lines | canonicalises to 26.2 state? |
+| crate | protocol | version | lines (at `d197d555`) | canonicalises to 26.2 state? |
 |---|---|---|---|---|
-| v47 | 47 | 1.8.9 | 3,856 | **No — stores raw `(id << 4) \| meta` as the palette entry** |
-| v340 | 340 | 1.12.2 | 14,079 | **Yes** — `flattening.rs` + `canonical.rs` |
-| v735 | 754 | 1.16.5 | 4,237 | **No — leaves 1.16.5-space state ids** |
-| v770 | 776 | 26.2 | 15,626 | native (it *is* the canonical space) |
+| v47 | 47 | 1.8.9 | 3,856 | **No** — `packets/chunk.rs`'s own header: the packed `(blockId << 4) \| meta` value "*is* the natural block-state id", stored raw in the palette container. Same file documents a second seam: 2-D biomes are fabricated into 3-D containers, discarding 15/16 of the horizontal resolution |
+| v340 | 340 | 1.12.2 | 14,128 | **Yes** — `flattening.rs` + `canonical.rs` |
+| v735 | 754 | 1.16.5 | 4,237 | **No** — `packets/chunk.rs:17` stores "a single flat block-state id" in **1.16.5's** id space; zero references to `canonical` or `flattening` in the crate |
+| v770 | 776 | 26.2 | 16,290 | native (it *is* the canonical space) |
 
-Connectedness, measured this session (`cargo xtask connectedness`, supersedes the figures in
-the epic and in `docs/roadmap/protocol.md`): v47 21/74 clientbound decoded, v340 22/80,
-v735 17/92, v770 113/141 clientbound and 60/69 serverbound decoded (15/69 connected, 45
-decode-to-`Ignored`). The epic's "serverbound decode is 0/69" line, repeated in every child
-issue, is stale; `docs/roadmap/protocol.md` retracts its own "completely zero" at lines
-231–238.
+**Connectedness, measured this revision** (`cargo xtask connectedness` at `d197d555`,
+exit 0 read from a captured file). **Do not re-quote these — re-run the command**; the
+previous revision's figures rotted in one day, and `docs/roadmap/protocol.md:229-238`
+records the same class of figure rotting *while the paragraph quoting it was being
+written*:
 
-**Already implemented, issues still open** (`git log --grep`, all sixteen issues are OPEN):
+```
+v47   clientbound decoded 21/74;  emits 21/74;  serverbound encoded 17/26
+v340  clientbound decoded 22/80;  emits 22/80;  serverbound encoded 20/33
+v735  clientbound decoded 17/92;  emits 17/92;  serverbound encoded 21/48
+v770  clientbound decoded 114/141; emits 112/141; serverbound encoded 54/69;
+      serverbound decoded 60/69, connected 17/69; decodes-to-Ignored-only 43
+```
+
+For each legacy family the tool itself prints the host-side verdict:
+
+> serverbound decode: not applicable (no src/server_protocol.rs — family does not
+> implement ServerProtocol, so it cannot host)
+
+**Quote the instrument, not prose, when asked which families can host** — the join/host
+split has been hand-derived wrongly more than once, and the tool now states it per family.
+
+**The serverbound two-file join, spelled out.** Serverbound decode lives in
+`crates/protocol/v770/src/server_protocol.rs`; consumption lives in
+`crates/lodestone-server/src/server.rs`, whose `ServerBound::Ignored => {}` arms sit at
+lines 1346 and 2316. A variant that decodes but lands in `Ignored` is stranded exactly as
+an unhandled clientbound packet would be — hence 60/69 *decoded* but only 17/69
+*connected*. The 43-strong `Ignored` list includes `CONFIGURATION_ACKNOWLEDGED` and
+`RESOURCE_PACK`; note carefully that those are **not** the hosting blockers below —
+`CONFIGURATION_ACKNOWLEDGED` is Play-state configuration *re-entry*, a different packet
+from the login-time handshake. Auditing hosting completeness is always this two-file join,
+never a one-file scan.
+
+**Already implemented, issues still open** (`git log --grep`; the sixteen issues remain
+OPEN — per the standing rule, check the log before dispatching any child):
 
 - #343 groundwork: `faeb692` — the derived sixteen-row version table,
-  `crates/lodestone-registry/src/generated/version_table.rs` (protocol + DataVersion +
-  provenance per version; see `docs/version-table.md`). `d0cd8d6` — the pre-Flattening
-  id:meta table from the 1.13.2 jar's own DataFixerUpper.
-- #345 (1.8.9): `53b906a` four new v47 decode arms; `0a3e00f` outbound death-screen/spectate.
-- #349 (1.12.2): `35d4401` decode arms; `714209b` `block_change`/`multi_block_change` decoded
-  *into canonical states* via the flattening bridge.
-- #353 (1.16.5): partial outbound via `0a3e00f`; the issue's "v735 may be 1.16.1" caveat is
-  resolved — `supports` says 754, which is 1.16.5.
+  `crates/lodestone-registry/src/generated/version_table.rs` (16 `Entry` rows, protocol +
+  DataVersion + per-field provenance; `docs/version-table.md`). `d0cd8d6` — the
+  pre-Flattening id:meta table from the 1.13.2 jar's own DataFixerUpper. The epic's
+  "change the CLAUDE.md scope line with the first non-770 family" instruction is already
+  satisfied (`07e3d83`).
+- #345 (1.8.9): `53b906a` four v47 decode arms; `0a3e00f` outbound death-screen/spectate.
+- #349 (1.12.2): `35d4401` decode arms; `714209b` `block_change`/`multi_block_change`
+  decoded *into canonical states* via the flattening bridge.
+- #353 (1.16.5): partial outbound via `0a3e00f`; the issue's "v735 may be 1.16.1" caveat
+  is resolved — `supports` says 754, which is 1.16.5.
 
-**Assets on disk.** `.cache/mc/` holds `server.jar` for 12 of the 15 target versions —
-missing only **1.7.10, 1.9.4, 1.10.2, 1.11.2**. 1.8.9 / 1.12.2 / 1.16.5 are full booted
-installs with worlds. Only 26.2 has decompiled source and `generated/` reports.
-`vendor/minecraft-data` is vendored (1.8 → 1.21.x; nothing for 1.7.10 or 26.x).
-`scripts/live-oracles/legacy-1.12.sh` exists and runs vanilla 1.12.2 under Apple `container`
-(game :25568 / RCON :25569, ports disjoint from the 26.2 oracles) — but per the roadmap it
-has **never been run for the v340 decode work**; that is evidence debt, unit U0 below.
+**Assets on disk.** `.cache/mc/` holds 12 of the 16 target versions — missing only
+**1.7.10, 1.9.4, 1.10.2, 1.11.2** (`xtask version-table --fetch-missing` exists to fetch
+them). 1.8.9 / 1.12.2 / 1.16.5 are full booted installs with worlds. Only 26.2 has
+decompiled source and `generated/` reports. `vendor/minecraft-data` is vendored
+(1.8 → 1.21.x; nothing for 1.7.10 or 26.x). `scripts/live-oracles/legacy-1.12.sh` exists
+(game :25568 / RCON :25569, `eclipse-temurin:8-jdk`, ports disjoint from the 26.2 oracles)
+— but per the roadmap it has **never been run for the v340 decode work**; that is evidence
+debt, unit U0 below.
 
-**Server side.** Only v770 implements `ServerProtocol`; `lodestone-registry` keeps `FAMILIES`
-and `SERVER_FAMILIES` as separate tables. The server's ECS decision (`docs/server-ecs.md`,
-`f0d22a1`) is decided but unimplemented. This plan scopes **hosting legacy clients (the lossy
-outbound direction) out to a phase 2** — every unit below is the inbound direction (our
-client joins a legacy server), which is where the epic's own value ranking points.
+**Scaffolding that did not exist when the family map was first drawn:** `xtask
+new-version` now generates a family skeleton and **withholds registry support until a
+generated `SHAPE_REVIEW.toml` is discharged** — a structural mitigation for the "1.12.2
+client wearing 1.16 packet IDs" failure the roadmap recorded. `xtask conformance --family
+<vNNN>` runs packet-id, registry, isolation, deletability, test and clippy checks per
+family, and `xtask check-deletable <vNNN>` simulates deleting a family and reports the
+fallout. Every family unit below should use all three.
+
+## Join versus host: two different sets, stated per version
+
+Conflating these is the single most likely way this plan goes wrong, so it gets its own
+section. The authority is `crates/lodestone-registry/src/lib.rs`: `FAMILIES` (join — a
+`VersionAdapter`) and `SERVER_FAMILIES` (host — a `lodestone_server::ServerProtocol`) are
+deliberately **two tables**, and the registry's own doc says why: "a family can have a
+`VersionAdapter` (so the client can *join* that version) and no `ServerProtocol` (so we
+cannot *host* it)". Today `SERVER_FAMILIES` has exactly one entry, v770. Adapters are
+constructed by a zero-argument `make: fn() -> Box<dyn VersionAdapter>` — verified
+directly; this is U2's premise.
+
+**This epic's fifteen child issues are scoped to the join direction.** Hosting is phase 2,
+but phase 2 is decomposed concretely below (H0–H4) rather than waved at, because two of
+its blockers are substrate that can land early, and one was located precisely during this
+revision's verification pass.
+
+### The hosting blockers, located
+
+1. **The configuration-phase handshake is hardwired into the connection state machine,
+   not version-gated.** `crates/lodestone-server/src/server.rs:1199-1207`:
+   `ServerBound::LoginAcknowledged` → `State::Configuration` → `begin_configuration()`,
+   and `ServerBound::ConfigurationFinished` → `State::Play` → `begin_play()`. A pre-1.20.2
+   client sends **neither packet** — they do not exist on its wire; after Login Success it
+   transitions straight to Play — so a legacy host connection stalls in Login forever.
+   And the fix cannot live inside a family: `ServerProtocol::decode`
+   (`crates/lodestone-server/src/protocol.rs:521`) is strictly one-packet-in,
+   one-`ServerBound`-out, so a family cannot synthesize the two transitions from packets
+   that never arrive. This is **one-off substrate** (H0), touching two choke-point files
+   once, after which no per-family work recurs.
+2. **A pre-1.13 host needs a flattening inverse; a pre-1.14 host needs light in-chunk.**
+   Flattening is not symmetric: modern states must be *lowered* to `(id, meta)`, and the
+   lossy cases are decisions, not transforms (H2). Pre-1.14 clients expect light inside
+   the chunk packet rather than as separate packets, so the host must fabricate or carry
+   light at encode time (H3).
+3. **v770's own hosting is only 17/69 connected** (the two-file join above). Widening that
+   is per-packet work on the existing family, orthogonal to this epic's units, but any
+   "host version X" claim inherits whatever the shared `server.rs` loop actually consumes.
+4. **`resource_pack_push/pop` is handled in Play state only, not Configuration** (#294).
+   Verified: the v770 adapter's Configuration-state clientbound arms
+   (`adapter.rs:2502-2571`) cover ten packet ids with no `RESOURCE_PACK_PUSH/POP`; the
+   Play arms exist at `adapter.rs:4149/4171`, and the serverbound *response* encoder is
+   already state-aware (`adapter.rs:4699` picks
+   `configuration::serverbound::RESOURCE_PACK`). So #294 is a decode-side gap in the
+   **join** direction against real 26.2 servers, and it matters here because v766's
+   configuration-phase machinery (U11) will be built by imitating v770's — fix #294 first
+   or the copy inherits the hole. The patch belongs to #294, not this epic: add the two
+   Configuration-state decode arms delegating to the same handlers Play uses.
+
+### Per-version split
+
+Join cost is the family map in the next section (U-units). Host cost, per version, is the
+v770 baseline **plus** the rows below. "H" units are defined after the phase-1 unit list.
+
+| version(s) | join unit | host needs beyond a per-family `server_protocol.rs` + `SERVER_FAMILIES` entry (H4-shaped) |
+|---|---|---|
+| 26.2 | done | baseline (17/69 connected and growing — blocker 3) |
+| 1.21.11, 1.20.6 | U11 | registry-sync/component **down**-conversion; config phase exists on these wires, so no H0 |
+| 1.19.4 | U10 | H0 (no config phase); host-side chat-signing enforcement decisions |
+| 1.17.1–1.18.2 | U9 | H0; height/biome down-conversion |
+| 1.14.4–1.16.5 | U8, U4 | H0; state-id down-mapping (inverse of U4's table) |
+| 1.13.2 | U7 | H0; H3 (light in-chunk) |
+| 1.7.10–1.12.2 | U13, U3, U6, U0 | H0; H2 (flattening inverse, lossy); H3; item component→NBT lowering |
+
+**Value ranking for phase 2:** hosting 1.8.9/1.12.2 clients (legacy friends joining a LAN
+world) is the plausible demand; hosting 1.15.2 clients is not. So phase 2, when it opens,
+starts at H0 + one pre-1.13 family, not at the version nearest 26.2. Phase 2 opens after
+`docs/server-ecs.md`'s migration lands — `lodestone-server` currently has live agents
+mid-migration, which is itself a reason H0 is the *only* server-side edit this plan
+schedules early.
 
 ## The decision: family-per-wire-era, range extension inside an era
 
-**Not fifteen new crates.** The unit of work is a *family crate per wire era*, and inside an
-era, additional versions are per-protocol generated tables plus branch points — a change to
-that family only, invisible to the registry.
+**Not fifteen new crates.** The unit of work is a *family crate per wire era*, and inside
+an era, additional versions are per-protocol generated tables plus branch points — a
+change to that family only, invisible to the registry.
 
 Evidence, not preference:
 
 1. `docs/roadmap/protocol.md` (§#306) measured the irreducible cost of a new family at
-   **~900 hand-written lines** concentrated in `adapter.rs` and `chunk.rs`, and recorded that
-   the `xtask new-version` cloning experiment produced "a 1.12.2 client wearing 1.16 packet
-   IDs". Fifteen clones would be ~13k lines of near-duplicate wire code with no shared
-   packet-definition layer to keep them honest.
-2. Adjacent-version deltas inside an era are small and *table-shaped* (packet id renumbering,
-   a handful of shape changes), which is exactly what the generated `packet_ids.rs` per
-   version already expresses — `xtask gen-packet-ids --source minecraft-data` parses any
-   version's `protocol.json` today (`xtask/src/lib.rs:251–296`).
+   **~900 hand-written lines** (line 539) concentrated in `adapter.rs` and `chunk.rs`, and
+   recorded that the `xtask new-version` cloning experiment produced "a 1.12.2 client
+   wearing 1.16 packet IDs" — now structurally mitigated by the `SHAPE_REVIEW.toml` gate,
+   but the lesson stands: fifteen clones would be ~13k lines of near-duplicate wire code.
+2. Adjacent-version deltas inside an era are small and *table-shaped* (packet id
+   renumbering, a handful of shape changes), which is exactly what the generated
+   `packet_ids.rs` per version already expresses — `xtask gen-packet-ids --source
+   minecraft-data` parses any covered version's `protocol.json` today.
 3. Widening a family costs the registry nothing: `adapter_for_protocol` delegates to each
-   family's `supports`, and v47 already answers for two release names under one protocol.
-   Adding a whole new family costs one optional dep line, one feature line, one `FAMILIES`
-   entry (`crates/lodestone-registry/src/lib.rs:1–40`).
-4. The era boundaries below are the places the epic itself ranks as the expensive
-   discontinuities (Flattening, light split, dynamic height, 3-D biomes, chat signing,
-   configuration phase, components). Crossing one inside a single crate is where the
-   "1.12.2 client wearing 1.16 packet IDs" failure mode lives; staying inside one is cheap.
+   family's `supports`. Adding a whole new family costs one optional dep line, one feature
+   line, one `FAMILIES` entry (verified against `crates/lodestone-registry/src/lib.rs`).
+   **So the fifth family is cheap at the registry and ~900 lines at the crate — the seam
+   scales; what does not scale without U2 is multi-protocol families.**
+4. The era boundaries below are the epic's own expensive discontinuities (Flattening,
+   light split, dynamic height, 3-D biomes, chat signing, configuration phase,
+   components). Crossing one inside a single crate is where the wearing-wrong-packet-IDs
+   failure lives; staying inside one is cheap.
 
 **The resulting family map** (protocol numbers from the derived table,
 `crates/lodestone-registry/src/generated/version_table.rs` — never hand-derived):
@@ -96,77 +205,81 @@ Evidence, not preference:
 | v735 | 754 | 1.16.5 | #353 | exists; needs canonicalisation retrofit (U4); rename to v754 optional (U12) |
 | v756 | 756, 758 | 1.17.1, 1.18.2 | #354–#355 | new, one crate (1.18 section-biome branch — the riskiest grouping, split if the chunk paths stop sharing) |
 | v762 | 762 | 1.19.4 | #356 | new — chat-signing state machine |
-| v766 | 766 | 1.20.6 | #357 | new — configuration phase + item components |
+| v766 | 766 | 1.20.6 | #357 | new — configuration phase + item components; **fix #294 first** |
 | v774 | 774 | 1.21.11 | #358 | new — nearest neighbour to v770; still its own crate (v770 is the canonical space *and* the only `ServerProtocol`; keeping it single-protocol keeps the hosting seam simple) |
 | v770 | 776 | 26.2 | — | done, canonical |
 
 Seven new crates instead of eleven; four multi-protocol groupings, each inside one era.
 
-**The seam change this requires (U2):** today no adapter stores the negotiated protocol —
-`supports` is the only place the number appears. A multi-protocol family must be
-*constructed with* the negotiated protocol and select its per-protocol `packet_ids` table at
-runtime. That is a signature change on the family-construction path in
+**The seam change this requires (U2):** verified this revision — no adapter receives the
+negotiated protocol at construction; `Family::make` is `fn() -> Box<dyn VersionAdapter>`
+and `supports` is the only place the number appears. A multi-protocol family must be
+*constructed with* the negotiated protocol and select its per-protocol `packet_ids` table
+at runtime. That is a signature change on the family-construction path in
 `crates/lodestone-model/src/adapter.rs` and the `FAMILIES` entries in
 `crates/lodestone-registry/src/lib.rs`, mechanical for the four existing families. It does
 **not** touch `net.rs`/`app.rs` (the shell already passes the negotiated protocol to
-`adapter_for_protocol` — the seam's whole design, `docs/singleplayer.md:38`). Do U2 before
-any multi-protocol family exists; retrofitting it after v110 is built single-protocol is the
-expensive order.
+`adapter_for_protocol` — the seam's whole design; `docs/singleplayer.md` "The version seam
+runs in both directions"). Do U2 before any multi-protocol family exists; retrofitting it
+after v110 is built single-protocol is the expensive order.
 
 ## Canonicalisation: the layer that is the actual work
 
 Epic #343 already decided the architecture: one canonical internal version (26.2), a
-translation layer per protocol. The survey's largest finding is that **two of the three
-existing legacy families skip the translation**: v47 parks raw `(id << 4) | meta` in the
-palette and v735 parks 1.16.5-space state ids — both feed the mesher and collision, which
-consume 26.2 ids, so both families "work" while rendering and colliding wrongly. Any plan
-that adds families before fixing this replicates the defect seven more times.
+translation layer per protocol. The survey's largest finding stands re-verified: **two of
+the three existing legacy families skip the translation** — v47 parks raw
+`(id << 4) | meta` in the palette (its own module header says the packed value "*is* the
+natural block-state id") and v735 parks 1.16.5-space flat ids — both feed the mesher and
+collision, which consume 26.2 ids, so both families "work" while rendering and colliding
+wrongly. Any plan that adds families before fixing this replicates the defect seven more
+times.
 
-**What exists (v340, the donor):** `flattening.rs` — 142-line API over a 9,076-line
-generated table: 4,095 `id:meta` slots, 1,663 resolved, 2,400 no-entry, 32
-`RequiresAdditionalContext`, 1 out-of-bounds; provenance is a reflective dump of the **real
+**What exists (v340, the donor):** `src/flattening.rs` (API) over
+`src/generated/flattening.rs` (9,076 lines): 4,095 `id:meta` slots, 1,663 resolved, 2,400
+no-entry, 32 `RequiresAdditionalContext`; provenance is a reflective dump of the **real
 1.13.2 jar's own DataFixerUpper**, regenerated via `LODESTONE_REGEN=1` against
 `tests/support/flattening_1_13_2_jvm.txt` (`docs/protocol-340-flattening-table.md`). Plus
-`canonical.rs` (557 lines): 1.13-name → 26.2-state bridge with the rename pass
-(`mob_spawner`→`spawner`, `grass`→`short_grass`, …), `waterlogged` defaulting, and an
-`Unmapped` drift-guard variant (`docs/protocol-340-canonical-bridge.md`). Item-side
-flattening (DFU class `aah`, 302 entries) is recorded but **not built**.
+`src/canonical.rs` (557 lines): 1.13-name → 26.2-state bridge with the rename pass,
+`waterlogged` defaulting, and an `Unmapped` drift-guard variant
+(`docs/protocol-340-canonical-bridge.md`). Item-side flattening: **zero hits for it
+anywhere in the tree** — recorded but not built.
 
 **Generalisation, two regimes with the Flattening as the boundary:**
 
-- **Pre-1.13 families (v5, v47, v110, v340):** all speak `id:meta`. The dumped table is the
-  1.13.2 DataFixer's, which upgrades *1.12.2-space* ids; older versions' id space is a strict
-  subset (ids were only added), so the same table serves all four — per-version difference is
-  which slots are populated, which the existing `NoTableEntry` outcome already expresses.
-  This forces a doctrine call: the roadmap records v47 was *deliberately* denied v340's table
-  to preserve per-crate deletability. **Decision: extract `flattening` + `canonical` into a
-  shared crate, U1 below.** Deletability applies to *families*; shared game data already has
-  a precedent crate (`lodestone-data`, the #361 extraction), and the alternative is four
-  copies of a 9k-line generated table drifting independently. Deleting a family remains
-  folder + dep line + feature line.
+- **Pre-1.13 families (v5, v47, v110, v340):** all speak `id:meta`. The dumped table is
+  the 1.13.2 DataFixer's, which upgrades *1.12.2-space* ids; older versions' id space is a
+  strict subset (ids were only added), so the same table serves all four — per-version
+  difference is which slots are populated, which the existing `NoTableEntry` outcome
+  already expresses. This forces a doctrine call: the roadmap records v47 was
+  *deliberately* denied v340's table to preserve per-crate deletability. **Decision:
+  extract `flattening` + `canonical` into a shared crate, U1 below.** Deletability applies
+  to *families*; shared game data already has a precedent crate (`lodestone-data`, the
+  #361 extraction), and the alternative is four copies of a 9k-line generated table
+  drifting independently. Deleting a family remains folder + dep line + feature line
+  (`xtask check-deletable` verifies exactly this).
 - **Post-1.13 families (v404, v498, v735, v756, v762, v766, v774):** each speaks its own
   version's block-state id space. The mapping is per-version: dump each version's
-  `blocks.json` by running **its own jar's** data generator (the jars are already in
-  `.cache/mc/`; the generator ships in the server jar from 1.13 onward — verify per jar as
-  part of each unit, do not assume the invocation is uniform), then resolve
-  name+properties → 26.2 state id through a **DFU-walk oracle against the 26.2 jar**, keyed
-  by the source `data_version` from the version table. The 26.2 jar contains every fixer
-  from every older DataVersion — that is DataFixerUpper's contract — so this replaces
-  v340's hand-written rename pass with the same outside-our-code provenance the flattening
-  table already has. New program in `oracle-java/` (pattern:
+  `blocks.json` by running **its own jar's** data generator (the jars are in `.cache/mc/`;
+  the generator ships in the server jar from 1.13 onward — verify per jar as part of each
+  unit, do not assume the invocation is uniform), then resolve name+properties → 26.2
+  state id through a **DFU-walk oracle against the 26.2 jar**, keyed by the source
+  `data_version` from the version table. The 26.2 jar contains every fixer from every
+  older DataVersion — DataFixerUpper's contract — so this replaces v340's hand-written
+  rename pass with the same outside-our-code provenance the flattening table already has.
+  New program in `oracle-java/` (pattern:
   `crates/lodestone-data/tests/{collision_shapes,hardness}.rs` generate-or-assert +
-  `LODESTONE_REGEN=1`). minecraft-data is a cross-check only, per every child issue; the
-  v340 cross-check measured 91.8% agreement with all 137 disagreements resolving in the
-  jar's favour.
+  `LODESTONE_REGEN=1`). minecraft-data is a cross-check only; the v340 cross-check
+  measured 91.8% agreement with all 137 disagreements resolving in the jar's favour.
 
-**The 1.12.2→1.13.2 boundary, costed explicitly:** for inbound blocks it is *already mostly
-paid* — `d0cd8d6`/`714209b` built and wired the table. Remaining boundary cost: (a) the 32
-context-dependent slots (need TileEntity/neighbour context; currently resolve-or-air);
-(b) **item flattening, entirely unbuilt** — 302 `aah` entries need the same reflective dump
-before any pre-1.13 family can decode inventories into canonical items; (c) the whole
-outbound direction (26.2 → id:meta is lossy; phase 2). New cost at this boundary for v404
-itself is *low* — 1.13.2 is the first version whose block model matches ours natively; its
-chunk format and command tree are ordinary era work, not Flattening work.
+**The 1.12.2→1.13.2 boundary, costed explicitly:** for inbound blocks it is *already
+mostly paid* — `d0cd8d6`/`714209b` built and wired the table. Remaining boundary cost:
+(a) the 32 context-dependent slots (need TileEntity/neighbour context; currently
+resolve-or-air); (b) **item flattening, entirely unbuilt** — the ~300-entry item table
+needs the same reflective dump before any pre-1.13 family can decode inventories into
+canonical items; (c) the whole outbound direction (26.2 → id:meta is lossy; phase 2, H2).
+New cost at this boundary for v404 itself is *low* — 1.13.2 is the first version whose
+block model matches ours natively; its chunk format and command tree are ordinary era
+work, not Flattening work.
 
 **Items pre-1.20.5 (all families except v774):** NBT → data components, both directions
 lossy per the epic. Inbound scope: map the NBT the client actually renders (display name,
@@ -175,93 +288,108 @@ lore, enchantments, damage) and preserve-the-rest; full fidelity is not required
 ## Data sources, per version
 
 Authority order per child issues: real oracle jar (strongest) → jar's generated reports →
-minecraft-data (cross-check only, never authority). Protocol/DataVersion numbers: always the
-derived table, never hand-written (epic first task, satisfied by `faeb692`).
+minecraft-data (cross-check only, never authority). Protocol/DataVersion numbers: always
+the derived table, never hand-written (epic first task, satisfied by `faeb692`). The #275
+lesson binds every registry-sync unit here: a generator file is authoritative about
+registry *contents*, not about which registries are *sent* — the sent-list comes from the
+jar (`RegistryDataLoader.SYNCHRONIZED_REGISTRIES` for 26.2; establish the per-version
+equivalent from each era's jar, not from `registries.json`).
 
 | versions | packet shapes | ids/registries/states | jar on disk? |
 |---|---|---|---|
-| 1.7.10 | **captures only** — no minecraft-data, nothing else exists | captures + the jar itself | **no — fetch via manifest** (`xtask version-table --fetch-missing` machinery) |
+| 1.7.10 | **captures only** — no minecraft-data, nothing else exists | captures + the jar itself | **no — fetch** (`xtask version-table --fetch-missing`) |
 | 1.8.9–1.12.2 | minecraft-data `protocol.json`, cross-checked by live capture | 1.13.2 DFU flattening table (blocks); item dump TBD (U5) | 1.8.9, 1.12.2 yes; **1.9.4/1.10.2/1.11.2 no — fetch** |
 | 1.13.2–1.20.4 era | minecraft-data, cross-checked by live capture (no packet report in these jars) | own jar's `blocks.json`/`registries.json` + 26.2 DFU walk | yes |
 | 1.20.6, 1.21.11 | own jar's generated packet report where present (report added in the 1.20.5 era — verify per jar), else minecraft-data + capture | own jar's reports + 26.2 DFU walk | yes |
+
+For frozen historical protocols minecraft-data will never rot the way its 26.2 data did —
+its weakness is *current* versions — which is why it is genuinely useful here and still
+never the authority.
 
 ## Oracle strategy: three JDK images, one live oracle at a time, captures committed
 
 The "15 versions × a container each" fear dissolves on inspection: the oracle image is a
 stock JDK; the version lives in the bind-mounted jar (`legacy-1.12.sh` already works this
-way — `eclipse-temurin:8-jdk` + `.cache/mc/1.12.2`). So:
+way — `eclipse-temurin:8-jdk` + `.cache/mc/1.12.2`, game :25568 / RCON :25569). So:
 
-- **Three base images total**: temurin 8 (≤1.16.5), temurin 17 (1.17.1–1.20.x), temurin 21
-  (1.21.11) — exact split verified per jar's `version.json` `java_version` when each script
-  is written, not assumed.
+- **Three base images total**: temurin 8 (≤1.16.5), temurin 17 (1.17.1–1.20.x), temurin
+  21 (1.21.11) — exact split verified per jar's `version.json` `java_version` when each
+  script is written, not assumed.
 - **One parameterized script**, `scripts/live-oracles/legacy.sh <version>`, generalizing
   `legacy-1.12.sh`: per-version port pairs carved out of a documented range disjoint from
-  :25565/:25570-1/:25580-1, `--memory 3g`, the three traps from `docs/oracle-runtimes.md`
-  (no `127.0.0.1` publishes; `--platform linux/arm64` on pulls; memory flag mandatory).
-- **Concurrency budget**: ≈1.1–1.3 GB resident per running oracle on Apple `container`, 16 GB
-  box, ~10 agents live — **run one legacy oracle at a time, stop it when the gate passes**.
-  Oracles are not repo state; scripts recreate them.
-- **Capture once, commit, replay forever.** Per version, one scripted session (login → join →
-  chunk load → RCON-driven `setblock`/`fill`/`summon` at *known coordinates* → disconnect)
-  recorded to `crates/protocol/<fam>/tests/support/<ver>_join_capture.bin` and committed.
-  The always-run test decodes the committed capture and asserts against the RCON-known
-  values — expected values originate outside our code, satisfying the evidence standard
-  without a running server. Live `#[ignore]`d gates re-run the capture script itself and are
-  needed only for serverbound effects (dig a block, observe the update come back), which a
-  replay structurally cannot exercise.
+  :25565/:25568-9/:25570-1/:25580-1, `--memory 3g`, the three traps from
+  `docs/oracle-runtimes.md`.
+- **Concurrency budget**: ≈1.1–1.3 GB resident per running oracle, 16 GB box, many agents
+  live — **run one legacy oracle at a time, stop it when the gate passes**. Oracles are
+  not repo state; scripts recreate them.
+- **Capture once, commit, replay forever.** Per version, one scripted session (login →
+  join → chunk load → RCON-driven `setblock`/`fill`/`summon` at *known coordinates* →
+  disconnect) recorded to `crates/protocol/<fam>/tests/support/<ver>_join_capture.bin`
+  and committed. The always-run test decodes the committed capture and asserts against the
+  RCON-known values — expected values originate outside our code, satisfying the evidence
+  standard without a running server. Live `#[ignore]`d gates re-run the capture script and
+  are needed only for serverbound effects (dig a block, observe the update come back),
+  which a replay structurally cannot exercise.
+- **The host direction inverts the oracle**: the external artifact is the **real Mojang
+  client jar** of that version (`xtask fetch-assets` fetches client jars), joining *our*
+  server. Our encoder cannot grade itself; the vanilla client rendering the world is the
+  only oracle for lossy down-conversion.
 
-## Units of work
+## Units of work — phase 1 (join)
 
 Each unit: scope, files owned (no two dispatchable-in-parallel units share a file), the
-consumer that proves it is not an island, the gate with its negative control, and what would
-make the gate vacuous. Choke-point note: **no unit below touches `app.rs`, `sim.rs`,
-`net.rs`, `gpu.rs`, or `lodestone-server/src/lib.rs`** — the registry seam is the whole
-reason. Units adding a `FAMILIES`/feature line touch `crates/lodestone-registry/src/lib.rs`
-and its `Cargo.toml` (2 lines each); those two files are the one collision surface, so the
-orchestrator serializes just those edits across units.
+consumer that proves it is not an island, the gate with its negative control, and what
+would make the gate vacuous. Choke-point note: **no phase-1 unit touches `app.rs`,
+`sim.rs`, `net.rs`, `gpu.rs`, or `lodestone-server/src/lib.rs`** — the registry seam is
+the whole reason. Units adding a `FAMILIES`/feature line touch
+`crates/lodestone-registry/src/lib.rs` and its `Cargo.toml` (2 lines each); those two
+files are the one collision surface, so the orchestrator serializes just those edits.
+Every family unit finishes by running `cargo xtask connectedness` and `cargo xtask
+conformance --family <vNNN>` and quoting the output in its report — never a remembered
+number.
 
 **U0 — pay the standing evidence debt (dispatch first, smallest unit).**
 Run `scripts/live-oracles/legacy-1.12.sh`; against it, verify `multi_block_change`'s
-`horizontalPos` nibble order, which is currently sourced from external wire docs only —
-flagged at `crates/protocol/v340/src/adapter.rs:687–703` and
-`tests/block_updates.rs:21–26`. Method: RCON `fill` an asymmetric pattern (different extents
-in x and z) inside one chunk in one tick, capture the packet, assert decoded relative coords
-match the RCON coordinates. **Negative control:** decode the same capture with the nibbles
-swapped and require the assertion to fail — if it doesn't, the pattern was symmetric and the
-control is vacuous; use extents like 3×1. Owns: `crates/protocol/v340/tests/block_updates.rs`
-(new live test), the captured fixture. Consumer: the existing decode arm. Also promote the
-capture to the committed-fixture pattern above.
+`horizontalPos` nibble order, currently sourced from external wire docs only — flagged in
+`crates/protocol/v340/src/adapter.rs` and `tests/block_updates.rs`. Method: RCON `fill` an
+asymmetric pattern (different extents in x and z, e.g. 3×1) inside one chunk in one tick,
+capture the packet, assert decoded relative coords match the RCON coordinates. **Negative
+control:** decode the same capture with the nibbles swapped and require the assertion to
+fail — if it doesn't, the pattern was symmetric and the control is vacuous. Owns:
+`crates/protocol/v340/tests/block_updates.rs` (new live test), the captured fixture.
+Consumer: the existing decode arm. Also promote the capture to the committed-fixture
+pattern above.
 
 **U1 — extract the canonical bridge into `crates/lodestone-canonical`.**
-Move `flattening.rs` + generated table + `canonical.rs` out of v340 into a new shared crate
-(or into `lodestone-data` if the crate-count objection wins — decide at dispatch; the #361
-extraction is the precedent either way). v340 re-exports through it. Owns: the new crate,
-`crates/protocol/v340/src/{flattening,canonical}.rs` (deletion/forwarding), v340
-`Cargo.toml`; workspace `Cargo.toml` member line (orchestrator-brokered). Consumer: v340's
-existing decode arms — unchanged call sites, new import path. Gate: v340's `flattening.rs`
-and `live_canonical.rs` suites green, **plus** `cargo test --workspace` for the doctest trap
-(CLAUDE.md: after any module move, grep the moved code for the old crate path — `check`
-never sees doctests). Negative control: perturb one table entry, `LODESTONE_REGEN`
-drift-guard must fail. Vacuous if: the drift test compares the file to itself rather than to
-the JVM dump.
+Move `flattening.rs` + generated table + `canonical.rs` out of v340 into a new shared
+crate (or into `lodestone-data` if the crate-count objection wins — decide at dispatch;
+the #361 extraction is the precedent either way). v340 re-exports through it. Owns: the
+new crate, `crates/protocol/v340/src/{flattening,canonical}.rs` (deletion/forwarding),
+v340 `Cargo.toml`; workspace `Cargo.toml` member line (orchestrator-brokered). Consumer:
+v340's existing decode arms — unchanged call sites, new import path. Gate: v340's
+flattening and canonical suites green, **plus** `cargo test --workspace` for the doctest
+trap (after any module move, grep the moved code for the old crate path — `check` never
+sees doctests). Negative control: perturb one table entry; the `LODESTONE_REGEN`
+drift-guard must fail. Vacuous if: the drift test compares the file to itself rather than
+to the JVM dump.
 
 **U2 — multi-protocol seam.** Adapter construction takes the negotiated protocol;
 `supports` may answer a set; per-protocol `packet_ids` module selection inside a family.
 Owns: `crates/lodestone-model/src/adapter.rs` (trait + docs), the four families'
 constructor impls, `crates/lodestone-registry/src/lib.rs` `FAMILIES` entries. Consumer:
 `adapter_for_protocol` — already passes the protocol; nothing above the registry changes.
-Gate: `just check-seam` (the shell must still compile with **no** family — this is the unit
-most able to break the seam) + existing per-family suites. Negative control:
-`supports(protocol+1)` must be false for a single-protocol family; a family constructed for
-protocol A must select A's table when B is also in its set (assert on a packet id that
+Gate: `just check-seam` (the shell must still compile with **no** family — this is the
+unit most able to break the seam) + existing per-family suites. Negative control:
+`supports(protocol+1)` must be false for a single-protocol family; a family constructed
+for protocol A must select A's table when B is also in its set (assert on a packet id that
 differs between A and B — if none differs, the grouping was free and the control needs a
 different pair). Blocks: U6, U8, U9. **Do this before any multi-protocol family.**
 
-**U3 — v47 canonicalisation retrofit.** Replace raw `(id << 4) | meta` palette entries with
-canonical 26.2 state ids via U1's crate. Owns: `crates/protocol/v47/src/` (chunk + block
-paths), v47 `Cargo.toml`. Consumer: the mesher/collision, which already consume the palette —
-this unit changes what flows through an existing pipe, so it cannot be an island. Gate:
-1.8.9 oracle (U-oracle script), RCON-place a block whose canonical id provably differs from
+**U3 — v47 canonicalisation retrofit.** Replace raw `(id << 4) | meta` palette entries
+with canonical 26.2 state ids via U1's crate. Owns: `crates/protocol/v47/src/` (chunk +
+block paths), v47 `Cargo.toml`. Consumer: the mesher/collision, which already consume the
+palette — this unit changes what flows through an existing pipe, so it cannot be an
+island. Gate: 1.8.9 oracle, RCON-place a block whose canonical id provably differs from
 its packed legacy encoding, assert the decoded palette holds the 26.2 id;
 committed-capture replay as the always-run form. **Negative control: assert the raw packed
 value fails the same assertion** — and pick the block so raw ≠ canonical (verify the
@@ -275,104 +403,177 @@ Owns: `crates/protocol/v735/src/` chunk/block paths, the 1.16.5 mapping table + 
 `.cache/mc/`. Establishes the pattern U6–U11 reuse. Blocked by: nothing (can run parallel
 to U1/U3 — different id regime, different files).
 
-**U5 — item canonicalisation, both regimes.** Pre-1.13 item flattening (the unbuilt 302-entry
-`aah` dump, same reflective pattern) + legacy-NBT → component mapping for the render-relevant
-subset. Owns: the shared canonical crate's item module, its oracle program, its dump fixture.
-Consumer: each family's inventory decode arms (wiring lands with each family's unit; this
-unit ships the table + API and **one** consumer — v340's inventory path — so it is not an
-island on day one). Gate: v340 `live_interaction`/`inventory` asserting a chest item placed
-by RCON with known id:damage decodes to the canonical item + components. Negative control:
-an id:damage pair absent from the table must decode to the explicit `Unmapped` variant, not
-to air/default — assert the variant, and prove the detector fires by feeding a known-bad pair.
-Blocked by: U1.
+**U5 — item canonicalisation, both regimes.** Pre-1.13 item flattening (the unbuilt
+~300-entry reflective dump, same pattern as blocks) + legacy-NBT → component mapping for
+the render-relevant subset. Owns: the shared canonical crate's item module, its oracle
+program, its dump fixture. Consumer: each family's inventory decode arms (wiring lands
+with each family's unit; this unit ships the table + API and **one** consumer — v340's
+inventory path — so it is not an island on day one). Gate: v340 live inventory test
+asserting a chest item placed by RCON with known id:damage decodes to the canonical item
++ components. Negative control: an id:damage pair absent from the table must decode to
+the explicit `Unmapped` variant, not to air/default — and prove the detector fires by
+feeding a known-bad pair. Blocked by: U1.
 
-**U6 — family v110 (1.9.4, 1.10.2, 1.11.2), issues #346–#348.** First new crate; first
-consumer of U2's multi-protocol machinery; three generated `packet_ids` tables; pre-1.13
-canonicalisation from day one via U1 (never the v47 raw-palette shape). Scope: the roadmap's
-~900-line irreducible core (join flow, chunk, entity, block updates, movement) × the era's
-specifics (offhand slot, attack cooldown as data, reshaped entity metadata — metadata index
-tables per version from minecraft-data cross-checked by capture; **never hand-count an
-index**, per CLAUDE.md run an oracle dump when in doubt). Owns: `crates/protocol/v110/`
-entirely + registry 2-liner (brokered). Jars must be fetched first (three missing).
-Gate: per-version committed-capture replay + one live join gate per protocol against the
+**U6 — family v110 (1.9.4, 1.10.2, 1.11.2), issues #346–#348.** First new crate
+(scaffolded via `xtask new-version`, `SHAPE_REVIEW.toml` discharged before registry
+support); first consumer of U2's machinery; three generated `packet_ids` tables; pre-1.13
+canonicalisation from day one via U1 (never the v47 raw-palette shape). Scope: the
+roadmap's ~900-line irreducible core (join flow, chunk, entity, block updates, movement)
+× the era's specifics (offhand slot, attack cooldown as data, reshaped entity metadata —
+index tables per version from minecraft-data cross-checked by capture; **never hand-count
+an index**; run an oracle dump when in doubt). Owns: `crates/protocol/v110/` entirely +
+registry 2-liner (brokered). Jars must be fetched first (three missing). Gate:
+per-version committed-capture replay + one live join gate per protocol against the
 parameterized oracle; negative control: the wrong-protocol handshake must be refused by
-`supports`. Vacuous if: captures are generated by our own encoder (`decode(encode(x))`) —
-they must come from the real server. Blocked by: U1, U2, oracle script, jar fetch.
+`supports`. Vacuous if: captures are generated by our own encoder — they must come from
+the real server. Blocked by: U1, U2, oracle script, jar fetch.
 
 **U7 — family v404 (1.13.2), issue #350.** The boundary anchor: first native-block-model
 family, new chunk format, command tree (reuse `lodestone-command`, the #118 substrate).
-State mapping via the first *small* DFU walk (1631 → 4903). Owns: `crates/protocol/v404/` +
-registry 2-liner. Gate/control: as U6, jar already on disk. Blocked by: U4's oracle pattern
-(not U2 — single protocol).
+State mapping via the first *small* DFU walk (1631 → 4903). Owns: `crates/protocol/v404/`
++ registry 2-liner. Gate/control: as U6, jar already on disk. Blocked by: U4's oracle
+pattern (not U2 — single protocol).
 
 **U8 — family v498 (1.14.4, 1.15.2), issues #351–#352.** Light out of the chunk packet
 (1.14), biome array into it (1.15) — the intra-family branch is confined to `chunk.rs`.
 Owns: `crates/protocol/v498/` + registry 2-liner. Blocked by: U2, U7 (pattern).
 
 **U9 — family v756 (1.17.1, 1.18.2), issues #354–#355.** Dynamic world height + 1.18
-section-scoped paletted biomes. **Check what the chunk store and mesher assume about section
-count before writing wire code** — the issue's own warning; if the store hardcodes 16
-sections this unit gains a prerequisite outside protocol land and must say so rather than
-absorb it. The grouping most likely to split into two crates; the tell is `chunk.rs` sharing
-under 50% between the two protocols. Owns: `crates/protocol/v756/` + registry 2-liner.
-Blocked by: U2, U8.
+section-scoped paletted biomes. **Check what the chunk store and mesher assume about
+section count before writing wire code** — if the store hardcodes 16 sections this unit
+gains a prerequisite outside protocol land and must say so rather than absorb it. The
+grouping most likely to split into two crates; the tell is `chunk.rs` sharing under 50%
+between the two protocols. Owns: `crates/protocol/v756/` + registry 2-liner. Blocked by:
+U2, U8.
 
 **U10 — family v762 (1.19.4), issue #356.** Chat signing: scope is *joining* — decode the
 session/signature packets, send unsigned chat where the oracle permits
-(`enforce-secure-profile=false` on our own oracle; document that joining strict servers may
-need the full signature chain and leave that as a named follow-up, not silent scope creep).
-Owns: `crates/protocol/v762/` + registry 2-liner. Blocked by: U7 pattern.
+(`enforce-secure-profile=false` on our own oracle; document that joining strict servers
+may need the full signature chain and leave that as a named follow-up, not silent scope
+creep). Owns: `crates/protocol/v762/` + registry 2-liner. Blocked by: U7 pattern.
 
 **U11 — family v766 (1.20.6, #357) and family v774 (1.21.11, #358).** Two units, one
 briefing: configuration-phase state machine (v766 — the login flow structurally differs;
-v770's own configuration handling is the reference implementation to imitate, not import)
-and components-era items (both; v774 items are near-26.2). v774 is the cheapest new family
-in the set — closest wire to v770 — and its packet shapes can come from its own jar's report
-if present. Owns: `crates/protocol/v766/`, `crates/protocol/v774/` + registry 2-liners.
-Blocked by: U7 pattern; v766 also by U5.
+v770's own configuration handling is the reference implementation to imitate, not import —
+**and #294's Configuration-state `resource_pack` gap must be fixed in v770 first, or the
+imitation copies the hole**) and components-era items (both; v774 items are near-26.2).
+v774 is the cheapest new family in the set — closest wire to v770 — and its packet shapes
+can come from its own jar's report if present. Owns: `crates/protocol/v766/`,
+`crates/protocol/v774/` + registry 2-liners. Blocked by: U7 pattern; v766 also by U5 and
+#294.
 
 **U13 — family v5 (1.7.10), issue #344 — last, eyes open.** No minecraft-data, no cached
 jar, pre-compression pre-UUID wire; every shape from captures against a fetched real jar.
 Budget it as the most expensive single family (the epic agrees) and do not let it block
 anything — nothing depends on it. Owns: `crates/protocol/v5/` + registry 2-liner.
 
-**U12 (optional, anytime) — rename v735 → v754** per `docs/protocol-crate-naming.md`'s
-recommendation (family named for its lowest protocol). Cheap but repo-wide: grep for the
-old crate path *including doctests* and run `cargo test --workspace`, not just check — the
-#361 extraction's exact trap.
+**U12 (optional, anytime) — rename v735 → v754** per `docs/protocol-crate-naming.md`
+(family named for its lowest protocol). Cheap but repo-wide: grep for the old crate path
+*including doctests* and run `cargo test --workspace`, not just check — the #361
+extraction's exact trap.
+
+## Units of work — phase 2 (host)
+
+Phase 2 opens after the server-ECS migration lands. **Exception: H0 is substrate that
+should land as soon as the `lodestone-server` choke-point calendar allows**, because it is
+tiny, independently gateable with fakes, and every legacy host unit is blocked on it.
+
+**H0 — version-gate the login→play transition.** Add a defaulted
+`ServerProtocol::has_configuration_phase(&self) -> bool { true }`; in the connection
+loop, when it answers false, run the Configuration→Play sequence immediately after
+`login_success` instead of waiting for `LoginAcknowledged`/`ConfigurationFinished` (which
+pre-1.20.2 wires cannot send — located at `server.rs:1199-1207`, decode contract at
+`protocol.rs:521`). Owns: `crates/lodestone-server/src/protocol.rs` (trait),
+`crates/lodestone-server/src/server.rs` (transition) — **both are live-agent choke
+points; the orchestrator schedules this as a solo slot.** Gate: a fake protocol with
+`has_configuration_phase() == false` reaches Play and receives chunks without either ack
+packet. Negative control: the default-true fake must **not** reach Play without them.
+External evidence: none at this layer — this is a state machine against our own trait;
+the external oracle arrives with H4's real client. Said plainly rather than inventing a
+round trip.
+
+**H1 — v770 serverbound connectivity (the 43 `Ignored` arms).** Ongoing per-packet work
+on the existing family; each arm is the two-file join (variant in
+`v770/src/server_protocol.rs`, consumer arm in `server.rs`). Not a unit of this epic —
+tracked per-packet elsewhere — but every host-version claim inherits it, so it is named
+here to stop it being rediscovered.
+
+**H2 — flattening inverse (26.2 state → `id:meta`).** Extends U1's crate. The resolvable
+direction is mechanical: invert the JVM-dumped forward table (this is *not* the
+`decode(encode(x))` trap — the forward table's provenance is the 1.13.2 jar, outside our
+code). The lossy remainder — modern states with no pre-1.13 representation — is a
+**decision table, hand-curated, reviewed case by case**, and it cannot be externally
+evidenced: no oracle knows what waxed copper "should" look like to a 1.12.2 client. What
+*can* be evidenced externally: (a) round-trip on the 1,663 resolved slots,
+`inverse(forward(id:meta)) == id:meta`; (b) H4's real-client gate rendering a world
+containing sampled lossy states without disconnect or visual holes. Owns: the shared
+canonical crate's inverse module + decision-table fixture. Blocked by: U1.
+
+**H3 — pre-1.14 light-in-chunk fabrication.** Pre-1.14 clients expect light nibble arrays
+inside the chunk packet. **Open question the unit must establish first, not assume: what
+light does the v770 host currently compute or send?** If the server has no real lighting
+engine, the fabricator's scope is "full-bright plausible light", explicitly labelled.
+Owns: the hosting family's `server_protocol.rs` encode path (per-family, after H4's first
+instance). External evidence: the real legacy client renders the world non-black — a
+screenshot-level gate against the vanilla client, which is the consumer.
+
+**H4 — first legacy `ServerProtocol` (recommend v340: the canonical bridge and H2 both
+live there).** A `server_protocol.rs` in the family crate + one `SERVER_FAMILIES` entry.
+Owns: `crates/protocol/v340/src/server_protocol.rs`, registry 2-liner (brokered). Gate —
+the strongest external oracle in this plan: **the real Mojang 1.12.2 client** (fetched
+via `xtask fetch-assets`) joins our hosted world and a scripted probe verifies chunks
+render and a placed block appears at known coordinates. Negative control: a
+wrong-protocol client must be refused at handshake with a version-mismatch message, not a
+stall. Blocked by: H0, H2, H3 (for its light), and the server-ECS migration settling.
 
 ## Order
 
 ```
+phase 1 (join):
 U0 (evidence debt)          — now, independent, smallest
 U1 (shared canonical crate) ─┬─ U3 (v47 retrofit)
                              ├─ U5 (items) ──────────┐
 U2 (multi-protocol seam) ────┼─ U6 (v110: 1.9–1.11)  │
 U4 (v735 retrofit, DFU walk pattern) ─ U7 (v404: 1.13.2) ─ U8 (v498) ─ U9 (v756)
-                                       U10 (v762)  U11 (v766 needs U5; v774)
+                                       U10 (v762)  U11 (v766 needs U5 + #294; v774)
 U13 (v5: 1.7.10) — last, depends on nothing, nothing depends on it
+
+phase 2 (host), after server-ECS lands:
+H0 (state-machine gate; may land early in a brokered solo slot)
+H2 (flattening inverse, needs U1) ─┬─ H4 (first legacy host, v340, real-client gate)
+H3 (light fabricator) ─────────────┘
+then per-family: server_protocol.rs + SERVER_FAMILIES entry each
 ```
 
-Parallelizable from day one: U0, U1, U2, U4 (disjoint files). The registry 2-liners and the
-workspace-member lines are the only cross-unit file contention; broker them.
+Parallelizable from day one: U0, U1, U2, U4 (disjoint files). The registry 2-liners and
+the workspace-member lines are the only cross-unit file contention; broker them. H0
+contends with the live `lodestone-server` agents and is scheduled by the orchestrator,
+not grabbed.
 
 ## Risks
 
-1. **The existing families are quietly wrong, and the pattern is contagious.** v47 and v735
-   decode into non-canonical id spaces feeding the mesher and collision. If U3/U4 land after
-   new families are built by imitation, the defect replicates seven times. Mitigation: U3/U4
-   early; every family unit's briefing names canonical-output as the acceptance bar with the
-   raw-value negative control.
-2. **The seam change (U2) is cross-cutting and order-sensitive.** Built late, v110/v498/v756
-   get built single-protocol and reworked. Built carelessly, it breaks `check-seam` —
-   the one health check whose failure mode is architectural. Mitigation: U2 before any
-   grouped family; `just check-seam` is its gate.
+1. **The existing families are quietly wrong, and the pattern is contagious.** v47 and
+   v735 decode into non-canonical id spaces feeding the mesher and collision. If U3/U4
+   land after new families are built by imitation, the defect replicates seven times.
+   Mitigation: U3/U4 early; every family unit's briefing names canonical-output as the
+   acceptance bar with the raw-value negative control.
+2. **The seam change (U2) is cross-cutting and order-sensitive.** Built late,
+   v110/v498/v756 get built single-protocol and reworked. Built carelessly, it breaks
+   `just check-seam` — the one health check whose failure mode is architectural.
+   Mitigation: U2 before any grouped family; `just check-seam` is its gate.
 3. **Evidence supply is the long pole, not code.** Four jars must be fetched; per-jar data
-   generators and packet reports must be *verified per jar, not assumed*; captures must come
-   from real servers (the `decode(encode(x))` trap); the box affords one live oracle at a
-   time. Mitigation: the capture-once/replay-forever pattern makes live time a one-shot cost
-   per version; U0 proves the whole capture loop on the family that already exists.
+   generators and packet reports must be *verified per jar, not assumed*; captures must
+   come from real servers (the `decode(encode(x))` trap); the box affords one live oracle
+   at a time. Mitigation: the capture-once/replay-forever pattern makes live time a
+   one-shot cost per version; U0 proves the whole capture loop on the family that already
+   exists.
+4. **Host-direction lossiness has no oracle.** H2's degradation choices are decisions;
+   the only external check is a real legacy client tolerating the result. Budget review
+   time for the decision table and do not let a round-trip test impersonate evidence.
+5. **Every number in this document ages.** Connectedness figures, line counts, and the
+   `Ignored` list were all measured at `d197d555` and some changed within a day of the
+   previous revision. Re-run `cargo xtask connectedness` before quoting anything here.
 
-Secondary: the v756 grouping may split (tell named in U9); chat signing scope creep (named
-in U10); the 32 context-dependent flattening slots and outbound/hosting are consciously
-deferred, not forgotten — phase 2 begins when `docs/server-ecs.md`'s world lands.
+Secondary: the v756 grouping may split (tell named in U9); chat signing scope creep
+(named in U10); the 32 context-dependent flattening slots are consciously deferred, not
+forgotten.
