@@ -63,6 +63,20 @@ pub mod music;
 /// biome assets already in this repository.
 pub mod biome_music;
 
+/// Ambient sound loops: the biome/dimension loop with its 40-tick crossfade, the
+/// darkness-driven "mood" one-shot (cave ambience), and the flat-probability
+/// "additions". Device-free and clock-free, like [`music`].
+pub mod ambient;
+
+/// The generated biome-id → [`ambient::AmbientSounds`] table, plus the
+/// per-*dimension* layer that actually carries cave ambience.
+pub mod biome_ambient;
+
+/// Client-predicted local sounds: which sounds vanilla plays without waiting for the
+/// server, the step-distance cadence that triggers footsteps, and the echo ledger
+/// that guards against double-play.
+pub mod predict;
+
 /// The native, device-backed engine ([`AudioEngine`]) and the audio types a
 /// consumer needs to drive it, re-exported so a caller depends on this one crate
 /// rather than reaching into [`lodestone-audio`](lodestone_audio) directly.

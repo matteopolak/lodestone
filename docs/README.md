@@ -30,6 +30,8 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `login::finish_interactive` rather than hand-rolling a second copy — issue #73,
   see that section) and for the offline-selection convention it establishes that
   `login::try_cached_session` already happens to handle correctly.
+- [Ambient sound loops and client-predicted local sounds](./ambient-sounds.md) — Two
+  related pieces of the audio layer, both in `crates/lodestone-sound`:
 - [Arm swing animation](./arm-swing-animation.md) — The arm swing you see when you
   mine, place, or hit something. Vanilla drives three separate things off one number
   — `attackAnim`, swing progress in `0.0..=1.0`:

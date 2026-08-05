@@ -133,6 +133,29 @@ impl JavaRandom {
         (hi << 32).wrapping_add(lo)
     }
 
+    /// A uniform `f64` in `[0, 1)`, matching `Random.nextDouble()`:
+    /// `(((long) next(26) << 27) + next(27)) * 2^-53`.
+    ///
+    /// Needed by biome ambient *additions*, which fire on
+    /// `random.nextDouble() < tick_chance` (`BiomeAmbientSoundsHandler.java:65`)
+    /// against chances as small as `0.0111`. Note this consumes **two** LCG steps,
+    /// so substituting `next_i32_bound` scaled would desync any shared stream.
+    pub fn next_f64(&mut self) -> f64 {
+        let hi = (self.next(26) as i64) << 27;
+        let lo = self.next(27) as i64;
+        (hi + lo) as f64 * (1.0 / (1i64 << 53) as f64)
+    }
+
+    /// A uniform `f32` in `[0, 1)`, matching `Random.nextFloat()`:
+    /// `next(24) / 2^24`. One LCG step, unlike [`JavaRandom::next_f64`].
+    ///
+    /// Vanilla uses it for the swim-sound pitch jitter
+    /// `1.0 + (nextFloat() - nextFloat()) * 0.4` (`Entity.java:1490`), which draws
+    /// twice and is therefore order-sensitive.
+    pub fn next_f32(&mut self) -> f32 {
+        self.next(24) as f32 / (1i32 << 24) as f32
+    }
+
     /// A `roll`-shaped draw for weighted selection: a uniform value in
     /// `[0, bound)`, the signature `lodestone-assets`' `resolve` expects.
     ///
