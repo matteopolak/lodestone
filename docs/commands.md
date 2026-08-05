@@ -161,6 +161,54 @@ its id matches the request currently pending (mirroring vanilla's
 `ClientSuggestionProvider::completeCustomSuggestions`) — a stale reply, from
 a request the input has since outgrown, is dropped rather than applied.
 
+### The keystroke path — what actually presses Tab (#471 steps 2 and 3)
+
+Everything above was, until #471, an island: `complete` and
+`SuggestionRequests` had **no production caller**, and
+`menu/render/screens.rs`'s `command_block_frame(state, tree)` was called only
+with `tree: None`. The chain now runs end to end:
+
+| link | where |
+|---|---|
+| decode | `crates/protocol/v770` → `ClientEvent::CommandTreeUpdated` / `CommandSuggestionsReceived` (#470) |
+| fold | `net::forward`'s two arms → `net::CommandTreeCell` (#471 step 1) |
+| chat box | `app::menus::handle_chat_key`'s `KeyCode::Tab` → `ChatInput::tab(tree)` |
+| round trip | `ChatInput::tab` returns the `ClientAction::CommandSuggestion`; `app::menus::pump_command_suggestions` polls the cell and calls `ChatInput::apply_suggestions` |
+| command block | `try_use` → `MenuNav::set_command_tree` → `key_command_block`'s Tab → `CommandBlockState::apply_completion` |
+
+`ChatInput::tab` **splices the chosen candidate into the line** rather than
+drawing a popup: the HUD already draws `chat_input`, so this is the shortest
+path from the server's tree to a pixel. Pressing Tab again on an unedited
+completed line cycles to the next candidate (the list and the prefix it was
+computed from are held in `ChatCompletion`, inside `ChatInput` — vanilla's
+`ChatScreen` owns its `CommandSuggestions` the same way); any other edit makes
+the "is this list still about this line?" comparison fail, so the next Tab
+recomputes. The popup list itself is a `hud.rs` draw and is **not** built yet.
+
+Two properties are worth keeping when this changes:
+
+- **The reply's own `start` decides where the text lands**, not a re-derived
+  local offset — a correct list at the wrong offset overwrites the wrong span.
+  A `start` outside the line it answers is rejected, never clamped.
+- **`apply_suggestions` is safe to poll every frame**: the id match consumes
+  the pending request, so the second poll of the same response is stale by
+  construction. That is what lets the frame loop read the cell like every other
+  `net` cell rather than needing a queue.
+
+Tab reaches `handle_chat_key` at all because `input::resolve_key`
+short-circuits on `gate.chat_open` before any gameplay binding — the
+player-list binding is on the same physical key.
+
+**Known gap, measured while wiring this**: `Screen::CommandBlockEdit` is drawn
+**nowhere**. `render::frame_for` has no arm for it (it is an overlay screen,
+like `Paused`/`Death`), `nav::on_screen_frame` has no arm either, and
+`app/redraw.rs` has overlay blocks for pause, death and in-world settings but
+not for this one — so `command_block_frame` still has no production caller and
+the screen's clicks never hit-test. The tree, the Tab key and the suggestion
+popup rows on that screen are therefore correct-but-dark until that fourth
+overlay block exists; the chat box is the half of #471 that reaches pixels
+today.
+
 ### The redirect-cycle guard
 
 A redirect is a **same-position jump**, not a token-consuming one, so a

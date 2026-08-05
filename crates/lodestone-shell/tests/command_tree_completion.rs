@@ -308,3 +308,296 @@ fn a_shared_prefix_narrows_to_exactly_the_commands_that_share_it() {
         "`game` is shared by exactly /gamemode and /gamerule in vanilla 26.2"
     );
 }
+
+// --- The consumer: the tree reaching the line on screen (issue #471) --------
+//
+// Everything above proves `complete()` walks a real tree correctly. That is
+// still not a pixel: until #471 steps 2 and 3 the *only* callers of `complete`
+// were tests and a `command_block_frame` argument every production caller
+// passed as `None`, which is this repo's island shape exactly. The gates below
+// drive the seams a keystroke actually reaches — `ChatInput::tab` (the chat
+// box's Tab key) and `CommandBlockState::apply_completion` (the edit screen's)
+// — against the same real server tree, so the assertion is on the text that
+// ends up in the field, not on a completion object nobody reads.
+//
+// What only a live session can confirm: that a joined 26.2 server's tree lands
+// in `net::CommandTreeCell` in time, and that the completed line is legible in
+// the chat box's own font. The tree here is that server's own bytes, and the
+// splice is asserted exactly, so what is left to a live run is the wiring
+// either side of these two calls.
+
+use lodestone::chat::ChatInput;
+use lodestone::menu::command_block::{CommandBlockOpen, CommandBlockState};
+use lodestone_client::ClientAction;
+use lodestone_model::command_tree::{CommandSuggestionEntry, CommandSuggestionsResponse};
+
+/// Tab against a **half-typed command name** — no trailing space, the input
+/// shape that has now hidden two separate bugs in this feature (a `.trim()`ing
+/// canonicalize, and a `parse_line` that offered a fully-typed token's own
+/// children instead of its parent). The chat line itself must change, and
+/// pressing Tab again must cycle rather than recompute.
+#[test]
+fn tab_completes_a_half_typed_command_name_and_then_cycles() {
+    let tree = real_server_tree();
+    let mut input = ChatInput::new();
+    input.set("/game");
+
+    assert!(
+        input.tab(Some(&tree)).is_none(),
+        "a locally-answerable position needs no server round trip"
+    );
+    assert_eq!(
+        input.as_str(),
+        "/gamemode",
+        "Tab must splice the first candidate into the line — this is the pixel"
+    );
+    assert_eq!(
+        input
+            .completion_candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gamemode", "gamerule"],
+        "and the offered set is the real server's own pair for the prefix `game`"
+    );
+
+    assert!(input.tab(Some(&tree)).is_none());
+    assert_eq!(input.as_str(), "/gamerule", "a second Tab cycles");
+    assert!(input.tab(Some(&tree)).is_none());
+    assert_eq!(input.as_str(), "/gamemode", "and the cycle wraps");
+
+    // Editing the line abandons the cycle: the next Tab must recompute against
+    // what is actually typed, not advance a list about older text.
+    input.push_str("x");
+    assert!(input.tab(Some(&tree)).is_none());
+    assert_eq!(
+        input.as_str(),
+        "/gamemodex",
+        "`gamemodex` matches no command, so Tab leaves the line alone rather \
+         than cycling the stale `gamemode`/`gamerule` list"
+    );
+}
+
+/// The trailing-space half at the *consumer*, with the splice offset asserted
+/// as a whole line: a correct list spliced at the wrong `start` overwrites the
+/// wrong span, and a line comparison catches that where a candidate-set
+/// comparison cannot.
+#[test]
+fn tab_after_a_trailing_space_splices_the_argument_domain_at_the_servers_start() {
+    let tree = real_server_tree();
+    let mut input = ChatInput::new();
+    input.set("/gamemode ");
+
+    assert!(input.tab(Some(&tree)).is_none());
+    assert_eq!(
+        input.as_str(),
+        "/gamemode adventure",
+        "the four modes the live server itself returned (start=10), spliced at 10 — \
+         a splice at any other offset produces a different line"
+    );
+    assert_eq!(
+        input
+            .completion_candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["adventure", "creative", "spectator", "survival"],
+    );
+
+    // The half-typed *argument* token, again with no trailing space.
+    let mut input = ChatInput::new();
+    input.set("/gamemode s");
+    assert!(input.tab(Some(&tree)).is_none());
+    assert_eq!(input.as_str(), "/gamemode spectator");
+    assert!(input.tab(Some(&tree)).is_none());
+    assert_eq!(input.as_str(), "/gamemode survival");
+}
+
+/// The control, run rather than described: with the cell empty — exactly the
+/// state before `minecraft:commands` arrives, and the state every caller was
+/// stuck in before #471 — the identical keystroke must leave the line
+/// untouched. Two hypotheses over the same input, so the gate above cannot be
+/// satisfied by a completer that ignores its tree.
+#[test]
+fn with_no_tree_the_same_tab_press_changes_nothing() {
+    let tree = real_server_tree();
+
+    let mut with = ChatInput::new();
+    with.set("/game");
+    let _ = with.tab(Some(&tree));
+
+    let mut without = ChatInput::new();
+    without.set("/game");
+    let action = without.tab(None);
+
+    assert_eq!(with.as_str(), "/gamemode");
+    assert_eq!(
+        without.as_str(),
+        "/game",
+        "no tree must mean no completion — never a guess, and never an empty list \
+         treated as an answer"
+    );
+    assert!(action.is_none(), "and nothing goes on the wire either");
+    assert!(without.completion_candidates().is_empty());
+    assert_ne!(
+        with.as_str(),
+        without.as_str(),
+        "if these ever agree, the gate above is measuring something other than the tree"
+    );
+}
+
+/// The server round trip, including the property the transaction id exists for.
+///
+/// `/summon ` is a resource argument: no local domain, so the walker defers to
+/// the server rather than guessing — the `Completion::NeedsServer` path, whose
+/// `SuggestionRequests::request`/`::receive` pair had **no production caller**
+/// at all before this change.
+#[test]
+fn a_suggestion_reply_is_applied_only_when_it_answers_the_request_in_flight() {
+    let tree = real_server_tree();
+    let mut input = ChatInput::new();
+    input.set("/summon ");
+
+    let Some(ClientAction::CommandSuggestion { id, command }) = input.tab(Some(&tree)) else {
+        panic!("a resource argument must produce a server round trip, not a local guess");
+    };
+    assert_eq!(command, "/summon ", "the request carries the line as typed");
+    assert_eq!(input.as_str(), "/summon ", "and the line waits, unchanged");
+
+    let entry = |text: &str| CommandSuggestionEntry {
+        text: text.to_string(),
+        tooltip: None,
+    };
+
+    // A reply to a *different* request — the stale case. Vanilla's own
+    // `completeCustomSuggestions` id check; ignored, not rendered.
+    let stale = CommandSuggestionsResponse {
+        id: id.wrapping_add(1),
+        start: 8,
+        length: 0,
+        suggestions: vec![entry("minecraft:creeper")],
+    };
+    assert!(
+        !input.apply_suggestions(&stale),
+        "a reply whose id does not match the request in flight must be dropped"
+    );
+    assert_eq!(input.as_str(), "/summon ", "and must not touch the line");
+
+    // A reply with the right id but a `start` outside the line it answers.
+    let out_of_range = CommandSuggestionsResponse {
+        id,
+        start: 999,
+        length: 0,
+        suggestions: vec![entry("minecraft:creeper")],
+    };
+    assert!(!input.apply_suggestions(&out_of_range));
+    assert_eq!(input.as_str(), "/summon ");
+
+    // The in-date reply. `start` is read from the response, not re-derived.
+    let mut input = ChatInput::new();
+    input.set("/summon ");
+    let Some(ClientAction::CommandSuggestion { id, .. }) = input.tab(Some(&tree)) else {
+        panic!("expected a second round trip");
+    };
+    let good = CommandSuggestionsResponse {
+        id,
+        start: 8,
+        length: 0,
+        suggestions: vec![entry("minecraft:creeper"), entry("minecraft:zombie")],
+    };
+    assert!(input.apply_suggestions(&good));
+    assert_eq!(input.as_str(), "/summon minecraft:creeper");
+    assert_eq!(
+        input
+            .completion_candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["minecraft:creeper", "minecraft:zombie"],
+    );
+
+    // Polling the same response again — which is exactly what the per-frame
+    // pump in `app::menus::pump_command_suggestions` does — is stale by
+    // construction, because the id match consumed the pending request.
+    assert!(
+        !input.apply_suggestions(&good),
+        "the second poll of one response must be a no-op, or a frame loop would \
+         re-splice it forever"
+    );
+    assert_eq!(input.as_str(), "/summon minecraft:creeper");
+}
+
+/// `start` is load-bearing, stated as two hypotheses over one identical
+/// suggestion list: the same texts at two different offsets produce two
+/// different lines. An implementation that ignored the response's `start` (or
+/// re-derived its own) could not tell these apart.
+#[test]
+fn the_replies_own_start_decides_where_the_text_lands() {
+    let tree = real_server_tree();
+    let entry = CommandSuggestionEntry {
+        text: "minecraft:zombie".to_string(),
+        tooltip: None,
+    };
+
+    let mut at_token = ChatInput::new();
+    at_token.set("/summon ");
+    let Some(ClientAction::CommandSuggestion { id, .. }) = at_token.tab(Some(&tree)) else {
+        panic!("expected a round trip");
+    };
+    assert!(at_token.apply_suggestions(&CommandSuggestionsResponse {
+        id,
+        start: 8,
+        length: 0,
+        suggestions: vec![entry.clone()],
+    }));
+
+    let mut at_zero = ChatInput::new();
+    at_zero.set("/summon ");
+    let Some(ClientAction::CommandSuggestion { id, .. }) = at_zero.tab(Some(&tree)) else {
+        panic!("expected a round trip");
+    };
+    // Not a shape vanilla sends — a deliberately different offset, so the two
+    // hypotheses are distinguishable at all.
+    assert!(at_zero.apply_suggestions(&CommandSuggestionsResponse {
+        id,
+        start: 0,
+        length: 0,
+        suggestions: vec![entry],
+    }));
+
+    assert_eq!(at_token.as_str(), "/summon minecraft:zombie");
+    assert_eq!(at_zero.as_str(), "minecraft:zombie");
+    assert_ne!(at_token.as_str(), at_zero.as_str());
+}
+
+/// Step 2's seam: the command block edit screen's own Tab key, against the same
+/// real tree, plus the `None` control it degraded to before #471.
+///
+/// The command field holds a **slash-less** line, so this also covers
+/// `menu::command_block::complete`'s offset shift — a completion spliced one
+/// byte out would show `gamemod` or `ggamemode` here.
+#[test]
+fn the_command_block_screens_tab_completes_from_the_same_tree() {
+    let tree = real_server_tree();
+    let open = CommandBlockOpen {
+        command: "game".to_string(),
+        ..CommandBlockOpen::default()
+    };
+
+    let mut state = CommandBlockState::new(open.clone());
+    assert!(state.apply_completion(Some(&tree)));
+    assert_eq!(
+        state.command.value(),
+        "gamemode",
+        "no leading slash on this screen, and the splice must land at 0 — an \
+         unshifted offset would produce `amemode`"
+    );
+
+    let mut without = CommandBlockState::new(open);
+    assert!(
+        !without.apply_completion(None),
+        "the honest degrade: no tree, no completion"
+    );
+    assert_eq!(without.command.value(), "game");
+    assert_ne!(state.command.value(), without.command.value());
+}

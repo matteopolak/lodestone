@@ -447,6 +447,45 @@ impl CommandBlockState {
         complete(tree, self.command.value())
     }
 
+    /// The Tab key (issue #471 step 2): splice the top locally-computed
+    /// candidate into the command field, replacing everything from the
+    /// completion's own `start`. Returns whether the field changed.
+    ///
+    /// Vanilla's Tab *cycles the popup's selection* and commits on Enter
+    /// (`CommandSuggestions.SuggestionsList.cycle`/`useSuggestion`); this
+    /// commits the top candidate directly, because no popup **selection**
+    /// state is modelled here — the popup rows `super::render::
+    /// command_block_frame` builds are derived from [`Self::completions`]
+    /// rather than held. Pressing Tab again is then idempotent rather than a
+    /// cycle: the completed token now matches only itself, so the same text is
+    /// spliced back. Named here rather than hidden, and the gap is what a
+    /// selection index would close.
+    ///
+    /// A [`Completion::NeedsServer`] position does nothing at all on this
+    /// screen: a `command_suggestion` round trip needs an outbound action, and
+    /// [`super::nav::MenuNav`] is pure — it returns a [`super::nav::MenuAction`]
+    /// and holds no client handle. The chat box, which does have one, takes
+    /// that path (`crate::chat::ChatInput::tab`).
+    pub fn apply_completion(&mut self, tree: Option<&CommandTree>) -> bool {
+        let Completion::Local { start, candidates } = self.completions(tree) else {
+            return false;
+        };
+        let Some(first) = candidates.first() else {
+            return false;
+        };
+        let value = self.command.value();
+        if start > value.len() || !value.is_char_boundary(start) {
+            return false;
+        }
+        let mut next = value[..start].to_string();
+        next.push_str(&first.text);
+        if next == value {
+            return false;
+        }
+        self.command.set_value(next);
+        true
+    }
+
     /// `populateAndSendPacket` (`CommandBlockEditScreen.java:96-109`): the
     /// outbound packet this screen exists to produce.
     #[must_use]

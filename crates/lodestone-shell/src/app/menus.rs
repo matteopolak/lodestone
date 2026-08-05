@@ -203,6 +203,13 @@ impl WindowApp {
         // Land any finished status pings before building the frame, or a row
         // shows "PINGING" for one frame longer than it needs to.
         self.statuses.pump();
+        // Same shape, for the same reason, and this is the *frame* half of the
+        // suggestion poll: this method is called once per rendered frame from
+        // `redraw`, before the early return for a screen it does not own, so a
+        // `command_suggestion` reply lands on the next frame rather than
+        // waiting for the player to press another key. `handle_chat_key` pumps
+        // too, which is what covers a driver that never renders.
+        self.pump_command_suggestions();
         // `frame_for` is the authority on which screens this renderer owns — it
         // covers the three menu screens *and* the error screen. Asking it,
         // rather than re-deriving the set here, is what keeps the two from
@@ -259,10 +266,19 @@ impl WindowApp {
     }
 
     /// Route one key press to the open chat prompt. Enter sends the line through
-    /// the client's chat/command seam, Escape cancels, Backspace edits, and any
-    /// printable text is appended (control chars and `§` are filtered by
-    /// [`ChatInput`]). Both Enter and Escape close the prompt and re-grab.
+    /// the client's chat/command seam, Escape cancels, Backspace edits, Tab
+    /// completes against the server's own command tree, and any printable text
+    /// is appended (control chars and `§` are filtered by [`ChatInput`]). Both
+    /// Enter and Escape close the prompt and re-grab.
+    ///
+    /// Tab reaches here at all because `input::resolve_key` short-circuits on
+    /// `gate.chat_open` before any gameplay binding — the player-list binding is
+    /// on the same physical key and would otherwise eat it.
     pub(super) fn handle_chat_key(&mut self, event: &winit::event::KeyEvent) {
+        // Land any `command_suggestion` reply that arrived since the last key.
+        // See `pump_command_suggestions` for why this is here rather than only
+        // in the frame loop.
+        self.pump_command_suggestions();
         if let PhysicalKey::Code(code) = event.physical_key {
             match code {
                 KeyCode::Escape => {
@@ -282,12 +298,62 @@ impl WindowApp {
                     self.chat_input.backspace();
                     return;
                 }
+                // Issue #471 step 3, and the point of the whole chain: the
+                // completion is computed against the tree **the server sent**
+                // (`net::CommandTreeCell`), not against anything local. With no
+                // tree yet — a server that has sent no `minecraft:commands`, or
+                // any point before login completes — `ChatInput::tab` offers
+                // nothing rather than an empty list.
+                KeyCode::Tab => {
+                    let tree = self.command_tree();
+                    if let Some(action) = self.chat_input.tab(tree.as_deref())
+                        && let Some(net) = self.sim.net()
+                    {
+                        // A `Completion::NeedsServer` position: the answer
+                        // arrives asynchronously and is applied by
+                        // `pump_command_suggestions`.
+                        net.send_action(action);
+                    }
+                    return;
+                }
                 _ => {}
             }
         }
         if let Some(text) = &event.text {
             self.chat_input.push_str(text.as_str());
         }
+    }
+
+    /// The command tree the connected server sent, if any.
+    ///
+    /// Read straight off the shared cell rather than cached: the tree is
+    /// replaced whole whenever the server re-sends `minecraft:commands` (an op
+    /// level change does), and an `Arc` clone is the whole cost — the tree
+    /// itself is ~2,000 nodes and is never copied here.
+    pub(super) fn command_tree(
+        &self,
+    ) -> Option<std::sync::Arc<lodestone_model::command_tree::CommandTree>> {
+        self.sim.net()?.shared_command_tree().tree()
+    }
+
+    /// Apply whatever `command_suggestion` reply the net thread has folded into
+    /// the shared cell.
+    ///
+    /// Safe to call as often as you like: [`ChatInput::apply_suggestions`]
+    /// honours a reply only once — the transaction-id match consumes the
+    /// pending request, so a second call with the same (still-latest) response
+    /// is stale by construction and returns `false`. That is what lets this be
+    /// a poll rather than a queue, matching how every other `net` cell here is
+    /// read.
+    pub(super) fn pump_command_suggestions(&mut self) {
+        let Some(response) = self
+            .sim
+            .net()
+            .and_then(|net| net.shared_command_tree().suggestions())
+        else {
+            return;
+        };
+        let _ = self.chat_input.apply_suggestions(&response);
     }
 
     /// `key.use` in the world — vanilla's `Minecraft.startUseItem`, plus the one
@@ -326,6 +392,13 @@ impl WindowApp {
             // as well: running both would place a block against the command
             // block behind the screen that just opened.
             self.sim.input_mut(InputState::release_all);
+            // Issue #471 step 2: hand the screen the tree the server actually
+            // sent, so its Tab key and its suggestion popup are computed from
+            // real data. `MenuNav` is pure and holds no client handle, so the
+            // push has to happen here, where one is in scope; doing it at open
+            // time (rather than caching) means a re-sent `minecraft:commands`
+            // is picked up the next time the screen opens.
+            self.nav.set_command_tree(self.command_tree());
             self.nav.open_command_block(&mut self.ui, open);
             self.tab_held = false;
             self.set_grab(false);

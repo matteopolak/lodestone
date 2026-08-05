@@ -22,9 +22,10 @@
 //! [`highlight`] and [`complete`] are this crate's half of the Brigadier
 //! command-tree UX. Both walk a [`CommandTree`] (decoded upstream, from the
 //! `minecraft:commands` packet — see `lodestone_model::command_tree`'s own
-//! doc for the wire shape and, importantly, **what still has to be brokered
-//! into a protocol-crate decode arm**, since this crate cannot touch
-//! `crates/protocol/**`) against the *current* input line, which
+//! doc for the wire shape; that decode landed in `090f2ff`/#470 and the fold
+//! into `net::CommandTreeCell` in `8b0aede`/#471, so this doc's old "still
+//! has to be brokered into a protocol-crate decode arm" is done) against the
+//! *current* input line, which
 //! [`ChatInput`]'s own doc already establishes is always edited at its end —
 //! so there is no separate cursor position to track here, only "the line so
 //! far".
@@ -103,6 +104,20 @@
 //!   produces a false red on input that is actually fine, which is the
 //!   safer direction for a UX feature to be wrong in.
 //!
+//! ## What presses the key (issue #471 step 3)
+//!
+//! [`ChatInput::tab`] is the seam a keystroke actually reaches:
+//! `app::menus::handle_chat_key`'s `KeyCode::Tab` arm calls it with the tree
+//! from `net::CommandTreeCell`, sends the [`ClientAction`] it returns for a
+//! [`Completion::NeedsServer`] position, and
+//! `app::menus::pump_command_suggestions` polls the cell for the reply and
+//! feeds it to [`ChatInput::apply_suggestions`]. Before that arm existed,
+//! [`complete`] and [`SuggestionRequests`] had **no production caller at all**
+//! — the island this module's tests could not see, because a crate's own test
+//! suite is a closed loop. `crates/lodestone-shell/tests/
+//! command_tree_completion.rs` is the gate that drives the whole chain against
+//! a real 26.2 server's captured tree.
+//!
 //! `highlight`/`complete` return **byte spans into the input string**, not
 //! screen pixels — this crate has no font metrics and does not compute any.
 //! Mapping a span to a pixel run belongs wherever the draw call already
@@ -122,6 +137,9 @@ use lodestone_model::command_tree::{
 #[derive(Debug, Clone, Default)]
 pub struct ChatInput {
     buf: String,
+    /// Tab-completion state for **this** line — see [`ChatCompletion`] for why
+    /// it lives inside the input rather than beside it.
+    completion: ChatCompletion,
 }
 
 impl ChatInput {
@@ -135,6 +153,9 @@ impl ChatInput {
     /// key). Replaces any current contents.
     pub fn set(&mut self, text: impl Into<String>) {
         self.buf = text.into();
+        // A wholesale replacement is a different line, so any list and any
+        // in-flight request are about text that no longer exists.
+        self.completion.reset();
     }
 
     /// Append typed text. Control characters (newlines, the section sign used by
@@ -177,6 +198,7 @@ impl ChatInput {
     /// Clear and return the typed line, ready to compose into an action.
     #[must_use]
     pub fn take(&mut self) -> String {
+        self.completion.reset();
         std::mem::take(&mut self.buf)
     }
 }
@@ -771,6 +793,215 @@ impl SuggestionRequests {
     #[must_use]
     pub fn is_pending(&self) -> bool {
         self.pending.is_some()
+    }
+}
+
+/// The suggestion list currently spliced into the input line, and where it
+/// came from.
+///
+/// `prefix` is `line[..start]` **captured when the list was computed**, which
+/// is what makes "is this list still about the line on screen?" answerable
+/// without re-walking the tree: the line is still ours exactly while it equals
+/// `prefix + candidates[index].text`. Any other edit — a typed character, a
+/// backspace, a send — makes that comparison fail, so the next Tab recomputes
+/// instead of cycling a list that no longer describes the line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveCompletion {
+    /// Byte offset the candidate text replaces from, to end of line.
+    start: usize,
+    /// `line[..start]` at the moment this list was produced.
+    prefix: String,
+    candidates: Vec<Candidate>,
+    /// Which candidate is currently spliced in. Tab advances it, wrapping.
+    index: usize,
+}
+
+impl ActiveCompletion {
+    /// The line this list currently claims to have produced.
+    fn line(&self) -> String {
+        let mut s = String::with_capacity(self.prefix.len() + 16);
+        s.push_str(&self.prefix);
+        if let Some(c) = self.candidates.get(self.index) {
+            s.push_str(&c.text);
+        }
+        s
+    }
+
+    /// Whether `line` is still the one this list produced — see the struct doc.
+    fn owns(&self, line: &str) -> bool {
+        self.line() == line
+    }
+}
+
+/// The chat box's Tab key: [`complete`] plus the state that makes pressing Tab
+/// twice cycle rather than recompute, and the [`SuggestionRequests`] round trip
+/// for a [`Completion::NeedsServer`] position.
+///
+/// Held **inside [`ChatInput`]** rather than beside it, mirroring vanilla,
+/// where `ChatScreen` owns one `CommandSuggestions` bound to its one `EditBox`
+/// (`ChatScreen.java`'s `commandSuggestions` field): the completion state is
+/// only ever meaningful against one specific in-progress line, and separating
+/// them is how the two drift apart.
+///
+/// # What is deliberately simpler than vanilla
+///
+/// Vanilla re-requests suggestions on **every keystroke** and draws a popup the
+/// player picks from; this splices the chosen candidate straight into the line
+/// on Tab, which is the same edit vanilla's `useSuggestion` performs when the
+/// player commits one. The popup itself is a `hud.rs` draw and is not built
+/// here — see `docs/commands.md`.
+#[derive(Debug, Clone, Default)]
+pub struct ChatCompletion {
+    requests: SuggestionRequests,
+    active: Option<ActiveCompletion>,
+    /// The line as it was when [`SuggestionRequests::request`] was sent. The
+    /// reply's `start` is a byte offset **into that text**, so applying it to a
+    /// line that has since changed would splice at an offset that no longer
+    /// means anything — the id check alone does not cover this, because a
+    /// reply can be perfectly in-date for a line the player has already edited.
+    pending_line: Option<String>,
+}
+
+impl ChatCompletion {
+    /// No list, no request in flight.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Forget any list and any in-flight request. Called when the line is
+    /// replaced wholesale (chat opened, or the line sent).
+    pub fn reset(&mut self) {
+        self.active = None;
+        self.pending_line = None;
+    }
+
+    /// The candidates currently offered, newest list first. Empty when Tab has
+    /// produced nothing — a draw can show this without asking again.
+    #[must_use]
+    pub fn candidates(&self) -> &[Candidate] {
+        self.active.as_ref().map_or(&[], |a| &a.candidates)
+    }
+
+    /// Which of [`Self::candidates`] is spliced into the line right now.
+    #[must_use]
+    pub fn selected(&self) -> Option<usize> {
+        self.active.as_ref().map(|a| a.index)
+    }
+
+    /// Whether a `command_suggestion` reply is still outstanding.
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.requests.is_pending()
+    }
+
+    /// Start (or restart) a list, splicing its first candidate into `buf`.
+    fn begin(&mut self, start: usize, buf: &mut String, candidates: Vec<Candidate>) {
+        if candidates.is_empty() || start > buf.len() || !buf.is_char_boundary(start) {
+            return;
+        }
+        let active = ActiveCompletion {
+            start,
+            prefix: buf[..start].to_string(),
+            candidates,
+            index: 0,
+        };
+        *buf = active.line();
+        self.active = Some(active);
+    }
+}
+
+impl ChatInput {
+    /// The Tab key. Completes the line in place against `tree`, and returns a
+    /// [`ClientAction`] the caller must send when the position can only be
+    /// answered by the server (`None` otherwise, including when there is no
+    /// tree yet — a server that has sent no `minecraft:commands`, or any point
+    /// before login completes, offers nothing rather than an empty list).
+    ///
+    /// Pressing Tab again on an unedited completed line **cycles** to the next
+    /// candidate rather than recomputing, which is vanilla's
+    /// `SuggestionsList.cycle` behaviour reached through the same key.
+    pub fn tab(&mut self, tree: Option<&CommandTree>) -> Option<ClientAction> {
+        if let Some(active) = self.completion.active.as_mut()
+            && active.owns(&self.buf)
+        {
+            if active.candidates.len() > 1 {
+                active.index = (active.index + 1) % active.candidates.len();
+                self.buf = active.line();
+            }
+            return None;
+        }
+        self.completion.active = None;
+        let tree = tree?;
+        match complete(tree, &self.buf) {
+            Completion::Local { start, candidates } => {
+                self.completion.begin(start, &mut self.buf, candidates);
+                None
+            }
+            Completion::NeedsServer { .. } => {
+                self.completion.pending_line = Some(self.buf.clone());
+                Some(self.completion.requests.request(&self.buf))
+            }
+            Completion::None => None,
+        }
+    }
+
+    /// Apply a `command_suggestion` reply. Returns `true` when it was applied
+    /// — i.e. it answered the request currently in flight *and* the line it was
+    /// asked about is still the line being typed.
+    ///
+    /// **`false` is the normal, expected answer for a reply that is out of
+    /// date**, and the caller must treat it as "ignore", not as an error: this
+    /// is safe to poll every frame off `net::CommandTreeCell::suggestions`,
+    /// because the id match consumes the pending request, so the second poll of
+    /// the same response is already stale.
+    ///
+    /// The splice uses the **server's own `start`**, not the local walker's:
+    /// the response's range is authoritative for where its texts belong (a
+    /// correct list at the wrong offset overwrites the wrong span on screen),
+    /// and a `start` outside the requested line is rejected rather than clamped.
+    pub fn apply_suggestions(
+        &mut self,
+        response: &lodestone_model::command_tree::CommandSuggestionsResponse,
+    ) -> bool {
+        let Some(candidates) = self
+            .completion
+            .requests
+            .receive(response.id, response.suggestions.clone())
+        else {
+            return false;
+        };
+        let Some(asked) = self.completion.pending_line.take() else {
+            return false;
+        };
+        if asked != self.buf {
+            return false;
+        }
+        let Ok(start) = usize::try_from(response.start) else {
+            return false;
+        };
+        if start > self.buf.len() || !self.buf.is_char_boundary(start) {
+            return false;
+        }
+        if candidates.is_empty() {
+            return false;
+        }
+        self.completion.begin(start, &mut self.buf, candidates);
+        true
+    }
+
+    /// The candidates the last Tab produced — for a draw, and for a test to
+    /// assert the exact set rather than "some suggestions appeared".
+    #[must_use]
+    pub fn completion_candidates(&self) -> &[Candidate] {
+        self.completion.candidates()
+    }
+
+    /// The completion state itself, for callers that need [`ChatCompletion::
+    /// is_pending`] or the selected index.
+    #[must_use]
+    pub fn completion(&self) -> &ChatCompletion {
+        &self.completion
     }
 }
 
