@@ -1801,6 +1801,7 @@ where
             // wildcard so that adding a variant stays a compile error.
             | ServerBound::ChatCommand { .. }
             | ServerBound::Chat { .. }
+            | ServerBound::PlayerCommand { .. }
             | ServerBound::Ignored => {}
         }
     }
@@ -3706,6 +3707,7 @@ where
         | ServerBound::ConfigurationFinished
         | ServerBound::StatusRequest
         | ServerBound::PingRequest { .. }
+        | ServerBound::PlayerCommand { .. }
         | ServerBound::Ignored => {}
     }
     Ok(())
