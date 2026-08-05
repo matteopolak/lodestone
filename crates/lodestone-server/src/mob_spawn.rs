@@ -385,6 +385,15 @@ impl SpawnRng {
         }
         (self.next_u64() % bound as u64) as i32
     }
+
+    /// A uniform `f64` in `[0.0, 1.0)` with a 53-bit mantissa, matching Java
+    /// `RandomSource.nextDouble()`'s contract — the roll
+    /// [`crate::composter::Composter::insert`] asks its caller for (taking the
+    /// top 53 bits of one draw and scaling by `2^-53` is equivalent to Java's
+    /// `(next(26) << 27) + next(27)) / (1L << 53)`).
+    pub fn next_f64(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
 }
 
 #[cfg(test)]

@@ -201,11 +201,15 @@ must emit nothing) and a clear-a-slot control.
    second, bottle-shaped wire path is built. Out of this landing's file
    ownership either way.
 2. **The composter has no menu to open, by design** — matching vanilla,
-   which never opens a screen for one either. Right-clicking a composter
-   with an item still falls through to this crate's existing plain-block
-   placement logic (unchanged): there is no serverbound handling of "feed
-   the composter one item," which is composter-specific future work, not a
-   container-packet gap.
+   which never opens a screen for one either. The serverbound feeding side
+   is now wired rather than future work — see the update section below:
+   `apply_use_item_on` routes a composter right-click through
+   `apply_composter_use`. Still absent is the client-facing *feedback*
+   vanilla pairs with these interactions: the `levelEvent` 1500 particle
+   burst on a successful add (`ComposterBlock.java:261`) and the
+   `COMPOSTER_EMPTY` sound on extraction (`ComposterBlock.java:307`), and
+   the extracted drop's `offsetRandomXZ` velocity jitter — none of which
+   this crate sends.
 3. **This crate does not send a `container_close` to force a client's UI
    shut** when the block backing an open window is broken out from under
    it (`apply_block_action` clears the *server's* own `OpenContainer`
@@ -247,6 +251,50 @@ The composter is the one kind written under a **namespaced** id
 its level is a block-state property and its ready delay is a scheduled block
 tick. That divergence is this crate's, not a schema mistake, and it is recorded
 at `Composter::restore`.
+
+## Update: the composter is now fed server-side (issue #249's consumer)
+
+The last composter-specific gap — "no serverbound handling of *feed the
+composter one item*" — is closed. `crate::server::apply_use_item_on` now
+routes a right-click on a registered composter through
+`apply_composter_use` *before* any placement logic; only `NotComposter` (no
+composter there, or a click vanilla itself would `PASS`) falls through.
+
+The wiring mirrors `ComposterBlock.useItemOn`/`useWithoutItem`'s order
+(`ComposterBlock.java:248-283`), with one load-bearing subtlety:
+`BlockBehaviour.useItemOn`'s default returns `TRY_WITH_EMPTY_HAND`, so the
+server dispatcher runs `useWithoutItem` for *any* click the composter's
+item-offer does not consume — which is why at level 8 every click (empty
+hand, compostable item, or non-compostable item) extracts bone meal while
+the hand is untouched, and why the chance table must be consulted **up
+front** rather than by `insert`: at level 7 vanilla's `COMPOSTABLES`
+`containsKey` guard fails *before* the `fillLevel < 7` add, so a
+non-compostable item falls through to placement there while a compostable
+one is consumed as the click — and `insert` alone answers `NotAccepting`
+for both.
+
+Concretely: a **compostable** item is rolled against `compostable_chance`
+(one `SpawnRng::next_f64` draw per click — top 53 bits, the same `[0,1)`
+contract as Java's `RandomSource.nextDouble()`), consumes one from the
+selected hotbar stack even on a failed roll (`itemStack.consume(1)`,
+`ComposterBlock.java:263`), and writes the new
+`minecraft:composter[level=N]` state via both `ChunkSource::set_block` and a
+client block-update packet — the latter only when the level actually
+advanced. The consumed count reaches the client as a window-0 slot update
+(menu slot 36 + hotbar, `state_id` 0 as in the brewing arm). Extraction
+drops exactly one bone meal just above the block via `MobSim::spawn_item`
+(`ItemLifecycle::newly_dropped`, pickup delay 10), which the existing
+`snapshots()`/`EntityStreamer` item path streams to clients — extraction is
+not an island. The 20-tick ready delay stays the tick loop's job, not this
+wiring's.
+
+`server.rs`'s own module pins the five outcomes against exact expectations:
+`right_click_consumes_one_compostable_and_raises_the_level`,
+`a_failed_roll_still_consumes_the_item_but_keeps_the_state`,
+`a_non_compostable_item_falls_through_without_touching_anything`,
+`extracting_a_ready_composter_spawns_bone_meal_and_resets` (plus the
+level-7 click-consumed case, the works-with-an-item-in-hand and
+works-for-a-non-compostable cases, and a no-composter negative control).
 
 ## How to change it
 

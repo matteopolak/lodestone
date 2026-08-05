@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lodestone_core::State;
-use lodestone_entity::DamageFlags;
+use lodestone_entity::{DamageFlags, ItemLifecycle};
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Rotation, Text, TextContent, Vec3,
 };
@@ -23,6 +23,7 @@ use lodestone_net::{Connection, NetError, Transport};
 
 use crate::block_entities::{BlockEntity, BlockEntityHandle, block_entity_for_item};
 use crate::brewing::{Bottle, BottleKind, is_ingredient};
+use crate::composter::{InsertOutcome, compostable_chance};
 use crate::command::{CommandCaller, CommandDispatch, CommandSession};
 use crate::chunk::{
     AIR, ChunkColumn, ChunkSource, generate_columns_offloaded, generate_columns_parallel,
@@ -30,6 +31,7 @@ use crate::chunk::{
 };
 use crate::fall::FallTracker;
 use crate::inventory::{ContainerMenuSlot, PlayerInventory, container_menu_slot};
+use crate::mob_spawn::SpawnRng;
 use crate::mobs::{MobHandle, PlayerPerception};
 use crate::neighbor_update::Direction;
 use crate::players::{ChatLine, PlayerListStreamer, PlayerRegistry, PlayerTicket};
@@ -39,6 +41,7 @@ use crate::redstone_diode::{set_comparator, set_repeater};
 use crate::redstone_observer::set_observer;
 use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue};
 use crate::tick::{BlockTickFeed, ExplosionFeed};
+use crate::weather::WeatherFeed;
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
 
 /// Server-initiated keep-alive interval, and the width of the window in
@@ -972,6 +975,7 @@ where
         mobs,
         &BlockTickFeed::default(),
         &ExplosionFeed::default(),
+        &WeatherFeed::default(),
         &CommandDispatch::none(),
     )
     .await
@@ -1013,6 +1017,7 @@ where
         mobs,
         block_ticks,
         explosions,
+        &WeatherFeed::default(),
         &CommandDispatch::none(),
     )
     .await
@@ -1068,6 +1073,7 @@ where
         mobs,
         block_ticks,
         explosions,
+        &WeatherFeed::default(),
         commands,
     )
     .await
@@ -1113,6 +1119,7 @@ where
         mobs,
         block_ticks,
         &ExplosionFeed::default(),
+        &WeatherFeed::default(),
         &CommandDispatch::none(),
     )
     .await
@@ -1138,6 +1145,11 @@ where
 /// the *feed-carrying* path down [`SourceRef::Borrowed`], i.e. #293's negative
 /// control with block ticks and explosions attached. Delete it only together
 /// with that control.
+///
+/// #324: also the only entry point that carries a real [`WeatherFeed`] today —
+/// the borrow-shaped twin of whatever feed the `_shared` variant will gain when
+/// `crate::integrated` wires it. `tests/serve_play.rs`'s weather gate drives
+/// this one precisely because it is borrow-shaped.
 #[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_connection_with_mob_events<T, P, S, E>(
@@ -1150,6 +1162,7 @@ pub async fn serve_connection_with_mob_events<T, P, S, E>(
     mobs: &MobHandle,
     block_ticks: &BlockTickFeed,
     explosions: &ExplosionFeed,
+    weather: &WeatherFeed,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1167,6 +1180,7 @@ where
         mobs,
         block_ticks,
         explosions,
+        weather,
         &CommandDispatch::none(),
     )
     .await
@@ -1220,6 +1234,7 @@ where
         mobs,
         block_ticks,
         explosions,
+        &WeatherFeed::default(),
         commands,
     )
     .await
@@ -1247,6 +1262,13 @@ async fn serve_connection_inner<T, P, S, E>(
     mobs: &MobHandle,
     block_ticks: &BlockTickFeed,
     explosions: &ExplosionFeed,
+    // Issue #324. Same shape as the two feeds above: the world tick loop's
+    // weather transitions, drained by `serve_play`'s `container_sync_tick`
+    // arm (see that arm's own comment for why a timer, not a packet, drives
+    // it). Every pre-existing entry point passes a permanently-empty default
+    // feed — the compatibility shape this file established for `block_ticks`
+    // and `explosions`, and the reason no off-limits call site broke.
+    weather: &WeatherFeed,
     // Issues #48/#464. `CommandDispatch::none()` — the `Default` — is the
     // inert value every pre-existing entry point passes, so adding this
     // changed no caller's behaviour and no caller's wire bytes.
@@ -1509,6 +1531,7 @@ where
                     mobs,
                     block_ticks,
                     explosions,
+                    weather,
                     commands,
                 )
                 .await;
@@ -2097,6 +2120,205 @@ fn insert_into_brewing_stand(
     BrewingInsertOutcome::Inserted(remainder)
 }
 
+/// The seed for the per-connection [`SpawnRng`] that draws a composter's
+/// insert roll — the same explicit-seed shape `tick::RANDOM_TICK_BEHAVIOR_SEED`
+/// uses for crop growth, and for the same reason: this crate takes seeds
+/// explicitly rather than drawing them, so a test can replay an exact
+/// outcome. Per-*connection*, not per-*level*: two players feeding the same
+/// composter draw from different streams, which only changes which roll a
+/// given insert sees — the shared fill state lives in the registry regardless.
+const COMPOSTER_BEHAVIOR_SEED: u64 = 0x5EED_C011;
+
+/// What a right-click on a composter did, so [`apply_use_item_on`] can decide
+/// whether the ordinary placement logic may still run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ComposterUseOutcome {
+    /// `pos` held no composter block entity, or the click left both the
+    /// composter and the player's hand untouched (a non-compostable held item,
+    /// or an empty hand on a not-yet-ready composter) — vanilla's
+    /// `super.useItemOn`/`useWithoutItem` both `PASS`, so the placement logic
+    /// below must run.
+    NotComposter,
+    /// The composter consumed the click but nothing moved — level `7`,
+    /// waiting on its scheduled tick (vanilla's `useItemOn` returns `SUCCESS`
+    /// there, `ComposterBlock.java:248-270`, and the hand is untouched). No
+    /// placement may follow.
+    Noop,
+    /// One item was consumed from the player's hand (`itemStack.consume(1)`,
+    /// `ComposterBlock.java:263`). `remainder` is the hand's new contents for
+    /// the caller to push as a window-0 slot update; `block_state` is the new
+    /// block state to write — `Some` when the fill level advanced, `None` on a
+    /// failed roll (the item is still consumed; only the state is unchanged).
+    Consumed {
+        remainder: Option<ItemStack>,
+        block_state: Option<String>,
+    },
+    /// Bone meal was extracted (level `8` -> `0`, `extractProduce`,
+    /// `ComposterBlock.java:298-309`) — the caller spawns the item entity and
+    /// writes `block_state`.
+    Extracted { block_state: String },
+}
+
+/// The decision `apply_composter_use`'s registry-locked step makes; the caller
+/// then applies the world side effects (inventory shrink, bone-meal spawn).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ComposterStep {
+    /// Not a composter, or the click leaves everything untouched — the
+    /// placement logic below may run.
+    FallThrough,
+    /// Click consumed, nothing changed (level 7 waiting).
+    Noop,
+    /// One item consumed; `block_state` is `Some` when the fill level advanced.
+    Consumed { block_state: Option<String> },
+    /// Level 8 reached — extract bone meal, reset to 0.
+    Extract,
+}
+
+/// The block-state string for a composter at fill `level` — vanilla's
+/// `minecraft:composter[level=0..8]`, the string the client's
+/// `resolve_state_id` maps to the composter's per-level ids (block 229 in
+/// `crates/lodestone-data/src/generated/block_states.rs`).
+fn composter_state(level: u8) -> String {
+    format!("minecraft:composter[level={level}]")
+}
+
+/// Applies one right-click on the composter at `pos` — the wiring that makes
+/// `Composter::insert`/`extract` (and therefore the whole seven-tier fill
+/// state machine, issue #249) reachable from a player at all.
+///
+/// Mirrors `ComposterBlock.useItemOn`'s order: the held item (if any) is
+/// offered to the fill machine first, and whatever the item offer does not
+/// consume falls through to `useWithoutItem` (`ComposterBlock.java:272-283`),
+/// which extracts at level `8` and otherwise `PASS`s. Concretely:
+///
+/// * an empty hand on a ready (level `8`) composter extracts the bone meal;
+/// * a compostable item is rolled against its chance, consuming one from the
+///   hand either way (a failed roll still eats the item — vanilla
+///   `itemStack.consume(1)`);
+/// * a compostable item at level `7` (waiting on its scheduled tick) is
+///   consumed as a click but changes nothing;
+/// * a *non*-compostable item never reaches `insert`'s level gate, because at
+///   level `7` vanilla's `COMPOSTABLES.containsKey` guard fails *before* the
+///   `fillLevel < 7` add, so the click falls through to placement there while
+///   the same item at level `8` extracts. Checking the chance table up front
+///   reproduces that ordering (`insert` alone would answer `NotAccepting` for
+///   both a compostable and a non-compostable item at level 7, and nothing
+///   could tell them apart).
+///
+/// `roll` is an injected `[0.0, 1.0)` sample the caller draws once per
+/// interaction — the "caller supplies the randomness" shape
+/// [`Composter::insert`] documents, so a test can pin an exact outcome.
+///
+/// The inventory shrink and the bone-meal spawn are **this** function's job,
+/// not the block-state writer's: item consumption lives with the caller (the
+/// composter never holds the inserted item — see `composter.rs`'s module
+/// doc), and `spawn_item` gives the extraction its world-facing item entity
+/// (which `MobSim::snapshots` streams to clients). The caller writes the
+/// returned `block_state` (if any) and pushes the window-0 slot update.
+fn apply_composter_use(
+    block_entities: &BlockEntityHandle,
+    inventory: &mut PlayerInventory,
+    mobs: &MobHandle,
+    pos: BlockPos,
+    roll: f64,
+) -> ComposterUseOutcome {
+    // The registry lookup happens first, so a right-click on any other block
+    // is untouched by this branch entirely.
+    let held = inventory.selected_item().cloned();
+    let step = block_entities.with(|reg| {
+        let Some(BlockEntity::Composter(composter)) = reg.get_mut(pos) else {
+            return ComposterStep::FallThrough;
+        };
+        let Some(held) = held else {
+            // Empty hand: `useWithoutItem` (`ComposterBlock.java:272-283`).
+            if composter.extract() {
+                return ComposterStep::Extract;
+            }
+            return ComposterStep::FallThrough;
+        };
+        let item = held.item.to_string();
+        // Non-compostable items fall through to `useWithoutItem` (see the doc
+        // comment above for why this must be checked before `insert`, not by
+        // it).
+        if compostable_chance(&item).is_none() {
+            if composter.extract() {
+                return ComposterStep::Extract;
+            }
+            return ComposterStep::FallThrough;
+        }
+        match composter.insert(&item, roll) {
+            InsertOutcome::Consumed { level_increased } => {
+                ComposterStep::Consumed {
+                    block_state: level_increased.then(|| composter_state(composter.level())),
+                }
+            }
+            InsertOutcome::NotAccepting => {
+                // Level 7 (waiting, compostable): vanilla `useItemOn` returns
+                // SUCCESS with the hand untouched. Level 8 (ready): the item
+                // offer failed `fillLevel < 8`, so the `useWithoutItem` half
+                // extracts instead.
+                if composter.extract() {
+                    ComposterStep::Extract
+                } else {
+                    ComposterStep::Noop
+                }
+            }
+            InsertOutcome::NotCompostable => unreachable!(
+                "compostable_chance() is the same table insert() consults; \
+                 the up-front guard above rules this out"
+            ),
+        }
+    });
+    match step {
+        ComposterStep::FallThrough => ComposterUseOutcome::NotComposter,
+        ComposterStep::Noop => ComposterUseOutcome::Noop,
+        ComposterStep::Consumed { block_state } => {
+            // Consume one from the selected hotbar stack — vanilla
+            // `itemStack.consume(1)`, the same shrink
+            // `insert_into_brewing_stand` performs for its own consumed insert.
+            let native = usize::from(inventory.selected_hotbar_slot());
+            let remainder = match inventory.native(native).cloned() {
+                Some(mut stack) => {
+                    stack.count -= 1;
+                    if stack.count == 0 {
+                        None
+                    } else {
+                        Some(stack)
+                    }
+                }
+                None => None,
+            };
+            inventory.set_native(native, remainder.clone());
+            ComposterUseOutcome::Consumed {
+                remainder,
+                block_state,
+            }
+        }
+        ComposterStep::Extract => {
+            // `extractProduce` (`ComposterBlock.java:298-309`): exactly one
+            // bone meal at the block's top, with the hand untouched. Vanilla's
+            // `offsetRandomXZ(0.7F)` jitter on the velocity is skipped because
+            // this crate has no gaussian f64 source; a gentle upward toss is
+            // enough to leave the block.
+            mobs.with(|sim| {
+                sim.spawn_item(
+                    "minecraft:bone_meal".parse().expect("bone_meal is a valid item id"),
+                    Vec3::new(
+                        pos.x as f64 + 0.5,
+                        pos.y as f64 + 1.01,
+                        pos.z as f64 + 0.5,
+                    ),
+                    Vec3::new(0.0, 0.2, 0.0),
+                    ItemLifecycle::newly_dropped(1, 64),
+                );
+            });
+            ComposterUseOutcome::Extracted {
+                block_state: composter_state(0),
+            }
+        }
+    }
+}
+
 /// Applies a right-click placement, mirroring
 /// `ServerGamePacketListenerImpl.handleUseItemOn`'s replace-vs-relative
 /// choice of placement cell (`BlockPlaceContext`'s constructor: place at the
@@ -2185,6 +2407,13 @@ async fn apply_use_item_on<T, P, S>(
     next_window_id: &mut i32,
     open_container: &mut Option<OpenContainer>,
     container_sync: &mut ContainerSync,
+    // Issue #249. The composter interaction: `mobs` so a level-8 extraction
+    // can spawn its bone-meal item entity, and `roll` — a fresh `[0.0, 1.0)`
+    // draw from the connection's [`SpawnRng`], one per right-click, so the
+    // fill machine's per-item chance sees a live sample rather than a constant
+    // (the caller-supplied-roll shape `Composter::insert` documents).
+    mobs: &MobHandle,
+    roll: f64,
     // Issue #465, the delayed half. `propagate_placement` below resolves
     // everything synchronous (dust) against a `ScheduledTickQueue` it then
     // discards; a torch/repeater/comparator/observer instead *schedules*, and
@@ -2240,6 +2469,45 @@ where
             return Ok(());
         }
         BrewingInsertOutcome::NotBrewing => {
+            // Fall through to the ordinary placement logic below.
+        }
+    }
+
+    // Issue #249, the missing-consumer half: a right-click on a composter
+    // feeds the seven-tier fill state machine — see
+    // [`apply_composter_use`]'s doc comment for the four outcomes. Anything
+    // the composter itself handles returns before the placement logic; only
+    // `NotComposter` (no composter, or a click vanilla would `PASS`) reaches
+    // it.
+    match apply_composter_use(block_entities, inventory, mobs, pos, roll) {
+        ComposterUseOutcome::Consumed {
+            remainder,
+            block_state,
+        } => {
+            // Write the new fill level — only when it actually advanced; a
+            // failed roll consumed the item but left the state alone.
+            if let Some(block_state) = block_state {
+                source.set_block(pos.x, pos.y, pos.z, &block_state);
+                apply(conn, state, proto.encode_block_update(pos.x, pos.y, pos.z, &block_state)).await?;
+            }
+            // Tell the client's window-0 hotbar slot (menu slots `36..=44` ->
+            // native `0..=8`, vanilla's `InventoryMenu`) so the held count
+            // visibly drops — the same server-initiated window-0 slot update
+            // vanilla broadcasts after a composter click consumes one.
+            // `state_id` is `0`, as in the brewing arm above (this crate
+            // applies a container diff verbatim and never validates a stale
+            // id).
+            let hotbar_slot = i32::from(inventory.selected_hotbar_slot()) + WINDOW_ZERO_HOTBAR_FIRST;
+            apply(conn, state, proto.encode_container_slot(0, 0, hotbar_slot, remainder.as_ref())).await?;
+            return Ok(());
+        }
+        ComposterUseOutcome::Extracted { block_state } => {
+            source.set_block(pos.x, pos.y, pos.z, &block_state);
+            apply(conn, state, proto.encode_block_update(pos.x, pos.y, pos.z, &block_state)).await?;
+            return Ok(());
+        }
+        ComposterUseOutcome::Noop => return Ok(()),
+        ComposterUseOutcome::NotComposter => {
             // Fall through to the ordinary placement logic below.
         }
     }
@@ -2826,6 +3094,10 @@ async fn dispatch_play_packet<T, P, S>(
     // needs to ask the world tick loop for a neighbour-update fan-out that
     // outlives this packet — see that function's own parameter comment.
     block_ticks: &BlockTickFeed,
+    // Issue #249. This connection's composter roll source — seeded once in
+    // `serve_play`, advanced once per right-click (see
+    // [`apply_composter_use`]'s `roll` parameter).
+    composter_rng: &mut SpawnRng,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -2960,6 +3232,10 @@ where
             face,
             sequence: _,
         } => {
+            // Issue #249: one roll per right-click, whatever block was hit —
+            // vanilla's level RNG advances on plenty of unrelated draws too,
+            // and the composter branch is the only consumer of this stream.
+            let roll = composter_rng.next_f64();
             apply_use_item_on(
                 conn,
                 proto,
@@ -2978,6 +3254,8 @@ where
                 next_window_id,
                 open_container,
                 container_sync,
+                mobs,
+                roll,
                 block_ticks,
             )
             .await?;
@@ -3180,6 +3458,9 @@ async fn serve_play<T, P, S, E>(
     mobs: &MobHandle,
     block_ticks: &BlockTickFeed,
     explosions: &ExplosionFeed,
+    // Issue #324. Weather transitions published by the world tick loop's
+    // `WeatherState`, drained on this same timer — see that arm's comment.
+    weather: &WeatherFeed,
     // Issues #48/#464. Owned rather than borrowed: it is built once, here at
     // the Play handoff, from *this* connection's login, and it is cheap
     // (an `Option<Arc>` plus a `Uuid` and a `String`).
@@ -3211,6 +3492,9 @@ where
     // very first open bumps it to `1` before use (`ServerPlayer.java:1330,
     // 1343`) — see [`open_container_screen`]'s own `% 100 + 1` wrap.
     let mut next_window_id: i32 = 0;
+    // Issue #249. This connection's composter roll stream — see
+    // `COMPOSTER_BEHAVIOR_SEED` and `dispatch_play_packet`'s parameter comment.
+    let mut composter_rng = SpawnRng::new(COMPOSTER_BEHAVIOR_SEED);
     // Issue #270's chunk-batch flow-control gate (`ServerBound::
     // ChunkBatchAcknowledged`, see `send_view_update`'s own doc comment):
     // starts `true` because `serve_connection`'s own initial full-view dump
@@ -3290,6 +3574,7 @@ where
                     &commands,
                     &mut outgoing_chat,
                     block_ticks,
+                    &mut composter_rng,
                     packet_id,
                     &payload,
                 )
@@ -3448,6 +3733,17 @@ where
                     )
                     .await?;
                 }
+                // Issue #324: same shape again — the world tick loop's weather
+                // cycle (`crate::weather::WeatherState`, ticked inside
+                // `run_tick_loop`) has no packet driving it either, so this
+                // connection learns of a rain flip or a level ramp only when
+                // this timer drains the feed. `WeatherFeed::drain_all` is
+                // single-consumer for the same reason the two drains above
+                // are (see that type's own doc comment).
+                for event in weather.drain_all() {
+                    let (kind, value) = event.wire();
+                    apply(conn, &mut state, proto.encode_game_event(kind, value)).await?;
+                }
                 // Issue #469: player chat, riding the same timer as the three
                 // above for the same reason. Unlike them this is *not* a
                 // drain-all feed — `chat_since` advances this connection's own
@@ -3510,6 +3806,11 @@ async fn serve_play<T, P, S, E>(
     // Issue #425: same gap, same reason — a detonation has no packet driving
     // it either, so this target simply never surfaces one.
     _explosions: &ExplosionFeed,
+    // Issue #324: same gap as `_explosions`, same reason — a weather flip or
+    // level ramp has no packet driving it, so this target (which owns none of
+    // `container_sync_tick`, the native loop's drain point) never surfaces
+    // one. Accepted for signature parity, exactly like its two neighbours.
+    _weather: &WeatherFeed,
     // Issues #48/#464 — **not** a gap on this target. Commands are entirely
     // packet-driven (a `chat_command` frame arrives, the sink answers, system
     // chat goes back), so the missing timers cost nothing here and this loop
@@ -3554,6 +3855,10 @@ where
     let mut open_container: Option<OpenContainer> = None;
     let mut container_sync = ContainerSync::default();
     let mut next_window_id: i32 = 0;
+    // Issue #249 — see the native `serve_play`'s identical binding: the
+    // composter roll stream has no timer and no wasm32 dependency, so it is
+    // wired identically on this target.
+    let mut composter_rng = SpawnRng::new(COMPOSTER_BEHAVIOR_SEED);
     // See the native `serve_play`'s identical field for why this starts
     // `true` (the initial join dump is itself an unacknowledged batch).
     let mut awaiting_chunk_batch_ack = true;
@@ -3588,6 +3893,7 @@ where
             &commands,
             &mut outgoing_chat,
             block_ticks,
+            &mut composter_rng,
             packet_id,
             &payload,
         )
@@ -3643,6 +3949,7 @@ where
 mod tests {
     use super::*;
     use crate::brewing::BrewingStand;
+    use crate::composter::{Composter, MAX_FILL_LEVEL, READY_DELAY_TICKS};
     use crate::chunk::ChunkColumn;
     use crate::furnace::{Furnace, FurnaceKind};
     use crate::protocol::MetadataField;
@@ -4333,6 +4640,271 @@ mod tests {
 
         assert_eq!(outcome, BrewingInsertOutcome::NotBrewing);
         assert_eq!(inventory.native(0), Some(&stack("minecraft:nether_wart", 1)));
+    }
+
+    // -- the composter interaction (issue #249) --
+
+    /// A composter at `pos`, and a player inventory whose selected hotbar slot
+    /// (0) holds `held`. `MobHandle::default()` is an empty sim, so the first
+    /// `spawn_item` in a test is entity id 1 (its `next_id` starts at 1 — see
+    /// `MobSim::new`).
+    fn composter_scene(
+        composter: Composter,
+        held: Option<ItemStack>,
+    ) -> (BlockEntityHandle, PlayerInventory, BlockPos, MobHandle) {
+        let block_entities = BlockEntityHandle::new();
+        let pos = BlockPos::new(4, 64, 4);
+        block_entities.with(|reg| reg.insert(pos, BlockEntity::Composter(composter)));
+        let mut inventory = PlayerInventory::new();
+        inventory.set_native(0, held);
+        (block_entities, inventory, pos, MobHandle::default())
+    }
+
+    /// The composter's fill level, read back through the registry.
+    fn composter_level(block_entities: &BlockEntityHandle, pos: BlockPos) -> u8 {
+        block_entities.with(|reg| match reg.get(pos) {
+            Some(BlockEntity::Composter(composter)) => composter.level(),
+            _ => u8::MAX,
+        })
+    }
+
+    /// A right-click with a compostable item consumes one from the hand and
+    /// raises the fill level — the wiring that makes `Composter::insert`
+    /// reachable at all.
+    #[test]
+    fn right_click_consumes_one_compostable_and_raises_the_level() {
+        let (block_entities, mut inventory, pos, mobs) =
+            composter_scene(Composter::new(), Some(stack("minecraft:oak_leaves", 3)));
+
+        // oak_leaves chance is 0.3; roll 0.0 always beats it (and level 0
+        // always advances regardless of roll — the documented special case).
+        let outcome = apply_composter_use(&block_entities, &mut inventory, &mobs, pos, 0.0);
+
+        assert_eq!(
+            outcome,
+            ComposterUseOutcome::Consumed {
+                remainder: Some(stack("minecraft:oak_leaves", 2)),
+                block_state: Some("minecraft:composter[level=1]".to_string()),
+            }
+        );
+        assert_eq!(composter_level(&block_entities, pos), 1);
+    }
+
+    /// A single compostable item in hand is fully consumed, emptying the slot.
+    #[test]
+    fn right_click_fully_consumes_a_single_item() {
+        let (block_entities, mut inventory, pos, mobs) =
+            composter_scene(Composter::new(), Some(stack("minecraft:wheat", 1)));
+
+        let outcome = apply_composter_use(&block_entities, &mut inventory, &mobs, pos, 0.0);
+
+        assert_eq!(
+            outcome,
+            ComposterUseOutcome::Consumed {
+                remainder: None,
+                block_state: Some("minecraft:composter[level=1]".to_string()),
+            }
+        );
+        assert_eq!(inventory.native(0), None, "the selected slot is empty after the click");
+    }
+
+    /// **Control**: a failed roll still consumes the item (vanilla consumes on
+    /// every accepted insert, `ComposterBlock.java:263`) but leaves the level —
+    /// and therefore the block state — unchanged.
+    #[test]
+    fn a_failed_roll_still_consumes_the_item_but_keeps_the_state() {
+        let (block_entities, mut inventory, pos, mobs) =
+            composter_scene(Composter::restore(1, None), Some(stack("minecraft:oak_leaves", 2)));
+
+        // oak_leaves chance is 0.3; a roll of 0.9 fails away from level 0.
+        let outcome = apply_composter_use(&block_entities, &mut inventory, &mobs, pos, 0.9);
+
+        assert_eq!(
+            outcome,
+            ComposterUseOutcome::Consumed {
+                remainder: Some(stack("minecraft:oak_leaves", 1)),
+                block_state: None,
+            }
+        );
+        assert_eq!(composter_level(&block_entities, pos), 1);
+    }
+
+    /// A non-compostable held item falls through without consuming anything or
+    /// touching the composter — the caller's cue to try ordinary placement
+    /// (vanilla `super.useItemOn`).
+    #[test]
+    fn a_non_compostable_item_falls_through_without_touching_anything() {
+        let (block_entities, mut inventory, pos, mobs) =
+            composter_scene(Composter::new(), Some(stack("minecraft:diamond", 1)));
+
+        let outcome = apply_composter_use(&block_entities, &mut inventory, &mobs, pos, 0.0);
+
+        assert_eq!(outcome, ComposterUseOutcome::NotComposter);
+        assert_eq!(inventory.native(0), Some(&stack("minecraft:diamond", 1)));
+        assert_eq!(composter_level(&block_entities, pos), 0);
+    }
+
+    /// An empty hand on a not-yet-ready composter falls through too (vanilla
+    /// `useWithoutItem` PASSes below level 8) — you can still place a block on
+    /// top of a partially filled composter.
+    #[test]
+    fn an_empty_hand_on_a_not_ready_composter_falls_through() {
+        let (block_entities, mut inventory, pos, mobs) =
+            composter_scene(Composter::restore(3, None), None);
+
+        let outcome = apply_composter_use(&block_entities, &mut inventory, &mobs, pos, 0.0);
+
+        assert_eq!(outcome, ComposterUseOutcome::NotComposter);
+        assert_eq!(composter_level(&block_entities, pos), 3);
+    }
+
+    /// A full (level 7, waiting on its scheduled tick) composter consumes the
+    /// click without touching the hand — vanilla `useItemOn` returns SUCCESS
+    /// at `fillLevel == 7` with nothing to add (`ComposterBlock.java:257-259`).
+    #[test]
+    fn level_seven_consumes_the_click_without_touching_the_hand() {
+        let mut composter = Composter::new();
+        for _ in 0..MAX_FILL_LEVEL {
+            assert!(matches!(
+                composter.insert("minecraft:cake", 0.0),
+                InsertOutcome::Consumed {
+                    level_increased: true
+                }
+            ));
+        }
+        let (block_entities, mut inventory, pos, mobs) =
+            composter_scene(composter, Some(stack("minecraft:cake", 2)));
+
+        let outcome = apply_composter_use(&block_entities, &mut inventory, &mobs, pos, 0.0);
+
+        assert_eq!(outcome, ComposterUseOutcome::Noop);
+        assert_eq!(
+            inventory.native(0),
+            Some(&stack("minecraft:cake", 2)),
+            "the hand must be untouched"
+        );
+        assert_eq!(composter_level(&block_entities, pos), MAX_FILL_LEVEL);
+    }
+
+    /// A ready composter (level 8) with an empty hand yields one bone-meal item
+    /// entity just above the block and resets to level 0 — the extraction half
+    /// of the interaction (`extractProduce`).
+    #[test]
+    fn extracting_a_ready_composter_spawns_bone_meal_and_resets() {
+        let mut composter = Composter::new();
+        for _ in 0..MAX_FILL_LEVEL {
+            composter.insert("minecraft:cake", 0.0);
+        }
+        for _ in 0..READY_DELAY_TICKS {
+            composter.tick();
+        }
+        assert!(composter.is_ready());
+        let (block_entities, mut inventory, pos, mobs) = composter_scene(composter, None);
+
+        let outcome = apply_composter_use(&block_entities, &mut inventory, &mobs, pos, 0.0);
+
+        assert_eq!(
+            outcome,
+            ComposterUseOutcome::Extracted {
+                block_state: "minecraft:composter[level=0]".to_string(),
+            }
+        );
+        assert_eq!(composter_level(&block_entities, pos), 0);
+        assert_eq!(
+            mobs.with(|sim| sim.item_count()),
+            1,
+            "exactly one bone-meal item entity must spawn"
+        );
+        // The first spawn in a fresh `MobSim` is id 1 (its `next_id` starts at
+        // 1), and it must land where vanilla's
+        // `atLowerCornerWithOffset(pos, 0.5, 1.01, 0.5)` puts it.
+        assert_eq!(
+            mobs.with(|sim| sim.item_position(1)),
+            Some(Vec3::new(4.5, 65.01, 4.5)),
+            "the bone meal must spawn just above the composter"
+        );
+    }
+
+    /// **Control**: extraction reaches the player even with a compostable item
+    /// in hand — the item offer fails `fillLevel < 8` (returns `NotAccepting`)
+    /// and the `useWithoutItem` half extracts without consuming the hand.
+    #[test]
+    fn extracting_a_ready_composter_works_even_with_an_item_in_hand() {
+        let mut composter = Composter::new();
+        for _ in 0..MAX_FILL_LEVEL {
+            composter.insert("minecraft:cake", 0.0);
+        }
+        for _ in 0..READY_DELAY_TICKS {
+            composter.tick();
+        }
+        let (block_entities, mut inventory, pos, mobs) =
+            composter_scene(composter, Some(stack("minecraft:cake", 2)));
+
+        let outcome = apply_composter_use(&block_entities, &mut inventory, &mobs, pos, 0.0);
+
+        assert_eq!(
+            outcome,
+            ComposterUseOutcome::Extracted {
+                block_state: "minecraft:composter[level=0]".to_string(),
+            }
+        );
+        assert_eq!(
+            inventory.native(0),
+            Some(&stack("minecraft:cake", 2)),
+            "extraction must not consume the hand"
+        );
+        assert_eq!(mobs.with(|sim| sim.item_count()), 1);
+    }
+
+    /// **Control**: a non-compostable item on a *ready* composter also extracts
+    /// — vanilla's item offer fails the `COMPOSTABLES.containsKey` guard and
+    /// the `useWithoutItem` half runs, without consuming the hand.
+    #[test]
+    fn extracting_a_ready_composter_works_for_a_non_compostable_item_too() {
+        let mut composter = Composter::new();
+        for _ in 0..MAX_FILL_LEVEL {
+            composter.insert("minecraft:cake", 0.0);
+        }
+        for _ in 0..READY_DELAY_TICKS {
+            composter.tick();
+        }
+        let (block_entities, mut inventory, pos, mobs) =
+            composter_scene(composter, Some(stack("minecraft:diamond", 1)));
+
+        let outcome = apply_composter_use(&block_entities, &mut inventory, &mobs, pos, 0.0);
+
+        assert_eq!(
+            outcome,
+            ComposterUseOutcome::Extracted {
+                block_state: "minecraft:composter[level=0]".to_string(),
+            }
+        );
+        assert_eq!(
+            inventory.native(0),
+            Some(&stack("minecraft:diamond", 1)),
+            "the non-compostable item must stay in hand"
+        );
+        assert_eq!(mobs.with(|sim| sim.item_count()), 1);
+    }
+
+    /// A position holding no composter is not a composter interaction at all,
+    /// regardless of the held item.
+    #[test]
+    fn a_position_without_a_composter_is_not_a_composter_interaction() {
+        let block_entities = BlockEntityHandle::new();
+        let mut inventory = PlayerInventory::new();
+        inventory.set_native(0, Some(stack("minecraft:oak_leaves", 1)));
+
+        let outcome = apply_composter_use(
+            &block_entities,
+            &mut inventory,
+            &MobHandle::default(),
+            BlockPos::new(9, 9, 9),
+            0.0,
+        );
+
+        assert_eq!(outcome, ComposterUseOutcome::NotComposter);
+        assert_eq!(inventory.native(0), Some(&stack("minecraft:oak_leaves", 1)));
     }
 
     /// [`join_view_rings`]'s shape, at the three inputs that matter: the shell's
