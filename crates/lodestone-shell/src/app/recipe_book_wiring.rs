@@ -369,6 +369,7 @@ fn an_open_panel_covers_its_own_screen_rect() {
     let (tabs, pages, _) = recipe_panel_contents(
         Some(&book),
         &panel,
+        &menu,
         lodestone_model::RecipeBookType::Crafting,
     );
     let rect = panel_rect_ndc(&panel, &menu, tabs, pages);
@@ -418,6 +419,7 @@ fn a_closed_panel_fails_the_coverage_assertion() {
     let (tabs, pages, _) = recipe_panel_contents(
         Some(&book),
         &open,
+        &menu,
         lodestone_model::RecipeBookType::Crafting,
     );
     // The *same* rect the positive gate measures — derived from the open
@@ -502,5 +504,158 @@ fn the_toast_expires_and_an_empty_queue_never_shows_one() {
     assert!(
         recipe_toast_view(&queue, now + lodestone_game::recipe::RECIPE_TOAST_DISPLAY_MS).is_none(),
         "and it must expire exactly at DISPLAY_TIME"
+    );
+}
+
+// -- the All/Craftable filter (issue #436) ----------------------------
+//
+// `SessionRecipeBookSettings` folded a `filtering` bit that had nothing to
+// land in: `RecipePanelState` had no such field, the cycle-button was
+// hit-tested into a no-op arm, and the sprite was hardcoded to the
+// `filter_disabled` art with a doc comment saying so. These three gates are
+// the "something on screen changes" half — the button's art, and the browsed
+// set behind it.
+
+/// A crafting menu stocked so the torch **is** craftable: coal and stick in
+/// the inventory, which is exactly what `plan_recipe_auto_fill` looks for.
+fn stocked_crafting_menu() -> Menu {
+    let mut menu = Menu::crafting(3, 3);
+    menu.set_slot_item(12, Some(stack("minecraft:coal", 5)));
+    menu.set_slot_item(20, Some(stack("minecraft:stick", 3)));
+    menu
+}
+
+/// **The filter button draws different art in its two states.**
+///
+/// A *two-hypothesis* assertion rather than a tolerance or a bare
+/// "is not empty": the sprite id at the filter rect is required to equal the
+/// enabled art **and** to differ from the disabled art, in the filtering
+/// state, with both hypotheses named. Asserting only "some sprite is here"
+/// would pass against the hardcoded `RECIPE_SPRITE_FILTER` this replaces —
+/// which is the whole defect.
+///
+/// Measured by **location**: the sprite is found by its `dst` rect matching
+/// `layout.filter_button`, not by index into the sprite list, so a reordering
+/// of the stream cannot silently point this at the page arrow.
+#[test]
+fn the_filter_button_swaps_its_art_between_all_and_craftable() {
+    let menu = stocked_crafting_menu();
+    let book = torch_book();
+
+    let sprite_at_filter_rect = |filtering: bool| -> String {
+        let panel = RecipePanelState { open: true, filtering, ..RecipePanelState::default() };
+        let (tabs, pages, _) =
+            recipe_panel_contents(Some(&book), &panel, &menu, lodestone_model::RecipeBookType::Crafting);
+        let layout = recipe_panel_layout(&panel, &menu, 1, W, H, tabs, pages);
+        let geo = recipe_panel_geometry(Some(&book), &panel, &menu, 1, None, None, W, H)
+            .expect("recipe book");
+        let want = layout.filter_button;
+        geo.sprites
+            .iter()
+            .find(|s| {
+                (s.dst[0] - want.x).abs() < 0.01
+                    && (s.dst[1] - want.y).abs() < 0.01
+                    && (s.dst[2] - want.w).abs() < 0.01
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "no sprite at the filter-button rect \
+                     [x={} y={} w={} h={}] — sprites present: {:?}",
+                    want.x,
+                    want.y,
+                    want.w,
+                    want.h,
+                    geo.sprites.iter().map(|s| (s.id, s.dst)).collect::<Vec<_>>()
+                )
+            })
+            .id
+            .to_string()
+    };
+
+    let all = sprite_at_filter_rect(false);
+    let craftable = sprite_at_filter_rect(true);
+
+    assert_eq!(
+        all,
+        crate::container::RECIPE_SPRITE_FILTER,
+        "the All state must still draw vanilla's filter_disabled art"
+    );
+    // The two hypotheses, both named: it is the enabled art, and it is *not*
+    // the disabled art. The second is what fails against the hardcoded id.
+    assert_eq!(
+        craftable,
+        crate::container::RECIPE_SPRITE_FILTER_ENABLED,
+        "the Craftable state must draw vanilla's filter_enabled art"
+    );
+    assert_ne!(
+        craftable, all,
+        "the two states must be distinguishable on screen — a single hardcoded \
+         sprite id passes every other assertion in this test"
+    );
+}
+
+/// **The Craftable filter actually narrows the browsed set — an exact count,
+/// not a direction.**
+///
+/// Both hypotheses are computed from outside the code under test: the torch
+/// is the only recipe in the corpus, so All must show exactly `1` and
+/// Craftable-with-nothing-in-hand exactly `0`. Asserting merely "filtered
+/// <= unfiltered" is satisfied by a filter that does nothing.
+#[test]
+fn the_craftable_filter_hides_a_recipe_the_player_cannot_make() {
+    let book = torch_book();
+    let empty = Menu::crafting(3, 3);
+    let stocked = stocked_crafting_menu();
+
+    let count = |menu: &Menu, filtering: bool| -> usize {
+        let panel = RecipePanelState { open: true, filtering, ..RecipePanelState::default() };
+        let (_, _, ids) =
+            recipe_panel_contents(Some(&book), &panel, menu, lodestone_model::RecipeBookType::Crafting);
+        ids.len()
+    };
+
+    assert_eq!(count(&empty, false), 1, "All shows the torch regardless of inventory");
+    assert_eq!(
+        count(&empty, true),
+        0,
+        "Craftable must hide the torch with no coal and no stick in the inventory"
+    );
+    // The control that proves the filter is reading the *inventory* and not
+    // simply returning nothing whenever `filtering` is set — the premise this
+    // gate would otherwise leave untested.
+    assert_eq!(
+        count(&stocked, true),
+        1,
+        "Craftable must still show the torch once coal and stick are in hand — \
+         a filter that always returns nothing passes the assertion above"
+    );
+}
+
+/// **The control for both gates above, run and observed.**
+///
+/// The filtered page must be a strict subset of the unfiltered one, and the
+/// panel geometry must still be drawable in the filtering state — a filter
+/// that emptied the corpus would break pagination (`total_pages` is
+/// `max(1)`, and `page` is clamped against it).
+#[test]
+fn a_filtered_empty_page_still_paginates_and_draws() {
+    let book = torch_book();
+    let menu = Menu::crafting(3, 3);
+    // A stale page from a wider search, which the clamp must absorb.
+    let panel = RecipePanelState {
+        open: true,
+        filtering: true,
+        page: 7,
+        ..RecipePanelState::default()
+    };
+    let (_, pages, ids) =
+        recipe_panel_contents(Some(&book), &panel, &menu, lodestone_model::RecipeBookType::Crafting);
+    assert_eq!(pages, 1, "an empty filtered set is page 0 of 1, never 0 of 0");
+    assert!(ids.is_empty(), "nothing is craftable here");
+    let geo = recipe_panel_geometry(Some(&book), &panel, &menu, 1, None, None, W, H)
+        .expect("the panel must still be built with an empty filtered page");
+    assert!(
+        geo.chrome_vertex_count > 0,
+        "the panel chrome must still be drawn — an empty result set hides recipes, not the book"
     );
 }

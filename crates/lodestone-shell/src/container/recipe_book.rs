@@ -216,6 +216,17 @@ pub struct RecipeBookPanelLayout {
     pub page_forward: Option<Rect>,
     /// The page-back arrow, only present when there is a previous page.
     pub page_back: Option<Rect>,
+    /// Whether the All/Craftable cycle-button is in its **Craftable** state,
+    /// which is what picks [`RECIPE_SPRITE_FILTER_ENABLED`] over
+    /// [`RECIPE_SPRITE_FILTER`] in the geometry below.
+    ///
+    /// Carried on the *layout* rather than passed to the geometry functions
+    /// purely so this stayed a one-field addition instead of a fourth
+    /// argument threaded through six public entry points and their callers.
+    /// [`recipe_book_panel_layout_with_scale`] leaves it `false`; the app
+    /// layer's `recipe_panel_layout` overwrites it from the panel's own state,
+    /// which is the single place that knows the user's filter choice.
+    pub filtering: bool,
 }
 
 /// Builds [`RecipeBookPanelLayout`] for `menu`'s own screen geometry — see
@@ -296,6 +307,8 @@ pub fn recipe_book_panel_layout_with_scale(
         recipes: std::array::from_fn(|i| at(recipe_grid_cell_local(i))),
         page_forward: has_next_page.then(|| at(RECIPE_PAGE_FORWARD)),
         page_back: has_prev_page.then(|| at(RECIPE_PAGE_BACK)),
+        // Geometry cannot know the filter state — see the field's own doc.
+        filtering: false,
     }
 }
 
@@ -429,9 +442,43 @@ pub fn recipe_book_panel_contents<'a>(
     search: &str,
     page: usize,
 ) -> RecipeBookPanelContents<'a> {
+    // `&|_| true` is "All", vanilla's un-filtered cycle state.
+    recipe_book_panel_contents_filtered(book, book_type, tab, search, page, &|_| true)
+}
+
+/// [`recipe_book_panel_contents`] with vanilla's **Craftable** filter applied —
+/// `RecipeBookComponent.java`'s `filtering` state, which hides every recipe the
+/// player cannot currently make.
+///
+/// `craftable` is injected rather than computed here for the same reason the
+/// contents query takes no viewport: this module has no [`Menu`] and no
+/// inventory. The app layer builds the predicate out of
+/// [`lodestone_game::menu::Menu::plan_recipe_auto_fill`] — the *same*
+/// primitive the click path already uses to fill the grid, so the button can
+/// never show a recipe that clicking it would then refuse to place.
+///
+/// The predicate runs over the whole browsed corpus, not just the visible
+/// page, because pagination has to be computed from the filtered set — a
+/// page count derived from the unfiltered corpus would leave empty pages the
+/// user could still arrow into. Callers should pass `&|_| true` (or use
+/// [`recipe_book_panel_contents`]) when not filtering, so the cost is only
+/// paid in the state that asks for it.
+#[must_use]
+pub fn recipe_book_panel_contents_filtered<'a>(
+    book: &'a RecipeBook,
+    book_type: lodestone_model::RecipeBookType,
+    tab: Option<usize>,
+    search: &str,
+    page: usize,
+    craftable: &dyn Fn(&lodestone_model::Identifier) -> bool,
+) -> RecipeBookPanelContents<'a> {
     let tabs = book.visible_tabs(book_type);
     let category = tab.and_then(|i| tabs.get(i).copied());
-    let all_ids = book.browse(book_type, category, search);
+    let all_ids: Vec<&'a lodestone_model::Identifier> = book
+        .browse(book_type, category, search)
+        .into_iter()
+        .filter(|id| craftable(id))
+        .collect::<Vec<_>>();
     let total_pages = all_ids.len().div_ceil(RECIPE_ITEMS_PER_PAGE).max(1);
     let page = page.min(total_pages - 1);
     let start = page * RECIPE_ITEMS_PER_PAGE;
@@ -469,10 +516,20 @@ pub const RECIPE_SPRITE_TAB_SELECTED: &str = "recipe_book/tab_selected";
 /// The filter cycle-button in its **not-filtering** state, 26×16 —
 /// `CraftingRecipeBookComponent.java:19-24`. `filter_disabled` is the "All"
 /// state (`getFilterButtonTextures().get(filtering, hovered)` with
-/// `filtering == false`, `RecipeBookComponent.java:136`), which is the only
-/// state this client has: craftable-only filtering is not modelled, so the
-/// button is drawn in its resting art rather than a state we cannot enter.
+/// `filtering == false`, `RecipeBookComponent.java:136`).
+///
+/// Both states are now real: [`RECIPE_SPRITE_FILTER_ENABLED`] is the other
+/// half, picked by [`RecipeBookPanelLayout::filtering`]. This doc used to say
+/// the disabled art was "the only state this client has" — true when written
+/// and stale since the filter became modelled (issue #436's
+/// `SessionRecipeBookSettings` island).
 pub const RECIPE_SPRITE_FILTER: &str = "recipe_book/filter_disabled";
+/// The same cycle-button in its **Craftable** state —
+/// `getFilterButtonTextures().get(true, false)`, `RecipeBookComponent.java:136`.
+/// A distinct `gui/sprites/recipe_book/**` entry, so it is already stitched
+/// into [`GuiAtlas`](lodestone_render::GuiAtlas) exactly like its sibling and
+/// needed no new atlas entry.
+pub const RECIPE_SPRITE_FILTER_ENABLED: &str = "recipe_book/filter_enabled";
 /// The furnace family's own filter art — `FurnaceRecipeBookComponent.java:15-20`.
 /// A genuinely different sheet, not a tint of the crafting one.
 pub const RECIPE_SPRITE_FILTER_FURNACE: &str = "recipe_book/furnace_filter_disabled";
@@ -752,7 +809,14 @@ fn recipe_book_panel_geometry_inner(
     // and threading one in means changing a caller that is not this module's to
     // change. A bounded, documented deviation — the two sheets differ only in
     // the glyph inside the button.
-    sprites.push(whole(RECIPE_SPRITE_FILTER, layout.filter_button));
+    //
+    // The All/Craftable state, however, *is* modelled now — vanilla's
+    // `getFilterButtonTextures().get(filtering, hovered)`
+    // (`RecipeBookComponent.java:136`), with `hovered` still unmodelled.
+    sprites.push(whole(
+        if layout.filtering { RECIPE_SPRITE_FILTER_ENABLED } else { RECIPE_SPRITE_FILTER },
+        layout.filter_button,
+    ));
 
     for (i, r) in layout.tabs.iter().enumerate() {
         let selected = selected_tab == Some(i);

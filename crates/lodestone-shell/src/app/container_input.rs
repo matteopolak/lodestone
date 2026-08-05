@@ -76,7 +76,7 @@ impl WindowApp {
             return false;
         };
         let (tab_count, total_pages, page_ids) =
-            recipe_panel_contents(self.recipe_book.as_ref(), &self.recipe_panel, book_type);
+            recipe_panel_contents(self.recipe_book.as_ref(), &self.recipe_panel, menu, book_type);
         let layout = recipe_panel_layout(
             &self.recipe_panel,
             menu,
@@ -103,6 +103,7 @@ impl WindowApp {
             Hit::Toggle => {
                 self.recipe_panel.open = !self.recipe_panel.open;
                 self.recipe_panel.search_focused = false;
+                self.send_recipe_book_settings(book_type);
             }
             Hit::SearchBox => self.recipe_panel.search_focused = true,
             Hit::Tab(i) => {
@@ -137,12 +138,52 @@ impl WindowApp {
                     self.auto_fill_recipe(menu, &id);
                 }
             }
-            // A click on the panel body or the unimplemented All/Craftable
-            // filter is still *consumed*, so it does not fall through and
-            // click the container slot behind the panel.
-            Hit::FilterButton | Hit::Panel => self.recipe_panel.search_focused = false,
+            // Vanilla's All/Craftable cycle-button
+            // (`RecipeBookComponent.java:136`). Cycling it re-browses the
+            // corpus through `craftable_in` and swaps the button art, so this
+            // arm is two visible changes, not a flag.
+            Hit::FilterButton => {
+                self.recipe_panel.filtering = !self.recipe_panel.filtering;
+                // A narrower set can leave `page` past the end. The contents
+                // query clamps on read, but resetting here keeps the *arrows*
+                // honest on the very next frame rather than one frame late.
+                self.recipe_panel.page = 0;
+                self.recipe_panel.search_focused = false;
+                self.send_recipe_book_settings(book_type);
+            }
+            // A click on the panel body is still *consumed*, so it does not
+            // fall through and click the container slot behind the panel.
+            Hit::Panel => self.recipe_panel.search_focused = false,
         }
         true
+    }
+
+    /// Report this panel's open/filter state for `book_type` to the server —
+    /// vanilla's `ServerboundRecipeBookChangeSettingsPacket`, sent from
+    /// `RecipeBookComponent`'s own toggle and filter handlers.
+    ///
+    /// This is the **producer** half of a round trip whose two other thirds
+    /// already existed: every protocol family encodes
+    /// [`ClientAction::SetRecipeBookSettings`] and nothing in the shell ever
+    /// constructed one (an outbound island, the `ClientAction::SetFlying`
+    /// shape), while the inbound `RECIPE_BOOK_SETTINGS` fold landed in
+    /// `fd53995` and nothing read it. Issue #436.
+    ///
+    /// Sent directly rather than queued through `ActionQueue`, like
+    /// `Sim::send_selected_slot`: this is a discrete click, not a per-tick
+    /// state, and `ActionQueue` only drains inside the tick loop.
+    ///
+    /// Deliberately *not* guarded on "changed": both call sites have already
+    /// flipped the value they report, so every call is a real change.
+    /// `restore_recipe_book_settings` is the one path that writes these fields
+    /// without reporting, which is what stops a restore echoing straight back
+    /// at the server that sent it.
+    pub(super) fn send_recipe_book_settings(&mut self, book_type: lodestone_model::RecipeBookType) {
+        self.sim.send_recipe_book_settings(
+            book_type,
+            self.recipe_panel.open,
+            self.recipe_panel.filtering,
+        );
     }
 
     /// Auto-fill the crafting grid for `id` (issue #163's "click a recipe to
