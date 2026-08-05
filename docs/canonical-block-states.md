@@ -27,6 +27,19 @@ slot; `canonical` passes all three through and adds `Unmapped` as a drift guard.
 decision to substitute air is the **consuming family's**, made in its own `chunk.rs` and
 counted in a `FallbackTally` so it stays visible.
 
+Two helpers exist for wires that carry the composite rather than a split pair (added with
+unit U3, when `v47` became the second consumer):
+
+| function | for |
+|---|---|
+| `canonical::split_composite(raw) -> Option<(u8, u8)>` | the 12-bit `(id << 4) \| meta` rule itself, which is a property of the **era** and not of one protocol. `None` means past `id 255`; the *policy* on `None` belongs to the caller |
+| `canonical::resolve_composite_or_air(raw, tally)` | wires carrying the composite **per cell** with no palette (1.8's `map_chunk`), where one bad value must not cost the whole column, so out-of-range counts as a fallback |
+
+A wire carrying composites in a *palette* (1.9–1.12.2) should call `split_composite`
+directly and reject the packet on `None` instead — a bad palette entry means the index
+stream is suspect too, which is why `v340`'s `legacy_id_meta` is now nothing but that
+policy choice.
+
 Deep detail lives in the two documents this one summarises:
 [`protocol-340-flattening-table.md`](./protocol-340-flattening-table.md) (the table, its
 ambiguous cases, the `minecraft-data` cross-check) and
@@ -75,6 +88,11 @@ game data living in a shared crate has precedent in `lodestone-data` (issue #361
 
 ## Dependencies
 
-`lodestone-data` only, for the 26.2 block-state census. Consumed today by
-`lodestone-v340`; every future pre-1.13 family (`v5`, `v47`, `v110`) is expected to consume
-it rather than store raw packed ids, which is the defect `v47` is in today.
+`lodestone-data` only, for the 26.2 block-state census. Consumed today by `lodestone-v340`
+and — since epic #343 unit U3 — `lodestone-v47`, whose raw-packed-id defect this crate
+existed to fix and which is now fixed
+([`protocol-47-canonicalisation.md`](./protocol-47-canonicalisation.md)). Every remaining
+pre-1.13 family (`v5`, `v110`) is expected to consume it from day one rather than store raw
+packed ids. Note `v735` is **not** in this crate's scope: 1.16.5 is post-Flattening and
+speaks its own flat state-id space, so it needs the DFU-walk mapping of unit U4, not this
+table.

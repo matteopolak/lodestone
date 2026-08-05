@@ -791,6 +791,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   cost of changing course is still low. `v340` (protocol 340, Minecraft 1.12.2) is
   that version: pre-Flattening, already depends only on version-free crates, already
   live-verified against a real 1.12.2 server.
+- [Protocol 47 (1.8.9) block canonicalisation](./protocol-47-canonicalisation.md) —
+  The retrofit that made `lodestone-v47`'s chunk decoder emit **canonical 26.2**
+  block-state ids instead of 1.8's raw `(blockId << 4) | meta` wire composite — unit
+  U3 of epic #343's dispatch plan
+  ([`plans/multi-version-protocol.md`](./plans/multi-version-protocol.md)). Before it,
+  every 1.8.9 world this client joined was meshed and collided as the wrong blocks,
+  with a fully green test suite.
 - [The version-free part of each adapter's helper prologue](./protocol-adapter-prologue.md) —
   `crates/lodestone-core/src/lib.rs` now exports `encode_body`, `decode_body`,
   `decode_body_exact`, and `unpack_degrees` — the substance of four small helpers
