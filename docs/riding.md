@@ -210,8 +210,8 @@ So, deferred, each blocked on that one thing:
   `STOP_RIDING_JUMP` exists on the wire and the vanilla client **never sends it**. The server's
   `handleStartJump` is cosmetic only (`AbstractHorse.java:897-902`); the impulse is simulated by
   the authoritative client, so this is blocked on the same vehicle physics.
-- **The horse jump bar.** The HUD element itself is a small addition, but `HudFrame` is built at
-  `crates/lodestone-shell/src/app.rs:1857` and `app.rs` was held by another agent during this
+- **The horse jump bar.** The HUD element itself is a small addition, but `HudFrame` is built in
+  `app.rs::WindowApp::redraw` and `app.rs` was held by another agent during this
   change. No jump-bar sprites are referenced anywhere in the tree yet either.
 - **`ClientEvent::VehicleMoved`.** The clientbound correction for a vehicle we are authoritative
   over — it cannot fire until we are.

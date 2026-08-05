@@ -352,7 +352,7 @@ rewrite. Same for `tick.rs`, which has ~85 lines of in-flight redstone work in i
 ### U1 — non-blocking generation (#293). First, and independently valuable.
 
 **Owns:** `crates/lodestone-server/src/chunk.rs`, `crates/lodestone-server/src/server.rs`.
-**Touches (broker):** `integrated.rs:185`, `:314`, `:413` (call sites), `lib.rs:165` (re-export).
+**Touches (broker):** `integrated.rs:185`, `:314`, `:413` (call sites), `lib.rs::server::serve_connection` (re-export).
 
 **What.** Add `generate_columns_offloaded(source: Arc<S>, coords: Vec<(i32,i32)>) -> Vec<ChunkColumn>`
 in `chunk.rs` beside `generate_columns_parallel`: an `async fn` that wraps the existing scoped fan-out
@@ -361,15 +361,16 @@ in `tokio::task::spawn_blocking` and `.await`s it. Replace both call sites (`ser
 
 **CORRECTED 2026-08-04 — this paragraph's central claim was wrong, and #293 landed without it.**
 It read: *"The signature change is the entire cost, and it is unavoidable… `serve_connection` is
-publicly re-exported (`lib.rs:165`), so this is a **public API change** — that is the broker item."*
+publicly re-exported (`lib.rs::server::serve_connection`), so this is a **public API change** —
+that is the broker item."*
 
 The `'static` requirement is real; the conclusion that it forces a public signature change is not.
 `server.rs` gained a private `SourceRef<'a, S>` enum — `Borrowed(&'a S)` / `Shared(&'a Arc<S>)` —
 threaded through the private dispatch chain, so both shapes share one `serve_connection_inner` body
 with no duplication. Two consequences the plan did not anticipate:
 
-- **`mod server` is private (`lib.rs:123`) and `lib.rs:165` re-exports only the *name*
-  `serve_connection`, not any type.** So the new `serve_connection_shared` /
+- **`mod server` is private (`lib.rs::server`) and `lib.rs::server::serve_connection` re-exports
+  only the *name* `serve_connection`, not any type.** So the new `serve_connection_shared` /
   `serve_connection_with_mob_events_shared` entry points are `pub(crate)`, and #293 required **no
   `lib.rs` patch and no public API change at all**. The brokered choke point was never touched, and
   no `crates/protocol/v770/tests/*` call site changed. The only public-surface change is a widened

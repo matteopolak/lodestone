@@ -160,7 +160,7 @@ measurements:
   `Block.BLOCK_STATE_REGISTRY` census — cross-checked independently against
   `generated/reports/blocks.json`, which also says 3370. The decode is correct and always
   was.
-- **There is no local prediction to mask anything.** `Sim::break_block` (`sim.rs:2444`) is
+- **There is no local prediction to mask anything.** `Sim::break_block` (`sim.rs::Sim::break_block`) is
   the *demo world's* direct edit; on a live server both the punched block and the cascaded
   one get their burst from the same 2001 arm. The masking mechanism did not exist.
 

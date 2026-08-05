@@ -544,19 +544,19 @@ in container screens — 3D geometry only reaches the hotbar").
 
 | step | state |
 |---|---|
-| `container.attach_items(...)` in `WindowApp::resumed` | **done** (`app.rs:1488`) |
-| `container.attach_item_models(...)` in `WindowApp::resumed` | **done** (`app.rs:1496`) |
+| `container.attach_items(...)` in `WindowApp::resumed` | **done** (`app.rs::lifecycle::WindowApp::resumed`) |
+| `container.attach_item_models(...)` in `WindowApp::resumed` | **done** (`app.rs::lifecycle::WindowApp::resumed`) |
 | pass `models` + `depth` in the per-frame draw | **outstanding** — this is #50 |
 
 So the container's 3-D item pass is fully constructed and fully bound, and then
-**never fed**. `app.rs:1273` calls
+**never fed**. `app.rs::WindowApp::redraw` calls
 
 ```rust
 container_renderer.render_scaled(device, queue, frame.view(), &container_frame, gui_scale, w, h);
 ```
 
 and `ContainerRenderer::render_scaled` hardcodes `depth: None, models: None`
-(`container.rs:1278`). `render_with_icons_scaled` then computes
+(`container.rs::ContainerRenderer::render_scaled`). `render_with_icons_scaled` then computes
 `want_models = self.icons.models_attached() && depth.is_some()` — `false` — and
 `IconAssets { models: None }` reaches `push_item_model`, which returns early. Flat
 sprite icons still draw (they need only `attach_items`), which is precisely why the
@@ -566,10 +566,10 @@ sprite stream is unaffected and only the mini-blocks vanish.
 This is the *island* shape at its purest — a complete, attached, tested capability
 with nothing calling it. It has cost this repo eleven confirmed instances.
 
-The fix is one call swap at `app.rs:1273`:
+The fix is one call swap in `app.rs::WindowApp::redraw`:
 
 ```rust
-// `item_models` is the same value the HUD call at app.rs:1359 already computes;
+// `item_models` is the same value the HUD call in `app.rs::WindowApp::redraw` already computes;
 // it is currently created *after* this block, so hoist it above the
 // `if container_menu.is_some()` guard.
 let item_models = self.sim.vanilla_atlas().and_then(|a| a.models());
@@ -596,7 +596,7 @@ the `_scaled` variant, not `render_with_icons`: the plain one lays out against
 `AUTO_GUI_SCALE` and would disagree with `hit_test_with_scale` about where the
 slots are.
 
-The third step, the **carried stack**, is also **done**: `app.rs:1270` builds the
+The third step, the **carried stack**, is also **done**: `app.rs::WindowApp::redraw` builds the
 frame with `.with_cursor(Some([self.cursor.0, self.cursor.1]))`. Kept here because
 the failure mode is worth recording — `ContainerGeometry::build_inner` checks
 `frame.cursor` before it checks `menu.carried()`, so leaving the field at its `None`

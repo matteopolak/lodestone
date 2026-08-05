@@ -30,7 +30,8 @@ gate is `LocalPlayer.canStartSprinting` → `isSprintingPossible` →
 cutoff, so exactly 6 does not qualify.
 
 `movement_intent(state: &InputState) -> MovementInput` is **unchanged** —
-`lodestone-shell`'s `sim.rs` calls it directly (a test, `sim.rs:6645`), and
+`lodestone-shell`'s `sim.rs` calls it directly (a test via
+`crates/lodestone-controller/src/input.rs::movement_intent`), and
 this crate does not own that file. The gate lives in a new function,
 `movement_intent_with_food(state, sprint_allowed_by_food: bool)`, which the
 caller feeds a pre-resolved bool rather than food state itself — this crate
@@ -55,7 +56,7 @@ parameter) into `movement_intent_with_food`. `Vitals`/`Abilities` are both
 food".
 
 **Residual gap, not fixed here:** `sim.rs`'s own `movement_intent()` accessor
-method (`sim.rs:1854`) and its handful of callers (mostly `sneak` reads in
+method (`sim.rs::Sim::movement_intent`) and its handful of callers (mostly `sneak` reads in
 tests) still go through the ungated function. `sim.rs` is owned by another
 in-flight agent at the time of this change, so it was not touched. If that
 accessor ever becomes the real sprint-decision path (it currently is not —

@@ -42,12 +42,12 @@ routing around X doesn't exist" rule, not assumed.
 | `HurtTime`/`hurtDuration` countdown (drives red overlay + `bobHurt`) | `LivingEntity.java:1873-1876`, `:2044-2049` | **correct**, both event sources wired | `HurtTime` component + `tick_hurt_time`, `crates/lodestone-ecs/src/ingest.rs`/`entity.rs` |
 | Per-entity hurt/death red overlay (`hasRedOverlay`) | `LivingEntityRenderer.java:281`, `OverlayTexture.java` | **correct, reaches pixels** (issue #98) — landed inside `812eb67`, documented at `ce6224d` after a staging mishap; **not stale**, verified live in tree | `crates/lodestone-render/src/entity_pipeline.rs` (`EntityInstanceRaw::with_hurt_overlay`), wired from `crates/lodestone-shell/src/entities.rs`/`gpu.rs` |
 | — same overlay, `deathTime` half | `LivingEntityRenderer.java:281`'s `\|\| entity.deathTime > 0` | **absent, small** — nothing decodes a death animation, so overlay ends ~10 ticks after the killing blow instead of persisting through the death flop. Documented, not a surprise. | — |
-| `bobHurt` — camera roll toward `hurtDir` | `GameRenderer.java:297-317` | **island** — mechanism built and unit-tested (`ViewBob::hurt`, `BobFrame::hurt_roll_degrees`), **zero production callers**, and `Sim::render_camera` hardcodes `damage_tilt_strength = 0.0`. Blocked on `Camera` gaining a 4th (roll) DOF — a real architectural blocker, not a forgotten call. | `crates/lodestone-shell/src/camera_rig.rs:447` (`ViewBob::hurt`, called only from its own tests at `:936`/`:973`); `crates/lodestone-shell/src/sim.rs:5164-5174` (hardcoded `0.0`) |
+| `bobHurt` — camera roll toward `hurtDir` | `GameRenderer.java:297-317` | **island** — mechanism built and unit-tested (`ViewBob::hurt`, `BobFrame::hurt_roll_degrees`), **zero production callers**, and `Sim::render_camera` hardcodes `damage_tilt_strength = 0.0`. Blocked on `Camera` gaining a 4th (roll) DOF — a real architectural blocker, not a forgotten call. | `crates/lodestone-shell/src/camera_rig.rs:447` (`ViewBob::hurt`, called only from its own tests at `:936`/`:973`); `crates/lodestone-shell/src/sim.rs::Sim::render_camera` (hardcoded `0.0`) |
 | Crit condition (`canCriticalAttack`) + `1.5×` damage + `CRIT` particle | `Player.java:972-975,1032-1041`; particle spawn is **client-only local prediction**, `LocalPlayer.java:664-665` — never sent by the server | **absent** — no code anywhere computes the client-side crit condition. Genuinely needs building (not a wiring bug): damage math itself is still server-side, only the particle-trigger condition needs porting. | — |
 | Sweep-attack condition + `SWEEP_ATTACK` particle + sound | `Player.java:978,1043-1053,1164-1192` | **unverified, likely partially working already** — `minecraft:sweep_attack` IS a registered particle id (`crates/lodestone-data/src/generated/particle_types.rs:86`) and the generic server→`ClientEvent::Particles`→emitter pipeline is real and wired (fixed as an island in `77cb3a5`/`d26c4e6`). Unlike crit, vanilla's sweep particle is server-sent (`serverLevel.sendParticles`, `Player.java:1191`), so it may already render with no new code. **Not confirmed** — the `count == 0` call encodes a direction vector rather than a spread, which our particle decode may or may not special-case correctly; needs a live-oracle check, not new code, as the first step. | `crates/lodestone-shell/src/net.rs:395-409`,`1438-1445` |
-| Shield raise / hold-to-block | `LivingEntity.java:1198-1202` (`applyItemBlocking`), item is `useOnRelease()`-gated | **absent in practice — see finding #1 below**, not because blocking logic needs porting (it's 100% server-side) but because the client cannot currently *hold* a use-item state at all in the situations combat actually happens in | `crates/lodestone-shell/src/sim.rs:3901-3930` |
+| Shield raise / hold-to-block | `LivingEntity.java:1198-1202` (`applyItemBlocking`), item is `useOnRelease()`-gated | **absent in practice — see finding #1 below**, not because blocking logic needs porting (it's 100% server-side) but because the client cannot currently *hold* a use-item state at all in the situations combat actually happens in | `crates/lodestone-shell/src/sim.rs::Sim::use_item_live` |
 | Bow/crossbow draw-then-release fire | `LivingEntity.java:3471-3475,3565-3616` (`updateUsingItem`→`completeUsingItem`→`releaseUsingItem`, gated on `useOnRelease()`) | **absent in practice — see finding #2 below** | `crates/protocol/v770/src/adapter.rs:3951-3960` (encodes `ReleaseUseItem`, zero callers) |
-| Attack sounds (weak/strong/crit/sweep/no-damage/knockback) | `Player.java:965,1000,1064,1069,1165` — all `playServerSideSound` → `level().playSound(null,…)`, broadcast | **already correct, no client work needed** — generic server-sound pipeline (`docs/sound-playback.md`) plays any broadcast sound; combat sounds are just broadcast sounds like any other | `crates/lodestone-shell/src/sim.rs:4631` (`ShellAudio::play_sound`) |
+| Attack sounds (weak/strong/crit/sweep/no-damage/knockback) | `Player.java:965,1000,1064,1069,1165` — all `playServerSideSound` → `level().playSound(null,…)`, broadcast | **already correct, no client work needed** — generic server-sound pipeline (`docs/sound-playback.md`) plays any broadcast sound; combat sounds are just broadcast sounds like any other | `crates/lodestone-shell/src/audio.rs::ShellAudio::play_sound` |
 | Camera shake on nearby explosions | claimed by original issue #98 | **not a real vanilla mechanic** — grepped `client-src` clean for `[Ss]hake`; only hit is an unrelated item-wobble in `ItemInHandRenderer.java`. `ClientExplosionTracker.java` only spawns particles, holds no camera reference. | `docs/combat.md`'s own "What is deliberately not built here" already says this |
 
 ---
@@ -73,10 +73,11 @@ Every hit is inside the four protocol crates' own adapter/test files, or
 `ClientAction::SetFlying` — a serverbound island, the outbound mirror of the
 inbound-island class this repo already tracks nine-plus instances of.
 
-Confirmed in `crates/lodestone-shell/src/app.rs:2766-2797`: the mouse-input match has
+Confirmed in `crates/lodestone-shell/src/app.rs::lifecycle::WindowApp::window_event`: the
+mouse-input match has
 both `(Attack, Pressed)` and `(Attack, Released)` arms (`begin_attack`/`end_attack`),
 but only `(Use, Pressed) => self.sim.use_item()` — **no `(Use, Released)` arm at
-all**. The keyboard path (`InputAction::Use` bound to `V`, `app.rs:393`) is the same:
+all**. The keyboard path (`InputAction::Use` bound to `V`, `app.rs`) is the same:
 pressed-only. `ElementState::Released` appears exactly twice in `app.rs` — the menu
 click handler and `Attack`.
 
@@ -94,7 +95,7 @@ whatever else the server uses to cancel item-use, e.g. taking damage or attackin
 
 ### Finding 2 — `Sim::use_item_live` cannot even *start* a use in the situations combat happens in
 
-Independent of Finding 1, `use_item_live` (`crates/lodestone-shell/src/sim.rs:3901-3930`)
+Independent of Finding 1, `use_item_live` (`crates/lodestone-shell/src/sim.rs::Sim::use_item_live`)
 often sends nothing at all on a right-click:
 
 ```rust
@@ -171,7 +172,7 @@ further evidence this is a real, high-traffic bug rather than an edge case.
    sprint-knockback sound condition), `!in_water`/`!on_climbable` (both already
    modeled per `docs/swimming.md`'s existence), and no passenger check needed yet
    (no vehicles land). The natural plug point is `Sim::attack_entity`
-   (`sim.rs:3768`), which already computes `attack_strength_scale` for the ticker
+   (`sim.rs::Sim::attack_entity`), which already computes `attack_strength_scale` for the ticker
    reset — `fullStrengthAttack = attackStrengthScale > 0.9F` is the other half of
    the condition and is *already computed* there today, just not read for this.
    Emit via the existing `ClientEvent`-adjacent local particle path (whatever
@@ -205,7 +206,7 @@ further evidence this is a real, high-traffic bug rather than an edge case.
    roll DOF (the one blocker `docs/view-bobbing.md` names explicitly, with the
    exact fold spec already written: drive `ViewBob::hurt(yaw)` from the local
    player's own `HurtTime`/`EntityHurtAnimation` yaw, pass real
-   `damage_tilt_strength` instead of the hardcoded `0.0` in `sim.rs:5173`). Lower
+   `damage_tilt_strength` instead of the hardcoded `0.0` in `sim.rs::Sim::render_camera`). Lower
    priority than 1-3: a subtle camera roll on taking damage is real vanilla feel
    but far less noticeable in the first hour than "my bow doesn't shoot" or "no
    crit particles ever, even off a fall attack."
@@ -242,7 +243,7 @@ further evidence this is a real, high-traffic bug rather than an edge case.
   `camera_rig.rs`, called only by its own tests (`camera_rig.rs:936,973`), never
   from production. Distinct second problem: even if wired, `Sim::render_camera`
   passes a hardcoded `0.0` for `damage_tilt_strength`
-  (`sim.rs:5164-5174`), so wiring the call alone would still show nothing — both
+  (`sim.rs::Sim::render_camera`), so wiring the call alone would still show nothing — both
   hops need fixing together. Not a routing-switch bug (no `ingest`/`session`/
   `net.rs` arm involved); this one is a plain "nobody calls the function" island,
   worth naming because it is the same defect class by a different mechanism.

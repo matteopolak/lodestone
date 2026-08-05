@@ -855,7 +855,7 @@ from "the server says we are fine" for any future consumer.
 `on_fire` was checked in the same pass and **had the identical bug** — see
 [`screen-overlays.md`](./screen-overlays.md#a-session-scoped-flag-needs-an-explicit-reset-issue-390).
 Its polarity makes it quieter (absence reads as `false`), not less real:
-`app.rs:1543` feeds `PlayerSnapshot::on_fire` straight into the fire overlay, so
+`app.rs::WindowApp::redraw` feeds `PlayerSnapshot::on_fire` straight into the fire overlay, so
 dying while burning left the flames painted over a freshly respawned player.
 
 ### The gotcha for the next metadata-fed session field

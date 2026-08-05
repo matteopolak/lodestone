@@ -182,7 +182,7 @@ container/pip so two slots at one tick do not correlate.
 - **`item_icon.rs`'s `draw_item_icon_popped` intentionally duplicates
   `draw_item_icon_counted`'s decorations tail** rather than sharing it. The
   container screen calls `draw_item_icon_counted` directly
-  (`container.rs:2695`, off-limits to this change); refactoring that function
+  (`container.rs::builder::Builder::item_icon_counted`, off-limits to this change); refactoring that function
   to also serve the popped path would risk its signature, which nothing here
   needs to touch.
 
@@ -192,7 +192,7 @@ container/pip so two slots at one tick do not correlate.
 already exists and is already populated — the doc comment on that field even
 says so ("no reader draws this today... `PlayerSnapshot::saturation` is a
 public bot-API field"). `Sim` exposes `health()`/`food()`/`air()`
-(`sim.rs:1765-1782`) from the same `Vitals` component but no `saturation()`.
+(`sim.rs::Sim::health`/`food`/`air`) from the same `Vitals` component but no `saturation()`.
 Two one-line additions (outside this change's file ownership; flagged for the
 orchestrator rather than made here) complete the wiring:
 

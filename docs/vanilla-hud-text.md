@@ -141,7 +141,7 @@ invented:
 
 `HudRenderer::render_with_item_models` is the single `HudGeometry::build_inner` call
 site in the renderer, and it passes `self.font`. `render()` delegates to it, so
-**every** HUD render path — `app.rs:677`, `gpu.rs`, `scoreboard.rs`, `tablist.rs` —
+**every** HUD render path — `app.rs::WindowApp::redraw`, `gpu.rs`, `scoreboard.rs`, `tablist.rs` —
 gets vanilla text with no call-site change.
 
 Crucially, **measurement and drawing read the same field**. `Builder::text_width` /

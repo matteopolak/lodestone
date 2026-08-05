@@ -78,25 +78,27 @@ custom literal name — see §4. The default key comes from each container block
 does **not** flatten early). That `Text` rides `ClientEvent::ScreenOpened` through
 `Menus::apply` (`crates/lodestone-game/src/menus.rs:224-236`) to `Menus::opened_title()`
 (`menus.rs:199`), and is flattened to a string exactly once, at the shell's read boundary:
-`crates/lodestone-shell/src/app.rs:2257` calls
+`app.rs::WindowApp::redraw` calls
 `crate::container::menu_title(&open.title, self.sim.translator().as_ref())`, which is
-`lodestone_game::text::resolve_to_string` (`container.rs:243-248`) — i.e. resolved through the
+`lodestone_game::text::resolve_to_string` (`container.rs::frame::menu_title`) — i.e. resolved through the
 **live language table** (`Language::translator`), not the model crate's own 14-key stub
 (`lodestone_model::Text::to_plain_string`'s doc comment at `crates/lodestone-model/src/text.rs:338-364`
 names this exact defect and cites this exact fix by number: "the container-screen title did not
 [go through the language table], and shipped `container.crafting` where 'Crafting' belonged").
 
 The player inventory screen (opened with `E`, no packet involved) gets the same treatment via
-`container::player_inventory_title` (`container.rs:266-272`), which resolves
+`container::player_inventory_title` (`container.rs::frame::player_inventory_title`), which resolves
 `Text::translate("container.crafting", vec![])` — matching `InventoryScreen.java:28` exactly,
 including the non-obvious fact that the **player inventory screen's title is "Crafting," not
 "Inventory"** (that word is the *second* label, drawn separately).
 
 **Capitalisation**: since the string is the live language table's own value, there is no separate
-uppercasing step to get wrong — except there used to be one. `container.rs:728-731`'s comment
+uppercasing step to get wrong — except there used to be one.
+`container.rs::geometry::ContainerGeometry::build_inner`'s comment
 records the exact prior bug: the title used to go through `.to_ascii_uppercase()`, so a chest
 renamed "Loot" drew as "LOOT". That call is gone; confirmed by reading the current `menu_title`/
-`player_inventory_title` functions (`container.rs:224-272`), neither of which touches case.
+`player_inventory_title` functions (`container.rs::frame::menu_title`,
+`container.rs::frame::player_inventory_title`), neither of which touches case.
 
 **Conclusion: nothing to patch for claims 1–2.** They are correct, sourced from the real language
 table, and pixel-gated (`crates/lodestone-shell/tests/container_labels.rs::a_custom_name_reaches_the_panel_verbatim_and_nothing_is_uppercased`,
@@ -108,24 +110,27 @@ line 498).
 
 ### Font, colour, shadow — already fixed, for every anchor currently modelled
 
-`container.rs:712-750` draws both labels with `Builder::label` (`container.rs:1970-1978`), which:
+`container.rs::geometry::ContainerGeometry::build_inner` draws both labels with
+`container.rs::builder::Builder::label`, which:
 
 - uses the real proportional `VanillaFont` (`f.draw_plain`) when a jar font is attached, not the
-  fixed-advance 5×7 debug font `ColourStream::text` used before the fix (`container.rs:732-734`'s
-  comment names this as the second of three bugs the play report was actually seeing);
+  fixed-advance 5×7 debug font `ColourStream::text` used before the fix
+  (`container.rs::geometry::ContainerGeometry::build_inner`'s comment names this as the second of
+  three bugs the play report was actually seeing);
 - draws with **no drop shadow** — the trailing `false` in vanilla's
   `graphics.text(font, title, titleLabelX, titleLabelY, -12566464, false)`
-  (`AbstractContainerScreen.java:189-191`, quoted at `container.rs:714-716`) — matched by
-  `label`'s doc comment (`container.rs:1960-1969`) and the fact it never calls the shadowed
-  `VanillaFont::draw`;
+  (`AbstractContainerScreen.java:189-191`, quoted at
+  `container.rs::geometry::ContainerGeometry::build_inner`) — matched by
+  `Builder::label`'s doc comment (`container.rs::builder::Builder::label`) and the fact it never
+  calls the shadowed `VanillaFont::draw`;
 - uses vanilla's colour `-12566464` = `0xFF404040` = `(64,64,64)/255` when real background art is
-  attached (`container.rs:739-743`), falling back to a warm-light ink only on the jar-less
-  programmatic-panel path (documented divergence, not a bug — the flat fallback fill is itself
-  dark, so vanilla's dark grey would be invisible on it).
+  attached (in `container.rs::geometry::ContainerGeometry::build_inner`), falling back to a
+  warm-light ink only on the jar-less programmatic-panel path (documented divergence, not a bug —
+  the flat fallback fill is itself dark, so vanilla's dark grey would be invisible on it).
 
 ### Placement — correct for 3 anchor sets, wrong (defaults to `(8,6)`) for 10 real screens
 
-`label_layout` (`container.rs:338-351`) has exactly two branches:
+`label_layout` (`container.rs::frame::label_layout`) has exactly two branches:
 
 ```rust
 pub fn label_layout(menu: &Menu, layout: &SlotLayout) -> LabelLayout {
@@ -140,7 +145,7 @@ pub fn label_layout(menu: &Menu, layout: &SlotLayout) -> LabelLayout {
 }
 ```
 
-Its own doc comment (`container.rs:331-336`) already flags the gap: *"Not modelled:
+Its own doc comment (`container.rs::frame::label_layout`) already flags the gap: *"Not modelled:
 `AbstractFurnaceScreen.java:39` centres its title... There is no furnace `MenuKind` yet — a furnace
 arrives here as a `Generic` and gets `x = 8`."* That is true today for every one of these, read
 from `.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/inventory/`:
@@ -202,9 +207,9 @@ re-deriving it. Traced end to end:
 | router | `crates/lodestone-ecs/src/session.rs:492` | `ScreenOpened` **is** listed in `session::handles_event`'s match — confirmed present, not a stale claim (grepped the live file, not a note about it) |
 | apply | `crates/lodestone-ecs/src/session.rs:530` (`apply_menus`) → `crates/lodestone-game/src/menus.rs:224-236` | `Menus::apply` stores `title` verbatim on the `pending`/`opened` record |
 | read | `crates/lodestone-game/src/menus.rs:199` | `Menus::opened_title()` |
-| snapshot | `crates/lodestone-shell/src/sim.rs:2470-2480` | `Sim::open_menu()` copies it into `OpenMenuSnapshot::title` |
-| resolve | `crates/lodestone-shell/src/app.rs:2257` | `container::menu_title(&open.title, translator)` — the language table only changes the *rendering* of a `translate` node; a `literal` custom name passes through untouched |
-| draw | `crates/lodestone-shell/src/app.rs:2293`, `container.rs:744-750` | `ContainerFrame::new(container_menu, &container_title)` → `b.label(frame.title, ...)` |
+| snapshot | `sim.rs::Sim::open_menu` | `Sim::open_menu()` copies it into `OpenMenuSnapshot::title` |
+| resolve | `app.rs::WindowApp::redraw` | `container::menu_title(&open.title, translator)` — the language table only changes the *rendering* of a `translate` node; a `literal` custom name passes through untouched |
+| draw | `app.rs::WindowApp::redraw`, `container.rs::geometry::ContainerGeometry::build_inner` | `ContainerFrame::new(container_menu, &container_title)` → `b.label(frame.title, ...)` |
 
 No router drops it: `ScreenOpened` is not in `ingest::handles_event`'s per-entity switch (correctly
 absent — a screen title is not per-entity state) and is correctly present in
@@ -232,7 +237,7 @@ change.
 
 ### 5.1 `crates/lodestone-shell/src/container.rs` — add `menu_type` to `ContainerFrame`
 
-Anchor (current text, `container.rs:139-207`):
+Anchor (current text, `container.rs::frame::ContainerFrame`):
 
 ```rust
 /// The container screen to draw for one frame.
@@ -434,7 +439,7 @@ pub fn menu_type_title_anchor(
 
 ### 5.3 `crates/lodestone-shell/src/container.rs` — apply the override in `build_inner`
 
-Anchor (current text, `container.rs:736-750`):
+Anchor (current text, `container.rs::geometry::ContainerGeometry::build_inner`):
 
 ```rust
     // `label_layout` supplies the anchors; `titleLabelY` is 6, not 7, and
@@ -489,7 +494,7 @@ Replace with:
 
 ### 5.4 `crates/lodestone-shell/src/app.rs` — wire the live `menu_type` in
 
-Anchor (current text, `app.rs:2293-2297`):
+Anchor (current text, `app.rs::WindowApp::redraw`):
 
 ```rust
             let container_frame = ContainerFrame::new(container_menu, &container_title)
@@ -515,9 +520,11 @@ Replace with:
                 .with_menu_type(open_menu.as_ref().map(|open| &open.menu_type));
 ```
 
-This is safe against the player-inventory branch (`self.ui.is_container_open()`, `app.rs:2259-2272`):
-`open_menu` is the same `Option<OpenMenuSnapshot>` read once at `app.rs:2248`, so when the player
-screen is open (no server menu) this is `None`, exactly matching the current, unchanged behaviour.
+This is safe against the player-inventory branch (`self.ui.is_container_open()`, in
+`app.rs::WindowApp::redraw`):
+`open_menu` is the same `Option<OpenMenuSnapshot>` read once in `app.rs::WindowApp::redraw`, so when
+the player screen is open (no server menu) this is `None`, exactly matching the current, unchanged
+behaviour.
 
 ### 5.5 New tests — append to `crates/lodestone-shell/tests/container_labels.rs`
 
@@ -623,7 +630,7 @@ actually moves. This is the control CLAUDE.md's evidence-standards section asks 
 an absence need a control proving the detector works").
 
 **What else already paints in this rect, checked before trusting the control**: for `Menu::generic(3)`
-(used for both the anvil and furnace tests), `background_kind` (`container.rs:399-408`) resolves to
+(used for both the anvil and furnace tests), `background_kind` (`container.rs::background::background_kind`) resolves to
 `BackgroundKind::Generic { rows: 1 }` — the plain chest-style fallback, not a furnace/anvil texture
 (neither exists in `ContainerBackground`; see §3's "deliberately out of scope" note extended to
 these too, though title-anchor correctness does not depend on the background being right). Nothing

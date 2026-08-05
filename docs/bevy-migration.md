@@ -52,13 +52,13 @@ This is not a hypothetical hazard. Measured in the current tree:
 
 | state | fold #1 | fold #2 |
 |---|---|---|
-| scoreboard | `lodestone_client::scoreboard::Scoreboard` via `Inner::apply` ([`state.rs:190`](../crates/lodestone-client/src/state.rs), [`:792-831`](../crates/lodestone-client/src/state.rs)) | `lodestone_game::scoreboard::Scoreboard::apply` at [`sim.rs:2255`](../crates/lodestone-shell/src/sim.rs) |
-| player list | `Inner.players: HashMap<Uuid, PlayerListEntry>` ([`state.rs:187`](../crates/lodestone-client/src/state.rs), fold at `:787`) | `lodestone_game::tablist::TabList::apply` at [`sim.rs:2252`](../crates/lodestone-shell/src/sim.rs) |
+| scoreboard | `lodestone_client::scoreboard::Scoreboard` via `Inner::apply` ([`state.rs:190`](../crates/lodestone-client/src/state.rs), [`:792-831`](../crates/lodestone-client/src/state.rs)) | folded into `lodestone_ecs::SessionScoreboard`, read by [`sim.rs::Sim::sidebar`](../crates/lodestone-shell/src/sim.rs) |
+| player list | `Inner.players: HashMap<Uuid, PlayerListEntry>` ([`state.rs:187`](../crates/lodestone-client/src/state.rs), fold at `:787`) | folded into `lodestone_ecs::SessionTabList`, read by [`sim.rs::Sim::tab_list`](../crates/lodestone-shell/src/sim.rs) |
 | entity pose | `EntityView` ([`state.rs:107`](../crates/lodestone-client/src/state.rs)) | `EntitySnapshot` ([`entities.rs:149`](../crates/lodestone-shell/src/entities.rs)) → `Track` ([`entities.rs:248`](../crates/lodestone-shell/src/entities.rs)) |
 
 Two *different types* named `Scoreboard` fold the same `ClientEvent` stream in two crates, and the
 shell simultaneously reads `handle.players()` ([`net.rs:487`](../crates/lodestone-shell/src/net.rs),
-[`sim.rs:2835`](../crates/lodestone-shell/src/sim.rs)) *and* keeps its own `TabList`. Entity pose is
+[`sim.rs::Sim::tab_list`](../crates/lodestone-shell/src/sim.rs)) *and* keeps its own `TabList`. Entity pose is
 copied three times per frame: `EntityView` → `EntitySnapshot` (`net.rs:495`) → `Track`.
 
 Collapsing these is the concrete, checkable benefit of the migration. It is also the reason the
@@ -525,7 +525,7 @@ their set labels (§4.2), `WorldTime`, and the `Arc<RwLock<World>>` handle. `Inn
 `features = ["std"]`), the four schedule labels and set labels of §4.2, a `CorePlugin`, the
 `Arc<RwLock<World>>` handle type, and a `Runner` seam (winit-driven in the shell, timer-driven
 headless — azalea's `run_schedule_loop`, `client.rs:163-223`, is the model for the headless arm).
-`lodestone-shell`'s `redraw` ([`app.rs:760`](../crates/lodestone-shell/src/app.rs)) calls
+`lodestone-shell`'s `redraw` ([`app.rs::WindowApp::redraw`](../crates/lodestone-shell/src/app.rs)) calls
 `app.update()` before `sim.step(dt)`.
 
 **Stays:** everything else, untouched.
@@ -599,16 +599,19 @@ authoritative". Bound it two ways:
   deriving an `EntityView` on demand for `ClientHandle::entities()`. One direction only, one stage
   wide, with the removal stage named in the attribute.
 
-**Verified by:** the ~20 interpolation tests in `entities.rs:642-1202` ported to drive systems —
-including the two negative controls (`item_pop_without_velocity_never_rises_above_spawn_apex_control`
-at `entities.rs:1120` and `item_pop_position_only_snapshots_produce_no_apex_either` at `:1143`),
+**Verified by:** the ~20 interpolation tests in `entities.rs`'s test module (`mod tests`, after line
+2589) ported to drive systems — including the two negative controls
+(`item_pop_without_velocity_never_rises_above_spawn_apex_control` at
+`entities.rs::item_pop_without_velocity_never_rises_above_spawn_apex_control` and
+`item_pop_position_only_snapshots_produce_no_apex_either` at
+`entities.rs::item_pop_position_only_snapshots_produce_no_apex_either`),
 which must still **fail** if the item-physics system is removed. Plus
 `crates/lodestone-render/tests/entity_night_pixels.rs` and the live entity gates: pixels inside the
 mob's screen rect, which is the only thing that can see an island here.
 
 **Gotcha that will bite:** the nested `Option<Option<T>>` in `EntityView.item` /
 `EntityView.custom_name` encodes *"never reported"* vs *"explicitly cleared"*, and
-`entities.rs:1031-1054` has tests for both. In the ECS the natural encoding is **component absent =
+`entities.rs`'s test module has tests for both. In the ECS the natural encoding is **component absent =
 never reported, component present with an empty value = explicitly cleared** — which is strictly
 clearer. A careless port that spawns every component with a default silently regresses the
 dropped-item-goes-invisible defect. Port those two tests first.
@@ -717,8 +720,9 @@ later (azalea's entire design rests on it), and it is free now and expensive to 
 
 **Authority test:** `Inner` is **empty** at the end of this stage and the struct is deleted. The
 duplicate fold in §1.1 is gone: `lodestone_client::scoreboard::Scoreboard` and the second
-`TabList` fold at `sim.rs:2252-2255` both disappear, leaving `lodestone-game`'s one implementation
-called from one system.
+`TabList` fold — the one `[`sim.rs::Sim::tab_list`](../crates/lodestone-shell/src/sim.rs) /
+[`sim.rs::Sim::sidebar`](../crates/lodestone-shell/src/sim.rs) now read — both disappear, leaving
+`lodestone-game`'s one implementation called from one system.
 
 **Two sources of truth:** this stage's *purpose* is to remove the two that already exist. The
 overall `Inner`-vs-ECS window therefore spans Stages 0–3 only, per-field one stage, and closes here

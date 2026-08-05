@@ -261,7 +261,7 @@ not duplicated here.** `lodestone_physics::player::PlayerState::frozen_ticks`/
 already exist, already tick (`update_freezing`, called from `tick` at
 `player.rs:2783`), and are already reachable from the shell with **no new
 `Sim` accessor** — `Sim::player()` already returns the physics crate's
-`PlayerState` by value (`sim.rs:1792`), so `self.sim.player().percent_frozen()`
+`PlayerState` by value (`sim.rs::Sim::player`), so `self.sim.player().percent_frozen()`
 is a real, tested input today, not a stub. This also answers issue #139's own
 first scope checkbox ("determine whether the freezing state is
 server-authoritative or client-computed"): it is **client-computed**, the
@@ -521,7 +521,7 @@ to feed it yet.
 > **Historical, as of the "Closed" heading above.** That last paragraph describes
 > the state *before* #112 landed. `app.rs`'s `redraw()` now reads
 > `PlayerSnapshot::on_fire` off the shared handle
-> (`crates/lodestone-shell/src/app.rs:1543`), so production does pass `true`. It
+> (`app.rs::WindowApp::redraw`), so production does pass `true`. It
 > matters for issue #390 below: the flag reaches real pixels, which is what made
 > a *stale* flag a real defect rather than a dormant one.
 
@@ -559,7 +559,7 @@ where `on_fire` came from.
 
 **Closed — stale "patch pending" heading corrected.** `app.rs`'s `redraw()`
 already computes `wearing_pumpkin` from `player_menu.player_native(39)` and
-feeds it into the `screen_effects` literal (`app.rs:2323-2333` as of this
+feeds it into the `screen_effects` literal (in `app.rs::WindowApp::redraw`, as of this
 writing). `ScreenEffects::wearing_pumpkin`, `stats.pumpkin_overlay_drawn`,
 `ScreenEffectRenderer::draw_pumpkin`, `pumpkin_overlay_triangles`, and
 `load_pumpkin_overlay_texture` are all real and wired end to end through

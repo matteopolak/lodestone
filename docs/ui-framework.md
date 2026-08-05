@@ -96,8 +96,9 @@ complete **and reaches pixels**:
 - `crates/lodestone-render/src/gui_atlas.rs:274` `GuiAtlas::geometry(id, x, y, w, h)` applies it.
 - `GuiAtlas::build` stitches **466** `gui/sprites/**` PNGs. Verified against the jar itself:
   `unzip -l .cache/mc/26.2/client.jar | /usr/bin/grep -c 'gui/sprites/.*\.png$'` = 466.
-- It is reachable through exactly **two** production call sites — `menu/render.rs:1828` and
-  `hud.rs:1211`. Every other `.geometry(` caller is a test.
+- It is reachable through exactly **two** production call sites —
+  `crates/lodestone-render/src/gui_atlas.rs::GuiAtlas::geometry` (menu side in `menu/render.rs::draw`,
+  hud side in `hud.rs`). Every other `.geometry(` caller is a test.
 - #51's startup log said `sprites=468`. That resolves exactly: 466 + the two `TITLE_TEXTURES`
   extras at `resources.rs:372-381`.
 
@@ -108,7 +109,8 @@ every screen writes its own blits. That is #393, not a sprite issue.
 
 `GuiAtlas::build` globs `gui/sprites/**` and **structurally cannot see** the **89** GUI textures
 outside it: every `container/*.png` background, `advancements/window.png`, `book.png`, the
-hanging-sign sheets. `resources.rs:363` already documents this and `container.rs:355-369` already
+hanging-sign sheets. `resources.rs:363` already documents this and
+`container.rs::background::ContainerBackground` already
 works around it deliberately — vanilla blits hand-placed sub-rects of those 256×256 sheets at native
 size (`ContainerScreen.java:21-27` draws the chest as *two* blits), and `GuiScaling` has no variant
 for an arbitrary sub-rect.

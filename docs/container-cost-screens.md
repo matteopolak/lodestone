@@ -124,7 +124,7 @@ used to describe the anvil/enchanting cost feed as an island: decoded
 `Sim::open_menu` never populating one, so nothing in `lodestone-shell` could
 reach it. That gap is closed — `OpenMenuSnapshot::data: Vec<(i32, i32)>`
 exists (`crates/lodestone-client/src/state.rs:320`), `Sim::open_menu` fills it
-from `menus.opened_data().to_vec()` (`crates/lodestone-shell/src/sim.rs:2068`),
+from `menus.opened_data().to_vec()` (`crates/lodestone-shell/src/sim.rs::Sim::open_menu`),
 and `app.rs`'s `ContainerFrame::with_cost_context` call already reads
 `open_menu.data.as_slice()` through to `ContainerFrame::cost_data`. Re-checked
 directly against the current source rather than trusted from this doc's own
@@ -142,7 +142,8 @@ the anvil/enchanting cost lines already read from.
 
 **Drawing the numbers themselves is also done, not merely "comparatively
 small" — a second stale claim in this same section, caught the same way.**
-`draw_anvil_cost`/`draw_enchanting_costs` (`container.rs:1675`, `:1737`) are
+`draw_anvil_cost`/`draw_enchanting_costs` (`container.rs::geometry::draw_anvil_cost`,
+`container.rs::geometry::draw_enchanting_costs`) are
 real, non-stub implementations: the anvil's is/isn't-affordable colouring
 (`AnvilMenu::mayPickup`), its `>= 40` "Too Expensive!" branch, and the right-
 aligned backdrop text at `AnvilScreen.java:112-115`'s own `tx`/`ty`; the
