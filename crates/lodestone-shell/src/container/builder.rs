@@ -34,6 +34,12 @@ fn icon_record(stack: &lodestone_game::item::ItemStack) -> Option<HotbarSlot> {
     })
 }
 
+/// The stack-count ink on the **atlas-less** fallback path (the real path uses
+/// [`item_icon::COUNT_INK`]). Named rather than inline so the recipe-panel
+/// submission-order gate can find a count-digit vertex by the same constant the
+/// draw writes, instead of restating the literal.
+pub(super) const FALLBACK_COUNT_INK: [f32; 4] = [0.98, 0.98, 0.92, 1.0];
+
 fn item_label(path: &str) -> String {
     path.rsplit(['/', '_'])
         .find(|part| !part.is_empty())
@@ -227,13 +233,7 @@ impl<'a> Builder<'a> {
                 let label = item_label(stack.item().path());
                 self.text(&label, x + 5.0, y + 5.0, 1.0, [0.97, 0.95, 0.86, 1.0]);
                 if stack.count() > 1 {
-                    self.text(
-                        &stack.count().to_string(),
-                        x + 8.0,
-                        y + 10.0,
-                        1.0,
-                        [0.98, 0.98, 0.92, 1.0],
-                    );
+                    self.text(&stack.count().to_string(), x + 8.0, y + 10.0, 1.0, FALLBACK_COUNT_INK);
                 }
             }
         }
