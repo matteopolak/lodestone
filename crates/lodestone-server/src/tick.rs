@@ -56,6 +56,7 @@ use crate::mobs::{Detonation, LiveMobSource, MobHandle, MobSim};
 use lodestone_entity::ai::mob::EatenBlock;
 use crate::random_tick::{DEFAULT_RANDOM_TICK_SPEED, RandomTickScheduler};
 use crate::scheduled_tick::{ScheduledTick, TickPriority};
+use crate::sleep::{SleepEvent, SleepFeed, SleepState, SleepVote};
 use crate::weather::{WeatherFeed, WeatherState};
 use lodestone_model::BlockPos;
 
@@ -103,6 +104,40 @@ fn mob_griefing() -> bool {
 /// can currently turn back on.
 fn advance_weather() -> bool {
     true
+}
+
+/// Issue #325 / `docs/plans/world-state.md` S1: whether a passed night-skip
+/// vote may actually jump the clock. Vanilla's `ServerLevel.advanceTime`
+/// (`ServerLevel.java:367-379`) — the rule checked inside `tickSleepingPlayers`
+/// after a vote passes — returns true only when the weather has not ended a
+/// thunder storm this tick (the world is not allowed to "skip" while a
+/// thunderstorm is being resolved).
+///
+/// Same shape as [`advance_weather`] just above: a function returning a
+/// constant is the disclosed gap this crate has **no world-level `GameRules`
+/// registry** (R1 of the world-state plan), and when R1 lands a world-level
+/// `GameRules`, this function is the only call site to change.
+///
+/// Returning the default is the conservative choice for the *observable*
+/// behaviour: vanilla ships `doDaylightCycle` (and weather resolution) on, so
+/// night skips past, and modelling the rule as off would freeze the day
+/// forever behind a toggle nobody can currently turn back on.
+fn advance_time() -> bool {
+    true
+}
+
+/// Issue #325 / `docs/plans/world-state.md` S1: the fraction of players whose
+/// vote is required to skip the night — the `playersSleepingPercentage` of
+/// `ServerLevel`'s `sleepStatus` (`SleepStatus.java`, defaulting to
+/// `sleepingPercentage=100` in `ServerLevel.java`'s constructor).
+///
+/// Another R1-shaped constant: vanilla's `GameRules.PLAYERS_SLEEPING_PERCENTAGE`
+/// ships at 100 (every player must be in bed) and is command-tunable. This
+/// crate has no world-level game-rules registry (see the R1 gaps above), so
+/// 100 is hard-coded and [`SleepState::sleepers_needed`]'s `max(1, …)` floor
+/// still makes singleplayer require exactly one sleeper.
+fn players_sleeping_percentage() -> u32 {
+    100
 }
 
 /// Vanilla's tick period at normal (non-sprinting) speed — 20 TPS, matching
@@ -667,6 +702,16 @@ pub(crate) async fn run_tick_loop<W>(
     // ticked either way — it just publishes into a feed no connection reads.
     // Production (`crate::IntegratedServer::open_in_memory_with_mobs`, and
     // `bind` since #439) calls the `_with_weather` variant with a real feed.
+    //
+    // The same applies to the night-skip vote (issue #325): a fresh
+    // [`SleepVote`] and [`SleepFeed`] no connection reads. The vote's
+    // arithmetic still runs here — a `SleepState` is ticked either way, so
+    // the loop shape is identical — it just never passes. This is the loop
+    // `bind`'s LAN worlds run on, which is why LAN does not yet skip the
+    // night: the LAN connection relays world-global feeds, but a vote whose
+    // `lay_down`/`get_up` arms no connection calls is structurally
+    // disconnected, and wiring it is a separate LAN pass (see
+    // `crate::sleep`'s module doc).
     run_tick_loop_with_weather(
         mobs,
         mob_out,
@@ -678,6 +723,9 @@ pub(crate) async fn run_tick_loop<W>(
         explosion_out,
         WeatherFeed::default(),
         WeatherState::default(),
+        // Issue #325: see the wrapper doc above.
+        &SleepVote::new(),
+        &SleepFeed::default(),
         scheduled,
     )
     .await
@@ -690,7 +738,9 @@ pub(crate) async fn run_tick_loop<W>(
 /// second, differently-named function exists instead of adding `weather_out`
 /// to [`run_tick_loop`]'s own signature (it would break the world-loop's
 /// non-weather call sites in `crate::chunk_store`/`crate::redstone_placement_gate`,
-/// which are not this issue's to edit).
+/// which are not this issue's to edit). Issue #325's [`SleepVote`]/[`SleepFeed`]
+/// follow the same `_with_weather` shape for the same reason, so the sleep
+/// wiring lives here too.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn run_tick_loop_with_weather<W>(
     mobs: MobHandle,
@@ -717,6 +767,22 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // test start a world already mid-cycle instead of waiting out a
     // 12k-180k-tick rain delay.
     weather: WeatherState,
+    // Issue #325 / `docs/plans/world-state.md` S1: the night-skip vote.
+    // `sleep_vote` is the shared roster and voter count — connections call
+    // `lay_down`/`get_up` on it (the `UseItemOn` bed arm and the
+    // `PlayerCommand` arm in `server.rs`) — and this loop reads it via
+    // `snapshot()` once per tick, folding it into a loop-owned
+    // [`SleepState`] (see below). The same single-consumer snapshot shape as
+    // `weather_out` makes it safe for the one connection
+    // `open_in_memory_with_mobs` spawns; a vote the wrapper's discarded
+    // default (no connection calls) can never pass.
+    sleep_vote: &SleepVote,
+    // Issue #325: where a passed vote publishes its [`SleepEvent::SkippedNight`]
+    // broadcast, drained by the connection — `serve_play`'s
+    // `container_sync_tick` arm — into a real `encode_set_time` so the
+    // client's day clock jumps to the morning. Snapshot-feed, like
+    // `weather_out`, with the same single-consumer caveat.
+    sleep_feed: &SleepFeed,
     // Issue #468's last wire. The two scheduled-tick queues used to be locals
     // here, so the queues the persistence path reads were always empty in
     // production and a pending repeater tick was lost on quit — the schema
@@ -741,12 +807,25 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     let mut next_tick_at = tokio::time::Instant::now();
     let mut last_overload_warning_at: Option<tokio::time::Instant> = None;
     let mut game_tick: u64 = 0;
+    // Issue #325 / `docs/plans/world-state.md` S1: the day clock, advanced one
+    // per tick in lockstep with `game_tick` until a night skip jumps it — the
+    // `dayTime` counter of vanilla's `ServerLevel.tickTime` (which increments
+    // both `gameTime` and `dayTime` as two counters). Owned by this thread with
+    // no lock, exactly like `game_tick`. `i64` because the night skip lands on
+    // `SleepState::morning_after`'s multiples of `DAY_LENGTH_TICKS`.
+    let mut day_time: i64 = 0;
     // Issue #324 / `docs/plans/world-state.md` W1: the weather cycle, owned
     // by the tick thread with no lock, exactly like `game_tick`/`block_ticks`
     // — the plain-struct shape the ECS migration (shape A) turns into a
     // `Resource` mechanically later. Seeded by the caller (see the parameter
     // comment); this binding is what makes it mutable for the loop.
     let mut weather = weather;
+    // Issue #325 / `docs/plans/world-state.md` S1: the night-skip vote's
+    // state, owned by this loop with no lock, exactly like `weather` — the
+    // shared [`SleepVote`] holds the roster, but who has been *deep* asleep is
+    // measured here against this thread's own `game_tick`, and the loop is
+    // what decides a pass (see `crate::sleep`'s module doc).
+    let mut sleep_state = SleepState::default();
     // #308: one queue per vanilla queue (`ServerLevel.blockTicks`/
     // `fluidTicks`, `ServerLevel.java:209-210`). Owned by `scheduled` rather
     // than by this function since #468, which is what lets them be saved; they
@@ -858,12 +937,47 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         });
 
         game_tick += 1;
+        // Issue #325 / `docs/plans/world-state.md` S1: the day clock advances
+        // once per tick, in lockstep with `game_tick` — vanilla's
+        // `ServerLevel.tickTime` increments both (`ServerLevel.java`). The two
+        // diverge only when a passed night-skip vote jumps `day_time` below.
+        day_time += 1;
         // Issue #324 / `docs/plans/world-state.md` W1: the weather cycle is
         // world-global state, so it belongs to the world tick (not to any
         // connection — the straddle the world-state plan's migration exists
         // to delete). `advance_weather()` stands in for the R1 game rule.
         for event in weather.tick(advance_weather()) {
             weather_out.publish(event);
+        }
+        // Issue #325 / `docs/plans/world-state.md` S1: the night-skip vote, in
+        // vanilla's own position — `ServerLevel.tick` runs
+        // `tickSleepingPlayers` right after the weather-cycle timers
+        // (`ServerLevel.java:367-379`). Snapshot the shared roster, fold it
+        // into the loop-owned [`SleepState`] (recording each sleeper's
+        // lay-down tick and dropping anyone who woke), then test the vote: at
+        // least `sleepers_needed` players asleep, and at least that many deep
+        // (`DEEP_SLEEP_TICKS`).
+        //
+        // On a pass, vanilla's three steps run in order
+        // (`ServerLevel.java:367-379`): the clock jumps to the next morning
+        // (`moveToTimeMarker`, gated on the `advanceTime` rule standing in for
+        // R1); the skip is broadcast so each connection can re-anchor its day
+        // clock (`encode_set_time` on the connection side); and every sleeper
+        // wakes (`wakeUpAllPlayers` → `SleepStatus.removeAllSleepers`) and the
+        // roster is cleared so a day-sleeping click cannot vote again tonight.
+        let (active, sleeper_ids) = sleep_vote.snapshot();
+        sleep_state.reconcile(&sleeper_ids, game_tick);
+        if sleep_state.vote_passes(active, players_sleeping_percentage(), game_tick) {
+            if advance_time() {
+                let morning = SleepState::morning_after(day_time);
+                day_time = morning;
+                sleep_feed.publish(SleepEvent::SkippedNight {
+                    game_time: game_tick as i64,
+                    morning,
+                });
+            }
+            sleep_state.wake_all();
+            sleep_vote.clear();
         }
         // Issue #468: the tick every pending `trigger_tick` is relative to, so a
         // saved queue can be rebased on load. One relaxed atomic store — the
@@ -1687,19 +1801,34 @@ mod tests {
         weather.thunder_time = i32::MAX;
         weather.rain_level = 0.5;
 
-        tokio::spawn(run_tick_loop_with_weather(
-            mobs,
-            out,
-            block_entities,
-            Arc::clone(&clock),
-            world,
-            block_tick_out,
-            tick_area,
-            ExplosionFeed::default(),
-            weather_out.clone(),
-            weather,
-            crate::region_source::ScheduledTickHandle::default(),
-        ));
+        // Issue #325: a fresh night-skip vote no connection calls — the
+        // `_with_weather` body ticks a `SleepState` either way, so the loop
+        // shape is identical, but an empty roster can never pass. Wrapped in
+        // `async move` because the loop borrows the vote/feed, and
+        // `tokio::spawn` demands `'static`. The feed the loop writes is
+        // cloned out first — the test drains the original `weather_out` after
+        // the spawn, so the block must not capture it.
+        let vote = SleepVote::new();
+        let feed = SleepFeed::default();
+        let weather_for_loop = weather_out.clone();
+        tokio::spawn(async move {
+            run_tick_loop_with_weather(
+                mobs,
+                out,
+                block_entities,
+                Arc::clone(&clock),
+                world,
+                block_tick_out,
+                tick_area,
+                ExplosionFeed::default(),
+                weather_for_loop,
+                weather,
+                &vote,
+                &feed,
+                crate::region_source::ScheduledTickHandle::default(),
+            )
+            .await;
+        });
         // See `ten_periods_advance_exactly_ten_ticks_with_no_overrun`: the
         // spawned task must reach its first `Instant::now()` before the first
         // `advance`, or every tick prediction shifts by one period.
@@ -1748,19 +1877,32 @@ mod tests {
         weather.thunder_time = i32::MAX;
         weather.rain_level = 0.0;
 
-        tokio::spawn(run_tick_loop_with_weather(
-            mobs,
-            out,
-            block_entities,
-            Arc::clone(&clock),
-            world,
-            block_tick_out,
-            tick_area,
-            ExplosionFeed::default(),
-            weather_out.clone(),
-            weather,
-            crate::region_source::ScheduledTickHandle::default(),
-        ));
+        // Issue #325: a fresh night-skip vote no connection calls (see the
+        // other weather gate's comment — the loop shape is identical, the
+        // vote just cannot pass). `async move` so the borrow survives
+        // `tokio::spawn`'s `'static` bound; the feed the loop writes is
+        // cloned out first for the same reason as the other gate.
+        let vote = SleepVote::new();
+        let feed = SleepFeed::default();
+        let weather_for_loop = weather_out.clone();
+        tokio::spawn(async move {
+            run_tick_loop_with_weather(
+                mobs,
+                out,
+                block_entities,
+                Arc::clone(&clock),
+                world,
+                block_tick_out,
+                tick_area,
+                ExplosionFeed::default(),
+                weather_for_loop,
+                weather,
+                &vote,
+                &feed,
+                crate::region_source::ScheduledTickHandle::default(),
+            )
+            .await;
+        });
         tokio::task::yield_now().await;
 
         for _ in 0..110 {
@@ -1796,5 +1938,91 @@ mod tests {
             assert_eq!(event.wire(), (7, *level), "rain ramp must be GAME_EVENT id 7");
         }
         assert_eq!(previous, 1.0, "the ramp must land exactly on 1.0");
+    }
+
+    /// Gate for issue #325's wiring through the **production** loop, not at
+    /// `SleepState` directly (its arithmetic is already pinned by
+    /// `crate::sleep`'s own tests): a singleplayer-shaped vote — nobody calls
+    /// `set_active`, so `active` stays `0` and [`SleepState::sleepers_needed`]'s
+    /// `max(1, …)` floor demands exactly one sleeper — with one sleeper already
+    /// in bed when the loop starts. The loop must tick `day_time` in lockstep
+    /// with `game_tick`, record the lay-down, and on the
+    /// `DEEP_SLEEP_TICKS`-th (100th) tick publish **exactly one**
+    /// `SkippedNight` — `game_time == 101`, `morning == 24_000` — then wake the
+    /// sleeper and clear the roster so no later tick re-fires the skip.
+    ///
+    /// Every value is computed here from vanilla's arithmetic, never echoed
+    /// from the loop: the lay-down at `game_tick == 1` makes the deep-sleep
+    /// threshold pass at `game_tick == 101` (`101 - 1 == DEEP_SLEEP_TICKS`),
+    /// `morning_after(101)` is the next multiple of `DAY_LENGTH_TICKS`, i.e.
+    /// `24_000`, and the cleared roster makes ticks 102..=110 silent — a
+    /// second-skip event at any of them would fail the exact `len() == 1`.
+    #[tokio::test(start_paused = true)]
+    async fn one_deep_sleeper_skips_the_night_exactly_once_through_the_loop() {
+        let (mobs, out, block_entities) = handles();
+        let clock = Arc::new(TickClock::new());
+        let (world, block_tick_out, tick_area) = world_tick_args();
+        let weather_out = WeatherFeed::default();
+        // The roster is shared with the loop; nothing here calls `set_active`,
+        // which is precisely the singleplayer shape (`active == 0`).
+        let vote = SleepVote::new();
+        let feed = SleepFeed::default();
+        // `LOCAL_PLAYER_ENTITY_ID` (server.rs).
+        vote.lay_down(1);
+
+        // Wrapped in `async move`: the loop borrows the vote/feed, and
+        // `tokio::spawn` demands `'static`, so the future owns them and this
+        // test keeps its own clones for the drain/roster assertions.
+        let loop_vote = vote.clone();
+        let loop_feed = feed.clone();
+        tokio::spawn(async move {
+            run_tick_loop_with_weather(
+                mobs,
+                out,
+                block_entities,
+                Arc::clone(&clock),
+                world,
+                block_tick_out,
+                tick_area,
+                ExplosionFeed::default(),
+                weather_out,
+                WeatherState::default(),
+                &loop_vote,
+                &loop_feed,
+                crate::region_source::ScheduledTickHandle::default(),
+            )
+            .await;
+        });
+        // See `ten_periods_advance_exactly_ten_ticks_with_no_overrun`: the
+        // spawned task must reach its first `Instant::now()` before the first
+        // `advance`, or every tick prediction shifts by one period.
+        tokio::task::yield_now().await;
+
+        // 110 ticks: the 101st fires the skip (deep-sleep threshold), the rest
+        // prove it does not re-fire.
+        for _ in 0..110 {
+            tokio::time::advance(TICK_PERIOD).await;
+        }
+        tokio::task::yield_now().await;
+
+        let events = feed.drain_all();
+        assert_eq!(
+            events.len(),
+            1,
+            "a single deep sleeper must skip the night exactly once in 110 ticks: {events:?}"
+        );
+        assert_eq!(
+            events[0],
+            SleepEvent::SkippedNight {
+                game_time: 101,
+                morning: 24_000,
+            }
+        );
+        // The skip cleared the roster, so a day-sleeping click cannot vote
+        // again tonight.
+        assert!(
+            vote.snapshot().1.is_empty(),
+            "the passed vote's roster must be cleared by the skip"
+        );
     }
 }
