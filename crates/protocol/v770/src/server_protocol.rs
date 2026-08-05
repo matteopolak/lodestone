@@ -42,8 +42,10 @@
 
 use std::collections::HashMap;
 
-use lodestone_core::{Ctx, Decode, Encode, Nbt, Reader, Writer, write_network_nbt};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Vec3};
+use lodestone_core::{Ctx, Decode, Encode, Nbt, NbtTag, Reader, Writer, write_network_nbt};
+use lodestone_model::{
+    BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Text, TextContent, Vec3,
+};
 use lodestone_server::{
     ChunkColumn as ServerChunkColumn, EntitySnapshot, HOTBAR_SIZE, MetadataField, ServerBound,
     ServerDirective, ServerProtocol,
@@ -78,7 +80,7 @@ use crate::packets::game::{
     SetStructureBlock, SetTestBlock, SignUpdate, Swing, UseItem, UseItemOn,
 };
 use crate::packets::handshake::Intention;
-use crate::packets::login::{LoginFinished, LoginHello};
+use crate::packets::login::{LoginDisconnect, LoginFinished, LoginHello};
 
 /// The local player's fixed network entity id, matching
 /// [`begin_play`](V770ServerProtocol::begin_play)'s `GameLogin { entity_id:
@@ -744,6 +746,124 @@ fn encode_system_chat(message: &str, overlay: bool) -> Vec<u8> {
     write_network_nbt(&mut w, &component).expect("plain string NBT component always encodes");
     w.bool(overlay);
     w.into_vec()
+}
+
+/// Lowers a [`Text`] to a network-NBT chat component, for the **disconnect
+/// reason** field (issue #279).
+///
+/// # Scope, stated because a partial serializer is a trap
+///
+/// This is **not** a general `Text` → NBT serializer, and must not be reused as
+/// one. It writes exactly the three things a disconnect reason carries —
+/// `text`, `translate` (with `fallback` and `with`), and `extra` — and
+/// **deliberately drops style, click, hover and insertion**, because a
+/// disconnect reason renders on the "connection lost" screen, which has no
+/// interactivity and (in vanilla) applies its own styling. Passing a styled
+/// component through here would silently lose the styling, which is why the
+/// function is private and named for its one caller. A general serializer
+/// belongs in `lodestone-model` next to `Text::from_nbt`, as its inverse.
+///
+/// The shape is pinned by the *decoder* on the other side of the same wire:
+/// `V770Adapter`'s `nbt_reason_text` reads this with `read_network_nbt` +
+/// `Text::from_nbt`, and that decoder has been validated against real servers'
+/// disconnect packets. Field names follow vanilla's own component codecs —
+/// `Codec.STRING.fieldOf("translate")` and the optional `"fallback"` beside it
+/// (`network/chat/contents/TranslatableContents.java:40-41`).
+fn text_to_nbt(text: &Text) -> Nbt {
+    let mut fields: Vec<(String, Nbt)> = Vec::new();
+    match &text.content {
+        TextContent::Literal(literal) => {
+            fields.push(("text".to_owned(), Nbt::String(literal.clone())));
+        }
+        TextContent::Translate {
+            key,
+            with,
+            fallback,
+        } => {
+            fields.push(("translate".to_owned(), Nbt::String(key.clone())));
+            if let Some(fallback) = fallback {
+                fields.push(("fallback".to_owned(), Nbt::String(fallback.clone())));
+            }
+            if !with.is_empty() {
+                fields.push(("with".to_owned(), component_list(with)));
+            }
+        }
+    }
+    if !text.extra.is_empty() {
+        fields.push(("extra".to_owned(), component_list(&text.extra)));
+    }
+    Nbt::Compound(fields)
+}
+
+/// An NBT list of chat components — every element a `TAG_Compound`, which is the
+/// `element_type` a wire NBT list carries in its header. Only reached for a
+/// non-empty slice: an *empty* NBT list would need an element tag with no element
+/// to derive it from, and both callers guard on `is_empty` for that reason.
+fn component_list(texts: &[Text]) -> Nbt {
+    Nbt::List {
+        element_type: NbtTag::Compound,
+        elements: texts.iter().map(text_to_nbt).collect(),
+    }
+}
+
+/// Serializes a disconnect reason into the raw network-NBT payload the
+/// Configuration- and Play-phase `ClientboundDisconnectPacket` carries: the
+/// component alone, with no wrapper fields, which is why there is no struct to
+/// derive `Encode` from. Same `write_network_nbt` path `encode_system_chat` uses.
+fn encode_component_nbt(text: &Text) -> Vec<u8> {
+    let mut w = Writer::default();
+    write_network_nbt(&mut w, &text_to_nbt(text))
+        .expect("a chat component built from a `Text` always encodes into a `Vec<u8>` writer");
+    w.into_vec()
+}
+
+/// The JSON twin of [`text_to_nbt`], for the **login**-phase disconnect only.
+///
+/// The login phase predates NBT components on the wire, so
+/// `ClientboundLoginDisconnectPacket` still carries its reason as a
+/// length-prefixed JSON string (`ByteBufCodecs.lenientJson(262144)`,
+/// `login/ClientboundLoginDisconnectPacket.java:18`) while the Configuration and
+/// Play `ClientboundDisconnectPacket` carries NBT. Writing NBT in the login phase
+/// produces a packet a real client cannot parse, which is the single easiest
+/// mistake to make here — hence two functions rather than one, with the same
+/// field names and the same deliberate omissions (see [`text_to_nbt`]'s scope
+/// note).
+fn text_to_json(text: &Text) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    match &text.content {
+        TextContent::Literal(literal) => {
+            object.insert(
+                "text".to_owned(),
+                serde_json::Value::String(literal.clone()),
+            );
+        }
+        TextContent::Translate {
+            key,
+            with,
+            fallback,
+        } => {
+            object.insert("translate".to_owned(), serde_json::Value::String(key.clone()));
+            if let Some(fallback) = fallback {
+                object.insert(
+                    "fallback".to_owned(),
+                    serde_json::Value::String(fallback.clone()),
+                );
+            }
+            if !with.is_empty() {
+                object.insert(
+                    "with".to_owned(),
+                    serde_json::Value::Array(with.iter().map(text_to_json).collect()),
+                );
+            }
+        }
+    }
+    if !text.extra.is_empty() {
+        object.insert(
+            "extra".to_owned(),
+            serde_json::Value::Array(text.extra.iter().map(text_to_json).collect()),
+        );
+    }
+    serde_json::Value::Object(object)
 }
 
 /// Base64-encodes `bytes` with the standard RFC 4648 alphabet and `=`
@@ -1958,6 +2078,40 @@ impl ServerProtocol for V770ServerProtocol {
                 favicon_png,
                 enforces_secure_chat,
             ),
+        }
+    }
+
+    fn encode_disconnect(&self, state: lodestone_core::State, reason: &Text) -> ServerDirective {
+        use lodestone_core::State;
+
+        match state {
+            // JSON, not NBT — see `text_to_json`'s doc comment. `LoginDisconnect`
+            // already derives `Encode`/`Decode` and its own doc comment records
+            // the same asymmetry from the decode side.
+            State::Login => send(
+                login::clientbound::LOGIN_DISCONNECT,
+                &LoginDisconnect {
+                    reason: text_to_json(reason).to_string(),
+                },
+            ),
+            // NBT, via the same `write_network_nbt` path `encode_system_chat`
+            // uses. There is no `Disconnect` struct to derive `Encode` from
+            // (the body is a bare component with no wrapper fields), so the
+            // payload is the NBT alone.
+            State::Configuration => ServerDirective::Send {
+                packet_id: configuration::clientbound::DISCONNECT,
+                payload: encode_component_nbt(reason),
+            },
+            State::Play => ServerDirective::Send {
+                packet_id: play::clientbound::DISCONNECT,
+                payload: encode_component_nbt(reason),
+            },
+            // Handshaking and Status have no disconnect packet in 26.2 — the
+            // Status clientbound set is `status_response`/`pong_response` only,
+            // and vanilla's `ServerStatusPacketListenerImpl` closes the channel
+            // rather than sending anything. Emitting nothing is correct; the
+            // caller still closes.
+            State::Handshaking | State::Status => ServerDirective::None,
         }
     }
 

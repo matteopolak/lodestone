@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use lodestone_core::State;
 use lodestone_entity::DamageFlags;
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Vec3};
+use lodestone_model::{
+    BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Text, TextContent, Vec3,
+};
 use lodestone_net::{Connection, NetError, Transport};
 
 use crate::block_entities::{BlockEntity, BlockEntityHandle, block_entity_for_item};
@@ -59,6 +61,59 @@ pub const STATUS_MOTD: &str = "A Lodestone Server";
 /// deliberately the same number: a client that sees `0/20` in its list and then
 /// joins a 20-slot server should not see the cap change.
 pub const STATUS_MAX_PLAYERS: i32 = 20;
+
+/// The disconnect reason for an unanswered keep-alive (issue #279).
+///
+/// Vanilla's is exactly `Component.translatable("disconnect.timeout")`
+/// (`net/minecraft/server/network/ServerCommonPacketListenerImpl.java:37`, sent
+/// at `:86`), so the key is not ours to choose. The `fallback` is vanilla's own
+/// English string for that key, read from
+/// `.cache/mc/26.2/client-src/assets/minecraft/lang/en_us.json:3498`
+/// (`"disconnect.timeout": "Timed out"`) — not invented here.
+///
+/// Carrying a fallback at all is a deliberate improvement over vanilla's bare
+/// `translatable`, and it is a real vanilla feature, not an extension:
+/// `TranslatableContents` resolves `currentLanguage.getOrDefault(key, fallback)`
+/// (`network/chat/contents/TranslatableContents.java:90`). So a real client shows
+/// its own localized "Timed out", while any client that cannot resolve the key —
+/// including *our* client today, which renders raw translation keys (issue #68) —
+/// shows readable English instead of the literal string `disconnect.timeout`.
+fn timeout_reason() -> Text {
+    Text {
+        content: TextContent::Translate {
+            key: "disconnect.timeout".to_owned(),
+            with: Vec::new(),
+            fallback: Some("Timed out".to_owned()),
+        },
+        ..Text::default()
+    }
+}
+
+/// Whether `name` is a username vanilla's own server would accept.
+///
+/// `StringUtil.isValidPlayerName` (`net/minecraft/util/StringUtil.java:66-68`):
+/// at most 16 characters, and **no** character `<= 32` or `>= 127` — i.e. every
+/// char must be printable ASCII, excluding space. Vanilla checks this on the
+/// login-phase `hello` packet (`ServerLoginPacketListenerImpl.java:120`).
+///
+/// Note the bound is on `char`s, matching vanilla's `name.chars()` (Java code
+/// points) rather than bytes: a name of 16 multi-byte characters is length-16 to
+/// vanilla, and every one of those characters is `>= 127` and so already rejected.
+fn is_valid_player_name(name: &str) -> bool {
+    name.chars().count() <= 16 && name.chars().all(|c| c > ' ' && (c as u32) < 127)
+}
+
+/// The disconnect reason for a username our server will not accept.
+///
+/// Unlike [`timeout_reason`], the *text* here is ours: vanilla rejects an invalid
+/// name by throwing (`Validate.validState(StringUtil.isValidPlayerName(...))`,
+/// `ServerLoginPacketListenerImpl.java:120`), which closes the connection with no
+/// translatable reason at all. Rejecting is faithful; explaining is an
+/// improvement, so this is a plain literal rather than a translation key we would
+/// have had to invent.
+fn invalid_username_reason() -> Text {
+    Text::literal("Invalid username")
+}
 
 /// Cadence of the periodic time-of-day broadcast.
 ///
@@ -579,6 +634,11 @@ pub enum ServerError {
     /// [`crate::IntegratedServer`]'s accept loops).
     #[error("server-list status request handled; connection closed (not an error)")]
     StatusRequestHandled,
+    /// The client presented a username vanilla's own server would refuse
+    /// (`StringUtil.isValidPlayerName` — see [`is_valid_player_name`]), and was
+    /// sent a login-phase disconnect explaining so (issue #279).
+    #[error("login rejected: invalid username")]
+    InvalidUsername,
 }
 
 async fn apply<T: Transport>(
@@ -952,6 +1012,20 @@ where
                 username: name,
                 uuid,
             } => {
+                // Issue #279's login-phase producer. Vanilla validates the name on
+                // this exact packet (`ServerLoginPacketListenerImpl.java:120`) —
+                // but by *throwing*, which closes the socket with no explanation.
+                // We reject the same names and say why, which is the whole point
+                // of this issue.
+                //
+                // Not merely cosmetic: an offline-mode server derives the account
+                // uuid from the username and persists player data under it, so a
+                // name carrying control characters is a name that reaches storage.
+                if !is_valid_player_name(&name) {
+                    let directive = proto.encode_disconnect(state, &invalid_username_reason());
+                    apply(conn, &mut state, directive).await?;
+                    return Err(ServerError::InvalidUsername);
+                }
                 username = Some(name.clone());
                 for directive in proto.login_success(&name, uuid) {
                     apply(conn, &mut state, directive).await?;
@@ -2197,6 +2271,23 @@ where
 
             _ = keep_alive_tick.tick() => {
                 if pending_keep_alive.is_some() {
+                    // Issue #279: tell the client *why* before hanging up.
+                    // Vanilla sends `Component.translatable("disconnect.timeout")`
+                    // on exactly this path (`ServerCommonPacketListenerImpl
+                    // .java:37,86`) — up to now we closed the socket silently and
+                    // a real client showed a generic "connection lost".
+                    //
+                    // The write is best-effort: a peer that stopped answering
+                    // keep-alives may well be gone, so a failed write must still
+                    // produce `KeepAliveTimeout` rather than masking it as a
+                    // transport error. That is what `let _ =` buys here, and it is
+                    // the one place in this loop where dropping an error is right.
+                    // Built before the `&mut state` borrow, not inline in the
+                    // call: `apply` takes `&mut state` and `encode_disconnect`
+                    // reads it, which the borrow checker rejects as an argument
+                    // expression.
+                    let directive = proto.encode_disconnect(state, &timeout_reason());
+                    let _ = apply(conn, &mut state, directive).await;
                     return Err(ServerError::KeepAliveTimeout);
                 }
                 next_keep_alive_id += 1;

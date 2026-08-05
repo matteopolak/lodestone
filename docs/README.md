@@ -737,6 +737,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   a connection asks for a burst of terrain: `serve_connection`'s initial `view_radius`
   join, and `ViewTracker::recenter`'s "chunks that entered the view" diff (both in
   `crates/lodestone-server/src/server.rs`).
+- [Server-side disconnect packets](./server-disconnect.md) — How Lodestone's
+  integrated server tells a client **why** it is being disconnected, instead of
+  silently closing the socket. Issue #279.
 - [Server ECS, Phase 0: the `App` exists and is provably live](./server-ecs-phase0.md) —
   Phase 0 of [`docs/plans/server-ecs-migration.md`](./plans/server-ecs-migration.md)
   — the dependency edge and `ServerCorePlugin` that give `lodestone-server` its own
