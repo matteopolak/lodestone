@@ -20,6 +20,11 @@ or down a ladder or a vine, or one a 45° corner-cut away — and it walks, jump
 there, planning the next leg while still walking the current one if the goal is further than one
 snapshot away. That is still deliberately not a finished bot.
 
+**And it is not in the shipped client.** `lodestone-shell` does not depend on `lodestone-autopilot`
+— there is no cargo feature to turn it on, and `#goto` no longer exists. It is a pre-implemented
+*external* plugin for people building on the library. See "Not wired into the shell" below for the
+two routes to using it and for the one-way constraint on `Sim`'s plugin set.
+
 ## How it works
 
 ### The two-crate split, and why the plugin is thin
@@ -183,31 +188,74 @@ length — and therefore every `O(plan)` operation on it, including this section
 witness check — is bounded by one segment's snapshot radius for the entire journey, never by how far
 the player has travelled in total. Nothing to trim, because nothing grows.
 
-### `sim.rs` registration and `#goto`: both closed, re-verified rather than assumed
+### Not wired into the shell — deliberately, and how to get it back
 
-Issue #38's title ("shell built and driving in a hermetic test; needs `sim.rs` registration +
-`#goto` command") is stale — both halves are done and were re-verified against the tree directly
-for this pass, not from the plan or from this document's own prior wording:
+**`lodestone-shell` does not depend on `lodestone-autopilot` at all.** Not optionally, not behind a
+cargo feature: there is no dependency line and no `AutopilotPlugin` in `Sim::new`'s `add_plugins`
+tuple. The shipped client does not navigate itself.
 
-- `lodestone_shell::sim::Sim::new`'s `app.add_plugins((CorePlugin, LocalPlayerPlugin,
-  ControllerPlugin, …, InteractPlugin, lodestone_autopilot::AutopilotPlugin))` tuple has
-  `AutopilotPlugin` in it (`crates/lodestone-shell/src/sim.rs`), plus a
-  `lodestone-autopilot = { workspace = true }` line in `crates/lodestone-shell/Cargo.toml`'s
-  `[dependencies]`. `sim::tests::autopilot_plugin_is_registered_and_its_systems_actually_run` (in
-  `crates/lodestone-shell/src/sim/tests.rs`) proves the two systems actually *run*, not merely that
-  the plugin is in the list.
-- `#goto x z` is a real, tested client-local chat command: `Sim::send_chat` intercepts any
-  `#`-prefixed line before `compose_chat_action` ever sees it (`sim.rs`'s own doc comment: "any
-  `#`-prefixed line is consumed here, matched or not"), `parse_goto_command` parses it, and a
-  well-formed one writes `AutopilotGoal` directly. `sim/tests.rs`'s
-  `goto_chat_command_drives_the_player_toward_the_goal_over_real_ticks` ticks a real schedule and
-  asserts `AutopilotStatus::Arrived`; `goto_chat_command_never_reaches_the_outbound_action_queue`
-  is the negative control that `#goto` never leaks onto the wire as ordinary chat, and that a
-  malformed one is not silently swallowed.
+This reverses what this section said until 2026-08-04, and the reversal is the *decision*, not a
+regression. The autopilot is a pre-implemented **external** plugin — a worked example of the plugin
+API for people building headless bots on the library, who will modify it anyway — so having the
+graphical client link it was backwards. Three things went with the dependency:
 
-Both landed in `bc41685` and `2830ea2`, some time before this pass. Issue #38 remains open on the
-tracker; nothing in this crate's remaining scope depends on it, and it should be closed with this
-finding rather than left to mislead the next reader into re-doing already-done work.
+| removed | was |
+|---|---|
+| `lodestone-autopilot = { workspace = true }` | `crates/lodestone-shell/Cargo.toml` `[dependencies]` |
+| `lodestone_autopilot::AutopilotPlugin` | the last entry of `Sim::new`'s `add_plugins` tuple, `sim/build.rs` |
+| `#goto x z` and its `parse_goto_command` | `Sim::send_chat` (`sim/session.rs`) and `sim.rs` |
+
+Each site now carries a comment saying it was removed on purpose, so the next reader does not
+"fix" it by adding the line back.
+
+**What a user does to get it back**, in the owner's own framing — two routes, and they are not
+equally good:
+
+1. **Use the library** (intended). Build your own `lodestone_ecs::app::App`, `add_plugins((CorePlugin,
+   LocalPlayerPlugin, AutopilotPlugin))`, take its `World`, and hand it to
+   `lodestone_client::ClientBuilder::ecs(world, session)` — which is `pub`. This is exactly what
+   `crates/plugins/lodestone-autopilot/tests/drives_to_goal.rs` already does, so the route is
+   test-covered rather than aspirational. You get no window and no `#goto`; you set `AutopilotGoal`
+   yourself, which is the honest shape for a bot.
+2. **Clone the repo and add the three lines back.** The only route that gets the autopilot into the
+   *graphical* client, because of the constraint in the next paragraph.
+
+**The constraint worth knowing before you plan around it: `Sim`'s plugin set is closed at compile
+time.** `Sim::build` ends with `let mut ecs = std::mem::take(app.world_mut())` — it takes the `World`
+and **drops the `App`** — and `Sim` stores only an `EcsHandle` (`Arc<RwLock<World>>`). But
+`bevy_app::Plugin::build` needs `&mut App`. So although `Sim::ecs()` is `pub` and hands out
+`&mut World` (enough to insert resources, spawn entities, or run a schedule), **no downstream crate
+holding a `Sim` can register a plugin into it.** There is no supported way to merge one `App`'s
+`Schedules` into another `World`'s. That is why route 1 goes around `Sim` rather than through it, and
+it is the real finding for [#77](https://github.com/matteopolak/lodestone/issues/77): the plugin
+boundary is *sound for anything that builds its own `App`* and **one-way for the shell**.
+
+**`#goto` should move into the plugin once
+[#118](https://github.com/matteopolak/lodestone/issues/118) (plugin command registration) lands**,
+not come back to the shell. A chat command in the shell that writes a resource owned by a plugin is
+the wrong direction — the shell had to know the plugin's type to compile. What #118 needs to supply
+for the move: a registry a plugin can add a command name and argument tree to from its own `build`,
+and a shell-side dispatch that resolves a typed `#` line against that registry without naming any
+plugin. `crates/lodestone-command` is already the argument-tree substrate for this and currently has
+**zero consumers**; its own docs name #118 as the intended first one.
+
+**What the shell kept, and why.** `Sim::send_chat` still intercepts *every* `#`-prefixed line and
+refuses it. That reservation is not autopilot-specific: deleting it would restore no capability and
+would start leaking `#goto`-style lines onto the wire as ordinary chat for every other player to
+read. Two shell gates pin it —
+`sim::tests::a_hash_prefixed_line_is_consumed_locally_and_never_reaches_the_outbound_queue` (with a
+`/say` control proving the outbound queue is live, so the emptiness means "refused" and not "nothing
+wired"), and `no_chat_line_makes_the_shipped_client_walk_itself`, which carves the *same* corridor
+the deleted drive gate used and asserts the player moves **under 0.5 blocks** over 200 ticks after
+`#goto 0 5`, where that gate measured about 4 blocks of travel.
+
+**The autopilot's own evidence did not weaken.** The two shell gates that were deleted
+(`autopilot_plugin_is_registered_and_its_systems_actually_run` and
+`goto_chat_command_drives_the_player_toward_the_goal_over_real_ticks`) had their subject already
+covered, more strongly, by `crates/plugins/lodestone-autopilot/tests/drives_to_goal.rs`: it installs
+`AutopilotPlugin` in a real `App`, drives a real `GameTick` schedule, and asserts arrival against
+**jar-derived** collision with unreachable-goal controls. What is genuinely gone is only the claim
+that the shell registered it.
 
 ### `Climb`: landed, and what the two hard parts actually needed
 
