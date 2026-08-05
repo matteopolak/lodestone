@@ -159,9 +159,11 @@ oracle-top-layer:
 # --- Delegating wrappers (scripts/* keep their bodies and paths) ------------
 
 # wasm32 compile + confinement-guard tripwire (debug build, fast). Does NOT
-# prove the browser runs — see the script's own header.
+# prove the browser runs — see xtask's wasm-check section (issue #431; the
+# tested port of scripts/wasm-check.sh, which remains as the reference
+# original).
 wasm-check:
-    ./scripts/wasm-check.sh
+    cargo run -q -p xtask {{jflag}} --target-dir {{tdir}} -- wasm-check
 
 # Release wasm bundle-size ceiling (gzip-enforced; brotli reported when
 # available). Separate from wasm-check because a --release + lto=fat build

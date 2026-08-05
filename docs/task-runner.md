@@ -22,14 +22,18 @@ and the boundary between them is the whole point of this file existing:
 
 | role | owns | example |
 |---|---|---|
-| `xtask` | anything that parses Rust/workspace structure, generates a committed artifact, or needs its own test | `docs-index`, `check-isolation`, `check-deletable`, `gen-packet-ids` |
+| `xtask` | anything that parses Rust/workspace structure, generates a committed artifact, or needs its own test | `docs-index`, `check-isolation`, `check-deletable`, `gen-packet-ids`, `wasm-check` |
 | `just` | the canonical *invocation* — one to three lines, no logic | `just check` → `cargo check --workspace --all-targets …` |
 | `scripts/*` | the script *body*, at its current path | `scripts/wasm-check.sh`, `scripts/worldgen-region-sweep.sh` |
 
-**No script body moved into the Justfile.** `wasm-check`, `wasm-size`, and
-`worldgen-sweep` are one-line delegations (`./scripts/wasm-check.sh`, etc.).
-This was a deliberate constraint, not laziness: roughly 30 docs already
-reference `scripts/…` paths by name (`docs/bevy-migration.md`,
+**No script body moved into the Justfile.** `wasm-size` and `worldgen-sweep`
+are one-line delegations (`./scripts/wasm-size.sh`, etc.). `wasm-check` is the
+one exception: its body moved into `xtask` (issue #431) so its confinement
+guards could get unit tests and a real exit code —
+`scripts/wasm-check.sh` remains at its path as the reference original, but the
+recipe now runs `cargo xtask wasm-check`.
+The rest of this was a deliberate constraint, not laziness: roughly 30 docs
+already reference `scripts/…` paths by name (`docs/bevy-migration.md`,
 `docs/chunk-world-resource.md`, `docs/session-components.md`, …), and every
 one of those links stays correct precisely because the script never moved. A
 Justfile that inlined the bodies would have required editing all ~30; the
@@ -127,8 +131,8 @@ correct it.
   script logic. If what you're adding needs more than that, it belongs in
   `xtask` (if it parses Rust/workspace structure or needs a test) or a new
   script under `scripts/` (if it's a shell pipeline) — write the recipe as a
-  delegation to it, the same way `wasm-check` delegates to
-  `scripts/wasm-check.sh`.
+  delegation to it, the same way `wasm-size` delegates to
+  `scripts/wasm-size.sh`.
 - **Never reintroduce a `CARGO_*`-prefixed variable anywhere in this file.**
   That is the exact env-var form measured at ~0% sccache hits. If a future
   edit needs a new cargo-affecting variable, name it `LODESTONE_*` and pass it
