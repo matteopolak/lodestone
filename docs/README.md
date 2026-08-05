@@ -561,6 +561,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   is the "not Minecraft" tell issue
   [#22](https://github.com/matteopolak/lodestone/issues/22) named: flat per-block
   light plus directional shade, with no darkening in corners and crevices.
+- [Situational music selection](./music-selection.md) — The layer that decides
+  *when* to play a music track and *which* one — menu music, per-biome overworld
+  music, the creative and underwater variants, and the End boss and credits tracks. It
+  is pure logic over the player's situation plus a randomised countdown, and it lives
+  in `crates/lodestone-sound/src/music.rs` with a generated biome table beside it in
+  `src/biome_music.rs`.
 - [Which settings actually do something, and what the rest are waiting on](./options-consumption-census.md) —
   A consumption audit of the settings tree: for every option
   `crates/lodestone-shell/src/menu/options.rs` puts on screen, whether the value
