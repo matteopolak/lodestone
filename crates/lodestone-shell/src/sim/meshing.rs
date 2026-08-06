@@ -227,9 +227,6 @@ impl Sim {
     /// budget by the `heal_dirty_columns` system, so a spiral load re-meshes each
     /// column a small constant number of times instead of nine.
     pub(crate) fn on_column_arrived(&mut self, cx: i32, cz: i32) {
-        tracing::info!(
-            "on_column_arrived: ({cx},{cz}) — meshing center and marking neighbours dirty"
-        );
         self.mark_column_dirty(cx, cz);
         self.terrain_and_world(|store, terrain| terrain.mark_neighbours_dirty(store, cx, cz));
     }

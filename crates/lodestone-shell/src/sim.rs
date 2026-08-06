@@ -610,12 +610,9 @@ pub struct Sim {
     /// by [`Self::set_sprint_window_ticks`] and forwarded to the live
     /// [`InputState`] once per frame at the top of [`Self::step`].
     sprint_window_ticks: u8,
-    /// PERF INSTRUMENT: wall-clock instant the first chunk arrived at this
-    /// client. `None` until the first `NetUpdate::Chunk` is processed.
+    /// Wall-clock instant the first chunk arrived at this client, for join-latency
+    /// measurement. `None` until the first `NetUpdate::Chunk` is processed.
     first_chunk_at: Option<std::time::Instant>,
-    /// PERF INSTRUMENT: count of chunks received via NetUpdate::Chunk.
-    /// Used to log progress every 50 chunks.
-    chunks_arrived: u64,
     /// Per-position chest lid animation state (issue #23) — vanilla's
     /// `ChestLidController`, one per open or closing chest.
     ///
