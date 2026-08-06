@@ -126,6 +126,12 @@ impl BlockResources {
         // render path resolves state ids to real quads instead of full cubes.
         let models = BlockModels::build(&manager, &registry)
             .map_err(|e| format!("build models from {}: {e}", root.display()))?;
+        tracing::info!(
+            target: "assets",
+            state_count = models.state_count(),
+            "baked per-state model geometry for {} block states",
+            models.state_count(),
+        );
         // The language table shares the jar; a missing or malformed file just
         // disables translation rather than failing the whole live load.
         let language = manager
