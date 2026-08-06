@@ -1324,6 +1324,12 @@ impl MeshScheduler {
     /// [`TerrainMesh::mesh_column`] meshes nothing at all.
     #[must_use]
     pub fn new(worker_count: usize, classifier: ShellClassifier) -> Self {
+        tracing::info!(
+            "MeshScheduler::new: {} workers, is_vanilla={}, models={}",
+            worker_count,
+            classifier.is_vanilla(),
+            classifier.models().is_some(),
+        );
         let column_source = if classifier.is_vanilla() {
             ColumnSource::Streaming
         } else {
@@ -1355,6 +1361,12 @@ impl MeshScheduler {
                     // → mesh through the packed full-cube path.
                     let mesh = match classifier.models() {
                         Some(models) => {
+                            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                tracing::info!(
+                                    "worker: classifier.models() = Some, meshing through Model path"
+                                );
+                            }
                             let mut opaque = mesh_snapshot_models(&snap, models);
                             let fluids = mesh_snapshot_fluids(&snap, models);
                             // Lava is opaque and full-bright: fold it into
@@ -1366,7 +1378,15 @@ impl MeshScheduler {
                                 water: fluids.water,
                             }
                         }
-                        None => SectionGeometry::Packed(mesh_snapshot(&snap, &classifier)),
+                        None => {
+                            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                tracing::warn!(
+                                    "worker: classifier.models() = None, meshing through PACKED path (wrong for live terrain!)"
+                                );
+                            }
+                            SectionGeometry::Packed(mesh_snapshot(&snap, &classifier))
+                        }
                     };
                     drop(_span);
                     if result_tx
