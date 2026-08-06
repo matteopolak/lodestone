@@ -68,17 +68,11 @@ flight** until the tiers are genuinely exhausted.
   a predicted value and a specified negative control turns a day of guessing into a mechanical patch.
   Several bugs this way turned out to be the opposite of their symptom.
 - **Prefer, in order:** a player report, the lowest open tier, then an investigation.
-- **Set a recurring check for the usage window** (`CronCreate`, every 5 hours — cron cannot express
-  5h05m, so have the fired prompt read real usage with the `claude-usage` skill rather than trusting the
-  cadence; pass the right `--plan`). When it fires: resume agents that stopped on the usage limit,
-  then top the queue back up. Note an agent stopped by the *harness* cannot be resumed at all — relaunch
-  a replacement pointed at its on-disk work, and make it read that work before planning. Cron jobs are
-  session-only and expire after 7 days.
-- **Three things to re-check on every such pass**, because each has bitten: `git diff --cached` must be
+- **Three things to re-check on every dispatch pass**, because each has bitten: `git diff --cached` must be
   empty (a stale blob there has twice been a reversal of someone's just-landed work, waiting for the
   next agent's `git commit` to ship it under their message); `git status --short` for a tree someone
-  broke; and `docker ps`, since the live oracles die with Docker and agents then waste time treating an
-  unreachable oracle as evidence.
+  broke; and `container ps`, since the live oracles die with the Apple container runtime and agents then
+  waste time treating an unreachable oracle as evidence.
 
 ---
 
@@ -89,9 +83,7 @@ every issue as needing its lifecycle closed out — not just its code written.
 
 **Set a recurring 30-minute dispatch check** (`CronCreate`, `13,43 * * * *`). Pick off-marks like `:13`
 and `:43` rather than `:00`/`:30`: every user who asks for "every 30 minutes" gets `*/30`, so those two
-minutes are when the whole fleet hits the API at once. This is separate from the 5-hour usage-window
-check above and does a different job — that one is about quota, this one is about never going quiet.
-Session-only, expires after 7 days.
+minutes are when the whole fleet hits the API at once. Session-only, expires after 7 days.
 
 **Probe tool health before resuming or dispatching anything.** Run a trivial `echo` through Bash. If it
 comes back blocked with a classifier error, **Sonnet is down** — the Bash safety classifier runs on it,
@@ -105,6 +97,21 @@ replays its context, and its in-flight work is already on disk; a fresh spawn du
 risks clobbering what the first one wrote. Include in the resume message everything that changed while it
 was down: HEAD moved, the tree went red, a file freed, another agent's finding that changes its order of
 work. Retry the whole fleet in one sweep once the probe is clean.
+
+**Tell every agent never to launch a background `cargo` job and then stop.** This was the single most
+repeated operational failure of the session — **six restarts across five agents**. When an agent stops
+with no live background children the harness marks it **complete**, so the completion notification it is
+waiting for never arrives; it sits idle until the orchestrator notices and resumes it. Agents describe
+this as "waiting for the notification" or "monitor armed", which reads like progress and is not.
+
+The instruction that works: **run cargo in the foreground**, and if a run exceeds the tool timeout, poll
+your own log with a cheap `grep` for `Finished` / `test result:` rather than stopping. And confirm the run
+finished before reading any count out of it — a count read from a log cargo is still writing looks exactly
+like a pass, which the orchestrator also got wrong once.
+
+Note this failure became much rarer once builds got fast: per-agent private target dirs removed the
+shared-`target/` lock, and one agent whose test run had died four times in four different ways completed
+it in full on the first attempt afterwards.
 
 **Slow new feature work when architecture would pay more.** Landing modularity, throughput and
 performance improvements ahead of the next feature batch is wanted, not a detour. The four choke-point

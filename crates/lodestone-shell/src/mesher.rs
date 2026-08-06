@@ -1324,12 +1324,6 @@ impl MeshScheduler {
     /// [`TerrainMesh::mesh_column`] meshes nothing at all.
     #[must_use]
     pub fn new(worker_count: usize, classifier: ShellClassifier) -> Self {
-        tracing::info!(
-            "MeshScheduler::new: {} workers, is_vanilla={}, models={}",
-            worker_count,
-            classifier.is_vanilla(),
-            classifier.models().is_some(),
-        );
         let column_source = if classifier.is_vanilla() {
             ColumnSource::Streaming
         } else {
@@ -1361,12 +1355,6 @@ impl MeshScheduler {
                     // → mesh through the packed full-cube path.
                     let mesh = match classifier.models() {
                         Some(models) => {
-                            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                                tracing::info!(
-                                    "worker: classifier.models() = Some, meshing through Model path"
-                                );
-                            }
                             let mut opaque = mesh_snapshot_models(&snap, models);
                             let fluids = mesh_snapshot_fluids(&snap, models);
                             // Lava is opaque and full-bright: fold it into
@@ -1378,15 +1366,7 @@ impl MeshScheduler {
                                 water: fluids.water,
                             }
                         }
-                        None => {
-                            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                                tracing::warn!(
-                                    "worker: classifier.models() = None, meshing through PACKED path (wrong for live terrain!)"
-                                );
-                            }
-                            SectionGeometry::Packed(mesh_snapshot(&snap, &classifier))
-                        }
+                        None => SectionGeometry::Packed(mesh_snapshot(&snap, &classifier)),
                     };
                     drop(_span);
                     if result_tx
@@ -2012,16 +1992,6 @@ impl TerrainMesh {
     /// [`Self::uploaded_sections`].
     pub fn drain_meshes(&mut self) -> Vec<Meshed> {
         let meshes = self.scheduler.drain();
-        let still_pending = self.scheduler.pending();
-        // Log every drain so we can see mesh completion cadence
-        if !meshes.is_empty() || still_pending > 0 {
-            tracing::info!(
-                "mesh: drained {} sections this frame, {} still pending, {} total uploaded, {} dirty columns queued, {} forced",
-                meshes.len(), still_pending,
-                self.uploaded_sections.len() + meshes.len(),
-                self.dirty_columns.len(), self.forced_columns.len(),
-            );
-        }
         self.uploaded_sections.extend(meshes.iter().map(|m| m.key));
         meshes
     }

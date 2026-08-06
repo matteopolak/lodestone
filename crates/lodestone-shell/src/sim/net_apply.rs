@@ -65,20 +65,6 @@ impl Sim {
             Some(net) => net.poll(),
             None => return,
         };
-        // Diagnostic: count total updates and chunk events per poll
-        let mut chunk_count: u32 = 0;
-        let update_count = updates.len();
-        for u in &updates {
-            if matches!(u, NetUpdate::Chunk { .. }) {
-                chunk_count += 1;
-            }
-        }
-        if update_count > 0 && chunk_count > 0 {
-            tracing::info!(
-                "poll_net: {} total updates, {} chunk events",
-                update_count, chunk_count,
-            );
-        }
         for update in updates {
             match update {
                 NetUpdate::Connecting => {
@@ -96,18 +82,6 @@ impl Sim {
                     self.set_phase(SessionPhase::Connected);
                 }
                 NetUpdate::Chunk { x, z } => {
-                    if self.first_chunk_at.is_none() {
-                        self.first_chunk_at = Some(std::time::Instant::now());
-                        tracing::info!(
-                            "first chunk ({x}, {z}) arrived at client, meshing begins"
-                        );
-                    }
-                    self.chunks_arrived += 1;
-                    // Log every column arrival for debugging — let's see the cadence
-                    tracing::debug!(
-                        "chunk {}: ({x}, {z}) arrived, queueing mesh",
-                        self.chunks_arrived,
-                    );
                     // §12.24 dirty-region signal: no block data travels on the
                     // event — the client applies decoded chunks to its own
                     // `World`, which we read via `NetClient::sections_and_light_at`

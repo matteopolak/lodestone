@@ -227,11 +227,6 @@ impl Sim {
         // silently.
         let resources = BlockResources::load(!demo_world);
         let render_live = resources.vanilla_atlas.is_some();
-        tracing::error!(
-            "BUILD: demo_world={demo_world} render_live={render_live} is_vanilla={} models={}",
-            resources.classifier.is_vanilla(),
-            resources.classifier.models().is_some(),
-        );
         let mut terrain = TerrainMesh::new(MeshScheduler::new(workers, resources.classifier));
         // Issue #423: build the write handle and derive the read handle from it,
         // so the resource this session installs pairs two halves of one `Arc`.
@@ -424,7 +419,6 @@ impl Sim {
             auto_jump: false,
             sprint_window_ticks: lodestone_controller::SPRINT_TRIGGER_WINDOW_TICKS,
             first_chunk_at: None,
-            chunks_arrived: 0,
             chest_lids: crate::block_entities::ChestLids::new(),
             pickups: lodestone_game::mining::PickupFeed::new(),
         };

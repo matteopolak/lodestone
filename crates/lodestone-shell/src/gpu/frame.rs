@@ -473,14 +473,6 @@ impl RenderState {
             }
 
             if let Some(model) = &self.model {
-                static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let t = TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                if t <= 10 || t % 120 == 0 {
-                    tracing::error!(
-                        "draw tick {t}: {} model sections, {} packed sections",
-                        model.sections.len(), self.sections.len(),
-                    );
-                }
                 pass.set_pipeline(&model.pipeline.pipeline);
                 pass.set_bind_group(1, &model.atlas_bind_group, &[]);
                 pass.set_bind_group(2, &model.palette_bind_group, &[]);
