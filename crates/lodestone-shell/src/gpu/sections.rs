@@ -72,6 +72,10 @@ impl RenderState {
             SectionGeometry::Packed(mesh) => self.upload_packed_section(device, queue, key, mesh),
             SectionGeometry::Model { opaque, water } => {
                 let Some(model) = self.model.as_mut() else {
+                    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        tracing::error!("upload: SectionGeometry::Model but self.model is None — sections dropped!");
+                    }
                     return;
                 };
                 let origin = key.origin();

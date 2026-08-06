@@ -473,17 +473,13 @@ impl RenderState {
             }
 
             if let Some(model) = &self.model {
-                // Log once: model section count for diagnostics
-                static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    tracing::info!(
-                        "draw: model pipeline has {} sections, camera=({:.1},{:.1},{:.1})",
-                        model.sections.len(),
-                        camera.position.x, camera.position.y, camera.position.z,
+                static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let t = TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if t <= 10 || t % 120 == 0 {
+                    tracing::error!(
+                        "draw tick {t}: {} model sections, {} packed sections",
+                        model.sections.len(), self.sections.len(),
                     );
-                    if model.sections.is_empty() {
-                        tracing::warn!("draw: model pipeline exists but has ZERO sections — GPU has no live terrain!");
-                    }
                 }
                 pass.set_pipeline(&model.pipeline.pipeline);
                 pass.set_bind_group(1, &model.atlas_bind_group, &[]);
