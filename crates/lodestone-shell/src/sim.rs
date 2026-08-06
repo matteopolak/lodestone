@@ -1014,12 +1014,6 @@ impl Sim {
         } else {
             self.vanilla_atlas.is_none()
         };
-        tracing::debug!(
-            "mesh policy: net={} atlas={} => id_spaces_agree={} sky={sky_default:?}",
-            self.net.is_some(),
-            self.vanilla_atlas.is_some(),
-            id_spaces_agree,
-        );
         let policy = MeshPolicy {
             sky_default,
             id_spaces_agree,
