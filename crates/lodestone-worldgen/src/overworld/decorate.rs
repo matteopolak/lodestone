@@ -175,7 +175,7 @@ impl OverworldGenerator {
     /// all 9 source chunks on every `column()` call (this is the "9×
     /// String-map re-materialisation" issue #106 named — the per-source
     /// *pipeline* recompute this loop's caller avoids is a separate,
-    /// already-fixed cost; see [`OverworldGenerator::pre_ore_cache`]'s doc
+    /// already-fixed cost; see [`OverworldGenerator::store`]'s doc
     /// comment), so cutting its allocation count matters regardless of
     /// whether the pipeline itself was a cache hit. `ocean_floor_wg` stays
     /// a small `HashMap<(i32,i32), i32>` — at most 48×48 = 2304 entries

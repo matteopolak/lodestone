@@ -148,9 +148,12 @@
 //! shell has), so neighbour work that's shared between two adjacent
 //! `column()` calls is redone from scratch every time. A per-generator
 //! neighbour cache (safe to memoize — generation is pure/deterministic) was
-//! the natural next step, and has since **LANDED** — see [`PreOreCache`]/
-//! [`PostOreCache`] and [`Self::pre_ore_stage`] a few hundred lines below
-//! (`6509a97`). The rest of this paragraph is kept as the argument that
+//! the natural next step, and has since **LANDED** — first as two
+//! `Mutex`-guarded FIFO caches (`6509a97`), and now as the sharded staged
+//! [`store`] that replaced them in Unit 6 of the rewrite plan, because the
+//! FIFO caches' own global mutexes became the next bottleneck (~5,000
+//! concurrent lock attempts under a 289-column join burst, `4307b59`).
+//! The rest of this paragraph is kept as the argument that
 //! produced it, because it named the real design constraint correctly:
 //! [`OverworldGenerator`] is used from multiple threads
 //! (`chunk::tests::parallel_generation_is_deterministic_and_matches_serial`
@@ -186,7 +189,11 @@
 //! the stage seams `column`/`column_timed` already called. Nothing moved but text:
 //!
 //! * this file — the generator struct, `new`, the `column`/`column_timed`
-//!   orchestration and the two memo caches;
+//!   orchestration and the two memoised stage entry points
+//!   (`pre_ore_stage`/`post_ore_world`);
+//! * [`store`] — the staged sharded per-chunk store those two memoise into,
+//!   Unit 6's replacement for the two `Mutex`-guarded FIFO caches this file
+//!   used to hold;
 //! * [`fill`] — stages 1-4 (aquifer, shape, surface, materialise, carve);
 //! * [`biome`] — the climate/biome resolution stages;
 //! * [`decorate`] — stages 5-7 (ore, vegetation, top layer) and their stitches;
@@ -196,9 +203,10 @@ mod biome;
 mod decorate;
 mod fill;
 mod output;
+pub mod store;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -221,55 +229,61 @@ pub use self::output::StageTimes;
 /// pre-ore result", not an anonymous 3-tuple.
 type PreOreResult = (crate::dense_grid::DenseBlockGrid, [i32; 256], [(String, bool); 16]);
 
-/// Bound on [`PreOreCache`]'s size. `OverworldGenerator` is not only used by
-/// one-shot sweeps (this cache's original motivation): `lodestone_server`'s
-/// `OverworldChunkSource` holds one generator for a whole world's lifetime
-/// ("share it across the view", its own doc comment), so a session that
-/// gradually explores a large area would otherwise grow this cache without
-/// bound — each entry holds a full `16×height×16` `DenseBlockGrid`, on the
-/// order of 200 KiB, so unbounded growth here is a real, if slow, memory
-/// leak on a machine `CLAUDE.md` already flags memory as the binding limit
-/// on. 512 entries (~100 MiB worst case) comfortably covers the 14×14 = 196
-/// unique chunks the 144-chunk sweep this cache was built for actually needs
-/// (its 12×12 centres plus their shared 1-chunk halo), with headroom to
-/// spare — and an eviction only ever costs a recompute on the next request
-/// for that key, never a wrong answer (see [`OverworldGenerator::pre_ore_stage`]'s
-/// own doc comment on why the *value* per key never changes).
-const PRE_ORE_CACHE_CAPACITY: usize = 512;
-
-/// [`OverworldGenerator::pre_ore_cache`]'s storage: the memoisation map plus
-/// a FIFO insertion-order queue so eviction can drop the oldest key once the
-/// map exceeds [`PRE_ORE_CACHE_CAPACITY`]. Plain FIFO rather than true LRU
-/// (which would need to reorder on *read*, not just insert) because the
-/// access pattern this exists for — a centre's own [`Self::column`] call plus
-/// [`Self::ore_stage`]'s 8-neighbour sweep, repeated across a scan that
-/// advances roughly in coordinate order — makes insertion order and recency
-/// order coincide closely enough that the extra bookkeeping of true LRU
-/// would not measurably change the hit rate.
-#[derive(Default)]
-struct PreOreCache {
-    map: HashMap<(i32, i32), Arc<PreOreResult>>,
-    order: std::collections::VecDeque<(i32, i32)>,
+/// One chunk's memoised intermediate products — the payload of a
+/// [`store::StagedStore`] entry, one [`store::StageSlot`] per stage of the
+/// pipeline that other chunks read.
+///
+/// Unit 6 of `docs/plans/worldgen-rewrite.md` replaced two independent
+/// `Mutex<HashMap + VecDeque>` FIFO caches with this: one entry per chunk
+/// holding *both* stages, so the two products of one chunk share one shard
+/// lookup instead of two global-mutex acquisitions, and each stage carries its
+/// own once-only guard. Adding a stage (Unit 9's memoised per-source biome is
+/// next) means adding a field here and nothing else — see [`store`]'s module
+/// doc, including its reentrancy rule: a stage may only depend on stages
+/// declared *below* it.
+#[derive(Debug, Default)]
+struct ChunkStages {
+    /// Stages 1–4 — see [`OverworldGenerator::pre_ore_stage`].
+    pre_ore: store::StageSlot<PreOreResult>,
+    /// Stages 1–5 — see [`OverworldGenerator::post_ore_world`].
+    post_ore: store::StageSlot<crate::dense_grid::DenseBlockGrid>,
 }
 
-/// [`OverworldGenerator::post_ore_cache`]'s storage — same FIFO shape as
-/// [`PreOreCache`], for the same reason: [`Self::vegetation_stage`]'s 3×3
-/// driver (issue #427) calls [`Self::post_ore_world`] for 8 neighbours on
-/// every `column()` call, and a sweep over adjacent chunks asks for the
-/// *same* neighbour's post-ore world repeatedly (centre `(cx,cz)`'s own
-/// vegetation pass computes `(cx+1,cz)`'s post-ore world; `(cx+1,cz)`'s own
-/// `column()` call needs that exact same value for itself). Without this
-/// cache, [`Self::ore_stage`]'s own real 3×3 `UNDERGROUND_ORES` RNG-driver
-/// (not just the memoised [`Self::pre_ore_stage`] terrain feeding it) would
-/// be recomputed from scratch for every `(neighbour, requester)` pair in a
-/// sweep — a further, uncached 9× on top of the 9× `docs/worldgen-parity.md`
-/// already measured for ore composition alone (700.57s for a 12×12 debug
-/// sweep), which this cache exists specifically to avoid multiplying again.
-#[derive(Default)]
-struct PostOreCache {
-    map: HashMap<(i32, i32), Arc<crate::dense_grid::DenseBlockGrid>>,
-    order: std::collections::VecDeque<(i32, i32)>,
-}
+/// Chebyshev chunk radius one [`OverworldGenerator::column`] call closes over.
+///
+/// **Derived from the drivers, not chosen.** [`OverworldGenerator::vegetation_stage`]
+/// reads the post-ore world of the 3×3 around its centre (radius 1), and each of
+/// those post-ore worlds runs [`OverworldGenerator::ore_stage`], which reads the
+/// pre-ore world of *its own* 3×3 — so one column's pre-ore closure is 5×5,
+/// radius **2**. If a driver's neighbourhood ever widens, this widens with it or
+/// the pin below stops covering the request that needs it.
+const COLUMN_CLOSURE_RADIUS: i32 = 2;
+
+/// Soft ceiling on entries retained by [`OverworldGenerator::store`].
+///
+/// **Derived from the scenario this unit exists to fix, not picked as a round
+/// number.** `4307b59` — the revert that put `lodestone-server`'s per-ring
+/// barrier back — names a **289-column join burst**. 289 columns are a 17×17
+/// view, and a 17×17 view's pre-ore closure is 21×21 = **441** chunks. Retention
+/// therefore has to exceed 441, or the very burst this store is built for could
+/// evict its own live working set; 512 is the next power of two above it, and
+/// also comfortably covers the 12×12 parity sweep's 16×16 = 256-chunk closure.
+///
+/// Two things keep this from being the capacity-FIFO guess it replaced. First,
+/// in-flight neighbourhoods are **pinned** ([`store::StagedStore::open_view`]),
+/// so exceeding the ceiling can never evict something a live request needs.
+/// Second, [`store::StagedStore::evicted`] is observable, so "no eviction
+/// happened" is a checkable control rather than an assumption — which is what
+/// licenses reading the stage-computation counters as `chunks × stages`.
+///
+/// Memory is unchanged by the swap, deliberately: 512 entries × (one pre-ore
+/// grid + one post-ore grid, ~192 KiB each) is the same worst case as the two
+/// 512-entry caches it replaces, and the reason a ceiling exists at all is
+/// still `lodestone_server`'s `OverworldChunkSource`, which holds one generator
+/// for a whole world's lifetime — a session gradually exploring a large area
+/// would otherwise grow this without bound, a real if slow leak on a machine
+/// CLAUDE.md already flags memory as the binding limit on.
+const STORE_RETENTION: usize = 512;
 
 /// A composed, reusable overworld generator. Build once per seed; call
 /// [`column`](Self::column) per chunk.
@@ -334,39 +348,31 @@ pub struct OverworldGenerator {
     /// Block-tag closures for every tag referenced by any biome's ore
     /// targets, resolved once — see `crate::compose::build_ore_tag_map`.
     ore_tag_map: HashMap<String, HashSet<String>>,
-    /// Per-generator memoisation of [`Self::pre_ore_stage`] (issue #295's Job
-    /// 1 performance follow-up, see this module's doc "Performance"
-    /// section). [`Self::ore_stage`]'s real 3×3 driver calls
-    /// `pre_ore_stage` for the centre plus all 8 neighbours on *every*
-    /// [`column`](Self::column) call, with no memoisation across calls — so a
-    /// 144-chunk sweep, where every interior chunk is somebody else's
-    /// neighbour up to 8 times, redid the same full pre-ore pipeline up to
-    /// 9× (measured: a 144-chunk sweep went from ~68s to 700.57s in debug
-    /// after ore composition landed, matching the predicted ~9×). This cache
-    /// makes each chunk's pre-ore result pay for its own computation exactly
-    /// once per generator, regardless of whether it is first reached as a
-    /// centre or as a neighbour.
+    /// The staged per-chunk store: this generator's memoisation of
+    /// [`Self::pre_ore_stage`] and [`Self::post_ore_world`], and Unit 6's
+    /// replacement for the two `Mutex`-guarded FIFO caches that preceded it.
     ///
-    /// Keyed by the **exact** chunk coordinate, never clamped or rounded —
-    /// see [`Self::pre_ore_stage`]'s own doc comment for why a clamped
-    /// equivalent is a known failure shape (it aliased two distinct chunks
-    /// onto one cached value in a JVM oracle and hung the process). `Arc`
-    /// so a hit hands back a cheap pointer clone rather than a clone of the
-    /// `DenseBlockGrid`'s own `Vec`s; `Mutex`-protected because
-    /// [`OverworldGenerator`] is shared across threads by
-    /// `lodestone_server::chunk::generate_columns_parallel` — the value
-    /// behind each key is immutable-after-insert (a pure function of
-    /// `(cx, cz)` and this generator's own fixed state), so the lock only
-    /// ever guards *insertion*, never a mutation raced against a reader.
-    /// Bounded — see [`PreOreCache`] and [`PRE_ORE_CACHE_CAPACITY`].
-    pre_ore_cache: Mutex<PreOreCache>,
-    /// Memoises [`Self::post_ore_world`] (issue #427's vegetation 3×3
-    /// driver) — same shape, same bound, same rationale as `pre_ore_cache`
-    /// one level up the pipeline; see [`PostOreCache`]'s own doc comment for
-    /// why this one specifically matters (it caches the expensive *ore
-    /// placement RNG walk*, not just the cheap-to-clone pre-ore terrain
-    /// `pre_ore_cache` already covers).
-    post_ore_cache: Mutex<PostOreCache>,
+    /// The memoisation itself is not new and its motivation is unchanged:
+    /// [`Self::ore_stage`]'s real 3×3 driver needs the centre plus all 8
+    /// neighbours' pre-ore pipelines on *every* [`column`](Self::column) call,
+    /// and [`Self::vegetation_stage`]'s 3×3 driver needs 8 neighbours' full
+    /// post-ore worlds (the expensive ore *RNG walk*, not just terrain), so
+    /// without memoisation a sweep redoes each of those up to 9× — measured, a
+    /// 144-chunk sweep went from ~68s to 700.57s in debug when ore composition
+    /// landed, matching the predicted ~9×.
+    ///
+    /// What **is** new is that computing once is now structural rather than
+    /// best-effort. The old caches took one global `Mutex` each and released it
+    /// across the computation, so two threads racing the same key both ran the
+    /// whole pipeline — `pre_ore_stage`'s own comment conceded "the work really
+    /// was done twice". Under a 289-column join burst that produced ~5,000
+    /// concurrent attempts on a single `Arc<Mutex>` and forced
+    /// `lodestone-server`'s per-ring barrier back in (`4307b59`). Here the map
+    /// is sharded [`store::SHARD_COUNT`] ways and each stage has its own
+    /// once-only guard, so a racing thread *waits for the value* instead of
+    /// computing a second copy. See [`store`]'s module doc for the full
+    /// argument, the exact-key rule, and why eviction is view-scoped.
+    store: store::StagedStore<ChunkStages>,
     /// Per-biome `VEGETAL_DECORATION` list (issue #406), resolved the same
     /// way and at the same time as `ores_by_biome` — see
     /// `crate::compose::build_biome_vegetation`. Empty (whole map) when the
@@ -572,8 +578,7 @@ impl OverworldGenerator {
             carvers_by_biome,
             ores_by_biome,
             ore_tag_map,
-            pre_ore_cache: Mutex::new(PreOreCache::default()),
-            post_ore_cache: Mutex::new(PostOreCache::default()),
+            store: store::StagedStore::new(STORE_RETENTION),
             vegetation_by_biome,
             veg_tags,
             biome_climates,
@@ -601,9 +606,43 @@ impl OverworldGenerator {
         self.sea_level
     }
 
+    /// Distinct chunks currently held in the staged store. **Diagnostics and
+    /// gates only** — nothing in generation may branch on it.
+    ///
+    /// Exposed because it is the one assertion about the store that works with
+    /// `gen-counters` **off**: it bounds from above how many times a stage can
+    /// have run. A sweep that ends with exactly as many entries as its
+    /// neighbourhood closure, and [`Self::store_evictions`] at zero, has proved
+    /// no chunk was entered twice and none was dropped — the counters-off half of
+    /// Unit 6's acceptance criterion, and the reason the gate is not a
+    /// counters-only test that silently measures nothing in a default build.
+    #[must_use]
+    pub fn store_len(&self) -> usize {
+        self.store.len()
+    }
+
+    /// Store entries dropped by reclamation over this generator's life.
+    /// **Diagnostics and gates only.**
+    ///
+    /// The control that separates "each stage computed exactly once" from "each
+    /// stage computed once, plus however many times eviction silently made us
+    /// redo it". A sweep or burst asserting this is zero has established that its
+    /// stage-computation counts cannot have been inflated by the retention
+    /// ceiling — see [`STORE_RETENTION`] for why zero is expected there.
+    #[must_use]
+    pub fn store_evictions(&self) -> usize {
+        self.store.evicted()
+    }
+
     /// Generates the block field for chunk `(cx, cz)`.
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> GeneratedColumn {
+        // Pins this request's whole 5×5 pre-ore closure in the store for the
+        // duration of the call, so nothing it computes can be evicted before it
+        // is read back — the property that makes eviction view-scoped instead of
+        // a capacity guess. Dropped at the end of the call; see
+        // [`COLUMN_CLOSURE_RADIUS`] for where the 5×5 comes from.
+        let _view = self.store.open_view((cx, cz), COLUMN_CLOSURE_RADIUS);
         let cached = self.pre_ore_stage(cx, cz);
         // Issue #427: routed through `post_ore_world` (which wraps
         // `ore_stage` in `Self::post_ore_cache`) rather than calling
@@ -643,58 +682,33 @@ impl OverworldGenerator {
     /// carves (and later decorates) differently, so there is no shortcut
     /// that reuses the centre's own field.
     ///
-    /// Memoised in [`Self::pre_ore_cache`], keyed by the **exact** `(cx, cz)`
-    /// passed in — never rounded, clamped, or otherwise merged with a
-    /// neighbouring key. That distinction matters: an earlier version of
-    /// this same idea in the JVM oracle this crate is proven against
-    /// (`FeatureOracle.java`) *did* clamp reads to a bounded region, aliasing
-    /// two distinct chunk coordinates onto one memoised value, and vanilla's
-    /// own `BulkSectionAccess` then tried to lock the same
-    /// `LevelChunkSection`'s non-reentrant semaphore twice within one
-    /// placement and hung forever (see `docs/worldgen-parity.md`'s "Known
-    /// gap" section on the 3×3 driver). This engine has no such semaphore,
-    /// but the aliasing shape — two logically distinct chunks sharing one
-    /// cached answer — is exactly what an exact-coordinate key rules out.
+    /// Memoised in [`Self::store`], keyed by the **exact** `(cx, cz)` passed in
+    /// — never rounded, clamped, or otherwise merged with a neighbouring key.
+    /// That distinction matters: an earlier version of this same idea in the JVM
+    /// oracle this crate is proven against (`FeatureOracle.java`) *did* clamp
+    /// reads to a bounded region, aliasing two distinct chunk coordinates onto
+    /// one memoised value, and vanilla's own `BulkSectionAccess` then tried to
+    /// lock the same `LevelChunkSection`'s non-reentrant semaphore twice within
+    /// one placement and hung forever (see `docs/worldgen-parity.md`'s "Known
+    /// gap" section on the 3×3 driver). This engine has no such semaphore, but
+    /// the aliasing shape — two logically distinct chunks sharing one cached
+    /// answer — is exactly what an exact-coordinate key rules out, and
+    /// [`store::ChunkPos`] carries that rule as its own documentation.
+    ///
+    /// **Computed exactly once per chunk per generator, now by construction.**
+    /// The shard lock is released before this returns and is never held across
+    /// the pipeline below — but unlike the FIFO cache this replaced, a second
+    /// thread arriving on the same miss no longer recomputes: it blocks on the
+    /// slot's own once-guard and takes the first thread's value. The counter is
+    /// bumped from *inside* that guard, so `pre_ore_computed` is the number of
+    /// distinct chunks whose stages 1–4 really ran, and a sweep can assert it
+    /// equals the size of the region it swept.
     fn pre_ore_stage(&self, cx: i32, cz: i32) -> Arc<PreOreResult> {
-        {
-            let cache = self.pre_ore_cache.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(hit) = cache.map.get(&(cx, cz)) {
-                crate::counters::bump_pre_ore(false);
-                return Arc::clone(hit);
-            }
-        }
-        // Counted before the computation, not after, so a panic mid-pipeline
-        // still leaves the counter describing what was attempted. Note the
-        // racing-miss path below can make `pre_ore_computed` exceed the number
-        // of *distinct* chunks computed under a parallel sweep — which is the
-        // honest reading (the work really was done twice), and is exactly the
-        // waste U6's store is meant to make impossible.
-        crate::counters::bump_pre_ore(true);
-        // Computed with the lock released: this is a pure function of
-        // `(cx, cz)` and this generator's own fixed state, so two threads
-        // racing on the same miss both landing here just means the same
-        // value gets computed twice, never a wrong one — see
-        // `pre_ore_cache`'s doc comment. The alternative (holding the lock
-        // across the whole pipeline) would serialise every worker thread in
-        // `generate_columns_parallel` on one mutex for the most expensive
-        // part of generation, defeating the parallelism it relies on.
-        let computed = Arc::new(self.pre_ore_stage_uncached(cx, cz));
-        let mut cache = self.pre_ore_cache.lock().unwrap_or_else(PoisonError::into_inner);
-        // Another thread may have inserted the same key while this one was
-        // computing (a racing miss, not an error — see above); keep
-        // whichever is already there instead of double-inserting into
-        // `order`, which would let one key occupy two eviction slots.
-        if let Some(existing) = cache.map.get(&(cx, cz)) {
-            return Arc::clone(existing);
-        }
-        cache.map.insert((cx, cz), Arc::clone(&computed));
-        cache.order.push_back((cx, cz));
-        if cache.order.len() > PRE_ORE_CACHE_CAPACITY {
-            if let Some(oldest) = cache.order.pop_front() {
-                cache.map.remove(&oldest);
-            }
-        }
-        computed
+        let entry = self.store.entry((cx, cz));
+        entry.pre_ore.get_or_compute(
+            crate::counters::bump_pre_ore,
+            || self.pre_ore_stage_uncached(cx, cz),
+        )
     }
 
     /// One chunk's own post-carve-and-ore world (stages 1-5), for an
@@ -707,37 +721,28 @@ impl OverworldGenerator {
     /// per [`Self::pre_ore_cache`]'s doc comment) — real parity, not an
     /// approximation.
     ///
-    /// Memoised in [`Self::post_ore_cache`] — see that field's and
-    /// [`PostOreCache`]'s own doc comments for why this specific result
-    /// (not just the pre-ore terrain feeding it) needs its own cache: without
-    /// it, a sweep over adjacent chunks would rerun the full `ore_stage` RNG
-    /// walk once per `(neighbour, requester)` pair instead of once per
-    /// neighbour. Same lock-released-during-compute shape as
-    /// [`Self::pre_ore_stage`], for the same reason (never serialise
-    /// `generate_columns_parallel`'s worker threads on this mutex).
+    /// Memoised in [`Self::store`]'s `post_ore` slot — a *separate* stage from
+    /// `pre_ore` on the same entry, because this one memoises the expensive ore
+    /// placement **RNG walk**, not just the cheap-to-share pre-ore terrain
+    /// feeding it: without it, a sweep over adjacent chunks would rerun the full
+    /// [`Self::ore_stage`] once per `(neighbour, requester)` pair instead of once
+    /// per neighbour, a second 9× on top of the one ore composition already
+    /// costs.
+    ///
+    /// **The layering here is what keeps the store deadlock-free**, and it is a
+    /// rule rather than an accident. This stage's computation calls
+    /// [`Self::pre_ore_stage`] — a strictly *lower* stage — for its own chunk and,
+    /// via [`Self::ore_stage`], for its 3×3; `pre_ore` calls nothing in the
+    /// store. So the wait-for graph only ever points downward and its lowest
+    /// layer never waits. A stage that re-entered its own slot, or that reached
+    /// back up a layer, would deadlock on the once-guard: see [`store`]'s module
+    /// doc before adding one.
     fn post_ore_world(&self, cx: i32, cz: i32) -> Arc<crate::dense_grid::DenseBlockGrid> {
-        {
-            let cache = self.post_ore_cache.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(hit) = cache.map.get(&(cx, cz)) {
-                crate::counters::bump_post_ore(false);
-                return Arc::clone(hit);
-            }
-        }
-        crate::counters::bump_post_ore(true);
-        let pre = self.pre_ore_stage(cx, cz);
-        let computed = Arc::new(self.ore_stage(cx, cz, pre.0.clone(), &pre.1));
-        let mut cache = self.post_ore_cache.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(existing) = cache.map.get(&(cx, cz)) {
-            return Arc::clone(existing);
-        }
-        cache.map.insert((cx, cz), Arc::clone(&computed));
-        cache.order.push_back((cx, cz));
-        if cache.order.len() > PRE_ORE_CACHE_CAPACITY {
-            if let Some(oldest) = cache.order.pop_front() {
-                cache.map.remove(&oldest);
-            }
-        }
-        computed
+        let entry = self.store.entry((cx, cz));
+        entry.post_ore.get_or_compute(crate::counters::bump_post_ore, || {
+            let pre = self.pre_ore_stage(cx, cz);
+            self.ore_stage(cx, cz, pre.0.clone(), &pre.1)
+        })
     }
 
     /// Identical to [`column`](Self::column), timed per stage. Exists so the
@@ -749,6 +754,11 @@ impl OverworldGenerator {
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn column_timed(&self, cx: i32, cz: i32) -> (GeneratedColumn, StageTimes) {
+        // Same pin as [`Self::column`] — this path drives the same 3×3/5×5
+        // neighbourhood through `ore_stage`/`vegetation_stage`, so it needs the
+        // same protection or a bench near the retention ceiling could measure an
+        // eviction rather than the pipeline.
+        let _view = self.store.open_view((cx, cz), COLUMN_CLOSURE_RADIUS);
         let base_x = cx * 16;
         let base_z = cz * 16;
 
