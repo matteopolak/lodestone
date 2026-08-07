@@ -2582,29 +2582,104 @@ mod tests {
         assert!(mesh.quad_count() > 0, "ground section should emit faces");
     }
 
+    /// **A section with nothing in it must produce no snapshot at all.**
+    ///
+    /// The premise — *which* section is empty — is the whole difficulty, and this
+    /// test got it wrong twice in the same way. It used to hard-code a section
+    /// index; that was fixed to derive one from `surface_height(0, 0)`, which
+    /// reads better but is the same mistake: a section is **16×16 columns**, and
+    /// `surface_height(0, 0)` is the height of *one* of them. Any column in the
+    /// chunk that reaches higher than the origin's puts geometry in the
+    /// "guaranteed sky" section, and the feature stage duly did it — a birch tree
+    /// at local (3, 13) reaches y82, twelve blocks above the origin's ground, so
+    /// section 5 (y80–96) held leaves and the assertion failed with a real
+    /// snapshot in hand.
+    ///
+    /// Deriving one index from one column cannot be repaired by picking a taller
+    /// column either: chunk (0,0)'s own canopy reaches y82, so at
+    /// `SECTION_COUNT = 6` (window y0–96) that chunk has **no** empty section at
+    /// all. Any "the section above the terrain is sky" arithmetic is guessing.
+    ///
+    /// So the subject is *found* rather than computed — every section of every
+    /// loaded chunk is classified all-air or not by direct scan, which makes the
+    /// premise true by construction instead of by inference — and then both
+    /// directions are asserted over the whole 3×3 world at once: every empty
+    /// section must yield `None`, every non-empty one must yield `Some`. The two
+    /// counts are asserted non-zero, because either half alone is satisfied by a
+    /// `snapshot_section` that answers the same way always, and a world of all
+    /// terrain or all sky would make one of them vacuous without saying so.
     #[test]
     fn empty_sky_section_is_skipped() {
-        let world = crate::worldgen::generate(0);
-        // Pick the first section that starts strictly above the generated
-        // surface at the origin, so it is guaranteed sky. Deriving the index
-        // from `surface_height` keeps this honest as the terrain generator
-        // changes underneath us (real vanilla terrain lifted the origin surface
-        // to ~y71, which used to be hard-coded sky).
-        let surface = crate::worldgen::surface_height(0, 0);
-        let si = ((surface - crate::worldgen::MIN_Y) / 16 + 1) as usize;
+        // Radius 1: 3×3 columns, so a chunk whose terrain does not reach the top
+        // of the window is available even when the origin's does.
+        let world = crate::worldgen::generate(1);
+        let min_y = crate::worldgen::MIN_Y;
+
+        let mut empty_sections = 0usize;
+        let mut occupied_sections = 0usize;
+
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                let loaded = world
+                    .get(ChunkPos::new(cx, cz))
+                    .expect("generate(1) loads the whole 3×3");
+                let column = &loaded.column;
+                for si in 0..crate::worldgen::SECTION_COUNT {
+                    let base_y = min_y + (si as i32) * 16;
+                    let mut occupied = None;
+                    'scan: for lx in 0..16usize {
+                        for lz in 0..16usize {
+                            for ly in 0..16i32 {
+                                let block = column.get_block(lx, base_y + ly, lz);
+                                if block != crate::blocks::id::AIR {
+                                    occupied = Some((lx, base_y + ly, lz, block));
+                                    break 'scan;
+                                }
+                            }
+                        }
+                    }
+
+                    let key = SectionKey {
+                        cx,
+                        cz,
+                        si,
+                        min_y,
+                    };
+                    let snapshot = snapshot_section(&world, key);
+                    match occupied {
+                        None => {
+                            empty_sections += 1;
+                            assert!(
+                                snapshot.is_none(),
+                                "section ({cx},{cz},{si}) is all air by direct \
+                                 scan, so it must produce no snapshot — meshing \
+                                 it costs a job and an upload per empty section \
+                                 of every column"
+                            );
+                        }
+                        Some((lx, y, lz, block)) => {
+                            occupied_sections += 1;
+                            assert!(
+                                snapshot.is_some(),
+                                "section ({cx},{cz},{si}) holds id {block} at \
+                                 ({lx},{y},{lz}), so it must produce a snapshot — \
+                                 skipping it is the invisible-terrain defect, not \
+                                 an optimisation"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         assert!(
-            si < crate::worldgen::SECTION_COUNT,
-            "surface {surface} leaves no sky section in the window"
+            empty_sections > 0,
+            "no loaded section was all air, so the skip path was never exercised"
         );
-        let key = SectionKey {
-            cx: 0,
-            cz: 0,
-            si,
-            min_y: crate::worldgen::MIN_Y,
-        };
         assert!(
-            snapshot_section(&world, key).is_none(),
-            "all-air section produces no snapshot"
+            occupied_sections > 0,
+            "control: no loaded section had geometry, so `is_none()` above is \
+             satisfied by a function that always returns None"
         );
     }
 
