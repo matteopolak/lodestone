@@ -2004,3 +2004,147 @@ async fn weather_feed_transitions_reach_the_client_as_game_event_bytes() {
     drop(client);
     let _ = server.await.expect("server task panicked");
 }
+
+/// A [`ChunkSource`] that records every coordinate it is asked to generate.
+///
+/// Exists for [`generation_is_anchored_at_the_player_not_at_the_origin`]: the
+/// owner's own hypothesis for the walk-away-from-spawn slowdown was that the
+/// server enumerates from `(0, 0)` outward rather than from the player, so
+/// walking further makes each recenter do more work. That is a claim about
+/// *which coordinates are generated*, and nothing that counts columns can answer
+/// it — only something that records the coordinates themselves.
+struct RecordingSource {
+    seen: std::sync::Arc<std::sync::Mutex<Vec<(i32, i32)>>>,
+}
+
+impl ChunkSource for RecordingSource {
+    fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        self.seen.lock().expect("recording lock").push((cx, cz));
+        let mut column = ChunkColumn::new(0, 16);
+        for lx in 0..16 {
+            for lz in 0..16 {
+                column.set_block(lx, 8, lz, "minecraft:stone");
+            }
+        }
+        column
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        // Deliberately does NOT record: only whole-column generation is the
+        // subject, and a spawn-position probe reading single blocks near the
+        // origin would otherwise show up as origin-anchored generation and make
+        // this test lie in the alarming direction.
+        let _ = (x, y, z);
+        if y == 8 { "minecraft:stone".to_string() } else { "minecraft:air".to_string() }
+    }
+
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+        // No storage; edits are discarded by design (issue #440: explicit).
+    }
+}
+
+/// **Generation is anchored at the player, not at `(0, 0)`** — instrumented on
+/// the real `serve_connection` path at a coordinate 80,000 blocks from spawn.
+///
+/// This is the direct falsification of the owner's hypothesis for the
+/// "exponentially slower as I walk away from spawn" report.
+/// [`player_moved_streams_view_across_several_chunk_boundaries`] already gates
+/// the exact-diff shape, but it does so at chunk 10–11 (160 blocks), which is
+/// close enough to the origin that an origin-anchored enumeration and a
+/// player-anchored one would produce sets of similar size. At chunk 5,000 the two
+/// hypotheses differ by five orders of magnitude in column count, so the
+/// measurement is unambiguous.
+///
+/// The assertion is on the recorded coordinate *set*, and it has two halves,
+/// because either alone is satisfiable by a wrong implementation:
+///
+/// * every column generated for the far recenter lies within the view radius of
+///   the player — an origin-anchored spiral would generate columns near `(0, 0)`;
+/// * the *count* is exactly the window size — an implementation that generated
+///   the whole rectangle between the origin and the player would satisfy the
+///   first half for its final columns while doing 5,000× the work.
+///
+/// The count half is the one that matters, and it is a magnitude assertion, not
+/// a direction: the expected value is derived from the view radius (`(2r+1)²`)
+/// rather than read off a measurement.
+#[tokio::test]
+async fn generation_is_anchored_at_the_player_not_at_the_origin() {
+    let view_radius = 1; // 3x3 = 9 columns
+    let (client_end, server_end) = memory_pair();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let source = RecordingSource {
+        seen: std::sync::Arc::clone(&seen),
+    };
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &source,
+            &NoEntities,
+            view_radius,
+            &BlockEntityHandle::default(),
+            &MobHandle::default(),
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "FarWalker", 9).await;
+    send_chunk_batch_received(&mut client, 10.0).await;
+
+    // Everything generated for the join is not this test's subject. Clear it so
+    // the far recenter's own coordinate set is read in isolation.
+    seen.lock().expect("recording lock").clear();
+
+    // Chunk (5000, 0) — 80,000 blocks out, the scale the owner's report is about.
+    const FAR_CHUNK: i32 = 5000;
+    send_player_moved(&mut client, f64::from(FAR_CHUNK) * 16.0, 64.0, 0.0).await;
+    let far = drain_available(&mut client).await;
+
+    let (center, _forgotten, added) = split_view_directives(&far);
+    assert_eq!(
+        center,
+        Some((FAR_CHUNK, 0)),
+        "the cache centre must follow the player"
+    );
+    assert_eq!(
+        added,
+        square(FAR_CHUNK, 0, view_radius),
+        "exactly the player's own window must be sent"
+    );
+
+    let recorded = seen.lock().expect("recording lock").clone();
+
+    // Half one: nothing outside the player's window was generated at all.
+    let window = square(FAR_CHUNK, 0, view_radius);
+    let strays: Vec<(i32, i32)> = recorded
+        .iter()
+        .copied()
+        .filter(|pos| !window.contains(pos))
+        .collect();
+    assert!(
+        strays.is_empty(),
+        "generation is not anchored at the player: {} of {} generated columns lie outside \
+         the player's window, e.g. {:?}",
+        strays.len(),
+        recorded.len(),
+        &strays[..strays.len().min(8)]
+    );
+
+    // Half two, the magnitude: the expected count comes from the view radius,
+    // not from a measurement. An origin-anchored enumeration would be ~5,000x
+    // this; a rectangle-fill between origin and player, ~10,000x.
+    let expected = ((2 * view_radius + 1) * (2 * view_radius + 1)) as usize;
+    assert_eq!(
+        recorded.len(),
+        expected,
+        "a recenter 80,000 blocks out generated {} columns; a player-anchored window \
+         is exactly {expected}",
+        recorded.len()
+    );
+
+    drop(client);
+    let _ = server.await.expect("server task panicked");
+}
