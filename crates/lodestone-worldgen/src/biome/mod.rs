@@ -43,9 +43,24 @@
 //! Unit 9 is the fix, in two independent halves: [`tree`] ports vanilla's
 //! `Climate.RTree` (so a search stops being O(table_len)), and [`memo`]
 //! memoises the per-source-chunk answer (so 289 searches per chunk become the
-//! window's newly-entered strip). [`nearest_biome`] is retained as the
-//! brute-force **reference** the tree is gated against, not as the production
-//! path.
+//! window's newly-entered strip).
+//!
+//! # And the tree is also the *answer* (owner ruling on #492)
+//!
+//! The first landing of Unit 9 made the tree deliberately result-identical to
+//! [`nearest_biome`], on the reasoning that the old engine was the JVM-proven
+//! bridge. Measuring the two vanilla searches against each other then showed they
+//! resolve to **different biome ids at 0.98% of arbitrary climate targets**, and
+//! vanilla calls the tree. The owner ruled: do what vanilla does. So
+//! [`BiomeTable::nearest_row`] now implements vanilla's own indexed search and
+//! [`nearest_biome`] is the **documented divergence** rather than the target —
+//! kept because it is the independent implementation proving the tree finds the
+//! same minimum *distance* everywhere.
+//!
+//! The disagreement is exclusively about **which of several tied rows** to take;
+//! neither search ever finds a different nearest *distance*. [`tree`]'s module doc
+//! traces that, and why vanilla's `lastResult` carry-over is the one part of its
+//! search that cannot be reproduced here.
 //!
 //! # The y = 0 trap
 //!
@@ -205,12 +220,17 @@ pub fn quantize_coord(v: f64) -> i64 {
 /// `Climate.ParameterList.findValueBruteForce` (`Climate.java:182`), vanilla's
 /// own un-optimized reference search, sitting next to the `RTree` it also ships.
 ///
-/// **This is U9's oracle, not U9's production path.** Production goes through
-/// [`BiomeTable::nearest_row`]; this stays as the independent implementation the
-/// tree is proven result-identical to, at every coordinate (see [`tree`]'s module
-/// doc for why identity is a theorem and `tests/biome_tree_identity.rs` for the
-/// gates). It bumps no counter, so a gate may call it millions of times without
-/// polluting the measurement the tree is judged by.
+/// **Not the production path, and since #492 not the target either.** Production
+/// goes through [`BiomeTable::nearest_row`], which reproduces vanilla's own
+/// indexed search — and vanilla calls the tree, so the tree is the answer. This
+/// stays as the independent implementation that proves the tree finds the same
+/// minimum *distance* at every target, and as the **documented divergence**: it
+/// breaks a distance tie by earliest table row where vanilla's tree breaks it by
+/// traversal order, which resolves to a different biome id at 0.98% of arbitrary
+/// targets. See [`tree`]'s module doc and `tests/biome_tree_identity.rs`.
+///
+/// It bumps no counter, so a gate may call it millions of times without polluting
+/// the measurement the tree is judged by.
 ///
 /// Matches vanilla's tie-break exactly: ties keep the **earlier** table entry
 /// (`if (fitness < bestFitness)`, strict `<`), so `table`'s order must match the
@@ -302,8 +322,11 @@ impl BiomeTable {
         }
     }
 
-    /// The nearest biome's table row, via the tree. Identical to
-    /// [`nearest_row_brute_force`] at every target.
+    /// The nearest biome's table row, via vanilla's own indexed search
+    /// (`Climate.ParameterList.findValue`) with no `lastResult` seeding — the
+    /// fresh-instance answer. Always at the same minimum squared distance as
+    /// [`nearest_row_brute_force`]; the *row* differs from it wherever two rows tie
+    /// on that distance. See [`tree`]'s module doc.
     #[must_use]
     pub fn nearest_row(&self, target: &[i64; 7]) -> u32 {
         self.tree.nearest_row(target)
@@ -366,28 +389,46 @@ impl BiomeTable {
         self.tree.node_is_leaf(id)
     }
 
-    /// Forces the search's seed hint — gate support for proving the answer is
-    /// seed-invariant. A wrong seed costs pruning, never correctness (see
-    /// [`tree`]'s module doc).
-    pub fn force_seed_hint(&self, node: u32) {
-        self.tree.force_seed_hint(node);
-    }
-
     /// Collapses one tree node's span to a point, breaking the lower-bound
-    /// premise the pruning relies on. **The control** for every identity gate:
-    /// an identity assertion that cannot fail under this is not evidence.
+    /// premise the pruning relies on. **The control** for the hull-containment and
+    /// distance-identity gates: an assertion that cannot fail under this is not
+    /// evidence.
     pub fn perturb_tree_node(&mut self, node: usize) {
         self.tree.perturb_node_span(node);
     }
 
-    /// Vanilla's *exact* `RTree` search — strict pruning, incumbent-wins ties, an
-    /// explicit `candidate` in place of its `ThreadLocal`. Not the production
-    /// path; it exists so a gate can measure whether vanilla's own tree and
-    /// vanilla's own brute force ever disagree on the real table. See [`tree`]'s
-    /// module doc.
+    /// `(row, squared distance)` of the selected leaf. Exposed because since #492
+    /// the *distance* claim and the *row* claim have different strengths: the
+    /// distance always matches [`nearest_row_brute_force`], the row matches it only
+    /// where no tie exists. See [`tree`]'s module doc.
     #[must_use]
-    pub fn nearest_row_vanilla_exact(&self, target: &[i64; 7], candidate: Option<u32>) -> u32 {
-        self.tree.nearest_row_vanilla_exact(target, candidate)
+    pub fn nearest_row_and_distance(&self, target: &[i64; 7]) -> (u32, i64) {
+        self.tree.nearest_row_and_distance(target)
+    }
+
+    /// Vanilla's search with an explicit `candidate` standing in for its
+    /// `ThreadLocal` `lastResult`. **Not the production path** — production always
+    /// searches unseeded (see [`tree`]'s module doc for why `lastResult` is
+    /// deliberately not reproduced). Exposed so a gate can demonstrate that a
+    /// tying seed really does change the returned row.
+    #[must_use]
+    pub fn nearest_row_seeded(&self, target: &[i64; 7], candidate: Option<u32>) -> u32 {
+        self.tree.nearest_row_seeded(target, candidate)
+    }
+
+    /// The tree node id of the leaf carrying `row`, so a gate can seed a search
+    /// with a chosen row.
+    #[must_use]
+    pub fn leaf_node_for_row(&self, row: u32) -> Option<u32> {
+        self.tree.leaf_node_for_row(row)
+    }
+
+    /// The root's child node ids in traversal order — see
+    /// [`tree::BiomeTree::root_child_nodes`] for why a control has to perturb a
+    /// *later* one than the first.
+    #[must_use]
+    pub fn tree_root_child_nodes(&self) -> Vec<u32> {
+        self.tree.root_child_nodes()
     }
 }
 

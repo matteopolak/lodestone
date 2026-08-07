@@ -1194,13 +1194,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `lodestone_ecs::EcsHandle = Arc<parking_lot::RwLock<World>>`, and that one `World`
   carries **one** `GameTick` schedule driven by **one** 20 Hz accumulator.
 - [Worldgen biome search](./worldgen-biome-search.md) — The climate → biome lookup
-  layer: vanilla's `Climate.RTree` ported as a real search structure, plus a
+  layer: vanilla's `Climate.RTree` ported as a real search structure — and, since
+  the owner's ruling on #492, as the *definition of the answer* — plus a
   per-source-chunk memo, replacing an uncached brute-force scan of the 7,594-row
   overworld climate table. Unit 9 of
   [`docs/plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md), the fix for its
   diagnostic **D5**. Measured over a 6×6 sweep of real embedded data: **235,991,144
-  climate comparisons → 258,747**, a 912× reduction, with the biome selected at
-  every coordinate provably unchanged.
+  climate comparisons → 278,298**, an 848× reduction.
 - [Overworld biome assignment (multi-noise climate)](./worldgen-biomes.md) — Before
   this, `OverworldGenerator` ran the whole world under one hardcoded biome
   (`minecraft:plains`) — every column looked the same and surface rules never
