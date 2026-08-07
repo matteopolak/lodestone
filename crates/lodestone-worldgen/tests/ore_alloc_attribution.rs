@@ -214,15 +214,26 @@ fn armed<T>(capture: bool, f: impl FnOnce() -> T) -> (T, [u64; STAGE_COUNT]) {
 }
 
 /// Without `gen-counters` every allocation lands in `Stage::Other` and the whole
-/// table is one row — an instrument that looks like it works. Fail instead.
+/// table is one row — an instrument that looks like it works.
+///
+/// # Why this is a `cfg`, not an `assert!(counters::enabled())`
+///
+/// It was the latter for one run, and that made `cargo test -p lodestone-worldgen`
+/// red on a tree whose code was fine: the default build has the feature **off**,
+/// so an unconditional assertion here fails for every developer who did not ask
+/// for the diagnostic. The guard exists to protect
+/// [`where_the_ore_stages_allocations_come_from`], which is `#[ignore]`d and
+/// therefore only ever runs when someone asks for it by name — so the guard
+/// belongs *in* that test (it asserts the same thing on entry) and this one only
+/// needs to exist in the configuration where it can be true.
+#[cfg(feature = "gen-counters")]
 #[test]
 fn attribution_requires_counters() {
     assert!(
         counters::enabled(),
-        "ore_alloc_attribution is meaningless without --features gen-counters: \
-         `current_stage()` is a constant `Stage::Other`, so every allocation \
-         would be attributed to one bucket and the table would read as a \
-         working instrument reporting a surprising answer."
+        "the gen-counters feature is on for this build but `counters::enabled()` \
+         reads false, which means the feature did not reach \
+         lodestone-worldgen-core — see this crate's Cargo.toml on the forward."
     );
 }
 
@@ -240,6 +251,17 @@ fn attribution_requires_counters() {
 fn where_the_ore_stages_allocations_come_from() {
     const SEED: i64 = 42;
     const SIDE: i32 = 3;
+
+    // The guard, on the only path that can reach the table. Without the feature
+    // `current_stage()` is a constant `Stage::Other`, so every row would land in
+    // one bucket and the output would read as a working instrument reporting a
+    // surprising answer.
+    assert!(
+        counters::enabled(),
+        "ore_alloc_attribution is meaningless without --features gen-counters: \
+         `current_stage()` is a constant `Stage::Other`, so every allocation \
+         would be attributed to one bucket."
+    );
 
     let generator = lodestone_server::overworld_generator(SEED);
     // Warm the store so neighbours' pre-ore stages are not attributed here.
