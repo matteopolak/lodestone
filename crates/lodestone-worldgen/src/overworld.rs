@@ -295,6 +295,17 @@ pub struct OverworldGenerator {
     /// [`AquiferTrees`]'s doc comment.
     slot_count: usize,
     surface: SurfaceSystem,
+    /// Block-state string to [`crate::interner::StateId`] table, shared by
+    /// **every** grid this generator builds — that sharing is what lets a cell
+    /// move between two grids as a `u16` instead of a fresh `String`, which is
+    /// where Unit 3's 884,736-allocations-per-column saving comes from
+    /// (`docs/plans/worldgen-rewrite.md` D2).
+    ///
+    /// Owned per generator rather than globally, and it outlives every column,
+    /// so interning is a warmup cost and steady-state serving allocates nothing
+    /// here. See [`crate::interner`]'s module doc for why id-assignment order
+    /// cannot reach the wire.
+    interner: Arc<crate::interner::StateInterner>,
     min_y: i32,
     height: i32,
     sea_level: i32,
@@ -553,6 +564,14 @@ impl OverworldGenerator {
         Self {
             slot_count,
             surface,
+            // Fresh per generator. Deliberately *not* pre-populated from the
+            // resolver's data: the allocation budget is written against a
+            // steady-state column, by which point every state the data can
+            // produce has been interned by ordinary generation. Pre-interning
+            // would only move cold-start work around, and a pre-intern list
+            // that drifted out of sync with the data would be a stale claim of
+            // exactly the kind CLAUDE.md's rule 2 is about.
+            interner: Arc::new(crate::interner::StateInterner::new()),
             min_y,
             height,
             sea_level,
@@ -757,14 +776,15 @@ impl OverworldGenerator {
         // in the covered region — every one of the 9 sources always stitches
         // its own full 16-wide column range before ore placement runs.
         let region_size = crate::feature::REGION_MAX - crate::feature::REGION_MIN;
-        let mut region = crate::feature::RegionGrid::new(
+        let mut region = crate::feature::RegionGrid::with_interner(
+            Arc::clone(&self.interner),
             crate::feature::REGION_MIN,
             self.min_y,
             crate::feature::REGION_MIN,
             region_size,
             self.height,
             region_size,
-            "minecraft:air",
+            crate::interner::StateId::AIR,
         );
         let mut ocean_floor_wg: HashMap<(i32, i32), i32> = HashMap::new();
 
@@ -969,7 +989,8 @@ impl OverworldGenerator {
         // (especially 2×2 trunks and their canopies) can spill past the tight
         // 48-block 3×3 neighbourhood, and `VegGrid::set_if_in_bounds` drops any
         // cell outside it — the chunk-border cut-off trees the player sees.
-        let mut grid = crate::feature::vegetation::VegGrid::with_footprint(
+        let mut grid = crate::feature::vegetation::VegGrid::with_footprint_interned(
+            Arc::clone(&self.interner),
             self.min_y,
             self.height,
             base_x,
@@ -1056,8 +1077,18 @@ impl OverworldGenerator {
         // outside its own box, so this loop naturally keeps only the writes
         // that land in the chunk actually being served, discarding spill
         // into a neighbour with no extra filtering needed.
-        for (x, y, z, state) in grid.dirty_cells() {
-            world.set(x, y, z, state);
+        // Ids, not strings: `dirty_cells` would resolve each write through the
+        // interner (a read guard per cell) only for `world.set` to hash the
+        // string and look the same id back up. Both grids share this
+        // generator's interner, so the id moves straight across. Allocation-free
+        // either way — this is lock and hash traffic, not heap traffic.
+        debug_assert_eq!(
+            grid.interner().instance_id(),
+            world.interner().instance_id(),
+            "folding vegetation writes back requires both grids on one interner",
+        );
+        for (x, y, z, state) in grid.dirty_cell_ids() {
+            world.set_id(x, y, z, state);
         }
         world
     }
@@ -1211,20 +1242,31 @@ impl OverworldGenerator {
     ) {
         let base_x = source_cx * 16;
         let base_z = source_cz * 16;
-        // The single most damning number in the rewrite diagnosis: one
-        // `String` allocation per cell, `256 * height` cells per source chunk,
-        // nine sources per column — the ~885k-allocations-per-warm-column figure
-        // (D2). Counted in bulk from the loop bounds for the same reason
-        // `stitch_region` does; the `to_string()` below is unconditional.
+        // This loop *was* the single most damning number in the rewrite
+        // diagnosis: one `String` allocation per cell, `256 * height` cells per
+        // source chunk, nine sources per column — 884,736 of the 905,459
+        // allocations a warm column performed, 97.7% of the serve path's entire
+        // heap traffic from one `to_string()`.
+        //
+        // Unit 3 deleted it. Both grids now carry `crate::interner::StateId`
+        // against the same interner, so a cell copy is a `u16` move and the
+        // `bump_string_allocs` that used to accompany `bump_stitch_cells` is
+        // gone with it. `stitch_cells` itself stays — the *copy* is still real,
+        // and deleting it (not just its allocations) is Unit 7's job, measured
+        // by this same counter.
+        debug_assert_eq!(
+            world.interner().instance_id(),
+            grid.interner().instance_id(),
+            "stitching between grids with different interners would copy meaningless ids",
+        );
         let cells = 256 * height.max(0) as u64;
         crate::counters::bump_stitch_cells(cells);
-        crate::counters::bump_string_allocs(cells);
         for ly in 0..height {
             let y = min_y + ly;
             for lz in 0..16i32 {
                 for lx in 0..16i32 {
-                    let state = world.get(base_x + lx, y, base_z + lz);
-                    grid.seed(base_x + lx, y, base_z + lz, state.to_string());
+                    let state = world.get_id(base_x + lx, y, base_z + lz);
+                    grid.seed_id(base_x + lx, y, base_z + lz, state);
                 }
             }
         }
@@ -1472,14 +1514,15 @@ impl OverworldGenerator {
         base_z: i32,
     ) -> crate::dense_grid::DenseBlockGrid {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Materialize);
-        let mut world = crate::dense_grid::DenseBlockGrid::new(
+        let mut world = crate::dense_grid::DenseBlockGrid::with_interner(
+            Arc::clone(&self.interner),
             base_x,
             self.min_y,
             base_z,
             16,
             self.height,
             16,
-            "minecraft:air",
+            crate::interner::StateId::AIR,
         );
         // `surface_diff` is consulted by **point lookup**, in the same fixed
         // `(lz, lx, ly)` order as the base fill below — never iterated
@@ -1581,7 +1624,16 @@ impl OverworldGenerator {
             &mut observer,
         );
         if std::env::var("LODESTONE_CARVE_HASHMAP_DEBUG").is_ok() {
-            crate::dense_grid::DenseBlockGrid::from_hashmap(base_x, self.min_y, base_z, 16, self.height, 16, &grid.into_blocks())
+            crate::dense_grid::DenseBlockGrid::from_hashmap_with_interner(
+                Arc::clone(&self.interner),
+                base_x,
+                self.min_y,
+                base_z,
+                16,
+                self.height,
+                16,
+                &grid.into_blocks(),
+            )
         } else {
             grid.into_dense()
         }

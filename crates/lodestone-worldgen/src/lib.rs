@@ -34,6 +34,7 @@ pub mod dense_grid;
 pub mod density;
 pub mod feature;
 pub mod hash;
+pub mod interner;
 pub mod math;
 pub mod noise;
 pub mod overworld;

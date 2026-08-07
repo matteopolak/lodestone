@@ -102,6 +102,27 @@ thread_local! {
     /// Gate on [`ALLOC_COUNT`]. Off by default so criterion's own sampling,
     /// generator construction and JSON parsing are not attributed to generation.
     static ALLOC_COUNTING: Cell<bool> = const { Cell::new(false) };
+    /// [`ALLOC_COUNT`] split by the stage that was executing, so a residual
+    /// allocation count can be *attributed* instead of guessed at.
+    ///
+    /// Added for Unit 3, which took the steady-state figure from 905,459 to
+    /// 20,684 and then needed to answer "and where is the rest?" — a question
+    /// the single total structurally cannot answer. Reasoning about it from the
+    /// source instead would be the kind of hand-derived number
+    /// `CLAUDE.md` records as having been wrong four times in four ways.
+    ///
+    /// An array of `Cell`s rather than a `Cell<[u64; N]>`: the latter would
+    /// copy the whole array in and out on **every allocation in the process**.
+    ///
+    /// **Only meaningful with `--features gen-counters`**, because
+    /// [`counters::current_stage`] is compiled down to a constant
+    /// [`Stage::Other`] without it — which is exactly why
+    /// `steady_state_heap_allocs_per_column` must read the same with the feature
+    /// on and off (the bench asserts this; see
+    /// [`bench_steady_state_and_cold`]). If it did not, the attribution would
+    /// describe a different program from the one the ratchet measures.
+    static ALLOC_BY_STAGE: [Cell<u64>; counters::STAGE_COUNT] =
+        const { [const { Cell::new(0) }; counters::STAGE_COUNT] };
 }
 
 /// Counts allocations, forwarding everything to [`System`].
@@ -140,6 +161,13 @@ unsafe impl GlobalAlloc for CountingAllocator {
         let _ = ALLOC_COUNTING.try_with(|on| {
             if on.get() {
                 let _ = ALLOC_COUNT.try_with(|n| n.set(n.get().wrapping_add(1)));
+                // `current_stage` reads a thread-local `Cell` and cannot
+                // allocate, so this cannot recurse into `alloc`.
+                let stage = counters::current_stage() as usize;
+                let _ = ALLOC_BY_STAGE.try_with(|bins| {
+                    let bin = &bins[stage.min(counters::STAGE_COUNT - 1)];
+                    bin.set(bin.get().wrapping_add(1));
+                });
             }
         });
         // SAFETY: `layout` is forwarded unchanged to the system allocator, which
@@ -159,11 +187,31 @@ static GLOBAL_ALLOC: CountingAllocator = CountingAllocator;
 /// Runs `f` with allocation counting on for this thread, returning its value and
 /// the count.
 fn measure_allocs<T>(f: impl FnOnce() -> T) -> (T, u64) {
+    let (out, total, _by_stage) = measure_allocs_by_stage(f);
+    (out, total)
+}
+
+/// [`measure_allocs`] plus the per-stage split (see [`ALLOC_BY_STAGE`]).
+///
+/// The per-stage figures are all-zero-but-`other` without
+/// `--features gen-counters`; the total is exact either way.
+fn measure_allocs_by_stage<T>(f: impl FnOnce() -> T) -> (T, u64, [u64; counters::STAGE_COUNT]) {
     ALLOC_COUNT.set(0);
+    ALLOC_BY_STAGE.with(|bins| {
+        for bin in bins {
+            bin.set(0);
+        }
+    });
     ALLOC_COUNTING.set(true);
     let out = f();
     ALLOC_COUNTING.set(false);
-    (out, ALLOC_COUNT.get())
+    let mut by_stage = [0u64; counters::STAGE_COUNT];
+    ALLOC_BY_STAGE.with(|bins| {
+        for (slot, bin) in by_stage.iter_mut().zip(bins) {
+            *slot = bin.get();
+        }
+    });
+    (out, ALLOC_COUNT.get(), by_stage)
 }
 
 /// Same shape as `tests/overworld_gen.rs`'s `FsResolver` / `chunk_parity.rs`'s
@@ -1054,18 +1102,44 @@ fn bench_counter_calibration(_c: &mut Criterion) {
          {expected_stitch}; got {}. U7's acceptance criterion is that this reaches 0.",
         s.stitch_cells
     );
-    // The vegetation stitch is the one that allocates a `String` per cell.
-    let veg_strings = STITCH_SOURCES_PER_STAGE * per_fill;
+    // The vegetation stitch used to allocate a `String` per cell. **Unit 3
+    // deleted that term**, so this assertion is now the other way round — and it
+    // is written as a two-hypothesis magnitude check rather than a bound in one
+    // direction, per `CLAUDE.md`'s "predict the value, do not merely assert the
+    // sign of the change".
+    //
+    // The two hypotheses, both derived from constants outside the code under
+    // test:
+    //
+    // * **Pre-U3** (`stitch_veg_region` calls `to_string()` per cell):
+    //   `string_allocs >= 884,736`.
+    // * **Post-U3** (both grids carry `StateId`): the only remaining
+    //   contributor is `StateInterner`'s one-allocation-per-distinct-state
+    //   warmup, which is bounded by the number of distinct block states this
+    //   data can produce — two orders of magnitude below the above. Measured at
+    //   **65** for the cold column on the embedded data.
+    //
+    // A ceiling rather than `== 65` deliberately: the exact count is a property
+    // of the worldgen *data*, so pinning it would make this assertion fail on a
+    // data update for no good reason. The ceiling is far enough below the
+    // pre-U3 hypothesis that no confusion between the two is possible, and low
+    // enough that a regression to per-cell or per-block interning (the real
+    // failure mode, which would put it in the tens of thousands) still trips it.
+    let veg_stitch_cells = STITCH_SOURCES_PER_STAGE * per_fill;
     assert_eq!(
-        veg_strings, 884_736,
+        veg_stitch_cells, 884_736,
         "the ~885k figure D2 calls the single most damning number in the diagnosis: \
          {STITCH_SOURCES_PER_STAGE} × {per_fill}"
     );
+    /// Ceiling on interner warmup allocations for one cold column. See above for
+    /// why this is a ceiling and not an equality.
+    const U3_INTERN_CEILING: u64 = 1_000;
     assert!(
-        s.string_allocs >= veg_strings,
-        "expected at least {veg_strings} String allocations from `stitch_veg_region` alone \
-         (9 sources × {per_fill} cells, one `to_string()` each); got {}. U3's acceptance \
-         criterion is that this reaches 0 steady-state.",
+        s.string_allocs < U3_INTERN_CEILING,
+        "expected fewer than {U3_INTERN_CEILING} String allocations on the block path \
+         after Unit 3 (interner warmup only, measured at 65 on embedded data); got {}. \
+         If this is >= {veg_stitch_cells}, `stitch_veg_region` is allocating per cell \
+         again and the interning has been reverted or bypassed.",
         s.string_allocs
     );
 
@@ -1313,7 +1387,8 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
     // all computed, so this is the steady-state serve path — the number the
     // plan's allocation budget ratchets down to "0 from the hot path, plus O(1)
     // for the returned column's own buffers".
-    let (warm_col, steady_allocs) = measure_allocs(|| generator.column(5, 5));
+    let (warm_col, steady_allocs, steady_allocs_by_stage) =
+        measure_allocs_by_stage(|| generator.column(5, 5));
     black_box(warm_col.non_air_count());
 
     // ---- Report ------------------------------------------------------
@@ -1324,6 +1399,25 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
     println!("  C_cold (first column, fresh)    : {c_cold_us:>12.1} us   target <= 8000 us");
     println!("  whole {SIDE}x{SIDE} sweep            : {sweep_s:>12.3} s");
     println!("  steady-state heap allocs/column : {steady_allocs:>12}   target 0 from hot path + O(1) output");
+    if counters::enabled() {
+        // Attribution for whatever the total still is. Unit 3 took it from
+        // 905,459 to 20,684 by interning; the split says which stage owns the
+        // residue, so the next unit aims at a measured target rather than a
+        // plausible one.
+        println!("  -- steady-state allocs by stage (needs gen-counters) --");
+        let mut ranked: Vec<(usize, u64)> = steady_allocs_by_stage.iter().copied().enumerate().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        for (stage, n) in ranked {
+            if n == 0 {
+                continue;
+            }
+            let pct = 100.0 * n as f64 / steady_allocs.max(1) as f64;
+            println!(
+                "     {:<14} {n:>10}  ({pct:>5.1}%)",
+                counters::STAGE_NAMES[stage]
+            );
+        }
+    }
     if counters::enabled() {
         println!("\n  -- counters over the {}-chunk sweep --", coords.len());
         print_counters(&s, u64::try_from(coords.len()).unwrap());
