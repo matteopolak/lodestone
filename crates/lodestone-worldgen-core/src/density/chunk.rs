@@ -9,16 +9,63 @@
 //!
 //! * **`interpolated`** samples its wrapped function only at the corners of a
 //!   4×8×4 (`cellWidth`×`cellHeight`×`cellWidth`) cell grid, then trilinearly
-//!   interpolates per block. The interpolation order matches vanilla's
-//!   incremental `updateForY` → `updateForX` → `updateForZ` (y, then x, then z),
-//!   which is bit-significant.
+//!   interpolates per block, in the `Mth.lerp3` nesting — **X innermost**, then
+//!   Y, then Z. That order is bit-significant and it is *not* the one vanilla's
+//!   driver loop appears to produce; see `## Which interpolation order` below
+//!   before changing [`lerp3`].
 //! * **`flat_cache`** snaps XZ to the quart grid (`blockX >> 2 << 2`) and forces
 //!   `y = 0`, so 2D climate/shift fields are sampled once per 4×4 column.
 //!
 //! All other markers (`cache_2d`, `cache_once`, `cache_all_in_cell`,
-//! `blend_density`) are value-transparent. This module reimplements that
-//! wrapping behaviour so `final_density(x, y, z)` equals
+//! `blend_density`) are value-transparent *in this evaluator*. This module
+//! reimplements that wrapping behaviour so `final_density(x, y, z)` equals
 //! `NoiseChunk.getInterpolatedDensity()` block-for-block.
+//!
+//! ## Which interpolation order
+//!
+//! `NoiseChunk.NoiseInterpolator` has **two** value paths over the same eight
+//! corners, and as floating-point expressions they are different:
+//!
+//! | vanilla path | expression | nesting |
+//! |---|---|---|
+//! | `fillingCell == true` | `Mth.lerp3` (`lerp2` is `lerp(dy, lerp(dx, x00, x10), lerp(dx, x01, x11))`) | **X inner**, Y, Z |
+//! | `fillingCell == false` | the incremental `updateForY` → `updateForX` → `updateForZ` chain | **Y inner**, X, Z |
+//!
+//! This module implements the **first**. That looks wrong on a first reading of
+//! `NoiseChunk`, because the driver loop (`selectCellYZ` → `updateForY` →
+//! `updateForX` → `updateForZ`) is visibly feeding the *second*. The resolution
+//! is two levels removed from the interpolator: `NoiseChunk`'s constructor
+//! (`NoiseChunk.java:157-160`) does not read the router's `final_density`
+//! directly, it wraps it —
+//!
+//! ```text
+//! fullNoiseValue = DensityFunctions.cacheAllInCell(
+//!         DensityFunctions.add(wrappedRouter.finalDensity(), BeardifierMarker.INSTANCE))
+//!     .mapAll(this::wrap);
+//! ```
+//!
+//! — and that `cache_all_in_cell` is applied **in code, not in data** (no
+//! `minecraft:cache_all_in_cell` appears anywhere in 26.2's worldgen JSON, so
+//! reading the `noise_settings` document cannot see it). Its cell array is
+//! pre-filled inside `selectCellYZ`, which brackets the fill with
+//! `fillingCell = true` / `false`. So every value `getInterpolatedDensity()`
+//! returns for `final_density` was produced in the `fillingCell == true`
+//! regime — by `Mth.lerp3`. The incremental chain is never what
+//! `final_density` reads.
+//!
+//! **Measured, because the difference is ~1 ULP and therefore does not look like
+//! a bug.** Swapping [`lerp3`] to the incremental chain takes
+//! `chunk_parity`'s whole-chunk JVM gate from 98304/98304 to **90563/98304**
+//! (7,741 diverged blocks, all 1-ULP). `docs/plans/worldgen-rewrite.md`'s U4 row
+//! prescribes "vanilla's incremental cell walk", so the trap is written into the
+//! plan; `crates/lodestone-worldgen/tests/interpolation_order.rs` is the
+//! standing guard, and `docs/worldgen-density-engine.md` has the full account.
+//!
+//! The consequence for a rewrite is not "keep a point query". It is that the
+//! correct cell walk **pre-fills a 4×8×4 = 128-value cell array with `Mth.lerp3`
+//! from eight corners held once per cell**, exactly as vanilla's
+//! `CacheAllInCell` does — same arithmetic as here, hoisted. A walk built on
+//! `updateForY/X/Z` would be a different world.
 //!
 //! No Mojang source is transliterated: the algorithm here is derived from the
 //! observable per-block field and cross-checked against a JVM oracle
