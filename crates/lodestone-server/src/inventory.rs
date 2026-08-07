@@ -159,7 +159,149 @@ impl PlayerInventory {
             None => false,
         }
     }
+
+    /// Adds `stack` to this inventory, mirroring vanilla's
+    /// `Inventory.add(-1, stack)` → `addResource` loop
+    /// (`Inventory.java`'s `add`/`addResource`/`getSlotWithRemainingSpace`/
+    /// `getFreeSlot`), and returns **every native index this call wrote** plus
+    /// whatever could not be fitted.
+    ///
+    /// This is what item pickup credits into (issue #337). The returned index
+    /// list is the point: the caller has to tell the client about each slot it
+    /// touched with its own `container_set_slot`, and a pickup that overflows
+    /// into a second slot writes *two*.
+    ///
+    /// # The destination order is not "first empty slot", and getting it wrong
+    /// is invisible
+    ///
+    /// `getSlotWithRemainingSpace` searches for a **mergeable** slot in this
+    /// exact order — and `hasRemainingSpaceForItem` requires the candidate to
+    /// be non-empty, so this pass only ever tops up an existing stack:
+    ///
+    /// 1. the **selected hotbar slot** (`this.selected`),
+    /// 2. the **off-hand** (native `40`, the literal `40` in vanilla's own
+    ///    source),
+    /// 3. natives `0..36` in ascending order (hotbar, then main storage).
+    ///
+    /// Only if that finds nothing does `getFreeSlot` place a fresh stack — and
+    /// it scans **`items` alone, `0..36`**. So a fresh stack can never land in
+    /// the off-hand or in an armour slot, while a *merge* into the off-hand is
+    /// entirely normal. Both halves are needed: picking "first empty slot"
+    /// unconditionally still produces an item in the inventory, so the naive
+    /// version passes any test that only asks whether the pickup arrived.
+    ///
+    /// Returns `(written natives, leftover)`. `leftover` is `None` when the
+    /// whole stack fitted; a full inventory returns the unplaced remainder so
+    /// the caller can leave the item entity in the world rather than deleting
+    /// it — vanilla's `playerTouch` only removes the entity when
+    /// `getInventory().add(...)` consumed everything.
+    pub fn add(&mut self, stack: ItemStack) -> (Vec<usize>, Option<ItemStack>) {
+        let mut remaining = stack;
+        let mut written = Vec::new();
+        // `max_stack_size` is per-item in vanilla (`getMaxStackSize`); this
+        // crate has no per-item census of it on the server side, so 64 stands
+        // in. That is right for every block drop the bundled tables produce
+        // (cobblestone/dirt/gravel/flint/coal/raw_iron are all 64-stackable)
+        // and is the same constant `MobSim::spawn_item`'s callers already pass
+        // to `ItemLifecycle::newly_dropped`. A tool or a bucket picked up this
+        // way would over-stack; that wants a real `max_stack_size` census
+        // rather than a guess here.
+        let max = u32::from(lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE);
+
+        loop {
+            if remaining.count == 0 {
+                return (written, None);
+            }
+            let Some(slot) = self.slot_with_remaining_space(&remaining, max).or_else(|| self.free_slot()) else {
+                return (written, Some(remaining));
+            };
+            let in_slot = self.slots[slot].as_ref().map_or(0, |s| s.count);
+            let to_add = remaining.count.min(max.saturating_sub(in_slot));
+            if to_add == 0 {
+                // `addResource` returns the untouched count in this case;
+                // looping again would pick the same slot forever.
+                return (written, Some(remaining));
+            }
+            match self.slots[slot].as_mut() {
+                Some(existing) => existing.count += to_add,
+                None => {
+                    let mut fresh = remaining.clone();
+                    fresh.count = to_add;
+                    self.slots[slot] = Some(fresh);
+                }
+            }
+            remaining.count -= to_add;
+            if !written.contains(&slot) {
+                written.push(slot);
+            }
+        }
+    }
+
+    /// `Inventory.getSlotWithRemainingSpace` — see [`add`](Self::add)'s doc
+    /// comment for the order and why it matters.
+    fn slot_with_remaining_space(&self, stack: &ItemStack, max: u32) -> Option<usize> {
+        let mergeable = |index: usize| -> bool {
+            self.slots
+                .get(index)
+                .and_then(Option::as_ref)
+                .is_some_and(|slot| {
+                    slot.item == stack.item
+                        && slot.components == stack.components
+                        && slot.count < max
+                })
+        };
+        let selected = usize::from(self.selected_hotbar_slot);
+        if mergeable(selected) {
+            return Some(selected);
+        }
+        if mergeable(OFFHAND_NATIVE) {
+            return Some(OFFHAND_NATIVE);
+        }
+        (0..ITEMS_SIZE).find(|&index| mergeable(index))
+    }
+
+    /// `Inventory.getFreeSlot` — the first empty slot in `items` (`0..36`)
+    /// **only**, which is why a fresh stack never reaches armour or the
+    /// off-hand.
+    fn free_slot(&self) -> Option<usize> {
+        (0..ITEMS_SIZE).find(|&index| self.slots[index].is_none())
+    }
 }
+
+/// The **inverse** of [`player_menu_native_index`]: which window-`0` menu slot a
+/// native index appears in, for a server-initiated `container_set_slot`.
+///
+/// Needed because a pickup writes wherever [`PlayerInventory::add`] decided, and
+/// the client must be told in *menu* coordinates. Every existing
+/// server-initiated slot write in this crate targets the selected hotbar slot and
+/// so could hardcode `selected + 36`; a pickup can land in main storage or the
+/// off-hand too, and inverting the table by hand at the call site is how the two
+/// directions drift apart.
+///
+/// `None` for an index with no window-`0` menu slot, which today means only an
+/// out-of-range one — all 41 native slots are reachable on the player's own
+/// screen.
+#[must_use]
+pub fn window_zero_menu_slot(native: usize) -> Option<i32> {
+    let slot = match native {
+        0..=8 => i32::try_from(native).ok()? + 36, // hotbar -> 36..=44
+        9..=35 => i32::try_from(native).ok()?,     // main storage, identity
+        36 => 8,                                   // feet
+        37 => 7,                                   // legs
+        38 => 6,                                   // chest
+        39 => 5,                                   // head
+        OFFHAND_NATIVE => 45,
+        _ => return None,
+    };
+    Some(slot)
+}
+
+/// Size of vanilla's `Inventory.items` list — hotbar plus main storage
+/// (`Inventory.INVENTORY_SIZE = 36`). Distinct from [`PLAYER_NATIVE_SIZE`]:
+/// the five slots past this (armour `36..=39`, off-hand `40`) live in separate
+/// vanilla lists, and the difference is load-bearing for
+/// [`PlayerInventory::add`] — `getFreeSlot` scans only this range.
+const ITEMS_SIZE: usize = 36;
 
 /// The menu-index → native-index mapping for the player's own inventory
 /// screen (window `0`) — see [`PlayerInventory::apply_menu_slot_change`]'s
@@ -378,5 +520,97 @@ mod tests {
         assert_eq!(container_menu_slot(5, 32), Some(ContainerMenuSlot::Player(0)));
         assert_eq!(container_menu_slot(5, 40), Some(ContainerMenuSlot::Player(8)));
         assert_eq!(container_menu_slot(5, 41), None);
+    }
+
+    /// [`window_zero_menu_slot`] must be the exact inverse of
+    /// [`player_menu_native_index`] over every native slot — the property that
+    /// keeps a pickup's `container_set_slot` landing where the pickup actually
+    /// wrote.
+    ///
+    /// A round-trip against the *other* direction rather than a restatement of
+    /// the table: restating it is how the two copies drift, and a hand-written
+    /// expectation list would be checking this file against itself.
+    #[test]
+    fn window_zero_menu_slot_inverts_the_menu_to_native_table() {
+        for native in 0..PLAYER_NATIVE_SIZE {
+            let menu = window_zero_menu_slot(native)
+                .unwrap_or_else(|| panic!("native {native} has no window-0 menu slot"));
+            assert_eq!(
+                player_menu_native_index(menu),
+                Some(native),
+                "native {native} -> menu {menu} must map back to itself"
+            );
+        }
+        assert_eq!(window_zero_menu_slot(PLAYER_NATIVE_SIZE), None);
+    }
+
+    /// Vanilla's `getSlotWithRemainingSpace` order, asserted by **destination**
+    /// rather than by "the item arrived".
+    ///
+    /// Both halves are load-bearing and a naive "first empty slot"
+    /// implementation gets both wrong while still putting the item somewhere:
+    ///
+    /// * a mergeable **selected** slot wins over an earlier mergeable one,
+    /// * a mergeable **off-hand** wins over any slot in `0..36`,
+    /// * but a *fresh* stack never reaches the off-hand, because `getFreeSlot`
+    ///   scans `items` alone.
+    #[test]
+    fn add_follows_vanillas_selected_then_offhand_then_scan_order() {
+        let cobble = |count: u32| ItemStack::new("minecraft:cobblestone".parse().unwrap(), count);
+
+        // Selected beats an earlier mergeable slot.
+        let mut inv = PlayerInventory::new();
+        inv.set_native(2, Some(cobble(1)));
+        inv.set_native(5, Some(cobble(1)));
+        assert!(inv.set_selected_hotbar_slot(5));
+        let (written, leftover) = inv.add(cobble(1));
+        assert_eq!(written, vec![5], "the selected slot is checked first");
+        assert!(leftover.is_none());
+        assert_eq!(inv.native(5).unwrap().count, 2);
+        assert_eq!(inv.native(2).unwrap().count, 1, "slot 2 is untouched");
+
+        // Off-hand beats the 0..36 scan for a *merge*.
+        let mut inv = PlayerInventory::new();
+        inv.set_native(3, Some(cobble(1)));
+        inv.set_native(OFFHAND_NATIVE, Some(cobble(1)));
+        let (written, _) = inv.add(cobble(1));
+        assert_eq!(
+            written,
+            vec![OFFHAND_NATIVE],
+            "the off-hand is checked before the 0..36 scan"
+        );
+
+        // …but never for a *fresh* stack: `getFreeSlot` scans `items` only.
+        let mut inv = PlayerInventory::new();
+        for native in 0..36 {
+            inv.set_native(native, Some(ItemStack::new("minecraft:stone".parse().unwrap(), 64)));
+        }
+        let (written, leftover) = inv.add(cobble(1));
+        assert!(
+            written.is_empty(),
+            "a full items list must not spill into the off-hand or armour, got {written:?}"
+        );
+        assert_eq!(
+            leftover.map(|s| s.count),
+            Some(1),
+            "the unplaced remainder is reported so the caller leaves the entity in the world"
+        );
+        assert!(inv.native(OFFHAND_NATIVE).is_none());
+    }
+
+    /// A stack larger than one slot's space overflows into a second slot, and
+    /// **both** indices are reported — the property a caller needs to send two
+    /// `container_set_slot`s rather than one.
+    #[test]
+    fn add_reports_every_slot_it_wrote_when_a_stack_overflows() {
+        let mut inv = PlayerInventory::new();
+        let cobble = |count: u32| ItemStack::new("minecraft:cobblestone".parse().unwrap(), count);
+        inv.set_native(0, Some(cobble(60)));
+        // 60 in the selected slot takes 4, the remaining 6 start a fresh stack.
+        let (written, leftover) = inv.add(cobble(10));
+        assert!(leftover.is_none());
+        assert_eq!(written, vec![0, 1], "topped up slot 0, then opened slot 1");
+        assert_eq!(inv.native(0).unwrap().count, 64);
+        assert_eq!(inv.native(1).unwrap().count, 6);
     }
 }

@@ -100,6 +100,10 @@
 
 mod advancements;
 mod block_entities;
+/// Rolling a broken block's loot table and popping the result as item entities
+/// (issue #337's missing consumer) — the join between [`loot`],
+/// [`MobSim::spawn_item`] and `server`'s block-break arm.
+pub mod block_drops;
 mod border;
 mod brewing;
 mod chunk;

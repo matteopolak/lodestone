@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use lodestone_core::State;
+use lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE;
 use lodestone_entity::{DamageFlags, ItemLifecycle};
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Rotation, Text, TextContent, Vec3,
@@ -32,7 +33,9 @@ use crate::chunk::{
     is_air_or_fluid, is_water,
 };
 use crate::fall::FallTracker;
-use crate::inventory::{ContainerMenuSlot, PlayerInventory, container_menu_slot};
+use crate::inventory::{
+    ContainerMenuSlot, PlayerInventory, container_menu_slot, window_zero_menu_slot,
+};
 use crate::mob_spawn::SpawnRng;
 use crate::mobs::{MobHandle, PlayerPerception};
 use crate::neighbor_update::Direction;
@@ -2205,6 +2208,13 @@ async fn apply_block_action<T, P, S>(
     block_entities: &BlockEntityHandle,
     open_container: &mut Option<OpenContainer>,
     container_sync: &mut ContainerSync,
+    // Issue #337. Where a broken block's rolled loot is spawned as item
+    // entities, and this connection's draw source for the roll plus
+    // `popResource`'s placement. `mobs` is the same shared handle the composter
+    // arm of `apply_use_item_on` already spawns bone meal into, so drops land in
+    // the one `MobSim` every connection's streaming pass reads.
+    mobs: &MobHandle,
+    drops_rng: &mut SpawnRng,
     action: BlockActionKind,
     pos: BlockPos,
 ) -> Result<(), ServerError>
@@ -2225,7 +2235,57 @@ where
         BlockActionKind::StopDestroy => {
             if *pending_break == Some(pos) {
                 *pending_break = None;
+                // Issue #337: read the block *before* it becomes air. This is
+                // the whole reason the drop has to happen here rather than in a
+                // later tick — once `set_block` has run, what was broken is
+                // unrecoverable, and vanilla's own `destroyBlock` likewise
+                // captures the state first (`Level.destroyBlock` reads
+                // `getBlockState(pos)`, calls `dropResources` with it, and only
+                // then `setBlock(pos, AIR)`).
+                let broken = source.block_state(pos.x, pos.y, pos.z);
                 source.set_block(pos.x, pos.y, pos.z, AIR);
+                debug_assert!(
+                    !broken.is_empty(),
+                    "`ChunkSource::block_state` returns a state name, never an empty string"
+                );
+                // Roll the broken block's loot table and pop each resulting
+                // stack as a real item entity. `MobSim` already ticks item
+                // lifecycle and fall dynamics every server tick
+                // (`crate::tick::run_tick_loop`) and already streams items to
+                // every connection (`MobSim::snapshots`), so this one call is
+                // what connects a 1,551-line loot module that had no production
+                // caller to the wire path mobs already proved reaches a client.
+                //
+                // **Not gated on `doTileDrops`.** Vanilla wraps `popResource` in
+                // `level.getGameRules().get(GameRules.BLOCK_DROPS)`, but this
+                // crate has no live game-rule registry to consult —
+                // `crate::game_rules` describes the rules for the wire and
+                // stores no values (`server.rs`'s own three "no `GameRules`
+                // registry" notes). A real registry is the prerequisite, not a
+                // guess here; see `docs/block-drops.md`.
+                let popped = crate::block_drops::drop_block_loot(
+                    crate::block_drops::bundled_tables(),
+                    &broken,
+                    pos,
+                    drops_rng,
+                );
+                if !popped.is_empty() {
+                    mobs.with(|sim| {
+                        for drop in popped {
+                            // `ItemLifecycle::newly_dropped` already sets the
+                            // 10-tick delay `popResource`'s
+                            // `setDefaultPickUpDelay()` applies, so the breaker
+                            // cannot re-absorb the drop on the spawning tick.
+                            let count = u8::try_from(drop.stack.count).unwrap_or(u8::MAX);
+                            sim.spawn_item(
+                                drop.stack.item.clone(),
+                                drop.position,
+                                drop.velocity,
+                                ItemLifecycle::newly_dropped(count, DEFAULT_MAX_STACK_SIZE),
+                            );
+                        }
+                    });
+                }
                 block_entities.with(|reg| {
                     reg.remove(pos);
                 });
@@ -2239,6 +2299,76 @@ where
         }
     }
     Ok(())
+}
+
+/// Collects every dropped item within this player's pickup volume into their
+/// inventory, and returns the native slots that changed (issue #337's fifth and
+/// last link).
+///
+/// This is vanilla's `Player.aiStep` → `ItemEntity.playerTouch` →
+/// `Inventory.add` chain, minus the XP-orb branch. See
+/// [`crate::block_drops::is_within_pickup_range`] for the volume and
+/// [`PlayerInventory::add`] for the destination order — both are vanilla
+/// behaviour that a plausible simplification gets wrong.
+///
+/// # Why the whole thing happens inside one `mobs.with`
+///
+/// Query-then-remove across two lock acquisitions is a duplication bug with a
+/// player on each side of it: two connections whose volumes overlap the same
+/// drop would both see it collectable, both credit it, and one `remove_item`
+/// would return `false` while the item had already been banked twice. Deciding
+/// and removing under a single lock makes the loser's `remove_item` the thing
+/// that fails, and it fails *before* the inventory write, so nothing is
+/// duplicated.
+///
+/// # A full inventory leaves the item in the world
+///
+/// [`PlayerInventory::add`] reports its leftover, and vanilla's `playerTouch`
+/// only removes the entity when `getInventory().add(...)` consumed everything.
+/// A partial pickup therefore credits what fitted and puts the remainder back as
+/// the item's new count — the entity stays, visibly, rather than the surplus
+/// vanishing.
+fn collect_nearby_items(
+    mobs: &MobHandle,
+    inventory: &mut PlayerInventory,
+    player_feet: Vec3,
+) -> Vec<usize> {
+    let mut changed: Vec<usize> = Vec::new();
+    mobs.with(|sim| {
+        for (id, item, count) in sim.items_within_pickup_range(player_feet) {
+            let stack = ItemStack::new(item, u32::from(count));
+            let (written, leftover) = inventory.add(stack);
+            match leftover {
+                None => {
+                    // Fully banked, so the entity goes. `remove_item` returning
+                    // `false` would mean another connection took it between the
+                    // query and here — impossible under this one lock, which is
+                    // the property the doc comment above is about.
+                    sim.remove_item(id);
+                }
+                Some(remaining) => {
+                    // Partial fit (or none at all): the inventory keeps what
+                    // fitted and the entity keeps the rest, exactly as vanilla's
+                    // in-place `ItemStack` shrink does. Clamped into `u8`
+                    // because that is what the lifecycle counts in; `remaining`
+                    // can never exceed the `count` we started from, which came
+                    // from that same `u8`.
+                    let left = u8::try_from(remaining.count).unwrap_or(u8::MAX);
+                    if left == 0 {
+                        sim.remove_item(id);
+                    } else {
+                        sim.set_item_count(id, left);
+                    }
+                }
+            }
+            for slot in written {
+                if !changed.contains(&slot) {
+                    changed.push(slot);
+                }
+            }
+        }
+    });
+    changed
 }
 
 /// Vanilla's `Direction.fromYRot` (`Direction.java:291-293`) restricted to the
@@ -3529,6 +3659,13 @@ async fn dispatch_play_packet<T, P, S>(
     // `serve_play`, advanced once per right-click (see
     // [`apply_composter_use`]'s `roll` parameter).
     composter_rng: &mut SpawnRng,
+    // Issue #337. This connection's block-drop roll source — seeded once in
+    // `serve_play`, advanced by every break that rolls a table (see
+    // `apply_block_action`'s parameter comment). A second stream rather than
+    // sharing the composter's, so a composter click cannot shift which drop a
+    // later break rolls; the two features would otherwise be coupled through
+    // nothing but draw order.
+    drops_rng: &mut SpawnRng,
     // Issue #335. This connection's declared channel support (register/
     // unregister interpretation happens here, in Play) and the shared registry
     // to dispatch ordinary payloads on.
@@ -3677,6 +3814,8 @@ where
                 block_entities,
                 open_container,
                 container_sync,
+                mobs,
+                drops_rng,
                 action,
                 pos,
             )
@@ -4017,6 +4156,10 @@ where
     // Issue #249. This connection's composter roll stream — see
     // `COMPOSTER_BEHAVIOR_SEED` and `dispatch_play_packet`'s parameter comment.
     let mut composter_rng = SpawnRng::new(COMPOSTER_BEHAVIOR_SEED);
+    // Issue #337. This connection's block-drop roll stream — see
+    // `block_drops::BLOCK_DROPS_BEHAVIOR_SEED` and `dispatch_play_packet`'s
+    // parameter comment for why it is separate from the composter's.
+    let mut drops_rng = SpawnRng::new(crate::block_drops::BLOCK_DROPS_BEHAVIOR_SEED);
     // Issue #329. This connection's per-player respawn point, written by
     // `apply_use_item_on`'s bed arm. Never read here — the placement half of
     // P2 is the next consumer (see `crate::world_spawn`'s module doc).
@@ -4117,6 +4260,7 @@ where
                     &mut outgoing_chat,
                     block_ticks,
                     &mut composter_rng,
+                    &mut drops_rng,
                     client_channels,
                     plugin_channels,
                     &mut respawn,
@@ -4175,6 +4319,35 @@ where
                     player_pos,
                 ) {
                     registry.set_position(ticket.entity_id(), Vec3::new(x, y, z));
+                }
+                // Issue #337: collect any drops this player is now standing in.
+                // Here, and not in `dispatch_play_packet`, for the same reason
+                // the position republish above is here: `player_pos` has just
+                // been updated by whichever movement packet arrived, and the
+                // `stream_pass` below will carry the resulting
+                // `REMOVE_ENTITIES` for the collected item in the very same
+                // pass — so the item vanishes from the world and appears in the
+                // hotbar together rather than a packet apart.
+                if let Some((x, y, z)) = player_pos {
+                    for native in collect_nearby_items(mobs, &mut inventory, Vec3::new(x, y, z)) {
+                        // Window `0`, menu slot for this native index. `state_id`
+                        // `0` matches every other server-initiated slot write in
+                        // this file (`apply_container_clicked` applies a click's
+                        // diff verbatim and never validates a stale id).
+                        if let Some(menu_slot) = window_zero_menu_slot(native) {
+                            apply(
+                                conn,
+                                &mut state,
+                                proto.encode_container_slot(
+                                    0,
+                                    0,
+                                    menu_slot,
+                                    inventory.native(native),
+                                ),
+                            )
+                            .await?;
+                        }
+                    }
                 }
                 // Issue #262: the same republish for facing. A separate
                 // `if let` rather than a third binding in the tuple above,
@@ -4542,6 +4715,9 @@ where
     // composter roll stream has no timer and no wasm32 dependency, so it is
     // wired identically on this target.
     let mut composter_rng = SpawnRng::new(COMPOSTER_BEHAVIOR_SEED);
+    // Issue #337 — see the native `serve_play`'s identical binding: the
+    // block-drop roll stream has no timer and no wasm32 dependency either.
+    let mut drops_rng = SpawnRng::new(crate::block_drops::BLOCK_DROPS_BEHAVIOR_SEED);
     // Issue #329 — see the native `serve_play`'s identical binding: the
     // per-player respawn point has no timer and no wasm32 dependency, so it
     // is wired identically on this target.
@@ -4589,6 +4765,7 @@ where
             &mut outgoing_chat,
             block_ticks,
             &mut composter_rng,
+            &mut drops_rng,
             client_channels,
             plugin_channels,
             &mut respawn,
@@ -4632,6 +4809,21 @@ where
             (player_ticket.as_ref(), entities.players(), player_pos)
         {
             registry.set_position(ticket.entity_id(), Vec3::new(x, y, z));
+        }
+        // Issue #337, identical to the native loop — the pickup sweep is
+        // packet-driven with no timer, so unlike `vitals`/`sync_open_container`
+        // this target loses nothing. See the native loop's comment.
+        if let Some((x, y, z)) = player_pos {
+            for native in collect_nearby_items(mobs, &mut inventory, Vec3::new(x, y, z)) {
+                if let Some(menu_slot) = window_zero_menu_slot(native) {
+                    apply(
+                        conn,
+                        &mut state,
+                        proto.encode_container_slot(0, 0, menu_slot, inventory.native(native)),
+                    )
+                    .await?;
+                }
+            }
         }
         // Issue #262, identical to the native loop — see its own comment.
         if let (Some(ticket), Some(registry), Some(rotation)) =
