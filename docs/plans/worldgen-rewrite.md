@@ -328,7 +328,10 @@ it does not start over. What it adds:
   palette interns; heap allocations in the column path (counting-allocator wrapper in the bench
   binary only); `pre_ore`/`post_ore` stage computations vs lookups (hits/misses); biome
   nearest-neighbour searches; RNG draws per stage. A counter beats a duration — this repo has a
-  measured 585× mis-attributed timing on record.
+  measured 585× mis-attributed timing on record, and the counters-off re-measure runs made the
+  same point inside this exact codebase: three vegetation timings on one identical binary read
+  63.42 / 63.77 / 52.28 ms — a 22% swing — while the allocation counter read **905,459 to the
+  digit, three times of three** (2026-08-07).
 - **Calibration assertions**: on one known chunk, counters must equal hand-derived expectations
   (e.g. exactly 98,304 `block_at` calls today; exactly 1,225 corner evals per interpolated slot
   after U4). A counter that cannot predict is a counter that cannot gate.
@@ -337,6 +340,20 @@ it does not start over. What it adds:
   bench against data that makes stages no-ops — is the documented history of this exact file).
 - **Two-arm rule**: any before/after comparison runs both arms interleaved in one process; a
   timing-shaped regression is re-run alone before being believed (CLAUDE.md).
+- **Profiling (`samply` — an instrument, never a gate):** a sampled profile answers *where*,
+  not *how much*. Use `samply` to decide which frames to attack; use counters to decide whether
+  an attack worked. A profile is never a unit's acceptance criterion, and a duration is never
+  preferred to a counter when both are available. The workflow already exists — cite it, do not
+  reinvent it: [`../roadmap/benchmarks.md`](../roadmap/benchmarks.md) documents `samply` +
+  `[profile.release] debug = 2` + `threadCPUDelta` weighting (`scripts/profile-cost-table.py`),
+  and records both that a plain `cargo build --release` already carries the DWARF `samply` needs
+  (deliberately no separate profiling profile to keep in sync) and the precedent that profiling
+  has paid for itself here: #75 was found only because a `samply` session was run when no bench
+  suite existed. `samply 0.13.1` is installed at `~/.cargo/bin/samply`. A different instrument
+  for a different question: `lodestone-shell` carries `tracing-chrome` for span-timeline
+  flamegraphs — a sampled profile says where CPU went; a span timeline says when stages ran and
+  overlapped. Profiles are large artifacts: write them under a scratch path adjacent to the
+  unit's private `--target-dir` and delete by exact name when the unit ends.
 - Acceptance criteria for later units are expressed **in these counters** (U3: zero String
   allocations steady-state; U6: stage computations == chunks × stages exactly; U7: zero stitch
   copies), so the harness is the contract, not a dashboard.
@@ -403,7 +420,9 @@ implied.
 
 Costs: S ≲ 1 session, M ≈ 1–2, L ≈ 3+, XL = epic (own issue tree). "RNG" = can this unit change
 any RNG draw or consumption order? Every unit's baseline evidence: `just health` green plus the
-gates named in Q4 step 2; per-unit evidence listed is *additional*.
+gates named in Q4 step 2; per-unit evidence listed is *additional*. A `samply` profile is the
+right way for a unit to *choose* its targets (see the harness section's profiling rules), but
+acceptance is always counters and gates — never a profile, never a bare duration.
 
 | # | Unit | Cluster (files) | Depends | Cost | RNG order |
 |---|------|-----------------|---------|------|-----------|
@@ -430,6 +449,12 @@ the orchestrator; the engine middle is a pipeline, not a fan-out. Genuinely para
 alongside it: U1/U2 (benches), U5 (engine files only, once U4's seam exists), U8's
 `vegetation.rs` interior (after U7 lands its seam), and the data-extraction phases of U13/U14.
 A six-agent fan-out across U3–U9 cannot happen; do not schedule one.
+
+**Disk note:** per-unit private `--target-dir`s and profile artifacts run to tens of GB each;
+abandoned ones filled the disk to 100% mid-planning (2026-08-07, ~147 GB reclaimed, ENOSPC broke
+tool output session-wide). Name them per-unit, delete by exact name when the unit ends, and have
+the orchestrator sweep stale `/private/tmp/lt-*` dirs periodically — a fourteen-unit rewrite will
+reproduce this otherwise.
 
 **Per-unit notes — the trap most likely to sink each:**
 
