@@ -138,8 +138,32 @@ And whichever pass owns it, the *colour* must stay the resolved fog colour — s
 [above](#the-sky-passs-clear-colour-is-the-world-below-the-horizon); a scratch
 value there is a pure-black band across the horizon, not an invisible detail.
 
-**Fancy clouds and the `cloudStatus` option: what is left, precisely.** Not done,
-and scoped here so the next attempt does not have to re-derive it. All constants
+**Fancy clouds and the `cloudStatus` option: what is left, precisely.**
+
+> **Items 1–3 below have since landed (issue #403) and this list is kept for its
+> constants, not for its status.** `crates/lodestone-render/src/cloud_mesh.rs` is
+> the real mesh, `SkyRenderer` retains the voxelized `CloudCells` (so item 2's "keeps
+> only its dimensions" is stale), and `SkyFrame::new` defaults to `Fancy`. Item 4,
+> the settings row, is still inactive.
+>
+> **The face enumeration is memoised, and getting there cost a doc-contradiction
+> lesson worth keeping.** `extruded_faces` is a pure function of `(camera cell x,
+> cell z, radius, CloudRelativePos)` and was called *every frame* — 578 cells
+> walked, up to 4678 faces allocated. `cloud_mesh.rs`'s own module doc asserted the
+> caching as done ("the faces once per camera *cell* — not per frame") while
+> `sky.rs`'s `CLOUD_FANCY_RADIUS_CELLS` doc said, correctly, that it was "what
+> `cloud_mesh`'s own module doc already asks for and this does not yet do". Two docs
+> in one crate, one true and one false, and the false one was the one a reader of
+> that file would find first. `CloudFaceCache` closed it: counter
+> `CloudFaceCache::rebuilds()`, measured 6 → **1** over six frames inside one cell,
+> with the **vertex** expansion deliberately still per frame (the sub-cell scroll
+> moves every tick, so a cache that froze the vertices would freeze the clouds).
+> **`CloudRelativePos` is in the key and is the part a reader drops** — it changes
+> at an unchanged cell when the camera crosses the layer; dropping it produced
+> "4168 cached verts vs 6288 uncached" in the gate's own control.
+> `crates/lodestone-render/tests/cloud_face_cache_counts.rs`, `DESIGN.md` §12.115.
+
+All constants
 below are read from `CloudRenderer.java` and `CloudStatus.java` in
 `.cache/mc/26.2/client-src`, not remembered.
 
