@@ -29,3 +29,11 @@
 # crates, 0 errors, 0 ICEs) and `cargo bench -p lodestone-worldgen --no-run`.
 channel = "nightly-2026-08-07"
 components = ["rustfmt", "clippy"]
+# `targets` is load-bearing, not decoration. Pinning the channel above was done with
+# `rustup toolchain install --profile minimal`, which installs the host target only —
+# and the previously-floating `nightly` happened to already carry
+# `wasm32-unknown-unknown`. The result was 19 `lodestone-wasm-host` tests failing to
+# build their guest, on a pin that had otherwise been verified green: an environmental
+# break that looks exactly like a code regression. Declaring the target here makes the
+# pin self-sufficient, so a fresh checkout or a new machine cannot reproduce it.
+targets = ["wasm32-unknown-unknown"]
