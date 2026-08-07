@@ -1,3 +1,15 @@
 [toolchain]
-channel = "1.95.0"
+# Nightly, deliberately: worldgen's rewrite uses `std::simd`, which is gated behind
+# `#![feature(portable_simd)]` and is nightly-only. The alternative was a
+# `#[cfg]`-selected scalar fallback, and that was rejected on parity grounds --
+# SIMD changes float accumulation order, so two arms can each be individually
+# "correct" and generate two different worlds from one seed, with nothing in a
+# single-arm test run able to see it. One implementation, gated once against the
+# JVM oracle, is the cheaper correctness story.
+#
+# The cost, stated rather than discovered later: `portable_simd` is an unstable
+# API that can change under us, and an unpinned `nightly` means any `rustup
+# update` can break the build. If that churn becomes expensive, pin a dated
+# nightly (`channel = "nightly-YYYY-MM-DD"`) rather than returning to stable.
+channel = "nightly"
 components = ["rustfmt", "clippy"]
