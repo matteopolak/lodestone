@@ -98,20 +98,269 @@
 //!
 //! [`crate::dense_grid::DenseBlockGrid`] for the sources, and
 //! [`crate::interner`] for the `StateId`↔`&str` shim `get`/`set` still need.
-//! There is **no buffer pool here, shared or otherwise** — the overlay is the
-//! only allocation, it is owned by the view, and the view is a local of the stage
-//! that made it. A shared pool behind a lock would re-create exactly the
-//! contention [`crate::overworld::store`] exists to delete; if this ever needs
-//! scratch reuse, it goes in a `thread_local` free-list.
+//! There is still **no shared buffer pool** — see [`scratch`], which is the
+//! `thread_local` free-list this module's own doc named as the only acceptable
+//! form of reuse here, installed by Unit 19. A pool behind a lock would
+//! re-create exactly the contention [`crate::overworld::store`] exists to
+//! delete, and `4307b59` is the scar for getting that wrong.
 
 use std::sync::Arc;
-
-use lodestone_worldgen_core::hash::FastMap;
 
 use crate::dense_grid::DenseBlockGrid;
 use crate::interner::{StateId, StateInterner};
 
 use super::{REGION_MAX, REGION_MIN};
+
+pub(crate) use scratch::{Overlay, WriteLog};
+
+/// Per-thread recycling for the two container shapes decoration writes into.
+///
+/// # Why this exists
+///
+/// Unit 8 took a warm served column from 20,678 heap allocations to 87, of which
+/// 41 are the returned column's own palette/blocks buffers (the rewrite plan's
+/// explicit O(1) output allowance) and **30 were these two containers growing
+/// geometrically from empty on every column** — `VegGrid`'s write overlay and its
+/// `dirty` log, plus [`RegionView`]'s overlay. `O(log writes)` each, so ~13 per
+/// vegetation pass. Unit 8 could not remove them because they are this unit's
+/// medium, and Unit 7 had recorded a deliberate decision not to pool them.
+///
+/// # Why it is a `thread_local` free-list and not a pool
+///
+/// The constraint that made Unit 7 avoid reuse is real and unchanged: a source
+/// grid is an `Arc` shared with every other in-flight column that has the same
+/// neighbour, and the rewrite plan's parallel model gives each chunk's grid
+/// exactly one writer. A **shared** pool behind a lock would put 289 concurrent
+/// generator calls back into cache contention on one cache line —
+/// [`crate::overworld::store`]'s own doc makes "no shared pool here, ever" a
+/// change rule, and commit `4307b59` is the measured incident behind it. A
+/// free-list in thread-local storage has no cross-thread edge at all: a buffer
+/// that migrates (taken on one thread, dropped on another) is still correct,
+/// merely relocated.
+///
+/// # How to change it, and the two traps
+///
+/// * **A recycled `HashMap` has a different capacity, and therefore a different
+///   iteration order, from a fresh one.** That is only safe because neither
+///   consumer observes iteration order: `VegGrid`'s map is private to its module
+///   and reached solely through `get`/`insert` (never iterated at all), and
+///   [`RegionView::centre_writes_in_scan_order`] sorts by the full key precisely
+///   so order cannot be observed — see the ordering argument on
+///   [`lodestone_worldgen_core::hash::fast`], and `crate::overworld`'s module doc
+///   for the palette-order bug this repo has already shipped once. **Before
+///   letting anything else share this free-list, establish that half of the
+///   argument at the new consumer**, exactly as a `FastMap` swap would require.
+/// * **Take-and-return, never borrow across a body.** [`Overlay`] and
+///   [`WriteLog`] own their buffer and hand it back in `Drop`, so a nested or
+///   re-entrant construction gets a *fresh* (merely allocating) buffer instead of
+///   a `RefCell` panic — the same discipline Unit 8's `place.rs`/`tree.rs`
+///   scratch uses, and for the same reason.
+mod scratch {
+    use std::cell::{Cell, RefCell};
+
+    use lodestone_worldgen_core::hash::FastMap;
+
+    use crate::interner::StateId;
+
+    /// The overlay's key: centre-relative local `(lx, y, lz)` for
+    /// [`super::RegionView`], `VegGrid`-local for the vegetation grid. Both are
+    /// "local coordinates in that medium's own space" — the distinction the
+    /// absolute-vs-local bug lived in — so this alias deliberately does **not**
+    /// claim which.
+    type Key = (i32, i32, i32);
+
+    /// How many buffers of each shape one thread keeps. Steady state needs one
+    /// per shape per simultaneously-live medium (ore's view and vegetation's grid
+    /// are sequential within a column, so one); the rest of the headroom exists so
+    /// a re-entrant or nested construction does not permanently lose its buffer.
+    ///
+    /// A bound rather than an unbounded `Vec` because this is thread-local storage
+    /// that lives as long as the thread: an unbounded free-list is a leak wearing
+    /// a cache's clothes.
+    const KEEP: usize = 4;
+
+    thread_local! {
+        static MAPS: RefCell<Vec<FastMap<Key, StateId>>> = const { RefCell::new(Vec::new()) };
+        static LOGS: RefCell<Vec<Vec<Key>>> = const { RefCell::new(Vec::new()) };
+        /// Takes that found the free-list empty and had to build a container from
+        /// scratch. `const`-initialised so reading it cannot itself allocate.
+        ///
+        /// **This is the instrument that makes a residual allocation count
+        /// attributable.** A warm column still allocating a handful of times says
+        /// nothing on its own about *which* container is responsible; this
+        /// separates "one of these containers escaped the free-list" from "the
+        /// residual is somewhere else entirely" without needing a profiler or a
+        /// call-site attribution pass. Always compiled in, like `ids`' fast/slow counters and
+        /// for the same reason: it is per-*medium*, not per-block, so it costs a
+        /// thread-local increment a few times per column.
+        static MISSES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// A sparse `(local) -> StateId` overlay whose backing map is recycled
+    /// through this thread's free-list.
+    ///
+    /// Cleared on **return** rather than on take, so a buffer sitting in the
+    /// free-list holds no keys: a stale entry can never be read by whoever takes
+    /// it next, which is the property that makes reuse invisible.
+    #[derive(Debug)]
+    pub(crate) struct Overlay {
+        /// `Option` only so [`Drop`] can move the map out. Every method sees it
+        /// as present; `expect` is unreachable outside `Drop`.
+        map: Option<FastMap<Key, StateId>>,
+    }
+
+    impl Default for Overlay {
+        fn default() -> Self {
+            let recycled = MAPS
+                .try_with(|free| free.try_borrow_mut().ok().and_then(|mut f| f.pop()))
+                .ok()
+                .flatten();
+            if recycled.is_none() {
+                bump_miss();
+            }
+            Self { map: Some(recycled.unwrap_or_default()) }
+        }
+    }
+
+    impl Overlay {
+        fn map(&self) -> &FastMap<Key, StateId> {
+            self.map.as_ref().expect("overlay map is only taken in Drop")
+        }
+
+        fn map_mut(&mut self) -> &mut FastMap<Key, StateId> {
+            self.map.as_mut().expect("overlay map is only taken in Drop")
+        }
+
+        pub(crate) fn get(&self, key: &Key) -> Option<StateId> {
+            self.map().get(key).copied()
+        }
+
+        pub(crate) fn insert(&mut self, key: Key, state: StateId) {
+            self.map_mut().insert(key, state);
+        }
+
+        /// Number of **distinct** cells written — `HashMap::len`, unchanged, so
+        /// overwriting a cell does not grow it.
+        pub(crate) fn len(&self) -> usize {
+            self.map().len()
+        }
+
+        /// Every entry. Only for a consumer that imposes a total order of its own
+        /// — see this module's doc.
+        pub(crate) fn iter(&self) -> impl Iterator<Item = (&Key, &StateId)> {
+            self.map().iter()
+        }
+    }
+
+    impl Drop for Overlay {
+        fn drop(&mut self) {
+            let Some(mut map) = self.map.take() else {
+                return;
+            };
+            // `clear` keeps the capacity — that is the whole point — and is what
+            // makes the next taker's view identical to a fresh map's.
+            map.clear();
+            let _ = MAPS.try_with(|free| {
+                if let Ok(mut f) = free.try_borrow_mut() {
+                    if f.len() < KEEP {
+                        f.push(map);
+                    }
+                }
+            });
+        }
+    }
+
+    /// A write-order log of local keys whose backing `Vec` is recycled through
+    /// this thread's free-list. `VegGrid::dirty`'s medium.
+    ///
+    /// Write **order** is world-visible here (`vegetation_stage` folds back in
+    /// insertion order and a `DenseBlockGrid` appends to its palette in
+    /// first-write order), so this stays a `Vec` and nothing about recycling
+    /// touches that: a returned log is empty and a taken one is appended to from
+    /// index 0, exactly as `Vec::new()` was.
+    #[derive(Debug)]
+    pub(crate) struct WriteLog {
+        entries: Option<Vec<Key>>,
+    }
+
+    impl Default for WriteLog {
+        fn default() -> Self {
+            let recycled = LOGS
+                .try_with(|free| free.try_borrow_mut().ok().and_then(|mut f| f.pop()))
+                .ok()
+                .flatten();
+            if recycled.is_none() {
+                bump_miss();
+            }
+            Self { entries: Some(recycled.unwrap_or_default()) }
+        }
+    }
+
+    impl WriteLog {
+        fn entries(&self) -> &Vec<Key> {
+            self.entries.as_ref().expect("write log is only taken in Drop")
+        }
+
+        pub(crate) fn push(&mut self, key: Key) {
+            self.entries.as_mut().expect("write log is only taken in Drop").push(key);
+        }
+
+        pub(crate) fn len(&self) -> usize {
+            self.entries().len()
+        }
+
+        pub(crate) fn iter(&self) -> impl Iterator<Item = &Key> {
+            self.entries().iter()
+        }
+    }
+
+    impl Drop for WriteLog {
+        fn drop(&mut self) {
+            let Some(mut entries) = self.entries.take() else {
+                return;
+            };
+            entries.clear();
+            let _ = LOGS.try_with(|free| {
+                if let Ok(mut f) = free.try_borrow_mut() {
+                    if f.len() < KEEP {
+                        f.push(entries);
+                    }
+                }
+            });
+        }
+    }
+
+    /// How many buffers of each shape this thread is currently holding — for the
+    /// gates in `tests/vegetation_allocs.rs`, which need to distinguish "the
+    /// free-list served the buffer" from "the count happened to be low".
+    #[must_use]
+    pub(crate) fn free_list_lengths() -> (usize, usize) {
+        let maps = MAPS.with(|f| f.borrow().len());
+        let logs = LOGS.with(|f| f.borrow().len());
+        (maps, logs)
+    }
+
+    fn bump_miss() {
+        let _ = MISSES.try_with(|m| m.set(m.get().wrapping_add(1)));
+    }
+
+    /// Takes on this thread that found the free-list empty and had to allocate.
+    pub(crate) fn misses() -> u64 {
+        MISSES.try_with(Cell::get).unwrap_or(0)
+    }
+
+    /// Zeroes [`misses`] for this thread.
+    pub(crate) fn reset_misses() {
+        let _ = MISSES.try_with(|m| m.set(0));
+    }
+
+    /// Drops every buffer this thread is holding. The control half of the
+    /// allocation gate — see [`super::drain_scratch_free_lists`].
+    pub(crate) fn drain_free_lists() {
+        MAPS.with(|f| f.borrow_mut().clear());
+        LOGS.with(|f| f.borrow_mut().clear());
+    }
+}
 
 /// Which of the nine source chunks owns centre-relative local column
 /// `(lx, lz)`, or `None` for a column outside the driven 3×3 region.
@@ -141,6 +390,46 @@ fn slot_of_offset(dx: i32, dz: i32) -> usize {
     ((dx + 1) * 3 + (dz + 1)) as usize
 }
 
+/// How many recycled buffers of each shape (overlay map, write log) this thread
+/// currently holds — for a gate that needs to tell "the free-list served this
+/// buffer" apart from "the count happened to be low".
+#[must_use]
+pub fn scratch_free_list_lengths() -> (usize, usize) {
+    scratch::free_list_lengths()
+}
+
+/// Empties this thread's scratch free-lists, so the next medium constructed on
+/// this thread has to allocate its containers from scratch.
+///
+/// **This exists to make the allocation gate's control real.** An assertion that
+/// a warm pass allocates zero is worth exactly as much as the evidence the
+/// mechanism would have fired, and the mechanism here is the free-list. Draining
+/// it and re-running the *same* pass must put the allocations back — the same
+/// binary, the same code path, the same scene, one variable. See
+/// `recycling_is_what_removes_the_containers_and_draining_the_free_list_puts_them_back`
+/// in `tests/vegetation_allocs.rs`.
+pub fn drain_scratch_free_lists() {
+    scratch::drain_free_lists();
+}
+
+/// How many decoration media on this thread had to **allocate** their containers
+/// because the free-list was empty, since [`reset_scratch_misses`].
+///
+/// This is what makes a residual allocation count attributable rather than merely
+/// small. A warm column that still allocates a handful of times leaves open which
+/// container is responsible; a zero here says **neither of these two is**, so the
+/// residual belongs to something else and the search moves elsewhere. It is the
+/// counter form of the question, which `DESIGN.md` §12 prefers to a duration.
+#[must_use]
+pub fn scratch_misses() -> u64 {
+    scratch::misses()
+}
+
+/// Zeroes [`scratch_misses`] for this thread.
+pub fn reset_scratch_misses() {
+    scratch::reset_misses();
+}
+
 /// A read/write view over one column's 3×3 decoration neighbourhood.
 ///
 /// Addressed in **centre-relative local** coordinates on every method
@@ -162,17 +451,20 @@ pub struct RegionView<'a> {
     /// few thousand cells per column against a 884,736-cell region, which is
     /// the whole reason the region does not need materialising.
     ///
-    /// [`FastMap`], not the default hasher. This was the single hottest hash
-    /// consumer in the whole pipeline when U17 profiled it — **39.5% of all
-    /// SipHash time**, because ore placement probes it on every read and insert
-    /// on every write, and `reserve_rehash` showed up on top of that as it grew.
+    /// [`Overlay`]: a [`lodestone_worldgen_core::hash::FastMap`] whose buffer is
+    /// recycled through [`scratch`]'s per-thread free-list. Not the default
+    /// hasher: this was the single hottest hash consumer in the whole pipeline
+    /// when U17 profiled it — **39.5% of all SipHash time**, because ore
+    /// placement probes it on every read and inserts on every write — and
+    /// `reserve_rehash` showed up on top of that at 6.8% as it grew, which is the
+    /// half U19's recycling removes (a reused buffer is already at capacity).
     ///
-    /// Re-hashing it is safe *specifically* because
+    /// Both re-hashing it *and* recycling it are safe for the same single reason:
     /// [`Self::centre_writes_in_scan_order`] sorts by the full key rather than
     /// trusting iteration order — see the ordering argument on
     /// [`lodestone_worldgen_core::hash::fast`], and the doc on that method,
     /// which was already written to defend against exactly this.
-    overlay: FastMap<(i32, i32, i32), StateId>,
+    overlay: Overlay,
     interner: Arc<StateInterner>,
 }
 
@@ -210,7 +502,7 @@ impl<'a> RegionView<'a> {
             origin_z: centre_cz * 16,
             min_y,
             height,
-            overlay: FastMap::default(),
+            overlay: Overlay::default(),
             interner,
         }
     }
@@ -234,7 +526,7 @@ impl<'a> RegionView<'a> {
             origin_z: 0,
             min_y,
             height,
-            overlay: FastMap::default(),
+            overlay: Overlay::default(),
             interner: Arc::clone(grid.interner()),
         }
     }
@@ -264,7 +556,7 @@ impl<'a> RegionView<'a> {
         if !self.in_region(lx, y, lz) {
             return StateId::AIR;
         }
-        if let Some(&id) = self.overlay.get(&(lx, y, lz)) {
+        if let Some(id) = self.overlay.get(&(lx, y, lz)) {
             return id;
         }
         match source_slot(lx, lz).and_then(|slot| self.sources[slot]) {
@@ -285,7 +577,7 @@ impl<'a> RegionView<'a> {
         if !self.in_region(lx, y, lz) {
             return "minecraft:air";
         }
-        if let Some(&id) = self.overlay.get(&(lx, y, lz)) {
+        if let Some(id) = self.overlay.get(&(lx, y, lz)) {
             return self.interner.name_of(id);
         }
         match source_slot(lx, lz).and_then(|slot| self.sources[slot]) {
@@ -415,6 +707,89 @@ mod tests {
              CENTRE, or the exhaustive routing test proves nothing about div_euclid",
         );
         assert_ne!(source_slot(-1, -1), truncating(-1, -1));
+    }
+
+    /// A recycled buffer must be indistinguishable from a fresh one. This is the
+    /// whole correctness surface of [`scratch`]: a returned buffer is cleared on
+    /// the way *out*, so a stale entry can never be read by whoever takes it next.
+    ///
+    /// The control half matters as much as the claim. Without the second
+    /// assertion — that the buffer really was the recycled one — this test passes
+    /// identically against a free-list that never hands anything back, which is
+    /// the *premise-false* shape: it would be testing `HashMap::new()`.
+    #[test]
+    fn a_recycled_overlay_is_empty_and_is_really_the_recycled_one() {
+        scratch::drain_free_lists();
+        {
+            let mut first = Overlay::default();
+            for y in 0..64 {
+                first.insert((1, y, 2), StateId::AIR);
+            }
+            assert_eq!(first.len(), 64);
+        }
+        // Control: the drop really did return it, so the take below is a reuse and
+        // not a fresh allocation wearing the same name.
+        assert_eq!(
+            scratch::free_list_lengths().0,
+            1,
+            "control: the dropped overlay must be on this thread's free-list, or the \
+             emptiness assertion below is about a brand-new map and proves nothing \
+             about recycling",
+        );
+        let second = Overlay::default();
+        assert_eq!(second.len(), 0, "a recycled overlay must carry no stale keys");
+        assert_eq!(
+            second.get(&(1, 7, 2)),
+            None,
+            "a key written through the previous holder must not be visible",
+        );
+        assert_eq!(scratch::free_list_lengths().0, 0, "the take must consume it");
+    }
+
+    /// The same contract for the write log, and additionally that write **order**
+    /// starts at index 0 — the log's order reaches the served palette through
+    /// `vegetation_stage`'s fold-back, so a recycled log that retained entries
+    /// would be a world-visible defect, not a leak.
+    #[test]
+    fn a_recycled_write_log_is_empty_and_restarts_at_index_zero() {
+        scratch::drain_free_lists();
+        {
+            let mut first = WriteLog::default();
+            for y in 0..32 {
+                first.push((3, y, 4));
+            }
+            assert_eq!(first.len(), 32);
+        }
+        assert_eq!(
+            scratch::free_list_lengths().1,
+            1,
+            "control: the dropped log must be on the free-list, or this test is \
+             about a fresh Vec",
+        );
+        let mut second = WriteLog::default();
+        assert_eq!(second.len(), 0, "a recycled write log must be empty");
+        second.push((9, 9, 9));
+        assert_eq!(
+            second.iter().copied().collect::<Vec<_>>(),
+            vec![(9, 9, 9)],
+            "the first push into a recycled log must land at index 0",
+        );
+    }
+
+    /// The free-list is bounded, so it cannot become a leak that only shows up on a
+    /// long-lived worker thread.
+    #[test]
+    fn the_free_list_does_not_grow_without_bound() {
+        scratch::drain_free_lists();
+        let overlays: Vec<Overlay> = (0..32).map(|_| Overlay::default()).collect();
+        drop(overlays);
+        let (maps, _) = scratch::free_list_lengths();
+        assert!(
+            maps <= 4,
+            "32 overlays were dropped and the free-list kept {maps} of them; a \
+             thread-local cache with no bound is a leak wearing a cache's clothes",
+        );
+        assert!(maps > 0, "control: it must keep at least one, or reuse never happens");
     }
 
     fn chunk_grid(interner: &Arc<StateInterner>, cx: i32, cz: i32, state: &str) -> DenseBlockGrid {

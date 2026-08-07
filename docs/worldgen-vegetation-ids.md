@@ -117,13 +117,16 @@ positions is ever added, it needs its own variant; it must not be smuggled in as
   **only because air carries no block-state properties**; `config::is_air`'s doc says not to
   add a property-carrying state to it, and
   `the_id_based_air_test_answers_what_the_string_scan_answered` is the differential control.
-- **The residual 30 allocations are `VegGrid`'s own containers, not the engine.** The write
-  overlay (`HashMap`) and the `dirty` log (`Vec`) start empty on a fresh grid and grow
-  geometrically — `O(log writes)`.
-  [`worldgen-in-place-decoration.md`](./worldgen-in-place-decoration.md) records that Unit 7
+- **The residual 30 allocations were `VegGrid`'s own containers, not the engine — and Unit 19
+  has since removed them.** The write overlay (`HashMap`) and the `dirty` log (`Vec`) started
+  empty on a fresh grid and grew geometrically, `O(log writes)`.
+  [`worldgen-in-place-decoration.md`](./worldgen-in-place-decoration.md) recorded that Unit 7
   deliberately did not pool them ("If scratch reuse is ever needed here it goes in a
-  `thread_local` free-list"), so reaching literal zero is a change to that unit's medium and
-  is left as a named follow-up rather than smuggled in here.
+  `thread_local` free-list"), so Unit 8 left them rather than change a non-owned unit's
+  medium. Unit 19 owned both files, took exactly that escape hatch, and a warm column now
+  reads **64** (41 output + 16 other + 7 vegetation) rather than 87 — see
+  [`worldgen-decoration-scratch-reuse.md`](./worldgen-decoration-scratch-reuse.md), which
+  also records why the 7 that remain are provably not those containers.
 - **A `_ => false` in `member` is a silent no-op the way every terminal router arm in this
   repo is.** `member` is exhaustive over `Tag` on purpose; keep it that way.
 

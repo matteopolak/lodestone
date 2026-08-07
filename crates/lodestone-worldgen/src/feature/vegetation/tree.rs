@@ -4,7 +4,9 @@
 //! Moved here verbatim from `feature/vegetation.rs` by U16 Phase B.
 
 use std::cell::RefCell;
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
+
+use lodestone_worldgen_core::hash::FastSet;
 
 use serde_json::Value;
 
@@ -509,23 +511,32 @@ pub(super) fn update_leaf_distances(
 /// [`update_leaf_distances`]' reusable bucket queue and visited set.
 struct Bfs {
     buckets: Vec<VecDeque<(i32, i32, i32)>>,
-    visited: HashSet<(i32, i32, i32)>,
+    /// [`FastSet`], not the default hasher — the third of the vegetation maps U17
+    /// measured at 0.8% of all worldgen CPU and left for this file's owner.
+    ///
+    /// Order-safe, and the argument is stronger here than "never iterated": the BFS
+    /// **traversal** order comes entirely from `buckets`, and this set only ever
+    /// answers membership (`clear`, `insert`, `contains` — no `iter`, no `drain`).
+    /// So the leaf `distance` values this function assigns cannot depend on the
+    /// hasher, which is what matters, because those values reach the wire.
+    visited: FastSet<(i32, i32, i32)>,
 }
 
 impl Default for Bfs {
     fn default() -> Self {
         Self {
             buckets: Vec::new(),
-            visited: HashSet::new(),
+            visited: FastSet::default(),
         }
     }
 }
 
 thread_local! {
-    /// One tree's BFS scratch, reused across trees. Not `const`-initialised
-    /// (`HashSet::new` is not a const fn under the default hasher), so the first
-    /// touch on a thread allocates — which is warmup, not steady state, and is why
-    /// the acceptance gate measures a *second* pass rather than the first.
+    /// One tree's BFS scratch, reused across trees. Not `const`-initialised — the
+    /// `Vec` would be, but `HashSet::with_hasher` is only usable here through
+    /// `Default`, so the first touch on a thread allocates. That is warmup, not
+    /// steady state, and is why the acceptance gate measures a *second* pass rather
+    /// than the first.
     static BFS: RefCell<Bfs> = RefCell::new(Bfs::default());
 }
 

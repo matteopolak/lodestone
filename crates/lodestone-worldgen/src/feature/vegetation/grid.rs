@@ -3,11 +3,10 @@
 //!
 //! Moved here verbatim from `feature/vegetation.rs` by U16 Phase B.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::dense_grid::DenseBlockGrid;
-use crate::feature::region_view::source_slot;
+use crate::feature::region_view::{Overlay, WriteLog, source_slot};
 use crate::interner::{StateId, StateInterner};
 
 use self::census::bump as census_bump;
@@ -84,7 +83,7 @@ pub struct VegGrid {
     /// which is what keeps every parity fixture — naturally one hand-written
     /// sparse map with no source grids at all — working unchanged against the
     /// identical read path.
-    blocks: HashMap<(i32, i32, i32), StateId>,
+    blocks: Overlay,
     /// The nine post-ore source chunks a read falls through to, indexed by
     /// [`crate::feature::region_view::source_slot`] over this grid's **local**
     /// coordinates. Empty for every fixture/unit-test constructor (a miss then
@@ -119,7 +118,7 @@ pub struct VegGrid {
     /// carries no ambiguity to begin with. Lets the fold-back touch only the
     /// (typically small) written subset instead of rewriting all
     /// `16 × height × 16` cells.
-    dirty: Vec<(i32, i32, i32)>,
+    dirty: WriteLog,
     origin_x: i32,
     origin_z: i32,
 pub(super)     min_y: i32,
@@ -189,10 +188,10 @@ impl VegGrid {
             interner.id_of("minecraft:void_air"),
         ];
         Self {
-            blocks: HashMap::new(),
+            blocks: Overlay::default(),
             sources: std::array::from_fn(|_| None),
             interner,
-            dirty: Vec::new(),
+            dirty: WriteLog::default(),
             origin_x,
             origin_z,
             min_y,
@@ -278,7 +277,7 @@ impl VegGrid {
                 self.origin_x + lx,
                 y,
                 self.origin_z + lz,
-                self.blocks.get(&(lx, y, lz)).copied().unwrap_or(StateId::AIR),
+                self.blocks.get(&(lx, y, lz)).unwrap_or(StateId::AIR),
             )
         })
     }
@@ -348,7 +347,7 @@ impl VegGrid {
             return StateId::AIR;
         }
         match self.blocks.get(&(lx, y, lz)) {
-            Some(&id) => id,
+            Some(id) => id,
             None => self.source_id(lx, y, lz),
         }
     }
