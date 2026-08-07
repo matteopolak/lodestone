@@ -3102,10 +3102,18 @@ mod tests {
 
     /// Removing the intermediate `HashMap` must not move a single block.
     ///
+    /// `#[ignore]`d for the same reason the thirteen collision gates above it are:
+    /// `LiveCollision::new` needs a real [`BlockAtlas`] and `vanilla_atlas()` reads
+    /// the client jar out of `.cache/`, which no `git worktree` has. Left
+    /// un-ignored it passed in the main checkout and failed in every isolated
+    /// verification worktree — a test that is green only where it was written.
+    ///
     /// Not "the grid is built": the dense build and the old map build are compared
     /// cell for cell over the whole footprint and a ring outside it, including the
     /// absent edge column whose two footprints genuinely differ.
     #[test]
+    #[ignore = "requires the vanilla client.jar (LiveCollision::new needs a real BlockAtlas); \
+                run with -- --ignored"]
     fn the_dense_grid_answers_exactly_what_the_map_build_did() {
         let atlas = vanilla_atlas();
         let dense = grid_fixture_view(grid_fixture_aligned(false), &atlas);
@@ -3149,6 +3157,7 @@ mod tests {
     /// caught. Run it and watch it disagree — a gate that only ever sees the
     /// correct order proves nothing about the order.
     #[test]
+    #[ignore = "requires the vanilla client.jar, like its subject above"]
     fn a_transposed_request_order_is_detected_by_that_comparison() {
         let atlas = vanilla_atlas();
         let transposed = grid_fixture_view(grid_fixture_aligned(true), &atlas);
