@@ -1,91 +1,97 @@
 //! Vanilla's `Climate.RTree`, ported — the search structure that replaces the
-//! O(table_len) brute-force climate scan (`docs/plans/worldgen-rewrite.md` D5).
+//! O(table_len) brute-force climate scan (`docs/plans/worldgen-rewrite.md` D5),
+//! and since the owner's ruling on #492 also **the definition of the answer**.
 //!
-//! # What is ported verbatim, and what deliberately is not
+//! # What is ported, and the one thing that cannot be
 //!
 //! **The tree structure is a literal port** of `Climate.RTree.create`/`build`/
 //! `bucketize`/`sort`/`cost`/`buildParameterSpace` (`net/minecraft/world/level/
 //! biome/Climate.java`, 26.2 de-obfuscated). Node ordering therefore comes from
-//! the game data's own row order run through vanilla's own splitting heuristic
-//! — nothing here re-derives a bucketing scheme of its own, which is the
-//! property `docs/plans/worldgen-rewrite.md` Q2 asks for ("tree structure taken
-//! from the game data's own node ordering").
+//! the game data's own row order run through vanilla's own splitting heuristic —
+//! nothing here re-derives a bucketing scheme of its own.
 //!
-//! **The search is not a literal port, and that is the whole point of this
-//! module.** Read `SubTree.search` in the Java:
+//! **The search is now a literal port too**, with exactly one documented
+//! omission: `RTree.lastResult`. Vanilla's `SubTree.search` is
 //!
 //! ```java
 //! long minDistance = candidate == null ? Long.MAX_VALUE : distanceMetric.distance(candidate, target);
+//! Leaf<T> closestLeaf = candidate;
 //! for (Node<T> child : this.children) {
 //!    long childDistance = distanceMetric.distance(child, target);
-//!    if (minDistance > childDistance) { ... if (minDistance > leafDistance) { ... } }
+//!    if (minDistance > childDistance) {
+//!       Leaf<T> leaf = child.search(target, closestLeaf, distanceMetric);
+//!       long leafDistance = child == leaf ? childDistance : distanceMetric.distance(leaf, target);
+//!       if (minDistance > leafDistance) { minDistance = leafDistance; closestLeaf = leaf; }
+//!    }
 //! }
 //! ```
 //!
-//! Both comparisons are **strict**, and `candidate` is seeded from
-//! `RTree.lastResult`, a `ThreadLocal` holding the previous search's leaf. Three
-//! consequences, all of them measured off the source rather than assumed:
+//! and `RTree.search` seeds `candidate` from `this.lastResult`, a `ThreadLocal`
+//! holding *the previous search's leaf*, then stores the new one.
 //!
-//! 1. On an exact distance tie the **incumbent wins**, so the answer depends on
-//!    which leaf the tree happened to reach first — i.e. on child order.
-//! 2. Because the incumbent can be `lastResult`, the answer depends on **what
-//!    this thread searched previously**. Vanilla's tree is therefore *not a pure
-//!    function of the target* when ties exist.
-//! 3. Vanilla's own `findValueBruteForce` breaks ties by **earliest table row**
-//!    (`if (fitness < bestFitness)` over `values()` in order). So vanilla ships
-//!    two searches with two different tie-breaks and uses the history-dependent
-//!    one.
+//! ## What `lastResult` can and cannot do — traced, not guessed
 //!
-//! Porting (1)+(2) into this engine would put thread-local search history into
-//! chunk generation: two identically-seeded generators could disagree, and
-//! `column_is_byte_identical_across_two_independently_constructed_generators`
-//! would become a coin flip. Per the plan's Q4.5 rollback rule the old engine is
-//! the bridge and its behaviour is JVM-proven, and the old engine is brute
-//! force. So this port keeps **brute force's tie-break** and makes the tree
-//! *provably* result-identical to it:
+//! This matters because if the seed reached the answer, "what vanilla does" would
+//! be thread-schedule-dependent and could not be implemented as a function at all.
+//! Two claims, both resting on span containment (below):
 //!
-//! | vanilla | here |
-//! |---|---|
-//! | prune when `best > child_bound` (strict) | descend when `child_bound <= best_dist` — ties are **never** pruned |
-//! | incumbent wins a tie | **lowest table row wins a tie** |
-//! | `ThreadLocal` last-result seed decides ties | last-result seed is a pure pruning *hint*, provably unable to change the answer |
+//! * **It cannot change the returned leaf's distance.** A node's bound
+//!   lower-bounds every leaf beneath it. A subtree is skipped only when
+//!   `minDistance <= bound`, and at that moment every leaf inside is at distance
+//!   `>= bound >= minDistance`; `minDistance` is always the distance of some real
+//!   leaf and only decreases. So no skipped subtree ever held anything better, and
+//!   the returned leaf is always at the global minimum distance `d_min` — for
+//!   **every** seed, including an adversarial one.
+//! * **It can change the returned *row*.** If `dist(candidate) == d_min`, then
+//!   `minDistance == d_min` from the start; every subtree has `bound <= d_min` so
+//!   is skipped unless `bound < d_min`, and any subtree that *is* descended yields
+//!   a leaf at distance `>= d_min`, so the strict `minDistance > leafDistance`
+//!   never fires. **The candidate itself is returned**, beating whichever leaf
+//!   tree order would otherwise have selected.
 //!
-//! # Why result-identity is a theorem here, not a hope
+//! So `lastResult` is not a pure optimisation: at a target where two rows tie on
+//! squared distance, vanilla's answer depends on what that thread searched before.
+//! `a_tying_seed_changes_the_returned_row` in `biome_tree_identity.rs` exhibits a
+//! concrete case rather than leaving this as an argument.
 //!
-//! Define `key(L) = (dist(L, t), row(L))` for a leaf `L`, ordered
-//! lexicographically. Brute force returns the leaf minimising `key` (its strict
-//! `<` on distance keeps the earliest row on a tie, which is exactly the
-//! lexicographic minimum). [`BiomeTree::nearest_row`] also returns the
-//! lexicographic minimum, because:
+//! ## Therefore: which vanilla behaviour this implements
 //!
-//! * **The node bound is a lower bound.** A subtree's `space[i]` is the
-//!   *interval hull* of its children's (`buildParameterSpace` unions with
-//!   `Parameter.span`), and for `[lo, hi] ⊇ [lo', hi']` we have
-//!   `distance([lo, hi], t) <= distance([lo', hi'], t)` for every `t` — widening
-//!   a span can only move `t` closer to it or leave it inside. By induction
-//!   `bound(N, t) <= dist(L, t)` for every leaf `L` under `N`.
-//!   [`BiomeTree::hull_containment_violations`] checks the premise
-//!   (`space(child) ⊆ space(parent)` on all 7 axes) exhaustively over **every**
-//!   node/child pair in the real tree, so this is a verified premise rather
-//!   than a claim about code that was written correctly.
-//! * **Nothing that could tie is pruned.** A subtree is skipped only when
-//!   `bound > best_dist` *or* when `bound == best_dist` and the subtree's
-//!   minimum row (`min_row`, precomputed) cannot beat the incumbent's row. In
-//!   both cases every leaf inside is `key`-worse than the incumbent, and the
-//!   incumbent only improves, so a pruned subtree can never hold the answer.
-//! * **The candidate set therefore always contains the lexicographic minimum**,
-//!   and `Best::offer` is a lexicographic min-reduction — an associative,
-//!   commutative, idempotent fold. Visit order and the initial seed cannot
-//!   change its result.
+//! **Implemented — the fresh-instance answer:** vanilla's traversal with
+//! `candidate == null`, i.e. *the first leaf in vanilla's pruned DFS child order
+//! achieving the minimum distance*. That is what a freshly constructed
+//! `ParameterList` returns, what vanilla's very first sample after load returns,
+//! and the only reading of "what vanilla does" that is a function of the target.
 //!
-//! That last line is what licenses the `AtomicU32` seed hint: any leaf row is a
-//! legal seed, a torn or foreign read is still a legal seed, and the fold's
-//! result is seed-independent. So the locality trick vanilla gets from a
-//! `ThreadLocal` is available here **without** making output history-dependent.
-//! `biome_tree_identity.rs`'s `the_result_is_invariant_under_every_search_seed`
-//! is the gate on that, not this comment.
-
-use std::sync::atomic::{AtomicU32, Ordering};
+//! **Deliberately not implemented — `lastResult` carry-over.** Reproducing it
+//! would make a served chunk's biome depend on which chunk that worker thread
+//! generated previously, so one seed would produce different worlds across runs
+//! and `parallel_generation_is_deterministic_and_matches_serial` plus the
+//! byte-identity gates would be measuring a coin flip. No seeding of any kind
+//! happens here — not even a pruning-only hint, because under vanilla's
+//! incumbent-wins-a-tie rule a hint that ties *is* the answer.
+//!
+//! # The theorem, restated for vanilla's tie-break
+//!
+//! Span containment gives the part that still holds unconditionally:
+//!
+//! * **The node bound is a lower bound.** A subtree's `space[i]` is the interval
+//!   hull of its children's (`buildParameterSpace` unions with `Parameter.span`),
+//!   and for `[lo, hi] ⊇ [lo', hi']`, `distance([lo, hi], t) <= distance([lo',
+//!   hi'], t)` for every `t`. By induction `bound(N, t) <= dist(L, t)` for every
+//!   leaf `L` under `N`. [`BiomeTree::hull_containment_violations`] checks that
+//!   premise by complete enumeration over **every** node/child pair on all 7 axes
+//!   of the real tree.
+//! * **Hence `nearest_row` returns a row at the same minimum distance as
+//!   [`super::nearest_row_brute_force`], at every target.** That is the strongest
+//!   true statement, and it is what the exhaustive lattice gates now assert.
+//!
+//! What is *no longer* claimed — and this is the substance of #492 — is
+//! row-identity with brute force. Brute force breaks a tie by **earliest table
+//! row**; vanilla's tree breaks it by **traversal order**. Measured on the real
+//! table, those disagree on the resolved biome id at 0.98% of arbitrary targets.
+//! Vanilla calls the tree, so the tree is the answer and brute force is now the
+//! documented divergence — retained as the independent implementation that proves
+//! the distance claim, not as the target.
 
 use super::{BiomeParameterPoint, Parameter};
 
@@ -97,8 +103,8 @@ const CHILDREN_PER_NODE: usize = 6;
 /// degenerate `offset` span. See [`BiomeParameterPoint`].
 const DIMENSIONS: usize = 7;
 
-/// Sentinel for "no seed hint yet" in [`BiomeTree::seed_hint`].
-const NO_HINT: u32 = u32::MAX;
+/// "No leaf selected" — a node id that cannot exist.
+const NONE: u32 = u32::MAX;
 
 /// One flattened tree node. Leaves and subtrees share a representation so the
 /// bound computation ([`BiomeTree::bound`]) is branch-free over kind.
@@ -112,15 +118,11 @@ struct Node {
     /// or an empty range for a leaf.
     first_child: u32,
     child_count: u32,
-    /// The table row this leaf carries, or — for a subtree — the **minimum**
-    /// table row anywhere beneath it.
-    ///
-    /// For a leaf this is the tie-break key. For a subtree it is a second prune:
-    /// a subtree whose bound merely *ties* the incumbent distance is worth
-    /// entering only if it could also beat the incumbent's row, and `min_row`
-    /// answers that in one comparison. Not in vanilla (which has no row
-    /// tie-break to prune for).
-    min_row: u32,
+    /// The table row this leaf carries. Subtrees store the minimum row beneath
+    /// them, which is *no longer read*: it existed to prune for brute force's
+    /// lowest-row tie-break, and vanilla breaks ties by traversal order instead.
+    /// Kept because the leaf case is how a search result becomes a row.
+    row: u32,
 }
 
 impl Node {
@@ -138,15 +140,15 @@ impl Node {
 struct Arena {
     space: Vec<[Parameter; DIMENSIONS]>,
     children: Vec<Vec<u32>>,
-    min_row: Vec<u32>,
+    row: Vec<u32>,
 }
 
 impl Arena {
-    fn push(&mut self, space: [Parameter; DIMENSIONS], children: Vec<u32>, min_row: u32) -> u32 {
+    fn push(&mut self, space: [Parameter; DIMENSIONS], children: Vec<u32>, row: u32) -> u32 {
         let id = self.space.len() as u32;
         self.space.push(space);
         self.children.push(children);
-        self.min_row.push(min_row);
+        self.row.push(row);
         id
     }
 
@@ -200,7 +202,7 @@ impl Arena {
 
     fn min_row_of(&self, ids: &[u32]) -> u32 {
         ids.iter()
-            .map(|&id| self.min_row[id as usize])
+            .map(|&id| self.row[id as usize])
             .min()
             .expect("a subtree needs at least one child")
     }
@@ -252,44 +254,14 @@ fn bucketize(ids: &[u32]) -> Vec<Vec<u32>> {
     buckets
 }
 
-/// The lexicographic `(distance, row)` minimum found so far, and the node it
-/// came from (kept only to update [`BiomeTree::seed_hint`]).
-#[derive(Debug, Clone, Copy)]
-struct Best {
-    dist: i64,
-    row: u32,
-    node: u32,
-}
-
-impl Best {
-    /// The lexicographic min-reduction. Associative, commutative and idempotent,
-    /// which is why visit order and the seed cannot change the search's result.
-    #[inline]
-    fn offer(&mut self, dist: i64, row: u32, node: u32) {
-        if dist < self.dist || (dist == self.dist && row < self.row) {
-            *self = Best { dist, row, node };
-        }
-    }
-}
-
-/// Vanilla's `Climate.RTree`, with a deterministic brute-force-identical search.
-/// See the module doc for exactly which parts are a literal port and which are
-/// not.
+/// Vanilla's `Climate.RTree`, with vanilla's own search minus `lastResult`. See
+/// the module doc for exactly which behaviour that is and which it is not.
 #[derive(Debug)]
 pub(crate) struct BiomeTree {
     nodes: Vec<Node>,
     /// Child ids, referenced by `Node::{first_child, child_count}`.
     children: Vec<u32>,
     root: u32,
-    /// Vanilla's `RTree.lastResult` locality trick, made safe: a node id whose
-    /// distance seeds `best` so the first level can prune immediately.
-    ///
-    /// `Relaxed` and shared across threads on purpose. Any node id is a legal
-    /// seed and the search's result is provably seed-independent (module doc), so
-    /// this needs no synchronisation and cannot make output depend on which
-    /// thread searched what first. A `ThreadLocal` would cost a TLS lookup per
-    /// search to buy nothing.
-    seed_hint: AtomicU32,
 }
 
 impl BiomeTree {
@@ -306,10 +278,8 @@ impl BiomeTree {
         let mut arena = Arena {
             space: Vec::with_capacity(points.len() * 2),
             children: Vec::with_capacity(points.len() * 2),
-            min_row: Vec::with_capacity(points.len() * 2),
+            row: Vec::with_capacity(points.len() * 2),
         };
-        // Leaves in table order, so `min_row` is the table row and brute force's
-        // tie-break key is carried by construction.
         let ids: Vec<u32> = points
             .iter()
             .enumerate()
@@ -320,14 +290,13 @@ impl BiomeTree {
     }
 
     /// Depth-first flatten of the arena into `nodes`/`children`, preserving child
-    /// order (which is vanilla's traversal order, and what makes the pruning
-    /// efficient even though the *result* does not depend on it).
+    /// order — which under vanilla's tie-break is now **load-bearing for the
+    /// answer**, not merely for pruning efficiency.
     fn flatten(arena: &Arena, root: u32) -> Self {
         let mut tree = Self {
             nodes: Vec::with_capacity(arena.space.len()),
             children: Vec::with_capacity(arena.space.len()),
             root: 0,
-            seed_hint: AtomicU32::new(NO_HINT),
         };
         tree.root = tree.flatten_node(arena, root);
         tree
@@ -340,13 +309,11 @@ impl BiomeTree {
             space: arena.space[id as usize],
             first_child: 0,
             child_count: kids.len() as u32,
-            min_row: arena.min_row[id as usize],
+            row: arena.row[id as usize],
         });
         if kids.is_empty() {
             return me;
         }
-        // Reserve a contiguous slot range first: children are flattened after,
-        // and each may append its own subtree's slots.
         let first = self.children.len() as u32;
         self.children.extend(std::iter::repeat_n(0u32, kids.len()));
         self.nodes[me as usize].first_child = first;
@@ -372,104 +339,115 @@ impl BiomeTree {
         sum
     }
 
-    /// The table row of the nearest biome — the lexicographic `(distance, row)`
-    /// minimum, identical to [`super::nearest_biome`]'s answer at every target
-    /// (module doc for the proof, `biome_tree_identity.rs` for the gates).
+    /// The nearest biome's table row, by **vanilla's own search with no
+    /// `lastResult`** — the fresh-instance answer (module doc).
     ///
-    /// Returns the row and bumps the biome-search counters: one search, plus the
-    /// number of `Node::distance` evaluations it really performed. That second
-    /// number is the D5 quantity — `biome_rows_compared` used to be
-    /// `searches × table_len` by construction, and the whole point of this module
-    /// is that it no longer is, so it has to be counted rather than derived.
+    /// Bumps the biome-search counters: one search, plus the number of
+    /// `Node::distance` evaluations it really performed. That second number is the
+    /// D5 quantity — it used to be `searches × table_len` by construction, and the
+    /// point of this module is that it no longer is, so it is counted.
     pub(crate) fn nearest_row(&self, target: &[i64; DIMENSIONS]) -> u32 {
-        let mut evaluations = 0u64;
-        let mut best = {
-            let hint = self.seed_hint.load(Ordering::Relaxed);
-            // A hint is a *node* id; only a leaf is a legal candidate, and a
-            // stale hint from a differently-shaped tree cannot occur (the hint
-            // lives in the tree). Both checks are cheap insurance, not required
-            // for correctness of the answer.
-            if hint != NO_HINT
-                && (hint as usize) < self.nodes.len()
-                && self.nodes[hint as usize].is_leaf()
-            {
-                evaluations += 1;
-                Best {
-                    dist: self.bound(hint, target),
-                    row: self.nodes[hint as usize].min_row,
-                    node: hint,
-                }
-            } else {
-                Best {
-                    dist: i64::MAX,
-                    row: u32::MAX,
-                    node: NO_HINT,
-                }
-            }
-        };
-        let root_bound = self.bound(self.root, target);
-        evaluations += 1;
-        self.descend(self.root, root_bound, target, &mut best, &mut evaluations);
-        debug_assert_ne!(best.node, NO_HINT, "the tree always has at least one leaf");
-        self.seed_hint.store(best.node, Ordering::Relaxed);
-        crate::counters::bump_biome_search(evaluations);
-        best.row
+        self.search(target, None).0
     }
 
-    /// Vanilla's `SubTree.search`, with the two comparison changes the module doc
-    /// tabulates. `bound` is the caller's already-computed bound for `id`, so no
-    /// node's distance is evaluated twice.
-    fn descend(
+    /// Vanilla's search with an explicit `candidate` in place of its `ThreadLocal`
+    /// — the seeded form, kept **only** so a gate can demonstrate that seeding
+    /// changes the returned row (and never the distance). Production always passes
+    /// `None`; see the module doc for why.
+    pub(crate) fn nearest_row_seeded(
+        &self,
+        target: &[i64; DIMENSIONS],
+        candidate: Option<u32>,
+    ) -> u32 {
+        self.search(target, candidate).0
+    }
+
+    /// `(row, distance)` of the selected leaf. `distance` is exposed so gates can
+    /// assert the distance claim separately from the row claim — the two have
+    /// different strengths now (module doc).
+    pub(crate) fn nearest_row_and_distance(&self, target: &[i64; DIMENSIONS]) -> (u32, i64) {
+        self.search(target, None)
+    }
+
+    /// Vanilla's `RTree.search` + `SubTree.search`, transcribed.
+    ///
+    /// Vanilla threads `closestLeaf` down as each recursive call's `candidate`, and
+    /// a recursive call's own `minDistance` is therefore `dist(closestLeaf)` — the
+    /// same value the caller holds. So a single running `(best_dist, best_node)`
+    /// is exactly equivalent to Java's parameter passing, and it also lets a
+    /// subtree's returned leaf skip the redundant `distance(leaf, target)` Java
+    /// recomputes. Neither is a semantic change; the counter counts the
+    /// evaluations this form actually performs.
+    fn search(&self, target: &[i64; DIMENSIONS], candidate: Option<u32>) -> (u32, i64) {
+        let mut evaluations = 0u64;
+        let mut best_dist = i64::MAX;
+        let mut best_node = NONE;
+        if let Some(seed) = candidate {
+            if (seed as usize) < self.nodes.len() && self.nodes[seed as usize].is_leaf() {
+                best_dist = self.bound(seed, target);
+                best_node = seed;
+                evaluations += 1;
+            }
+        }
+        // A single-row table's root is itself the leaf; vanilla's
+        // `root.search(...)` returns it directly.
+        if self.nodes[self.root as usize].is_leaf() {
+            let d = self.bound(self.root, target);
+            evaluations += 1;
+            if best_dist > d {
+                best_dist = d;
+                best_node = self.root;
+            }
+        } else {
+            self.visit(self.root, target, &mut best_dist, &mut best_node, &mut evaluations);
+        }
+        debug_assert_ne!(best_node, NONE, "the tree always has at least one leaf");
+        crate::counters::bump_biome_search(evaluations);
+        (self.nodes[best_node as usize].row, best_dist)
+    }
+
+    /// One `SubTree.search` frame: iterate children in order, evaluate each
+    /// child's bound, and descend on **strict** `best_dist > child_bound` —
+    /// vanilla's `if (minDistance > childDistance)`. A tie is therefore *pruned*,
+    /// which is precisely how the incumbent wins it.
+    fn visit(
         &self,
         id: u32,
-        bound: i64,
         target: &[i64; DIMENSIONS],
-        best: &mut Best,
+        best_dist: &mut i64,
+        best_node: &mut u32,
         evaluations: &mut u64,
     ) {
         let node = &self.nodes[id as usize];
-        if node.is_leaf() {
-            best.offer(bound, node.min_row, id);
-            return;
-        }
         let first = node.first_child as usize;
         let end = first + node.child_count as usize;
         for slot in first..end {
             let child = self.children[slot];
             let child_bound = self.bound(child, target);
             *evaluations += 1;
-            if self.can_hold_a_better_leaf(child, child_bound, best) {
-                self.descend(child, child_bound, target, best, evaluations);
+            if *best_dist > child_bound {
+                if self.nodes[child as usize].is_leaf() {
+                    // Java: `leaf == child`, so `leafDistance == childDistance`,
+                    // and the outer `minDistance > leafDistance` is the same
+                    // strict test that just passed.
+                    *best_dist = child_bound;
+                    *best_node = child;
+                } else {
+                    self.visit(child, target, best_dist, best_node, evaluations);
+                }
             }
         }
-    }
-
-    /// The prune test. `child_bound` lower-bounds every leaf under `child`, so:
-    ///
-    /// * `child_bound < best.dist` — a leaf inside could win on distance alone.
-    /// * `child_bound == best.dist` — a leaf inside could *tie* on distance, and
-    ///   then wins only with a lower row, which is possible only if the
-    ///   subtree's `min_row` is lower. **Ties are never pruned on distance
-    ///   alone**; that is what keeps the answer equal to brute force's.
-    /// * `child_bound > best.dist` — every leaf inside is strictly worse.
-    #[inline]
-    fn can_hold_a_better_leaf(&self, child: u32, child_bound: i64, best: &Best) -> bool {
-        if child_bound < best.dist {
-            return true;
-        }
-        child_bound == best.dist && self.nodes[child as usize].min_row < best.row
     }
 
     /// Every `(parent, child)` pair whose spans violate hull containment on some
     /// axis, as `(parent_id, child_id, axis)`.
     ///
-    /// The premise the result-identity proof rests on (module doc): a subtree's
-    /// span must contain each child's span, or its `bound` stops lower-bounding
-    /// the leaves beneath it and a prune could discard the true nearest biome.
-    /// Exposed so a gate can check it **exhaustively over every node/child pair
-    /// in the real tree** rather than trusting `Arena::hull`'s three lines. An
+    /// The premise both distance claims rest on (module doc): a subtree's span must
+    /// contain each child's, or its `bound` stops lower-bounding the leaves beneath
+    /// it and a prune could discard the true nearest biome. Exposed so a gate can
+    /// check it **exhaustively over every node/child pair in the real tree**. An
     /// empty return is only meaningful next to a control that perturbs a node and
-    /// sees this fire — see `biome_tree_identity.rs`.
+    /// sees this fire.
     pub(crate) fn hull_containment_violations(&self) -> Vec<(u32, u32, usize)> {
         let mut bad = Vec::new();
         for (id, node) in self.nodes.iter().enumerate() {
@@ -496,15 +474,6 @@ impl BiomeTree {
         )
     }
 
-    /// Forces the seed hint, so a gate can prove the answer is seed-invariant
-    /// (module doc's last paragraph). Gate support: production never needs to
-    /// choose a seed, and a wrong one costs speed, never correctness. Not
-    /// `#[cfg(test)]`, because `tests/biome_tree_identity.rs` is a separate crate
-    /// and cannot see the lib's test-only items.
-    pub(crate) fn force_seed_hint(&self, node: u32) {
-        self.seed_hint.store(node, Ordering::Relaxed);
-    }
-
     /// The number of nodes, for a gate that wants to perturb one by index.
     pub(crate) fn node_count(&self) -> usize {
         self.nodes.len()
@@ -516,11 +485,33 @@ impl BiomeTree {
         self.nodes[id].is_leaf()
     }
 
+    /// The root's child node ids, in vanilla's traversal order.
+    ///
+    /// Gate support with a specific purpose: a control that breaks a node's bound
+    /// only observes anything if that node can actually be **pruned**, and the
+    /// root's *first* child never can — `search` starts with `best_dist = i64::MAX`,
+    /// so `best_dist > child_bound` is unconditionally true for it. A control must
+    /// therefore target a later child. (Measured: collapsing node 1, the first
+    /// child, produced zero wrong distances.)
+    pub(crate) fn root_child_nodes(&self) -> Vec<u32> {
+        let node = &self.nodes[self.root as usize];
+        let first = node.first_child as usize;
+        self.children[first..first + node.child_count as usize].to_vec()
+    }
+
+    /// Every leaf's node id, in table-row order — so a gate can seed a search with
+    /// a specific row's leaf.
+    pub(crate) fn leaf_node_for_row(&self, row: u32) -> Option<u32> {
+        self.nodes
+            .iter()
+            .position(|n| n.is_leaf() && n.row == row)
+            .map(|i| i as u32)
+    }
+
     /// Shrinks one node's span to a degenerate point — the **control** for
-    /// [`Self::hull_containment_violations`] and for the brute-force identity
-    /// gate. Breaking the lower-bound property is exactly the defect class the
-    /// identity gate exists to detect, so the gate is only evidence if this makes
-    /// it fail.
+    /// [`Self::hull_containment_violations`] and for the distance-identity gate.
+    /// Breaking the lower-bound property is exactly the defect class those gates
+    /// exist to detect, so they are only evidence if this makes them fail.
     pub(crate) fn perturb_node_span(&mut self, id: usize) {
         for d in 0..DIMENSIONS {
             let p = &mut self.nodes[id].space[d];
@@ -528,57 +519,6 @@ impl BiomeTree {
             p.min = centre;
             p.max = centre;
         }
-    }
-
-    /// Vanilla's *exact* search — strict pruning, incumbent-wins ties, an
-    /// explicit `candidate` seed in place of the `ThreadLocal`. Not used in
-    /// production (see the module doc); it exists so a gate can answer the
-    /// question the module doc raises: does vanilla's own tree ever disagree with
-    /// vanilla's own brute force on the real table?
-    pub(crate) fn nearest_row_vanilla_exact(
-        &self,
-        target: &[i64; DIMENSIONS],
-        candidate: Option<u32>,
-    ) -> u32 {
-        fn go(
-            tree: &BiomeTree,
-            id: u32,
-            target: &[i64; DIMENSIONS],
-            mut min_distance: i64,
-            mut closest: Option<u32>,
-        ) -> (i64, Option<u32>) {
-            let node = &tree.nodes[id as usize];
-            if node.is_leaf() {
-                return (min_distance, closest);
-            }
-            let first = node.first_child as usize;
-            for slot in first..first + node.child_count as usize {
-                let child = tree.children[slot];
-                let child_distance = tree.bound(child, target);
-                if min_distance > child_distance {
-                    let (_, leaf) = go(tree, child, target, min_distance, closest);
-                    let leaf = if tree.nodes[child as usize].is_leaf() {
-                        Some(child)
-                    } else {
-                        leaf
-                    };
-                    let leaf_distance = match leaf {
-                        Some(l) if l == child => child_distance,
-                        Some(l) => tree.bound(l, target),
-                        None => i64::MAX,
-                    };
-                    if min_distance > leaf_distance {
-                        min_distance = leaf_distance;
-                        closest = leaf;
-                    }
-                }
-            }
-            (min_distance, closest)
-        }
-        let seed_distance = candidate.map_or(i64::MAX, |c| self.bound(c, target));
-        let (_, leaf) = go(self, self.root, target, seed_distance, candidate);
-        let leaf = leaf.expect("vanilla's search always returns a leaf");
-        self.nodes[leaf as usize].min_row
     }
 }
 
@@ -664,9 +604,7 @@ mod tests {
     #[test]
     fn bucket_size_matches_vanillas_float_formula_for_every_plausible_n() {
         for n in 2..100_000usize {
-            let vanilla = 6.0f64
-                .powf(((n as f64 - 0.01).ln() / 6.0f64.ln()).floor())
-                as usize;
+            let vanilla = 6.0f64.powf(((n as f64 - 0.01).ln() / 6.0f64.ln()).floor()) as usize;
             assert_eq!(
                 expected_bucket_size(n),
                 vanilla,
@@ -717,16 +655,11 @@ mod tests {
         }
     }
 
-    /// The `Arena::hull` premise, and the control that it can fail. A gate that
-    /// only ever observes "no violations" cannot distinguish a correct hull from
-    /// a detector that never fires.
     #[test]
     fn hull_containment_control_fires_when_a_node_is_shrunk() {
         let table = spread_table(300);
         let mut tree = BiomeTree::build(&table);
         assert!(tree.hull_containment_violations().is_empty());
-        // Node 0 is a leaf (leaves are pushed first), so shrink a subtree: the
-        // root, which by construction has children.
         let root = tree.root as usize;
         tree.perturb_node_span(root);
         assert!(
@@ -735,8 +668,10 @@ mod tests {
         );
     }
 
+    /// The distance claim: vanilla's search always lands on the same *minimum
+    /// squared distance* brute force finds, even where the chosen row differs.
     #[test]
-    fn tree_and_brute_force_agree_on_a_synthetic_table() {
+    fn the_minimum_distance_always_matches_brute_force_on_a_synthetic_table() {
         let table = spread_table(400);
         let tree = BiomeTree::build(&table);
         let mut checked = 0u32;
@@ -745,10 +680,11 @@ mod tests {
                 for c in (-11000..=11000).step_by(1301) {
                     let target = [t, h, c, 0, 0, 0, 0];
                     let brute = super::super::nearest_row_brute_force(&table, &target);
+                    let (_, dist) = tree.nearest_row_and_distance(&target);
                     assert_eq!(
-                        tree.nearest_row(&target),
-                        brute,
-                        "tree disagreed with brute force at {target:?}"
+                        dist,
+                        table[brute as usize].fitness(&target),
+                        "tree found a different minimum distance at {target:?}"
                     );
                     checked += 1;
                 }
@@ -757,23 +693,23 @@ mod tests {
         assert!(checked > 5_000, "the sweep must actually run: {checked}");
     }
 
-    /// The answer is a lexicographic min-reduction, so it cannot depend on the
-    /// seed hint. Adversarial seeds included: the last leaf, and (per target) a
-    /// rotating one.
+    /// A seed can never change the *distance* — the first of the module doc's two
+    /// `lastResult` claims, on a synthetic table.
     #[test]
-    fn the_answer_is_invariant_under_every_seed_hint() {
+    fn no_seed_can_change_the_minimum_distance() {
         let table = spread_table(400);
         let tree = BiomeTree::build(&table);
         let nodes = tree.node_count() as u32;
         for t in (-11000..=11000).step_by(997) {
             let target = [t, t / 2, -t, 0, 0, 0, 0];
-            let expected = super::super::nearest_row_brute_force(&table, &target);
-            for hint in [NO_HINT, 0, 1, nodes - 1, (t.unsigned_abs() as u32) % nodes] {
-                tree.force_seed_hint(hint);
+            let brute = super::super::nearest_row_brute_force(&table, &target);
+            let expected = table[brute as usize].fitness(&target);
+            for seed in [None, Some(0), Some(1), Some(nodes - 1)] {
+                let row = tree.nearest_row_seeded(&target, seed);
                 assert_eq!(
-                    tree.nearest_row(&target),
+                    table[row as usize].fitness(&target),
                     expected,
-                    "seed hint {hint} changed the answer at {target:?}"
+                    "seed {seed:?} changed the minimum distance at {target:?}"
                 );
             }
         }

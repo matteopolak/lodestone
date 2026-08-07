@@ -64,9 +64,12 @@ impl OverworldGenerator {
             // Y needs the same quart-rounding as X/Z (see the module doc).
             let y = (heights[(lz * 16 + lx) as usize] >> 2) << 2;
             let target = dynamic.climate.target(base_x + lx, y, base_z + lz);
-            // Unit 9: the tree, not `crate::biome::nearest_biome`'s brute-force
-            // scan. Result-identical at every target by construction — see
-            // `crate::biome::tree`'s module doc. **Not memoised**, deliberately:
+            // Unit 9: vanilla's own indexed search, not
+            // `crate::biome::nearest_biome`'s brute-force scan — and since the
+            // owner's ruling on #492 the tree is the *answer*, not merely a faster
+            // route to brute force's answer. The two differ only in which of
+            // several distance-tied rows they take; see `crate::biome::tree`'s
+            // module doc. **Not memoised**, deliberately:
             // each quart samples at its own surface height, so all 16 targets in
             // a chunk are distinct and there is nothing to reuse. The memo is for
             // `biome_for_carver_source`, whose key really does repeat.
@@ -74,6 +77,63 @@ impl OverworldGenerator {
             let cold = crate::biome::cold_enough_to_snow(&dynamic.temperatures, name);
             (name.to_string(), cold)
         })
+    }
+
+    /// **Diagnostic for #492, not used by generation.** At one source chunk's own
+    /// `y = 0` climate target, does vanilla's indexed search (what
+    /// [`Self::biome_for_carver_source`] now uses) resolve to a different biome id
+    /// than the brute-force scan it used before?
+    ///
+    /// This exists because "no gate failed" and "nothing changed" are different
+    /// claims, and only the second one is worth reporting. The 0.98% divergence
+    /// figure is measured over *arbitrary* climate targets; whether real generated
+    /// climate at real coordinates ever lands on an exact tie is a separate
+    /// question that no existing gate answers, so this lets one count it directly.
+    /// Returns `(vanilla's indexed answer, the brute-force answer)`, equal when the
+    /// tie-break makes no difference here, or `None` for a fixed-biome generator
+    /// (which has no table to search). Returning both *names* rather than a bool is
+    /// what lets a gate print coordinates and expected values a JVM oracle run can
+    /// be pointed straight at.
+    #[must_use]
+    pub fn source_biome_tiebreak(&self, source_cx: i32, source_cz: i32) -> Option<(&str, &str)> {
+        let d = self.dynamic_biome.as_ref()?;
+        let target = d.climate.target(source_cx * 16, 0, source_cz * 16);
+        let tree = d.table.nearest_row(&target);
+        let brute = crate::biome::nearest_row_brute_force(&d.table, &target);
+        Some((d.table.biome_at(tree), d.table.biome_at(brute)))
+    }
+
+    /// The same question for the 16 **surface** quarts of one chunk — the biome a
+    /// player standing there sees. Returns `(quarts, differing)`.
+    ///
+    /// Needs the chunk's own generated heights, so it runs the pre-ore pipeline via
+    /// the store exactly as [`Self::biome_stage`]'s caller does; the sample height
+    /// convention is therefore identical to production's rather than a restatement
+    /// of it.
+    #[must_use]
+    pub fn surface_biome_tiebreak_differences(&self, cx: i32, cz: i32) -> (usize, usize) {
+        let Some(d) = self.dynamic_biome.as_ref() else {
+            return (0, 0);
+        };
+        let cached = self.pre_ore_stage(cx, cz);
+        let heights = &cached.1;
+        let base_x = cx * 16;
+        let base_z = cz * 16;
+        let mut differing = 0usize;
+        for i in 0..16usize {
+            let qx = (i % 4) as i32;
+            let qz = (i / 4) as i32;
+            let lx = qx * 4;
+            let lz = qz * 4;
+            let y = (heights[(lz * 16 + lx) as usize] >> 2) << 2;
+            let target = d.climate.target(base_x + lx, y, base_z + lz);
+            let tree = d.table.nearest_row(&target);
+            let brute = crate::biome::nearest_row_brute_force(&d.table, &target);
+            if d.table.biome_at(tree) != d.table.biome_at(brute) {
+                differing += 1;
+            }
+        }
+        (16, differing)
     }
 
     /// Biome for one *source chunk* in the carve neighbourhood — vanilla's

@@ -29,8 +29,17 @@
 //     resulting convention. Dumps the quantized `Climate.TargetPoint` plus the
 //     biome vanilla resolves it to via **both** `findValueBruteForce` (the
 //     un-optimized reference next to the RTree, `Climate.java:182`) and
-//     `findValue` (the real indexed search) — printing both lets the Rust
-//     test confirm they agree before trusting either as ground truth.
+//     `findValue` (the real indexed search). The original reason for printing
+//     both was "to confirm they agree before trusting either as ground truth";
+//     **that premise is false and was measured false** (issue #492): the two
+//     disagree on the resolved biome id at ~1% of arbitrary climate targets and
+//     at 8 of 16,384 real carver/ore source chunks, because `findValue` breaks a
+//     distance tie by tree-traversal order while `findValueBruteForce` breaks it
+//     by earliest table row. Vanilla calls `findValue`, so `indexed` is ground
+//     truth and `brute` is the divergence. **One sample per process when it
+//     matters**: `RTree.lastResult` is a ThreadLocal seeded from the previous
+//     search, so within one invocation only the first sample's `indexed` value
+//     is the fresh-instance answer.
 //
 // No Mojang source is copied; this only drives the compiled classes and reads
 // their output.
