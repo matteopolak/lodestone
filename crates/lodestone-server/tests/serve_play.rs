@@ -1826,6 +1826,115 @@ fn control_the_old_raster_order_fails_the_proximity_assertion() {
     );
 }
 
+/// **The same three rules, over the arm production actually runs.**
+///
+/// [`join_streams_the_view_outward_from_the_players_own_column`] calls
+/// `serve_connection`, which resolves to `SourceRef::Borrowed`. Every production
+/// caller in `crate::integrated` resolves to `SourceRef::Shared`, and the ring loop
+/// **branches on that**: `Borrowed` awaits one `generate_columns_parallel` per ring,
+/// while `Shared` spawns each of the ring's columns into the blocking pool
+/// individually and awaits the handles in ring order. Two different loop bodies,
+/// one of them untested — the `world` species of vacuous test (`DESIGN.md` §12.43),
+/// where the source is exemplary and the flaw is which implementation the test's
+/// transport resolves to.
+///
+/// `serve_connection_shared` is `pub(crate)` and deliberately not re-exported, so
+/// this reaches the arm the way the shell does: through the public
+/// `IntegratedServer::bind`, over a real loopback socket.
+///
+/// # Two differences from the `Borrowed` gate, both deliberate
+///
+/// `bind` wraps the source in a [`crate::ChunkStore`], so ring 0 is a **cache hit**
+/// on the column the world-spawn search already generated and
+/// `generated_at_first` is `1` rather than `2`. [`check_proximity_stream`]'s bound
+/// is `<= 2`, which covers both; asserting `1` here would be pinning the store's
+/// presence, which `chunk_store.rs` already owns.
+///
+/// `bind` also spawns `run_tick_loop` over a 5×5 tick area, which would inflate the
+/// counter — except that issue #481 defers its first random-tick pass for 40 ticks
+/// (2.0 s), and a 361-column air view served from a store completes long before
+/// that. Rule 3 reads only `observed[0]`, so even a slow run cannot be corrupted by
+/// tick-loop generation that happens after the first encode.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_shared_arm_streams_the_view_outward_too() {
+    let view_radius = 9;
+    let expected_chunks = ((2 * view_radius + 1) * (2 * view_radius + 1)) as usize;
+    let generated = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let server = lodestone_server::IntegratedServer::bind(
+        "127.0.0.1:0",
+        ProbeProto {
+            generated: std::sync::Arc::clone(&generated),
+        },
+        CountingAirSource {
+            generated: std::sync::Arc::clone(&generated),
+        },
+        view_radius,
+    )
+    .await
+    .expect("bind loopback");
+    let addr = server.local_addr().expect("a bound server has an address");
+
+    let mut client = Connection::new(
+        tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client connects"),
+    );
+    client.write_packet(HANDSHAKE, &[2]).await.expect("hs");
+    let mut w = Writer::default();
+    w.string("SharedSpiral");
+    client
+        .write_packet(LOGIN_START, w.as_slice())
+        .await
+        .expect("login start");
+    client.read_packet().await.unwrap().unwrap(); // LOGIN_SUCCESS
+    client
+        .write_packet(LOGIN_ACKNOWLEDGED, &[])
+        .await
+        .expect("login ack");
+    client
+        .write_packet(FINISH_CONFIGURATION, &[])
+        .await
+        .expect("finish configuration");
+
+    let (id, _) = client.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, SET_TIME_S2C);
+    let (id, _) = client.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, CHUNK_BATCH_START);
+
+    let mut observed = Vec::with_capacity(expected_chunks);
+    for _ in 0..expected_chunks {
+        let (id, payload) = client.read_packet().await.unwrap().unwrap();
+        assert_eq!(id, CHUNK);
+        let mut r = Reader::new(&payload);
+        let cx = r.var_i32().unwrap();
+        let cz = r.var_i32().unwrap();
+        let at = r.var_i32().unwrap() as usize;
+        observed.push((cx, cz, at));
+    }
+    let (id, payload) = client.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, CHUNK_BATCH_FINISHED);
+    assert_eq!(
+        Reader::new(&payload).var_i32().unwrap(),
+        expected_chunks as i32,
+        "still exactly one batch covering the whole view on this arm too"
+    );
+
+    check_proximity_stream(&observed, view_radius)
+        .expect("the Shared arm must stream nearest-first as well");
+
+    let sent: HashSet<(i32, i32)> = observed.iter().map(|&(cx, cz, _)| (cx, cz)).collect();
+    assert_eq!(
+        sent,
+        square(0, 0, view_radius),
+        "the Shared arm's per-column spawn_blocking fan-out must cover the same square, \
+         with no gaps or repeats — awaiting the handles out of ring order would show up here"
+    );
+
+    drop(client);
+    server.shutdown().await;
+}
+
 /// Issue #324 / `docs/plans/world-state.md` W1, gate (c)'s serve half:
 /// `serve_play`'s `container_sync_tick` arm must actually drain the
 /// [`WeatherFeed`] and turn each transition into an `encode_game_event`
