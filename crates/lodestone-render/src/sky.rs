@@ -768,6 +768,25 @@ impl SplitMix64 {
     }
 }
 
+/// How many times [`build_star_field`] has been called in this process.
+///
+/// A counter, not a duration: the star field is a pure function of a fixed seed,
+/// so the only defensible number is **one per [`SkyRenderer`] built**
+/// ([`crate::sky_pipeline::SkyRenderer`] keeps the unrotated base and rotates it
+/// per frame, exactly as vanilla rotates its static star buffer). It used to be
+/// rebuilt inside `render`, once per *night frame* — ~1500 iterations × 4
+/// `SplitMix64` draws plus a `Vec` allocation, ~6000 PRNG steps a frame, for a
+/// value that never changes. `sky_pipeline_gpu`'s
+/// `the_star_field_is_built_once_per_renderer_not_once_per_night_frame` is the
+/// gate; this is what it reads.
+static STAR_FIELD_BUILDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Reads [`STAR_FIELD_BUILDS`]. See it for what the number means.
+#[must_use]
+pub fn star_field_builds() -> u64 {
+    STAR_FIELD_BUILDS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Builds the star field's quads (unrotated — apply [`celestial_rotation_matrix`]
 /// per frame to place them, matching how vanilla rotates the static star
 /// buffer by `starAngle` rather than rebuilding it).
@@ -785,6 +804,7 @@ impl SplitMix64 {
 /// vanilla's exact star positions, only its distribution shape.
 #[must_use]
 pub fn build_star_field(seed: u64) -> Vec<[[f32; 3]; 4]> {
+    STAR_FIELD_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut rng = SplitMix64::new(seed);
     let mut quads = Vec::with_capacity(STAR_COUNT);
     for _ in 0..STAR_COUNT {

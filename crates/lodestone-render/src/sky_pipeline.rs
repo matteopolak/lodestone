@@ -708,7 +708,18 @@ pub struct SkyRenderer {
 
     star_vbuf: wgpu::Buffer,
     star_ibuf: wgpu::Buffer,
-    star_quad_count: u32,
+    /// The **unrotated** star quads, built once here and rotated per frame —
+    /// which is what [`crate::sky::build_star_field`]'s own doc asks for and what
+    /// vanilla does (it rotates a static star buffer by `starAngle` rather than
+    /// rebuilding it).
+    ///
+    /// `render` used to call `build_star_field` again on every night frame and
+    /// keep only the length here, dropping the `Vec` — ~1500 iterations of four
+    /// `SplitMix64` draws plus an allocation, per frame, for a pure function of a
+    /// fixed seed. Keeping the geometry rather than the count also removes the
+    /// only way the buffer capacity and the draw could disagree: the quad count
+    /// is now `star_base.len()` at both.
+    star_base: Vec<[[f32; 3]; 4]>,
 
     cloud_vbuf: wgpu::Buffer,
     cloud_ibuf: wgpu::Buffer,
@@ -1174,12 +1185,13 @@ impl SkyRenderer {
         );
         let celestial_ibuf = quad_index_buffer(device, "lodestone-sky-celestial-ibuf", 2);
 
-        let star_field = build_star_field(STAR_FIELD_SEED);
-        let star_quad_count = star_field.len() as u32;
+        // Built once, kept unrotated, rotated per frame in `render`.
+        let star_base = build_star_field(STAR_FIELD_SEED);
+        let star_quad_count = star_base.len() as u32;
         let star_vbuf = vertex_buffer(
             device,
             "lodestone-sky-star-vbuf",
-            (star_field.len() * 4 * std::mem::size_of::<StarVertex>()) as u64,
+            (star_base.len() * 4 * std::mem::size_of::<StarVertex>()) as u64,
         );
         let star_ibuf = quad_index_buffer(device, "lodestone-sky-star-ibuf", star_quad_count);
 
@@ -1238,7 +1250,7 @@ impl SkyRenderer {
             celestial_ibuf,
             star_vbuf,
             star_ibuf,
-            star_quad_count,
+            star_base,
             cloud_vbuf,
             cloud_ibuf,
             fancy_cloud_vbuf,
@@ -1402,9 +1414,9 @@ impl SkyRenderer {
         if star_brightness > 0.0 {
             let rotation = celestial_rotation_matrix(angle);
             let color = [star_brightness, star_brightness, star_brightness, star_brightness];
-            let mut star_verts = Vec::with_capacity(self.star_quad_count as usize * 4);
-            for quad in build_star_field(STAR_FIELD_SEED) {
-                for corner in quad {
+            let mut star_verts = Vec::with_capacity(self.star_base.len() * 4);
+            for quad in &self.star_base {
+                for corner in *quad {
                     let p = rotation.transform_point3(glam::Vec3::from(corner));
                     star_verts.push(StarVertex {
                         position: p.to_array(),
@@ -1509,7 +1521,7 @@ impl SkyRenderer {
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_vertex_buffer(0, self.star_vbuf.slice(..));
             pass.set_index_buffer(self.star_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.star_quad_count * 6, 0, 0..1);
+            pass.draw_indexed(0..(self.star_base.len() as u32) * 6, 0, 0..1);
         }
 
         pass.set_pipeline(&self.celestial.pipeline);
