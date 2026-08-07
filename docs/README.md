@@ -1193,6 +1193,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   driver's (`lodestone_shell::sim::Sim`). It now holds **one**, behind
   `lodestone_ecs::EcsHandle = Arc<parking_lot::RwLock<World>>`, and that one `World`
   carries **one** `GameTick` schedule driven by **one** 20 Hz accumulator.
+- [Worldgen biome search](./worldgen-biome-search.md) — The climate → biome lookup
+  layer: vanilla's `Climate.RTree` ported as a real search structure, plus a
+  per-source-chunk memo, replacing an uncached brute-force scan of the 7,594-row
+  overworld climate table. Unit 9 of
+  [`docs/plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md), the fix for its
+  diagnostic **D5**. Measured over a 6×6 sweep of real embedded data: **235,991,144
+  climate comparisons → 258,747**, a 912× reduction, with the biome selected at
+  every coordinate provably unchanged.
 - [Overworld biome assignment (multi-noise climate)](./worldgen-biomes.md) — Before
   this, `OverworldGenerator` ran the whole world under one hardcoded biome
   (`minecraft:plains`) — every column looked the same and surface rules never
@@ -1227,6 +1235,18 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   issue #404's unit U2. Before it, nothing in this engine ever wrote `minecraft:snow`
   or surface ice: every snowy biome generated bare, which the parity census called the
   most player-visible absent feature in worldgen.
+- [In-place region decoration](./worldgen-in-place-decoration.md) — The read/write
+  medium the worldgen decoration stages use to reach across a 3×3 chunk neighbourhood
+  without copying it. Vanilla's `blockStateWriteRadius(1)` at the FEATURES stage lets
+  a feature placed in one chunk write into its neighbour, so both the
+  `UNDERGROUND_ORES` and `VEGETAL_DECORATION` drivers run all nine of a column's
+  source chunks against one shared block field. Until Unit 7 of
+  [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md) that field was a
+  *materialised copy* of the neighbourhood, rebuilt on every served column;
+  [`RegionView`](../crates/lodestone-worldgen/src/feature/region_view.rs) and
+  `VegGrid::with_sources` route reads to whichever source chunk owns the column
+  instead, holding writes in a sparse overlay, which took the copy count from ~2.85M
+  cells per column to zero.
 - [Worldgen module layout and per-unit file ownership](./worldgen-module-layout.md) —
   The file layout of `crates/lodestone-worldgen`'s generation engine after Unit 16
   (the decomposition unit) of

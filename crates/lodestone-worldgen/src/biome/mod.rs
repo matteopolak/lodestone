@@ -18,10 +18,34 @@
 //! builder needed transliterating, only its resolved output, reachable with
 //! zero bootstrap via `MultiNoiseBiomeSourceParameterList.knownPresets()` —
 //! but the row count itself was a guess from reading Java control flow, not a
-//! measurement, and the guess was off by 10x. A brute-force search over 7594
-//! points is still trivial (a few thousand squared-distance comparisons per
-//! quart column), so this doesn't change the cost story, only the "~700"
-//! number quoted in the issue and epic.
+//! measurement, and the guess was off by 10x.
+//!
+//! # Correction (Unit 9): "a brute-force search over 7594 points is trivial"
+//!
+//! This module used to conclude the paragraph above with "so this doesn't change
+//! the cost story", and [`nearest_biome`] used to carry the same claim as a
+//! reason for declining vanilla's `RTree`: *"a few thousand squared-distance
+//! comparisons per quart column is already fast"*. **Both were true when written
+//! and are false in composition**, which is why they survived review — nothing
+//! about them looks stale.
+//!
+//! What changed underneath them is the *number of searches*, not their cost.
+//! When they were written the only caller was [`crate::overworld`]'s per-quart
+//! surface sample: 16 searches per chunk, ~121k comparisons, genuinely trivial.
+//! Carver composition then added [`crate::overworld::OverworldGenerator`]'s
+//! per-source-chunk resolution over a **17×17 = 289-chunk** neighbourhood, once
+//! per pre-ore chunk, and a cold `column()` closes over 25 pre-ore chunks. That
+//! is ~2.2M squared-distance comparisons per pre-ore chunk (`docs/plans/
+//! worldgen-rewrite.md` D5, found by audit — no test could see it), and it is
+//! overhead vanilla does not pay at all: vanilla ships **both** searches and
+//! calls the tree.
+//!
+//! Unit 9 is the fix, in two independent halves: [`tree`] ports vanilla's
+//! `Climate.RTree` (so a search stops being O(table_len)), and [`memo`]
+//! memoises the per-source-chunk answer (so 289 searches per chunk become the
+//! window's newly-entered strip). [`nearest_biome`] is retained as the
+//! brute-force **reference** the tree is gated against, not as the production
+//! path.
 //!
 //! # The y = 0 trap
 //!
@@ -92,10 +116,14 @@
 //! `docs/worldgen-parity.md` for what was and wasn't measured here.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 
 use crate::density::{Builder, Context, Density};
+
+pub(crate) mod memo;
+mod tree;
 
 /// The three biomes [`usable_overworld_table`] used to exclude before
 /// `SurfaceSystem.getBand` was ported — see the module doc's "Three biomes
@@ -152,7 +180,7 @@ impl BiomeParameterPoint {
     /// (offset) is always `0` for a real climate sample — only a biome's own
     /// parameter point ever carries a nonzero offset span.
     #[must_use]
-    fn fitness(&self, target: &[i64; 7]) -> i64 {
+    pub fn fitness(&self, target: &[i64; 7]) -> i64 {
         let mut sum = 0i64;
         for i in 0..7 {
             let d = self.params[i].distance(target[i]);
@@ -173,38 +201,211 @@ pub fn quantize_coord(v: f64) -> i64 {
     ((v as f32) * 10000.0_f32) as i64
 }
 
-/// Finds the nearest biome by squared climate distance —
+/// The table row of the nearest biome by squared climate distance —
 /// `Climate.ParameterList.findValueBruteForce` (`Climate.java:182`), vanilla's
-/// own un-optimized reference search sitting next to the RTree it also ships.
-/// The RTree is purely a lookup-speed optimization over the same table (plan
-/// §2/§7: "same nearest point, different lookup structure"), safe to skip —
-/// this port never builds one, since a few thousand squared-distance
-/// comparisons per quart column is already fast.
+/// own un-optimized reference search, sitting next to the `RTree` it also ships.
 ///
-/// Matches vanilla's tie-break exactly: ties keep the **earlier** table
-/// entry (`if (fitness < bestFitness)`, strict `<`), so `table`'s order must
-/// match the oracle dump's order — [`parse_table`] preserves JSON array
-/// order for exactly this reason.
+/// **This is U9's oracle, not U9's production path.** Production goes through
+/// [`BiomeTable::nearest_row`]; this stays as the independent implementation the
+/// tree is proven result-identical to, at every coordinate (see [`tree`]'s module
+/// doc for why identity is a theorem and `tests/biome_tree_identity.rs` for the
+/// gates). It bumps no counter, so a gate may call it millions of times without
+/// polluting the measurement the tree is judged by.
+///
+/// Matches vanilla's tie-break exactly: ties keep the **earlier** table entry
+/// (`if (fitness < bestFitness)`, strict `<`), so `table`'s order must match the
+/// oracle dump's order — [`parse_table`] preserves JSON array order for exactly
+/// this reason.
+///
+/// # Panics
+/// Panics if `table` is empty.
+#[must_use]
+pub fn nearest_row_brute_force(table: &[BiomeParameterPoint], target: &[i64; 7]) -> u32 {
+    let mut best_row = 0u32;
+    let mut best_fitness = table[0].fitness(target);
+    for (row, entry) in table.iter().enumerate().skip(1) {
+        let fitness = entry.fitness(target);
+        if fitness < best_fitness {
+            best_fitness = fitness;
+            best_row = row as u32;
+        }
+    }
+    best_row
+}
+
+/// [`nearest_row_brute_force`]'s answer as a biome id. Kept as a public name
+/// because it predates U9 and reads as the obvious entry point; production uses
+/// [`BiomeTable::nearest`] instead.
 ///
 /// # Panics
 /// Panics if `table` is empty.
 #[must_use]
 pub fn nearest_biome<'a>(table: &'a [BiomeParameterPoint], target: &[i64; 7]) -> &'a str {
     // Diagnostic D5. Both numbers matter and neither implies the other: the
-    // search *count* is what U9's memoisation reduces, while `table.len()` rows
-    // per search is what the RTree port reduces. A single "searches" counter
-    // would make an RTree that searched just as often look like no improvement.
+    // search *count* is what U9's memoisation reduces, while rows examined per
+    // search is what the RTree port reduces. A single "searches" counter would
+    // make an RTree that searched just as often look like no improvement.
     crate::counters::bump_biome_search(table.len() as u64);
-    let mut best = &table[0];
-    let mut best_fitness = best.fitness(target);
-    for entry in &table[1..] {
-        let fitness = entry.fitness(target);
-        if fitness < best_fitness {
-            best_fitness = fitness;
-            best = entry;
+    &table[nearest_row_brute_force(table, target) as usize].biome
+}
+
+/// Monotonic id source for [`BiomeTable::id`] — see [`memo`] for why the memo's
+/// key has to carry table identity as well as chunk position. Starts at 1 so
+/// zero can be [`memo`]'s empty-slot sentinel.
+fn next_table_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The parsed climate table plus its search structure: a [`Vec`] of
+/// [`BiomeParameterPoint`] in the oracle dump's row order, and the
+/// [`tree::BiomeTree`] built from it.
+///
+/// # Why this type exists at all
+///
+/// The search structure has to be built once per generator and live beside the
+/// rows it indexes, and the rows are reached today as
+/// `OverworldGenerator::dynamic_biome`'s `table` field — whose struct literal
+/// lives in `overworld/mod.rs`, one of this repo's six measured choke-point files
+/// (`CLAUDE.md`; `docs/worldgen-staged-store.md` owns that file for Unit 6).
+/// Returning this from [`usable_overworld_table`] instead of a bare `Vec` puts
+/// the tree in place with **no edit to any file outside `src/biome/` and
+/// `src/overworld/biome.rs`**, because the [`Deref`](std::ops::Deref) and
+/// [`IntoIterator`] impls below keep every existing `Vec`-shaped use compiling
+/// unchanged — `d.table.iter()` in `overworld/mod.rs` and
+/// `table.into_iter().map(|p| p.biome)` in `lodestone_server::worldgen_data`.
+///
+/// That is a deliberate trade and worth naming: a `Deref` to a slice hides that
+/// the type carries more than the slice. The alternative was a one-line patch to
+/// a file two other units were mid-flight in.
+#[allow(missing_debug_implementations)]
+pub struct BiomeTable {
+    points: Vec<BiomeParameterPoint>,
+    tree: tree::BiomeTree,
+    /// Unique per constructed table — [`memo`]'s tag component.
+    id: u64,
+}
+
+impl BiomeTable {
+    /// Builds the search structure over `points`, preserving row order.
+    ///
+    /// # Panics
+    /// Panics if `points` is empty — [`crate::overworld::OverworldGenerator`]
+    /// only constructs one when the resolver supplied a non-empty table.
+    #[must_use]
+    pub fn new(points: Vec<BiomeParameterPoint>) -> Self {
+        let tree = tree::BiomeTree::build(&points);
+        Self {
+            points,
+            tree,
+            id: next_table_id(),
         }
     }
-    &best.biome
+
+    /// The nearest biome's table row, via the tree. Identical to
+    /// [`nearest_row_brute_force`] at every target.
+    #[must_use]
+    pub fn nearest_row(&self, target: &[i64; 7]) -> u32 {
+        self.tree.nearest_row(target)
+    }
+
+    /// The nearest biome's id, via the tree — the drop-in replacement for
+    /// [`nearest_biome`] on the production path.
+    #[must_use]
+    pub fn nearest(&self, target: &[i64; 7]) -> &str {
+        &self.points[self.nearest_row(target) as usize].biome
+    }
+
+    /// The biome id at a row, for a caller holding a memoised row.
+    ///
+    /// # Panics
+    /// Panics if `row` is out of range, which can only happen if a row from a
+    /// *different* table reached here — the bug [`memo`]'s `table_id` tag exists
+    /// to make impossible.
+    #[must_use]
+    pub fn biome_at(&self, row: u32) -> &str {
+        &self.points[row as usize].biome
+    }
+
+    /// This table's memo identity — see [`memo`].
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Every `(parent, child, axis)` violating the tree's hull-containment
+    /// premise; empty for a correctly built tree. Exposed for
+    /// `tests/biome_tree_identity.rs` — see [`tree::BiomeTree::hull_containment_violations`].
+    #[must_use]
+    pub fn hull_containment_violations(&self) -> Vec<(u32, u32, usize)> {
+        self.tree.hull_containment_violations()
+    }
+
+    /// `(total nodes, leaves)` in the tree. Leaves must equal
+    /// [`BiomeTable::len`].
+    #[must_use]
+    pub fn tree_shape(&self) -> (usize, usize) {
+        self.tree.shape()
+    }
+
+    /// Node count, for a gate that perturbs one by index.
+    #[must_use]
+    pub fn tree_node_count(&self) -> usize {
+        self.tree.node_count()
+    }
+
+    /// Whether tree node `id` is a leaf. Gate support: a control that perturbs a
+    /// *leaf* cannot break the pruning bound (a narrower child is still contained
+    /// by its parent), so a control has to target an interior node and prove it
+    /// targeted one.
+    ///
+    /// Nodes are laid out in DFS **pre-order**, so node 0 is the root and node 1
+    /// is its first child.
+    #[must_use]
+    pub fn tree_node_is_leaf(&self, id: usize) -> bool {
+        self.tree.node_is_leaf(id)
+    }
+
+    /// Forces the search's seed hint — gate support for proving the answer is
+    /// seed-invariant. A wrong seed costs pruning, never correctness (see
+    /// [`tree`]'s module doc).
+    pub fn force_seed_hint(&self, node: u32) {
+        self.tree.force_seed_hint(node);
+    }
+
+    /// Collapses one tree node's span to a point, breaking the lower-bound
+    /// premise the pruning relies on. **The control** for every identity gate:
+    /// an identity assertion that cannot fail under this is not evidence.
+    pub fn perturb_tree_node(&mut self, node: usize) {
+        self.tree.perturb_node_span(node);
+    }
+
+    /// Vanilla's *exact* `RTree` search — strict pruning, incumbent-wins ties, an
+    /// explicit `candidate` in place of its `ThreadLocal`. Not the production
+    /// path; it exists so a gate can measure whether vanilla's own tree and
+    /// vanilla's own brute force ever disagree on the real table. See [`tree`]'s
+    /// module doc.
+    #[must_use]
+    pub fn nearest_row_vanilla_exact(&self, target: &[i64; 7], candidate: Option<u32>) -> u32 {
+        self.tree.nearest_row_vanilla_exact(target, candidate)
+    }
+}
+
+impl std::ops::Deref for BiomeTable {
+    type Target = [BiomeParameterPoint];
+
+    fn deref(&self) -> &Self::Target {
+        &self.points
+    }
+}
+
+impl IntoIterator for BiomeTable {
+    type Item = BiomeParameterPoint;
+    type IntoIter = std::vec::IntoIter<BiomeParameterPoint>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.points.into_iter()
+    }
 }
 
 /// Parses the embedded overworld biome-parameter table dumped by
@@ -265,14 +466,18 @@ pub fn parse_table(value: &Value) -> Vec<BiomeParameterPoint> {
 /// Used to drop [`UNSUPPORTED_SURFACE_BIOMES`] from a parsed table before
 /// `SurfaceSystem.getBand` was ported (`crate::surface::Rule::Bandlands`) —
 /// see the module doc's "Three biomes this port could not surface, until
-/// now" section. Now a pass-through: every biome in the parsed table,
-/// including the three formerly-excluded badlands variants, is searchable.
-/// Kept as a named function (not inlined away at call sites) so
-/// [`crate::overworld::OverworldGenerator::new`] doesn't need to change, and
-/// so a future exclusion has an obvious place to live again.
+/// now" section. Still a pass-through in the sense that matters: every biome in
+/// the parsed table, including the three formerly-excluded badlands variants, is
+/// searchable, and row order is preserved.
+///
+/// Since Unit 9 it also **builds the search tree**, and is therefore the seam
+/// that put [`BiomeTable`] in place without touching `overworld/mod.rs` — see
+/// [`BiomeTable`]'s own doc for that reasoning. Callers that only wanted the rows
+/// need no change: [`BiomeTable`] derefs to `[BiomeParameterPoint]` and consumes
+/// into an iterator of them.
 #[must_use]
-pub fn usable_overworld_table(table: Vec<BiomeParameterPoint>) -> Vec<BiomeParameterPoint> {
-    table
+pub fn usable_overworld_table(table: Vec<BiomeParameterPoint>) -> BiomeTable {
+    BiomeTable::new(table)
 }
 
 /// Parses the embedded per-biome `temperature` map (`{"minecraft:plains":

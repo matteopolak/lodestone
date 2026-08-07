@@ -31,7 +31,15 @@ const WATER: &str = "minecraft:water[level=0]";
 const LAVA: &str = "minecraft:lava[level=0]";
 
 /// The carver neighbourhood radius (`applyCarvers`: `dx,dz ∈ [-8, 8]`).
-const NEIGHBOURHOOD_RANGE: i32 = 8;
+///
+/// `pub` since Unit 9, and the visibility is load-bearing rather than cosmetic:
+/// [`crate::biome::memo`]'s slot map is sized so that one carve stage's
+/// `2 * NEIGHBOURHOOD_RANGE + 1` wide source window cannot self-collide, and that
+/// module asserts the relationship **at compile time** against this constant. Left
+/// private, the memo would have had to hard-code 17, and widening the carver
+/// neighbourhood would have silently degraded the memo to a thrashing cache with
+/// every test still green.
+pub const NEIGHBOURHOOD_RANGE: i32 = 8;
 /// Each carver's own `getRange()` (== 4), giving a max tunnel length of
 /// `(4*2-1)*16 = 112` blocks.
 const CARVER_RANGE: i32 = 4;
