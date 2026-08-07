@@ -151,8 +151,39 @@ impl Cache2DSlot {
     /// it. `y` is not part of the key: the node kind this backs (`cache_2d`)
     /// is, by construction, asked to cache a subtree whose value cannot
     /// depend on `y` (see `## Caching` on [`Density`]).
+    /// Uses `try_lock`, not `lock`, and treats contention as a cache miss.
+    ///
+    /// This is value-invariant, and the reason is the whole justification for
+    /// sharing a compiled graph across threads: the memo's key is an exact
+    /// `(x, z)` and the wrapped subtree is a pure function of it, so a hit and a
+    /// recomputation return the same bits. Nothing observable distinguishes them.
+    ///
+    /// Why it matters: U4 made a `Program` `Arc`-shared, and the compiled
+    /// `final_density` carries **708** `Cache2D` nodes inside its point-evaluated
+    /// leaves (`Program::cache_2d_under_leaves`). Before that, `build_aquifer`
+    /// deep-cloned the trees per chunk, so each chunk had its own cold,
+    /// uncontended slots; sharing turns those into 708 slots contended by every
+    /// generating thread, hit on the order of 10^4-10^5 times per chunk from the
+    /// spline leaves. A blocking `lock` there converts a cache that exists to
+    /// save time into a serialisation point. `try_lock` means no thread ever
+    /// waits: under contention it simply does the work it would have done on a
+    /// miss anyway.
+    ///
+    /// A poisoned lock (only possible if a panic unwound out of `inner.compute`
+    /// while this slot was held) is recovered from rather than propagated, for
+    /// the same reason — a cache is not a correctness-critical invariant.
     fn get_or_compute(&self, x: i32, z: i32, f: impl FnOnce() -> f64) -> f64 {
-        let mut slot = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Ok(mut slot) = self
+            .0
+            .try_lock()
+            .or_else(|e| match e {
+                std::sync::TryLockError::Poisoned(p) => Ok(p.into_inner()),
+                std::sync::TryLockError::WouldBlock => Err(()),
+            })
+        else {
+            // Another thread holds the slot. Recompute rather than wait.
+            return f();
+        };
         if let Some((cached_x, cached_z, value)) = *slot
             && cached_x == x
             && cached_z == z

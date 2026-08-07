@@ -122,7 +122,7 @@ fn corner_lookups_and_evaluations_match_the_cell_geometry() {
     // --- premise: the graph is real and does interpolate ------------------
     // Without this, a stub or a mis-rooted tree would measure zero lookups and
     // "0" would read as a spectacular win rather than as nothing happening.
-    let program = Program::compile(&final_density, builder.slot_count());
+    let program = Program::compile(&final_density);
     let interpolated_nodes = program.count_kind("interpolated");
     let structural_slots = program.interpolating_slots();
     assert!(

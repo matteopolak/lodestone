@@ -142,18 +142,22 @@ pub struct Graph {
 pub struct Program {
     graph: Arc<Graph>,
     root: NodeId,
-    slot_count: usize,
 }
 
 impl Program {
     /// Compiles `root` into a fresh single-root graph.
     ///
-    /// `slot_count` is [`crate::density::Builder::slot_count`]'s value — the
-    /// builder's over-approximation shared across all trees it built, which
-    /// this preserves verbatim rather than recomputing, so slot indices keep
-    /// pointing at the same cache slots they did before the flattening.
+    /// Deliberately does **not** take a slot count. The number of cache slots is
+    /// a property of the *scratch* a sampler evaluates against, not of the graph,
+    /// and conflating them creates a construction-order trap: `Builder`'s
+    /// `slot_count` is an over-approximation shared across every tree it built
+    /// and is only final after the **last** `build` call, so a `compile` that
+    /// demanded it could not be called at the point where the trees are
+    /// assembled. It is supplied to
+    /// [`NoiseChunkSampler::from_program`](crate::density::NoiseChunkSampler::from_program)
+    /// instead.
     #[must_use]
-    pub fn compile(root: &Density, slot_count: usize) -> Self {
+    pub fn compile(root: &Density) -> Self {
         let mut g = Graph {
             ops: Vec::new(),
             params: Vec::new(),
@@ -165,7 +169,6 @@ impl Program {
         Self {
             graph: Arc::new(g),
             root: id,
-            slot_count,
         }
     }
 
@@ -179,12 +182,6 @@ impl Program {
     #[must_use]
     pub(crate) fn root(&self) -> NodeId {
         self.root
-    }
-
-    /// Cache-slot width for [`super::Scratch`].
-    #[must_use]
-    pub fn slot_count(&self) -> usize {
-        self.slot_count
     }
 
     /// Number of flattened nodes in the shared graph — an implementation
@@ -770,7 +767,7 @@ mod tests {
             );
             // And the compiled node must actually carry that kind, which is the
             // half of the mapping the discriminant equality above cannot see.
-            let p = Program::compile(density, 1);
+            let p = Program::compile(density);
             let root = p.graph().op(p.root());
             assert_eq!(
                 root.kind, *kind,
@@ -832,7 +829,7 @@ mod tests {
             b(Density::Mul(b(Density::Const(2.0)), b(Density::Const(3.0)))),
             b(Density::Abs(b(Density::Const(-4.0)))),
         );
-        let p = Program::compile(&d, 0);
+        let p = Program::compile(&d);
         assert_eq!(p.node_count(), 6, "2 consts + mul + const + abs + add");
         assert_eq!(p.root(), 5, "the root is the last node pushed");
         let g = p.graph();

@@ -33,10 +33,12 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde_json::Value;
 
 use crate::density::{Builder, Context as DfContext, Density, NoiseChunkSampler};
+use crate::engine::{Bounds, Program};
 use crate::math::{clamp, clamped_map, floor, map};
 use crate::rng::{PositionalRandomFactory, RandomSource};
 pub use crate::rng::XoroshiroPositionalFactory;
@@ -168,11 +170,15 @@ pub struct AquiferSystem {
     final_density: NoiseChunkSampler,
     erosion: NoiseChunkSampler,
     depth: NoiseChunkSampler,
-    barrier: Density,
-    floodedness: Density,
-    spread: Density,
-    lava: Density,
-    prelim: Density,
+    /// The four point-evaluated router outputs and the preliminary-surface
+    /// tree, behind `Arc` so a per-chunk `AquiferSystem` shares them instead of
+    /// deep-copying five `Density` trees (diagnostic D3). `Density::compute`
+    /// reaches through the `Deref`, so every use site is unchanged.
+    barrier: Arc<Density>,
+    floodedness: Arc<Density>,
+    spread: Arc<Density>,
+    lava: Arc<Density>,
+    prelim: Arc<Density>,
 
     positional: XoroshiroPositionalFactory,
     sea_level: i32,
@@ -200,14 +206,14 @@ impl AquiferSystem {
         let height = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
         let sea_level = settings["sea_level"].as_i64().unwrap_or(63) as i32;
 
-        let final_density_node = builder.build(&router["final_density"]);
-        let erosion_node = builder.build(&router["erosion"]);
-        let depth_node = builder.build(&router["depth"]);
-        let barrier = builder.build(&router["barrier"]);
-        let floodedness = builder.build(&router["fluid_level_floodedness"]);
-        let spread = builder.build(&router["fluid_level_spread"]);
-        let lava = builder.build(&router["lava"]);
-        let prelim = builder.build(&router["preliminary_surface_level"]);
+        let final_density_node = Program::compile(&builder.build(&router["final_density"]));
+        let erosion_node = Program::compile(&builder.build(&router["erosion"]));
+        let depth_node = Program::compile(&builder.build(&router["depth"]));
+        let barrier = Arc::new(builder.build(&router["barrier"]));
+        let floodedness = Arc::new(builder.build(&router["fluid_level_floodedness"]));
+        let spread = Arc::new(builder.build(&router["fluid_level_spread"]));
+        let lava = Arc::new(builder.build(&router["lava"]));
+        let prelim = Arc::new(builder.build(&router["preliminary_surface_level"]));
 
         // `randomState.aquiferRandom()` = random.fromHashOf("minecraft:aquifer").forkPositional().
         let mut aquifer_src = builder
@@ -245,17 +251,23 @@ impl AquiferSystem {
     /// once and construct a fresh per-chunk [`AquiferSystem`] — matching
     /// vanilla's own per-chunk `NoiseChunk` — by cloning the trees rather than
     /// re-resolving JSON every chunk.
+    ///
+    /// Since U4 those clones are **refcount bumps**: the three interpolated
+    /// routes arrive as a [`Program`] (`Arc<Graph>` plus a root index) and the
+    /// five point-evaluated ones as `Arc<Density>`. Before that they were eight
+    /// recursive deep copies of a `Box`-linked tree whose every node was 232
+    /// bytes wide, performed once per chunk — diagnostic D3.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn from_parts(
-        final_density_node: Density,
-        erosion_node: Density,
-        depth_node: Density,
-        barrier: Density,
-        floodedness: Density,
-        spread: Density,
-        lava: Density,
-        prelim: Density,
+        final_density_node: Program,
+        erosion_node: Program,
+        depth_node: Program,
+        barrier: Arc<Density>,
+        floodedness: Arc<Density>,
+        spread: Arc<Density>,
+        lava: Arc<Density>,
+        prelim: Arc<Density>,
         positional: XoroshiroPositionalFactory,
         sea_level: i32,
         min_y: i32,
@@ -285,17 +297,21 @@ impl AquiferSystem {
         // locations that legitimately range outside this chunk's own bounds
         // (the padded grid-cell search `Self::compute_aquifer_fluid` walks),
         // so bounding them would violate `new_bounded`'s contract.
-        let final_density = NoiseChunkSampler::new_bounded(
+        let final_density = NoiseChunkSampler::from_program(
             final_density_node,
             slots,
             CELL_WIDTH,
             CELL_HEIGHT,
-            (min_block_x, max_block_x),
-            (min_y, min_y + height - 1),
-            (min_block_z, max_block_z),
+            Some(Bounds {
+                x: (min_block_x, max_block_x),
+                y: (min_y, min_y + height - 1),
+                z: (min_block_z, max_block_z),
+            }),
         );
-        let erosion = NoiseChunkSampler::new(erosion_node, slots, CELL_WIDTH, CELL_HEIGHT);
-        let depth = NoiseChunkSampler::new(depth_node, slots, CELL_WIDTH, CELL_HEIGHT);
+        let erosion =
+            NoiseChunkSampler::from_program(erosion_node, slots, CELL_WIDTH, CELL_HEIGHT, None);
+        let depth =
+            NoiseChunkSampler::from_program(depth_node, slots, CELL_WIDTH, CELL_HEIGHT, None);
 
         let min_grid_x = grid_x(min_block_x + -5);
         let max_grid_x = grid_x(max_block_x + -5) + 1;
