@@ -41,10 +41,15 @@
 //! # Cross-unit boundary
 //!
 //! `noise_settings/{nether,end}.json` and the nether multi-noise parameter list
-//! belong to the concurrent Nether/End unit, not to this phase. The preset
-//! closure check ([`presets_resolve_except_the_two_noise_settings_the_nether_end_unit_owns`])
-//! encodes that as a bounded allowance and asserts the allowance is exactly
-//! those two, so it cannot quietly grow into cover for a real gap.
+//! belong to the concurrent Nether/End unit, not to this phase, which took only
+//! `amplified`, `caves`, `floating_islands` and `large_biomes`.
+//!
+//! [`every_preset_reference_resolves`] originally carried that as a bounded
+//! allowance, written to report itself as deletable rather than persist quietly.
+//! Those two files have since landed, so the allowance is gone and full closure
+//! is required — with a named assertion that both are present, and a control that
+//! the presets really do reference both, so their absence fails loudly here
+//! instead of being tolerated.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -622,7 +627,7 @@ fn every_jigsaw_structure_start_pool_resolves() {
 }
 
 #[test]
-fn presets_resolve_except_the_two_noise_settings_the_nether_end_unit_owns() {
+fn every_preset_reference_resolves() {
     let noise_settings = ids("noise_settings");
     let flat = ids("flat_level_generator_preset");
     let structure_set_tags = ids("tags/worldgen/structure");
@@ -631,12 +636,21 @@ fn presets_resolve_except_the_two_noise_settings_the_nether_end_unit_owns() {
     assert_eq!(structure_set_tags.len(), 20, "bundled structure_set tags");
     assert_eq!(structure_sets.len(), 20, "bundled structure sets");
 
-    // The concurrent Nether/End unit owns these two files. Bounded, and asserted
-    // to be exactly two just below, so it cannot grow into cover for a gap.
+    // `nether` and `end` belong to the concurrent Nether/End unit, not to this
+    // phase, and this assertion was originally a bounded allowance for them. They
+    // have since landed, so the allowance is gone and closure is required
+    // outright — which is strictly stronger, and the reason the allowance was
+    // written to report itself as deletable rather than to persist quietly.
     const NE_OWNED: [&str; 2] = ["nether", "end"];
-    assert_eq!(NE_OWNED.len(), 2);
+    for id in NE_OWNED {
+        assert!(
+            noise_settings.contains(id),
+            "noise_settings/{id}.json is absent. It is the Nether/End unit's file, \
+             not this phase's, and the presets cannot close without it — see \
+             docs/worldgen-structure-corpus.md's cross-unit boundary section."
+        );
+    }
 
-    let mut deferred = BTreeSet::new();
     let mut n_settings = 0usize;
     let mut n_overrides = 0usize;
     for p in files_of("world_preset").into_iter().chain(files_of("flat_level_generator_preset")) {
@@ -644,15 +658,11 @@ fn presets_resolve_except_the_two_noise_settings_the_nether_end_unit_owns() {
         for r in refs_under(&doc, &["settings"]) {
             n_settings += 1;
             let id = strip(&r);
-            if NE_OWNED.contains(&id) {
-                deferred.insert(id.to_owned());
-            } else {
-                assert!(
-                    noise_settings.contains(id),
-                    "{}: settings {r} -> no bundled noise_settings",
-                    p.display()
-                );
-            }
+            assert!(
+                noise_settings.contains(id),
+                "{}: settings {r} -> no bundled noise_settings",
+                p.display()
+            );
         }
         for r in all_refs_under(&doc, &["structure_overrides"]) {
             n_overrides += 1;
@@ -678,14 +688,18 @@ fn presets_resolve_except_the_two_noise_settings_the_nether_end_unit_owns() {
     }
     assert_eq!(n_settings, 16, "noise_settings references across the 16 presets");
     assert_eq!(n_overrides, 20, "structure_overrides references across the 16 presets");
-    // The control: the deferred set is non-empty, so this test really is
-    // exercising the allowance rather than passing because nothing hit it.
-    assert_eq!(
-        deferred,
-        NE_OWNED.iter().map(|s| (*s).to_owned()).collect::<BTreeSet<_>>(),
-        "presets reference exactly nether+end from the Nether/End unit; if this \
-         set shrank, that unit landed and the allowance should be deleted"
-    );
+    // The control that the NE files above are load-bearing here rather than a
+    // vacuous precondition: the presets really do reference both, so removing
+    // either one fails this test rather than passing unexercised.
+    let referenced: BTreeSet<String> = files_of("world_preset")
+        .into_iter()
+        .chain(files_of("flat_level_generator_preset"))
+        .flat_map(|p| refs_under(&json(&p), &["settings"]))
+        .map(|r| strip(&r).to_owned())
+        .collect();
+    for id in NE_OWNED {
+        assert!(referenced.contains(id), "no preset references noise_settings/{id}");
+    }
 }
 
 // ---------------------------------------------------------------------------
