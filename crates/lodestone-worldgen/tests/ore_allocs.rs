@@ -363,10 +363,12 @@ fn a_warm_ore_pass_allocates_a_bounded_amount_not_one_per_attempt() {
         warm_allocs <= WARM_BOUND,
         "a warm 3x3 ore pass allocated {warm_allocs}, over the {WARM_BOUND} \
          bound, for {warm_writes} writes. The two hypotheses: scratch reuse \
-         predicts a bounded count (the RegionView overlay's geometric growth, \
-         ~O(log2 {warm_writes}) reallocations); a per-attempt allocation \
-         predicts a count that scales with placement attempts, which pre-U18 \
-         measured at 8,306 per ore pass. {warm_allocs} is in the second regime."
+         predicts a count independent of the work done (measured at 1, because \
+         RegionView recycles its overlay from a thread-local free-list rather \
+         than regrowing it); a per-attempt allocation predicts a count that \
+         scales with placement attempts, which the two controls in \
+         docs/worldgen-ore-allocations.md measured at 6,701 and 1,901 per pass \
+         on this very fixture. {warm_allocs} is in the second regime."
     );
 }
 
