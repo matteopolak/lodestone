@@ -70,12 +70,37 @@ const COMMAND_BLOCKS: [(&str, CommandBlockMode); 3] = [
 
 /// The mode for `state_id`, or `None` if it is not a command block at all.
 ///
-/// `block_type_name` rather than `block_name`: the former is the block's own
-/// id, stable across the state's properties, which is what the three-way match
-/// needs.
+/// # `block_name`, and why `block_type_name` here was a live bug
+///
+/// [`block_name`](lodestone_data::block_states::block_name) is the accessor
+/// keyed by **block-state** id — the id space a chunk-section palette and
+/// `World::block_at` deal in, and the one `state_id` is. It already returns the
+/// block's own identifier rather than the state's, so it is stable across
+/// `facing`/`conditional`, which is the property the three-way match needs.
+///
+/// This used to call `block_type_name`, whose parameter is a
+/// **`minecraft:block` registry** id (1,196 entries, registration order) and
+/// *not* a state id — its own doc says so. The two spaces are unrelated orders,
+/// so passing a state id in resolved to an arbitrary block, and the effect was
+/// symmetrical and both halves player-visible: every real command block
+/// (states 9968, 14817, 14829) fell past `BLOCK_COUNT` and answered `None`, so
+/// the edit screen #442 wired up could never open in the game; while the three
+/// *registry* ids reused as state ids answered `Some` — state 407 is
+/// `minecraft:cherry_leaves` (→ Redstone) and 668/669 are
+/// `minecraft:note_block` (→ Auto/Sequence), so right-clicking leaves or a note
+/// block opened the command-block editor.
+///
+/// It survived review because every test gating this picked its subject with
+/// the *same* wrong accessor, so the gate agreed with the bug — a mirror, and
+/// the reason a green suite said nothing. Reverting this line was run and
+/// observed: `each_command_block_reports_its_own_mode_and_a_normal_block_
+/// reports_none` fails immediately on the real command block (`None` vs
+/// `Some(Redstone)`), now that it selects its subject in the state-id space.
+/// That test's second half additionally pins the *false-positive* direction,
+/// which no positive assertion can see.
 #[must_use]
 pub fn mode_for_state(state_id: u32) -> Option<CommandBlockMode> {
-    let name = lodestone_data::block_states::block_type_name(state_id)?;
+    let name = lodestone_data::block_states::block_name(state_id)?;
     COMMAND_BLOCKS
         .iter()
         .find(|(id, _)| *id == name)
@@ -190,41 +215,54 @@ mod tests {
         )
     }
 
+    /// The first **block-state** id belonging to `name`, panicking rather than
+    /// skipping if the table has no such block.
+    ///
+    /// `block_name`, not `block_type_name`: see [`mode_for_state`]'s doc. The
+    /// previous spelling made every helper here select its subject through the
+    /// same wrong id space as the code under test, so the whole module's tests
+    /// agreed with the bug.
+    ///
+    /// A `find` that returns `None` used to `continue`/`return` — the
+    /// *precondition* species of vacuous test, green when it measured nothing.
+    /// These are all vanilla blocks in a generated 26.2 table; absence is a
+    /// broken table, not a case to skip.
+    fn state_of(name: &str) -> u32 {
+        (0u32..lodestone_data::block_states::STATE_COUNT as u32)
+            .find(|id| lodestone_data::block_states::block_name(*id).is_some_and(|n| n == name))
+            .unwrap_or_else(|| panic!("the block-state table must contain {name}"))
+    }
+
     /// A state id that is definitely not a command block, resolved from the
     /// real table rather than guessed — `0` happens to be air, but asserting
     /// that would be asserting a table detail this test does not care about.
     fn non_command_block_state() -> u32 {
-        (0u32..4096)
-            .find(|id| {
-                lodestone_data::block_states::block_type_name(*id)
-                    .is_some_and(|n| n == "minecraft:stone")
-            })
-            .expect("the block-state table must contain stone")
+        state_of("minecraft:stone")
     }
 
-    fn command_block_state() -> Option<u32> {
-        (0u32..40_000).find(|id| {
-            lodestone_data::block_states::block_type_name(*id)
-                .is_some_and(|n| n == "minecraft:command_block")
-        })
+    fn command_block_state() -> u32 {
+        state_of("minecraft:command_block")
     }
 
     /// **The mode comes from the block, not the NBT** — the trap this module's
     /// doc names. A reader that only looked at the payload would report every
     /// chain block as Redstone, which is a plausible-looking wrong answer.
+    ///
+    /// The second half is the control for the id-space bug [`mode_for_state`]'s
+    /// doc describes, and it is deliberately **not** built from anything this
+    /// module chooses: it takes each command block's `minecraft:block`
+    /// **registry** id — the number the broken call was really indexing — and
+    /// requires that same number, read as a *state* id, to answer `None`. Under
+    /// the bug those three ids are exactly the ones that answered `Some`
+    /// (cherry leaves and note blocks), so this fails there and passes here.
+    /// Asserting only the positive half cannot see it: the positive half was
+    /// *also* green under the bug, because it picked its subject the same wrong
+    /// way.
     #[test]
     fn each_command_block_reports_its_own_mode_and_a_normal_block_reports_none() {
         for (name, expected) in COMMAND_BLOCKS {
-            let Some(id) = (0u32..40_000).find(|id| {
-                lodestone_data::block_states::block_type_name(*id).is_some_and(|n| n == name)
-            }) else {
-                // The table is data-driven; skip rather than fail if a block is
-                // absent, but the assertion below stops that being vacuous for
-                // the whole test.
-                continue;
-            };
             assert_eq!(
-                mode_for_state(id),
+                mode_for_state(state_of(name)),
                 Some(expected),
                 "{name} must report its own mode"
             );
@@ -234,6 +272,29 @@ mod tests {
             None,
             "stone is not a command block, and must not open the screen"
         );
+
+        for (name, _) in COMMAND_BLOCKS {
+            let registry_id = (0u32..lodestone_data::block_states::BLOCK_COUNT as u32)
+                .find(|id| {
+                    lodestone_data::block_states::block_type_name(*id).is_some_and(|n| n == name)
+                })
+                .unwrap_or_else(|| panic!("the block registry must contain {name}"));
+            let as_a_state = lodestone_data::block_states::block_name(registry_id);
+            assert_ne!(
+                as_a_state,
+                Some(name),
+                "premise: {name}'s registry id {registry_id} must not also be one of \
+                 its state ids, or this control cannot distinguish the two spaces"
+            );
+            assert_eq!(
+                mode_for_state(registry_id),
+                None,
+                "control: {name}'s *registry* id {registry_id} is block-state id \
+                 {as_a_state:?}, which is not a command block — reading a state id \
+                 through the registry table is the bug that made the edit screen \
+                 unopenable on real command blocks and openable on these"
+            );
+        }
     }
 
     /// **`TrackOutput` defaults to `true`, unlike every other flag here.**
@@ -243,9 +304,7 @@ mod tests {
     /// only, and that is precisely the field an unaware port gets wrong.
     #[test]
     fn an_empty_payload_opens_with_vanillas_own_field_initialisers() {
-        let Some(id) = command_block_state() else {
-            return;
-        };
+        let id = command_block_state();
         let pos = BlockPos::new(3, 64, -7);
         let open = command_block_open(pos, id, &Nbt::End)
             .expect("a command block with no payload must still open");
@@ -266,9 +325,7 @@ mod tests {
     /// control for the test above.
     #[test]
     fn a_real_payload_overrides_every_default_it_carries() {
-        let Some(id) = command_block_state() else {
-            return;
-        };
+        let id = command_block_state();
         let nbt = compound(vec![
             ("Command", Nbt::String("say hello".into())),
             ("TrackOutput", Nbt::Byte(0)),
@@ -289,9 +346,7 @@ mod tests {
     /// `"-"` placeholder, and a malformed payload never refuses to open.
     #[test]
     fn last_output_is_hidden_while_untracked_and_junk_still_opens() {
-        let Some(id) = command_block_state() else {
-            return;
-        };
+        let id = command_block_state();
         let with_output = |track: i8| {
             compound(vec![
                 ("TrackOutput", Nbt::Byte(track)),
