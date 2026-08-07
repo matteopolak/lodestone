@@ -181,7 +181,16 @@ const MAX_SCHEDULED_TICKS_PER_TICK: usize = 65536;
 /// 40 ticks, the random-tick pass pays the remaining cold generations on the
 /// core thread, exactly as it did before this deferral existed. The gate only
 /// removes the common case where the tick loop starts before seeding does.
-const INITIAL_RANDOM_TICK_DEFERRAL_TICKS: u64 = 40;
+///
+/// `pub(crate)` because it is *observable*: the random-tick pass is the only
+/// thing in this loop that touches `world.column()`, so a gate counting column
+/// generations over N ticks sees `N - INITIAL_RANDOM_TICK_DEFERRAL_TICKS`
+/// passes, not N. Three gates hardcoded the pre-deferral assumption that every
+/// tick is a pass and reported **zero** columns when this landed
+/// (`chunk_store`'s pair and `tests/lan_world_tick.rs`). A gate must derive its
+/// tick count from this constant rather than restate `40`, so raising the
+/// deferral moves the expectations with it instead of silently voiding them.
+pub(crate) const INITIAL_RANDOM_TICK_DEFERRAL_TICKS: u64 = 40;
 
 /// Seeds for [`RandomTickScheduler`]'s two independent generators (issue
 /// #307). Vanilla seeds its position LCG (`Level.randValue`) from an
