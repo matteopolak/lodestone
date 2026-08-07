@@ -48,6 +48,14 @@
 //! alongside their JVM dumps and drive these modules through the parent's
 //! re-exports, so they were not moved and their fixture paths are unchanged.
 
+// Unit 5: `std::simd` in the noise kernels. The workspace is pinned to nightly
+// (see `rust-toolchain.toml`) specifically so this needs **no** `#[cfg]`-selected
+// scalar fallback — a dual path is two worlds from one seed waiting to happen,
+// each arm individually "correct" and invisible to a single-arm test run. The one
+// vectorised kernel is `noise::improved::ImprovedNoise::sample_and_lerp`, gated
+// bit-exact against the JVM fixtures like everything else.
+#![feature(portable_simd)]
+
 pub mod counters;
 pub mod density;
 pub mod engine;

@@ -1255,6 +1255,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `src/overworld.rs` (1,873 lines) and `src/feature/vegetation.rs` (3,661) — became
   two directories, by pure move, so the rewrite's engine middle can run at width 2 and
   then 4 instead of width 1.
+- [Worldgen SIMD kernels: what vectorising the noise actually bought](./worldgen-simd-kernels.md) —
+  The `std::simd` vectorisation of `lodestone-worldgen-core`'s noise kernels — Unit
+  5 of [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md) — and, more
+  usefully, the profile that decided how far it was worth taking and the disassembly
+  control that showed the premise behind it was half wrong. One function is
+  vectorised: `ImprovedNoise::sample_and_lerp`. The measured whole-column effect is
+  about **2.4% of `C_ss`**, and this document exists mainly so nobody re-attempts the
+  larger version whose ceiling is recorded here as smaller.
 - [Worldgen staged sharded store](./worldgen-staged-store.md) — The memoisation
   layer under `OverworldGenerator`'s 3×3-of-3×3 neighbourhood recursion: a
   concurrent map from chunk position to a per-chunk entry holding one slot per
