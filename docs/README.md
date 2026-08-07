@@ -1608,6 +1608,14 @@ of these caught the *brief* being wrong rather than the code.
   `bdf93a28` (the interim palette-mask fix); every claim below was re-verified against
   the tree and the 26.2 jar, not inherited from the briefing — see "Corrections to
   the briefing" at the end.
+- [Plan: render performance — culling first, then submission](./plans/render-performance.md) —
+  The sequenced plan for making terrain rendering scale from the shipped render
+  distance 8 to 16 and 32: frustum culling, vanilla's circular view-membership
+  distance cull, the section occlusion graph (vanilla's cave culling), draw-submission
+  batching, and the translucency ordering that culling changes the cost model for.
+  Written 2026-08-07 against `297706a1`; every number below was re-verified against
+  the tree, the recorded diagnostics, or the 26.2 decompiled client — not inherited
+  from the briefing, whose errors are listed at the end.
 - [Plan: runtime plugin loading — wasm components, and the same plugin compiled in](./plans/runtime-plugin-loading.md) —
   The design for loading plugins at runtime (Java-style, drop a file in a folder)
   using WebAssembly components, while keeping the existing compiled-in bevy-plugin
