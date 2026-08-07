@@ -97,21 +97,85 @@ fn move_bytes(x: f64, y: f64, z: f64) -> Vec<u8> {
     w.into_vec()
 }
 
+/// How long a silence means "the server has finished sending for now".
+///
+/// Only sound where an **absence** is being established, because a gap is the
+/// only evidence of an absence there is. Where a packet is *expected*, use
+/// [`drain_until`] — see its doc comment for why this one flaked.
+const QUIET_GAP: Duration = Duration::from_millis(400);
+
+/// Ceiling on waiting for a packet that must arrive. Fails the test rather than
+/// hanging, and is deliberately far larger than [`QUIET_GAP`]: it is only ever
+/// reached when the packet genuinely never comes.
+const ARRIVAL_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Reads until the stream goes quiet for [`QUIET_GAP`].
+///
+/// A **gap-terminated** drain can only ever *under*-collect, so it is the right
+/// instrument for "no `add_entity` arrived" and the wrong one for "A's
+/// `add_entity` arrived" — see [`drain_until`].
 async fn drain<T: lodestone_net::Transport>(client: &mut Connection<T>) -> Vec<(i32, Vec<u8>)> {
     let mut out = Vec::new();
-    while let Ok(Ok(Some(p))) =
-        tokio::time::timeout(Duration::from_millis(400), client.read_packet()).await
-    {
+    while let Ok(Ok(Some(p))) = tokio::time::timeout(QUIET_GAP, client.read_packet()).await {
         out.push(p);
     }
     out
 }
 
-async fn join<T: lodestone_net::Transport>(
+/// Reads until `done` is satisfied by the packets collected so far, or until
+/// [`ARRIVAL_DEADLINE`] — then keeps draining whatever is already queued so the
+/// caller still sees the full picture for its other assertions.
+///
+/// # Why this exists: a wall-clock stopping condition on a *positive* assertion
+///
+/// Both "B receives A" assertions used [`drain`], whose stopping condition is a
+/// 400 ms silence. That silence is not evidence the server is done — it is
+/// evidence that *nothing arrived in 400 ms*, and the two differ under load. This
+/// test passed standalone (4.3 s and 30.8 s on two runs) and failed inside
+/// `cargo test --workspace -- --test-threads=2`, reporting *"An empty list means
+/// `bind` is still handing each connection the bare mob source"* — a confident
+/// accusation against production for a drain that simply stopped early.
+///
+/// The join path also got slower underneath it: issue #329's world-spawn search
+/// runs before chunk streaming and, against [`AirSource`], finds no valid spawn in
+/// any of its 121 spiral candidates — so it generates 121 full-height columns
+/// (~196 KiB each) on the connection task between `FINISH_CONFIGURATION` and the
+/// first packet. 400 ms of quiet in that window stopped being unusual.
+///
+/// So the stopping condition is now the **event**, and the timeout is only a
+/// failure ceiling. This cannot mask the defect the test exists to catch: with
+/// `bind` reverted to its pre-#438 form the `add_entity` never arrives at all, and
+/// this waits the full deadline and then fails on the same assertion.
+async fn drain_until<T: lodestone_net::Transport>(
+    client: &mut Connection<T>,
+    done: impl Fn(&[(i32, Vec<u8>)]) -> bool,
+) -> Vec<(i32, Vec<u8>)> {
+    let mut out = Vec::new();
+    let deadline = tokio::time::Instant::now() + ARRIVAL_DEADLINE;
+    while !done(&out) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, client.read_packet()).await {
+            Ok(Ok(Some(p))) => out.push(p),
+            // Closed socket or decode error: stop and let the caller's own
+            // assertion report what is missing.
+            Ok(_) => break,
+            Err(_) => break,
+        }
+    }
+    out.extend(drain(client).await);
+    out
+}
+
+/// Drives the handshake/login/configuration exchange, stopping just before the
+/// play-state stream so the caller chooses its own drain.
+async fn handshake<T: lodestone_net::Transport>(
     client: &mut Connection<T>,
     name: &str,
     uuid: Uuid,
-) -> Vec<(i32, Vec<u8>)> {
+) {
     client.write_packet(0, &handshake_bytes()).await.unwrap();
     client
         .write_packet(0, &hello_bytes(name, uuid))
@@ -127,7 +191,29 @@ async fn join<T: lodestone_net::Transport>(
         .write_packet(configuration::serverbound::FINISH_CONFIGURATION, &[])
         .await
         .unwrap();
+}
+
+/// A join whose caller asserts an **absence**, so the gap-terminated [`drain`] is
+/// the only instrument available.
+async fn join<T: lodestone_net::Transport>(
+    client: &mut Connection<T>,
+    name: &str,
+    uuid: Uuid,
+) -> Vec<(i32, Vec<u8>)> {
+    handshake(client, name, uuid).await;
     drain(client).await
+}
+
+/// A join whose caller asserts a packet **arrives**, so it waits for the event
+/// rather than for a silence. See [`drain_until`].
+async fn join_awaiting<T: lodestone_net::Transport>(
+    client: &mut Connection<T>,
+    name: &str,
+    uuid: Uuid,
+    done: impl Fn(&[(i32, Vec<u8>)]) -> bool,
+) -> Vec<(i32, Vec<u8>)> {
+    handshake(client, name, uuid).await;
+    drain_until(client, done).await
 }
 
 /// Decodes `add_entity`'s leading id / uuid / type-id triple.
@@ -180,7 +266,12 @@ async fn two_lan_clients_receive_each_others_player_entities() {
         add_entities(&a_join)
     );
 
-    let b_join = join(&mut client_b, &name_b, uuid_b).await;
+    let b_join = join_awaiting(&mut client_b, &name_b, uuid_b, |packets| {
+        add_entities(packets)
+            .iter()
+            .any(|(_, uuid, _)| *uuid == uuid_a)
+    })
+    .await;
     let spawns = add_entities(&b_join);
     let a_spawn = spawns
         .iter()
@@ -211,7 +302,15 @@ async fn two_lan_clients_receive_each_others_player_entities() {
         )
         .await
         .unwrap();
-    let a_after = drain(&mut client_a).await;
+    // Also a positive assertion, so also event-terminated. Note the predicate
+    // matches on the uuid alone while the assertion additionally pins the type id:
+    // a wrong type id must fail the assertion, not silently extend the wait.
+    let a_after = drain_until(&mut client_a, |packets| {
+        add_entities(packets)
+            .iter()
+            .any(|(_, uuid, _)| *uuid == uuid_b)
+    })
+    .await;
     assert!(
         add_entities(&a_after)
             .iter()
