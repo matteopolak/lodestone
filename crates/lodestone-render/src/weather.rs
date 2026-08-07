@@ -716,7 +716,13 @@ pub fn extract_columns(
             // Vanilla clamps both ends of the span up to the terrain height, so a
             // column over a mountain draws only above the peak. With no heightmap
             // the span is the plain camera-centred cube.
-            let (bottom_y, top_y) = match probe.column_top(x, z) {
+            // Resolved **once** per column and reused for the light sample below.
+            // It used to be asked twice for the same `(x, z)`, which doubled the
+            // probe traffic — and every shell-side probe query is a world lock
+            // (`lodestone_shell::app::weather`), so the second call was 441 locks
+            // a frame for a value already in hand.
+            let terrain = probe.column_top(x, z);
+            let (bottom_y, top_y) = match terrain {
                 Some(terrain) => ((cam_y - radius).max(terrain), (cam_y + radius).max(terrain)),
                 None => (cam_y - radius, cam_y + radius),
             };
@@ -730,7 +736,7 @@ pub fn extract_columns(
             // Vanilla samples light at `max(camera_y, terrain_height)`, i.e. at the
             // top of the column, never at the camera's own y when standing in a
             // hole — otherwise a player in a one-block pit sees pitch-black rain.
-            let light_y = probe.column_top(x, z).map_or(cam_y, |t| cam_y.max(t));
+            let light_y = terrain.map_or(cam_y, |t| cam_y.max(t));
             let light = probe.light(x, light_y, z);
             let mut random = ColumnRandom::new(column_seed(x, z));
             columns.push(match kind {

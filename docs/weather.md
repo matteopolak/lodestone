@@ -251,6 +251,19 @@ Gotchas beyond the three above:
 * **A ramping rain level re-uploads the fog uniform every tick**, not only on a
   water crossing. Intended: the ramp is ±0.01/tick over ~100 ticks, and a
   change-detected upload that ignored it would render a storm at clear-sky colours.
+* **`ShellWeatherProbe` must be built per frame, and its doc used to claim a design
+  it did not implement.** The probe answers 441 columns; issue #25's per-column biome
+  lookup made each of those three world-lock acquisitions (`world_dimensions`,
+  `section_at`, the climate mutex) while the doc still said the probe was answered
+  from a single sample — ~1,300 locks a frame, contended against chunk streaming.
+  `ProbeMemo` now keys each read by what it actually varies over, so a rainy frame
+  costs **one** `world_dimensions`, **one `section_at` per chunk column** (4, 6 or 9
+  — 21 consecutive blocks straddle two chunk boundaries, so "at most 4" is wrong) and
+  one climate lookup per biome in view. The memo is a *snapshot*, so reusing a probe
+  across frames would serve pre-`BLOCK_UPDATE` biomes. Counter and both wrong
+  hypotheses: `app::weather::tests::one_section_fetch_per_chunk_column_not_one_per_column`
+  (measured 441 → 4) and `lodestone-render/tests/weather_probe_query_counts.rs`
+  (`column_top` 882 → 441). `DESIGN.md` §12.113.
 
 ## Deferred
 
