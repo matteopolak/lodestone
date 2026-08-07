@@ -183,6 +183,19 @@ pub struct Snapshot {
     /// against the derived corner lattice (`5 * 49 * 5 = 1,225` per slot for a
     /// chunk), which is the quantity the hoist must **not** change.
     pub corner_evals: u64,
+    /// Vectorised gradient batches in `ImprovedNoise::sample_and_lerp` — one per
+    /// call, each computing the **eight** corner dot products of one noise
+    /// lattice cell in eight `std::simd` lanes (Unit 5).
+    ///
+    /// This is the island check for the SIMD kernel, and it is predictive rather
+    /// than a smoke test: one `PerlinNoise::get_value` over a stack with `k`
+    /// non-`None` octaves is exactly `k` batches, so a caller with a known octave
+    /// count pins the expected value from outside the kernel.
+    ///
+    /// What it does **not** prove is that the lanes stayed vectorised — a counter
+    /// cannot see LLVM scalarising a `Simd` op. That question is answered by
+    /// disassembly, recorded in `docs/worldgen-simd-kernels.md`.
+    pub noise_corner_batches: u64,
     /// Slot-cache lookups that found a memoised value.
     pub slot_hits: u64,
     /// Slot-cache lookups that had to evaluate the subtree — the real
@@ -205,7 +218,14 @@ pub struct Snapshot {
     pub post_ore_computed: u64,
     /// `post_ore_world` hits: served from the memo cache.
     pub post_ore_hits: u64,
-    /// `biome::nearest_biome` calls — brute-force nearest-neighbour searches.
+    /// `biome::nearest_biome` calls — climate nearest-neighbour searches.
+    ///
+    /// **Not brute-force any more.** U9 (`7ff942dd`) put a ported
+    /// `Climate.RTree` on this path, and `71dd8b22` then matched vanilla's own
+    /// traversal rather than its `findValueBruteForce`, so a "search" is now a
+    /// pruned descent rather than a full table scan. Pair this with
+    /// [`biome_rows_compared`](Self::biome_rows_compared) to get evaluations per
+    /// search; neither is reconstructible from the other.
     pub biome_searches: u64,
     /// Climate-table rows compared across all
     /// [`biome_searches`](Self::biome_searches). The D5 number.
@@ -265,6 +285,7 @@ impl Default for Snapshot {
             corner_lookups: 0,
             cell_fills: 0,
             corner_evals: 0,
+            noise_corner_batches: 0,
             slot_hits: 0,
             slot_misses: 0,
             slot_misses_by_slot: [0; MAX_TRACKED_SLOTS],
@@ -336,6 +357,7 @@ mod imp {
         corner_lookups: AtomicU64,
         cell_fills: AtomicU64,
         corner_evals: AtomicU64,
+        noise_corner_batches: AtomicU64,
         slot_hits: AtomicU64,
         slot_misses: AtomicU64,
         slot_misses_by_slot: [AtomicU64; MAX_TRACKED_SLOTS],
@@ -362,6 +384,7 @@ mod imp {
         corner_lookups: AtomicU64::new(0),
         cell_fills: AtomicU64::new(0),
         corner_evals: AtomicU64::new(0),
+        noise_corner_batches: AtomicU64::new(0),
         slot_hits: AtomicU64::new(0),
         slot_misses: AtomicU64::new(0),
         slot_misses_by_slot: [const { AtomicU64::new(0) }; MAX_TRACKED_SLOTS],
@@ -436,6 +459,12 @@ mod imp {
     #[inline]
     pub fn bump_corner_eval() {
         bump(&C.corner_evals);
+    }
+
+    /// One vectorised eight-lane gradient batch ran (Unit 5's SIMD kernel).
+    #[inline]
+    pub fn bump_noise_corner_batch() {
+        bump(&C.noise_corner_batches);
     }
 
     #[inline]
@@ -543,6 +572,7 @@ mod imp {
         C.corner_lookups.store(0, Relaxed);
         C.cell_fills.store(0, Relaxed);
         C.corner_evals.store(0, Relaxed);
+        C.noise_corner_batches.store(0, Relaxed);
         C.slot_hits.store(0, Relaxed);
         C.slot_misses.store(0, Relaxed);
         for a in &C.slot_misses_by_slot {
@@ -578,6 +608,7 @@ mod imp {
             corner_lookups: C.corner_lookups.load(Relaxed),
             cell_fills: C.cell_fills.load(Relaxed),
             corner_evals: C.corner_evals.load(Relaxed),
+            noise_corner_batches: C.noise_corner_batches.load(Relaxed),
             slot_hits: C.slot_hits.load(Relaxed),
             slot_misses: C.slot_misses.load(Relaxed),
             slot_misses_by_slot: std::array::from_fn(|i| C.slot_misses_by_slot[i].load(Relaxed)),
@@ -621,6 +652,9 @@ mod imp {
     /// Inert without the feature.
     #[inline(always)]
     pub fn bump_corner_eval() {}
+    /// Inert without the feature.
+    #[inline(always)]
+    pub fn bump_noise_corner_batch() {}
     #[inline(always)]
     pub fn bump_slot_hit() {}
     #[inline(always)]
@@ -669,7 +703,8 @@ mod imp {
 pub use imp::{
     StageGuard, bump_biome_search, bump_block_at, bump_cell_fill, bump_corner_eval,
     bump_corner_lookup, bump_density_eval,
-    bump_density_point_compute, bump_palette_intern_hit, bump_palette_intern_new, bump_post_ore,
+    bump_density_point_compute, bump_noise_corner_batch, bump_palette_intern_hit,
+    bump_palette_intern_new, bump_post_ore,
     bump_pre_ore, bump_rng_draw, bump_slot_hit, bump_slot_miss, bump_state_intern_new,
     bump_state_name_lookup, bump_stitch_cells, bump_string_allocs, current_stage, reset, snapshot,
 };
