@@ -598,14 +598,8 @@ fn mc_string(text: &str) -> Vec<u8> {
     out
 }
 
-/// A network-NBT bare string component: `TAG_String`, big-endian u16 length,
-/// then the UTF-8 bytes.
-fn nbt_string(text: &str) -> Vec<u8> {
-    let mut out = vec![0x08];
-    out.extend_from_slice(&(text.len() as u16).to_be_bytes());
-    out.extend_from_slice(text.as_bytes());
-    out
-}
+// `nbt_string` for this file lives at the top, beside `utf`/`var_i32`; the #286
+// signature work added a byte-identical second copy here. One definition.
 
 /// A signed `player_chat` payload: a full 256-byte signature, an empty
 /// last-seen list, no unsigned component, pass-through filter. Feeding this
