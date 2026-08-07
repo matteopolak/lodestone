@@ -906,7 +906,7 @@ fn rss_bytes() -> u64 {
 
 /// Chunk-fill geometry, restated once so every prediction below can cite it.
 ///
-/// `fill_stage` (`src/overworld.rs`) is `lz in 0..16` × `lx in 0..16` ×
+/// `fill_stage` (`src/overworld/fill.rs`) is `lz in 0..16` × `lx in 0..16` ×
 /// `ly in 0..height`, with exactly one `AquiferSystem::block_at` per iteration
 /// and no `continue`. So one chunk fill is `256 * height` calls — and for the
 /// overworld's `height = 384` (`noise_settings/overworld.json`) that is
