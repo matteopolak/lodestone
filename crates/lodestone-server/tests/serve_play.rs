@@ -1450,7 +1450,8 @@ async fn a_player_moved_packet_feeds_mob_perception_through_the_real_connection(
 // generated — not raster-order from the far corner after all of it exists.
 // ---------------------------------------------------------------------------
 
-/// [`AirSource`] that also counts how many columns have been generated so far.
+/// A column source that counts how many columns have been generated so far, over
+/// terrain a world spawn can actually be found in.
 ///
 /// The count is the load-bearing half of this gate. Ordering alone is not
 /// enough: generating all 361 columns and *then* encoding them nearest-first
@@ -1458,15 +1459,43 @@ async fn a_player_moved_packet_feeds_mob_perception_through_the_real_connection(
 /// exactly as bad as before. So [`ProbeProto`] stamps this counter into each
 /// chunk packet, and the assertion is about **how much had been generated when
 /// the player's own column reached the wire**.
+///
+/// # Why there is a floor, and why that is not a convenience
+///
+/// This served bare air until issue #329 gave `serve_connection` a real world
+/// spawn *search* ahead of the ring loop. Against an air column
+/// `get_level_respawn_pos` finds no solid block anywhere, so every one of the
+/// spiral's 121 candidates is invalid and the search walks the whole ±5-chunk box
+/// before a single chunk is encoded — measured at **123** columns before the first
+/// encode (1 fallback query + 121 spiral + ring 0), which reads exactly like the
+/// pre-#453 "generate everything first" defect and is not it.
+///
+/// So the air fixture was a *world*-species vacuity in the making: it exercised
+/// the pathological invalid-origin path, not the one a joining player takes. A
+/// solid layer at `y = 8` makes the origin chunk a valid spawn candidate, which is
+/// what every real world presents, and the bound in
+/// [`check_proximity_stream`] is then about the ring loop again rather than about
+/// the spawn search.
 struct CountingAirSource {
     generated: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
+
+/// The Y of [`CountingAirSource`]'s floor. Inside the column's `0..16` extent,
+/// and clear of the top so `get_level_respawn_pos`'s downward scan reaches it
+/// through air rather than being aborted by a fluid.
+const FLOOR_Y: i32 = 8;
 
 impl ChunkSource for CountingAirSource {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         self.generated
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        ChunkColumn::new(0, 16)
+        let mut column = ChunkColumn::new(0, 16);
+        for lx in 0..16 {
+            for lz in 0..16 {
+                column.set_block(lx, FLOOR_Y, lz, "minecraft:stone");
+            }
+        }
+        column
     }
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
@@ -1581,12 +1610,26 @@ fn chebyshev(cx: i32, cz: i32) -> i32 {
 /// 3. the first chunk was encoded after **at most two columns** of
 ///    generation — the "generate everything, then encode" half.
 ///
-/// Rule 3's bound is `2`, not `1`: issue #461's terrain-derived spawn Y
-/// queries the spawn column's surface height before the ring generation
-/// starts (one call to `ChunkSource::column` that outlives the batch), and
-/// ring 0 is the same column generated a second time. Two columns is still
-/// the player's own column plus one infra query, not the full view. The
-/// wrong hypothesis is 361.
+/// Rule 3's bound is `2`, not `1`, and the two are itemised rather than rounded:
+///
+/// | column | why |
+/// |---|---|
+/// | 1 | the world spawn search (#329/#461) resolves the origin column's surface before the batch opens, and reuses that one column for the spiral's `(0, 0)` candidate — `world_spawn::a_valid_origin_column_is_generated_exactly_once` |
+/// | 2 | ring 0 asks the source for the same column again; the fixture has no `ChunkStore`, so it is a second generation |
+///
+/// So 2 is the player's own column plus one infra query, not the full view, and
+/// the wrong hypothesis is 361.
+///
+/// Two ways this bound has been wrong, both worth keeping because both fail in the
+/// *safe*-looking direction — a number just over the bound reads as a mild
+/// ordering regression:
+///
+/// * before the origin-column reuse landed, the search generated `(0, 0)` twice,
+///   making the honest figure 3 and this bound unreachable;
+/// * with an all-air fixture the search finds no valid spawn anywhere and walks
+///   all 121 spiral candidates first, for a figure of **123** — which looks like
+///   issue #453 undone and is not. [`CountingAirSource`] has a floor for exactly
+///   that reason.
 fn check_proximity_stream(observed: &[(i32, i32, usize)], view_radius: i32) -> Result<(), String> {
     let expected_total = ((2 * view_radius + 1) * (2 * view_radius + 1)) as usize;
     if observed.len() != expected_total {
