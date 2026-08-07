@@ -116,6 +116,18 @@ const TICK_PERIOD_MILLIS: u128 = 50;
 /// inside this square.
 const LAN_TICK_RADIUS: i32 = 2;
 
+/// `tick::INITIAL_RANDOM_TICK_DEFERRAL_TICKS` (issue #481), likewise
+/// `pub(crate)` and so restated here.
+///
+/// **This is why the probe count needs a wait rather than a window.** The
+/// random-tick pass is the only thing in `run_tick_loop` that calls
+/// `world.column()`, and #481 skips it while `game_tick <=` this value — so a
+/// gate that samples the probe after a fixed 1.5 s window read **0** and failed
+/// its own structural control, which is exactly what it is for. Restated rather
+/// than inferred from the observed count: the number a gate compares against
+/// must come from the production knob, not from what the run happened to do.
+const INITIAL_RANDOM_TICK_DEFERRAL_TICKS: u64 = 40;
+
 /// Counts `ChunkSource::column` calls, split into a total and a single probe
 /// chunk.
 ///
@@ -283,6 +295,38 @@ async fn bind_lan(view_radius: i32) -> (IntegratedServer, TickProbe, std::net::S
 /// `IntegratedServer`, so an absolute reading cannot distinguish "ticking now"
 /// from "ticked earlier and stopped". Two of these bracketing two different
 /// connection counts is what makes the ratio below meaningful.
+/// Blocks until the world tick loop has completed at least one random-tick pass,
+/// i.e. until its tick counter is past [`INITIAL_RANDOM_TICK_DEFERRAL_TICKS`].
+///
+/// Waits on the **tick counter**, not on wall-clock: 40 ticks is 2.0 s only at a
+/// nominal 20 TPS, and this file's own table records the loop managing 2.66
+/// ticks/s on a loaded shared checkout. A `sleep(2.1s)` would therefore be a
+/// load-bound flake in precisely the conditions this repo runs under, and it
+/// would fail as "the store is not in the source path" — a wrong diagnosis
+/// rather than a timeout.
+///
+/// The timeout fails rather than skips, and reports the counter it reached, so a
+/// genuinely stalled loop is distinguishable from a slow one.
+async fn await_past_random_tick_deferral(server: &IntegratedServer) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let ticks = server
+            .tick_stats()
+            .expect("tick_stats() must stay Some for the life of the handle")
+            .tick_count;
+        if ticks > INITIAL_RANDOM_TICK_DEFERRAL_TICKS {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the world tick loop reached only {ticks} ticks in 30s and must pass \
+             INITIAL_RANDOM_TICK_DEFERRAL_TICKS ({INITIAL_RANDOM_TICK_DEFERRAL_TICKS}) before \
+             the probe count means anything"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 async fn ticks_delta_over(server: &IntegratedServer, window: Duration) -> (u64, Duration) {
     let before = server
         .tick_stats()
@@ -339,6 +383,12 @@ async fn lan_bind_runs_exactly_one_world_tick_loop() {
     // under 3 TPS (see the table below), so a shorter window yields counts of
     // 2-3 and a ratio computed from those is noise.
     let window = Duration::from_millis(1500);
+    // Issue #481: the loop defers its first random-tick pass, and that pass is
+    // the only thing that reaches `ChunkSource::column`. Get past it before the
+    // probe is read, or Control #2 below measures a deferral rather than the
+    // source path. Ordered before the rate window so the window itself does not
+    // have to be long enough to cover the deferral.
+    await_past_random_tick_deferral(&server).await;
     let (solo_delta, solo_elapsed) = ticks_delta_over(&server, window).await;
 
     assert!(
@@ -360,7 +410,9 @@ async fn lan_bind_runs_exactly_one_world_tick_loop() {
         "the tick loop must have visited the probe chunk exactly once: 0 means it never \
          iterated its tick area (block entities, scheduled/fluid ticks and random ticks all \
          frozen), and more than 1 over {solo_elapsed:?} means #289's `ChunkStore` is not in \
-         the source path and every column is being regenerated per tick"
+         the source path and every column is being regenerated per tick. The #481 deferral \
+         is already past by construction — see `await_past_random_tick_deferral` — so 0 here \
+         is a real freeze, not a wait"
     );
     // `start_stats` exists only for Control #1's `expect`; the rate above is a
     // bracketed delta, per `ticks_delta_over`'s doc comment.

@@ -471,7 +471,10 @@ mod tests {
     use super::*;
     use crate::block_entities::BlockEntityHandle;
     use crate::mobs::{ChunkWorld, MobHandle};
-    use crate::tick::{BlockTickFeed, ExplosionFeed, TICK_PERIOD, TickClock, run_tick_loop};
+    use crate::tick::{
+        BlockTickFeed, ExplosionFeed, INITIAL_RANDOM_TICK_DEFERRAL_TICKS, TICK_PERIOD, TickClock,
+        run_tick_loop,
+    };
 
     /// The world height a real overworld column has, so the clone-cost
     /// measurement below is about the representation production actually pays
@@ -597,6 +600,34 @@ mod tests {
     const EXPECTED_TICK_AREA_COLUMNS: usize =
         ((2 * SHELL_TICK_RADIUS + 1) * (2 * SHELL_TICK_RADIUS + 1)) as usize;
 
+    /// How many random-tick *passes* the gates below observe — **not** how many
+    /// ticks they drive.
+    ///
+    /// [`crate::tick::run_tick_loop`] is the only thing that calls
+    /// `world.column()` here, and since issue #481 it skips its random-tick pass
+    /// while `game_tick <= INITIAL_RANDOM_TICK_DEFERRAL_TICKS`. `game_tick` is
+    /// incremented at the top of each iteration, so driving [`TICKS`] periods
+    /// yields passes on ticks `INITIAL_RANDOM_TICK_DEFERRAL_TICKS + 1 ..= TICKS`,
+    /// i.e. exactly this many.
+    ///
+    /// 12 rather than some other number because it is the figure this module's
+    /// own doc comment and the negative control's `49 × 12 = 588` observation
+    /// were recorded against — the *passes* count is what those numbers were
+    /// always about; only the tick count had to move.
+    const RANDOM_TICK_PASSES: u32 = 12;
+
+    /// Tick periods to drive, derived from the deferral rather than restated:
+    /// the deferral is a production knob, and a gate that hardcoded a tick
+    /// count went to **zero** observed generations when it was introduced.
+    const TICKS: u32 = INITIAL_RANDOM_TICK_DEFERRAL_TICKS as u32 + RANDOM_TICK_PASSES;
+
+    // The deferral must not swallow the whole window, or both gates below
+    // measure nothing while still reading as rigorous. Checked at compile time
+    // so raising `INITIAL_RANDOM_TICK_DEFERRAL_TICKS` past `TICKS` is a build
+    // failure rather than a silent pair of zeroes.
+    const _: () = assert!(RANDOM_TICK_PASSES > 0);
+    const _: () = assert!(TICKS as u64 > INITIAL_RANDOM_TICK_DEFERRAL_TICKS);
+
     /// Drives `run_tick_loop` for `ticks` virtual tick periods against `world`,
     /// returning nothing — the caller reads its own counter afterwards.
     ///
@@ -645,10 +676,11 @@ mod tests {
     /// # Predicting the value, not the sign
     ///
     /// The two competing hypotheses are computed rather than compared: with a
-    /// store, `TICKS × 49` visits produce **49** generations; without one they
-    /// produce **`TICKS × 49`**. Those are not "more" and "less", they are two
-    /// exact numbers a factor of `TICKS` apart, and the negative control below
-    /// lands on the second.
+    /// store, `RANDOM_TICK_PASSES × 49` visits produce **49** generations;
+    /// without one they produce **`RANDOM_TICK_PASSES × 49`**. Those are not
+    /// "more" and "less", they are two exact numbers a factor of
+    /// [`RANDOM_TICK_PASSES`] apart, and the negative control below lands on the
+    /// second.
     ///
     /// # Duration species
     ///
@@ -658,8 +690,6 @@ mod tests {
     /// precondition (did the loop actually run?), never as the measurement.
     #[tokio::test(start_paused = true)]
     async fn the_store_generates_each_column_exactly_once_across_many_ticks() {
-        const TICKS: u32 = 12;
-
         let counting = CountingSource::new();
         let calls = Arc::clone(&counting.calls);
         let per_chunk = Arc::clone(&counting.per_chunk);
@@ -695,15 +725,16 @@ mod tests {
         let (worst_coord, worst_count) = worst_chunk(&per_chunk);
         assert_eq!(
             worst_count, 1,
-            "chunk {worst_coord:?} was generated {worst_count} times over {TICKS} ticks; \
-             every column must be generated exactly once"
+            "chunk {worst_coord:?} was generated {worst_count} times over \
+             {RANDOM_TICK_PASSES} random-tick passes; every column must be generated \
+             exactly once"
         );
         assert_eq!(
             generated, EXPECTED_TICK_AREA_COLUMNS as u64,
             "expected exactly one generation per column of the tick area \
              ({EXPECTED_TICK_AREA_COLUMNS}); got {generated}. \
-             {} would mean every chunk is still regenerated every tick.",
-            EXPECTED_TICK_AREA_COLUMNS as u64 * u64::from(TICKS)
+             {} would mean every chunk is still regenerated every pass.",
+            EXPECTED_TICK_AREA_COLUMNS as u64 * u64::from(RANDOM_TICK_PASSES)
         );
         assert_eq!(
             store.evicted(),
@@ -721,13 +752,11 @@ mod tests {
     /// rather than as a temporary neuter, so the control is permanent.
     ///
     /// Observed when this landed: **588** generations for 49 columns over 12
-    /// ticks, i.e. exactly `49 × 12`, against 49 with the store. At the
-    /// measured 909 ms per real column that is 44.5 s of generation per 50 ms
-    /// tick budget.
+    /// random-tick passes, i.e. exactly `49 × 12`, against 49 with the store. At
+    /// the measured 909 ms per real column that is 44.5 s of generation per
+    /// 50 ms tick budget.
     #[tokio::test(start_paused = true)]
     async fn without_retention_every_chunk_is_regenerated_every_tick() {
-        const TICKS: u32 = 12;
-
         let counting = CountingSource::new();
         let calls = Arc::clone(&counting.calls);
         let per_chunk = Arc::clone(&counting.per_chunk);
@@ -742,15 +771,15 @@ mod tests {
         let (worst_coord, worst_count) = worst_chunk(&per_chunk);
         assert_eq!(
             worst_count,
-            u64::from(TICKS),
-            "control: chunk {worst_coord:?} should have been regenerated once per tick \
-             ({TICKS}), got {worst_count}"
+            u64::from(RANDOM_TICK_PASSES),
+            "control: chunk {worst_coord:?} should have been regenerated once per random-tick \
+             pass ({RANDOM_TICK_PASSES}), got {worst_count}"
         );
         assert_eq!(
             generated,
-            EXPECTED_TICK_AREA_COLUMNS as u64 * u64::from(TICKS),
+            EXPECTED_TICK_AREA_COLUMNS as u64 * u64::from(RANDOM_TICK_PASSES),
             "the zero-capacity control must reproduce the pre-store behaviour exactly: \
-             {EXPECTED_TICK_AREA_COLUMNS} columns × {TICKS} ticks. If this ever reports \
+             {EXPECTED_TICK_AREA_COLUMNS} columns × {RANDOM_TICK_PASSES} passes. If this ever reports \
              {EXPECTED_TICK_AREA_COLUMNS} instead, retention has leaked into the control \
              and the positive gate above is no longer measuring anything."
         );
