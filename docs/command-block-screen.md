@@ -145,6 +145,44 @@ There is no mode field on the wire at all, so a reader that consulted only the
 NBT would show every chain block as Redstone — a plausible-looking wrong
 answer, and the reason `mode_for_state` exists as its own gated function.
 
+### `mode_for_state` takes a block-**state** id, and getting that wrong was invisible
+
+Read the accessor's parameter, not its name. `lodestone_data::block_states` has
+two lookups whose names read almost identically and whose id spaces are
+unrelated orders:
+
+| accessor | id space | size | order |
+|---|---|---|---|
+| `block_name(id)` | block **state** | 32,366 | grouped by block, alphabetical |
+| `block_type_name(id)` | `minecraft:block` **registry** | 1,196 | registration |
+
+`mode_for_state` was written against `block_type_name` while being handed the
+state ids the store deals in, and the symptom was **both directions at once**:
+
+- real command blocks are states 9968 / 14817 / 14829, all past the registry's
+  1,196 entries, so they answered `None` and **the edit screen could not open
+  in the game at all** — the feature was dead the day it landed;
+- the three registry ids reused as state ids answered `Some` — 407 is
+  `minecraft:cherry_leaves` (Redstone), 668/669 are `minecraft:note_block`
+  (Auto/Sequence) — so **right-clicking leaves or a note block opened the
+  command-block editor**.
+
+The audit that signed this path off verified the *wiring*
+(`try_use` ← `KeyOutcome::Use` ← `lifecycle.rs`, resolving
+`Sim::targeted_command_block`) and the wiring was real. A connected wire
+carrying a wrong value is a separate question, and no `cargo check` and no
+connectedness run can see it.
+
+**What kept it green** is the part worth remembering: every test gating the
+path picked its subject with the same wrong accessor, so the gate agreed with
+the bug — a mirror. It only surfaced because state 407 owns no block entity, so
+the harness panicked on `block_entity_type(...).expect(...)` several lines
+before it could assert anything about a mode. The gate now takes each command
+block's *registry* id — the number the broken call was really indexing — and
+requires it, read as a state id, to answer `None`; that direction is one no
+positive assertion can reach. Both fixed and reverted states were run and
+observed.
+
 The trigger is `WindowApp::try_use`, **not** `interact.rs`, and that is
 deliberate. `drive_placement` returns `PlaceRejection::NothingPlaceableHeld`
 before it ever looks at the clicked block, so a right-click with an empty hand
