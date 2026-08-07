@@ -1202,6 +1202,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   range, biome)` entries. Different climate → different biome → different surface
   material (sand in deserts, snow in taiga, terracotta-adjacent in savanna, etc.) and,
   once a render-layer consumer exists, different grass/foliage tint.
+- [Nether and End worldgen](./worldgen-dimensions.md) — The bundled 26.2 data for
+  the Nether and the End, and the precise engine deficit that still stands between
+  that data and a generating dimension. Only the Overworld generates today. This doc
+  is the jar-derived answer to "what is actually missing", per dimension, with each
+  item classed **[data]** (absent from the bundle), **[engine]** (absent engine
+  primitive), **[unwritten]** (nothing blocks it), **[gameplay]** (cannot finish even
+  with perfect worldgen) or **[structures]** (belongs to the structure corpus, not
+  terrain). Phase NE-data of
+  [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md); the data half is landed,
+  the engine half is not started.
 - [Snow layers and surface ice: `freeze_top_layer` (`TOP_LAYER_MODIFICATION`)](./worldgen-freeze-top-layer.md) —
   The port of vanilla's `freeze_top_layer` — the whole of the eleventh and last
   decoration step, `TOP_LAYER_MODIFICATION` — into `lodestone-worldgen`, composed
@@ -1209,6 +1219,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   issue #404's unit U2. Before it, nothing in this engine ever wrote `minecraft:snow`
   or surface ice: every snowy biome generated bare, which the parity census called the
   most player-visible absent feature in worldgen.
+- [Worldgen block-state interning](./worldgen-state-interning.md) — Numeric `u16`
+  handles (`StateId`) for block-state strings inside `lodestone-worldgen`'s generation
+  engine, so a block moving between two internal grids costs a `u16` move instead of a
+  heap-allocated `String`. Unit 3 of
+  [`docs/plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md); it took a
+  steady-state warm column from **905,459 heap allocations to 20,686**, a 97.7%
+  reduction, with every parity gate byte-identical.
 - [The bundled 26.2 structure corpus (worldgen phase S-data)](./worldgen-structure-corpus.md) —
   The complete vanilla 26.2 structure dataset, extracted verbatim from the server jar
   into `crates/lodestone-server/assets/`, plus the drift gate that keeps it
