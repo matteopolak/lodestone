@@ -47,6 +47,7 @@
 //! swapped produces a plausible-but-wrong world, which is why the oracle compares
 //! whole-chunk block output rather than sampled positions.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use serde_json::Value;
@@ -373,43 +374,101 @@ impl Placement {
 
     /// `PlacementModifier.getPositions`: emit the positions this modifier
     /// produces for one incoming position, drawing RNG exactly as vanilla does.
+    ///
+    /// Returns an [`OrePositions`] rather than a `Vec<BlockPos>`; see that
+    /// type's doc for why the three shapes are exhaustive over what this
+    /// function could previously produce, and for the measurement.
     fn get_positions<R: RandomSource>(
         &self,
         random: &mut R,
         pos: BlockPos,
         ctx: &Ctx,
-    ) -> Vec<BlockPos> {
+    ) -> OrePositions {
         match self {
             Placement::Count(count) => {
                 let n = count.sample(random);
-                vec![pos; n.max(0) as usize]
+                OrePositions::Repeat(pos, n)
             }
             Placement::RarityFilter(chance) => {
                 // RarityFilter.shouldPlace: nextFloat() < 1/chance.
                 if random.next_float() < 1.0 / *chance as f32 {
-                    vec![pos]
+                    OrePositions::One(pos)
                 } else {
-                    Vec::new()
+                    OrePositions::None
                 }
             }
             Placement::InSquare => {
                 let x = random.next_int_bounded(16) + pos.x;
                 let z = random.next_int_bounded(16) + pos.z;
-                vec![BlockPos { x, y: pos.y, z }]
+                OrePositions::One(BlockPos { x, y: pos.y, z })
             }
             Placement::HeightRange(h) => {
                 let y = h.sample(random, ctx.min_gen_y, ctx.gen_depth);
-                vec![BlockPos {
+                OrePositions::One(BlockPos {
                     x: pos.x,
                     y,
                     z: pos.z,
-                }]
+                })
             }
             // BiomeFilter for a single-biome world always keeps the position and
             // draws nothing (topFeature is in the biome by construction).
-            Placement::Biome => vec![pos],
+            Placement::Biome => OrePositions::One(pos),
         }
     }
+}
+
+/// What one ore [`Placement`] modifier emits for one incoming position — the
+/// allocation-free replacement for the `Vec<BlockPos>` it used to return.
+///
+/// # Why exactly three shapes, and why that is not a narrowing
+///
+/// Enumerating every arm of [`Placement::get_positions`] shows the returned
+/// `Vec` only ever had one of three shapes, so this enum is exhaustive over what
+/// the old code could produce rather than a subset of it:
+///
+/// | arm | old | new |
+/// |---|---|---|
+/// | `Count` | `vec![pos; n.max(0)]` | [`OrePositions::Repeat`] |
+/// | `InSquare`, `HeightRange`, `Biome` | `vec![one]` | [`OrePositions::One`] |
+/// | `RarityFilter` | `vec![pos]` or `Vec::new()` | [`OrePositions::One`] / [`OrePositions::None`] |
+///
+/// **No modifier in the `UNDERGROUND_ORES` subset returns two *different*
+/// positions.** If one is ever added, it does **not** get to smuggle itself in
+/// as a `Repeat` — add a variant and handle it in [`place_placed_feature`]'s
+/// walk, because `Repeat`'s consumer recurses `n` times on the *same* position,
+/// which is precisely what `vec![pos; n]` meant and is not what a fan-out means.
+///
+/// This is [`vegetation::config::Positions`]' shape, applied to the ore engine.
+/// U8 did it for vegetation and took a warm column from 20,678 allocations to
+/// 87; the ore engine kept returning a `Vec` per modifier per attempt, and U18
+/// measured that as **79.96%** of the ore stage's 207,671 allocations on a 3×3
+/// cold sweep — cross-checked by an unsampled size histogram in which **78.62%**
+/// of ore allocations are exactly 12 bytes, `size_of::<BlockPos>()`. Nine full
+/// passes per chunk multiply it (see [`apply_ore_step_3x3_per_source`]).
+///
+/// # Why this cannot move an RNG draw
+///
+/// The draw still happens inside [`Placement::get_positions`], before this value
+/// is returned, so the consumption order is byte-identical: the driver's
+/// depth-first `recurse` walks `Repeat`'s `n` copies in the same order
+/// `for next in vec` did. `docs/plans/worldgen-rewrite.md` names breadth-first
+/// "optimisation" of this exact recursion as instant desync — this change never
+/// touches the recursion's shape, only what it iterates.
+///
+/// `Repeat`'s `n` is stored **unclamped**, exactly as `IntProvider::sample`
+/// returned it, and the consumer's `0..n` range is empty for `n <= 0` — the same
+/// set `vec![pos; n.max(0) as usize]` produced. Clamping here instead would be
+/// equivalent; not clamping keeps the value the sample actually produced visible
+/// to a reader comparing against vanilla.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrePositions {
+    /// The modifier filtered this position out.
+    None,
+    /// Exactly one position (possibly moved from the input).
+    One(BlockPos),
+    /// `n` copies of one position — `Count`'s `vec![pos; n]`. `n <= 0` means
+    /// none.
+    Repeat(BlockPos, i32),
 }
 
 /// `net.minecraft.world.level.levelgen.structure.templatesystem.RuleTest` (the
@@ -984,8 +1043,20 @@ fn place_placed_feature<R: RandomSource>(
             place_ore_feature(random, pos, config, input, working);
             return;
         }
-        for next in modifiers[i].get_positions(random, pos, ctx) {
-            recurse(random, modifiers, i + 1, next, ctx, config, input, working);
+        // Depth-first, exactly as `for next in vec` was: `One` recurses once,
+        // `Repeat(p, n)` recurses `n` times on the same position (what
+        // `vec![p; n]` meant), `None` not at all. An `n <= 0` range is empty,
+        // matching the old `n.max(0) as usize` length.
+        match modifiers[i].get_positions(random, pos, ctx) {
+            OrePositions::None => {}
+            OrePositions::One(next) => {
+                recurse(random, modifiers, i + 1, next, ctx, config, input, working);
+            }
+            OrePositions::Repeat(next, n) => {
+                for _ in 0..n {
+                    recurse(random, modifiers, i + 1, next, ctx, config, input, working);
+                }
+            }
         }
     }
     recurse(
@@ -1047,6 +1118,42 @@ pub fn place_ore_feature<R: RandomSource>(
     );
 }
 
+thread_local! {
+    /// [`do_place`]'s per-blob sphere table (`size * 4` f64s: x, y, z, r) and
+    /// [`VisitedBox`]'s bitset words, reused across blobs.
+    ///
+    /// # Why thread-local, and why taken-and-returned
+    ///
+    /// These were `vec![0.0; size * 4]` and `vec![0u64; cells / 64]`, one of each
+    /// per `do_place` call, i.e. per blob of every ore feature of all nine source
+    /// chunks. U18 measured them at **9.65%** and **10.21%** of the ore stage's
+    /// 207,671 allocations on a 3×3 cold sweep — the whole non-`OrePositions`
+    /// remainder. The size histogram identifies them independently: 2,048 bytes
+    /// is `size = 64` (`64 * 4 * 8`) and 1,056 bytes is `size = 33`.
+    ///
+    /// Thread-local rather than a field on a scratch struct threaded through the
+    /// call graph, because [`place_ore_feature`] and [`apply_ore_step`] are `pub`
+    /// and the parity fixtures call them directly — a signature change would
+    /// churn files this unit does not own for no measured gain.
+    ///
+    /// **Taken and returned, not borrowed across the body**, matching U8's
+    /// precedent in `feature/vegetation/`: a `Cell::take` leaves an empty `Vec`
+    /// behind, so a hypothetical re-entrant call gets a correct (merely
+    /// allocating) fresh buffer rather than a `RefCell` panic or, worse, a shared
+    /// one. `do_place` is not re-entrant today — `try_place_ore` reaches only
+    /// `should_skip_air_check` and `is_adjacent_to_air` — and this pattern means
+    /// that fact is not load-bearing.
+    ///
+    /// A panic inside the body loses the buffer to the empty default, which costs
+    /// one allocation on the next call and nothing else. There is deliberately no
+    /// shared pool: `docs/worldgen-in-place-decoration.md` makes "no shared pool
+    /// here, ever" a change rule for U6's store, and a per-thread free-list is
+    /// what that rule permits.
+    static BLOB_DATA: Cell<Vec<f64>> = const { Cell::new(Vec::new()) };
+    /// [`VisitedBox`]'s bitset words. See [`BLOB_DATA`].
+    static VISITED_BITS: Cell<Vec<u64>> = const { Cell::new(Vec::new()) };
+}
+
 #[allow(clippy::too_many_arguments)]
 fn do_place<R: RandomSource>(
     random: &mut R,
@@ -1064,7 +1171,14 @@ fn do_place<R: RandomSource>(
     z_start: i32,
 ) {
     let size = config.size;
-    let mut data = vec![0.0_f64; (size * 4) as usize];
+    // Reused scratch, not a fresh allocation per blob — see `BLOB_DATA`.
+    // `clear` + `resize` reproduces `vec![0.0; size * 4]` exactly (every element
+    // is zeroed and the length is the same); the first loop below then writes
+    // all `size * 4` of them before any is read, so the zeroing is belt and
+    // braces rather than load-bearing.
+    let mut data = BLOB_DATA.take();
+    data.clear();
+    data.resize((size * 4) as usize, 0.0_f64);
     for i in 0..size {
         let step = i as f32 / size as f32;
         let xx = math::lerp(step as f64, x0, x1);
@@ -1120,7 +1234,8 @@ fn do_place<R: RandomSource>(
     // getting it one block small would silently drop a dedup and place an extra
     // ore. Derived this way the box is exactly the set of coordinates the loop
     // can visit, so `VisitedBox` cannot be too small by construction.
-    let mut tested = VisitedBox::over_spheres(&data, size, x_start, y_start, z_start);
+    let mut tested =
+        VisitedBox::over_spheres(VISITED_BITS.take(), &data, size, x_start, y_start, z_start);
     for i in 0..size {
         let b = (i * 4) as usize;
         let r = data[b + 3];
@@ -1163,6 +1278,12 @@ fn do_place<R: RandomSource>(
             }
         }
     }
+
+    // Hand both scratch buffers back for the next blob. Reached on every normal
+    // exit; a panic in the body loses them to the empty default, which costs one
+    // allocation next call. See `BLOB_DATA`.
+    VISITED_BITS.set(tested.into_bits());
+    BLOB_DATA.set(data);
 }
 
 /// The set of block positions one `doPlace` blob has already tested, as a dense
@@ -1185,7 +1306,18 @@ impl VisitedBox {
     /// The union of every live sphere's clamped bound box, computed with the
     /// **same expressions** `do_place`'s placement loop uses. A sphere with
     /// `r < 0` is skipped there and so is skipped here.
-    fn over_spheres(data: &[f64], size: i32, x_start: i32, y_start: i32, z_start: i32) -> Self {
+    ///
+    /// `bits` is a reused buffer taken from [`VISITED_BITS`]; it is cleared and
+    /// resized here, so its incoming contents and length are irrelevant. It is
+    /// handed back by [`Self::into_bits`].
+    fn over_spheres(
+        mut bits: Vec<u64>,
+        data: &[f64],
+        size: i32,
+        x_start: i32,
+        y_start: i32,
+        z_start: i32,
+    ) -> Self {
         let (mut lo_x, mut lo_y, mut lo_z) = (i32::MAX, i32::MAX, i32::MAX);
         let (mut hi_x, mut hi_y, mut hi_z) = (i32::MIN, i32::MIN, i32::MIN);
         for i in 0..size {
@@ -1207,10 +1339,17 @@ impl VisitedBox {
         }
         if lo_x > hi_x {
             // Every sphere was culled; the placement loop will visit nothing.
-            return Self { x0: 0, y0: 0, z0: 0, xs: 0, ys: 0, zs: 0, bits: Vec::new() };
+            bits.clear();
+            return Self { x0: 0, y0: 0, z0: 0, xs: 0, ys: 0, zs: 0, bits };
         }
         let (xs, ys, zs) = (hi_x - lo_x + 1, hi_y - lo_y + 1, hi_z - lo_z + 1);
         let cells = (xs as usize) * (ys as usize) * (zs as usize);
+        // `clear` before `resize` matters: `resize` only zeroes the elements it
+        // *adds*, so a buffer returning from a larger blob would arrive carrying
+        // that blob's set bits. A stale set bit reads as "already tested" and
+        // silently DROPS an ore placement — a changed world, not a slow one.
+        bits.clear();
+        bits.resize(cells.div_ceil(64), 0u64);
         Self {
             x0: lo_x,
             y0: lo_y,
@@ -1218,8 +1357,13 @@ impl VisitedBox {
             xs,
             ys,
             zs,
-            bits: vec![0u64; cells.div_ceil(64)],
+            bits,
         }
+    }
+
+    /// Hands the bitset buffer back for reuse. See [`VISITED_BITS`].
+    fn into_bits(self) -> Vec<u64> {
+        self.bits
     }
 
     /// `HashSet::insert`'s contract: `true` iff the position was not already in
@@ -1528,7 +1672,8 @@ mod tests {
             data[b + 3] = if i % 7 == 3 { -1.0 } else { 1.0 + 2.0 * (t * 3.0).sin().abs() };
         }
 
-        let mut boxed = VisitedBox::over_spheres(&data, size, x_start, y_start, z_start);
+        let mut boxed =
+            VisitedBox::over_spheres(Vec::new(), &data, size, x_start, y_start, z_start);
         let mut set: HashSet<(i32, i32, i32)> = HashSet::new();
         let mut visits = 0u32;
         let mut firsts = 0u32;
@@ -1602,8 +1747,54 @@ mod tests {
         for i in 0..size {
             data[(i * 4 + 3) as usize] = -1.0;
         }
-        let b = VisitedBox::over_spheres(&data, size, 0, 0, 0);
+        let b = VisitedBox::over_spheres(Vec::new(), &data, size, 0, 0, 0);
         assert_eq!(b.bits.len(), 0);
         assert_eq!((b.xs, b.ys, b.zs), (0, 0, 0));
+    }
+
+    /// A recycled `VISITED_BITS` buffer arriving with bits already set must not
+    /// be believed. `Vec::resize` only zeroes the elements it **adds**, so a
+    /// buffer coming back from a larger blob keeps that blob's set bits in the
+    /// words the smaller blob reuses — and a stale set bit reads as "already
+    /// tested", which makes `do_place` **skip** a `try_place_ore` it must
+    /// perform. That is a dropped ore, i.e. a changed world, and it is invisible
+    /// to any test that only ever hands `over_spheres` a fresh `Vec`.
+    ///
+    /// The control is the same call with the same dirty buffer against the
+    /// `clear()` removed — asserted here by checking that every word really is
+    /// zero on entry, which is the property `clear()` provides and `resize()`
+    /// alone does not.
+    #[test]
+    fn a_recycled_visited_buffer_starts_clear() {
+        let size = 4i32;
+        let mut data = vec![0.0f64; (size * 4) as usize];
+        for i in 0..size {
+            let b = (i * 4) as usize;
+            data[b] = f64::from(i);
+            data[b + 1] = f64::from(i);
+            data[b + 2] = f64::from(i);
+            data[b + 3] = 2.0;
+        }
+        // A buffer as it would come back from a previous, larger blob: every bit
+        // set, and longer than this blob needs.
+        let dirty = vec![u64::MAX; 64];
+        let boxed = VisitedBox::over_spheres(dirty, &data, size, 0, 0, 0);
+        assert!(
+            !boxed.bits.is_empty(),
+            "this blob should need at least one word; the scene is wrong"
+        );
+        assert!(
+            boxed.bits.iter().all(|&w| w == 0),
+            "a recycled buffer reached the placement loop with bits already set, \
+             so `insert` would report positions as already tested and `do_place` \
+             would silently skip placing them: {:?}",
+            boxed.bits
+        );
+
+        // And the box really is used as a dedup afterwards, so the assertion
+        // above is about a live mechanism rather than an inert field.
+        let mut boxed = boxed;
+        assert!(boxed.insert(1, 1, 1), "first insert must be new");
+        assert!(!boxed.insert(1, 1, 1), "second insert must be a duplicate");
     }
 }
