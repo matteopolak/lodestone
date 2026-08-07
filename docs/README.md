@@ -1209,6 +1209,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   issue #404's unit U2. Before it, nothing in this engine ever wrote `minecraft:snow`
   or surface ice: every snowy biome generated bare, which the parity census called the
   most player-visible absent feature in worldgen.
+- [The bundled 26.2 structure corpus (worldgen phase S-data)](./worldgen-structure-corpus.md) —
+  The complete vanilla 26.2 structure dataset, extracted verbatim from the server jar
+  into `crates/lodestone-server/assets/`, plus the drift gate that keeps it
+  byte-identical to the jar. 1606 files, 4.42 MiB: 34 structures, 20 structure sets,
+  188 template pools, 40 processor lists, 7 world presets, 9 flat presets, 4 noise
+  settings, 92 worldgen tags, and 1212 NBT structure templates. This is phase
+  **S-data** of [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md) (issue
+  #484) and it is data only — no placement, no jigsaw, no beardifier.
 - [Surface-stage generation performance](./worldgen-surface-perf.md) — Two
   profile-driven optimisations to `lodestone-worldgen`'s surface stage
   (`crates/lodestone-worldgen/src/surface/mod.rs`, consumed by
