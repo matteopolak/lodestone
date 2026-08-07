@@ -380,9 +380,13 @@ impl Sim {
             self.bob_frame(),
             // `bobHurt` is deliberately **not** driven from here yet. It is almost
             // entirely a roll, and `bobbed_camera` cannot carry roll — `Camera`
-            // has `position`/`yaw`/`pitch` and `view_matrix` hardcodes `Vec3::Y`
-            // as up — so wiring it would produce a visibly wrong tilt rather than
-            // a slightly imprecise one. Verified against the jar: the server
+            // has `position`/`yaw`/`pitch`, two angles, and the rotation it builds
+            // has a zero `Rz` term — so wiring it would produce a visibly wrong
+            // tilt rather than a slightly imprecise one. (This said `view_matrix`
+            // hardcodes `Vec3::Y` as up, true until `d17c731c`; the basis now
+            // derives `up` from the rotation, which fixed a 180° roll at pitch
+            // ±90 without adding a roll degree of freedom.)
+            // Verified against the jar: the server
             // sends `hurtDir = atan2(damage) - playerYaw`
             // (`ServerPlayer.java:2133`), so a hit from straight ahead is `0`
             // and `bobHurt`'s tilt is *pure* roll — exactly the component this

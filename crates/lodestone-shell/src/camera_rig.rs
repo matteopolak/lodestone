@@ -621,8 +621,17 @@ impl BobFrame {
 /// than derived, and a camera transform is exactly that shape of hazard.
 ///
 /// What it cannot carry is **roll**. [`Camera`] has `position`, `yaw` and
-/// `pitch`, and `view_matrix` hardcodes `Vec3::Y` as up, so a decomposed
-/// orientation has two degrees of freedom where `B · V` has three. Concretely:
+/// `pitch` — two angles — so a decomposed orientation has two degrees of freedom
+/// where `B · V` has three.
+///
+/// **The reason is the parameterisation, not the up vector.** This comment used
+/// to say `view_matrix` hardcodes `Vec3::Y` as up, which was true until
+/// `d17c731c` and is now false: the basis is derived from vanilla's
+/// `Ry(π − yaw) · Rx(−pitch)`, so `up` rotates with the camera. That change
+/// fixed a 180° roll at pitch ±90 and did **not** add a roll degree of freedom —
+/// the rotation still has a zero `Rz` term. Corrected rather than deleted
+/// because §12.114's finding was that a stale comment is precisely why nobody
+/// looks again. Concretely:
 ///
 /// | bob term | magnitude | carried? |
 /// |---|---|---|
