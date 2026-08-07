@@ -12,7 +12,7 @@ use crate::interner::{StateId, StateInterner};
 
 use self::census::bump as census_bump;
 use super::base_id;
-use super::config::{is_air, is_fluid};
+use super::config::is_fluid;
 
 /// The mutable block field vegetal decoration reads and writes. Defaults to
 /// chunk-local (`0..16` × `0..16`, absolute `y`) via [`VegGrid::new`] — see
@@ -131,6 +131,11 @@ pub(super)     height: i32,
     /// [`apply_vegetal_decoration_step_3x3_per_source`]).
     local_lo: i32,
     local_hi: i32,
+    /// The ids of `minecraft:{air,cave_air,void_air}` in [`Self::interner`],
+    /// resolved once here so [`Self::height_world_surface`]'s per-cell air test is
+    /// three integer compares rather than an interner read guard. See
+    /// [`Self::is_air_id`] for why an id comparison is exact for air. Unit 8.
+    air_ids: [StateId; 3],
 }
 
 impl VegGrid {
@@ -178,6 +183,11 @@ impl VegGrid {
         local_lo: i32,
         local_hi: i32,
     ) -> Self {
+        let air_ids = [
+            interner.id_of("minecraft:air"),
+            interner.id_of("minecraft:cave_air"),
+            interner.id_of("minecraft:void_air"),
+        ];
         Self {
             blocks: HashMap::new(),
             sources: std::array::from_fn(|_| None),
@@ -189,6 +199,7 @@ impl VegGrid {
             height,
             local_lo,
             local_hi,
+            air_ids,
         }
     }
 
@@ -398,12 +409,31 @@ impl VegGrid {
     pub fn height_world_surface(&self, x: i32, z: i32) -> i32 {
         let (lx, lz) = self.to_local_clamped(x, z);
         for y in (self.min_y..self.min_y + self.height).rev() {
-            let base = base_id(self.get_local(lx, y, lz));
-            if !is_air(base) {
+            if !self.is_air_id(self.get_local_id(lx, y, lz)) {
                 return y + 1;
             }
         }
         self.min_y
+    }
+
+    /// Whether `id` is one of the three air states.
+    ///
+    /// # Why this can be an id comparison and the fluid test below cannot
+    ///
+    /// **Air carries no block-state properties**, so for an air state
+    /// `base_id(name) == name` and "base is one of three names" is exactly "id is
+    /// one of three ids" — the three resolved in [`Self::with_footprint_interned`].
+    /// `crate::feature::vegetation::config::is_air` is still the definition; this
+    /// is that definition pushed through the interner once per grid instead of
+    /// once per cell. Adding a property-carrying state to `is_air` would silently
+    /// break this, which is why that function's doc says not to.
+    ///
+    /// A fluid, by contrast, really does carry properties here —
+    /// `crate::carver` writes `minecraft:water[level=0]` — so
+    /// [`Self::height_ocean_floor`] cannot reduce its test to a fixed id set and
+    /// resolves the name for the (few) cells it has already found to be non-air.
+    fn is_air_id(&self, id: StateId) -> bool {
+        self.air_ids.contains(&id)
     }
 
     /// `Heightmap.Types.OCEAN_FLOOR`/`OCEAN_FLOOR_WG` — topmost non-air,
@@ -412,8 +442,15 @@ impl VegGrid {
     pub fn height_ocean_floor(&self, x: i32, z: i32) -> i32 {
         let (lx, lz) = self.to_local_clamped(x, z);
         for y in (self.min_y..self.min_y + self.height).rev() {
-            let base = base_id(self.get_local(lx, y, lz));
-            if !is_air(base) && !is_fluid(base) {
+            let id = self.get_local_id(lx, y, lz);
+            // The air test first and lock-free, so the ~250 cells of empty sky
+            // above a surface column cost three integer compares each instead of
+            // an interner read guard each. Only a non-air cell — the surface
+            // itself and at most a few fluid cells above it — resolves a name.
+            if self.is_air_id(id) {
+                continue;
+            }
+            if !is_fluid(base_id(self.interner.name_of(id))) {
                 return y + 1;
             }
         }

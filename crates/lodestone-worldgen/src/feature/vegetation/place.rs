@@ -4,18 +4,17 @@
 //!
 //! Moved here verbatim from `feature/vegetation.rs` by U16 Phase B.
 
+use std::cell::RefCell;
+
 use crate::feature::BlockPos;
 use crate::rng::RandomSource;
 
-use super::base_id;
-use super::config::{
-    BlockColumnConfig, BlockStateProvider, Decorator, TreeConfig, VegTags, is_air,
-};
+use super::config::{BlockColumnConfig, BlockStateProvider, Decorator, TreeConfig, VegTags};
 use super::grid::VegGrid;
 use super::grid::census::bump as census_bump;
+use super::ids::{Tag, tag_at};
 use super::tree::{
-    Attachment, TrunkPlacerCfg, place_dark_oak_trunk, place_forking_trunk,
-    update_leaf_distances,
+    Attachment, TrunkPlacerCfg, place_dark_oak_trunk, place_forking_trunk, update_leaf_distances,
 };
 
 pub(super) fn place_simple_block<R: RandomSource>(
@@ -25,18 +24,36 @@ pub(super) fn place_simple_block<R: RandomSource>(
     grid: &mut VegGrid,
     tags: &VegTags,
 ) {
-    let Some(state) = provider.get_state(grid, tags, random, pos) else {
+    let Some(state) = provider.get_state_id(grid, tags, random, pos) else {
         census_bump(|c| c.simple_block_no_state += 1);
         return;
     };
     // `VegetationBlock.canSurvive`: the block below must support vegetation
     // — see module doc on why this is applied uniformly.
-    let below = base_id(grid.get(pos.x, pos.y - 1, pos.z));
-    if !tags.supports_vegetation.contains(below) {
+    //
+    // This is the single most-executed rejection in the whole engine —
+    // `docs/worldgen-vegetation-census.md` counts 74,745 of them in one
+    // 136-chunk sweep, every one of which used to be an interner read guard, a
+    // `split('[')` and a `HashSet<String>` probe. Unit 8 made it a bit test.
+    if !tag_at(grid, tags, Tag::SupportsVegetation, pos.x, pos.y - 1, pos.z) {
         census_bump(|c| c.simple_block_unsupported_ground += 1);
         return;
     }
-    grid.set_if_in_bounds(pos.x, pos.y, pos.z, state);
+    grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
+}
+
+thread_local! {
+    /// Reusable scratch for [`place_block_column`]'s per-layer sampled heights.
+    ///
+    /// `const`-initialised so touching it never allocates, and taken-then-returned
+    /// rather than borrowed across the body so a future nested placement would get
+    /// a correct (merely allocating) fresh buffer instead of a panic.
+    static LAYER_HEIGHTS: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+    /// Reusable scratch for one tree's trunk positions — the
+    /// `TreeFeature.place` `trunks` set that seeds `update_leaf_distances`' BFS.
+    static TRUNKS: RefCell<Vec<BlockPos>> = const { RefCell::new(Vec::new()) };
+    /// Reusable scratch for one tree's foliage attachments.
+    static ATTACHMENTS: RefCell<Vec<Attachment>> = const { RefCell::new(Vec::new()) };
 }
 
 /// `BlockColumnFeature.place`: samples every layer's height up front (so the
@@ -53,9 +70,17 @@ pub(super) fn place_block_column<R: RandomSource>(
     grid: &mut VegGrid,
     tags: &VegTags,
 ) {
-    let mut layer_heights: Vec<i32> = cfg.layers.iter().map(|(h, _)| h.sample(random)).collect();
+    // Reused scratch, not a fresh `Vec` — see [`LAYER_HEIGHTS`]. The draws below
+    // happen in the same order on the same provider list, so the sampled values
+    // are unchanged; only where they are stored moved.
+    let mut layer_heights = LAYER_HEIGHTS.take();
+    layer_heights.clear();
+    for (h, _) in &cfg.layers {
+        layer_heights.push(h.sample(random));
+    }
     let total_height: i32 = layer_heights.iter().sum();
     if total_height == 0 {
+        LAYER_HEIGHTS.set(layer_heights);
         return;
     }
     let (dx, dy, dz) = cfg.direction;
@@ -82,8 +107,8 @@ pub(super) fn place_block_column<R: RandomSource>(
     let mut place_pos = origin;
     for (i, (_, provider)) in cfg.layers.iter().enumerate() {
         for _ in 0..layer_heights[i] {
-            if let Some(state) = provider.get_state(grid, tags, random, place_pos) {
-                grid.set_if_in_bounds(place_pos.x, place_pos.y, place_pos.z, state);
+            if let Some(state) = provider.get_state_id(grid, tags, random, place_pos) {
+                grid.set_id_if_in_bounds(place_pos.x, place_pos.y, place_pos.z, state);
             }
             place_pos = BlockPos {
                 x: place_pos.x + dx,
@@ -92,6 +117,7 @@ pub(super) fn place_block_column<R: RandomSource>(
             };
         }
     }
+    LAYER_HEIGHTS.set(layer_heights);
 }
 
 /// `BlockColumnFeature.truncate`: removes `total_height - new_height` blocks
@@ -100,12 +126,11 @@ pub(super) fn place_block_column<R: RandomSource>(
 pub(super) fn truncate_layers(layer_heights: &mut [i32], total_height: i32, new_height: i32, prioritize_tip: bool) {
     let mut to_remove = total_height - new_height;
     let n = layer_heights.len();
-    let indices: Vec<usize> = if prioritize_tip {
-        (0..n).collect()
-    } else {
-        (0..n).rev().collect()
-    };
-    for i in indices {
+    // Unit 8: the index order used to be materialised into a `Vec` per call.
+    // `prioritize_tip` walks `0..n`, everything else walks it reversed — the same
+    // two orders, computed rather than collected.
+    for k in 0..n {
+        let i = if prioritize_tip { k } else { n - 1 - k };
         if to_remove <= 0 {
             break;
         }
@@ -145,10 +170,18 @@ pub(super) fn place_tree<R: RandomSource>(
         let r = cfg.feature_size.size_at_height(tree_height, y);
         for dx in -r..=r {
             for dz in -r..=r {
-                let base = base_id(grid.get(origin.x + dx, origin.y + y, origin.z + dz));
-                let free = is_air(base)
-                    || tags.replaceable_by_trees.contains(base)
-                    || tags.logs.contains(base);
+                // Unit 8: one grid read and up to three bit tests, where this
+                // used to be an interner read guard plus three `HashSet<String>`
+                // probes — and this scan runs over the tree's whole footprint on
+                // every attempt, including the ones that reject.
+                //
+                // `y` here is the loop's tree-relative offset and `clipped` is
+                // derived from it, so the absolute position must NOT shadow it.
+                let id = grid.get_id(origin.x + dx, origin.y + y, origin.z + dz);
+                let interner = grid.interner();
+                let free = tags.has(interner, Tag::Air, id)
+                    || tags.has(interner, Tag::ReplaceableByTrees, id)
+                    || tags.has(interner, Tag::Logs, id);
                 if !free {
                     clipped = y - 2;
                     break 'scan;
@@ -177,17 +210,26 @@ pub(super) fn place_tree<R: RandomSource>(
     // every position `trunkSetter` actually fired at (issue #428's
     // `update_leaf_distances` BFS seed, see that function's doc comment) —
     // so the foliage loop below is written once, not once per trunk kind.
-    let (attachments, trunk_positions, placed_log) = match &cfg.trunk_placer {
+    // Unit 8: both buffers are reused thread-local scratch rather than a fresh
+    // `Vec` pair per tree, and the two delegating placers now fill them in place
+    // instead of returning owned `Vec`s. Nothing about what is pushed, or in what
+    // order, changed — `trunk_positions` is still every position `trunkSetter`
+    // fired at, in the same sequence, which is what `update_leaf_distances`' BFS
+    // seed depends on.
+    let mut trunk_positions = TRUNKS.take();
+    let mut attachments = ATTACHMENTS.take();
+    trunk_positions.clear();
+    attachments.clear();
+    let placed_log = match &cfg.trunk_placer {
         TrunkPlacerCfg::Straight { .. } => {
-            let mut trunk_positions = Vec::new();
             if let Some(below_provider) = &cfg.below_trunk_provider {
                 let below_pos = BlockPos {
                     x: origin.x,
                     y: origin.y - 1,
                     z: origin.z,
                 };
-                if let Some(state) = below_provider.get_state(grid, tags, random, below_pos) {
-                    grid.set_if_in_bounds(below_pos.x, below_pos.y, below_pos.z, state);
+                if let Some(state) = below_provider.get_state_id(grid, tags, random, below_pos) {
+                    grid.set_id_if_in_bounds(below_pos.x, below_pos.y, below_pos.z, state);
                     trunk_positions.push(below_pos);
                 }
             }
@@ -198,16 +240,19 @@ pub(super) fn place_tree<R: RandomSource>(
                     y: origin.y + y,
                     z: origin.z,
                 };
-                let base = base_id(grid.get(pos.x, pos.y, pos.z));
-                if is_air(base) || tags.replaceable_by_trees.contains(base) {
-                    if let Some(state) = cfg.trunk_provider.get_state(grid, tags, random, pos) {
-                        grid.set_if_in_bounds(pos.x, pos.y, pos.z, state);
+                let id = grid.get_id(pos.x, pos.y, pos.z);
+                let interner = grid.interner();
+                if tags.has(interner, Tag::Air, id)
+                    || tags.has(interner, Tag::ReplaceableByTrees, id)
+                {
+                    if let Some(state) = cfg.trunk_provider.get_state_id(grid, tags, random, pos) {
+                        grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
                         placed_log = true;
                         trunk_positions.push(pos);
                     }
                 }
             }
-            let attachment = Attachment {
+            attachments.push(Attachment {
                 pos: BlockPos {
                     x: origin.x,
                     y: origin.y + tree_height,
@@ -215,8 +260,8 @@ pub(super) fn place_tree<R: RandomSource>(
                 },
                 radius_offset: 0,
                 double_trunk: false,
-            };
-            (vec![attachment], trunk_positions, placed_log)
+            });
+            placed_log
         }
         TrunkPlacerCfg::Forking { .. } => place_forking_trunk(
             random,
@@ -226,6 +271,8 @@ pub(super) fn place_tree<R: RandomSource>(
             tags,
             &cfg.trunk_provider,
             &cfg.below_trunk_provider,
+            &mut attachments,
+            &mut trunk_positions,
         ),
         TrunkPlacerCfg::DarkOak { .. } => place_dark_oak_trunk(
             random,
@@ -235,6 +282,8 @@ pub(super) fn place_tree<R: RandomSource>(
             tags,
             &cfg.trunk_provider,
             &cfg.below_trunk_provider,
+            &mut attachments,
+            &mut trunk_positions,
         ),
     };
 
@@ -264,13 +313,15 @@ pub(super) fn place_tree<R: RandomSource>(
     }
 
     if !placed_log && !placed_leaf {
+        TRUNKS.set(trunk_positions);
+        ATTACHMENTS.set(attachments);
         return;
     }
 
     for decorator in &cfg.decorators {
         match decorator {
             Decorator::Beehive { probability } => {
-                place_beehive_decorator(random, *probability, origin, tree_height, grid);
+                place_beehive_decorator(random, *probability, origin, tree_height, grid, tags);
             }
             Decorator::Unsupported => {}
         }
@@ -285,8 +336,11 @@ pub(super) fn place_tree<R: RandomSource>(
     // (no `rootPositions` — no root placer implemented) — every absolute
     // position this ONE tree call wrote, from `dirty_start` (captured right
     // before trunk placement began) to now (right after decorators ran).
+    // `dirty_cell_ids`, not `dirty_cells`: the latter resolves every position's
+    // state to a `&'static str` through the interner's read guard, and this loop
+    // discards the state entirely — it only wants the coordinates. Unit 8.
     let mut bbox: Option<(i32, i32, i32, i32, i32, i32)> = None;
-    for (x, y, z, _) in grid.dirty_cells().skip(dirty_start) {
+    for (x, y, z, _) in grid.dirty_cell_ids().skip(dirty_start) {
         bbox = Some(match bbox {
             None => (x, y, z, x, y, z),
             Some((min_x, min_y, min_z, max_x, max_y, max_z)) => {
@@ -304,6 +358,8 @@ pub(super) fn place_tree<R: RandomSource>(
     if let Some(bbox) = bbox {
         update_leaf_distances(grid, tags, &trunk_positions, bbox);
     }
+    TRUNKS.set(trunk_positions);
+    ATTACHMENTS.set(attachments);
 }
 
 /// `net.minecraft.world.level.levelgen.feature.treedecorators.BeehiveDecorator`,
@@ -322,6 +378,8 @@ pub(super) fn place_beehive_decorator<R: RandomSource>(
     origin: BlockPos,
     tree_height: i32,
     grid: &mut VegGrid,
+    // Unit 8: needed only for the two air tests, which are now bit tests.
+    tags: &VegTags,
 ) {
     // logs is never empty here (a straight trunk always tries to place at
     // least one log at y=0..tree_height, per place_tree above).
@@ -336,10 +394,11 @@ pub(super) fn place_beehive_decorator<R: RandomSource>(
     let hive_y = (leaves_top_y - 1).max(logs_bottom_y + 1).min(logs_top_y);
 
     const SPAWN_DIRECTIONS: [(i32, i32); 3] = [(1, 0), (-1, 0), (0, -1)]; // east, west, north — all but south (the worldgen-fixed facing)
-    let mut candidates: Vec<(i32, i32, i32)> = SPAWN_DIRECTIONS
-        .iter()
-        .map(|(dx, dz)| (origin.x + dx, hive_y, origin.z + dz))
-        .collect();
+    // A fixed array, not a `Vec`: the list is exactly three long by construction
+    // (it is `SPAWN_DIRECTIONS`), so `candidates.len()` below was already a
+    // compile-time 3 and the heap allocation bought nothing. Unit 8.
+    let mut candidates: [(i32, i32, i32); SPAWN_DIRECTIONS.len()] =
+        SPAWN_DIRECTIONS.map(|(dx, dz)| (origin.x + dx, hive_y, origin.z + dz));
 
     // `Util.shuffle` on a fixed 3-element list — a Fisher-Yates pass draws
     // exactly 2 `nextInt` calls regardless of list contents, so the RNG-draw
@@ -352,13 +411,15 @@ pub(super) fn place_beehive_decorator<R: RandomSource>(
     }
 
     let Some(&(hx, hy, hz)) = candidates.iter().find(|&&(x, y, z)| {
-        is_air(base_id(grid.get(x, y, z))) && is_air(base_id(grid.get(x, y, z + 1)))
+        tag_at(grid, tags, Tag::Air, x, y, z) && tag_at(grid, tags, Tag::Air, x, y, z + 1)
     }) else {
         return;
     };
 
-    let state = "minecraft:bee_nest[facing=south,honey_level=0]".to_string();
-    grid.set_if_in_bounds(hx, hy, hz, state);
+    // Interned rather than allocated — the name is a constant, so the `String` it
+    // used to build was pure waste. Unit 8.
+    let state = grid.interner().id_of("minecraft:bee_nest[facing=south,honey_level=0]");
+    grid.set_id_if_in_bounds(hx, hy, hz, state);
     // Bee-entity storage (2-3 bees) is not modelled — this engine has no
     // block-entity/NBT layer for a freshly generated chunk to carry it in;
     // named here rather than silently pretending the hive is fully stocked.
