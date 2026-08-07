@@ -38,6 +38,12 @@ separately landable piece of work with its own evidence standard.
     end of input".
   - Cross-crate changes still land as one reviewable commit per coherent change, with the
     boundary change separable from the optimisation that motivated it.
+- **Architecture authority (owner grant, 2026-08-07):** structural change — splitting files,
+  extracting sub-crates — is explicitly authorized where it reduces contention or improves
+  maintainability. In this plan that is not a nicety: `overworld.rs` is the single file that made
+  the engine middle a pipeline, so decomposition is a scheduled unit (U16) placed ahead of the
+  units it unblocks, with its own discipline — pure-move commits, gated exactly like logic
+  changes, never landed together with one. See [Decomposition](#decomposition-u16-detail).
 - Parity is **bit-exact**: the placement engine reproduces vanilla's depth-first `flatMap`
   RNG-consumption order, and the existing gates (`lodestone-worldgen-parity`'s composed fixture,
   the per-stage `*_parity.rs` suites, `FeatureOracle`/`VegetationOracle`) are the definition of
@@ -416,6 +422,95 @@ tree clones and per-chunk slot caches, U7 the stitch grids, U10 asserts the end 
 figure is the single most damning number in the diagnosis; its disappearance is measured, not
 implied.
 
+## Decomposition (U16 detail)
+
+Enabled by the architecture grant above. Measured surface at planning time (counts drift while U3
+is live in this crate): `feature/vegetation.rs` 3,661 lines, `overworld.rs` 1,832,
+`feature/mod.rs` 1,100, `density/mod.rs` 1,052; crate total 16,335 across 44 workspace members
+(`cargo metadata`), so sub-crates are idiomatic here, not novel. `overworld.rs` sits in the
+cluster of six units — that one file is why the middle was scheduled as a pipeline. Decomposition
+converts the file bottleneck into a fan-out, so it runs early: **strictly after U3 lands** (U3 is
+live in `crates/lodestone-worldgen/**` now; U16 starts from post-U3 state and must not be folded
+into U3's landing) and before the units it frees.
+
+**Phase A — split `overworld.rs` along its existing stage seams.** The seams already exist as
+named methods (`pre_ore_stage`, `ore_stage`, `stitch_region`, `vegetation_stage`,
+`top_layer_stage`, `post_ore_world`), so this is a move, not a design. Target layout — names
+indicative, the ownership column is the point:
+
+| new file | moves | owned after by |
+|---|---|---|
+| `overworld/mod.rs` (thin) | `OverworldGenerator::new`, `column`/`column_timed` orchestration, `PreOreCache`/`PostOreCache` fields | U6 (the store replaces the caches) |
+| `overworld/fill.rs` | the fill/aquifer half of `pre_ore_stage{,_uncached}` | U4, then U15 |
+| `overworld/biome.rs` | `DynamicBiome` + biome nearest-neighbour sampling | U9, then U11 |
+| `overworld/decorate.rs` | `ore_stage`, `stitch_region`, `vegetation_stage`, `top_layer_stage`, `stitch_veg_region` | U7, then U12 |
+| `overworld/output.rs` | `GeneratedColumn`, `StageTimes` | read-mostly; changes brokered |
+
+U4, U6, U7 and U9 must end this unit owning **different files**; that is the acceptance shape.
+
+**Phase B — `feature/vegetation.rs` (3,661 lines, U8's entire scope) splits here, in U16 — not as
+U8's first step.** U8 depends on U7, so "U8's first step" would keep the split serialized behind
+U7; doing it in U16 costs nothing extra (same pure-move discipline, same gates) and means U7 ends
+up owning only the driver/seeding file while U8's interior can fan out — including across agents
+inside U8 — the moment U7's seam lands. The split is driver/seeding in one file, per-feature
+interior in `feature/vegetation/` submodules; the depth-first recursion order is untouched by
+construction, and the parity suite proves it anyway.
+
+**Phase C — one leaf sub-crate, and only that one for now.** Verdicts from a measured
+`use crate::` scan (2026-08-07), not from the module diagram:
+
+- **`{hash, math, rng, noise, density}` → `lodestone-worldgen-core`: yes.** Measured a closed
+  set — `math` imports nothing crate-internal, `rng` only `hash`, `noise` only `math`/`rng`,
+  `density` only `math`/`noise`/`rng` — so the boundary exists today and the extraction is
+  mechanical. 3,670 lines, ~22% of the crate. Buys: feature-layer iteration (U7/U8/U12, the
+  most-edited code) stops rebuilding the numeric core; the leaf is independently testable (JVM
+  noise/density fixtures run without building the other ~12.7k lines); it is exactly the surface
+  U5 SIMDs; and U4's new `engine/` can be born inside it instead of moved later. Costs, honestly:
+  the rebuild win accrues only to the *top* of the stack — editing the leaf still rebuilds every
+  dependent — plus one more crate and the Phase-C guard runs below.
+- **`carver`/`surface`/`aquifer` middle crate: no.** No two units contend for those directories,
+  the rebuild win is ~2.6k lines, and `aquifer` is entangled with the fill path U4 is about to
+  rewrite — a crate boundary through an active rewrite gets redrawn. Revisit after U4 if the
+  numbers argue for it.
+- **`feature/` as its own crate: defer until after U8.** The boundary would cut exactly along
+  U7's region-view seam and U8's port, both scheduled rewrites; a speculative crate boundary is
+  its own maintenance burden. Carve it when the decoration medium is stable, if ever.
+
+**Discipline — the unit's evidence:**
+
+- **Pure-move commits only.** No logic changes, no signature changes beyond visibility, nothing
+  reordered. Review under `git diff --color-moved=dimmed-zebra`; new lines other than
+  `mod`/`use`/visibility plumbing are defects.
+- **The byte-identity gate and the full parity suite run against the moved tree in the same
+  commit**, plus `just health`. A "pure move" that changes RNG order is the single worst outcome
+  available — landed bare, the failure would be attributed to whichever unit lands next.
+- **A split never shares a commit with a logic change.** If both are needed, the move lands
+  first, green, alone.
+- Phase C additionally: **`just check-seam`** (the version seam), and **`cargo xtask
+  check-isolation` + `cargo xtask check-connected`** (wasm confinement and the plugins→engine
+  dependency direction) — the two classes of break a crate split can cause that a file split
+  structurally cannot.
+
+### Concurrency after U16 (recomputed, data-honest)
+
+File ownership was only one of two constraints. The data edges remain — U6←U3, U7←U3+U6,
+U8←U3+U7, U9←U6, U10←U6+U7, U11←U9, U5←U4+U2, U12←U7, U15←U4 — so the payoff is smaller than the
+file split suggests, and worth stating exactly:
+
+- **The critical path does not shorten: U3 → U16 → U6 → U7 → U8.** Decomposition cannot remove a
+  data edge; what it removes is the *false* serialization of everything else queued behind that
+  path.
+- **Wave 1** (U16 lands): **U4 ∥ U6** — `fill.rs` + new `engine/` vs `mod.rs` + `store.rs`. The
+  one shared point is the driver→fill call site, a one-line change brokered by the orchestrator.
+  U13/U14 data extraction free-runs alongside, as ever.
+- **Wave 2** (U4 + U6 landed): **U5 ∥ U7 ∥ U9 ∥ U15** — engine kernels / `decorate.rs` + feature
+  medium / `biome.rs` / `fill.rs` veins. Four units that were previously a queue.
+- **Wave 3** (U7 landed): **U8 ∥ U10 ∥ U12** — vegetation interior / server scheduler (different
+  crate) / new decoration modules — and **U11** once U9 lands.
+- Net: the six-unit serial middle becomes width **2 → 4 → 4** around an unchanged five-unit
+  critical path. Before U16, the same work was width 1 throughout. That is the whole payoff, and
+  it is bought by an M-cost pure-move unit.
+
 ## Unit list
 
 Costs: S ≲ 1 session, M ≈ 1–2, L ≈ 3+, XL = epic (own issue tree). "RNG" = can this unit change
@@ -429,9 +524,9 @@ acceptance is always counters and gates — never a profile, never a bare durati
 | U1 | Benchmark harness: counters + C_ss/C_cold + calibration | `benches/`, `src/` counter hooks, `docs/benchmark-harness.md` | — | M | none |
 | U2 | Release baseline + profile on embedded data; publish per-stage µs + counters; re-negotiate targets | bench-results, this doc, DESIGN §12 entry | U1 | S | none |
 | U3 | Numeric ids: interned `u16` states through dense_grid/carver/ore/top-layer; `String` only at serve boundary | `dense_grid.rs`, `carver/`, `feature/mod.rs`, `feature/top_layer.rs`, `overworld.rs` | U1 | L | none (representation) |
-| U4 | Flattened density engine + vanilla cell-walk + per-chunk scratch (kills D1, D3) | new `src/engine/`, then `density/`, `aquifer/`, `overworld.rs` fill cutover | U1 | L | none (no RNG in density) |
+| U4 | Flattened density engine + vanilla cell-walk + per-chunk scratch (kills D1, D3) | new `engine/` (in the U16 leaf crate), then `density/`, `aquifer/`, `overworld/fill.rs` cutover | U1, U16 | L | none (no RNG in density) |
 | U5 | `std::simd` noise kernels behind U4's batched fill API | `noise/`, `src/engine/` | U4, U2 profile | M | none (position-lane only) |
-| U6 | Staged sharded store replacing both mutex caches; drivers unchanged | new `src/engine/store.rs`, `overworld.rs` | U3 | L | **must not** — byte-identical gate |
+| U6 | Staged sharded store replacing both mutex caches; drivers unchanged | new `src/engine/store.rs`, `overworld/mod.rs` | U3, U16 | L | **must not** — byte-identical gate |
 | U7 | In-place region decoration view; delete stitch copies + `RegionGrid`/`VegGrid` re-seeding | `feature/mod.rs`, `feature/vegetation.rs`, `overworld.rs` | U3, U6 | M | **must not** — same driver order |
 | U8 | Vegetation engine port to ids + region view (the 3.6k-line module) | `feature/vegetation.rs` | U3, U7 | L | **must not** — depth-first recursion untouched |
 | U9 | Biome layer: memoised per-source biome in store + RTree port | `biome.rs`, `src/engine/` | U6 | M | none, but **values must match brute force exactly** |
@@ -440,20 +535,22 @@ acceptance is always counters and gates — never a profile, never a bare durati
 | U12 | Missing decoration steps: lakes, springs, geodes/icebergs, disks, dungeons/fossils | `feature/`, `compose.rs` | U7 | L | additive (per-feature `set_feature_seed` isolates streams; index-preservation already in place) |
 | U13 | Nether + End generation — **unit group NE**, own issue tree; see [inventory](#full-parity-inventory-jar-derived-262) | new engine instantiations + data + server dimension plumbing | U4–U9 | XL (group) | new content |
 | U14 | Structures — **unit group S**, own issue tree; see [inventory](#full-parity-inventory-jar-derived-262) | new `src/structure/`, data, beardifier hookup, ChunkStatus contract | U6, U7 | XL (group) | new content |
-| U15 | Ore-vein system (`OreVeinifier`): large copper/iron veins from the `vein_toggle`/`vein_ridged`/`vein_gap` router channels, applied during fill | `src/engine/`, `overworld.rs` fill stage | U4 | M | none (positional RNG, per-block chooser) — **changes overworld terrain toward vanilla**; needs a vein-positive JVM fixture |
+| U15 | Ore-vein system (`OreVeinifier`): large copper/iron veins from the `vein_toggle`/`vein_ridged`/`vein_gap` router channels, applied during fill | `src/engine/`, `overworld/fill.rs` | U4 | M | none (positional RNG, per-block chooser) — **changes overworld terrain toward vanilla**; needs a vein-positive JVM fixture |
+| U16 | Decomposition: split `overworld.rs` and `vegetation.rs` on stage seams; extract `lodestone-worldgen-core` leaf crate — [detail](#decomposition-u16-detail) | `overworld.rs` → `overworld/`, `feature/vegetation.rs` → `feature/vegetation/`, new leaf crate | U3 | M | **must not** — pure moves only; byte-identity + full parity on the moved tree, same commit |
 
-**Scheduling note (shared checkout):** `overworld.rs` is in the cluster of U3, U4, U6, U7, U9 and
-U11 — it is a choke-point file, and the dependency column above understates how serial the middle
-really is. Plan for **at most one in-flight unit owning `overworld.rs` at a time**, brokered by
-the orchestrator; the engine middle is a pipeline, not a fan-out. Genuinely parallel-safe
-alongside it: U1/U2 (benches), U5 (engine files only, once U4's seam exists), U8's
-`vegetation.rs` interior (after U7 lands its seam), and the data-extraction phases of U13/U14.
-A six-agent fan-out across U3–U9 cannot happen; do not schedule one.
+**Scheduling note (shared checkout):** until U16 lands, `overworld.rs` remains the choke point
+across U3/U4/U6/U7/U9/U11 — **at most one in-flight owner at a time**, brokered by the
+orchestrator. **U16 exists to end that regime**: it converts the file bottleneck into the wave
+structure in [Concurrency after U16](#concurrency-after-u16-recomputed-data-honest). Post-U16 the
+middle is still not a free fan-out — the data edges cap it at width 2 → 4 → 4 and the critical
+path U3 → U16 → U6 → U7 → U8 stays serial, so a six-agent fan-out across U3–U9 remains
+unschedulable. Genuinely parallel-safe at any time: U1/U2 (benches) and the data-extraction
+phases of U13/U14.
 
 **Disk note:** per-unit private `--target-dir`s and profile artifacts run to tens of GB each;
 abandoned ones filled the disk to 100% mid-planning (2026-08-07, ~147 GB reclaimed, ENOSPC broke
 tool output session-wide). Name them per-unit, delete by exact name when the unit ends, and have
-the orchestrator sweep stale `/private/tmp/lt-*` dirs periodically — a fourteen-unit rewrite will
+the orchestrator sweep stale `/private/tmp/lt-*` dirs periodically — a sixteen-unit rewrite will
 reproduce this otherwise.
 
 **Per-unit notes — the trap most likely to sink each:**
