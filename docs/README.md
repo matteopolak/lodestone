@@ -1315,6 +1315,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   from the outside. This is issue #478's other half: the diagnosis was that vegetation
   was missing, and the finding was that it is not, but that nothing in the tree could
   have told you either way.
+- [Vegetal decoration on numeric ids](./worldgen-vegetation-ids.md) — The vegetation
+  placement engine's port off block-state strings and onto Unit 3's `StateId`s, plus
+  the fixed bitsets that answer tag membership in O(1). Unit 8 of
+  [`plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md); it took a steady-state
+  warm column from **20,678 heap allocations to 87** — vegetation's own share from
+  20,621 to 30 — while changing **not one byte** of generated world.
 - [Vegetal decoration: grass, flowers and trees](./worldgen-vegetation.md) —
   `crates/lodestone-worldgen/src/feature/vegetation.rs` is the engine that places
   grass, flowers and trees (oak, birch, spruce, plus spruce's own `pine` sibling)
