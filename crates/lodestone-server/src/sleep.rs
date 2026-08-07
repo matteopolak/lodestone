@@ -388,20 +388,54 @@ mod tests {
     }
 
     /// A sleeper who gets up drops out of the vote the next reconcile, and
-    /// their deep-sleep clock is not preserved if they lie down again.
+    /// their deep-sleep clock is not preserved if they lie down again — while a
+    /// sleeper who never got up keeps the clock they laid down with.
+    ///
+    /// Both halves matter and they pull in opposite directions, which is what
+    /// this test is for: `reconcile` must *re*-clock a returnee and must **not**
+    /// re-clock a stayer. [`SleepState::reconcile`]'s push is guarded on
+    /// `!self.sleepers.iter().any(...)` for exactly that reason.
+    ///
+    /// This assertion used to expect `50` for the stayer — the tick of the
+    /// *second* reconcile rather than the tick 1002 actually lay down at — and so
+    /// had never passed since the module landed (`d09c694`; production and test
+    /// are both untouched since). The corrected value is `LAY_DOWN`, taken from
+    /// this test's own first call: 1002 is in every roster from that call onward,
+    /// so nothing may move its clock. Reading `50` as the expectation was
+    /// asserting the bug the guard exists to prevent.
     #[test]
     fn reconcile_drops_woken_players_and_reclocks_returnees() {
+        // Named so the assertions read against the call that set them rather
+        // than against three loose literals.
+        const LAY_DOWN: u64 = 0;
+        const ONE_GETS_UP: u64 = 50;
+        const RETURNS: u64 = 60;
+
         let mut state = SleepState::default();
-        state.reconcile(&[1001, 1002], 0);
+        state.reconcile(&[1001, 1002], LAY_DOWN);
         // Player 1001 gets up; 1002 stays.
-        state.reconcile(&[1002], 50);
+        state.reconcile(&[1002], ONE_GETS_UP);
         assert_eq!(state.sleepers.len(), 1);
         assert_eq!(state.sleepers[0].entity_id, 1002);
         // 1001 lies down again at tick 60: their counter restarts, so the
         // previously-elapsed deep sleep does not count.
-        state.reconcile(&[1002, 1001], 60);
-        assert_eq!(state.sleepers[0].since_game_tick, 50);
-        assert_eq!(state.sleepers[1].since_game_tick, 60);
+        state.reconcile(&[1002, 1001], RETURNS);
+        assert_eq!(
+            state.sleepers[0].since_game_tick, LAY_DOWN,
+            "1002 never got up, so its clock must still be the tick it lay down at \
+             ({LAY_DOWN}) — not the tick of any later reconcile"
+        );
+        assert_eq!(
+            state.sleepers[1].since_game_tick, RETURNS,
+            "1001 did get up, so its clock must restart at the tick it lay down again \
+             ({RETURNS}) and its earlier {ONE_GETS_UP} ticks of sleep must not count"
+        );
+        // The two must differ, or the assertions above are both satisfied by a
+        // `reconcile` that stamps every sleeper with the current tick.
+        assert_ne!(
+            state.sleepers[0].since_game_tick, state.sleepers[1].since_game_tick,
+            "a stayer and a returnee must not share a clock"
+        );
     }
 
     /// The roster round-trips the shared vote: `lay_down`/`get_up`/`set_active`
