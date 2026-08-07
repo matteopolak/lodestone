@@ -1994,6 +1994,10 @@ async fn live_precipitation_matches_vanillas_own_threshold_for_real_biomes() {
         sky_visible: true,
         handle: Some(Arc::clone(&handle)),
         biome_climates: Some(Arc::clone(&climates)),
+        // One `section_at` per distinct chunk column rather than per call — this
+        // gate samples 16 different columns, so it fetches 16 sections and reuses
+        // none, which is exactly the memo's contract.
+        memo: Default::default(),
     };
 
     // Sample a real column in the middle of a loaded chunk, at mid-build-

@@ -365,8 +365,11 @@ impl WindowApp {
                 .map(|w| {
                     // ONE light sample per frame, at the eye, reused for every
                     // column — see `ShellWeatherProbe`'s doc for the three
-                    // divergences that buys and why 441 world locks per frame was
-                    // not the trade to make first. `sky_darken()` is the
+                    // divergences that buys. The *biome* half is a real
+                    // per-column lookup (issue #25) and is what used to cost
+                    // 441 × 3 world locks a frame; `ShellWeatherProbe::memo`
+                    // now takes one lock per chunk column instead, which is why
+                    // the probe below **must** stay per-frame. `sky_darken()` is the
                     // weather-folded factor the terrain and entity passes are
                     // already using this frame, so the rain cannot be lit by a
                     // different sky than the blocks it falls past.
@@ -400,6 +403,8 @@ impl WindowApp {
                         sky_visible: packed.is_none_or(|p| ((p >> 4) & 0x0F) > 0),
                         handle: self.sim.net().and_then(|n| n.shared_handle().get().cloned()),
                         biome_climates: self.sim.net().map(crate::net::NetClient::shared_biome_climates),
+                        // Fresh every frame, by construction — see the field doc.
+                        memo: Default::default(),
                     };
                     weather_columns_for_frame(w, &camera, tick, &probe)
                 })
