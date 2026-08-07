@@ -29,9 +29,11 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use lodestone_worldgen::density::{Builder, NoiseParams, Resolver};
-use lodestone_worldgen::surface::{BlockCanon, SurfaceSystem};
+use lodestone_worldgen::interner::StateInterner;
+use lodestone_worldgen::surface::{BlockCanon, PreState, SurfaceSystem};
 use serde_json::Value;
 
 const SEED: i64 = 42;
@@ -147,13 +149,21 @@ fn run_fixture(label: &str, text: &str) {
     assert_eq!(r.biome, "minecraft:plains", "fixture biome");
 
     let builder = Builder::new(SEED, &resolver);
-    let surface = SurfaceSystem::new(&settings, &builder, &r.canon);
+    // U21: `SurfaceSystem` speaks interned `StateId` now. This fixture path
+    // deliberately goes through `PreState::from_name`, which classifies from the
+    // *string* (`class_of_name`) exactly as the pre-U21 scan did — so what this
+    // test drives is the same classification logic against the same JVM-dumped
+    // expected values, not the `BlockKind` shortcut production takes. The
+    // shortcut's agreement with this path is asserted separately, at the
+    // production seam in `overworld/fill.rs::surface_stage`.
+    let interner = Arc::new(StateInterner::new());
+    let surface = SurfaceSystem::new(&settings, &builder, &r.canon, &interner);
 
-    let pre_fn = |x: i32, y: i32, z: i32| -> String {
-        r.pre
-            .get(&key(x, y, z))
-            .cloned()
-            .unwrap_or_else(|| "minecraft:air".to_string())
+    let pre_fn = |x: i32, y: i32, z: i32| -> PreState {
+        match r.pre.get(&key(x, y, z)) {
+            Some(name) => PreState::from_name(&interner, name),
+            None => PreState::AIR,
+        }
     };
     let hm_fn = |x: i32, z: i32| -> i32 { *r.hm.get(&(x, z)).expect("heightmap") };
     // plains is not "cold enough to snow"; the temperature condition is only
@@ -161,7 +171,7 @@ fn run_fixture(label: &str, text: &str) {
     // Fixed for the whole fixture (issue #405 made biome a runtime input, but
     // this fixture — like the JVM dump it compares against — only ever ran
     // under one biome).
-    let biome_at = |_x: i32, _z: i32| -> (String, bool) { (r.biome.clone(), false) };
+    let biome_at = |_x: i32, _z: i32| -> (&str, bool) { (r.biome.as_str(), false) };
 
     // `build_surface` now returns a sparse diff (only positions a surface rule
     // actually rewrote — see its doc comment); a position absent from it is
@@ -180,14 +190,18 @@ fn run_fixture(label: &str, text: &str) {
             for y in MIN_Y..(MIN_Y + HEIGHT) {
                 total += 1;
                 let want = r.post.get(&key(x, y, z)).expect("post block");
-                let got = result
+                // The diff carries ids; resolve back to the canonical name the
+                // JVM dump is written in. A position absent from the diff is
+                // unchanged, i.e. the pre-surface block.
+                let got_id = result
                     .get(&key(x, y, z))
-                    .cloned()
-                    .unwrap_or_else(|| pre_fn(x, y, z));
-                if *want == got {
+                    .copied()
+                    .unwrap_or_else(|| pre_fn(x, y, z).state);
+                let got = interner.name_of(got_id);
+                if want == got {
                     matching += 1;
                 } else if first_divergence.is_none() {
-                    first_divergence = Some((x, y, z, want.clone(), got.clone()));
+                    first_divergence = Some((x, y, z, want.clone(), got.to_string()));
                 }
             }
         }

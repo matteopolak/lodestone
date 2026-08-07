@@ -299,6 +299,24 @@ fn where_the_ore_stages_allocations_come_from() {
     }
     println!("  rng_draws[Ore]            : {}", snap.rng_draws[Stage::Ore as usize]);
 
+    // U21 (issue #501) added this table. `rng_draws[Ore]` alone is the right
+    // control for a change to the ore engine and the wrong one for a change to
+    // any other stage — and "RNG order is the world", so every unit that edits
+    // a stage needs its own stage's draw count and entry count, digit-identical
+    // across arms, not ore's. Printing the whole array rather than one more
+    // hand-picked row is deliberate: the next unit should not have to edit this
+    // harness again, and a harness edit is a thing that has to be md5-matched
+    // across both arms of a byte-identity comparison.
+    println!("\n  -- per-stage entry and RNG draw counts (arm-comparison controls) --");
+    for (i, name) in STAGE_NAMES.iter().enumerate() {
+        let entered = snap.stage_entered[i];
+        let draws = snap.rng_draws[i];
+        if entered == 0 && draws == 0 {
+            continue;
+        }
+        println!("     {name:<14} entered {entered:>8}   rng_draws {draws:>12}");
+    }
+
     println!("\n  -- allocations by stage --");
     let mut ranked: Vec<(usize, u64)> = by_stage.iter().copied().enumerate().collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1));
