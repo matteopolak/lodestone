@@ -536,44 +536,44 @@ pub(super)     fn get_positions<R: RandomSource>(
         pos: BlockPos,
         grid: &VegGrid,
         tags: &VegTags,
-    ) -> Vec<BlockPos> {
+    ) -> Positions {
         match self {
             VegPlacement::Count(ip) => {
                 let n = ip.sample(random);
-                vec![pos; n.max(0) as usize]
+                Positions::Repeat(pos, n.max(0))
             }
             VegPlacement::InSquare => {
                 let x = pos.x + random.next_int_bounded(16);
                 let z = pos.z + random.next_int_bounded(16);
-                vec![BlockPos { x, y: pos.y, z }]
+                Positions::One(BlockPos { x, y: pos.y, z })
             }
             VegPlacement::Heightmap(kind) => {
                 let height = kind.scan(grid, pos.x, pos.z);
                 if height > grid.min_y {
-                    vec![BlockPos {
+                    Positions::One(BlockPos {
                         x: pos.x,
                         y: height,
                         z: pos.z,
-                    }]
+                    })
                 } else {
-                    Vec::new()
+                    Positions::None
                 }
             }
-            VegPlacement::Biome => vec![pos],
+            VegPlacement::Biome => Positions::One(pos),
             VegPlacement::RarityFilter(chance) => {
                 if random.next_float() < 1.0 / *chance as f32 {
-                    vec![pos]
+                    Positions::One(pos)
                 } else {
-                    Vec::new()
+                    Positions::None
                 }
             }
             VegPlacement::SurfaceWaterDepthFilter(max_depth) => {
                 let ocean = grid.height_ocean_floor(pos.x, pos.z);
                 let surface = grid.height_world_surface(pos.x, pos.z);
                 if surface - ocean <= *max_depth {
-                    vec![pos]
+                    Positions::One(pos)
                 } else {
-                    Vec::new()
+                    Positions::None
                 }
             }
             VegPlacement::NoiseThresholdCount {
@@ -586,7 +586,7 @@ pub(super)     fn get_positions<R: RandomSource>(
                     f64::from(pos.z) / 200.0,
                 );
                 let n = if noise < *noise_level { *below } else { *above };
-                vec![pos; n.max(0) as usize]
+                Positions::Repeat(pos, n.max(0))
             }
             VegPlacement::RandomOffset { xz, y } => {
                 // Two INDEPENDENT samples of `xz` (x, then z) — matches
@@ -595,23 +595,65 @@ pub(super)     fn get_positions<R: RandomSource>(
                 let scatter_x = pos.x + xz.sample(random);
                 let scatter_y = pos.y + y.sample(random);
                 let scatter_z = pos.z + xz.sample(random);
-                vec![BlockPos {
+                Positions::One(BlockPos {
                     x: scatter_x,
                     y: scatter_y,
                     z: scatter_z,
-                }]
+                })
             }
             VegPlacement::BlockPredicateFilter(pred) => {
                 census_bump(|c| c.block_predicate_filter_in += 1);
                 if pred.test(grid, tags, pos) {
                     census_bump(|c| c.block_predicate_filter_out += 1);
-                    vec![pos]
+                    Positions::One(pos)
                 } else {
-                    Vec::new()
+                    Positions::None
                 }
             }
         }
     }
+}
+
+/// What one [`VegPlacement`] yields for one input position — the allocation-free
+/// replacement for the `Vec<BlockPos>` this used to return.
+///
+/// # Why exactly three shapes, and why that is not a narrowing
+///
+/// Unit 8 of [`docs/plans/worldgen-rewrite.md`](../../../../../docs/plans/worldgen-rewrite.md)
+/// had to remove a heap allocation **per placement modifier per attempt** without
+/// moving one RNG draw. Enumerating every arm of
+/// [`VegPlacement::get_positions`] shows the returned `Vec` only ever had one of
+/// three shapes, so this enum is exhaustive over what the old code could produce
+/// rather than a subset of it:
+///
+/// | arm | old | new |
+/// |---|---|---|
+/// | `Count`, `NoiseThresholdCount` | `vec![pos; n]` | [`Positions::Repeat`] |
+/// | `InSquare`, `RandomOffset`, `Biome` | `vec![one]` | [`Positions::One`] |
+/// | `Heightmap`, `RarityFilter`, `SurfaceWaterDepthFilter`, `BlockPredicateFilter` | `vec![one]` or `Vec::new()` | [`Positions::One`] / [`Positions::None`] |
+///
+/// **No modifier vanilla ships in the vegetal-decoration subset returns two
+/// *different* positions.** If one is ever added (a real `EnvironmentScan`-style
+/// modifier that fans out), it does **not** get to smuggle itself in as a
+/// `Repeat` — add a variant and handle it in the driver's walk, because
+/// `Repeat`'s consumer recurses `n` times on the *same* position, which is
+/// precisely what `vec![pos; n]` meant and is not what a fan-out means.
+///
+/// The draw still happens inside `get_positions`, before this value is returned,
+/// so the consumption order is byte-identical: the driver's depth-first `recurse`
+/// walks `Repeat`'s `n` copies in the same order `for next in vec` did. The plan
+/// marks U8 **"must not"** change RNG order and names breadth-first
+/// "optimisation" of this exact recursion as instant desync — this change never
+/// touches the recursion's shape, only what it iterates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Positions {
+    /// The modifier filtered this position out.
+    None,
+    /// Exactly one position (possibly moved from the input).
+    One(BlockPos),
+    /// `n` copies of one position — `Count`/`NoiseThresholdCount`'s
+    /// `vec![pos; n]`. `n <= 0` means none.
+    Repeat(BlockPos, i32),
 }
 
 /// `net.minecraft.world.level.levelgen.feature.treedecorators.TreeDecorator`
