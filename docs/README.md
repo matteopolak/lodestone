@@ -988,6 +988,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   describes behaviour, it is describing the design, not shipped code; where it cites
   `crates/lodestone-ecs/` today, that code already exists and this document is
   reporting it directly.
+- [Server-side gameplay gap census against vanilla 26.2](./server-gameplay-gap-census.md) —
+  An evidenced inventory of what the integrated server actually simulates, measured
+  against vanilla 26.2 — block drops, crafting, mob spawning, lighting, drowning,
+  hunger, fluids, fire, explosions, redstone, item entities, sound and particles.
+  Every row carries a verdict (**reached** / **orphaned** / **partial** / **absent**),
+  what consumes it in production, a `file:line` citation and an issue number, so a
+  later reader can re-verify rather than inherit. It is the server-side sibling of
+  [`worldgen-gap-census.md`](./worldgen-gap-census.md) and exists for the same reason:
+  the written record here goes stale silently, and this repo's dominant defect is the
+  *island* — code that is built, unit-tested green, and reached by nothing.
 - [Server-authoritative inventory (issue #408)](./server-inventory.md) —
   `lodestone-server`'s model for a player's own inventory, and the decode + consumer
   that lets `SET_CARRIED_ITEM` and `CONTAINER_CLICK` actually change server state.
