@@ -518,6 +518,46 @@ fn the_server_protocol_default_emits_no_registry_data() {
         ) -> lodestone_server::ServerBound {
             lodestone_server::ServerBound::Ignored
         }
+
+        // The join and chunk-streaming methods are **required**, with no trait
+        // default, and that is deliberate: issue #440 established that a
+        // defaulted `ServerProtocol` method is a trap, because a family that
+        // silently inherits a no-op looks implemented. This double exists only
+        // to read `encode_registry_data`'s default, so every one of them is
+        // unreachable here — and says so loudly rather than returning an empty
+        // vec that a future reader could mistake for a real answer.
+        fn login_success(
+            &self,
+            _name: &str,
+            _uuid: uuid::Uuid,
+        ) -> Vec<lodestone_server::ServerDirective> {
+            unreachable!("this control never drives a join")
+        }
+
+        fn begin_configuration(&self) -> Vec<lodestone_server::ServerDirective> {
+            unreachable!("this control never drives a join")
+        }
+
+        fn begin_play(&self, _entity_id: i32) -> Vec<lodestone_server::ServerDirective> {
+            unreachable!("this control never drives a join")
+        }
+
+        fn begin_chunk_batch(&self) -> lodestone_server::ServerDirective {
+            unreachable!("this control never streams chunks")
+        }
+
+        fn encode_chunk(
+            &self,
+            _cx: i32,
+            _cz: i32,
+            _column: &lodestone_server::ChunkColumn,
+        ) -> lodestone_server::ServerDirective {
+            unreachable!("this control never streams chunks")
+        }
+
+        fn end_chunk_batch(&self, _count: i32) -> lodestone_server::ServerDirective {
+            unreachable!("this control never streams chunks")
+        }
     }
 
     assert!(
