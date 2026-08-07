@@ -1215,6 +1215,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   range, biome)` entries. Different climate → different biome → different surface
   material (sand in deserts, snow in taiga, terracotta-adjacent in savanna, etc.) and,
   once a render-layer consumer exists, different grass/foliage tint.
+- [Decoration scratch reuse](./worldgen-decoration-scratch-reuse.md) — The
+  per-thread free-list that recycles the three containers worldgen's decoration media
+  write into — `RegionView`'s write overlay and `VegGrid`'s overlay and `dirty` log
+  — so a served column takes them already at capacity instead of growing them from
+  empty. Unit 19 of [`plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md); it took
+  a warm served column from **87 heap allocations to 64** and the vegetation stage's
+  own share from **30 to 7**, while changing **not one byte** of generated world (45
+  columns, 5 seeds, `cmp` clean, both dumps md5 `a9db7cf741214167db615fa8b9356fa8`).
 - [Worldgen density engine: the block field, and the interpolation order it depends on](./worldgen-density-engine.md) —
   How `crates/lodestone-worldgen-core`'s density stack turns vanilla's data-driven
   density-function graph into the per-block field that `fillFromNoise` writes, and the

@@ -44,20 +44,39 @@
 //! production relationship: `OverworldGenerator` owns one interner and one
 //! `VegTags` and builds a new grid per served column.
 //!
-//! # What is NOT zero, named rather than rounded away
+//! # Arm 2 now reads literal zero — Unit 19
 //!
-//! Arm 2 does not reach literal zero, and the residual is `VegGrid`'s own
-//! containers, not the placement engine: the write overlay (`HashMap`) and the
-//! `dirty` log (`Vec`) both start empty on a fresh grid and grow geometrically as
-//! the pass writes into them, which is `O(log writes)` allocations — a dozen or so
-//! each. `docs/worldgen-in-place-decoration.md` states outright that Unit 7 chose
-//! *not* to pool them ("There is no buffer pool... If scratch reuse is ever needed
-//! here it goes in a `thread_local` free-list"), so removing these is a change to
-//! that unit's medium and is left as a named follow-up rather than smuggled in
-//! here. `allocations_are_geometric_growth_not_per_write` is the assertion that
-//! keeps the distinction honest: it fails if the count ever becomes proportional
-//! to the number of writes again, which is what a reintroduced per-block
-//! allocation would look like.
+//! Until Unit 19 arm 2 read **13**, and the residual was `VegGrid`'s own
+//! containers rather than the placement engine: the write overlay and the `dirty`
+//! log both started empty on a fresh grid and grew geometrically as the pass wrote
+//! into them, `O(log writes)` allocations each. Unit 8 left them because
+//! `docs/worldgen-in-place-decoration.md` records Unit 7 deliberately *not* pooling
+//! them ("There is no buffer pool... If scratch reuse is ever needed here it goes in
+//! a `thread_local` free-list") and a non-owned file's lifecycle was not Unit 8's to
+//! change. Unit 19 owns both files and took exactly the escape hatch that doc named:
+//! `feature::region_view::scratch`'s per-thread free-list. Arm 2 reads **0**.
+//!
+//! Three things about that number are worth keeping, because each was a wrong
+//! answer first:
+//!
+//! * **`drop(cold_grid)` between the arms is load-bearing.** Production builds one
+//!   `VegGrid` per served column and drops it before building the next; that drop is
+//!   what returns the buffers. Holding both arms' grids alive — what this file did
+//!   before — makes arm 2 draw from an *empty* free-list, so it measured a cold
+//!   growth while calling itself warm and still read 13 after the pooling landed.
+//! * **`census::reset()` must not happen inside a measured region.** The census's
+//!   `unsupported` map is a `BTreeMap<String, usize>`; clearing it costs a `String`
+//!   clone plus a node on the first unmodelled dispatch of each distinct reason —
+//!   measured as exactly **2**, flat across four scenes of 2,086–2,499 writes.
+//!   `OverworldGenerator` never resets the census, so those 2 are the instrument,
+//!   not the engine. The arms take deltas instead.
+//! * **Zero is asserted as an equality and paired with a causal control.**
+//!   `a_warm_pass_allocates_zero_at_every_scene_size` replaces the old
+//!   `allocations_are_geometric_growth_not_per_write` — whose ratio form divided by
+//!   a floored zero and *failed against a correct implementation* — and
+//!   `recycling_is_what_removes_the_containers_and_draining_the_free_list_puts_them_back`
+//!   drains the free-list and observes the allocations return (0 → 11 for the same
+//!   2,499-write pass), so "zero" is attributed to the mechanism rather than assumed.
 
 // The counting allocator needs `unsafe impl GlobalAlloc`, and the workspace sets
 // `unsafe_code = "deny"`. Same exemption and same reason as
@@ -307,13 +326,48 @@ fn a_warm_vegetal_decoration_pass_allocates_only_its_grids_own_container_growth(
     );
     assert!(cold_writes > 0, "the grid recorded no dirty cells");
 
+    // ---- The production lifecycle, and why this `drop` is load-bearing -------
+    // `OverworldGenerator` builds one `VegGrid` per served column and drops it
+    // before building the next, which is what returns its containers to Unit 19's
+    // per-thread free-list. Holding two grids alive across the two arms — what
+    // this file did before U19 — means arm 2 draws from an *empty* free-list and
+    // measures a cold container growth while calling itself warm. That is not a
+    // detail of the harness: it is the difference between measuring production's
+    // steady state and measuring its first column.
+    drop(cold_grid);
+    assert_eq!(
+        lodestone_worldgen::feature::region_view::scratch_free_list_lengths(),
+        (1, 1),
+        "dropping the cold grid must have returned its overlay map and its write log \
+         to this thread's free-list; without that, arm 2 below is a second cold arm \
+         wearing a warm label"
+    );
+
     // ---- Arm 2: warm. The steady state the budget is written against. --------
+    // **No `census::reset()` here, and that is a measurement decision.** The census
+    // accumulates; `reset()` clears its `unsupported` `BTreeMap<String, usize>`,
+    // and re-filling that map costs a `String` clone plus a tree node on the first
+    // unmodelled dispatch of each distinct reason — measured as exactly 2
+    // allocations, flat across all four scenes, once U19 pooled the containers.
+    // Those 2 belong to the *instrument*: `OverworldGenerator` never resets the
+    // census, so from its second column onward every reason key is already present
+    // and the cost is zero. Resetting here and then calling the residual "engine
+    // allocations" would have attributed the harness to the subject — the same
+    // mistake this file's own `seeded_grid` doc records for the 16,384 `to_string()`s.
+    // A delta across the window measures the pass without disturbing the map.
     let mut warm_grid = seeded_grid(&interner, 0, 0);
-    census::reset();
     ids::reset_counts();
+    let before = census::snapshot();
     let (_, warm_allocs) = allocs_of(|| run_pass(&mut warm_grid, &tags, &features, 0, 0));
+    let after = census::snapshot();
     let warm_writes = warm_grid.dirty_len();
-    let warm_census = census::snapshot();
+    let warm_census = census::VegCensus {
+        writes: after.writes - before.writes,
+        tree: after.tree - before.tree,
+        simple_block: after.simple_block - before.simple_block,
+        block_predicate_filter_in: after.block_predicate_filter_in - before.block_predicate_filter_in,
+        ..census::VegCensus::default()
+    };
     let fast = ids::fast_hits();
     let slow = ids::slow_hits();
 
@@ -348,6 +402,14 @@ fn a_warm_vegetal_decoration_pass_allocates_only_its_grids_own_container_growth(
     //  * POST-U8 hypothesis: the placement engine allocates nothing, and the only
     //    allocations are the fresh grid's overlay and dirty-log geometric growth,
     //    which is O(log writes) — for a few thousand writes, tens.
+    //  * U19 hypothesis: **exactly zero**. The two containers are recycled through
+    //    a per-thread free-list, so a warm grid takes buffers that are already at
+    //    the high-water capacity of the scene arm 1 ran, and nothing in the pass
+    //    can grow them.
+    //
+    // Zero is asserted as an equality, not as a ceiling, deliberately: a ceiling
+    // of "a dozen or so" is satisfied by a partially-broken free-list, and the
+    // whole point of this unit is that there is no residual left to hide in.
     let pre_u8_floor = u64::try_from(warm_census.writes).expect("writes fits u64");
     let geometric_ceiling = 4 * (64 - pre_u8_floor.max(1).leading_zeros() as u64) + 32;
     assert!(
@@ -357,14 +419,16 @@ fn a_warm_vegetal_decoration_pass_allocates_only_its_grids_own_container_growth(
          means the per-block allocation is back.",
         warm_census.writes
     );
-    assert!(
-        warm_allocs <= geometric_ceiling,
-        "a warm pass allocated {warm_allocs}, above the {geometric_ceiling} a \
-         purely geometric container growth predicts for {} writes. Something in the \
-         placement engine is allocating per placement again — check the two \
-         thread-local scratch buffers in `place.rs`, `tree.rs`'s BFS scratch, and \
-         `ids`' rewrite memo (a memo miss allocates, and a miss on a WARM pass means \
-         the memo key is wrong).",
+    assert_eq!(
+        warm_allocs, 0,
+        "a warm pass allocated {warm_allocs} for {} writes, against U19's predicted \
+         zero (the pre-U19 geometric-growth hypothesis predicted up to \
+         {geometric_ceiling}). Either the placement engine is allocating per \
+         placement again — check `place.rs`/`tree.rs`'s thread-local scratch and \
+         `ids`' rewrite memo — or the grid's containers are no longer being recycled \
+         through `feature::region_view`'s free-list. \
+         `recycling_is_what_removes_the_containers_and_draining_the_free_list_puts_them_back` \
+         separates those two causes.",
         warm_census.writes
     );
     assert_eq!(warm_writes, cold_writes, "both arms must write the same cells");
@@ -397,59 +461,162 @@ fn a_warm_vegetal_decoration_pass_allocates_only_its_grids_own_container_growth(
     );
 }
 
-/// The residual is geometric container growth, not per-write allocation — and the
-/// discriminating measurement is how the count responds to **more writes**.
+/// Zero is zero **at every scene size**, which is what separates it from a small
+/// number that happens to look like zero.
 ///
-/// A per-write allocation scales linearly; geometric `Vec`/`HashMap` growth scales
-/// logarithmically. Two passes over scenes of very different size therefore
-/// separate the two hypotheses in a way one absolute number cannot, which is the
-/// point: this is the assertion that would catch a future change reintroducing an
-/// allocation into the placement engine, even if the absolute count still looked
-/// small.
+/// # What this replaced, and why the old shape had to go
+///
+/// Until Unit 19 this test was `allocations_are_geometric_growth_not_per_write`,
+/// and it argued from the *shape* of the residual: a per-write allocation scales
+/// linearly with writes, geometric `Vec`/`HashMap` growth scales logarithmically,
+/// so requiring `alloc_ratio < write_ratio` separated the two hypotheses without
+/// needing an absolute number. That was the right test for a residual that
+/// existed. With the containers recycled there is no residual to characterise, and
+/// the ratio form actively misfires: `min_allocs` reaches 0, `max(1)` floors the
+/// denominator, and the very first (still-cold) scene divides by it — the shape
+/// **failed against a correct implementation**, reporting `2 -> 13, ratio 6.50`
+/// against a write ratio of 1.20.
+///
+/// The replacement is strictly stronger rather than merely different. A
+/// reintroduced per-write allocation — the thing the old form existed to catch —
+/// makes a warm count non-zero at *every* scene, and the largest scene worst, so
+/// this fails on it too; but this also fails on a residual the old form was built
+/// to tolerate. The spread assertion is kept, because without it four identical
+/// scenes would pass vacuously.
 #[test]
-fn allocations_are_geometric_growth_not_per_write() {
+fn a_warm_pass_allocates_zero_at_every_scene_size() {
     let resolver = FsResolver { root: data_dir() };
     let tags = build_veg_tags(&resolver);
     let features = build_biome_vegetation(&resolver, BIOME);
     let interner = std::sync::Arc::new(lodestone_worldgen::interner::StateInterner::new());
 
-    // Warm everything first; the first pass on a thread is warmup by definition.
-    let mut warmup = seeded_grid(&interner, 0, 0);
-    run_pass(&mut warmup, &tags, &features, 0, 0);
+    const SCENES: [(i32, i32); 4] = [(0, 0), (7, 11), (-3, 5), (20, -5)];
 
-    // Four further passes at different chunk coordinates. Different decoration
-    // seeds mean genuinely different write counts. The grid is built and seeded
-    // OUTSIDE the measured window — see `seeded_grid`.
+    // Warm the whole thread, including the free-list's capacity high-water mark.
+    // Each grid is dropped at the end of its own iteration — production's
+    // lifecycle — so the buffers come back before the next take. Two rounds, not
+    // one: round 1 grows each buffer to whatever *its* scene needed, and only
+    // after every scene has been seen once is the retained capacity guaranteed to
+    // cover the largest of them. That convergence is the honest cost model — the
+    // growth is paid once per thread, not once per column — and it is why this is
+    // self-tuning rather than a `with_capacity` guess. `docs/worldgen-fast-hashing.md`
+    // explicitly declined to guess a number here for want of a measured target.
+    for _ in 0..2 {
+        for (cx, cz) in SCENES {
+            let mut grid = seeded_grid(&interner, cx, cz);
+            run_pass(&mut grid, &tags, &features, cx, cz);
+        }
+    }
+
+    // Deltas, never `census::reset()` inside a measured region — see arm 2 of the
+    // test above for the 2 allocations a reset costs and why they are the
+    // instrument rather than the engine.
     let mut samples: Vec<(usize, u64)> = Vec::new();
-    for (cx, cz) in [(0, 0), (7, 11), (-3, 5), (20, -5)] {
+    for (cx, cz) in SCENES {
         let mut grid = seeded_grid(&interner, cx, cz);
-        census::reset();
+        let before = census::snapshot().writes;
         let (_, allocs) = allocs_of(|| run_pass(&mut grid, &tags, &features, cx, cz));
-        samples.push((census::snapshot().writes, allocs));
+        samples.push((census::snapshot().writes - before, allocs));
     }
     samples.sort_unstable();
-    let (min_writes, min_allocs) = samples[0];
-    let (max_writes, max_allocs) = samples[samples.len() - 1];
+    let (min_writes, _) = samples[0];
+    let (max_writes, _) = samples[samples.len() - 1];
     assert!(
         max_writes > min_writes,
-        "the four scenes produced no spread in write counts ({samples:?}), so this \
-         test cannot distinguish linear from logarithmic growth and is vacuous"
+        "the four scenes produced no spread in write counts ({samples:?}), so a \
+         zero result here says nothing about whether the count responds to scene \
+         size and this test is vacuous"
     );
-
-    // Linear would predict allocs scaling like writes. Logarithmic predicts a
-    // ratio near 1. Require the alloc ratio to sit far below the write ratio.
-    let write_ratio = max_writes as f64 / min_writes.max(1) as f64;
-    let alloc_ratio = max_allocs as f64 / min_allocs.max(1) as f64;
-    assert!(
-        alloc_ratio < write_ratio.max(1.5),
-        "allocations scaled like writes ({min_allocs} -> {max_allocs}, ratio \
-         {alloc_ratio:.2}) as the scene grew ({min_writes} -> {max_writes}, ratio \
-         {write_ratio:.2}). That is the signature of a per-write allocation, which \
-         is exactly what Unit 8 removed. Samples: {samples:?}"
+    let worst = samples.iter().map(|&(_, a)| a).max().expect("four samples");
+    assert_eq!(
+        worst, 0,
+        "a warm pass allocated up to {worst} across four scenes of {min_writes}..\
+         {max_writes} writes. A count that is non-zero and rises with writes is a \
+         per-write allocation back in the placement engine; a count that is non-zero \
+         and flat is a container escaping the free-list. Samples (writes, allocs): \
+         {samples:?}"
     );
     println!(
-        "writes {min_writes} -> {max_writes} (x{write_ratio:.2}) but allocs \
-         {min_allocs} -> {max_allocs} (x{alloc_ratio:.2}) — logarithmic, not linear"
+        "warm passes over {min_writes}..{max_writes} writes: 0 allocations at every \
+         scene size. Samples: {samples:?}"
+    );
+}
+
+/// The control for every zero above: **the free-list is what removes them**, and
+/// draining it puts them back.
+///
+/// Two assertions of near-absence sit above this one, and CLAUDE.md's rule is that
+/// each is worth exactly as much as the evidence its mechanism would have fired.
+/// The mechanism here is `feature::region_view`'s per-thread free-list, and the
+/// discriminating experiment is available *in this process, on this thread, with
+/// one variable*: run the identical pass over the identical scene twice, dropping
+/// the free-list in between. Same binary, same code path, same scene, same seed.
+///
+/// This is not the detector control (that one proves the allocator counts at all,
+/// and lives in the test above). This is the causal one: it rules out "the warm
+/// count was zero for some unrelated reason and the free-list is inert".
+#[test]
+fn recycling_is_what_removes_the_containers_and_draining_the_free_list_puts_them_back() {
+    use lodestone_worldgen::feature::region_view::{
+        drain_scratch_free_lists, scratch_free_list_lengths,
+    };
+
+    let resolver = FsResolver { root: data_dir() };
+    let tags = build_veg_tags(&resolver);
+    let features = build_biome_vegetation(&resolver, BIOME);
+    let interner = std::sync::Arc::new(lodestone_worldgen::interner::StateInterner::new());
+
+    // Converge the thread, exactly as the test above does.
+    for _ in 0..2 {
+        let mut grid = seeded_grid(&interner, 0, 0);
+        run_pass(&mut grid, &tags, &features, 0, 0);
+    }
+
+    // ---- Arm A: free-list populated. The claim. ------------------------------
+    assert_eq!(
+        scratch_free_list_lengths(),
+        (1, 1),
+        "the warmup must have left one recycled buffer of each shape on this thread"
+    );
+    let mut recycled = seeded_grid(&interner, 0, 0);
+    let before_a = census::snapshot().writes;
+    let (_, recycled_allocs) = allocs_of(|| run_pass(&mut recycled, &tags, &features, 0, 0));
+    let recycled_writes = census::snapshot().writes - before_a;
+    drop(recycled);
+
+    // ---- Arm B: free-list drained. The control. -----------------------------
+    drain_scratch_free_lists();
+    assert_eq!(
+        scratch_free_list_lengths(),
+        (0, 0),
+        "the drain did not empty the free-list, so arm B is a second arm A"
+    );
+    let mut fresh = seeded_grid(&interner, 0, 0);
+    let before_b = census::snapshot().writes;
+    let (_, fresh_allocs) = allocs_of(|| run_pass(&mut fresh, &tags, &features, 0, 0));
+    let fresh_writes = census::snapshot().writes - before_b;
+
+    assert_eq!(
+        recycled_writes, fresh_writes,
+        "the two arms must place identically — same scene, same seed, same features. \
+         A difference means they are not the same experiment and the comparison below \
+         is meaningless."
+    );
+    assert_eq!(
+        recycled_allocs, 0,
+        "arm A (free-list populated) allocated {recycled_allocs}, not zero"
+    );
+    assert!(
+        fresh_allocs > 0,
+        "arm B drained the free-list and the identical pass STILL allocated nothing. \
+         The free-list is therefore not what makes arm A zero — something else is, \
+         and every zero in this file is unexplained. Check that `VegGrid`'s overlay \
+         and write log really are `region_view`'s pooled types and that their `Drop` \
+         returns them."
+    );
+    println!(
+        "free-list control: recycled {recycled_allocs} vs drained {fresh_allocs} \
+         allocations for the same {recycled_writes}-write pass"
     );
 }
 

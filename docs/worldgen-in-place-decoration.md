@@ -61,11 +61,15 @@ into the one grid it owns.
 | `vegetation_stage`'s fold-back | the `dirty` list | same |
 | the `OCEAN_FLOOR_WG` gather | 2,304 `i32`s | the driver reads it by *clamped* region-local key, so a view would have to reproduce the clamp — 0.26% of the volume that went away |
 
-There is **no buffer pool**, shared or otherwise. The overlay is the only
-allocation and it is a local of the stage that made it; a pool behind a lock would
-re-create the contention [`worldgen-staged-store.md`](./worldgen-staged-store.md)
-exists to delete. If scratch reuse is ever needed here it goes in a
-`thread_local` free-list.
+There is **no shared buffer pool**, and there must never be one: a pool behind a
+lock would re-create the contention
+[`worldgen-staged-store.md`](./worldgen-staged-store.md) exists to delete, and
+`4307b59` is the measured scar. The `thread_local` free-list this section named as
+the one acceptable form of reuse **now exists** — Unit 19 built it, and both media's
+containers are recycled through it, which is what took a warm column's 30 residual
+allocations to 0. See
+[`worldgen-decoration-scratch-reuse.md`](./worldgen-decoration-scratch-reuse.md);
+the constraint it had to satisfy is still per-thread-never-shared, unchanged.
 
 ## How to change it, and the gotchas
 

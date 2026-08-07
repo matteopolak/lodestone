@@ -86,7 +86,7 @@
 //!   string. **`Fluid` must stay base-aware**: `carver/mod.rs` writes
 //!   `minecraft:water[level=0]`, so a fluid is not a fixed handful of ids.
 
-use std::collections::HashMap;
+use lodestone_worldgen_core::hash::FastMap;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicI8, AtomicU64, AtomicUsize, Ordering};
 
@@ -210,7 +210,16 @@ pub(super) struct IdTags {
     /// `waterlogged`. It is taken **per rewritten leaf**, tens of times per
     /// column, never per block; and at steady state every entry is present, so it
     /// is a read guard and a hash, with no allocation.
-    rewrites: RwLock<HashMap<(u64, u16, Rewrite), Option<u16>>>,
+    /// [`FastMap`], not the default hasher — U17 measured this among the
+    /// vegetation maps still paying SipHash (0.8% of all worldgen CPU, shared with
+    /// `VegGrid`'s overlay and `tree.rs`'s BFS visited set) and left the row for
+    /// whoever owned these files; U19 took it.
+    ///
+    /// Order-safe because this map is **never iterated**: it is a pure memo reached
+    /// only through `get`, `insert` and `clear` (grep the field name, not the file —
+    /// that is the check `docs/worldgen-fast-hashing.md` prescribes). Nothing about
+    /// a rewrite's *value* changes; only which bucket it lands in.
+    rewrites: RwLock<FastMap<(u64, u16, Rewrite), Option<u16>>>,
 }
 
 /// A block-state property edit vegetal decoration performs on an
@@ -237,7 +246,7 @@ impl Default for IdTags {
                 .map(|_| AtomicU64::new(0))
                 .collect(),
             distance: (0..ID_SPACE).map(|_| AtomicI8::new(-1)).collect(),
-            rewrites: RwLock::new(HashMap::new()),
+            rewrites: RwLock::new(FastMap::default()),
         }
     }
 }
