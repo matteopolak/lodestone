@@ -122,3 +122,9 @@ lodestone-anvil = { path = "../lodestone-anvil" }
 # verification the issue body calls for. `lodestone-testsupport` does not
 # depend on `lodestone-server`, so this adds no cycle.
 lodestone-testsupport = { workspace = true }
+# `tests/worldgen_structure_corpus.rs` (issue #484) hashes the 1606 bundled
+# structure-corpus assets against a jar-derived SHA-256 manifest. Dev-only: the
+# manifest is a test anchor, nothing in `src/` hashes anything. Same
+# `[workspace.dependencies]` entry the OAuth PKCE path already builds against,
+# so no new version enters the graph.
+sha2 = { workspace = true }
