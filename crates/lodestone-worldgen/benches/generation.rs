@@ -1180,19 +1180,44 @@ fn bench_counter_calibration(_c: &mut Criterion) {
         s.string_allocs
     );
 
-    // --- 4. Corner lookups: 8 per interpolated query ---------------------
-    // `interpolate` unrolls exactly 8 `corner()` calls, hit or miss, and every
-    // `block_at` makes one `final_density` query. The aquifer's other samplers
-    // (erosion, depth, ...) also interpolate, so 8 × block_at is a floor, not an
-    // equality — stated as a floor rather than guessed as an equality.
-    assert!(
-        s.corner_lookups >= 8 * s.block_at,
-        "corner lookups ({}) should be at least 8 per `block_at` ({} × 8 = {}), since \
-         `interpolate` unrolls 8 corners per interpolated query and every `block_at` \
-         makes one. A lower number means the root is no longer an `Interpolated` node.",
+    // --- 4. Corner lookups: 8 per *cell fill* ----------------------------
+    // This assertion used to read `corner_lookups >= 8 * block_at`, on the
+    // premise that `interpolate` unrolls 8 `corner()` calls per block. **Unit 4's
+    // corner hoist deleted that premise**: the eight corners of a cell are now
+    // fetched once for the whole cell, so the true figure is 8 per *cell fill* —
+    // 128× below the old floor, since a 4×8×4 cell holds 128 blocks. The old
+    // floor is now not merely wrong but inverted, and its diagnostic ("a lower
+    // number means the root is no longer an `Interpolated` node") would send a
+    // reader hunting for a missing node that is present and working.
+    //
+    // What survives as a bench-level check is the *identity*, which holds
+    // regardless of geometry, plus a liveness floor. The magnitudes have a
+    // dedicated gate with derived predictions and named failure diagnoses:
+    // `tests/engine_counters.rs`, which is its own binary because these counters
+    // are process-global.
+    assert_eq!(
         s.corner_lookups,
-        s.block_at,
-        8 * s.block_at
+        8 * s.cell_fills,
+        "every `interpolated` cell fill assembles exactly 8 corners: {} lookups \
+         over {} fills. This is an identity, so a mismatch is a broken hoist, not \
+         a geometry change.",
+        s.corner_lookups,
+        s.cell_fills
+    );
+    assert!(
+        s.cell_fills > 0 && s.corner_evals > 0,
+        "no cell was filled ({}) or no corner evaluated ({}) during a cold \
+         column, so the interpolation path did not run at all",
+        s.cell_fills,
+        s.corner_evals
+    );
+    assert!(
+        s.corner_evals < s.corner_lookups,
+        "corner evaluations ({}) must be strictly fewer than corner lookups \
+         ({}) — adjacent cells share corners, so equality means the per-slot memo \
+         beneath the cell cache is dead",
+        s.corner_evals,
+        s.corner_lookups
     );
 
     // --- 5. Every stage real -------------------------------------------

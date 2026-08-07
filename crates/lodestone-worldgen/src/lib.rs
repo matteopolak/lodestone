@@ -49,7 +49,7 @@ pub mod surface;
 /// These are modules of `lodestone-worldgen-core`, not of this crate. Nothing
 /// else in the workspace had to change: `crate::density::…` inside this crate
 /// and `lodestone_worldgen::density::…` outside it both route through here.
-pub use lodestone_worldgen_core::{counters, density, hash, math, noise, rng};
+pub use lodestone_worldgen_core::{counters, density, engine, hash, math, noise, rng};
 
 pub use noise::{ImprovedNoise, NormalNoise, PerlinNoise};
 pub use rng::{

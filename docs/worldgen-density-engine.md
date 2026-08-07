@@ -114,6 +114,72 @@ Three things about that test are worth copying rather than just reading:
   thing worth catching is one of the two helpers being miswritten, which would
   differ by O(1).
 
+## The flattened engine (U4), as built
+
+`crates/lodestone-worldgen-core/src/engine/` is the engine the correction below
+implies. Three files, split by mutability, and the split *is* the design:
+
+| file | holds | lifetime |
+|---|---|---|
+| `graph.rs` | `Program` — the `Op` table plus side tables | immutable, `Sync`, `Arc`-shared |
+| `scratch.rs` | `Scratch` — the corner and cell caches | per-chunk, per-thread, pooled |
+| `field.rs` | the `NoiseChunk`-semantics evaluator | borrows both |
+
+`density/chunk.rs`'s `NoiseChunkSampler` is now a façade that pairs a `Program`
+with a `Scratch`; its public API is unchanged, so `aquifer/`, `chunk_parity` and
+`interpolation_order` needed no edits across the cutover. The recursive walk over
+`Box`-linked `Density` nodes it used to contain is deleted.
+
+Because **no** cache lives in the graph, one graph backs concurrent chunk
+generation on any number of threads with no lock and no copy. That is what makes
+a `Program` clone a refcount bump, which is diagnostic D3's per-chunk deep clone.
+
+### Why flatten at all: the node is 14× too wide
+
+`Density` inlines a `BlendedNoise` in one variant — three `PerlinNoise` stacks,
+each two `Vec`s plus two `f64`s — so **every** node, including a bare
+`Const(f64)`, occupies that width, and every child is a separate heap allocation
+of it. Measured: **`size_of::<Density>()` = 232 bytes** against
+**`size_of::<Op>()` = 16**, a 14× ratio, with the wide payloads moved to side
+tables. `graph::tests::density_node_is_much_wider_than_an_op` re-measures and
+prints both on every run and fails below 8×, so the figure quoted here has a
+source rather than being a number someone once got by adding up struct fields.
+
+### The route the plan expected was not needed
+
+Issue #490 records that a compiled-graph cache had "nowhere to live" without
+either patching `overworld/mod.rs` or making `Builder::build`'s returned
+`Density` carry the compiled form, and judged the second viable. **Neither was
+needed.** Two of that analysis's premises had moved: `AquiferTrees` is in
+`overworld/fill.rs`, not `overworld/mod.rs`, and `overworld/mod.rs` came into
+U4's ownership. So the compiled form is held directly and `Builder::build` still
+returns a plain `Density` — which matters, because `biome/mod.rs` (U9's file)
+consumes `Builder::build` and a changed return type would have reached across an
+ownership boundary for no benefit.
+
+All 11 `Density::` construction sites outside `density/` are
+`Density::YClampedGradient`, which has no boxed children, and `Spline` has zero
+external users — so the blast radius the issue measured was real, it just did not
+have to be spent.
+
+### What it cost and what it bought, measured
+
+Old-vs-new equality, the U6 bar: **786,432 blocks over 8 chunks at 4 seeds**
+(42, 1234, 987654321, −99, two chunks each including negative and far-from-origin
+coordinates) dumped from two worktrees whose harness was md5-verified identical,
+`cmp`-clean and md5-identical (`3366dd68c4a7ddc4c8923abe47889c03`), 0 differing
+lines of 786,432. Detector control: a single flipped hex digit 15 MB into one file
+is reported by both `cmp` (`char 15000033, line 469116`) and the line counter
+(exactly 1). Plus `chunk_parity` bit-exact against the JVM dump on both the hashed
+and dense paths.
+
+**No speedup is claimed.** The two arms are different builds of the same symbol,
+so they cannot be interleaved in one process, and this repo's two-arm rule exists
+precisely because non-interleaved worldgen timings have been attributed to the
+wrong cause before. For context only, explicitly not a claim: the density-field
+sweep above took 1.31 s on the old engine and 0.35 s on the new one, in separate
+processes, on a loaded machine.
+
 ## What this means for the engine rewrite (U4)
 
 The correction is not "keep the point-query sampler". Vanilla really does hoist
@@ -133,15 +199,70 @@ Counter shapes, derived from the geometry (`cell_width = 4`, `cell_height = 8`,
 | quantity | value | derivation |
 |---|---|---|
 | corner lattice per interpolated slot per chunk | **1,225** | 5 × 49 × 5 = (4+1)² × (48+1) |
-| corner *lookups* today | **786,432** | 98,304 blocks × 8 |
+| cells per chunk per interpolated slot | **768** | 4 × 48 × 4 |
+| corner *lookups* per slot, pre-hoist | **786,432** | 98,304 blocks × 8 |
+| corner *lookups* per slot, post-hoist | **6,144** | 768 cells × 8 |
 | `block_at` calls per chunk | **98,304** | 16 × 16 × 384 |
 
 1,225 agrees with the plan's figure, and also with vanilla's own slice
 accounting: `fillSlice` fills (cellCountXZ+1) × (cellCountY+1) = 5 × 49 = 245 per
 X-plane, over `initializeForFirstCellX` plus four `advanceCellX` calls = 5
-planes. The win the hoist deletes is `786,432 → 1,225` evaluations plus the
-elimination of every corner *lookup*; it does not change the number of
-multiply-adds in the lerp itself.
+planes. The hoist deletes corner *lookups*; it does not change the number of
+corner *evaluations* and does not change the number of multiply-adds in the lerp.
+
+### Measured, and the premise that was wrong first
+
+`tests/engine_counters.rs` is the gate, in its own binary because the counters are
+process-global. Its first version asserted the overworld `final_density` contained
+**one** `interpolated` node and derived `768 × 8 = 6,144` from that. **It contains
+five**, and only **two** are entered per block — that premise check fired on its
+first run. Without it the file would have asserted a wrong literal and then been
+"fixed" by relaxing it.
+
+So the per-slot figures above are the per-slot figures; the whole-router numbers,
+measured on chunk (0,0) at seed 42, are:
+
+| quantity | measured | derivation |
+|---|---|---|
+| `interpolated` evaluations | 196,608 | 2 nodes entered × 98,304 blocks |
+| cell fills | 1,536 | 2 × 768 |
+| corner lookups | **12,288** | 8 × 1,536 |
+| corner lookups, no-hoist hypothesis | 1,572,864 | 8 × 196,608 |
+| corner evaluations | **2,450** | 2 × 1,225, unchanged by the hoist |
+
+The two lookup hypotheses sit exactly 128× apart — the blocks in a `4 × 8 × 4`
+cell — so the gate is a prediction rather than a tolerance. Two failure modes get
+named diagnoses in its message: measuring 1,572,864 means the cell cache is not
+consulted, and measuring 196,608 means a *single* last-cell memo rather than a
+per-cell cache, which the fill loop's Y-innermost order evicts 12,288 times per
+node per chunk.
+
+Three of the five `interpolated` nodes are never entered. That is `mul`
+short-circuiting and `range_choice` branching, **not** transparency: the
+structural walk `Program::interpolating_slots` — which applies the same
+transparency rule the evaluator does — finds all five reachable in an
+interpolating context.
+
+### Two cache layers, and why neither can go
+
+| layer | keyed by | population per chunk | deletes |
+|---|---|---|---|
+| cell | cell triple, per `interpolated` slot | 768 octets | the *lookup* |
+| slot | corner block position, per slot | 1,225 values | the *evaluation* |
+
+Dropping the cell layer restores 8 lookups per block. Dropping the slot layer
+leaves the winning lookup count while **quintupling** evaluations, because
+adjacent cells share corners (768 × 8 = 6,144 fetches over a lattice of 1,225).
+The counters are one per layer for exactly this reason, and the gate asserts both.
+
+### The pooled scratch's one hazard
+
+A recycled `Scratch` keeps its `values` buffers, so `reconfigure` clearing every
+presence flag is the only thing standing between the pool and a stale value from
+the previous chunk — a failure that is silent, position-dependent, and produces
+plausible terrain. `scratch::tests::reuse_clears_presence_flags` and
+`pool_round_trip_is_clean` are the gates, each with a control proving a store
+would have been visible.
 
 ### Semantics a flattened graph must preserve
 
@@ -161,6 +282,39 @@ per-wrapper fixture rather than only an end-to-end gate:
    `cache_all_in_cell` are transparent in *both* of our evaluators, and the
    `cache_all_in_cell` above `final_density` is not in the data at all (above) —
    its effect is already baked into the choice of `Mth.lerp3`.
+5. **`cache_all_in_cell` selecting the interpolation order.** Value-transparent,
+   but it is what picks `Mth.lerp3` over the incremental chain. This is the one
+   that actually bit.
+
+`crates/lodestone-worldgen/tests/engine_semantics.rs` is the per-wrapper suite,
+one test per rule, each carrying a control that shows the assertion could have
+failed. Three things in it are worth knowing before writing another such test:
+
+- **At `cell_width = 4`, semantics 2 and 5 are value-unobservable.** `flat_cache`
+  snaps XZ to the **quart** grid — a hardcoded `>> 2 << 2`, *not*
+  `cell_width` — so when `cell_width` is also 4, every quart-snapped position and
+  every corner position is a cell corner. At a cell corner all three lerp factors
+  are exactly `0.0` and `lerp(0.0, a, b) == a` exactly, which makes a nested
+  `interpolated` the identity whether or not it is transparent, and makes the
+  X-inner and Y-inner nestings agree bit-for-bit. The suite therefore uses
+  `cell_width = 8` for those two, which puts the quart grid mid-cell. **A version
+  of these tests written at `cell_width = 4` passes while measuring nothing**, and
+  `chunk_parity` — which is the overworld, at 4 — says nothing about either rule.
+- **The real router does not exercise semantic 2 at all.** None of the five
+  `interpolated` nodes in the compiled `final_density` is nested inside another.
+- **A fixture of `const`/`y_clamped_gradient` cannot expose an interpolation-order
+  difference**, because a function of `y` alone has x/z-invariant corners and every
+  nesting then agrees exactly. The suite instantiates a real `NormalNoise` through
+  an in-memory `Resolver` so its fixtures vary in all three axes, and the
+  interpolation-order test asserts that at least one sampled position is
+  bit-distinguishable between the two nestings (currently 2 of 6) rather than
+  assuming it.
+
+Semantic 1's fixture is worth copying: `mul(0.0, invert(0.0))` is `0.0` with the
+short-circuit and **`NaN`** without it, because `1/0` is infinity and `0.0 * inf`
+is `NaN`. A value difference, so it holds with the counters compiled out; and the
+control asserts `mul(1.0, invert(0.0))` really is infinite, without which the test
+would pass just as happily against a harmless second operand.
 
 And the float-order rule: no `mul_add` or any FMA-introducing operation anywhere
 in ported numerics, and no reassociation of an accumulation chain (octave sums in
@@ -183,6 +337,34 @@ accumulation chain is not.
   `NoiseChunkSampler::new` and `new_bounded`. Changing the corner *key shape*,
   the traversal's `interpolate` flag, or which node kinds the field evaluator
   recurses into is not value-invariant and does.
+- **The field walk must stay a recursive descent.** `Mul` does not evaluate its
+  second operand when the first is exactly `0.0`, and a skipped subtree can
+  contain a cache-slot write, so a bottom-up sweep over the `Op` table would
+  change what *later* queries return, not merely the cost. `range_choice`,
+  `interval_select` and `interpolated`'s two regimes branch as well, so the set of
+  nodes one evaluation touches is position-dependent.
+- **Adding a `Density` variant is three edits and only two are compile errors.**
+  `graph.rs`'s `compile_node` and `field.rs`'s `eval` are both exhaustive matches
+  and will fail to build. But `OpKind`'s discriminant must *also* equal the new
+  variant's `Density::kind_index()`, and only
+  `graph::tests::op_kind_discriminants_match_density_kind_index` catches that.
+  Get it wrong and the node still evaluates — as the wrong operator, with the
+  per-kind counter filed under the wrong name. Append to both tables; never insert
+  in the middle, because a recorded counter table from an earlier run is indexed by
+  these numbers. `graph.rs`'s `walk_interpolating` is a **fourth** place, and it is
+  not exhaustive-checked in a useful way: an operator missing a case there silently
+  stops contributing its subtree to `interpolating_slots`.
+- **Do not flatten beneath `spline` / `old_blended_noise` / `find_top_surface`.**
+  They are leaves to the field evaluator by vanilla's own semantics, so they hold
+  an untouched `Density` subtree and are evaluated with `Density::compute`.
+- **`Arc`-sharing one graph across threads shares its leaves' `cache_2d` slots.**
+  The compiled `final_density` has **708** `Cache2D` nodes nested inside its
+  point-evaluated leaves (`Program::cache_2d_under_leaves`), each carrying a
+  `Mutex`-backed last-value slot. Sharing is value-invariant — the memo is keyed on
+  an exact `(x, z)` and the function is pure — but it converts 708 per-chunk cold,
+  uncontended caches into shared contended ones. Anything that starts sharing a
+  graph across threads should measure that, and the cheap fix if it bites is a
+  `try_lock`-and-recompute, which stays value-invariant for the same reason.
 - `new_bounded`'s contract is unchecked in release: every query must fall inside
   the declared inclusive bounds or it silently aliases another cell. `erosion`
   and `depth` deliberately stay on the unbounded `new` because
@@ -199,9 +381,23 @@ from inert to live; it must be forwarded as
 
 ## Dependencies
 
-`density/chunk.rs` depends only on `density/mod.rs` (the point interpreter and
-the `Density` graph) and `counters`. Its consumers are
+`density/chunk.rs` is now a façade over `engine/` and depends on it plus
+`density/mod.rs` (the point interpreter and the `Density` graph it compiles from);
+`engine/` depends on `density`, `noise`, `math` and `counters`, and on nothing
+outside this crate. Its consumers are
 `crates/lodestone-worldgen/src/aquifer/mod.rs` (three samplers: `final_density`
 bounded, `erosion` and `depth` unbounded) and `tests/chunk_parity.rs`. Evidence
 comes from `scripts/worldgen-oracle/DensityChunkOracle.java` and the decompiled
 `NoiseChunk.java` under `.cache/mc/26.2/src`.
+
+One caveat on that oracle, since it is the authority for `chunk_parity`:
+`DensityChunkOracle.java` itself calls the **incremental** methods
+(`initializeForFirstCellX` / `advanceCellX` / `updateForY` …), because that is
+vanilla's driver loop. It is still authoritative, and the reason is the same
+`cacheAllInCell` that this document is about — the values it reads back through
+`getInterpolatedDensity()` come out of the pre-filled cell array, produced while
+`fillingCell == true`, i.e. by `Mth.lerp3`. So the oracle drives the Y-inner API
+and reports X-inner values. Reading its *method calls* as evidence for the
+nesting is precisely the mistake that made the plan's U4 row wrong; the fixture it
+produces is what settles the question, and 98304/98304 against `Mth.lerp3` is that
+answer.

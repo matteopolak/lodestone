@@ -160,9 +160,29 @@ pub struct Snapshot {
     /// survey of this crate found the second evaluator only by grepping for the
     /// `match`; a merged counter would have hidden it again.
     pub density_point_computes: [u64; crate::density::Density::KIND_COUNT],
-    /// Corner *lookups* — `NoiseChunkSampler::corner` calls. Exactly 8 per
-    /// interpolated query, hit or miss.
+    /// Corner *lookups* — one per corner fetched while filling a cell, hit or
+    /// miss. Since U4's hoist this is exactly `8 * cell_fills`, **not** 8 per
+    /// block: the eight corners of a cell are fetched once for the whole cell.
+    /// For one chunk-bounded interpolated slot that is `768 * 8 = 6,144` where
+    /// the pre-hoist walker measured `98,304 * 8 = 786,432`.
     pub corner_lookups: u64,
+    /// Cell fills — one per `interpolated` cell whose eight corners were
+    /// assembled, i.e. per miss in the per-cell corner cache. The hoist's
+    /// primary quantity: [`corner_lookups`](Self::corner_lookups) is
+    /// mechanically `8 *` this, so asserting both pins the identity as well as
+    /// the magnitude.
+    pub cell_fills: u64,
+    /// Corner *evaluations* — cell-corner fetches that missed the per-slot memo
+    /// and had to evaluate the subtree.
+    ///
+    /// Split out from [`slot_misses`](Self::slot_misses) because that total also
+    /// counts `flat_cache` misses, and because `slot_misses_by_slot` folds every
+    /// slot at [`MAX_TRACKED_SLOTS`] — the real router's interpolated slots are
+    /// numbered above 1000, so they all land in the fold bin and the per-slot
+    /// split cannot separate them. This counter is the one that can be compared
+    /// against the derived corner lattice (`5 * 49 * 5 = 1,225` per slot for a
+    /// chunk), which is the quantity the hoist must **not** change.
+    pub corner_evals: u64,
     /// Slot-cache lookups that found a memoised value.
     pub slot_hits: u64,
     /// Slot-cache lookups that had to evaluate the subtree — the real
@@ -238,6 +258,8 @@ impl Default for Snapshot {
             density_evals: [0; crate::density::Density::KIND_COUNT],
             density_point_computes: [0; crate::density::Density::KIND_COUNT],
             corner_lookups: 0,
+            cell_fills: 0,
+            corner_evals: 0,
             slot_hits: 0,
             slot_misses: 0,
             slot_misses_by_slot: [0; MAX_TRACKED_SLOTS],
@@ -307,6 +329,8 @@ mod imp {
         density_evals: [AtomicU64; KINDS],
         density_point_computes: [AtomicU64; KINDS],
         corner_lookups: AtomicU64,
+        cell_fills: AtomicU64,
+        corner_evals: AtomicU64,
         slot_hits: AtomicU64,
         slot_misses: AtomicU64,
         slot_misses_by_slot: [AtomicU64; MAX_TRACKED_SLOTS],
@@ -331,6 +355,8 @@ mod imp {
         density_evals: [const { AtomicU64::new(0) }; KINDS],
         density_point_computes: [const { AtomicU64::new(0) }; KINDS],
         corner_lookups: AtomicU64::new(0),
+        cell_fills: AtomicU64::new(0),
+        corner_evals: AtomicU64::new(0),
         slot_hits: AtomicU64::new(0),
         slot_misses: AtomicU64::new(0),
         slot_misses_by_slot: [const { AtomicU64::new(0) }; MAX_TRACKED_SLOTS],
@@ -393,6 +419,18 @@ mod imp {
     #[inline]
     pub fn bump_corner_lookup() {
         bump(&C.corner_lookups);
+    }
+
+    /// One `interpolated` cell had its eight corners assembled.
+    #[inline]
+    pub fn bump_cell_fill() {
+        bump(&C.cell_fills);
+    }
+
+    /// One cell corner missed the per-slot memo and was evaluated.
+    #[inline]
+    pub fn bump_corner_eval() {
+        bump(&C.corner_evals);
     }
 
     #[inline]
@@ -498,6 +536,8 @@ mod imp {
             a.store(0, Relaxed);
         }
         C.corner_lookups.store(0, Relaxed);
+        C.cell_fills.store(0, Relaxed);
+        C.corner_evals.store(0, Relaxed);
         C.slot_hits.store(0, Relaxed);
         C.slot_misses.store(0, Relaxed);
         for a in &C.slot_misses_by_slot {
@@ -531,6 +571,8 @@ mod imp {
                 C.density_point_computes[i].load(Relaxed)
             }),
             corner_lookups: C.corner_lookups.load(Relaxed),
+            cell_fills: C.cell_fills.load(Relaxed),
+            corner_evals: C.corner_evals.load(Relaxed),
             slot_hits: C.slot_hits.load(Relaxed),
             slot_misses: C.slot_misses.load(Relaxed),
             slot_misses_by_slot: std::array::from_fn(|i| C.slot_misses_by_slot[i].load(Relaxed)),
@@ -568,6 +610,12 @@ mod imp {
     pub fn bump_density_point_compute(_kind_index: usize) {}
     #[inline(always)]
     pub fn bump_corner_lookup() {}
+    /// Inert without the feature.
+    #[inline(always)]
+    pub fn bump_cell_fill() {}
+    /// Inert without the feature.
+    #[inline(always)]
+    pub fn bump_corner_eval() {}
     #[inline(always)]
     pub fn bump_slot_hit() {}
     #[inline(always)]
@@ -614,7 +662,8 @@ mod imp {
 }
 
 pub use imp::{
-    StageGuard, bump_biome_search, bump_block_at, bump_corner_lookup, bump_density_eval,
+    StageGuard, bump_biome_search, bump_block_at, bump_cell_fill, bump_corner_eval,
+    bump_corner_lookup, bump_density_eval,
     bump_density_point_compute, bump_palette_intern_hit, bump_palette_intern_new, bump_post_ore,
     bump_pre_ore, bump_rng_draw, bump_slot_hit, bump_slot_miss, bump_state_intern_new,
     bump_state_name_lookup, bump_stitch_cells, bump_string_allocs, current_stage, reset, snapshot,
