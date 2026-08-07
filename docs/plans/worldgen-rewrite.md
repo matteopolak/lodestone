@@ -462,7 +462,22 @@ construction, and the parity suite proves it anyway.
 - **`{hash, math, rng, noise, density}` → `lodestone-worldgen-core`: yes.** Measured a closed
   set — `math` imports nothing crate-internal, `rng` only `hash`, `noise` only `math`/`rng`,
   `density` only `math`/`noise`/`rng` — so the boundary exists today and the extraction is
-  mechanical. 3,670 lines, ~22% of the crate. Buys: feature-layer iteration (U7/U8/U12, the
+  mechanical. 3,670 lines, ~22% of the crate. **Correction, measured in U16 (see
+  [`docs/worldgen-module-layout.md`](../worldgen-module-layout.md)): this set is NOT closed, and
+  the module it misses is the one that matters.** Re-running the scan while separating *code*
+  lines from *doc-comment* lines finds **8 real call sites into `crate::counters`** —
+  `density/chunk.rs`'s `bump_density_eval`/`bump_corner_lookup`/`bump_slot_hit` and `rng`'s
+  `next_bits` hook — while every other apparent edge (`feature` 6, `overworld` 2, `biome` 2,
+  `aquifer` 1, `compose` 1) is an intra-doc link and no dependency at all. And `counters`
+  depends back on `density::Density::KIND_COUNT` for two array sizes and a loop bound, so this
+  is a **cycle**, which a crate boundary cannot cut: extracting the five modules as written puts
+  8 call sites in the new crate pointing at the old one. The set that *is* closed is these five
+  **plus `counters`** (measured zero code edges out, ~4,372 lines) — that is the extraction to
+  do. `KIND_COUNT` needs no change: with `counters` inside the core crate the edge is
+  intra-crate, and making it local to `counters` is not a clean move anyway (`KIND_NAMES`'s
+  array length and two of `density`'s own tests are written against it, so the only shape
+  available is a duplicate plus a drift guard — and that guard re-creates the same edge as a
+  dev-dependency). Buys: feature-layer iteration (U7/U8/U12, the
   most-edited code) stops rebuilding the numeric core; the leaf is independently testable (JVM
   noise/density fixtures run without building the other ~12.7k lines); it is exactly the surface
   U5 SIMDs; and U4's new `engine/` can be born inside it instead of moved later. Costs, honestly:

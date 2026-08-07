@@ -1219,6 +1219,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   issue #404's unit U2. Before it, nothing in this engine ever wrote `minecraft:snow`
   or surface ice: every snowy biome generated bare, which the parity census called the
   most player-visible absent feature in worldgen.
+- [Worldgen module layout and per-unit file ownership](./worldgen-module-layout.md) —
+  The file layout of `crates/lodestone-worldgen`'s generation engine after Unit 16
+  (the decomposition unit) of
+  [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md), plus the map of which
+  rewrite unit owns which file. Two files that six units all had to edit —
+  `src/overworld.rs` (1,873 lines) and `src/feature/vegetation.rs` (3,661) — became
+  two directories, by pure move, so the rewrite's engine middle can run at width 2 and
+  then 4 instead of width 1.
 - [Worldgen block-state interning](./worldgen-state-interning.md) — Numeric `u16`
   handles (`StateId`) for block-state strings inside `lodestone-worldgen`'s generation
   engine, so a block moving between two internal grids costs a `u16` move instead of a
