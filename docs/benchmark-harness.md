@@ -269,7 +269,7 @@ Two practical consequences for a unit written against these counters:
   it improves `C_cold`. Check *which* stages your metric can see before aiming a
   unit at it.
 
-### The three traps this cost us to learn
+### The five traps this cost us to learn
 
 - **A stage-participation counter belongs *below* the stage's no-data early
   return.** Above it, the counter reports "the stage ran" for exactly the run
@@ -289,6 +289,54 @@ Two practical consequences for a unit written against these counters:
   another thread's allocations, and adding a mutex *flaked*, because a lock only
   excludes code that takes it. A `const`-initialised `Cell` per thread needs no
   cooperation from anything.
+- **A counter gate needs its own test binary.** Sharing one made
+  `pre_ore_computed` read **502** against a true **256** — a 96% over-count that
+  looks exactly like a broken store, because a second test in the same binary had
+  already bumped the process-wide counters. This is why
+  `crates/lodestone-worldgen/tests/engine_counters.rs` is a separate binary
+  rather than another `#[test]` alongside its neighbours. When you add a counter
+  assertion, give it its own binary or reset-and-own the counters for the whole
+  binary; a shared one is a *duration*-species vacuity (the flaw is the test's
+  lifetime against process-wide state, and reading the test cannot reveal it).
+- **Counters-on inflates a burst by roughly 3×, so a counter run and a timing run
+  must never be the same run.** This is now **enforced rather than remembered**:
+  `benches/support.rs`'s `record()` refuses to write an absolute timing when
+  `lodestone_worldgen::counters::enabled()`, printing a loud `REFUSING to record`
+  line instead. A recorded poisoned timing is worse than a missing one, because
+  `cargo xtask bench-compare` will cheerfully ratio it against a clean run and
+  report a 3× "regression" that is pure instrumentation.
+
+  The predicate is `support::timing_is_poisoned_by_counters(unit, enabled)`, keyed
+  on **absolute** time units only (`ns`/`us`/`µs`/`ms`/`s`). Ratio, count and size
+  metrics — `stage_<name>_pct` (`%`), `linearity_ratio_vs_expected` (`x`),
+  `calibration_*` (`calls`), `region_rss_*` (`bytes`) — still record under
+  counters, deliberately: the stage split is one of the things you run *with*
+  counters on, so blocking everything would defeat the purpose. Verified on a real
+  `--features gen-counters --bench generation -- --test` run: **33 metrics
+  refused, 18 still recorded**; of the 9 units in use, 3 blocked and 6 not. That
+  is the check that the guard is neither vacuous nor total. **If you add a timing
+  metric in a new unit, add it to `ABSOLUTE_TIME_UNITS`** — the guard is a table,
+  and a unit missing from it fails open.
+
+  The negative control matters as much as the guard: with counters **off** the
+  same run refuses **0** and records **50**, so the guard is not simply always-on.
+  (The counts do not sum across the two runs — `calibration_*` metrics only exist
+  *with* counters, which is why the counters-on run attempts one more.)
+
+  One honest caveat on the 3× figure: it is a **burst** phenomenon, and the guard
+  is deliberately blanket because the inflation is metric-dependent and a bench
+  cannot know which of its numbers is burst-shaped. In the two runs above the
+  steady-state `c_ss_median_interior_us` moved only ~1% (19416 → 19624 µs) — but
+  those were **separate, non-concurrent processes under different machine load**,
+  so per `CLAUDE.md` that ratio is a sample, not a measurement, and it is
+  emphatically not evidence that counters are free for steady-state timings.
+
+  Counting the units by grep is itself a trap worth knowing: metrics are recorded
+  through **two** call shapes, an explicit `unit: "us"` field and a
+  `("name", value, "us")` tuple loop, and grepping only the first reports 5 units
+  when 9 are live — it misses `ns` and `bytes` entirely. The first pass at this
+  guard's own non-vacuity check made exactly that mistake and got the right
+  verdict from wrong numbers. Read the run.
 
 ### Which resolver a bench may use
 

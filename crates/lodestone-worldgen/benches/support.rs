@@ -82,6 +82,39 @@ fn build_profile() -> &'static str {
     if cfg!(debug_assertions) { "debug" } else { "release" }
 }
 
+/// Units that make a metric an **absolute timing**.
+///
+/// Deliberately absolute time only. `stage_<name>_pct` (unit `%`) and
+/// `linearity_ratio_vs_expected` (unit `x`) are *ratios*, and the stage split is
+/// one of the things you specifically want to read *with* counters on — so they
+/// are a considered carve-out, not an oversight. Structural counts (`calls`)
+/// are likewise unaffected.
+///
+/// Measured against a real `--features gen-counters --bench generation -- --test`
+/// run, not inferred from a grep: **33 metrics refused, 18 still recorded.** Of
+/// the 9 units this bench uses, 3 are blocked (`ns`, `us`, `s`) and 6 are not
+/// (`%`, `x`, `calls`, `allocs`, `draws`, `bytes`) — so the guard is neither
+/// vacuous nor total. `µs`/`ms` are listed ahead of need, because adding a metric
+/// in them is likelier than remembering this table exists.
+///
+/// Note when re-checking this: metrics are recorded through *two* call shapes —
+/// an explicit `unit: "us"` field and a `("name", value, "us")` tuple loop — and
+/// grepping only the first undercounts the units in use (it misses `ns` and
+/// `bytes` entirely). Read the run, not the grep.
+const ABSOLUTE_TIME_UNITS: &[&str] = &["ns", "us", "µs", "ms", "s"];
+
+/// Whether recording `unit` while the structural counters are compiled in would
+/// write a number that is not comparable to anything.
+///
+/// **Counters-on inflates a burst by roughly 3×**, so a counter run and a timing
+/// run must never be the same run. That was a calibration two units of this
+/// drive had to rediscover from memory; encoding it here makes it structural
+/// instead. Split out as a pure function of its inputs so the rule can be read
+/// and checked without running a bench.
+pub fn timing_is_poisoned_by_counters(unit: &str, counters_enabled: bool) -> bool {
+    counters_enabled && ABSOLUTE_TIME_UNITS.contains(&unit)
+}
+
 /// One recorded measurement: a named metric (e.g. `"column_us_median"`), a
 /// value, and the scene it was measured under (e.g. `"seed=42 radius=8"`).
 /// `bench` is the bench-binary name (`generation`, `chunk_light`, …), used to
@@ -100,7 +133,25 @@ pub struct Record<'a> {
 /// entry, if one exists. Never panics on I/O failure (a missing/unwritable
 /// `bench-results/` directory degrades to "recording skipped", not a bench
 /// failure) — these are local dev artifacts, not gated correctness.
+///
+/// **Refuses to record an absolute timing from a `gen-counters` build.** See
+/// [`timing_is_poisoned_by_counters`]: the counters inflate a burst ~3×, and a
+/// recorded timing is worse than a missing one because `bench-compare` will
+/// happily ratio it against a clean run and report a 3× "regression". The
+/// refusal is loud on stderr and skips only that one metric — structural counts
+/// and ratios from the same run still record, which is the point of running with
+/// counters at all.
 pub fn record(rec: Record<'_>) {
+    if timing_is_poisoned_by_counters(rec.unit, lodestone_worldgen::counters::enabled()) {
+        eprintln!(
+            "[bench-support] REFUSING to record {:?} ({} {}): this build has \
+             `--features gen-counters`, which inflates a burst by roughly 3×, so the \
+             number is not comparable to a clean run. Counter runs and timing runs must \
+             be separate runs. Re-run without `--features gen-counters` for timings.",
+            rec.metric, rec.value, rec.unit
+        );
+        return;
+    }
     let root = workspace_root();
     let dir = root.join("bench-results");
     if std::fs::create_dir_all(&dir).is_err() {
