@@ -1590,6 +1590,14 @@ of these caught the *brief* being wrong rather than the code.
   tier needs is a seam the public bevy-plugin API must expose anyway, none of those
   seams is reachable today, and the JVM tier itself should not start until the
   adjudication window and player registry exist.
+- [Plan: incremental random-tick section counters (issue #507 follow-up)](./plans/random-tick-counter.md) —
+  The plan for replacing `random_tick.rs`'s per-tick section scan with vanilla's
+  incrementally maintained `tickingBlockCount` — a per-section counter kept correct
+  by every mutation path, so "does this section randomly tick" becomes an O(1) integer
+  compare instead of an O(blocks) scan per column per tick. Written 2026-08-07 against
+  `bdf93a28` (the interim palette-mask fix); every claim below was re-verified against
+  the tree and the 26.2 jar, not inherited from the briefing — see "Corrections to
+  the briefing" at the end.
 - [Plan: runtime plugin loading — wasm components, and the same plugin compiled in](./plans/runtime-plugin-loading.md) —
   The design for loading plugins at runtime (Java-style, drop a file in a folder)
   using WebAssembly components, while keeping the existing compiled-in bevy-plugin
