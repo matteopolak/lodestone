@@ -102,6 +102,18 @@ table. Five things will bite you:
    `ender_pearl` → `"fall"`, `spit` → `"mob"`. Death-message code must read the
    field, never the type name.
 
+6. **The table is `src/generated/damage_types.rs`, not `src/damage_types.rs`.**
+   Both files exist, which is how a real belief went wrong for months:
+   `PlayerVitals::apply_border_damage` hardcoded `DamageFlags::default()` and
+   justified it with *"`grep outside_border crates/lodestone-data/src/damage_types.rs`
+   → empty — the table omits it"*. The grep was at the wrong path. `outside_border`
+   is in the table and is **`bypasses_armor bypasses_shield bypasses_wolf_armor
+   no_knockback`**, so the same doc's follow-on claim — that the derived flags
+   "would be all `false` anyway" — was independently wrong too. **When a
+   conclusion here rests on zero grep hits, check the file you searched contains
+   anything at all.** A tripwire caught the first half; nothing could have caught
+   the second, because it was reasoning rather than an assertion.
+
 **Adding a tag** also needs a `DamageTypeTag` variant in the right alphabetical
 slot: the discriminant *is* the bit index, so a variant in the wrong place would
 shift every membership bit. `every_tag_membership_matches_the_closure_of_the_committed_dump`
@@ -125,6 +137,8 @@ put a `DamageType` index on the wire.
 | `armour_reduction_lands_on_the_real_tag_data_for_both_types` | 10.0 (`generic`) vs 3.0 (`mob_attack`) — magnitude, not sign |
 | `a_broken_bypasses_armor_lookup_would_be_caught` | permanent mutation control on the flag derivation |
 | `fall_flags_come_from_the_damage_type_table_and_are_load_bearing` | the `vitals.rs` consumer is wired to the table |
+| `outside_border_resolves_and_is_bypasses_armor` | the entry exists *and* carries the tag — successor to a tripwire that asserted its absence and fired |
+| `border_damage_flags_skip_armour_where_the_default_flags_would_not` | 10.0 (table flags) vs 3.0 (`DamageFlags::default()`) for border damage — magnitude, with the 3.0 arm run as a control |
 
 Observed controls (run, not described): flipping **one bit** in `generic`'s tag
 mask fails the membership gate *and* the drift gate; forcing `bypasses_armor` to
@@ -140,6 +154,15 @@ mutation. The flag is correct and currently **inert** there; it becomes
 observable when a player equipment model lands (issue #261). The gate is
 therefore on the derivation plus its composition with armour, not on that
 function's return value.
+
+`apply_border_damage` has the identical shape and the same limit, and its history
+is the argument for gating the derivation rather than the return value: because
+every border-damage test passed under **both** flag hypotheses, the wrong flags
+survived until a tripwire on an unrelated claim fired. So when you wire a new
+`vitals.rs` consumer to the table, the gate that matters is not "does the health
+change" — that passes either way with no armour model — but "does this consumer's
+flags, composed with armour that bites, land on the table's number rather than the
+default's". Both numbers must be computed, and the wrong one asserted negatively.
 
 ## Configuration
 
