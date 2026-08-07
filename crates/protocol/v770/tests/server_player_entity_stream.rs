@@ -420,10 +420,36 @@ async fn two_connections_see_each_other_as_player_entities() {
     // Spawn position, so a player entity that arrived at the origin (an
     // uninitialised `Vec3::default()`) rather than at the join spawn point
     // cannot pass.
+    //
+    // This expected `y = 100.0` and had to change. `100.0` is
+    // `ServerProtocol::begin_play`'s *default* spawn
+    // (`server_protocol.rs`'s `begin_play_at(view_radius, Vec3::new(8.0, 100.0,
+    // 8.0))`), but `serve_connection` does not use that default: since issues #461
+    // and #329 it calls `begin_play_at` with the result of
+    // `world_spawn::find_initial_spawn`, a real search over the source. Nothing in
+    // the adapter changed — the root cause is entirely on the server side, and the
+    // constant here was a stale copy of a default this path stopped taking.
+    //
+    // For [`AirSource`] that search finds no solid block in any of its 121 spiral
+    // candidates, so it returns its documented full-invalid-box fallback of
+    // `(8, min_y + 1, 8)`. `AirSource`'s column is `ChunkColumn::new(-64, 384)`, so
+    // `min_y + 1` is `-63` — derived from the fixture plus `find_initial_spawn`'s
+    // contract, not read off the failure.
+    //
+    // X and Z stay `8.0`, which is what keeps this assertion able to do its job:
+    // all three components remain non-zero, so an uninitialised `Vec3::default()`
+    // still fails on every axis.
+    const AIR_SOURCE_MIN_Y: f64 = -64.0;
     assert_eq!(
         (a_entity.x, a_entity.y, a_entity.z),
-        (8.0, 100.0, 8.0),
-        "A's entity must stand at the join spawn position `begin_play` teleported A to"
+        (8.0, AIR_SOURCE_MIN_Y + 1.0, 8.0),
+        "A's entity must stand at the join spawn position `begin_play_at` teleported A to — \
+         `find_initial_spawn`'s fallback for a source with no solid block anywhere"
+    );
+    assert_ne!(
+        (a_entity.x, a_entity.y, a_entity.z),
+        (0.0, 0.0, 0.0),
+        "and it must not be an uninitialised Vec3::default()"
     );
 
     // ------------------------------------------------------------------
