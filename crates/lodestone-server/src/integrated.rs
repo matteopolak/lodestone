@@ -316,7 +316,12 @@ impl IntegratedServer {
         // single block every 50 ms through `ChunkSource::block_state`, whose
         // *default* implementation regenerates a whole column to read one cell.
         // See `crate::chunk_store`'s module docs.
-        let source = Arc::new(ChunkStore::new(source));
+        //
+        // Issue #505: sized from `view_radius`, not from a literal. This
+        // constructor serves the whole `[-view_radius, view_radius]²` square at
+        // join, and a capacity that does not cover it puts the columns the player
+        // is looking at permanently in eviction range.
+        let source = Arc::new(ChunkStore::for_view_radius(source, view_radius));
         // A fresh, empty registry for this one connection's lifetime. Nothing
         // ticks it here — only `open_in_memory_with_mobs` spawns the tick
         // loop (see that constructor's doc comment) — so a block entity
@@ -542,7 +547,14 @@ impl IntegratedServer {
         // terrain through this same store, so the 49 columns of `mob_area` are
         // generated **once** for the whole world instead of once here and once
         // more from a second, independent generator (issue #454).
-        let source = Arc::new(ChunkStore::new(source));
+        //
+        // Issue #505: the capacity is `chunk_store::capacity_for_view_radius`,
+        // not a literal. This is the constructor where the union matters most —
+        // `tick_area` here is *not* a subset of the streamed view (it is centred on
+        // world spawn and never moves), so the derivation adds
+        // `CONCURRENT_SCAN_COLUMNS` on top of the view rather than assuming the
+        // view covers it.
+        let source = Arc::new(ChunkStore::for_view_radius(source, view_radius));
 
         // Issue #454: **mob seeding is off the critical path.**
         //
@@ -980,7 +992,14 @@ impl IntegratedServer {
         // columns) but the per-column cost is the same, and the store is
         // shared across every accepted connection exactly as `source` already
         // was. See `crate::chunk_store`'s module docs.
-        let source = Arc::new(ChunkStore::new(source));
+        //
+        // Issue #505: sized from `view_radius` like the two in-memory constructors
+        // above. The store is shared across every accepted connection, and
+        // `view_radius` is this server's configured cap — `dispatch_play_packet`
+        // clamps each client's requested distance to it — so one derivation from
+        // the cap covers every connection's worst case rather than the first
+        // one's.
+        let source = Arc::new(ChunkStore::for_view_radius(source, view_radius));
         let shutdown = Arc::new(Notify::new());
         let signal = shutdown.clone();
         // Shared across every accepted connection (like `protocol`/`source`
@@ -1670,11 +1689,14 @@ mod tests {
     /// independent sources, one for the connection's store and one for mob
     /// pathing — must generate the tick area **twice**.
     ///
-    /// Reproduced rather than described: `ChunkStore::new(source)` is what the
-    /// connection path serves from, `MobHandle::seeded(&world_source, …)` is what
-    /// the constructor used to call, and both report into a single counter the
-    /// way two instances of one seeded generator do in production. Predicted
-    /// exactly: 49 columns × 2 paths = **98**, with every coordinate at 2.
+    /// Reproduced rather than described: `ChunkStore::for_view_radius(source,
+    /// VIEW_RADIUS)` is what the connection path serves from — the same
+    /// constructor and the same radius `open_in_memory_with_mobs` uses, so issue
+    /// #505's capacity derivation is in the picture here too rather than a
+    /// literal — `MobHandle::seeded(&world_source, …)` is what the constructor
+    /// used to call, and both report into a single counter the way two instances
+    /// of one seeded generator do in production. Predicted exactly: 49 columns ×
+    /// 2 paths = **98**, with every coordinate at 2.
     ///
     /// If this ever reads 49, the two paths have stopped being independent and
     /// the gate above is passing for a reason that has nothing to do with the
@@ -1682,7 +1704,7 @@ mod tests {
     #[test]
     fn control_two_independent_sources_generate_the_tick_area_twice() {
         let calls = Arc::new(Mutex::new(HashMap::new()));
-        let store = ChunkStore::new(CountingSource::new(&calls));
+        let store = ChunkStore::for_view_radius(CountingSource::new(&calls), VIEW_RADIUS);
         let world_source = CountingSource::new(&calls);
 
         // The connection path: the initial view, of which the tick area is a

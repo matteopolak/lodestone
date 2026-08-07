@@ -115,6 +115,19 @@
 //! | same 512 touched, retention off | 7.8 MiB |
 //! | **delta** | **97.6 MiB**, i.e. 195.5 KiB per column |
 //!
+//! Re-read while sizing issue #505's cap, with a third arm at [`MAX_CAPACITY`]
+//! (`measure_rss_at_the_capacity_cap`) so the ceiling rests on a measurement
+//! rather than on a 2.5× extrapolation of the rate above:
+//!
+//! | arm | peak RSS | delta | per column |
+//! |---|---|---|---|
+//! | retention off (the shared control) | 8.1 MiB | — | — |
+//! | 512 retained | 105.4 MiB | 97.4 MiB | 194.8 KiB |
+//! | **1,275 retained** ([`MAX_CAPACITY`]) | **250.1 MiB** | **242.0 MiB** | 194.4 KiB |
+//!
+//! The 512 row reproduces the original to 0.2 MiB, and the rate is flat across
+//! the 2.5× range, so residency is linear in the retained count.
+//!
 //! The delta lands within 2% of the 192 KiB arithmetic, the remainder being the
 //! palette and biome `String`s and the map itself. The two arms are also each
 //! other's control: a delta near zero would mean the columns were dropped in
@@ -123,13 +136,33 @@
 //! `touched_column`, which exists because `alloc_zeroed` pages that are never
 //! written do not show up in RSS.
 //!
-//! [`DEFAULT_CAPACITY`] is the knob, and 97.6 MiB is what it currently buys.
-//! Lowering it to 128 (~24 MiB) **still fixes the reported bug completely** —
-//! the starvation fix needs only the 49-column `tick_area` resident, and
-//! everything beyond that is avoided *re*-generation as a player walks back
-//! over ground they have seen. 512 was chosen to also cover the default
-//! streamed view (`render_distance` 8 ⇒ `view_radius` 9 ⇒ 361 columns) so that
-//! walking in a circle does not pay 909 ms per column again.
+//! [`capacity_for_view_radius`] is the knob, and 97.6 MiB is what it buys at the
+//! default render distance. Lowering it to 128 (~24 MiB) **still fixes the
+//! originally reported bug completely** — the starvation fix needs only the
+//! 49-column `tick_area` resident, and everything beyond that is avoided
+//! *re*-generation as a player walks back over ground they have seen. 512 was
+//! chosen to also cover the default streamed view (`render_distance` 8 ⇒
+//! `view_radius` 9 ⇒ 361 columns) so that walking in a circle does not pay 909 ms
+//! per column again.
+//!
+//! # Why the capacity is a function of the view radius (issue #505)
+//!
+//! That last sentence is the whole of issue #505: 512 covered *the default*
+//! streamed view, as a bare literal, in a different file from the
+//! `render_distance` it was chosen for. The shell serves
+//! `view_radius = render_distance + 1` (`crates/lodestone-shell/src/app/session.rs`
+//! — the `+ 1` is vanilla's `ChunkTrackingView` buffer ring and is correct), so
+//! the streamed square is `(2 × (rd + 1) + 1)²`: 361 columns at `rd = 8`, 441 at
+//! 9, **529 at 10**, **729 at vanilla's own default of 12**, 4,489 at the
+//! slider's maximum of 32. One notch of the render-distance slider past 9 and the
+//! literal was under the set it was chosen to hold.
+//!
+//! [`capacity_for_view_radius`] derives it instead, floored at
+//! [`DEFAULT_CAPACITY`] and capped at [`MAX_CAPACITY`]; both of those constants
+//! carry their own argument. The gate is
+//! `tests/view_radius_store_capacity.rs`, whose subject is `view_radius = 13`
+//! (`render_distance` 12) precisely because a gate at the default radius is under
+//! the old ceiling on *both* arms and can see nothing.
 //!
 //! To reduce the cost rather than the count, the prior art is
 //! `lodestone-world`'s `PalettedContainer` over `PackedArray` plus
@@ -166,17 +199,196 @@ use std::sync::Mutex;
 
 use crate::chunk::{ChunkColumn, ChunkSource};
 
-/// How many columns a [`ChunkStore::new`] store retains before evicting the
-/// least-recently-used one.
+/// The floor under [`capacity_for_view_radius`], and the capacity a radius-less
+/// `ChunkStore::new` store retains before evicting the least-recently-used one.
 ///
 /// 512 dense full-height columns measured **97.6 MiB** of resident memory (see
 /// this module's memory section for the paired `/usr/bin/time -l` arms — that is
-/// a measurement, not the 96 MiB arithmetic). Chosen to hold `run_tick_loop`'s 49-column
-/// `tick_area` plus a typical streamed view with room to spare, not to hold a
-/// whole large view: retaining the tick area is what removes the per-tick
-/// regeneration, and eviction is lossless, so overshooting the view costs a
-/// regeneration and never a block.
-pub(crate) const DEFAULT_CAPACITY: usize = 512;
+/// a measurement, not the 96 MiB arithmetic). It holds `run_tick_loop`'s
+/// 49-column `tick_area` plus the default streamed view (`render_distance` 8 ⇒
+/// `view_radius` 9 ⇒ 361 columns) with room to spare.
+///
+/// **It is no longer the capacity a served connection gets** — issue #505.
+/// A bare literal is not a function of the radius the connection serves, and at
+/// `render_distance` 10 the streamed view alone (529 columns) passes it. See
+/// [`capacity_for_view_radius`], which every constructor in
+/// [`crate::integrated`] now goes through. This constant survives as that
+/// function's **floor**, so the derivation can only ever move capacity *up*
+/// from what was measured here, never down: at the default radius the store is
+/// byte-for-byte the 512-column, 97.6 MiB configuration it has always been.
+pub const DEFAULT_CAPACITY: usize = 512;
+
+/// The columns in a square view of `radius`: the `[-radius, radius]²` window
+/// `crate::server`'s `ViewTracker::window` and `join_view_rings` enumerate.
+///
+/// This is the *count* of what a connection actually streams, not an
+/// approximation of it — both of those functions build the same square, and
+/// `crate::server`'s `check_proximity_stream` gate already pins the join's
+/// column total at `(2 * view_radius + 1)²`.
+///
+/// A negative radius is **0 columns**, matching `join_view_rings`, which returns
+/// no rings rather than clamping to ring 0 (see its own doc comment for why the
+/// clamp would be wrong).
+///
+/// Widened to `u64`/`usize` before squaring rather than after. `2 * radius + 1`
+/// overflows `i32` past a radius of about 1.07 × 10⁹ and the square overflows a
+/// 32-bit `usize` far sooner, and `IntegratedServer::bind` is public: the shell
+/// clamps `render_distance` to 32 but a host embedding this crate has nothing
+/// stopping it passing `i32::MAX`. In a `const fn` an overflow is a compile
+/// error; at runtime it is a debug panic and a silently tiny capacity in release.
+/// Saturating is right rather than merely safe — the result feeds
+/// [`capacity_for_view_radius`], which clamps to [`MAX_CAPACITY`] anyway, so an
+/// absurd radius lands on the cap instead of wrapping to nothing.
+pub const fn view_columns(radius: i32) -> usize {
+    if radius < 0 {
+        return 0;
+    }
+    // `u128`, not `u64`: at `radius = i32::MAX` the side is ~2³² and the square
+    // is ~2⁶⁴, which overflows `u64` itself. One more width costs nothing in a
+    // `const fn` evaluated at compile time.
+    let side = 2 * (radius as u128) + 1;
+    let columns = side * side;
+    if columns > usize::MAX as u128 {
+        usize::MAX
+    } else {
+        columns as usize
+    }
+}
+
+/// The radius of the largest concurrent scan over this store that is **not** the
+/// streamed view: `crate::tick::run_tick_loop`'s random-tick `tick_area`.
+///
+/// The shell passes `mob_radius = view_radius.clamp(1, 3)`
+/// (`crates/lodestone-shell/src/net.rs:1773`), so at any real view radius the
+/// tick area is `-3..=3` on both axes — **49** columns, not the 9 a "radius 3"
+/// reading suggests. `crate::integrated`'s LAN path is strictly smaller
+/// (`LAN_TICK_RADIUS`, 2 ⇒ 25 columns), so 3 bounds both.
+pub const CONCURRENT_TICK_RADIUS: i32 = 3;
+
+/// Columns the capacity derivation reserves **on top of** the streamed view:
+/// the 49-column `tick_area` plus the one column `crate::server`'s `vitals_tick`
+/// probes every 50 ms.
+///
+/// # Why this is added to the view rather than assumed inside it
+///
+/// `mob_area` is centred on world spawn and never moves, so once the player has
+/// walked away it is 49 columns *outside* the streamed view that are still
+/// touched at 20 Hz. The working set is the **union** of the concurrent scans,
+/// not the largest of them.
+///
+/// And the union is what matters rather than the frequency, which is the
+/// counter-intuitive half. Issue #504's investigation measured a column polled
+/// at 20 Hz being regenerated **12** times over 12 random-tick passes, not once:
+/// the block-entity scan runs before the random-tick pass, which then touches 49
+/// columns after it, so by the end of a pass the polled column's stamp is the
+/// *oldest* in the map. `an_over_capacity_store_makes_the_polled_column_cold_every_pass`
+/// below is that measurement. **Access frequency does not confer LRU residency
+/// — headroom does.**
+///
+/// # What this deliberately does *not* cover
+///
+/// The block-entity registry. `crate::tick`'s 20 Hz scan probes
+/// `world.block_state` once per hopper, the registry has no chunk-unload path, so
+/// the set it probes only grows with exploration — that is issue #503/§12.110 and
+/// it is unbounded by construction, so no constant here can size for it. Hopper
+/// chunks past this headroom evict *view* columns rather than each other (the
+/// view is touched once per column, the scan every 50 ms, so LRU's minimum stamp
+/// always falls on a view column), which means they erode the "the whole view is
+/// resident" property that `tests/view_radius_store_capacity.rs` gates with an
+/// empty registry. Bounding the scan by the loaded view, as vanilla does, is the
+/// fix; adding to this constant is not.
+pub const CONCURRENT_SCAN_COLUMNS: usize = view_columns(CONCURRENT_TICK_RADIUS) + 1;
+
+/// The largest view radius whose whole square this store promises to hold
+/// resident, and therefore where [`capacity_for_view_radius`] stops growing.
+///
+/// 17 is `render_distance` 16 (the shell serves `render_distance + 1`) — twice
+/// our default of 8, and the midpoint of vanilla's own `IntRange(2, 32)` slider
+/// (`crates/lodestone-shell/src/config.rs`'s `MAX_RENDER_DISTANCE`). **The cap
+/// is a memory decision and the number is the whole argument.** Both ends of the
+/// table are `/usr/bin/time -l` readings on the release lib-test binary rather
+/// than arithmetic — `measure_rss_without_retention` (8.1 MiB) is the control
+/// both are differenced against:
+///
+/// | `render_distance` | `view_radius` | view columns | capacity | resident |
+/// |---|---|---|---|---|
+/// | 8 (default) | 9 | 361 | 512 (floor) | **97.4 MiB, measured** |
+/// | 10 | 11 | 529 | 579 | 110 MiB |
+/// | 12 (vanilla default) | 13 | 729 | 779 | 148 MiB |
+/// | 16 | 17 | 1225 | 1275 | **242.0 MiB, measured** |
+/// | 24 | 25 | 2601 | 1275 (capped) | 242.0 MiB |
+/// | 32 (slider max) | 33 | 4489 | 1275 (capped) | 242.0 MiB |
+///
+/// The two measured rows are 194.8 and 194.4 KiB per column, so residency is
+/// linear in the count across a 2.5× range and the interpolated rows are safe to
+/// read. That linearity is not a given and is why the cap row was measured
+/// instead of extrapolated: a `HashMap` growing through several rehash thresholds
+/// with 192 KiB values in it could plausibly have been superlinear.
+///
+/// An *un*capped derivation is what makes this a real choice rather than an
+/// oversight: `render_distance` 32 would size the store at 4,539 columns, i.e.
+/// **863 MiB** of resident chunk cache inside a client process that also holds
+/// meshes, textures and a GPU allocator, on a machine whose whole budget this
+/// repo's own operational notes put at 16 GB shared with everything else.
+/// Trading issue #505's CPU cliff for a memory cliff of that size is not a fix.
+///
+/// # What degrades above it, precisely
+///
+/// The store holds 1,275 of the view's columns and no more, so the columns
+/// outside that set cost a regeneration when something asks for them again —
+/// a `block_state` probe from redstone, a fluid tick, mob pathing, or the same
+/// column re-entering the view after the player walked back over it. It is not
+/// a per-access cost on the whole view (the view is *diffed* as the player
+/// moves, never rescanned — see `ViewTracker::recenter`), and the 20 Hz scans
+/// are covered by [`CONCURRENT_SCAN_COLUMNS`] at every radius. So the
+/// degradation is bounded and localised rather than the LRU-worst-case
+/// collapse that `render_distance` 10 hits today, and
+/// `tests/view_radius_store_capacity.rs` measures it as this module's permanent
+/// negative control.
+///
+/// To raise it, raise this constant — but re-run
+/// `measure_rss_with_retention`/`measure_rss_without_retention` first and put
+/// the new pair of numbers in the table above. Reducing the *cost* per column
+/// instead is unit U8 of `docs/plans/chunk-lifecycle.md`.
+pub const FULLY_RESIDENT_VIEW_RADIUS: i32 = 17;
+
+/// The ceiling [`capacity_for_view_radius`] saturates at — see
+/// [`FULLY_RESIDENT_VIEW_RADIUS`] for the memory argument behind the number.
+pub const MAX_CAPACITY: usize =
+    view_columns(FULLY_RESIDENT_VIEW_RADIUS) + CONCURRENT_SCAN_COLUMNS;
+
+/// The capacity a store serving `view_radius` is built with — **issue #505's
+/// fix**, and the only thing [`crate::integrated`]'s constructors call.
+///
+/// `view_columns(view_radius) + CONCURRENT_SCAN_COLUMNS`, clamped to
+/// `DEFAULT_CAPACITY ..= MAX_CAPACITY`. Each of those three terms is load-bearing
+/// and documented on its own constant; in short:
+///
+/// * the **view** term is the bug: a literal 512 covers `render_distance` 9 and
+///   nothing above it, and 10 is one notch of a slider away;
+/// * the **scan** term is the union with `run_tick_loop`'s tick area, which is
+///   not a subset of the view;
+/// * the **floor** keeps every existing measurement in this module valid, since
+///   the derivation can then only move capacity up;
+/// * the **ceiling** stops a CPU cliff being traded for an 866 MiB memory one.
+///
+/// `const fn` deliberately: `MAX_CAPACITY` is derived from it in a const
+/// context, and `tests/view_radius_store_capacity.rs` computes both of its
+/// competing hypotheses at compile time from these same constants.
+pub const fn capacity_for_view_radius(view_radius: i32) -> usize {
+    // `saturating_add`, because `view_columns` saturates at `usize::MAX` for an
+    // absurd radius and a plain `+` would then wrap to a *tiny* capacity — the
+    // worst possible failure mode for this function, and one that would look
+    // like a thrashing cache rather than like arithmetic.
+    let want = view_columns(view_radius).saturating_add(CONCURRENT_SCAN_COLUMNS);
+    if want < DEFAULT_CAPACITY {
+        DEFAULT_CAPACITY
+    } else if want > MAX_CAPACITY {
+        MAX_CAPACITY
+    } else {
+        want
+    }
+}
 
 /// One retained column plus the stamp that orders eviction.
 struct Entry {
@@ -244,8 +456,31 @@ pub(crate) struct ChunkStore<S> {
 
 impl<S> ChunkStore<S> {
     /// Wraps `source`, retaining up to [`DEFAULT_CAPACITY`] columns.
+    ///
+    /// **`#[cfg(test)]` since issue #505, and that is the fix stated as a type
+    /// signature.** Every production caller is in [`crate::integrated`] and every
+    /// one of them already has a `view_radius` in scope, so a store built without
+    /// one is exactly the defect: a capacity chosen for a radius, in a different
+    /// file from the radius. Removing this from the non-test build means a new
+    /// call site cannot reintroduce it by accident — it has to name a capacity or
+    /// a radius. The gates below keep it because a store with no view attached
+    /// has no radius to derive from.
+    #[cfg(test)]
     pub(crate) fn new(source: S) -> Self {
         Self::with_capacity(source, DEFAULT_CAPACITY)
+    }
+
+    /// Wraps `source` with the capacity the connection's `view_radius` needs —
+    /// [`capacity_for_view_radius`], which carries the derivation and the two
+    /// clamps.
+    ///
+    /// Takes the radius rather than the column count so the *policy* lives in
+    /// one place: a call site that computed `(2r+1)² + 50` itself would be a
+    /// second copy of the derivation, and the reason issue #505 existed at all is
+    /// that the number and the radius it was chosen for lived in two different
+    /// files.
+    pub(crate) fn for_view_radius(source: S, view_radius: i32) -> Self {
+        Self::with_capacity(source, capacity_for_view_radius(view_radius))
     }
 
     /// Wraps `source` with an explicit capacity. A capacity of 0 disables
@@ -957,6 +1192,93 @@ mod tests {
         );
     }
 
+    /// Issue #505's policy at its **boundaries**, which is the part of it a
+    /// behavioural gate cannot reach.
+    ///
+    /// `tests/view_radius_store_capacity.rs` measures the regimes end to end and
+    /// is the gate that matters. What it cannot see is where one regime stops and
+    /// the next begins, or what happens to a radius no slider can produce — and
+    /// those are the three ways this function breaks silently:
+    ///
+    /// 1. **the floor's last radius and the derivation's first.** The floor
+    ///    applies while `view_columns(r) + 50 <= 512`, i.e. `(2r+1)² <= 462`, i.e.
+    ///    `r <= 10`. So radius 10 is the last floored radius and 11 the first
+    ///    derived one, and 11 is exactly `render_distance` 10 — the notch issue
+    ///    #505 reports.
+    /// 2. **the cap's first radius.** `FULLY_RESIDENT_VIEW_RADIUS` must be the
+    ///    largest radius that is *not* capped, or the constant's name and its
+    ///    memory table are both lies.
+    /// 3. **arithmetic, not policy.** `view_columns` squares its argument and
+    ///    `IntegratedServer::bind` is public, so `i32::MAX` must land on the cap
+    ///    rather than wrap to a tiny capacity — a failure that would present as a
+    ///    thrashing cache, not as an overflow.
+    ///
+    /// Every expected value below is computed from `view_columns` and the three
+    /// constants rather than written out, so a policy change moves the
+    /// expectations with it instead of voiding them.
+    #[test]
+    fn the_capacity_policy_clamps_at_both_ends_and_cannot_overflow() {
+        // (1) the floor/derivation seam. Found by search rather than asserted at
+        // a hardcoded radius, so the seam is *located* even if the constants move.
+        let first_derived = (0..=64)
+            .find(|&r| capacity_for_view_radius(r) > DEFAULT_CAPACITY)
+            .expect("some radius must exceed the floor, or the derivation is dead code");
+        assert_eq!(
+            first_derived, 11,
+            "the floor should stop applying at view_radius 11 (render_distance 10), \
+             which is the notch issue #505 reports; it stops at {first_derived}"
+        );
+        assert_eq!(capacity_for_view_radius(first_derived - 1), DEFAULT_CAPACITY);
+        assert_eq!(
+            capacity_for_view_radius(first_derived),
+            view_columns(first_derived) + CONCURRENT_SCAN_COLUMNS
+        );
+
+        // (2) the cap's seam, and the claim FULLY_RESIDENT_VIEW_RADIUS's name makes.
+        assert_eq!(
+            capacity_for_view_radius(FULLY_RESIDENT_VIEW_RADIUS),
+            view_columns(FULLY_RESIDENT_VIEW_RADIUS) + CONCURRENT_SCAN_COLUMNS,
+            "the largest fully-resident radius must not itself be capped"
+        );
+        assert_eq!(capacity_for_view_radius(FULLY_RESIDENT_VIEW_RADIUS), MAX_CAPACITY);
+        assert_eq!(
+            capacity_for_view_radius(FULLY_RESIDENT_VIEW_RADIUS + 1),
+            MAX_CAPACITY,
+            "one radius past it must be capped, or the cap never engages"
+        );
+
+        // Monotonic across the whole slider, so no radius is ever served a
+        // *smaller* store than a narrower one. `MAX_RENDER_DISTANCE` is 32, hence
+        // a maximum served radius of 33.
+        for r in 0..=33 {
+            assert!(
+                capacity_for_view_radius(r) >= capacity_for_view_radius(r - 1),
+                "capacity must not shrink as the radius grows: {} at {} vs {} at {}",
+                capacity_for_view_radius(r),
+                r,
+                capacity_for_view_radius(r - 1),
+                r - 1
+            );
+            assert!(
+                capacity_for_view_radius(r) >= view_columns(r).min(MAX_CAPACITY),
+                "radius {r} must get either its whole view or the cap"
+            );
+        }
+
+        // (3) arithmetic. A negative radius is 0 columns (matching
+        // `join_view_rings`), and both extremes must land on a clamp rather than
+        // on a wrap.
+        assert_eq!(view_columns(-1), 0);
+        assert_eq!(capacity_for_view_radius(-1), DEFAULT_CAPACITY);
+        assert_eq!(capacity_for_view_radius(i32::MIN), DEFAULT_CAPACITY);
+        assert_eq!(
+            capacity_for_view_radius(i32::MAX),
+            MAX_CAPACITY,
+            "an absurd radius must saturate onto the cap; a wrap here would present \
+             as a thrashing cache rather than as an overflow"
+        );
+    }
+
     /// Eviction must be least-recently-used, not arbitrary — otherwise a
     /// capacity that comfortably holds the tick area still thrashes it, because
     /// the streamed view pushes hundreds of one-shot columns through the same
@@ -1116,6 +1438,43 @@ mod tests {
         let store = fill_and_hold(0, DEFAULT_CAPACITY);
         assert_eq!(store.len(), 0);
         println!("retained 0 columns after touching {DEFAULT_CAPACITY}");
+        std::hint::black_box(&store);
+    }
+
+    /// **Retained arm at the cap** — what issue #505's ceiling actually costs,
+    /// measured rather than extrapolated.
+    ///
+    /// [`FULLY_RESIDENT_VIEW_RADIUS`]'s memory table is arithmetic off the 195.5
+    /// KiB per column the pair above measured at 512, and a 2.5× extrapolation of
+    /// a measured rate is still an extrapolation — the map's own growth, its
+    /// rehashing and the allocator's fragmentation are all superlinear in
+    /// principle. This arm reads the absolute figure at [`MAX_CAPACITY`], the one
+    /// number the whole cap decision rests on.
+    ///
+    /// Its control is `measure_rss_without_retention` exactly as the 512 pair's
+    /// is: subtract, and treat a delta near zero as a failure to measure rather
+    /// than as free residency.
+    ///
+    /// ```text
+    /// /usr/bin/time -l cargo test --release -p lodestone-server --lib -- --ignored \
+    ///     --nocapture --exact chunk_store::tests::measure_rss_at_the_capacity_cap
+    /// ```
+    #[test]
+    #[ignore = "measurement tool; run in --release under /usr/bin/time -l"]
+    fn measure_rss_at_the_capacity_cap() {
+        let store = fill_and_hold(MAX_CAPACITY, MAX_CAPACITY);
+        assert_eq!(store.len(), MAX_CAPACITY);
+        println!(
+            "retained {} columns of {} rows (~{} KiB each) — the ceiling \
+             capacity_for_view_radius saturates at, i.e. view_radius \
+             {FULLY_RESIDENT_VIEW_RADIUS} (render_distance {}) and every radius above it; \
+             arithmetic ceiling {} MiB",
+            store.len(),
+            REAL_HEIGHT,
+            16 * REAL_HEIGHT * 16 * 2 / 1024,
+            FULLY_RESIDENT_VIEW_RADIUS - 1,
+            (MAX_CAPACITY as i32 * 16 * REAL_HEIGHT * 16 * 2) / (1024 * 1024)
+        );
         std::hint::black_box(&store);
     }
 
@@ -1448,9 +1807,14 @@ mod tests {
     /// # Why this arm exists
     ///
     /// Without it the subject above has a second, much weaker explanation: at
-    /// the default render distance the working set (289-column view + 49-column
-    /// tick area = 338) never reaches [`DEFAULT_CAPACITY`] at all, so "no
+    /// the default render distance the working set (361-column view + 49-column
+    /// tick area = 410) never reaches [`DEFAULT_CAPACITY`] at all, so "no
     /// eviction" could be pure headroom rather than any property of the polling.
+    /// (This read **289** until issue #505. 289 is `(2 × 8 + 1)²`, i.e. the view
+    /// for a *view radius* of 8 — but 8 is the `render_distance`, and the shell
+    /// serves `render_distance + 1`. The conclusion held with room to spare either
+    /// way, which is exactly why the arithmetic slipped through twice in one
+    /// file.)
     /// `with_capacity(source, EXPECTED_TICK_AREA_COLUMNS)` removes the headroom:
     /// 49 tick-area columns plus one remote is 50 against a ceiling of 49.
     ///
@@ -1537,10 +1901,24 @@ mod tests {
     /// factor of [`TICKS`] apart rather than "more" and "less".
     ///
     /// Production's own threshold is lower than this rig's, because production
-    /// also holds a 289-column view: `512 - 289 - 49` = **174** distinct
-    /// hopper-bearing *chunks*, since only `BlockEntity::Hopper` probes the world
-    /// at all (see `sixteen_hundred_opaque_block_entities_never_reach_the_store`)
-    /// and hoppers sharing a chunk share one column.
+    /// also holds a streamed view — at the default `render_distance` 8 that is
+    /// `view_radius` 9 and so **361** columns, leaving `512 - 361 - 49` = **102**
+    /// distinct hopper-bearing *chunks*, since only `BlockEntity::Hopper` probes
+    /// the world at all (see
+    /// `sixteen_hundred_opaque_block_entities_never_reach_the_store`) and hoppers
+    /// sharing a chunk share one column.
+    ///
+    /// This read `512 - 289 - 49 = 174` until issue #505; 289 is the square of a
+    /// *view radius* of 8, and 8 is the `render_distance`, which the shell serves
+    /// plus one. **Treat 102 as a conservative floor rather than the threshold**:
+    /// it assumes the view competes with the 20 Hz scans for residency, and in
+    /// steady state it does not — the view is touched once per column while the
+    /// tick area and the registry are touched every 50 ms, so LRU's minimum stamp
+    /// always falls on a view column. What the view really costs is that the store
+    /// sits permanently at its ceiling, permanently evicting, once
+    /// `view_columns(view_radius)` alone exceeds it. That is issue #505, and
+    /// `tests/view_radius_store_capacity.rs` is where the view side is measured
+    /// rather than derived.
     ///
     /// # This arm characterises a defect, it does not bless it
     ///
