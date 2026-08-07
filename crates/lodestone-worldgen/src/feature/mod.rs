@@ -54,11 +54,21 @@ use serde_json::Value;
 use crate::math;
 use crate::rng::{RandomSource, WorldgenRandom};
 
+use self::region_view::RegionView;
+
 /// Grass/flower/tree placement (issue #406) — a separate engine from the
 /// rest of this module (ores), sharing only [`BlockPos`]/[`IntProvider`]/
 /// [`canon_state`] and the [`STEP_VEGETAL_DECORATION`] constant below. See
 /// its own module doc for scope and named gaps.
 pub mod vegetation;
+
+/// The **in-place** decoration medium (Unit 7 of
+/// `docs/plans/worldgen-rewrite.md`): [`region_view::RegionView`], a read/write
+/// surface over the 3×3 neighbourhood's own grids that replaced the stitched
+/// `48 × height × 48` copies this module's ore driver and
+/// [`vegetation`]'s own driver both used to be handed. See its module doc for
+/// the coordinate-space trap it inherits.
+pub mod region_view;
 
 /// `TOP_LAYER_MODIFICATION` — snow layers and surface ice (issue #404's U2),
 /// vanilla's `freeze_top_layer`. A third engine again: it consumes no RNG, never
@@ -511,24 +521,25 @@ pub fn parse_placements(placed: &Value) -> Vec<Placement> {
         .collect()
 }
 
-/// The mutable block field the ore stage reads and writes, over the whole
-/// driven 3×3 neighbourhood. Addressed by `(local_x, y, local_z)`,
-/// centre-relative, with `local_x, local_z ∈ [`[`REGION_MIN`]`,`[`REGION_MAX`]`)`
-/// and `y` absolute. See [`OreInput::region_local`] for why this is wider
-/// than one chunk.
+/// A single dense grid spanning the whole driven 3×3 region, addressed by
+/// `(local_x, y, local_z)` centre-relative with `y` absolute — **the parity
+/// fixtures' shape, no longer production's.**
 ///
-/// A [`crate::dense_grid::DenseBlockGrid`] (issue #106's ore-composition
-/// perf pass), not a `HashMap<(i32,i32,i32), String>` — this was, per
-/// `crate::overworld`'s own module doc "Performance" section, "the one
-/// remaining `HashMap<(i32,i32,i32), String>` in the hot path", left there
-/// deliberately by issue #295's Job 2 as further work. `stitch_region`
-/// (`crate::overworld::OverworldGenerator`) populates one of these for all 9
-/// source chunks in the driven neighbourhood on every single `column()`
-/// call, so every cell used to cost a fresh heap-allocated `String` even
-/// though real terrain repeats a small palette overwhelmingly — a
-/// `DenseBlockGrid` interns each distinct state once and stores a `u16`
-/// per cell instead. See `crate::overworld`'s module doc for the measured
-/// before/after.
+/// Issue #106 made this a [`crate::dense_grid::DenseBlockGrid`] instead of a
+/// `HashMap<(i32,i32,i32), String>`, and Unit 3 gave that grid interned ids. What
+/// neither could remove is that materialising the region at all means **copying
+/// all nine already-computed source chunks into it** — 884,736 cells per
+/// `column()` call for the ore driver, plus another 884,736 for the `clone()` the
+/// driver itself performed, every one of them warm. Unit 7 deleted both by
+/// routing reads at their source instead: production now drives the ore engine
+/// through [`region_view::RegionView`], which borrows the nine grids and holds
+/// writes in a sparse overlay.
+///
+/// This alias survives because a *fixture* is naturally one sparse map over the
+/// whole region rather than nine per-chunk fields, and
+/// [`region_view::RegionView::over_region_grid`] adapts exactly this shape onto
+/// the same read path production uses — so the JVM fixtures still exercise the
+/// routing rather than a second implementation of it.
 pub type RegionGrid = crate::dense_grid::DenseBlockGrid;
 
 /// Centre-relative local coordinate lower/upper (exclusive) bound the 3×3
@@ -657,7 +668,7 @@ fn apply_one_source<R: RandomSource>(
     seed: i64,
     input: &OreInput<'_>,
     ores: &[PlacedOre],
-    working: &mut RegionGrid,
+    working: &mut RegionView<'_>,
 ) -> i64 {
     let origin = input.origin();
     let decoration_seed = random.set_decoration_seed(seed, origin.x, origin.z);
@@ -685,18 +696,17 @@ fn apply_one_source<R: RandomSource>(
 /// should use — see this module's doc comment for why a single-source-only
 /// driver under-models vanilla's `blockStateWriteRadius(1)` spill.
 ///
-/// The returned grid is the input `grid` with ore writes applied; the caller
-/// diffs it against the original to obtain the placed ores.
+/// Writes land in `view`'s own overlay, so the caller reads the placed ores back
+/// off the view (or folds them into the one grid it owns) rather than diffing two
+/// full copies of the region — see [`region_view`]'s module doc.
 pub fn apply_ore_step<R: RandomSource>(
     random: &mut WorldgenRandom<R>,
     seed: i64,
     input: &OreInput<'_>,
-    grid: &RegionGrid,
+    view: &mut RegionView<'_>,
     ores: &[PlacedOre],
-) -> RegionGrid {
-    let mut working = grid.clone();
-    apply_one_source(random, seed, input, ores, &mut working);
-    working
+) -> i64 {
+    apply_one_source(random, seed, input, ores, view)
 }
 
 /// The real vanilla 3×3 neighbourhood driver for one CENTRE chunk.
@@ -720,10 +730,10 @@ pub fn apply_ore_step<R: RandomSource>(
 /// case; composing against real per-quart biome variety (issue #295) uses
 /// that function directly with a per-source ore-list closure instead.
 ///
-/// Returns the region grid after all 9 passes; the caller diffs the CENTRE
-/// 16×16 slice (`in_center`) against the original to obtain the fixture-
-/// comparable `ore.*` output, and can separately read `working` at any
-/// region-local coordinate to see spill into (or within) a neighbour.
+/// Returns the CENTRE pass's own decoration seed. All 9 passes' writes are in
+/// `view`, which the caller reads at any region-local coordinate — the centre
+/// 16×16 slice (`in_center`) for the fixture-comparable `ore.*` output, or a
+/// neighbour's third to see spill into (or within) a neighbour.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_ore_step_3x3<R: RandomSource>(
     random: &mut WorldgenRandom<R>,
@@ -736,9 +746,9 @@ pub fn apply_ore_step_3x3<R: RandomSource>(
     gen_depth: i32,
     ocean_floor_wg: &HashMap<(i32, i32), i32>,
     in_tag: &dyn Fn(&str, &str) -> bool,
-    grid: &RegionGrid,
+    view: &mut RegionView<'_>,
     ores: &[PlacedOre],
-) -> (RegionGrid, i64) {
+) -> i64 {
     apply_ore_step_3x3_per_source(
         random,
         seed,
@@ -750,7 +760,7 @@ pub fn apply_ore_step_3x3<R: RandomSource>(
         gen_depth,
         ocean_floor_wg,
         in_tag,
-        grid,
+        view,
         &|_source_x, _source_z| ores,
     )
 }
@@ -776,10 +786,9 @@ pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
     gen_depth: i32,
     ocean_floor_wg: &HashMap<(i32, i32), i32>,
     in_tag: &dyn Fn(&str, &str) -> bool,
-    grid: &RegionGrid,
+    view: &mut RegionView<'_>,
     ores_for_source: &dyn Fn(i32, i32) -> &'a [PlacedOre],
-) -> (RegionGrid, i64) {
-    let mut working = grid.clone();
+) -> i64 {
     let mut center_decoration_seed = 0;
     for dx in -1..=1 {
         for dz in -1..=1 {
@@ -798,13 +807,13 @@ pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
                 in_tag,
             };
             let ores = ores_for_source(source_x, source_z);
-            let ds = apply_one_source(random, seed, &input, ores, &mut working);
+            let ds = apply_one_source(random, seed, &input, ores, view);
             if dx == 0 && dz == 0 {
                 center_decoration_seed = ds;
             }
         }
     }
-    (working, center_decoration_seed)
+    center_decoration_seed
 }
 
 /// The `decorationSeed` for a chunk origin — exposed so tests can cross-check it
@@ -826,7 +835,7 @@ fn place_placed_feature<R: RandomSource>(
     ore: &PlacedOre,
     input: &OreInput<'_>,
     ctx: &Ctx,
-    working: &mut RegionGrid,
+    working: &mut RegionView<'_>,
 ) {
     fn recurse<R: RandomSource>(
         random: &mut R,
@@ -836,7 +845,7 @@ fn place_placed_feature<R: RandomSource>(
         ctx: &Ctx,
         config: &OreConfig,
         input: &OreInput<'_>,
-        working: &mut RegionGrid,
+        working: &mut RegionView<'_>,
     ) {
         if i == modifiers.len() {
             place_ore_feature(random, pos, config, input, working);
@@ -869,7 +878,7 @@ pub fn place_ore_feature<R: RandomSource>(
     origin: BlockPos,
     config: &OreConfig,
     input: &OreInput<'_>,
-    working: &mut RegionGrid,
+    working: &mut RegionView<'_>,
 ) {
     let size = config.size;
     let dir = random.next_float() * std::f32::consts::PI;
@@ -910,7 +919,7 @@ fn do_place<R: RandomSource>(
     random: &mut R,
     config: &OreConfig,
     input: &OreInput<'_>,
-    working: &mut RegionGrid,
+    working: &mut RegionView<'_>,
     x0: f64,
     x1: f64,
     z0: f64,
@@ -1015,7 +1024,7 @@ fn try_place_ore<R: RandomSource>(
     random: &mut R,
     config: &OreConfig,
     input: &OreInput<'_>,
-    working: &mut RegionGrid,
+    working: &mut RegionView<'_>,
     x: i32,
     y: i32,
     z: i32,
@@ -1068,7 +1077,7 @@ fn should_skip_air_check<R: RandomSource>(random: &mut R, chance: f32) -> bool {
 /// see `OreInput::region_local`), so a read just outside the centre sees the
 /// real neighbour terrain (or an in-flight write from an earlier source
 /// pass), not an assumed-empty scratch chunk.
-fn is_adjacent_to_air(input: &OreInput<'_>, working: &RegionGrid, x: i32, y: i32, z: i32) -> bool {
+fn is_adjacent_to_air(input: &OreInput<'_>, working: &RegionView<'_>, x: i32, y: i32, z: i32) -> bool {
     const DIRS: [(i32, i32, i32); 6] = [
         (0, -1, 0),
         (0, 1, 0),
@@ -1084,7 +1093,7 @@ fn is_adjacent_to_air(input: &OreInput<'_>, working: &RegionGrid, x: i32, y: i32
     })
 }
 
-fn block_at<'a>(input: &OreInput<'_>, working: &'a RegionGrid, x: i32, y: i32, z: i32) -> &'a str {
+fn block_at<'a>(input: &OreInput<'_>, working: &'a RegionView<'_>, x: i32, y: i32, z: i32) -> &'a str {
     if is_outside_build_height(y, input.min_y, input.height) {
         return "minecraft:air";
     }

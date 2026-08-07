@@ -1,9 +1,37 @@
 //! Stages 5-7 of [`OverworldGenerator::column`]: the `UNDERGROUND_ORES` and
-//! `VEGETAL_DECORATION` 3×3 neighbourhood drivers, `TOP_LAYER_MODIFICATION`, and the
-//! two region stitches that feed them.
+//! `VEGETAL_DECORATION` 3×3 neighbourhood drivers and `TOP_LAYER_MODIFICATION`.
 //!
 //! Moved here verbatim from `overworld.rs` by U16 Phase A; see [`super`]'s own module
 //! doc for the parity history of the 3×3 drivers.
+//!
+//! # Unit 7: the two region stitches that used to feed these drivers are gone
+//!
+//! Both drivers need to read *and write* across a 3×3 chunk neighbourhood, and
+//! until Unit 7 of `docs/plans/worldgen-rewrite.md` the way that neighbourhood was
+//! made addressable was to copy it: `stitch_region` materialised a
+//! `48 × height × 48` `DenseBlockGrid` from the nine sources (884,736 cells),
+//! `apply_ore_step_3x3_per_source` cloned it (884,736 more),
+//! `stitch_veg_region` copied the nine post-ore fields into a `VegGrid`'s
+//! `HashMap` (884,736 again), and each driver's output was folded back over the
+//! centre's full 98,304 cells. ~2.85M cell copies per served column, **every one of
+//! them warm** — the neighbours were already computed and memoised in
+//! [`super::store`]; the copies existed only to give them one coordinate space.
+//!
+//! [`crate::feature::region_view::RegionView`] and
+//! [`crate::feature::vegetation::VegGrid::with_sources`] route reads to whichever
+//! source chunk owns the column instead, holding writes in a sparse overlay, so
+//! `crate::counters::Counters::stitch_cells` reads **zero** for a served column —
+//! this unit's acceptance criterion. What is left is one `Vec<u16>` clone of the
+//! centre's own post-ore grid (the store's copy is shared and must not be mutated)
+//! and two sparse fold-backs of what decoration actually wrote.
+//!
+//! **The trap, if you edit this file:** the fold-back order decides the served
+//! palette, because a `DenseBlockGrid` appends to its local palette in first-write
+//! order. `ore_stage` folds in `(y, lz, lx)` scan order because the full-box walk
+//! it replaced did; `vegetation_stage` folds in *write* order because the `dirty`
+//! `Vec` it replays always did. Neither is interchangeable with the other, and
+//! `column_is_byte_identical_across_two_independently_constructed_generators` is
+//! what notices.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -49,40 +77,47 @@ impl OverworldGenerator {
         // would have reported "ore ran once per chunk" for that exact run.
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Ore);
 
-        // Issue #106: a `DenseBlockGrid`, not a `HashMap<(i32,i32,i32),
-        // String>` — see `crate::feature::RegionGrid`'s own doc for why.
-        // `"minecraft:air"` as the default is a real behaviour match, not
-        // just a placeholder: the old `HashMap`'s `.get(&key)` returned
-        // `None` (folded to `"minecraft:air"` by every reader) for any cell
-        // `stitch_region` hadn't visited yet, which never actually happens
-        // in the covered region — every one of the 9 sources always stitches
-        // its own full 16-wide column range before ore placement runs.
-        let region_size = crate::feature::REGION_MAX - crate::feature::REGION_MIN;
-        let mut region = crate::feature::RegionGrid::with_interner(
-            Arc::clone(&self.interner),
-            crate::feature::REGION_MIN,
-            self.min_y,
-            crate::feature::REGION_MIN,
-            region_size,
-            self.height,
-            region_size,
-            crate::interner::StateId::AIR,
-        );
-        let mut ocean_floor_wg: HashMap<(i32, i32), i32> = HashMap::new();
-
-        Self::stitch_region(&mut region, &mut ocean_floor_wg, cx, cz, cx, cz, &center_world, center_heights);
+        // Unit 7: **no region grid is materialised.** What used to happen here was
+        // a fresh 48 × height × 48 `DenseBlockGrid` plus `stitch_region` copying
+        // all nine already-computed source chunks into it — 884,736 cells, every
+        // one warm, on every `column()` call — which
+        // `apply_ore_step_3x3_per_source` then `clone()`d for another 884,736.
+        // Both are gone: the nine grids are *borrowed* and reads are routed to
+        // whichever chunk owns the column, with the ore writes held in the view's
+        // own sparse overlay. See `crate::feature::region_view`.
+        //
+        // The eight neighbours' pre-ore products are pulled out of the staged
+        // store first and held in `pre` for the whole lifetime of the view below,
+        // because the view borrows into them. `Arc`s, so nothing is copied and
+        // nothing is written — a neighbour's product is shared read-only with
+        // every other in-flight column that has the same neighbour, which is what
+        // keeps "one writer per chunk grid" true.
+        let mut pre: [Option<Arc<super::PreOreResult>>; 9] = std::array::from_fn(|_| None);
         for dx in -1..=1i32 {
             for dz in -1..=1i32 {
                 if dx == 0 && dz == 0 {
                     continue;
                 }
-                // No clone: `stitch_region` only ever reads through a
-                // reference, so a cache hit here (the common case in a
-                // sweep — see `pre_ore_cache`'s doc comment) costs one
-                // `HashMap` lookup and an `Arc` bump, not a recomputed
-                // pipeline or a copied grid.
-                let cached = self.pre_ore_stage(cx + dx, cz + dz);
-                Self::stitch_region(&mut region, &mut ocean_floor_wg, cx + dx, cz + dz, cx, cz, &cached.0, &cached.1);
+                pre[Self::region_slot(dx, dz)] = Some(self.pre_ore_stage(cx + dx, cz + dz));
+            }
+        }
+
+        // The `OCEAN_FLOOR_WG` heightmap is still gathered into a small map,
+        // deliberately: at most 48 × 48 = 2,304 entries across the whole region,
+        // three orders of magnitude below the block field this pass stopped
+        // copying, and `OreInput` reads it by clamped region-local key rather than
+        // by chunk. It was never the cost D2 named.
+        let mut ocean_floor_wg: HashMap<(i32, i32), i32> = HashMap::new();
+        Self::stitch_heights(&mut ocean_floor_wg, 0, 0, center_heights);
+        for dx in -1..=1i32 {
+            for dz in -1..=1i32 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let neighbour = pre[Self::region_slot(dx, dz)]
+                    .as_ref()
+                    .expect("every non-centre offset was filled above");
+                Self::stitch_heights(&mut ocean_floor_wg, dx * 16, dz * 16, &neighbour.1);
             }
         }
 
@@ -99,16 +134,37 @@ impl OverworldGenerator {
                 .is_some_and(|members| members.contains(block))
         };
 
+        // Borrowed once, outside the closure, so the view's lifetime is plainly
+        // tied to two locals rather than to whatever the closure captured.
+        let centre_source: &crate::dense_grid::DenseBlockGrid = &center_world;
+        let pre_sources = &pre;
+        let mut view = crate::feature::region_view::RegionView::over_sources(
+            Arc::clone(&self.interner),
+            cx,
+            cz,
+            self.min_y,
+            self.height,
+            |dx, dz| {
+                if dx == 0 && dz == 0 {
+                    Some(centre_source)
+                } else {
+                    pre_sources[Self::region_slot(dx, dz)]
+                        .as_ref()
+                        .map(|neighbour| &neighbour.0)
+                }
+            },
+        );
+
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
         // Debug-only escape hatch (LODESTONE_ORE_SINGLE_SOURCE_DEBUG): run only
         // the centre's own decoration pass (matching `ComposedChunkOracle
-        // .java`'s single-source-only `postfeatures` stage) while still
-        // stitching the full 3x3 terrain/heightmap above, so `get_height`'s
+        // .java`'s single-source-only `postfeatures` stage) while still exposing
+        // the full 3x3 terrain/heightmap through the view, so `get_height`'s
         // probes never panic. Used once to isolate "is the centre pass itself
         // correct" from "does real 3x3 spill widen the gap against a
         // single-source oracle" — see docs/worldgen-parity.md. Not used by
         // `column()`'s normal path.
-        let region = if std::env::var("LODESTONE_ORE_SINGLE_SOURCE_DEBUG").is_ok() {
+        if std::env::var("LODESTONE_ORE_SINGLE_SOURCE_DEBUG").is_ok() {
             let ores = ores_for_source(cx, cz);
             let input = crate::feature::OreInput {
                 chunk_x: cx,
@@ -122,9 +178,9 @@ impl OverworldGenerator {
                 ocean_floor_wg: &ocean_floor_wg,
                 in_tag: &in_tag,
             };
-            crate::feature::apply_ore_step(&mut random, self.seed, &input, &region, ores)
+            crate::feature::apply_ore_step(&mut random, self.seed, &input, &mut view, ores);
         } else {
-            let (region, _decoration_seed) = apply_ore_step_3x3_per_source(
+            apply_ore_step_3x3_per_source(
                 &mut random,
                 self.seed,
                 cx,
@@ -135,105 +191,80 @@ impl OverworldGenerator {
                 self.height,
                 &ocean_floor_wg,
                 &in_tag,
-                &region,
+                &mut view,
                 &ores_for_source,
             );
-            region
-        };
+        }
 
+        // Only the cells ore actually wrote, in the `(y, lz, lx)` order the
+        // deleted full-box walk visited them in.
+        //
+        // **That order is the byte-identity argument, not a tidiness one.** The
+        // old fold-back called `set_id` on all 98,304 centre cells; a
+        // `DenseBlockGrid` appends to its local palette in first-write order, and
+        // that palette is what reaches the wire. Skipping the unchanged cells is
+        // safe because an unchanged cell's state came out of `center_world` itself
+        // and so is already in its palette — therefore every state that is *new*
+        // to the palette sits at a written cell, and the new states' first-write
+        // sequence is unchanged as long as the written cells are visited in the
+        // same order. See `RegionView::centre_writes_in_scan_order`.
+        let writes = view.centre_writes_in_scan_order();
+        // Releases the view's borrow of `center_world` and of `pre`.
+        drop(view);
         let mut center_world = center_world;
-        // Unconditional, unlike the old `HashMap`'s `if let Some(state) =
-        // region.get(&key)`: the centre's own 16×16×height range is always
-        // fully stitched before ore placement runs (the very first
-        // `stitch_region` call above), so every cell this loop reads was
-        // always already written — a `DenseBlockGrid` has no separate
-        // "touched" bit to check, and none is needed here.
-        for y in self.min_y..self.min_y + self.height {
-            for lz in 0..16i32 {
-                for lx in 0..16i32 {
-                    // Id-keyed for the same reason as `stitch_region`'s loop
-                    // above: `region` and `center_world` share this generator's
-                    // one `Arc<StateInterner>`, so routing 98,304 cells per
-                    // chunk through `id_of`'s `RwLock` to recover an id the
-                    // source grid already held was pure contention.
-                    let state = region.get_id(lx, y, lz);
-                    center_world.set_id(cx * 16 + lx, y, cz * 16 + lz, state);
-                }
-            }
+        for (lx, y, lz, state) in writes {
+            center_world.set_id(cx * 16 + lx, y, cz * 16 + lz, state);
         }
         center_world
     }
 
-    /// Copies one source chunk's own post-carve world/heights into a shared
-    /// 3×3 region grid, translating its absolute coordinates into
-    /// centre-relative local coordinates (`crate::feature::REGION_MIN..
-    /// REGION_MAX` on each axis, matching [`crate::feature::OreInput::region_local`]'s
-    /// key space).
+    /// The [`crate::feature::region_view`] slot index for chunk offset
+    /// `(dx, dz)` ∈ `[-1, 1]²`.
     ///
-    /// `world` is read via [`crate::dense_grid::DenseBlockGrid::get`] (O(1)
-    /// array access, issue #295's Job 2) and written into `region` — also a
-    /// [`crate::dense_grid::DenseBlockGrid`] since issue #106 — via
-    /// [`crate::dense_grid::DenseBlockGrid::set`], which interns each
-    /// distinct state string once in `region`'s own palette rather than
-    /// heap-allocating a fresh `String` per cell the way a
-    /// `HashMap<(i32,i32,i32), String>`'s `.insert` used to. This runs for
-    /// all 9 source chunks on every `column()` call (this is the "9×
-    /// String-map re-materialisation" issue #106 named — the per-source
-    /// *pipeline* recompute this loop's caller avoids is a separate,
-    /// already-fixed cost; see [`OverworldGenerator::store`]'s doc
-    /// comment), so cutting its allocation count matters regardless of
-    /// whether the pipeline itself was a cache hit. `ocean_floor_wg` stays
-    /// a small `HashMap<(i32,i32), i32>` — at most 48×48 = 2304 entries
-    /// total across the whole region, an order of magnitude below the
-    /// `48×384×48` block field, so it was never the cost this pass targets.
-    fn stitch_region(
-        region: &mut crate::feature::RegionGrid,
+    /// Derived by asking `source_slot` about that offset's **own origin column**,
+    /// so this file and the view agree on the slot convention by construction
+    /// rather than by two copies of the same arithmetic staying in step. That is
+    /// the class of mistake `region_view`'s module doc records.
+    fn region_slot(dx: i32, dz: i32) -> usize {
+        crate::feature::region_view::source_slot(dx * 16, dz * 16)
+            .expect("a 3x3 chunk offset's own origin column is inside the driven region")
+    }
+
+    /// Copies one source chunk's own `OCEAN_FLOOR_WG` heightmap into the shared
+    /// region-local map the ore driver probes, at centre-relative offset
+    /// `(offset_x, offset_z)` = `(source_cx - center_cx) * 16` (matching
+    /// [`crate::feature::OreInput::region_local`]'s key space).
+    ///
+    /// **This is all that is left of `stitch_region`.** Until Unit 7 this function
+    /// also copied the source's entire `16 × height × 16` block field into a
+    /// materialised region grid — 98,304 cells per source, nine sources, on every
+    /// `column()` call, warm, which is the half of diagnostic D2 that survived
+    /// Unit 3's interning and Unit 6's id-keying. `RegionView` routes those reads
+    /// to the source grid instead, so the block loop is gone and with it the
+    /// `crate::counters::bump_stitch_cells` call that measured it: the counter now
+    /// reads **zero** for a served column, which is this unit's acceptance
+    /// criterion.
+    ///
+    /// The heights stayed a copy on purpose. 256 `i32`s per source is 2,304
+    /// entries for the whole region against the 884,736-cell field that went away,
+    /// and the driver reads them by *clamped* region-local key
+    /// ([`crate::feature::OreInput::region_local`]) rather than by chunk, so a view
+    /// over nine `[i32; 256]`s would have to reproduce that clamp to answer the
+    /// same thing. Not worth the risk for 0.26% of the volume; if it ever matters,
+    /// the win is a dense `[i32; 48 * 48]` array rather than a `HashMap`, and the
+    /// clamp has to move with it.
+    fn stitch_heights(
         ocean_floor_wg: &mut HashMap<(i32, i32), i32>,
-        source_cx: i32,
-        source_cz: i32,
-        center_cx: i32,
-        center_cz: i32,
-        world: &crate::dense_grid::DenseBlockGrid,
+        offset_x: i32,
+        offset_z: i32,
         heights: &[i32; 256],
     ) {
-        let base_x = source_cx * 16;
-        let base_z = source_cz * 16;
-        let dx = (source_cx - center_cx) * 16;
-        let dz = (source_cz - center_cz) * 16;
-        // Diagnostic D2, and U7's acceptance criterion (zero). Counted in bulk
-        // from the loop bounds rather than once per cell: an atomic increment
-        // 98,304 times per stitch would dominate the very cost being measured,
-        // and the product is exact — the loop below has no `continue`.
-        crate::counters::bump_stitch_cells(256 * world.bounds().4.max(0) as u64);
-        for ly in 0..world.bounds().4 {
-            let y = world.bounds().1 + ly;
-            for lz in 0..16i32 {
-                for lx in 0..16i32 {
-                    // `get_id`/`set_id`, not `get`/`set`. The string-keyed pair
-                    // resolves the source cell to a `&'static str` and then hands
-                    // it straight back to `interner.id_of`, which takes an
-                    // `RwLock` **read** guard — 884,736 of them per `ore_stage`
-                    // (9 sources x 98,304 cells). A read guard is not free under
-                    // concurrency: it increments a shared atomic, so every one of
-                    // the join burst's workers was ping-ponging the same cache
-                    // line through a lock whose answer it already had. Safe
-                    // because `region` and `world` are built from the *same*
-                    // `Arc<StateInterner>` (`ore_stage` and `fill`'s
-                    // `with_interner` calls both pass `Arc::clone(&self.interner)`),
-                    // so a `StateId` means the same state in both. Palette order
-                    // is untouched: `set_id` appends to the local palette in
-                    // first-write order exactly as `set` did — the property
-                    // DESIGN.md 12.100 warns must never reach the wire.
-                    let state = world.get_id(base_x + lx, y, base_z + lz);
-                    let rx = base_x + lx - center_cx * 16;
-                    let rz = base_z + lz - center_cz * 16;
-                    region.set_id(rx, y, rz, state);
-                }
-            }
-        }
         for lz in 0..16i32 {
             for lx in 0..16i32 {
-                ocean_floor_wg.insert((dx + lx, dz + lz), heights[(lz * 16 + lx) as usize]);
+                ocean_floor_wg.insert(
+                    (offset_x + lx, offset_z + lz),
+                    heights[(lz * 16 + lx) as usize],
+                );
             }
         }
     }
@@ -272,16 +303,22 @@ impl OverworldGenerator {
         &self,
         cx: i32,
         cz: i32,
-        world: crate::dense_grid::DenseBlockGrid,
+        world: Arc<crate::dense_grid::DenseBlockGrid>,
     ) -> crate::dense_grid::DenseBlockGrid {
         if self.vegetation_by_biome.values().all(Vec::is_empty) {
-            return world;
+            return Arc::try_unwrap(world).unwrap_or_else(|shared| (*shared).clone());
         }
         // After the early return — see `ore_stage`'s note on why.
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Vegetation);
 
         let base_x = cx * 16;
         let base_z = cz * 16;
+        // Debug-only escape hatch (LODESTONE_VEG_SINGLE_SOURCE_DEBUG),
+        // mirroring `LODESTONE_ORE_SINGLE_SOURCE_DEBUG` above: give the grid no
+        // neighbour sources and decorate the centre only, matching
+        // `VegetationOracle.java`'s SINGLE mode's own narrower scope for
+        // direct comparison. Not used by `column()`'s normal path.
+        let single_source_debug = std::env::var("LODESTONE_VEG_SINGLE_SOURCE_DEBUG").is_ok();
         // `VegGrid` takes the CENTRE chunk's own absolute block origin so
         // every one of the 9 sources' absolute-coordinate writes translates
         // correctly relative to it — see `VegGrid`'s own doc comment (the
@@ -291,7 +328,18 @@ impl OverworldGenerator {
         // (especially 2×2 trunks and their canopies) can spill past the tight
         // 48-block 3×3 neighbourhood, and `VegGrid::set_if_in_bounds` drops any
         // cell outside it — the chunk-border cut-off trees the player sees.
-        let mut grid = crate::feature::vegetation::VegGrid::with_footprint_interned(
+        //
+        // Unit 7: `with_sources`, not `with_footprint_interned` + a seeding loop.
+        // `stitch_veg_region` used to copy all nine post-ore chunks into this
+        // grid's `HashMap` — 884,736 inserts per column, leaving 884,736 live
+        // entries — purely to make the neighbourhood addressable. The grids are
+        // now borrowed as read-only `Arc` snapshots straight out of the staged
+        // store and the map holds only what decoration writes. Nothing about the
+        // placement engine's view of the world changed: a read still answers the
+        // source terrain, a write still shadows it for later reads in the same
+        // step, and the padding ring still answers air because no source covers
+        // it.
+        let mut grid = crate::feature::vegetation::VegGrid::with_sources(
             Arc::clone(&self.interner),
             self.min_y,
             self.height,
@@ -299,26 +347,20 @@ impl OverworldGenerator {
             base_z,
             crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
             crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
-        );
-
-        Self::stitch_veg_region(&mut grid, cx, cz, &world, self.min_y, self.height);
-        // Debug-only escape hatch (LODESTONE_VEG_SINGLE_SOURCE_DEBUG),
-        // mirroring `LODESTONE_ORE_SINGLE_SOURCE_DEBUG` above: skip
-        // stitching/decorating the 8 neighbours, matching
-        // `VegetationOracle.java`'s SINGLE mode's own narrower scope for
-        // direct comparison. Not used by `column()`'s normal path.
-        let single_source_debug = std::env::var("LODESTONE_VEG_SINGLE_SOURCE_DEBUG").is_ok();
-        if !single_source_debug {
-            for dx in -1..=1i32 {
-                for dz in -1..=1i32 {
-                    if dx == 0 && dz == 0 {
-                        continue;
-                    }
-                    let neighbour_world = self.post_ore_world(cx + dx, cz + dz);
-                    Self::stitch_veg_region(&mut grid, cx + dx, cz + dz, &neighbour_world, self.min_y, self.height);
+            |dx, dz| {
+                if dx == 0 && dz == 0 {
+                    Some(Arc::clone(&world))
+                } else if single_source_debug {
+                    None
+                } else {
+                    // Recurses into that neighbour's own 3×3 ore composition,
+                    // memoised in the store — the same call the seeding loop made,
+                    // in the same `dx` outer / `dz` inner order, just without the
+                    // copy that followed it.
+                    Some(self.post_ore_world(cx + dx, cz + dz))
                 }
-            }
-        }
+            },
+        );
 
         let features_for_source = |source_x: i32, source_z: i32| -> &[(usize, crate::feature::vegetation::PlacedRef)] {
             // Issue #480: resolve the per-source feature list from the source
@@ -371,7 +413,15 @@ impl OverworldGenerator {
             );
         }
 
-        let mut world = world;
+        // The one grid this call is allowed to mutate, and the one copy this stage
+        // still makes: the store owns the canonical post-ore product and shares it
+        // with every other column that has this chunk as a neighbour, so the
+        // served chunk has to be a private copy of it. That is one 98,304-cell
+        // `Vec<u16>` memcpy — the same clone `column()` used to make before
+        // handing the grid in, moved here so the pre-vegetation content can also
+        // serve as the view's centre source. It is not a stitch: nothing is
+        // re-palettised and no cell is read individually.
+        let mut world = (*world).clone();
         // `grid.dirty_cells()` yields absolute coordinates over the whole
         // driven `REGION_MIN..REGION_MAX` footprint (any of the 9 sources
         // may have written there), but `world` is sized to exactly the
@@ -384,6 +434,10 @@ impl OverworldGenerator {
         // string and look the same id back up. Both grids share this
         // generator's interner, so the id moves straight across. Allocation-free
         // either way — this is lock and hash traffic, not heap traffic.
+        //
+        // Write order, not scan order, and unchanged by Unit 7: `dirty` is a `Vec`
+        // in insertion order, so the states vegetation introduces are appended to
+        // `world`'s palette in exactly the sequence they were placed, as before.
         debug_assert_eq!(
             grid.interner().instance_id(),
             world.interner().instance_id(),
@@ -483,51 +537,19 @@ impl OverworldGenerator {
         (world, counts)
     }
 
-    /// Copies one source chunk's own post-ore terrain into the shared
-    /// [`crate::feature::vegetation::VegGrid`] `grid` — the vegetation
-    /// analogue of [`Self::stitch_region`], but via [`VegGrid::seed`]
-    /// (absolute-coordinate, per-cell) rather than a second dense-grid
-    /// region, since [`VegGrid`] is this module's own established seam for
-    /// vegetal decoration's read/write surface (see that type's doc
-    /// comment) and [`Self::vegetation_stage`] already owns exactly one
-    /// such grid per `column()` call.
-    fn stitch_veg_region(
-        grid: &mut crate::feature::vegetation::VegGrid,
-        source_cx: i32,
-        source_cz: i32,
-        world: &crate::dense_grid::DenseBlockGrid,
-        min_y: i32,
-        height: i32,
-    ) {
-        let base_x = source_cx * 16;
-        let base_z = source_cz * 16;
-        // This loop *was* the single most damning number in the rewrite
-        // diagnosis: one `String` allocation per cell, `256 * height` cells per
-        // source chunk, nine sources per column — 884,736 of the 905,459
-        // allocations a warm column performed, 97.7% of the serve path's entire
-        // heap traffic from one `to_string()`.
-        //
-        // Unit 3 deleted it. Both grids now carry `crate::interner::StateId`
-        // against the same interner, so a cell copy is a `u16` move and the
-        // `bump_string_allocs` that used to accompany `bump_stitch_cells` is
-        // gone with it. `stitch_cells` itself stays — the *copy* is still real,
-        // and deleting it (not just its allocations) is Unit 7's job, measured
-        // by this same counter.
-        debug_assert_eq!(
-            world.interner().instance_id(),
-            grid.interner().instance_id(),
-            "stitching between grids with different interners would copy meaningless ids",
-        );
-        let cells = 256 * height.max(0) as u64;
-        crate::counters::bump_stitch_cells(cells);
-        for ly in 0..height {
-            let y = min_y + ly;
-            for lz in 0..16i32 {
-                for lx in 0..16i32 {
-                    let state = world.get_id(base_x + lx, y, base_z + lz);
-                    grid.seed_id(base_x + lx, y, base_z + lz, state);
-                }
-            }
-        }
-    }
 }
+
+// `stitch_veg_region` used to live here, and Unit 7 deleted it rather than
+// narrowing it. It copied one source chunk's whole post-ore field into the
+// vegetation grid, absolute cell by absolute cell, and it was the single most
+// damning number in `docs/plans/worldgen-rewrite.md`'s diagnosis: at one
+// `String` allocation per cell it accounted for 884,736 of the 905,459 heap
+// allocations a warm column performed — 97.7% of the serve path's entire heap
+// traffic from one `to_string()`.
+//
+// Unit 3 took the allocations (both grids carry `StateId` against one interner,
+// so a cell copy became a `u16` move) and Unit 6 took the interner lock traffic,
+// but the *copy* survived both, and so did the 884,736-entry `HashMap` it filled.
+// `VegGrid::with_sources` deletes it outright: the nine grids are borrowed, and
+// `crate::counters::Counters::stitch_cells` — the counter that measured exactly
+// this loop and `stitch_region`'s twin — now reads zero for a served column.
