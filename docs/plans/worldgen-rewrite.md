@@ -61,9 +61,16 @@ Measured or directly cited defects, not adjectives. Cites are to the tree at `43
   makes **98,304 `AquiferSystem::block_at` calls per chunk**, each walking `final_density` plus up
   to 7 more trees. Cell interpolation exists and matches vanilla's 4×8×4 corner scheme, but it is
   implemented as memoised *point queries* (8 corner lookups through `RefCell`-guarded per-slot
-  caches per block) rather than vanilla's incremental cell walk (`advanceCellX`/`updateForY`),
-  which `chunk.rs`'s own module doc admits. Branchy dispatch + pointer-chasing + hash-or-index
-  lookups per block, where vanilla pays a sliding lerp.
+  caches per block) where vanilla prefills each cell once. **Corrected (`08f5d98a`, DESIGN.md
+  §12.101): the arithmetic was already right and this paragraph previously prescribed the wrong
+  fix.** Vanilla has *two* interpolation orders — `Mth.lerp3` (X-inner) under `fillingCell`, and
+  the incremental `advanceCellX`/`updateForY` chain (Y-inner) — different IEEE 754 expressions,
+  and the block field only ever sees the first, because `NoiseChunk.java:157-160` wraps
+  `final_density` in a code-only `cache_all_in_cell` whose cache is prefilled under
+  `fillingCell == true`. `chunk.rs` implements exactly that; its module doc claimed the opposite
+  (now fixed, with a standing inverted guard). The defect here is the per-block *lookup cost*,
+  not the nesting: branchy dispatch + pointer-chasing + hash-or-index lookups per block, where
+  vanilla pays a sliding lerp over a prefilled cell.
 - **D2 — `String` block states end-to-end.** `DenseBlockGrid` palette-interns but `get`/`set`
   traffic in `&str` with a `HashMap<String,u16>` probe per write (`dense_grid.rs:108`).
   `stitch_region` (`overworld.rs:866`) copies all 9 sources' full 16×384×16 grids into a fresh
@@ -108,9 +115,13 @@ engine's *semantics*.
 2. **A flattened density graph.** The `Density` tree compiles (per seed, once) into a contiguous
    `Vec` of components addressed by index — children are indices, not `Box`es — with per-chunk
    evaluation state (interpolator planes, flat-cache tables, cell caches) in reusable buffers owned
-   by a per-chunk scratch object, not `RefCell`s inside the sampler. Evaluation is vanilla's
-   incremental cell walk: corner lattices evaluated per cell column, lerped incrementally.
-   (PumpkinMC independently converged on exactly this shape; see Q2.)
+   by a per-chunk scratch object, not `RefCell`s inside the sampler. Evaluation fills each cell's
+   corner lattice once and interpolates in **`Mth.lerp3`'s X-inner order — the order
+   `cache_all_in_cell` selects for the block field (`08f5d98a`, §12.101) — never the
+   `advanceCellX`/`updateForY` incremental chain**, which is a different IEEE 754 expression:
+   measured, the two nestings differ on 60,300 of 393,216 blocks, and swapping them takes
+   `chunk_parity` from 98,304/98,304 to 90,563/98,304. (PumpkinMC independently converged on the
+   cell-fill shape; see Q2.)
 3. **A staged per-chunk store instead of caches.** Each chunk's intermediate products (pre-ore
    grid + heights + biomes; post-ore grid) live in a sharded store keyed by chunk pos with a
    per-entry stage state machine, retained while any in-flight request's neighbourhood needs them
@@ -225,7 +236,12 @@ delete" vs "irreducible parity-bound work".**
   ~2.2M-comparison-per-chunk biome scan (D5) and the ~2.8M-cell stitch copies (D2) are pure
   overhead vanilla does not perform at all. Deleting waste does not move an RNG draw.
 - The irreducible floor at parity is: ~1,225 corner evaluations per interpolated slot per chunk
-  (5×49×5 lattice) + flat-cache quart sampling + the surface-rule walk + the 289-source carver
+  (5×49×5 lattice) + flat-cache quart sampling + the surface-rule walk.
+  **Be precise about what U4's corner win is: a lookup win, not arithmetic** — ~786,432 per-block
+  corner *lookups* per chunk collapse to ~6,144 corner *evaluations*, while the lerp's
+  multiply-adds are unchanged. That bounds how much of `C_ss` U4 alone can move; a flat `C_ss`
+  after U4 is this accounting showing itself, not a failed implementation. The remaining floor
+  also includes the 289-source carver
   probability gates + the ore and vegetation RNG walks. The RNG walks are **sequential by
   definition** — vanilla's draw order is the spec — so SIMD and parallelism cannot touch them.
   But be precise about what that argument covers: the spec fixes **which numbers are drawn and in
@@ -323,6 +339,14 @@ propagate a shared misunderstanding; both gates run, always).
    gate set, reclassifying a mismatch as "expected" without a JVM fixture proving vanilla
    produces it, or landing the cutover with the investigation open.
 
+   **Worked example of why the tolerance rule is absolute** (measured, `08f5d98a` / §12.101):
+   implementing the wrong one of vanilla's two interpolation orders scores **90,563/98,304** on
+   `chunk_parity` — 7,741 blocks per chunk, every one a last-place float difference, worst gap
+   `1.78e-15`; across the field, 60,300 of 393,216 blocks. A 92% pass with float-dust residuals
+   reads *exactly* like a "tighten the epsilon" discussion — which is how a wrong **algorithm**
+   survives review as a **precision** problem. The tolerance is the alarm; widening it is
+   cutting the wire.
+
 ## Benchmark definition (Unit 1 detail)
 
 `benches/generation.rs` already has criterion + JSONL recording, a 10-stage split with per-stage
@@ -361,8 +385,17 @@ it does not start over. What it adds:
   overlapped. Profiles are large artifacts: write them under a scratch path adjacent to the
   unit's private `--target-dir` and delete by exact name when the unit ends.
 - Acceptance criteria for later units are expressed **in these counters** (U3: zero String
-  allocations steady-state; U6: stage computations == chunks × stages exactly; U7: zero stitch
-  copies), so the harness is the contract, not a dashboard.
+  allocations steady-state; U6: stage computations exactly equal to **each stage's own closure
+  count** — for a 12×12 sweep, pre-ore 16×16 = 256 and post-ore 14×14 = 196; U7: zero stitch
+  copies), so the harness is the contract, not a dashboard. U6's criterion originally read
+  "chunks × stages", whose natural reading (144 × 2 = 288) is **wrong** — each stage closes over
+  its own neighbourhood radius; do not gate on 288.
+- **If a change has a concurrency dimension, a serial measurement can conclude there was nothing
+  to fix.** Measured while landing U6: a serial sweep reads 256/196 under **both** the old FIFO
+  cache and the new store — serially, a cache never has a racing miss, so the two implementations
+  are indistinguishable by the very counter that defines the unit. The discriminating instrument
+  was a 289-column concurrent join burst: old **452/452/448 and varying across runs**, new
+  **441/441/441 exact**. Gate concurrency-dimension changes under concurrency.
 
 ## SIMD policy
 
@@ -423,6 +456,14 @@ figure is the single most damning number in the diagnosis; its disappearance is 
 implied.
 
 ## Decomposition (U16 detail)
+
+**Status: delivered.** Phases A and B are in-tree (`overworld/` and `feature/vegetation/` exist
+as directories), Phase C landed as `4aa7ac85` — extracting the *corrected* closed set including
+`counters` (see Phase C below, corrected in `4be59556`). The as-built ownership map, and the
+gotchas the split actually hit, are in
+[`../worldgen-module-layout.md`](../worldgen-module-layout.md); this section remains as the
+design record. Older docs naming `overworld.rs`/`feature/vegetation.rs` read as the directory of
+the same name, deliberately not bulk-rewritten.
 
 Enabled by the architecture grant above. Measured surface at planning time (counts drift while U3
 is live in this crate): `feature/vegetation.rs` 3,661 lines, `overworld.rs` 1,832,
@@ -539,9 +580,9 @@ acceptance is always counters and gates — never a profile, never a bare durati
 | U1 | Benchmark harness: counters + C_ss/C_cold + calibration | `benches/`, `src/` counter hooks, `docs/benchmark-harness.md` | — | M | none |
 | U2 | Release baseline + profile on embedded data; publish per-stage µs + counters; re-negotiate targets | bench-results, this doc, DESIGN §12 entry | U1 | S | none |
 | U3 | Numeric ids: interned `u16` states through dense_grid/carver/ore/top-layer; `String` only at serve boundary | `dense_grid.rs`, `carver/`, `feature/mod.rs`, `feature/top_layer.rs`, `overworld.rs` | U1 | L | none (representation) |
-| U4 | Flattened density engine + vanilla cell-walk + per-chunk scratch (kills D1, D3) | new `engine/` (in the U16 leaf crate), then `density/`, `aquifer/`, `overworld/fill.rs` cutover | U1, U16 | L | none (no RNG in density) |
+| U4 | Flattened density engine + vanilla cell-fill (`Mth.lerp3` order — §12.101, **not** the incremental walk) + per-chunk scratch (kills D1, D3) — order fix landed `08f5d98a`; remainder re-scoped in **#490** | new `engine/` (in the U16 core crate), then `density/`, `aquifer/`, `overworld/fill.rs` cutover | U1, U16 | L | none (no RNG in density) |
 | U5 | `std::simd` noise kernels behind U4's batched fill API | `noise/`, `src/engine/` | U4, U2 profile | M | none (position-lane only) |
-| U6 | Staged sharded store replacing both mutex caches; drivers unchanged | new `src/engine/store.rs`, `overworld/mod.rs` | U3, U16 | L | **must not** — byte-identical gate |
+| U6 | Staged sharded store replacing both mutex caches; drivers unchanged — **landed** `34202a21` | `overworld/store.rs`, `overworld/mod.rs` | U3, U16 | L | **must not** — byte-identical gate (held) |
 | U7 | In-place region decoration view; delete stitch copies + `RegionGrid`/`VegGrid` re-seeding | `feature/mod.rs`, `feature/vegetation.rs`, `overworld.rs` | U3, U6 | M | **must not** — same driver order |
 | U8 | Vegetation engine port to ids + region view (the 3.6k-line module) | `feature/vegetation.rs` | U3, U7 | L | **must not** — depth-first recursion untouched |
 | U9 | Biome layer: memoised per-source biome in store + RTree port | `biome.rs`, `src/engine/` | U6 | M | none, but **values must match brute force exactly** |
@@ -582,15 +623,32 @@ reproduce this otherwise.
   the gate. Evidence adds: steady-state String-allocation counter == 0.
 - **U4**: the semantic subtleties the interpreter hides — `Mul`'s `v1 == 0.0` short-circuit,
   `interpolated`-inside-corner transparency (`interpolate=false`), `flat_cache`'s forced `y=0`,
-  `cache_once`/`cache_2d` scoping. Evidence adds: `DensityChunkOracle` fixtures bit-exact, whole
-  chunks byte-identical to old sampler at ≥3 seeds, corner-eval counter == predicted lattice.
+  `cache_once`/`cache_2d` scoping — and above all the interpolation order: the block field is
+  `Mth.lerp3` under a code-only `cache_all_in_cell` (§12.101). Evidence adds:
+  `DensityChunkOracle` fixtures bit-exact **for component functions only — the oracle itself
+  drives the incremental `advanceCellX`/`updateForY` chain (its own source, lines 76–83), so it
+  is *not* authoritative for the block field's interpolation order**; that gate is `chunk_parity`
+  (98,304/98,304) plus the standing inverted guard landed in `08f5d98a`. Whole chunks
+  byte-identical to old sampler at ≥3 seeds, corner-eval counter == predicted lattice.
+  **Status: partially delivered** — `08f5d98a` landed the order fix, the module doc and the
+  inverted guard; the flattened engine, the cutover, `legacy_random_source` (#486) and
+  `end_islands` are re-scoped in **#490**. Two measured structural constraints for the engine
+  design: `column_timed` pins all seven stage signatures and derives `StageTimes` from the
+  `build_aquifer`/`fill_stage` boundary; and `AquiferTrees` pins **eight** `Density` fields by
+  struct literal, so a compiled-graph cache has nowhere to live **unless `Builder::build`'s
+  returned `Density` carries it** — a route needing no non-owned edits (outside `density/`,
+  `Density` variants are only constructed, 11 sites; `Spline` has no external users), which also
+  makes `t.erosion.clone()` an `Arc` bump, delivering D3's eight-deep-clones fix for free.
 - **U5**: FMA and reduction reassociation (see policy). Evidence: bit-identical to U4 output
   across the full fixture set — an internal refactor gate *plus* the JVM fixtures, because
   "identical to our own previous output" alone is `decode(encode(x))` in disguise.
-- **U6**: the aliasing trap — `pre_ore_stage`'s doc records a clamped-key cache aliasing two
-  chunks and hanging a JVM oracle. Exact keys only; eviction is view-scoped, never capacity-FIFO.
-  Evidence adds: stage-computation counter == chunks × stages over a sweep; 12×12 sweep
-  byte-identical to old engine; join-burst wall time on 289 columns (the D4 regression scenario).
+- **U6** (**landed**, `34202a21` + `9c4f0967`, doc `5814da19`): the aliasing trap —
+  `pre_ore_stage`'s doc records a clamped-key cache aliasing two chunks and hanging a JVM oracle.
+  Exact keys only; eviction is view-scoped, never capacity-FIFO. Evidence as delivered:
+  stage-computation counter == each stage's closure count (256/196 on a 12×12 sweep — see the
+  corrected criterion in the harness section); sweep byte-identical to old engine; and the
+  289-column join burst as the *discriminating* gate, since the serial counter reads identically
+  under old cache and new store (old burst: 452/452/448 varying; new: 441/441/441 exact).
 - **U7**: the **VegGrid absolute-vs-local precedent** — a coordinate-space bug produced zero
   vegetation in every served chunk with the unit suite green, and the gate that caught it was
   later deleted. Evidence adds: a boundary-write control (a feature known to spill across the
@@ -647,6 +705,16 @@ Everything full vanilla parity requires, present or absent, so nothing is discov
 de-obfuscated `src/` — not recalled from memory. Blocker classes: **[data]** absent from the
 bundle, **[engine]** absent engine primitive, **[gameplay]** cannot finish even with perfect
 worldgen, **[unwritten]** nothing blocks it, **[out-of-scope]** deliberately excluded.
+
+**Caveat (learned the hard way — `08f5d98a`, §12.101): this census is authoritative about which
+density-function *types* exist and silent about how they are *evaluated*.** It was built by
+walking the `noise_settings` JSON, and the marker that selects the block field's interpolation
+arithmetic — `cache_all_in_cell` — appears **nowhere in 26.2's worldgen JSON** (0 hits across
+both the bundled corpus and the jar's own `data/minecraft/worldgen/`, with a working detector:
+the `minecraft:interpolated` control hits 2 and 8). Vanilla applies it in code,
+`NoiseChunk.java:157-160`. This is the same class as CLAUDE.md's `registries.json` trap: an
+authoritative source answering a *neighbouring* question. A data census cannot see evaluation
+order; only the decompiled call path can.
 
 **Data completeness, bundle vs jar** (`assets/worldgen/` vs `data/minecraft/worldgen/`):
 
