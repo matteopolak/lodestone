@@ -412,7 +412,20 @@ fn place_configured_feature<R: RandomSource>(
                 "LODESTONE_VEG_STRICT: unmodelled vegetal-decoration feature reached a \
                  placement at {pos:?}: {reason}"
             );
-            census_bump(|c| *c.unsupported.entry(reason.clone()).or_default() += 1);
+            // U8: `entry(reason.clone())` allocated a `String` on EVERY unmodelled
+            // dispatch, not just the first — `Entry` has to own the key before it
+            // knows whether it needs it. Unmodelled dispatches are not rare
+            // (`multiface_growth` alone is in 55 biomes, and ~1/3 of oak attempts
+            // roll a fancy/fallen branch), so this one line was the largest single
+            // remaining allocation source in the steady-state serve path once the
+            // placement engine itself stopped allocating. Probe first, clone only
+            // to insert; a `BTreeMap<String, _>` looks up by `&str` via `Borrow`.
+            census_bump(|c| match c.unsupported.get_mut(reason.as_str()) {
+                Some(n) => *n += 1,
+                None => {
+                    c.unsupported.insert(reason.clone(), 1);
+                }
+            });
         }
     }
 }
