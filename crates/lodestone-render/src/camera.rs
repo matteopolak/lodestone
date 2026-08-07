@@ -15,6 +15,14 @@
 //! * **Yaw/pitch/forward:** **held, exactly.** The expansion above equals our
 //!   `(-sin(yaw)cos(pitch), -sin(pitch), cos(yaw)cos(pitch))`: yaw `0` faces
 //!   `+Z` (south), yaw `90` faces `-X` (west), positive pitch looks down.
+//! * **Up/right are *derived*, not supplied:** **this was wrong and is now
+//!   corrected.** Vanilla rotates `UP` and `LEFT` by the same
+//!   `rotationYXZ(π − yaw, −pitch, 0)` quaternion it rotates `FORWARDS` by, so
+//!   `up = (−sin y·sin p, cos p, cos y·sin p)` and `left = (cos y, 0, sin y)`.
+//!   [`Camera::view_matrix`] used to hand `Vec3::Y` to a look-at instead, which
+//!   is **degenerate at pitch ±90** — the flipped-camera bug. See
+//!   `Camera::basis` for the whole mechanism; there is no singularity in
+//!   vanilla's construction, and no pitch clamp tighter than `±90` is needed.
 //! * **FOV is vertical, default 70:** **held.** `GameRenderer`/`Camera` pass
 //!   `options.fov` (default 70) straight into JOML `Matrix4f.perspective`, whose
 //!   first argument is the *vertical* FOV in radians. Sprint/sneak/speed/death
@@ -102,20 +110,117 @@ impl Camera {
         (rd_blocks * 4.0).max(cloud_range_chunks as f32 * 16.0)
     }
 
+    /// The camera's orthonormal world-space basis, `(right, up, forward)`,
+    /// derived from a **single YXZ Euler rotation** exactly the way vanilla's
+    /// `Camera.setRotation` derives its own `forwards`/`up`/`left`
+    /// (`.cache/mc/26.2/client-src/net/minecraft/client/Camera.java:336-344`):
+    ///
+    /// ```text
+    /// this.rotation.rotationYXZ((float) Math.PI - yRot * (float) (Math.PI / 180.0),
+    ///                           -xRot * (float) (Math.PI / 180.0), 0.0F);
+    /// FORWARDS.rotate(this.rotation, this.forwards);   // FORWARDS = ( 0,  0, -1)
+    /// UP.rotate(this.rotation, this.up);               // UP       = ( 0,  1,  0)
+    /// LEFT.rotate(this.rotation, this.left);           // LEFT     = (-1,  0,  0)
+    /// ```
+    ///
+    /// JOML's `Quaternionf.rotationYXZ(y, x, z)` is documented as
+    /// `rotationY(y).rotateX(x).rotateZ(z)`, and JOML's `rotateX`/`rotateZ`
+    /// right-multiply (local-frame), so the rotation matrix is `Ry · Rx · Rz`.
+    /// With vanilla's arguments — `y = π − yaw`, `x = −pitch`, `z = 0` (**no
+    /// roll**) — that is `R = Ry(π − yaw) · Rx(−pitch)`, whose expansion is:
+    ///
+    /// ```text
+    /// forward = (−sin y · cos p,  −sin p,   cos y · cos p)
+    /// up      = (−sin y · sin p,   cos p,   cos y · sin p)
+    /// left    = ( cos y,           0,       sin y       )   → right = −left
+    /// ```
+    ///
+    /// `cos(π − yaw) = −cos(yaw)` and `sin(π − yaw) = sin(yaw)` are what fold the
+    /// `π` away, which is why no `π` survives below.
+    ///
+    /// # Why this is not a look-at
+    ///
+    /// This function is the fix for a long-standing bug: looking straight up or
+    /// straight down flipped the camera. [`view_matrix`](Self::view_matrix) used
+    /// to be `look_to_mat4(position, forward(), Vec3::Y)`, and a look-to derives
+    /// `right = normalize(forward × up)` — which is **undefined** at pitch `±90`,
+    /// where `forward` is `(0, ∓1, 0)`, exactly parallel to the hardcoded
+    /// `Vec3::Y`. It failed in two modes, and the second is why it survived
+    /// years of review:
+    ///
+    /// * with an *exactly* vertical forward, `forward × Vec3::Y` is the zero
+    ///   vector and normalising it gives `NaN` — a blank frame;
+    /// * with the forward f32 actually produces at pitch `90.0` it does **not**
+    ///   go `NaN`, because `cos(90°)` rounds to `-4.371139e-8` rather than `0`.
+    ///   The cross product is tiny but non-zero and normalises to **unit
+    ///   length** — pointing the *opposite* way from the one it had at pitch
+    ///   `89.95`. Measured (yaw 0): `right` goes `(-1, 0, 0) → (+1, 0, 0)` and
+    ///   `up` goes `(0, 0.00087, 0.99999964) → (0, 4.4e-8, -1)` across that one
+    ///   `0.05°` step. **Both** flip, so the result is a 180° roll about the
+    ///   view axis, not a reflection: the basis stays finite, orthonormal,
+    ///   right-handed and determinant `+1`, and the image simply turns upside
+    ///   down. That is why every "is this matrix well-formed" check passes on
+    ///   the broken code and **only a continuity sweep or a predicted basis
+    ///   value can see it** — a gate sampling pitch `0`/`±45` sees nothing.
+    ///
+    /// Deriving `up` and `right` from the rotation removes the singularity rather
+    /// than hiding it: there is nothing to normalise, so nothing to divide by
+    /// zero. `right` has no pitch term at all (it is always horizontal), and at
+    /// pitch `−90` `up` simply becomes horizontal too — precisely vanilla's
+    /// behaviour, which renders looking perfectly straight down correctly. **Do
+    /// not "fix" this by clamping pitch to `±89.9`**: that hides one symptom,
+    /// diverges from vanilla, and leaves the `NaN` reachable by every other
+    /// caller.
+    ///
+    /// Gated by `tests/camera_pitch_singularity.rs`, whose control runs the same
+    /// assertions against the old construction and observes them fail.
+    fn basis(&self) -> (Vec3, Vec3, Vec3) {
+        let (sy, cy) = self.yaw.to_radians().sin_cos();
+        let (sp, cp) = self.pitch.to_radians().sin_cos();
+        let right = Vec3::new(-cy, 0.0, -sy);
+        let up = Vec3::new(-sy * sp, cp, cy * sp);
+        let forward = Vec3::new(-sy * cp, -sp, cy * cp);
+        (right, up, forward)
+    }
+
     /// The normalised view direction from yaw/pitch, per Minecraft's convention.
+    ///
+    /// Bit-identical to the closed form `(-sin y · cos p, -sin p, cos y · cos p)`
+    /// it has always been — see `Camera::basis`, which is now the single
+    /// source of that expression so the direction block-targeting raycasts from
+    /// and the direction [`view_matrix`](Self::view_matrix) renders down cannot
+    /// drift apart.
     #[must_use]
     pub fn forward(&self) -> Vec3 {
-        let yaw = self.yaw.to_radians();
-        let pitch = self.pitch.to_radians();
-        let (sy, cy) = yaw.sin_cos();
-        let (sp, cp) = pitch.sin_cos();
-        Vec3::new(-sy * cp, -sp, cy * cp)
+        self.basis().2
     }
 
     /// The right-handed view matrix (world → view).
+    ///
+    /// Built from `Camera::basis` rather than from a look-at, so it has no
+    /// singularity at pitch `±90`; read that doc for the bug this shape exists to
+    /// avoid. The layout is the standard right-handed one — the camera basis as
+    /// the *rows* of the upper-left 3×3 block, in the order `right`, `up`,
+    /// `-forward` (view space looks down `-Z`), with the translation column
+    /// holding the basis-projected negated eye. That is element-for-element what
+    /// `glam::camera::rh::view::look_to_mat4` produced for every non-singular
+    /// pitch, which the gate pins directly.
+    ///
+    /// The determinant is `+1` (a rotation composed with a translation), so
+    /// `sign(det(view_projection))` is decided entirely by the projection — this
+    /// is the fact `entity.rs`'s `camera_orientation` (transpose instead of
+    /// invert) and the GUI winding invariant in `CLAUDE.md` both rest on, and it
+    /// is unchanged by this construction, at every pitch including `±90`.
     #[must_use]
     pub fn view_matrix(&self) -> Mat4 {
-        glam::camera::rh::view::look_to_mat4(self.position, self.forward(), Vec3::Y)
+        let (right, up, forward) = self.basis();
+        let eye = self.position;
+        Mat4::from_cols(
+            Vec4::new(right.x, up.x, -forward.x, 0.0),
+            Vec4::new(right.y, up.y, -forward.y, 0.0),
+            Vec4::new(right.z, up.z, -forward.z, 0.0),
+            Vec4::new(-right.dot(eye), -up.dot(eye), forward.dot(eye), 1.0),
+        )
     }
 
     /// The perspective projection matrix, targeting `wgpu`'s `[0,1]` depth.

@@ -149,6 +149,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   via the `--target-dir` flag, trimmed dev profiles in the root `Cargo.toml`, and a
   cleanup-on-finish policy. This doc is the record of what was measured, what was
   decided from it, and the honest limits of both.
+- [The render camera: basis, view matrix, and the pitch-±90 singularity](./camera.md) —
+  `lodestone-render`'s `Camera` — the eye position, yaw/pitch orientation and
+  projection every world-space matrix in the frame is derived from, reconciled against
+  vanilla's `net.minecraft.client.Camera`. Its orientation is built the way vanilla
+  builds it, from a **single YXZ Euler rotation**, because the obvious alternative (a
+  look-at with a hardcoded `Vec3::Y` up) is degenerate at pitch `±90` and flipped the
+  camera whenever the player looked straight up or straight down.
 - [Cancelable interaction verbs](./cancelable-actions.md) — `ActionVetoes`
   (`crates/lodestone-ecs/src/veto.rs`) is the veto point for the interaction verbs
   every protection, anti-grief and anti-cheat plugin actually cancels. A plugin

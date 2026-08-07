@@ -3673,3 +3673,93 @@ report that started the work.
   vertex index, which of the seven components `(x,y,z,r,g,b,a)` it is, and both values — the
   "make failure output print a bounding box" rule applied to a vertex stream rather than to pixels.
   The second run's whole message is one line and names the mechanism.
+
+**12.115 The long-standing "looking straight up flips the camera" bug was a look-at singularity, and the reason it survived years of review is that at the singularity the broken basis is finite, unit-length, orthogonal, right-handed and determinant `+1` — every well-formedness assertion passes. The owner's diagnosis (a missing pitch clamp) was wrong in the safe-looking direction: a clamp already existed, and the flip happens *at* its bound.**
+
+`crates/lodestone-render/src/camera.rs`'s `view_matrix` was
+`glam::camera::rh::view::look_to_mat4(position, forward(), Vec3::Y)`. A look-to derives
+`right = normalize(forward × up)`, and `forward()` at pitch `±90` is `(0, ∓1, 0)` — parallel to the
+hardcoded `Vec3::Y`. `crates/lodestone-ecs/src/player.rs`'s `pitch.clamp(-90.0, 90.0)` therefore does
+not prevent the defect; it *delivers* the player exactly to it.
+
+- **The construction has two failure modes and only the harmless-looking one shipped.** With an
+  exactly vertical forward, `forward × Vec3::Y` is the zero vector and normalising it makes the whole
+  matrix `NaN` — measured: `look_to_mat4(ZERO, NEG_Y, Y)` returns `Mat4 { x_axis: Vec4(NaN, NaN, -0.0,
+  0.0), … }`. But **f32 never reaches that input from degrees**: `90.0_f32.to_radians().cos()` is
+  `-4.371139e-8`, not `0`. So the cross product is tiny-but-non-zero, normalises to unit length, and
+  points the **opposite** way from a hair earlier. Measured at yaw 0 across the single `0.05°` step
+  from pitch `89.95` to `90.0`:
+
+  | vector | pitch 89.95 | pitch 90.0 |
+  |---|---|---|
+  | `right` | `(-1, 0, 0)` | `(+1, 0, 0)` |
+  | `up` | `(0, 0.00087, 0.99999964)` | `(0, 4.4e-8, -1)` |
+  | `forward` | `(0, -0.99999964, 0.00087)` | `(0, -1, -4.4e-8)` |
+
+- **`right` and `up` *both* negate while `forward` is untouched, so it is a 180° roll about the view
+  axis, not a reflection — and that is precisely why no existing gate could see it.** A double sign
+  flip preserves length, orthogonality, handedness and `det == +1`. The gate written for this bug
+  confirms it in the same run: `legacy_basis_at_the_singularity_is_rolled_180_degrees` asserts the
+  legacy basis **passes** the full health check (finite, unit, orthogonal, `(right × up) · back = +1`,
+  `det = +1`) while being wrong. **"Is this matrix well-formed" is not a test for "is this matrix
+  right", and for an orthonormal basis the two are much further apart than they look**: the space of
+  wrong-but-well-formed bases is every rotation, and a rotation is exactly what a sign-flip pair is.
+  The corollary for the *next* singularity: the only detectors that work are **continuity across the
+  input** and **a predicted value from outside**, never a property of the output alone.
+- **A gate sampling pitch `0`/`±45` cannot see this at all — the *world* species from CLAUDE.md's
+  table, and the pre-existing `camera.rs` tests were exactly that.** `forward_matches_minecraft_
+  convention` does test pitch `90` — but only `forward()`, which is the one vector the bug leaves
+  correct. Nine other camera tests existed; every one of them ran at pitch `0` or `-12`. **The input
+  set, not the assertions, was the whole defect in the test suite**, and no amount of reading the test
+  sources would have revealed it.
+- **The fix is vanilla's own construction, which has no singularity to hide.** `Camera.setRotation`
+  (`.cache/mc/26.2/client-src/net/minecraft/client/Camera.java:336-344`) builds one YXZ Euler
+  quaternion and **derives** all three vectors from it — `rotationYXZ(π − yaw, −pitch, 0)` applied to
+  `FORWARDS (0,0,-1)`, `UP (0,1,0)`, `LEFT (-1,0,0)`. JOML's `rotationYXZ(y,x,z)` is documented as
+  `rotationY(y).rotateX(x).rotateZ(z)` with local-frame right-multiplication, i.e. the matrix
+  `Ry · Rx · Rz`; with `z = 0` and `cos(π − yaw) = −cos yaw`, the `π` folds away to
+  `up = (−sin y·sin p, cos p, cos y·sin p)` and `left = (cos y, 0, sin y)`. **`right` has no pitch term
+  at all**, and at pitch `−90` `up` simply becomes horizontal — which is why vanilla renders looking
+  perfectly straight down correctly and we did not. There is nothing to normalise, so nothing to divide
+  by zero: the fix removes the singularity rather than steering around it. **Clamping pitch to `±89.9`
+  would have hidden one symptom and left the `NaN` reachable by every other caller** — and would have
+  been indistinguishable from a fix in any screenshot.
+- **The control had to be a `#[should_panic]` sweep, because the failure is a *sequence* property and
+  no single sample is wrong.** `legacy_basis_flips_through_the_pitch_singularity` runs the identical
+  continuity assertion over the old construction and requires it to panic, so a green run is evidence
+  the detector fires rather than a description of what it would do. Its observed failure on the unfixed
+  tree, quoted verbatim: `view_matrix: right is discontinuous between pitch 89.95 and 90 at yaw 0:
+  Vec3(-1.0, 0.0, 0.0) → Vec3(1.0, -0.0, 0.0), dot = -1`. Two other subject tests failed the same run
+  on predicted values (`right is Vec3(1.0, -0.0, 0.0), vanilla's YXZ rotation predicts
+  Vec3(-1.0, 0.0, 0.0)`), and `basis_is_healthy_at_the_pitch_singularity` **passed** — the single most
+  informative line in the control run.
+- **The expected values come from a second construction path, not from the closed form under test.**
+  `basis_matches_the_vanilla_yxz_rotation` rebuilds `Ry(π − yaw) · Rx(−pitch)` from glam's own
+  `Mat3::from_rotation_y`/`from_rotation_x` and rotates vanilla's three literal base vectors, so
+  agreement is not `decode(encode(x)) == x`. A third path is pinned too: away from the singularity the
+  new matrix must equal the old `look_to_mat4` element-for-element (`< 1e-4`), which is what stops the
+  fix quietly moving the camera at the 99.9% of pitches that were fine.
+- **The threshold is a magnitude prediction, not a sign.** A `0.05°` step can rotate a basis vector by
+  at most `0.05°`, so `dot(adjacent) ≥ cos(0.05°) = 0.99999962`; the gate requires `> 0.9999` (~26×
+  headroom) and the bug measures `dot = -1`. Both hypotheses are computed from outside constants and
+  the measurement lands on one of them by a factor of 2·10⁴, rather than the assertion merely
+  observing that something changed.
+- **The winding invariant survived because `det(view) == +1` is structural, not incidental.** A
+  rotation composed with a translation has determinant exactly `+1`, so
+  `sign(det(view_projection))` is decided by the projection alone and is unchanged: measured
+  `-5.7369545e-2` at pitch `±90` and `-5.736955e-2` at pitch `0`, same sign, and the gate asserts
+  equality against the **pitch-0 camera** rather than against the literal "negative" — the polarity is
+  derived, per CLAUDE.md. The new gate extends this to pitch `±90`, where the old matrix's determinant
+  said nothing at all. `entity.rs`'s `camera_orientation` (transpose instead of invert) rests on the
+  same `+1`.
+- **`forward()` is now `basis().2` and is *bit*-identical, asserted with `assert_eq!` on
+  `to_array()`, not a tolerance.** The two directions had to stay fused rather than merely close:
+  block-targeting raycasts read `forward()` and rendering reads `view_matrix()`, and a `1e-7` drift
+  between them is a gameplay bug that renders perfectly. `view_matrix_third_row_is_the_negated_forward`
+  pins the join from the other side.
+- **`check-all` was red throughout on `crates/lodestone-server/src/server.rs:4332` and it was
+  another agent's 193 uncommitted lines, reachable from `lodestone-render`'s own dev-dependency graph
+  under `--all-features`.** Under default features the whole workspace was green (569 binaries, 6819
+  passed, 0 failed, 433 ignored). The verdict came from re-running in a detached worktree at the
+  committed sha, where that file is at its committed state — the procedure CLAUDE.md prescribes, and
+  the only thing that distinguishes "my change broke the tree" from "I can see someone else typing".
