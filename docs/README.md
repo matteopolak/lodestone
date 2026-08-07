@@ -614,6 +614,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   vanilla's four-state sprite record, and therefore the **disabled render path** —
   the thing the settings tree (#55) needs so an unsupported option can be present and
   greyed out rather than absent.
+- [Mesh fill rate](./mesh-fill-rate.md) — A headless measurement of the owner's own
+  metric — **how long, standing still, the whole render distance takes to reach the
+  GPU as meshed geometry** — driven through the real `Sim`, the real integrated
+  server and the real mesh worker pool. It exists because that figure was once
+  measured, attributed and then made unobservable when the diagnostics that produced
+  it were deleted, and because the answer it gives is not the one the mesher is
+  usually blamed for.
 - [Mob block perception](./mob-block-perception.md) — The seam that lets a mob AI
   goal ask what block it is standing on. `MobController` declared 33 methods and not
   one read a block, so every vanilla goal whose predicate consults the world was
