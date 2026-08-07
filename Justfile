@@ -116,6 +116,20 @@ regen-damage-types:
     python3 scripts/extract-damage-types.py .cache/mc/26.2/versions/26.2/server-26.2.jar crates/lodestone-data/tests/support/damage_types_jar.txt
     LODESTONE_REGEN=1 cargo test -p lodestone-data --test damage_types {{jflag}} --target-dir {{tdir}} committed_table_matches_dump -- --ignored --nocapture
 
+# Re-extract the bundled 26.2 structure corpus (1606 files: 34 structures, 20
+# structure sets, 188 template pools, 40 processor lists, 7 world presets, 9 flat
+# presets, 4 noise settings, 92 worldgen tags, 1212 NBT templates) VERBATIM from
+# the server jar, together with the jar-derived SHA-256 manifest that is the
+# drift gate's anchor. Needs no JVM and no container — this is all datapack data,
+# so unzipping it is strictly more authoritative than asking a program to
+# describe it. Note the OUTER .cache/mc/26.2/server.jar is a bundler and holds
+# none of these paths. Test: crates/lodestone-server/tests/
+# worldgen_structure_corpus.rs :: manifest_matches_a_fresh_jar_extraction
+# (#[ignore]d).
+regen-worldgen-structures:
+    python3 scripts/extract-worldgen-structures.py
+    cargo test -p lodestone-server --test worldgen_structure_corpus {{jflag}} --target-dir {{tdir}} -- --nocapture
+
 # Regenerate crates/lodestone-data's freeze_top_layer support table
 # (src/generated/snow_support.rs) from the committed JVM dump. Test:
 # crates/lodestone-data/tests/snow_support.rs :: committed_table_matches_dump
