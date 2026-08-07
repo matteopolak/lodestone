@@ -417,6 +417,132 @@ fn end_islands_is_the_only_novel_density_function_type() {
 }
 
 // ---------------------------------------------------------------------------
+// Nether multi-noise biome parameter list
+// ---------------------------------------------------------------------------
+
+/// `biome_parameters/nether.json` — the resolved NETHER multi-noise parameter
+/// table, dumped by `scripts/worldgen-oracle/NetherParametersOracle.java`.
+///
+/// It is **not** a jar file copy, which is why it is absent from
+/// [`DIMENSION_FILES`]: the jar's
+/// `multi_noise_biome_source_parameter_list/nether.json` is 37 bytes of
+/// `{"preset": "minecraft:nether"}`, because the table lives in Java
+/// (`MultiNoiseBiomeSourceParameterList.java:51-67`) and its codec only ever
+/// serialises the preset id. The committed file is the oracle's output.
+const NETHER_PARAMETERS: &str = "biome_parameters/nether.json";
+
+/// Parses the 14-column table into `(row, biome)` pairs. Column order is
+/// `lodestone_worldgen::biome::parse_table`'s: temperature, humidity,
+/// continentalness, erosion, depth, weirdness (each `min,max`), then the scalar
+/// `offset`, then the biome id.
+fn nether_rows() -> Vec<([i64; 13], String)> {
+    let doc = read_json(&bundle_dir().join(NETHER_PARAMETERS));
+    doc.as_array()
+        .expect("nether parameter table is a JSON array")
+        .iter()
+        .map(|row| {
+            let row = row.as_array().expect("row is an array");
+            assert_eq!(row.len(), 14, "row must be 13 numbers + a biome id: {row:?}");
+            let mut nums = [0i64; 13];
+            for (i, slot) in nums.iter_mut().enumerate() {
+                *slot = row[i].as_i64().unwrap_or_else(|| {
+                    panic!("column {i} is not an integer (the table stores quantized longs)")
+                });
+            }
+            let biome = row[13].as_str().expect("column 13 is the biome id").to_string();
+            (nums, biome)
+        })
+        .collect()
+}
+
+#[test]
+fn nether_biome_parameters_agree_with_the_nether_surface_rule_biome_set() {
+    // Two independently-extracted documents must name the same five biomes:
+    // `noise_settings/nether.json` is a byte copy out of the jar, while
+    // `biome_parameters/nether.json` came from a JVM dump of a Java-hardcoded
+    // table. Neither was derived from the other, so agreement here is real
+    // cross-validation rather than a round trip.
+    let closure = dimension_closure();
+    let from_params: BTreeSet<String> = nether_rows()
+        .into_iter()
+        .map(|(_, biome)| {
+            strip_namespace(&biome)
+                .unwrap_or_else(|| panic!("biome id must be minecraft-namespaced: {biome}"))
+                .to_string()
+        })
+        .collect();
+
+    assert_eq!(
+        from_params, closure.biomes,
+        "the NETHER parameter table's biome set and nether.json's surface-rule \
+         biome set disagree; one of the two extractions is wrong"
+    );
+
+    // And every one resolves to a bundled biome document.
+    let bundle = bundle_dir();
+    for biome in &from_params {
+        assert!(
+            bundle.join(format!("biome/{biome}.json")).is_file(),
+            "biome/{biome}.json named by the NETHER parameter table is not bundled"
+        );
+    }
+}
+
+#[test]
+fn nether_biome_parameters_are_degenerate_points_discriminated_by_offset() {
+    let rows = nether_rows();
+
+    // Magnitude, not sign: the exact quantized table. `Climate.parameters`'
+    // 7-float overload wraps each channel in `Parameter.point(v)` (= `span(v,v)`)
+    // and quantizes by 10000 (`Climate.java:27,77-83`), so every bound is an
+    // exact multiple of the source constant: crimson_forest's 0.4F -> 4000,
+    // warped_forest's 0.375F offset -> 3750, basalt_deltas' 0.175F -> 1750.
+    let expected: Vec<([i64; 13], &str)> = vec![
+        ([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "minecraft:nether_wastes"),
+        ([0, 0, -5000, -5000, 0, 0, 0, 0, 0, 0, 0, 0, 0], "minecraft:soul_sand_valley"),
+        ([4000, 4000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "minecraft:crimson_forest"),
+        ([0, 0, 5000, 5000, 0, 0, 0, 0, 0, 0, 0, 0, 3750], "minecraft:warped_forest"),
+        ([-5000, -5000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1750], "minecraft:basalt_deltas"),
+    ];
+    let actual: Vec<([i64; 13], &str)> =
+        rows.iter().map(|(n, b)| (*n, b.as_str())).collect();
+    assert_eq!(
+        actual, expected,
+        "NETHER parameter table changed — row order is load-bearing only as a \
+         tie-break, but the values are the biome layout itself"
+    );
+
+    // Structural properties the engine relies on, asserted rather than assumed:
+    for (nums, biome) in &rows {
+        // Every channel is a degenerate point (min == max). Unlike the
+        // overworld table, the nether list never uses `Parameter.span`.
+        for ch in 0..6 {
+            assert_eq!(
+                nums[ch * 2],
+                nums[ch * 2 + 1],
+                "{biome} channel {ch} is a span, not a point"
+            );
+        }
+        // continentalness / erosion / depth / weirdness are all zero, because
+        // the nether router sets those channels to `zero()`
+        // (`NoiseRouterData.java:390-411`). Only temperature, humidity and
+        // offset discriminate — which is why the two nether-specific noises
+        // matter so much: they ARE the biome layout.
+        for ch in 2..6 {
+            assert_eq!(nums[ch * 2], 0, "{biome} channel {ch} is nonzero");
+        }
+    }
+
+    // Exactly two rows carry a nonzero offset. Vanilla's `fitness` adds
+    // `Mth.square(this.offset)` as a flat penalty (`Climate.java:231-238`), so
+    // these two are the deliberately-rarer biomes. Our engine reaches the same
+    // number via `params[6].distance(0)^2`, which equals `offset^2` for either
+    // sign — equivalent, not a gap.
+    let with_offset = rows.iter().filter(|(n, _)| n[12] != 0).count();
+    assert_eq!(with_offset, 2, "expected warped_forest and basalt_deltas to be offset");
+}
+
+// ---------------------------------------------------------------------------
 // Provenance guard (jar-backed, `#[ignore]`d)
 // ---------------------------------------------------------------------------
 
@@ -487,4 +613,57 @@ fn bundled_dimension_files_match_the_jar() {
          LODESTONE_REGEN=1 (see this file's module doc).",
         drifted.join("\n")
     );
+}
+
+#[test]
+#[ignore = "runs the JVM oracle in a container against the 26.2 server jar"]
+fn nether_biome_parameters_match_the_jvm_oracle() {
+    let script = manifest_dir().join("../../scripts/worldgen-oracle/run.sh");
+    assert!(
+        script.is_file(),
+        "oracle runner not found at {}",
+        script.display()
+    );
+
+    let out = Command::new("bash")
+        .arg(&script)
+        .arg("NetherParametersOracle")
+        .output()
+        .unwrap_or_else(|e| panic!("running {script:?} NetherParametersOracle: {e}"));
+    assert!(
+        out.status.success(),
+        "oracle failed ({}):\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The oracle writes nothing but the JSON document to stdout. If a stray log
+    // line ever leaks in — log4j over System.err comes back out on stdout once
+    // `Bootstrap.bootStrap()` has run, which the oracle's first version did —
+    // this parse fails loudly rather than the bytes being written through.
+    let dumped = String::from_utf8(out.stdout).expect("oracle stdout is UTF-8");
+    let parsed: Value = serde_json::from_str(&dumped).unwrap_or_else(|e| {
+        panic!("oracle stdout is not valid JSON ({e}); first 200 bytes:\n{:.200}", dumped)
+    });
+    assert_eq!(
+        parsed.as_array().map(Vec::len),
+        Some(5),
+        "expected 5 NETHER parameter rows from the oracle"
+    );
+
+    let dest = bundle_dir().join(NETHER_PARAMETERS);
+    if std::env::var_os("LODESTONE_REGEN").is_some() {
+        std::fs::write(&dest, dumped.as_bytes())
+            .unwrap_or_else(|e| panic!("writing {dest:?}: {e}"));
+        println!("regenerated {NETHER_PARAMETERS} ({} bytes)", dumped.len());
+        return;
+    }
+
+    let have = std::fs::read_to_string(&dest).unwrap_or_else(|e| panic!("reading {dest:?}: {e}"));
+    assert_eq!(
+        have, dumped,
+        "{NETHER_PARAMETERS} differs from the JVM oracle's output. Refresh with \
+         LODESTONE_REGEN=1 (see this file's module doc)."
+    );
+    println!("ok {NETHER_PARAMETERS} ({} bytes, identical to the oracle)", dumped.len());
 }
