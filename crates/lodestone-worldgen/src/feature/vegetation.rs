@@ -206,11 +206,13 @@
 //!   engine generally.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde_json::Value;
 
 use crate::density::Resolver;
 use crate::feature::{BlockPos, IntProvider, STEP_VEGETAL_DECORATION};
+use crate::interner::{StateId, StateInterner};
 use crate::rng::{RandomSource, WorldgenRandom};
 
 fn base_id(state: &str) -> &str {
@@ -2117,7 +2119,22 @@ pub struct VegGrid {
     /// with `plains_grass_patch_attempt_count_matches_the_placement_json` carrying
     /// the predicted magnitude — but treat *this sentence* as a claim like any
     /// other and grep for the name before trusting it.
-    blocks: HashMap<(i32, i32, i32), String>,
+    /// Unit 3 (`docs/plans/worldgen-rewrite.md`) changed the value type from
+    /// `String` to [`StateId`]. That single change is where **884,736 of the
+    /// 905,459 heap allocations per warm column** went: the seeding loop
+    /// (`OverworldGenerator::stitch_veg_region`) copies `48 × 384 × 48` cells
+    /// out of the post-ore dense grids into this map, and with a `String` value
+    /// every one of those copies allocated. With ids, seeding is a `u16` move.
+    ///
+    /// The vegetation *engine* around this store is still string-based (that is
+    /// Unit 8); its `&str` accessors below are shims over the id path, so the
+    /// per-placement cost is unchanged while the per-*cell* cost is gone.
+    blocks: HashMap<(i32, i32, i32), StateId>,
+    /// Resolves this grid's [`StateId`]s. Shared with the generator's dense
+    /// grids, which is what lets `stitch_veg_region` move ids across without a
+    /// string round-trip — ids from a different interner are meaningless here
+    /// (see [`StateId`]).
+    interner: Arc<StateInterner>,
     /// Positions actually written by `set_if_in_bounds`, **local** (see
     /// `blocks`' doc), in write order — a `Vec`, not a re-iterated
     /// `HashMap`, specifically so a caller folding this back into a dense
@@ -2162,8 +2179,35 @@ impl VegGrid {
     /// origin (see this struct's own doc comment).
     #[must_use]
     pub fn with_footprint(min_y: i32, height: i32, origin_x: i32, origin_z: i32, local_lo: i32, local_hi: i32) -> Self {
+        Self::with_footprint_interned(
+            Arc::new(StateInterner::new()),
+            min_y,
+            height,
+            origin_x,
+            origin_z,
+            local_lo,
+            local_hi,
+        )
+    }
+
+    /// [`VegGrid::with_footprint`] against a **shared** interner — the form
+    /// production must use, so ids seeded from the generator's dense grids mean
+    /// the same thing here. The string-taking constructors above build a private
+    /// interner, which is correct for a self-contained unit test or parity
+    /// fixture and wrong for anything that exchanges ids with another grid.
+    #[must_use]
+    pub fn with_footprint_interned(
+        interner: Arc<StateInterner>,
+        min_y: i32,
+        height: i32,
+        origin_x: i32,
+        origin_z: i32,
+        local_lo: i32,
+        local_hi: i32,
+    ) -> Self {
         Self {
             blocks: HashMap::new(),
+            interner,
             dirty: Vec::new(),
             origin_x,
             origin_z,
@@ -2174,6 +2218,13 @@ impl VegGrid {
         }
     }
 
+    /// This grid's interner, for a caller that needs to resolve or mint ids
+    /// against it.
+    #[must_use]
+    pub fn interner(&self) -> &Arc<StateInterner> {
+        &self.interner
+    }
+
     /// Positions written by `set_if_in_bounds` since construction, in write
     /// order, **as absolute world coordinates**, each paired with the state
     /// currently at that position (i.e. the *final* state if the same cell
@@ -2181,12 +2232,20 @@ impl VegGrid {
     /// should fold back into a wider grid, with no further translation
     /// needed.
     pub fn dirty_cells(&self) -> impl Iterator<Item = (i32, i32, i32, &str)> {
+        self.dirty_cell_ids()
+            .map(|(x, y, z, id)| (x, y, z, self.interner.name_of(id)))
+    }
+
+    /// [`Self::dirty_cells`] without resolving the states to strings — the
+    /// allocation-free form, for a caller folding these writes back into
+    /// another id-carrying grid.
+    pub fn dirty_cell_ids(&self) -> impl Iterator<Item = (i32, i32, i32, StateId)> {
         self.dirty.iter().map(|&(lx, y, lz)| {
             (
                 self.origin_x + lx,
                 y,
                 self.origin_z + lz,
-                self.blocks.get(&(lx, y, lz)).map_or("minecraft:air", String::as_str),
+                self.blocks.get(&(lx, y, lz)).copied().unwrap_or(StateId::AIR),
             )
         })
     }
@@ -2229,18 +2288,30 @@ impl VegGrid {
     /// post-ore composed grid. Callers fill every `(x, y, z)` in this
     /// chunk's own `16 × height × 16` footprint before running vegetal
     /// decoration.
+    /// String-taking shim over [`Self::seed_id`], for parity fixtures and unit
+    /// tests. **Not** for the production seeding loop — that is the 884,736
+    /// allocations (see the `blocks` field doc).
     pub fn seed(&mut self, x: i32, y: i32, z: i32, state: String) {
+        let id = self.interner.id_of(&state);
+        self.seed_id(x, y, z, id);
+    }
+
+    /// Seeds one column position (absolute world coordinates) from the post-ore
+    /// composed grid, by interned id — the zero-allocation seeding path.
+    pub fn seed_id(&mut self, x: i32, y: i32, z: i32, state: StateId) {
         let (lx, lz) = self.to_local_exact(x, z);
         self.blocks.insert((lx, y, lz), state);
     }
 
-    fn get_local(&self, lx: i32, y: i32, lz: i32) -> &str {
+    fn get_local_id(&self, lx: i32, y: i32, lz: i32) -> StateId {
         if y < self.min_y || y >= self.min_y + self.height {
-            return "minecraft:air";
+            return StateId::AIR;
         }
-        self.blocks
-            .get(&(lx, y, lz))
-            .map_or("minecraft:air", String::as_str)
+        self.blocks.get(&(lx, y, lz)).copied().unwrap_or(StateId::AIR)
+    }
+
+    fn get_local(&self, lx: i32, y: i32, lz: i32) -> &str {
+        self.interner.name_of(self.get_local_id(lx, y, lz))
     }
 
     /// Reads always succeed (clamped into bounds) — a read past the local
@@ -2252,12 +2323,28 @@ impl VegGrid {
         self.get_local(lx, y, lz)
     }
 
+    /// [`Self::get`] without resolving to a string — the allocation-free and
+    /// lock-free read path.
+    #[must_use]
+    pub fn get_id(&self, x: i32, y: i32, z: i32) -> StateId {
+        let (lx, lz) = self.to_local_clamped(x, z);
+        self.get_local_id(lx, y, lz)
+    }
+
     /// Writes past the local footprint (`0..16` for [`VegGrid::new`], wider
     /// for [`VegGrid::with_footprint`]) or outside the vertical build range
     /// are dropped, not clamped — see module doc's "Scope" section; a write
     /// past whatever footprint this grid covers would fabricate a block on
     /// the wrong column. Returns whether the write actually landed.
     pub fn set_if_in_bounds(&mut self, x: i32, y: i32, z: i32, state: String) -> bool {
+        let id = self.interner.id_of(&state);
+        self.set_id_if_in_bounds(x, y, z, id)
+    }
+
+    /// [`Self::set_if_in_bounds`] by interned id — the allocation-free write
+    /// path. Identical bounds behaviour, including the census bumps, so which
+    /// form a caller uses cannot change a placement outcome.
+    pub fn set_id_if_in_bounds(&mut self, x: i32, y: i32, z: i32, state: StateId) -> bool {
         let (lx, lz) = self.to_local_exact(x, z);
         if self.in_bounds_local(lx, lz) && y >= self.min_y && y < self.min_y + self.height {
             census_bump(|c| c.writes += 1);

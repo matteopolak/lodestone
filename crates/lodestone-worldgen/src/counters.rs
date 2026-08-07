@@ -200,10 +200,35 @@ pub struct Snapshot {
     /// Cells copied by `stitch_region` + `stitch_veg_region` — diagnostic D2's
     /// ~2.8M-per-column figure, and U7's acceptance criterion (zero).
     pub stitch_cells: u64,
-    /// `String` allocations on the block path: palette pushes plus
-    /// `stitch_veg_region`'s per-cell `to_string`. U3's acceptance criterion
-    /// (zero steady-state) is written in this one.
+    /// `String` allocations on the block path.
+    ///
+    /// **Both original contributors are gone as of Unit 3** — `dense_grid`'s
+    /// two-per-new-palette-entry and `stitch_veg_region`'s one-per-cell — so
+    /// what remains here is [`Self::state_intern_new`]'s warmup interning. The
+    /// per-column figure this counter was built to watch went
+    /// **905,459 → 20,684** (measured). The residue is *not* instrumented here
+    /// — it lives in code paths this counter never covered — so attribute it
+    /// with `benches/generation.rs`'s per-stage allocation binning, which reads
+    /// [`current_stage`] from inside the counting allocator.
+    ///
+    /// **This counter is hand-bumped, so it is an attribution aid, not the
+    /// gate.** Zeroing it proves nothing on its own — deleting a `bump` call
+    /// would do it. The gate is `benches/generation.rs`'s counting allocator
+    /// (`measure_allocs`), which counts real `GlobalAlloc` calls.
     pub string_allocs: u64,
+    /// New entries in a [`crate::interner::StateInterner`] — i.e. the first
+    /// time that generator sees a given block-state string, which is the one
+    /// allocating path in that module. U3's zero-allocation claim rests on this
+    /// being **0 for a steady-state column** and non-zero only during warmup;
+    /// a non-zero steady-state value means some stage synthesises a state
+    /// string the warmup never produced.
+    pub state_intern_new: u64,
+    /// [`crate::interner::StateInterner::name_of`] calls — id-to-string
+    /// resolutions. Not an allocation (the names are interned), but each takes
+    /// a shared `RwLock` read guard, so this is the counter that makes a
+    /// regression into per-block string resolution visible. Expected to fall
+    /// toward zero as Unit 8 ports the vegetation engine off strings.
+    pub state_name_lookups: u64,
 }
 
 impl Default for Snapshot {
@@ -228,6 +253,8 @@ impl Default for Snapshot {
             stage_entered: [0; STAGE_COUNT],
             stitch_cells: 0,
             string_allocs: 0,
+            state_intern_new: 0,
+            state_name_lookups: 0,
         }
     }
 }
@@ -295,6 +322,8 @@ mod imp {
         stage_entered: [AtomicU64; STAGE_COUNT],
         stitch_cells: AtomicU64,
         string_allocs: AtomicU64,
+        state_intern_new: AtomicU64,
+        state_name_lookups: AtomicU64,
     }
 
     static C: Counters = Counters {
@@ -317,6 +346,8 @@ mod imp {
         stage_entered: [const { AtomicU64::new(0) }; STAGE_COUNT],
         stitch_cells: AtomicU64::new(0),
         string_allocs: AtomicU64::new(0),
+        state_intern_new: AtomicU64::new(0),
+        state_name_lookups: AtomicU64::new(0),
     };
 
     thread_local! {
@@ -378,9 +409,14 @@ mod imp {
     #[inline]
     pub fn bump_palette_intern_new() {
         bump(&C.palette_intern_new);
-        // Two `String`s per new palette entry: the `palette` push and the
-        // `index_of` key (`dense_grid.rs`'s `set`).
-        bump_by(&C.string_allocs, 2);
+        // No `string_allocs` bump: as of Unit 3 a new palette entry is a
+        // `StateId` push plus a `u16`-keyed map insert, so it allocates no
+        // `String` at all. It used to cost two (the `palette` push and the
+        // `index_of` key) and this counter used to say so — left as a comment
+        // rather than deleted because a stale *attribution* is exactly the
+        // failure mode `CLAUDE.md`'s rule 2 describes, and a reader comparing
+        // against the pre-U3 numbers in `docs/plans/worldgen-rewrite.md` needs
+        // to know the 2-per-entry term went away rather than went missing.
     }
 
     #[inline]
@@ -417,6 +453,21 @@ mod imp {
     #[inline]
     pub fn bump_string_allocs(n: u64) {
         bump_by(&C.string_allocs, n);
+    }
+
+    #[inline(always)]
+    pub fn bump_state_intern_new() {
+        bump_by(&C.state_intern_new, 1);
+        // A new intern owns its string, so it is also a real `String`
+        // allocation — attributed here too, so `string_allocs` stays a complete
+        // account of the block path rather than silently losing the ones that
+        // moved from `to_string()` into the interner.
+        bump_by(&C.string_allocs, 1);
+    }
+
+    #[inline(always)]
+    pub fn bump_state_name_lookup() {
+        bump_by(&C.state_name_lookups, 1);
     }
 
     /// Enters `stage` on this thread; the previous tag is restored on drop.
@@ -468,6 +519,8 @@ mod imp {
         }
         C.stitch_cells.store(0, Relaxed);
         C.string_allocs.store(0, Relaxed);
+        C.state_intern_new.store(0, Relaxed);
+        C.state_name_lookups.store(0, Relaxed);
     }
 
     pub fn snapshot() -> Snapshot {
@@ -493,6 +546,8 @@ mod imp {
             stage_entered: std::array::from_fn(|i| C.stage_entered[i].load(Relaxed)),
             stitch_cells: C.stitch_cells.load(Relaxed),
             string_allocs: C.string_allocs.load(Relaxed),
+            state_intern_new: C.state_intern_new.load(Relaxed),
+            state_name_lookups: C.state_name_lookups.load(Relaxed),
         }
     }
 }
@@ -533,6 +588,10 @@ mod imp {
     pub fn bump_stitch_cells(_n: u64) {}
     #[inline(always)]
     pub fn bump_string_allocs(_n: u64) {}
+    #[inline(always)]
+    pub fn bump_state_intern_new() {}
+    #[inline(always)]
+    pub fn bump_state_name_lookup() {}
 
     /// Zero-sized in the default build: `StageGuard::enter` compiles to nothing.
     #[derive(Debug)]
@@ -557,8 +616,8 @@ mod imp {
 pub use imp::{
     StageGuard, bump_biome_search, bump_block_at, bump_corner_lookup, bump_density_eval,
     bump_density_point_compute, bump_palette_intern_hit, bump_palette_intern_new, bump_post_ore,
-    bump_pre_ore, bump_rng_draw, bump_slot_hit, bump_slot_miss, bump_stitch_cells,
-    bump_string_allocs, current_stage, reset, snapshot,
+    bump_pre_ore, bump_rng_draw, bump_slot_hit, bump_slot_miss, bump_state_intern_new,
+    bump_state_name_lookup, bump_stitch_cells, bump_string_allocs, current_stage, reset, snapshot,
 };
 
 /// Whether this build has counters compiled in.

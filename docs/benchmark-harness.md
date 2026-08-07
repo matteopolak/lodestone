@@ -205,7 +205,10 @@ Added by Unit 1 of [`docs/plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.m
 pipeline — `block_at` calls, density component evaluations by kind, corner
 lookups and slot-cache hits/misses, palette interns, `pre_ore`/`post_ore`
 computations vs cache hits, biome nearest-neighbour searches and rows compared,
-stitch copies, `String` allocations, and RNG draws attributed per stage.
+stitch copies, `String` allocations, interner interns and id-to-name lookups, and
+RNG draws attributed per stage. The bench binary's counting allocator additionally
+bins **real** heap allocations per stage (`ALLOC_BY_STAGE`), which is how a
+residual allocation total gets attributed rather than guessed at.
 
 **Why a counter and not another timing.** `DESIGN.md` §12.95 carries a measured
 **585×** mis-attributed timing, and §12.98 records that release-profile
@@ -222,6 +225,49 @@ independent predictions from the rewrite plan were confirmed this way (98,304
 `block_at` per chunk fill; a 25-chunk pre-ore closure; 9 ore walks; a 7,594-row
 climate table; ~885k `String`s per warm column). If you add a counter, add its
 prediction in the same commit.
+
+**When a unit deletes what a calibration asserts, invert the assertion — do not
+delete it.** Unit 3 removed the ~885k `String`s, so that prediction became false
+and `bench_counter_calibration` failed, correctly. Its replacement names *both*
+hypotheses and requires the measurement to land on one: pre-U3 is
+`string_allocs >= 884,736`, post-U3 is interner warmup only (measured 65, ceiling
+1,000). A one-directional bound would have been the *magnitude* species of vacuous
+test — satisfied by any improvement at all, including a broken one.
+
+**Measured on this file, in one sitting, when the two instruments disagreed.**
+Re-taking the U2 baseline counters-off produced three runs of an *identical*
+release binary:
+
+| run | C_ss | vegetation stage | steady-state allocations |
+|---|---|---|---|
+| 1 | 101.68 ms | 63.42 ms | **905,459** |
+| 2 | 97.78 ms | 63.77 ms | **905,459** |
+| 3 | 95.99 ms | 52.28 ms | **905,459** |
+
+The vegetation figure swung **22%** across three runs of the same binary while
+the allocation counter reproduced **to the digit, three times out of three**. So
+when a duration and a counter disagree here, **believe the counter** — and the
+corollary, which is the part that actually costs time if you get it wrong: an
+effect *smaller* than the timing spread cannot be measured with a timing at all.
+The same three runs put the counters-off C_ss median at 97.8 ms against a
+counters-on 96.8 ms, i.e. counter overhead is **below this instrument's own noise
+floor**, so the prediction that removing the counters would show a speedup was
+simply not answerable that way. (§12.98's follow-up block carries the full
+record.)
+
+Two practical consequences for a unit written against these counters:
+
+- **Verify the `gen-counters` feature is neutral for whatever you are counting,
+  and say so.** Unit 3 needed per-stage allocation attribution, which only works
+  with the feature on; `steady_state_heap_allocs_per_column` reads 20,684 with it
+  on *and* off identically, which is what licenses attributing the one to the other. Without
+  that control the attribution would describe a different program from the one
+  the ratchet measures.
+- **A per-column counter only sees stages that actually run on that column.** On
+  a warm column, fill/surface/carve/ore are cache hits and contribute exactly 0,
+  so a change to any of them is invisible to `C_ss`'s counters no matter how much
+  it improves `C_cold`. Check *which* stages your metric can see before aiming a
+  unit at it.
 
 ### The three traps this cost us to learn
 
