@@ -86,9 +86,10 @@ impl PerlinNoise {
             }
             i -= 1;
         }
-        let lowest_freq_input_factor = 2f64.powi(-zero_octave_index);
+        let lowest_freq_input_factor = crate::math::exp2_exact(-zero_octave_index);
         let lowest_freq_value_factor =
-            2f64.powi(octaves as i32 - 1) / (2f64.powi(octaves as i32) - 1.0);
+            crate::math::exp2_exact(octaves as i32 - 1)
+                / (crate::math::exp2_exact(octaves as i32) - 1.0);
         Self {
             noise_levels,
             amplitudes,
@@ -111,9 +112,10 @@ impl PerlinNoise {
                 noise_levels.push(None);
             }
         }
-        let lowest_freq_input_factor = 2f64.powi(-zero_octave_index);
+        let lowest_freq_input_factor = crate::math::exp2_exact(-zero_octave_index);
         let lowest_freq_value_factor =
-            2f64.powi(octaves as i32 - 1) / (2f64.powi(octaves as i32) - 1.0);
+            crate::math::exp2_exact(octaves as i32 - 1)
+                / (crate::math::exp2_exact(octaves as i32) - 1.0);
         Self {
             noise_levels,
             amplitudes,

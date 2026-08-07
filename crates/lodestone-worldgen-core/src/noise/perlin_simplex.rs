@@ -111,8 +111,8 @@ impl PerlinSimplexNoise {
 
         Self {
             levels,
-            highest_freq_input_factor: 2.0_f64.powi(high_freq_octaves),
-            highest_freq_value_factor: 1.0 / (2.0_f64.powi(octave_count) - 1.0),
+            highest_freq_input_factor: crate::math::exp2_exact(high_freq_octaves),
+            highest_freq_value_factor: 1.0 / (crate::math::exp2_exact(octave_count) - 1.0),
         }
     }
 
