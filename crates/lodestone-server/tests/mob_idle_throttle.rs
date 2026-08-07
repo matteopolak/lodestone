@@ -22,17 +22,44 @@
 //!
 //! # Why the throttle was fatal rather than merely slow
 //!
-//! `RandomStrollGoal::can_use` needs `next_i32(120) == 0`, and every
-//! `NavigatingMob` shares one hardcoded seed
-//! (`lodestone-entity/src/ai/navigating_mob.rs`'s
-//! `SplitMix64(0x1234_5678_9ABC_DEF0)`; `with_seed` has no caller outside a
+//! `RandomStrollGoal::can_use` needs `next_i32(120) == 0`, so the tick a lone
+//! stroll first fires is the first draw of that mob's stream where
+//! `next_u64() % 120 == 0`. If that draw lands past the throttle at 100, a mob
+//! with no player nearby can **never** stroll — total and deterministic rather
+//! than a rare unlucky roll, which is what makes [`no_player_is_the_control`]
+//! able to assert a hard `None`.
+//!
+//! # CHANGED by issue #463: the seed is now the mob id, not a shared literal
+//!
+//! This file used to open with: *"every `NavigatingMob` shares one hardcoded seed
+//! (`SplitMix64(0x1234_5678_9ABC_DEF0)`; `with_seed` has no caller outside a
 //! test). For that one stream the first draw where `next_u64() % 120 == 0` is
-//! draw **130** — past the wall at 100. Computed outside the code under test,
-//! by a standalone program over the documented SplitMix64 recurrence, which is
-//! what makes `EXPECTED_FIRST_STROLL_TICK` below an external expected value
-//! rather than a restatement of our own producer. It is also why the failure
-//! was total and identical for every mob in every world instead of a rare
-//! unlucky roll, and why [`no_player_is_the_control`] can assert a hard zero.
+//! draw **130** — past the wall at 100."* True and evidenced when written.
+//! `3b65cbf` replaced it with a per-mob seed of `id as u64`
+//! (`MobSim::spawn_with_type`), and every mob in a fresh [`MobSim`] is id `1`, for
+//! which the first hit is draw **9** — *inside* the throttle. So all three gates
+//! here failed, and the control was not merely wrong but **structurally void**:
+//! with the stroll firing before tick 100, no outcome of the control can
+//! distinguish a working throttle from a missing one.
+//!
+//! The seed change is correct — the lockstep it removed is the "separate defect in
+//! a crate this module does not own" this file's own doc used to name. What the
+//! gates needed was a subject whose first hit is still past the throttle, so
+//! [`STROLL_MOB_ID`] picks one, and a compile-time assert now makes a void control
+//! a build failure instead of a silent pass.
+//!
+//! Every draw index below is computed **outside the code under test**, by a
+//! standalone program over the documented SplitMix64 recurrence
+//! (`navigating_mob.rs:116-123`). That program reproduces the pre-#463 shared
+//! seed's 130 exactly, which is what validates it as an oracle rather than a
+//! restatement of our own producer:
+//!
+//! | seed | first draw with `% 120 == 0` |
+//! |---|---|
+//! | `0x1234_5678_9ABC_DEF0` (pre-#463, shared) | 130 |
+//! | `1` (the default first mob id) | **9** |
+//! | `2` | 48 |
+//! | `3` | **147** |
 //!
 //! Hermetic and deterministic, so these always run — no skip path.
 
@@ -42,15 +69,42 @@ use lodestone_model::Vec3;
 use lodestone_server::{ChunkWorld, MobSim, PlayerPerception, WorldgenChunkSource};
 use lodestone_worldgen::density::Density;
 
+/// The mob id [`observe`] spawns its subject with, and therefore
+/// (`MobSim::spawn_with_type`'s `id as u64`) its RNG seed.
+///
+/// **Chosen, not observed.** Its first successful 1/120 stroll draw must land past
+/// [`IDLE_THROTTLE_TICKS`], or [`no_player_is_the_control`] cannot separate a
+/// working throttle from an absent one — see the module doc's table. `3` is the
+/// lowest id that satisfies that; the default `1` does not, which is what broke
+/// these gates.
+const STROLL_MOB_ID: i32 = 3;
+
 /// The tick a lone stroll goal first reaches `move_to`, once the throttle stops
-/// blocking it: draw 130 of the shared mob RNG stream (see the module doc).
-/// `can_use` draws exactly once per tick for a mob whose only goal is the
+/// blocking it: draw 147 of `SplitMix64(STROLL_MOB_ID)` (see the module doc's
+/// table). `can_use` draws exactly once per tick for a mob whose only goal is the
 /// stroll, so the draw index *is* the tick number.
-const EXPECTED_FIRST_STROLL_TICK: usize = 130;
+const EXPECTED_FIRST_STROLL_TICK: usize = 147;
+
+/// `RandomStrollGoal`'s idle throttle: `goals.rs`'s `no_action_time() >= 100`
+/// early return, itself vanilla's `ai/goal/RandomStrollGoal.java:43`. Restated
+/// here because it is the number the control's whole premise rests on.
+const IDLE_THROTTLE_TICKS: usize = 100;
+
+/// **The control's premise, enforced at compile time.**
+///
+/// A subject whose stroll fires *before* the throttle closes makes
+/// [`no_player_is_the_control`] vacuous while it still reads as rigorous — the
+/// exact failure that landed here when #463 moved the seed. A build failure is the
+/// only version of this check that cannot be skipped: whoever changes the seed
+/// scheme must pick a new [`STROLL_MOB_ID`] rather than transcribe whatever tick
+/// the run reports.
+const _: () = assert!(EXPECTED_FIRST_STROLL_TICK > IDLE_THROTTLE_TICKS);
 
 /// Long enough to pass `EXPECTED_FIRST_STROLL_TICK` with room to spare, and to
 /// let the control arm climb far past the throttle.
 const TICKS: usize = 600;
+
+const _: () = assert!(TICKS > EXPECTED_FIRST_STROLL_TICK);
 
 /// A flat solid floor with its surface at y=0, from the server's own
 /// density-function terrain source — the same shape `tests/mob_sim.rs` uses.
@@ -90,12 +144,21 @@ fn observe(persistent: bool, players: Vec<PlayerPerception>) -> Observed {
     assert!(!world.is_solid(8, 0, 8), "expected air at the y=0 surface");
 
     let mut sim = MobSim::new(&world);
+    // Issue #463: the mob's RNG seed *is* its id, so this call is what selects the
+    // stroll stream — see `STROLL_MOB_ID`. Not decoration: the default id `1`
+    // strolls at tick 9, inside the throttle, which voids the control.
+    sim.set_next_id(STROLL_MOB_ID);
     let id = {
         let m = sim.spawn(Vec3::new(8.5, 0.0, 8.5), MobShape::land(0.6, 1.95), 0.23, 560);
         m.set_persistent(persistent);
         m.add_goal(7, Box::new(RandomStrollGoal::new(1.0)));
         m.id()
     };
+    assert_eq!(
+        id, STROLL_MOB_ID,
+        "the subject's id is its RNG seed, so a different id means a different stroll \
+         schedule and every tick number below is about another stream"
+    );
 
     let mut first_stroll_tick = None;
     let mut peak_no_action_time = 0;
@@ -145,9 +208,11 @@ fn a_player_nearby_clears_the_idle_throttle_every_tick_and_the_mob_strolls() {
     assert_eq!(
         near.first_stroll_tick,
         Some(EXPECTED_FIRST_STROLL_TICK),
-        "the stroll must first fire on the shared RNG stream's first successful \
-         1/120 draw (draw 130). Landing on None is the pre-fix behaviour — the \
-         throttle closed at tick 100, 30 draws early"
+        "the stroll must first fire on this mob's own RNG stream's first successful \
+         1/120 draw (draw {EXPECTED_FIRST_STROLL_TICK} for seed {STROLL_MOB_ID}). \
+         Landing on None is the pre-fix behaviour — the throttle closed at tick \
+         {IDLE_THROTTLE_TICKS}, {} draws early",
+        EXPECTED_FIRST_STROLL_TICK - IDLE_THROTTLE_TICKS
     );
     // The stroll reached the wire-visible state, not just the goal scheduler:
     // `move_to` ran A* and the follower really carried the mob off its spawn.
@@ -178,8 +243,11 @@ fn no_player_is_the_control() {
     );
     assert_eq!(
         alone.first_stroll_tick, None,
-        "a mob with no player nearby is idle-throttled from tick 100 and cannot \
-         reach draw 130, so it must never stroll — this is vanilla, not the bug"
+        "a mob with no player nearby is idle-throttled from tick {IDLE_THROTTLE_TICKS} \
+         and cannot reach draw {EXPECTED_FIRST_STROLL_TICK}, so it must never stroll — \
+         this is vanilla, not the bug. Note `can_use` returns before drawing once the \
+         throttle closes, so the stream stops advancing at \
+         {IDLE_THROTTLE_TICKS} draws too"
     );
     assert_eq!(
         alone.end,
@@ -216,6 +284,6 @@ fn the_persistent_flag_alone_does_not_clear_the_throttle() {
     assert_eq!(
         persistent.first_stroll_tick, None,
         "so a persistent mob with no player nearby is idle-throttled exactly like \
-         any other, and never reaches draw 130"
+         any other, and never reaches draw {EXPECTED_FIRST_STROLL_TICK}"
     );
 }
