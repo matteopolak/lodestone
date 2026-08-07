@@ -349,9 +349,17 @@ impl RandomTickScheduler {
         }
         let min_x = cx * 16;
         let min_z = cz * 16;
+        // Classified once for the whole column, not once per block. A column
+        // whose palette holds no randomly-ticking state at all — every
+        // all-stone, all-water or all-air column, i.e. most of them — is
+        // decided here without touching the 98,304-entry index grid.
+        let mask = randomly_ticking_palette_mask(column);
+        if !mask.iter().any(|&t| t) {
+            return events;
+        }
         let mut section_min_y = column.min_y;
         while section_min_y < column.min_y + column.height {
-            if section_has_randomly_ticking_block(column, section_min_y) {
+            if section_has_randomly_ticking_block(column, section_min_y, &mask) {
                 for _ in 0..tick_speed {
                     let (x, y, z) =
                         next_random_tick_pos(&mut self.position_state, min_x, section_min_y, min_z, 15);
@@ -1088,18 +1096,50 @@ fn react_to_notification(
     }
 }
 
-/// `LevelChunkSection::isRandomlyTicking`'s boolean, computed by scanning —
-/// see this module's doc comment for why a scan is the faithful reduction
-/// for a chunk representation with no incremental per-section counter.
-fn section_has_randomly_ticking_block(column: &crate::chunk::ChunkColumn, section_min_y: i32) -> bool {
+/// Which of `column`'s palette entries are randomly ticking, indexed by
+/// palette id.
+///
+/// The prefilter that makes [`section_has_randomly_ticking_block`] affordable.
+/// [`is_randomly_ticking`] is a **string** predicate (four `base_name` splits
+/// in the worst case), and the scan below used to run it on all 4096 blocks of
+/// every section, of every column, on every tick. A column's palette is tens
+/// of entries, so classifying the palette once per column and then comparing
+/// integers reaches the *identical* decision for a small constant instead of a
+/// per-block one — the same argument
+/// [`ChunkColumn::raw_palette`](crate::chunk::ChunkColumn::raw_palette)
+/// already makes for the save path.
+fn randomly_ticking_palette_mask(column: &crate::chunk::ChunkColumn) -> Vec<bool> {
+    column
+        .raw_palette()
+        .iter()
+        .map(|state| is_randomly_ticking(state))
+        .collect()
+}
+
+/// `LevelChunkSection::isRandomlyTicking`'s boolean, computed by scanning the
+/// section's palette **indices** against `mask` — see this module's doc comment
+/// for why a scan is the faithful reduction for a chunk representation with no
+/// incremental per-section counter, and
+/// [`randomly_ticking_palette_mask`] for why the scan tests integers.
+///
+/// The decision is bit-for-bit the one the string scan reached, so the
+/// `tick_speed` position draws that follow it stay on the same LCG sequence.
+fn section_has_randomly_ticking_block(
+    column: &crate::chunk::ChunkColumn,
+    section_min_y: i32,
+    mask: &[bool],
+) -> bool {
     let max_y = (section_min_y + 16).min(column.min_y + column.height);
+    let blocks = column.raw_blocks();
     for y in section_min_y..max_y {
-        for z in 0..16 {
-            for x in 0..16 {
-                if is_randomly_ticking(column.block_state(x, y, z)) {
-                    return true;
-                }
-            }
+        // `blocks[(y_local * 16 + z) * 16 + x]`, so one y-row is the 256
+        // contiguous entries at `y_local * 256`.
+        let base = (y - column.min_y) as usize * 256;
+        let Some(row) = blocks.get(base..base + 256) else {
+            continue;
+        };
+        if row.iter().any(|&id| mask[id as usize]) {
+            return true;
         }
     }
     false
