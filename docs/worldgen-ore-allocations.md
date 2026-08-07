@@ -11,6 +11,13 @@ removed the engine's *lookups*) and applies
 [`worldgen-vegetation-ids.md`](./worldgen-vegetation-ids.md)'s (U8) `Positions`
 shape to the engine U8 did not touch.
 
+Tracked as [#500](https://github.com/matteopolak/lodestone/issues/500). (The
+issue link is deliberately **not** in the summary paragraph above:
+`cargo xtask docs-index` reads that paragraph verbatim into `docs/README.md`, so
+editing it forces a regeneration of a shared generated file — and a sibling unit
+had an unindexed doc in the working tree at the time, whose entry a regeneration
+would have swept into this unit's commit.)
+
 It also carries the more important measurement, which is a correction: **the ore
 path is not where worldgen's remaining allocations are.** The surface stage is,
 by a factor of 18.
@@ -178,7 +185,8 @@ than reputation. None of them fits what the measurement found:
   `HashMap<(i32,i32,i32), String>` is the same type `worldgen-fast-hashing.md`
   lists as still open. It is a larger change than this unit's remaining budget
   and it is the single biggest allocation win left in worldgen. Tracked as
-  [#500](https://github.com/matteopolak/lodestone/issues/500).
+  [#501](https://github.com/matteopolak/lodestone/issues/501), which carries the
+  site table, the shape of the fix and the constraints it has to respect.
 * **`in_tag`'s string hashing.** `worldgen-ore-lookup-cost.md` names it as "the
   next lookup on this path" at 10.58% inclusive CPU, and it remains true — but it
   is **not an allocation**: `HashMap<String, HashSet<String>>::get(&str)` plus
