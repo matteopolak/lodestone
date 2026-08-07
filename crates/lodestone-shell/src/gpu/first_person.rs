@@ -829,10 +829,10 @@ mod tests {
     /// the item it asked for, not a hand mid-raise.
     #[test]
     fn the_first_observation_seeds_at_rest() {
-        let pickaxe = item("diamond_pickaxe");
+        let pickaxe = (item("diamond_pickaxe"), false);
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&(pickaxe, false)));
-        assert_eq!(equip.visible(), Some(&(pickaxe, false)));
+        equip.advance(Some(&pickaxe));
+        assert_eq!(equip.visible(), Some(&pickaxe));
         assert_eq!(equip.inverse_arm_height(), 0.0);
     }
 
@@ -852,28 +852,28 @@ mod tests {
     ///   than the per-tick step) gives `0.8, 0.6, 0.4`.
     #[test]
     fn the_swap_ramp_steps_by_exactly_the_vanilla_rate() {
-        let pickaxe = item("diamond_pickaxe");
-        let sword = item("diamond_sword");
+        let pickaxe = (item("diamond_pickaxe"), false);
+        let sword = (item("diamond_sword"), false);
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&(pickaxe, false)));
+        equip.advance(Some(&pickaxe));
 
-        equip.advance_by(TICK, Some(&(sword, false)));
+        equip.advance_by(TICK, Some(&sword));
         assert!(
             (equip.height - 0.6).abs() < 1e-6,
             "one tick in, height must be 0.6; got {}",
             equip.height
         );
         // Still the *old* item on screen: the exchange happens at the bottom.
-        assert_eq!(equip.visible(), Some(&(pickaxe, false)));
+        assert_eq!(equip.visible(), Some(&pickaxe));
 
-        equip.advance_by(TICK, Some(&(sword, false)));
+        equip.advance_by(TICK, Some(&sword));
         assert!(
             (equip.height - 0.2).abs() < 1e-6,
             "two ticks in, height must be 0.2 — not the 0.36 a proportional ramp \
              gives, nor the 0.6 a half-rate one does; got {}",
             equip.height
         );
-        assert_eq!(equip.visible(), Some(&(pickaxe, false)));
+        assert_eq!(equip.visible(), Some(&pickaxe));
     }
 
     /// The visible item is exchanged **at the bottom of the dip**, and the hand
@@ -885,17 +885,17 @@ mod tests {
     /// `0.4, 0.8, 1.0` back up. The full swap is six ticks: **300 ms**.
     #[test]
     fn the_item_is_exchanged_at_the_bottom_and_the_hand_rises_again() {
-        let pickaxe = item("diamond_pickaxe");
-        let sword = item("diamond_sword");
+        let pickaxe = (item("diamond_pickaxe"), false);
+        let sword = (item("diamond_sword"), false);
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&(pickaxe, false)));
+        equip.advance(Some(&pickaxe));
 
         let mut heights = Vec::new();
         let mut swap_tick = None;
         for tick in 0..8 {
-            equip.advance_by(TICK, Some(&(sword, false)));
+            equip.advance_by(TICK, Some(&sword));
             heights.push(equip.height);
-            if swap_tick.is_none() && equip.visible() == Some(&(sword, false)) {
+            if swap_tick.is_none() && equip.visible() == Some(&sword) {
                 swap_tick = Some(tick);
             }
         }
@@ -924,11 +924,11 @@ mod tests {
     /// source on every single frame.
     #[test]
     fn holding_the_same_item_never_dips() {
-        let pickaxe = item("diamond_pickaxe");
+        let pickaxe = (item("diamond_pickaxe"), false);
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&(pickaxe, false)));
+        equip.advance(Some(&pickaxe));
         for _ in 0..40 {
-            equip.advance_by(TICK, Some(&(pickaxe, false)));
+            equip.advance_by(TICK, Some(&pickaxe));
             assert_eq!(equip.inverse_arm_height(), 0.0);
         }
     }
@@ -955,19 +955,19 @@ mod tests {
     ///   of frame on a swap.
     #[test]
     fn the_partial_tick_lerp_lands_on_the_predicted_value() {
-        let pickaxe = item("diamond_pickaxe");
-        let sword = item("diamond_sword");
+        let pickaxe = (item("diamond_pickaxe"), false);
+        let sword = (item("diamond_sword"), false);
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&(pickaxe, false)));
+        equip.advance(Some(&pickaxe));
 
-        equip.advance_by(TICK, Some(&(sword, false)));
+        equip.advance_by(TICK, Some(&sword));
         assert!(
             equip.inverse_arm_height().abs() < 1e-6,
             "at the tick boundary the drawn hand is still at last tick's rest, so \
              the dip must be 0.0; got {}",
             equip.inverse_arm_height()
         );
-        equip.advance_by(TICK * 0.25, Some(&(sword, false)));
+        equip.advance_by(TICK * 0.25, Some(&sword));
         assert!(
             (equip.inverse_arm_height() - 0.1).abs() < 1e-6,
             "a quarter tick into the first step the dip must be 0.1 (drawn height \
@@ -981,14 +981,14 @@ mod tests {
     /// continuous motion rather than an item vanishing.
     #[test]
     fn putting_an_item_away_lowers_it_before_the_arm_appears() {
-        let pickaxe = item("diamond_pickaxe");
+        let pickaxe = (item("diamond_pickaxe"), false);
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&(pickaxe, false)));
+        equip.advance(Some(&pickaxe));
 
         equip.advance_by(TICK, None);
         assert_eq!(
             equip.visible(),
-            Some(&(pickaxe, false)),
+            Some(&pickaxe),
             "the item must still be drawn while it lowers"
         );
         equip.advance_by(TICK * 2.0, None);
@@ -1005,12 +1005,12 @@ mod tests {
     /// swap that a tab-out spanned.
     #[test]
     fn a_long_frame_gap_completes_the_swap() {
-        let pickaxe = item("diamond_pickaxe");
-        let sword = item("diamond_sword");
+        let pickaxe = (item("diamond_pickaxe"), false);
+        let sword = (item("diamond_sword"), false);
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&(pickaxe, false)));
-        equip.advance_by(5.0, Some(&(sword, false)));
-        assert_eq!(equip.visible(), Some(&(sword, false)));
+        equip.advance(Some(&pickaxe));
+        equip.advance_by(5.0, Some(&sword));
+        assert_eq!(equip.visible(), Some(&sword));
         assert_eq!(equip.inverse_arm_height(), 0.0);
     }
 

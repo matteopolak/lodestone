@@ -242,7 +242,9 @@ fn the_first_person_held_item_dims_with_the_world_at_night() {
 
     let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
     state.set_entity_light_source(|_| Some(SKY_LIT_NO_BLOCK));
-    state.set_main_hand_source(move || Some(item.clone()));
+    // `false` is the glint flag (#452): this gate measures lighting, and a glint
+    // pass would add emission that the darken sweep below would read as light.
+    state.set_main_hand_source(move || Some((item.clone(), false)));
     let cam = camera();
 
     let mut shoot = |darken: f32| -> Vec<u8> {
