@@ -50,6 +50,7 @@
 
 pub mod counters;
 pub mod density;
+pub mod engine;
 pub mod hash;
 pub mod math;
 pub mod noise;
