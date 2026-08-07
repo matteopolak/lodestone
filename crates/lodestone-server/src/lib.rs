@@ -115,6 +115,11 @@ mod growth_tick;
 mod hopper;
 mod integrated;
 mod inventory;
+/// The join burst's generation scheduler (`docs/plans/worldgen-rewrite.md`
+/// Unit 10): a primed sliding window over the wire order, replacing the per-ring
+/// barrier `4307b59` reinstated. `pub` because its gates measure in-flight
+/// concurrency through it from `tests/`, which `pub(crate)` cannot reach.
+pub mod join_scheduler;
 /// Loot-table loading and rolling (issue #337): parses Mojang's datapack
 /// loot-table JSON from the bundled `assets/loot_table/` set and rolls it with
 /// the server's deterministic RNG for the empty loot context.

@@ -658,9 +658,14 @@ impl ViewTracker {
 ///   materialised from the far corner inward;
 /// * nothing at all was encoded until the last column finished generating.
 ///
-/// Returning *groups* rather than one flat `Vec` is what fixes the second half:
-/// the caller generates and encodes one ring at a time, so the first chunk
-/// reaches the client after **one** column of generation instead of 361. That is
+/// Fixing the second half needs a *scheduler*, not an order, and since Unit 10
+/// that is `crate::join_scheduler`: the caller flattens these groups and drives a
+/// primed sliding window over the result, so the first chunk still reaches the
+/// client after **one** column of generation instead of 361 while nothing waits
+/// on a ring boundary. This function is therefore now purely the **wire order**
+/// — the grouping survives because it is the clearest statement of that order and
+/// because `join_view_rings_partitions_the_square_exactly` gates it, not because
+/// anything synchronises per group. That is
 /// also why this deliberately does not touch `ViewTracker::build_batch`, whose
 /// lexicographic `sort_unstable` exists for byte-reproducibility — proximity
 /// belongs at the enumeration/dispatch layer, and the batch's internal
@@ -679,11 +684,13 @@ impl ViewTracker {
 ///
 /// # Cost
 ///
-/// The inner rings are smaller than `available_parallelism`, so rings 0 and 1
-/// leave most worker threads idle where one 361-column batch would not. That is
-/// a deliberate trade: it costs a fraction of a second of total generation to
-/// buy time-to-first-chunk falling from *the whole view* to *one column*, which
-/// is the entire reported symptom. Rings 2 and up saturate the fan-out.
+/// One column. Before Unit 10 the caller waited on every ring boundary, so all
+/// the rings smaller than `available_parallelism` — 0 through 2 — left most
+/// worker threads idle, and every ring paid its slowest column's tail rather
+/// than its mean. `crate::join_scheduler` keeps exactly the first column of that
+/// trade (ring 0 is generated alone, which is what buys the one-column
+/// time-to-first-chunk) and deletes the rest: from the second column onward the
+/// in-flight window spans ring boundaries freely.
 fn join_view_rings(view_radius: i32) -> Vec<Vec<(i32, i32)>> {
     // A negative radius yields **no rings**, not ring 0. `view_radius.max(0)`
     // reads as the harmless guard and is not: the raster walk this replaced built
@@ -1652,71 +1659,92 @@ where
                 // the largest single generation batch a session performs — no
                 // longer holds up `run_tick_loop`. See `SourceRef`.
                 //
-                // Issue #453: **one ring at a time, generated and encoded before
-                // the next is asked for.** This loop used to build all
-                // `(2r+1)²` coordinates up front, `await` a single `generate`
-                // over the lot, and only then start encoding — so at
-                // `view_radius = 9` nothing reached the client until all 361
-                // columns existed, and raster order put the player's own column
-                // at item ~180. Now ring 0 is the player's column, so the first
-                // chunk is encoded after exactly one column of generation, and
-                // the sequence is non-decreasing in distance from the centre
-                // thereafter.
+                // Issue #453: the player's own column is encoded after **one**
+                // column of generation. This loop used to build all `(2r+1)²`
+                // coordinates up front, `await` a single `generate` over the lot,
+                // and only then start encoding — so at `view_radius = 9` nothing
+                // reached the client until all 361 columns existed, and raster
+                // order put the player's own column at item ~180. [`join_view_rings`]
+                // fixed the order and the scheduler below preserves the latency.
                 //
-                // Still **one** chunk batch, not one per ring: the batch markers
+                // Still **one** chunk batch, not one per group: the batch markers
                 // stay outside this loop, so the client's flow-control
                 // accounting (issue #270) sees the same single
                 // begin/…/end sequence it always did.
+                //
+                // Unit 10: **no per-ring barrier.** Until now this walked
+                // [`join_view_rings`] and waited for every column of ring `r`
+                // before asking for ring `r + 1`, so the rings' slowest-column
+                // tails stacked. Its stated rationale was the old FIFO memo
+                // caches' warmup order — "ring 0 seeds the cache" — which
+                // stopped describing anything when Unit 6's staged store landed
+                // (`34202a21`): a stage now computes exactly once regardless of
+                // arrival order, measured 441/361 exactly across 3 of 3
+                // concurrent 289-column bursts against the old cache's varying
+                // 452/452/448. The rings remain as the **wire order** only;
+                // `crate::join_scheduler` schedules on a bounded window over
+                // that order, whose width comes from `available_parallelism`
+                // rather than from the view radius — which is the half of
+                // `5104adf` that `4307b59` was right to revert.
                 let t_chunks = Instant::now();
                 let mut batch_size = 0;
-                let mut ring_idx = 0u32;
-                let shared_source: Option<Arc<_>> = match &source {
-                    SourceRef::Shared(src) => Some(Arc::clone(src)),
-                    SourceRef::Borrowed(_) => None,
-                };
-                // Per-ring generation respects the generator's pre_ore_cache
-                // warmup order: ring 0 seeds the cache, ring 1's columns hit
-                // those cache entries, and so on outward. Within each ring all
-                // columns race through the blocking pool concurrently.
-                for ring in join_view_rings(view_radius) {
-                    let t_ring = Instant::now();
-                    if let Some(shared) = &shared_source {
-                        let handles: Vec<_> = ring.iter().map(|&(cx, cz)| {
-                            let src = Arc::clone(shared);
-                            ((cx, cz), tokio::task::spawn_blocking(move || src.column(cx, cz)))
-                        }).collect();
-                        for ((cx, cz), handle) in handles {
-                            let column = handle.await.expect("worldgen join burst panicked");
+                let window = crate::join_scheduler::generation_window();
+                let rings = join_view_rings(view_radius);
+                let ring_count = rings.len();
+                match &source {
+                    SourceRef::Shared(src) => {
+                        let coords: Vec<(i32, i32)> = rings.into_iter().flatten().collect();
+                        let mut pipeline = crate::join_scheduler::ColumnPipeline::with_window(
+                            Arc::clone(src),
+                            coords,
+                            window,
+                        );
+                        while let Some(((cx, cz), column)) = pipeline.next().await {
                             apply(conn, &mut state, proto.encode_chunk(cx, cz, &column)).await?;
                             batch_size += 1;
                         }
-                    } else {
-                        let columns = source.generate(ring.clone()).await;
-                        for (&(cx, cz), column) in ring.iter().zip(columns.iter()) {
-                            apply(conn, &mut state, proto.encode_chunk(cx, cz, column)).await?;
-                            batch_size += 1;
+                    }
+                    SourceRef::Borrowed(_) => {
+                        // **Deliberately still per-ring, and this is not the
+                        // divergence `805a1fb` warned about.** A borrowed source
+                        // is not `'static`, so it cannot be spawned; every batch
+                        // on this arm is a `generate_columns_parallel` call that
+                        // blocks until the whole batch is done. There is
+                        // therefore no generation for a window to overlap with
+                        // the encode — the one thing a window buys — and
+                        // splitting a ring into window-sized batches would only
+                        // *add* barriers: measured while building
+                        // `join_scheduler_gates.rs`, ring cumulative sizes are
+                        // `1 + 4r(r + 1)`, always ≡ 1 (mod 8), so at a window of
+                        // 8 no batch even straddles a ring boundary and ring 8's
+                        // 64 columns become eight serial batches instead of one.
+                        //
+                        // What has to match across the arms is the **wire
+                        // order**, and it does: both walk the same flattened ring
+                        // sequence, both encode one column before generating the
+                        // second, and both are gated —
+                        // `join_streams_the_view_outward_from_the_players_own_column`
+                        // here and `the_shared_arm_streams_the_view_outward_too`
+                        // over a real loopback socket.
+                        for ring in &rings {
+                            let columns = source.generate(ring.clone()).await;
+                            for (&(cx, cz), column) in ring.iter().zip(columns.iter()) {
+                                apply(conn, &mut state, proto.encode_chunk(cx, cz, column)).await?;
+                                batch_size += 1;
+                            }
                         }
                     }
-                    let gen_ms = t_ring.elapsed().as_millis();
-                    let ring_columns = ring.len();
-                    tracing::info!(
-                        "join ring {}/{}: {} columns, gen+encode={}ms",
-                        ring_idx,
-                        view_radius,
-                        ring_columns,
-                        gen_ms,
-                    );
-                    ring_idx += 1;
                 }
                 apply(conn, &mut state, proto.end_chunk_batch(batch_size)).await?;
                 let chunk_ms = t_chunks.elapsed().as_millis();
                 let chunks_sent = batch_size as usize;
                 tracing::info!(
-                    "join chunks: {} columns in {}ms ({:.0} col/s), {} rings",
+                    "join chunks: {} columns in {}ms ({:.0} col/s), {} rings, window {}",
                     chunks_sent,
                     chunk_ms,
                     chunks_sent as f64 / (chunk_ms as f64 / 1000.0),
-                    ring_idx,
+                    ring_count,
+                    window,
                 );
 
                 let t_welcome = Instant::now();
