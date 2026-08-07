@@ -182,14 +182,35 @@ const MAX_SCHEDULED_TICKS_PER_TICK: usize = 65536;
 /// core thread, exactly as it did before this deferral existed. The gate only
 /// removes the common case where the tick loop starts before seeding does.
 ///
-/// `pub(crate)` because it is *observable*: the random-tick pass is the only
-/// thing in this loop that touches `world.column()`, so a gate counting column
-/// generations over N ticks sees `N - INITIAL_RANDOM_TICK_DEFERRAL_TICKS`
+/// `pub(crate)` because it is *observable*: a gate counting column generations
+/// over N ticks sees `N - INITIAL_RANDOM_TICK_DEFERRAL_TICKS` random-tick
 /// passes, not N. Three gates hardcoded the pre-deferral assumption that every
 /// tick is a pass and reported **zero** columns when this landed
 /// (`chunk_store`'s pair and `tests/lan_world_tick.rs`). A gate must derive its
 /// tick count from this constant rather than restate `40`, so raising the
 /// deferral moves the expectations with it instead of silently voiding them.
+///
+/// # This defers *one* of three `world.column()` callers, not all of them
+///
+/// This comment used to claim the random-tick pass was "the only thing in this
+/// loop that touches `world.column()`". It is not, in two ways, and **the
+/// deferral covers neither** — so it is a startup-smoothing measure, not a bound
+/// on tick-thread generation:
+///
+/// * `block_ticks.drain_due` calls `world.column()` directly, from tick 1,
+///   *above* the deferral gate.
+/// * the block-entity scan calls `world.block_state()` per hopper, also from
+///   tick 1 and also above the gate, and `ChunkStore::block_state` regenerates a
+///   whole column on an LRU miss. Measured: with retention off, a single remote
+///   hopper is a cold column on **every one of 52 ticks, including the 40 this
+///   constant covers** — `chunk_store::tests`'
+///   `without_retention_a_remote_hopper_is_a_cold_column_every_single_tick`.
+///   Past `DEFAULT_CAPACITY` that reaches **610 cold columns per tick**; see
+///   `docs/block-entity-tick-distance.md` and issue #503.
+///
+/// A gate that counts `world.column()` calls over this loop must therefore say
+/// which caller it is attributing them to. `chunk_store`'s pair is only clean
+/// because it passes an **empty** `BlockEntityHandle`.
 pub(crate) const INITIAL_RANDOM_TICK_DEFERRAL_TICKS: u64 = 40;
 
 /// Seeds for [`RandomTickScheduler`]'s two independent generators (issue
