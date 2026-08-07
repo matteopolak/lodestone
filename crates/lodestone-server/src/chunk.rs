@@ -507,6 +507,22 @@ impl OverworldChunkSource {
     pub fn height(&self) -> i32 {
         self.generator.height()
     }
+
+    /// The wrapped generator, for the store observables a gate has to read.
+    ///
+    /// `store_len`/`store_evictions` live on [`OverworldGenerator`] and are what
+    /// license reading Unit 6's stage counters as one-per-chunk ("nothing was
+    /// evicted, so nothing was recomputed"). Without this accessor a gate
+    /// measuring the join scheduler would have to drive a hand-rolled
+    /// [`ChunkSource`] over a bare generator instead of the source production
+    /// actually serves through — the `world` species of vacuous test
+    /// (`DESIGN.md` §12.43), where the flaw is which implementation the test
+    /// resolves to rather than anything in the test's source. Read-only, and no
+    /// column is generated.
+    #[must_use]
+    pub fn generator(&self) -> &OverworldGenerator {
+        &self.generator
+    }
 }
 
 impl std::fmt::Debug for OverworldChunkSource {

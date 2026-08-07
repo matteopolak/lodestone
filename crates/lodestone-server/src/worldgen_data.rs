@@ -469,8 +469,8 @@ mod tests {
     ///
     /// The split comes from `OverworldGenerator::column_timed`'s own
     /// `StageTimes.top_layer` field rather than from an A/B of two runs. That is
-    /// deliberate: an A/B needs a fresh generator per arm (the
-    /// `pre_ore_cache`/`post_ore_cache` are per-generator and 512 entries deep, so
+    /// deliberate: an A/B needs a fresh generator per arm (the staged store is
+    /// per-generator and retains 512 entries, so
     /// a reused generator makes the second arm recompute nothing and report a
     /// fabricated delta — the vacuity `049c603` had to fix in two determinism
     /// gates), and even then it measures two different process states. One
@@ -1560,8 +1560,9 @@ mod tests {
     /// test uses, with no threading involved at all.
     ///
     /// **Made vacuous by `6509a97`'s pre-ore memoisation cache, now fixed.**
-    /// `OverworldGenerator::pre_ore_cache` (`crates/lodestone-worldgen/src/overworld.rs`)
-    /// is a field on the generator instance, keyed by exact `(cx, cz)`. This
+    /// `OverworldGenerator::store` (`crates/lodestone-worldgen/src/overworld/mod.rs`,
+    /// with the store itself in `overworld/store.rs`) is a field on the generator
+    /// instance, keyed by exact `(cx, cz)`. This
     /// test used to call `column()` twice on *one* `generator`, so the
     /// second call was served straight out of the first call's cache entry
     /// — literally the same `Arc<PreOreResult>` — which guarantees identical
