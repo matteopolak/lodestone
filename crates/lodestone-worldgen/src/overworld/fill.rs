@@ -5,13 +5,13 @@
 //! Moved here verbatim from `overworld.rs` by U16 Phase A; see [`super`]'s own module
 //! doc for the pipeline order and for every measurement behind these stages.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::aquifer::{AquiferSystem, BlockKind, XoroshiroPositionalFactory};
 use crate::carver::{CarveGrid, CarverConfig, NoObserver};
 use crate::density::Density;
 use crate::engine::Program;
+use crate::surface::{PreState, SurfaceDiff};
 
 use super::{OverworldGenerator, PreOreResult};
 
@@ -144,6 +144,27 @@ impl OverworldGenerator {
     /// Stage 3: surface rules over the pre-surface (post-fill) column.
     /// Returns a **sparse diff** (see [`SurfaceSystem::build_surface`]): only
     /// the positions a surface rule actually rewrote.
+    ///
+    /// # This stage was 92% of the pipeline's allocations (issue #501, U21)
+    ///
+    /// Measured over a 3×3 cold sweep at seed 42 with real `GlobalAlloc` calls
+    /// binned by innermost stage (`tests/ore_alloc_attribution.rs`), the three
+    /// closures below allocated **3,847,972** times — 97.3% of that scene's
+    /// heap traffic, and 18× the entire ore path, which the same instrument had
+    /// just been pointed at. The cause was entirely representational: `pre`
+    /// returned `String` (77.08% of the stage), `try_apply` returned
+    /// `Option<String>` (21.92%), and `biome_at` cloned a biome name per column
+    /// (0.35%). Nothing about the *scan* changed here — see
+    /// `docs/worldgen-surface-ids.md`.
+    ///
+    /// `build_surface` used to derive air/fluid/stone from each probe's *name*;
+    /// it now reads the class off the [`PreState`] this function hands it. The
+    /// classes are **not** written down here: they come from
+    /// `crate::surface::class_of_name` applied to the settings' own strings,
+    /// once, in [`OverworldGenerator::new`] — see the `default_*_pre` fields.
+    /// A wrong class would change which rules fire and still produce a
+    /// plausible column, so the pairing is re-derived and asserted on every
+    /// entry below rather than reasoned about.
     pub(super) fn surface_stage(
         &self,
         field: &[BlockKind],
@@ -151,24 +172,57 @@ impl OverworldGenerator {
         biome_quarts: &[(String, bool); 16],
         base_x: i32,
         base_z: i32,
-    ) -> HashMap<(i32, i32, i32), String> {
+    ) -> SurfaceDiff {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Surface);
-        let pre = |lx: i32, y: i32, lz: i32| -> String {
+
+        // The lock-step check on every `PreState` this stage can hand over.
+        // It **re-derives** each one from the settings string it is supposed to
+        // have come from, so it is total: it catches a wrong id and a wrong
+        // class equally, and it catches the copy-paste that pairs
+        // `default_block_pre` with `default_fluid`'s string — none of which a
+        // constant-vs-constant assertion could see. Four `from_name` calls per
+        // stage *entry* (not per probe): a warm `id_of` lookup each, and 25
+        // entries over the whole 3×3 attribution sweep.
+        //
+        // `PreState::AIR` is the one value in this function still written as a
+        // literal, which is exactly why it is on this list.
+        debug_assert_eq!(
+            self.default_block_pre,
+            PreState::from_name(&self.interner, &self.default_block),
+            "default_block_pre must be default_block, interned and classified"
+        );
+        debug_assert_eq!(
+            self.default_fluid_pre,
+            PreState::from_name(&self.interner, &self.default_fluid),
+            "default_fluid_pre must be default_fluid, interned and classified"
+        );
+        debug_assert_eq!(
+            self.default_lava_pre,
+            PreState::from_name(&self.interner, &self.default_lava),
+            "default_lava_pre must be default_lava, interned and classified"
+        );
+        debug_assert_eq!(
+            PreState::AIR,
+            PreState::from_name(&self.interner, "minecraft:air"),
+            "PreState::AIR must be what class_of_name says minecraft:air is"
+        );
+
+        let pre = |lx: i32, y: i32, lz: i32| -> PreState {
             let ly = y - self.min_y;
             if !(0..self.height).contains(&ly) {
-                return "minecraft:air".to_string();
+                return PreState::AIR;
             }
             match field[Self::idx(lx, ly, lz, self.height)] {
-                BlockKind::Stone => self.default_block.clone(),
-                BlockKind::Water => self.default_fluid.clone(),
-                BlockKind::Lava => self.default_lava.clone(),
-                BlockKind::Air => "minecraft:air".to_string(),
+                BlockKind::Stone => self.default_block_pre,
+                BlockKind::Water => self.default_fluid_pre,
+                BlockKind::Lava => self.default_lava_pre,
+                BlockKind::Air => PreState::AIR,
             }
         };
         let heightmap = |lx: i32, lz: i32| -> i32 { heights[(lz * 16 + lx) as usize] };
-        let biome_at = |lx: i32, lz: i32| -> (String, bool) {
+        let biome_at = |lx: i32, lz: i32| -> (&str, bool) {
             let (name, cold) = &biome_quarts[((lz >> 2) * 4 + (lx >> 2)) as usize];
-            (name.clone(), *cold)
+            (name.as_str(), *cold)
         };
 
         self.surface
@@ -185,7 +239,7 @@ impl OverworldGenerator {
     pub(super) fn materialize_world(
         &self,
         field: &[BlockKind],
-        surface_diff: HashMap<(i32, i32, i32), String>,
+        surface_diff: SurfaceDiff,
         base_x: i32,
         base_z: i32,
     ) -> crate::dense_grid::DenseBlockGrid {
@@ -219,20 +273,24 @@ impl OverworldGenerator {
         // terrain did not. Confirmed by that control test failing with
         // exactly a palette permutation (`gravel`/`dirt`/`bedrock` reordered,
         // nothing added or removed) before this fix.
+        //
+        // U21: `set_id` rather than `set`, and pre-interned `default_*` ids
+        // rather than `&str`. `DenseBlockGrid::set` is `id_of` + `set_id`, so
+        // this deletes 98,304 block-state *string* hashes per chunk and changes
+        // nothing else — the palette is still appended in this loop's order,
+        // which is the property the comment above is about.
         for lz in 0..16i32 {
             for lx in 0..16i32 {
                 for ly in 0..self.height {
                     let y = self.min_y + ly;
                     let base = match field[Self::idx(lx, ly, lz, self.height)] {
-                        BlockKind::Stone => self.default_block.as_str(),
-                        BlockKind::Water => self.default_fluid.as_str(),
-                        BlockKind::Lava => self.default_lava.as_str(),
-                        BlockKind::Air => "minecraft:air",
+                        BlockKind::Stone => self.default_block_pre.state,
+                        BlockKind::Water => self.default_fluid_pre.state,
+                        BlockKind::Lava => self.default_lava_pre.state,
+                        BlockKind::Air => crate::interner::StateId::AIR,
                     };
-                    match surface_diff.get(&(lx, y, lz)) {
-                        Some(state) => world.set(base_x + lx, y, base_z + lz, state),
-                        None => world.set(base_x + lx, y, base_z + lz, base),
-                    }
+                    let state = surface_diff.get(&(lx, y, lz)).copied().unwrap_or(base);
+                    world.set_id(base_x + lx, y, base_z + lz, state);
                 }
             }
         }

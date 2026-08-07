@@ -13,10 +13,44 @@
 //! aquifer-filled block field, exactly what vanilla's `NoiseChunk` +
 //! `NoiseBasedChunkGenerator.doFill` produce) and the `WORLD_SURFACE_WG`
 //! heightmap, and reproduces vanilla's `SurfaceSystem.buildSurface` scan
-//! block-for-block. The pre-surface strings are taken as given (so the engine
+//! block-for-block. The pre-surface states are taken as given (so the engine
 //! needs no block registry): a rule only ever *replaces* a `defaultBlock`
 //! (stone) with one of the surface rule's result states, whose canonical form
 //! is supplied by the caller (version data, exactly like the block registry).
+//!
+//! # This seam speaks [`StateId`], not `String` (issue #501, U21)
+//!
+//! Every block-state that crosses this engine's boundary is an **interned
+//! [`StateId`]**, resolved once at construction. Before U21 the `pre` callback
+//! returned `String`, [`SurfaceSystem::try_apply`] returned `Option<String>`
+//! and the diff was `HashMap<_, String>`: measured over a 3×3 cold sweep at
+//! seed 42 (`tests/ore_alloc_attribution.rs`), that was **3,847,972 real
+//! `GlobalAlloc` calls, 97.3% of the whole pipeline's heap traffic** — 18× the
+//! entire ore path — from four `to_string()`/`clone()` sites on a per-probe
+//! path. `docs/worldgen-surface-ids.md` carries the measurement.
+//!
+//! Three properties make the conversion total rather than a relocation, and
+//! each is the thing to preserve if you change this file:
+//!
+//! * **Nothing is interned during a scan.** [`Rule::Block`] holds a `StateId`
+//!   resolved at parse time, and the caller hands [`PreState`]s built from
+//!   ids it already owns. There is no `id_of` and no `name_of` — and therefore
+//!   no `RwLock` — anywhere under [`SurfaceSystem::build_surface`]. That
+//!   matters beyond allocation: `4307b59` is this repo's scar for putting many
+//!   concurrent generator calls on one shared cache line.
+//! * **`Rule::Bandlands`' "computed" name is a table subscript.**
+//!   `SurfaceSystem.getBand` looked like the blocker — it *computes* which
+//!   block it returns rather than selecting a static one — but the set it
+//!   computes over is `SurfaceSystem.clayBands`, exactly [`CLAY_BANDS_LEN`]
+//!   entries drawn from the [`BAND_BLOCK_NAMES`] seven. So the whole band set
+//!   is known once per world seed and pre-interned into `Vec<StateId>` by
+//!   [`RuleParser::bandlands`], which also *asserts* the finiteness rather
+//!   than assuming it. `get_band` is now an index and a `Copy`.
+//! * **Classification is supplied, not re-derived.** The scan branches on
+//!   air/fluid/stone, which a `String` let it read off the name. [`PreState`]
+//!   carries a [`PreClass`] beside the id so the branch costs nothing, and
+//!   [`class_of_name`] keeps the *string* definition (`is_air`/`is_fluid`)
+//!   as the single source of truth that a supplied class is checked against.
 //!
 //! # Parity discipline
 //!
@@ -27,16 +61,120 @@
 //! documented algorithm and checked against the running server (plan §11).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use lodestone_worldgen_core::hash::FastMap;
 use serde_json::Value;
 
 use crate::density::{Builder, Context as DfContext, Density};
+use crate::interner::{StateId, StateInterner};
 use crate::math::{floor, lerp2, map, random_between_inclusive, round};
 use crate::noise::NormalNoise;
 use crate::rng::{PositionalRandomFactory, RandomSource, XoroshiroPositionalFactory};
 
 /// The vanilla `Integer.MIN_VALUE` sentinel meaning "no water above".
 const NO_WATER: i32 = i32::MIN;
+
+/// The **sparse** surface diff [`SurfaceSystem::build_surface`] returns: local
+/// `(x, y, z)` -> the interned state a surface rule rewrote that position to.
+/// A position absent from the map is unchanged from the pre-surface column.
+///
+/// # Why a [`FastMap`] is safe here
+///
+/// `docs/worldgen-fast-hashing.md` requires the other half of the argument to
+/// be established **at the map**, in one of exactly two forms, because a
+/// hasher swap changes iteration order and this repo has already shipped a
+/// palette permutation from exactly that (`crate::overworld`'s module doc).
+/// This map takes the *first* form — **never iterated**. Its only consumer,
+/// [`crate::overworld::OverworldGenerator::materialize_world`], reads it by
+/// **point lookup** in the same fixed `(lz, lx, ly)` order as its own base
+/// fill, precisely so that the `DenseBlockGrid` palette is appended in a
+/// deterministic order independent of this map; that call site's own comment
+/// carries the post-mortem. The parity tests likewise only `get`.
+///
+/// So the check to re-run after editing anything here is a grep for `.iter()`
+/// / `.keys()` / `.values()` / `.drain()` / `for (.., ..) in` against a
+/// `SurfaceDiff` **binding**, not against a file. If a consumer ever needs to
+/// iterate it, this alias must go back to `HashMap` or the consumer must
+/// impose a total order of its own and say so.
+pub type SurfaceDiff = FastMap<(i32, i32, i32), StateId>;
+
+/// Which of vanilla's three `buildSurface` classes a pre-surface block is in.
+///
+/// The scan branches on this and nothing else about the block's identity, so
+/// carrying it beside the id (see [`PreState`]) is what lets the pre-surface
+/// callback stop returning a `String` that only ever got its *name* read to
+/// answer these three questions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PreClass {
+    /// `BlockState.isAir()`.
+    Air,
+    /// `!FluidState.isEmpty()` — water or lava, at any property set.
+    Fluid,
+    /// Neither: vanilla's implicit "stone" case, `!isAir && fluid.isEmpty()`.
+    Stone,
+}
+
+/// One pre-surface block as [`SurfaceSystem::build_surface`] needs it: the
+/// interned state plus its [`PreClass`].
+///
+/// # Why the class is a field and not recomputed
+///
+/// Deriving the class from an id needs either the state's *name* (an interner
+/// `RwLock` read per probe — ~60,000 per chunk, on a table shared by every
+/// concurrent generator call) or a base-name lookup (the same lock). The
+/// caller always already knows the class for free: `overworld/fill.rs` reads
+/// it straight off the `BlockKind` its own aquifer fill wrote.
+///
+/// That is a shortcut, so it is *checked* rather than trusted —
+/// [`class_of_name`] is the string definition it must agree with, and
+/// `surface_stage` asserts the agreement for every id it can produce on every
+/// call under `debug_assertions`. Without that check this would be the
+/// fully-connected-wire-carrying-the-wrong-value shape `CLAUDE.md` warns
+/// about: a mis-classified pre-surface block changes which rules fire and
+/// still produces a plausible column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PreState {
+    /// The interned canonical pre-surface state.
+    pub state: StateId,
+    /// Its air/fluid/stone class.
+    pub class: PreClass,
+}
+
+impl PreState {
+    /// `minecraft:air` — what an out-of-range Y reads as, matching vanilla's
+    /// own out-of-section behaviour.
+    pub const AIR: Self = Self {
+        state: StateId::AIR,
+        class: PreClass::Air,
+    };
+
+    /// A pre-surface block whose class is derived from its **name**, for a
+    /// caller holding a canonical string rather than a pre-classified field
+    /// (the JVM parity fixtures). Production does not take this path; it is
+    /// also the reference [`class_of_name`] agreement is asserted against.
+    #[must_use]
+    pub fn from_name(interner: &StateInterner, name: &str) -> Self {
+        Self {
+            state: interner.id_of(name),
+            class: class_of_name(name),
+        }
+    }
+}
+
+/// The [`PreClass`] of a canonical block-state string — the definition the
+/// scan used to apply to every probe, kept as one function so a caller that
+/// supplies a class can be checked against it.
+#[must_use]
+pub fn class_of_name(name: &str) -> PreClass {
+    if is_air(name) {
+        PreClass::Air
+    } else if is_fluid(name) {
+        PreClass::Fluid
+    } else {
+        PreClass::Stone
+    }
+}
 
 /// Maps a result-state *partial key* (`name` + sorted specified `[k=v]`) to its
 /// full canonical block string (all properties, defaults filled). Supplied by
@@ -88,8 +226,11 @@ enum Cond {
 
 /// A parsed surface rule (`SurfaceRules.RuleSource`).
 enum Rule {
-    /// Emits a fully-canonical block string.
-    Block(String),
+    /// Emits a fully-canonical block state, interned at parse time (U21) so a
+    /// match is a `u16` copy rather than a `String` clone. This arm was
+    /// `try_apply`'s `Some(state.clone())`, measured at 21.92% of the surface
+    /// stage's 3,847,972 allocations.
+    Block(StateId),
     /// First non-`None` child wins.
     Sequence(Vec<Rule>),
     /// Runs `then` only when `cond` holds.
@@ -114,11 +255,15 @@ enum Rule {
 /// SurfaceSystem(...)` returns.
 struct BandBlocks {
     /// `SurfaceSystem.clayBands` — always exactly
-    /// [`CLAY_BANDS_LEN`] entries long, each already the full canonical
-    /// block string (these seven blocks carry no properties at 26.2 — see
-    /// [`generate_bands`]'s doc comment — so no [`BlockCanon`] lookup is
+    /// [`CLAY_BANDS_LEN`] entries long, each the **interned id** of a full
+    /// canonical block string (these seven blocks carry no properties at 26.2
+    /// — see [`generate_bands`]'s doc comment — so no [`BlockCanon`] lookup is
     /// needed, unlike every other [`Rule::Block`] result state).
-    clay_bands: Vec<String>,
+    ///
+    /// Interned once per world seed by [`RuleParser::bandlands`], which is the
+    /// whole reason `Bandlands` was not the blocker it looked like: see the
+    /// module doc's third bullet.
+    clay_bands: Vec<StateId>,
     /// `SurfaceSystem.clayBandsOffsetNoise` (`minecraft:clay_bands_offset`).
     offset_noise: NormalNoise,
 }
@@ -128,12 +273,31 @@ struct BandBlocks {
 /// anything version-supplied.
 const CLAY_BANDS_LEN: usize = 192;
 
+/// Every block [`generate_bands`] can write into the clay-band table, and
+/// therefore the *entire* value set `SurfaceSystem.getBand` can return.
+///
+/// This list is what makes `Rule::Bandlands` pre-internable: the band index is
+/// computed per block, but the thing indexed is drawn from these seven names,
+/// fixed at 26.2. [`RuleParser::bandlands`] asserts the built table against
+/// this rather than trusting it (`CLAUDE.md` rule 2), so an eighth band block
+/// in a future version fails loudly at generator construction instead of
+/// silently reintroducing a per-block intern.
+const BAND_BLOCK_NAMES: [&str; 7] = [
+    "minecraft:terracotta",
+    "minecraft:orange_terracotta",
+    "minecraft:yellow_terracotta",
+    "minecraft:brown_terracotta",
+    "minecraft:red_terracotta",
+    "minecraft:white_terracotta",
+    "minecraft:light_gray_terracotta",
+];
+
 impl BandBlocks {
     /// `SurfaceSystem.getBand(worldX, y, worldZ)`. Never returns `None` —
     /// vanilla's own `Bandlands` rule (`context.system::getBand`) is a bare
     /// `SurfaceRule` function reference with no condition wrapped around it,
     /// so every call that reaches [`Rule::Bandlands`] gets a real block back.
-    fn get_band(&self, world_x: i32, y: i32, world_z: i32) -> String {
+    fn get_band(&self, world_x: i32, y: i32, world_z: i32) -> StateId {
         let offset = round(
             self.offset_noise
                 .get_value(f64::from(world_x), 0.0, f64::from(world_z))
@@ -147,7 +311,9 @@ impl BandBlocks {
         // own `% this.clayBands.length` line) rather than needing a true
         // Euclidean modulo.
         let index = (y + offset + len) % len;
-        self.clay_bands[index as usize].clone()
+        // A `Copy` out of a pre-interned table. This line was
+        // `self.clay_bands[index as usize].clone()`.
+        self.clay_bands[index as usize]
     }
 }
 
@@ -227,7 +393,7 @@ fn make_bands<R: RandomSource>(random: &mut R, clay_bands: &mut [String], base_w
 }
 
 /// Per-column / per-Y scan state mirroring `SurfaceRules.Context`.
-struct Ctx {
+struct Ctx<'a> {
     block_x: i32,
     block_z: i32,
     surface_depth: i32,
@@ -237,8 +403,15 @@ struct Ctx {
     water_height: i32,
     stone_depth_above: i32,
     stone_depth_below: i32,
-    /// This column's biome id (issue #405) — consulted by [`Cond::BiomeIs`].
-    biome: String,
+    /// This column's biome id (issue #405) — consulted by [`Cond::BiomeIs`],
+    /// which only ever *compares* it.
+    ///
+    /// **Borrowed, not owned** (U21). It was a `String`, and both producers had
+    /// to clone into it: `build_surface`'s `biome_at` callback once per column
+    /// (0.35% of the surface stage's allocations) and `top_material` once per
+    /// call on the carver path. Neither clone bought anything — the biome table
+    /// this borrows from outlives the scan in both cases.
+    biome: &'a str,
     /// This column's biome's `coldEnoughToSnow` answer — consulted by
     /// [`Cond::Temperature`]. See [`crate::biome::cold_enough_to_snow`].
     cold_enough_to_snow: bool,
@@ -250,7 +423,15 @@ struct Ctx {
 pub struct SurfaceSystem {
     min_y: i32,
     gen_depth: i32,
-    default_block: String,
+    /// The settings' `default_block`, interned — the `old == this.defaultBlock`
+    /// guard is now a `u16` compare rather than a string compare.
+    default_block: StateId,
+    /// The table every id in this system was issued by. Held so
+    /// [`Self::top_material`] can still hand a `String` to the carver seam,
+    /// which is *not* part of this unit and keeps its `Option<String>`
+    /// signature; see that method's own note. Never touched by
+    /// [`Self::build_surface`].
+    interner: Arc<StateInterner>,
     surface_noise: NormalNoise,
     surface_secondary_noise: NormalNoise,
     master: XoroshiroPositionalFactory,
@@ -269,11 +450,25 @@ impl SurfaceSystem {
     /// `cold_enough_to_snow` moved from build-time constants here to
     /// per-column runtime inputs on [`build_surface`](Self::build_surface)/
     /// [`top_material`](Self::top_material) instead.
+    ///
+    /// `interner` is the generator's own [`StateInterner`] (U21). Every result
+    /// state in the `surface_rule` tree, every clay band and `default_block`
+    /// are interned **here**, once, so nothing under
+    /// [`build_surface`](Self::build_surface) ever takes the interner's lock.
+    /// This is a bounded set walked out of the parsed data itself, not a
+    /// hand-maintained pre-intern list, so it cannot drift from the data the
+    /// way `crate::overworld`'s own note about pre-populating warns.
     #[must_use]
-    pub fn new(settings: &Value, builder: &Builder, canon: &BlockCanon) -> Self {
+    pub fn new(
+        settings: &Value,
+        builder: &Builder,
+        canon: &BlockCanon,
+        interner: &Arc<StateInterner>,
+    ) -> Self {
         let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(-64) as i32;
         let gen_depth = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
-        let default_block = canonical_from_block_json(&settings["default_block"], canon);
+        let default_block =
+            interner.id_of(&canonical_from_block_json(&settings["default_block"], canon));
 
         let surface_noise = builder.noise("minecraft:surface");
         let surface_secondary_noise = builder.noise("minecraft:surface_secondary");
@@ -283,6 +478,7 @@ impl SurfaceSystem {
         let parser = RuleParser {
             builder,
             canon,
+            interner,
             min_y,
             gen_depth,
         };
@@ -292,6 +488,7 @@ impl SurfaceSystem {
             min_y,
             gen_depth,
             default_block,
+            interner: Arc::clone(interner),
             surface_noise,
             surface_secondary_noise,
             master,
@@ -373,21 +570,24 @@ impl SurfaceSystem {
 
     /// Reproduces `SurfaceSystem.buildSurface` for one 16×16 chunk.
     ///
-    /// * `pre` yields the pre-surface (aquifer-filled) canonical block string at
-    ///   local `(x, y, z)` (`x, z` in `0..16`, `y` a world Y). Out-of-range Y is
-    ///   treated as air.
+    /// * `pre` yields the pre-surface (aquifer-filled) block at local
+    ///   `(x, y, z)` (`x, z` in `0..16`, `y` a world Y) as a [`PreState`] —
+    ///   interned id plus [`PreClass`]. Out-of-range Y is treated as air, and
+    ///   this method applies that clamp itself, so `pre` is never asked.
     /// * `heightmap` yields `WORLD_SURFACE_WG` at local `(x, z)`.
     /// * `biome_at` yields `(biome id, cold_enough_to_snow)` at local `(x, z)`
     ///   (issue #405) — called once per column, not per block, so a caller
     ///   whose biome varies at quart (not block) resolution can cheaply
-    ///   return the same pair for every `(x, z)` in one 4×4 cell.
+    ///   return the same pair for every `(x, z)` in one 4×4 cell. The id is
+    ///   **borrowed** from the caller's own biome table (U21).
     /// * `min_block_x`/`min_block_z` are the chunk's world-space origin.
     ///
-    /// Returns a **sparse diff**: local `(x, y, z)` -> canonical block string,
-    /// present only where a surface rule actually rewrote the pre-surface
-    /// block. A position absent from the map is unchanged, i.e. still exactly
-    /// `pre(x, y, z)` — callers that need the full column reconstruct it from
-    /// `pre` overlaid with this map, rather than the map alone.
+    /// Returns a **sparse** [`SurfaceDiff`]: local `(x, y, z)` -> interned
+    /// state, present only where a surface rule actually rewrote the
+    /// pre-surface block. A position absent from the map is unchanged, i.e.
+    /// still exactly `pre(x, y, z)` — callers that need the full column
+    /// reconstruct it from `pre` overlaid with this map, rather than the map
+    /// alone. Read [`SurfaceDiff`]'s own doc before iterating it.
     ///
     /// This used to be an exhaustive map (every one of a chunk's 16×16×`gen_depth`
     /// positions inserted up front from `pre`, then selectively overwritten by
@@ -400,14 +600,14 @@ impl SurfaceSystem {
     /// scan below still needs `pre`/`block_at` for its own classification logic
     /// (unchanged); only the redundant up-front full-column copy is gone.
     #[must_use]
-    pub fn build_surface(
+    pub fn build_surface<'b>(
         &self,
-        pre: &dyn Fn(i32, i32, i32) -> String,
+        pre: &dyn Fn(i32, i32, i32) -> PreState,
         heightmap: &dyn Fn(i32, i32) -> i32,
-        biome_at: &dyn Fn(i32, i32) -> (String, bool),
+        biome_at: &dyn Fn(i32, i32) -> (&'b str, bool),
         min_block_x: i32,
         min_block_z: i32,
-    ) -> HashMap<(i32, i32, i32), String> {
+    ) -> SurfaceDiff {
         let y_lo = self.min_y;
         let y_hi = self.min_y + self.gen_depth; // exclusive
         let way_below_min_y = self.min_y << 4;
@@ -431,14 +631,14 @@ impl SurfaceSystem {
         let corner_c3 =
             self.preliminary_surface_level((corner_cell_x + 1) << 4, (corner_cell_z + 1) << 4);
 
-        let mut out: HashMap<(i32, i32, i32), String> = HashMap::new();
+        let mut out: SurfaceDiff = SurfaceDiff::default();
 
         // Immutable classification source: vanilla only ever reads the original
         // column while scanning (`old` is at the current, not-yet-written Y and
         // the ceiling look-ahead only reads lower, unvisited Y).
-        let block_at = |x: i32, y: i32, z: i32| -> String {
+        let block_at = |x: i32, y: i32, z: i32| -> PreState {
             if y < y_lo || y >= y_hi {
-                "minecraft:air".to_string()
+                PreState::AIR
             } else {
                 pre(x, y, z)
             }
@@ -481,10 +681,14 @@ impl SurfaceSystem {
                 let mut y = height;
                 while y >= end_y {
                     let old = block_at(x, y, z);
-                    if is_air(&old) {
+                    // Was `is_air(&old)` / `is_fluid(&old)` on the block's
+                    // *name*; the class is now supplied beside the id and
+                    // checked against `class_of_name` at the production seam.
+                    // The three arms are the same three, in the same order.
+                    if old.class == PreClass::Air {
                         stone_above_depth = 0;
                         water_height = NO_WATER;
-                    } else if is_fluid(&old) {
+                    } else if old.class == PreClass::Fluid {
                         if water_height == NO_WATER {
                             water_height = y + 1;
                         }
@@ -493,7 +697,9 @@ impl SurfaceSystem {
                             next_ceiling_stone_y = way_below_min_y;
                             let mut lookahead_y = y - 1;
                             while lookahead_y >= end_y - 1 {
-                                if !is_stone(&block_at(x, lookahead_y, z)) {
+                                // `!is_stone(..)` — `is_stone` was exactly
+                                // `!is_air && !is_fluid`, i.e. `PreClass::Stone`.
+                                if block_at(x, lookahead_y, z).class != PreClass::Stone {
                                     next_ceiling_stone_y = lookahead_y + 1;
                                     break;
                                 }
@@ -508,7 +714,7 @@ impl SurfaceSystem {
                         ctx.stone_depth_above = stone_above_depth;
                         ctx.stone_depth_below = stone_below_depth;
 
-                        if old == self.default_block {
+                        if old.state == self.default_block {
                             if let Some(state) = self.try_apply(&self.rule, heightmap, &ctx) {
                                 out.insert((x, y, z), state);
                             }
@@ -529,6 +735,17 @@ impl SurfaceSystem {
     /// grass/mycelium block. Returns the canonical result state, or `None` if no
     /// rule matched. `heightmap(local_x, local_z)` is only consulted by the
     /// `steep` condition.
+    ///
+    /// # Why this still returns an owned `String` (U21)
+    ///
+    /// The carver seam (`crate::carver`'s `top_material: &dyn Fn(..) ->
+    /// Option<String>`) is outside issue #501's scope and was left untouched,
+    /// so this method resolves its id back to a name at the boundary. That is
+    /// **allocation-neutral, by construction**: the pre-U21 body allocated one
+    /// `String` for the biome and one for the matched state, and this one
+    /// allocates one for the matched state and none for the biome — so the
+    /// carve stage can only go down, never up. Converting the carver seam to
+    /// ids is the obvious follow-up and is deliberately not done here.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn top_material(
@@ -552,20 +769,21 @@ impl SurfaceSystem {
             water_height: if under_fluid { block_y + 1 } else { NO_WATER },
             stone_depth_above: 1,
             stone_depth_below: 1,
-            biome: biome.to_string(),
+            biome,
             cold_enough_to_snow,
         };
         self.try_apply(&self.rule, heightmap, &ctx)
+            .map(|id| self.interner.name_of(id).to_string())
     }
 
     fn try_apply(
         &self,
         rule: &Rule,
         heightmap: &dyn Fn(i32, i32) -> i32,
-        ctx: &Ctx,
-    ) -> Option<String> {
+        ctx: &Ctx<'_>,
+    ) -> Option<StateId> {
         match rule {
-            Rule::Block(state) => Some(state.clone()),
+            Rule::Block(state) => Some(*state),
             Rule::Sequence(rules) => {
                 for r in rules {
                     if let Some(s) = self.try_apply(r, heightmap, ctx) {
@@ -585,9 +803,9 @@ impl SurfaceSystem {
         }
     }
 
-    fn test(&self, cond: &Cond, heightmap: &dyn Fn(i32, i32) -> i32, ctx: &Ctx) -> bool {
+    fn test(&self, cond: &Cond, heightmap: &dyn Fn(i32, i32) -> i32, ctx: &Ctx<'_>) -> bool {
         match cond {
-            Cond::BiomeIs(list) => list.iter().any(|b| b == &ctx.biome),
+            Cond::BiomeIs(list) => list.iter().any(|b| b.as_str() == ctx.biome),
             Cond::AbovePreliminarySurface => ctx.block_y >= ctx.min_surface_level,
             Cond::NoiseThreshold {
                 noise,
@@ -713,6 +931,9 @@ impl SurfaceSystem {
 struct RuleParser<'a, 'b> {
     builder: &'a Builder<'b>,
     canon: &'a BlockCanon,
+    /// Where every result state and clay band is interned, once, at parse time
+    /// — so `try_apply` never touches the table. See [`SurfaceSystem::new`].
+    interner: &'a StateInterner,
     min_y: i32,
     gen_depth: i32,
 }
@@ -721,7 +942,10 @@ impl RuleParser<'_, '_> {
     fn rule(&self, node: &Value) -> Rule {
         let ty = strip(node["type"].as_str().expect("rule type"));
         match ty {
-            "block" => Rule::Block(canonical_from_block_json(&node["result_state"], self.canon)),
+            "block" => Rule::Block(
+                self.interner
+                    .id_of(&canonical_from_block_json(&node["result_state"], self.canon)),
+            ),
             "sequence" => Rule::Sequence(
                 node["sequence"]
                     .as_array()
@@ -747,13 +971,38 @@ impl RuleParser<'_, '_> {
     /// factory [`SurfaceSystem::new`] itself stores (`RandomState.random`,
     /// i.e. vanilla's `noiseRandom`) — see this module's own `master` field
     /// doc for why that identity holds.
+    /// U21 added the interning of the finished table, and the two assertions
+    /// that make "the band set is finite" a checked claim rather than an
+    /// assumption. `generate_bands` itself is untouched — every RNG draw in it
+    /// is world-defining, and its `Vec<String>` is built exactly once per
+    /// generator, so leaving it in strings costs 192 allocations per world.
     fn bandlands(&self) -> BandBlocks {
         let offset_noise = self.builder.noise("minecraft:clay_bands_offset");
         let mut random = self
             .builder
             .positional_factory()
             .from_hash_of("minecraft:clay_bands");
-        let clay_bands = generate_bands(&mut random);
+        let names = generate_bands(&mut random);
+
+        assert_eq!(
+            names.len(),
+            CLAY_BANDS_LEN,
+            "generate_bands must produce exactly SurfaceSystem.clayBands.length entries"
+        );
+        if let Some(unknown) = names
+            .iter()
+            .find(|n| !BAND_BLOCK_NAMES.contains(&n.as_str()))
+        {
+            panic!(
+                "clay band table contains {unknown:?}, which is not one of \
+                 BAND_BLOCK_NAMES {BAND_BLOCK_NAMES:?} — Rule::Bandlands' \
+                 pre-interning assumes the band set is exactly those seven \
+                 blocks (see this module's doc); add the new block to the list \
+                 rather than reintroducing a per-block intern"
+            );
+        }
+
+        let clay_bands = names.iter().map(|n| self.interner.id_of(n)).collect();
         BandBlocks {
             clay_bands,
             offset_noise,
@@ -860,9 +1109,9 @@ fn is_fluid(s: &str) -> bool {
     name == "minecraft:water" || name == "minecraft:lava"
 }
 
-fn is_stone(s: &str) -> bool {
-    !is_air(s) && !is_fluid(s)
-}
+// `is_stone` was `!is_air(s) && !is_fluid(s)`. It is gone as a function because
+// `class_of_name`'s `else` arm *is* that expression, and the scan now compares
+// `PreClass::Stone` rather than calling it — see `build_surface`'s lookahead.
 
 /// The partial key (`name` + sorted specified `[k=v]`) for a `{Name, Properties?}`
 /// block JSON node — the lookup key into a [`BlockCanon`].

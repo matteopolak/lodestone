@@ -315,6 +315,24 @@ pub struct OverworldGenerator {
     /// from `Blocks.LAVA.defaultBlockState()`, not from `NoiseGeneratorSettings`)
     /// — not a simplification, this is vanilla's own behaviour.
     default_lava: String,
+    /// The three `default_*` strings above as [`PreState`]s — interned id plus
+    /// air/fluid/stone class — resolved once here (issue #501, U21).
+    ///
+    /// [`Self::surface_stage`]'s `pre` closure and [`Self::materialize_world`]
+    /// both need a block-state per position and used to `clone()` / re-hash one
+    /// of the strings above per call; these make both a 4-byte copy.
+    ///
+    /// **Both halves come from [`PreState::from_name`]**, i.e. from
+    /// `class_of_name` applied to the very string the settings supplied — so
+    /// the class is *derived*, never hand-written at the use site. That is
+    /// deliberate: a hand-written class would be a fully-connected wire
+    /// carrying the wrong value (`CLAUDE.md`'s own phrase) — the scan would
+    /// branch differently and still produce a plausible column. The `String`
+    /// forms are kept as the definition `surface_stage` re-derives against on
+    /// every entry under `debug_assertions`.
+    default_block_pre: crate::surface::PreState,
+    default_fluid_pre: crate::surface::PreState,
+    default_lava_pre: crate::surface::PreState,
     /// The biome (and its `coldEnoughToSnow` answer) used for every column
     /// when [`Self::dynamic_biome`] is `None` — i.e. exactly the whole-world
     /// behaviour this generator had before issue #405, kept as the fallback
@@ -438,7 +456,13 @@ impl OverworldGenerator {
         let router = &settings["noise_router"];
         let final_density = builder.build(&router["final_density"]);
         let canon = identity_canon(settings);
-        let surface = SurfaceSystem::new(settings, &builder, &canon);
+        // Built here rather than in the `Self { .. }` literal below because
+        // `SurfaceSystem::new` interns its whole result-state set into it at
+        // parse time (issue #501) — see that method's own note on why a set
+        // walked out of the parsed data cannot drift the way a hand-maintained
+        // pre-intern list would.
+        let interner = Arc::new(crate::interner::StateInterner::new());
+        let surface = SurfaceSystem::new(settings, &builder, &canon, &interner);
 
         let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(-64) as i32;
         let height = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
@@ -452,6 +476,9 @@ impl OverworldGenerator {
             .unwrap_or("minecraft:water")
             .to_string();
         let default_lava = "minecraft:lava".to_string();
+        let default_block_pre = crate::surface::PreState::from_name(&interner, &default_block);
+        let default_fluid_pre = crate::surface::PreState::from_name(&interner, &default_fluid);
+        let default_lava_pre = crate::surface::PreState::from_name(&interner, &default_lava);
 
         let raw_table = crate::biome::parse_table(&resolver.biome_parameters());
         let dynamic_biome = if raw_table.is_empty() {
@@ -557,20 +584,27 @@ impl OverworldGenerator {
         Self {
             slot_count,
             surface,
-            // Fresh per generator. Deliberately *not* pre-populated from the
-            // resolver's data: the allocation budget is written against a
-            // steady-state column, by which point every state the data can
-            // produce has been interned by ordinary generation. Pre-interning
-            // would only move cold-start work around, and a pre-intern list
-            // that drifted out of sync with the data would be a stale claim of
-            // exactly the kind CLAUDE.md's rule 2 is about.
-            interner: Arc::new(crate::interner::StateInterner::new()),
+            // Fresh per generator, built just above so `SurfaceSystem::new`
+            // could intern into it. Still deliberately *not* pre-populated
+            // from a hand-written list of everything the resolver's data can
+            // produce: the allocation budget is written against a steady-state
+            // column, by which point every state the data can produce has been
+            // interned by ordinary generation, and a hand-maintained
+            // pre-intern list that drifted out of sync with the data would be
+            // a stale claim of exactly the kind CLAUDE.md's rule 2 is about.
+            // U21's additions are not that: the surface rule's result states,
+            // the clay bands and the three `default_*` blocks are all walked
+            // out of the parsed data itself, so they cannot drift from it.
+            interner,
             min_y,
             height,
             sea_level,
             default_block,
             default_fluid,
             default_lava,
+            default_block_pre,
+            default_fluid_pre,
+            default_lava_pre,
             fallback_biome: biome.to_string(),
             fallback_cold_enough_to_snow: cold_enough_to_snow,
             dynamic_biome,
