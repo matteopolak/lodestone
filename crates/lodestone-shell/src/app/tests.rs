@@ -2350,12 +2350,20 @@ fn without_the_rule_the_same_death_still_raises_the_death_screen() {
 fn right_clicking_a_command_block_opens_the_edit_screen() {
     use crate::raycast::RayHit;
 
-    let Some(state_id) = (0u32..40_000).find(|id| {
-        lodestone_data::block_states::block_type_name(*id)
-            .is_some_and(|n| n == "minecraft:command_block")
-    }) else {
-        return;
-    };
+    // `block_name`, keyed by block-**state** id, is the id space the store and
+    // `write_predicted_block` deal in. This used to scan `block_type_name`,
+    // whose parameter is a `minecraft:block` **registry** id, so it selected
+    // state 407 — `minecraft:cherry_leaves` — and the test agreed with the
+    // production bug it was meant to gate (see `command_block_source::
+    // mode_for_state`). A `None` here is a broken generated table, not a case to
+    // skip: silently returning green is the *precondition* species of vacuous
+    // test.
+    let state_id = (0u32..lodestone_data::block_states::STATE_COUNT as u32)
+        .find(|id| {
+            lodestone_data::block_states::block_name(*id)
+                .is_some_and(|n| n == "minecraft:command_block")
+        })
+        .expect("the 26.2 block-state table must contain minecraft:command_block");
 
     let mut app = WindowApp::new(Config {
         mode: Mode::Headless,
@@ -2438,11 +2446,14 @@ fn right_clicking_a_command_block_opens_the_edit_screen() {
 fn right_clicking_a_normal_block_does_not_open_the_command_block_screen() {
     use crate::raycast::RayHit;
 
-    let Some(stone) = (0u32..4096).find(|id| {
-        lodestone_data::block_states::block_type_name(*id).is_some_and(|n| n == "minecraft:stone")
-    }) else {
-        return;
-    };
+    // Block-**state** id space, as above: a control that writes some arbitrary
+    // block instead of stone still passes, so the wrong accessor made this
+    // control weaker than it reads.
+    let stone = (0u32..lodestone_data::block_states::STATE_COUNT as u32)
+        .find(|id| {
+            lodestone_data::block_states::block_name(*id).is_some_and(|n| n == "minecraft:stone")
+        })
+        .expect("the 26.2 block-state table must contain minecraft:stone");
 
     let mut app = WindowApp::new(Config {
         mode: Mode::Headless,
