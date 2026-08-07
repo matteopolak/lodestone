@@ -100,13 +100,37 @@ return this.useLegacyRandomSource ? WorldgenRandom.Algorithm.LEGACY
                                   : WorldgenRandom.Algorithm.XOROSHIRO;
 ```
 
-Our engine hardcodes the other branch: `density/mod.rs:708` is
-`XoroshiroRandomSource::new(seed).fork_positional()`, and `legacy_random_source`
-has **zero occurrences** anywhere under `crates/lodestone-worldgen/src/`. This is
-not cosmetic — it changes every noise value in both dimensions, so no amount of
-correct data produces correct terrain until it lands. `LegacyRandomSource` itself
-already exists (`rng`), so the work is making the algorithm selectable and
-threading the setting through, not writing a new RNG.
+**This is a wiring gap, not a missing implementation, and the distinction sets
+the size of the job.** Say it precisely, because the loose version ("the legacy
+RNG is unimplemented") is false and was in an earlier revision of this doc:
+
+* `LegacyRandomSource` is **fully implemented and in production use** —
+  `rng/legacy.rs:16` (struct), `:41` (`impl RandomSource`), `:116`
+  (`consume_count`), `:125` `LegacyPositionalFactory`, `:137`
+  (`impl PositionalRandomFactory`). Live callers: `noise/perlin_simplex.rs` (14
+  references), `noise/simplex.rs` (3), `feature/vegetation.rs` (5),
+  `carver/mod.rs` (3).
+* `consume_count` is on the `RandomSource` **trait** (`rng/mod.rs:78`), not a
+  concrete-type convenience, and is implemented for both algorithms
+  (`legacy.rs:116`, `xoroshiro.rs:166`).
+* What is missing is that **the flag is read nowhere**: `legacy_random_source` has
+  **zero occurrences under `crates/lodestone-worldgen/`**. (Tree-wide it has 3, all
+  of them in this phase's own
+  `crates/lodestone-data/tests/worldgen_dimension_data.rs` — so quote the engine
+  scope, not "tree-wide", or the number looks like progress.)
+* `density::Builder::new` hardcodes the other branch at `density/mod.rs:708`:
+  `XoroshiroRandomSource::new(seed).fork_positional()`.
+* **Why it is more than a one-liner**: `Builder`'s `master` field is the
+  *concrete* type `crate::rng::XoroshiroPositionalFactory` (`density/mod.rs:700`),
+  and `Builder::positional_factory` (`:750`) *returns* that concrete type too. So
+  there are **two** sites to make polymorphic (an enum or a boxed trait object),
+  not one, and the accessor's return type is part of `density/`'s public surface.
+
+Not cosmetic: it changes every noise value in both dimensions, so no amount of
+correct data produces correct terrain until it lands. Bounded, though — the change
+is confined to `density/` plus threading the flag from `noise_settings`. Note
+`density/` sits inside the proposed `lodestone-worldgen-core` leaf crate and is
+U4's rewrite target, so sequencing matters.
 
 **2. The two Nether noises need bespoke instantiation** — [engine].
 
@@ -382,14 +406,27 @@ and will port every DF type; a version written against today's interpreter is
 thrown away, and the traps above are the kind that get re-introduced by a
 port-of-a-port. `crates/lodestone-worldgen/**` also has a live owner.
 
-The reasoning against doing it early anyway, despite it being only ~40 lines:
-it is **untestable in isolation right now**. Its correctness depends on
-`LegacyRandomSource` + `consumeCount(17292)` + `SimplexNoise` seeding, and
-`legacy_random_source` is unimplemented, so the only available gate would compare
-our output against our own seeding — `decode(encode(x)) == x`. It becomes cheap
-and *checkable* the moment item 1 lands, and a `DensityOracle` dump of
-`end_islands` at known coordinates is the expected value that has to originate
-outside our code. Sequence it after the legacy RNG, inside U4.
+**The reason is U4's rewrite, and nothing else.** An earlier revision of this doc
+also argued it was "untestable in isolation right now" because the legacy RNG was
+missing. **That was wrong, and the correction matters more than the claim did**:
+every primitive `end_islands` needs already exists and is in production use —
+`LegacyRandomSource` (`rng/legacy.rs:16`, `impl RandomSource` at `:41`),
+`consume_count` on the `RandomSource` *trait* (`rng/mod.rs:78`, legacy impl at
+`legacy.rs:116`), and `SimplexNoise::new<R: RandomSource>` (`noise/simplex.rs:59`),
+which is generic and so takes a `LegacyRandomSource` directly.
+
+Crucially, `EndIslandDensityFunction`'s seeding **does not consult
+`legacy_random_source` at all** — it always constructs `new
+LegacyRandomSource(seed)` (`DensityFunctions.java:498`) regardless of the setting.
+So the density function is independently constructible and gate-able **today**,
+against a `DensityOracle` dump at known coordinates. Item 1 is not a prerequisite
+of testing it; the two are independent.
+
+What remains is the ordinary argument: U4 replaces the boxed-enum interpreter, a
+version written against today's one is thrown away, and the traps above are
+exactly the kind that get re-introduced by a port-of-a-port. Sequence it inside
+U4. If a reason ever appears to want it sooner, that is now a schedule question
+with no technical blocker behind it.
 
 ## How to change it
 
