@@ -45,9 +45,29 @@ scanned all 4096 blocks of every section of every column, every tick, calling th
 the tick thread** (3,939 of 4,034 samples) in that one predicate. Measured cost:
 
 * **2.108 ms per column** (24 sections × 4096 = 98,304 predicate calls at 21.45 ns)
-* at 361 columns that is **761 ms of scanning per 50 ms tick — 15× over budget**
-* the palette prefilter is **38.7 µs per column, 54× cheaper**; 361 columns is
-  then 14 ms, which fits
+* the random-tick loop iterates **`tick_area`, not the streamed view**.
+  `tick_area` is `mob_area` (`integrated.rs:520`) at radius
+  `view_radius.clamp(1, 3)` (`net.rs:1773`) — a 7×7 square, **49 columns**, as
+  `integrated.rs:538` states independently. So **103 ms of scanning per 50 ms
+  tick, 2.07× over budget**; the headroom is `50 / 2.108 = 23.7` columns and 49
+  exceeds it.
+* the palette prefilter is **38.7 µs per column, 54× cheaper**; 49 columns is
+  then 1.9 ms, which fits
+
+> **Correction (issue #507 follow-up).** This document and `bdf93a28`'s commit
+> message previously multiplied 2.108 ms by the **361 resident columns of the
+> streamed view** and reported **761 ms / 15.2× over budget**. That is the wrong
+> multiplier — the random-tick loop never iterates the view — and those two
+> numbers should not be requoted anywhere. The conclusion is unchanged: 49
+> columns still exceeds the 23.7-column budget, so delivery still starves.
+
+The palette prefilter was the interim fix (`bdf93a28`) and is **no longer the
+production path**: it was still O(blocks) per column per tick, re-walking a grid
+to reach a decision that almost never changes. `ChunkColumn` now keeps vanilla's
+`tickingBlockCount` per 16-row window, so the decision is one integer compare and
+the per-tick scan is gone entirely — see `tick-scheduling.md` §"Section
+eligibility". The per-column measurements above stay as the record of what was
+replaced.
 
 Generation shares that thread, so past a few tens of resident columns it gets
 effectively no time and delivery stops permanently. That is the reported

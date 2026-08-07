@@ -44,6 +44,10 @@ use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
 
 pub(crate) const AIR: &str = "minecraft:air";
 pub(crate) const STONE: &str = "minecraft:stone";
+/// Rows per implicit section. [`ChunkColumn`] has no per-section struct — a
+/// "section" here is a 16-row window of the one flat grid, counted from
+/// `min_y` — so this is the only place the window height is written down.
+pub(crate) const SECTION_ROWS: usize = 16;
 /// Fallback biome for a [`ChunkColumn`] built with no generator behind it
 /// ([`ChunkColumn::new`]'s blank column, and [`WorldgenChunkSource`], which
 /// only ever models solidity — see that type's own doc comment). A column
@@ -100,6 +104,33 @@ pub struct ChunkColumn {
     palette: Vec<String>,
     /// `blocks[(y_local * 16 + z) * 16 + x]` indexes into `palette`.
     blocks: Vec<u16>,
+    /// `palette_ticking[id] == crate::random_tick::is_randomly_ticking(&palette[id])`,
+    /// computed once per palette entry as that entry is appended.
+    ///
+    /// Sound because the palette is **append-only**: [`ChunkColumn::intern`]
+    /// pushes and nothing in this crate ever removes, remaps or compacts an
+    /// entry (`palette` is private, so that is compiler-enforced rather than
+    /// conventional). Palette entries are *full* state strings including
+    /// `[...]` properties, and the predicate is a pure function of that string
+    /// — property-sensitive families like `leaves_should_decay` included — so a
+    /// per-entry classification is exact, not an approximation.
+    palette_ticking: Vec<bool>,
+    /// How many cells in each implicit 16-row window hold a randomly-ticking
+    /// state — vanilla's `LevelChunkSection.tickingBlockCount`
+    /// (`LevelChunkSection.java:16`), one entry per section, `len =
+    /// height.div_ceil(16)`.
+    ///
+    /// `u16` for the same reason vanilla uses `short`: a section holds at most
+    /// 4096 cells. Maintained incrementally by [`ChunkColumn::set_block`] and
+    /// recomputed wholesale by [`ChunkColumn::recalc_ticking_counts`] for the
+    /// one constructor that adopts an already-populated grid.
+    ///
+    /// **Derived state — never serialized.** `crate::chunk_nbt` does not write
+    /// it and a column read back off disk rebuilds it from the predicate
+    /// compiled into the running binary, so widening
+    /// `crate::random_tick::is_randomly_ticking` later cannot strand a stale
+    /// persisted count.
+    section_ticking: Vec<u16>,
     /// Biome id per horizontal quart, row-major `qz * 4 + qx` (issue #405),
     /// constant across `y` — see [`GeneratedColumn::biome_state`]'s doc for
     /// why this port broadcasts one climate sample per quart column instead
@@ -119,6 +150,15 @@ impl ChunkColumn {
             height,
             palette: vec![AIR.to_string()],
             blocks: vec![0u16; 16 * 16 * height as usize],
+            // All-air, so every section count is zero and every palette entry
+            // is classified — correct by construction with no counting pass,
+            // exactly like vanilla's empty-section constructor
+            // (`LevelChunkSection.java:36-39`), which likewise does not call
+            // `recalcBlockCounts`. The one classification is still routed
+            // through the predicate rather than hardcoded `false`, so the
+            // table cannot drift from the definition.
+            palette_ticking: vec![crate::random_tick::is_randomly_ticking(AIR)],
+            section_ticking: vec![0u16; (height as usize).div_ceil(SECTION_ROWS)],
             biome_quarts: std::array::from_fn(|_| DEFAULT_BIOME.to_string()),
         }
     }
@@ -134,13 +174,23 @@ impl ChunkColumn {
             Some(AIR),
             "generated palette must start with air"
         );
-        Self {
+        let mut column = Self {
             min_y,
             height,
             palette,
             blocks,
+            // Placeholders: this constructor *adopts* an already-populated
+            // grid, so the counters cannot be right by construction the way
+            // `new`'s all-air ones are. `recalc_ticking_counts` below is the
+            // one counting pass in the crate — vanilla's
+            // `recalcBlockCounts`, called from exactly the analogous
+            // constructor (`LevelChunkSection.java:33`).
+            palette_ticking: Vec::new(),
+            section_ticking: Vec::new(),
             biome_quarts,
-        }
+        };
+        column.recalc_ticking_counts();
+        column
     }
 
     /// Biome id at local `(x, z)` in `0..16` — quart resolution, same value
@@ -159,12 +209,62 @@ impl ChunkColumn {
         ((y_local * 16 + z) * 16 + x) as usize
     }
 
+    /// Which 16-row window a `y - min_y` offset falls in. The windows are
+    /// measured from `min_y`, not from world y = 0, which is the same
+    /// arithmetic [`recalc_ticking_counts`](Self::recalc_ticking_counts) and
+    /// `crate::random_tick`'s section walk use — change one and all three must
+    /// change together.
+    #[inline]
+    fn section_index(y_local: i32) -> usize {
+        y_local as usize / SECTION_ROWS
+    }
+
+    /// Recomputes both derived ticking tables from scratch — vanilla's
+    /// `LevelChunkSection.recalcBlockCounts` (`LevelChunkSection.java:122-153`),
+    /// kept as a named production function for the same reason vanilla keeps
+    /// it: exactly one constructor needs it (the one that *adopts* an
+    /// already-populated grid), and naming it says so.
+    ///
+    /// Cost as a count rather than a duration, per this repo's evidence rule:
+    /// exactly `palette.len()` predicate evaluations plus one read of every
+    /// cell in `blocks` (98,304 for a full overworld column). The caller has
+    /// just moved those same cells, so the pass adds less than one extra read
+    /// of data already in cache, once per column construction — against the
+    /// per-tick, per-column scan it removes.
+    fn recalc_ticking_counts(&mut self) {
+        self.palette_ticking = self
+            .palette
+            .iter()
+            .map(|state| crate::random_tick::is_randomly_ticking(state))
+            .collect();
+        let mut counts = vec![0u16; (self.height as usize).div_ceil(SECTION_ROWS)];
+        for (cell, &id) in self.blocks.iter().enumerate() {
+            if self.palette_ticking[id as usize] {
+                // `blocks[(y_local * 16 + z) * 16 + x]`, so `cell / 256` is
+                // `y_local` and `cell / 4096` is its 16-row window.
+                counts[cell / (256 * SECTION_ROWS)] += 1;
+            }
+        }
+        self.section_ticking = counts;
+    }
+
     /// Interns a block-state string into the palette, returning its index.
     fn intern(&mut self, name: &str) -> u16 {
         if let Some(i) = self.palette.iter().position(|p| p == name) {
             return i as u16;
         }
         self.palette.push(name.to_string());
+        // Classify each palette entry exactly once, as it is appended — the
+        // only place a new classification is ever needed, because the palette
+        // is append-only. This is what lets `set_block` decide a counter delta
+        // with **no** string predicate evaluation at all.
+        self.palette_ticking
+            .push(crate::random_tick::is_randomly_ticking(name));
+        debug_assert_eq!(
+            self.palette.len(),
+            self.palette_ticking.len(),
+            "palette and its ticking classification must stay the same length"
+        );
         (self.palette.len() - 1) as u16
     }
 
@@ -173,7 +273,40 @@ impl ChunkColumn {
         let id = self.intern(name);
         let y_local = y - self.min_y;
         let i = self.index(x, y_local, z);
+        let old = self.blocks[i];
         self.blocks[i] = id;
+
+        // Vanilla's `LevelChunkSection.setBlockState` (`:58-102`) maintains
+        // `tickingBlockCount` exactly here: decrement for the state leaving the
+        // cell, increment for the one arriving. Both classifications are
+        // already cached per palette id, so this is two array reads and at most
+        // one `±1`. A same-state rewrite, and any ticking→ticking or
+        // non-ticking→non-ticking replacement, is a no-op by construction —
+        // `was == now` — with no special case needed.
+        let was = self.palette_ticking[old as usize];
+        let now = self.palette_ticking[id as usize];
+        if was != now {
+            let section = Self::section_index(y_local);
+            if now {
+                self.section_ticking[section] += 1;
+            } else {
+                // Plain `-=` behind a `debug_assert!`, deliberately **not**
+                // `saturating_sub`. Saturation would silently absorb precisely
+                // the maintenance bug this counter exists to prevent — a
+                // mutation path that incremented on the way in but not on the
+                // way out — converting a loud panic at the offending write into
+                // a section that quietly stops random-ticking forever. Do not
+                // "harden" this.
+                debug_assert!(
+                    self.section_ticking[section] > 0,
+                    "section_ticking[{section}] underflowed writing {name} at ({x}, {y}, {z}): \
+                     a randomly-ticking state left a cell the counter did not know held one, so \
+                     some mutation path reached `blocks` without `set_block` or \
+                     `recalc_ticking_counts`"
+                );
+                self.section_ticking[section] -= 1;
+            }
+        }
     }
 
     /// Sets solidity at a local `(x, z)` in `0..16` and world `y`. `true` writes
@@ -230,6 +363,69 @@ impl ChunkColumn {
     #[must_use]
     pub fn raw_blocks(&self) -> &[u16] {
         &self.blocks
+    }
+
+    /// `LevelChunkSection::isRandomlyTicking`'s boolean for the 16-row window
+    /// whose lowest row is world `section_min_y` — `tickingBlockCount > 0`
+    /// (`LevelChunkSection.java:110-112`).
+    ///
+    /// **O(1): one integer compare.** This is the whole point of the counters;
+    /// `crate::random_tick` used to reach the identical boolean by scanning up
+    /// to 4096 cells per section, per column, per tick (issue #507). A
+    /// `section_min_y` outside this column is `false`.
+    #[must_use]
+    pub fn section_is_randomly_ticking(&self, section_min_y: i32) -> bool {
+        let y_local = section_min_y - self.min_y;
+        if y_local < 0 {
+            return false;
+        }
+        self.section_ticking
+            .get(Self::section_index(y_local))
+            .is_some_and(|&count| count > 0)
+    }
+
+    /// `true` if any 16-row window in this column holds a randomly-ticking
+    /// state — the whole-column early exit taken before any section is walked.
+    /// At most `height / 16` integer compares (24 for a full overworld column).
+    #[must_use]
+    pub fn has_randomly_ticking_block(&self) -> bool {
+        self.section_ticking.iter().any(|&count| count > 0)
+    }
+
+    /// The raw per-section ticking counts, indexed by 16-row window from
+    /// `min_y`.
+    ///
+    /// Production code never reads the count itself, only whether it is
+    /// positive ([`section_is_randomly_ticking`](Self::section_is_randomly_ticking)).
+    /// This exists for the permanent parity gate
+    /// (`tests/random_tick_section_counters.rs`), which compares every count
+    /// against an independent recount walking [`raw_blocks`](Self::raw_blocks)
+    /// — a *boolean*-only accessor would let a count drift by any amount
+    /// without the gate noticing as long as it stayed on the same side of zero.
+    #[must_use]
+    pub fn section_ticking_counts(&self) -> &[u16] {
+        &self.section_ticking
+    }
+
+    /// **Test hook. Deliberately corrupts the ticking counter for one section.**
+    ///
+    /// It exists for one purpose: to be the negative control of the parity gate
+    /// in `tests/random_tick_section_counters.rs`. An assertion that two things
+    /// agree is worth nothing without evidence the comparison can fail, and the
+    /// only way to produce a genuine desync is to break the invariant on the
+    /// **production** side — corrupting the gate's own recount instead would
+    /// pass even if the gate were accidentally comparing the recount to itself.
+    ///
+    /// It is plain `pub` rather than `#[cfg(test)]` because an integration test
+    /// is a separate crate and cannot see `#[cfg(test)]` items; the census test
+    /// `no_production_code_corrupts_the_ticking_counter` in that same file
+    /// keeps it out of `src/` permanently. **No production caller may exist.**
+    /// After calling this the column's counters are wrong by `delta` and every
+    /// random-tick decision derived from them is unsound.
+    #[doc(hidden)]
+    pub fn debug_corrupt_section_ticking_count(&mut self, section_index: usize, delta: i32) {
+        let slot = &mut self.section_ticking[section_index];
+        *slot = (i32::from(*slot) + delta) as u16;
     }
 
     /// The 16 per-quart biome ids, row-major `qz * 4 + qx`.
