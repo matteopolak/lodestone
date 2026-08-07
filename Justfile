@@ -185,6 +185,20 @@ wasm-check:
 wasm-size:
     ./scripts/wasm-size.sh
 
+# Gate for scripts/profile-cost-table.py, the samply join the whole worldgen
+# perf record was measured through (docs/roadmap/benchmarks.md). It rotted
+# undetected across a samply upgrade because nothing ran it: the script had no
+# test, and `cargo test --workspace` cannot see a Python file. 20 checks over
+# three committed fixtures, stdlib only, no capture needed.
+#
+# NOT part of `just health`, and that is the remaining gap rather than a
+# decision — a gate you must choose to run is the shape of the original
+# problem. Folding it in wants an xtask test shelling out to python3, and the
+# trap there is that "python3 missing => skip" is the *precondition* species of
+# vacuous test (CLAUDE.md): it must fail loudly, not skip. Tracked separately.
+test-profile-table:
+    python3 scripts/test-profile-cost-table.py
+
 # Region-level worldgen throughput/peak-RSS sweep. No args: the script's own
 # courteous default radii (8 16) apply. Pass radii to override, e.g.
 # `just worldgen-sweep 3 32` for the full RD-32 sweep — only on an otherwise
