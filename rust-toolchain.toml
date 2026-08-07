@@ -11,5 +11,21 @@
 # API that can change under us, and an unpinned `nightly` means any `rustup
 # update` can break the build. If that churn becomes expensive, pin a dated
 # nightly (`channel = "nightly-YYYY-MM-DD"`) rather than returning to stable.
-channel = "nightly"
+# **Pinned, and to this date specifically.** Two nightlies days apart differ on a
+# codegen ICE: rustc `7608eb7b0` panics compiling tokio 1.53.1 at `opt-level=3`
+# when dev-deps enable `rt-multi-thread`, which breaks `cargo test --release` and
+# `cargo bench` workspace-wide. `84b36a78a` does not. Since the worldgen rewrite's
+# whole premise is release-profile measurement (`docs/plans/worldgen-rewrite.md`),
+# an unpinned channel means a `rustup update` can silently remove the ability to
+# benchmark, and a moving compiler makes a performance baseline unreproducible.
+#
+# **The date is the *publish* date, not the commit date, and they do not match.**
+# `nightly-2026-08-07` is rustc `84b36a78a (2026-08-06)` — the validated one.
+# `nightly-2026-08-06` is rustc `7608eb7b0 (2026-08-05)` — the one that ICEs.
+# Reading the rustc date and pinning the same-numbered channel gets you the wrong
+# compiler; verify with `rustup run <channel> rustc --version` before changing this.
+#
+# Validated at this pin: `cargo build --release --workspace --all-targets` (292
+# crates, 0 errors, 0 ICEs) and `cargo bench -p lodestone-worldgen --no-run`.
+channel = "nightly-2026-08-07"
 components = ["rustfmt", "clippy"]
