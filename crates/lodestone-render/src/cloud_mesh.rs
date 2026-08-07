@@ -60,7 +60,7 @@
 //! that gating rebuilds on a cell crossing was "what `cloud_mesh`'s own module doc
 //! already asks for and this does not yet do". Two docs in one crate, one true and
 //! one false, and the false one was the one a reader of *this* file would find.
-//! [`CloudFaceCache`] is what closed it; `DESIGN.md` §12.115 has the counter.
+//! [`CloudFaceCache`] is what closed it; `DESIGN.md` §12.114 has the counter.
 //!
 //! **One deliberate divergence from vanilla.** `CloudRenderer.java:74` and `:76`
 //! wrap the *x* axis by `height` when sampling the east and west neighbours:
@@ -300,7 +300,7 @@ pub fn extruded_faces(
 /// camera *cell* — not per frame. Rebuilding is keyed on the camera crossing a
 /// cell boundary"; nothing keyed anything, and `sky.rs`'s
 /// `CLOUD_FANCY_RADIUS_CELLS` doc said so honestly two files away. `DESIGN.md`
-/// §12.115.
+/// §12.114.
 ///
 /// # How to change it, and the gotchas
 ///

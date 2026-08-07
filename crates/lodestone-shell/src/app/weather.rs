@@ -134,7 +134,7 @@ impl WeatherTracker {
 /// path — 441 × 3 acquisitions per rainy frame, contended against the chunk
 /// streaming writer — while both this comment and `redraw.rs`'s repeated the cheap
 /// design. A comment describing a design the code does not implement is worse than
-/// none, because it stops the next reader looking (`DESIGN.md` §12.113). The memo
+/// none, because it stops the next reader looking (`DESIGN.md` §12.114). The memo
 /// is what makes the claim true again.
 ///
 /// The three divergences from vanilla, in order of how visible they are:

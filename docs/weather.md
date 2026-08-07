@@ -263,7 +263,7 @@ Gotchas beyond the three above:
   across frames would serve pre-`BLOCK_UPDATE` biomes. Counter and both wrong
   hypotheses: `app::weather::tests::one_section_fetch_per_chunk_column_not_one_per_column`
   (measured 441 → 4) and `lodestone-render/tests/weather_probe_query_counts.rs`
-  (`column_top` 882 → 441). `DESIGN.md` §12.113.
+  (`column_top` 882 → 441). `DESIGN.md` §12.114.
 
 ## Deferred
 

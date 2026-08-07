@@ -3581,3 +3581,95 @@ grid). Landed as found, plus four fixes; every number below was measured this se
   `just check` (debug, `--all-targets`) stays green. The tree as found had this right; recorded
   because the next person writing a tripwire has a 50% chance of getting it wrong and no health
   check in CLAUDE.md would tell them.
+
+**12.114 Four `bdf93a28`-class defects in the render/shell frame path, and in three of the four a *comment* was the reason nobody had looked: two docs asserted the cheap design that the code did not implement, and one pair of docs in the same crate contradicted each other about it.**
+
+Same class as `bdf93a28` (the random-tick palette scan): work whose cost is a pure function of
+data that changes on an event, recomputed unconditionally. What is new here is the *concealment
+mechanism*, which was documentation in three of the four cases, and one arithmetic error in the
+report that started the work.
+
+- **The weather probe took ~1,300 world locks a frame inside the function whose doc said it took
+  one sample.** `ShellWeatherProbe::precipitation` is called once per column — 441 at
+  `DEFAULT_WEATHER_RADIUS` — and issue #25's per-column biome lookup put three world-lock
+  acquisitions on that path (`world_dimensions`, `section_at` plus an `Arc<ChunkSection>` clone,
+  and the `BiomeClimateCell` mutex), contended against the chunk-streaming writer. The probe's own
+  doc said it "answers every column from" a single light sample and that "441 locks per frame at
+  60 fps is not a trade worth making"; `redraw.rs` repeated it. **Both were true when written and
+  #25 falsified them without touching either.** A comment describing a design the code does not
+  implement is worse than no comment, because it stops the next reader looking — and this one was
+  load-bearing enough that the author of the finding had read it and believed it. Fixed with
+  `ProbeMemo`, keying each read by what it actually varies over. Measured, both hypotheses stated
+  from outside: **441 → 4** `section_at` calls for a camera at x=0 and **441 → 9** at x=24, with
+  `column_top` **882 → 441** separately (`extract_columns` asked twice per column for one value).
+  Control: the memo neutered to always fetch reads `left: 441, right: 4`; a clear frame reads 0,
+  which is what makes the rainy fixture load-bearing rather than decorative.
+- **"At most 4 chunk columns" was wrong, and only predicting the number found it.** The finding
+  derived the fixed lock count as 4 because a 21×21 *block* square is smaller than a 16×16 chunk.
+  21 consecutive blocks straddle **two** chunk boundaries whenever the camera sits near one, so the
+  span is 2 *or 3* columns per axis and the answer is 4, 6 or **9**. The gate asserts both 4 and 9
+  from two cameras, worked out from the block range by hand. **An assertion of "fewer than before"
+  would have passed at every one of those values and at 441 minus one.** This is the *magnitude*
+  species arriving through a derived constant rather than through a weak predicate.
+- **A hermetic gate for a shell-side world lock needs a seam, and there is exactly one honest place
+  to put it.** There is no way to build a `ClientHandle` without `ClientBuilder::connect`, so the
+  alternative to a seam was a live oracle. `ProbeMemo::precipitation_at` now takes the three world
+  reads as closures: the key derivation, the memo and the climate arithmetic are all production
+  code driven by the real `extract_columns`, and only the `ClientHandle` call is counted rather
+  than performed. `handle.rs`'s own doc ("acquiring the internal world lock exactly once") is what
+  makes a call count a lock count.
+- **`LiveCollision`'s intermediate `HashMap` was justified in a circle.** `Sim::live_collision`
+  built a `HashMap<(i32,i32,usize), Arc<ChunkSection>>` by zipping its request list against
+  `sections_at`'s aligned response, and `new` immediately consumed it into a dense `Vec` — on a
+  path rebuilt 100–160 times a second. The comment: *"`sections` keeps its `HashMap` shape at this
+  boundary because `Sim::live_collision` already builds one"*. Each end cited the other. Ordering
+  the request list the way the grid is indexed makes the response *be* the grid. Evidence for a
+  pure refactor is equivalence, not a counter: the two builds are compared cell for cell over the
+  footprint plus a one-chunk ring and a section above and below, with an absent edge column so the
+  two *footprints* genuinely differ (3×3 dense vs 2×3 bounding-box) — the exact case the old code's
+  doc claimed was harmless. Control: the one producer mistake that still yields a correctly-sized
+  `Vec` is emitting the list z-major, and that reads **"73728 cells disagree; first at Some((80, 0,
+  -32)) (dense 109 vs map 103)"**.
+- **The memo that would have been the larger win is deliberately unbuilt, because the signal it
+  needs does not exist.** A `LiveCollision` cached on `(player chunk, world revision)` would cut
+  160 rebuilds a second to ~20. There is no world revision: `lodestone_world::World` is a bare
+  `HashMap<ChunkPos, LoadedChunk>` with no mutation counter, `lodestone_ecs::ChunkWorld` wraps it
+  in an `RwLock` and adds none, and `ClientHandle` exposes none — checked, not assumed. Any
+  substitute (hashing the snapshot, a time bound, "the player did not move") keys the cache on
+  something that is not the thing that changes, and **a stale collision view is a player falling
+  through the world**, which is far worse than 160 rebuilds. Recorded at the call site as a
+  prerequisite rather than left as an invitation.
+- **The star field was regenerated from its PRNG every night frame while its own doc described
+  vanilla's static buffer.** `build_star_field`'s doc says the quads are built "unrotated — apply
+  `celestial_rotation_matrix` per frame to place them, matching how vanilla rotates the static star
+  buffer by `starAngle` rather than rebuilding it". `SkyRenderer::new` called it purely to size the
+  buffer and dropped the `Vec`; `render` called it again inside the `star_brightness > 0.0` branch —
+  ~1500 iterations of four `SplitMix64` draws plus an allocation, ~6000 PRNG steps a frame. The
+  counter is `sky::star_field_builds()` and the gate needs a GPU, because `render` is the only thing
+  that can be asked "how often". Observed before: **`left: 4, right: 1`** over one construction plus
+  three night frames. **A daytime frame cannot reach the branch at all** (`render` gates on
+  `star_brightness_for_time_of_day`, which the gate asserts is `0.0` at noon and `> 0` at midnight
+  from the same expression the draw uses) — the *world* species, closed by naming it in the fixture.
+- **Two docs in one crate contradicted each other about the fancy clouds, and the false one was the
+  one a reader of that file would find.** `cloud_mesh.rs`'s module doc asserted the fix as landed
+  ("the faces once per camera *cell* — not per frame. Rebuilding is keyed on the camera crossing a
+  cell boundary"); `sky.rs`'s `CLOUD_FANCY_RADIUS_CELLS` doc said, correctly, that gating rebuilds
+  on a cell crossing was "what `cloud_mesh`'s own module doc already asks for and this does not yet
+  do". Nothing keyed anything: 578 cells walked and up to 4678 faces allocated every frame, on the
+  default cloud mode. `extruded_faces`' signature was already the cache key. **Checking one doc
+  against the code is not enough when a second doc in the same crate makes the opposite claim — the
+  contradiction is self-contained and greppable, exactly like §12.111's `289`/`361`.**
+- **The cloud cache's key completeness is the whole risk, and the component a reader drops is the
+  one that does not vary with position.** `CloudRelativePos` changes when the camera crosses the
+  layer *at an unchanged cell*, and it changes which faces exist at all. Dropping it from the key
+  fails the gate's byte-identity assertion with **"4168 cached verts vs 6288 uncached"** — 530
+  faces silently missing, from the side of the cloud you are inside. The gate therefore asserts
+  byte-identity against the uncached build on **every** frame including cache hits, plus that all
+  six sub-cell frames still produce *different* vertices (the scroll must stay per frame, so a
+  cache that froze the geometry is a different bug with the same counter).
+- **A byte-identity gate whose failure output is the two byte streams is a failure report nobody
+  reads.** The first run of that control emitted **857 KB** of hex and had to be captured to a file
+  to be read at all. Replaced with a comparison that reports the count of differing components, the
+  vertex index, which of the seven components `(x,y,z,r,g,b,a)` it is, and both values — the
+  "make failure output print a bounding box" rule applied to a vertex stream rather than to pixels.
+  The second run's whole message is one line and names the mechanism.
