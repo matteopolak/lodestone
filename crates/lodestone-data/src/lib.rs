@@ -64,6 +64,8 @@ pub(crate) mod generated_hardness;
 pub(crate) mod generated_item_prototypes;
 #[path = "generated/items.rs"]
 pub(crate) mod generated_items;
+#[path = "generated/light_props.rs"]
+pub(crate) mod generated_light_props;
 #[path = "generated/menus.rs"]
 pub(crate) mod generated_menus;
 #[path = "generated/mob_effects.rs"]
@@ -100,6 +102,7 @@ pub mod entity_types;
 pub mod hardness;
 pub mod item_prototypes;
 pub mod items;
+pub mod light_props;
 pub mod menus;
 pub mod mob_effects;
 pub mod outline_shapes;
