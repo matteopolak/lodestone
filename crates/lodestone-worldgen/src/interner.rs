@@ -76,9 +76,10 @@
 //! number of distinct block states per generator (a few hundred), not by
 //! columns served.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+
+use lodestone_worldgen_core::hash::FastMap;
 
 /// A numeric handle for a canonical block-state string, valid only against the
 /// [`StateInterner`] that issued it.
@@ -126,7 +127,15 @@ struct Table {
     /// return `&'static str` out of a dropped read guard (see module doc).
     names: Vec<&'static str>,
     /// `canonical state string -> id`.
-    ids: HashMap<&'static str, u16>,
+    ///
+    /// Never iterated — `names` is the ordered structure, and the module doc
+    /// above is explicit that ids may be assigned in any order because they
+    /// never reach the wire. That is what makes the non-default hasher safe
+    /// here; see U17's note on [`FastMap`]. U17's profile measured this one map
+    /// at 20.8% of all SipHash time in the pipeline, because `id_of` hashes a
+    /// full block-state *string* (`"minecraft:oak_log[axis=y]"`), which is the
+    /// most expensive key shape in the engine.
+    ids: FastMap<&'static str, u16>,
     /// `id -> id of that state's base name` (the part before `[`). Self-
     /// referential for a state that has no properties, so this is always a
     /// valid index and never an `Option`.

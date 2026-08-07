@@ -40,6 +40,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use lodestone_worldgen_core::hash::FastMap;
+
 use crate::interner::{StateId, StateInterner};
 
 /// A dense block field over `[min_x, min_x+size_x) × [min_y, min_y+size_y) ×
@@ -94,7 +96,16 @@ pub struct DenseBlockGrid {
     /// makes this a plain `Copy` shadow rather than a second set of owned
     /// `String`s.
     palette_names: Vec<&'static str>,
-    index_of: HashMap<StateId, u16>,
+    /// Reverse lookup for [`Self::palette`] — **not** an ordered structure, and
+    /// never iterated (see U17's note on [`FastMap`]). `palette` is the thing
+    /// whose order reaches the wire, and it is a `Vec` appended in first-write
+    /// order; `index_of` only answers "is this state already in it".
+    ///
+    /// [`FastMap`] rather than the default hasher because this is probed on
+    /// **every block write** — ~98,304 per chunk fill, ×25 for a cold column's
+    /// pre-ore closure — on a `u16` key. U17's profile measured that probe at
+    /// 11.8% of all SipHash time in the pipeline.
+    index_of: FastMap<StateId, u16>,
     blocks: Vec<u16>,
 }
 
@@ -134,7 +145,7 @@ impl DenseBlockGrid {
         size_z: i32,
         default: StateId,
     ) -> Self {
-        let mut index_of = HashMap::new();
+        let mut index_of = FastMap::default();
         index_of.insert(default, 0u16);
         let cells = (size_x.max(0) as usize) * (size_y.max(0) as usize) * (size_z.max(0) as usize);
         let default_name = interner.name_of(default);

@@ -34,45 +34,26 @@
 //! `docs/worldgen-density-engine.md` records the measured cost of removing it.
 
 use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
 
-/// Minimal FxHash-style hasher for the caches' integer keys.
+/// The caches' hasher.
 ///
 /// The default `HashMap` uses SipHash, which is DoS-resistant but slow; these
 /// keys are trusted internal cell coordinates, so a multiply-xor fold is both
-/// correct and far cheaper. Choice of hasher is value-invariant — it changes
-/// only lookup speed, never which value is stored or returned.
-#[derive(Default)]
-pub(crate) struct FxHasher {
-    hash: u64,
-}
-
-impl FxHasher {
-    #[inline]
-    fn add(&mut self, i: u64) {
-        const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
-        self.hash = (self.hash.rotate_left(5) ^ i).wrapping_mul(K);
-    }
-}
-
-impl Hasher for FxHasher {
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.add(u64::from(b));
-        }
-    }
-    #[inline]
-    fn write_i32(&mut self, i: i32) {
-        self.add(i as u64);
-    }
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.hash
-    }
-}
-
-type FxBuild = BuildHasherDefault<FxHasher>;
+/// correct and far cheaper. Choice of hasher is value-invariant here — it
+/// changes only lookup speed, never which value is stored or returned, because
+/// these two maps are point caches (`get`/`insert`/`clear`) and are never
+/// iterated.
+///
+/// **This used to be a private `FxHasher` declared in this file.** U17 found the
+/// same construction was wanted by four more maps outside this crate's `engine/`
+/// and promoted it to [`crate::hash::fast`], which is now the one copy — go
+/// there for the ordering discipline that has to hold before *any* further map
+/// adopts it, and for why `finish` deliberately does not rotate. The only
+/// behavioural difference from the version that lived here is that `write`
+/// folds eight bytes at a time instead of one, and folds the length; no caller
+/// in this file hashes a byte string, so the cached values are unchanged either
+/// way.
+type FxBuild = crate::hash::FastBuildHasher;
 
 /// The declared inclusive query bounds of a sampler, from which both the slot
 /// grid and the cell grid are derived.

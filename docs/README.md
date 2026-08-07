@@ -1233,6 +1233,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   terrain). Phase NE-data of
   [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md); the data half is landed,
   the engine half is not started.
+- [Worldgen fast hashing](./worldgen-fast-hashing.md) — The worldgen engine's
+  internal lookup tables use a cheap in-house `FxHash`-style `BuildHasher`
+  (`lodestone_worldgen_core::hash::fast`) instead of `std`'s SipHash-1-3
+  `RandomState`. A `samply` profile measured **21.01% of all worldgen CPU as self time
+  inside SipHash** — the second-largest item in the whole pipeline — and this is
+  unit U17 of [`plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md) removing the
+  part of it that can be removed *safely*, where "safely" is a claim about `HashMap`
+  iteration order and not about speed.
 - [Snow layers and surface ice: `freeze_top_layer` (`TOP_LAYER_MODIFICATION`)](./worldgen-freeze-top-layer.md) —
   The port of vanilla's `freeze_top_layer` — the whole of the eleventh and last
   decoration step, `TOP_LAYER_MODIFICATION` — into `lodestone-worldgen`, composed
