@@ -151,8 +151,13 @@ impl OverworldGenerator {
         for y in self.min_y..self.min_y + self.height {
             for lz in 0..16i32 {
                 for lx in 0..16i32 {
-                    let state = region.get(lx, y, lz);
-                    center_world.set(cx * 16 + lx, y, cz * 16 + lz, state);
+                    // Id-keyed for the same reason as `stitch_region`'s loop
+                    // above: `region` and `center_world` share this generator's
+                    // one `Arc<StateInterner>`, so routing 98,304 cells per
+                    // chunk through `id_of`'s `RwLock` to recover an id the
+                    // source grid already held was pure contention.
+                    let state = region.get_id(lx, y, lz);
+                    center_world.set_id(cx * 16 + lx, y, cz * 16 + lz, state);
                 }
             }
         }
@@ -204,10 +209,25 @@ impl OverworldGenerator {
             let y = world.bounds().1 + ly;
             for lz in 0..16i32 {
                 for lx in 0..16i32 {
-                    let state = world.get(base_x + lx, y, base_z + lz);
+                    // `get_id`/`set_id`, not `get`/`set`. The string-keyed pair
+                    // resolves the source cell to a `&'static str` and then hands
+                    // it straight back to `interner.id_of`, which takes an
+                    // `RwLock` **read** guard — 884,736 of them per `ore_stage`
+                    // (9 sources x 98,304 cells). A read guard is not free under
+                    // concurrency: it increments a shared atomic, so every one of
+                    // the join burst's workers was ping-ponging the same cache
+                    // line through a lock whose answer it already had. Safe
+                    // because `region` and `world` are built from the *same*
+                    // `Arc<StateInterner>` (`ore_stage` and `fill`'s
+                    // `with_interner` calls both pass `Arc::clone(&self.interner)`),
+                    // so a `StateId` means the same state in both. Palette order
+                    // is untouched: `set_id` appends to the local palette in
+                    // first-write order exactly as `set` did — the property
+                    // DESIGN.md 12.100 warns must never reach the wire.
+                    let state = world.get_id(base_x + lx, y, base_z + lz);
                     let rx = base_x + lx - center_cx * 16;
                     let rz = base_z + lz - center_cz * 16;
-                    region.set(rx, y, rz, state);
+                    region.set_id(rx, y, rz, state);
                 }
             }
         }
