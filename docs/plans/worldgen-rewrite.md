@@ -4,20 +4,40 @@
 
 The plan for rewriting `crates/lodestone-worldgen`'s generation engine from scratch for speed —
 targeting sub-millisecond steady-state serial chunk generation at bit-exact vanilla 26.2 parity —
-plus the roadmap for everything worldgen-shaped the repo does not have yet (structures, Nether/End,
-the missing decoration steps, 3-D biomes). Owner-directed (2026-08-06). Planning artifact only; each
-unit below is a separately landable piece of work with its own evidence standard.
+plus the jar-derived inventory of everything full parity requires that the repo does not have yet
+(structures, Nether/End, ore veins, the missing decoration steps, 3-D biomes, world presets), each
+item blocker-classed. Owner-directed (2026-08-06/07). Planning artifact only; each unit below is a
+separately landable piece of work with its own evidence standard.
 
 ## Status and ground rules
 
-- `HEAD` at planning time: `4307b59`. The workspace is on **nightly** (`rustc 1.99.0-nightly
-  (da86f4d07 2026-07-24)`, `rust-toolchain.toml` `channel = "nightly"`), moved by the owner
+- `HEAD` at planning time: `4307b59`. The workspace is on **nightly**, moved by the owner
   specifically so `#![feature(portable_simd)]` is available. There is **one** SIMD implementation —
   no `#[cfg]` scalar fallback, ever: a dual path is two worlds from one seed waiting to happen.
-  **Recommendation to the owner:** pin a dated nightly (`channel = "nightly-2026-07-24"`, the one
-  already proven to compile the workspace) rather than floating `"nightly"`. `portable_simd` is an
-  unstable API; a floating channel means an upstream API change can break every agent's build
-  mid-flight on an arbitrary morning. Renewing the pin should be a deliberate, single-commit act.
+  **Settled (2026-08-07):** the toolchain is pinned to `channel = "nightly-2026-08-07"`
+  (rustc `84b36a78a`); renewing the pin is a deliberate, single-commit act. Trap for whoever
+  renews it: the dated channel is a **publish** date, and adjacent days are different compilers —
+  `nightly-2026-08-06` (rustc `7608eb7b0`) ICEs on tokio at `opt-level=3`, breaking release
+  benches. Release builds and benches are verified clean on the pinned compiler; verify the same
+  two things before landing any future pin bump.
+- **Implementation mandate (owner ruling, 2026-08-07): performance work may rewrite whatever it
+  needs, in any crate.** Units are *scoped* to the clusters below for scheduling, but the mandate
+  is not confined to `lodestone-worldgen`: encodings, data layout, the serve boundary
+  (`GeneratedColumn`, `ChunkSource`, `ChunkColumn`), palette/section storage, bit-packing, and the
+  protocol-side chunk encode are all fair game where measurement says the win is there. Wider
+  blast radius means the guard rails matter more, not less:
+  - Parity, the gate set, and the cutover rollback rule (Q4.5) are unchanged and absolute — more
+    reach is more ways to change the world by accident.
+  - The health standard is **`cargo test --workspace --no-fail-fast`**, never `cargo check`
+    (a check cannot see an assertion). Baseline at planning time: **6647 passed / 0 failed /
+    403 ignored across 536 binaries** — each landing preserves 0 failed and explains any delta
+    in the other counts.
+  - A unit that touches wire-facing encoding needs evidence originating **outside our own
+    encoder** — captured server bytes or a real vanilla client, never a round-trip; the recorded
+    scar is hermetic self-encoded fixtures passing while a live gate produced 49 × "unexpected
+    end of input".
+  - Cross-crate changes still land as one reviewable commit per coherent change, with the
+    boundary change separable from the optimisation that motivated it.
 - Parity is **bit-exact**: the placement engine reproduces vanilla's depth-first `flatMap`
   RNG-consumption order, and the existing gates (`lodestone-worldgen-parity`'s composed fixture,
   the per-stage `*_parity.rs` suites, `FeatureOracle`/`VegetationOracle`) are the definition of
@@ -206,8 +226,9 @@ delete" vs "irreducible parity-bound work".**
   what order**, not **how expensively each draw's consequences are evaluated**. Draw count is
   spec-bound; cost per draw is ours. See
   [Vegetation: cost per draw](#vegetation-cost-per-draw) — that is where the remaining headroom
-  lives, and nobody has measured any of it in release with counters. That measurement (U2) is
-  the whole ballgame.
+  lives. U2's first release baseline now exists — recorded in **DESIGN.md §12.98**, provisional
+  while re-measured counters-off on the pinned toolchain. This plan cites the section rather than
+  restating the number, so the record has one home.
 - **Where the goals genuinely conflict:** if, *after* D2/D3 are dead and the per-draw costs of
   the vegetation walk are driven to O(1) (bitset predicates, precompiled placement programs,
   incremental column probes — the candidates below), the walk still measures ≥1 ms in release,
@@ -279,8 +300,12 @@ propagate a shared misunderstanding; both gates run, always).
 3. The old path for a stage is deleted **in the cutover commit**, not left as a fallback — two
    live paths is the two-worlds hazard again, and `cargo xtask connectedness` cannot see a
    crate-internal island (CLAUDE.md §2).
-4. `GeneratedColumn` and the `ChunkSource` seam stay stable throughout, so `lodestone-server`
-   only changes in U10 (scheduler) — the game keeps working at every intermediate sha.
+4. `GeneratedColumn` and the `ChunkSource` seam stay stable **by default**, so the game keeps
+   working at every intermediate sha — but stability is a scheduling default, not a boundary of
+   the mandate (see Status): a unit with a measured reason may redesign the serve boundary,
+   `ChunkColumn`, section/palette storage, or the protocol-side encode, under the mandate's
+   guard rails (external-origin evidence for anything wire-facing, one reviewable commit per
+   coherent change, full-workspace test standard).
 5. **Rollback rule for cutover gates, stated before the first cutover.** A byte-equality mismatch
    at *any* gate seed **blocks the landing** — one seed out of five failing is a failure, and it
    is the likeliest real outcome, which is exactly why it gets a rule now rather than a
@@ -394,8 +419,9 @@ gates named in Q4 step 2; per-unit evidence listed is *additional*.
 | U10 | Server scheduler: dependency-edge generation, delete per-ring barrier | `lodestone-server/src/{server,chunk}.rs` | U6, U7 | M | none |
 | U11 | 3-D biome sampling (4×4×4 quart cells) on the RTree | `biome.rs`, `overworld.rs`, serve boundary | U9 | M | **changes biome-dependent placement inputs** — vanilla-ward; needs fresh JVM fixtures |
 | U12 | Missing decoration steps: lakes, springs, geodes/icebergs, disks, dungeons/fossils | `feature/`, `compose.rs` | U7 | L | additive (per-feature `set_feature_seed` isolates streams; index-preservation already in place) |
-| U13 | Nether + End generation | new engine instantiations + data + server dimension plumbing | U4–U9 | XL | new content |
-| U14 | Structures: placement/locate → templates → jigsaw | new `src/structure/`, data, beardifier hookup | U6, U7 | XL | new content |
+| U13 | Nether + End generation — **unit group NE**, own issue tree; see [inventory](#full-parity-inventory-jar-derived-262) | new engine instantiations + data + server dimension plumbing | U4–U9 | XL (group) | new content |
+| U14 | Structures — **unit group S**, own issue tree; see [inventory](#full-parity-inventory-jar-derived-262) | new `src/structure/`, data, beardifier hookup, ChunkStatus contract | U6, U7 | XL (group) | new content |
+| U15 | Ore-vein system (`OreVeinifier`): large copper/iron veins from the `vein_toggle`/`vein_ridged`/`vein_gap` router channels, applied during fill | `src/engine/`, `overworld.rs` fill stage | U4 | M | none (positional RNG, per-block chooser) — **changes overworld terrain toward vanilla**; needs a vein-positive JVM fixture |
 
 **Scheduling note (shared checkout):** `overworld.rs` is in the cluster of U3, U4, U6, U7, U9 and
 U11 — it is a choke-point file, and the dependency column above understates how serial the middle
@@ -456,18 +482,131 @@ A six-agent fan-out across U3–U9 cannot happen; do not schedule one.
   reseeding (`set_feature_seed`) means adding a feature cannot desync its neighbours' streams.
   The trap is assuming that and not proving it: each new feature type lands with its own
   `FeatureOracle`-shaped fixture, and the composed postfeatures gap must shrink monotonically.
-- **U13**: blocker inventory: no `noise_settings/{nether,end}.json`, no nether biome parameter
-  set, no End island density function in the bundle — **data work first** (extend the asset dump),
-  then engine instantiation (the engine is version/dimension-free by design), then server
-  dimension plumbing (#330: only overworld is hosted; portal/dimension-switch is **gameplay**, not
-  worldgen — a Nether generator is testable against oracles without any portal existing).
-- **U14**: phase order: (a) structure *placement* (structure sets, rings/random-spread, `/locate`
-  answering) — pure math against the jar's placement JSON, no blocks; (b) template structures
-  (needs `template_pool`/`structure` NBT assets — **absent from the bundle**, 188+54+40 files in
-  the vanilla jar per DESIGN §12.30 — data work first); (c) jigsaw (villages etc.), the XL tail.
-  Beardifier is currently a constant-0 leaf (`density/mod.rs`), so terrain-adaptation hookup is a
-  real engine seam, not free. Mob spawn tables in structures (#221/#222) are **gameplay-blocked**,
-  not worldgen-blocked — flagged per the brief, not part of these units.
+- **U13 (group NE)**: measured blocker inventory (2026-08-07 jar audit — better than previously
+  believed): the bundle already carries **all 66 biome documents and all 35 density-function
+  files byte-identical to the jar**, including `nether/`, `end/`, `overworld_amplified/` and
+  `overworld_large_biomes/`. Actually missing from the bundle: 6 of 7 `noise_settings`
+  (everything but overworld), the nether multi-noise parameter list (bundle has
+  `overworld`+`overworld_temperature` only), and 2 of 63 noises. Missing from the *engine*:
+  the `minecraft:end_islands` density type (the only DF type used anywhere in vanilla's worldgen
+  data that we do not implement — measured by full type census across all 7 noise_settings) and
+  the three non-multi-noise biome sources. So: small data top-up first, then engine instantiation
+  (version/dimension-free by design), then server dimension plumbing (#330: only overworld is
+  hosted; portal/dimension-switch is **gameplay**, not worldgen — a Nether generator is testable
+  against oracles without any portal existing).
+- **U14 (group S)**: phased S0–S4 in the [inventory](#full-parity-inventory-jar-derived-262) —
+  S0 ChunkStatus contract, S1 placement/locate (pure math, no blocks), S2 templates (data
+  extraction first: 188 template pools + 40 processor lists + 34 structures + 20 sets, all
+  absent from the bundle, measured), S3 beardifier (currently a constant-0 leaf in
+  `density/mod.rs` — a real engine seam, not free), S4 jigsaw. `structure_spawn_overrides` and
+  in-structure mob spawning (#221/#222) are **gameplay-blocked**, not worldgen-blocked. Wants
+  its own issue tree; do not execute group S from this document.
+
+## Full-parity inventory (jar-derived, 26.2)
+
+Everything full vanilla parity requires, present or absent, so nothing is discovered late.
+**Method**: every count below was measured on 2026-08-07 against
+`.cache/mc/26.2/versions/26.2/server-26.2.jar` (the real jar inside the bundler wrapper) and the
+de-obfuscated `src/` — not recalled from memory. Blocker classes: **[data]** absent from the
+bundle, **[engine]** absent engine primitive, **[gameplay]** cannot finish even with perfect
+worldgen, **[unwritten]** nothing blocks it, **[out-of-scope]** deliberately excluded.
+
+**Data completeness, bundle vs jar** (`assets/worldgen/` vs `data/minecraft/worldgen/`):
+
+| registry | jar | bundled | delta |
+|---|---|---|---|
+| biome | 66 | 66 | complete |
+| placed_feature / configured_feature | 262 / 226 | 262 / 226 | complete |
+| density_function | 35 | 35 | complete, **byte-identical all 35** (diffed) |
+| configured_carver | 4 | 4 | complete |
+| noise | 63 | 61 | 2 missing (dimension-specific) [data] |
+| noise_settings | 7 | 1 | missing nether, end, amplified, caves, floating_islands, large_biomes [data] |
+| multi_noise parameter lists | 2 | overworld + overworld_temperature | nether list missing [data] |
+| structure / structure_set | 34 / 20 | 0 / 0 | all missing [data] |
+| template_pool / processor_list | 188 / 40 | 0 / 0 | all missing [data] |
+| world_preset / flat presets | 7 / 9 | 0 / 0 | all missing [data] |
+
+**The chunk-status pipeline — the scheduling contract, and a structures prerequisite.**
+Vanilla's progression (read from `chunk/status/ChunkStatus.java`): `EMPTY → STRUCTURE_STARTS →
+STRUCTURE_REFERENCES → BIOMES → NOISE → SURFACE → CARVERS → FEATURES → INITIALIZE_LIGHT → LIGHT →
+SPAWN → FULL`. Structure starts run **before** noise so the beardifier can consult them during
+fill. U6's staged store is the natural home: its stage enum grows toward this contract, and doing
+so is a **prerequisite of group S**, not a detail inside it (phase S0 below). [engine]
+
+**Heightmaps as persisted artefacts.** Vanilla maintains six (`Heightmap.java`):
+`WORLD_SURFACE_WG` / `OCEAN_FLOOR_WG` (worldgen-time) and `WORLD_SURFACE`, `OCEAN_FLOOR`,
+`MOTION_BLOCKING`, `MOTION_BLOCKING_NO_LEAVES` (persisted/sent). Our engine computes one ad-hoc
+solid-top array. Load-bearing twice already: #437's gate reads vanilla's own `WORLD_SURFACE`,
+and vegetation cost candidate 3 *is* the incremental-update semantics of these maps. Becomes a
+named deliverable inside U6 (storage) + U8 (incremental updates). [engine]
+
+**Density-function types.** Measured census: across all 7 noise_settings plus all 35 DF files,
+the **only** DF type the engine lacks is `minecraft:end_islands` (one use, `end.json`). Notably,
+26.2 has **no `weird_scaled_sampler`** — the noodle/spaghetti/pillars caves are expressed via
+`interval_select`, which we already implement; anyone porting from 1.21-era sources will look
+for a type that no longer exists. [engine, one type]
+
+**The ore-vein system (U15).** Vanilla's `OreVeinifier` generates the large copper/iron veins as
+a block chooser during fill, driven by the `vein_toggle`/`vein_ridged`/`vein_gap` router
+channels — all three present in the bundled `overworld.json`, **entirely unimplemented in the
+engine** (grep: zero non-comment hits). This is an *overworld* parity gap in the current world,
+not a new-dimension feature; it is invisible to the existing `(0,0)` composed fixture only
+because that chunk happens not to prove a vein, so U15's gate must include a vein-positive JVM
+fixture. [engine]
+
+**Biome sources.** Vanilla has four (`level/biome/`): `MultiNoiseBiomeSource` (ours),
+`TheEndBiomeSource`, `CheckerboardColumnBiomeSource`, `FixedBiomeSource`. The End is **not**
+multi-noise; single-biome and debug presets need fixed/checkerboard. All three others: [engine,
+small — each is a page of logic].
+
+**Group NE — Nether.** Terrain: `nether.json` noise settings + nether parameter list + 2 noises
+[data], lava-sea aquifer behaviour (vanilla hardcodes the second fluid as lava — already
+modelled) and per-dimension surface-rule coverage (the census shows nether/end settings use only
+condition types the overworld also uses, but per-dimension verification is part of the unit)
+[unwritten once data lands]. Biomes (basalt deltas, soul sand valley, crimson/warped forest,
+nether wastes, warped forest) are **already bundled** — 66/66. Fortress and bastion are group S
+work, not terrain work. Server-side: dimension registry/travel is #330 [gameplay-adjacent; the
+generator itself is oracle-testable without it].
+
+**Group NE — End.** `TheEndBiomeSource` + `end_islands` DF type [engine]; `end.json` [data];
+the obsidian pillars (`end_spike` configured feature) and chorus plants land via U12's
+step-census machinery [unwritten]; end cities + gateways are group S; the dragon fight and
+respawn mechanics are [gameplay], not worldgen.
+
+**Group S — structures, the full enumeration** (34, from the jar): ancient_city,
+bastion_remnant, buried_treasure, desert_pyramid, end_city, fortress, igloo, jungle_pyramid,
+mansion, mineshaft, mineshaft_mesa, monument, nether_fossil, ocean_ruin_cold, ocean_ruin_warm,
+pillager_outpost, ruined_portal (×7 variants), shipwreck, shipwreck_beached, stronghold,
+swamp_hut, trail_ruins, trial_chambers, village (×5 variants). Shared machinery: jigsaw +
+template pools (188) + processor lists (40) + structure sets (20) with their placement types
+(concentric-rings for stronghold, random-spread for the rest) [data + engine];
+`structure_spawn_overrides` — where a structure's mob spawn table lives — is parsed with the
+rest but **[gameplay]** to honour (the spawning system consumes it, not the generator).
+Phasing: **S0** ChunkStatus contract in the store (above) → **S1** placement/locate (structure
+sets + rings/spread math, `/locate`-answerable, zero blocks, oracle: vanilla `/locate` dumps) →
+**S2** template structures (NBT structure templates + processors; data extraction first) →
+**S3** beardifier (real terrain adaptation replacing the constant-0 leaf) → **S4** jigsaw
+(villages, ancient city, bastion, trial chambers — the XL tail). Group S is a **unit group with
+its own issue tree**; this plan fixes only its phase boundaries and evidence standards.
+
+**World presets and generator types** (7 presets + 9 flat presets, enumerated from the jar:
+normal, amplified, large_biomes, single_biome_surface, flat, flat_all_dimensions,
+debug_all_block_states). Amplified and large_biomes are **pure data** over the existing engine
+(their DF files are already bundled) [data: noise_settings only]. Superflat is a trivial
+separate generator [unwritten, small]. Debug world is a special block-grid generator [unwritten,
+small, low value]. Single-biome needs `FixedBiomeSource` (above). Honest cost: cheap once the
+engine is data-driven — none of these justify scheduling before the engine units land.
+
+**Blending / upgrade data (`BlendingData`) — explicitly [out-of-scope]**, stated so it reads as
+a decision rather than an omission: it exists to blend chunks generated by *older versions* into
+new terrain. We generate fresh worlds only; there is no old-version chunk data to blend against.
+The engine keeps vanilla's empty-blender constants (`blend_alpha`=1, `blend_offset`=0,
+`blend_density` transparent), which is exactly vanilla's behaviour on a fresh world. Revisit
+only if importing pre-26.2 worlds ever becomes a goal.
+
+**Also checked, already covered elsewhere**: decoration-step census (U12), 3-D biomes (U11),
+lighting (different subsystem, excluded from C_ss by definition), mob spawn placement (#221/#222,
+[gameplay]).
 
 ## Stale claims found while planning (reported, not edited)
 
@@ -485,9 +624,10 @@ A six-agent fan-out across U3–U9 cannot happen; do not schedule one.
   generated `BiomeTree` preserves vanilla's node ordering exactly (asserted by construction there,
   not spot-checked), and the provenance of its captured vanilla chunk dumps (no dump-generation
   tool is committed in that checkout). Neither blocks anything here — we build our own fixtures.
-- **Release-profile baseline for the composed pipeline on this machine** — does not exist yet
-  anywhere in the repo's records; U2 creates it. Every performance number above from the tree is
-  debug-profile or partial.
+- **Release-profile baseline** — now exists (U2 landed; DESIGN.md §12.98) but is **provisional**:
+  the counters-on figure is being re-measured counters-off on the pinned toolchain. Treat any
+  quoted C_ss as superseded by §12.98's latest entry. Every other performance number above from
+  the tree is debug-profile or partial.
 - **Vegetation walk cost in release with D2/D3 fixed** — the make-or-break number for the sub-ms
   verdict (Q3); measured at the U4 checkpoint.
 - **Vanilla's decoration-step census against the 26.2 jar** (exact step list our composition still
