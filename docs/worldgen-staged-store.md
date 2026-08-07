@@ -222,5 +222,8 @@ a choke point this repo has been burned on, so the store went under `overworld/`
 owns outright — for zero contention. It names no generator type, so relocating it under an `engine/`
 module once Unit 4 creates one is a pure move plus a re-export.
 `lodestone_worldgen::overworld::store` is public today so **Unit 10**'s server-side scheduler can
-drive it — and U10 can now delete the per-ring barrier, whose rationale ("ring 0 seeds the cache") no
-longer describes anything.
+drive it. **U10 has landed** (`7ba0176b`, issue #494): the per-ring barrier is gone, replaced by a
+window whose width comes from `available_parallelism` rather than the view radius, and the same
+289-column burst driven through it reads 441/361 with hits 5,698/2,240 — this doc's numbers exactly,
+three runs of three. See [`join-scheduler.md`](join-scheduler.md). It also found that the barrier's
+removal needed *both* halves of `4307b59` addressed, not just this store's.
