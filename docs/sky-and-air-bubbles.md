@@ -161,7 +161,7 @@ value there is a pure-black band across the horizon, not an invisible detail.
 > **`CloudRelativePos` is in the key and is the part a reader drops** — it changes
 > at an unchanged cell when the camera crosses the layer; dropping it produced
 > "4168 cached verts vs 6288 uncached" in the gate's own control.
-> `crates/lodestone-render/tests/cloud_face_cache_counts.rs`, `DESIGN.md` §12.115.
+> `crates/lodestone-render/tests/cloud_face_cache_counts.rs`, `DESIGN.md` §12.114.
 
 All constants
 below are read from `CloudRenderer.java` and `CloudStatus.java` in
