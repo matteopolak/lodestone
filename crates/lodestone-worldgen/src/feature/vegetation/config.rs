@@ -14,9 +14,9 @@ use crate::density::Resolver;
 use crate::feature::{BlockPos, IntProvider};
 use crate::rng::RandomSource;
 
-use super::base_id;
 use super::grid::VegGrid;
 use super::grid::census::bump as census_bump;
+use super::ids::{IdTags, Tag, tag_at};
 use super::tree::{FoliagePlacerCfg, TrunkPlacerCfg};
 
 /// `Heightmap.Types` (the subset vegetal decoration references). See this
@@ -124,13 +124,20 @@ pub(super) fn parse_offset(v: &Value) -> (i32, i32, i32) {
     (get(0), get(1), get(2))
 }
 
-/// See [`BlockPredicate::MatchingFluid`]'s doc: both the source and flowing
-/// JSON ids for one fluid collapse onto this engine's single base id.
-pub(super) fn fluid_base_matches(fluid_id: &str, base: &str) -> bool {
+/// See [`BlockPredicate::MatchingFluid`]'s doc: both the source and flowing JSON
+/// ids for one fluid collapse onto this engine's single base id, so a JSON fluid
+/// id selects one of two [`Tag`]s and an unrecognised one matches nothing.
+///
+/// Unit 8 turned this from a `&str`-vs-`&str` comparison into a tag selection:
+/// the *state* side of the question is now answered by
+/// [`super::ids`]'s bitset, so only the JSON side is still a string — and that
+/// side is a fixed list of at most two entries from the placed-feature document,
+/// not a per-block value.
+pub(super) fn fluid_tag_of(fluid_id: &str) -> Option<Tag> {
     match fluid_id {
-        "minecraft:water" | "minecraft:flowing_water" => base == "minecraft:water",
-        "minecraft:lava" | "minecraft:flowing_lava" => base == "minecraft:lava",
-        _ => false,
+        "minecraft:water" | "minecraft:flowing_water" => Some(Tag::Water),
+        "minecraft:lava" | "minecraft:flowing_lava" => Some(Tag::Lava),
+        _ => None,
     }
 }
 
@@ -167,53 +174,83 @@ pub(super)     fn test(&self, grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> 
             BlockPredicate::AllOf(list) => list.iter().all(|p| p.test(grid, tags, pos)),
             BlockPredicate::AnyOf(list) => list.iter().any(|p| p.test(grid, tags, pos)),
             BlockPredicate::MatchingBlockTag(tag) => {
-                let base = base_id(grid.get(pos.x, pos.y, pos.z));
+                // The JSON tag name is a per-feature constant, so matching it as
+                // a string costs nothing per attempt; what used to cost is the
+                // *state* side, now a bit test. Unit 8.
                 if tag == "minecraft:air" {
-                    is_air(base)
+                    tag_at(grid, tags, Tag::Air, pos.x, pos.y, pos.z)
                 } else if tag == "minecraft:cannot_replace_below_tree_trunk" {
-                    tags.cannot_replace_below_tree_trunk.contains(base)
+                    tag_at(grid, tags, Tag::CannotReplaceBelowTreeTrunk, pos.x, pos.y, pos.z)
                 } else {
                     false
                 }
             }
             BlockPredicate::MatchingFluid { fluids, offset } => {
                 let (dx, dy, dz) = *offset;
-                let base = base_id(grid.get(pos.x + dx, pos.y + dy, pos.z + dz));
-                fluids.iter().any(|f| fluid_base_matches(f, base))
+                let id = grid.get_id(pos.x + dx, pos.y + dy, pos.z + dz);
+                fluids.iter().any(|f| {
+                    fluid_tag_of(f).is_some_and(|tag| tags.has(grid.interner(), tag, id))
+                })
             }
             BlockPredicate::WouldSurviveOnSupportsVegetation => {
-                let below = base_id(grid.get(pos.x, pos.y - 1, pos.z));
-                tags.supports_vegetation.contains(below)
+                tag_at(grid, tags, Tag::SupportsVegetation, pos.x, pos.y - 1, pos.z)
             }
             BlockPredicate::WouldSurviveCactus => {
-                let below = base_id(grid.get(pos.x, pos.y - 1, pos.z));
-                if below != "minecraft:cactus" && !tags.supports_cactus.contains(below) {
+                let below = grid.get_id(pos.x, pos.y - 1, pos.z);
+                if !tags.has(grid.interner(), Tag::Cactus, below)
+                    && !tags.has(grid.interner(), Tag::SupportsCactus, below)
+                {
                     return false;
                 }
-                let neighbours_ok = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().all(|&(dx, dz)| {
-                    is_air(base_id(grid.get(pos.x + dx, pos.y, pos.z + dz)))
-                });
+                let neighbours_ok = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .iter()
+                    .all(|&(dx, dz)| tag_at(grid, tags, Tag::Air, pos.x + dx, pos.y, pos.z + dz));
                 if !neighbours_ok {
                     return false;
                 }
-                !is_fluid(base_id(grid.get(pos.x, pos.y + 1, pos.z)))
+                !tag_at(grid, tags, Tag::Fluid, pos.x, pos.y + 1, pos.z)
             }
             BlockPredicate::WouldSurviveSugarCane => {
-                let below = base_id(grid.get(pos.x, pos.y - 1, pos.z));
-                below == "minecraft:sugar_cane" || tags.supports_sugar_cane.contains(below)
+                let below = grid.get_id(pos.x, pos.y - 1, pos.z);
+                tags.has(grid.interner(), Tag::SugarCane, below)
+                    || tags.has(grid.interner(), Tag::SupportsSugarCane, below)
             }
         }
     }
 }
 
-pub(super) fn is_air(base: &str) -> bool {
+/// The three air states, by **base** name.
+///
+/// Since Unit 8 almost every caller asks this of a [`crate::interner::StateId`]
+/// via [`Tag::Air`] instead. This function survives as the *definition* those
+/// bits are filled from ([`super::ids`]'s `member`), so there is exactly one
+/// place that decides what counts as air — a second `matches!` inlined next to
+/// the bitset fill would be free to drift from this one, and nothing would fail.
+///
+/// **Air states carry no block-state properties**, which is what lets
+/// [`VegGrid`]'s heightmap scans test air by comparing against three cached ids
+/// rather than resolving a name: for air, `base_id(name) == name`, so
+/// "base is one of three names" and "id is one of three ids" are the same
+/// question. Do not extend this list with a state that *does* carry properties
+/// without revisiting `VegGrid::is_air_id`.
+#[must_use]
+pub fn is_air(base: &str) -> bool {
     matches!(
         base,
         "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
     )
 }
 
-pub(super) fn is_fluid(base: &str) -> bool {
+/// The two fluid states, by **base** name — so `minecraft:water[level=0]` (which
+/// `crate::carver` really does write) counts.
+///
+/// As with [`is_air`], this is now the definition [`Tag::Fluid`]'s bits are
+/// filled from rather than a hot-path call. The one remaining hot caller is
+/// [`VegGrid::height_ocean_floor`], which reaches it only for cells it has
+/// already established are not air — a handful per probe instead of the whole
+/// column.
+#[must_use]
+pub fn is_fluid(base: &str) -> bool {
     matches!(base, "minecraft:water" | "minecraft:lava")
 }
 
@@ -304,25 +341,37 @@ impl BlockStateProvider {
         }
     }
 
-pub(super)     fn get_state<R: RandomSource>(
-        &self,
+    /// The state this provider yields at `pos`, **borrowed from the provider**.
+    ///
+    /// Unit 8: this used to return `Option<String>`, cloning out of the very
+    /// config it was reading. Every grass blade, every log and every leaf paid one
+    /// heap allocation for a string the provider already owned, and those clones
+    /// are a large part of the 20,621 allocations
+    /// `docs/worldgen-state-interning.md` attributes to this stage. Borrowing is
+    /// enough because the provider outlives the placement: it lives in the
+    /// generator's resolved feature list.
+    ///
+    /// Prefer [`Self::get_state_id`] at a placement site — the grid stores ids, so
+    /// the name is only ever an intermediate.
+pub(super)     fn get_state<'a, R: RandomSource>(
+        &'a self,
         grid: &VegGrid,
         tags: &VegTags,
         random: &mut R,
         pos: BlockPos,
-    ) -> Option<String> {
+    ) -> Option<&'a str> {
         match self {
-            BlockStateProvider::Simple(state) => Some(state.clone()),
+            BlockStateProvider::Simple(state) => Some(state.as_str()),
             BlockStateProvider::Weighted(entries) => {
                 let total: i32 = entries.iter().map(|(w, _)| *w).sum();
                 let mut roll = random.next_int_bounded(total.max(1));
                 for (weight, state) in entries {
                     roll -= *weight;
                     if roll < 0 {
-                        return Some(state.clone());
+                        return Some(state.as_str());
                     }
                 }
-                entries.last().map(|(_, s)| s.clone())
+                entries.last().map(|(_, s)| s.as_str())
             }
             BlockStateProvider::NoiseThreshold {
                 seed,
@@ -345,12 +394,12 @@ pub(super)     fn get_state<R: RandomSource>(
                 );
                 if value < *threshold {
                     let idx = random.next_int_bounded(low_states.len().max(1) as i32) as usize;
-                    low_states.get(idx).cloned().or_else(|| Some(default_state.clone()))
+                    Some(low_states.get(idx).unwrap_or(default_state).as_str())
                 } else if random.next_float() < *high_chance {
                     let idx = random.next_int_bounded(high_states.len().max(1) as i32) as usize;
-                    high_states.get(idx).cloned().or_else(|| Some(default_state.clone()))
+                    Some(high_states.get(idx).unwrap_or(default_state).as_str())
                 } else {
-                    Some(default_state.clone())
+                    Some(default_state.as_str())
                 }
             }
             BlockStateProvider::RuleBased { rules, fallback } => {
@@ -364,6 +413,26 @@ pub(super)     fn get_state<R: RandomSource>(
                     .and_then(|f| f.get_state(grid, tags, random, pos))
             }
         }
+    }
+
+    /// [`Self::get_state`] resolved to the id the grid actually stores.
+    ///
+    /// The interner lookup here is not new cost: `VegGrid::set_if_in_bounds`
+    /// already performed exactly this `id_of` on the `String` it was handed, so
+    /// Unit 8 removed the allocation and left the lookup where it was. It is the
+    /// next lever if the shared read guard ever shows up in a profile — the fix
+    /// would be caching the resolved id in the provider, which needs a
+    /// `Sync` interior-mutability cell and a per-interner guard, and is not worth
+    /// it until measured.
+pub(super)     fn get_state_id<R: RandomSource>(
+        &self,
+        grid: &VegGrid,
+        tags: &VegTags,
+        random: &mut R,
+        pos: BlockPos,
+    ) -> Option<crate::interner::StateId> {
+        let name = self.get_state(grid, tags, random, pos)?;
+        Some(grid.interner().id_of(name))
     }
 }
 
@@ -394,6 +463,15 @@ pub struct VegTags {
     /// (a dark oak trunk can grow up through a neighbour's already-placed
     /// canopy; dense dark forests depend on that).
     pub leaves: HashSet<String>,
+    /// Unit 8: the same membership questions as the sets above, as bitsets
+    /// indexed by [`crate::interner::StateId`] — see [`super::ids`] for the whole
+    /// design, including why the sets above must not be mutated after
+    /// [`Self::bind`] has run.
+    ///
+    /// Not `pub`: it is a derived cache of this struct's own public sets, and a
+    /// caller that could reach it could desynchronise it. Callers ask through
+    /// [`Self::bind`] (once per pass) and [`super::ids::tag_at`] (per query).
+    pub(super) id_tags: IdTags,
 }
 
 /// Resolves [`VegTags`] from a [`Resolver`]. Empty sets (never a panic) if
@@ -415,6 +493,10 @@ pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
         supports_cactus: resolve("minecraft:supports_cactus"),
         supports_sugar_cane: resolve("minecraft:supports_sugar_cane"),
         leaves: resolve("minecraft:leaves"),
+        // Unbound: the bitsets are per-interner and the interner does not exist
+        // yet at generator-construction time. The decoration driver binds them
+        // once per pass. See [`super::ids`].
+        id_tags: IdTags::default(),
     }
 }
 

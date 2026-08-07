@@ -221,6 +221,7 @@
 
 mod config;
 mod grid;
+pub mod ids;
 mod place;
 mod tree;
 
@@ -247,6 +248,11 @@ pub fn apply_vegetal_decoration_step<R: RandomSource>(
     tags: &VegTags,
     features: &[(usize, PlacedRef)],
 ) {
+    // U8: bring `tags`' id bitsets up to date with this grid's interner, once per
+    // pass. This is the only place `StateInterner::len`'s lock is taken on the
+    // decoration path — see [`ids`] for why per-query binding would defeat the
+    // whole mechanism, and why skipping it entirely is merely slow, not wrong.
+    tags.bind(grid.interner());
     let origin = BlockPos {
         x: chunk_x * 16,
         y: grid.min_y,

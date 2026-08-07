@@ -3,16 +3,17 @@
 //!
 //! Moved here verbatim from `feature/vegetation.rs` by U16 Phase B.
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashSet, VecDeque};
 
 use serde_json::Value;
 
 use crate::feature::{BlockPos, IntProvider};
 use crate::rng::RandomSource;
 
-use super::base_id;
-use super::config::{BlockStateProvider, VegTags, is_air, try_parse_int_provider};
+use super::config::{BlockStateProvider, VegTags, try_parse_int_provider};
 use super::grid::VegGrid;
+use super::ids::{Rewrite, Tag};
 
 /// `net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer` (the
 /// `Straight`/`Forking` subset — issue #428 adds `Forking`, acacia's real
@@ -128,6 +129,10 @@ pub(super)     double_trunk: bool,
 /// places via the SAME `trunkSetter` (`TrunkPlacer.java`'s own
 /// `placeBelowTrunkBlock`), and therefore counts as a real distance-0
 /// source for [`update_leaf_distances`], not merely cosmetic soil.
+/// Unit 8: `attachments` and `trunk_positions` are now caller-owned reusable
+/// buffers (already cleared) rather than freshly allocated `Vec`s, and the return
+/// is just `placed_any`. What is pushed, and in what order, is unchanged.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn place_forking_trunk<R: RandomSource>(
     random: &mut R,
     origin: BlockPos,
@@ -136,17 +141,17 @@ pub(super) fn place_forking_trunk<R: RandomSource>(
     tags: &VegTags,
     trunk_provider: &BlockStateProvider,
     below_trunk_provider: &Option<BlockStateProvider>,
-) -> (Vec<Attachment>, Vec<BlockPos>, bool) {
-    let mut trunk_positions = Vec::new();
+    attachments: &mut Vec<Attachment>,
+    trunk_positions: &mut Vec<BlockPos>,
+) -> bool {
     if let Some(below_provider) = below_trunk_provider {
         let below_pos = BlockPos { x: origin.x, y: origin.y - 1, z: origin.z };
-        if let Some(state) = below_provider.get_state(grid, tags, random, below_pos) {
-            grid.set_if_in_bounds(below_pos.x, below_pos.y, below_pos.z, state);
+        if let Some(state) = below_provider.get_state_id(grid, tags, random, below_pos) {
+            grid.set_id_if_in_bounds(below_pos.x, below_pos.y, below_pos.z, state);
             trunk_positions.push(below_pos);
         }
     }
 
-    let mut attachments = Vec::new();
     let mut placed_any = false;
 
     const STEP: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)]; // NORTH, EAST, SOUTH, WEST
@@ -164,10 +169,9 @@ pub(super) fn place_forking_trunk<R: RandomSource>(
             lean_steps -= 1;
         }
         let pos = BlockPos { x: tx, y: yy, z: tz };
-        let base = base_id(grid.get(pos.x, pos.y, pos.z));
-        if is_air(base) || tags.replaceable_by_trees.contains(base) {
-            if let Some(state) = trunk_provider.get_state(grid, tags, random, pos) {
-                grid.set_if_in_bounds(pos.x, pos.y, pos.z, state);
+        if valid_tree_pos(grid, tags, pos.x, pos.y, pos.z) {
+            if let Some(state) = trunk_provider.get_state_id(grid, tags, random, pos) {
+                grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
                 placed_any = true;
                 trunk_positions.push(pos);
                 ey = Some(yy + 1);
@@ -192,10 +196,9 @@ pub(super) fn place_forking_trunk<R: RandomSource>(
                 tx += branch_direction.0;
                 tz += branch_direction.1;
                 let pos = BlockPos { x: tx, y: yy, z: tz };
-                let base = base_id(grid.get(pos.x, pos.y, pos.z));
-                if is_air(base) || tags.replaceable_by_trees.contains(base) {
-                    if let Some(state) = trunk_provider.get_state(grid, tags, random, pos) {
-                        grid.set_if_in_bounds(pos.x, pos.y, pos.z, state);
+                if valid_tree_pos(grid, tags, pos.x, pos.y, pos.z) {
+                    if let Some(state) = trunk_provider.get_state_id(grid, tags, random, pos) {
+                        grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
                         placed_any = true;
                         trunk_positions.push(pos);
                         ey = Some(yy + 1);
@@ -210,7 +213,19 @@ pub(super) fn place_forking_trunk<R: RandomSource>(
         }
     }
 
-    (attachments, trunk_positions, placed_any)
+    placed_any
+}
+
+/// `TreeFeature.validTreePos`: air or `#minecraft:replaceable_by_trees`.
+///
+/// One grid read and two bit tests since Unit 8 — it was an interner read guard,
+/// a `split('[')` and two `HashSet<String>` probes, evaluated once per candidate
+/// log and once per candidate leaf. Written once here rather than inlined at each
+/// of the six call sites it had, so the predicate cannot drift between trunk kinds.
+pub(super) fn valid_tree_pos(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: i32) -> bool {
+    let id = grid.get_id(x, y, z);
+    let interner = grid.interner();
+    tags.has(interner, Tag::Air, id) || tags.has(interner, Tag::ReplaceableByTrees, id)
 }
 
 /// `DarkOakTrunkPlacer.placeTrunk` — dark oak's real trunk (issue #428),
@@ -231,6 +246,8 @@ pub(super) fn place_forking_trunk<R: RandomSource>(
 /// [`place_forking_trunk`] — `trunk_positions` is every position
 /// `trunkSetter`/`placeBelowTrunkBlock` fired at (the below-origin 2×2
 /// included), seeding [`update_leaf_distances`]'s BFS.
+/// Unit 8: same buffer-in / `bool`-out change as [`place_forking_trunk`].
+#[allow(clippy::too_many_arguments)]
 pub(super) fn place_dark_oak_trunk<R: RandomSource>(
     random: &mut R,
     origin: BlockPos,
@@ -239,8 +256,9 @@ pub(super) fn place_dark_oak_trunk<R: RandomSource>(
     tags: &VegTags,
     trunk_provider: &BlockStateProvider,
     below_trunk_provider: &Option<BlockStateProvider>,
-) -> (Vec<Attachment>, Vec<BlockPos>, bool) {
-    let mut trunk_positions = Vec::new();
+    attachments: &mut Vec<Attachment>,
+    trunk_positions: &mut Vec<BlockPos>,
+) -> bool {
     // The 2×2 base: `below`, `below.east()`, `below.south()`,
     // `below.south().east()` — each via `placeBelowTrunkBlock`, in exactly
     // vanilla's order.
@@ -251,14 +269,13 @@ pub(super) fn place_dark_oak_trunk<R: RandomSource>(
                 y: origin.y - 1,
                 z: origin.z + dz,
             };
-            if let Some(state) = below_provider.get_state(grid, tags, random, below_pos) {
-                grid.set_if_in_bounds(below_pos.x, below_pos.y, below_pos.z, state);
+            if let Some(state) = below_provider.get_state_id(grid, tags, random, below_pos) {
+                grid.set_id_if_in_bounds(below_pos.x, below_pos.y, below_pos.z, state);
                 trunk_positions.push(below_pos);
             }
         }
     }
 
-    let mut attachments = Vec::new();
     let mut placed_any = false;
 
     const STEP: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)]; // NORTH, EAST, SOUTH, WEST
@@ -280,14 +297,15 @@ pub(super) fn place_dark_oak_trunk<R: RandomSource>(
         // the four `placeLog` calls; each log itself still individually
         // checks `validTreePos` (air or `#replaceable_by_trees`) below,
         // matching vanilla exactly.
-        let base = base_id(grid.get(tx, yy, tz));
-        if is_air(base) || tags.leaves.contains(base) {
+        let anchor = grid.get_id(tx, yy, tz);
+        if tags.has(grid.interner(), Tag::Air, anchor)
+            || tags.has(grid.interner(), Tag::Leaves, anchor)
+        {
             for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                 let (lx, lz) = (tx + dx, tz + dz);
-                let lbase = base_id(grid.get(lx, yy, lz));
-                if is_air(lbase) || tags.replaceable_by_trees.contains(lbase) {
-                    if let Some(state) = trunk_provider.get_state(grid, tags, random, BlockPos { x: lx, y: yy, z: lz }) {
-                        grid.set_if_in_bounds(lx, yy, lz, state);
+                if valid_tree_pos(grid, tags, lx, yy, lz) {
+                    if let Some(state) = trunk_provider.get_state_id(grid, tags, random, BlockPos { x: lx, y: yy, z: lz }) {
+                        grid.set_id_if_in_bounds(lx, yy, lz, state);
                         placed_any = true;
                         trunk_positions.push(BlockPos { x: lx, y: yy, z: lz });
                     }
@@ -314,10 +332,9 @@ pub(super) fn place_dark_oak_trunk<R: RandomSource>(
                 let (bx, bz) = (origin.x + ox, origin.z + oz);
                 for branch_y in 0..length {
                     let by = ey - branch_y - 1;
-                    let bbase = base_id(grid.get(bx, by, bz));
-                    if is_air(bbase) || tags.replaceable_by_trees.contains(bbase) {
-                        if let Some(state) = trunk_provider.get_state(grid, tags, random, BlockPos { x: bx, y: by, z: bz }) {
-                            grid.set_if_in_bounds(bx, by, bz, state);
+                    if valid_tree_pos(grid, tags, bx, by, bz) {
+                        if let Some(state) = trunk_provider.get_state_id(grid, tags, random, BlockPos { x: bx, y: by, z: bz }) {
+                            grid.set_id_if_in_bounds(bx, by, bz, state);
                             placed_any = true;
                             trunk_positions.push(BlockPos { x: bx, y: by, z: bz });
                         }
@@ -332,7 +349,7 @@ pub(super) fn place_dark_oak_trunk<R: RandomSource>(
         }
     }
 
-    (attachments, trunk_positions, placed_any)
+    placed_any
 }
 
 /// `TreeFeature.updateLeaves` — the real post-processing pass vanilla runs
@@ -410,9 +427,17 @@ pub(super) fn update_leaf_distances(
         (min_x..=max_x).contains(&x) && (min_y..=max_y).contains(&y) && (min_z..=max_z).contains(&z)
     };
 
-    let mut buckets: Vec<std::collections::VecDeque<(i32, i32, i32)>> =
-        (0..MAX_DISTANCE).map(|_| std::collections::VecDeque::new()).collect();
-    let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
+    // Unit 8: the bucket queue and the visited set are reused thread-local
+    // scratch, not eight fresh allocations per tree. `BFS.take()` (rather than a
+    // borrow held across the body) keeps a hypothetical nested call correct — it
+    // would get fresh, allocating buffers instead of a `RefCell` panic.
+    let mut scratch = BFS.take();
+    let Bfs { buckets, visited } = &mut scratch;
+    buckets.resize_with(MAX_DISTANCE as usize, VecDeque::new);
+    for bucket in buckets.iter_mut() {
+        bucket.clear();
+    }
+    visited.clear();
     // Every trunk position is, by construction, inside `bbox` (the caller
     // derives `bbox` to encapsulate them) — matching real vanilla, where
     // `bounds` is built FROM `trunks`, so a log is trivially always its own
@@ -428,15 +453,25 @@ pub(super) fn update_leaf_distances(
     loop {
         loop {
             if smallest >= MAX_DISTANCE {
+                BFS.set(scratch);
                 return;
             }
             let Some((x, y, z)) = buckets[smallest as usize].pop_front() else {
                 break;
             };
             if smallest != 0 {
-                let state = grid.get(x, y, z).to_string();
-                if let Some(new_state) = set_distance_property(&state, smallest) {
-                    grid.set_if_in_bounds(x, y, z, new_state);
+                // Unit 8: the `distance=N` rewrite is a memoised id -> id lookup.
+                // It was `grid.get(..).to_string()` plus a `replace_range` plus a
+                // re-intern, once per visited leaf — one of the three sites
+                // `docs/worldgen-state-interning.md` names as this unit's residual.
+                let id = grid.get_id(x, y, z);
+                let new_state = tags.rewrite(
+                    grid.interner(),
+                    id,
+                    Rewrite::Distance(u8::try_from(smallest).unwrap_or(0)),
+                );
+                if let Some(new_state) = new_state {
+                    grid.set_id_if_in_bounds(x, y, z, new_state);
                 }
             }
             for (dx, dy, dz) in NEIGHBOR_OFFSETS {
@@ -451,12 +486,11 @@ pub(super) fn update_leaf_distances(
                 if !inside(nx, ny, nz) {
                     continue;
                 }
-                let neighbor_state = grid.get(nx, ny, nz);
-                let base = base_id(neighbor_state);
-                let current_distance = if tags.logs.contains(base) {
+                let neighbor = grid.get_id(nx, ny, nz);
+                let current_distance = if tags.has(grid.interner(), Tag::Logs, neighbor) {
                     Some(0)
                 } else {
-                    distance_property(neighbor_state)
+                    tags.distance_of(grid.interner(), neighbor)
                 };
                 if let Some(current_distance) = current_distance {
                     let new_distance = (smallest + 1).min(current_distance);
@@ -472,33 +506,37 @@ pub(super) fn update_leaf_distances(
     }
 }
 
-/// `LeavesBlock.getOptionalDistanceAt`'s non-tag half:
-/// `state.hasProperty(DISTANCE) ? OptionalInt.of(state.getValue(DISTANCE)) :
-/// OptionalInt.empty()`. The `#prevents_nearby_leaf_decay` half is handled
-/// by the caller ([`update_leaf_distances`]) via [`VegTags::logs`] directly.
-pub(super) fn distance_property(state: &str) -> Option<i32> {
-    let idx = state.find("distance=")?;
-    let start = idx + "distance=".len();
-    let end = state[start..].find([',', ']']).map_or(state.len(), |o| start + o);
-    state[start..end].parse().ok()
+/// [`update_leaf_distances`]' reusable bucket queue and visited set.
+struct Bfs {
+    buckets: Vec<VecDeque<(i32, i32, i32)>>,
+    visited: HashSet<(i32, i32, i32)>,
 }
 
-/// Rewrites an existing `distance=N` property in place, preserving every
-/// other property and bracket — the same `replace_range` idiom
-/// [`try_place_leaf`]'s waterlogged fix-up already uses for the identical
-/// shape of edit. `None` if `state` has no `distance` property at all
-/// (never actually called on such a state — [`update_leaf_distances`] only
-/// calls this after confirming [`distance_property`] returned `Some` for
-/// the same position — but returning `Option` rather than panicking keeps
-/// this fn safe to call standalone, e.g. from a future caller or a test).
-pub(super) fn set_distance_property(state: &str, new_distance: i32) -> Option<String> {
-    let idx = state.find("distance=")?;
-    let start = idx + "distance=".len();
-    let end = state[start..].find([',', ']']).map_or(state.len(), |o| start + o);
-    let mut s = state.to_string();
-    s.replace_range(start..end, &new_distance.to_string());
-    Some(s)
+impl Default for Bfs {
+    fn default() -> Self {
+        Self {
+            buckets: Vec::new(),
+            visited: HashSet::new(),
+        }
+    }
 }
+
+thread_local! {
+    /// One tree's BFS scratch, reused across trees. Not `const`-initialised
+    /// (`HashSet::new` is not a const fn under the default hasher), so the first
+    /// touch on a thread allocates — which is warmup, not steady state, and is why
+    /// the acceptance gate measures a *second* pass rather than the first.
+    static BFS: RefCell<Bfs> = RefCell::new(Bfs::default());
+}
+
+// `distance_property` and `set_distance_property` used to live here, as `&str ->
+// Option<i32>` and `&str -> Option<String>`. Unit 8 moved both into
+// [`super::ids`] — `parse_distance` and `rewrite_property` — because the
+// question is now asked of a `StateId` and answered from a table filled once per
+// interner, and keeping a second string implementation beside it would be a
+// definition free to drift from the one the table is built from. The `&str`
+// bodies survive verbatim inside those two functions; nothing about the property
+// syntax handling changed.
 
 /// `net.minecraft.world.level.levelgen.feature.foliageplacers.FoliagePlacer`
 /// (the `Blob`/`Spruce`/`Pine`/`Acacia` subset — see module doc's "Named
@@ -881,26 +919,30 @@ pub(super) fn try_place_leaf<R: RandomSource>(
     provider: &BlockStateProvider,
     placed_any: &mut bool,
 ) {
-    let base = base_id(grid.get(pos.x, pos.y, pos.z));
     // `!isPersistent && validTreePos`: nothing this engine ever places
     // during worldgen carries `persistent=true` (only a player placing a
     // leaf block by hand can set it), so the persistence half of the check
     // is unconditionally true here — not modelled as a separate branch.
-    let valid = is_air(base) || tags.replaceable_by_trees.contains(base);
-    if !valid {
+    let existing = grid.get_id(pos.x, pos.y, pos.z);
+    if !valid_tree_pos(grid, tags, pos.x, pos.y, pos.z) {
         return;
     }
-    let Some(mut state) = provider.get_state(grid, tags, random, pos) else {
+    let Some(state) = provider.get_state_id(grid, tags, random, pos) else {
         return;
     };
-    if let Some(idx) = state.find("waterlogged=") {
-        let is_water_source = base == "minecraft:water";
-        let start = idx + "waterlogged=".len();
-        let end = state[start..]
-            .find([',', ']'])
-            .map_or(state.len(), |o| start + o);
-        state.replace_range(start..end, if is_water_source { "true" } else { "false" });
-    }
-    grid.set_if_in_bounds(pos.x, pos.y, pos.z, state);
+    // The `waterlogged` fix-up, by id: `Rewrite::Waterlogged` answers `None` for a
+    // leaf state that carries no such property, which is exactly what the old
+    // `state.find("waterlogged=")` miss meant — leave the state alone. Unit 8;
+    // this is the third of the three sites `docs/worldgen-state-interning.md`
+    // names, and it used to allocate on every single leaf placed.
+    let is_water_source = tags.has(grid.interner(), Tag::Water, existing);
+    let state = tags
+        .rewrite(
+            grid.interner(),
+            state,
+            Rewrite::Waterlogged(is_water_source),
+        )
+        .unwrap_or(state);
+    grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
     *placed_any = true;
 }
