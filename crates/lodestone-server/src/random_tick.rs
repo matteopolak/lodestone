@@ -62,15 +62,35 @@
 //!
 //! `LevelChunkSection::isRandomlyTicking` (`LevelChunkSection.java:110-118`)
 //! is `tickingBlockCount > 0`, an incrementally maintained count vanilla
-//! updates on every block change in the section. This crate has no such
-//! incremental counter (`ChunkColumn` — see `crate::chunk`'s module doc —
-//! has no per-section bookkeeping at all), so [`section_has_randomly_ticking_block`]
-//! computes the same **boolean** by scanning the section directly. This
-//! changes nothing observable: the count itself is never read, only
-//! whether it is positive, and a scan produces the identical true/false
-//! answer a maintained counter would. It is the honest reduction for a
-//! chunk representation with no incremental bookkeeping, not an invented
-//! shortcut.
+//! updates on every block change in the section. **This crate now keeps the
+//! same counter** — `ChunkColumn::section_ticking`, one `u16` per implicit
+//! 16-row window, maintained by `ChunkColumn::set_block` and recomputed once
+//! per adopted grid by `recalc_ticking_counts` — so
+//! [`RandomTickScheduler::tick_chunk`]'s gate is
+//! `ChunkColumn::section_is_randomly_ticking`, an integer compare.
+//!
+//! It was a scan until `bdf93a28`+1. The history is worth keeping, because the
+//! scan is still the *definition*: `is_randomly_ticking` ran on all 4096 blocks
+//! of every section, of every column, on every tick, as a **string** predicate
+//! — `sample(1)` put **97.6%** of the integrated server's tick thread in it.
+//!
+//! The budget arithmetic, corrected: this loop iterates `tick_area`, **not** the
+//! streamed view. `tick_area` is `mob_area` (`integrated.rs:520`), whose radius
+//! is the shell's `view_radius.clamp(1, 3)` (`net.rs:1773`) — a 7×7 square,
+//! **49 columns**, as `integrated.rs:538` states independently. At the measured
+//! 2.108 ms/column that is **103 ms per 50 ms tick, 2.07× over budget**; the
+//! headroom is `50 / 2.108 = 23.7` columns and 49 exceeds it. (Earlier records,
+//! including `bdf93a28`'s own commit message, multiplied by the 361-column
+//! streamed view instead and reported 761 ms / 15.2×. Those two numbers are
+//! wrong and must not be requoted — the conclusion they supported is not.)
+//! Chunk delivery starved badly enough that rings 5-8 of the 289-column view
+//! never arrived (issue #507, `docs/mesh-fill-rate.md`).
+//!
+//! The interim fix classified the palette once per tick and scanned palette
+//! *indices*, 54× cheaper but still O(blocks) per column per tick. The counter
+//! removes the per-tick scan entirely. [`section_has_randomly_ticking_block`]
+//! survives as that definition, and the counters are checked against it by a
+//! `debug_assert!` inside `tick_chunk` on every debug run.
 //!
 //! # `getBlockRandomPos`, cited directly
 //!
@@ -177,10 +197,46 @@ pub fn is_air_variant(state: &str) -> bool {
 /// leaf decay, all cited in `crate::growth_tick`'s own module doc comment.
 #[must_use]
 pub fn is_randomly_ticking(block_state: &str) -> bool {
+    #[cfg(test)]
+    predicate_calls::bump();
     base_name(block_state) == GRASS_BLOCK
         || growth_tick::is_growable_crop(block_state)
         || growth_tick::is_sapling(block_state)
         || growth_tick::leaves_should_decay(block_state)
+}
+
+/// An instrument, not a mechanism: how many times [`is_randomly_ticking`] has
+/// been evaluated on **this thread**.
+///
+/// Issue #507's fix is a claim about an operation *count*, and this repo's
+/// evidence rule says to measure a count rather than a duration (this machine's
+/// wall clock reproduces to 10.8% at best, and one stage swung 22% across three
+/// runs of an identical binary). The two competing hypotheses are computable
+/// exactly: with the counters, `tick_chunk` on an already-built column performs
+/// **0** evaluations; without them it performs at least `palette.len()` per
+/// tick (the interim mask) or 4096 per section (the original scan). A gate that
+/// lands on 0 therefore distinguishes them with no tolerance at all.
+///
+/// Thread-local rather than a global `AtomicU64` on purpose: the lib test binary
+/// runs unit tests concurrently, and a shared global would make every count a
+/// race. `cfg(test)`-only, so the instrument cannot exist in a build anything
+/// ships.
+#[cfg(test)]
+mod predicate_calls {
+    use std::cell::Cell;
+
+    thread_local! {
+        static CALLS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn bump() {
+        CALLS.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Reads the current count for this thread.
+    pub(super) fn get() -> u64 {
+        CALLS.with(Cell::get)
+    }
 }
 
 /// The position-pick LCG, verbatim from `Level.getBlockRandomPos`
@@ -305,6 +361,24 @@ impl RandomTickScheduler {
         Self { position_state: position_seed, behavior_rng: SpawnRng::new(behavior_seed) }
     }
 
+    /// Vanilla's `Level.randValue` as it stands now — the position LCG's whole
+    /// state, and therefore the exact number of position draws that have
+    /// happened since [`new`](Self::new).
+    ///
+    /// Read-only, and it exists for one observation a gate cannot make any other
+    /// way: `tests/random_tick_section_counters.rs` replays the expected draw
+    /// sequence from `next_random_tick_pos` alone (never consulting the section
+    /// counters) and compares the two states exactly. Since the per-(column,
+    /// section, tick) boolean is the *only* input that decides whether draws
+    /// happen, an equal final state is proof that the O(1) counter decision put
+    /// the LCG on the same sequence the definitional scan would have — which is
+    /// the real compatibility requirement of issue #507's fix, not merely that
+    /// the same blocks changed.
+    #[must_use]
+    pub fn position_state(&self) -> i32 {
+        self.position_state
+    }
+
     /// One chunk's worth of random ticks at `tick_speed` picks per
     /// randomly-ticking 16-block section — mirrors `ServerLevel::tickChunk`'s
     /// block-ticking loop (`ServerLevel.java:508-535`; this crate does not
@@ -349,17 +423,55 @@ impl RandomTickScheduler {
         }
         let min_x = cx * 16;
         let min_z = cz * 16;
-        // Classified once for the whole column, not once per block. A column
-        // whose palette holds no randomly-ticking state at all — every
-        // all-stone, all-water or all-air column, i.e. most of them — is
-        // decided here without touching the 98,304-entry index grid.
-        let mask = randomly_ticking_palette_mask(column);
-        if !mask.iter().any(|&t| t) {
+        // Vanilla's `tickingBlockCount > 0`, now an O(1) integer compare
+        // against the counter `ChunkColumn` maintains on every mutation
+        // (issue #507's real fix). Nothing here reads the index grid at all:
+        // the whole-column early exit below is at most 24 compares, and the
+        // per-section decision is one.
+        //
+        // **Fluids are deliberately out of scope, and this is the boundary.**
+        // Vanilla's gate is `isRandomlyTickingBlocks() || isRandomlyTickingFluids()`
+        // (`LevelChunkSection.java:110-112`), and lava is the one fluid whose
+        // `isRandomlyTicking()` is true (`LavaFluid.java:221` overrides
+        // `Fluid.java:79`'s `false`; water never overrides). This crate models
+        // no fluid random ticks — `is_randomly_ticking` names no fluid — so a
+        // `tickingFluidCount` today would have zero producers and zero
+        // consumers: an island by construction. The disclosed consequence is
+        // that our LCG position stream is not vanilla-comparable for a section
+        // whose only ticking content is lava, unchanged by the counters. When a
+        // lava `randomTick` handler first lands, the same change must (1) add
+        // the fluid counter maintained at `ChunkColumn`'s same three sites and
+        // (2) widen *this* condition to the OR. See
+        // `docs/plans/random-tick-counter.md` §"Fluids".
+        if !column.has_randomly_ticking_block() {
             return events;
         }
+        // The definitional scan, kept as the tripwire's reference arm below.
+        // Debug builds only, so every `cargo test` run in this repo pays for it
+        // and no release build does.
+        #[cfg(debug_assertions)]
+        let definitional_mask = randomly_ticking_palette_mask(column);
         let mut section_min_y = column.min_y;
         while section_min_y < column.min_y + column.height {
-            if section_has_randomly_ticking_block(column, section_min_y, &mask) {
+            let section_ticks = column.section_is_randomly_ticking(section_min_y);
+            // Permanent debug tripwire. The counters are maintained by
+            // `ChunkColumn::set_block`/`recalc_ticking_counts`; any future
+            // mutation path inside `chunk.rs` that reaches `blocks` without
+            // updating them desyncs silently in release, and this fails the
+            // nearest debug run at the point of *consumption*, naming the
+            // section. The reference is the same index scan that shipped as the
+            // interim fix, so this is the one comparison that keeps the O(1)
+            // decision bit-for-bit identical to the definition — and therefore
+            // keeps the `tick_speed` position draws on the same LCG sequence.
+            #[cfg(debug_assertions)]
+            debug_assert_eq!(
+                section_ticks,
+                section_has_randomly_ticking_block(column, section_min_y, &definitional_mask),
+                "random-tick counter desync at chunk ({cx}, {cz}) section_min_y {section_min_y}: \
+                 counters say {section_ticks}, the definitional index scan disagrees — some \
+                 mutation path bypassed `ChunkColumn`'s counter maintenance"
+            );
+            if section_ticks {
                 for _ in 0..tick_speed {
                     let (x, y, z) =
                         next_random_tick_pos(&mut self.position_state, min_x, section_min_y, min_z, 15);
@@ -1099,6 +1211,17 @@ fn react_to_notification(
 /// Which of `column`'s palette entries are randomly ticking, indexed by
 /// palette id.
 ///
+/// **No longer the production path.** `ChunkColumn` now keeps this
+/// classification permanently (one entry pushed per palette append) and a
+/// per-section count derived from it, so [`RandomTickScheduler::tick_chunk`]
+/// reaches the decision with an integer compare. This function and
+/// [`section_has_randomly_ticking_block`] below are kept because they are the
+/// **validated definition** of that decision: they are the tripwire's reference
+/// arm in debug builds and the reference the unit test below compares against.
+/// Deleting them would throw away the spec; leaving them in release builds
+/// would be dead production code, so they are `cfg`-gated to exactly the
+/// configurations that use them.
+///
 /// The prefilter that makes [`section_has_randomly_ticking_block`] affordable.
 /// [`is_randomly_ticking`] is a **string** predicate (four `base_name` splits
 /// in the worst case), and the scan below used to run it on all 4096 blocks of
@@ -1108,6 +1231,7 @@ fn react_to_notification(
 /// per-block one — the same argument
 /// [`ChunkColumn::raw_palette`](crate::chunk::ChunkColumn::raw_palette)
 /// already makes for the save path.
+#[cfg(any(test, debug_assertions))]
 fn randomly_ticking_palette_mask(column: &crate::chunk::ChunkColumn) -> Vec<bool> {
     column
         .raw_palette()
@@ -1124,6 +1248,10 @@ fn randomly_ticking_palette_mask(column: &crate::chunk::ChunkColumn) -> Vec<bool
 ///
 /// The decision is bit-for-bit the one the string scan reached, so the
 /// `tick_speed` position draws that follow it stay on the same LCG sequence.
+///
+/// See [`randomly_ticking_palette_mask`] for why this is no longer the
+/// production path and why it is nonetheless kept.
+#[cfg(any(test, debug_assertions))]
 fn section_has_randomly_ticking_block(
     column: &crate::chunk::ChunkColumn,
     section_min_y: i32,
@@ -1935,6 +2063,211 @@ mod tests {
         assert_eq!(
             column.block_state(3, 5, 3),
             "minecraft:oak_fence_gate[open=false,powered=false]"
+        );
+    }
+
+    // ---- Issue #507: the counter is O(1), proven as a count ---------------
+
+    /// **U3-b, the O(1) claim as a count.** The section *decision* evaluates
+    /// [`is_randomly_ticking`] zero times, so `tick_chunk`'s per-tick predicate
+    /// count depends on `tick_speed` and on how many sections tick — never on
+    /// the column's height or block count.
+    ///
+    /// Both hypotheses are computed from outside the code under test, so this is
+    /// a prediction rather than a sign check (`DESIGN.md` §12.43's *magnitude*
+    /// species). Per `tick_chunk` call, a correct counter implementation
+    /// evaluates the predicate exactly:
+    ///
+    /// * `tick_speed` times — vanilla's own per-picked-position
+    ///   `blockState.isRandomlyTicking()` (`ServerLevel.java:513`), one per
+    ///   position draw in the one randomly-ticking section. This term is
+    ///   *supposed* to be there; it is bounded by `tick_speed`, not by cells.
+    /// * plus `palette.len()` **in debug builds only**, for the definitional
+    ///   scan the permanent tripwire runs as its reference arm.
+    ///
+    /// The competing hypothesis — the pre-`bdf93a28` per-block string scan —
+    /// evaluates the predicate up to 4096 times per non-ticking section per
+    /// tick, so it predicts ~200k for the short column below and ~2.4M for the
+    /// tall one. The **12× column-height ratio is the discriminator**: the two
+    /// arms carry byte-identical content in one section and differ only in how
+    /// many empty sections sit above it, so any implementation whose decision
+    /// touches cells must report different counts for them.
+    ///
+    /// **What this gate deliberately cannot separate:** the interim palette mask
+    /// (`bdf93a28`) also evaluated the predicate `palette.len()` times per tick
+    /// and no more, so a predicate count cannot tell it from counters-plus-debug-
+    /// tripwire. What separated them was *index-grid reads*, and that proof is
+    /// structural rather than measured:
+    /// [`section_has_randomly_ticking_block`] and
+    /// [`randomly_ticking_palette_mask`] are `#[cfg(any(test, debug_assertions))]`,
+    /// so they **do not exist** in a release build and the shipped decision
+    /// provably reads no cell of the index grid.
+    #[test]
+    fn per_tick_predicate_count_is_independent_of_column_height() {
+        /// A stage-1 sapling: randomly ticking (`is_sapling`), and its handler
+        /// is a named no-op at stage 1 (`SaplingOutcome::TreeGrowthNotModeled`),
+        /// so nothing this gate ticks ever mutates a block. That keeps the
+        /// palette at a fixed 2 entries and makes the per-tick count exact
+        /// rather than "exact plus however many states the run happened to
+        /// intern".
+        const INERT_TICKING_STATE: &str = "minecraft:oak_sapling[stage=1]";
+        const TICKS: u64 = 25;
+        const TICK_SPEED: u32 = 7;
+
+        fn measure(height: i32) -> (u64, usize, usize) {
+            let mut column = ChunkColumn::new(0, height);
+            column.set_block(3, 5, 3, INERT_TICKING_STATE);
+            // World-species preconditions, failing rather than skipping. Without
+            // a ticking section the whole-column early exit fires and this gate
+            // measures nothing; without a non-ticking section the height arm
+            // below has no empty sections to be independent of.
+            assert!(
+                column.has_randomly_ticking_block(),
+                "fixture at height {height} holds no randomly-ticking block"
+            );
+            let sections = column.section_ticking_counts().len();
+            let ticking = column
+                .section_ticking_counts()
+                .iter()
+                .filter(|&&c| c > 0)
+                .count();
+            assert_eq!(ticking, 1, "fixture at height {height} must tick exactly one section");
+            assert!(
+                sections > ticking,
+                "fixture at height {height} has no non-ticking section, so a scan-based \
+                 implementation would cost the same as a counter-based one here"
+            );
+
+            let mut scheduler = RandomTickScheduler::new(31, 31);
+            let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+            let before = predicate_calls::get();
+            for _ in 0..TICKS {
+                scheduler.tick_chunk(&mut column, 0, 0, TICK_SPEED, &mut block_ticks, 0);
+            }
+            let during = predicate_calls::get() - before;
+            // Nothing mutated, so the palette never grew: the count is exact.
+            assert_eq!(column.raw_palette().len(), 2);
+            (during, sections, ticking)
+        }
+
+        // Two sections vs twenty-four, same content in section 0.
+        let (short_count, short_sections, _) = measure(32);
+        let (tall_count, tall_sections, _) = measure(384);
+        assert_eq!((short_sections, tall_sections), (2, 24));
+
+        // The debug tripwire's reference scan classifies the palette once per
+        // `tick_chunk` call. Derived from the same `cfg` the tripwire itself
+        // uses, not restated as a literal.
+        let tripwire_per_tick = if cfg!(debug_assertions) { 2u64 } else { 0 };
+        let expected = TICKS * (u64::from(TICK_SPEED) + tripwire_per_tick);
+
+        assert_eq!(
+            short_count, expected,
+            "2-section column: expected exactly {expected} predicate evaluations over {TICKS} \
+             ticks at tick_speed {TICK_SPEED} ({TICK_SPEED} position checks + \
+             {tripwire_per_tick} tripwire per tick)"
+        );
+        assert_eq!(
+            tall_count, expected,
+            "24-section column: expected the SAME {expected} evaluations as the 2-section \
+             column — the decision must not touch cells. A per-block scan predicts ~12x more \
+             here than there"
+        );
+    }
+
+    /// **U3-b's other half, and U3-c's instrument control.** Building a column
+    /// evaluates the predicate exactly `palette.len()` times — one per palette
+    /// entry, once, ever.
+    ///
+    /// This is also what proves the instrument in the gate above is not simply
+    /// broken: a counter that never increments would report two vacuous zeros.
+    /// Here it must report a specific non-zero number, predicted from the
+    /// palette the constructor adopts.
+    #[test]
+    fn constructing_a_column_evaluates_the_predicate_once_per_palette_entry() {
+        // Control first: the instrument really does count a bare call.
+        let before_bare = predicate_calls::get();
+        let _ = is_randomly_ticking(GRASS_BLOCK);
+        assert_eq!(
+            predicate_calls::get() - before_bare,
+            1,
+            "instrument control failed: a single `is_randomly_ticking` call must register as 1, \
+             otherwise the zero this gate's sibling reports means nothing"
+        );
+
+        // `ChunkColumn::new` is the all-air constructor: palette of exactly 1.
+        let before_new = predicate_calls::get();
+        let column = ChunkColumn::new(0, 32);
+        assert_eq!(
+            predicate_calls::get() - before_new,
+            column.raw_palette().len() as u64,
+            "the all-air constructor must classify exactly its one palette entry"
+        );
+
+        // The real generator column: `from_generated` + `recalc_ticking_counts`,
+        // the production transport (`OverworldChunkSource::column`), not a
+        // hand-rolled source.
+        let source = crate::overworld_chunk_source(2026);
+        let before_gen = predicate_calls::get();
+        let generated = crate::chunk::ChunkSource::column(&source, 0, 0);
+        let generated_calls = predicate_calls::get() - before_gen;
+        assert_eq!(
+            generated_calls,
+            generated.raw_palette().len() as u64,
+            "a generated column must classify each of its {} palette entries exactly once — \
+             any multiple of that means the classification is being redone",
+            generated.raw_palette().len()
+        );
+        assert!(
+            generated_calls > 1,
+            "a real generator column with a single-entry palette cannot exercise this gate \
+             (got {generated_calls} evaluations)"
+        );
+    }
+
+    /// The counters' decision must equal the definitional index scan
+    /// ([`section_has_randomly_ticking_block`]) for every section, at every step
+    /// of a mutation sequence — the same invariant `tick_chunk`'s debug tripwire
+    /// asserts, pinned here as a test so it is visible in the crate's own suite
+    /// and so the definition stays live in `--release` test builds too.
+    ///
+    /// The broad parity gate, over real generator columns and an NBT round trip,
+    /// is `tests/random_tick_section_counters.rs`; this is the in-module version
+    /// that keeps the reference scan honest.
+    #[test]
+    fn counter_decision_equals_the_definitional_scan_through_a_mutation_sequence() {
+        let mut column = ChunkColumn::new(-16, 48);
+        let script: [(i32, i32, i32, &str); 8] = [
+            (0, -16, 0, GRASS_BLOCK),            // bottom section, 0 -> 1
+            (1, -16, 1, GRASS_BLOCK),            // same section, 1 -> 2
+            (0, -16, 0, DIRT_BLOCK),             // 2 -> 1
+            (1, -16, 1, DIRT_BLOCK),             // 1 -> 0
+            (2, 20, 2, "minecraft:wheat[age=3]"), // middle section, 0 -> 1
+            (2, 20, 2, "minecraft:wheat[age=4]"), // ticking -> ticking, unchanged
+            (3, 31, 3, GRASS_BLOCK),             // top section, 0 -> 1
+            (3, 31, 3, "minecraft:stone"),       // 1 -> 0
+        ];
+        let mut saw_ticking = false;
+        for (i, (x, y, z, state)) in script.iter().enumerate() {
+            column.set_block(*x, *y, *z, state);
+            let mask = randomly_ticking_palette_mask(&column);
+            let mut section_min_y = column.min_y;
+            while section_min_y < column.min_y + column.height {
+                let expected = section_has_randomly_ticking_block(&column, section_min_y, &mask);
+                saw_ticking |= expected;
+                assert_eq!(
+                    column.section_is_randomly_ticking(section_min_y),
+                    expected,
+                    "step {i} ({state} at ({x}, {y}, {z})): counter and definitional scan \
+                     disagree for section_min_y {section_min_y}"
+                );
+                section_min_y += 16;
+            }
+        }
+        assert!(
+            saw_ticking,
+            "no step of this script ever produced a ticking section — the comparison above \
+             was `false == false` throughout and proved nothing"
         );
     }
 }

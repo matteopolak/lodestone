@@ -14,8 +14,16 @@ briefing — see "Corrections to the briefing" at the end.
 **The measured problem is real and matches the record.** `bdf93a28`'s commit message and
 `docs/mesh-fill-rate.md` agree: `sample(1)` put **97.6%** (3,939 of 4,034 samples) of the
 integrated server's tick thread in `is_randomly_ticking` under the old 4096-block string scan;
-independently measured at **2.108 ms/column** (98,304 calls × 21.45 ns), 361 resident columns =
-761 ms per 50 ms tick, 15.2× over budget, rings 5–8 never delivered. The interim fix (classify
+independently measured at **2.108 ms/column** (98,304 calls × 21.45 ns), rings 5–8 never
+delivered. **Correction, made while implementing this plan:** every figure in this document that
+multiplies 2.108 ms by **361 columns** to reach **761 ms / 15.2× over budget** uses the wrong
+multiplier, and this section, the per-tick-saving bullet below and "Corrections to the briefing"
+item 1 all inherited it. The random-tick loop iterates `tick_area`, not the streamed view:
+`tick_area` is `mob_area` (`integrated.rs:520`) at radius `view_radius.clamp(1, 3)`
+(`net.rs:1773`) — a 7×7 square, **49 columns**, as `integrated.rs:538` states independently.
+The correct figures are **103 ms per 50 ms tick, 2.07× over budget** against a
+`50 / 2.108 = 23.7`-column headroom. Every conclusion below is unchanged (49 > 23.7), and
+**761 ms / 15.2× / 361 must not be requoted**. The interim fix (classify
 the palette once, scan palette **indices**) measures **38.7 µs/column, 54× cheaper**, and the
 289-column view fills in **6.3–6.9 s** (`docs/mesh-fill-rate.md`; the briefing's "6.27 s" was
 one run inside that range). The interim fix is still O(blocks) per column per tick: every
@@ -186,7 +194,8 @@ Per this repo's rule, quantified by operation counts (this machine's wall clock 
 - Region load: **zero extra passes** — O(1) counter delta inside each `set_block` the loader
   already makes.
 - Per-tick saving: the interim scan re-reads up to 98,304 indices per column per tick
-  (361 columns × 20 Hz); the counter replaces that with ≤ 24 integer compares per column.
+  (49 columns × 20 Hz — see the correction at the top of this document, not 361); the
+  counter replaces that with ≤ 24 integer compares per column.
   Break-even is therefore **before the first tick completes**: one construction pass costs what
   one tick's scan of the same column cost, and the scan ran 20×/s forever.
 
@@ -356,8 +365,13 @@ functions of the state string (their call sites treat them so).
 
 Checked rather than inherited, per the briefing's own request:
 
-1. **97.6%, 2.108 ms, 761 ms, 15.2×, 38.7 µs, 54×** — all correct as stated; they match the
-   primary record (`bdf93a28`'s message, `docs/mesh-fill-rate.md`).
+1. **97.6%, 2.108 ms, 38.7 µs, 54×** — correct as stated; they match the primary record
+   (`bdf93a28`'s message, `docs/mesh-fill-rate.md`). **`761 ms` and `15.2×` are NOT** — this
+   item originally endorsed them, which is the error the top-of-document correction fixes:
+   agreement with the primary record was mistaken for verification, and both the record and
+   this plan had multiplied by the streamed view instead of `tick_area`. The corrected figures
+   are 49 columns → 103 ms → 2.07×. An authoritative-looking source that agrees with itself is
+   exactly the failure mode CLAUDE.md's "re-verify before routing around" section describes.
 2. **"View fills in 6.27 s"** — the record says **6.3–6.9 s across runs**; 6.27 s is at best
    one run's value. Immaterial to the plan; corrected because a single-run timing quoted as
    *the* number is the exact timing-vs-counter trap CLAUDE.md documents.

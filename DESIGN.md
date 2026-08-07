@@ -3513,3 +3513,71 @@ Issue #505. `ChunkStore::DEFAULT_CAPACITY` was a bare literal `512` chosen to co
 - **A fix that works is not a diagnosis.** `cargo bench` failed to link with `could not materialize bitcode object file …liballoca…`; `alloca` is a genuinely non-optional dependency of `criterion 0.8.2`, which made a dependency story credible, and an issue (#528) was filed naming it. `MACOSX_DEPLOYMENT_TARGET=26.0` then made the bench link, exit 0 — apparent confirmation. **Two variables had changed at once**: the env var, and a fresh `CARGO_TARGET_DIR` in a throwaway worktree. The control — fresh target dir, **no** env var — also exited 0, proving the env var irrelevant. The real cause was a poisoned `alloca` build-script output in the shared `target/`, and the fix is `cargo clean -p alloca`, which CLAUDE.md already prescribes for exactly this symptom. Without the control this file would carry a permanent, plausible, wrong workspace-wide deployment-target setting. **When a fix works, ask which of the things you changed did it; "it links now" is compatible with every hypothesis you did not test.**
 - **The harness refused to let a counters build contaminate the record, and that guard is why the per-stage split above is quotable at all.** Running `--features gen-counters` printed `REFUSING to record "embedded_stage_ore_us" … inflates a burst by roughly 3×, so the number is not comparable to a clean run` for all eight stages. The same run is what verified the split is not vacuous — its header reads *all ten stages live*, the check the counters-off run explicitly disclaims (*"counters NOT compiled in, so the exactly-once invariant was NOT checked … precisely the condition that let this file measure an ore-free pipeline for as long as it did"*). **Stage participation and stage timing cannot come from the same run, so a trustworthy per-stage number needs two runs and a guard that stops you conflating them.**
 - **Two independent instruments agree, which is the only reason the absolute figures are worth stating on a machine whose wall clock reproduces to 10.8%.** This bench projects RD 8 at ~6–7 s from its rd=2/rd=4 arms (24,295 and 21,524 µs/chunk); the mesh-fill harness (`docs/mesh-fill-rate.md`), a different process measuring delivered columns over wall time through the real server, measured the 361-column view filling in **6.3–6.9 s**. Neither was calibrated against the other. **Agreement between two instruments built for different questions is worth more than three runs of either.**
+
+**12.113 Issue #507's incremental section counter, finished from another agent's uncommitted tree: the implementation and its 675-line gate were sound, but the perf figure every record in the chain carried was multiplied by the wrong column count — 49, not 361 — and the plan document had explicitly "verified" the wrong one by checking it against a record that shared its ancestor.**
+
+`bdf93a28` replaced `random_tick.rs`'s 4096-block **string** scan with a per-tick palette
+prefilter; this unit replaced the prefilter with vanilla's `LevelChunkSection.tickingBlockCount`
+(`ChunkColumn::section_ticking`, one `u16` per implicit 16-row window, maintained in `set_block`
+and recomputed once by `recalc_ticking_counts` for the one constructor that adopts a populated
+grid). Landed as found, plus four fixes; every number below was measured this session.
+
+- **The multiplicand was checked three times and the multiplier never was.** `bdf93a28`'s commit
+  message, `docs/mesh-fill-rate.md` and `docs/plans/random-tick-counter.md` all reported
+  **761 ms per 50 ms tick, 15.2× over budget** from 2.108 ms/column × **361 columns**. The
+  random-tick loop does not iterate the streamed view. It iterates `tick_area`, which is
+  `mob_area` (`integrated.rs:520`) at radius `view_radius.clamp(1, 3)` (`net.rs:1773`) — a 7×7
+  square, **49 columns**, which `integrated.rs:538` states in prose in the same file. Correct
+  figures: **103 ms per 50 ms tick, 2.07× over budget**, against a `50 / 2.108 = 23.7`-column
+  headroom. The conclusion never depended on it (49 > 23.7 either way), which is exactly why the
+  error survived four documents. **The plan's "Corrections to the briefing" section is the
+  instructive part: it examined `761 ms, 15.2×`, found they "match the primary record
+  (`bdf93a28`'s message, `docs/mesh-fill-rate.md`)", and marked them verified.** Both of those
+  records inherited the figure from the same original mistake. **Agreement between two records
+  that share an ancestor is not verification — it is one observation counted twice.** The check
+  that would have worked costs one grep: find the loop's bound, not the number's provenance.
+- **Three deliberate defects, each observed failing, because a predecessor's claim that a control
+  was observed is not evidence.** The gate's own permanent second arms (a `debug_corrupt_…` hook)
+  fired, but an artificial corruption only proves the comparison is wired, not that it detects the
+  *maintenance* bug the counter exists to prevent. So the real bugs were introduced:
+
+  | defect injected | gates that failed | observed text |
+  |---|---|---|
+  | `set_block`'s decrement removed (`if was != now` → `if was != now && now`) | 3 of 7 | `step 3: 2 -> 1 (minecraft:dirt at (1, -46, 1)): 1 section(s) disagree — section 1 (y -48..-32): counter 2, recount 1` |
+  | `recalc_ticking_counts` section index broken (`counts[cell / 4096]` → `counts[0]`) | 3 of 7 | `as generated (from_generated + recalc): 2 section(s) disagree — section 0 (y -64..-48): counter 252, recount 0; section 7 (y 48..64): counter 0, recount 252` |
+  | pre-`bdf93a28` per-block string scan restored as the decision | the predicate-count gate | `expected exactly 225 predicate evaluations … left: 135925, right: 225` |
+
+  The third number decomposes exactly and that is what makes it a prediction rather than a sign
+  check: 4096 (the one non-ticking section, scanned in full) + 1332 (the ticking section,
+  short-circuiting at the sapling at y=5, x=3, z=3) + 7 + 2 = 5437 per tick × 25 ticks = 135,925.
+- **The perf claim as a counter, in both configurations.** `tick_chunk` over 25 ticks at
+  `tick_speed` 7 evaluates `is_randomly_ticking` **225 times in debug** — `25 × (7 + 2)`, the 7
+  being vanilla's own per-drawn-position `blockState.isRandomlyTicking()` and the 2 being the
+  debug tripwire's reference scan of a 2-entry palette — and **175 in release**, `25 × 7`, with
+  the tripwire compiled out. **Both figures are byte-identical for a 2-section and a 24-section
+  column carrying the same content**, which is the discriminator: the decision reads no cell.
+  Zero of those evaluations are attributable to the section decision. Construction evaluates it
+  exactly `palette.len()` times, once, ever.
+- **The one vacuous arm in an otherwise exemplary 675-line gate was a literal.** Among a dozen
+  asserted-not-assumed coverage flags sat `let wrote_bottom_section = true;` … `assert!(wrote_bottom_section)`.
+  It reads as coverage in a list of real flags, which is the whole problem — the *assertion*
+  species hiding inside a file written specifically to defend against the unreadable species.
+  Replaced with an observation that the bottom window's counter actually went 0 → 1 → 0.
+- **And underneath it, a real world-species defect the flag was masking.** A generated surface
+  column has **exactly one** ticking section (measured: index 7, 248 ticking cells, all 23 others
+  zero), so the gate's `position(|&c| c == 0)` picked section **0** as its "quiet section" — the
+  same window as the dedicated bottom-window arm. Three arms claiming to cover bottom, middle and
+  top covered two distinct indices. The pick is now constrained to `1..last` and the distinctness
+  is asserted. **A fixture precondition that only asserts "≥1 ticking and ≥1 quiet section exists"
+  does not assert that the sections your arms select are different ones.**
+- **`cargo check --release` is not in this repo's health list, and one idiom makes that gap
+  load-bearing.** `debug_assert_eq!` expands to `if cfg!(debug_assertions) { assert_eq!(…) }`, so
+  **its body is type-checked with debug-assertions off**. Verified directly with `rustc -C
+  debug-assertions=off` on a four-line probe: a `debug_assert_eq!` naming a
+  `#[cfg(debug_assertions)]` binding is `error[E0425]: cannot find value ... in this scope`, a hard
+  error. A debug tripwire whose reference arm is `cfg`-gated therefore needs
+  `#[cfg(debug_assertions)]` on the **macro statement itself**, not only on the binding it reads —
+  and the failure lands on `cargo run --release`, which is how the game launches, while
+  `just check` (debug, `--all-targets`) stays green. The tree as found had this right; recorded
+  because the next person writing a tripwire has a 50% chance of getting it wrong and no health
+  check in CLAUDE.md would tell them.

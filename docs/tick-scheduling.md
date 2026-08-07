@@ -68,12 +68,54 @@ The real selection, cited directly from the decompiled 26.2 jar
   from. [`next_random_tick_pos`] is the LCG, bit-for-bit; [`RandomTickScheduler`]
   keeps a second, independent generator (`SpawnRng`, this crate's existing
   deterministic RNG from `mob_spawn.rs`) for behaviour draws.
-- **Section eligibility.** `LevelChunkSection::isRandomlyTicking` is an
-  incrementally maintained counter this crate has no equivalent field for
-  (`ChunkColumn` has no per-section bookkeeping — see `chunk.rs`'s own module
-  doc). [`RandomTickScheduler::tick_chunk`] computes the same boolean by
-  scanning the section instead — the identical true/false answer, just
-  computed differently.
+- **Section eligibility.** `LevelChunkSection::isRandomlyTicking` is
+  `tickingBlockCount > 0`, an incrementally maintained counter, and **this crate
+  now keeps the same one**: `ChunkColumn::section_ticking`, a `u16` per implicit
+  16-row window, maintained in `ChunkColumn::set_block` (`±1` when the leaving
+  and arriving states differ in classification) and recomputed once per adopted
+  grid by `recalc_ticking_counts`. `ChunkColumn` still has no per-section
+  *struct* — sections are 16-row windows of one flat grid — so the counter is a
+  per-column vector rather than a field on a section object.
+  [`RandomTickScheduler::tick_chunk`] reads it with one integer compare.
+
+  It was a per-block scan until issue #507. That scan ran the **string**
+  predicate on all 4096 blocks of every section, of every column, every tick;
+  `sample(1)` put **97.6%** of the integrated server's tick thread in it and
+  chunk delivery starved so badly that rings 5–8 of a 289-column view never
+  arrived (`mesh-fill-rate.md`).
+
+  **Get the budget arithmetic's multiplier right if you requote it.** This loop
+  iterates `tick_area`, *not* the streamed view: `tick_area` is `mob_area`
+  (`integrated.rs:520`) at radius `view_radius.clamp(1, 3)` (`net.rs:1773`), a
+  7×7 square — **49 columns**, which `integrated.rs:538` also states. At the
+  measured 2.108 ms/column that is **103 ms per 50 ms tick, 2.07× over budget**
+  against a `50 / 2.108 = 23.7`-column headroom. Earlier records (including
+  `bdf93a28`'s commit message and, until this change, `mesh-fill-rate.md`)
+  multiplied by the 361-column view and reported 761 ms / 15.2×; those two
+  numbers are wrong and must not be requoted. The starvation conclusion is not
+  affected — 49 still exceeds 23.7.
+
+  Two properties keep the counter honest, and both
+  are gated in `crates/lodestone-server/tests/random_tick_section_counters.rs`:
+  the counters equal an independent recount at every step of a mutation storm
+  and across an NBT round trip, and the O(1) decision leaves the position LCG on
+  the exact sequence the definitional scan would have (draw **order and count**
+  is the spec, not just the resulting world). A `debug_assert!` inside
+  `tick_chunk` re-checks the decision against that scan on every debug run.
+
+  Two gotchas if you touch it. **Decrement with `-=` behind a `debug_assert!`,
+  never `saturating_sub`** — saturation hides exactly the maintenance bug the
+  counter exists to prevent. And the counters are **derived state, never
+  serialized**: `chunk_nbt` does not write them, so widening
+  [`is_randomly_ticking`] cannot strand a stale persisted count.
+- **Fluids are out of scope, deliberately.** Vanilla's section gate is
+  `isRandomlyTickingBlocks() || isRandomlyTickingFluids()`, and lava is the one
+  fluid that ticks (`LavaFluid.java:221` overrides `Fluid.java:79`). This crate
+  models no fluid random ticks, so a `tickingFluidCount` today would have zero
+  producers and zero consumers. The disclosed consequence: our LCG position
+  stream is not vanilla-comparable for a section whose only ticking content is
+  lava. A comment at the gate site in `tick_chunk` says what a future lava
+  handler must add; see `docs/plans/random-tick-counter.md` §"Fluids".
 - **Grass ↔ dirt**, cited from `SpreadingSnowyBlock.randomTick`
   (`SpreadingSnowyBlock.java:44-64`): not `canStayAlive` (block above is a
   full fluid, or fully light-dampened) → convert to dirt, zero further draws.
