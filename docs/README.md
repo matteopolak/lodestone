@@ -1462,3 +1462,10 @@ of these caught the *brief* being wrong rather than the code.
   already expects (structures and the other unported decoration steps), names
   agent-sized units with file ownership, and states what "full parity" cannot mean
   yet.
+- [Worldgen rewrite plan](./plans/worldgen-rewrite.md) — The plan for rewriting
+  `crates/lodestone-worldgen`'s generation engine from scratch for speed — targeting
+  sub-millisecond steady-state serial chunk generation at bit-exact vanilla 26.2
+  parity — plus the roadmap for everything worldgen-shaped the repo does not have
+  yet (structures, Nether/End, the missing decoration steps, 3-D biomes).
+  Owner-directed (2026-08-06). Planning artifact only; each unit below is a separately
+  landable piece of work with its own evidence standard.
