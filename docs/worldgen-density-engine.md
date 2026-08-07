@@ -162,6 +162,34 @@ All 11 `Density::` construction sites outside `density/` are
 external users — so the blast radius the issue measured was real, it just did not
 have to be spent.
 
+### D3: the eight per-chunk clones, deleted and measured
+
+`build_aquifer` runs once per chunk and used to `.clone()` eight `Density` trees.
+`AquiferTrees` now holds the three sampler routes as `Program` and the five
+point-evaluated routes as `Arc<Density>`, so every one of those clones is a
+refcount bump.
+
+Measured, both arms in one process with a thread-local counting allocator
+(`tests/engine_clone_allocs.rs`, its own binary because a `#[global_allocator]` is
+per-binary):
+
+| arm | allocations per chunk |
+|---|---|
+| deep-cloning the eight trees (pre-U4) | **19,356** |
+| cloning the compiled/shared form | **exactly 0** |
+
+The control is measured *first* and required to exceed 1,000, so the zero cannot
+be explained by a dead instrument. The sinks are pre-allocated to capacity outside
+the measurement window and the clone targets are fixed-size **arrays**, not
+`Vec`s — the first version used `Vec`s and had to permit 16 allocations of
+container overhead, which is exactly the kind of allowance that later gets
+widened instead of removed.
+
+One consequence worth knowing before sharing a graph more widely: see the
+`cache_2d` note under *How to change it*. `Cache2DSlot` now uses `try_lock` and
+treats contention as a miss, which is value-invariant because the memo is keyed on
+an exact `(x, z)` over a pure subtree.
+
 ### What it cost and what it bought, measured
 
 Old-vs-new equality, the U6 bar: **786,432 blocks over 8 chunks at 4 seeds**

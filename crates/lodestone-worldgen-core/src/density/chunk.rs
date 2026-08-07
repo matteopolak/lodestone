@@ -116,12 +116,7 @@ impl NoiseChunkSampler {
     /// and sample it immediately.
     #[must_use]
     pub fn new(root: Density, slot_count: usize, cell_width: i32, cell_height: i32) -> Self {
-        Self::from_program(
-            Program::compile(&root, slot_count),
-            cell_width,
-            cell_height,
-            None,
-        )
+        Self::from_program(Program::compile(&root), slot_count, cell_width, cell_height, None)
     }
 
     /// Creates a sampler whose corner/flat-cache memoisation is a bounded,
@@ -150,7 +145,8 @@ impl NoiseChunkSampler {
         z_range: (i32, i32),
     ) -> Self {
         Self::from_program(
-            Program::compile(&root, slot_count),
+            Program::compile(&root),
+            slot_count,
             cell_width,
             cell_height,
             Some(Bounds {
@@ -173,11 +169,12 @@ impl NoiseChunkSampler {
     #[must_use]
     pub fn from_program(
         program: Program,
+        slot_count: usize,
         cell_width: i32,
         cell_height: i32,
         bounds: Option<Bounds>,
     ) -> Self {
-        let scratch = Scratch::acquire(program.slot_count(), cell_width, cell_height, bounds);
+        let scratch = Scratch::acquire(slot_count, cell_width, cell_height, bounds);
         Self {
             program,
             geom: Geom {

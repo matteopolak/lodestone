@@ -11,6 +11,7 @@ use std::sync::Arc;
 use crate::aquifer::{AquiferSystem, BlockKind, XoroshiroPositionalFactory};
 use crate::carver::{CarveGrid, CarverConfig, NoObserver};
 use crate::density::Density;
+use crate::engine::Program;
 
 use super::{OverworldGenerator, PreOreResult};
 
@@ -29,14 +30,17 @@ use super::{OverworldGenerator, PreOreResult};
 /// via [`AquiferSystem::from_parts`] instead of re-resolving JSON every chunk.
 #[allow(missing_debug_implementations)]
 pub(super) struct AquiferTrees {
-    pub(super) final_density: Density,
-    pub(super) erosion: Density,
-    pub(super) depth: Density,
-    pub(super) barrier: Density,
-    pub(super) floodedness: Density,
-    pub(super) spread: Density,
-    pub(super) lava: Density,
-    pub(super) prelim: Density,
+    /// The three routes that become [`NoiseChunkSampler`]s, held as compiled
+    /// [`Program`]s: cloning one is an `Arc` bump plus a `u32` copy.
+    pub(super) final_density: Program,
+    pub(super) erosion: Program,
+    pub(super) depth: Program,
+    /// The five point-evaluated routes, behind `Arc` for the same reason.
+    pub(super) barrier: Arc<Density>,
+    pub(super) floodedness: Arc<Density>,
+    pub(super) spread: Arc<Density>,
+    pub(super) lava: Arc<Density>,
+    pub(super) prelim: Arc<Density>,
     pub(super) positional: XoroshiroPositionalFactory,
 }
 
@@ -64,6 +68,11 @@ impl OverworldGenerator {
     /// Builds a fresh, chunk-bound [`AquiferSystem`] from this generator's
     /// pre-built [`AquiferTrees`] — matching vanilla's own per-chunk
     /// `NoiseChunk`, which the aquifer's internal grid-bound caches assume.
+    /// Every `clone()` below is a **refcount bump**, not a tree copy. Before U4
+    /// these were eight recursive deep copies of `Box`-linked `Density` trees
+    /// (232 bytes per node) on every chunk — diagnostic D3. That is why the
+    /// field types are `Program` and `Arc<Density>`: nothing else in this
+    /// function changed.
     pub(super) fn build_aquifer(&self, cx: i32, cz: i32) -> AquiferSystem {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Aquifer);
         let t = &self.aquifer_trees;

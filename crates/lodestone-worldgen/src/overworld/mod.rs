@@ -472,14 +472,16 @@ impl OverworldGenerator {
         // `AquiferTrees`'s doc comment for why `slot_count` is captured only
         // after every one of these `builder.build()` calls.
         let aquifer_trees = AquiferTrees {
-            final_density,
-            erosion: builder.build(&router["erosion"]),
-            depth: builder.build(&router["depth"]),
-            barrier: builder.build(&router["barrier"]),
-            floodedness: builder.build(&router["fluid_level_floodedness"]),
-            spread: builder.build(&router["fluid_level_spread"]),
-            lava: builder.build(&router["lava"]),
-            prelim: builder.build(&router["preliminary_surface_level"]),
+            final_density: crate::engine::Program::compile(&final_density),
+            erosion: crate::engine::Program::compile(&builder.build(&router["erosion"])),
+            depth: crate::engine::Program::compile(&builder.build(&router["depth"])),
+            barrier: std::sync::Arc::new(builder.build(&router["barrier"])),
+            floodedness: std::sync::Arc::new(
+                builder.build(&router["fluid_level_floodedness"]),
+            ),
+            spread: std::sync::Arc::new(builder.build(&router["fluid_level_spread"])),
+            lava: std::sync::Arc::new(builder.build(&router["lava"])),
+            prelim: std::sync::Arc::new(builder.build(&router["preliminary_surface_level"])),
             positional: {
                 use crate::rng::{PositionalRandomFactory, RandomSource};
                 let mut src = builder
