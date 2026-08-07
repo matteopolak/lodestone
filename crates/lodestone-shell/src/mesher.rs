@@ -3300,42 +3300,106 @@ mod tests {
     // Issue #479: the walk harness
     // -----------------------------------------------------------------------
 
-    /// Chebyshev radius of the simulated tracking view, in columns. Small on
-    /// purpose — the defect is about *unbounded growth*, which a short walk
-    /// already separates from a bounded window by a factor of two.
+    /// Chebyshev radius of the simulated tracking view, in columns, for the
+    /// eviction pair. Small on purpose — the defect is about *unbounded growth*,
+    /// which a short walk already separates from a bounded window by a factor of
+    /// two.
+    ///
+    /// The heal-backlog test uses [`BACKLOG_RD`] instead, which is larger and
+    /// derived; see its doc for why one radius could not serve both, and note
+    /// that widening this one would cost every test in this harness real
+    /// worldgen time (≈0.15 s per column, and the column count grows as
+    /// `(WALK_STEPS + 2·rd + 1)(2·rd + 1)`).
     const WALK_RD: i32 = 3;
     /// How many columns the simulated player advances in `+x`.
     const WALK_STEPS: i32 = 12;
 
-    /// The columns a tracking view centred on `(ccx, 0)` holds.
-    fn window(ccx: i32) -> BTreeSet<(i32, i32)> {
+    /// Chebyshev view radius for
+    /// [`standing_still_drains_the_heal_backlog_and_no_column_is_lost`], derived
+    /// from [`DIRTY_COLUMN_BUDGET`] rather than chosen.
+    ///
+    /// # Why this cannot be a constant
+    ///
+    /// A backlog only forms if columns are dirtied faster than one frame's budget
+    /// clears them, and at one frame per step there is exactly one moment in the
+    /// walk when that can happen: **step 0**, where the whole view loads at once
+    /// and every column of it is dirtied by a neighbour's arrival, offering
+    /// `(2·rd + 1)²` columns against a single budget. Every later step is a
+    /// frontier of `2·(2·rd + 1)` columns — 14 at `WALK_RD` — which no budget
+    /// above about 15 can fall behind no matter how many steps are added. So the
+    /// scenario size is a function of the budget, and `WALK_STEPS` is not a lever
+    /// on it.
+    ///
+    /// Hard-coding `3` here is what silently voided the test when `17c786e`
+    /// raised the budget from 4 to 64: a 49-column window drained inside one
+    /// frame, `max_backlog` went from 45 (= 49 − 4, the figure in the #479
+    /// record) to **0**, and the vacuity guard the author had written fired
+    /// rather than the test passing quietly. This solves for `rd` instead, so
+    /// the next budget change scales the scenario instead of breaking it:
+    ///
+    /// ```text
+    /// (2·rd + 1)² > 2 · DIRTY_COLUMN_BUDGET
+    /// ```
+    ///
+    /// One budget to drain in the first frame and more than one still queued
+    /// after it, which is exactly what the guard requires. At 64 that gives
+    /// `rd = 6` — a 169-column window, 325 columns visited, and a first-frame
+    /// backlog of 105. A view distance of 6 is also a real setting a player can
+    /// pick, so the scenario is not absurd; if a future budget pushed this past
+    /// vanilla's maximum of 32 the honest conclusion would be that no reachable
+    /// view distance can back the queue up, and the deferral bug it guards could
+    /// no longer occur by that route.
+    ///
+    /// Floored at `WALK_RD` so a *smaller* budget keeps the original geometry.
+    const BACKLOG_RD: i32 = {
+        let mut rd = WALK_RD;
+        while ((2 * rd + 1) * (2 * rd + 1)) as usize <= 2 * DIRTY_COLUMN_BUDGET {
+            rd += 1;
+        }
+        rd
+    };
+
+    /// The columns a tracking view of radius `rd` centred on `(ccx, 0)` holds.
+    fn window_rd(ccx: i32, rd: i32) -> BTreeSet<(i32, i32)> {
         let mut out = BTreeSet::new();
-        for cx in (ccx - WALK_RD)..=(ccx + WALK_RD) {
-            for cz in -WALK_RD..=WALK_RD {
+        for cx in (ccx - rd)..=(ccx + rd) {
+            for cz in -rd..=rd {
                 out.insert((cx, cz));
             }
         }
         out
     }
 
-    /// Every column that at some point during the walk had all eight of its
-    /// horizontal neighbours resident at once — i.e. exactly the columns that can
-    /// ever have escaped [`SnapshotOutcome::Deferred`] and reached the GPU.
+    /// [`window_rd`] at [`WALK_RD`], the eviction pair's radius.
+    fn window(ccx: i32) -> BTreeSet<(i32, i32)> {
+        window_rd(ccx, WALK_RD)
+    }
+
+    /// Every column that at some point during a radius-`rd` walk had all eight of
+    /// its horizontal neighbours resident at once — i.e. exactly the columns that
+    /// can ever have escaped [`SnapshotOutcome::Deferred`] and reached the GPU.
     ///
     /// Derived from the walk's geometry rather than measured, so it is an
     /// *outside* expectation: the two frontier columns in `x` (the first view's
     /// trailing ring, which is unloaded before the view ever advances past it,
     /// and the last view's leading ring) never qualify, and neither do the
-    /// `z = ±WALK_RD` rows, since the view never moves in `z`. At the constants
-    /// above that is 17 × 5 = 85 columns out of 133 visited.
-    fn ever_interior() -> BTreeSet<(i32, i32)> {
+    /// `z = ±rd` rows, since the view never moves in `z`. That is
+    /// `(WALK_STEPS + 2·rd − 1) × (2·rd − 1)` columns out of
+    /// `(WALK_STEPS + 2·rd + 1) × (2·rd + 1)` visited: 17 × 5 = 85 of 133 at
+    /// [`WALK_RD`], 23 × 11 = 253 of 325 at [`BACKLOG_RD`].
+    fn ever_interior_rd(rd: i32) -> BTreeSet<(i32, i32)> {
         let mut out = BTreeSet::new();
-        for cx in (-WALK_RD + 1)..=(WALK_STEPS + WALK_RD - 1) {
-            for cz in (-WALK_RD + 1)..=(WALK_RD - 1) {
+        for cx in (-rd + 1)..=(WALK_STEPS + rd - 1) {
+            for cz in (-rd + 1)..=(rd - 1) {
                 out.insert((cx, cz));
             }
         }
         out
+    }
+
+    /// [`ever_interior_rd`] at [`WALK_RD`], the eviction pair's radius.
+    fn ever_interior() -> BTreeSet<(i32, i32)> {
+        ever_interior_rd(WALK_RD)
     }
 
     /// A `TerrainMesh` whose deferral rule is the **live** one.
@@ -3546,23 +3610,69 @@ mod tests {
     /// permanently deferred, so the mesh path is not lossy and any real-world
     /// shortfall is throughput or latency** — which is a worldgen/CPU question,
     /// not a client scheduling bug. A failure would have said the opposite.
+    ///
+    /// # The scenario is sized from the budget, not chosen
+    ///
+    /// This test runs at [`BACKLOG_RD`], not [`WALK_RD`], and that indirection is
+    /// the whole reason it still means anything: with a hard-coded radius it went
+    /// silently vacuous the moment `17c786e` raised [`DIRTY_COLUMN_BUDGET`] from
+    /// 4 to 64, because a 49-column window drains inside one frame. Read
+    /// `BACKLOG_RD`'s doc before touching either number.
+    ///
+    /// One consequence is worth stating rather than leaving to be discovered: at
+    /// a 64-column budget the backlog is built by the *initial* view load and is
+    /// gone within about three of the walk's own frames, so the standing-still
+    /// phase now has nothing left to drain and reports **0 frames**. That is the
+    /// truth at this budget, not a broken test — the frontier of a moving view is
+    /// `2·(2·rd + 1)` columns and only a radius of 16 or more would outpace 64 per
+    /// frame, which is a 1,089-column window and roughly four minutes of real
+    /// worldgen. The standing loop stays as the bounded safety net that would
+    /// catch a genuinely stuck queue, `frames_with_backlog` is what proves the
+    /// queue carried work across frames, and `resident == expected` — the
+    /// permanent-deferral evidence #479 turned on — is unaffected either way and
+    /// now covers 132 columns rather than 30.
     #[test]
     fn standing_still_drains_the_heal_backlog_and_no_column_is_lost() {
         // One frame per step is deliberately the *worst* case the shell can
-        // present: a column arrives and the heal system gets a single 4-column
-        // budget before the player has moved again. If the backlog is going to
-        // diverge, it diverges here.
+        // present: a column arrives and the heal system gets a single
+        // `DIRTY_COLUMN_BUDGET` before the player has moved again. If the backlog
+        // is going to diverge, it diverges here.
         const FRAMES_PER_STEP: usize = 1;
+
+        // Predicted from outside the code under test, before it runs: step 0
+        // loads the whole view at once and every column of it is dirtied by a
+        // neighbour's arrival, so the first frame is offered `window` columns and
+        // clears exactly `DIRTY_COLUMN_BUDGET` of them. Later frontiers are
+        // `2·(2·rd+1)` columns, well inside one budget, so the queue only shrinks
+        // from here and this is also the maximum over the whole walk.
+        let view_columns = window_rd(0, BACKLOG_RD).len();
+        // Checked before the subtraction, because an undersized scenario makes
+        // that subtraction underflow and "attempt to subtract with overflow" is a
+        // useless thing to hand whoever next changes the budget. Observed: with
+        // `BACKLOG_RD` forced to `WALK_RD` this fires and names the cause, where
+        // the bare subtraction panicked with nothing to act on.
+        assert!(
+            view_columns > 2 * DIRTY_COLUMN_BUDGET,
+            "premise: a {view_columns}-column view cannot leave more than one \
+             further {DIRTY_COLUMN_BUDGET}-column budget queued after the first \
+             frame, so no backlog forms and this test would measure nothing. \
+             `BACKLOG_RD` ({BACKLOG_RD}) must solve \
+             (2·rd + 1)² > 2 · DIRTY_COLUMN_BUDGET."
+        );
+        let predicted_first_frame_backlog = view_columns - DIRTY_COLUMN_BUDGET;
 
         let write = ChunkWorldWrite::new(World::new());
         let store = write.read_handle();
         let mut terrain = streaming_terrain();
         let mut gpu: HashSet<SectionKey> = HashSet::new();
         let mut max_backlog = 0usize;
+        // Frames that ended with work still queued — i.e. frames across which the
+        // heal queue actually carried a column. See the assertion below.
+        let mut frames_with_backlog = 0usize;
 
         let mut live = BTreeSet::new();
         for step in 0..=WALK_STEPS {
-            let next = window(step);
+            let next = window_rd(step, BACKLOG_RD);
             for &(cx, cz) in next.difference(&live) {
                 write
                     .write()
@@ -3600,6 +3710,9 @@ mod tests {
                     gpu.insert(meshed.key);
                 }
                 max_backlog = max_backlog.max(terrain.dirty_columns.len());
+                if !terrain.dirty_columns.is_empty() {
+                    frames_with_backlog += 1;
+                }
             }
         }
         let backlog_while_walking = terrain.dirty_columns.len();
@@ -3635,14 +3748,16 @@ mod tests {
         }
 
         let resident: BTreeSet<(i32, i32)> = gpu.iter().map(|k| (k.cx, k.cz)).collect();
-        let expected: BTreeSet<(i32, i32)> = ever_interior()
-            .intersection(&window(WALK_STEPS))
+        let expected: BTreeSet<(i32, i32)> = ever_interior_rd(BACKLOG_RD)
+            .intersection(&window_rd(WALK_STEPS, BACKLOG_RD))
             .copied()
             .collect();
         eprintln!(
-            "backlog: max {max_backlog}, {backlog_while_walking} on arrival at the \
-             last step, drained in {frames_to_drain} standing frames; resident {} \
-             of {} expected",
+            "backlog: max {max_backlog} (predicted {predicted_first_frame_backlog} \
+             from a {view_columns}-column view against a {DIRTY_COLUMN_BUDGET}-column \
+             budget at rd {BACKLOG_RD}), carried across {frames_with_backlog} \
+             frames, {backlog_while_walking} on arrival at the last step, drained \
+             in {frames_to_drain} standing frames; resident {} of {} expected",
             resident.len(),
             expected.len()
         );
@@ -3656,10 +3771,42 @@ mod tests {
         );
         // Not vacuous: there has to have *been* a backlog for draining it to be
         // evidence of anything.
+        //
+        // The *predicted* count, not merely "more than a budget": asserting the
+        // sign of the thing would be satisfied by any backlog at all, and would
+        // have gone on passing through a change that shrank the real one to a
+        // single column. The two competing hypotheses are computed from outside
+        // constants and this has to land on one of them — `view_columns −
+        // DIRTY_COLUMN_BUDGET` if the first frame is offered the whole view (the
+        // mechanism `BACKLOG_RD` is derived from), or `0` if the window drains
+        // inside one frame, which is what the 4 → 64 budget change did.
+        assert_eq!(
+            max_backlog, predicted_first_frame_backlog,
+            "the backlog peak must be the whole view minus one frame's budget \
+             ({view_columns} − {DIRTY_COLUMN_BUDGET}). A max of 0 means the window \
+             drains inside a single frame and this test exercised no queue at all \
+             — re-derive `BACKLOG_RD` from `DIRTY_COLUMN_BUDGET` rather than \
+             relaxing this."
+        );
         assert!(
             max_backlog > DIRTY_COLUMN_BUDGET,
             "the walk never built a backlog past one frame's budget (max \
              {max_backlog}), so this test did not exercise the queue it claims to"
+        );
+        // And the queue really carried work *across frame boundaries*, which is
+        // what "exercised the queue" has to mean — a peak measured inside a single
+        // frame would say nothing about deferral surviving a frame. The floor is
+        // derived, not picked: a `predicted_first_frame_backlog`-column queue
+        // against a `DIRTY_COLUMN_BUDGET`-column budget cannot be cleared in
+        // fewer than `ceil(predicted / budget)` further frames even with nothing
+        // else arriving.
+        let minimum_carrying_frames = predicted_first_frame_backlog.div_ceil(DIRTY_COLUMN_BUDGET);
+        assert!(
+            frames_with_backlog >= minimum_carrying_frames,
+            "the backlog was carried across only {frames_with_backlog} frames, \
+             but {predicted_first_frame_backlog} columns against a \
+             {DIRTY_COLUMN_BUDGET}-column budget needs at least \
+             {minimum_carrying_frames}"
         );
         assert_eq!(
             resident, expected,
