@@ -101,15 +101,25 @@ Three of the measured maps sit in files owned by other in-flight units at the
 time of writing, and were reported to the orchestrator rather than edited (two
 agents in one file is its own incident class):
 
-| map | file | unit | ≈ CPU |
-|---|---|---|---|
-| `ocean_floor_wg` | `overworld/decorate.rs`, `feature/mod.rs` | U15 | 2.7% |
-| `surface_diff` (type flows through the fill seam) | `overworld/fill.rs` | U15 | 1.2% |
-| `VegGrid::blocks`, `IdTags::rewrites`, `Bfs::visited` | `feature/vegetation/**` | U8 | 0.8% |
+| map | file | unit | ≈ CPU | status |
+|---|---|---|---|---|
+| `ocean_floor_wg` | `overworld/decorate.rs`, `feature/mod.rs` | U15 | 2.7% | **done in `a27cbb98`** |
+| `surface_diff` (type flows through the fill seam) | `overworld/fill.rs` | U15 | 1.2% | open |
+| `VegGrid::blocks`, `IdTags::rewrites`, `Bfs::visited` | `feature/vegetation/**` | U8 | 0.8% | open |
 
 Each is a point cache, never iterated, so each is a one-line `FastMap` swap
-whenever its owner is free. Together they are the remaining ~4.7% of CPU that
+whenever its owner is free. Together they were the remaining ~4.7% of CPU that
 U17 attributed but did not claim.
+
+**Reporting rather than editing paid off on the largest of them, and in a way a
+`FastMap` swap would have foreclosed.** U15 took `ocean_floor_wg` in `a27cbb98`
+and did not re-hash it — they replaced it with `feature::RegionHeights`, a dense
+48×48 array on the pre-clamped region-local key, which removes the hashing
+*entirely* rather than making it cheaper. `decorate.rs`'s own doc had predicted
+that exact fix. The lesson for the two rows still open: **a cheap hasher is the
+right fix only for a map that has to stay a map.** Where the key space is dense
+and bounded — which is true of every coordinate-keyed cache in this engine —
+check for an array before reaching for `FastMap`.
 
 **Pre-sizing was also left alone.** `reserve_rehash` is real (6.8% of hash time)
 and `RegionView::overlay` starts at capacity zero, but a `with_capacity` guess
@@ -159,3 +169,35 @@ of arithmetic in a crate that is inside the wasm-confined set
   the test name verified present in each run's output. (The first attempt at this
   was vacuous: `--exact` without the full module path reported
   `0 passed; 545 filtered out` and exit 0 twelve times over.)
+
+## What was measured, and what must not be quoted
+
+**No speedup is claimed.** The two arms are separate binaries and cannot be
+interleaved in one process, which is the bar DESIGN.md §12.103 sets after
+measuring full-burst totals that *changed sign with arm order* on this machine.
+
+The re-profile does support a **categorical** result, and that is the one to
+rely on. Comparing the hash-caller attribution before and after, the callers that
+disappeared are exactly the maps this unit changed — `StateInterner::id_of`,
+`DenseBlockGrid::set_id`, `RegionView::get`, and the overlay half of `ore_stage`
+— and every caller that remains is a map it did not change (`ocean_floor_wg`,
+`surface_diff`, and the vegetation maps). A named frame vanishing from an
+attribution table is not a duration and does not care how hot the machine was.
+
+**The scalar delta, `21.01% → 10.46%` of CPU, must not be quoted as a
+measurement**, and the reason is in the captures themselves. Absolute hash self
+time for code this unit did **not** touch moved as follows between the two:
+
+| unchanged caller | capture 1 | capture 2 | ratio |
+|---|---|---|---|
+| `build_surface` | 237.3 µs | 420.8 µs | **×1.77** |
+| `top_layer::StatePredicate::test` | 230.2 µs | 418.0 µs | **×1.82** |
+| `VegGrid::get_local_id` | 94.6 µs | 213.3 µs | **×2.25** |
+| `ore_stage` (+ closure) | 1473.9 µs | 1331.3 µs | ×0.90 |
+
+Identical code moving by ×0.90 to ×2.25 means microseconds are not comparable
+across these captures — sibling agents were compiling during the second — and a
+percentage whose numerator and denominator both come from a shifting baseline
+inherits that. Each figure is a valid description of *its own* capture; their
+difference is not a delta. Quote the categorical result, or re-measure both arms
+under alternation on a quiet machine.

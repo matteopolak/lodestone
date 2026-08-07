@@ -20,6 +20,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use lodestone_worldgen_core::hash::FastSet;
+
 use serde_json::Value;
 
 use crate::aquifer::{AquiferSystem, BlockKind};
@@ -348,7 +350,13 @@ struct CarveEnv<'a> {
     aquifer: &'a AquiferSystem,
     replaceable: &'a HashSet<String>,
     top_material: &'a dyn Fn(i32, i32, i32, bool) -> Option<String>,
-    mask: HashSet<(i32, i32, i32)>,
+    /// Cells this carve pass has already written.
+    ///
+    /// [`FastSet`], not the default hasher — a per-carved-cell membership test on
+    /// a coordinate key. Insert/contains only, never iterated, so no order is
+    /// observable; see [`lodestone_worldgen_core::hash::fast`] for why that has
+    /// to be established per map. U17.
+    mask: FastSet<(i32, i32, i32)>,
     min_gen_y: i32,
     gen_depth: i32,
     center_x: i32,
@@ -891,7 +899,7 @@ pub fn apply_carvers<O: CarveObserver>(
         aquifer,
         replaceable,
         top_material,
-        mask: HashSet::new(),
+        mask: FastSet::default(),
         min_gen_y,
         gen_depth,
         center_x: chunk_x,
