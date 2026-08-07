@@ -656,8 +656,12 @@ impl OverworldGenerator {
         // `DenseBlockGrid` clone (unwrapping the cached `Arc`) in place of
         // the clone `ore_stage` already required directly — same order of
         // cost as before, not a new one.
-        let world = (*self.post_ore_world(cx, cz)).clone();
-        let world = self.vegetation_stage(cx, cz, world);
+        //
+        // Unit 7 moved that clone *inside* `vegetation_stage`: the `Arc` is
+        // handed over intact so the pre-vegetation content can double as the
+        // centre source of the in-place region view, and the private mutable copy
+        // is taken once at the end. Same one clone, one stage later.
+        let world = self.vegetation_stage(cx, cz, self.post_ore_world(cx, cz));
         // Issue #404's U2: `TOP_LAYER_MODIFICATION` is vanilla's LAST decoration
         // step (index 10) and must run after vegetation, because the
         // `MOTION_BLOCKING` height it reads includes leaves and logs — snow sits
@@ -778,7 +782,12 @@ impl OverworldGenerator {
         let t_ore_start = std::time::Instant::now();
         let world = self.ore_stage(cx, cz, world, &heights);
         let t_vegetation_start = std::time::Instant::now();
-        let world = self.vegetation_stage(cx, cz, world);
+        // `Arc::new` rather than a store lookup: this path builds its own world
+        // locally (it is the per-stage timing split, not the memoised serve path),
+        // so wrapping it is a pointer move, not a copy. `vegetation_stage` takes
+        // the shared form because in `column` the centre's post-ore grid really is
+        // shared — see there.
+        let world = self.vegetation_stage(cx, cz, Arc::new(world));
         let t_top_layer_start = std::time::Instant::now();
         // Issue #404's U2. This call is why `StageTimes` grew a field rather
         // than folding another stage into `intern`: `top_layer_stage` is the

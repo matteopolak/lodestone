@@ -45,6 +45,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use lodestone_worldgen::dense_grid::DenseBlockGrid;
+use lodestone_worldgen::feature::region_view::RegionView;
 use lodestone_worldgen::feature::{
     PlacedOre, REGION_MAX, REGION_MIN, apply_ore_step_3x3, parse_ore_config, parse_placements,
 };
@@ -283,7 +284,15 @@ fn run_fixture(
     let grid = DenseBlockGrid::from_hashmap(
         REGION_MIN, MIN_Y, REGION_MIN, region_size, HEIGHT, region_size, &f.input,
     );
-    let (working, center_decoration_seed) = apply_ore_step_3x3(
+    // Unit 7: the driver now reads and writes through a `RegionView` instead of
+    // being handed a region grid to clone. `over_region_grid` wraps this fixture's
+    // single region-local grid as all nine of the view's sources with origin
+    // `(0, 0)`, so a read still goes through `source_slot` and this JVM fixture
+    // exercises the same routing production does — a fixture that bypassed it
+    // would be a transport complete enough to pass while resolving to a different
+    // implementation than the one being shipped.
+    let mut working = RegionView::over_region_grid(&grid, MIN_Y, HEIGHT);
+    let center_decoration_seed = apply_ore_step_3x3(
         &mut random,
         f.seed,
         f.chunk_x,
@@ -294,7 +303,7 @@ fn run_fixture(
         GEN_DEPTH,
         &f.ocean_floor_wg,
         &in_tag,
-        &grid,
+        &mut working,
         ores,
     );
 

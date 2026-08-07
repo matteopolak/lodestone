@@ -1089,18 +1089,53 @@ fn bench_counter_calibration(_c: &mut Criterion) {
         );
     }
 
-    // --- 3. D2's stitch copies and ~885k Strings -------------------------
-    // `ore_stage` stitches 9 sources into a `RegionGrid`, once per ore walk;
-    // `vegetation_stage` stitches 9 sources into a `VegGrid`, once. Each stitch
-    // copies 256*height cells.
-    let expected_stitch =
+    // --- 3. D2's stitch copies: ZERO, which is U7's acceptance criterion ---
+    //
+    // Unit 7 of `docs/plans/worldgen-rewrite.md` replaced both stitches with views
+    // that borrow the nine source grids rather than copying them —
+    // `crate::feature::region_view::RegionView` for the ore driver and
+    // `VegGrid::with_sources` for vegetation. This assertion is the criterion.
+    //
+    // Written as a two-hypothesis magnitude check rather than a bare `== 0`, per
+    // `CLAUDE.md`'s "predict the value, do not merely assert the sign of the
+    // change". Both hypotheses come from constants outside the code under test:
+    //
+    // * **Pre-U7** — `ore_stage` stitched 9 sources once per ore walk and
+    //   `vegetation_stage` stitched 9 once, each copying `256 * height` cells:
+    //   `(9 walks × 9 + 9) × 98,304`.
+    // * **Post-U7** — nothing is copied to make the neighbourhood addressable, so
+    //   exactly 0. Not "small": there is no residual term, because the counter is
+    //   bumped from the stitch loops and both are deleted.
+    //
+    // The two are 8.8 million apart, so no measurement can be ambiguous between
+    // them, and a *partial* revert (one stitch back, one gone) lands on neither
+    // and fails.
+    let pre_u7_stitch =
         (COLD_POST_ORE_CHUNKS * STITCH_SOURCES_PER_STAGE + STITCH_SOURCES_PER_STAGE) * per_fill;
     assert_eq!(
-        s.stitch_cells, expected_stitch,
-        "stitch copies: ({COLD_POST_ORE_CHUNKS} ore walks × {STITCH_SOURCES_PER_STAGE} \
-         sources + {STITCH_SOURCES_PER_STAGE} vegetation sources) × {per_fill} cells = \
-         {expected_stitch}; got {}. U7's acceptance criterion is that this reaches 0.",
+        pre_u7_stitch, 8_847_360,
+        "arithmetic check on the pre-U7 hypothesis itself: \
+         ({COLD_POST_ORE_CHUNKS} × {STITCH_SOURCES_PER_STAGE} + {STITCH_SOURCES_PER_STAGE}) \
+         × {per_fill} should be 8,847,360"
+    );
+    assert_eq!(
+        s.stitch_cells, 0,
+        "U7's acceptance criterion: a cold column must copy ZERO cells to make its 3×3 \
+         neighbourhood addressable. The pre-U7 hypothesis for this same column is \
+         {pre_u7_stitch}; got {}. Anything non-zero means a region stitch is back — \
+         grep `bump_stitch_cells` for the caller.",
         s.stitch_cells
+    );
+    // **Control for the assertion above.** An absence claim is only as good as the
+    // evidence the detector would have fired, and `stitch_cells == 0` is exactly
+    // the shape that reads as a pass when the instrument is dead. Bumping by hand
+    // must move the snapshot. Safe to do here: `s` was already taken, so nothing
+    // above or below re-reads the live counter.
+    counters::bump_stitch_cells(7);
+    assert_eq!(
+        counters::snapshot().stitch_cells, 7,
+        "control: the stitch_cells counter must be observed moving in this very build, \
+         or the `== 0` above proves only that the hook is compiled out"
     );
     // The vegetation stitch used to allocate a `String` per cell. **Unit 3
     // deleted that term**, so this assertion is now the other way round — and it
@@ -1138,8 +1173,10 @@ fn bench_counter_calibration(_c: &mut Criterion) {
         s.string_allocs < U3_INTERN_CEILING,
         "expected fewer than {U3_INTERN_CEILING} String allocations on the block path \
          after Unit 3 (interner warmup only, measured at 65 on embedded data); got {}. \
-         If this is >= {veg_stitch_cells}, `stitch_veg_region` is allocating per cell \
-         again and the interning has been reverted or bypassed.",
+         If this is >= {veg_stitch_cells}, something is allocating a String per \
+         neighbourhood cell again — the loop that used to do it (`stitch_veg_region`) \
+         was deleted by Unit 7, so a regression here means a new per-cell copy, not \
+         that one coming back.",
         s.string_allocs
     );
 

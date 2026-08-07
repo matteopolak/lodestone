@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::dense_grid::DenseBlockGrid;
+use crate::feature::region_view::source_slot;
 use crate::interner::{StateId, StateInterner};
 
 use self::census::bump as census_bump;
@@ -70,7 +72,37 @@ pub struct VegGrid {
     /// The vegetation *engine* around this store is still string-based (that is
     /// Unit 8); its `&str` accessors below are shims over the id path, so the
     /// per-placement cost is unchanged while the per-*cell* cost is gone.
+    ///
+    /// **Unit 7 then deleted the seeding loop itself, and this map with it became
+    /// a sparse *overlay*.** Unit 3 made a seeded cell a `u16` move rather than a
+    /// `String` allocation, but there were still 884,736 of them per column —
+    /// nine already-computed post-ore chunks copied, cell by cell, into a
+    /// `HashMap` that then held 884,736 live entries. Production now supplies the
+    /// nine grids as [`VegGrid::sources`] and this map holds **only what
+    /// decoration wrote** (a few thousand cells), with a miss falling through to
+    /// the source chunk that owns the column. [`Self::seed_id`] still writes here,
+    /// which is what keeps every parity fixture — naturally one hand-written
+    /// sparse map with no source grids at all — working unchanged against the
+    /// identical read path.
     blocks: HashMap<(i32, i32, i32), StateId>,
+    /// The nine post-ore source chunks a read falls through to, indexed by
+    /// [`crate::feature::region_view::source_slot`] over this grid's **local**
+    /// coordinates. Empty for every fixture/unit-test constructor (a miss then
+    /// answers air, exactly as an unseeded cell always did); populated by
+    /// [`Self::with_sources`] in production.
+    ///
+    /// Read-only, and that is a rule rather than an accident: these are `Arc`
+    /// snapshots shared with every other in-flight column that has the same
+    /// neighbour, and the rewrite plan's parallel model requires each chunk's grid
+    /// to have exactly one writer — its own serve task. Writes therefore go to
+    /// `blocks` and the caller folds them into the one grid it owns.
+    ///
+    /// Note the footprint is **wider** than the sources cover: `local_lo` /
+    /// `local_hi` span `REGION_MIN - VEG_PADDING .. REGION_MAX + VEG_PADDING`, so
+    /// the padding ring has no source and reads air there — which is precisely
+    /// what the unseeded ring did before, so tree canopy spilling into the pad is
+    /// still writable and still readable back.
+    sources: [Option<Arc<DenseBlockGrid>>; 9],
     /// Resolves this grid's [`StateId`]s. Shared with the generator's dense
     /// grids, which is what lets `stitch_veg_region` move ids across without a
     /// string round-trip — ids from a different interner are meaningless here
@@ -148,6 +180,7 @@ impl VegGrid {
     ) -> Self {
         Self {
             blocks: HashMap::new(),
+            sources: std::array::from_fn(|_| None),
             interner,
             dirty: Vec::new(),
             origin_x,
@@ -156,6 +189,54 @@ impl VegGrid {
             height,
             local_lo,
             local_hi,
+        }
+    }
+
+    /// [`VegGrid::with_footprint_interned`] over the 3×3 neighbourhood's **own**
+    /// post-ore grids instead of a seeded copy of them — the production form
+    /// since Unit 7 of `docs/plans/worldgen-rewrite.md`.
+    ///
+    /// `source_at(dx, dz)` is called once per chunk offset in `[-1, 1]²` and
+    /// returns that chunk's post-ore world (absolute-coordinate addressed), or
+    /// `None` to make that chunk read as air — which is exactly what the
+    /// `LODESTONE_VEG_SINGLE_SOURCE_DEBUG` path wants for the eight neighbours.
+    ///
+    /// The slots are filled through [`crate::feature::region_view::source_slot`],
+    /// the same function every read routes with, so the fill convention and the
+    /// lookup convention cannot drift apart. Getting that wrong is the recorded
+    /// `VegGrid` failure mode — see this type's own doc comment.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_sources(
+        interner: Arc<StateInterner>,
+        min_y: i32,
+        height: i32,
+        origin_x: i32,
+        origin_z: i32,
+        local_lo: i32,
+        local_hi: i32,
+        source_at: impl Fn(i32, i32) -> Option<Arc<DenseBlockGrid>>,
+    ) -> Self {
+        let mut grid = Self::with_footprint_interned(
+            interner, min_y, height, origin_x, origin_z, local_lo, local_hi,
+        );
+        for dx in -1..=1i32 {
+            for dz in -1..=1i32 {
+                let slot = source_slot(dx * 16, dz * 16)
+                    .expect("a 3x3 offset's own origin column is inside the region");
+                grid.sources[slot] = source_at(dx, dz);
+            }
+        }
+        grid
+    }
+
+    /// The state one of the nine source chunks holds at **local** `(lx, y, lz)`,
+    /// or [`StateId::AIR`] when no source owns that column (the padding ring, a
+    /// fixture with no sources, or a `None` slot).
+    fn source_id(&self, lx: i32, y: i32, lz: i32) -> StateId {
+        match source_slot(lx, lz).and_then(|slot| self.sources[slot].as_deref()) {
+            Some(grid) => grid.get_id(self.origin_x + lx, y, self.origin_z + lz),
+            None => StateId::AIR,
         }
     }
 
@@ -244,11 +325,21 @@ impl VegGrid {
         self.blocks.insert((lx, y, lz), state);
     }
 
+    /// This pass's own write if there is one, else the source chunk that owns the
+    /// column, else air.
+    ///
+    /// Overlay-first is load-bearing, not an optimisation: vanilla's heightmaps
+    /// update as decoration places blocks, so a tree placed earlier in the step
+    /// must be visible to a later `height_world_surface` probe in the same step.
+    /// A post-pass merge of the writes would answer stale and is parity-unsafe.
     fn get_local_id(&self, lx: i32, y: i32, lz: i32) -> StateId {
         if y < self.min_y || y >= self.min_y + self.height {
             return StateId::AIR;
         }
-        self.blocks.get(&(lx, y, lz)).copied().unwrap_or(StateId::AIR)
+        match self.blocks.get(&(lx, y, lz)) {
+            Some(&id) => id,
+            None => self.source_id(lx, y, lz),
+        }
     }
 
     fn get_local(&self, lx: i32, y: i32, lz: i32) -> &str {
