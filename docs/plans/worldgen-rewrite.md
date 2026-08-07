@@ -184,8 +184,12 @@ both validates the D1–D3 diagnosis and means SIMD is headroom Pumpkin left on 
 > **C_cold (cold-region cost)** — wall time of the first `column()` in a fresh region (25 pre-ore
 > chunks, 9 ore walks from nothing).
 
-Target: **C_ss ≤ 1.0 ms**, C_cold ≤ 8 ms, with a mandatory re-negotiation checkpoint after U2
-(baseline) and after U4 (new density engine measured).
+Target: **C_ss ≤ 1.0 ms**, C_cold ≤ 8 ms. **Goal, not gate** (owner ruling, 2026-08-06): sub-ms
+stays the direction of travel even if a checkpoint measures it unmet. The U2 (baseline) and U4
+(new density engine) checkpoints decide **how much further to push and where** — a missed target
+is a recorded number plus a named next lever, never a stop condition and never a licence to weaken
+parity. The only thing a checkpoint can remove from the plan is an optimisation that measurement
+shows is not worth its complexity.
 
 **Honest verdict: plausible, not proven — and it decomposes cleanly into "structural waste we can
 delete" vs "irreducible parity-bound work".**
@@ -197,19 +201,64 @@ delete" vs "irreducible parity-bound work".**
 - The irreducible floor at parity is: ~1,225 corner evaluations per interpolated slot per chunk
   (5×49×5 lattice) + flat-cache quart sampling + the surface-rule walk + the 289-source carver
   probability gates + the ore and vegetation RNG walks. The RNG walks are **sequential by
-  definition** — vanilla's draw order is the spec — so SIMD and parallelism cannot touch them;
-  their cost at parity is whatever it is, and today nobody has measured them in release with
-  counters. That measurement (U2) is the whole ballgame.
-- **Where the goals genuinely conflict:** if the vegetation walk alone measures ≥1 ms in release
-  after D2/D3 are fixed (plausible for dense-forest biomes; unknown today), then sub-ms C_ss at
-  strict parity is **unreachable**, full stop — every remaining cost would already be spec-bound
-  RNG consumption. The recourses are then throughput-shaped (amortise across the parallel store,
-  hide behind view-radius pipelining), not correctness-shaped. This plan does not propose any
-  approximation; it names the checkpoint where the owner decides with the number in hand.
+  definition** — vanilla's draw order is the spec — so SIMD and parallelism cannot touch them.
+  But be precise about what that argument covers: the spec fixes **which numbers are drawn and in
+  what order**, not **how expensively each draw's consequences are evaluated**. Draw count is
+  spec-bound; cost per draw is ours. See
+  [Vegetation: cost per draw](#vegetation-cost-per-draw) — that is where the remaining headroom
+  lives, and nobody has measured any of it in release with counters. That measurement (U2) is
+  the whole ballgame.
+- **Where the goals genuinely conflict:** if, *after* D2/D3 are dead and the per-draw costs of
+  the vegetation walk are driven to O(1) (bitset predicates, precompiled placement programs,
+  incremental column probes — the candidates below), the walk still measures ≥1 ms in release,
+  then every remaining cost is spec-bound draw count and sub-ms C_ss at strict parity is out of
+  reach. Sub-ms remains the goal (see above); the recourses are throughput-shaped (the parallel
+  store, view-radius pipelining), not correctness-shaped. This plan proposes no approximation
+  anywhere; the checkpoint puts the number in front of the owner with the levers ranked.
 - Prior probability check, stated as opinion not evidence: vanilla itself spends single-digit
   milliseconds per chunk per thread on much of this in a JIT'd JVM; a Rust engine with flat ids,
   a flattened DAG, no copies, and no allocation in the hot path beating it by ~5–10× is a
   reasonable engineering bet. Sub-ms with vegetation included is the aggressive edge of that bet.
+
+### Vegetation: cost per draw
+
+The candidates for making the spec-bound RNG walk cheap per draw, each with a parity verdict.
+"No" is an acceptable outcome per the owner — but no candidate is refused on the sequentiality
+argument alone, because that argument is about order, not cost. Each candidate lands (or is
+refused with a measurement) inside U8 unless noted.
+
+1. **Precompiled placement programs — parity-safe.** Compile each biome's placement-modifier
+   pipelines once per seed into flat typed programs (fixed-arg ops in a `Vec`, resolved ids, no
+   `serde_json::Value` reads, no enum-tree dispatch per attempt). Same draws, same order — only
+   the interpreter around the draws changes. The feature *lists* are already resolved per seed
+   (`build_biome_vegetation`); this extends that to the modifier chains and feature configs.
+2. **Tag membership as bitsets over U3's numeric ids — parity-safe.** `supports_vegetation`,
+   `replaceable_by_trees`, `logs`, `cannot_replace_below_tree_trunk` become fixed bitsets indexed
+   by state id (≤8 KiB per tag): O(1) bit test, zero allocation, no RNG involvement. These
+   predicates run enormously often — `docs/worldgen-vegetation-census.md` counts **74,745 ground
+   rejections in one 136-chunk sweep**, every one of which is currently a string/hash operation.
+3. **Per-column surface probes — parity-safe only if mutation-aware, and that is the trap.**
+   Most scattered attempts (`random_offset` spreads ±7 xz / ±3 y) die on a heightmap/ground
+   probe whose answer is column-invariant — *between mutations*. Vanilla's heightmaps update
+   incrementally as decoration places blocks (a tree placed earlier in the step changes later
+   `MOTION_BLOCKING` queries), so a snapshot precomputed before the step answers **stale** and is
+   parity-unsafe. The safe form is vanilla's own: per-column tops maintained **incrementally on
+   write** — O(1) probe, update only on the (rare) placements, never recomputed per attempt.
+4. **Precomputed foliage/trunk offset tables — partially safe; precompute enumeration, never
+   outcomes.** For a given drawn parameter tuple (trunk height, radius, offset), the *candidate
+   position set and its iteration order* are deterministic and reusable — a per-config table
+   keyed by the small parameter space. The per-position draws inside foliage placement (leaf
+   skip chances etc.) are spec-bound and stay live, in order. So: table-drive the loop bounds
+   and offset arithmetic; never cache anything downstream of a draw. Measure first whether the
+   enumeration arithmetic is actually hot before building the tables.
+5. **Cheap rejection in vanilla's order — parity-safe.** The draw always happens first (spec);
+   the *test* that follows it becomes O(1) against candidates 2 and 3, and the per-position biome
+   check rides U9's memoised per-quart biome instead of a climate search. Nothing about rejection
+   order or count changes — only the price of each rejection.
+
+What this does **not** cover: reducing draw count (spec-bound, refused) and cross-feature
+caching of placed shapes (downstream of draws, refused — a cached tree is a wrong tree the
+moment any draw differs).
 
 ## Q4: Migration strategy
 
@@ -232,6 +281,16 @@ propagate a shared misunderstanding; both gates run, always).
    crate-internal island (CLAUDE.md §2).
 4. `GeneratedColumn` and the `ChunkSource` seam stay stable throughout, so `lodestone-server`
    only changes in U10 (scheduler) — the game keeps working at every intermediate sha.
+5. **Rollback rule for cutover gates, stated before the first cutover.** A byte-equality mismatch
+   at *any* gate seed **blocks the landing** — one seed out of five failing is a failure, and it
+   is the likeliest real outcome, which is exactly why it gets a rule now rather than a
+   rationalisation later. What happens next, in order: localise with the per-wrapper fixtures
+   (Q2) to a single wrapper/stage; then the **JVM oracle is the tie-breaker**, because the old
+   engine is a bridge, not the spec — if investigation shows the *old* engine is the wrong one,
+   that finding lands first as its own fix with its own JVM fixture, and the cutover rebases on
+   it. Never allowed, under any schedule pressure: widening a tolerance, dropping a seed from the
+   gate set, reclassifying a mismatch as "expected" without a JVM fixture proving vanilla
+   produces it, or landing the cutover with the investigation open.
 
 ## Benchmark definition (Unit 1 detail)
 
@@ -275,6 +334,46 @@ Nightly + `portable_simd` is settled; one implementation, no scalar twin. Rules 
   U3+U6+U7 land the target, SIMD (U5) may legitimately shrink to "the noise kernels that still
   show in the profile". "Not useful here" is an acceptable U5 outcome; the profile decides.
 
+## Parallelism and allocation budget
+
+First-class goals (owner ruling, 2026-08-06), with the acceptance criteria in U1's counters.
+
+**Parallel model — single-writer chunks over a stage wavefront.** The dependency edges, explicitly:
+fill/surface/carve of a chunk depend on nothing but the seed (embarrassingly parallel);
+`ore(C)` reads `pre_ore(3×3(C))`; `veg(C)` reads `post_ore(3×3(C))`, which closes over
+`pre_ore(5×5(C))`; `top_layer(C)` depends on `veg(C)` alone. The scheduler runs the resulting
+wavefront: a chunk's stage becomes ready when its edges are satisfied, so achievable concurrency
+is the frontier width — for a join burst, essentially *all* columns minus a one-chunk halo per
+stage, with serial depth O(stages), not O(radius). No rings, no barriers. Crucially, **every
+chunk's grid has exactly one writer — its own serve task**: decoration keeps the proven
+per-centre fold (all 9 sources computed, writes routed into the centre's own grid, out-of-bounds
+writes dropped), so neighbour products are consumed strictly as read-only `Arc` snapshots and no
+cross-chunk write lock exists anywhere. Determinism is by construction, and
+`parallel_generation_is_deterministic_and_matches_serial` stays as the gate.
+
+**Shared mutable state after U6 — none on the hot path.** The only shared structure is the store's
+map itself: sharded by chunk-pos hash (fixed shard count; a shard lock is held for the duration of
+a lookup/insert of an `Arc`, nanoseconds, never across a computation — the discipline
+`pre_ore_stage` already follows, minus the single global mutex and minus FIFO bookkeeping).
+Per-entry stage transitions are an atomic state machine on the entry, so two workers contend only
+when they need the *same entry's* transition at the same instant — which is a real dependency
+edge, not incidental sharing. The block loops, density evaluation, and decoration walks touch
+zero shared mutable state. D4's scar (`4307b59`, ~5000 lock attempts on one `Arc<Mutex>`) is the
+control: the join-burst bench (U10) must show shard-lock time not measurable at 289 concurrent
+columns.
+
+**Allocation budget — a counter-asserted acceptance criterion, not an aspiration.** Steady-state
+serve of one column: **0 heap allocations from the hot path**, with an explicit output allowance
+of O(1) allocations for the returned `GeneratedColumn`'s own `palette`/`blocks` buffers (they
+leave the function; everything else comes from scratch). All scratch — interpolator planes,
+cell buffers, region views, RNG carriers — from **per-thread** pools (`thread_local` free-lists,
+Pumpkin's `F64_BUFFER_POOL` pattern; never a shared pool behind a lock, which would serialise
+what the store just parallelised). U1's `column_heap_allocs` counter (counting-allocator wrapper
+in the bench binary) gates it, with the ratchet per unit: U3 deletes the ~885k Strings, U4 the
+tree clones and per-chunk slot caches, U7 the stitch grids, U10 asserts the end state. The ~885k
+figure is the single most damning number in the diagnosis; its disappearance is measured, not
+implied.
+
 ## Unit list
 
 Costs: S ≲ 1 session, M ≈ 1–2, L ≈ 3+, XL = epic (own issue tree). "RNG" = can this unit change
@@ -297,6 +396,14 @@ gates named in Q4 step 2; per-unit evidence listed is *additional*.
 | U12 | Missing decoration steps: lakes, springs, geodes/icebergs, disks, dungeons/fossils | `feature/`, `compose.rs` | U7 | L | additive (per-feature `set_feature_seed` isolates streams; index-preservation already in place) |
 | U13 | Nether + End generation | new engine instantiations + data + server dimension plumbing | U4–U9 | XL | new content |
 | U14 | Structures: placement/locate → templates → jigsaw | new `src/structure/`, data, beardifier hookup | U6, U7 | XL | new content |
+
+**Scheduling note (shared checkout):** `overworld.rs` is in the cluster of U3, U4, U6, U7, U9 and
+U11 — it is a choke-point file, and the dependency column above understates how serial the middle
+really is. Plan for **at most one in-flight unit owning `overworld.rs` at a time**, brokered by
+the orchestrator; the engine middle is a pipeline, not a fan-out. Genuinely parallel-safe
+alongside it: U1/U2 (benches), U5 (engine files only, once U4's seam exists), U8's
+`vegetation.rs` interior (after U7 lands its seam), and the data-extraction phases of U13/U14.
+A six-agent fan-out across U3–U9 cannot happen; do not schedule one.
 
 **Per-unit notes — the trap most likely to sink each:**
 
@@ -325,7 +432,9 @@ gates named in Q4 step 2; per-unit evidence listed is *additional*.
   vegetation in every served chunk with the unit suite green, and the gate that caught it was
   later deleted. Evidence adds: a boundary-write control (a feature known to spill across the
   seam, asserted present on both sides), plus the two live `worldgen_data.rs` gates.
-- **U8**: breadth-first "optimisation" of the depth-first recursion — instant RNG desync;
+- **U8**: also owns the five [cost-per-draw candidates](#vegetation-cost-per-draw), each landed
+  or refused with a measurement. Its trap: breadth-first "optimisation" of the depth-first
+  recursion — instant RNG desync;
   also `TrapezoidInt`-vs-`Uniform` (same support, different draw count) is the recorded shape of
   subtle stream desync. Evidence adds: `VegetationOracle` plains 30/30 + 57/57 exact, savanna
   fixtures re-run (two named residuals, 11/185 and 1/116, are pre-existing — do not absorb them).
