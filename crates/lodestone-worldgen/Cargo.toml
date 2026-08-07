@@ -11,9 +11,21 @@ workspace = true
 
 [features]
 default = []
-# Structural counters through the generation hot path (`src/counters.rs`), the
-# instrument the worldgen-rewrite acceptance criteria are written in
+# Structural counters through the generation hot path, the instrument the
+# worldgen-rewrite acceptance criteria are written in
 # (`docs/plans/worldgen-rewrite.md` Unit 1, `docs/benchmark-harness.md`).
+#
+# **This is now a forward, not a definition.** `counters.rs` moved to
+# `lodestone-worldgen-core` in Unit 16, so the `#[cfg(feature = "gen-counters")]`
+# that selects live hooks over inert ones is evaluated *there*. This entry has to
+# keep existing — this crate's own `benches/generation.rs` reads
+# `cfg!(feature = "gen-counters")` and callers pass
+# `-p lodestone-worldgen --features gen-counters` — and it has to enable the core
+# crate's feature, or the parent would compile with the flag set and count
+# nothing. That failure mode is silent and would make every downstream
+# acceptance criterion vacuous, so it has a dedicated gate:
+# `tests/gen_counters_forward.rs` asserts a non-zero counter through the
+# re-export with the feature on, and `Snapshot::default()` with it off.
 #
 # Default OFF and it must stay that way: every hook is an `#[inline(always)]`
 # empty function without it, so a shipped build carries no counter code at all.
@@ -24,10 +36,16 @@ default = []
 # Additive only: it adds atomics and hook bodies, and touches no arithmetic and
 # no RNG draw, so it cannot change generated terrain. `just test` covers both
 # settings via `--all-features`.
-gen-counters = []
+gen-counters = ["lodestone-worldgen-core/gen-counters"]
 
 [dependencies]
 serde_json = { workspace = true }
+# The numeric core (hash, math, rng, noise, density, counters) — Unit 16's leaf
+# extraction. Re-exported wholesale from `src/lib.rs` under the original module
+# paths, so this dependency is invisible to every caller. A path dependency
+# rather than a `[workspace.dependencies]` alias, matching how `lodestone-server`
+# spells its dependency on this crate.
+lodestone-worldgen-core = { path = "../lodestone-worldgen-core" }
 
 [dev-dependencies]
 serde_json = { workspace = true }

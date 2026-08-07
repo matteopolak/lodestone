@@ -24,22 +24,32 @@
 //!   the `WorldgenRandom` seed derivations.
 //! * [`hash`] — the standalone hashing (MD5, Java `String::hashCode`) that
 //!   worldgen seeding depends on.
+//!
+//! # The numeric core is a separate crate
+//!
+//! `counters`, `density`, `hash`, `math`, `noise` and `rng` live in
+//! `lodestone-worldgen-core` (Unit 16 of the rewrite plan; see
+//! `docs/worldgen-module-layout.md`) and are **re-exported below under their
+//! original paths**, so `lodestone_worldgen::density::Resolver` and every other
+//! path a caller already spells still resolves — the split moved no public path.
+//! Add new numeric/kernel code there and new pipeline code here.
 
 pub mod aquifer;
 pub mod biome;
 pub mod carver;
 pub mod compose;
-pub mod counters;
 pub mod dense_grid;
-pub mod density;
 pub mod feature;
-pub mod hash;
 pub mod interner;
-pub mod math;
-pub mod noise;
 pub mod overworld;
-pub mod rng;
 pub mod surface;
+
+/// The numeric core, re-exported so every pre-split path keeps resolving.
+///
+/// These are modules of `lodestone-worldgen-core`, not of this crate. Nothing
+/// else in the workspace had to change: `crate::density::…` inside this crate
+/// and `lodestone_worldgen::density::…` outside it both route through here.
+pub use lodestone_worldgen_core::{counters, density, hash, math, noise, rng};
 
 pub use noise::{ImprovedNoise, NormalNoise, PerlinNoise};
 pub use rng::{

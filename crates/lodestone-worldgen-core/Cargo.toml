@@ -1,0 +1,41 @@
+[package]
+name = "lodestone-worldgen-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Numeric core of the world-generation engine: hashing, seeded RNG, noise, and the density-function interpreter."
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Structural counters through the generation hot path (`src/counters.rs`), the
+# instrument the worldgen-rewrite acceptance criteria are written in
+# (`docs/plans/worldgen-rewrite.md` Unit 1, `docs/benchmark-harness.md`).
+#
+# **This is the definition; `lodestone-worldgen`'s same-named feature forwards to
+# it** (`gen-counters = ["lodestone-worldgen-core/gen-counters"]`). The hook
+# bodies and the `#[cfg]`s that select them live here, so a build that enables
+# the feature only on the parent and not here would compile fine and count
+# nothing — which is why `crates/lodestone-worldgen/tests/gen_counters_forward.rs`
+# asserts a non-zero counter through the parent's re-export in both states.
+#
+# Default OFF and it must stay that way: every hook is an `#[inline(always)]`
+# empty function without it, so a shipped build carries no counter code at all.
+# With it on, relaxed atomics sit inside `AquiferSystem::block_at` (98,304 calls
+# per chunk fill) and `WorldgenRandom::next_bits` — measurably slower, which is
+# why a timing run and a counter run are two separate runs, never one.
+#
+# Additive only: it adds atomics and hook bodies, and touches no arithmetic and
+# no RNG draw, so it cannot change generated terrain. `just test` covers both
+# settings via `--all-features`.
+gen-counters = []
+
+[dependencies]
+# `density`'s data layer parses noise settings, spline tables and biome/climate
+# documents straight from the version crate's JSON. The only non-`std` dependency
+# in the whole crate, deliberately: this is a leaf, and every unit scheduled
+# against it (U4's engine, U5's SIMD kernels) wants it to stay one.
+serde_json = { workspace = true }
