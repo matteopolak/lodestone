@@ -243,6 +243,25 @@ impl Sim {
     /// it. The 3×3 span covers the player's ±0.3-wide hitbox and its swept path
     /// within a tick; all-air sections are elided by `sections_at` and simply
     /// read as air.
+    ///
+    /// # This is still rebuilt 100–160 times a second, and deliberately so
+    ///
+    /// Per frame from `update_target` (`sim/step.rs`), again per frame in third
+    /// person (`sim/camera.rs`), and twice per tick (`collide.rs`,
+    /// `render_sources.rs`). The intermediate `HashMap` this used to fill and
+    /// immediately consume is gone (see [`crate::collision::SectionGrid`]), so a
+    /// rebuild is now one `sections_at` plus `9 × section_count` `Arc` clones.
+    ///
+    /// **The remaining win is a memo keyed on `(player chunk, world revision)`, and
+    /// it is not buildable today: there is no world-revision signal.**
+    /// `lodestone_world::World` is a bare `HashMap<ChunkPos, LoadedChunk>` with no
+    /// mutation counter, `lodestone_ecs::ChunkWorld` is an `Arc<RwLock<World>>` that
+    /// adds none, and `ClientHandle` exposes none — checked, not assumed. Inventing
+    /// one *here* (a hash of the snapshot, a time bound, "the player did not move")
+    /// would key the cache on something that is not the thing that changes, and a
+    /// stale collision view is a player falling through the world. Left unbuilt on
+    /// purpose; the prerequisite is a real revision counter bumped by `World::load`
+    /// / `merge` / `unload` and the per-section edit path. `DESIGN.md` §12.114.
     pub(crate) fn live_collision(&self) -> Option<LiveCollision> {
         let atlas = self.vanilla_atlas.clone()?;
         let net = self.net.as_ref()?;
@@ -261,23 +280,29 @@ impl Sim {
             return None;
         }
 
+        // **The loop order is the grid's index order**, x-major over z, so
+        // `sections_at`'s aligned response *is* the dense grid
+        // `LiveCollision::block_at` indexes — no intermediate `HashMap` to fill
+        // and immediately consume. Swapping these two loops transposes the world
+        // and nothing here would say so; see `SectionGrid`'s own doc.
         let mut requests: Vec<(lodestone_client::ChunkPos, usize)> =
             Vec::with_capacity(9 * section_count);
-        for cz in (pcz - 1)..=(pcz + 1) {
-            for cx in (pcx - 1)..=(pcx + 1) {
+        for cx in (pcx - 1)..=(pcx + 1) {
+            for cz in (pcz - 1)..=(pcz + 1) {
                 for si in 0..section_count {
                     requests.push((lodestone_client::ChunkPos { x: cx, z: cz }, si));
                 }
             }
         }
 
-        let fetched = net.sections_at(&requests);
-        let mut sections = HashMap::new();
-        for ((pos, si), section) in requests.iter().zip(fetched) {
-            if let Some(section) = section {
-                sections.insert((pos.x, pos.z, *si), section);
-            }
-        }
+        let sections = crate::collision::SectionGrid::from_aligned(
+            net.sections_at(&requests),
+            pcx - 1,
+            pcz - 1,
+            3,
+            3,
+            section_count,
+        );
 
         Some(LiveCollision::new(
             sections,

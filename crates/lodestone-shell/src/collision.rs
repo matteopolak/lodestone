@@ -754,17 +754,23 @@ pub struct LiveCollision {
     /// probed the table. `Sim::live_collision` (`sim.rs`) always snapshots
     /// exactly the 3×3 columns centred on the player (see
     /// `docs/chunk-world-resource.md`), so the key space is bounded and known
-    /// at construction time: [`Self::new`] converts the `HashMap` into this
-    /// grid **once per tick**, and every per-cell lookup after that is
-    /// `origin`-relative array-index arithmetic — no hashing, no probing.
+    /// at construction time, and every per-cell lookup is `origin`-relative
+    /// array-index arithmetic — no hashing, no probing.
+    ///
+    /// The map is gone from the *build* path too, not only from the lookups:
+    /// `Sim::live_collision` orders its `sections_at` request list in exactly
+    /// this grid's order, so the aligned response **is** the grid and there is
+    /// no intermediate table to fill and consume. See [`SectionGrid`].
     grid: Vec<Option<Arc<ChunkSection>>>,
     /// Chunk-x of `grid`'s `(0, 0, _)` slot.
     origin_cx: i32,
     /// Chunk-z of `grid`'s `(0, 0, _)` slot.
     origin_cz: i32,
-    /// Columns spanned by `grid` along x (at most 3; less if an edge column of
-    /// the requested 3×3 has no non-air section at all, which is a real
-    /// answer — see [`Self::block_at`] — not a truncated snapshot).
+    /// Columns spanned by `grid` along x — the *requested* footprint (3 from
+    /// `Sim::live_collision`). A column of the request with no non-air section
+    /// at all is still in the footprint and reads as air through its `None`
+    /// slots, which is the same answer the bounding-box footprint gave; see
+    /// [`Self::block_at`].
     width_x: i32,
     /// Columns spanned by `grid` along z. See [`width_x`](Self::width_x).
     width_z: i32,
@@ -870,14 +876,134 @@ pub(crate) fn inferred_version_data() -> Option<Arc<dyn VersionAdapter>> {
         .clone()
 }
 
-impl LiveCollision {
-    /// Build a view from a pre-fetched section snapshot and the dimension geometry.
+/// The dense `(chunk column, section index)` grid [`LiveCollision`] reads, in the
+/// order [`ClientHandle::sections_at`](lodestone_client::ClientHandle::sections_at)
+/// already answers a request list in.
+///
+/// # Why this type exists at all
+///
+/// `LiveCollision::new` used to take a `HashMap<(i32, i32, usize), Arc<ChunkSection>>`,
+/// which `Sim::live_collision` built by zipping its request list against
+/// `sections_at`'s aligned response — and which `new` then immediately consumed into
+/// a dense `Vec`. The map was pure overhead on a path rebuilt 100–160 times a second
+/// (per frame in `update_target`, again in third person, and twice per tick), and the
+/// comment excusing it argued in a circle: *"`sections` keeps its `HashMap` shape at
+/// this boundary because `Sim::live_collision` already builds one"*. The request
+/// order is dense and known, so ordering the request list the way the grid is
+/// indexed makes the response the grid. `DESIGN.md` §12.114.
+///
+/// # How to change it, and the gotcha
+///
+/// **The order is load-bearing and is not the obvious one.** `cells` is indexed
+/// `((cx - origin_cx) * width_z + (cz - origin_cz)) * section_count + si` — x-major
+/// over z, *not* z-major — because that is the layout
+/// [`LiveCollision::block_at`] indexes. A producer that emits its request list
+/// z-major compiles, allocates the right length, and silently transposes the world
+/// on any non-square footprint. [`Self::from_sparse`] is the reference build the
+/// equivalence gate compares against.
+#[derive(Debug)]
+pub struct SectionGrid {
+    cells: Vec<Option<Arc<ChunkSection>>>,
+    origin_cx: i32,
+    origin_cz: i32,
+    width_x: i32,
+    width_z: i32,
+}
+
+impl SectionGrid {
+    /// Wrap the aligned response of a `sections_at` request list that was built
+    /// in this grid's own order.
     ///
-    /// `sections` keeps its `HashMap` shape at this boundary because
-    /// `Sim::live_collision` (`sim.rs`) already builds one while zipping its
-    /// request list against `sections_at`'s response — but it is consumed
-    /// exactly once, here, to build the dense grid every later lookup reads.
-    /// See [`Self::grid`] for why.
+    /// # Panics
+    /// Debug-only: panics if `cells.len()` is not
+    /// `width_x * width_z * section_count`, which is the one way a caller can get
+    /// the order wrong *and* be detectable.
+    #[must_use]
+    pub fn from_aligned(
+        cells: Vec<Option<Arc<ChunkSection>>>,
+        origin_cx: i32,
+        origin_cz: i32,
+        width_x: i32,
+        width_z: i32,
+        section_count: usize,
+    ) -> Self {
+        debug_assert_eq!(
+            cells.len(),
+            (width_x.max(0) * width_z.max(0)) as usize * section_count,
+            "a `sections_at` response must stay aligned with its request list"
+        );
+        Self {
+            cells,
+            origin_cx,
+            origin_cz,
+            width_x,
+            width_z,
+        }
+    }
+
+    /// Build from a sparse `(cx, cz, si)` map, with the footprint taken as the
+    /// bounding box of the keys actually present.
+    ///
+    /// This is the **old production build**, kept verbatim as the reference the
+    /// equivalence gate compares [`Self::from_aligned`] against, and as the
+    /// ergonomic shape for fixtures that place a section or two at arbitrary
+    /// coordinates. It is `#[cfg(test)]` because production has no map to hand it:
+    /// keeping it compiled in would be a second build path for a caller that does
+    /// not exist.
+    ///
+    /// Its footprint differs from `from_aligned`'s and the two still agree on every
+    /// input: a `(cx, cz)` outside the observed bounding box was never a key in the
+    /// map either, so [`LiveCollision::block_at`]'s bounds check and a `None` slot
+    /// give the same answer — air.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn from_sparse(
+        sections: HashMap<(i32, i32, usize), Arc<ChunkSection>>,
+        section_count: usize,
+    ) -> Self {
+        if sections.is_empty() {
+            return Self {
+                cells: Vec::new(),
+                origin_cx: 0,
+                origin_cz: 0,
+                width_x: 0,
+                width_z: 0,
+            };
+        }
+        let mut min_cx = i32::MAX;
+        let mut max_cx = i32::MIN;
+        let mut min_cz = i32::MAX;
+        let mut max_cz = i32::MIN;
+        for &(cx, cz, _) in sections.keys() {
+            min_cx = min_cx.min(cx);
+            max_cx = max_cx.max(cx);
+            min_cz = min_cz.min(cz);
+            max_cz = max_cz.max(cz);
+        }
+        let width_x = max_cx - min_cx + 1;
+        let width_z = max_cz - min_cz + 1;
+        let mut cells = vec![None; (width_x * width_z) as usize * section_count];
+        for ((cx, cz, si), section) in sections {
+            let dx = cx - min_cx;
+            let dz = cz - min_cz;
+            cells[((dx * width_z + dz) as usize) * section_count + si] = Some(section);
+        }
+        Self {
+            cells,
+            origin_cx: min_cx,
+            origin_cz: min_cz,
+            width_x,
+            width_z,
+        }
+    }
+}
+
+impl LiveCollision {
+    /// Build a view from a pre-fetched section grid and the dimension geometry.
+    ///
+    /// `sections` arrives dense and already in [`Self::block_at`]'s index order —
+    /// see [`SectionGrid`] for why that is the producer's job rather than a
+    /// conversion here.
     ///
     /// `version` is a required parameter, not an inferred default (issue #42):
     /// the caller states what collision geometry this view has, rather than
@@ -891,7 +1017,7 @@ impl LiveCollision {
     /// it that way).
     #[must_use]
     pub fn new(
-        sections: HashMap<(i32, i32, usize), Arc<ChunkSection>>,
+        sections: SectionGrid,
         min_y: i32,
         section_count: usize,
         atlas: Arc<BlockAtlas>,
@@ -913,60 +1039,18 @@ impl LiveCollision {
                 air_states.push(id);
             }
         }
-        let (grid, origin_cx, origin_cz, width_x, width_z) =
-            Self::build_grid(sections, section_count);
         Self {
-            grid,
-            origin_cx,
-            origin_cz,
-            width_x,
-            width_z,
+            grid: sections.cells,
+            origin_cx: sections.origin_cx,
+            origin_cz: sections.origin_cz,
+            width_x: sections.width_x,
+            width_z: sections.width_z,
             min_y,
             section_count,
             atlas,
             version,
             air_states,
         }
-    }
-
-    /// Converts the `HashMap` snapshot into the dense grid [`Self::block_at`]
-    /// reads, in one pass over its entries.
-    ///
-    /// The grid's footprint is the bounding box of the keys actually present,
-    /// not a hardcoded 3×3: `sections_at` elides every all-air section
-    /// regardless of column, so a column with no non-air section anywhere in
-    /// it contributes no keys at all and must not be misread as "not
-    /// requested" — see the type docs. Both are handled identically here: a
-    /// `(cx, cz)` outside the observed bounding box was never a key in the
-    /// map either, so [`Self::block_at`]'s bounds check and the old
-    /// `HashMap::get` miss agree on every input, air included.
-    fn build_grid(
-        sections: HashMap<(i32, i32, usize), Arc<ChunkSection>>,
-        section_count: usize,
-    ) -> (Vec<Option<Arc<ChunkSection>>>, i32, i32, i32, i32) {
-        if sections.is_empty() {
-            return (Vec::new(), 0, 0, 0, 0);
-        }
-        let mut min_cx = i32::MAX;
-        let mut max_cx = i32::MIN;
-        let mut min_cz = i32::MAX;
-        let mut max_cz = i32::MIN;
-        for &(cx, cz, _) in sections.keys() {
-            min_cx = min_cx.min(cx);
-            max_cx = max_cx.max(cx);
-            min_cz = min_cz.min(cz);
-            max_cz = max_cz.max(cz);
-        }
-        let width_x = max_cx - min_cx + 1;
-        let width_z = max_cz - min_cz + 1;
-        let mut grid = vec![None; (width_x * width_z) as usize * section_count];
-        for ((cx, cz, si), section) in sections {
-            let dx = cx - min_cx;
-            let dz = cz - min_cz;
-            let idx = ((dx * width_z + dz) as usize) * section_count + si;
-            grid[idx] = Some(section);
-        }
-        (grid, min_cx, min_cz, width_x, width_z)
     }
 
     /// Override the version data [`new`](Self::new) was built with, after
@@ -1693,7 +1777,7 @@ mod tests {
         }
         let mut sections = HashMap::new();
         sections.insert((0, 0, 0), Arc::new(section));
-        LiveCollision::new(sections, 0, 1, atlas, version)
+        LiveCollision::new(SectionGrid::from_sparse(sections, 1), 0, 1, atlas, version)
     }
 
     /// A one-section live view (chunk `0,0`, `min_y = 0`) whose cells at
@@ -1726,7 +1810,13 @@ mod tests {
         }
         let mut sections = HashMap::new();
         sections.insert((0, 0, 0), Arc::new(section));
-        LiveCollision::new(sections, 0, 1, atlas, inferred_version_data())
+        LiveCollision::new(
+            SectionGrid::from_sparse(sections, 1),
+            0,
+            1,
+            atlas,
+            inferred_version_data(),
+        )
     }
 
     /// The block-local boxes this view resolves for a single cell holding
@@ -2302,7 +2392,13 @@ mod tests {
         }
         let mut sections = HashMap::new();
         sections.insert((0, 0, 0), Arc::new(section));
-        let view = LiveCollision::new(sections, 0, 1, Arc::clone(&atlas), inferred_version_data());
+        let view = LiveCollision::new(
+            SectionGrid::from_sparse(sections, 1),
+            0,
+            1,
+            Arc::clone(&atlas),
+            inferred_version_data(),
+        );
 
         let hit = crate::raycast::raycast(
             [0.5, 6.5, 0.5],
@@ -2593,7 +2689,13 @@ mod tests {
         }
         let mut sections = HashMap::new();
         sections.insert((0, 0, 0), Arc::new(section));
-        let view = LiveCollision::new(sections, 0, 1, atlas, inferred_version_data());
+        let view = LiveCollision::new(
+            SectionGrid::from_sparse(sections, 1),
+            0,
+            1,
+            atlas,
+            inferred_version_data(),
+        );
         assert!(
             view.has_real_shapes(),
             "no version collision census is wired in — run with --features live"
@@ -2856,5 +2958,214 @@ mod tests {
              this is the case the pre-#216 'any fluid -> not solid' shortcut \
              answered false"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // `SectionGrid`: the dense build must answer exactly what the map build did
+    // -----------------------------------------------------------------------
+
+    /// Sections per column in the equivalence fixture. More than one, because a
+    /// wrong `section_count` stride is invisible at 1.
+    const GRID_SECTIONS: usize = 3;
+    /// Deliberately non-zero and not symmetric between x and z, so a transposed
+    /// index lands somewhere else instead of on itself.
+    const GRID_ORIGIN: (i32, i32) = (5, -3);
+
+    /// Which `(cx, cz, si)` slots of the 3x3x`GRID_SECTIONS` request are present.
+    ///
+    /// Two shapes `sections_at` really produces are both in here and both matter:
+    /// individual **elided all-air sections** (`None` slots inside a live column),
+    /// and a whole **edge column with no non-air section anywhere** — which
+    /// contributed no keys at all to the old map, so its bounding-box footprint was
+    /// 2 columns wide where the request was 3. That difference is the one thing the
+    /// old build's doc claimed was harmless, and this is what checks it.
+    fn grid_fixture_present(cx: i32, cz: i32, si: usize) -> bool {
+        if cx == GRID_ORIGIN.0 + 2 {
+            return false; // the absent edge column
+        }
+        !(si == 1 && cz == GRID_ORIGIN.1) // an elided section inside a live column
+    }
+
+    /// A section filled uniformly with `state`, so every cell compared below is a
+    /// distinguishing cell rather than air.
+    fn filled_section(state: u32) -> Arc<ChunkSection> {
+        let mut section = ChunkSection::new(
+            PaletteKind::block_states_with_direct_bits(20),
+            PaletteKind::biomes(),
+            0,
+            0,
+        );
+        for x in 0..16 {
+            for y in 0..16 {
+                for z in 0..16 {
+                    section.set_block(x, y, z, state);
+                }
+            }
+        }
+        Arc::new(section)
+    }
+
+    /// A unique id per slot, so a mis-indexed grid reads as *another slot's* block
+    /// rather than as air — the failure a uniform fill could not see.
+    fn grid_fixture_state(cx: i32, cz: i32, si: usize) -> u32 {
+        let dx = (cx - GRID_ORIGIN.0) as u32;
+        let dz = (cz - GRID_ORIGIN.1) as u32;
+        100 + (dx * 3 + dz) * GRID_SECTIONS as u32 + si as u32
+    }
+
+    /// The dense grid `Sim::live_collision` hands in: `sections_at`'s response to a
+    /// request list built **x-major over z**.
+    ///
+    /// `transpose` swaps the two loops, which is the one mistake a producer can
+    /// make that still yields a correctly-sized `Vec` — the control below.
+    fn grid_fixture_aligned(transpose: bool) -> SectionGrid {
+        let mut cells = Vec::new();
+        if transpose {
+            for cz in GRID_ORIGIN.1..=(GRID_ORIGIN.1 + 2) {
+                for cx in GRID_ORIGIN.0..=(GRID_ORIGIN.0 + 2) {
+                    for si in 0..GRID_SECTIONS {
+                        cells.push(grid_fixture_present(cx, cz, si).then(|| {
+                            filled_section(grid_fixture_state(cx, cz, si))
+                        }));
+                    }
+                }
+            }
+        } else {
+            for cx in GRID_ORIGIN.0..=(GRID_ORIGIN.0 + 2) {
+                for cz in GRID_ORIGIN.1..=(GRID_ORIGIN.1 + 2) {
+                    for si in 0..GRID_SECTIONS {
+                        cells.push(grid_fixture_present(cx, cz, si).then(|| {
+                            filled_section(grid_fixture_state(cx, cz, si))
+                        }));
+                    }
+                }
+            }
+        }
+        SectionGrid::from_aligned(
+            cells,
+            GRID_ORIGIN.0,
+            GRID_ORIGIN.1,
+            3,
+            3,
+            GRID_SECTIONS,
+        )
+    }
+
+    /// The same content as the old `HashMap` snapshot, for
+    /// [`SectionGrid::from_sparse`] — the pre-change production build, kept as the
+    /// reference this equivalence is measured against.
+    fn grid_fixture_sparse() -> SectionGrid {
+        let mut sections = HashMap::new();
+        for cx in GRID_ORIGIN.0..=(GRID_ORIGIN.0 + 2) {
+            for cz in GRID_ORIGIN.1..=(GRID_ORIGIN.1 + 2) {
+                for si in 0..GRID_SECTIONS {
+                    if grid_fixture_present(cx, cz, si) {
+                        sections.insert(
+                            (cx, cz, si),
+                            filled_section(grid_fixture_state(cx, cz, si)),
+                        );
+                    }
+                }
+            }
+        }
+        SectionGrid::from_sparse(sections, GRID_SECTIONS)
+    }
+
+    fn grid_fixture_view(sections: SectionGrid, atlas: &Arc<BlockAtlas>) -> LiveCollision {
+        LiveCollision::new(
+            sections,
+            0,
+            GRID_SECTIONS,
+            Arc::clone(atlas),
+            inferred_version_data(),
+        )
+    }
+
+    /// Every cell of the footprint **plus a one-chunk ring and one section above
+    /// and below**, so the bounds checks are compared too and not only the hits.
+    fn grid_fixture_mismatches(a: &LiveCollision, b: &LiveCollision) -> Vec<(i32, i32, i32, u32, u32)> {
+        let mut out = Vec::new();
+        let x0 = (GRID_ORIGIN.0 - 1) * 16;
+        let z0 = (GRID_ORIGIN.1 - 1) * 16;
+        for x in x0..(x0 + 16 * 5) {
+            for z in z0..(z0 + 16 * 5) {
+                for y in -16..(16 * (GRID_SECTIONS as i32 + 1)) {
+                    let (l, r) = (a.block_at(x, y, z), b.block_at(x, y, z));
+                    if l != r {
+                        out.push((x, y, z, l, r));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Removing the intermediate `HashMap` must not move a single block.
+    ///
+    /// Not "the grid is built": the dense build and the old map build are compared
+    /// cell for cell over the whole footprint and a ring outside it, including the
+    /// absent edge column whose two footprints genuinely differ.
+    #[test]
+    fn the_dense_grid_answers_exactly_what_the_map_build_did() {
+        let atlas = vanilla_atlas();
+        let dense = grid_fixture_view(grid_fixture_aligned(false), &atlas);
+        let sparse = grid_fixture_view(grid_fixture_sparse(), &atlas);
+
+        // The two footprints really do differ, or this is comparing one shape with
+        // itself and the absent-edge-column case is untested.
+        assert_eq!((dense.width_x, dense.width_z), (3, 3));
+        assert_eq!(
+            (sparse.width_x, sparse.width_z),
+            (2, 3),
+            "the sparse build's footprint is the bounding box of present keys, so \
+             the absent edge column must shrink it — if it does not, the fixture \
+             stopped exercising the difference"
+        );
+
+        let mismatches = grid_fixture_mismatches(&dense, &sparse);
+        assert!(
+            mismatches.is_empty(),
+            "{} cells disagree; first at {:?} (dense {} vs map {}), last at {:?}",
+            mismatches.len(),
+            mismatches.first().map(|m| (m.0, m.1, m.2)),
+            mismatches.first().map(|m| m.3).unwrap_or(0),
+            mismatches.first().map(|m| m.4).unwrap_or(0),
+            mismatches.last().map(|m| (m.0, m.1, m.2)),
+        );
+
+        // And the comparison is not vacuously empty: the footprint really holds
+        // non-air blocks, at the ids the fixture assigned.
+        let cx = GRID_ORIGIN.0;
+        let cz = GRID_ORIGIN.1 + 1;
+        assert_eq!(
+            dense.block_at(cx * 16 + 3, 5, cz * 16 + 7),
+            grid_fixture_state(cx, cz, 0),
+            "the fixture must actually put its own state ids in the footprint"
+        );
+    }
+
+    /// The control for the gate above: the one producer mistake that still yields a
+    /// correctly-sized `Vec` is emitting the request list z-major, and that must be
+    /// caught. Run it and watch it disagree — a gate that only ever sees the
+    /// correct order proves nothing about the order.
+    #[test]
+    fn a_transposed_request_order_is_detected_by_that_comparison() {
+        let atlas = vanilla_atlas();
+        let transposed = grid_fixture_view(grid_fixture_aligned(true), &atlas);
+        let sparse = grid_fixture_view(grid_fixture_sparse(), &atlas);
+        let mismatches = grid_fixture_mismatches(&transposed, &sparse);
+        assert!(
+            !mismatches.is_empty(),
+            "a z-major request list must disagree with the map build; if it does \
+             not, the comparison above cannot see an index-order regression"
+        );
+        // Located, not merely counted: the disagreement is inside the footprint.
+        let (x, _, z, _, _) = mismatches[0];
+        assert!(
+            x.div_euclid(16) >= GRID_ORIGIN.0 && x.div_euclid(16) <= GRID_ORIGIN.0 + 2,
+            "first mismatch at x={x} is outside the footprint, so it is not the \
+             transposition being detected"
+        );
+        assert!(z.div_euclid(16) >= GRID_ORIGIN.1 && z.div_euclid(16) <= GRID_ORIGIN.1 + 2);
     }
 }
