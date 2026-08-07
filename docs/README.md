@@ -1271,6 +1271,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   issue #404's unit U2. Before it, nothing in this engine ever wrote `minecraft:snow`
   or surface ice: every snowy biome generated bare, which the parity census called the
   most player-visible absent feature in worldgen.
+- [World-generation gap census against vanilla 26.2](./worldgen-gap-census.md) — An
+  evidenced inventory of what our world generation actually does, per axis, measured
+  against vanilla 26.2 — dimensions, biomes, surface rules, carvers, ores and ore
+  veins, decoration steps, structures, slime chunks, mob spawning, heightmaps, light,
+  block entities and the seed's derivation. Every row carries a verdict (**reached** /
+  **orphaned** / **partial** / **absent**), the vanilla source of truth, and a
+  `file:line` citation, so a later reader can re-verify rather than inherit. It exists
+  because the written record here goes stale silently and because this repo's dominant
+  defect is the *island* — code that is built, unit-tested green, and reached by
+  nothing.
 - [In-place region decoration](./worldgen-in-place-decoration.md) — The read/write
   medium the worldgen decoration stages use to reach across a 3×3 chunk neighbourhood
   without copying it. Vanilla's `blockStateWriteRadius(1)` at the FEATURES stage lets
