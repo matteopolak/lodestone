@@ -198,6 +198,119 @@ alone; both were obvious once `threadCPUDelta`-weighted self-time was
 attributed back to `preliminary_surface_level` and `build_surface`'s own
 frame, respectively.
 
+## Structural counters, and the two numbers they replace
+
+Added by Unit 1 of [`docs/plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md).
+`crates/lodestone-worldgen/src/counters.rs` counts *events* in the generation
+pipeline — `block_at` calls, density component evaluations by kind, corner
+lookups and slot-cache hits/misses, palette interns, `pre_ore`/`post_ore`
+computations vs cache hits, biome nearest-neighbour searches and rows compared,
+stitch copies, `String` allocations, and RNG draws attributed per stage.
+
+**Why a counter and not another timing.** `DESIGN.md` §12.95 carries a measured
+**585×** mis-attributed timing, and §12.98 records that release-profile
+benchmarking was silently broken workspace-wide for long enough that a
+9× structural regression was found by a 700-second test run instead of an
+assertion. A counter is reproducible under machine load, predicts an exact value,
+and can therefore *gate*. Acceptance criteria for worldgen-rewrite Units 3–14 are
+written in these counters, not in microseconds — the harness is the contract.
+
+**The rule that makes them worth having: a counter that cannot predict is a
+counter that cannot gate.** Every counter has a hand-derivable expected value,
+and `bench_counter_calibration` asserts them exactly on one known chunk. Five
+independent predictions from the rewrite plan were confirmed this way (98,304
+`block_at` per chunk fill; a 25-chunk pre-ore closure; 9 ore walks; a 7,594-row
+climate table; ~885k `String`s per warm column). If you add a counter, add its
+prediction in the same commit.
+
+### The three traps this cost us to learn
+
+- **A stage-participation counter belongs *below* the stage's no-data early
+  return.** Above it, the counter reports "the stage ran" for exactly the run
+  where the resolver supplied nothing and the stage early-returned — the *world*
+  vacuity species, and `benches/generation.rs`'s own documented history. Below it,
+  `stage_entered[top_layer] == 0` is a mechanical detector for "this bench is
+  secretly pointed at the fixture tree".
+- **"Exactly once per chunk" is one sentence with a different count per stage.**
+  Each stage has its own dependency radius, so over a 12×12 sweep the correct
+  assertion is 256 (5×5 closure) for fill/surface/carve, 196 (3×3) for ore, and
+  144 for vegetation/top_layer/intern. A single "144 of each" is wrong for nine of
+  the ten and fails for the wrong reason.
+- **Counting allocations needs a thread-local, not a global atomic.** The
+  counting allocator in `benches/generation.rs` copies the design
+  `crates/lodestone-fuzz/tests/length_prefix_allocation.rs` arrived at after two
+  failures (issue #450): a process-wide `AtomicU64` let one measurement absorb
+  another thread's allocations, and adding a mutex *flaked*, because a lock only
+  excludes code that takes it. A `const`-initialised `Cell` per thread needs no
+  cooperation from anything.
+
+### Which resolver a bench may use
+
+`benches/generation.rs` has three generator constructors and they are not
+interchangeable:
+
+| constructor | data | valid for |
+|---|---|---|
+| `make_shape_only_generator` | fixture tree, 2 of 9 resolver methods | raw noise-router throughput only |
+| `make_full_generator` | fixture tree, all 9 methods | single-biome composed benches — **`biome` and `top_layer` are structurally inert** |
+| `make_embedded_generator` | `lodestone-server`'s embedded 26.2 data | C_ss / C_cold / calibration — all ten stages live |
+
+The fixture tree is single-biome plains and carries no `block_freeze_facts`
+document, so against it the biome search never runs and `freeze_top_layer`
+early-returns. A "composed pipeline" number taken against it describes a pipeline
+with two stages missing while looking entirely plausible. **The defence is
+`assert_all_ten_stages_ran`, not a comment** — this file already carried the
+comment, and it did not help.
+
+### C_ss and C_cold
+
+The two numbers the rewrite is measured against, defined in the plan's §Q3 so
+they can be held to:
+
+- **C_ss** — median `column()` over the **100 interior chunks of a 12×12 sweep**,
+  single thread, release, embedded data, seed 42. The border chunk ring is
+  excluded because its neighbours were computed *by it*, so it carries
+  cold-neighbour cost.
+- **C_cold** — the first `column()` in a fresh region (25 pre-ore chunks, 9 ore
+  walks from nothing). Needs a **fresh generator**: the memo caches are
+  per-generator, and reusing a warm one is the trap that neutered two determinism
+  gates in this repo already.
+
+Run them:
+
+```bash
+# NOTE the --config: see "Configuration" below. Without it this ICEs on tokio.
+cargo --config 'profile.release.package.tokio.opt-level=1' \
+  bench -p lodestone-worldgen --features gen-counters --bench generation
+```
+
+Counters are **off by default** and every hook compiles to an empty
+`#[inline(always)]` function without the feature, so a shipped build carries no
+counter code. They are measurably slower when on, which means **a timing run and
+a counter run are two different runs, never one.**
+
+### The two-arm rule, for every unit that claims an improvement
+
+A later unit's "we made it faster" is a before/after comparison, and this repo has
+a recorded false signal from doing that sequentially: a 3/5-vs-0/5 result that was
+1/6 on both arms once the arms were interleaved. So:
+
+- **Run both arms interleaved in one process**, alternating per iteration — not
+  arm A to completion then arm B. A machine that gets busy halfway through
+  otherwise attributes the change to your diff.
+- **Build a fresh generator per arm.** `OverworldGenerator` holds two
+  512-entry memo caches, so a second arm on the same generator reads the first
+  arm's cached results and agrees with itself no matter what. This already
+  neutered two determinism gates here; `bench_stage_split`'s anti-drift control
+  carries the same rule for the same reason.
+- **Prefer a counter to a duration**, and when you must report a duration, report
+  the counter beside it so the ratio is machine-independent. The vegetation walk's
+  headline figure is *ns per RNG draw* rather than ms per column precisely so a
+  later unit can claim an improvement without reproducing this machine's state.
+- **Re-run a timing-shaped result alone before believing it.** The U2 baseline was
+  taken twice with no other CPU-consuming process and agreed within 2%; that
+  agreement is what makes it a measurement rather than a sample.
+
 ## Status of specific sub-issues, re-verified rather than assumed
 
 Per `CLAUDE.md`'s "re-verify before routing around 'X doesn't exist yet'"
@@ -376,6 +489,21 @@ deleted; the live replacement is `fold_entities`. The docs still referencing it
   `--baseline NAME` for local before/after diffing.
 - **Output location**: `<workspace-root>/bench-results/<bench-name>.jsonl`
   (gitignored — see the `.gitignore` entry added alongside this doc).
+- **`lodestone-worldgen`'s `gen-counters` feature**: default **off**. Turns on
+  `src/counters.rs`'s relaxed atomics. `cargo bench -p lodestone-worldgen
+  --features gen-counters` is required for the calibration assertions and for the
+  exactly-once invariant on C_ss; without it those benches **skip loudly** rather
+  than asserting against zeros.
+- **`--config 'profile.release.package.tokio.opt-level=1'` is currently required
+  to run any release bench in this workspace.** `rustc 1.99.0-nightly
+  (da86f4d07 2026-07-24)` ICEs compiling `tokio` 1.53.1 at `opt-level=3` when
+  dev-dependencies enable `rt-multi-thread`
+  (`rustc_codegen_ssa/src/mir/operand.rs:291: not immediate`). This is
+  **pre-existing and unrelated to any bench** — `cargo build --release
+  -p lodestone-server --tests` reproduces it — and it is invisible to every health
+  check in `CLAUDE.md` because all of them are debug builds. The override cannot
+  affect a measurement: no bench here executes tokio. See `DESIGN.md` §12.98; if a
+  dated nightly is pinned, pin one that compiles tokio in release.
 
 ## Dependencies
 
@@ -388,6 +516,16 @@ deleted; the live replacement is `fold_entities`. The docs still referencing it
   encode/decode in `support.rs`.
 - `git` (external binary, invoked via `std::process::Command`) — best-effort;
   its absence degrades `git_sha` to `"unknown"` rather than failing the bench.
+- `lodestone-server` — **dev-dependency of `lodestone-worldgen`, benches only**,
+  for `overworld_generator`: the embedded 26.2 production data C_ss/C_cold are
+  defined against. This is a dev-dependency *cycle* (`lodestone-server` depends on
+  `lodestone-worldgen` normally), which Cargo supports, and it adds nothing to
+  `lodestone-worldgen`'s lib — the wasm build and `cargo check -p lodestone-shell
+  --no-default-features` are untouched. The alternative (pointing an `FsResolver`
+  at `crates/lodestone-server/assets/worldgen/`) reproduces eight of the nine
+  resolver methods and silently misses `block_freeze_facts`, which is built from
+  `lodestone-data`'s jar dumps rather than from any JSON asset — so it would leave
+  the `top_layer` stage inert while looking complete.
 - `lodestone-world`'s and `lodestone-entity`'s benches add no new crate
   dependencies beyond `criterion`/`serde_json`: both link only against the
   library they are benchmarking (its own public API) plus, for
