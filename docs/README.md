@@ -1581,6 +1581,14 @@ of these caught the *brief* being wrong rather than the code.
   through the wire to a named client consumer. Written 2026-08-04 against a verified
   tree; every "X doesn't exist" below was re-grepped tree-wide, and three children
   turned out substantially landed since their issues were written.
+- [Worldgen cycle accounting](./plans/worldgen-cycle-accounting.md) — The
+  measurement programme that follows the allocation drive: instruction-denominated,
+  per-stage cost accounting for the worldgen pipeline, built on the task-level
+  hardware counters macOS exposes through `proc_pid_rusage`, and an A/B protocol that
+  makes a before/after performance claim defensible on this machine **without keeping
+  two live production code paths**. Owner-directed (2026-08-07); written from a
+  read-only architecture review at `6803146d`+. Planning artifact only — each build
+  item below is separately landable with its own evidence standard.
 - [Plan: full 26.2 chunk-generation parity, and the version seam for later generators](./plans/worldgen-parity.md) —
   The dispatch plan for taking `lodestone-worldgen` from today's composed subset
   (shape, aquifer, biomes, surface, carvers, ores, most vegetation) to **full 26.2
