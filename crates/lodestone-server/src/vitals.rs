@@ -143,6 +143,22 @@ fn fall_damage_type() -> lodestone_data::damage_types::DamageType {
         .expect("minecraft:fall is in the generated damage-type table")
 }
 
+/// `minecraft:outside_border`, resolved from the real damage-type registry the
+/// same way [`fall_damage_type`] is.
+///
+/// Called once per border-damage tick rather than per landing, so the table scan
+/// is on a hotter path than `fall_damage_type`'s — still a scan of a generated
+/// const table, and `crate::server`'s `vitals_tick` only reaches it when
+/// `damage_for_position` is `Some`, i.e. when the player is actually past the
+/// safe zone. With a default full-size border that is never.
+///
+/// The `expect` is pinned by `outside_border_resolves_and_is_bypasses_armor`
+/// below, which is the successor to the tripwire that asserted the opposite.
+fn border_damage_type() -> lodestone_data::damage_types::DamageType {
+    lodestone_data::damage_types::DamageType::from_name("minecraft:outside_border")
+        .expect("minecraft:outside_border is in the generated damage-type table")
+}
+
 /// `minecraft:drown`. Used only to *assert* the premise behind applying
 /// [`DROWN_DAMAGE`] straight to health (see the tests): `drown` is
 /// `bypasses_armor`-tagged, so with no armour/absorption model the raw
@@ -346,18 +362,45 @@ impl PlayerVitals {
     /// ("a player at distance d outside takes exactly `max(1, floor(d*0.2))`
     /// per tick") requires.
     ///
-    /// # Why `DamageFlags::default()` instead of the derived table
+    /// # The flags come from the real table, and the old reasoning here was
+    /// **wrong in both halves**
     ///
-    /// `apply_fall_damage` resolves its flags from the real `minecraft:damage_type`
-    /// table; border damage cannot, because **`minecraft:outside_border` is
-    /// not in the generated table** (verified: `grep outside_border
-    /// crates/lodestone-data/src/damage_types.rs` → empty — the table is a
-    /// byproduct of Mojang's generator and omits it). The vanilla JSON
-    /// (`outside_border.json`: `exhaustion 0.0, message_id outsideBorder,
-    /// scaling when_caused_by_living_non_player`) carries **no bypass tags**,
-    /// so the derived [`lodestone_entity::DamageFlags`] for it would be all
-    /// `false` anyway — `DamageFlags::default()` is exactly that, sourced from
-    /// the datapack definition rather than a table that lacks the entry.
+    /// This used to pass `DamageFlags::default()` and justify it like so:
+    /// *"`minecraft:outside_border` is not in the generated table (verified:
+    /// `grep outside_border crates/lodestone-data/src/damage_types.rs` → empty)
+    /// … the vanilla JSON carries **no bypass tags**, so the derived flags would
+    /// be all `false` anyway."*
+    ///
+    /// A tripwire test asserted that absence and named the production change it
+    /// wanted if the entry ever appeared. It appeared, and the second half of the
+    /// justification turned out to be false independently of the first:
+    /// `crates/lodestone-data/src/generated/damage_types.rs` records
+    /// `outside_border` as **`bypasses_armor bypasses_shield bypasses_wolf_armor
+    /// no_knockback`** — so the derived flags are *not* all `false`, and
+    /// `DamageFlags::default()` was never "exactly that". The original grep
+    /// looked at `damage_types.rs`; the table lives in `generated/`, which is
+    /// also why "not in the table" read as evidence.
+    ///
+    /// So the flags now resolve through [`border_damage_type`], the same route
+    /// [`apply_fall_damage`](Self::apply_fall_damage) already takes. It is
+    /// behaviour-neutral **today** — `Defenses::default()` has zero armour, and
+    /// `bypasses_armor` cannot change a reduction of nothing — and that is the
+    /// point: when a real equipment model lands, border damage will bypass armour
+    /// because vanilla says it does, rather than because nobody revisited a
+    /// hardcoded default.
+    ///
+    /// # One thing this deliberately does **not** change
+    ///
+    /// The table also says `outside_border` is **not** `bypasses_cooldown`, while
+    /// this method bypasses the i-frame gate structurally (it never consults
+    /// [`hurt_cooldown`](Self::hurt_cooldown)). Vanilla routes border damage
+    /// through `hurtServer`, so its i-frame logic does apply — and since the
+    /// damage at a fixed distance is constant, vanilla would land it once per 20
+    /// ticks rather than every tick. That contradicts the plan gate's stated
+    /// per-tick cadence, which this crate's tests pin. Recorded rather than
+    /// changed: it is a behavioural question about the cadence, not about where
+    /// the flags come from, and picking it up here would silently move a number
+    /// three gates assert on.
     ///
     /// Returns `Some(damage_dealt)` if the hit landed (a dead player is a
     /// no-op, mirroring [`apply_fall_damage`](Self::apply_fall_damage)), `None`
@@ -369,7 +412,7 @@ impl PlayerVitals {
         let outcome = lodestone_entity::apply_reductions(
             raw as f32,
             &lodestone_entity::Defenses::default(),
-            lodestone_entity::DamageFlags::default(),
+            lodestone_entity::DamageFlags::for_damage_type(border_damage_type()),
         );
         self.health = (self.health - outcome.to_health).max(0.0);
         Some(outcome.to_health)
@@ -761,17 +804,91 @@ mod tests {
         assert_eq!(v.health(), MAX_HEALTH - 2.0);
     }
 
-    /// Why [`apply_border_damage`](Self::apply_border_damage) uses
-    /// `DamageFlags::default()`: `minecraft:outside_border` is **not** in the
-    /// generated damage-type table (verified: the table derives from Mojang's
-    /// generator and omits it), so `for_damage_type(outside_border_type())`
-    /// would be a runtime `expect` panic. Pin the premise so nobody "fixes"
-    /// the flags back to a table lookup that cannot resolve.
+    /// The successor to a tripwire that asserted the **opposite** and fired.
+    ///
+    /// It read: *"`minecraft:outside_border` is not in the generated damage-type
+    /// table … if this starts resolving, route `apply_border_damage` through
+    /// `for_damage_type`"*. It started resolving, and the routing was done — so
+    /// this pins the entry's presence, which is what
+    /// [`border_damage_type`]'s `expect` rests on.
+    ///
+    /// It also pins the tag, because that is the half the old reasoning got
+    /// **backwards**: the previous doc claimed the vanilla JSON "carries no bypass
+    /// tags, so the derived flags would be all `false` anyway", and the generated
+    /// table says `bypasses_armor`. An absence-only successor would have left that
+    /// error in place.
     #[test]
-    fn outside_border_is_absent_from_the_generated_damage_type_table() {
+    fn outside_border_resolves_and_is_bypasses_armor() {
+        let ty = lodestone_data::damage_types::DamageType::from_name("minecraft:outside_border")
+            .expect("minecraft:outside_border must be in the generated damage-type table");
+        let flags = lodestone_entity::DamageFlags::for_damage_type(ty);
         assert!(
-            lodestone_data::damage_types::DamageType::from_name("minecraft:outside_border").is_none(),
-            "if this starts resolving, route apply_border_damage through for_damage_type"
+            flags.bypasses_armor,
+            "the generated table records outside_border as bypasses_armor \
+             (crates/lodestone-data/src/generated/damage_types.rs); the pre-fix doc comment \
+             claimed it carried no bypass tags at all"
+        );
+        assert!(
+            !flags.bypasses_cooldown,
+            "and it is NOT bypasses_cooldown — see `apply_border_damage`'s doc comment for why \
+             the per-tick cadence is nonetheless left as it is"
+        );
+    }
+
+    /// **The magnitude gate for the routing**, and the only assertion here that
+    /// can tell the two flag hypotheses apart.
+    ///
+    /// [`PlayerVitals::apply_border_damage`] passes `Defenses::default()`, so with
+    /// zero armour `bypasses_armor` reduces nothing either way and every other
+    /// border-damage test in this module passes under **both** hypotheses. That is
+    /// a real exposure, not a nitpick: it is exactly why the wrong flags survived.
+    ///
+    /// So this drives the production flags through the production reduction
+    /// function with armour that *does* bite, and requires the result to land on
+    /// one of two numbers computed from outside this module:
+    ///
+    /// | hypothesis | expected |
+    /// |---|---|
+    /// | table flags (`bypasses_armor`) | `10.0` — armour skipped entirely |
+    /// | `DamageFlags::default()` | `3.0` — the figure `apply_damage_runs_the_full_armour_reduction_pipeline` pins for the same defenses |
+    ///
+    /// Both are asserted, the wrong one negatively, so a future change that
+    /// reverts the routing fails here rather than passing quietly.
+    #[test]
+    fn border_damage_flags_skip_armour_where_the_default_flags_would_not() {
+        const NO_BYPASS_HYPOTHESIS: f32 = 3.0;
+        let defenses = lodestone_entity::Defenses {
+            armor: 20.0,
+            armor_toughness: 8.0,
+            ..Default::default()
+        };
+        let flags = lodestone_entity::DamageFlags::for_damage_type(border_damage_type());
+
+        let dealt = lodestone_entity::apply_reductions(10.0, &defenses, flags).to_health;
+        assert_eq!(
+            dealt, 10.0,
+            "outside_border is bypasses_armor-tagged, so a fully-armoured player takes the \
+             raw amount"
+        );
+        assert_ne!(
+            dealt, NO_BYPASS_HYPOTHESIS,
+            "landing on {NO_BYPASS_HYPOTHESIS} would mean apply_border_damage is back on \
+             DamageFlags::default() and the table lookup was reverted"
+        );
+
+        // The control: the same defenses under the wrong hypothesis really do
+        // produce the other number, so the assertion above is separating two
+        // reachable outcomes rather than one outcome and one impossibility.
+        let unflagged = lodestone_entity::apply_reductions(
+            10.0,
+            &defenses,
+            lodestone_entity::DamageFlags::default(),
+        )
+        .to_health;
+        assert_eq!(
+            unflagged, NO_BYPASS_HYPOTHESIS,
+            "control: without bypasses_armor the same hit must reduce to \
+             {NO_BYPASS_HYPOTHESIS}, or this gate is comparing 10.0 against nothing"
         );
     }
 
