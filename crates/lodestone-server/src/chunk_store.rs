@@ -468,6 +468,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use lodestone_model::BlockPos;
+
     use super::*;
     use crate::block_entities::BlockEntityHandle;
     use crate::mobs::{ChunkWorld, MobHandle};
@@ -641,11 +643,27 @@ mod tests {
         area: (RangeInclusive<i32>, RangeInclusive<i32>),
         ticks: u32,
     ) -> Arc<TickClock> {
+        drive_tick_loop_with_block_entities(world, area, ticks, BlockEntityHandle::default()).await
+    }
+
+    /// [`drive_tick_loop`], with the registry supplied by the caller — the arm
+    /// the block-entity gates below need, since the whole question there is what
+    /// a *populated* registry makes the tick loop ask the store for.
+    ///
+    /// A separate entry point rather than a fourth parameter on
+    /// [`drive_tick_loop`] so the two column-generation gates above keep the
+    /// exact call they were measured with.
+    async fn drive_tick_loop_with_block_entities<W: ChunkSource + 'static>(
+        world: Arc<W>,
+        area: (RangeInclusive<i32>, RangeInclusive<i32>),
+        ticks: u32,
+        block_entities: BlockEntityHandle,
+    ) -> Arc<TickClock> {
         let clock = Arc::new(TickClock::new());
         tokio::spawn(run_tick_loop(
             MobHandle::new(ChunkWorld::new(REAL_MIN_Y, REAL_HEIGHT)),
             crate::mobs::LiveMobSource::default(),
-            BlockEntityHandle::default(),
+            block_entities,
             Arc::clone(&clock),
             world,
             BlockTickFeed::default(),
@@ -1213,5 +1231,464 @@ mod tests {
             per_column * 8
         );
         assert_eq!(store.generated(), 8, "each distinct column generated once");
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #503's block-entity lead: is the 20 Hz registry scan a *second*,
+    // CPU-side, distance-dependent term? See
+    // `docs/block-entity-tick-distance.md` for the full write-up. The counter
+    // is `CountingSource::per_chunk` for the *remote* column, and the two
+    // competing hypotheses are computed from constants below rather than
+    // compared as "more" and "less".
+    // ---------------------------------------------------------------------
+
+    /// The chunk a "walked away from" hopper sits in — 1,600 blocks out, the
+    /// same stroll length `docs/worldgen-store-distance-leak.md` measured its
+    /// memory term over, and far outside [`shell_tick_area`] so the random-tick
+    /// pass never touches it. Whether this column is resident is therefore
+    /// decided by the block-entity scan alone, which is the whole point.
+    const REMOTE_CHUNK: (i32, i32) = (100, 100);
+
+    /// A y inside [`CountingSource::full_height`]'s extent, so
+    /// `ChunkColumn::block_state` indexes in range.
+    const REMOTE_Y: i32 = 64;
+
+    fn remote_pos(chunk: (i32, i32)) -> BlockPos {
+        BlockPos::new(chunk.0 * 16 + 8, REMOTE_Y, chunk.1 * 16 + 8)
+    }
+
+    /// A registry holding one hopper at `chunk`, and nothing else.
+    ///
+    /// A hopper specifically, not any of the other four kinds: it is the **only**
+    /// variant whose tick reaches the world at all —
+    /// `tick_all_with_hopper_lock`'s `enabled` closure is called for
+    /// `BlockEntity::Hopper` and for nothing else, and that closure is the
+    /// `world.block_state` call the lead is about.
+    fn registry_with_one_hopper(chunk: (i32, i32)) -> BlockEntityHandle {
+        let handle = BlockEntityHandle::new();
+        handle.with(|registry| {
+            registry.insert(
+                remote_pos(chunk),
+                crate::block_entities::BlockEntity::Hopper(crate::hopper::Hopper::new()),
+            );
+        });
+        handle
+    }
+
+    fn generations_for(per_chunk: &PerChunk, chunk: (i32, i32)) -> u64 {
+        per_chunk
+            .lock()
+            .expect("per-chunk map poisoned")
+            .get(&chunk)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// **The subject.** A hopper whose column the player has walked away from
+    /// costs **one** column generation in total, not one per tick.
+    ///
+    /// # The two hypotheses, both computed outside the measurement
+    ///
+    /// `tick.rs`'s block-entity arm really does call `world.block_state` per
+    /// hopper, every tick, and `ChunkStore::block_state` really does regenerate
+    /// a whole column on a miss (`ensure` → `source.column`). Issue #503's lead
+    /// reads those two facts together and predicts **[`TICKS`]** generations of
+    /// the remote column — one per tick, ~50 ms each against a 50 ms budget.
+    ///
+    /// The competing prediction is **1**, and the reason is the line the lead
+    /// does not account for: *the miss is self-healing*. `ensure` inserts with
+    /// the newest stamp and `read` refreshes `last_used` on every hit, so a
+    /// position polled at 20 Hz is permanently among the most-recently-used
+    /// entries. `evict_down_to` takes the **minimum** stamp, so evicting this
+    /// column would require [`DEFAULT_CAPACITY`] *other* distinct columns to be
+    /// touched inside one 50 ms tick period. The 20 Hz scan does not merely fail
+    /// to evict the column — it **pins** it.
+    ///
+    /// So the two hypotheses are 1 and 52, a factor of [`TICKS`] apart, and this
+    /// gate lands on one of them. `without_retention_a_remote_hopper_is_a_cold_
+    /// column_every_single_tick` below is the same rig landing on the other, so
+    /// the instrument is known to be able to report 52.
+    #[tokio::test(start_paused = true)]
+    async fn a_walked_away_hopper_costs_one_column_generation_not_one_per_tick() {
+        let counting = CountingSource::full_height();
+        let calls = Arc::clone(&counting.calls);
+        let per_chunk = Arc::clone(&counting.per_chunk);
+        let store = Arc::new(ChunkStore::new(counting));
+
+        let clock = drive_tick_loop_with_block_entities(
+            Arc::clone(&store),
+            shell_tick_area(),
+            TICKS,
+            registry_with_one_hopper(REMOTE_CHUNK),
+        )
+        .await;
+
+        assert!(
+            clock.tick_count() >= u64::from(TICKS) - 1,
+            "precondition: the loop only advanced {} ticks of {TICKS}, so \"one generation\" \
+             would be trivially true",
+            clock.tick_count()
+        );
+
+        let remote = generations_for(&per_chunk, REMOTE_CHUNK);
+        assert_eq!(
+            remote, 1,
+            "the remote hopper's column {REMOTE_CHUNK:?} was generated {remote} times over \
+             {TICKS} ticks. 0 would mean the block-entity scan never reached the world at all \
+             and this gate measures nothing; {TICKS} is issue #503's lead — one cold column per \
+             tick; 1 is the store pinning the column it just polled."
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            EXPECTED_TICK_AREA_COLUMNS as u64 + 1,
+            "the whole session should cost the {EXPECTED_TICK_AREA_COLUMNS}-column tick area \
+             plus exactly one remote column"
+        );
+        assert_eq!(
+            store.evicted(),
+            0,
+            "precondition on the mechanism: 49 tick-area columns + 1 remote is far under \
+             {DEFAULT_CAPACITY}, so nothing should be evicted. If this is ever non-zero the \
+             pinning argument above needs re-deriving, not the assertion relaxing."
+        );
+    }
+
+    /// **The negative control, and it lands on the lead's own number.**
+    ///
+    /// `with_capacity(source, 0)` retains nothing, so every poll of the remote
+    /// hopper is a cold column — exactly the failure issue #503's lead
+    /// describes, reproduced as a real *configuration* of the shipped type
+    /// rather than a temporary neuter. Predicted **[`TICKS`]** (the
+    /// block-entity scan runs on every tick, unlike the random-tick pass, which
+    /// `INITIAL_RANDOM_TICK_DEFERRAL_TICKS` holds off), and that is what makes
+    /// the subject's `1` a measurement rather than an absence.
+    ///
+    /// Without this arm the subject is the *assertion* species of vacuity: a
+    /// registry that was never scanned, a hopper that was never ticked and a
+    /// closure that was never called would all also report a low number.
+    #[tokio::test(start_paused = true)]
+    async fn without_retention_a_remote_hopper_is_a_cold_column_every_single_tick() {
+        let counting = CountingSource::full_height();
+        let per_chunk = Arc::clone(&counting.per_chunk);
+        let store = Arc::new(ChunkStore::with_capacity(counting, 0));
+
+        drive_tick_loop_with_block_entities(
+            Arc::clone(&store),
+            shell_tick_area(),
+            TICKS,
+            registry_with_one_hopper(REMOTE_CHUNK),
+        )
+        .await;
+
+        let remote = generations_for(&per_chunk, REMOTE_CHUNK);
+        assert_eq!(
+            remote,
+            u64::from(TICKS),
+            "control: with retention off the remote hopper's column must be regenerated on \
+             every one of {TICKS} ticks, got {remote}. If this ever reports 1, retention has \
+             leaked into the control and the subject above is no longer measuring anything."
+        );
+    }
+
+    /// **The curve, in counter form: flat in distance.**
+    ///
+    /// The claim under test is that walking away introduces a term that grows
+    /// with distance. `world.block_state`'s cost has no coordinate in it — the
+    /// store is a `HashMap<(i32, i32), _>` and the LRU stamp is a counter — so
+    /// the prediction is the *same* number at every band, including one a
+    /// million blocks out, matching `docs/worldgen-store-distance-leak.md`'s
+    /// finding that per-column cost is itself flat to 1,048,576 blocks.
+    ///
+    /// The bands double as the control the walk investigation used (nine runs at
+    /// one distance gave a 1.01× spread): here the arms differ *only* in the
+    /// hopper's coordinate, so any spread at all is a distance term. A count has
+    /// no spread to explain away, which is why this is a counter and not a
+    /// timing.
+    #[tokio::test(start_paused = true)]
+    async fn the_registry_scan_costs_the_same_at_every_distance_from_the_tick_area() {
+        // 64 blocks (just outside the 49-column tick area) to 16,000,000.
+        const BANDS: [(i32, i32); 4] = [(4, 4), (100, 100), (10_000, 10_000), (1_000_000, 1_000_000)];
+
+        for chunk in BANDS {
+            let counting = CountingSource::full_height();
+            let calls = Arc::clone(&counting.calls);
+            let per_chunk = Arc::clone(&counting.per_chunk);
+            let store = Arc::new(ChunkStore::new(counting));
+
+            drive_tick_loop_with_block_entities(
+                Arc::clone(&store),
+                shell_tick_area(),
+                TICKS,
+                registry_with_one_hopper(chunk),
+            )
+            .await;
+
+            assert_eq!(
+                generations_for(&per_chunk, chunk),
+                1,
+                "band {chunk:?} ({} blocks out): the remote column must be generated exactly \
+                 once, as at every other band. A band-dependent count here is the \
+                 distance-dependent CPU term issue #503's lead predicts.",
+                chunk.0 * 16
+            );
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                EXPECTED_TICK_AREA_COLUMNS as u64 + 1,
+                "band {chunk:?}: total generations must be the tick area plus one, identically \
+                 at every distance"
+            );
+        }
+    }
+
+    /// **The arm that isolates the mechanism, and the one that says the lead is
+    /// real.** Once the store is over its ceiling, the 20 Hz-polled remote
+    /// column becomes a cold generation **once per random-tick pass** — on the
+    /// tick thread, against a 50 ms budget.
+    ///
+    /// # Why this arm exists
+    ///
+    /// Without it the subject above has a second, much weaker explanation: at
+    /// the default render distance the working set (289-column view + 49-column
+    /// tick area = 338) never reaches [`DEFAULT_CAPACITY`] at all, so "no
+    /// eviction" could be pure headroom rather than any property of the polling.
+    /// `with_capacity(source, EXPECTED_TICK_AREA_COLUMNS)` removes the headroom:
+    /// 49 tick-area columns plus one remote is 50 against a ceiling of 49.
+    ///
+    /// # A wrong prediction, kept
+    ///
+    /// This arm was written predicting **1**, on the argument that
+    /// `ChunkStore::read` refreshes `last_used` on every hit and `ensure`
+    /// inserts with the newest stamp, so a position polled at 20 Hz is
+    /// permanently among the most-recently-used entries and `evict_down_to`
+    /// (which takes the **minimum**) would always prefer a stale tick-area
+    /// column. It measured **12** and the argument is wrong, for a reason worth
+    /// keeping: the block-entity scan runs *once* per tick and the random-tick
+    /// pass then touches 49 columns *after* it, so by the end of a pass the
+    /// remote column's stamp is the oldest in the map, not the newest. Being
+    /// polled at 20 Hz does not pin a column when something else touches 49
+    /// columns in the same 50 ms. The pin only ever came from headroom.
+    ///
+    /// # The prediction, derived
+    ///
+    /// One cold generation on the first poll, then one per random-tick pass
+    /// thereafter — except the final pass's eviction has no following poll
+    /// inside the window, so `1 + (RANDOM_TICK_PASSES - 1)` =
+    /// [`RANDOM_TICK_PASSES`]. The three candidate values are therefore 1 (the
+    /// headroom regime the subject measures), 12 (this regime) and [`TICKS`]
+    /// (no retention at all), and this arm lands on the middle one.
+    #[tokio::test(start_paused = true)]
+    async fn an_over_capacity_store_makes_the_polled_column_cold_every_pass() {
+        let counting = CountingSource::full_height();
+        let per_chunk = Arc::clone(&counting.per_chunk);
+        let store = Arc::new(ChunkStore::with_capacity(
+            counting,
+            EXPECTED_TICK_AREA_COLUMNS,
+        ));
+
+        drive_tick_loop_with_block_entities(
+            Arc::clone(&store),
+            shell_tick_area(),
+            TICKS,
+            registry_with_one_hopper(REMOTE_CHUNK),
+        )
+        .await;
+
+        assert!(
+            store.evicted() > 0,
+            "precondition: a capacity of {EXPECTED_TICK_AREA_COLUMNS} against a \
+             {EXPECTED_TICK_AREA_COLUMNS}-column tick area plus one remote column must actually \
+             evict, or this arm is the same measurement as the subject and proves nothing"
+        );
+        let remote = generations_for(&per_chunk, REMOTE_CHUNK);
+        assert_eq!(
+            remote,
+            u64::from(RANDOM_TICK_PASSES),
+            "over capacity, the remote hopper's column must be cold once per random-tick pass \
+             ({RANDOM_TICK_PASSES}), got {remote}. 1 would mean the polling pins it (it does \
+             not — see this test's doc comment); {TICKS} would mean retention had stopped \
+             working entirely."
+        );
+    }
+
+    /// **The curve, and the threshold it turns on.** Cold generations per tick
+    /// are ~0 while the accumulated block-entity columns fit under
+    /// [`DEFAULT_CAPACITY`] alongside the tick area, and **one per entity per
+    /// tick** the moment they do not.
+    ///
+    /// This is the term issue #503's lead is really about, once the arms above
+    /// have located it. `BlockEntityRegistry` has no unload path, so the set of
+    /// positions the 20 Hz scan probes only ever grows with exploration. Each
+    /// probed position holds one column resident. So exploration does not make
+    /// any single call slower — it walks the *working set* across the store's
+    /// fixed ceiling, and the miss rate goes from 0 to 1 over a narrow band.
+    ///
+    /// # Both hypotheses computed from constants, and the boundary is exact
+    ///
+    /// The rig's resident set is `EXPECTED_TICK_AREA_COLUMNS + entities`. Below
+    /// the ceiling every column is generated exactly **once** for the whole
+    /// session, so remote generations total `entities`. Above it the access
+    /// pattern is a **cyclic** scan of `entities` positions through an LRU of
+    /// [`DEFAULT_CAPACITY`], which is LRU's worst case — by the time the scan
+    /// returns to a position it has touched every other one, so **every** probe
+    /// misses and the total is `entities × TICKS`.
+    ///
+    /// At `entities = UNDER` those are 400 and 20,800; at `entities = OVER` they
+    /// are 600 and 31,200. Four numbers, no fitting, and the two regimes are a
+    /// factor of [`TICKS`] apart rather than "more" and "less".
+    ///
+    /// Production's own threshold is lower than this rig's, because production
+    /// also holds a 289-column view: `512 - 289 - 49` = **174** distinct
+    /// hopper-bearing *chunks*, since only `BlockEntity::Hopper` probes the world
+    /// at all (see `sixteen_hundred_opaque_block_entities_never_reach_the_store`)
+    /// and hoppers sharing a chunk share one column.
+    ///
+    /// # This arm characterises a defect, it does not bless it
+    ///
+    /// The over-capacity band is **not** desired behaviour — it is issue #503's
+    /// block-entity lead, measured. If a fix lands (vanilla ticks block entities
+    /// per *loaded chunk*, so the scan should be bounded by the view rather than
+    /// by everything the registry ever saw) this band goes red, and the right
+    /// response is to rewrite it against the new bound, not to relax it. See
+    /// `docs/block-entity-tick-distance.md`.
+    #[tokio::test(start_paused = true)]
+    async fn the_miss_rate_crosses_from_zero_to_one_when_the_registry_outgrows_the_store() {
+        /// Comfortably under the ceiling: `49 + 400 = 449 <= 512`.
+        const UNDER: i32 = 400;
+        /// Over it: `49 + 600 = 649 > 512`.
+        const OVER: i32 = 600;
+
+        const _: () = assert!(EXPECTED_TICK_AREA_COLUMNS + UNDER as usize <= DEFAULT_CAPACITY);
+        const _: () = assert!(EXPECTED_TICK_AREA_COLUMNS + OVER as usize > DEFAULT_CAPACITY);
+
+        for (entities, over_capacity) in [(UNDER, false), (OVER, true)] {
+            let handle = BlockEntityHandle::new();
+            handle.with(|registry| {
+                for i in 0..entities {
+                    registry.insert(
+                        remote_pos((2_000 + i, 2_000 + i)),
+                        crate::block_entities::BlockEntity::Hopper(crate::hopper::Hopper::new()),
+                    );
+                }
+            });
+
+            // A shorter column than `full_height` for this arm alone: the
+            // over-capacity band generates ~31,200 columns, and at 192 KiB each
+            // that is allocation churn the measurement does not need. The count
+            // is what is under test, not the column's size.
+            let counting = CountingSource::sized(0, 128);
+            let calls = Arc::clone(&counting.calls);
+            let store = Arc::new(ChunkStore::new(counting));
+
+            drive_tick_loop_with_block_entities(
+                Arc::clone(&store),
+                shell_tick_area(),
+                TICKS,
+                handle,
+            )
+            .await;
+
+            let total = calls.load(Ordering::Relaxed);
+            let remote = total - EXPECTED_TICK_AREA_COLUMNS as u64;
+            // Printed as well as asserted: the doc quotes these, and a curve is
+            // more use to the next reader than a bare pass.
+            eprintln!(
+                "entities {entities:>4}  resident-set {:>4}  ceiling {DEFAULT_CAPACITY}  \
+                 remote generations {remote:>6}  evictions {:>6}  per tick {:>6.1}",
+                EXPECTED_TICK_AREA_COLUMNS + entities as usize,
+                store.evicted(),
+                remote as f64 / f64::from(TICKS)
+            );
+            if over_capacity {
+                let predicted = u64::from(entities as u32) * u64::from(TICKS);
+                assert!(
+                    remote >= predicted * 9 / 10,
+                    "over capacity ({entities} entities + \
+                     {EXPECTED_TICK_AREA_COLUMNS} tick area > {DEFAULT_CAPACITY}): a cyclic scan \
+                     through a smaller LRU must miss on essentially every probe, so remote \
+                     generations should approach {entities} × {TICKS} = {predicted}; got \
+                     {remote}. {entities} would mean the store was still absorbing them."
+                );
+                assert!(
+                    store.evicted() > 0,
+                    "precondition: the over-capacity band must actually evict"
+                );
+            } else {
+                assert_eq!(
+                    remote,
+                    u64::from(entities as u32),
+                    "under capacity ({entities} entities + {EXPECTED_TICK_AREA_COLUMNS} tick \
+                     area <= {DEFAULT_CAPACITY}): each column must be generated exactly once for \
+                     the whole session, so {entities} total. {} would be one per tick.",
+                    u64::from(entities as u32) * u64::from(TICKS)
+                );
+                assert_eq!(
+                    store.evicted(),
+                    0,
+                    "precondition: the under-capacity band must not evict, or it is not the \
+                     regime it claims to be"
+                );
+            }
+        }
+    }
+
+    /// The registry is scanned **unfiltered** — and the 1,608-of-1,613
+    /// unsimulated kinds issue #477 round-trips as
+    /// [`BlockEntity::Opaque`](crate::block_entities::BlockEntity::Opaque) reach
+    /// the world **zero** times regardless.
+    ///
+    /// `tick_all_with_hopper_lock` does not filter: it collects *every* key into
+    /// a fresh `Vec` and dispatches on the variant, so a vanilla world's whole
+    /// block-entity population is walked at 20 Hz. That is a real property and
+    /// worth pinning — but the cost of an `Opaque` entry is a `Vec` push, two
+    /// hash probes and an empty `tick_non_hopper` arm. **No coordinate of it
+    /// reaches the store**, which is what this gate measures: with #477's own
+    /// figure of 1,608 opaque entities scattered over distinct far-flung
+    /// columns, the store still generates only the 49-column tick area.
+    ///
+    /// The competing hypothesis is `49 + 1608`: if the scan probed the world per
+    /// entry — the shape the lead attributes to it — every one of those columns
+    /// would be cold.
+    #[tokio::test(start_paused = true)]
+    async fn sixteen_hundred_opaque_block_entities_never_reach_the_store() {
+        /// Issue #477's measured figure for a real vanilla world: 1,608 of its
+        /// 1,613 block entities are kinds this crate does not simulate.
+        const OPAQUE_ENTITIES: i32 = 1_608;
+
+        let handle = BlockEntityHandle::new();
+        handle.with(|registry| {
+            for i in 0..OPAQUE_ENTITIES {
+                // One per distinct column, all outside the tick area, so a
+                // per-entry world probe would be a distinct cold generation and
+                // could not be absorbed by the store.
+                registry.insert(
+                    remote_pos((1_000 + i, 1_000 + i)),
+                    crate::block_entities::BlockEntity::Opaque {
+                        id: "minecraft:chest".to_owned(),
+                        nbt: lodestone_core::Nbt::End,
+                    },
+                );
+            }
+        });
+        assert_eq!(
+            handle.with(|registry| registry.len()),
+            OPAQUE_ENTITIES as usize,
+            "precondition: the registry must really hold all {OPAQUE_ENTITIES} entries, or the \
+             count below is right for the wrong reason"
+        );
+
+        let counting = CountingSource::full_height();
+        let calls = Arc::clone(&counting.calls);
+        let store = Arc::new(ChunkStore::new(counting));
+
+        drive_tick_loop_with_block_entities(Arc::clone(&store), shell_tick_area(), TICKS, handle)
+            .await;
+
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            EXPECTED_TICK_AREA_COLUMNS as u64,
+            "the tick area and nothing else. {} would mean the unfiltered scan probes the \
+             world per entry.",
+            EXPECTED_TICK_AREA_COLUMNS as u64 + OPAQUE_ENTITIES as u64
+        );
     }
 }

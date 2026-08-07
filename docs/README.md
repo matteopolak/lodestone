@@ -108,6 +108,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   in degree. Today: chests (single, double left, double right; every material; the lid
   animation), skull/head geometry (five of vanilla's seven types), and the bell
   body/rim (see [Bell](#bell)).
+- [The block-entity scan is a cold-column term, but not a distance one](./block-entity-tick-distance.md) —
+  The measured resolution of the block-entity lead in [issue
+  #503](https://github.com/matteopolak/lodestone/issues/503): whether
+  `BlockEntityRegistry`'s unfiltered 20 Hz scan is a **second, CPU-side,
+  distance-dependent** cause of the game degrading as you walk from spawn. The
+  cold-column mechanism is real and costs **610 column regenerations per tick** past a
+  threshold, but it is flat in distance — what crosses the threshold is registry
+  size, not travel.
 - [Block outline and interaction shapes](./block-outline-shapes.md) —
   Per-block-state `BlockStateBase.getShape` (the **outline**) and
   `BlockStateBase.getInteractionShape`, for protocol 776 (Minecraft 26.2), dumped from
