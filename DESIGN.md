@@ -3274,6 +3274,22 @@ D5's "~2.2M squared-distance comparisons per pre-ore chunk" measured **2.37M** (
 | C_cold (first column, fresh region) | **883 ms** | ≤ 8 ms | 110× over |
 | vegetation stage alone | **52.8 ms** | ~1 ms decision threshold | 53× over |
 
+**Follow-up correction (U3, `HEAD` at `55909f4`): the table above was taken counters-ON, which this harness's own doc forbids for a timing, and on the nightly whose release profile was broken. Both were re-taken; the figure barely moved, and *that* is the finding.** The row above stands as what was measured then — it is not rewritten — but the number later units are held to is the one below. Re-taken with `gen-counters` **off**, release, on the pinned `nightly-2026-08-07` (rustc `84b36a78a`), same bench binary, same seed 42 / 12×12 / 100-interior definition, machine quiet (`Swapouts` **971378 → 971378, flat across all three runs**; compressor pages *fell* 81642 → 80672; no other cargo invocation):
+
+| run | C_ss | C_cold | vegetation stage | steady-state allocs/column |
+|---|---|---|---|---|
+| 1 | 101.68 ms | 867.1 ms | 63.42 ms | **905,459** |
+| 2 | 97.78 ms | 851.8 ms | 63.77 ms | **905,459** |
+| 3 | 95.99 ms | 822.6 ms | 52.28 ms | **905,459** |
+| **median** | **97.8 ms** (98× over) | **852 ms** (107× over) | 63.4 ms | 905,459 |
+
+**The expectation going in was that counters-off would measure materially *lower*** — the counters add relaxed atomics inside `block_at` (98,304 calls per chunk fill) and `next_bits`. It did not. 96.8 ms sits *inside* the counters-off spread (95.99–101.68, 5.6% peak-to-peak), so **the counter overhead is below this instrument's noise floor and cannot be resolved by it at all.** Two consequences, and the second is the one that matters:
+
+- **No later unit's acceptance criterion changes.** C_ss moves 96.8 → 97.8 ms and the ratio 97× → 98×; the sub-ms verdict, the structural-waste-vs-parity-floor decomposition, and the per-draw argument below are all untouched. A 1 ms shift on a 97 ms number cannot reach any of them.
+- **This bench's *timings* have a precision of roughly ±3%, and its `vegetation stage` figure is far worse than that — 52.28…63.77 ms, a 22% peak-to-peak spread on three runs of the identical binary, with nothing else on the machine.** Meanwhile the allocation counter read **905,459 exactly, three times out of three, to the digit.** That is CLAUDE.md's "prefer a counter over a duration" arriving as a measurement rather than a maxim, on this exact file, within one session: the counter reproduces bit-for-bit and can gate; the duration beside it cannot distinguish a 20% regression from Tuesday. **Do not state a vegetation-stage timing to three significant figures from a single run — and do not build any unit's acceptance criterion on one.** U3's criterion is the String counter for precisely this reason.
+
+One caveat recorded rather than papered over: all three runs (and, as far as can be told, U2's) execute the whole `generation` binary, so ~2 min of other one-shot diagnostics precede C_ss and pre-heat the machine identically in every arm. That makes the arms comparable, which is what was needed here; it does not make any of these numbers a cold-cache figure.
+
 Per-stage share of a served column: vegetation **52.0%**, ore **22.2%**, shape 9.9%, carve 6.8%, surface 3.1%, top_layer 2.1%, materialize 2.0%, aquifer 1.6%, biome 0.3%, intern 0.0%.
 
 **The one number that decides whether the plan's optimism is justified is not any of the above — it is cost per RNG draw.** The vegetation walk draws **11,034** RNG values per column, and the plan is correct that this count is spec-bound and untouchable at parity. But it costs **4,781 ns per draw** — roughly **14,000 CPU cycles to service one random number**. A spec-bound draw whose consequences were evaluated against flat arrays and bitsets should cost tens to hundreds of cycles. So the 97× gap is **not** made of irreducible parity-bound work: it is one to two orders of magnitude of per-draw overhead sitting on top of a draw count nobody proposes to change. That reframes Q3's verdict — sub-ms is out of reach by tuning, and the question is entirely whether U3/U6/U7/U8 delete enough structure. Nothing measured here argues for weakening parity, and the recourse is not needed yet.
