@@ -455,10 +455,22 @@ fn view_walk_curve() {
 
     // Non-degeneracy: the walk must have driven the store past its ceiling, or
     // this printed a flat line about a regime it never entered.
+    //
+    // **`len + evicted`, not `len`** — the same form `age_curve` above uses, and
+    // it is load-bearing rather than cosmetic. Until #503 was fixed, `open_view`
+    // could not reach the retention check, so `len` alone *was* the number of
+    // entries the walk wanted and this read 2,541. Now that reclamation runs,
+    // `len` plateaus at the ceiling by design and a `len`-only assertion would
+    // fail precisely *because* the defect it was written to expose is gone. The
+    // quantity that still grows — and the one the question "did this walk reach
+    // the retention path?" is actually about — is how many entries the walk
+    // asked for, which is `len + evicted`.
     assert!(
-        generator.store_len() > STORE_RETENTION_UNDER_TEST,
-        "store_len {} never exceeded the {STORE_RETENTION_UNDER_TEST}-entry ceiling",
-        generator.store_len()
+        generator.store_len() + generator.store_evictions() > STORE_RETENTION_UNDER_TEST,
+        "the walk wanted only {} live + {} evicted entries, under the \
+         {STORE_RETENTION_UNDER_TEST}-entry ceiling — it never exercised retention",
+        generator.store_len(),
+        generator.store_evictions(),
     );
 }
 

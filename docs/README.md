@@ -1332,11 +1332,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   reduction, with every parity gate byte-identical.
 - [Walking away from spawn: the staged store's dead retention ceiling](./worldgen-store-distance-leak.md) —
   The measured diagnosis of a player-visible defect — the game getting steadily
-  worse the further you walk from spawn. Per-column generation cost is **flat in
-  distance from the origin**; what grows is *memory*. `lodestone-worldgen`'s staged
-  chunk store has a documented 512-entry retention ceiling that is **never enforced on
-  the generation path**, so the store grows linearly and without bound at **21 entries
-  (~7.9 MiB) per chunk of travel** for a normal 17×17 view. The instrument is
+  worse the further you walk from spawn — **and the record of the fix that closed
+  it** ([#503](https://github.com/matteopolak/lodestone/issues/503)). Per-column
+  generation cost is **flat in distance from the origin**; what grew was *memory*.
+  `lodestone-worldgen`'s staged chunk store had a documented 512-entry retention
+  ceiling that was **never enforced on the generation path**, so the store grew
+  linearly and without bound at **21 entries (~7.9 MiB) per chunk of travel** for a
+  normal 17×17 view. The instrument is
   [`crates/lodestone-server/tests/walk_distance_curve.rs`](../crates/lodestone-server/tests/walk_distance_curve.rs).
 - [The bundled 26.2 structure corpus (worldgen phase S-data)](./worldgen-structure-corpus.md) —
   The complete vanilla 26.2 structure dataset, extracted verbatim from the server jar
