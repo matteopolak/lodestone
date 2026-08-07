@@ -247,6 +247,15 @@ supposed to produce.
 The end-to-end recipe that found #75's 2.08× win, now a repeatable tool instead of
 tribal knowledge in a closed issue's writeup.
 
+> **Verified against `samply` 0.13.1** (`samply --version`), on a real capture, 2026-08-07.
+> The script parses samply's saved-profile format, which is not ours and has already moved
+> underneath us once — so the version is recorded here to make the next drift
+> *attributable* rather than a mystery. **After upgrading samply, run the gate:**
+>
+> ```bash
+> python3 scripts/test-profile-cost-table.py
+> ```
+
 1. **Build with debug info in release.** Already the default here --
    `[profile.release] debug = 2` is committed in the root `Cargo.toml` specifically for
    this (`samply`/Instruments profiling). A plain `cargo build --release` already
@@ -282,13 +291,67 @@ tribal knowledge in a closed issue's writeup.
    the one `--unstable-presymbolicate` actually symbolicated against.
 
 `scripts/profile-cost-table.py --help` has the option reference; its module doc covers
-the join in full (`profile["shared"].funcTable/frameTable/stackTable/resourceTable`,
-`profile["libs"][i].debugName`, and the sidecar's `data[].symbol_table`/
-`known_addresses`/`string_table`, all confirmed against `fxprof-processed-profile`'s and
-samply's own source rather than assumed from the on-disk shape of one capture). Verified
-against a hand-built fixture profile + sidecar with a known expected answer (not a real
-capture -- this machine's sandbox has no GPU session to profile) — see the script's own
-`--help` example for the exact invocation shape a real session uses.
+the join in full (both table layouts, `profile["libs"][i].debugName`, and the sidecar's
+`data[].symbol_table`/`known_addresses`/`string_table`).
+
+### How this workflow broke, and what now stops it (U20)
+
+The script shipped reading exactly one profile shape, derived from
+`fxprof-processed-profile`'s source rather than from a capture. Every `samply` 0.13.1
+capture therefore died on `KeyError: 'shared'`, and **two separate agents (#496, #498)
+hit it independently before it was fixed** — while `docs/roadmap/benchmarks.md` went on
+documenting it as *the* workflow. Four distinct defects, all confirmed against a real
+0.13.1 capture:
+
+| # | defect | how it failed |
+|---|---|---|
+| 1 | read only the hoisted `profile["shared"]` tables | `KeyError: 'shared'` — **loud** |
+| 2 | `stackTable.prefix` read as `prefixOffset` | **silent wrong answer** (below) |
+| 3 | join documented on address alone | **silent misattribution** across libraries |
+| 4 | sidecar spelling | already correct — `p.json.syms.json`, both spellings tried |
+
+**The two layouts.** samply carries `stackTable`/`frameTable`/`funcTable`/
+`resourceTable`/`stringArray` either **per thread** (`preprocessedProfileVersion`
+absent or ≤ 55) or **hoisted** into `profile["shared"]` (≥ 56). **samply 0.13.1 emits
+the per-thread form and no `preprocessedProfileVersion` key at all** (`meta.version: 24`),
+so *absent means per-thread*, not unknown. Dispatch is on the version, never on
+`"shared" in profile`: a presence check silently picks a branch when the format moves,
+and in the per-thread layout **function indices are not comparable across threads**, so
+a wrongly-picked branch reports a plausible table built from the wrong thread's indices.
+A version above the script's `MAX_KNOWN_PROFILE_VERSION`, or a shape contradicting its
+own version, is a hard error naming the version.
+
+**`prefix` vs `prefixOffset` is the trap worth remembering**, because it is the one that
+does not crash. `prefix[i]` is the parent's *index* (`null` at the root); `prefixOffset[i]`
+is a *delta* (parent = `i - offset`, `0` at the root). Measured on the committed fixture:
+reading one as the other leaves the **self-time table byte-identical** — a leaf is a leaf
+whichever way you walk upward — while the **inclusive table silently loses the root frame**.
+A gate asserting only self time is vacuous against this entire class, which is why
+`scripts/test-profile-cost-table.py` asserts both and keeps the wrong reading as an
+executed control.
+
+**The join key is `(library, address)`.** `known_addresses` are library-relative, so
+every library's `.text` starts at a small RVA and collisions across libraries are
+routine. An address-only join does not fail — it files cost under whichever library was
+indexed last. The gate builds a two-library fixture colliding at RVA `0x1000`, joins it
+on address alone, and asserts all 100 units land on the *wrong* symbol; if the fixture
+ever stopped colliding, that control would report itself premise-false instead of
+quietly passing.
+
+**The gate.** `python3 scripts/test-profile-cost-table.py` — stdlib only, no pytest.
+20 checks over three committed fixtures in `scripts/fixtures/profile-cost-table/`: a
+**real samply 0.13.1 capture** subsampled to 311 samples (~3 KB), plus two synthetic
+colliding profiles, one per layout. The real capture's subject is a 3-function probe
+whose `gamma` calls `alpha(n)` and `beta(n/4)`, so the expected **4:1 leaf ratio
+originates outside this code entirely** — that is what separates "the join did not
+crash" from "the join attributed to the right symbols"; the measured ratio is 5.01,
+against 0.25 for the swapped-attribution hypothesis. Every fix is mutation-tested:
+seven broken copies of the script (via `PROFILE_COST_TABLE_PATH`, which points the
+suite at a copy so nothing in the shared checkout is edited) each turn the suite red,
+and the layout mutation reproduces the original `KeyError: 'shared'` exactly.
+
+**It is not yet wired into `cargo test`** — it is a Python script and no crate owns it.
+Run it after a samply upgrade, or when touching the script.
 
 **No profiling data is committed by this tooling.** `profile.json.gz` and its sidecar
 are local, one-off artifacts of a specific investigation; check `git status` before

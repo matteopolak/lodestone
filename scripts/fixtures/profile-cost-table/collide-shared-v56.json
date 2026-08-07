@@ -1,0 +1,239 @@
+{
+ "counters": [],
+ "libs": [
+  {
+   "arch": "arm64",
+   "breakpadId": "AAAA0000AAAA0000AAAA0000AAAA00000",
+   "codeId": "AAAA0000AAAA0000AAAA0000AAAA0000",
+   "debugName": "liba",
+   "debugPath": "/fixture/liba",
+   "name": "liba",
+   "path": "/fixture/liba"
+  },
+  {
+   "arch": "arm64",
+   "breakpadId": "BBBB0000BBBB0000BBBB0000BBBB00000",
+   "codeId": "BBBB0000BBBB0000BBBB0000BBBB0000",
+   "debugName": "libb",
+   "debugPath": "/fixture/libb",
+   "name": "libb",
+   "path": "/fixture/libb"
+  }
+ ],
+ "meta": {
+  "categories": [
+   {
+    "color": "grey",
+    "name": "Other",
+    "subcategories": [
+     "Other"
+    ]
+   }
+  ],
+  "interval": 1.0,
+  "markerSchema": [],
+  "processType": 0,
+  "product": "u20-fixture",
+  "sampleUnits": {
+   "eventDelay": "ms",
+   "threadCPUDelta": "us",
+   "time": "ms"
+  },
+  "stackwalk": 1,
+  "startTime": 0,
+  "version": 24
+ },
+ "pages": [],
+ "preprocessedProfileVersion": 56,
+ "profilerOverhead": [],
+ "shared": {
+  "frameTable": {
+   "address": [
+    -1,
+    -1,
+    -1
+   ],
+   "category": [
+    0,
+    0,
+    0
+   ],
+   "column": [
+    null,
+    null,
+    null
+   ],
+   "func": [
+    0,
+    1,
+    2
+   ],
+   "inlineDepth": [
+    0,
+    0,
+    0
+   ],
+   "innerWindowID": [
+    null,
+    null,
+    null
+   ],
+   "length": 3,
+   "line": [
+    null,
+    null,
+    null
+   ],
+   "nativeSymbol": [
+    null,
+    null,
+    null
+   ],
+   "subcategory": [
+    0,
+    0,
+    0
+   ]
+  },
+  "funcTable": {
+   "columnNumber": [
+    null,
+    null,
+    null
+   ],
+   "fileName": [
+    null,
+    null,
+    null
+   ],
+   "isJS": [
+    false,
+    false,
+    false
+   ],
+   "length": 3,
+   "lineNumber": [
+    null,
+    null,
+    null
+   ],
+   "name": [
+    0,
+    1,
+    2
+   ],
+   "relevantForJS": [
+    false,
+    false,
+    false
+   ],
+   "resource": [
+    0,
+    1,
+    -1
+   ]
+  },
+  "resourceTable": {
+   "host": [
+    null,
+    null
+   ],
+   "length": 2,
+   "lib": [
+    0,
+    1
+   ],
+   "name": [
+    0,
+    1
+   ],
+   "type": [
+    1,
+    1
+   ]
+  },
+  "stackTable": {
+   "category": [
+    0,
+    0,
+    0
+   ],
+   "frame": [
+    2,
+    0,
+    1
+   ],
+   "length": 3,
+   "prefixOffset": [
+    0,
+    1,
+    1
+   ],
+   "subcategory": [
+    0,
+    0,
+    0
+   ]
+  },
+  "stringArray": [
+   "0x1000",
+   "0x1000",
+   "fixture_plain_main"
+  ]
+ },
+ "threads": [
+  {
+   "isMainThread": true,
+   "markers": {
+    "category": [],
+    "data": [],
+    "endTime": [],
+    "length": 0,
+    "name": [],
+    "phase": [],
+    "startTime": []
+   },
+   "name": "main",
+   "nativeSymbols": {
+    "address": [],
+    "functionSize": [],
+    "length": 0,
+    "libIndex": [],
+    "name": []
+   },
+   "pausedRanges": [],
+   "pid": "1",
+   "processName": "u20fix",
+   "processType": "default",
+   "registerTime": 0,
+   "samples": {
+    "length": 3,
+    "stack": [
+     1,
+     2,
+     2
+    ],
+    "threadCPUDelta": [
+     10,
+     20,
+     70
+    ],
+    "time": [
+     0.0,
+     1.0,
+     2.0
+    ],
+    "timeDeltas": [
+     1.0,
+     1.0,
+     1.0
+    ],
+    "weight": null,
+    "weightType": "samples"
+   },
+   "showMarkersInTimeline": false,
+   "tid": 1,
+   "unregisterTime": null
+  }
+ ]
+}
