@@ -5,9 +5,17 @@
 //! name, and the legacy positional factory uses Java's `String::hashCode`. Both
 //! are reproduced here from their public specifications (RFC 1321 and the
 //! documented `31*h + c` polynomial) so no external dependency is needed.
+//!
+//! Those two are **parity** hashes: they reproduce a value vanilla also
+//! computes, so their output is load-bearing to the byte. [`fast`] is the
+//! opposite kind of thing — a container accelerator whose output is load-bearing
+//! for nothing — and it carries the ordering argument that has to hold before
+//! any map is switched to it. Do not reach for one when you meant the other.
 
+pub mod fast;
 mod md5;
 
+pub use fast::{FastBuildHasher, FastHasher, FastMap, FastSet};
 pub use md5::md5;
 
 /// Java's `String::hashCode`: `h = 31*h + c` over UTF-16 code units, with

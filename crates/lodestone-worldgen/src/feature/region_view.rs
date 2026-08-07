@@ -104,8 +104,9 @@
 //! contention [`crate::overworld::store`] exists to delete; if this ever needs
 //! scratch reuse, it goes in a `thread_local` free-list.
 
-use std::collections::HashMap;
 use std::sync::Arc;
+
+use lodestone_worldgen_core::hash::FastMap;
 
 use crate::dense_grid::DenseBlockGrid;
 use crate::interner::{StateId, StateInterner};
@@ -160,7 +161,18 @@ pub struct RegionView<'a> {
     /// Writes made through this view, keyed local. Sparse: decoration writes a
     /// few thousand cells per column against a 884,736-cell region, which is
     /// the whole reason the region does not need materialising.
-    overlay: HashMap<(i32, i32, i32), StateId>,
+    ///
+    /// [`FastMap`], not the default hasher. This was the single hottest hash
+    /// consumer in the whole pipeline when U17 profiled it — **39.5% of all
+    /// SipHash time**, because ore placement probes it on every read and insert
+    /// on every write, and `reserve_rehash` showed up on top of that as it grew.
+    ///
+    /// Re-hashing it is safe *specifically* because
+    /// [`Self::centre_writes_in_scan_order`] sorts by the full key rather than
+    /// trusting iteration order — see the ordering argument on
+    /// [`lodestone_worldgen_core::hash::fast`], and the doc on that method,
+    /// which was already written to defend against exactly this.
+    overlay: FastMap<(i32, i32, i32), StateId>,
     interner: Arc<StateInterner>,
 }
 
@@ -198,7 +210,7 @@ impl<'a> RegionView<'a> {
             origin_z: centre_cz * 16,
             min_y,
             height,
-            overlay: HashMap::new(),
+            overlay: FastMap::default(),
             interner,
         }
     }
@@ -222,7 +234,7 @@ impl<'a> RegionView<'a> {
             origin_z: 0,
             min_y,
             height,
-            overlay: HashMap::new(),
+            overlay: FastMap::default(),
             interner: Arc::clone(grid.interner()),
         }
     }
