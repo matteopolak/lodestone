@@ -111,9 +111,12 @@ To move code between these files:
 
 ## The leaf sub-crate, and a correction to the plan
 
-U16's third phase was to extract `{hash, math, rng, noise, density}` as a
-`lodestone-worldgen-core` leaf crate. **It was not done, and the plan's stated premise for it
-is wrong.** Both halves of that matter, so here is the measurement.
+U16's third phase extracted the numeric core as the `lodestone-worldgen-core` leaf crate —
+**18 files, 4,372 lines, and the plan's stated set for it was wrong.** Phases A and B measured
+the correction and handed Phase C off rather than executing it, because the fix needs edits
+*outside* `crates/lodestone-worldgen/**`. Phase C then landed the extraction. Both halves matter,
+so here is the measurement, followed by what the landing found that the correction did not
+predict.
 
 The plan records a `use crate::` scan concluding "a closed set — `math` imports nothing
 crate-internal, `rng` only `hash`, `noise` only `math`/`rng`, `density` only
@@ -137,7 +140,25 @@ crate boundary — extracting the plan's five modules as written would put 8 cal
 new crate pointing back at the old one.
 
 The set that *is* closed is the same five **plus `counters`** — measured zero code edges out,
-~4,372 lines. That is the extraction to do, and it is mechanical.
+4,372 lines. That is the extraction that was done, and it was mechanical.
+
+**Re-measured independently at Phase C before moving anything, and the table above reproduced
+exactly**: 6 distinct `crate::` targets in code (`rng` 11, `counters` 8, `math` 6, `density` 6,
+`noise` 5, `hash` 2 call sites), every one of them *inside* the set, and 14 doc-comment
+references pointing out of it. The re-run also turned up two doc-only edges the first scan did
+not list (`crate::interner`, 2 mentions in `counters.rs`) — which changes nothing, and is worth
+recording only because it shows the code/doc split is the whole difficulty here: the classifier,
+not the grep.
+
+The proof that it was a pure move is stronger than Phases A and B could manage. Those split one
+file into several and so had to add `mod`/`use`/visibility plumbing, leaving a line-multiset
+comparison as the best available evidence. Phase C moved whole files, so the concatenation of the
+18 files is **byte-identical** before and after — same MD5, 0 lines lost, 0 gained. The control
+still matters and still ran: corrupting one constant in `mix_stafford13` made the comparison
+report exactly 1 lost line and exit non-zero, and the first attempt at that control **silently
+did nothing** because the `sed` pattern did not match the real source line, reporting a clean
+PASS that measured nothing. Assert the corrupted file's hash actually changed before believing a
+control fired.
 
 Two consequences worth carrying forward:
 
@@ -148,12 +169,69 @@ Two consequences worth carrying forward:
   living in `counters`, re-creates the very `counters -> density` edge it was meant to remove,
   as a dev-dependency. With `counters` inside the core crate instead, the edge is intra-crate
   and there is nothing to fix.
-- **A crate split needs three gates a file split structurally cannot fail**: `just check-seam`,
-  `cargo xtask check-isolation` (wasm confinement) and `cargo xtask check-connected`
-  (the plugins→engine dependency direction). It also needs a new workspace member in the root
-  `Cargo.toml` and the `gen-counters` feature forwarded from `lodestone-worldgen` to the new
-  crate — both **outside** `crates/lodestone-worldgen/**`. U16 was scoped as a pure move inside
-  that directory, so this is a hand-off rather than a widening.
+- **A crate split needs gates a file split structurally cannot fail**: `just check-seam`,
+  `cargo xtask check-isolation`, `cargo xtask check-connected` and `cargo xtask wasm-check`.
+  **Two of the parentheticals this bullet used to carry were wrong**, and the wrong labels are
+  the more useful record: `check-isolation` enforces *protocol version crate* deletability, not
+  wasm confinement; `check-connected` enforces *reachability from shipped binary/cdylib roots*,
+  not the plugins→engine direction; wasm confinement is `wasm-check`'s job. Read each command's
+  own `--help` line rather than a summary of it — including this one.
+
+**What the landing found that the correction did not predict.** Five things, and three of them
+would have shipped silently:
+
+- **No root `members` edit was needed at all.** `members` uses the glob `crates/lodestone-*`, so
+  `crates/lodestone-worldgen-core` joined the workspace by existing. The hand-off above billed
+  this as one of the two out-of-directory edits; it is not one.
+- **A root `[profile.dev]` edit *was* needed, and nothing would have reported its absence.**
+  `[profile.dev.package.lodestone-worldgen] opt-level = 2` exists because it took the 144-chunk
+  sweep from 203.42s to 27.13s — and the arithmetic that buys is precisely what moved out.
+  `[profile.dev.package."*"]` matches only **non-workspace** packages, so without a matching
+  entry for the new crate it builds at `opt-level = 0` and the sweep regresses ~7×. No health
+  check calls that a failure; it calls it a slow suite. **When a crate splits, grep the root
+  manifest for the old crate's name** — profile overrides are per-package and do not follow code.
+- **Zero `use`-path edits and zero visibility bumps across all 4,372 moved lines**, which is why
+  this phase is a cleaner move than A or B. All six modules are crate-*root* modules in both the
+  old and the new crate, so every `crate::density::…`/`super::…` path kept resolving verbatim.
+  The five `pub(crate)` items (all in `rng/`) are used only inside the set, and `mix_stafford13`
+  already had a `mix_stafford13_pub` alias for the parity test. It compiled on the first attempt.
+- **The `gen-counters` forward is the one genuinely dangerous edit, and it needs its own gate.**
+  `counters.rs` now lives in the core crate, so the `#[cfg(feature = "gen-counters")]` that picks
+  live hooks over inert ones is evaluated in a *different crate* from the one callers pass the
+  flag to. `lodestone-worldgen`'s entry must read
+  `gen-counters = ["lodestone-worldgen-core/gen-counters"]`. Drop the forward and the failure is
+  **silent and safe-looking**: the parent still compiles, still accepts `--features
+  gen-counters`, `cfg!(feature = "gen-counters")` in its own bench still reads true, and every
+  counter reads 0 — which would make every counter-expressed acceptance criterion in the plan
+  vacuous. `crates/lodestone-worldgen/tests/gen_counters_forward.rs` is the gate: it drives real
+  draws through `WorldgenRandom::next_bits` via the parent's re-export and predicts the exact
+  attribution (4 in `Other`, 7 in `Vegetation`, 11 total) rather than asserting non-zero, and it
+  asserts `Snapshot::default()` with the feature off so the 11 is evidence and not a constant.
+  De-forwarding the feature makes it fail with that diagnostic — verified, not described.
+- **`check-isolation`, `check-connected` and `wasm-check` were all already red at `4be59556`**
+  (9, 9 and 6 pre-existing failures). An absolute verdict from any of them is therefore useless
+  here; the only usable evidence is a **before/after diff of the failure set**, which came back
+  byte-identical, with the new crate named in none of them. Baseline them in a second detached
+  worktree before touching anything — and note `check-connected` reporting 9 unreachable crates
+  is its own proof the detector fires, which is what makes the new crate's absence from that list
+  mean something.
+
+**Known cost, accepted deliberately: 14 broken intra-doc links.** The moved files carry 14
+doc-comment references to modules that stayed behind (`crate::feature::vegetation`,
+`crate::interner`, `crate::biome`, `crate::overworld`, `crate::aquifer`, `crate::compose`). They
+were left verbatim, because rewriting them is 14 non-move lines in a diff whose only review
+mechanism is that it has none, and there is no target that would resolve anyway — the core crate
+cannot depend on its parent. They are rustdoc warnings, invisible to all four health checks.
+Fix them in a later, ordinary commit if they bother you; do not fix them inside a pure move.
+
+**Where the tests stayed.** All 13 `*_parity` binaries remain in `lodestone-worldgen/tests/`
+(12) and `lodestone-worldgen-parity/tests/` (1) and drive the numeric core through the parent's
+re-exports. Their JVM fixture dumps are resolved relative to `CARGO_MANIFEST_DIR`, so moving the
+binaries would have meant moving fixtures and rewriting paths — logic changes inside a pure move.
+The consequence is that the plan's "the leaf is independently testable" benefit is only partly
+realised: the core crate's own `#[cfg(test)]` unit tests moved with it and do run standalone, but
+the fixture-backed parity gates still require building the parent. Moving them is a clean
+follow-up unit, not part of this one.
 
 U4 has a stake in this specifically: the plan wants U4's new `engine/` born inside the leaf
 crate rather than moved there later, so U4 should not inherit the five-module figure.
@@ -164,7 +242,15 @@ None. This is a source layout; no feature flag, env var or build setting selects
 
 ## Dependencies
 
-Internal only, and the split did not add one. `overworld/` depends on the crate's `aquifer`,
+One workspace edge, added by Phase C: `lodestone-worldgen` → `lodestone-worldgen-core`, a plain
+path dependency (not a `[workspace.dependencies]` alias, matching how `lodestone-server` spells
+its dependency on `lodestone-worldgen`). The core crate's own only non-`std` dependency is
+`serde_json`, which `density`'s data layer needs; keeping it a leaf is the point of it.
+
+No *module* edge changed. `overworld/` depends on `aquifer`,
 `biome`, `carver`, `compose`, `counters`, `dense_grid`, `density`, `feature`, `interner`, `rng` and
-`surface` modules exactly as `overworld.rs` did; `feature/vegetation/` on `density::Resolver`,
+`surface` exactly as `overworld.rs` did — the last six of those now resolve through
+`lib.rs`'s `pub use lodestone_worldgen_core::{counters, density, hash, math, noise, rng}`, so
+every path a caller already spelled, inside the crate or outside it, is unchanged;
+`feature/vegetation/` on `density::Resolver`,
 `feature::{BlockPos, IntProvider}`, `interner` and `rng`.
