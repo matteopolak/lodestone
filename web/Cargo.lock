@@ -2091,6 +2091,7 @@ version = "0.1.0"
 dependencies = [
  "lodestone-core",
  "lodestone-data",
+ "lodestone-game",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-server",
@@ -2144,6 +2145,14 @@ dependencies = [
 
 [[package]]
 name = "lodestone-worldgen"
+version = "0.1.0"
+dependencies = [
+ "lodestone-worldgen-core",
+ "serde_json",
+]
+
+[[package]]
+name = "lodestone-worldgen-core"
 version = "0.1.0"
 dependencies = [
  "serde_json",

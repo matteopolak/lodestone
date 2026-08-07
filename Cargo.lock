@@ -2962,6 +2962,7 @@ dependencies = [
  "lodestone-world",
  "lodestone-worldgen",
  "serde_json",
+ "sha2",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
@@ -3201,7 +3202,15 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "lodestone-server",
+ "lodestone-worldgen-core",
  "memory-stats",
+ "serde_json",
+]
+
+[[package]]
+name = "lodestone-worldgen-core"
+version = "0.1.0"
+dependencies = [
  "serde_json",
 ]
 
