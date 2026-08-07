@@ -208,8 +208,13 @@ pub struct Snapshot {
     /// `biome::nearest_biome` calls — brute-force nearest-neighbour searches.
     pub biome_searches: u64,
     /// Climate-table rows compared across all
-    /// [`biome_searches`](Self::biome_searches). The D5 number: this is
-    /// `biome_searches * table_len`.
+    /// [`biome_searches`](Self::biome_searches). The D5 number.
+    ///
+    /// `biome_rows_compared == biome_searches * table_len` was true only of the
+    /// brute-force scan, and U9 (`7ff942dd`) ended that: the ported
+    /// `Climate.RTree` prunes, so the ratio is now node evaluations per search —
+    /// measured at 113.7 on the real table, against 7,594 for the linear scan.
+    /// Do not reconstruct one of these counters from the other.
     pub biome_rows_compared: u64,
     /// RNG primitive draws, attributed to the innermost [`Stage`].
     pub rng_draws: [u64; STAGE_COUNT],
