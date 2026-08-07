@@ -1809,7 +1809,13 @@ where
                 let initial = advancements.initial_update(player_uuid, true);
                 apply(conn, &mut state, proto.encode_update_advancements(&initial)).await?;
                 let total_ms = t_cfg.elapsed().as_millis();
-                let welcome_ms = t_welcome.elapsed().as_millis() - 1; // approx, minus advancement encode
+                // `saturating_sub`, not `- 1`: `as_millis()` is `u128`, and over an
+                // in-memory or loopback transport the welcome phase completes in
+                // under a millisecond, so the plain subtraction underflows. That
+                // panicked every integrated-server test in debug and wrapped
+                // silently in release, which is why no `cargo check` and no
+                // `cargo run --release` could see it.
+                let welcome_ms = t_welcome.elapsed().as_millis().saturating_sub(1); // approx, minus advancement encode
                 tracing::info!(
                     "Configuration -> Play: {}ms total (chunks={}ms, welcome/entities/advancements={}ms)",
                     total_ms,
