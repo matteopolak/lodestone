@@ -69,6 +69,56 @@ fn gap(sim: &MobSim<'_>, id: i32, player: Vec3) -> f64 {
     (player.x - sim.get(id).expect("alive").position().x).abs()
 }
 
+/// Where the single player stands in every arm below.
+const PLAYER: Vec3 = Vec3::new(9.0, 0.0, 0.0);
+
+/// Ticks per arm. Long enough for a `TemptGoal` to cross the 9 blocks at the
+/// roster's follow speed, and 120 was the original figure.
+const TICKS: usize = 120;
+
+/// # Why the negative arms compare **positions**, not distances
+///
+/// The margin form these used — "an untempted mob must not close by 3 blocks in
+/// 120 ticks" — is a *premise* about an unconstrained random walk, and it was true
+/// only by accident of the RNG seed. Issue #463 (`3b65cbf`) replaced
+/// `NavigatingMob`'s shared `SplitMix64(0x1234_5678_9ABC_DEF0)` with a per-mob seed
+/// of `id as u64`; for id 1 the first successful 1/120 stroll draw is draw **9**
+/// instead of draw 130, so a `RandomStrollGoal` now fires well inside the window
+/// and a ±10-block stroll can carry a mob 3+ blocks toward a player it has no
+/// interest in. Both negative controls failed, and neither was measuring anything
+/// about the roster: they were measuring a coin flip.
+///
+/// The property actually under test is not "stayed far away" — vanilla mobs wander
+/// — it is **"its movement does not depend on what the player is holding."** So each
+/// negative arm runs the same species twice from a fresh sim, identical in every
+/// way except the held item, and requires the trajectories to be *bit-identical*.
+/// A mob with no `TemptGoal` never reads `held_item`, and `TemptGoal::can_use`
+/// consumes no RNG (it is a `mob.temptation()` lookup), so an untempted mob's
+/// stream is unperturbed by the item. That makes the assertion exact — no
+/// tolerance, no seed dependence, and strictly stronger than the 3-block margin,
+/// since it catches *any* item-dependent movement rather than 3 blocks' worth.
+///
+/// Each negative arm carries its own positive control on the same comparison, so a
+/// change that made every arm identical (perception never fed at all) fails rather
+/// than passing twice.
+///
+/// Runs one species alone from a fresh sim and returns its end position.
+fn run_species(species: &str, held: Option<&str>) -> Vec3 {
+    let world = pen();
+    let mut sim = MobSim::new(&world);
+    let id = sim
+        .spawn_species(rk(species), Vec3::new(0.0, 0.0, 0.0))
+        .id();
+    sim.set_players(vec![match held {
+        Some(item) => holding(PLAYER, item),
+        None => empty_handed(PLAYER),
+    }]);
+    for _ in 0..TICKS {
+        sim.tick();
+    }
+    sim.get(id).expect("alive").position()
+}
+
 /// The headline gate: a cow spawned through the production path follows a player
 /// holding wheat, because the roster installed `TemptGoal` — which no production
 /// code path installed before it existed.
@@ -86,22 +136,25 @@ fn a_cow_follows_food_because_the_roster_installed_temptgoal() {
     // Control first: an empty-handed player must not draw the cow in. This is a
     // *precondition* on the measurement, not decoration — without it, "the cow
     // ended up closer" is satisfied by an unlucky random stroll.
+    //
+    // Note the shape. The control used to assert its own `> before - 3.0` margin,
+    // and that margin held only by accident of the pre-#463 shared RNG seed (see
+    // `run_species`'s doc comment) — it is exactly the assertion that failed in the
+    // two negative arms below. It is **removed rather than loosened**: an untempted
+    // cow strolling 3 blocks toward the player is legitimate vanilla behaviour, so
+    // there was never a correct threshold. What replaces it is a *relative*
+    // comparison against the subject arm, whose only differing input is the held
+    // item — see the two assertions after the subject.
     let mut control = MobSim::new(&world);
     let cid = control
         .spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0))
         .id();
     control.set_players(vec![empty_handed(player)]);
-    let control_before = gap(&control, cid, player);
-    for _ in 0..120 {
+    for _ in 0..TICKS {
         control.tick();
     }
     let control_after = gap(&control, cid, player);
-    assert!(
-        control_after > control_before - 3.0,
-        "control failed its own premise: an untempted cow closed from \
-         {control_before} to {control_after}, so the subject's assertion below \
-         would be satisfied by strolling alone"
-    );
+    let control_end = control.get(cid).expect("alive").position();
 
     // Subject: identical, but the player holds wheat — `cow_food` is exactly
     // `[wheat]` (`.cache/mc/26.2/src/data/minecraft/tags/item/cow_food.json`).
@@ -111,17 +164,31 @@ fn a_cow_follows_food_because_the_roster_installed_temptgoal() {
         .id();
     sim.set_players(vec![holding(player, "wheat")]);
     let before = gap(&sim, id, player);
-    for _ in 0..120 {
+    for _ in 0..TICKS {
         sim.tick();
     }
     let after = gap(&sim, id, player);
+    let end = sim.get(id).expect("alive").position();
 
     assert!(
         after < before - 3.0,
         "a cow spawned through spawn_species must follow a player holding \
-         wheat: gap went {before} -> {after} over 120 ticks. No goal was added \
+         wheat: gap went {before} -> {after} over {TICKS} ticks. No goal was added \
          by this test, so a failure here means the roster is not reaching \
          spawn_species (or is keyed on the wrong species string)"
+    );
+    assert!(
+        after < control_after,
+        "and it must end up closer than the same cow with an empty-handed player \
+         ({after} vs {control_after}), or the approach is strolling rather than tempting"
+    );
+    // The load-bearing comparison: the two arms differ in exactly one input, so any
+    // difference in outcome is attributable to it. Exact, and immune to whatever the
+    // stroll RNG happens to do — unlike the 3-block margins this file used to rest on.
+    assert_ne!(
+        end, control_end,
+        "the wheat must be what moved the cow: it ended at {end:?} with wheat and \
+         {control_end:?} without"
     );
 }
 
@@ -134,28 +201,29 @@ fn a_cow_follows_food_because_the_roster_installed_temptgoal() {
 /// roster: a llama is a real 26.2 species that no family claims, so it takes the
 /// fallback path by construction, and `llama_food` exists in the jar so the
 /// choice of item is not what makes it fail.
+///
+/// See [`run_species`] for why this compares trajectories rather than distances.
 #[test]
 fn a_species_with_no_roster_entry_does_not_follow_food() {
-    let world = pen();
-    let player = Vec3::new(9.0, 0.0, 0.0);
-    let mut sim = MobSim::new(&world);
-    let id = sim
-        .spawn_species(rk("minecraft:llama"), Vec3::new(0.0, 0.0, 0.0))
-        .id();
-    sim.set_players(vec![holding(player, "wheat")]);
+    let tempted = run_species("minecraft:llama", Some("wheat"));
+    let untempted = run_species("minecraft:llama", None);
+    assert_eq!(
+        tempted, untempted,
+        "a llama has no roster entry, so it gets FALLBACK (stroll + look) and nothing in it \
+         reads the player's held item — its trajectory must be identical whether or not the \
+         player holds wheat. It ended at {tempted:?} with wheat and {untempted:?} without, so \
+         either the fallback is not the fallback or every species is getting the same table"
+    );
 
-    let before = gap(&sim, id, player);
-    for _ in 0..120 {
-        sim.tick();
-    }
-    let after = gap(&sim, id, player);
-
-    assert!(
-        after > before - 3.0,
-        "a llama has no roster entry, so it must get FALLBACK (stroll + look) \
-         and must NOT close on a player holding wheat: gap went {before} -> \
-         {after}. If it did close, either the fallback is not the fallback or \
-         every species is getting the same table"
+    // The control, on the identical comparison: a species the roster *does* give a
+    // `TemptGoal` must not be item-blind. Without this, "the two arms matched"
+    // is also satisfied by perception never being fed at all.
+    let cow_tempted = run_species("minecraft:cow", Some("wheat"));
+    let cow_untempted = run_species("minecraft:cow", None);
+    assert_ne!(
+        cow_tempted, cow_untempted,
+        "control: a cow's roster has TemptGoal and wheat is cow_food, so wheat must change \
+         where it ends up. If a cow is item-blind too, the assertion above is vacuous"
     );
 }
 
@@ -168,35 +236,59 @@ fn a_species_with_no_roster_entry_does_not_follow_food() {
 /// whether the goal is installed — it is a test that the *perception* and the
 /// roster agree on which species is which. An assertion that passed for both
 /// would mean the species key is being ignored somewhere.
+/// The pig's half stays a **magnitude** assertion — it must really cross the gap,
+/// not merely move — while the cow's half is the exact trajectory comparison
+/// [`run_species`]'s doc comment explains. A pig and a cow cannot perceive each
+/// other (`BreedGoal`/`FollowParentGoal` are same-species, and nothing else in
+/// either roster reads another mob), so the pig diverging between the two arms
+/// cannot move the cow.
 #[test]
 fn one_item_tempts_a_pig_and_not_a_cow_through_the_same_spawn_path() {
-    let world = pen();
-    let player = Vec3::new(9.0, 0.0, 0.0);
-    let mut sim = MobSim::new(&world);
-    let pig = sim
-        .spawn_species(rk("minecraft:pig"), Vec3::new(0.0, 0.0, 0.0))
-        .id();
-    let cow = sim
-        .spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 4.0))
-        .id();
-    sim.set_players(vec![holding(player, "potato")]);
-
-    let pig_before = gap(&sim, pig, player);
-    let cow_before = gap(&sim, cow, player);
-    for _ in 0..120 {
-        sim.tick();
+    /// Both animals in one world, as the test's own premise requires.
+    fn run(held: Option<&str>) -> (f64, f64, Vec3) {
+        let world = pen();
+        let mut sim = MobSim::new(&world);
+        let pig = sim
+            .spawn_species(rk("minecraft:pig"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+        let cow = sim
+            .spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 4.0))
+            .id();
+        sim.set_players(vec![match held {
+            Some(item) => holding(PLAYER, item),
+            None => empty_handed(PLAYER),
+        }]);
+        let pig_before = gap(&sim, pig, PLAYER);
+        for _ in 0..TICKS {
+            sim.tick();
+        }
+        (
+            pig_before,
+            gap(&sim, pig, PLAYER),
+            sim.get(cow).expect("alive").position(),
+        )
     }
-    let pig_after = gap(&sim, pig, player);
-    let cow_after = gap(&sim, cow, player);
+
+    let (pig_before, pig_after, cow_with_potato) = run(Some("potato"));
+    let (_, pig_after_empty, cow_without) = run(None);
 
     assert!(
         pig_after < pig_before - 3.0,
         "a potato is in pig_food, so the pig must close: {pig_before} -> {pig_after}"
     );
-    assert!(
-        cow_after > cow_before - 3.0,
-        "a potato is NOT in cow_food (which is exactly [wheat]), so the cow \
-         must not close: {cow_before} -> {cow_after}"
+    // The same arm read as a difference, so "the pig closed" cannot be satisfied by
+    // a stroll that would have closed anyway with the player empty-handed.
+    assert_ne!(
+        pig_after, pig_after_empty,
+        "the pig's approach must be caused by the potato: it ended {pig_after} from the \
+         player with one and {pig_after_empty} without"
+    );
+    assert_eq!(
+        cow_with_potato, cow_without,
+        "a potato is NOT in cow_food (which is exactly [wheat]), so nothing the cow does may \
+         depend on the player holding one — it ended at {cow_with_potato:?} with the potato \
+         and {cow_without:?} without. A difference means the species key is being ignored \
+         somewhere between the roster and the perception feed"
     );
 }
 

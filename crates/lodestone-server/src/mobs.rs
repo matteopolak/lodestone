@@ -1877,17 +1877,28 @@ impl<'w> MobSim<'w> {
         // reached a connected client and then stood still forever
         // (`crates/protocol/v770/tests/live_mob_sim.rs`).
         //
-        // It was total rather than intermittent because the throttle closes
-        // before the goal's own `1/120` roll can succeed even once: every
-        // `NavigatingMob` shares one hardcoded RNG seed
-        // (`lodestone-entity/src/ai/navigating_mob.rs`'s
-        // `SplitMix64(0x1234_5678_9ABC_DEF0)`, and `with_seed` has no caller
-        // outside a test), and for that one stream the first draw where
-        // `next_u64() % 120 == 0` is draw **130** — past the wall at 100. So
-        // the failure was deterministic and identical for every mob in every
-        // world, not a rare unlucky roll. The shared seed is a separate defect
-        // in a crate this module does not own; this reset is what makes the
-        // throttle behave like vanilla's regardless of it.
+        // It was total rather than intermittent because the throttle closed
+        // before the goal's own `1/120` roll could succeed even once. **That
+        // second half is now stale and is kept only as the record of why this
+        // reset exists.** It read: *"every `NavigatingMob` shares one hardcoded
+        // RNG seed (`SplitMix64(0x1234_5678_9ABC_DEF0)`, and `with_seed` has no
+        // caller outside a test), and for that one stream the first draw where
+        // `next_u64() % 120 == 0` is draw 130 — past the wall at 100 … The
+        // shared seed is a separate defect in a crate this module does not
+        // own."*
+        //
+        // That defect was fixed: issue #463 (`3b65cbf`) seeds each
+        // `NavigatingMob` from its own id (`spawn_with_type` passes
+        // `id as u64`), so the first hit is per-mob — draw 9 for id 1, 48 for
+        // id 2, 147 for id 3. The consequence is that the *symptom* is no longer
+        // uniform: a low-id mob now strolls before the throttle would have
+        // closed, and only a mob whose first hit lands past 100 shows it at all.
+        // Two gates in `tests/` had premises built on the old shared stream and
+        // failed when the seed changed; `tests/mob_idle_throttle.rs` now selects
+        // its subject's id deliberately, and its module doc carries the table.
+        //
+        // None of that changes what this reset is for: with it, a mob near a
+        // player never reaches the throttle regardless of which stream it draws.
         //
         // Reusing [`check_despawn`] rather than restating its 32-block immune
         // radius: this call site wants only its `reset_timer` verdict, so it
