@@ -586,7 +586,7 @@ acceptance is always counters and gates — never a profile, never a bare durati
 | U7 | In-place region decoration view; delete stitch copies + `RegionGrid`/`VegGrid` re-seeding | `feature/mod.rs`, `feature/vegetation.rs`, `overworld.rs` | U3, U6 | M | **must not** — same driver order |
 | U8 | Vegetation engine port to ids + region view (the 3.6k-line module) | `feature/vegetation.rs` | U3, U7 | L | **must not** — depth-first recursion untouched |
 | U9 | Biome layer: memoised per-source biome in store + RTree port | `biome.rs`, `src/engine/` | U6 | M | none, but **values must match brute force exactly** |
-| U10 | Server scheduler: dependency-edge generation, delete per-ring barrier | `lodestone-server/src/{server,chunk}.rs` | U6, U7 | M | none |
+| U10 | Server scheduler: dependency-edge generation, delete per-ring barrier — **landed** `7ba0176b`/`0a3ede8d` (#494), see [`../join-scheduler.md`](../join-scheduler.md) | `lodestone-server/src/{server,chunk,join_scheduler}.rs` | U6, U7 | M | none |
 | U11 | 3-D biome sampling (4×4×4 quart cells) on the RTree | `biome.rs`, `overworld.rs`, serve boundary | U9 | M | **changes biome-dependent placement inputs** — vanilla-ward; needs fresh JVM fixtures |
 | U12 | Missing decoration steps: lakes, springs, geodes/icebergs, disks, dungeons/fossils | `feature/`, `compose.rs` | U7 | L | additive (per-feature `set_feature_seed` isolates streams; index-preservation already in place) |
 | U13 | Nether + End generation — **unit group NE**, own issue tree; see [inventory](#full-parity-inventory-jar-derived-262) | new engine instantiations + data + server dimension plumbing | U4–U9 | XL (group) | new content |
