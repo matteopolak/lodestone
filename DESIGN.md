@@ -3763,3 +3763,72 @@ not prevent the defect; it *delivers* the player exactly to it.
   passed, 0 failed, 433 ignored). The verdict came from re-running in a detached worktree at the
   committed sha, where that file is at its committed state — the procedure CLAUDE.md prescribes, and
   the only thing that distinguishes "my change broke the tree" from "I can see someone else typing".
+
+**12.116 Issue #337's "confirmed island" was four fifths built and the missing fifth was not the loot roller: the block-break→drop call, plus a shipped bug that made every dropped item this server has ever spawned arrive at the client as `minecraft:acacia_boat` — asserted as correct by a test whose name agreed with it.**
+
+Landed: the join from block break to `loot.rs`, `Block.popResource`'s geometry, the merge driver, and all of
+pickup, gated end-to-end through the real `serve_connection` path over a stone world (6,845 workspace tests
+passing; five controls run and observed failing). What follows is what the closed-issue audit's own reopen
+comment did not say, and could not have.
+
+- **The audit's verdict ("1551 well-tested lines against real bundled JSON, reaching zero players") was
+  right about the loot module and wrong about the shape of the gap.** Links 3, 4 and 5 already existed:
+  `MobSim::spawn_item` had a real production caller (the composter's bone-meal extraction),
+  `MobSim::tick` already advanced item lifecycle *and* `ItemMotion` fall dynamics, and
+  `MobSim::snapshots` already streamed items on the same wire path mobs use. **An island report names the
+  subsystem it found unreached; it does not enumerate what else the chain needs, and reading it as a
+  work-breakdown over-scopes the work in one direction while missing a defect in another.** The honest
+  unit here was one call site, one mapping function, one geometry function and pickup — not "build a loot
+  system".
+- **`MobSim::snapshots` set each dropped item's `entity_type` to the *item's* key, and network entity type
+  `0` is `minecraft:acacia_boat`.** `entity_type` is an entity type; `minecraft:bone_meal` is not one, so
+  `v770`'s `entity_type_id(name).unwrap_or(0)` resolved the miss to id 0. Every dropped item ever spawned
+  by this server arrived as a boat, silently. This is #323's `SET_TIME` shape exactly — every link green,
+  wrong value on the wire — and `cargo xtask connectedness` is documented as blind to it. **The
+  `unwrap_or(0)` is the whole mechanism: a total function over a partial registry converts "wrong name"
+  into "valid but absurd entity", which is unfalsifiable from the encoder's side.** `players.rs` had
+  already written this warning down for `minecraft:player` ("getting the key wrong is silent — maps an
+  unknown name to type `0`") one file away, and the item path still had it.
+- **A test asserted the bug, and the flaw is not visible in the assertion.**
+  `projectile_and_item_registries.rs` had `assert_eq!(item_snap.entity_type, rk("minecraft:diamond"))`
+  inside `snapshots_include_projectiles_and_items_with_their_own_identity_and_motion`. The name says
+  "their own identity", the assertion checks the item's own identity, and the two agree — so nothing about
+  it reads as wrong on inspection, which is the property §12's staleness entries keep describing for
+  *documentation*. **This is a sixth species to sit beside the five in CLAUDE.md: the assertion is exact,
+  predicted, non-vacuous and wrong, and the test's own name is the corroborating evidence that makes it
+  survive review.** Neither reading the test nor reading the code catches it; only asking "what does this
+  field *mean* on the wire" does. It was caught here only because a new gate asserted the same field
+  against a different expectation and the two collided.
+- **The two claims in my brief that were stale, in opposite directions.** #438 ("players are never spawned
+  as entities, so there is no player registry or broadcast path") has **landed** — `players.rs` carries
+  `PlayerRegistry`, tracked positions and a tab-list streamer, and its own module doc explains that the
+  broadcast path *never needed building* because `EntityStreamer`'s per-connection diff is a pull. So step
+  4 was not a constraint at all, and pickup got player positions for free. Conversely #337's own body
+  ("`grep -rniE 'loot.table|loot_table'` returns zero hits anywhere") was true when written and is now
+  false by 1,551 lines. **Two issues, one stale in each direction, and the one that would have caused
+  over-building was the one that sounded like a blocker.**
+- **`popResource`'s draw order is five draws in the order x, y, z, vx, vz, and `vy` is a constant that
+  consumes none.** A port that draws for `vy` produces a statistically identical cloud of items and
+  desyncs per-seed; the envelope test cannot see it, because a drawn `vy` lands in `[0.1, 0.3)` and looks
+  like a plausible toss. Only recomputing all five values from a parallel stream distinguishes them. Same
+  class as the `Mth` vs `java.lang.Math` note: **the specification of a random process is its draw count
+  and order, and a distributional test is structurally incapable of checking either.**
+- **Three vanilla volumes here are anisotropic and all three read as "a radius" if you do not look.**
+  Pickup is `getBoundingBox().inflate(1.0, 0.5, 1.0)` intersected against the *item's* box too, so the
+  horizontal reach is `0.3 + 1.0 + 0.125 = 1.425` and the vertical band is `[-0.75, +2.3]` about the feet
+  — a point-vs-inflated-box test is short by exactly the item's half-width, which is why the gate pins
+  `1.3` (inside vanilla, outside the naive version) rather than a round number. Merging is
+  `inflate(0.5, 0.0, 0.5)`, where the **`0.0`** means stacks a block apart vertically never merge. And
+  `Inventory.getSlotWithRemainingSpace` searches selected → off-hand → `0..36` and merges only into
+  non-empty slots, while `getFreeSlot` scans `items` alone — so a *merge* into the off-hand is normal and a
+  *fresh stack* there is impossible. **Every one of these is satisfied by a simplification that still puts
+  the item in the inventory, which is why the gates assert the destination and the boundary rather than the
+  arrival.**
+- **The last hop is invisible and it is a `Copy` derive that says so.** A client draws nothing for an item
+  entity whose stack it has not been told, and the stack travels as `ItemEntity.DATA_ITEM` — so it needs a
+  `MetadataField::Item { item: ResourceKey, .. }` variant. `ResourceKey` is not `Copy`, and
+  `v770`'s `encode_set_entity_data` does `match *field` with **no wildcard arm**, so the variant *and* the
+  dropped `Copy` both break a file outside this crate's ownership. **A version-free vocabulary enum that
+  derives `Copy` is a latent constraint on every future field: it silently forbids any field carrying an
+  owned value, and the cost is only discovered by the first feature that needs one.** Recorded with the
+  exact two-file patch in `docs/block-drops.md` rather than half-landed.

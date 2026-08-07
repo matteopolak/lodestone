@@ -87,6 +87,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `lodestone-game`'s `mining` module (`BreakInputs`, `Mining`), the per-block data
   lives in the version crates behind `VersionAdapter::block_hardness`, and
   `lodestone-shell`'s `sim.rs` is the join between them.
+- [Block drops](./block-drops.md) — Breaking a block server-side now rolls that
+  block's vanilla loot table, spawns the result as real item entities with vanilla's
+  `popResource` position and velocity, streams them to every connection, and lets a
+  player walk over them to collect them into their inventory. This is issue #337's
+  *consumer* — the loot roller itself already existed and had never been called.
 - [Block editing: dig, place, and a world that actually holds the change](./block-edit.md) —
   The piece that closes the loop a served session was still missing after
   [`docs/served-session-liveness.md`](./served-session-liveness.md): a player on our

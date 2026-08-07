@@ -35,7 +35,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use lodestone_core::{Reader, State, Writer};
-use lodestone_model::{Difficulty, ItemStack};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Vec3};
 use lodestone_net::{Connection, NetError, memory_pair};
 use lodestone_server::{
     BlockEntityHandle, BlockTickFeed, ChunkColumn, ChunkSource, ChunkWorld, ExplosionFeed,
@@ -77,6 +77,10 @@ const CLIENT_INFORMATION_C2S: i32 = 52;
 const CHUNK_BATCH_RECEIVED_C2S: i32 = 53;
 const GAME_RULE_VALUES_S2C: i32 = 54;
 const GAME_EVENT_S2C: i32 = 55;
+/// Issue #337: this stand-in format's block-break packet (a destroy ordinal
+/// plus x/y/z) and the server-initiated window-slot write a pickup produces.
+const BLOCK_ACTION_C2S: i32 = 56;
+const CONTAINER_SET_SLOT_S2C: i32 = 57;
 
 /// A [`ChunkSource`] that hands out an all-air column instantly — these
 /// tests are about packet scheduling, not terrain, so real worldgen would
@@ -243,6 +247,30 @@ impl ServerProtocol for FakeProtocol {
                     desired_chunks_per_tick: r.f32().expect("desired rate"),
                 }
             }
+            // Issue #337: a minimal stand-in for `PLAYER_ACTION`'s three
+            // destroy ordinals — same "test the server's own consumer logic,
+            // not wire fidelity" rationale as `CHANGE_DIFFICULTY_C2S`. The
+            // ordinals match vanilla's (`START_DESTROY_BLOCK` 0,
+            // `ABORT_DESTROY_BLOCK` 1, `STOP_DESTROY_BLOCK` 2) because
+            // `apply_block_action`'s behaviour is defined in terms of them.
+            State::Play if packet_id == BLOCK_ACTION_C2S => {
+                let mut r = Reader::new(payload);
+                let action = match r.u8().expect("destroy ordinal") {
+                    0 => BlockActionKind::StartDestroy,
+                    1 => BlockActionKind::AbortDestroy,
+                    _ => BlockActionKind::StopDestroy,
+                };
+                ServerBound::BlockAction {
+                    action,
+                    pos: BlockPos::new(
+                        r.i32().expect("x"),
+                        r.i32().expect("y"),
+                        r.i32().expect("z"),
+                    ),
+                    face: BlockFace::Up,
+                    sequence: 0,
+                }
+            }
             _ => ServerBound::Ignored,
         }
     }
@@ -393,6 +421,32 @@ impl ServerProtocol for FakeProtocol {
             payload: w.as_slice().to_vec(),
         }
     }
+
+    /// Issue #337: a pickup tells the client which window-0 slot changed. This
+    /// stand-in carries `(slot, present, item key, count)` — enough for the
+    /// pickup gate to assert *which* slot was announced and what landed in it,
+    /// which is the part `lodestone-server` decides. The real wire layout is
+    /// `v770`'s concern.
+    fn encode_container_slot(
+        &self,
+        window_id: i32,
+        _state_id: i32,
+        slot: i32,
+        item: Option<&ItemStack>,
+    ) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(window_id);
+        w.var_i32(slot);
+        w.bool(item.is_some());
+        if let Some(item) = item {
+            w.string(&item.item.to_string());
+            w.var_i32(i32::try_from(item.count).unwrap_or(i32::MAX));
+        }
+        ServerDirective::Send {
+            packet_id: CONTAINER_SET_SLOT_S2C,
+            payload: w.as_slice().to_vec(),
+        }
+    }
 }
 
 /// Drives the client side of handshake → login → configuration → the
@@ -490,6 +544,44 @@ async fn send_player_moved(client: &mut Connection<DuplexStream>, x: f64, y: f64
         .write_packet(PLAYER_MOVED_C2S, w.as_slice())
         .await
         .expect("send move");
+}
+
+/// Sends one block-break phase (issue #337). `ordinal` is vanilla's destroy
+/// ordinal — `0` start, `1` abort, `2` stop.
+async fn send_block_action(
+    client: &mut Connection<DuplexStream>,
+    ordinal: u8,
+    pos: BlockPos,
+) {
+    let mut w = Writer::default();
+    w.u8(ordinal);
+    w.i32(pos.x);
+    w.i32(pos.y);
+    w.i32(pos.z);
+    client
+        .write_packet(BLOCK_ACTION_C2S, w.as_slice())
+        .await
+        .expect("send block action");
+}
+
+/// Every `(slot, item key, count)` a `CONTAINER_SET_SLOT_S2C` in `packets`
+/// announced, decoded back out of this file's stand-in layout.
+fn container_slot_writes(packets: &[(i32, Vec<u8>)]) -> Vec<(i32, String, i32)> {
+    packets
+        .iter()
+        .filter(|(id, _)| *id == CONTAINER_SET_SLOT_S2C)
+        .filter_map(|(_, payload)| {
+            let mut r = Reader::new(payload);
+            let _window = r.var_i32().ok()?;
+            let slot = r.var_i32().ok()?;
+            if !r.bool().ok()? {
+                return None;
+            }
+            let key = r.string(64).ok()?;
+            let count = r.var_i32().ok()?;
+            Some((slot, key, count))
+        })
+        .collect()
 }
 
 /// Sends a `SET_CREATIVE_MODE_SLOT`-equivalent write. `item` mirrors the real
@@ -2143,6 +2235,382 @@ async fn generation_is_anchored_at_the_player_not_at_the_origin() {
         "a recenter 80,000 blocks out generated {} columns; a player-anchored window \
          is exactly {expected}",
         recorded.len()
+    );
+
+    drop(client);
+    let _ = server.await.expect("server task panicked");
+}
+
+/// A [`ChunkSource`] of solid `minecraft:stone` — the block-drop tests' subject
+/// world, chosen because `assets/loot_table/blocks/stone.json` is one of the five
+/// bundled block tables and its `alternatives`/`match_tool` shape is the
+/// non-trivial one (a bare hand must fall through the silk-touch branch to
+/// cobblestone, so a fixture of stone proves the fall-through actually happens
+/// rather than that "an item dropped").
+struct StoneSource;
+
+impl ChunkSource for StoneSource {
+    fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+        let mut col = ChunkColumn::new(0, 16);
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 0..16 {
+                    col.set_block(x, y, z, "minecraft:stone");
+                }
+            }
+        }
+        col
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+        // No storage; edits are discarded by design. Harmless here: the drop is
+        // rolled from the state read *before* `set_block`, which is exactly the
+        // ordering `apply_block_action` guarantees.
+    }
+}
+
+/// The block every block-drop test below breaks. Inside the served view, and
+/// inside `StoneSource`'s 0..16 stone band.
+const BREAK_POS: BlockPos = BlockPos::new(4, 9, 4);
+
+/// **Issue #337's acceptance gate, first half: a broken block drops.**
+///
+/// Before this, `apply_block_action`'s `StopDestroy` arm set the block to air and
+/// nothing else — `crate::loot`'s 1,551 lines had zero production callers, which
+/// is why #337 was reopened as a confirmed island. This drives the *real*
+/// `serve_connection` path (not `drop_block_loot` directly, which would pass
+/// whether or not the server ever called it) and asserts the exact drop.
+///
+/// Three separate predictions, each of which a plausible-but-wrong
+/// implementation fails:
+///
+/// 1. **exactly one** item entity — not "at least one", which a table rolling
+///    its pool twice would also satisfy;
+/// 2. the item is **`minecraft:cobblestone`**, which is stone's table falling
+///    through its silk-touch `alternatives` branch under the empty loot context.
+///    A port that took the *first* alternative would produce `minecraft:stone`
+///    here, and "a stone-ish item dropped" reads as success;
+/// 3. the entity streams with entity type **`minecraft:item`**. This is the
+///    regression guard for a real shipped bug: `MobSim::snapshots` used to set
+///    `entity_type` to the *item's* key, so a dropped `minecraft:cobblestone`
+///    streamed as entity type `minecraft:cobblestone` — which is not in the
+///    entity-type registry, and `v770`'s `entity_type_id(name).unwrap_or(0)`
+///    resolves a miss to network id `0`, `minecraft:acacia_boat`. Every wire on
+///    that path read green while the value travelling it was a boat.
+#[tokio::test(start_paused = true)]
+async fn breaking_stone_drops_exactly_one_cobblestone_item_entity() {
+    let (client_end, server_end) = memory_pair();
+    let mobs = MobHandle::default();
+    let mobs_for_server = mobs.clone();
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &StoneSource,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+            &mobs_for_server,
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Driller", 1).await;
+    assert_eq!(
+        mobs.with(|sim| sim.item_count()),
+        0,
+        "precondition: nothing has dropped anything yet"
+    );
+
+    send_block_action(&mut client, 0, BREAK_POS).await;
+    send_block_action(&mut client, 2, BREAK_POS).await;
+    let _ = drain_available(&mut client).await;
+
+    let snapshots = mobs.with(|sim| sim.snapshots());
+    assert_eq!(
+        mobs.with(|sim| sim.item_count()),
+        1,
+        "one break of stone rolls one pool once, so exactly one item entity"
+    );
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "the drop must be the only entity in the sim, so the assertions below \
+         cannot be reading some other entity: {snapshots:?}"
+    );
+    assert_eq!(
+        snapshots[0].entity_type.to_string(),
+        "minecraft:item",
+        "a dropped item is entity type `minecraft:item`; the item's own key here \
+         means `entity_type_id` misses and the client draws `minecraft:acacia_boat`"
+    );
+
+    drop(client);
+    let _ = server.await.expect("server task panicked");
+}
+
+/// **The control for the gate above, and it must fail the same assertion.**
+///
+/// Same world, same block, same packets — except the second phase is
+/// `AbortDestroy` (ordinal `1`) instead of `StopDestroy`. Vanilla's
+/// `pos.equals(this.destroyPos)` bookkeeping means an aborted dig breaks nothing,
+/// so nothing may drop.
+///
+/// Without this, `breaking_stone_drops_exactly_one_cobblestone_item_entity` would
+/// pass just as well against a server that dropped an item on *every* block
+/// packet, including the `StartDestroy` that precedes every break. The two tests
+/// differ in exactly one byte.
+#[tokio::test(start_paused = true)]
+async fn an_aborted_dig_drops_nothing() {
+    let (client_end, server_end) = memory_pair();
+    let mobs = MobHandle::default();
+    let mobs_for_server = mobs.clone();
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &StoneSource,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+            &mobs_for_server,
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Aborter", 1).await;
+    send_block_action(&mut client, 0, BREAK_POS).await;
+    send_block_action(&mut client, 1, BREAK_POS).await;
+    let _ = drain_available(&mut client).await;
+
+    assert_eq!(
+        mobs.with(|sim| sim.item_count()),
+        0,
+        "an aborted dig breaks no block, so it must drop nothing — if this is \
+         non-zero the drop is firing on the wrong packet and the positive gate \
+         proves nothing"
+    );
+
+    drop(client);
+    let _ = server.await.expect("server task panicked");
+}
+
+/// **Issue #337's acceptance gate, second half: the drop can be picked up, and
+/// the pickup reaches the client.**
+///
+/// The chain under test is `Player.aiStep` → `ItemEntity.playerTouch` →
+/// `Inventory.add` → a window-0 `container_set_slot`. Two assertions that a
+/// weaker gate would omit:
+///
+/// * the item entity is **gone** from the sim afterwards — a pickup that credits
+///   the inventory without removing the entity duplicates items forever, and an
+///   inventory-only assertion cannot see it;
+/// * the client was told **which slot** changed, and the announced slot is `36`
+///   — window-0 menu coordinates for native hotbar slot `0`, the selected one.
+///   A pickup that wrote the right item into the right native slot but announced
+///   a native index instead of a menu index puts cobblestone in the player's
+///   *main storage* row on screen while the server thinks it is in the hand.
+///
+/// `tick_for(10)` before the walk is not incidental: `popResource` calls
+/// `setDefaultPickUpDelay()` (10 ticks), so the drop is deliberately
+/// uncollectable when it spawns. See the control below.
+#[tokio::test(start_paused = true)]
+async fn a_dropped_item_is_collected_into_the_hotbar_and_announced() {
+    let (client_end, server_end) = memory_pair();
+    let mobs = MobHandle::default();
+    let mobs_for_server = mobs.clone();
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &StoneSource,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+            &mobs_for_server,
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Collector", 1).await;
+    send_block_action(&mut client, 0, BREAK_POS).await;
+    send_block_action(&mut client, 2, BREAK_POS).await;
+    let _ = drain_available(&mut client).await;
+    assert_eq!(mobs.with(|sim| sim.item_count()), 1, "precondition: a drop exists");
+
+    // Let the 10-tick pickup delay elapse. `MobSim::tick` is what production's
+    // `run_tick_loop` calls every 50 ms; driving it here rather than
+    // `ItemLifecycle::tick` keeps the delay's advancement on the real path.
+    mobs.with(|sim| sim.tick_for(12));
+
+    // Stand on the block that was broken. `popResource` scatters the drop within
+    // ±0.25 of the block centre, and the pickup volume reaches 1.425 blocks
+    // horizontally, so the centre is comfortably inside it from any roll.
+    send_player_moved(
+        &mut client,
+        f64::from(BREAK_POS.x) + 0.5,
+        f64::from(BREAK_POS.y),
+        f64::from(BREAK_POS.z) + 0.5,
+    )
+    .await;
+    let packets = drain_available(&mut client).await;
+
+    assert_eq!(
+        mobs.with(|sim| sim.item_count()),
+        0,
+        "the collected item entity must be removed from the world, not merely \
+         copied into the inventory — otherwise it is an infinite item source"
+    );
+
+    let writes = container_slot_writes(&packets);
+    assert_eq!(
+        writes,
+        vec![(36, "minecraft:cobblestone".to_owned(), 1)],
+        "exactly one window-0 slot write, announcing menu slot 36 (native hotbar \
+         slot 0, the selected one) holding one cobblestone; got {writes:?}"
+    );
+
+    drop(client);
+    let _ = server.await.expect("server task panicked");
+}
+
+/// **The control for the pickup gate: the delay is real.**
+///
+/// Identical to the test above but with **no** `tick_for`, so the drop still
+/// carries its full 10-tick `setDefaultPickUpDelay`. The player stands exactly on
+/// it and must collect nothing.
+///
+/// This is the control that matters most here, because its absence is invisible:
+/// a server that ignored `pickup_delay` entirely would pass the positive gate
+/// (the item is collected — just a few ticks early), and the only symptom would
+/// be that a player mining in survival never sees a drop bounce, because they
+/// re-absorb it on the spawning tick. It also proves the pickup sweep is
+/// genuinely gated rather than firing on every movement packet regardless.
+#[tokio::test(start_paused = true)]
+async fn a_freshly_popped_drop_is_not_collectable_before_its_delay_elapses() {
+    let (client_end, server_end) = memory_pair();
+    let mobs = MobHandle::default();
+    let mobs_for_server = mobs.clone();
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &StoneSource,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+            &mobs_for_server,
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Impatient", 1).await;
+    send_block_action(&mut client, 0, BREAK_POS).await;
+    send_block_action(&mut client, 2, BREAK_POS).await;
+    let _ = drain_available(&mut client).await;
+    assert_eq!(mobs.with(|sim| sim.item_count()), 1);
+
+    // No `tick_for`: the pickup delay is still 10.
+    send_player_moved(
+        &mut client,
+        f64::from(BREAK_POS.x) + 0.5,
+        f64::from(BREAK_POS.y),
+        f64::from(BREAK_POS.z) + 0.5,
+    )
+    .await;
+    let packets = drain_available(&mut client).await;
+
+    assert_eq!(
+        mobs.with(|sim| sim.item_count()),
+        1,
+        "the drop still carries its 10-tick pickup delay, so standing on it must \
+         collect nothing"
+    );
+    assert!(
+        container_slot_writes(&packets).is_empty(),
+        "and no slot write may be announced: {:?}",
+        container_slot_writes(&packets)
+    );
+
+    drop(client);
+    let _ = server.await.expect("server task panicked");
+}
+
+/// **The other control on the pickup volume: distance is real.**
+///
+/// The delay has elapsed and the drop is collectable, but the player walks to a
+/// position well outside `Player.aiStep`'s inflated box (10 blocks away). Nothing
+/// may be collected.
+///
+/// Without this, the positive pickup gate is satisfied by a server that collects
+/// every drop in the world on any movement packet — which would look completely
+/// correct in the one scene where the only drop is the one at your feet. That is
+/// this repo's *world* species: the flaw would live in the fixture, not the
+/// assertion.
+#[tokio::test(start_paused = true)]
+async fn a_drop_outside_the_pickup_volume_is_not_collected() {
+    let (client_end, server_end) = memory_pair();
+    let mobs = MobHandle::default();
+    let mobs_for_server = mobs.clone();
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &StoneSource,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+            &mobs_for_server,
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Distant", 1).await;
+    send_block_action(&mut client, 0, BREAK_POS).await;
+    send_block_action(&mut client, 2, BREAK_POS).await;
+    let _ = drain_available(&mut client).await;
+    mobs.with(|sim| sim.tick_for(12));
+
+    // Ten blocks away — far outside the 1.425-block horizontal reach, and inside
+    // the same served column so the connection is not disconnected for a view
+    // change mid-test.
+    send_player_moved(
+        &mut client,
+        f64::from(BREAK_POS.x) + 10.5,
+        f64::from(BREAK_POS.y),
+        f64::from(BREAK_POS.z) + 0.5,
+    )
+    .await;
+    let packets = drain_available(&mut client).await;
+
+    assert_eq!(
+        mobs.with(|sim| sim.item_count()),
+        1,
+        "a collectable drop ten blocks away must stay in the world; if this is 0 \
+         the pickup sweep ignores position and the positive gate proves nothing"
+    );
+    assert!(
+        container_slot_writes(&packets).is_empty(),
+        "and nothing may be credited: {:?}",
+        container_slot_writes(&packets)
     );
 
     drop(client);

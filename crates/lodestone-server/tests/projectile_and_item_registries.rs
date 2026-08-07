@@ -277,7 +277,29 @@ fn snapshots_include_projectiles_and_items_with_their_own_identity_and_motion() 
         .iter()
         .find(|s| s.id == item_id)
         .expect("item snapshot present");
-    assert_eq!(item_snap.entity_type, rk("minecraft:diamond"));
+    // **This assertion used to read `rk("minecraft:diamond")`, and that was the
+    // bug, not the fix** (issue #337).
+    //
+    // `EntitySnapshot::entity_type` is an *entity* type key, and a dropped item's
+    // is `minecraft:item` — the stack's own identity travels as entity metadata
+    // (`ItemEntity.DATA_ITEM`), not in this field. Setting it to the item key
+    // meant `v770`'s `encode_add_entity_body` called
+    // `entity_type_id("minecraft:diamond")`, which misses because that is not an
+    // entity type, and its `.unwrap_or(0)` resolved the miss to network entity
+    // type **`0` = `minecraft:acacia_boat`**. Every dropped item this server has
+    // ever spawned arrived at a client as a boat, silently.
+    //
+    // The test name ("with their own identity") and this line agreed with each
+    // other, which is why it survived review: it was self-consistent and wrong.
+    // Nothing in `cargo xtask connectedness` could see it either — the wire was
+    // fully connected and carrying a wrong value, the same shape as #323's
+    // `SET_TIME`.
+    assert_eq!(
+        item_snap.entity_type,
+        rk("minecraft:item"),
+        "a dropped item streams as entity type `minecraft:item`; the item's own \
+         key here resolves to `minecraft:acacia_boat` on the wire"
+    );
     assert_eq!(item_snap.position, item_pos);
 
     // Distinct uuids: two different entities must not collide on wire
