@@ -146,10 +146,20 @@ silently follows the data.
 `noise_settings/{nether,end}.json`, the nether multi-noise parameter list and 2
 absent noises belong to the concurrent **Nether/End** unit, not here. This phase
 took the other four noise settings — `amplified`, `caves`, `floating_islands`,
-`large_biomes` — and touched none of theirs. The preset closure test encodes the
-gap as an allowance bounded to exactly `{nether, end}`, and asserts the allowance
-is *hit*, so when that unit lands the assertion tells you to delete it rather
-than leaving cover for a real gap.
+`large_biomes` — and touched none of theirs.
+
+`every_preset_reference_resolves` originally carried that gap as an allowance
+bounded to exactly `{nether, end}`, written to report itself as *deletable* once
+that unit landed rather than persist quietly as cover for a real gap. It landed
+within the session, so the allowance is gone and full closure is required: the
+test asserts both files are present by name, and a control asserts the presets
+really do reference both, so their absence fails loudly here instead of being
+tolerated. The 16 preset `settings` references now all resolve against bundled
+data.
+
+The nether multi-noise parameter list is still that unit's, and nothing in this
+corpus references it — `world_preset`'s `preset` key points at it, which is why
+that key is deliberately *not* one of the closure-checked reference kinds.
 
 ## Configuration
 
