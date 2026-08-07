@@ -22,13 +22,23 @@
 //!
 //! # Honest scope of what renders
 //!
-//! The composed generator produces real terrain **shape + surface** only. It
-//! does not yet run carvers (no caves), the full aquifer (no underground
-//! water/lava pockets), or features (no ores, trees, or vegetation) — those
-//! stages exist and are individually verified, and are the next things to chain
-//! in. Generation also runs a single fixed biome (plains) until the multi-noise
-//! biome source lands. So this is a real Minecraft *landscape*, not a
-//! block-for-block-complete chunk, and it says so.
+//! The composed generator produces real terrain **shape + surface**, and — since
+//! the feature stage was chained in — **ores and vegetation** as well. Enumerated
+//! rather than assumed, by walking every state of chunks `(-2..=2)²` at seed 3
+//! and collecting distinct base names, it emits: stone/deepslate/andesite/
+//! diorite/granite/tuff/clay/gravel/dirt/grass_block/water; the full ore set
+//! (coal, copper, iron, gold, lapis, redstone, diamond, plus the deepslate
+//! variants); `oak`/`birch`/`dark_oak` logs and leaves; and the non-solid plants
+//! `bush`, `short_grass`, `leaf_litter`, `wildflowers`, `lilac`, `peony`,
+//! `rose_bush`, `lily_of_the_valley`. Carvers (no caves) and the full aquifer
+//! (no underground water/lava pockets) are still absent, and generation runs a
+//! single fixed biome (plains) until the multi-noise biome source lands.
+//!
+//! **That list is load-bearing for [`map_block`]**, whose `_ =>` fallback is
+//! `STONE`: while this doc still claimed features did not run, every tree in the
+//! local world rendered as a solid stone pillar and every flower as a solid
+//! stone cube. Re-run the enumeration after chaining in another stage rather
+//! than trusting this paragraph.
 //!
 //! # Vertical windowing
 //!
@@ -75,12 +85,57 @@ fn base(name: &str) -> &str {
     name.split('[').next().unwrap_or(name)
 }
 
-/// Maps a vanilla block-state name onto the shell's tiny demo palette. Unknown
-/// solid blocks fall back to stone (a safe, always-in-atlas id); this only maps
-/// the states the shape+surface pipeline actually emits for plains.
+/// Whether a block name is a log-shaped full cube — a log, a stripped log, or a
+/// `_wood` block. All of them take the demo palette's `LOG` sprite pair.
+fn is_log(name: &str) -> bool {
+    name.ends_with("_log") || name.ends_with("_wood") || name.ends_with("_stem")
+}
+
+/// Maps a vanilla block-state name onto the shell's tiny demo palette.
+///
+/// The arms cover exactly the names the module doc's enumeration says the
+/// composed generator emits; unknown **solid** blocks fall back to stone, a safe
+/// always-in-atlas id.
+///
+/// # The fallback is only safe for solids
+///
+/// `_ => STONE` is wrong for two whole categories the feature stage introduced,
+/// and both were shipping:
+///
+/// * **Trees.** `oak`/`birch`/`dark_oak` logs and leaves have had `id::LOG` and
+///   `id::LEAVES` in [`crate::blocks`] — sprites, tint colours, and a light
+///   opacity of 1 for leaves — since before this module called the real
+///   generator. Nothing mapped onto them, so every tree drew as a solid stone
+///   pillar under a solid stone canopy, and the canopy blocked skylight like
+///   stone instead of attenuating it by 1.
+/// * **Plants.** `bush`, `short_grass`, `leaf_litter`, `wildflowers`, `lilac`,
+///   `peony`, `rose_bush` and `lily_of_the_valley` have no collision and no
+///   full-cube model in vanilla, and the demo palette has no cross-quad sprite
+///   to draw them with. They map to **air**, not stone: a stone cube there is
+///   wrong in three separate ways at once — it draws a grey block on the grass,
+///   it blocks the player's movement, and it blocks skylight. Air is the honest
+///   rendering of "this palette cannot draw a flower", and it is what the old
+///   sine-terrain world showed.
 fn map_block(name: &str) -> u32 {
     match base(name) {
         "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" => id::AIR,
+        // Non-solid vegetation the demo palette has no model for. See above:
+        // air rather than the `_` fallback, which would be a solid cube.
+        "minecraft:bush"
+        | "minecraft:short_grass"
+        | "minecraft:tall_grass"
+        | "minecraft:fern"
+        | "minecraft:large_fern"
+        | "minecraft:dead_bush"
+        | "minecraft:leaf_litter"
+        | "minecraft:wildflowers"
+        | "minecraft:lilac"
+        | "minecraft:peony"
+        | "minecraft:rose_bush"
+        | "minecraft:sunflower"
+        | "minecraft:lily_of_the_valley"
+        | "minecraft:dandelion"
+        | "minecraft:poppy" => id::AIR,
         "minecraft:grass_block" => id::GRASS,
         "minecraft:dirt"
         | "minecraft:coarse_dirt"
@@ -94,27 +149,74 @@ fn map_block(name: &str) -> u32 {
         "minecraft:gravel" => id::GRAVEL,
         "minecraft:water" | "minecraft:lava" => id::WATER,
         "minecraft:bedrock" => id::BEDROCK,
+        // Trees. `_log` / `_leaves` catches every wood type the vegetation
+        // stage can place, not just the three seed 3 happens to grow, so
+        // another biome does not silently reintroduce stone trees. Stripped
+        // logs and wood blocks take the same side sprite.
+        _ if is_log(base(name)) => id::LOG,
+        _ if base(name).ends_with("_leaves") => id::LEAVES,
         // stone, deepslate, tuff, calcite, and any other solid: render as stone.
         _ => id::STONE,
     }
 }
 
-/// Surface height (world-Y of the highest walkable, i.e. non-air/non-fluid,
-/// block) at world column `(wx, wz)`, clamped to the rendered window.
-#[must_use]
-pub fn surface_height(wx: i32, wz: i32) -> i32 {
+/// The topmost `y` in the rendered window whose **mapped** palette id satisfies
+/// `keep`, or [`MIN_Y`] if none does.
+///
+/// Classifies through [`map_block`] rather than matching raw vanilla names a
+/// second time, and that is the point: a height query that used its own name list
+/// reports a `y` where the generated column has nothing. That is exactly what
+/// happened when the feature stage landed — `surface_height` counted a
+/// `minecraft:bush` as ground while [`generate_column`] wrote air there, so the
+/// reported surface was a block above the real one at every column carrying a
+/// plant. One classifier, one answer, no second list to drift.
+fn top_mapped(wx: i32, wz: i32, keep: impl Fn(u32) -> bool) -> i32 {
     let cx = wx.div_euclid(16);
     let cz = wz.div_euclid(16);
     let lx = wx.rem_euclid(16) as usize;
     let lz = wz.rem_euclid(16) as usize;
     let col = generator().column(cx, cz);
     for y in (MIN_Y..TOP_Y).rev() {
-        match base(col.block_state(lx, y, lz)) {
-            "minecraft:air" | "minecraft:cave_air" | "minecraft:water" | "minecraft:lava" => {}
-            _ => return y,
+        // The floor is forced to bedrock by `generate_column`, so it is solid
+        // regardless of what the generator says there.
+        let block = if y == MIN_Y {
+            id::BEDROCK
+        } else {
+            map_block(col.block_state(lx, y, lz))
+        };
+        if keep(block) {
+            return y;
         }
     }
     MIN_Y
+}
+
+/// Surface height (world-Y of the highest walkable, i.e. non-air/non-fluid,
+/// block) at world column `(wx, wz)`, clamped to the rendered window.
+///
+/// **Includes tree canopy**, since leaves are walkable — this is vanilla's
+/// `MOTION_BLOCKING` sense. For "where is the ground", which is what a spawn
+/// point wants, use [`ground_height`].
+#[must_use]
+pub fn surface_height(wx: i32, wz: i32) -> i32 {
+    top_mapped(wx, wz, |block| block != id::AIR && block != id::WATER)
+}
+
+/// World-Y of the highest **terrain** block at `(wx, wz)`: like
+/// [`surface_height`], but ignoring anything the vegetation stage placed.
+///
+/// Vanilla's `MOTION_BLOCKING_NO_LEAVES` heightmap, and the one it uses to
+/// choose a spawn position for exactly this reason. Once the feature stage was
+/// chained in, seed 3's origin column acquired a birch canopy at y78–79 over
+/// ground at y70, so [`spawn_feet`] — "just above the surface" — was putting the
+/// player on top of a tree nine blocks in the air. Logs are excluded as well as
+/// leaves: standing on a trunk is no more "the ground" than standing on the
+/// canopy.
+#[must_use]
+pub fn ground_height(wx: i32, wz: i32) -> i32 {
+    top_mapped(wx, wz, |block| {
+        block != id::AIR && block != id::WATER && block != id::LOG && block != id::LEAVES
+    })
 }
 
 /// Generate a single chunk column at chunk position `(cx, cz)` by windowing the
@@ -209,10 +311,15 @@ pub fn generate(radius: i32) -> World {
 
 /// A comfortable spawn position (feet) just above the surface at the world
 /// origin.
+///
+/// [`ground_height`], not [`surface_height`]: seed 3's origin column grows a
+/// birch tree, and "just above the surface" through the canopy-inclusive height
+/// put the player standing on leaves nine blocks off the ground. Vanilla picks a
+/// spawn off `MOTION_BLOCKING_NO_LEAVES` for the same reason.
 #[must_use]
 pub fn spawn_feet() -> [f64; 3] {
-    let surface = surface_height(0, 0);
-    [0.5, (surface + 1) as f64, 0.5]
+    let ground = ground_height(0, 0);
+    [0.5, (ground + 1) as f64, 0.5]
 }
 
 #[cfg(test)]
@@ -224,6 +331,28 @@ mod tests {
         assert_eq!(surface_height(3, 7), surface_height(3, 7));
     }
 
+    /// **The surface rule ran, and nothing solid sits above what it produced.**
+    ///
+    /// Asserted against [`ground_height`], not [`surface_height`]: the feature
+    /// stage grows a birch tree on seed 3's origin column, so the canopy-inclusive
+    /// height lands on a leaf block at y79 and "the origin surface is grass" fails
+    /// with `left: 1` — `map_block`'s `_ => STONE` fallback, which was the real
+    /// defect that failure was reporting.
+    ///
+    /// The expectation is vanilla's overworld surface rule, not a transcription of
+    /// the measurement: on dry land above sea level it places `grass_block` with
+    /// `dirt` beneath it, over the stone the density function produced. So this
+    /// predicts the *stack* — grass, then dirt directly under it, then stone
+    /// within the dirt rule's 1..=4 depth — rather than one block at one height,
+    /// and a generator that stopped running surface rules would fail on the dirt
+    /// or the stone even if it happened to leave grass on top.
+    ///
+    /// The last loop is what makes it a gate on the feature stage rather than on
+    /// terrain alone: everything above the ground surface must be air or
+    /// vegetation. A stray stone or dirt block up there means either the density
+    /// function grew a detached overhang the ground-height scan walked past, or
+    /// `map_block` sent a plant down the `_ => STONE` fallback again — the exact
+    /// bug this test found.
     #[test]
     fn bedrock_floor_and_real_surface() {
         let chunk = generate_column(0, 0);
@@ -233,19 +362,70 @@ mod tests {
             id::BEDROCK,
             "forced bedrock at the floor"
         );
-        // Seed 3's origin is dry grassland: the top walkable block is grass and
-        // the block above it is air.
+
+        let ground = ground_height(0, 0);
+        assert!(
+            (SEA_LEVEL..TOP_Y).contains(&ground),
+            "origin ground {ground} should be dry land in the window"
+        );
+        assert_eq!(
+            col.get_block(0, ground, 0),
+            id::GRASS,
+            "the surface rule puts grass_block on dry land above sea level"
+        );
+        assert_eq!(
+            col.get_block(0, ground - 1, 0),
+            id::DIRT,
+            "and dirt directly beneath it — grass with stone under it means the \
+             surface rule's dirt band did not run"
+        );
+        let stone_within_rule_depth = (1..=4)
+            .any(|depth| col.get_block(0, ground - depth, 0) == id::STONE);
+        assert!(
+            stone_within_rule_depth,
+            "the dirt band is 1..=4 deep, so stone must appear within four \
+             blocks of the surface"
+        );
+
+        for y in (ground + 1)..TOP_Y {
+            let block = col.get_block(0, y, 0);
+            assert!(
+                block == id::AIR || block == id::LOG || block == id::LEAVES,
+                "y={y} above the ground surface is id {block}: only air and \
+                 vegetation may sit above the terrain the surface rule capped"
+            );
+        }
+    }
+
+    /// The origin column really does carry the tree that broke the test above —
+    /// the premise the assertions there depend on, made explicit so it cannot
+    /// quietly stop holding.
+    ///
+    /// Without this, `bedrock_floor_and_real_surface`'s vegetation loop is
+    /// satisfied by a column of pure air above the grass, and
+    /// `spawn_feet`'s reason for preferring `ground_height` would be untested.
+    #[test]
+    fn the_origin_column_carries_canopy_above_its_ground_surface() {
+        let chunk = generate_column(0, 0);
+        let col = &chunk.column;
+        let ground = ground_height(0, 0);
         let surface = surface_height(0, 0);
         assert!(
-            (SEA_LEVEL..TOP_Y).contains(&surface),
-            "origin surface {surface} should be dry land in the window"
+            surface > ground,
+            "premise: seed 3's origin grows a birch tree, so the walkable \
+             surface ({surface}) must sit above the ground ({ground})"
         );
         assert_eq!(
             col.get_block(0, surface, 0),
-            id::GRASS,
-            "origin surface is grass"
+            id::LEAVES,
+            "and the block at the walkable surface is canopy, not the stone the \
+             `_ =>` fallback used to make it"
         );
-        assert_eq!(col.get_block(0, surface + 1, 0), id::AIR);
+        assert_eq!(
+            spawn_feet()[1],
+            f64::from(ground + 1),
+            "so spawn stands on the ground, not on the canopy"
+        );
     }
 
     #[test]
