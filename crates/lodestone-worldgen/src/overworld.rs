@@ -655,9 +655,17 @@ impl OverworldGenerator {
         {
             let cache = self.pre_ore_cache.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(hit) = cache.map.get(&(cx, cz)) {
+                crate::counters::bump_pre_ore(false);
                 return Arc::clone(hit);
             }
         }
+        // Counted before the computation, not after, so a panic mid-pipeline
+        // still leaves the counter describing what was attempted. Note the
+        // racing-miss path below can make `pre_ore_computed` exceed the number
+        // of *distinct* chunks computed under a parallel sweep — which is the
+        // honest reading (the work really was done twice), and is exactly the
+        // waste U6's store is meant to make impossible.
+        crate::counters::bump_pre_ore(true);
         // Computed with the lock released: this is a pure function of
         // `(cx, cz)` and this generator's own fixed state, so two threads
         // racing on the same miss both landing here just means the same
@@ -731,6 +739,14 @@ impl OverworldGenerator {
         if self.ores_by_biome.values().all(Vec::is_empty) {
             return center_world;
         }
+        // Entered AFTER the no-data early return, deliberately: `stage_entered`
+        // must count stages that did real work, not stages that were called.
+        // That is what makes it a detector for the "world" species of vacuous
+        // benchmark — this file's own documented history is a resolver that
+        // supplied no ore data, so `ore_stage` early-returned while a percentage
+        // table went on looking plausible. A counter placed above this `if`
+        // would have reported "ore ran once per chunk" for that exact run.
+        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Ore);
 
         // Issue #106: a `DenseBlockGrid`, not a `HashMap<(i32,i32,i32),
         // String>` — see `crate::feature::RegionGrid`'s own doc for why.
@@ -877,6 +893,11 @@ impl OverworldGenerator {
         let base_z = source_cz * 16;
         let dx = (source_cx - center_cx) * 16;
         let dz = (source_cz - center_cz) * 16;
+        // Diagnostic D2, and U7's acceptance criterion (zero). Counted in bulk
+        // from the loop bounds rather than once per cell: an atomic increment
+        // 98,304 times per stitch would dominate the very cost being measured,
+        // and the product is exact — the loop below has no `continue`.
+        crate::counters::bump_stitch_cells(256 * world.bounds().4.max(0) as u64);
         for ly in 0..world.bounds().4 {
             let y = world.bounds().1 + ly;
             for lz in 0..16i32 {
@@ -934,6 +955,8 @@ impl OverworldGenerator {
         if self.vegetation_by_biome.values().all(Vec::is_empty) {
             return world;
         }
+        // After the early return — see `ore_stage`'s note on why.
+        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Vegetation);
 
         let base_x = cx * 16;
         let base_z = cz * 16;
@@ -1078,6 +1101,12 @@ impl OverworldGenerator {
         {
             return (world, crate::feature::top_layer::FreezeCounts::default());
         }
+        // After the early return — see `ore_stage`'s note on why. This is the
+        // stage the fixture tree cannot exercise at all (no `block_freeze_facts`
+        // document), so `stage_entered[top_layer] == 0` is precisely how a bench
+        // discovers it is running against the fixture tree rather than the
+        // embedded server data.
+        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::TopLayer);
         // Debug-only escape hatch, mirroring `LODESTONE_ORE_SINGLE_SOURCE_DEBUG`
         // and `LODESTONE_VEG_SINGLE_SOURCE_DEBUG` above: skip the step entirely
         // so the A arm of a timing comparison can be measured in the same
@@ -1143,9 +1172,11 @@ impl OverworldGenerator {
         {
             let cache = self.post_ore_cache.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(hit) = cache.map.get(&(cx, cz)) {
+                crate::counters::bump_post_ore(false);
                 return Arc::clone(hit);
             }
         }
+        crate::counters::bump_post_ore(true);
         let pre = self.pre_ore_stage(cx, cz);
         let computed = Arc::new(self.ore_stage(cx, cz, pre.0.clone(), &pre.1));
         let mut cache = self.post_ore_cache.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1180,6 +1211,14 @@ impl OverworldGenerator {
     ) {
         let base_x = source_cx * 16;
         let base_z = source_cz * 16;
+        // The single most damning number in the rewrite diagnosis: one
+        // `String` allocation per cell, `256 * height` cells per source chunk,
+        // nine sources per column — the ~885k-allocations-per-warm-column figure
+        // (D2). Counted in bulk from the loop bounds for the same reason
+        // `stitch_region` does; the `to_string()` below is unconditional.
+        let cells = 256 * height.max(0) as u64;
+        crate::counters::bump_stitch_cells(cells);
+        crate::counters::bump_string_allocs(cells);
         for ly in 0..height {
             let y = min_y + ly;
             for lz in 0..16i32 {
@@ -1251,6 +1290,7 @@ impl OverworldGenerator {
     /// pre-built [`AquiferTrees`] — matching vanilla's own per-chunk
     /// `NoiseChunk`, which the aquifer's internal grid-bound caches assume.
     fn build_aquifer(&self, cx: i32, cz: i32) -> AquiferSystem {
+        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Aquifer);
         let t = &self.aquifer_trees;
         AquiferSystem::from_parts(
             t.final_density.clone(),
@@ -1276,6 +1316,7 @@ impl OverworldGenerator {
     /// Returns a `16×height×16` dense field of [`BlockKind`] indexed by
     /// [`Self::idx`].
     fn fill_stage(&self, aquifer: &AquiferSystem, base_x: i32, base_z: i32) -> Vec<BlockKind> {
+        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Shape);
         let height = self.height as usize;
         let mut field = vec![BlockKind::Air; 16 * 16 * height];
         for lz in 0..16i32 {
@@ -1330,6 +1371,12 @@ impl OverworldGenerator {
     /// height silently produces almost all cave/deep-ocean biomes instead of
     /// the terrain biome a player standing there would actually see.
     fn biome_stage(&self, heights: &[i32; 256], base_x: i32, base_z: i32) -> [(String, bool); 16] {
+        // Entered unconditionally, unlike `ore_stage`/`vegetation_stage` below:
+        // this stage has no single early return, it degrades per-quart when
+        // `dynamic_biome` is `None`. So `stage_entered[biome]` is NOT the
+        // vacuity signal for this one — `biome_searches` is. A fixed-biome
+        // generator enters this stage 16 times and searches zero times.
+        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Biome);
         std::array::from_fn(|i| {
             let Some(dynamic) = &self.dynamic_biome else {
                 return (
@@ -1387,6 +1434,7 @@ impl OverworldGenerator {
         base_x: i32,
         base_z: i32,
     ) -> HashMap<(i32, i32, i32), String> {
+        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Surface);
         let pre = |lx: i32, y: i32, lz: i32| -> String {
             let ly = y - self.min_y;
             if !(0..self.height).contains(&ly) {
@@ -1423,6 +1471,7 @@ impl OverworldGenerator {
         base_x: i32,
         base_z: i32,
     ) -> crate::dense_grid::DenseBlockGrid {
+        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Materialize);
         let mut world = crate::dense_grid::DenseBlockGrid::new(
             base_x,
             self.min_y,
@@ -1488,6 +1537,7 @@ impl OverworldGenerator {
         base_z: i32,
         world: crate::dense_grid::DenseBlockGrid,
     ) -> crate::dense_grid::DenseBlockGrid {
+        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Carve);
         let heightmap_fn = |lx: i32, lz: i32| -> i32 { heights[(lz * 16 + lx) as usize] };
         let top_material = |x: i32, y: i32, z: i32, under_fluid: bool| -> Option<String> {
             let lx = x - base_x;
@@ -1548,6 +1598,7 @@ impl OverworldGenerator {
         world: crate::dense_grid::DenseBlockGrid,
         biome_quarts: [(String, bool); 16],
     ) -> GeneratedColumn {
+        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Intern);
         debug_assert_eq!(world.bounds().3, 16, "centre chunk width must be 16");
         debug_assert_eq!(world.bounds().4, self.height, "centre chunk height must match the generator's");
         debug_assert_eq!(world.bounds().5, 16, "centre chunk depth must be 16");

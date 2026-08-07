@@ -332,6 +332,7 @@ impl NoiseChunkSampler {
     }
 
     fn eval(&self, node: &Density, x: i32, y: i32, z: i32, interpolate: bool) -> f64 {
+        crate::counters::bump_density_eval(node.kind_index());
         match node {
             Density::Interpolated { inner, slot } => {
                 if interpolate {
@@ -489,6 +490,12 @@ impl NoiseChunkSampler {
     }
 
     fn corner(&self, inner: &Density, slot: usize, x: i32, y: i32, z: i32) -> f64 {
+        // Counted here rather than inside `slot_get`, which `FlatCache` also
+        // calls: this must stay "corner lookups" exactly (8 per interpolated
+        // query, hit or miss), because that is the number `benches/generation.rs`
+        // predicts from the cell geometry. `slot_get`'s own hit/miss counters
+        // are the separate, larger population.
+        crate::counters::bump_corner_lookup();
         self.slot_get(slot, (x, y, z), inner)
     }
 
@@ -496,8 +503,10 @@ impl NoiseChunkSampler {
         match &self.caches[slot] {
             SlotStore::Hashed(cache) => {
                 if let Some(v) = cache.borrow().get(&key) {
+                    crate::counters::bump_slot_hit();
                     return *v;
                 }
+                crate::counters::bump_slot_miss(slot);
                 let v = self.eval(inner, key.0, key.1, key.2, false);
                 cache.borrow_mut().insert(key, v);
                 v
@@ -510,8 +519,10 @@ impl NoiseChunkSampler {
                 if let Some(v) = cell.borrow().as_ref().and_then(|ds| {
                     if ds.has[idx] { Some(ds.values[idx]) } else { None }
                 }) {
+                    crate::counters::bump_slot_hit();
                     return v;
                 }
+                crate::counters::bump_slot_miss(slot);
                 let v = self.eval(inner, key.0, key.1, key.2, false);
                 let mut borrow = cell.borrow_mut();
                 let ds = borrow.get_or_insert_with(|| DenseSlot::new(shape.len()));

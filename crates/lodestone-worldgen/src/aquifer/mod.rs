@@ -348,6 +348,7 @@ impl AquiferSystem {
     /// [`BlockKind`] (`None` → the default block, stone).
     #[must_use]
     pub fn block_at(&self, x: i32, y: i32, z: i32) -> BlockKind {
+        crate::counters::bump_block_at();
         let density = self.final_density.final_density(x, y, z);
         match self.compute_substance(x, y, z, density) {
             None => BlockKind::Stone,

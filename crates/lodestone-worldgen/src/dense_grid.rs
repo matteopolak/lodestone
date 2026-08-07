@@ -110,8 +110,14 @@ impl DenseBlockGrid {
             return;
         };
         let id = if let Some(&id) = self.index_of.get(state) {
+            // The common case, and diagnostic D2: a `HashMap<String, u16>` probe
+            // on every block write. Counted separately from the new-entry branch
+            // because U3's acceptance criterion is about the *allocations* (the
+            // branch below), while this branch's count is the hash-probe volume.
+            crate::counters::bump_palette_intern_hit();
             id
         } else {
+            crate::counters::bump_palette_intern_new();
             let id = self.palette.len() as u16;
             self.palette.push(state.to_string());
             self.index_of.insert(state.to_string(), id);

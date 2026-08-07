@@ -166,6 +166,15 @@ impl<R: RandomSource> RandomSource for WorldgenRandom<R> {
     }
 
     fn next_bits(&mut self, bits: u32) -> i32 {
+        // The single funnel for every production RNG draw: `next_int`,
+        // `next_int_bounded`, `next_long`, `next_bool`, `next_float`,
+        // `next_double` and `consume_count` all route through here, and all
+        // terrain RNG goes through `WorldgenRandom<R>` rather than a bare
+        // backend. Hooking the two backends' own primitives instead would
+        // double-count (`next_long` is two `next_bits` calls on the legacy
+        // source) and would also count the noise-construction draws that are
+        // not part of any stage.
+        crate::counters::bump_rng_draw();
         self.count = self.count.wrapping_add(1);
         self.inner.next_bits(bits)
     }

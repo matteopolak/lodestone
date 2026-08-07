@@ -3200,6 +3200,7 @@ name = "lodestone-worldgen"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "lodestone-server",
  "memory-stats",
  "serde_json",
 ]

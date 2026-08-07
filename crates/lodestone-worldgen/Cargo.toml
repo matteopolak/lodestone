@@ -9,6 +9,23 @@ description = "Version-free Minecraft world-generation engine (RNG, noise, densi
 [lints]
 workspace = true
 
+[features]
+default = []
+# Structural counters through the generation hot path (`src/counters.rs`), the
+# instrument the worldgen-rewrite acceptance criteria are written in
+# (`docs/plans/worldgen-rewrite.md` Unit 1, `docs/benchmark-harness.md`).
+#
+# Default OFF and it must stay that way: every hook is an `#[inline(always)]`
+# empty function without it, so a shipped build carries no counter code at all.
+# With it on, relaxed atomics sit inside `AquiferSystem::block_at` (98,304 calls
+# per chunk fill) and `WorldgenRandom::next_bits` — measurably slower, which is
+# why a timing run and a counter run are two separate runs, never one.
+#
+# Additive only: it adds atomics and hook bodies, and touches no arithmetic and
+# no RNG draw, so it cannot change generated terrain. `just test` covers both
+# settings via `--all-features`.
+gen-counters = []
+
 [dependencies]
 serde_json = { workspace = true }
 
@@ -29,6 +46,31 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 # once per process, and with no output parsing. Already in the lockfile via
 # `lodestone-shell`. Dev-only.
 memory-stats = "1"
+# **Dev-only, and only so `benches/generation.rs` can measure the EMBEDDED
+# production worldgen data** — `lodestone_server::overworld_generator`, the exact
+# generator the integrated server serves. This reverses an earlier decision
+# recorded in this file ("no `lodestone-server` dependency is needed"), and the
+# reason is `docs/plans/worldgen-rewrite.md`'s C_ss definition plus this bench
+# file's own documented history:
+#
+# * The in-crate fixture tree (`tests/support/worldgen_data`) is single-biome
+#   plains and carries no `block_freeze_facts` document, so against it the biome
+#   search never runs and `freeze_top_layer` early-returns. Two of the ten stages
+#   are structurally absent. Benchmarking the "composed pipeline" against it is
+#   the **"world" species of vacuous test** (`CLAUDE.md`) — the flaw is in the
+#   input data and reading the bench cannot reveal it. That is not a
+#   hypothetical here: it already happened in this file.
+# * `EmbeddedResolver` is private to `lodestone-server` and `block_freeze_facts`
+#   is built from `lodestone-data`'s jar dumps, not from any JSON asset, so
+#   pointing an `FsResolver` at `crates/lodestone-server/assets/worldgen/` would
+#   reproduce eight of the nine resolver methods and silently miss that one.
+#
+# This is a **dev-dependency cycle** (`lodestone-server` depends on this crate
+# normally), which Cargo supports: the lib builds from its non-dev deps first,
+# then `lodestone-server` against it, then this crate's dev targets against
+# both. It adds nothing to this crate's lib, so the wasm build and
+# `cargo check -p lodestone-shell --no-default-features` are untouched.
+lodestone-server = { path = "../lodestone-server" }
 
 [[bench]]
 name = "generation"
