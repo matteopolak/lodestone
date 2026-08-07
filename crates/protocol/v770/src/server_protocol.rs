@@ -54,7 +54,10 @@ use lodestone_server::{
     MetadataField, PlayerListing, ResourcePackPush, ServerBound, ServerDirective, ServerProtocol,
     WorldBorder, WorldgenScope,
 };
-use lodestone_world::{ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmaps};
+use lodestone_world::{
+    ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmaps, LightProperties,
+    compute_column_light,
+};
 use uuid::Uuid;
 
 use lodestone_data::block_states::{block_name, properties};
@@ -1452,12 +1455,21 @@ fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldCh
 /// block-state container then the biome container), an empty block-entity
 /// list, then the trailing light payload.
 ///
-/// Heightmaps are sent empty and light is sent as all-`Missing`: both are
-/// valid, decodable wire forms (confirmed against `Heightmaps`/`ColumnLight`'s
-/// own encode logic), so the client accepts the column even though real
-/// lighting and heightmap computation are not implemented yet — a documented
-/// gap, not a hidden one.
-fn encode_column_body(cx: i32, cz: i32, shape: &ChunkShape, column: &WorldChunkColumn) -> Vec<u8> {
+/// Heightmaps are still sent empty: a valid, decodable wire form (confirmed
+/// against `Heightmaps`'s own encode logic), so the client accepts the column
+/// even though heightmap computation is not implemented yet — a documented gap,
+/// not a hidden one.
+///
+/// **`light` is no longer all-`Missing`** (issue #517). It is the caller's
+/// computed [`ColumnLight`]; see [`compute_served_light`] for where it comes
+/// from and what `Missing` used to mean on the client.
+fn encode_column_body(
+    cx: i32,
+    cz: i32,
+    shape: &ChunkShape,
+    column: &WorldChunkColumn,
+    light: &ColumnLight,
+) -> Vec<u8> {
     let mut w = Writer::default();
     w.i32(cx);
     w.i32(cz);
@@ -1493,9 +1505,91 @@ fn encode_column_body(cx: i32, cz: i32, shape: &ChunkShape, column: &WorldChunkC
 
     w.var_i32(0); // block entities: none generated yet
 
-    ColumnLight::new(shape.section_count).encode(&mut w);
+    debug_assert_eq!(
+        light.light_section_count(),
+        shape.section_count + 2,
+        "light must span the shape's `section_count + 2` light sections"
+    );
+    light.encode(&mut w);
 
     w.into_vec()
+}
+
+/// The 26.2 [`LightProperties`] the served-chunk light engine runs against:
+/// `lodestone-data`'s per-block-state dampening/emission census, read straight
+/// out of rodata.
+///
+/// A zero-sized adapter rather than a table this crate builds, so there is no
+/// per-column setup cost and nothing to cache. See
+/// [`lodestone_data::light_props`] for the provenance argument — in particular
+/// that every gap in it darkens rather than brightens.
+struct V770LightProps;
+
+impl LightProperties for V770LightProps {
+    fn opacity(&self, state: u32) -> u8 {
+        lodestone_data::light_props::dampening(state)
+    }
+
+    fn emission(&self, state: u32) -> u8 {
+        lodestone_data::light_props::emission(state)
+    }
+}
+
+/// Computes the sky and block light for one served column.
+///
+/// # Why this exists at all (issue #517)
+///
+/// Until this landed, every column the integrated server sent carried
+/// `ColumnLight::new(section_count)` — all-`LightData::Missing`
+/// (`lodestone_world::light`), for both layers, in every section. That is a
+/// legal wire form, and it is *not* "no light": a client resolves an absent sky
+/// section to its dimension default, which in the overworld is **full daylight**
+/// (`lodestone_render::SkyDefault::Full`; vanilla's own client does the same
+/// through `SkyLightSectionStorage`). So the symptom was a **fully bright**
+/// world — caves and sealed rooms included — not a dark one. Anyone hunting this
+/// bug by looking for blackness was looking for the wrong colour.
+///
+/// # Where light is computed, and what that costs
+///
+/// Here, at serve time, over the [`WorldChunkColumn`] `build_world_column` has
+/// already materialised. That is not where it *belongs* — see the seam note
+/// below — but it is the only place reachable from
+/// [`ServerProtocol::encode_chunk`], whose signature carries one column and no
+/// access to the [`lodestone_server::ChunkSource`] the neighbours live in.
+///
+/// The cost is bounded by construction: the flood is `O(cells)` over the
+/// `(section_count + 2) * 4096` cells of one column with a 15-bucket queue, and
+/// it runs on whatever thread already paid for `build_world_column`'s 98,304
+/// `resolve_state_id` lookups — a far larger constant. `tests/server_light.rs`
+/// measures the ratio of the two in one process, which is the only honest way to
+/// state a cost on this machine (an absolute duration gets attributed to
+/// concurrent load).
+///
+/// # The cross-chunk seam, and why this is the isolated compute
+///
+/// Sky and block light cross column boundaries, so the exact answer for a column
+/// needs its eight neighbours — that is what
+/// `lodestone_world::compute_column_light_with_neighbours` is for, and it is exact, because
+/// light decays at least one level per block and `15 < 16` so no source beyond
+/// the immediate neighbours can reach the centre.
+///
+/// This function cannot call it: `encode_chunk` is handed one column, and at
+/// join the columns arrive in spiral ring order, so a column's *outward*
+/// neighbours have not been generated yet when it is encoded. Consulting only
+/// the neighbours seen so far would bias every column's outward edge dark —
+/// worse than a symmetric residual.
+///
+/// So this is the isolated compute, and the residual is a **measured, gated
+/// number**, not a caveat: `tests/server_light.rs`'s
+/// `served_light_has_no_cross_chunk_seam_residual` recomputes the same terrain
+/// with a full 3×3 neighbourhood and fails, printing a bounding box, if the two
+/// disagree anywhere. The day the generator grows terrain whose light genuinely
+/// spans a seam, that gate goes red and the fix is the brokered
+/// `lodestone-server` patch recorded in `DESIGN.md` §12.114: compute light in the
+/// chunk source, where the neighbourhood is already resident, and carry it on
+/// [`ServerChunkColumn`].
+fn compute_served_light(column: &WorldChunkColumn) -> ColumnLight {
+    compute_column_light(column, &V770LightProps)
 }
 
 /// Server-side implementation of the protocol-776 (Minecraft 26.2) wire
@@ -2777,7 +2871,8 @@ impl ServerProtocol for V770ServerProtocol {
     fn encode_chunk(&self, cx: i32, cz: i32, column: &ServerChunkColumn) -> ServerDirective {
         let shape = ChunkShape::overworld_1_21();
         let world_column = build_world_column(&shape, column);
-        let payload = encode_column_body(cx, cz, &shape, &world_column);
+        let light = compute_served_light(&world_column);
+        let payload = encode_column_body(cx, cz, &shape, &world_column, &light);
         ServerDirective::Send {
             packet_id: play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
             payload,
