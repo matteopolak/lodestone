@@ -602,11 +602,17 @@ impl IntegratedServer {
                 center_z,
                 mob_count,
             );
+            // Read the clock **once**: the previous form called `elapsed()` twice, so
+            // the logged parts did not sum to the logged total. `saturating_sub` for
+            // the same reason as `server.rs`'s welcome timing — `as_millis()` is
+            // `u128`, and a sub-millisecond phase makes a plain subtraction underflow
+            // and panic in debug while wrapping silently in release.
+            let seed_ms = t_seed.elapsed().as_millis();
             tracing::info!(
                 "mob seed task done: {}ms (gen={}ms, reseed={}ms)",
-                t_seed.elapsed().as_millis(),
+                seed_ms,
                 gen_ms,
-                t_seed.elapsed().as_millis() - gen_ms,
+                seed_ms.saturating_sub(gen_ms),
             );
         });
 
