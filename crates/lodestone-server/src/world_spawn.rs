@@ -102,20 +102,27 @@ fn get_level_respawn_pos(column: &ChunkColumn, lx: i32, lz: i32) -> Option<i32> 
     None
 }
 
-/// Scans one chunk's 256 block positions in vanilla's order (`for x … for z`,
-/// `PlayerSpawnFinder.getSpawnPosInChunk`, `:182-190`) and returns the first
-/// valid spawn position's world `BlockPos`, or `None` if the whole chunk is
-/// invalid (all ocean, all void, …).
-fn get_spawn_pos_in_chunk<S: ChunkSource>(source: &S, cx: i32, cz: i32) -> Option<BlockPos> {
-    let column = source.column(cx, cz);
+/// Scans one already-generated column's 256 block positions in vanilla's order
+/// (`for x … for z`, `PlayerSpawnFinder.getSpawnPosInChunk`, `:182-190`) and
+/// returns the first valid spawn position's world `BlockPos`, or `None` if the
+/// whole chunk is invalid (all ocean, all void, …).
+///
+/// Takes the column rather than the source so [`find_initial_spawn`] can reuse
+/// the origin column it has already paid for — see its own doc comment.
+fn spawn_pos_in_column(column: &ChunkColumn, cx: i32, cz: i32) -> Option<BlockPos> {
     for lx in 0..16 {
         for lz in 0..16 {
-            if let Some(y) = get_level_respawn_pos(&column, lx, lz) {
+            if let Some(y) = get_level_respawn_pos(column, lx, lz) {
                 return Some(BlockPos::new(cx * 16 + lx, y, cz * 16 + lz));
             }
         }
     }
     None
+}
+
+/// [`spawn_pos_in_column`] for a chunk that is not yet in hand.
+fn get_spawn_pos_in_chunk<S: ChunkSource>(source: &S, cx: i32, cz: i32) -> Option<BlockPos> {
+    spawn_pos_in_column(&source.column(cx, cz), cx, cz)
 }
 
 /// The 121 chunk offsets the initial-spawn spiral visits, in vanilla order.
@@ -165,6 +172,22 @@ fn spiral_chunk_offsets() -> Vec<(i32, i32)> {
 /// surface at local `(8, 8)`, vanilla's own fallback (`setInitialSpawn`
 /// pre-seeds `levelData.setSpawn` with `offset(8, height, 8)` before the
 /// loop and the loop only overrides it with a *valid* find).
+///
+/// # Column generations, because this is on the join critical path
+///
+/// This runs in `crate::server`'s `ConfigurationFinished` arm **before** the
+/// chunk-streaming ring loop, so every column it generates is time the client
+/// spends with no terrain (issue #453's time-to-first-chunk). For the normal case
+/// — a valid origin chunk — that cost is exactly **one** column: the spiral's
+/// first offset is `(0, 0)`, which is the column the `fallback_y` query already
+/// generated, so it is reused rather than re-requested. It used to be asked for
+/// twice, which made `serve_play`'s "at most 2 columns before the first encode"
+/// bound unsatisfiable at 3 against a store-less source.
+///
+/// For an *invalid* origin the spiral genuinely walks up to 121 columns first.
+/// That is vanilla's own search and it is not a leak — the ±5-chunk box sits
+/// inside the ±9 join view, so a [`crate::ChunkStore`]-wrapped source serves
+/// those columns from cache when the ring loop reaches them.
 pub(crate) fn find_initial_spawn<S: ChunkSource>(source: &S) -> WorldSpawn {
     let origin = source.column(0, 0);
     // `min_y + 1` when the origin is invalid (ocean/void) is the pre-#329
@@ -174,7 +197,15 @@ pub(crate) fn find_initial_spawn<S: ChunkSource>(source: &S) -> WorldSpawn {
     let fallback_y = get_level_respawn_pos(&origin, 8, 8).unwrap_or(origin.min_y + 1);
 
     for (xo, zo) in spiral_chunk_offsets() {
-        if let Some(pos) = get_spawn_pos_in_chunk(source, xo, zo) {
+        // `(0, 0)` is always the spiral's first offset, and `origin` is already
+        // in hand: asking the source for it again doubles the common case's
+        // pre-streaming generation cost. See this function's doc comment.
+        let candidate = if (xo, zo) == (0, 0) {
+            spawn_pos_in_column(&origin, 0, 0)
+        } else {
+            get_spawn_pos_in_chunk(source, xo, zo)
+        };
+        if let Some(pos) = candidate {
             return WorldSpawn {
                 pos: Vec3::new(pos.x as f64, pos.y as f64, pos.z as f64),
                 yaw: 0.0,
@@ -371,19 +402,109 @@ mod tests {
         assert_eq!(get_level_respawn_pos(&void, 0, 0), None, "no solid block at all");
     }
 
+    /// A valid origin chunk is accepted by the spiral's *first* candidate, and the
+    /// position inside it is vanilla's scan order — local `(0, 0)`, **not** the
+    /// centre.
+    ///
+    /// This test previously expected `(8, 8)` and named itself
+    /// `plains_origin_chunk_yields_spawn_at_local_8_8`, transcribed from the
+    /// pre-#329 hardcode it replaced. It had never passed: the search and the
+    /// expectation landed in the same commit (`43e096b`), and `(8, 8)` is not what
+    /// the search returns for a valid chunk.
+    ///
+    /// `(0, 0)` is read off `PlayerSpawnFinder.getSpawnPosInChunk`
+    /// (`.cache/mc/26.2/src/net/minecraft/server/level/PlayerSpawnFinder.java:183-190`),
+    /// which scans from `chunkPos.getMinBlockX()`/`getMinBlockZ()` and returns the
+    /// first valid `(x, z)` — for chunk `(0, 0)` that is world `(0, 0)`. Its
+    /// sibling [`ocean_origin_chunk_moves_the_spawn_to_the_nearest_land`] already
+    /// encoded the same rule (`x = 16, z = 0` for chunk `(1, 0)`, i.e. local
+    /// `(0, 0)`), so the two were mutually contradictory.
+    ///
+    /// `(8, 8)` is not lost: it is the *fallback* for a fully-invalid box, which
+    /// [`fully_ocean_box_falls_back_to_the_origin_surface`] pins.
     #[test]
-    fn plains_origin_chunk_yields_spawn_at_local_8_8() {
-        // A single flat land chunk at the origin: the first spiral candidate
-        // (offset 0, 0) is valid, so the spawn stays at local (8, 8) — the
-        // same column and centre the pre-#329 code hardcoded.
+    fn plains_origin_chunk_yields_spawn_at_vanillas_first_scanned_position() {
         let mut columns = std::collections::HashMap::new();
         columns.insert((0, 0), land_column(20));
         let spawn = find_initial_spawn(&MapSource { columns });
 
-        assert_eq!(spawn.pos.x, 8.0, "spawn X is the origin chunk's local centre");
-        assert_eq!(spawn.pos.z, 8.0, "spawn Z is the origin chunk's local centre");
+        assert_eq!(
+            spawn.pos.x, 0.0,
+            "spawn X is the first x vanilla's chunk scan visits, chunkPos.getMinBlockX()"
+        );
+        assert_eq!(
+            spawn.pos.z, 0.0,
+            "spawn Z is the first z of that scan, chunkPos.getMinBlockZ()"
+        );
         assert_eq!(spawn.pos.y, 21.0, "spawn Y is one above the surface");
         assert_eq!((spawn.yaw, spawn.pitch), (0.0, 0.0));
+    }
+
+    /// The origin column is generated **once**, not twice, for a valid origin.
+    ///
+    /// [`find_initial_spawn`] queries it for `fallback_y` and then meets it again
+    /// as the spiral's first offset. Asking the source twice is invisible behind a
+    /// [`crate::ChunkStore`] and very visible without one: it is a doubling of the
+    /// generation a joining client waits through before its first chunk, and it
+    /// made `tests/serve_play.rs`'s "at most 2 columns before the first encode"
+    /// bound unreachable.
+    ///
+    /// A count, not a duration, and the two hypotheses are exact: `1` if the
+    /// column is reused, `2` if it is re-requested.
+    #[test]
+    fn a_valid_origin_column_is_generated_exactly_once() {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingMapSource {
+            columns: Mutex<std::collections::HashMap<(i32, i32), ChunkColumn>>,
+            calls: AtomicUsize,
+        }
+
+        impl ChunkSource for CountingMapSource {
+            fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.columns
+                    .lock()
+                    .expect("map poisoned")
+                    .get(&(cx, cz))
+                    .cloned()
+                    .unwrap_or_else(|| ChunkColumn::new(0, 128))
+            }
+
+            fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+                let cx = x.div_euclid(16);
+                let cz = z.div_euclid(16);
+                self.column(cx, cz)
+                    .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
+                    .to_string()
+            }
+
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        }
+
+        let mut columns = std::collections::HashMap::new();
+        columns.insert((0, 0), land_column(20));
+        let source = CountingMapSource {
+            columns: Mutex::new(columns),
+            calls: AtomicUsize::new(0),
+        };
+
+        let spawn = find_initial_spawn(&source);
+        // Precondition: the search really did accept the origin. If it fell
+        // through to the fallback the count below would be 122 and the reuse
+        // would be untested.
+        assert_eq!(
+            (spawn.pos.x, spawn.pos.z),
+            (0.0, 0.0),
+            "precondition: the origin chunk must be the accepted candidate"
+        );
+        assert_eq!(
+            source.calls.load(Ordering::SeqCst),
+            1,
+            "the origin column must be generated once and reused for the spiral's (0, 0) \
+             candidate; 2 means the reuse was reverted"
+        );
     }
 
     #[test]
