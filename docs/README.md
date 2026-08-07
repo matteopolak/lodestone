@@ -1202,6 +1202,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   range, biome)` entries. Different climate → different biome → different surface
   material (sand in deserts, snow in taiga, terracotta-adjacent in savanna, etc.) and,
   once a render-layer consumer exists, different grass/foliage tint.
+- [Worldgen density engine: the block field, and the interpolation order it depends on](./worldgen-density-engine.md) —
+  How `crates/lodestone-worldgen-core`'s density stack turns vanilla's data-driven
+  density-function graph into the per-block field that `fillFromNoise` writes, and the
+  one bit-significant decision inside it that is easy to get wrong in the direction
+  that looks *more* faithful: which of vanilla's **two** trilinear interpolation
+  orders the block field actually uses. Written while executing U4 of
+  [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md); it records a measured
+  correction to that plan's U4 row plus the engine shape the correction implies.
 - [Nether and End worldgen](./worldgen-dimensions.md) — The bundled 26.2 data for
   the Nether and the End, and the precise engine deficit that still stands between
   that data and a generating dimension. Only the Overworld generates today. This doc
