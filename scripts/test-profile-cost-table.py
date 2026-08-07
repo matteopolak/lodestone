@@ -57,6 +57,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
@@ -203,11 +204,11 @@ def control_real_capture_without_sidecar_is_raw_addresses() -> None:
     )
     require_wrong(
         "real capture with no sidecar still names symbols",
-        lambda: test_assert_symbols(self_time),
+        lambda: _assert_symbols_present(self_time),
     )
 
 
-def test_assert_symbols(self_time: dict[str, float]) -> None:
+def _assert_symbols_present(self_time: dict[str, float]) -> None:
     assert "u20probe::u20_hot_alpha" in self_time
 
 
@@ -505,11 +506,9 @@ def test_missing_table_names_the_table_and_where() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_sidecar_path_matches_samply_naming(tmp_dir: Path | None = None) -> None:
+def test_sidecar_path_matches_samply_naming() -> None:
     """samply's `with_extension("syms.json")` on `p.json.gz` gives
     `p.json.syms.json`, measured against 0.13.1. Both spellings resolve."""
-    import tempfile
-
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
         (d / "p.json.gz").write_bytes(b"{}")
