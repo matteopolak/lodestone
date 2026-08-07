@@ -7,26 +7,164 @@
 //! benchmark meaningfully" specifically because it is the one subsystem
 //! verified bit-exact against JVM oracles (`HANDOFF.md` §4).
 //!
-//! This crate has no `[[bin]]`/example target of its own akin to
-//! `lodestone-server/examples/bench_worldgen.rs`; that example lives in
-//! `lodestone-server` (out of this pass's scope) and benches the *embedded*
-//! production data. This bench is deliberately independent of it — it proves
-//! the same generator, driven from data this crate already owns for its own
-//! parity tests, so no `lodestone-server` dependency is needed to benchmark
-//! `lodestone-worldgen` itself.
+//! # Two resolvers, and which benches may use which
 //!
-//! Run with: `cargo bench -p lodestone-worldgen --bench generation`
+//! **This changed in the worldgen-rewrite Unit 1 pass.** This file's header used
+//! to say "no `lodestone-server` dependency is needed to benchmark
+//! `lodestone-worldgen` itself", and for shape-only throughput that is still
+//! true. It is **not** true for anything claiming to measure the composed
+//! pipeline:
+//!
+//! | resolver | source | may be used by |
+//! |---|---|---|
+//! | [`make_shape_only_generator`] | in-crate fixture tree, 2 of 9 methods | raw noise-router throughput only |
+//! | [`make_full_generator`] | in-crate fixture tree, all 9 methods | single-biome composed benches; 2 of 10 stages inert |
+//! | [`make_embedded_generator`] | **`lodestone-server`'s embedded production data** | [`C_ss`/`C_cold`](bench_steady_state_and_cold) and the [calibration](bench_counter_calibration) |
+//!
+//! The fixture tree is single-biome plains and carries no `block_freeze_facts`
+//! document, so against it the biome nearest-neighbour search never runs and
+//! `freeze_top_layer` early-returns — **two of the ten stages are structurally
+//! absent**, and the percentage table stays perfectly plausible while describing
+//! a pipeline with stages missing. That is `CLAUDE.md`'s "world" species of
+//! vacuous test, and it is this file's own documented history (see
+//! [`make_shape_only_generator`]). `docs/plans/worldgen-rewrite.md` therefore
+//! pins C_ss/C_cold to the embedded data specifically.
+//!
+//! **The defence is a counter, not a comment.** Every bench below that claims to
+//! measure a stage asserts, via [`lodestone_worldgen::counters`], that the stage
+//! actually *ran* — `stage_entered[top_layer] == 0` is precisely how a bench
+//! discovers it has been silently pointed at the fixture tree. A prose warning
+//! is what this file already had, and it did not help.
+//!
+//! Run with: `cargo bench -p lodestone-worldgen --bench generation`. The counter
+//! benches need the feature:
+//! `cargo bench -p lodestone-worldgen --features gen-counters --bench generation`.
+
+// The counting allocator below needs `unsafe impl GlobalAlloc`, and the
+// workspace sets `unsafe_code = "deny"` (root `Cargo.toml`'s
+// `[workspace.lints.rust]`). This is the second opt-out in the workspace, after
+// `lodestone-fuzz/tests/length_prefix_allocation.rs`, and it is scoped as
+// narrowly as the lint allows: `#![allow]` is a crate-root attribute, and cargo
+// compiles each `[[bench]]` target as its own separate binary crate, so it
+// cannot leak into the library or any other target.
+//
+// The cost is paid for the same reason that file paid it: the rewrite plan's
+// allocation budget ("0 heap allocations from the hot path, plus O(1) for the
+// returned column's own buffers") is an *acceptance criterion* for Units 3, 4, 7
+// and 10, and the ~885k-allocations-per-column figure it ratchets down from is
+// the single most damning number in the diagnosis. Deriving that from source
+// reading is exactly the kind of static claim `CLAUDE.md`'s record is built out
+// of being wrong about. `alloc`/`dealloc` here are pass-throughs to `System`
+// plus a counter — no allocation logic of their own to get wrong.
+#![allow(unsafe_code)]
 
 mod support;
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::hint::black_box;
 use std::path::Path;
 use std::time::Instant;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use lodestone_worldgen::counters::{self, Snapshot, Stage};
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::overworld::OverworldGenerator;
 use serde_json::Value;
+
+// ---------------------------------------------------------------------------
+// Counting allocator — **this bench binary only**
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Allocations made **on the calling thread** while [`ALLOC_COUNTING`] is on.
+    ///
+    /// ## Per-thread, not a global atomic — and that is not a style choice
+    ///
+    /// `lodestone-fuzz/tests/length_prefix_allocation.rs` records (issue #450)
+    /// what happens with the obvious design: a bare process-wide
+    /// `AtomicU64` let one measurement absorb another thread's allocations, and
+    /// the follow-up fix — the same atomic plus a mutex held across each
+    /// measurement — *flaked*, because a lock only excludes code that takes it
+    /// and unrelated parallel work allocated straight into the shared counter.
+    /// A thread-local needs no cooperation from anything: other threads'
+    /// allocations land in their own cell and are structurally invisible here.
+    ///
+    /// That matters even though C_ss is single-threaded by definition: criterion
+    /// is free to allocate from its own threads, and `Vec::sort` and JSONL
+    /// recording run in the same process.
+    ///
+    /// `const`-initialised `Cell` deliberately, copying that file's reasoning
+    /// verbatim: it compiles to a plain per-thread slot with no lazy
+    /// initialisation and no destructor, so reading it from inside `alloc`
+    /// cannot itself allocate and recurse.
+    static ALLOC_COUNT: Cell<u64> = const { Cell::new(0) };
+    /// Gate on [`ALLOC_COUNT`]. Off by default so criterion's own sampling,
+    /// generator construction and JSON parsing are not attributed to generation.
+    static ALLOC_COUNTING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Counts allocations, forwarding everything to [`System`].
+///
+/// # Why this lives in the bench binary and nowhere else
+///
+/// `docs/plans/worldgen-rewrite.md`'s allocation budget is an *acceptance
+/// criterion* (0 heap allocations from the steady-state hot path, with an
+/// explicit O(1) allowance for the returned column's own buffers), so it needs a
+/// real count, not an estimate. But a `#[global_allocator]` is process-wide and
+/// exactly one may exist — `lodestone-allocbench` carries a deliberate
+/// `compile_error!` for precisely this reason. A bench binary is its own crate
+/// and its own process, so installing one here affects nothing else in the
+/// workspace and adds no allocator to any shipped artifact.
+///
+/// # Gotchas
+///
+/// * **It counts only the calling thread's allocations** (see [`ALLOC_COUNT`]).
+///   C_ss and C_cold are single-thread by definition, so that is what is wanted;
+///   but a *parallel* sweep wrapped in [`measure_allocs`] would report only the
+///   coordinating thread's share, which is not the per-column figure. Do not use
+///   this to gate `generate_columns_parallel`.
+/// * **It counts allocations, not bytes, and not peak.** `bench_region_rss`
+///   remains the footprint instrument; this one answers "did the hot path
+///   allocate at all", which is the question the ratchet is written in.
+/// * `realloc`/`alloc_zeroed` are left to `GlobalAlloc`'s defaults, which route
+///   through `alloc`, so a `Vec` growth counts as one allocation. That is the
+///   intended reading: it is a heap acquisition.
+struct CountingAllocator;
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // `try_with`, not `with`: an allocation during thread teardown (after
+        // TLS destruction) must be recorded nowhere rather than panic inside the
+        // global allocator. No measurement can be in flight then anyway.
+        let _ = ALLOC_COUNTING.try_with(|on| {
+            if on.get() {
+                let _ = ALLOC_COUNT.try_with(|n| n.set(n.get().wrapping_add(1)));
+            }
+        });
+        // SAFETY: `layout` is forwarded unchanged to the system allocator, which
+        // upholds `GlobalAlloc`'s contract for it.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: `ptr`/`layout` came from `Self::alloc`, i.e. from `System`.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL_ALLOC: CountingAllocator = CountingAllocator;
+
+/// Runs `f` with allocation counting on for this thread, returning its value and
+/// the count.
+fn measure_allocs<T>(f: impl FnOnce() -> T) -> (T, u64) {
+    ALLOC_COUNT.set(0);
+    ALLOC_COUNTING.set(true);
+    let out = f();
+    ALLOC_COUNTING.set(false);
+    (out, ALLOC_COUNT.get())
+}
 
 /// Same shape as `tests/overworld_gen.rs`'s `FsResolver` / `chunk_parity.rs`'s
 /// resolver: reads density functions and noises straight off disk under
@@ -149,6 +287,27 @@ fn make_shape_only_generator(seed: i64) -> OverworldGenerator {
 /// small patches.
 fn make_full_generator(seed: i64) -> OverworldGenerator {
     generator_with(seed, true)
+}
+
+/// The **embedded production** generator: `lodestone-server`'s bundled 26.2
+/// worldgen data, i.e. the exact generator the integrated server serves to a
+/// real client.
+///
+/// This is what `docs/plans/worldgen-rewrite.md`'s C_ss/C_cold definitions
+/// require, and the difference from [`make_full_generator`] is not cosmetic — it
+/// is the difference between eight live stages and ten:
+///
+/// * **real multi-noise biome variety** (`biome_parameters/overworld`, 7,594
+///   rows), so `biome_stage`'s nearest-neighbour search actually runs. Against
+///   the fixture tree `dynamic_biome` is `None` and the search count is zero.
+/// * **`block_freeze_facts`**, which is built from `lodestone-data`'s jar dumps
+///   rather than any JSON asset, so `freeze_top_layer` has predicates and the
+///   `top_layer` stage stops early-returning.
+///
+/// Both are asserted by counter, not assumed — see
+/// [`assert_all_ten_stages_ran`].
+fn make_embedded_generator(seed: i64) -> OverworldGenerator {
+    lodestone_server::overworld_generator(seed)
 }
 
 /// Seed 42, chunk (0,0): the exact fixture `overworld_gen.rs`'s
@@ -391,7 +550,21 @@ fn bench_stage_split(c: &mut Criterion) {
 
     // Scene string names the ten-bucket split explicitly, so a reader (and
     // `bench-compare`) can never pair these with the old four-bucket numbers.
-    let scene = format!("seed={SEED} patch=7x7(49 chunks) split=10stage");
+    //
+    // **The patch size is derived from `coords`, not restated.** It used to be
+    // the literal `patch=7x7(49 chunks)` while the sweep above was 3×3 — stale
+    // metadata found while planning the worldgen rewrite
+    // (`docs/plans/worldgen-rewrite.md`, "Stale claims found while planning").
+    // A scene string is what `cargo xtask bench-compare` pairs history on, so a
+    // wrong one silently compares 9-chunk runs against 49-chunk runs and reports
+    // the difference as a regression. Deriving it from the same expression the
+    // sweep uses is the only form that cannot drift again — a hand-written
+    // constant next to a loop is a second source of truth.
+    let side = (coords.len() as f64).sqrt().round() as usize;
+    let scene = format!(
+        "seed={SEED} patch={side}x{side}({} chunks) split=10stage resolver=fixture_tree",
+        coords.len()
+    );
     for (name, v) in &stages {
         support::record(support::Record {
             bench: "generation",
@@ -679,8 +852,632 @@ fn rss_bytes() -> u64 {
     memory_stats::memory_stats().map_or(0, |s| s.physical_mem as u64)
 }
 
+// ===========================================================================
+// Worldgen-rewrite Unit 1: counters, calibration, C_ss / C_cold
+// ===========================================================================
+
+/// Chunk-fill geometry, restated once so every prediction below can cite it.
+///
+/// `fill_stage` (`src/overworld.rs`) is `lz in 0..16` × `lx in 0..16` ×
+/// `ly in 0..height`, with exactly one `AquiferSystem::block_at` per iteration
+/// and no `continue`. So one chunk fill is `256 * height` calls — and for the
+/// overworld's `height = 384` (`noise_settings/overworld.json`) that is
+/// **98,304**, the figure `docs/plans/worldgen-rewrite.md`'s D1 states.
+///
+/// This is derived from the loop bounds and asserted against the *generator's
+/// own* reported height rather than hardcoded, so a settings change moves the
+/// prediction instead of breaking it.
+const BLOCKS_PER_CHUNK_LAYER: u64 = 16 * 16;
+
+/// Chunks whose stages 1–4 one cold `column()` must compute: the 5×5 pre-ore
+/// closure.
+///
+/// `vegetation_stage` reads `post_ore_world` over the 3×3 around the centre;
+/// each `ore_stage` reads `pre_ore_stage` over *its own* 3×3. Composing the two
+/// gives 5×5 = 25 — the number D4 states, here as an assertion rather than a
+/// claim.
+const COLD_PRE_ORE_CHUNKS: u64 = 25;
+
+/// Ore RNG walks one cold `column()` must run: the 3×3 post-ore closure. D4's
+/// "9 ore RNG walks".
+const COLD_POST_ORE_CHUNKS: u64 = 9;
+
+/// Source chunks each of `ore_stage` and `vegetation_stage` stitches into its
+/// region view (the 3×3 driver, all 9 sources including the centre).
+const STITCH_SOURCES_PER_STAGE: u64 = 9;
+
+/// Fails unless all ten stages really ran, by counter.
+///
+/// # Why this exists
+///
+/// This is the guard the plan makes Unit 1 responsible for. A bench measuring
+/// the "composed pipeline" against data that makes stages no-ops is the **world**
+/// species of vacuous test: the flaw is in the input, the source reads as
+/// rigorous, and the resulting percentage table is plausible. This file already
+/// shipped that defect once — carvers, ores, vegetation and freeze were all
+/// early-returning while a doc comment asserted the opposite.
+///
+/// A per-stage *timing* floor (which `bench_stage_split` has) catches it only
+/// probabilistically and only for stages expensive enough to notice. A
+/// `stage_entered` counter catches it exactly, which is why the stage guards sit
+/// *below* each stage's no-data early return rather than above it.
+fn assert_all_ten_stages_ran(s: &Snapshot, chunks: u64, what: &str) {
+    assert!(
+        counters::enabled(),
+        "assert_all_ten_stages_ran called in a build without `gen-counters`; \
+         every counter reads 0 and the assertions below would be vacuous"
+    );
+    for stage in [
+        Stage::Aquifer,
+        Stage::Shape,
+        Stage::Biome,
+        Stage::Surface,
+        Stage::Materialize,
+        Stage::Carve,
+        Stage::Ore,
+        Stage::Vegetation,
+        Stage::TopLayer,
+        Stage::Intern,
+    ] {
+        let n = s.stage_entered[stage as usize];
+        assert!(
+            n > 0,
+            "{what}: stage {:?} never ran ({n} entries over {chunks} chunks). This is \
+             the 'world' vacuity signature, not a slow stage: the resolver supplied no \
+             data for it and the stage early-returned. `top_layer` reading 0 means the \
+             generator is the fixture tree (no `block_freeze_facts`) rather than the \
+             embedded server data; `ore`/`vegetation` reading 0 means no ore/feature \
+             documents resolved.",
+            stage
+        );
+    }
+    // The biome stage is entered per call whether or not it has a parameter
+    // table (it degrades per-quart, it has no single early return), so its
+    // `stage_entered` count is NOT its reality check — the search count is.
+    // Without this line a fixture-tree run would satisfy every assertion above.
+    assert!(
+        s.biome_searches > 0,
+        "{what}: `biome_stage` ran but performed zero nearest-neighbour searches, so \
+         `dynamic_biome` is `None` and every column got the single fallback biome. \
+         Stage entry alone cannot see this — that is why it is checked separately."
+    );
+}
+
+/// **Calibration.** On a known chunk, every counter must equal a hand-derived
+/// expectation.
+///
+/// # The point
+///
+/// A counter that cannot predict is a counter that cannot gate. Acceptance
+/// criteria for Units 3–14 are written in these counters, so if a counter is
+/// merely *plausible* rather than *predicted*, every later unit's gate inherits
+/// the ambiguity. Each assertion below carries its arithmetic.
+///
+/// # Why one cold `column()` rather than one isolated chunk fill
+///
+/// `pre_ore_stage` is private, so a single chunk's stages 1–4 cannot be driven
+/// directly from a bench. Using a cold `column()` is strictly better anyway: it
+/// pins the per-fill count *and* the dependency-closure size in one measurement,
+/// and the two are independent (a wrong closure with a right per-fill count, or
+/// the reverse, both fail). `block_at / stage_entered[shape]` is the per-fill
+/// figure; `stage_entered[shape]` is the closure.
+fn bench_counter_calibration(_c: &mut Criterion) {
+    if !counters::enabled() {
+        println!(
+            "worldgen calibration: SKIPPED — build without `--features gen-counters`. \
+             Every counter reads 0, so asserting on them here would pass vacuously. \
+             Run: cargo bench -p lodestone-worldgen --features gen-counters --bench generation"
+        );
+        return;
+    }
+
+    // Fresh generator: the memo caches are per-generator, so this is the only
+    // way to get a genuinely cold region. Reusing a warmed generator is the trap
+    // that neutered two determinism gates in this repo already.
+    let generator = make_embedded_generator(SEED);
+    counters::reset();
+    let (column, allocs) = measure_allocs(|| generator.column(0, 0));
+    let s = counters::snapshot();
+
+    let height = u64::from(column.height().unsigned_abs());
+    assert_eq!(
+        height, 384,
+        "expected the 26.2 overworld's height=384 from `noise_settings/overworld.json`; \
+         got {height}. Every prediction below is a function of this number — if the \
+         settings really changed, the predictions move with them, but the 98,304 figure \
+         in `docs/plans/worldgen-rewrite.md` is specific to 384 and should be re-stated."
+    );
+
+    // --- 1. `block_at` per chunk fill = 256 * height = 98,304 ------------
+    let per_fill = BLOCKS_PER_CHUNK_LAYER * height;
+    assert_eq!(
+        per_fill, 98_304,
+        "arithmetic check on the derivation itself: 16*16*{height} should be 98,304"
+    );
+    assert_eq!(
+        s.stage_entered[Stage::Shape as usize], COLD_PRE_ORE_CHUNKS,
+        "cold `column()` should compute the fill for exactly {COLD_PRE_ORE_CHUNKS} chunks \
+         (the 5×5 pre-ore closure of the 3×3 ore closure of the 3×3 vegetation \
+         neighbourhood); got {}",
+        s.stage_entered[Stage::Shape as usize]
+    );
+    assert_eq!(
+        s.block_at,
+        per_fill * COLD_PRE_ORE_CHUNKS,
+        "`block_at` should be {per_fill} per fill × {COLD_PRE_ORE_CHUNKS} fills = {}; got {}. \
+         `block_at / stage_entered[shape]` = {} is the per-chunk figure the rewrite plan \
+         states as 98,304.",
+        per_fill * COLD_PRE_ORE_CHUNKS,
+        s.block_at,
+        s.block_at / s.stage_entered[Stage::Shape as usize].max(1)
+    );
+
+    // --- 2. The D4 dependency closure -----------------------------------
+    assert_eq!(
+        s.pre_ore_computed, COLD_PRE_ORE_CHUNKS,
+        "D4 predicts a cold column touches a 5×5 = {COLD_PRE_ORE_CHUNKS}-chunk pre-ore \
+         region; got {}",
+        s.pre_ore_computed
+    );
+    assert_eq!(
+        s.post_ore_computed, COLD_POST_ORE_CHUNKS,
+        "D4 predicts {COLD_POST_ORE_CHUNKS} ore RNG walks on a cold column; got {}",
+        s.post_ore_computed
+    );
+    for (stage, expected) in [
+        (Stage::Aquifer, COLD_PRE_ORE_CHUNKS),
+        (Stage::Surface, COLD_PRE_ORE_CHUNKS),
+        (Stage::Materialize, COLD_PRE_ORE_CHUNKS),
+        (Stage::Carve, COLD_PRE_ORE_CHUNKS),
+        (Stage::Ore, COLD_POST_ORE_CHUNKS),
+        (Stage::Vegetation, 1),
+        (Stage::TopLayer, 1),
+        (Stage::Intern, 1),
+    ] {
+        assert_eq!(
+            s.stage_entered[stage as usize], expected,
+            "stage {:?}: expected {expected} runs for one cold column, got {}",
+            stage, s.stage_entered[stage as usize]
+        );
+    }
+
+    // --- 3. D2's stitch copies and ~885k Strings -------------------------
+    // `ore_stage` stitches 9 sources into a `RegionGrid`, once per ore walk;
+    // `vegetation_stage` stitches 9 sources into a `VegGrid`, once. Each stitch
+    // copies 256*height cells.
+    let expected_stitch =
+        (COLD_POST_ORE_CHUNKS * STITCH_SOURCES_PER_STAGE + STITCH_SOURCES_PER_STAGE) * per_fill;
+    assert_eq!(
+        s.stitch_cells, expected_stitch,
+        "stitch copies: ({COLD_POST_ORE_CHUNKS} ore walks × {STITCH_SOURCES_PER_STAGE} \
+         sources + {STITCH_SOURCES_PER_STAGE} vegetation sources) × {per_fill} cells = \
+         {expected_stitch}; got {}. U7's acceptance criterion is that this reaches 0.",
+        s.stitch_cells
+    );
+    // The vegetation stitch is the one that allocates a `String` per cell.
+    let veg_strings = STITCH_SOURCES_PER_STAGE * per_fill;
+    assert_eq!(
+        veg_strings, 884_736,
+        "the ~885k figure D2 calls the single most damning number in the diagnosis: \
+         {STITCH_SOURCES_PER_STAGE} × {per_fill}"
+    );
+    assert!(
+        s.string_allocs >= veg_strings,
+        "expected at least {veg_strings} String allocations from `stitch_veg_region` alone \
+         (9 sources × {per_fill} cells, one `to_string()` each); got {}. U3's acceptance \
+         criterion is that this reaches 0 steady-state.",
+        s.string_allocs
+    );
+
+    // --- 4. Corner lookups: 8 per interpolated query ---------------------
+    // `interpolate` unrolls exactly 8 `corner()` calls, hit or miss, and every
+    // `block_at` makes one `final_density` query. The aquifer's other samplers
+    // (erosion, depth, ...) also interpolate, so 8 × block_at is a floor, not an
+    // equality — stated as a floor rather than guessed as an equality.
+    assert!(
+        s.corner_lookups >= 8 * s.block_at,
+        "corner lookups ({}) should be at least 8 per `block_at` ({} × 8 = {}), since \
+         `interpolate` unrolls 8 corners per interpolated query and every `block_at` \
+         makes one. A lower number means the root is no longer an `Interpolated` node.",
+        s.corner_lookups,
+        s.block_at,
+        8 * s.block_at
+    );
+
+    // --- 5. Every stage real -------------------------------------------
+    assert_all_ten_stages_ran(&s, 1, "calibration (cold column, embedded data)");
+
+    println!("\n=== worldgen counter calibration: 1 cold column, seed {SEED}, EMBEDDED data ===");
+    print_counters(&s, 1);
+    println!("  heap allocations in the column path: {allocs}");
+    println!(
+        "  DERIVED: block_at/fill = {} (plan states 98,304); pre_ore closure = {} (plan: 25); \
+         ore walks = {} (plan: 9)",
+        s.block_at / s.stage_entered[Stage::Shape as usize].max(1),
+        s.pre_ore_computed,
+        s.post_ore_computed
+    );
+
+    support::record(support::Record {
+        bench: "generation",
+        metric: "calibration_block_at_per_chunk_fill",
+        scene: "seed=42 chunk=(0,0) resolver=embedded cold=true",
+        value: (s.block_at / s.stage_entered[Stage::Shape as usize].max(1)) as f64,
+        unit: "calls",
+    });
+}
+
+/// Prints every counter, normalised per chunk where that is meaningful.
+fn print_counters(s: &Snapshot, chunks: u64) {
+    let n = chunks.max(1) as f64;
+    let row = |name: &str, v: u64| {
+        println!("  {name:<34} {v:>14}   {:>12.1}/chunk", v as f64 / n);
+    };
+    row("block_at", s.block_at);
+    row("density_evals (chunk sampler)", s.density_evals_total());
+    row("density_computes (point eval)", s.density_point_computes_total());
+    row("corner_lookups", s.corner_lookups);
+    row("slot_cache_hits", s.slot_hits);
+    row("slot_cache_misses (real evals)", s.slot_misses);
+    row("palette_intern_new", s.palette_intern_new);
+    row("palette_intern_hit", s.palette_intern_hit);
+    row("pre_ore_computed", s.pre_ore_computed);
+    row("pre_ore_cache_hits", s.pre_ore_hits);
+    row("post_ore_computed", s.post_ore_computed);
+    row("post_ore_cache_hits", s.post_ore_hits);
+    row("biome_nn_searches", s.biome_searches);
+    row("biome_rows_compared", s.biome_rows_compared);
+    row("stitch_cells_copied", s.stitch_cells);
+    row("string_allocs", s.string_allocs);
+    row("rng_draws (all stages)", s.rng_draws_total());
+    println!("  rng draws by stage:");
+    for (i, name) in lodestone_worldgen::counters::STAGE_NAMES.iter().enumerate() {
+        if s.rng_draws[i] > 0 {
+            println!(
+                "    {name:<14} {:>14}   {:>12.1}/chunk",
+                s.rng_draws[i],
+                s.rng_draws[i] as f64 / n
+            );
+        }
+    }
+    println!("  stage entries (work actually done):");
+    for (i, name) in lodestone_worldgen::counters::STAGE_NAMES.iter().enumerate() {
+        if s.stage_entered[i] > 0 {
+            println!("    {name:<14} {:>14}", s.stage_entered[i]);
+        }
+    }
+    println!("  top density component kinds by evaluation count:");
+    for (name, count) in s.density_evals_ranked().iter().take(8) {
+        println!("    {name:<20} {count:>14}");
+    }
+    // Per-slot corner/flat-cache evaluations. This is the counter U4's prediction
+    // is written in ("1,225 corner evaluations per interpolated slot per chunk",
+    // the 5x49x5 lattice), and it has to be per-slot rather than a total: the
+    // aquifer builds eight samplers sharing one slot address space, so a total
+    // cannot be attributed to the `final_density` interpolator that the lattice
+    // prediction is about. Printed normalised per chunk so the 1,225 is directly
+    // readable rather than needing division by the closure size.
+    println!("  slot-cache misses (real evaluations) by density slot, per chunk:");
+    let mut slots: Vec<(usize, u64)> = s
+        .slot_misses_by_slot
+        .iter()
+        .enumerate()
+        .filter(|&(_, &n)| n > 0)
+        .map(|(i, &n)| (i, n))
+        .collect();
+    slots.sort_by(|a, b| b.1.cmp(&a.1));
+    for (slot, count) in slots.iter().take(12) {
+        println!(
+            "    slot {slot:<3} {count:>14}   {:>12.1}/chunk",
+            *count as f64 / n
+        );
+    }
+}
+
+/// **C_ss and C_cold**, exactly as `docs/plans/worldgen-rewrite.md` §Q3 defines
+/// them. This is the baseline every later unit's acceptance criteria are stated
+/// against.
+///
+/// * **C_ss** — median wall time of `column(cx, cz)` over the **100 interior
+///   chunks of a 12×12 sweep**, single thread, release profile, embedded server
+///   data, all stages real, seed 42, every stage counter-asserted to have run
+///   exactly once per chunk across the sweep.
+/// * **C_cold** — wall time of the first `column()` in a fresh region.
+///
+/// # The "interior" 100, and why the border is excluded
+///
+/// A 12×12 sweep with a one-chunk border removed is 10×10 = 100. The border
+/// chunks are excluded because their neighbours' stages were computed *by them*
+/// rather than earlier in the sweep, so they carry cold-neighbour cost and would
+/// drag the median toward C_cold. Interior chunks find their dependencies already
+/// computed — "warm in the sense a sweep makes natural", which is the phrase the
+/// plan uses and the thing a server actually experiences.
+///
+/// # Exactly-once, per stage, with the right radius for each
+///
+/// The plan asks for "every stage ran exactly once per chunk". That is one
+/// statement with a different chunk count per stage, because each stage has its
+/// own dependency radius, and stating it as a single number would be wrong for
+/// nine of the ten. For a 12×12 sweep:
+///
+/// | stage | chunks | why |
+/// |---|---|---|
+/// | aquifer…carve | 16×16 = 256 | 5×5 pre-ore closure of the sweep |
+/// | ore | 14×14 = 196 | 3×3 post-ore closure of the sweep |
+/// | vegetation, top_layer, intern | 12×12 = 144 | the sweep itself |
+///
+/// This is a much stronger statement than "144 of each": it fails if a single
+/// chunk's stage is recomputed *or* if the closure is the wrong size. It holds
+/// only because 256 < the memo caches' 512-entry capacity — if a future sweep
+/// grows past that, FIFO eviction will cause recomputation and **this assertion
+/// is what will report it**, rather than a mysteriously slower median.
+fn bench_steady_state_and_cold(_c: &mut Criterion) {
+    const SIDE: i32 = 12;
+
+    // ---- C_cold: first column in a fresh region -----------------------
+    // Fresh generator, so nothing is warm. Timed before anything else runs.
+    let cold_generator = make_embedded_generator(SEED);
+    counters::reset();
+    let t0 = Instant::now();
+    let cold_column = cold_generator.column(0, 0);
+    let c_cold_us = t0.elapsed().as_secs_f64() * 1e6;
+    let cold_snapshot = counters::snapshot();
+    black_box(cold_column.non_air_count());
+
+    // ---- C_ss: 12×12 sweep, median of the 100 interior ----------------
+    let generator = make_embedded_generator(SEED);
+    let coords: Vec<(i32, i32)> =
+        (0..SIDE).flat_map(|cz| (0..SIDE).map(move |cx| (cx, cz))).collect();
+
+    counters::reset();
+    let mut per_chunk_us: Vec<(i32, i32, f64)> = Vec::with_capacity(coords.len());
+    let sweep_start = Instant::now();
+    let mut non_air_total = 0usize;
+    for &(cx, cz) in &coords {
+        let t = Instant::now();
+        let col = generator.column(cx, cz);
+        let us = t.elapsed().as_secs_f64() * 1e6;
+        non_air_total += col.non_air_count();
+        per_chunk_us.push((cx, cz, us));
+    }
+    let sweep_s = sweep_start.elapsed().as_secs_f64();
+    let s = counters::snapshot();
+    assert!(non_air_total > 0, "the whole sweep generated only air — nothing was measured");
+
+    // Interior = the sweep minus a one-chunk border.
+    let mut interior: Vec<f64> = per_chunk_us
+        .iter()
+        .filter(|&&(cx, cz, _)| cx > 0 && cz > 0 && cx < SIDE - 1 && cz < SIDE - 1)
+        .map(|&(_, _, us)| us)
+        .collect();
+    assert_eq!(
+        interior.len(),
+        100,
+        "C_ss is defined over the 100 interior chunks of a 12×12 sweep; this filter \
+         selected {}. The definition and the filter have drifted apart.",
+        interior.len()
+    );
+    interior.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let c_ss_us = (interior[49] + interior[50]) / 2.0;
+    let p95 = interior[94];
+
+    // ---- Counter assertions on the sweep ------------------------------
+    if counters::enabled() {
+        let sweep = u64::try_from(coords.len()).unwrap();
+        let closure = |extra: i32| -> u64 { u64::try_from((SIDE + 2 * extra) * (SIDE + 2 * extra)).unwrap() };
+        for (stage, expected, radius) in [
+            (Stage::Aquifer, closure(2), "5×5 pre-ore closure"),
+            (Stage::Shape, closure(2), "5×5 pre-ore closure"),
+            (Stage::Surface, closure(2), "5×5 pre-ore closure"),
+            (Stage::Materialize, closure(2), "5×5 pre-ore closure"),
+            (Stage::Carve, closure(2), "5×5 pre-ore closure"),
+            (Stage::Ore, closure(1), "3×3 post-ore closure"),
+            (Stage::Vegetation, sweep, "the sweep itself"),
+            (Stage::TopLayer, sweep, "the sweep itself"),
+            (Stage::Intern, sweep, "the sweep itself"),
+        ] {
+            assert_eq!(
+                s.stage_entered[stage as usize], expected,
+                "exactly-once violated for stage {:?}: expected {expected} runs over a \
+                 {SIDE}×{SIDE} sweep ({radius}), got {}. A HIGHER number means a chunk's \
+                 stage was recomputed — most likely FIFO eviction from the 512-entry memo \
+                 caches, which is exactly the failure U6's staged store removes \
+                 structurally. A LOWER number means a stage stopped running.",
+                stage, s.stage_entered[stage as usize]
+            );
+        }
+        assert_eq!(
+            s.pre_ore_computed,
+            closure(2),
+            "pre-ore computations over the sweep should equal the 5×5 closure exactly"
+        );
+        assert_eq!(
+            s.post_ore_computed,
+            closure(1),
+            "post-ore computations over the sweep should equal the 3×3 closure exactly"
+        );
+        assert_all_ten_stages_ran(&s, sweep, "C_ss sweep (embedded data)");
+        assert_all_ten_stages_ran(&cold_snapshot, 1, "C_cold (embedded data)");
+    } else {
+        println!(
+            "worldgen C_ss/C_cold: counters NOT compiled in, so the exactly-once \
+             invariant was NOT checked. The timings below are still real, but they \
+             describe a pipeline whose stage participation is unverified — which is \
+             precisely the condition that let this file measure an ore-free pipeline \
+             for as long as it did. Re-run with --features gen-counters to gate them."
+        );
+    }
+
+    // ---- Steady-state allocation count -------------------------------
+    // One more interior column on the warm generator. Its neighbours' stages are
+    // all computed, so this is the steady-state serve path — the number the
+    // plan's allocation budget ratchets down to "0 from the hot path, plus O(1)
+    // for the returned column's own buffers".
+    let (warm_col, steady_allocs) = measure_allocs(|| generator.column(5, 5));
+    black_box(warm_col.non_air_count());
+
+    // ---- Report ------------------------------------------------------
+    println!("\n=== worldgen C_ss / C_cold — release baseline, EMBEDDED server data ===");
+    println!("  scene: seed={SEED}, {SIDE}x{SIDE} sweep ({} chunks), single thread", coords.len());
+    println!("  C_ss   (median of 100 interior) : {c_ss_us:>12.1} us   target <= 1000 us (GOAL, not gate)");
+    println!("  C_ss   p95 interior             : {p95:>12.1} us");
+    println!("  C_cold (first column, fresh)    : {c_cold_us:>12.1} us   target <= 8000 us");
+    println!("  whole {SIDE}x{SIDE} sweep            : {sweep_s:>12.3} s");
+    println!("  steady-state heap allocs/column : {steady_allocs:>12}   target 0 from hot path + O(1) output");
+    if counters::enabled() {
+        println!("\n  -- counters over the {}-chunk sweep --", coords.len());
+        print_counters(&s, u64::try_from(coords.len()).unwrap());
+        println!("\n  -- counters for the single COLD column (C_cold) --");
+        print_counters(&cold_snapshot, 1);
+    }
+
+    let scene = format!(
+        "seed={SEED} patch={SIDE}x{SIDE}({} chunks) interior=100 resolver=embedded thread=1",
+        coords.len()
+    );
+    for (metric, value, unit) in [
+        ("c_ss_median_interior_us", c_ss_us, "us"),
+        ("c_ss_p95_interior_us", p95, "us"),
+        ("c_cold_first_column_us", c_cold_us, "us"),
+        ("c_ss_sweep_total_s", sweep_s, "s"),
+        ("steady_state_heap_allocs_per_column", steady_allocs as f64, "allocs"),
+    ] {
+        support::record(support::Record {
+            bench: "generation",
+            metric,
+            scene: &scene,
+            value,
+            unit,
+        });
+    }
+}
+
+/// **The number that decides the project**: the vegetation walk's own cost, in
+/// release, on embedded data — per `docs/plans/worldgen-rewrite.md` §Q3, whether
+/// it is under or over ~1 ms.
+///
+/// # Why this is measured with `column_timed` and what that changes
+///
+/// `column_timed` runs the centre chunk's stages 1–4 itself rather than through
+/// `pre_ore_stage`'s memo cache, so its `aquifer`…`carve` figures are
+/// **cache-cold** for the centre while its `ore`/`vegetation` figures include
+/// only whatever neighbour work the caches did not already have. The vegetation
+/// number is therefore the one to read here, and it is read *warm* (the sweep
+/// below primes the neighbourhood first) because that is the condition C_ss
+/// describes.
+///
+/// # The counter that makes the µs figure trustworthy
+///
+/// A per-stage duration on a shared machine is a sample. What is *not* a sample
+/// is `rng_draws[vegetation]` — the spec-bound draw count the plan says SIMD and
+/// parallelism cannot touch. Reported alongside, it converts the timing into a
+/// **cost per draw**, which is the quantity §Q3's five cost-per-draw candidates
+/// are about and the only form in which a later unit can claim an improvement
+/// without re-running this exact machine state.
+fn bench_vegetation_walk_cost(_c: &mut Criterion) {
+    let generator = make_embedded_generator(SEED);
+    // Warm the neighbourhood the way a sweep does, so the vegetation stage is
+    // measured against already-computed neighbours rather than paying for 25
+    // pre-ore chunks inside the timed window.
+    for cz in -2..=2 {
+        for cx in -2..=2 {
+            black_box(generator.column(cx, cz));
+        }
+    }
+
+    counters::reset();
+    let (col, times) = generator.column_timed(0, 0);
+    let s = counters::snapshot();
+    black_box(col.non_air_count());
+
+    let veg_us = times.vegetation.as_secs_f64() * 1e6;
+    let veg_draws = s.rng_draws[Stage::Vegetation as usize];
+    let ns_per_draw = if veg_draws > 0 {
+        times.vegetation.as_secs_f64() * 1e9 / veg_draws as f64
+    } else {
+        f64::NAN
+    };
+
+    // The per-stage µs table on EMBEDDED data — the U2 deliverable.
+    // `bench_stage_split` produces the same shape against the fixture tree,
+    // where `biome` and `top_layer` are structurally inert; this is the version
+    // with all ten stages live, and the two are deliberately recorded under
+    // different scene strings so `bench-compare` can never pair them.
+    let stage_us: [(&str, f64); 10] = [
+        ("aquifer", times.aquifer.as_secs_f64() * 1e6),
+        ("shape", times.shape.as_secs_f64() * 1e6),
+        ("biome", times.biome.as_secs_f64() * 1e6),
+        ("surface", times.surface.as_secs_f64() * 1e6),
+        ("materialize", times.materialize.as_secs_f64() * 1e6),
+        ("carve", times.carve.as_secs_f64() * 1e6),
+        ("ore", times.ore.as_secs_f64() * 1e6),
+        ("vegetation", veg_us),
+        ("top_layer", times.top_layer.as_secs_f64() * 1e6),
+        ("intern", times.intern.as_secs_f64() * 1e6),
+    ];
+    let total_us: f64 = stage_us.iter().map(|&(_, v)| v).sum();
+    println!("\n=== per-stage split, release, EMBEDDED server data (all ten stages live) ===");
+    println!("  (centre chunk's stages 1-4 are cache-cold by `column_timed`'s design; ore and");
+    println!("   vegetation read the warm 5x5 neighbourhood, matching C_ss's condition)");
+    for &(name, us) in &stage_us {
+        println!("  {name:<12} {us:>12.1} us  {:>6.2}%", 100.0 * us / total_us);
+    }
+    println!("  {:<12} {total_us:>12.1} us", "TOTAL");
+    if counters::enabled() {
+        // The same guard the other embedded benches carry: a stage reading ~0
+        // here must be genuinely cheap, not absent. `top_layer` is the one this
+        // catches — against the fixture tree it reads 0.000% because it never
+        // ran at all, and no timing threshold can tell those apart.
+        assert_all_ten_stages_ran(&s, 1, "per-stage split (embedded data)");
+    }
+    for &(name, us) in &stage_us {
+        support::record(support::Record {
+            bench: "generation",
+            metric: &format!("embedded_stage_{name}_us"),
+            scene: "seed=42 chunk=(0,0) warm=5x5 resolver=embedded split=10stage",
+            value: us,
+            unit: "us",
+        });
+    }
+
+    println!("\n=== the sub-ms question: vegetation walk cost, release, embedded data ===");
+    println!("  vegetation stage        : {veg_us:>12.1} us   (~1 ms is the decision threshold)");
+    println!("  RNG draws in vegetation : {veg_draws:>12}   (spec-bound: cannot be reduced at parity)");
+    println!("  cost per draw           : {ns_per_draw:>12.1} ns   (ours to reduce — plan Q3's five candidates)");
+    println!(
+        "  verdict: vegetation alone is {} the ~1ms threshold",
+        if veg_us <= 1000.0 { "UNDER" } else { "OVER" }
+    );
+    if counters::enabled() {
+        assert!(
+            veg_draws > 0,
+            "the vegetation stage drew zero RNG values, so it did no placement work at \
+             all — the cost-per-draw figure would be meaningless and the µs number would \
+             be measuring an early return"
+        );
+    }
+
+    let scene = format!("seed={SEED} chunk=(0,0) warm=5x5 resolver=embedded");
+    for (metric, value, unit) in [
+        ("vegetation_stage_us", veg_us, "us"),
+        ("vegetation_rng_draws", veg_draws as f64, "draws"),
+        ("vegetation_ns_per_rng_draw", ns_per_draw, "ns"),
+    ] {
+        support::record(support::Record {
+            bench: "generation",
+            metric,
+            scene: &scene,
+            value,
+            unit,
+        });
+    }
+}
+
 criterion_group!(
     benches,
+    bench_counter_calibration,
+    bench_steady_state_and_cold,
+    bench_vegetation_walk_cost,
     bench_column_throughput,
     bench_stage_split,
     bench_linearity_check,

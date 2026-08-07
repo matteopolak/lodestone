@@ -190,6 +190,11 @@ pub fn quantize_coord(v: f64) -> i64 {
 /// Panics if `table` is empty.
 #[must_use]
 pub fn nearest_biome<'a>(table: &'a [BiomeParameterPoint], target: &[i64; 7]) -> &'a str {
+    // Diagnostic D5. Both numbers matter and neither implies the other: the
+    // search *count* is what U9's memoisation reduces, while `table.len()` rows
+    // per search is what the RTree port reduces. A single "searches" counter
+    // would make an RTree that searched just as often look like no improvement.
+    crate::counters::bump_biome_search(table.len() as u64);
     let mut best = &table[0];
     let mut best_fitness = best.fitness(target);
     for entry in &table[1..] {

@@ -460,9 +460,108 @@ pub enum Density {
 }
 
 impl Density {
+    /// Number of [`Density`] variants — the width of the per-kind counter
+    /// arrays in [`crate::counters`].
+    ///
+    /// Adding a variant without extending [`Self::kind_index`]'s `match` is a
+    /// compile error (it is exhaustive), and `tests::kind_names_are_distinct`
+    /// plus `tests::kind_index_matches_names_for_constructible_variants` check
+    /// the rest. **The residual gap, stated rather than glossed:** an exhaustive
+    /// match would still compile if two variants shared one index, and the
+    /// index test can only cover the variants cheap to construct (24 of 31 — the
+    /// seven needing a `NormalNoise`/`BlendedNoise`/`Spline` payload are checked
+    /// by reading, not by assertion). Distinctness of the *names* is asserted for
+    /// all 31, which catches a copy-paste in the table itself.
+    pub const KIND_COUNT: usize = 31;
+
+    /// Human-readable variant names, indexed by [`Self::kind_index`].
+    pub const KIND_NAMES: [&'static str; Self::KIND_COUNT] = [
+        "const",
+        "blend_alpha",
+        "blend_offset",
+        "beardifier",
+        "y_clamped_gradient",
+        "add",
+        "mul",
+        "min",
+        "max",
+        "abs",
+        "square",
+        "cube",
+        "half_negative",
+        "quarter_negative",
+        "squeeze",
+        "invert",
+        "clamp",
+        "interpolated",
+        "flat_cache",
+        "cache_2d",
+        "marker",
+        "noise",
+        "shifted_noise",
+        "shift_a",
+        "shift_b",
+        "shift",
+        "range_choice",
+        "interval_select",
+        "spline",
+        "blended",
+        "find_top_surface",
+    ];
+
+    /// This node's variant as a dense index into `0..KIND_COUNT`.
+    ///
+    /// Exists so [`crate::counters`] can count evaluations *by kind* with a
+    /// single array index rather than a match at every hook, which is what makes
+    /// "which component kind dominates the tree walk" answerable — diagnostic D1
+    /// in `docs/plans/worldgen-rewrite.md`. `std::mem::discriminant` cannot be
+    /// used: it is deliberately opaque and yields no index.
+    ///
+    /// The order is the declaration order of the enum, and
+    /// [`Self::KIND_NAMES`] must stay in that same order. Insert new variants at
+    /// the **end** of both, not in the middle: a recorded counter table from an
+    /// earlier run is indexed by these numbers.
+    #[must_use]
+    pub fn kind_index(&self) -> usize {
+        match self {
+            Density::Const { .. } => 0,
+            Density::BlendAlpha { .. } => 1,
+            Density::BlendOffset { .. } => 2,
+            Density::Beardifier { .. } => 3,
+            Density::YClampedGradient { .. } => 4,
+            Density::Add { .. } => 5,
+            Density::Mul { .. } => 6,
+            Density::Min { .. } => 7,
+            Density::Max { .. } => 8,
+            Density::Abs { .. } => 9,
+            Density::Square { .. } => 10,
+            Density::Cube { .. } => 11,
+            Density::HalfNegative { .. } => 12,
+            Density::QuarterNegative { .. } => 13,
+            Density::Squeeze { .. } => 14,
+            Density::Invert { .. } => 15,
+            Density::Clamp { .. } => 16,
+            Density::Interpolated { .. } => 17,
+            Density::FlatCache { .. } => 18,
+            Density::Cache2D { .. } => 19,
+            Density::Marker { .. } => 20,
+            Density::Noise { .. } => 21,
+            Density::ShiftedNoise { .. } => 22,
+            Density::ShiftA { .. } => 23,
+            Density::ShiftB { .. } => 24,
+            Density::Shift { .. } => 25,
+            Density::RangeChoice { .. } => 26,
+            Density::IntervalSelect { .. } => 27,
+            Density::Spline { .. } => 28,
+            Density::Blended { .. } => 29,
+            Density::FindTopSurface { .. } => 30,
+        }
+    }
+
     /// Evaluates the node at `ctx`.
     #[must_use]
     pub fn compute(&self, ctx: Context) -> f64 {
+        crate::counters::bump_density_point_compute(self.kind_index());
         match self {
             Density::Const(v) => *v,
             Density::BlendAlpha => 1.0,
@@ -810,4 +909,144 @@ fn f(node: &Value, key: &str) -> f64 {
     node[key]
         .as_f64()
         .unwrap_or_else(|| panic!("missing/non-numeric field {key}"))
+}
+
+#[cfg(test)]
+mod kind_index_tests {
+    use super::Density;
+
+    /// The name table must be exactly as wide as the index space and carry no
+    /// duplicate — a copy-paste in [`Density::KIND_NAMES`] would silently make
+    /// two counter buckets report under one label, which is the failure mode
+    /// that makes a per-kind counter table lie without ever looking wrong.
+    #[test]
+    fn kind_names_are_distinct_and_complete() {
+        assert_eq!(Density::KIND_NAMES.len(), Density::KIND_COUNT);
+        let mut sorted = Density::KIND_NAMES;
+        sorted.sort_unstable();
+        for pair in sorted.windows(2) {
+            assert_ne!(
+                pair[0], pair[1],
+                "duplicate kind name {:?} in Density::KIND_NAMES — two counter \
+                 buckets would report under one label",
+                pair[0]
+            );
+        }
+    }
+
+    /// Every index [`Density::kind_index`] returns must be in range, and the
+    /// variants cheap enough to construct must map to *distinct* indices whose
+    /// [`Density::KIND_NAMES`] entry is the expected string.
+    ///
+    /// The exhaustive `match` in `kind_index` guarantees total coverage but
+    /// **not** injectivity — it would compile happily with two variants sharing
+    /// an index. This is the control for that. It covers 24 of the 31 variants;
+    /// the seven needing a `NormalNoise`/`BlendedNoise`/`Spline` payload
+    /// (`noise`, `shifted_noise`, `shift_a`, `shift_b`, `shift`, `spline`,
+    /// `blended`) are not constructible here without a resolver and are checked
+    /// by reading the match. Stated as a known gap rather than implied by
+    /// silence.
+    #[test]
+    fn kind_index_is_injective_over_constructible_variants() {
+        let b = || Box::new(Density::Const(0.0));
+        let cases: Vec<(Density, &str)> = vec![
+            (Density::Const(0.0), "const"),
+            (Density::BlendAlpha, "blend_alpha"),
+            (Density::BlendOffset, "blend_offset"),
+            (Density::Beardifier, "beardifier"),
+            (
+                Density::YClampedGradient {
+                    from_y: 0.0,
+                    to_y: 1.0,
+                    from_value: 0.0,
+                    to_value: 1.0,
+                },
+                "y_clamped_gradient",
+            ),
+            (Density::Add(b(), b()), "add"),
+            (Density::Mul(b(), b()), "mul"),
+            (Density::Min(b(), b()), "min"),
+            (Density::Max(b(), b()), "max"),
+            (Density::Abs(b()), "abs"),
+            (Density::Square(b()), "square"),
+            (Density::Cube(b()), "cube"),
+            (Density::HalfNegative(b()), "half_negative"),
+            (Density::QuarterNegative(b()), "quarter_negative"),
+            (Density::Squeeze(b()), "squeeze"),
+            (Density::Invert(b()), "invert"),
+            (
+                Density::Clamp {
+                    input: b(),
+                    min: 0.0,
+                    max: 1.0,
+                },
+                "clamp",
+            ),
+            (
+                Density::Interpolated { inner: b(), slot: 0 },
+                "interpolated",
+            ),
+            (Density::FlatCache { inner: b(), slot: 0 }, "flat_cache"),
+            (
+                Density::Cache2D {
+                    inner: b(),
+                    cache: super::Cache2DSlot::default(),
+                },
+                "cache_2d",
+            ),
+            (Density::Marker(b()), "marker"),
+            (
+                Density::RangeChoice {
+                    input: b(),
+                    min_inclusive: 0.0,
+                    max_exclusive: 1.0,
+                    when_in_range: b(),
+                    when_out_of_range: b(),
+                },
+                "range_choice",
+            ),
+            (
+                Density::FindTopSurface {
+                    density: b(),
+                    upper_bound: b(),
+                    lower_bound: 0,
+                    cell_height: 8,
+                },
+                "find_top_surface",
+            ),
+        ];
+
+        let mut seen: Vec<usize> = Vec::new();
+        for (node, expected_name) in &cases {
+            let i = node.kind_index();
+            assert!(
+                i < Density::KIND_COUNT,
+                "kind_index returned {i} for {expected_name}, out of range"
+            );
+            assert_eq!(
+                Density::KIND_NAMES[i], *expected_name,
+                "kind_index({expected_name}) = {i} names {:?} — the match and \
+                 KIND_NAMES have drifted out of order",
+                Density::KIND_NAMES[i]
+            );
+            assert!(
+                !seen.contains(&i),
+                "index {i} ({expected_name}) is already claimed by another \
+                 variant — kind_index is not injective, so two counter buckets \
+                 would be summed into one"
+            );
+            seen.push(i);
+        }
+        // Control on the control: if this list ever shrinks to nothing (a
+        // refactor deleting the cases while keeping the test), the assertions
+        // above are all vacuously satisfied and this test passes while checking
+        // nothing.
+        assert_eq!(
+            seen.len(),
+            23,
+            "the constructible-variant list changed size; update this count \
+             deliberately rather than letting the test measure fewer variants \
+             than it claims"
+        );
+    }
 }
