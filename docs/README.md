@@ -514,6 +514,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   drawn and on live stack state. A bow is `item/bow` at rest and `item/bow_pulling_0`,
   `_1` or `_2` as it is drawn; a spyglass is the flat `item/spyglass` sprite in an
   inventory slot and `item/spyglass_in_hand`'s 3-D tube in the hand.
+- [Join generation scheduler](./join-scheduler.md) — The server-side scheduler that
+  decides in what order, and with how much concurrency, the `(2r + 1)²` chunk columns
+  of a joining player's view are generated. It is a **primed sliding window** over the
+  wire order, and it replaced the per-ring barrier that `4307b59` reinstated — Unit
+  10 of [`plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md), issue #494.
 - [Keybindings](./keybindings.md) — A rebindable table mapping **logical actions**
   (`key.forward`, `key.inventory`) to **physical inputs** (a keyboard key or a mouse
   button), so nothing in the shell's gameplay input path names a key literally. It
