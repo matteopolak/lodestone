@@ -48,12 +48,19 @@
 //!
 //! # How to change it
 //!
-//! The cell grid is built once per texture, the faces once per camera *cell* — not
-//! per frame. Rebuilding is keyed on the camera crossing a cell boundary or the
-//! layer being entered/left, so [`CloudRelativePos`] is an input rather than
-//! something this module derives from a Y coordinate: the caller already knows the
-//! cloud height and its own eye position, and threading a height in here would
-//! duplicate that.
+//! The cell grid is built once per texture, and the faces once per camera *cell* —
+//! not per frame — through [`CloudFaceCache`], keyed on the camera's cell, the
+//! radius and [`CloudRelativePos`]. That is why `CloudRelativePos` is an *input*
+//! rather than something this module derives from a Y coordinate: the caller
+//! already knows the cloud height and its own eye position, threading a height in
+//! here would duplicate that, and the value has to be visible in the cache key.
+//!
+//! **This paragraph used to assert the caching as done when nothing keyed
+//! anything**, while `sky.rs`'s `CLOUD_FANCY_RADIUS_CELLS` doc said, correctly,
+//! that gating rebuilds on a cell crossing was "what `cloud_mesh`'s own module doc
+//! already asks for and this does not yet do". Two docs in one crate, one true and
+//! one false, and the false one was the one a reader of *this* file would find.
+//! [`CloudFaceCache`] is what closed it; `DESIGN.md` §12.115 has the counter.
 //!
 //! **One deliberate divergence from vanilla.** `CloudRenderer.java:74` and `:76`
 //! wrap the *x* axis by `height` when sampling the east and west neighbours:
@@ -278,6 +285,74 @@ pub fn extruded_faces(
         push_extruded_cell(&mut faces, rx, rz, packed, relative_pos);
     });
     faces
+}
+
+/// [`extruded_faces`] memoised on its own arguments, which are already exactly
+/// the cache key.
+///
+/// # Why this exists
+///
+/// `extruded_faces` is a pure function of `(center_cell_x, center_cell_z,
+/// radius_cells, relative_pos)` — and it was called **every frame**, walking 578
+/// cells and allocating up to 4678 faces, while all four of those change only
+/// when the camera crosses a cell boundary or enters/leaves the layer. This
+/// module's own "How to change it" claimed the faces were already built "once per
+/// camera *cell* — not per frame. Rebuilding is keyed on the camera crossing a
+/// cell boundary"; nothing keyed anything, and `sky.rs`'s
+/// `CLOUD_FANCY_RADIUS_CELLS` doc said so honestly two files away. `DESIGN.md`
+/// §12.115.
+///
+/// # How to change it, and the gotchas
+///
+/// * **The sub-cell scroll must stay per frame.** Only the face *enumeration* is
+///   cached; [`crate::sky::fancy_cloud_geometry_cached`] still expands every face
+///   into vertices on every frame, because the in-cell offset moves every tick.
+///   Caching the vertices would freeze the clouds between cell crossings.
+/// * **`relative_pos` is part of the key and is the one a reader drops.** It
+///   changes when the camera crosses the cloud layer, at an unchanged cell, and it
+///   changes which faces exist (`UP`/`DOWN` selection, plus the inside-face
+///   flags). A cache keyed on the cell alone renders the layer from the wrong side
+///   until you happen to walk into another cell.
+/// * **The key does not include the [`CloudCells`] identity.** It does not have to,
+///   because the cache lives inside the [`SkyRenderer`](crate::sky_pipeline::SkyRenderer)
+///   that owns the cells, and a resource-pack change rebuilds that renderer. Do not
+///   hoist a cache out to a longer-lived owner without adding the texture to the
+///   key.
+#[derive(Debug, Default)]
+pub struct CloudFaceCache {
+    key: Option<(i32, i32, i32, CloudRelativePos)>,
+    faces: Vec<CloudFace>,
+    rebuilds: u64,
+}
+
+impl CloudFaceCache {
+    /// The faces for this key, enumerating them only when the key has changed.
+    pub fn faces(
+        &mut self,
+        cells: &CloudCells,
+        center_cell_x: i32,
+        center_cell_z: i32,
+        radius_cells: i32,
+        relative_pos: CloudRelativePos,
+    ) -> &[CloudFace] {
+        let key = (center_cell_x, center_cell_z, radius_cells, relative_pos);
+        if self.key != Some(key) {
+            self.faces = extruded_faces(cells, center_cell_x, center_cell_z, radius_cells, relative_pos);
+            self.key = Some(key);
+            self.rebuilds += 1;
+        }
+        &self.faces
+    }
+
+    /// How many times the face list has actually been enumerated.
+    ///
+    /// The counter, not a duration: one per cell crossing (and per layer
+    /// entry/exit), against one per *frame* before this cache existed. Read by
+    /// `tests/cloud_face_cache_counts.rs`.
+    #[must_use]
+    pub fn rebuilds(&self) -> u64 {
+        self.rebuilds
+    }
 }
 
 /// Vanilla's `buildMesh` with `extrude = false`: one `DOWN` face per filled cell,

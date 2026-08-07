@@ -41,12 +41,12 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use crate::camera::Camera;
-use crate::cloud_mesh::CloudCells;
+use crate::cloud_mesh::{CloudCells, CloudFaceCache};
 use crate::fog::{VoidFog, scale_gamma};
 use crate::sky::{
     CLOUD_FANCY_RADIUS_CELLS, CloudStatus, STAR_FIELD_SEED, SUNRISE_MIN_ALPHA, build_star_field,
     celestial_quad_positions, celestial_quad_uvs, celestial_rotation_matrix, cloud_color_for_time_of_day,
-    cloud_fancy_max_faces, cloud_plane_geometry, fancy_cloud_geometry, fog_color_for_time_of_day,
+    cloud_fancy_max_faces, cloud_plane_geometry, fancy_cloud_geometry_cached, fog_color_for_time_of_day,
     moon_phase_index_for_time_of_day, quad_indices, sky_color_for_time_of_day, sky_disc_indices,
     sky_disc_positions, star_brightness_for_time_of_day, sunrise_fan_indices, sunrise_fan_positions,
     sunrise_fan_transform, sunrise_fan_vertex_alphas, sunrise_sunset_color_for_time_of_day,
@@ -695,9 +695,19 @@ pub struct SkyRenderer {
     cloud_size: (u32, u32),
     /// The FANCY cell grid, voxelized once from `clouds.png` at construction
     /// (`crate::cloud_mesh::CloudCells::from_rgba`) — the texture never
-    /// changes at runtime, so there is nothing to rebuild here across frames,
-    /// only the face list [`fancy_cloud_geometry`] walks over it.
+    /// changes at runtime, so there is nothing to rebuild here across frames.
     cloud_cells: CloudCells,
+    /// The face list walked over [`Self::cloud_cells`], memoised on the camera's
+    /// cloud cell and its position relative to the layer — see
+    /// [`CloudFaceCache`], which also explains why the *vertex* expansion stays
+    /// per frame.
+    ///
+    /// `Mutex` because [`Self::render`] takes `&self`: every caller in the tree
+    /// (including `lodestone_shell::gpu`) holds a shared `SkyRenderer`, and
+    /// widening that to `&mut self` would touch every one of them for a lock
+    /// that is uncontended and taken once a frame. It owns the cells the cache is
+    /// keyed against, which is what lets the key omit the texture.
+    cloud_faces: std::sync::Mutex<CloudFaceCache>,
 
     disc_vbuf: wgpu::Buffer,
     disc_ibuf: wgpu::Buffer,
@@ -1202,9 +1212,9 @@ impl SkyRenderer {
         );
         let cloud_ibuf = quad_index_buffer(device, "lodestone-sky-cloud-ibuf", 1);
 
-        // Voxelized once here (the texture is static for the session); the
-        // face *list* is walked fresh every frame in `render` — see
-        // `cloud_cells`'s field doc.
+        // Voxelized once here (the texture is static for the session); the face
+        // list over it is memoised per camera cell by `cloud_faces` — see both
+        // fields' docs.
         let cloud_cells = CloudCells::from_rgba(cloud_image.width, cloud_image.height, &cloud_image.rgba);
         let fancy_cloud_max_faces = cloud_fancy_max_faces(CLOUD_FANCY_RADIUS_CELLS);
         let fancy_cloud_vbuf = vertex_buffer(
@@ -1243,6 +1253,7 @@ impl SkyRenderer {
             moon_uv,
             cloud_size: (cloud_image.width, cloud_image.height),
             cloud_cells,
+            cloud_faces: std::sync::Mutex::new(CloudFaceCache::default()),
             disc_vbuf,
             disc_ibuf,
             disc_index_count,
@@ -1458,7 +1469,22 @@ impl SkyRenderer {
             queue.write_buffer(&self.cloud_vbuf, 0, bytemuck::cast_slice(&cloud_verts));
             0
         } else {
-            let verts = fancy_cloud_geometry(&self.cloud_cells, camera.position.to_array(), time_of_day, cloud_tint);
+            let verts = {
+                // Only the face *enumeration* is cached; the vertices are
+                // expanded every frame because the sub-cell scroll moves every
+                // tick. See `CloudFaceCache`.
+                let mut cache = self
+                    .cloud_faces
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                fancy_cloud_geometry_cached(
+                    &mut cache,
+                    &self.cloud_cells,
+                    camera.position.to_array(),
+                    time_of_day,
+                    cloud_tint,
+                )
+            };
             debug_assert!(
                 verts.len() as u32 <= self.fancy_cloud_max_faces * 4,
                 "fancy_cloud_geometry produced {} verts, over the {}-face buffer capacity — \
