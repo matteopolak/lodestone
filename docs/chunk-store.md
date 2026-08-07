@@ -107,8 +107,19 @@ storage.
 
 ## Configuration
 
-`DEFAULT_CAPACITY` (currently **512**) is the only knob. Measured cost, by
-`/usr/bin/time -l` on the release test binary:
+`capacity_for_view_radius(view_radius)` is the knob, and every constructor in
+`integrated.rs` goes through it via `ChunkStore::for_view_radius`. It is
+
+```
+clamp( view_columns(view_radius) + CONCURRENT_SCAN_COLUMNS,
+       DEFAULT_CAPACITY ..= MAX_CAPACITY )
+```
+
+with `view_columns(r) = (2r + 1)²`, `CONCURRENT_SCAN_COLUMNS = 50`,
+`DEFAULT_CAPACITY = 512` and `MAX_CAPACITY = 1275`. Each term has its own doc
+comment carrying its own argument; the short version is below.
+
+Measured cost, by `/usr/bin/time -l` on the release lib-test binary:
 
 | arm | peak RSS |
 |---|---|
@@ -124,11 +135,70 @@ measure rather than evidence that residency is free. `touched_column` in the
 test module exists for that second reason: `ChunkColumn::new` allocates through
 `alloc_zeroed`, and pages that are never written do not appear in RSS.
 
-Lowering the capacity to 128 (~24 MiB) **still fixes the reported bug
+Lowering the capacity to 128 (~24 MiB) **still fixes the originally reported bug
 completely**: the starvation fix needs only the 49-column `tick_area` resident.
-512 was chosen to also cover the default streamed view (`render_distance` 8 ⇒
-`view_radius` 9 ⇒ 361 columns), so walking in a circle does not pay 909 ms per
-column again.
+
+### Why the capacity is a function of the view radius (issue #505)
+
+512 was chosen to also cover the *default* streamed view — but as a bare literal,
+in a different file from the render distance it was chosen for. The shell serves
+`view_radius = render_distance + 1` (`app/session.rs`; the `+ 1` is vanilla's
+`ChunkTrackingView` buffer ring and is correct), so the streamed square is
+`(2·(rd+1) + 1)²`:
+
+| `render_distance` | `view_radius` | view columns | vs the old 512 |
+|---|---|---|---|
+| 8 (our default) | 9 | 361 | fits |
+| 9 | 10 | 441 | fits |
+| **10** | 11 | **529** | **over** |
+| **12** (vanilla's default) | 13 | **729** | **over** |
+| 32 (slider max) | 33 | 4489 | over |
+
+One notch of the slider past 9 and the literal was under the set it existed to
+hold. The three terms of the replacement:
+
+- **the view term** is the bug;
+- **`CONCURRENT_SCAN_COLUMNS` (50)** is added *on top of* the view, not assumed
+  inside it: `run_tick_loop`'s 49-column `tick_area` is centred on world spawn and
+  never moves, so once the player walks away it is 49 columns outside the view
+  that are still touched at 20 Hz, plus the one column `vitals_tick` probes. And
+  frequency is not residency — #504 measured a 20 Hz-polled column being
+  regenerated **12** times over 12 random-tick passes, because the pass touches
+  49 columns *after* the poll and leaves the polled column holding the oldest
+  stamp in the map;
+- **the `DEFAULT_CAPACITY` floor** means the derivation can only move capacity
+  *up*, so the default configuration is byte-for-byte the 512-column, 97.6 MiB
+  store every measurement in this doc was taken against;
+- **the `MAX_CAPACITY` ceiling** stops the CPU cliff being traded for a memory
+  one. Uncapped, `render_distance` 32 sizes the store at 4,539 columns ≈ 863 MiB.
+
+The cap's own cost was measured rather than extrapolated, since a `HashMap`
+growing through several rehash thresholds with 192 KiB values could plausibly
+have been superlinear:
+
+| arm | peak RSS | delta | per column |
+|---|---|---|---|
+| retention off (shared control) | 8.1 MiB | — | — |
+| 512 retained | 105.4 MiB | 97.4 MiB | 194.8 KiB |
+| **1,275 retained (`MAX_CAPACITY`)** | **250.1 MiB** | **242.0 MiB** | 194.4 KiB |
+
+It is not: the rate is flat across a 2.5× range, so the interpolated rows in
+`FULLY_RESIDENT_VIEW_RADIUS`'s table are safe to read.
+
+**What degrades above the cap, precisely.** The store holds 1,275 of the view's
+columns and no more, so a column outside that set costs a regeneration when
+something asks for it again — a `block_state` probe from redstone, a fluid tick,
+mob pathing, or the same column re-entering the view. It is **not** a per-access
+cost on the whole view: `ViewTracker::recenter` *diffs* the window as the player
+moves and only ever asks for columns that newly entered, so the view is streamed
+once and incrementally extended, never rescanned. Nor does it touch the 20 Hz
+scans, which `CONCURRENT_SCAN_COLUMNS` covers at every radius. The degradation is
+bounded and localised; `tests/view_radius_store_capacity.rs` measures it as this
+subsystem's permanent negative control.
+
+To raise the cap, raise `FULLY_RESIDENT_VIEW_RADIUS`, re-run the RSS pair, and
+put the new numbers in its table. To reduce the cost per column instead, that is
+unit U8 of `docs/plans/chunk-lifecycle.md`.
 
 ## Gates
 
@@ -154,9 +224,48 @@ In `chunk_store.rs`'s own test module, because they need `pub(crate)` access to
   here, because "does a lock serialise this" has no count. The two hypotheses
   are 2× apart (parallel < 240 ms, serialised ≥ 480 ms) and the threshold sits
   between them.
-- `measure_rss_with_retention` / `measure_rss_without_retention` /
-  `measure_real_column_generation_cost` — `#[ignore]`d measurement tools, not
-  assertions. Release profile only.
+- `measure_rss_with_retention` / `measure_rss_at_the_capacity_cap` /
+  `measure_rss_without_retention` / `measure_real_column_generation_cost` —
+  `#[ignore]`d measurement tools, not assertions. Release profile only.
+
+In `crates/lodestone-server/tests/view_radius_store_capacity.rs`, its own binary
+because it is a counter gate and because it must go through the *public* API to
+reach the real streaming path:
+
+- `regrowing_the_render_distance_regenerates_nothing_at_vanillas_default` — the
+  subject. Joins at `view_radius = 13` (`render_distance` 12) through
+  `IntegratedServer::open_in_memory`, drags the render-distance slider down to 0
+  and back up over the wire (`ServerBound::ClientInformationChanged`, the real
+  packet), and requires **zero** columns to be generated twice. The view size is
+  *measured* from the chunk packets `serve_connection` emits, not restated, so the
+  gate is a join between the policy and production rather than
+  `decode(encode(x)) == x`.
+- `past_the_capacity_cap_the_view_cannot_stay_resident` — the permanent negative
+  control, as a real configuration of the shipped policy (`view_radius = 20`,
+  past `FULLY_RESIDENT_VIEW_RADIUS`) rather than a temporary neuter. Asserts a
+  *computed* floor, `view_columns(20) − MAX_CAPACITY = 406`.
+- `the_default_render_distance_is_under_the_old_ceiling_on_both_arms` — why the
+  subject is not at our own default. 361 < 512, so a gate at `render_distance` 8
+  would have passed before *and* after the fix: the **world** species of vacuity,
+  kept as a test so it cannot quietly become false.
+- `the_regeneration_curve_across_the_render_distance_slider` — the curve, with
+  each row asserting the regime its capacity puts it in.
+
+Observed on the unfixed wiring (`ChunkStore::new`, literal 512) in an isolated
+detached worktree at `c77146d9`, against the same arms after the fix:
+
+| `view_radius` | `rd` | view | old cap | regenerated, unfixed | new cap | regenerated, fixed |
+|---|---|---|---|---|---|---|
+| 9 | 8 | 361 | 512 | 0 | 512 | 0 |
+| 11 | 10 | 529 | 512 | **92** | 579 | 0 |
+| 13 | 12 | 729 | 512 | **451** | 779 | 0 |
+| 20 | 19 | 1681 | 512 | 1595 | 1275 | 1077 (the cap's own degradation) |
+
+The unfixed figures move a few percent between runs and the arithmetic floors do
+not, because `generate_columns_offloaded` fans the re-grow out over the blocking
+pool and scheduling decides which entry a given miss evicts. **That is why the
+subject asserts 0 and the control asserts a computed floor — neither asserts an
+observed number.**
 
 **The trap every count gate here avoids:** `OverworldGenerator` carries a
 per-instance 512-entry memo cache, so a generation-count gate built on
@@ -168,11 +277,14 @@ kind. The same vacuity was found and fixed once already in `chunk.rs`'s
 ## Known remaining gaps (not fixed by this)
 
 - **The initial join burst is still slow.** The store removes *re*-generation,
-  not first generation. A `view_radius` 9 join is 361 first-time columns, and
-  `server.rs` generates the whole set before encoding any of them, in raster
-  order from the `(-9, -9)` corner — the player's own column is item ~180 of
-  361. That ordering defect is separate from this one and is what "chunks are
-  not close to me" is really about.
+  not first generation. A `view_radius` 9 join is 361 first-time columns, and at
+  `render_distance` 12 it is 729. The **ordering** half of this has since been
+  fixed and this bullet used to describe the pre-fix state: issue #453 replaced
+  the raster walk from the `(-9, -9)` corner with `join_view_rings`, and Unit 10's
+  `join_scheduler` streams each column as it finishes rather than generating the
+  whole set first, so the player's own column is item 1 on the wire instead of
+  ~180 of 361 (`tests/serve_play.rs`'s `check_proximity_stream`). The remaining
+  gap is the total first-generation cost, not the order.
 - **Nothing moves the player down.** The server runs no player gravity and
   sends no corrective teleport (`fall.rs` says so explicitly); the client
   freezes the player when its column is unloaded

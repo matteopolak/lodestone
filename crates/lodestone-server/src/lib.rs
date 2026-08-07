@@ -192,6 +192,23 @@ pub use brewing::{
     mix_bottle,
 };
 pub use chunk::{ChunkColumn, ChunkSource, OverworldChunkSource, WorldgenChunkSource};
+// Issue #505: `chunk_store::ChunkStore` itself stays crate-private (its methods
+// are `pub(crate)` and `IntegratedServer` is the only thing that should build
+// one), but its **capacity policy** is public, for one reason: the policy is a
+// claim about what `crate::server` streams, and the gate that joins the two —
+// `tests/view_radius_store_capacity.rs` — has to measure the streamed view
+// through the public API and then compare it against the policy. A gate that
+// could only see one side of that join would be `decode(encode(x)) == x`.
+// Prefixed `STORE_`/`store_` because `MAX_CAPACITY` and `DEFAULT_CAPACITY` are
+// far too generic for a crate root that already re-exports three other
+// `DEFAULT_*` constants.
+pub use chunk_store::{
+    CONCURRENT_SCAN_COLUMNS as STORE_CONCURRENT_SCAN_COLUMNS,
+    DEFAULT_CAPACITY as STORE_CAPACITY_FLOOR,
+    FULLY_RESIDENT_VIEW_RADIUS as STORE_FULLY_RESIDENT_VIEW_RADIUS,
+    MAX_CAPACITY as STORE_CAPACITY_CEILING, capacity_for_view_radius as store_capacity_for_view_radius,
+    view_columns,
+};
 pub use command::{
     CommandCaller, CommandDispatch, CommandResponse, CommandSink, UNKNOWN_COMMAND,
 };
