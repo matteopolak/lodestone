@@ -1227,6 +1227,17 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `src/overworld.rs` (1,873 lines) and `src/feature/vegetation.rs` (3,661) — became
   two directories, by pure move, so the rewrite's engine middle can run at width 2 and
   then 4 instead of width 1.
+- [Worldgen staged sharded store](./worldgen-staged-store.md) — The memoisation
+  layer under `OverworldGenerator`'s 3×3-of-3×3 neighbourhood recursion: a
+  concurrent map from chunk position to a per-chunk entry holding one slot per
+  intermediate product, with **compute-exactly-once** as a structural property rather
+  than a hope. Unit 6 of
+  [`docs/plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md); it replaced two
+  `Mutex`-guarded FIFO caches whose contention had already forced a per-ring barrier
+  back into `lodestone-server` (`4307b59`), and it lands the plan's acceptance
+  criterion exactly — each neighbour stage computed once per chunk reached, 3 of 3
+  under 289-way concurrency, byte-identical to the old engine over 28,496,229 dumped
+  bytes.
 - [Worldgen block-state interning](./worldgen-state-interning.md) — Numeric `u16`
   handles (`StateId`) for block-state strings inside `lodestone-worldgen`'s generation
   engine, so a block moving between two internal grids costs a `u16` move instead of a
