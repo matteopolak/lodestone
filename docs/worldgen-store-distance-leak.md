@@ -3,15 +3,17 @@
 ## What it is
 
 The measured diagnosis of a player-visible defect — the game getting steadily worse the further
-you walk from spawn. Per-column generation cost is **flat in distance from the origin**; what
-grows is *memory*. `lodestone-worldgen`'s staged chunk store has a documented 512-entry retention
-ceiling that is **never enforced on the generation path**, so the store grows linearly and without
-bound at **21 entries (~7.9 MiB) per chunk of travel** for a normal 17×17 view. The instrument is
+you walk from spawn — **and the record of the fix that closed it** ([#503](https://github.com/matteopolak/lodestone/issues/503)).
+Per-column generation cost is **flat in distance from the origin**; what grew was *memory*.
+`lodestone-worldgen`'s staged chunk store had a documented 512-entry retention ceiling that was
+**never enforced on the generation path**, so the store grew linearly and without bound at
+**21 entries (~7.9 MiB) per chunk of travel** for a normal 17×17 view. The instrument is
 [`crates/lodestone-server/tests/walk_distance_curve.rs`](../crates/lodestone-server/tests/walk_distance_curve.rs).
 
-This doc is the record of the measurement and the reasoning. The fix is **not** in it: the term
-lives in `crates/lodestone-worldgen/src/overworld/store.rs`, and the patch is in "The fix" below
-for whoever owns that crate to land.
+`open_view` now checks the ceiling once its whole box is pinned. A 1,600-block stroll went from
+**2,541 entries / 997.2 MiB and zero evictions** to a flat **512 entries / 324.6 MiB and 2,029
+evictions**, byte-identical output. "The fix, as landed" below has the measurements; the change rules
+live in [`worldgen-staged-store.md`](./worldgen-staged-store.md).
 
 ## The curve
 
@@ -143,9 +145,28 @@ This is the audit question `CLAUDE.md` names verbatim: *which implementation doe
 transport actually resolve to, and is it the one production uses?* Both reclamation gates in that
 file use a call shape `column()` cannot produce, so reclamation is green in CI and dead in the game.
 
-## The fix (not applied here — `lodestone-worldgen` is another unit's)
+### What the replacement gate had to do differently
 
-Have `open_view` check the ceiling **after** the whole box is pinned, in `store.rs`:
+`a_view_walked_across_the_world_stays_inside_the_retention_ceiling`, in the same file, drives
+`open_view()` over a **moving centre** — the one thing no existing test did. It is hermetic and costs
+0.03 s, so it runs on every `cargo test`, and its `visit_column` helper reproduces `column()`'s real
+store traffic (the 5×5 pin, pre-ore over that 5×5, post-ore over the 3×3) rather than a convenient
+approximation.
+
+The evidence that the model is faithful is not an argument, it is a coincidence too large to be one:
+the hermetic gate's curve matched this doc's live-server measurement **digit-for-digit on all twelve
+numbers** — 441 / 861 / 1,281 / 1,701 / 2,121 / 2,541 with zero evictions unfixed, and a flat 512 with
+349 / 769 / 1,189 / 1,609 / 2,029 evictions fixed. A `u64`-payload model in `lodestone-worldgen` and a
+real embedded-data server sweep in `lodestone-server` are independent implementations of the same
+geometry, and they agree exactly.
+
+The control was **built and observed failing before the fix existed**: on unmodified `open_view` the
+gate reports `store_len 861 at step 20 exceeds 537 … Predicted 2541 if reclamation never runs`.
+
+## The fix, as landed
+
+Applied exactly as specified below. `open_view` checks the ceiling **after** the whole box is pinned,
+in `store.rs`:
 
 ```rust
 pub fn open_view(&self, centre: ChunkPos, radius: i32) -> ViewScope<'_, E> {
@@ -171,26 +192,118 @@ pub fn open_view(&self, centre: ChunkPos, radius: i32) -> ViewScope<'_, E> {
 ```
 
 The post-pin ordering is the whole correctness argument and is why this cannot go inside the loop.
+Spelled out, because it is the one thing a future reader is likely to "tidy": a reclaim pass skips
+pinned entries, so after the loop this scope's closure is ineligible **by construction**. At iteration
+*k* only *k* of the box's 25 entries carry a pin, and the unpinned remainder are typically the *oldest*
+entries in the whole store — the neighbouring column visited a moment ago — so they sort to the **front**
+of the candidate list. A pass inside the loop would evict precisely the slots the request is about to
+compute into, turning a memory bound into a guaranteed hot-path recompute. `reclaim()` holds no lock
+when called, so nothing pulls in the other direction.
 
-Three things to check when landing it, none of which is a timing:
+### What it measured after landing
+
+`view_walk_curve`, the same instrument and the same 17×17 view, release, this machine:
+
+| blocks walked | `store_len` before → after | evictions after | RSS before → after |
+|---|---|---|---|
+| 0 (join view) | 441 → **441** | 0 | 208.9 → 208.5 MiB |
+| 320 | 861 → **512** | 349 | 371.3 → 287.7 MiB |
+| 960 | 1,701 → **512** | 1,189 | 681.8 → 324.3 MiB |
+| 1,600 | 2,541 → **512** | 2,029 | 997.2 → **324.6 MiB** |
+
+`store_len` plateaus at exactly the ceiling and the 21-entries-per-step slope moves *wholly* into
+`evictions` — 349 at step 20 to 2,029 at step 100 is 21.0 per step, so nothing was lost or double
+counted. **RSS is flat from step 60 on**: 324.3 → 324.5 → 324.6 MiB, +0.3 MiB across 640 blocks,
+against +315 MiB over the same stretch before. The marginal rate is **504 KiB per block → 0.48 KiB per
+block**. The instrument's own `kib_per_block` column now falls as `1/d`, which is the signature of a
+constant rather than a rate, and is the shape to look for if this is ever re-measured.
+
+The join view still evicts **zero**, which is why all four eviction-is-zero gates were unperturbed
+(`staged_store_counters` 256/0, `staged_store_gates` 441/0, `in_place_decoration_counters` 25/0,
+`join_scheduler_counters`) — 441 is under 512 by derivation, so a correct fix cannot move them.
+
+**Byte identity**, two arms of the same tree differing only in `open_view`'s ceiling check, md5-verified
+identical harness on both:
+
+| dump | arm A (reverted) | arm B (fixed) | md5 |
+|---|---|---|---|
+| 140-column strip, 20 columns sampled | `store_len=720` evictions **0** | `store_len=512` evictions **208** | both `6d80318bab2d514416cba1dce0216f52` |
+| `u15_column_dump`, 45 columns / 5 seeds | — | — | both `a9db7cf741214167db615fa8b9356fa8` |
+
+Arm A's 720 is exactly the predicted `5 · (140 + 4)`, and `720 − 512 = 208` is exactly arm B's eviction
+count, so the two arms account for the same entries and differ only in retaining them. Detector control
+on both dumps: one bit flipped at offset 2,000,001 is reported `differ: char 2000002`, exit 1. The u15
+hash matches the figure U18, U19 and U21 all recorded.
+
+**The u15 dump is, on its own, vacuous for this change** and is reported only as the repo's standard
+bar. Its scene is a fresh generator per seed over a 3×3 patch — a 49-entry closure — so it never
+reaches the ceiling on *either* arm and would be byte-identical whatever `open_view` does. That is the
+same *world* species that hid the defect, one level up, which is why the strip dump exists.
+
+**Determinism under concurrent reclamation.** A 21×21 = 441-column burst on 8 threads, closure 625
+against the 512 ceiling, every column compared to a serial arm: identical. The two arms reclaimed on
+genuinely **different schedules** — 113 evictions serial against 577 parallel — so the result does not
+depend on *when* entries were dropped.
+`parallel_generation_is_deterministic_and_matches_serial` ran **12/12 green**, each run verified to
+have matched exactly one test (`1 passed`) rather than silently filtering to none.
+
+### Was the leak → pressure → slowdown chain closed? No.
+
+Still **the leading explanation, not a completed chain**, exactly as first labelled. What is now also
+true is that the chain's *premise* has been removed: the `O(d)` term is gone whether or not memory
+pressure was the mechanism by which the owner felt it, so the fix does not depend on the chain.
+
+The missing link is unchanged — the machine actually entering swap and generation slowing *as a
+consequence*. Demonstrating it needs the leaking arm carried to multiple GB (≈ 5,000 blocks for 2.4 GB,
+20,000 for 9.6 GB), and `CLAUDE.md` records unbounded test memory force-rebooting this 17 GB machine.
+That experiment was deliberately **not** run. A cheaper wall-clock substitute was considered and
+rejected on this repo's own evidence: §12.103 records a two-arm timing here **changing sign with arm
+order**, and §12.104 records unchanged code moving ×1.8–2.3 between two captures because siblings were
+compiling — so a fixed-vs-leaking timing at 1 GB, where a 17 GB machine is under no pressure at all,
+could only produce a number that would later be attributed to the wrong cause.
+
+Three things to check when landing it, none of which is a timing — all three checked, all three as
+predicted:
 
 - **`store_len` must plateau** near 512 in `view_walk_curve`, and `store_evictions` must become
-  non-zero. Both are already printed.
+  non-zero. Both are already printed. **Measured: flat 512, 2,029 evictions.** One consequence had to
+  be repaired: `view_walk_curve`'s own non-degeneracy assertion was `store_len > 512`, which the fix
+  *inverts* — it would now fail precisely because the defect it was written to expose is gone. It is
+  now `store_len + store_evictions > 512`, the form `age_curve` already used, and the quantity that
+  question is really about: how many entries the walk *asked for*.
 - **The existing eviction-is-zero gates must stay green.** `staged_store_counters.rs` (16×16 = 256
   closure), `staged_store_gates.rs`, `in_place_decoration_counters.rs` and
   `join_scheduler_counters.rs` all assert zero evictions over closures of **at most 441** — under
   the 512 ceiling, so the fix should not perturb any of them. If one goes red, the ceiling is too
   low for that gate's closure, which is a real finding about the ceiling and not a test to relax.
+  **All four green, all still reading zero.**
 - **Byte identity.** Eviction changes *when* a stage is recomputed, never what it computes, so all
   13 parity binaries must be byte-identical. That is a claim worth checking rather than asserting:
   a recompute that produced different bytes would mean a stage is not a pure function of its key,
-  which is the store's central assumption.
+  which is the store's central assumption. **All 13 green (24 + 10 tests, 0 failed, 0 ignored), plus
+  the two-arm dumps above.** Worth keeping the reasoning: the one place a strong-count change could
+  have leaked into output is `decorate.rs`'s
+  `Arc::try_unwrap(world).unwrap_or_else(|shared| (*shared).clone())`, whose branch depends on whether
+  the store still holds the value. It is unreachable as a behaviour change on two independent grounds —
+  the centre is *pinned* for the whole call so the count is never 1, and both branches yield the same
+  content anyway — but it is the shape to look for if a future stage takes a mutable path.
 
-Also note the second-order hazard, which only becomes reachable once the fix lands: `reclaim()`
+The second-order hazard, which only becomes reachable once the fix lands: `reclaim()`
 gathers candidates across all 64 shards and sorts them, `O(live · log live)` **per insert** while
 over the ceiling. At `retention = 512` and ~21 inserts per chunk step that is a few thousand map
 probes per step against a ~50 ms column — negligible, but it is negligible *because* the ceiling
-holds, so the two changes are coupled.
+holds, so the two changes are coupled. **Measured rather than left as an estimate**: the hermetic walk
+gate performs 1,989 column visits and 2,029 evictions in **0.03 s release**, i.e. ~15 µs of
+store-and-reclaim work per column, **0.03%** of a real column. That is a bound from a counter-shaped
+run rather than a two-arm timing, deliberately — see §12.103 on what a two-arm timing does here.
+
+Reclamation also introduces **no new contention**, which the store's own change rule ("no shared pool
+here, ever"; `4307b59` is the scar) makes a hard requirement. The diff adds exactly one atomic
+operation — a `Relaxed` load of `total`, on the insert path, behind a `fresh_inserts > 0` guard, so a
+steady-state view that re-opens a resident neighbourhood does not even perform it. No lock was added;
+`entry()` and `StageSlot::get_or_compute` are untouched, so an **entry hit is still a `OnceLock` atomic
+load and no lock at all**. `reclaim()`'s candidate `Vec` lives on the reclaiming thread's own stack and
+only one thread runs a pass at a time.
 
 ## Configuration
 
@@ -200,8 +313,20 @@ holds, so the two changes are coupled.
   neighbourhood widens, this widens with it and the per-step growth constant changes with it.
 - `SHARD_COUNT = 64` — `store.rs`. Affects the `len() <= retention + SHARD_COUNT` slack only.
 - The instrument's own knobs are in `walk_distance_curve.rs`: `BANDS`, `COLUMNS_PER_BAND`,
-  `VIEW_RADIUS`, `VIEW_WALK_STEPS`. All three tests are `#[ignore]`d and print a curve rather than
+  `VIEW_RADIUS`, `VIEW_WALK_STEPS`. All four tests are `#[ignore]`d and print a curve rather than
   asserting a threshold.
+- The regression gate's knobs are in `store.rs`'s test module: `WALK_RETENTION`,
+  `WALK_CLOSURE_RADIUS`, `WALK_VIEW_RADIUS`, `WALK_STEPS`. The first two **restate private constants**
+  from `overworld/mod.rs` and carry the same duplicated-constant hazard `walk_distance_curve.rs`
+  documents — they are only ever used as an upper bound and as the predicted closure, so a stale value
+  weakens the gate rather than breaking it, but re-read `mod.rs` before trusting them.
+- `STRIP = 140`, `SAMPLE = 20` and `BURST_RADIUS = 10` in
+  `crates/lodestone-server/tests/store_reclaim_identity.rs`, all derived from `STORE_RETENTION` via the
+  `5 · (n + 4)` strip closure and the `(2R + 5)²` burst closure. **Shortening `STRIP` below ~100
+  silently stops reaching the retention path**, and the gate then goes green while measuring nothing —
+  which is why it asserts `evictions > 0` rather than trusting the constant.
+- `LODESTONE_STORE_WALK_DUMP` — output path for the two-arm dumper in that file; unset means the
+  dumper panics rather than skipping, on purpose.
 
 ## What was ruled out
 

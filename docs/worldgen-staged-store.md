@@ -96,6 +96,42 @@ generator's fixed state, so dropping one can only cost a recompute, never a wron
 skips pinned entries and entries whose `Arc` is still held elsewhere, takes one shard lock at a time,
 and lets losers of an `AtomicBool` swap carry on rather than pile up.
 
+#### There are **two** insertion paths, and both must check the ceiling
+
+The single most expensive thing to know about this file. `entry()` inserts, and `open_view()` inserts
+**too** — pinning *creates* every slot in the box. And `column()` opens its pin **before** touching a
+stage, so by the time `entry()` runs the slot already exists, `entry()`'s `inserted` flag is always
+false, and the ceiling check inside it is **unreachable in the game**.
+
+For one release only `entry()` checked the ceiling. The consequence was not eviction thrash, which is
+what reading the check would predict — it was **no reclamation whatsoever**: `reclaim()` never ran in a
+real session at all, and the store grew by `2R + 5` entries (21 at R=8, ~7.9 MiB) per chunk of travel,
+without bound, for as long as the player kept walking. Issue
+[#503](https://github.com/matteopolak/lodestone/issues/503),
+[`worldgen-store-distance-leak.md`](./worldgen-store-distance-leak.md), DESIGN.md §12.108–§12.109.
+
+`open_view()` now checks it **after the whole box is pinned**, and that ordering *is* the correctness
+argument rather than a style choice:
+
+- A reclaim pass skips pinned entries, so once the whole box is pinned this scope's closure is
+  ineligible **by construction** — the property that keeps eviction view-scoped rather than a capacity
+  guess.
+- **Inside** the loop that guarantee does not hold yet. At iteration *k* only *k* of the box's entries
+  carry a pin, and the rest are typically the **oldest unpinned entries in the whole store** — a
+  neighbouring column visited a moment ago — so they sort to the *front* of the candidate list. A pass
+  there would evict slots this very request is about to compute into, converting a memory bound into a
+  guaranteed recompute on the hot path.
+
+`reclaim()` holds no lock when it is called, so there is no competing reason to move it earlier.
+
+Two costs are deliberately bounded rather than eliminated. The check is gated on `fresh_inserts > 0`,
+so a steady-state view re-opening an already-resident neighbourhood does not even perform the atomic
+load — the same "misses only" rule `entry()` follows. And `reclaim()` is `O(live · log live)` per
+insert while over the ceiling; at retention 512 that is a few thousand map probes against a ~50 ms
+column. Measured: the whole 100-step hermetic walk (1,989 column visits, 2,029 evictions) costs
+**0.03 s in release**, ~15 µs of store-and-reclaim work per column, or **0.03%** of a real column.
+That figure is negligible *because* the ceiling holds, so the two properties are coupled.
+
 ## What was measured
 
 Release, real embedded data, seed 42. Closure sizes derived from the drivers *before* measuring.
@@ -162,7 +198,20 @@ byte-identical `Vec<String>` (DESIGN.md §12.100's trap).
 - **Do not add a shared scratch pool.** Any buffer reuse belongs in a `thread_local` free-list; a pool
   behind a lock re-creates exactly the contention this module deleted. The store currently owns **no**
   scratch at all — `ViewScope` re-derives its pinned set from `centre`/`radius` on drop rather than
-  holding a buffer.
+  holding a buffer. Reclamation does **not** change this: it allocates its candidate `Vec` on the
+  reclaiming thread's own stack frame and touches no shared buffer, and only one thread runs a pass at
+  a time (losers of the `AtomicBool` swap carry on). Entry-level hits still take **no lock at all** — a
+  `OnceLock` atomic load — and the ceiling fix added exactly one `Relaxed` load, on the insert path,
+  behind a `fresh_inserts > 0` guard.
+- **If you add a third insertion path, it must check the ceiling too, after pinning.** See "There are
+  two insertion paths" above. The failure mode is silent: the store simply stops being bounded, every
+  existing gate stays green, and the symptom reaches the player as the game degrading the further they
+  walk.
+- **Never gate reclamation on a call shape `column()` cannot produce.** Both original reclamation tests
+  drove their inserts through `entry()`, which production cannot reach as an inserter, so both were
+  green while reclamation was dead in the game — the *world* species, invisible in the test source.
+  `a_view_walked_across_the_world_stays_inside_the_retention_ceiling` exists to drive `open_view()`
+  over a **moving centre**, which is what production does. Do not "simplify" it to use `entry()`.
 - **Do not "fix" a counter gate by adding tests to its binary.** The counters are process-global
   atomics. The first version of the counter gate shared a binary with the byte-identity and burst
   tests and, under `--test-threads=2`, read `pre_ore_computed = 502` against a true 256 — a 96%
@@ -172,11 +221,45 @@ byte-identical `Vec<String>` (DESIGN.md §12.100's trap).
 
 ## Gates
 
-Always-on: `overworld::store`'s 9 unit tests. Two are worth knowing about —
+Always-on: `overworld::store`'s 10 unit tests. Three are worth knowing about —
 `the_old_probe_release_compute_shape_recomputes_under_the_same_race` is a **negative control** that
 observes the old cache shape recomputing under the same 16-thread race, so the once-only test is not
-vacuous; and `a_pinned_neighbourhood_survives_massive_over_pressure` drives the store 100× past its
-ceiling and asserts reclamation *actually fired* before believing that a pinned entry survived.
+vacuous; `a_pinned_neighbourhood_survives_massive_over_pressure` drives the store 100× past its
+ceiling and asserts reclamation *actually fired* before believing that a pinned entry survived; and
+`a_view_walked_across_the_world_stays_inside_the_retention_ceiling` is the #503 regression guard.
+
+The walk gate is the only test here that drives the **production** insertion path, and it is cheap
+(0.03 s) because its payload is a `u64` rather than terrain. Three properties make it worth trusting:
+
+- It **slides a 17×17 view 100 steps** and checks a *curve*, not a point — every 20th step is asserted
+  and all samples print on failure.
+- It states **both hypotheses from outside the measurement**: bounded at ≤ 512 + 25, or `441 + 21 × 100
+  = 2,541` if reclamation never runs. The assertion requires the measurement to be within the first
+  *and* a factor of four away from the second, so it is a magnitude check and not a direction one.
+- Its join-view closure is asserted to be exactly **441**, which is what says the hermetic model
+  reproduces production's geometry rather than some cheaper shape that could not leak in the first
+  place. It held on both arms, and the model's whole curve matched the real server instrument
+  digit-for-digit (441/861/1281/1701/2121/2541 unfixed; 512 with 349/769/1189/1609/2029 evictions
+  fixed).
+
+Byte identity under reclamation — `#[ignore]`d, release, `crates/lodestone-server/tests/store_reclaim_identity.rs`:
+
+```text
+cargo test --release -p lodestone-server --test store_reclaim_identity -- --ignored --nocapture \
+  reclaimed_columns_regenerate_byte_identically
+cargo test --release -p lodestone-server --test store_reclaim_identity -- --ignored --nocapture \
+  a_concurrent_burst_past_the_ceiling_matches_serial_bytes
+```
+
+The first walks a 140-column strip (closure ~720 against the 512 ceiling), captures 20 columns' wire
+bytes *before* anything is evicted, walks on until they are reclaimed, and regenerates them. The second
+runs a **21×21 = 441-column** burst on 8 threads — deliberately wider than `staged_store_gates.rs`'s
+R=8 burst, whose 441-entry closure is chosen to evict *nothing* — so reclamation and concurrent
+generation happen at the same instant, and compares every column to a serial arm. Both arms reclaim,
+and they reclaim on **different schedules** (113 evictions serial against 577 parallel) while producing
+identical bytes, which is the interesting part: the result does not depend on *when* entries were
+dropped. Both gates carry an `evictions > 0` detector, because without it either would be a re-run of
+an existing no-eviction gate.
 
 `#[ignore]`d, release, multi-minute — the end-to-end evidence:
 

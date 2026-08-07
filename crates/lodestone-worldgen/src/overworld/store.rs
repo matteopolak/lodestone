@@ -316,9 +316,36 @@ impl<E: Default> StagedStore<E> {
     /// an in-flight request's whole closure is ineligible for reclamation by
     /// construction, so no eviction policy — this one or a future one — can
     /// make a request recompute a stage it already computed.
+    ///
+    /// # This is an insertion path, and it is the one the game uses
+    ///
+    /// Pinning **creates** every slot in the box, so this — not
+    /// [`Self::entry`] — is where a real session's entries come from.
+    /// `OverworldGenerator::column` opens its pin first and only then touches a
+    /// stage, so by the time `entry` runs the slot already exists, `entry`'s own
+    /// `inserted` flag is always false, and its ceiling check is unreachable in
+    /// the game. For one release that meant `reclaim` never ran at all outside
+    /// tests and the store grew by 21 entries (~7.9 MiB) per chunk of travel,
+    /// without bound: issue #503, `docs/worldgen-store-distance-leak.md`,
+    /// DESIGN.md §12.108–§12.109. Hence the ceiling check below.
+    ///
+    /// # Why the check is after the loop and cannot go inside it
+    ///
+    /// A reclaim pass skips pinned entries, so once the **whole** box is pinned
+    /// this scope's closure is ineligible by construction — the property that
+    /// keeps eviction view-scoped rather than a capacity guess. Inside the loop
+    /// that guarantee does not hold yet: at iteration *k* only *k* of the box's
+    /// entries carry a pin, and the rest are typically the *oldest* unpinned
+    /// entries in the store (a neighbouring column visited a moment ago), so
+    /// they sort to the front of the candidate list. A pass there would evict
+    /// slots this very request is about to compute into, turning a memory bound
+    /// into a guaranteed recompute on the hot path. The ordering *is* the
+    /// correctness argument; `reclaim` holds no lock, so there is no other
+    /// reason to move it.
     #[must_use]
     pub fn open_view(&self, centre: ChunkPos, radius: i32) -> ViewScope<'_, E> {
         let epoch = self.epoch.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut fresh_inserts = 0usize;
         for pos in box_around(centre, radius) {
             let shard = &self.shards[shard_of(pos)];
             let mut slots = shard.slots.lock().unwrap_or_else(PoisonError::into_inner);
@@ -333,7 +360,16 @@ impl<E: Default> StagedStore<E> {
             drop(slots);
             if fresh {
                 self.total.fetch_add(1, Ordering::Relaxed);
+                fresh_inserts += 1;
             }
+        }
+        // Only a fresh insert can have pushed the store over its ceiling, so a
+        // steady-state view that re-opens an already-resident neighbourhood
+        // never reaches the shared counter — the same "misses only" rule
+        // `entry` follows, and what keeps a hit free of anything but the shard
+        // probe it already paid.
+        if fresh_inserts > 0 && self.total.load(Ordering::Relaxed) > self.retention {
+            self.reclaim();
         }
         ViewScope {
             store: self,
@@ -657,6 +693,142 @@ mod tests {
             store.len(),
             store.retention
         );
+    }
+
+    /// Retention ceiling the walk gate runs against — `overworld::STORE_RETENTION`
+    /// restated, because it is private to that module. Only ever compared against
+    /// as an upper bound, so a stale value here weakens the gate rather than
+    /// breaking it; re-read `overworld/mod.rs` before trusting it.
+    const WALK_RETENTION: usize = 512;
+
+    /// `overworld::COLUMN_CLOSURE_RADIUS`, restated for the same reason. The 5×5
+    /// pin every `column()` call opens.
+    const WALK_CLOSURE_RADIUS: i32 = 2;
+
+    /// View radius the walk gate slides: 8 gives a 17×17 = 289-column view, the
+    /// same render distance `STORE_RETENTION` was sized against.
+    const WALK_VIEW_RADIUS: i32 = 8;
+
+    /// Chunk steps the walk gate slides the view.
+    ///
+    /// **Derived from the leak's own slope, not picked.** A `+x` step exposes a
+    /// leading strip of `2R + 1` columns whose pins add `2R + 1 + 4` = 21 entries
+    /// at `R = 8`, so an unreclaimed store reaches `441 + 21 · steps`. 100 steps
+    /// puts that at 2,541 — ~5× the ceiling, and far enough past it that the
+    /// bounded assertion cannot pass by accident of a short walk.
+    const WALK_STEPS: i32 = 100;
+
+    /// One `OverworldGenerator::column` call's store traffic, in its real shape.
+    ///
+    /// Faithful to `column()` rather than convenient: the 5×5 pin, then the
+    /// pre-ore stage over that whole 5×5 (`ore_stage`'s 3×3-of-3×3 closure), then
+    /// the post-ore stage over the 3×3 (`vegetation_stage`'s driver). Both stage
+    /// loops go through [`StagedStore::entry`], exactly as production does —
+    /// which is why the entries are all created by `open_view` first and why
+    /// `entry`'s own ceiling check never sees `inserted == true` here either.
+    fn visit_column(store: &StagedStore<Stages>, pos: ChunkPos) {
+        let _view = store.open_view(pos, WALK_CLOSURE_RADIUS);
+        for p in box_around(pos, WALK_CLOSURE_RADIUS) {
+            store.entry(p).a.get_or_compute(|_| {}, || 1);
+        }
+        for p in box_around(pos, WALK_CLOSURE_RADIUS - 1) {
+            store.entry(p).b.get_or_compute(|_| {}, || 2);
+        }
+    }
+
+    /// **The gate for the `O(distance)` leak of `docs/worldgen-store-distance-leak.md`:
+    /// a view walked across the world must not grow the store without bound.**
+    ///
+    /// Every other reclamation test in this file drives its inserts through
+    /// [`StagedStore::entry`]. Production drives them through
+    /// [`StagedStore::open_view`], because `column()` opens its pin *before*
+    /// touching a stage, so by the time `entry` runs the slot already exists and
+    /// `entry`'s ceiling check is unreachable. Both of those tests were green
+    /// while reclamation was dead in the game: the *world* species — exemplary
+    /// source, wrong input. **This gate exists to drive the production path, and
+    /// nothing about it should be changed to route through `entry`.**
+    ///
+    /// Two hypotheses, both computed from constants outside the measurement, so
+    /// this is not a direction-only assertion:
+    ///
+    /// | hypothesis | predicted final `len()` |
+    /// |---|---|
+    /// | reclamation reaches the `open_view` path | ≤ 512 + 25 (a pass's peak overshoot is one view's box) |
+    /// | it does not (the shipped defect) | 441 + 21 × 100 = **2,541** |
+    ///
+    /// The measurement has to land on the first and be nowhere near the second.
+    #[test]
+    fn a_view_walked_across_the_world_stays_inside_the_retention_ceiling() {
+        let store: StagedStore<Stages> = StagedStore::new(WALK_RETENTION);
+        let r = WALK_VIEW_RADIUS;
+
+        // The join view, as a connecting player produces it.
+        for dz in -r..=r {
+            for dx in -r..=r {
+                visit_column(&store, (dx, dz));
+            }
+        }
+        let join_len = store.len();
+
+        // The closure of a 17×17 view is 21×21 = 441, and this is the number the
+        // real instrument measured in a live session. Asserting it here is what
+        // says this hermetic model reproduces production's geometry rather than
+        // some cheaper shape that could not leak in the first place — and it is
+        // under the ceiling, so it holds on both arms.
+        assert_eq!(
+            join_len,
+            (2 * (r + WALK_CLOSURE_RADIUS) + 1).pow(2) as usize,
+            "the join view's closure is not the 441 entries production reaches, so this \
+             gate is not modelling `column()`"
+        );
+
+        // A curve, not a point: the claim is about shape, so every sample is
+        // checked and all of them are printed on failure.
+        let mut curve: Vec<(i32, usize, usize)> = vec![(0, join_len, store.evicted())];
+        for step in 1..=WALK_STEPS {
+            let cx = step + r;
+            for dz in -r..=r {
+                visit_column(&store, (cx, dz));
+            }
+            if step % 20 == 0 {
+                curve.push((step, store.len(), store.evicted()));
+            }
+        }
+
+        let unreclaimed = join_len + (2 * (r + WALK_CLOSURE_RADIUS) + 1) as usize * WALK_STEPS as usize;
+        let ceiling = WALK_RETENTION + (2 * WALK_CLOSURE_RADIUS + 1).pow(2) as usize;
+        let shape = curve
+            .iter()
+            .map(|(step, len, evicted)| format!("step={step} len={len} evicted={evicted}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        for &(step, len, _) in &curve {
+            assert!(
+                len <= ceiling,
+                "store_len {len} at step {step} exceeds {ceiling} (retention \
+                 {WALK_RETENTION} + one view box): the ceiling is not reached from the \
+                 `open_view` path. Predicted {unreclaimed} if reclamation never runs. \
+                 Curve: {shape}"
+            );
+        }
+
+        // The detector: reclamation must actually have fired, or "bounded" above
+        // would be satisfied by a walk that never reached the ceiling at all.
+        assert!(
+            store.evicted() > 0,
+            "nothing was ever evicted over a {WALK_STEPS}-step walk, so the bound above \
+             is vacuous. Curve: {shape}"
+        );
+        // Magnitude, not sign: the measurement must be far from the leaking
+        // hypothesis, not merely smaller than it.
+        assert!(
+            store.len() * 4 < unreclaimed,
+            "store_len {} is within 4x of the {unreclaimed} entries the unreclaimed \
+             hypothesis predicts. Curve: {shape}",
+            store.len()
+        );
+        println!("view walk, {WALK_STEPS} steps at R={r}: {shape}");
     }
 
     /// No eviction at all below the ceiling — the regime every parity sweep and
