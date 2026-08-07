@@ -101,6 +101,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use lodestone_worldgen_core::hash::{FastMap, FastSet};
 use serde_json::Value;
 
 use crate::dense_grid::DenseBlockGrid;
@@ -233,21 +234,36 @@ pub struct SnowSupport {
 pub struct StatePredicate {
     /// Answer for each block's default state, keyed by base name
     /// (`minecraft:water`). Absent means `false`.
-    by_block_default: HashSet<String>,
+    ///
+    /// [`FastSet`], not the default hasher: [`Self::test`] runs per column of
+    /// every top-layer chunk on a `String` key, and U17's profile measured this
+    /// type at 15% of the pipeline's remaining SipHash time. Safe because both
+    /// fields are private and used only through `get`/`contains`/`is_empty` —
+    /// never iterated, so no order is observable. See
+    /// [`lodestone_worldgen_core::hash::fast`] for why that argument has to be
+    /// made per map rather than assumed.
+    by_block_default: FastSet<String>,
     /// Every state whose answer differs from its block's default, keyed by full
     /// canonical state string (`minecraft:water[level=0]`).
-    by_state: HashMap<String, bool>,
+    by_state: FastMap<String, bool>,
 }
 
 impl StatePredicate {
     /// Builds from the two halves. `by_state` must list **every** disagreeing
     /// state; a partial list is silently wrong, which is why it is produced by a
     /// full walk of the state registry rather than by hand.
+    ///
+    /// The signature keeps `std`'s containers deliberately: every caller
+    /// (including `lodestone-server`'s gates and [`SnowSupport::parse`] below)
+    /// builds them that way, and this runs **once per generator**, so the
+    /// re-hash into the internal [`FastSet`]/[`FastMap`] is paid at construction
+    /// and never again. Changing the signature would push a hasher choice across
+    /// a crate boundary for no gain.
     #[must_use]
     pub fn new(by_block_default: HashSet<String>, by_state: HashMap<String, bool>) -> Self {
         Self {
-            by_block_default,
-            by_state,
+            by_block_default: by_block_default.into_iter().collect(),
+            by_state: by_state.into_iter().collect(),
         }
     }
 
