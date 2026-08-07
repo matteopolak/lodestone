@@ -332,8 +332,19 @@ fn place_placed_feature<R: RandomSource>(
             place_configured_feature(random, pos, feature, grid, tags);
             return;
         }
-        for next in mods[i].get_positions(random, pos, grid, tags) {
-            recurse(random, mods, i + 1, next, grid, tags, feature);
+        // U8: `get_positions` returns [`Positions`] instead of a freshly
+        // allocated `Vec<BlockPos>`. The walk below is the same depth-first
+        // recursion in the same order — `Repeat(p, n)` recurses `n` times on the
+        // same position, exactly as `for next in vec![p; n]` did. See
+        // [`Positions`]'s own doc for why three shapes are exhaustive here.
+        match mods[i].get_positions(random, pos, grid, tags) {
+            Positions::None => {}
+            Positions::One(next) => recurse(random, mods, i + 1, next, grid, tags, feature),
+            Positions::Repeat(next, n) => {
+                for _ in 0..n {
+                    recurse(random, mods, i + 1, next, grid, tags, feature);
+                }
+            }
         }
     }
     recurse(
