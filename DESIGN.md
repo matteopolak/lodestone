@@ -3249,3 +3249,37 @@ The generalisable part is not "I was wrong about a cache". It is the **shape of 
 - **The orchestrator's patch is not privileged evidence.** Mine was reasoned from a call-site reading; the agent's came from a rig at four settings. The correct disposition of a brokered patch is *a hypothesis with a proposed diff*, and an agent that reshapes it on measurement is doing the job. Brokered patches should therefore state **what to verify**, not only what to type — this one stated the mechanism and asked for no measurement of it.
 
 The gate that resulted is the shape to copy: it enumerates **six** plausible wrong models (request never reaches the loop; instant flip; delay in redstone ticks `1+d`; off by one; placement delay used for signal changes; delay-on-falling-edge-only) and shows the oracle separating each at **4 of 4** delay settings. The last of those is why the *rising* edge was measured at all — a falling-edge-only model reproduces the falling column perfectly, so the falling column alone proves nothing.
+
+**12.98 The worldgen release baseline: the plan's five structural predictions were all correct, and the gap to sub-ms is 97×.**
+
+Units 1–2 of `docs/plans/worldgen-rewrite.md`. **No release-profile baseline for the composed worldgen pipeline existed anywhere in this repo before this**; every prior number was debug, partial, or against a fixture tree with stages missing. The instrument is `crates/lodestone-worldgen/src/counters.rs` (relaxed atomics behind a default-off `gen-counters` feature) plus new benches in `benches/generation.rs`. Machine: Apple Silicon, seed 42, single thread, embedded 26.2 server data, all ten stages counter-asserted live. Two independent runs, taken with no other CPU-consuming process, agreed to **within 2%** on every figure below, so these are measurements rather than samples.
+
+**The five predictions the counters confirmed — each derived independently, then asserted exactly:**
+
+| claim | plan | measured |
+|---|---|---|
+| `block_at` calls per chunk fill | 98,304 | **98,304** (`16 × 16 × height`, `height = 384`) |
+| pre-ore chunks touched by one cold `column()` | 25 (5×5) | **25** |
+| ore RNG walks on a cold column | 9 (3×3) | **9** |
+| climate table rows per biome search | 7,594 | **7,594** (58,519,364 / 7,706) |
+| `String` allocations per warm column | ~885k | **885,898** (884,736 from `stitch_veg_region` + palette interns) |
+
+D5's "~2.2M squared-distance comparisons per pre-ore chunk" measured **2.37M** (606,335,336 / 256) — within 8%, confirmed. The heap-allocation figure is worth stating separately because it validates the diagnosis rather than merely agreeing with it: a steady-state column performs **905,459** allocations, of which ~885k are those `String`s. **97.7% of all heap traffic on the serve path is one `to_string()` in one loop.**
+
+**The verdict on sub-ms (a goal, not a gate, per the owner's ruling):**
+
+| | measured | target | ratio |
+|---|---|---|---|
+| C_ss (median of 100 interior chunks, 12×12 sweep) | **96.8 ms** | ≤ 1.0 ms | **97× over** |
+| C_cold (first column, fresh region) | **883 ms** | ≤ 8 ms | 110× over |
+| vegetation stage alone | **52.8 ms** | ~1 ms decision threshold | 53× over |
+
+Per-stage share of a served column: vegetation **52.0%**, ore **22.2%**, shape 9.9%, carve 6.8%, surface 3.1%, top_layer 2.1%, materialize 2.0%, aquifer 1.6%, biome 0.3%, intern 0.0%.
+
+**The one number that decides whether the plan's optimism is justified is not any of the above — it is cost per RNG draw.** The vegetation walk draws **11,034** RNG values per column, and the plan is correct that this count is spec-bound and untouchable at parity. But it costs **4,781 ns per draw** — roughly **14,000 CPU cycles to service one random number**. A spec-bound draw whose consequences were evaluated against flat arrays and bitsets should cost tens to hundreds of cycles. So the 97× gap is **not** made of irreducible parity-bound work: it is one to two orders of magnitude of per-draw overhead sitting on top of a draw count nobody proposes to change. That reframes Q3's verdict — sub-ms is out of reach by tuning, and the question is entirely whether U3/U6/U7/U8 delete enough structure. Nothing measured here argues for weakening parity, and the recourse is not needed yet.
+
+**Three method findings, each of which would have cost the next unit time:**
+
+- **A stage-participation counter must sit *below* the stage's no-data early return, not above it.** Placed above, it reports "ore ran once per chunk" for exactly the run where `ore_stage` early-returned on an empty resolver — which is this file's own documented history and the *world* species of vacuous test. Placed below, `stage_entered[top_layer] == 0` is a precise, mechanical detector for "this bench is secretly pointed at the fixture tree". A per-stage *timing* floor, which the bench already had, catches this only probabilistically and only for expensive stages.
+- **"Every stage ran exactly once per chunk" is one sentence with a different chunk count per stage**, because each stage has its own dependency radius. For a 12×12 sweep it is 256 (5×5 closure) for fill/surface/carve, 196 (3×3) for ore, and 144 for vegetation/top_layer/intern — asserted, and it held. Stating it as a single "144 of each" would have been wrong for nine of the ten stages and would have failed for the wrong reason.
+- **`cargo bench`/`cargo test` in the release profile were already broken workspace-wide on the pinned nightly, and nothing reported it.** `rustc 1.99.0-nightly (da86f4d07 2026-07-24)` hits an **ICE** (`rustc_codegen_ssa/src/mir/operand.rs:291: not immediate`, on `UnsafeCell<MaybeUninit<Notified<Arc<multi_thread::Handle>>>>`) compiling **tokio 1.53.1** at `opt-level=3` whenever dev-dependencies enable `rt-multi-thread`. Confirmed pre-existing and independent of this work: `cargo build --release -p lodestone-server --tests` reproduces it on a graph these units never touch. Every health check in `CLAUDE.md` is a *debug* build, so none of them can see it — the same structural blind spot as the doctest rule, one profile over. Workaround that needs no file change and cannot affect a measurement (the bench never executes tokio): `cargo --config 'profile.release.package.tokio.opt-level=1' bench …`. **If a dated nightly is pinned, pin one that compiles tokio in release** — and note that a `--release` gate would have caught this months earlier than a `--release` benchmark did.
