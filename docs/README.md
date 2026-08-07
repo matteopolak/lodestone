@@ -1268,6 +1268,17 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `src/overworld.rs` (1,873 lines) and `src/feature/vegetation.rs` (3,661) — became
   two directories, by pure move, so the rewrite's engine middle can run at width 2 and
   then 4 instead of width 1.
+- [Ore placement: lookup cost, and the vein system that is still missing](./worldgen-ore-lookup-cost.md) —
+  The cost model of the `UNDERGROUND_ORES` decoration stage — the single most
+  expensive stage in chunk generation, measured at **43.54%** of stage time — plus
+  the record of what U15 removed from it, why the removal cannot move an RNG draw, and
+  the two non-obvious couplings that any future `OreVeinifier` port has to respect. It
+  is the companion to
+  [`worldgen-in-place-decoration.md`](./worldgen-in-place-decoration.md) (which owns
+  the *medium* decoration writes travel through) and to
+  [`worldgen-fast-hashing.md`](./worldgen-fast-hashing.md) (which makes the engine's
+  remaining lookup tables cheaper); this doc is about the lookups the ore engine
+  stopped performing at all.
 - [Worldgen SIMD kernels: what vectorising the noise actually bought](./worldgen-simd-kernels.md) —
   The `std::simd` vectorisation of `lodestone-worldgen-core`'s noise kernels — Unit
   5 of [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md) — and, more

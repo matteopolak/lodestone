@@ -47,7 +47,7 @@
 //! swapped produces a plausible-but-wrong world, which is why the oracle compares
 //! whole-chunk block output rather than sampled positions.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde_json::Value;
 
@@ -559,6 +559,130 @@ pub const REGION_MAX: i32 = 32;
 /// clusters that never spill.
 pub const VEG_PADDING: i32 = 8;
 
+/// Side of the driven 3×3 region in blocks (48) — [`REGION_MAX`] − [`REGION_MIN`].
+pub const REGION_SIDE: i32 = REGION_MAX - REGION_MIN;
+
+/// The `OCEAN_FLOOR_WG` heightmap over the driven 3×3 region as a **dense
+/// array**, addressed by centre-relative local `(lx, lz)` already clamped into
+/// `[`[`REGION_MIN`]`, `[`REGION_MAX`]`)` — i.e. by exactly the key space
+/// [`OreInput::region_local`] produces.
+///
+/// # Why this is not a `HashMap`
+///
+/// It was one until U15. `OreInput::get_height` is called once per cell of
+/// `place_ore_feature`'s pre-placement probe loop, whose box is
+/// `(2·(ceil(size/8) + max_radius) + 1)²` — up to 27 × 27 for the `size = 64`
+/// blob ores — for **every** emitted position of **every** ore feature of
+/// **all nine** source chunks. Each of those was a SipHash of an `(i32, i32)`
+/// tuple against a 2,304-entry map.
+///
+/// Measured (`samply` 0.13.1, release, `threadCPUDelta`-weighted,
+/// `bench_ore_composition_sweep`, seed 42): inside the ore engine's own subtree
+/// (`apply_one_source`, 22.85% of process CPU), `hash_one::<&(i32, i32)>` was
+/// **7.36% inclusive / 2.78% self** and `get_height` itself a further 2.95%
+/// self. `overworld/decorate.rs`'s own doc had already named this fix — "if it
+/// ever matters, the win is a dense `[i32; 48 * 48]` array rather than a
+/// `HashMap`, and the clamp has to move with it" — and the clamp did move with
+/// it: it stays in [`OreInput::region_local`], and this type's accessors assume
+/// their caller already applied it.
+///
+/// # The absence detector is preserved deliberately
+///
+/// The map version panicked on a probe with no entry, which is a real detector:
+/// a driver that forgot to stitch a source's heights would otherwise silently
+/// read 0 and change where ores place. So the dense array is filled with
+/// [`Self::UNSET`] and [`Self::get`] panics on it, rather than defaulting.
+#[derive(Clone)]
+pub struct RegionHeights {
+    /// `REGION_SIDE × REGION_SIDE`, row-major in `lz`.
+    heights: Box<[i32]>,
+}
+
+impl std::fmt::Debug for RegionHeights {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let set = self.heights.iter().filter(|&&v| v != Self::UNSET).count();
+        f.debug_struct("RegionHeights")
+            .field("cells", &self.heights.len())
+            .field("set", &set)
+            .finish()
+    }
+}
+
+impl Default for RegionHeights {
+    fn default() -> Self {
+        Self::unset()
+    }
+}
+
+impl RegionHeights {
+    /// Sentinel for "no source stitched this column", standing in for the
+    /// `HashMap`'s absent key. Not a reachable height: every real value is at
+    /// least `min_y - 1`.
+    pub const UNSET: i32 = i32::MIN;
+
+    /// Number of columns in the driven region (48 × 48 = 2,304).
+    pub const AREA: usize = (REGION_SIDE * REGION_SIDE) as usize;
+
+    /// An all-[`Self::UNSET`] map — nothing stitched yet.
+    #[must_use]
+    pub fn unset() -> Self {
+        Self {
+            heights: vec![Self::UNSET; Self::AREA].into_boxed_slice(),
+        }
+    }
+
+    #[inline]
+    fn index(lx: i32, lz: i32) -> usize {
+        debug_assert!((REGION_MIN..REGION_MAX).contains(&lx), "lx {lx} not clamped");
+        debug_assert!((REGION_MIN..REGION_MAX).contains(&lz), "lz {lz} not clamped");
+        ((lz - REGION_MIN) * REGION_SIDE + (lx - REGION_MIN)) as usize
+    }
+
+    /// Records one column's height. `(lx, lz)` must already be inside the
+    /// region; a coordinate outside it is a caller bug, not a silent drop —
+    /// the `HashMap` this replaced would have stored it and then never been
+    /// asked for it, which is the shape that hides a stitching mistake.
+    pub fn set(&mut self, lx: i32, lz: i32, y: i32) {
+        self.heights[Self::index(lx, lz)] = y;
+    }
+
+    /// Height at a **pre-clamped** region-local column.
+    ///
+    /// # Panics
+    ///
+    /// If no source stitched this column — same failure the `HashMap`'s
+    /// `unwrap_or_else(|| panic!(…))` produced, kept so the detector survives.
+    #[must_use]
+    #[inline]
+    pub fn get(&self, lx: i32, lz: i32) -> i32 {
+        let v = self.heights[Self::index(lx, lz)];
+        assert_ne!(
+            v,
+            Self::UNSET,
+            "RegionHeights::get: no heightmap entry for region-local ({lx},{lz})"
+        );
+        v
+    }
+
+    /// Builds one from the `HashMap<(i32, i32), i32>` shape the JVM parity
+    /// fixtures assemble (see [`apply_ore_step_3x3`]). Production never goes
+    /// through a map at all — `overworld::decorate` fills this type directly.
+    ///
+    /// Entries outside the driven region are dropped, matching the map version:
+    /// every read is clamped into the region first, so an out-of-region entry
+    /// was unreachable there too.
+    #[must_use]
+    pub fn from_map(map: &HashMap<(i32, i32), i32>) -> Self {
+        let mut out = Self::unset();
+        for (&(lx, lz), &y) in map {
+            if (REGION_MIN..REGION_MAX).contains(&lx) && (REGION_MIN..REGION_MAX).contains(&lz) {
+                out.set(lx, lz, y);
+            }
+        }
+        out
+    }
+}
+
 /// Inputs the ore driver needs beyond the RNG.
 pub struct OreInput<'a> {
     /// The chunk currently placing features — its own origin/seed
@@ -582,7 +706,7 @@ pub struct OreInput<'a> {
     /// `level.getHeight` returns it, keyed by centre-relative local
     /// `(x, z) ∈ [`[`REGION_MIN`]`,`[`REGION_MAX`]`)` (see
     /// [`OreInput::region_local`] for probes landing outside that range).
-    pub ocean_floor_wg: &'a HashMap<(i32, i32), i32>,
+    pub ocean_floor_wg: &'a RegionHeights,
     /// `true` iff the given block base name is in the given tag (closure already
     /// resolved by the caller).
     pub in_tag: &'a dyn Fn(&str, &str) -> bool,
@@ -599,7 +723,7 @@ impl std::fmt::Debug for OreInput<'_> {
             .field("height", &self.height)
             .field("min_gen_y", &self.min_gen_y)
             .field("gen_depth", &self.gen_depth)
-            .field("ocean_floor_wg", &self.ocean_floor_wg.len())
+            .field("ocean_floor_wg", &self.ocean_floor_wg)
             .finish_non_exhaustive()
     }
 }
@@ -650,11 +774,14 @@ impl OreInput<'_> {
         (lx, lz)
     }
 
+    /// `level.getHeight(OCEAN_FLOOR_WG, x, z)` for a probe anywhere in (or
+    /// clamped into) the driven region. One array index since U15 — see
+    /// [`RegionHeights`] for the measurement that motivated it and for why the
+    /// missing-entry panic is still here.
+    #[inline]
     fn get_height(&self, x: i32, z: i32) -> i32 {
         let (lx, lz) = self.region_local(x, z);
-        *self.ocean_floor_wg.get(&(lx, lz)).unwrap_or_else(|| {
-            panic!("OreInput::get_height: no heightmap entry for region-local ({lx},{lz})")
-        })
+        self.ocean_floor_wg.get(lx, lz)
     }
 }
 
@@ -734,6 +861,11 @@ pub fn apply_ore_step<R: RandomSource>(
 /// `view`, which the caller reads at any region-local coordinate — the centre
 /// 16×16 slice (`in_center`) for the fixture-comparable `ore.*` output, or a
 /// neighbour's third to see spill into (or within) a neighbour.
+///
+/// Takes the heightmap as the sparse `HashMap` a JVM parity fixture naturally
+/// parses (`ofh.<x>,<z>` lines) and converts it to the dense
+/// [`RegionHeights`] production builds directly, so the fixtures keep their
+/// shape while the driver has exactly one heightmap representation to read.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_ore_step_3x3<R: RandomSource>(
     random: &mut WorldgenRandom<R>,
@@ -749,6 +881,7 @@ pub fn apply_ore_step_3x3<R: RandomSource>(
     view: &mut RegionView<'_>,
     ores: &[PlacedOre],
 ) -> i64 {
+    let dense = RegionHeights::from_map(ocean_floor_wg);
     apply_ore_step_3x3_per_source(
         random,
         seed,
@@ -758,7 +891,7 @@ pub fn apply_ore_step_3x3<R: RandomSource>(
         height,
         min_gen_y,
         gen_depth,
-        ocean_floor_wg,
+        &dense,
         in_tag,
         view,
         &|_source_x, _source_z| ores,
@@ -784,7 +917,7 @@ pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
     height: i32,
     min_gen_y: i32,
     gen_depth: i32,
-    ocean_floor_wg: &HashMap<(i32, i32), i32>,
+    ocean_floor_wg: &RegionHeights,
     in_tag: &dyn Fn(&str, &str) -> bool,
     view: &mut RegionView<'_>,
     ores_for_source: &dyn Fn(i32, i32) -> &'a [PlacedOre],
@@ -971,7 +1104,23 @@ fn do_place<R: RandomSource>(
         }
     }
 
-    let mut tested: HashSet<(i32, i32, i32)> = HashSet::new();
+    // `OreFeature.doPlace`'s `BitSet` of already-tested positions. Vanilla keys
+    // it by a flat index into the blob's own box; until U15 this was a
+    // `HashSet<(i32, i32, i32)>`, which meant a SipHash per candidate position
+    // plus a chain of `RawTable::reserve_rehash` calls as it grew — measured
+    // (`samply`, release, `threadCPUDelta`) at 3.85% self in
+    // `hash_one::<&(i32, i32, i32)>` and a further 3.04% self across two
+    // `reserve_rehash` instantiations, inside an ore subtree that is itself
+    // 22.85% of process CPU.
+    //
+    // The box is derived by a **first pass over the very same per-sphere bound
+    // expressions the placement loop below uses**, rather than from an
+    // algebraic bound on `size`/`spread_xy`/`max_radius`. That is deliberate:
+    // an algebraic bound would be a second derivation to keep in step, and
+    // getting it one block small would silently drop a dedup and place an extra
+    // ore. Derived this way the box is exactly the set of coordinates the loop
+    // can visit, so `VisitedBox` cannot be too small by construction.
+    let mut tested = VisitedBox::over_spheres(&data, size, x_start, y_start, z_start);
     for i in 0..size {
         let b = (i * 4) as usize;
         let r = data[b + 3];
@@ -1006,13 +1155,94 @@ fn do_place<R: RandomSource>(
                     if is_outside_build_height(y, input.min_y, input.height) {
                         continue;
                     }
-                    if !tested.insert((x, y, z)) {
+                    if !tested.insert(x, y, z) {
                         continue;
                     }
                     try_place_ore(random, config, input, working, x, y, z);
                 }
             }
         }
+    }
+}
+
+/// The set of block positions one `doPlace` blob has already tested, as a dense
+/// bitset over the blob's own bounding box.
+///
+/// Replaces a `HashSet<(i32, i32, i32)>` — see [`do_place`]'s comment for the
+/// measurement. `insert` returns whether the position was **newly** inserted,
+/// exactly like `HashSet::insert`, so the call site is unchanged in meaning.
+struct VisitedBox {
+    x0: i32,
+    y0: i32,
+    z0: i32,
+    xs: i32,
+    ys: i32,
+    zs: i32,
+    bits: Vec<u64>,
+}
+
+impl VisitedBox {
+    /// The union of every live sphere's clamped bound box, computed with the
+    /// **same expressions** `do_place`'s placement loop uses. A sphere with
+    /// `r < 0` is skipped there and so is skipped here.
+    fn over_spheres(data: &[f64], size: i32, x_start: i32, y_start: i32, z_start: i32) -> Self {
+        let (mut lo_x, mut lo_y, mut lo_z) = (i32::MAX, i32::MAX, i32::MAX);
+        let (mut hi_x, mut hi_y, mut hi_z) = (i32::MIN, i32::MIN, i32::MIN);
+        for i in 0..size {
+            let b = (i * 4) as usize;
+            let r = data[b + 3];
+            if r < 0.0 {
+                continue;
+            }
+            let (xx, yy, zz) = (data[b], data[b + 1], data[b + 2]);
+            let x_min = math::floor(xx - r).max(x_start);
+            let y_min = math::floor(yy - r).max(y_start);
+            let z_min = math::floor(zz - r).max(z_start);
+            lo_x = lo_x.min(x_min);
+            lo_y = lo_y.min(y_min);
+            lo_z = lo_z.min(z_min);
+            hi_x = hi_x.max(math::floor(xx + r).max(x_min));
+            hi_y = hi_y.max(math::floor(yy + r).max(y_min));
+            hi_z = hi_z.max(math::floor(zz + r).max(z_min));
+        }
+        if lo_x > hi_x {
+            // Every sphere was culled; the placement loop will visit nothing.
+            return Self { x0: 0, y0: 0, z0: 0, xs: 0, ys: 0, zs: 0, bits: Vec::new() };
+        }
+        let (xs, ys, zs) = (hi_x - lo_x + 1, hi_y - lo_y + 1, hi_z - lo_z + 1);
+        let cells = (xs as usize) * (ys as usize) * (zs as usize);
+        Self {
+            x0: lo_x,
+            y0: lo_y,
+            z0: lo_z,
+            xs,
+            ys,
+            zs,
+            bits: vec![0u64; cells.div_ceil(64)],
+        }
+    }
+
+    /// `HashSet::insert`'s contract: `true` iff the position was not already in
+    /// the set.
+    ///
+    /// A position outside the box would be a defect in
+    /// [`Self::over_spheres`]'s derivation rather than a case to tolerate, so it
+    /// asserts instead of silently answering `true` (which would re-test a
+    /// position and could place an extra ore — a world change).
+    #[inline]
+    fn insert(&mut self, x: i32, y: i32, z: i32) -> bool {
+        let (dx, dy, dz) = (x - self.x0, y - self.y0, z - self.z0);
+        assert!(
+            (0..self.xs).contains(&dx) && (0..self.ys).contains(&dy) && (0..self.zs).contains(&dz),
+            "VisitedBox: ({x},{y},{z}) outside the box derived from the same sphere \
+             bounds the placement loop walks — the derivation and the loop have drifted"
+        );
+        let idx = ((dy * self.zs + dz) * self.xs + dx) as usize;
+        let (word, bit) = (idx / 64, idx % 64);
+        let mask = 1u64 << bit;
+        let already = self.bits[word] & mask != 0;
+        self.bits[word] |= mask;
+        !already
     }
 }
 
@@ -1036,27 +1266,43 @@ fn try_place_ore<R: RandomSource>(
     // has to happen so later reads (isAdjacentToAir, a later source's own
     // placement) see it, exactly as vanilla's real, shared block field would.
     let (lx, lz) = input.region_local(x, z);
-    let current = working.get(lx, y, lz);
-    let base = current.split('[').next().unwrap_or(current).to_string();
-    for target in &config.targets {
-        let matches = match &target.target {
-            RuleTest::TagMatch(tag) => (input.in_tag)(&base, tag),
-            RuleTest::BlockMatch(block) => base == block.as_str(),
-        };
-        // `TargetBlockState.target.test` never draws for tag/block tests, so a
-        // non-match costs nothing — exactly as vanilla loops to the next target.
-        if !matches {
-            continue;
+    // The base name is a **borrowed slice** of the view's own interned name, not
+    // an owned `String`. It used to be `.to_string()`d purely to end the
+    // immutable borrow of `working` before the `set` below, which cost one heap
+    // allocation for every candidate position of every blob of every ore of all
+    // nine source chunks. Instead the loop now decides *which* target wins under
+    // the immutable borrow and the single write happens after it — so the draw
+    // sequence is untouched (`should_skip_air_check` still fires per matching
+    // target, in target order, and the walk still stops at the first target that
+    // places) while the allocation is gone.
+    let mut chosen: Option<usize> = None;
+    {
+        let current = working.get(lx, y, lz);
+        let base = current.split('[').next().unwrap_or(current);
+        for (i, target) in config.targets.iter().enumerate() {
+            let matches = match &target.target {
+                RuleTest::TagMatch(tag) => (input.in_tag)(base, tag),
+                RuleTest::BlockMatch(block) => base == block.as_str(),
+            };
+            // `TargetBlockState.target.test` never draws for tag/block tests, so
+            // a non-match costs nothing — exactly as vanilla loops to the next
+            // target.
+            if !matches {
+                continue;
+            }
+            // canPlaceOre: shouldSkipAirCheck (may draw a nextFloat) ? true
+            // : !isAdjacentToAir.
+            let place = should_skip_air_check(random, config.discard_chance_on_air_exposure)
+                || !is_adjacent_to_air(input, working, x, y, z);
+            if place {
+                chosen = Some(i);
+                break;
+            }
+            // canPlaceOre returned false; vanilla continues to the next target.
         }
-        // canPlaceOre: shouldSkipAirCheck (may draw a nextFloat) ? true
-        // : !isAdjacentToAir.
-        let place = should_skip_air_check(random, config.discard_chance_on_air_exposure)
-            || !is_adjacent_to_air(input, working, x, y, z);
-        if place {
-            working.set(lx, y, lz, &target.state);
-            return;
-        }
-        // canPlaceOre returned false; vanilla continues to the next target.
+    }
+    if let Some(i) = chosen {
+        working.set(lx, y, lz, &config.targets[i].state);
     }
 }
 
@@ -1106,4 +1352,258 @@ fn is_air(base: &str) -> bool {
         base,
         "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// The height a probe resolves to must be, for **every** probe coordinate the
+    /// ore driver can produce, exactly what the `HashMap<(i32, i32), i32>` this
+    /// replaced resolved to.
+    ///
+    /// # Why this drives `OreInput::get_height` and not `RegionHeights::get`
+    ///
+    /// A first version of this test compared `RegionHeights::get` against the map
+    /// over every region column, and it was **vacuous**: `set` and `get` share
+    /// one `index` function, so permuting that function permutes writes and reads
+    /// together and nothing observable changes. Its companion "a transposed index
+    /// would be caught" control was run against a deliberately transposed
+    /// `index` and **passed** — a premise-false control of exactly the shape
+    /// `docs/plans/worldgen-rewrite.md`'s evidence standard warns about. The
+    /// index formula is not a correctness property at all; any bijection over the
+    /// region is equivalent.
+    ///
+    /// What *is* observable, and what this therefore tests, is the composition
+    /// the driver actually performs: the stitch's offset arithmetic, the
+    /// [`OreInput::region_local`] clamp, and the read, end to end — with the
+    /// expected side computed by the deleted `HashMap` lookup written out
+    /// longhand. The control below perturbs the stitch and does fire.
+    #[test]
+    fn every_probe_resolves_to_the_height_the_hashmap_resolved_to() {
+        let heights_for = |dx: i32, dz: i32| -> [i32; 256] {
+            let mut h = [0i32; 256];
+            for lz in 0..16i32 {
+                for lx in 0..16i32 {
+                    // Per-column variety, asymmetric in (lx, lz) and distinct per
+                    // source chunk, so a swapped offset or a wrong source shows up.
+                    h[(lz * 16 + lx) as usize] = dx * 1009 + dz * 97 + lx * 31 + lz * 7 - 64;
+                }
+            }
+            h
+        };
+        let mut map: HashMap<(i32, i32), i32> = HashMap::new();
+        let mut dense = RegionHeights::unset();
+        for dz in -1..=1i32 {
+            for dx in -1..=1i32 {
+                let h = heights_for(dx, dz);
+                for lz in 0..16i32 {
+                    for lx in 0..16i32 {
+                        let v = h[(lz * 16 + lx) as usize];
+                        map.insert((dx * 16 + lx, dz * 16 + lz), v);
+                        dense.set(dx * 16 + lx, dz * 16 + lz, v);
+                    }
+                }
+            }
+        }
+
+        let input = OreInput {
+            chunk_x: 4,
+            chunk_z: -3,
+            center_x: 4,
+            center_z: -3,
+            min_y: -64,
+            height: 384,
+            min_gen_y: -64,
+            gen_depth: 384,
+            ocean_floor_wg: &dense,
+            in_tag: &|_, _| false,
+        };
+        // Probe range: the whole region PLUS a wide ring outside it, because the
+        // largest blob ores really do probe past the 3x3 and the clamp is the
+        // thing that has to still agree there.
+        let base_x = 4 * 16;
+        let base_z = -3 * 16;
+        let mut compared = 0u32;
+        let mut clamped_compared = 0u32;
+        for z in (base_z + REGION_MIN - 20)..(base_z + REGION_MAX + 20) {
+            for x in (base_x + REGION_MIN - 20)..(base_x + REGION_MAX + 20) {
+                // The deleted lookup, longhand: clamp, then probe the map.
+                let lx = (x - base_x).clamp(REGION_MIN, REGION_MAX - 1);
+                let lz = (z - base_z).clamp(REGION_MIN, REGION_MAX - 1);
+                let expected = map[&(lx, lz)];
+                assert_eq!(
+                    input.get_height(x, z),
+                    expected,
+                    "probe ({x}, {z}) resolved differently from the HashMap",
+                );
+                compared += 1;
+                if lx != x - base_x || lz != z - base_z {
+                    clamped_compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, 88 * 88, "the probe sweep did not cover the intended range");
+        assert!(
+            clamped_compared > 4_000,
+            "only {clamped_compared} probes were outside the region, so the clamp is \
+             barely exercised",
+        );
+    }
+
+    /// The control for the test above, with a premise that is **true**: writing
+    /// the nine sources into the dense map with their `(dx, dz)` offsets swapped
+    /// must be caught, because the expected side is built with the correct ones.
+    ///
+    /// This is the assertion the first draft of this control failed to make — it
+    /// perturbed something unobservable and passed. Watch it fail by removing the
+    /// swap.
+    #[test]
+    fn a_swapped_source_offset_in_the_stitch_is_caught() {
+        let value = |dx: i32, dz: i32, lx: i32, lz: i32| dx * 1009 + dz * 97 + lx * 31 + lz * 7;
+        let mut map: HashMap<(i32, i32), i32> = HashMap::new();
+        let mut dense = RegionHeights::unset();
+        for dz in -1..=1i32 {
+            for dx in -1..=1i32 {
+                for lz in 0..16i32 {
+                    for lx in 0..16i32 {
+                        map.insert((dx * 16 + lx, dz * 16 + lz), value(dx, dz, lx, lz));
+                        // The bug: source (dx, dz) written at offset (dz, dx).
+                        dense.set(dz * 16 + lx, dx * 16 + lz, value(dx, dz, lx, lz));
+                    }
+                }
+            }
+        }
+        let mut disagreements = 0u32;
+        for lz in REGION_MIN..REGION_MAX {
+            for lx in REGION_MIN..REGION_MAX {
+                if dense.get(lx, lz) != map[&(lx, lz)] {
+                    disagreements += 1;
+                }
+            }
+        }
+        assert!(
+            disagreements > 1_000,
+            "control: swapping the source offsets must disagree over most of the region, \
+             but only {disagreements} of 2304 columns differed — the detector is blind",
+        );
+    }
+
+    /// A probe outside the region is clamped by [`OreInput::region_local`], and
+    /// an unstitched column still panics rather than reading as 0 — the detector
+    /// the `HashMap`'s `unwrap_or_else(|| panic!(…))` provided.
+    #[test]
+    #[should_panic(expected = "no heightmap entry for region-local")]
+    fn an_unstitched_region_column_still_panics() {
+        let dense = RegionHeights::unset();
+        let _ = dense.get(0, 0);
+    }
+
+    /// [`VisitedBox`] must behave exactly like the `HashSet<(i32, i32, i32)>` it
+    /// replaced, over the real coordinate walk `do_place` performs.
+    ///
+    /// The expected side is a live `HashSet`, driven by the same nested loop, so
+    /// the two are compared **decision by decision** (`insert`'s boolean, which
+    /// is what gates a `try_place_ore` call) rather than only on their final
+    /// contents. That distinction matters: a set that agreed on membership but
+    /// disagreed on *which* insert was the first would change how many ores are
+    /// placed.
+    #[test]
+    fn visited_box_makes_the_same_insert_decisions_as_the_hashset() {
+        // A blob shaped like a real one: `size = 33` (`ore_andesite`-ish), a
+        // sloped centre line, radii from a fixed sequence rather than an RNG so
+        // this test is deterministic without pulling a generator in.
+        let size = 33i32;
+        let (x_start, y_start, z_start) = (-13, -70, 41);
+        let mut data = vec![0.0f64; (size * 4) as usize];
+        for i in 0..size {
+            let b = (i * 4) as usize;
+            let t = f64::from(i) / f64::from(size);
+            data[b] = f64::from(x_start) + 6.0 + 8.0 * t;
+            data[b + 1] = f64::from(y_start) + 5.0 + 3.0 * t;
+            data[b + 2] = f64::from(z_start) + 6.0 + 8.0 * t;
+            // Cull a few spheres, exactly as the overlap pass does, so the
+            // `r < 0.0` skip is exercised on both sides.
+            data[b + 3] = if i % 7 == 3 { -1.0 } else { 1.0 + 2.0 * (t * 3.0).sin().abs() };
+        }
+
+        let mut boxed = VisitedBox::over_spheres(&data, size, x_start, y_start, z_start);
+        let mut set: HashSet<(i32, i32, i32)> = HashSet::new();
+        let mut visits = 0u32;
+        let mut firsts = 0u32;
+        for i in 0..size {
+            let b = (i * 4) as usize;
+            let r = data[b + 3];
+            if r < 0.0 {
+                continue;
+            }
+            let (xx, yy, zz) = (data[b], data[b + 1], data[b + 2]);
+            let x_min = math::floor(xx - r).max(x_start);
+            let y_min = math::floor(yy - r).max(y_start);
+            let z_min = math::floor(zz - r).max(z_start);
+            let x_max = math::floor(xx + r).max(x_min);
+            let y_max = math::floor(yy + r).max(y_min);
+            let z_max = math::floor(zz + r).max(z_min);
+            for x in x_min..=x_max {
+                for y in y_min..=y_max {
+                    for z in z_min..=z_max {
+                        visits += 1;
+                        let a = boxed.insert(x, y, z);
+                        let e = set.insert((x, y, z));
+                        assert_eq!(a, e, "insert({x},{y},{z}) disagreed with the HashSet");
+                        if e {
+                            firsts += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // Non-vacuity, in both directions: the walk really happened, and it
+        // really contained repeats — a walk with no repeat would satisfy the
+        // assertion above with a stub that always returns `true`.
+        assert!(visits > 5_000, "the walk visited only {visits} positions");
+        assert!(
+            firsts < visits,
+            "the walk produced no repeated position ({visits} visits, {firsts} first-time), \
+             so it cannot distinguish a real dedup from a stub that always answers true",
+        );
+    }
+
+    /// The control for the test above: a box one block too small in every axis
+    /// must be *caught*, not silently wrap or drop. This is what makes
+    /// [`VisitedBox::over_spheres`]'s "derived from the same expressions"
+    /// argument load-bearing rather than decorative — if an out-of-box insert
+    /// were tolerated, an undersized derivation would re-test positions and
+    /// place extra ore.
+    #[test]
+    #[should_panic(expected = "outside the box derived from the same sphere bounds")]
+    fn an_undersized_visited_box_panics_instead_of_dropping_a_position() {
+        let mut shrunk = VisitedBox {
+            x0: 0,
+            y0: 0,
+            z0: 0,
+            xs: 2,
+            ys: 2,
+            zs: 2,
+            bits: vec![0u64; 1],
+        };
+        assert!(shrunk.insert(1, 1, 1), "in-box insert must work first");
+        let _ = shrunk.insert(2, 1, 1);
+    }
+
+    /// An all-culled blob produces an empty box, and the placement loop that
+    /// follows visits nothing — so the empty case must not panic on
+    /// construction.
+    #[test]
+    fn a_fully_culled_blob_yields_an_empty_visited_box() {
+        let size = 4i32;
+        let mut data = vec![0.0f64; (size * 4) as usize];
+        for i in 0..size {
+            data[(i * 4 + 3) as usize] = -1.0;
+        }
+        let b = VisitedBox::over_spheres(&data, size, 0, 0, 0);
+        assert_eq!(b.bits.len(), 0);
+        assert_eq!((b.xs, b.ys, b.zs), (0, 0, 0));
+    }
 }

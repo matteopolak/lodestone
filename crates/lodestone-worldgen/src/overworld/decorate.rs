@@ -33,7 +33,6 @@
 //! `column_is_byte_identical_across_two_independently_constructed_generators` is
 //! what notices.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::feature::{PlacedOre, apply_ore_step_3x3_per_source};
@@ -107,7 +106,7 @@ impl OverworldGenerator {
         // three orders of magnitude below the block field this pass stopped
         // copying, and `OreInput` reads it by clamped region-local key rather than
         // by chunk. It was never the cost D2 named.
-        let mut ocean_floor_wg: HashMap<(i32, i32), i32> = HashMap::new();
+        let mut ocean_floor_wg = crate::feature::RegionHeights::unset();
         Self::stitch_heights(&mut ocean_floor_wg, 0, 0, center_heights);
         for dx in -1..=1i32 {
             for dz in -1..=1i32 {
@@ -250,19 +249,29 @@ impl OverworldGenerator {
     /// and the driver reads them by *clamped* region-local key
     /// ([`crate::feature::OreInput::region_local`]) rather than by chunk, so a view
     /// over nine `[i32; 256]`s would have to reproduce that clamp to answer the
-    /// same thing. Not worth the risk for 0.26% of the volume; if it ever matters,
-    /// the win is a dense `[i32; 48 * 48]` array rather than a `HashMap`, and the
-    /// clamp has to move with it.
+    /// same thing.
+    ///
+    /// **U15 took the second half of the advice this doc used to end on** — "if it
+    /// ever matters, the win is a dense `[i32; 48 * 48]` array rather than a
+    /// `HashMap`, and the clamp has to move with it". It mattered: the driver
+    /// probes this map once per cell of a box up to 27 x 27 for every emitted
+    /// position of every ore of all nine sources, so the 2,304 entries were being
+    /// SipHashed hundreds of thousands of times per column
+    /// ([`crate::feature::RegionHeights`] carries the profile). The destination is
+    /// now that dense array, and the clamp did move with it — it stays in
+    /// [`crate::feature::OreInput::region_local`], and `RegionHeights`'s accessors
+    /// document that they assume a pre-clamped key.
     fn stitch_heights(
-        ocean_floor_wg: &mut HashMap<(i32, i32), i32>,
+        ocean_floor_wg: &mut crate::feature::RegionHeights,
         offset_x: i32,
         offset_z: i32,
         heights: &[i32; 256],
     ) {
         for lz in 0..16i32 {
             for lx in 0..16i32 {
-                ocean_floor_wg.insert(
-                    (offset_x + lx, offset_z + lz),
+                ocean_floor_wg.set(
+                    offset_x + lx,
+                    offset_z + lz,
                     heights[(lz * 16 + lx) as usize],
                 );
             }
