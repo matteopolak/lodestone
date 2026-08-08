@@ -476,7 +476,7 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `server.rs` reports the result — including the `player_combat_kill` packet that
   actually raises the client's death screen, and the `respawn` packet that closes it
   again.
-- [Filled map item rendering (issue #184) — blocked on decode](./filled-map-item.md) —
+- [Filled map item rendering (issue #184) — the decode has landed](./filled-map-item.md) —
   Issue #184 asks for the filled map item's own visual: the generated per-map pixel
   texture, player/marker icons, and the border frame, whether held, in an item frame,
   or shown as a GUI icon.
