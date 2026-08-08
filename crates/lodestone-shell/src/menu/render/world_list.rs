@@ -48,10 +48,16 @@ const WORLD_SELECT_SMALL_BTN_W: f32 = 71.0;
 const STRING_WIDGET_H: f32 = 9.0;
 /// `WorldSelectionList.getRowWidth()` (`WorldSelectionList.java:247-249`) — a
 /// 270 px override of `AbstractSelectionList`'s own 220 (`:389-391`).
-const WORLD_LIST_ROW_W: f32 = 270.0;
+pub(super) const WORLD_LIST_ROW_W: f32 = 270.0;
 /// The list's `itemHeight`: the last argument of
 /// `super(minecraft, width, height, 0, 36)` (`WorldSelectionList.java:112`).
-const WORLD_LIST_ITEM_H: f32 = 36.0;
+///
+/// **Public since the list learned to scroll** (issue #541), for
+/// [`SERVER_LIST_ITEM_H`](super::SERVER_LIST_ITEM_H)'s reason: the keyboard
+/// scroll-into-view path in `nav.rs` has to turn a row index into a pixel top,
+/// and a second copy of `36.0` there is exactly how the draw and the hit-test
+/// drift apart.
+pub const WORLD_LIST_ITEM_H: f32 = 36.0;
 /// `AbstractSelectionList.Entry.CONTENT_PADDING` (`:436`). Every `getContentX`/
 /// `getContentY` insets the entry rect by 2 and `getContentWidth`/
 /// `getContentHeight` by 4 (`:477-495`), so a 36 px row has a **32** px content
@@ -300,17 +306,23 @@ pub fn world_select_title_label() -> MenuLabel {
     }
 }
 
-/// The top of world-list row `index`, in logical pixels.
+/// The top of world-list row `index` at `scroll` **pixels** of offset —
+/// `getFirstEntryY() + index * itemHeight - scrollAmount`,
+/// `repositionEntries` (`AbstractSelectionList.java:993-996`).
 ///
-/// `getFirstEntryY() + index * itemHeight` with no scroll term, because
-/// `scrollAmount` is 0 for a list that cannot overflow its band — which is the
-/// only list this screen has (see [`super::world_select`]). Canvas-independent:
-/// `list.getY()` is the content band's top, which
+/// **`scroll` is pixels, not rows** (issue #541), for the reason #445 settled one
+/// screen over: one wheel notch is `scrollRate = defaultEntryHeight / 2` = 18 px,
+/// and a row-quantised offset cannot represent that at all. Canvas-independent in
+/// the other axis: `list.getY()` is the content band's top, which
 /// `HeaderAndFooterLayout.arrangeElements` clamps to exactly the header height
 /// whenever the content is sized to `getContentHeight()`.
+///
+/// The scroll term used to be absent, and its absence was the whole of #541 —
+/// worlds past the tenth were unreachable.
 #[must_use]
-pub fn world_list_row_top(index: usize) -> f32 {
+pub fn world_list_row_top(index: usize, scroll: f32) -> f32 {
     world_select_block().content_top + WORLD_LIST_FIRST_ENTRY_Y + index as f32 * WORLD_LIST_ITEM_H
+        - scroll
 }
 
 /// How many whole world-list rows fit between the content band's top and the
@@ -326,41 +338,118 @@ pub fn world_list_row_top(index: usize) -> f32 {
 /// `calculate_gui_scale` can produce.
 #[must_use]
 pub fn world_list_visible_rows(height: f32) -> usize {
-    let top = world_list_row_top(0);
+    let top = world_list_row_top(0, 0.0);
     let bottom = height - WORLD_SELECT_FOOTER_H;
     (((bottom - top) / WORLD_LIST_ITEM_H).floor().max(0.0)) as usize
 }
 
-/// Whether world-list row `index` is inside the content band at this canvas.
+/// Whether world-list row `index` overlaps the content band on a `height`-tall
+/// canvas at `scroll` **pixels** of offset — `extractListItems`' own visibility
+/// test, `child.getY() + child.getHeight() >= getY() && child.getY() <=
+/// getBottom()` (`AbstractSelectionList.java:346-352`).
 ///
-/// The same gate `server_row_visible` applies to the multiplayer list and for the
-/// same two reasons: a row that would overflow into the footer must not draw
-/// **and** must not hit-test, because `row_rect` is read by `app.rs`'s click
-/// routing as well as by the draw. Without it a click below the last visible row
-/// would land on a row that is nowhere near the cursor.
+/// `row_rect` calls this too (through [`MenuRow::world`]'s carried `scroll`), so a
+/// click can no longer land on a row that is not on screen — and, in the other
+/// direction, **a row scrolled out of view is not a tab stop either**, because
+/// `WorldSelectNav` scrolls focus into view rather than leaving a focusable row
+/// off-band. That was the one genuinely wrong behaviour #541 named.
+///
+/// **A partial-overlap test, not `index < visible_rows`** (issue #541). The old
+/// form stood in for a scissor the draw did not have, so it rejected a row that
+/// was merely *partly* outside the band rather than let it paint over the footer.
+/// `draw_world_entry` runs inside [`Quads::with_clip`] now, and with a pixel
+/// offset a straddling row is the **normal** case rather than an edge one: at
+/// `scroll = 18.0`, row 0 is half above the band and must still draw its visible
+/// half. Keeping the reject would have made every intermediate scroll position
+/// drop a row.
 #[must_use]
-pub fn world_list_row_visible(index: usize, height: f32) -> bool {
-    index < world_list_visible_rows(height)
+pub fn world_list_row_visible(index: usize, height: f32, scroll: f32) -> bool {
+    let top = world_list_row_top(index, scroll);
+    let list_top = world_select_block().content_top;
+    let list_bottom = height - WORLD_SELECT_FOOTER_H;
+    top + WORLD_LIST_ITEM_H >= list_top && top <= list_bottom
 }
 
-/// The most world rows this screen will ever *list*, as opposed to draw.
+/// This screen's list as the generic [`widget::ListSpec`] (issue #541) — what
+/// `MenuNav::active_list` hands the scrollbar draw and the wheel arm.
 ///
-/// [`super::world_select::WorldSelectNav`] has to decide how many rows exist
-/// before any canvas is known — the widgets outlive a frame, and focus
-/// registration happens at construction — so it caps at the count for the
-/// **reference** canvas rather than for the real one.
-///
-/// The consequence is stated rather than hidden: on a canvas shorter than
-/// [`WORLD_SELECT_REF_CANVAS`]'s 480 the last few of those rows fail
-/// [`world_list_row_visible`] and are neither drawn nor clickable, and a player
-/// with more worlds than this cannot reach the rest at all. Both are the same
-/// missing feature — `AbstractSelectionList`'s scroll model, which #396 ported
-/// for the *server* list and which this screen still lacks. Filed as
-/// [#541](https://github.com/matteopolak/lodestone/issues/541), whose body names the
-/// machinery to reuse and the clip that becomes mandatory with it.
+/// The band and the pitch are derived from the same three values the draw uses
+/// (`world_select_block().content_top`, [`WORLD_SELECT_FOOTER_H`],
+/// [`WORLD_LIST_ITEM_H`]) rather than restated, which is the property that stops
+/// the thumb drifting away from its rows — see `server_list_spec`'s own doc for
+/// the measured failure that rule comes from.
 #[must_use]
-pub fn world_list_max_rows() -> usize {
-    world_list_visible_rows(WORLD_SELECT_REF_CANVAS.1)
+pub fn world_list_spec(entry_count: usize, scroll: f32) -> widget::ListSpec {
+    widget::ListSpec::uniform(
+        WORLD_LIST_ITEM_H,
+        world_select_block().content_top,
+        WORLD_SELECT_FOOTER_H,
+        entry_count,
+        WORLD_LIST_ROW_W,
+    )
+    .at(scroll)
+}
+
+/// The live [`widget::ScrollList`] for `entry_count` world rows at a
+/// `height`-tall canvas, or `None` when there is no band to scroll in (an empty
+/// list, or a canvas too short to have one).
+#[must_use]
+pub fn world_scroll_model(entry_count: usize, height: f32) -> Option<widget::ScrollList> {
+    world_list_spec(entry_count, 0.0).model(height)
+}
+
+/// The offset this frame's world list is **actually drawn at** on a
+/// `height`-tall canvas: the offset the rows carry, re-clamped through the same
+/// [`widget::ListSpec::model`] the scrollbar's thumb is placed from.
+///
+/// ## Why a re-clamp exists at all
+///
+/// `WorldSelectNav` writes its offset from two places, and only one of them knows
+/// the canvas. The wheel does (`app.rs` resolves a logical canvas for every mouse
+/// event) and clamps exactly. The **keyboard** does not: a keypress has no canvas,
+/// so scroll-into-view runs against [`world_list_window_rows`]' conservative
+/// shortest band, which can ask for an offset larger than a *taller* canvas's own
+/// `maxScrollAmount`. Left alone that draws the list scrolled past its end —
+/// blank band at the bottom, rows off the top — while the scrollbar, which
+/// re-clamps, says otherwise. That desynchronisation is a measured defect on the
+/// settings screen (`options::list_cell_origin` carries the same clamp for the
+/// same reason), and it is what a player sees as "scrolling does not reach the
+/// end".
+///
+/// This is vanilla's `refreshScrollAmount` (`AbstractScrollArea.java`), which
+/// `updateSizeAndPosition` calls after every resize (`:191-195`) — the canvas is
+/// an input to the clamp there too.
+///
+/// The entry count comes from the rows themselves rather than from a field,
+/// because a `MenuRow` carrying a [`WorldEntryView`] *is* a world row: counting
+/// them cannot disagree with how many there are.
+#[must_use]
+pub fn world_list_scroll_for(rows: &[MenuRow], height: f32) -> f32 {
+    let carried = rows
+        .iter()
+        .find_map(|r| r.world.as_ref())
+        .map_or(0.0, |v| v.scroll);
+    let len = rows.iter().filter(|r| r.world.is_some()).count();
+    world_list_spec(len, carried)
+        .model(height)
+        .map_or(carried, |list| list.scroll())
+}
+
+/// Rows guaranteed visible at [`crate::config::MIN_SCALED_HEIGHT`], for the
+/// keyboard's scroll-into-view path.
+///
+/// Same trade and same reason as [`server_list_window_rows`](super::server_list_window_rows):
+/// a keypress runs without a canvas, so the window is derived from the shortest
+/// one `calculate_gui_scale` can produce — correct at every canvas and merely
+/// conservative at a larger one. Unlike the *cap* this replaces, being
+/// conservative here costs nothing: it only means an arrow press sometimes
+/// scrolls a row further than it strictly had to, never that a row is
+/// unreachable.
+#[must_use]
+pub fn world_list_window_rows() -> usize {
+    let list_top = world_select_block().content_top;
+    let band = crate::config::MIN_SCALED_HEIGHT as f32 - list_top - WORLD_SELECT_FOOTER_H;
+    (band / WORLD_LIST_ITEM_H).floor().max(1.0) as usize
 }
 
 /// The left edge of every world-list row: `getRowLeft()`, which is
@@ -373,12 +462,13 @@ pub fn world_list_row_left(width: f32) -> f32 {
     (width * 0.5).floor() - (WORLD_LIST_ROW_W * 0.5).floor()
 }
 
-/// The rect of world-list row `index` at a `width`-wide canvas.
+/// The rect of world-list row `index` at a `width`-wide canvas, scrolled by
+/// `scroll` **pixels** (issue #541).
 #[must_use]
-pub fn world_list_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
+pub fn world_list_row_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32, f32) {
     (
         world_list_row_left(width),
-        world_list_row_top(index),
+        world_list_row_top(index, scroll),
         WORLD_LIST_ROW_W,
         WORLD_LIST_ITEM_H,
     )
@@ -389,8 +479,12 @@ pub fn world_list_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
 /// This is where a `WorldListEntry` puts its 32×32 icon and, at
 /// `x + 32 + 3`, its three text lines (`WorldSelectionList.java:494-502,569-571`).
 #[must_use]
-pub fn world_list_row_content_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
-    let (x, y, w, h) = world_list_row_rect(index, width);
+pub fn world_list_row_content_rect(
+    index: usize,
+    width: f32,
+    scroll: f32,
+) -> (f32, f32, f32, f32) {
+    let (x, y, w, h) = world_list_row_rect(index, width, scroll);
     (
         x + LIST_CONTENT_PADDING,
         y + LIST_CONTENT_PADDING,
@@ -469,7 +563,7 @@ pub fn world_list_row_label(text: &str) -> MenuLabel {
     // the screen for the reason above — so the width passed here is arbitrary.
     // Reading the rect anyway, instead of restating `row_top + 2`, is
     // `CLAUDE.md`'s "derive layout from the same expression the draw uses".
-    let (_, content_y, _, content_h) = world_list_row_content_rect(0, 0.0);
+    let (_, content_y, _, content_h) = world_list_row_content_rect(0, 0.0, 0.0);
     MenuLabel {
         text: text.to_string(),
         origin: Origin::ScreenTop,
