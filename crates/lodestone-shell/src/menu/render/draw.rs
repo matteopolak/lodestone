@@ -122,6 +122,20 @@ pub fn build(
             };
             b.text(&label.text, x, ay + label.dy, label.scale, label.colour);
         }
+        // The loading screen's progress bar (issue #449), drawn after the labels
+        // so it sits over the backdrop and under nothing. Vanilla's
+        // `LevelLoadingScreen` geometry: 200x2, centred, black track, green
+        // fill; the fill is `round(fraction * 200)` so a partial column shows as
+        // a whole pixel rather than a sub-pixel smear.
+        if let Some(progress) = frame.progress {
+            let bar_x = (width * 0.5 - PROGRESS_BAR_W * 0.5).floor();
+            let bar_y = (height * 0.5 + progress.dy).floor();
+            b.rect(bar_x, bar_y, PROGRESS_BAR_W, PROGRESS_BAR_H, PROGRESS_BAR_BG);
+            let filled = (progress.fraction * PROGRESS_BAR_W).round();
+            if filled > 0.0 {
+                b.rect(bar_x, bar_y, filled, PROGRESS_BAR_H, PROGRESS_BAR_FG);
+            }
+        }
     } else {
         // The row-stack screens' own centred title block.
         let tw = text_px(frame.title, TITLE_SCALE);

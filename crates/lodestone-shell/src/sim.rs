@@ -453,6 +453,15 @@ pub struct Sim {
     /// `with_demo_world` fixture's terrain alone.
     adopted_live_world: bool,
     status: String,
+    /// The loading screen's current step (issue #449) — set only from
+    /// `NetUpdate::ConnectPhase`/`LoggedIn`, i.e. from real boundaries in the
+    /// session task, so it can never advance on a timer. Read by
+    /// `WindowApp::drive_ui_from_session`.
+    connect_phase: crate::menu::loading::ConnectPhase,
+    /// Columns the initial view will contain, `None` until a session declares
+    /// its view radius (`Sim::set_view_radius`). The progress bar's denominator;
+    /// `None` means "no denominator, so no bar" rather than a guessed one.
+    expected_view_columns: Option<usize>,
     /// The stitched vanilla atlas for the live world, or `None` when running on
     /// the demo palette. Its presence is the single discriminant for "render the
     /// live server world with the vanilla atlas" vs "mesh the demo world": the

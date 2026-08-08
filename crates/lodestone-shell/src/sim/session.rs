@@ -357,6 +357,48 @@ impl Sim {
         !net.is_chunk_loaded(lodestone_client::ChunkPos { x: pcx, z: pcz })
     }
 
+    /// The loading screen's current step (issue #449).
+    ///
+    /// Distinct from [`Self::session_phase`], which is the coarse *state
+    /// machine* the menu switches on: this is the human-readable step the
+    /// screen names, and it has boundaries (`Joining`, terrain streaming) that
+    /// [`SessionPhase`] collapses into one `Connecting`/`Connected` pair.
+    #[must_use]
+    pub fn connect_phase(&self) -> crate::menu::loading::ConnectPhase {
+        self.connect_phase
+    }
+
+    /// Record the loading screen's step. Only [`crate::net::NetUpdate`] handling
+    /// calls this — see [`crate::menu::loading::ConnectPhase`].
+    pub(crate) fn set_connect_phase(&mut self, phase: crate::menu::loading::ConnectPhase) {
+        self.connect_phase = phase;
+    }
+
+    /// Declare how many columns this session's initial view contains, from the
+    /// view radius the launcher asked the server for. Establishes the progress
+    /// bar's denominator (issue #449).
+    pub fn set_view_radius(&mut self, view_radius: u32) {
+        self.expected_view_columns =
+            Some(crate::menu::loading::TerrainProgress::expected_for_radius(view_radius));
+    }
+
+    /// How much of the initial view has landed, or `None` when there is no
+    /// session or no declared view radius to divide by.
+    ///
+    /// The numerator is the client's own loaded-column count and the denominator
+    /// is the view square — both real, which is the whole constraint issue #449
+    /// puts on this feature. A missing denominator yields `None` so the screen
+    /// draws a phase name with no bar, rather than a synthesised one.
+    #[must_use]
+    pub fn terrain_progress(&self) -> Option<crate::menu::loading::TerrainProgress> {
+        let net = self.net()?;
+        let expected = self.expected_view_columns?;
+        Some(crate::menu::loading::TerrainProgress {
+            loaded: net.loaded_chunks().len(),
+            expected,
+        })
+    }
+
     /// The coarse session phase, for the menu state machine.
     ///
     /// Reads the [`Phase`] component; `Sim` holds no phase field.

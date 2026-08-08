@@ -545,6 +545,14 @@ pub type SharedSkyDefault = Arc<SkyDefaultCell>;
 pub enum NetUpdate {
     /// The background task is attempting to connect.
     Connecting,
+    /// The session task reached a named step of establishing the session —
+    /// issue #449's phase names for the loading screen.
+    ///
+    /// **Sent only from real boundaries in [`run_session`]**, never on a timer:
+    /// see [`crate::menu::loading::ConnectPhase`] for why there are three
+    /// phases and not vanilla's six, and for why a phase with no emit site here
+    /// would be an island rather than a feature.
+    ConnectPhase(crate::menu::loading::ConnectPhase),
     /// Login completed; the local player entity id.
     LoggedIn {
         /// Server-assigned entity id for the local player.
@@ -2015,6 +2023,15 @@ fn run(
         // a protocol disconnect, which the shell treats as equivalent.
         let handle = Arc::new(handle);
         let _ = shared_handle.set(Arc::clone(&handle));
+
+        // Issue #449: a real boundary — the handshake and login have completed
+        // (`connect`/`connect_with` returned a handle), so the loading screen
+        // stops saying "Connecting to the server..." and says "Joining
+        // world...". `NetUpdate::LoggedIn` moves it on again, from the forward
+        // loop below.
+        let _ = tx.send(NetUpdate::ConnectPhase(
+            crate::menu::loading::ConnectPhase::Joining,
+        ));
 
         let mut handed_actions: u64 = 0;
         loop {

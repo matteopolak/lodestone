@@ -85,6 +85,12 @@ impl WindowApp {
     /// server logs us in, and flips to Error the moment the session ends.
     pub(super) fn drive_ui_from_session(&mut self) {
         use crate::sim::SessionPhase;
+        // Issue #449: the loading screen's *label* comes from here, not from the
+        // coarse `SessionPhase` below — see `crate::menu::loading::ConnectPhase`
+        // for why they are two different questions. Pushed every frame rather
+        // than on transition, because `Sim` is the only thing the net thread
+        // reaches and `UiState` is the only thing `frame_for` reads.
+        self.ui.set_connect_phase(self.sim.connect_phase());
         match self.sim.session_phase() {
             // LocalOnly never drives the menu — the dev world is already Playing.
             SessionPhase::LocalOnly | SessionPhase::Connecting => {}
@@ -339,6 +345,15 @@ impl WindowApp {
         ) {
             Ok(net) => {
                 self.sim.attach_net(net);
+                // Issue #449: the loading screen's denominator. Declared only
+                // for singleplayer, because here we *asked* for this view radius
+                // and the integrated server streams exactly the square it
+                // implies. A multiplayer server clamps our requested view
+                // distance to its own, so the same number would be an upper
+                // bound there — a bar that stalls at 70% and reads as a hang.
+                // Better no bar than a wrong one.
+                self.sim
+                    .set_view_radius(u32::try_from(view_radius).unwrap_or(0));
                 self.install_session_render_sources();
             }
             // Reported, never routed around: the only cause is a build with no
