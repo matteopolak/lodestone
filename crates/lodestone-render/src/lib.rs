@@ -56,6 +56,7 @@ pub mod driver;
 pub mod entity;
 pub mod entity_anim;
 pub mod entity_pipeline;
+pub mod fluid_grid;
 pub mod fog;
 pub mod frame;
 pub mod glint;
@@ -177,6 +178,7 @@ pub use model_pipeline::{
     section_origin_buffer, update_model_anim_buffer, update_model_shared_camera_buffer,
     write_section_origin,
 };
+pub use fluid_grid::{FluidGrid, FluidNeighborCell, PackedCell};
 pub use models::{
     FluidMeshes, FluidSectionView, GUI_ITEM_LIGHT, ModelMesh, ModelSectionView, ModelVertex,
     face_of_direction, is_full_cube, is_packed_cube, mesh_fluids, mesh_item_quads, mesh_models,

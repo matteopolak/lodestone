@@ -1,0 +1,24 @@
+# Expected `mesh_fluids` output digests, one line per scene:
+#   <scene> water[v=<verts> i=<indices> vh=<fnv1a of vertex bytes> ih=<... index bytes>] lava[...]
+#
+# GENERATED from the pre-refactor `mesh_fluids` (sha 4e0ffdf2, before the padded
+# `FluidGrid` existed) by `fluid_mesh_identity_gate.rs`. DO NOT EDIT BY HAND.
+# A diff here means the fluid mesher's OUTPUT changed. For a cost-only change
+# that is a defect, not a bonus -- fluid rendering carries deliberate deviations
+# (#77 landed, #82 open), so 'different' and 'more correct' are indistinguishable
+# from here. Regenerate only for a reviewed, intended output change:
+#   LODESTONE_REGEN=1 cargo test -p lodestone-render --test fluid_mesh_identity_gate \
+#     -- --ignored --nocapture
+water_only water[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]
+ocean_floor water[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]
+surface water[v=2048 i=3072 vh=f2c83892c97cf83d ih=c1914beb7a580825] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]
+submerged_cave water[v=1584 i=2376 vh=70d2162c173f5c95 ih=6329a3a3f5a4eea5] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]
+flowing_slope water[v=2048 i=3072 vh=60efb464ff64cdfd ih=c1914beb7a580825] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]
+grass_shore water[v=512 i=768 vh=1f1861f0d727ae9d ih=d44927c814175325] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]
+glass_shore water[v=512 i=768 vh=3c2efd82d320ef85 ih=d44927c814175325] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]
+path_bank water[v=2304 i=3456 vh=f1adf2557327920d ih=4a39d86a56e5a425] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]
+lava_and_water water[v=2048 i=3072 vh=7d18a11d6293b665 ih=c1914beb7a580825] lava[v=2048 i=3072 vh=28e4a000eb61b59d ih=c1914beb7a580825]
+waterlogged water[v=2048 i=3072 vh=f2c83892c97cf83d ih=c1914beb7a580825] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]
+dry water[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]
+puddle_low_corner water[v=4 i=6 vh=547d716dce66981d ih=65c4284031300747] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]
+puddle_high_corner water[v=4 i=6 vh=e7adcd4a3ce8571d ih=65c4284031300747] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]

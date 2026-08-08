@@ -112,6 +112,7 @@ use lodestone_assets::fluid::{
 use lodestone_assets::{BakedQuad, Direction, GuiLight};
 
 use crate::block_models::{FluidCell, FluidKind, FluidSprites};
+use crate::fluid_grid::{FluidGrid, FluidNeighborCell};
 use crate::section::{Face, SECTION_SIZE};
 
 /// A vertex for arbitrary baked-model geometry. Wider than the packed cube
@@ -1048,6 +1049,29 @@ pub trait FluidSectionView {
         let _ = (x, y, z);
         None
     }
+
+    /// [`fluid_at`](Self::fluid_at), [`occludes_at`](Self::occludes_at) and
+    /// [`overlay_at`](Self::overlay_at) for one cell, **in a single call** —
+    /// the fill primitive for [`crate::fluid_grid::FluidGrid`].
+    ///
+    /// The default composes the three, so every existing implementor keeps
+    /// compiling and answers identically. Override it when the three share
+    /// work: `SnapshotFluidView`'s three accessors each redo the same three
+    /// `split16`s, the same snapshot-slot index and the same
+    /// `PalettedContainer::get` bit-unpack, so folding them into one call
+    /// removes two thirds of the fill's cost. See `docs/fluid-rendering.md`.
+    ///
+    /// Deliberately *not* including
+    /// [`partial_occluder_y_range_at`](Self::partial_occluder_y_range_at):
+    /// it does not pack into the grid's 16 bits and is consulted at most four
+    /// times per *surface* cell, so it stays a live call.
+    fn cell_at(&self, x: i32, y: i32, z: i32) -> FluidNeighborCell {
+        FluidNeighborCell {
+            fluid: self.fluid_at(x, y, z),
+            occludes: self.occludes_at(x, y, z),
+            overlay: self.overlay_at(x, y, z),
+        }
+    }
 }
 
 /// Water and lava geometry meshed from a section, on their two separate passes:
@@ -1061,29 +1085,31 @@ pub struct FluidMeshes {
 }
 
 /// The [`neighbor_height`] of the cell at `(x, y, z)` relative to a fluid of
-/// `kind` being baked: its own height if it is the same fluid (snapped to `1.0`
-/// when that same fluid continues above), `-1.0` if it is a solid block
+/// `kind_bits` being baked: its own height if it is the same fluid (snapped to
+/// `1.0` when that same fluid continues above), `-1.0` if it is a solid block
 /// (excluded from the average) or `0.0` if it is air-like.
-fn neighbor_height_at<V: FluidSectionView + ?Sized>(
-    view: &V,
-    kind: FluidKind,
-    x: i32,
-    y: i32,
-    z: i32,
-) -> f32 {
-    match view.fluid_at(x, y, z) {
-        Some(f) if f.kind == kind => {
-            let above_same = matches!(view.fluid_at(x, y + 1, z), Some(a) if a.kind == kind);
-            neighbor_height(true, above_same, f.state.own_height(), false)
-        }
-        _ => neighbor_height(false, false, 0.0, view.occludes_at(x, y, z)),
+///
+/// Reads the precomputed [`FluidGrid`] rather than the view. `kind_bits` is the
+/// centre cell's [`PackedCell::kind_bits`](crate::fluid_grid::PackedCell::kind_bits),
+/// which is never [`KIND_NONE`](crate::fluid_grid::KIND_NONE), so
+/// `c.kind_bits() == kind_bits` is exactly the old `Some(f) if f.kind == kind`
+/// — a fluid-free cell can never match it.
+#[inline]
+fn neighbor_height_in(grid: &FluidGrid, kind_bits: u16, x: i32, y: i32, z: i32) -> f32 {
+    let c = grid.get(x, y, z);
+    if c.kind_bits() == kind_bits {
+        let above_same = grid.get(x, y + 1, z).kind_bits() == kind_bits;
+        neighbor_height(true, above_same, c.own_height(), false)
+    } else {
+        neighbor_height(false, false, 0.0, c.occludes())
     }
 }
 
 /// The [`FlowNeighbor`] describing the cell one step `(dx, dz)` from `(x, y, z)`.
-fn flow_neighbor_at<V: FluidSectionView + ?Sized>(
-    view: &V,
-    kind: FluidKind,
+#[inline]
+fn flow_neighbor_in(
+    grid: &FluidGrid,
+    kind_bits: u16,
     x: i32,
     y: i32,
     z: i32,
@@ -1091,18 +1117,20 @@ fn flow_neighbor_at<V: FluidSectionView + ?Sized>(
     dz: i32,
 ) -> FlowNeighbor {
     let (nx, nz) = (x + dx, z + dz);
-    let own_height = match view.fluid_at(nx, y, nz) {
-        Some(f) if f.kind == kind => f.state.own_height(),
-        _ => 0.0,
-    };
-    let below_own_height = match view.fluid_at(nx, y - 1, nz) {
-        Some(f) if f.kind == kind => f.state.own_height(),
-        _ => 0.0,
-    };
+    let here = grid.get(nx, y, nz);
+    let below = grid.get(nx, y - 1, nz);
     FlowNeighbor {
-        own_height,
-        blocks_motion: view.occludes_at(nx, y, nz),
-        below_own_height,
+        own_height: if here.kind_bits() == kind_bits {
+            here.own_height()
+        } else {
+            0.0
+        },
+        blocks_motion: here.occludes(),
+        below_own_height: if below.kind_bits() == kind_bits {
+            below.own_height()
+        } else {
+            0.0
+        },
     }
 }
 
@@ -1116,10 +1144,11 @@ fn flow_neighbor_at<V: FluidSectionView + ?Sized>(
 /// `occludes_at` stands in for vanilla's `isSolidRender` — they agree for a
 /// plain opaque cube (the dominant case) and this mirrors the same
 /// approximation `mesh_fluids` already makes for `blocks_motion`/`isSolid` in
-/// [`flow_neighbor_at`]; see `docs/fluid-rendering.md`.
-fn should_render_backward_up_face<V: FluidSectionView + ?Sized>(
-    view: &V,
-    kind: FluidKind,
+/// [`flow_neighbor_in`]; see `docs/fluid-rendering.md`.
+#[inline]
+fn should_render_backward_up_face_in(
+    grid: &FluidGrid,
+    kind_bits: u16,
     x: i32,
     y: i32,
     z: i32,
@@ -1127,9 +1156,8 @@ fn should_render_backward_up_face<V: FluidSectionView + ?Sized>(
     let above_y = y + 1;
     for oz in -1..=1 {
         for ox in -1..=1 {
-            let (nx, nz) = (x + ox, z + oz);
-            let same = matches!(view.fluid_at(nx, above_y, nz), Some(f) if f.kind == kind);
-            if !same && !view.occludes_at(nx, above_y, nz) {
+            let c = grid.get(x + ox, above_y, z + oz);
+            if c.kind_bits() != kind_bits && !c.occludes() {
                 return true;
             }
         }
@@ -1179,17 +1207,33 @@ fn should_render_backward_up_face<V: FluidSectionView + ?Sized>(
 #[must_use]
 pub fn mesh_fluids<V: FluidSectionView + ?Sized>(view: &V) -> FluidMeshes {
     let mut out = FluidMeshes::default();
+    // The whole neighbourhood, resolved once. Every probe below is an index
+    // into this instead of a call back through `view` — see
+    // `crate::fluid_grid`. `any_fluid` is also the "contains no fluid"
+    // precheck, free as a by-product of the fill.
+    let grid = FluidGrid::build(view);
+    if !grid.any_fluid() {
+        return out;
+    }
+    // `fluid_sprites` is a function of the *kind*, so the old per-cell call was
+    // thousands of identical lookups per section. Memoised per kind rather than
+    // hoisted unconditionally, so a view is still never asked about a fluid its
+    // section does not contain.
+    let mut water_sprites: Option<FluidSprites> = None;
+    let mut lava_sprites: Option<FluidSprites> = None;
     let n = SECTION_SIZE;
     for y in 0..n {
         for z in 0..n {
             for x in 0..n {
                 let (xi, yi, zi) = (x as i32, y as i32, z as i32);
-                let Some(fc) = view.fluid_at(xi, yi, zi) else {
+                let cell = grid.get(xi, yi, zi);
+                let Some(fc) = cell.fluid() else {
                     continue;
                 };
                 let kind = fc.kind;
-                let self_h = neighbor_height_at(view, kind, xi, yi, zi);
-                let nh = |dx: i32, dz: i32| neighbor_height_at(view, kind, xi + dx, yi, zi + dz);
+                let kb = cell.kind_bits();
+                let self_h = neighbor_height_in(&grid, kb, xi, yi, zi);
+                let nh = |dx: i32, dz: i32| neighbor_height_in(&grid, kb, xi + dx, yi, zi + dz);
                 let corners = [
                     corner_height(self_h, nh(-1, 0), nh(0, -1), nh(-1, -1)), // NW
                     corner_height(self_h, nh(1, 0), nh(0, -1), nh(1, -1)),   // NE
@@ -1198,21 +1242,24 @@ pub fn mesh_fluids<V: FluidSectionView + ?Sized>(view: &V) -> FluidMeshes {
                 ];
                 let flow = flow_horizontal(
                     fc.state.own_height(),
-                    flow_neighbor_at(view, kind, xi, yi, zi, 0, -1),
-                    flow_neighbor_at(view, kind, xi, yi, zi, 0, 1),
-                    flow_neighbor_at(view, kind, xi, yi, zi, 1, 0),
-                    flow_neighbor_at(view, kind, xi, yi, zi, -1, 0),
+                    flow_neighbor_in(&grid, kb, xi, yi, zi, 0, -1),
+                    flow_neighbor_in(&grid, kb, xi, yi, zi, 0, 1),
+                    flow_neighbor_in(&grid, kb, xi, yi, zi, 1, 0),
+                    flow_neighbor_in(&grid, kb, xi, yi, zi, -1, 0),
                 );
 
-                let same = |dx: i32, dy: i32, dz: i32| matches!(view.fluid_at(xi + dx, yi + dy, zi + dz), Some(f) if f.kind == kind);
+                let same =
+                    |dx: i32, dy: i32, dz: i32| grid.get(xi + dx, yi + dy, zi + dz).kind_bits() == kb;
                 let emit = |dx: i32, dy: i32, dz: i32| {
-                    !same(dx, dy, dz) && !view.occludes_at(xi + dx, yi + dy, zi + dz)
+                    let c = grid.get(xi + dx, yi + dy, zi + dz);
+                    c.kind_bits() != kb && !c.occludes()
                 };
                 // Vanilla's `isFaceOccludedByNeighbor(UP, min(corners), aboveState)`
                 // only culls the top face when the *fully occluding* fast path
                 // (`Shapes.block()`) also has `height == 1.0`, which needs every
                 // corner at a full column — not merely a solid block above.
-                let up_occluded = view.occludes_at(xi, yi + 1, zi) && corners.iter().all(|&h| h >= 1.0);
+                let up_occluded =
+                    grid.get(xi, yi + 1, zi).occludes() && corners.iter().all(|&h| h >= 1.0);
                 // A side face's `isFaceOccludedByNeighbor(dir, max(h0, h1), state)`
                 // general branch (`Shapes.blockOccludes`, non-full-cube occluder):
                 // for the scoped single-box, full-`x`/`z`-footprint case this
@@ -1220,8 +1267,13 @@ pub fn mesh_fluids<V: FluidSectionView + ?Sized>(view: &V) -> FluidMeshes {
                 // `[0, face_height]`?" — the same derivation
                 // `docs/fluid-rendering.md`'s "Known gaps" walks through. `corners`
                 // is `[NW, NE, SE, SW]`.
+                // `partial_occluder_y_range_at` stays a live call on the view:
+                // it returns two `f32`s (so it does not pack into the grid) and
+                // it is only reached for a *surface* cell's non-occluding side
+                // neighbour, a few percent of an ocean section — see
+                // `crate::fluid_grid`'s module docs.
                 let side_occluded = |dx: i32, dz: i32, face_height: f32| {
-                    view.occludes_at(xi + dx, yi, zi + dz)
+                    grid.get(xi + dx, yi, zi + dz).occludes()
                         || view
                             .partial_occluder_y_range_at(xi + dx, yi, zi + dz)
                             .is_some_and(|(min_y, max_y)| {
@@ -1241,14 +1293,21 @@ pub fn mesh_fluids<V: FluidSectionView + ?Sized>(view: &V) -> FluidMeshes {
                     FluidKind::Water => Some(0),
                     FluidKind::Lava => None,
                 };
-                let sprites = view.fluid_sprites(kind);
-                let side_overlay = SideOverlay {
-                    north: faces.north && view.overlay_at(xi, yi, zi - 1),
-                    south: faces.south && view.overlay_at(xi, yi, zi + 1),
-                    east: faces.east && view.overlay_at(xi + 1, yi, zi),
-                    west: faces.west && view.overlay_at(xi - 1, yi, zi),
+                let sprites = *match kind {
+                    FluidKind::Water => water_sprites
+                        .get_or_insert_with(|| view.fluid_sprites(FluidKind::Water)),
+                    FluidKind::Lava => {
+                        lava_sprites.get_or_insert_with(|| view.fluid_sprites(FluidKind::Lava))
+                    }
                 };
-                let back_up_face = faces.up && should_render_backward_up_face(view, kind, xi, yi, zi);
+                let side_overlay = SideOverlay {
+                    north: faces.north && grid.get(xi, yi, zi - 1).overlay(),
+                    south: faces.south && grid.get(xi, yi, zi + 1).overlay(),
+                    east: faces.east && grid.get(xi + 1, yi, zi).overlay(),
+                    west: faces.west && grid.get(xi - 1, yi, zi).overlay(),
+                };
+                let back_up_face =
+                    faces.up && should_render_backward_up_face_in(&grid, kb, xi, yi, zi);
                 let geom = FluidGeometry {
                     corners,
                     flow,
