@@ -233,6 +233,114 @@ impl HotbarPop {
     }
 }
 
+/// How long the level-up flash lasts, in this module's ticks.
+///
+/// Half a second at 20 Hz — the same order as [`HeartAnim`]'s 10-tick heal
+/// blink, so a level-up reads as a peer of the other vitals animations rather
+/// than as a separate effect with its own timing vocabulary.
+const XP_FLASH_TICKS: i64 = 10;
+
+/// The XP bar's level-up flash (issue #30's last item).
+///
+/// # What this is, and what vanilla actually does
+///
+/// **26.2 has no XP-bar flash.** Read the record, not the folklore:
+/// `ExperienceBar.extractBackground` blits the background and the progress
+/// sprite and nothing else, and `ContextualBar.extractExperienceLevel` draws the
+/// level number as four black offset copies plus one `0x80FF20` copy
+/// unconditionally. The only things 26.2 does on an experience change are
+/// non-visual or non-bar: `LocalPlayer.setExperienceValues` stamps
+/// `experienceDisplayStartTick`, which `Hud.willPrioritizeExperienceInfo` uses
+/// to keep the XP bar *chosen* over the other contextual bars for 100 ticks;
+/// and `Player.giveExperienceLevels` plays the level-up sound every fifth level
+/// (`Player.java:1569-1572`).
+///
+/// So this is **not** a parity port and must not be described as one. It is the
+/// effect the issue asks for, built to sit alongside the other animations in
+/// this module: a brief brightening of the level number and the bar's fill on a
+/// level *increase*. The honest vanilla-parity item in the same area, still
+/// unbuilt, is the 100-tick priority window — it needs the contextual-bar
+/// selection this HUD does not have.
+///
+/// # Why increase only
+///
+/// A level *drop* is spending XP (an anvil, an enchantment) and vanilla gives it
+/// no celebratory feedback. Flashing on any change would fire on every enchant.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct XpFlash {
+    last_level: Option<i32>,
+    triggered_tick: Option<i64>,
+    /// Set after the first observation. Without it, joining a server at level 30
+    /// reads as an instant level-up — the same false-trigger
+    /// [`HotbarPop::primed`] and [`HeartAnim`]'s `None` arm exist to prevent.
+    primed: bool,
+}
+
+impl XpFlash {
+    pub(super) fn new() -> Self {
+        Self {
+            last_level: None,
+            triggered_tick: None,
+            primed: false,
+        }
+    }
+
+    /// Advances to `tick` for this frame's level (`None` off a server with no
+    /// experience) and returns the flash strength in `0.0..=1.0`, decaying
+    /// linearly over [`XP_FLASH_TICKS`].
+    ///
+    /// `None` **clears** the primed flag as well as the level: a session end
+    /// followed by a reconnect at a non-zero level must not read as a level-up,
+    /// which is the same reason the flag exists at all.
+    pub(super) fn tick(&mut self, tick: i64, level: Option<i32>) -> f32 {
+        match level {
+            None => {
+                self.last_level = None;
+                self.triggered_tick = None;
+                self.primed = false;
+                return 0.0;
+            }
+            Some(current) => {
+                if self.primed && self.last_level.is_some_and(|last| current > last) {
+                    self.triggered_tick = Some(tick);
+                }
+                self.last_level = Some(current);
+                self.primed = true;
+            }
+        }
+        match self.triggered_tick {
+            Some(t0) => {
+                let elapsed = tick - t0;
+                if elapsed < 0 || elapsed >= XP_FLASH_TICKS {
+                    0.0
+                } else {
+                    1.0 - elapsed as f32 / XP_FLASH_TICKS as f32
+                }
+            }
+            None => 0.0,
+        }
+    }
+}
+
+/// Brighten `colour`'s RGB toward white by `flash` (`0.0..=1.0`), alpha
+/// untouched.
+///
+/// **Mixed in gamma space, deliberately.** Vanilla is not colour-managed: every
+/// colour on this path is a raw ARGB byte fraction (the level number's green is
+/// literally `0x80FF20 / 255`), multiplied into the sampled texel as bytes. A
+/// mix done in linear light would pull the midpoint toward white and read as a
+/// wash rather than a flash — the same trap `docs/biome-tint.md` measured from
+/// the other direction.
+pub(super) fn flash_toward_white(colour: [f32; 4], flash: f32) -> [f32; 4] {
+    let t = flash.clamp(0.0, 1.0);
+    [
+        colour[0] + (1.0 - colour[0]) * t,
+        colour[1] + (1.0 - colour[1]) * t,
+        colour[2] + (1.0 - colour[2]) * t,
+        colour[3],
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,5 +589,65 @@ mod tests {
         slots[5] = Some(slot("minecraft:stone", 1)); // different item, lower count
         let after = p.tick(1, &slots);
         assert_eq!(after[5], 5.0, "a swapped identity must pop even at a lower count");
+    }
+}
+
+#[cfg(test)]
+mod xp_flash_tests {
+    use super::{XP_FLASH_TICKS, XpFlash, flash_toward_white};
+
+    /// The flash fires on a level *gain*, decays to nothing over
+    /// [`XP_FLASH_TICKS`], and — the two cases that would make it a nuisance —
+    /// does **not** fire on the first observation or on a level drop.
+    #[test]
+    fn the_flash_fires_only_on_a_level_gain_and_decays() {
+        let mut f = XpFlash::new();
+
+        // First observation at level 30 (a reconnect) must not flash.
+        assert_eq!(f.tick(0, Some(30)), 0.0, "priming must not flash");
+        assert_eq!(f.tick(1, Some(30)), 0.0, "a steady level must not flash");
+
+        // A gain flashes at full strength, then decays linearly to zero.
+        let peak = f.tick(2, Some(31));
+        assert_eq!(peak, 1.0);
+        let mid = f.tick(2 + XP_FLASH_TICKS / 2, Some(31));
+        assert!(mid > 0.0 && mid < peak, "must decay, got {mid}");
+        assert_eq!(
+            f.tick(2 + XP_FLASH_TICKS, Some(31)),
+            0.0,
+            "must be over after XP_FLASH_TICKS"
+        );
+
+        // Spending levels (anvil, enchanting) must not celebrate.
+        assert_eq!(f.tick(30, Some(28)), 0.0, "a level drop must not flash");
+
+        // Session end clears priming, so a reconnect at a high level is not a
+        // level-up.
+        assert_eq!(f.tick(31, None), 0.0);
+        assert_eq!(f.tick(32, Some(40)), 0.0, "a reconnect must not flash");
+    }
+
+    /// The mix is a real interpolation between the two endpoints, in the raw
+    /// byte space the rest of this path uses, and it leaves alpha alone.
+    #[test]
+    fn the_flash_mix_interpolates_toward_white_and_keeps_alpha() {
+        // Vanilla's XP green, `0x80FF20`.
+        let green = [128.0 / 255.0, 1.0, 32.0 / 255.0, 1.0];
+        assert_eq!(flash_toward_white(green, 0.0), green);
+        assert_eq!(flash_toward_white(green, 1.0), [1.0, 1.0, 1.0, 1.0]);
+
+        let half = flash_toward_white(green, 0.5);
+        // Predicted from outside the function: the gamma-space midpoint of
+        // 128/255 and 1.0. The linear-space hypothesis would land near 0.73
+        // here, well outside this tolerance.
+        assert!(
+            (half[0] - (128.0 / 255.0 + (1.0 - 128.0 / 255.0) * 0.5)).abs() < 1e-6,
+            "got {}",
+            half[0]
+        );
+        assert_eq!(half[3], 1.0, "alpha must be untouched");
+
+        // Out-of-range input is clamped rather than extrapolated.
+        assert_eq!(flash_toward_white(green, 2.0), [1.0, 1.0, 1.0, 1.0]);
     }
 }

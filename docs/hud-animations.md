@@ -175,6 +175,24 @@ container/pip so two slots at one tick do not correlate.
   `hotbar_pop_first_observation_primes_without_a_false_pop`; the latter's
   absence produced a **second-order** bug where a real, later decrease still
   read a nonzero pop left over from the phantom initial one.
+- **`XpFlash` is the one animation here that is *not* a vanilla port, and its
+  doc says so.** Read the record before "fixing" it toward parity: 26.2 has no
+  XP-bar flash at all. `ExperienceBar.extractBackground` blits background +
+  progress and nothing else, and `ContextualBar.extractExperienceLevel` draws
+  the level number's four black offset copies plus one `0x80FF20` copy
+  unconditionally. The only things 26.2 does on an XP change are
+  `LocalPlayer.setExperienceValues` stamping `experienceDisplayStartTick` —
+  which `Hud.willPrioritizeExperienceInfo` uses to keep the XP bar *selected*
+  over the other contextual bars for 100 ticks — and the every-fifth-level
+  sound in `Player.giveExperienceLevels` (`Player.java:1569-1572`). The flash
+  is what issue #30 asked for, built to sit alongside the others; **the real
+  unbuilt parity item in this area is that 100-tick priority window**, which
+  needs a contextual-bar selection this HUD does not have.
+- **The flash mix (`anim::flash_toward_white`) is in gamma space**, because
+  every colour on this path is a raw ARGB byte fraction that vanilla
+  multiplies into the texel as bytes. Mixing in linear light pulls the
+  midpoint toward white and reads as a wash — the same trap
+  `docs/biome-tint.md` measured from the other direction.
 - **New `HudAnim` fields go through `build_inner`'s one signature**, not a
   second parameter list — every draw site (`sprite_vitals`,
   `draw_hotbar_items`) already takes `&HudAnim`, so a fourth animation is a
