@@ -47,12 +47,43 @@
 //! into a dimension whose climate has a real depth channel**; issue #512 is the
 //! record of what broadcasting a biome vertically costs when it is not.
 //!
+//! ## Structures are here, and they were the island this generator shipped with
+//!
+//! The first version of this file composed no structure stage at all — no starts,
+//! no references, no beardifier, no place step. Every counter read healthy,
+//! `bastion_remnant`'s pools loaded, its jigsaw assembly was gated, and it placed
+//! **zero blocks anywhere in the game**: its biome tag is Nether-only, so the
+//! Overworld's stage could never accept it, and this dimension had no stage to
+//! accept it with. Four structures (`bastion_remnant`, `fortress`,
+//! `nether_fossil`, `ruined_portal_nether`) sat in that position and the
+//! unsupported ledger was silent about all four.
+//!
+//! What is composed now is the *dimension's* stage sequence, not new structure
+//! machinery: [`crate::overworld::structures`]'s
+//! [`StructureRefs`](crate::overworld::structures::StructureRefs) product,
+//! [`crate::structure::beardifier`] and [`crate::structure::StructureRegistry`]
+//! are all dimension-agnostic already, and this file supplies the four things they
+//! need that *are* dimension-shaped:
+//!
+//! | need | the Nether's answer |
+//! |---|---|
+//! | which structure sets exist here | [`StructureRegistry::new_for_biomes`] over the parameter table's own biome names — vanilla's `hasBiomesForStructureSet`, so a Nether registry loads `bastion`'s pools and no village's |
+//! | the height probe | a *disabled* aquifer over the Nether's `final_density`, `min_y 0`, height 128 — not an Overworld-shaped column, and never `sea_level 63` |
+//! | the biome the filter reads | [`Self::biome_quarts`]' own sampler at `y = 0`, because this dimension's climate is y-invariant |
+//! | memoisation of the 17×17 starts walk | a bounded pure-function memo on this generator, not the Overworld's staged store (which is keyed by that generator's own stage set) |
+//!
+//! **The bedrock roof and floor are surface-rule products and the height probe
+//! does not see them.** `first_occupied_height` reads the *pre-surface* fill,
+//! exactly as vanilla's `getBaseHeight` does, so a structure sited near y 127 is
+//! sited against noise rather than against the roof it will be buried under. That
+//! is vanilla's behaviour and not a gap; it is written down because the opposite
+//! assumption is the natural one.
+//!
 //! ## Decoration is not here
 //!
-//! Fill, biome, surface and carve are composed. The `UNDERGROUND_ORES` /
-//! `VEGETAL_DECORATION` / `SURFACE_STRUCTURES` steps that place glowstone, fire,
-//! nether wart, crimson/warped vegetation and basalt pillars are **not**, and
-//! neither are the fortress/bastion/nether-fossil/ruined-portal structures. The
+//! Fill, biome, surface, carve and structures are composed. The
+//! `UNDERGROUND_ORES` / `VEGETAL_DECORATION` steps that place glowstone, fire,
+//! nether wart, crimson/warped vegetation and basalt pillars are **not**. The
 //! biome documents already carry the step wiring and every configured/placed
 //! feature is bundled, so that is composition work in `crate::feature`, not
 //! missing data. See `docs/worldgen-nether.md`.
@@ -61,7 +92,8 @@
 //!
 //! * **The fill/surface/carve order is vanilla's and is load-bearing.** Carvers
 //!   run over the *post-surface* column, so a carver that exposes netherrack sees
-//!   the surface rules' output, not the raw fill.
+//!   the surface rules' output, not the raw fill. Structures are written *after*
+//!   carving, which is where `surface_structures` (step 4) sits.
 //! * **`min_gen_y + 31` in `NetherWorldCarver.carveBlock` is not `sea_level`.**
 //!   It is hardcoded, and at `min_y 0` it means "lava at y ≤ 31" — one below the
 //!   `sea_level 32` the fill uses. Do not unify them.
@@ -75,8 +107,9 @@
 //! [`crate::surface`], [`crate::dense_grid`], [`crate::interner`], and
 //! `lodestone-worldgen-core`'s density interpreter. Nothing version-specific.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
@@ -86,6 +119,9 @@ use crate::carver::{CarveGrid, CarverConfig, NoObserver};
 use crate::density::{Builder, Resolver};
 use crate::engine::Program;
 use crate::interner::{StateId, StateInterner};
+use crate::overworld::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
+use crate::structure::beardifier::Beardifier;
+use crate::structure::{HeightmapKind, StartContext, StructureRegistry, StructureStart};
 use crate::surface::{PreState, SurfaceDiff, SurfaceSystem, identity_canon};
 
 /// One generated Nether chunk: the block column plus its 16 horizontal biome
@@ -214,7 +250,40 @@ pub struct NetherGenerator {
     /// no-data-supplied convention every other stage here follows.
     carver_replaceable: HashSet<String>,
     carvers_by_biome: HashMap<String, Vec<CarverConfig>>,
+    /// The Nether's structure engine, or `None` for a resolver that supplies no
+    /// structure sets (every shape/surface fixture in this workspace). `None` makes
+    /// every structure stage below an early return, so nothing distinguishes "no
+    /// structure data" from "this generator before structures existed".
+    structures: Option<StructureRegistry>,
+    /// `(cx, cz)` → that chunk's starts. A memo of a **pure function** of
+    /// `(seed, cx, cz)`, which is the only reason it may exist at all here: one
+    /// `column` call walks the 17×17 [`REFS_RADIUS`] neighbourhood, and without
+    /// this a bastion within reach is reassembled once per column that can see it.
+    ///
+    /// Deliberately *not* the Overworld's [`crate::overworld::store`]: that store's
+    /// entry type is the Overworld's own stage set, and its retention ceiling is
+    /// sized against a 37×37 pinned closure this dimension does not have.
+    ///
+    /// **Eviction cannot change a byte of output**, only cost — see
+    /// [`STARTS_MEMO_CEILING`] for why the crude policy is sound where the
+    /// Overworld needed a view-pinned one.
+    starts: Mutex<HashMap<(i32, i32), Arc<Vec<Arc<StructureStart>>>>>,
 }
+
+/// Entries [`NetherGenerator::starts`] holds before it is cleared wholesale.
+///
+/// A 17×17 walk touches 289 chunks, so this is ~28 whole neighbourhoods — enough
+/// that a sweep in any locality never evicts a chunk it is about to re-read, and
+/// small enough that a long random-access session cannot grow without bound.
+///
+/// **Clearing the whole map is sound here and would not be in the Overworld.**
+/// The Overworld's store holds *stage products* that later stages consume within
+/// one `column` call, so dropping one mid-call would silently recompute a
+/// neighbour's terrain (which is why that store is view-pinned and counts its
+/// evictions). This map holds only starts, each a pure function of
+/// `(seed, cx, cz)`: a miss costs a recomputation and returns the identical value,
+/// so the worst an eviction can do is make a column slower.
+const STARTS_MEMO_CEILING: usize = 8192;
 
 impl NetherGenerator {
     /// Builds the generator for `seed` from `noise_settings/nether.json` and a
@@ -283,11 +352,28 @@ impl NetherGenerator {
         }
 
         let mut carvers_by_biome = HashMap::new();
+        // `MultiNoiseBiomeSource.possibleBiomes()` for this dimension, derived from
+        // the parameter table rather than written down: a hardcoded list of the
+        // Nether's five would be a second copy of the data, and a datapack that
+        // added a sixth would silently lose its structures.
+        let mut possible_biomes: HashSet<String> = HashSet::new();
         for point in table.iter() {
+            possible_biomes.insert(point.biome.clone());
             carvers_by_biome
                 .entry(point.biome.clone())
                 .or_insert_with(|| crate::compose::build_biome_carvers(resolver, &point.biome));
         }
+
+        // Issue #514's dimension half. Filtered by `possible_biomes` because
+        // vanilla filters (`ChunkGeneratorStructureState.createForNormal`), which
+        // here means the registry parses `nether_complexes`, `nether_fossils` and
+        // `ruined_portals` and loads only `bastion`'s pool graph — not every
+        // village's. `is_empty()` → `None`, so a fixture resolver is unaffected.
+        let structures = {
+            let registry =
+                StructureRegistry::new_for_biomes(seed, resolver, Some(&possible_biomes));
+            if registry.is_empty() { None } else { Some(registry) }
+        };
 
         // Captured after every `builder.build()` above, which is always a safe
         // bound for any one tree's own sampler.
@@ -312,6 +398,8 @@ impl NetherGenerator {
             default_fluid_pre,
             carver_replaceable,
             carvers_by_biome,
+            structures,
+            starts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -321,13 +409,23 @@ impl NetherGenerator {
         let base_x = cx * 16;
         let base_z = cz * 16;
 
+        // Stages 0a/0b, above the fill for the reason
+        // `crate::overworld::structures`' module doc gives: the beardifier consults
+        // the structure bounds intersecting this chunk, so the bounds have to exist
+        // before a single density sample is taken.
+        let refs = self.structure_refs(cx, cz);
+        let beard = self.beardifier_for(cx, cz, &refs);
+
         let aquifer = self.build_fill(cx, cz);
-        let field = self.fill_stage(&aquifer, base_x, base_z);
+        let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
         let heights = self.heights_from_field(&field);
         let biome_quarts = self.biome_quarts(cx, cz);
         let surface_diff = self.surface_stage(&field, &heights, &biome_quarts, base_x, base_z);
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
         let world = self.carve_stage(cx, cz, &aquifer, world);
+        // Stage 4b: `surface_structures` sits after carving, and no Nether
+        // decoration step runs here yet, so this is the last writer.
+        let world = self.structure_place_stage(cx, cz, &refs, world);
 
         let (palette, blocks) = world.into_palette_and_blocks();
         NetherColumn {
@@ -361,16 +459,42 @@ impl NetherGenerator {
         ((ly * 16 + lz) * 16 + lx) as usize
     }
 
-    /// `fillFromNoise`. No beardifier: nothing places a structure in this
-    /// dimension yet, and an unconditional `+ 0.0` would flip `-0.0`'s sign bit
-    /// for no reason (see `overworld::fill`'s own note).
-    fn fill_stage(&self, aquifer: &AquiferSystem, base_x: i32, base_z: i32) -> Vec<BlockKind> {
+    /// `fillFromNoise`, i.e. `add(finalDensity, BeardifierMarker)`.
+    ///
+    /// **Two loops, and the empty-beard one is a correctness property rather than a
+    /// micro-optimisation** — the same reasoning `overworld::fill::fill_stage`
+    /// records. Adding `0.0` is the identity for every finite `f64` *except*
+    /// `-0.0`, whose sign bit it flips; nothing downstream distinguishes the two
+    /// today, and the branch means that claim never has to be made. It is also what
+    /// keeps every Nether column with no adaptation-bearing start in reach —
+    /// which, while `nether_fossil` is the dimension's only adaptation-bearing
+    /// structure *and* has no piece generator, is every column — bit-identical to
+    /// the pre-structure generator.
+    fn fill_stage(
+        &self,
+        aquifer: &AquiferSystem,
+        base_x: i32,
+        base_z: i32,
+        beard: &Beardifier,
+    ) -> Vec<BlockKind> {
         let mut field = vec![BlockKind::Air; 16 * 16 * self.height as usize];
+        if beard.is_empty() {
+            for lz in 0..16i32 {
+                for lx in 0..16i32 {
+                    for ly in 0..self.height {
+                        field[Self::idx(lx, ly, lz, self.height)] =
+                            aquifer.block_at(base_x + lx, self.min_y + ly, base_z + lz);
+                    }
+                }
+            }
+            return field;
+        }
         for lz in 0..16i32 {
             for lx in 0..16i32 {
                 for ly in 0..self.height {
+                    let (wx, wy, wz) = (base_x + lx, self.min_y + ly, base_z + lz);
                     field[Self::idx(lx, ly, lz, self.height)] =
-                        aquifer.block_at(base_x + lx, self.min_y + ly, base_z + lz);
+                        aquifer.block_at_beard(wx, wy, wz, beard.compute(wx, wy, wz));
                 }
             }
         }
@@ -546,6 +670,326 @@ impl NetherGenerator {
             &mut NoObserver,
         );
         grid.into_dense()
+    }
+}
+
+/// [`StartContext`] over freshly sampled *Nether* noise columns.
+///
+/// The Overworld's equivalent is `overworld::structures::StartSampler`, and the
+/// difference between them is the whole reason this type exists rather than a
+/// shared one: every column it samples comes from
+/// [`AquiferSystem::disabled`] over the Nether's `final_density` at `min_y 0`,
+/// height 128, so a height probe answers against *this* dimension's terrain. A
+/// sampler that resolved to an Overworld-shaped column would site a bastion
+/// plausibly and wrongly, and nothing in a screenshot would say so.
+struct NetherStartSampler<'a> {
+    generator: &'a NetherGenerator,
+    /// `(cx, cz)` → that chunk's disabled aquifer. `RefCell` because
+    /// [`StartContext`] takes `&self` (it is called through a `&dyn` from the
+    /// registry) and this is single-threaded per stage invocation. Building one is
+    /// the expensive part and a start predicate asks about several columns of the
+    /// same chunk.
+    aquifers: RefCell<HashMap<(i32, i32), Arc<AquiferSystem>>>,
+}
+
+impl NetherStartSampler<'_> {
+    fn aquifer(&self, cx: i32, cz: i32) -> Arc<AquiferSystem> {
+        if let Some(existing) = self.aquifers.borrow().get(&(cx, cz)) {
+            return Arc::clone(existing);
+        }
+        let built = Arc::new(self.generator.build_fill(cx, cz));
+        self.aquifers
+            .borrow_mut()
+            .insert((cx, cz), Arc::clone(&built));
+        built
+    }
+}
+
+impl StartContext for NetherStartSampler<'_> {
+    /// `NoiseBasedChunkGenerator.getFirstOccupiedHeight` — the Y of the topmost
+    /// block satisfying the heightmap predicate, or `minY - 1` for a column that
+    /// never matches.
+    ///
+    /// **This reads the pre-surface fill, so it never sees the bedrock roof.** The
+    /// Nether's `y 123..=127` bedrock is a `vertical_gradient` surface rule, and
+    /// vanilla's own `getBaseHeight` runs against a fresh `NoiseChunk` too — so a
+    /// `WORLD_SURFACE_WG` probe here answers "topmost non-air *noise*", which is
+    /// exactly the number vanilla's structure placement uses. The Nether's noise is
+    /// solid near the roof over most of the dimension, so this is usually a large
+    /// number; a structure kind that treats it as "the walkable surface" would be
+    /// wrong about this dimension, and vanilla's Nether kinds do not (bastion is
+    /// `start_height: {absolute: 33}` and probes nothing).
+    fn first_occupied_height(&self, x: i32, z: i32, heightmap: HeightmapKind) -> i32 {
+        let generator = self.generator;
+        let aquifer = self.aquifer(x >> 4, z >> 4);
+        for ly in (0..generator.height).rev() {
+            let y = generator.min_y + ly;
+            let kind = aquifer.block_at(x, y, z);
+            let matched = match heightmap {
+                HeightmapKind::WorldSurfaceWg => kind != BlockKind::Air,
+                // `blocksMotion`: stone only — lava explicitly excluded, which in
+                // this dimension is the difference between the netherrack shelf and
+                // the lava sea's surface.
+                HeightmapKind::OceanFloorWg => kind == BlockKind::Stone,
+            };
+            if matched {
+                return y;
+            }
+        }
+        generator.min_y - 1
+    }
+
+    /// `MultiNoiseBiomeSource.getNoiseBiome(qx, qy, qz)`, written with the real
+    /// `qy` rather than the constant 0 [`NetherGenerator::biome_quarts`] uses.
+    ///
+    /// The two agree by the y-invariance `nether_biomes_do_not_vary_with_y` pins
+    /// (`temperature`/`vegetation` are `shifted_noise` with `y_scale: 0.0`), and
+    /// spelling it the vanilla way here means the structure biome filter does not
+    /// inherit an assumption from a neighbouring optimisation.
+    fn biome_at_quart(&self, qx: i32, qy: i32, qz: i32) -> String {
+        let target = self.generator.climate.target(qx * 4, qy * 4, qz * 4);
+        self.generator.table.nearest(&target).to_string()
+    }
+
+    fn sea_level(&self) -> i32 {
+        self.generator.sea_level
+    }
+
+    /// The real dimension bounds, so a jigsaw structure's `above_bottom` /
+    /// `below_top` start height and its `dimension_padding` resolve against a
+    /// 0..128 world rather than against the trait's Overworld default. Getting this
+    /// from the default would put every `below_top` bastion piece 256 blocks above
+    /// the Nether roof.
+    fn min_y(&self) -> i32 {
+        self.generator.min_y
+    }
+
+    fn dimension_height(&self) -> i32 {
+        self.generator.height
+    }
+
+    /// `isReplaceableByStructures`: air or fluid. Read out of the same per-chunk
+    /// aquifer the height probe uses.
+    fn is_replaceable_at(&self, x: i32, y: i32, z: i32) -> bool {
+        let aquifer = self.aquifer(x >> 4, z >> 4);
+        !matches!(aquifer.block_at(x, y, z), BlockKind::Stone)
+    }
+}
+
+/// The Nether's structure stages — the composition that closes the
+/// `dimension:nether_structures` island. See this module's own doc for what is
+/// dimension-shaped about them and what is shared.
+impl NetherGenerator {
+    /// Stage 0a: this chunk's structure starts, memoised in [`Self::starts`].
+    ///
+    /// Empty and allocation-cheap for a generator with no structure data.
+    fn structure_starts_stage(&self, cx: i32, cz: i32) -> Arc<Vec<Arc<StructureStart>>> {
+        if let Some(existing) = self
+            .starts
+            .lock()
+            .expect("nether starts memo poisoned")
+            .get(&(cx, cz))
+        {
+            return Arc::clone(existing);
+        }
+        // Computed **outside** the lock: `starts_at` samples columns and can assemble
+        // a whole jigsaw, and holding a single global mutex across that would
+        // serialise every generating thread on the memo. Two threads racing the same
+        // key both compute, and both compute the same value — the memo is a pure
+        // function of `(seed, cx, cz)`, so a duplicated computation costs time and
+        // cannot change a byte.
+        let computed: Arc<Vec<Arc<StructureStart>>> = Arc::new(match &self.structures {
+            None => Vec::new(),
+            Some(registry) => {
+                let sampler = NetherStartSampler {
+                    generator: self,
+                    aquifers: RefCell::new(HashMap::new()),
+                };
+                registry
+                    .starts_at(cx, cz, &sampler)
+                    .into_iter()
+                    .map(Arc::new)
+                    .collect()
+            }
+        });
+        let mut memo = self.starts.lock().expect("nether starts memo poisoned");
+        if memo.len() >= STARTS_MEMO_CEILING {
+            memo.clear();
+        }
+        memo.insert((cx, cz), Arc::clone(&computed));
+        computed
+    }
+
+    /// Stage 0b: `createReferences`' 17×17 walk, keeping the starts whose adjusted
+    /// box comes within [`BEARD_REACH`] blocks of this chunk.
+    ///
+    /// Identical in shape to the Overworld's — the widened reach is the
+    /// beardifier's own (`Beardifier.forStructuresInChunk`'s
+    /// `isCloseToChunk(chunkPos, 12)`), and
+    /// [`StructureRefs::packed_by_structure`] re-narrows to vanilla's exact
+    /// chunk-box test for the persistence view.
+    ///
+    /// Not memoised: it is a walk over an already-memoised product and is consumed
+    /// exactly once per column, so a second map would carry no work.
+    fn structure_refs(&self, cx: i32, cz: i32) -> StructureRefs {
+        if self.structures.is_none() {
+            return StructureRefs::default();
+        }
+        let mut entries = Vec::new();
+        for sx in (cx - REFS_RADIUS)..=(cx + REFS_RADIUS) {
+            for sz in (cz - REFS_RADIUS)..=(cz + REFS_RADIUS) {
+                for start in self.structure_starts_stage(sx, sz).iter() {
+                    if start
+                        .adjusted_bounding_box()
+                        .is_close_to_chunk(cx, cz, BEARD_REACH)
+                    {
+                        entries.push((sx, sz, Arc::clone(start)));
+                    }
+                }
+            }
+        }
+        StructureRefs { entries }
+    }
+
+    /// Stage 0c: this chunk's beard term.
+    ///
+    /// `nether_fossil` (`terrain_adaptation: beard_thin`) is the dimension's *only*
+    /// adaptation-bearing structure and has no piece generator, so today this is
+    /// empty for every chunk and [`Self::fill_stage`] takes its no-beard branch —
+    /// which is the negative control for the whole change: the Nether's biome and
+    /// bedrock parity against the vanilla oracle world is unchanged, by
+    /// construction rather than by measurement.
+    fn beardifier_for(&self, cx: i32, cz: i32, refs: &StructureRefs) -> Beardifier {
+        if self.structures.is_none() {
+            return Beardifier::empty();
+        }
+        Beardifier::for_chunk(cx, cz, refs.adaptation_bearing().map(AsRef::as_ref))
+    }
+
+    /// Stage 4b: writes every piece that touches this chunk into `world`.
+    ///
+    /// Clipping is the grid, not a box: [`crate::dense_grid::DenseBlockGrid::set`]
+    /// ignores a write outside this chunk's 16×16 columns, so a piece that straddles
+    /// a border writes its own half here and the other half when the neighbour
+    /// generates. That is only sound because every piece's position is fixed at
+    /// *start* time and every processor draw is position-seeded.
+    fn structure_place_stage(
+        &self,
+        cx: i32,
+        cz: i32,
+        refs: &StructureRefs,
+        mut world: crate::dense_grid::DenseBlockGrid,
+    ) -> crate::dense_grid::DenseBlockGrid {
+        let Some(registry) = &self.structures else {
+            return world;
+        };
+        let seed = registry.seed();
+        let (bx, bz) = (cx * 16, cz * 16);
+        for (_, _, start) in &refs.entries {
+            if !start.pieces_complete {
+                continue;
+            }
+            // One `referencePos` per start, from its **first** piece's box, before
+            // the per-piece loop — `StructureStart.placeInChunk`'s own derivation. It
+            // is not a per-piece value and it is not the chunk.
+            let reference = crate::structure::jigsaw::reference_position(&start.pieces);
+            for piece in &start.pieces {
+                if !piece.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15) {
+                    continue;
+                }
+                if let Some(blocks) = &piece.blocks {
+                    for block in blocks.iter() {
+                        world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
+                    }
+                }
+                let Some(placement) = &piece.placement else {
+                    continue;
+                };
+                let origin = crate::structure::template::PlaceOrigin {
+                    position: placement.position,
+                    reference,
+                    seed,
+                };
+                placement
+                    .template
+                    .place(origin, &placement.settings, &mut world);
+                // A `list_pool_element` writes several templates at one position, in
+                // document order — `ListPoolElement.place`'s own loop.
+                for extra in &piece.extra_placements {
+                    let origin = crate::structure::template::PlaceOrigin {
+                        position: extra.position,
+                        reference,
+                        seed,
+                    };
+                    extra.template.place(origin, &extra.settings, &mut world);
+                }
+            }
+        }
+        world
+    }
+
+    /// Every start whose origin is `(cx, cz)` and whose piece list is complete —
+    /// the set a save file may legitimately carry, and the one a gate asserts on.
+    #[must_use]
+    pub fn structure_starts(&self, cx: i32, cz: i32) -> Vec<Arc<StructureStart>> {
+        self.structure_starts_stage(cx, cz)
+            .iter()
+            .filter(|start| start.pieces_complete)
+            .map(Arc::clone)
+            .collect()
+    }
+
+    /// Every start whose origin is `(cx, cz)`, including the advisory ones this
+    /// engine can place but not build (`fortress`, `nether_fossil`,
+    /// `ruined_portal_nether`). This is the *placement* answer — the one to compare
+    /// against a vanilla save's `structures.starts` keys.
+    #[must_use]
+    pub fn structure_starts_including_incomplete(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Vec<Arc<StructureStart>> {
+        self.structure_starts_stage(cx, cz).to_vec()
+    }
+
+    /// This chunk's `structures.References`, narrowed to vanilla's own 16×16
+    /// intersection test — the NBT view rather than the beardifier's input.
+    #[must_use]
+    pub fn structure_references(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> std::collections::BTreeMap<String, Vec<i64>> {
+        let refs = self.structure_refs(cx, cz);
+        let (bx, bz) = (cx * 16, cz * 16);
+        let mut narrowed = StructureRefs::default();
+        for (sx, sz, start) in &refs.entries {
+            if start.pieces_complete
+                && start.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15)
+            {
+                narrowed.entries.push((*sx, *sz, Arc::clone(start)));
+            }
+        }
+        narrowed.packed_by_structure()
+    }
+
+    /// The beard term this generator's real starts imply for `(cx, cz)` — the exact
+    /// value the production fill uses, so a gate can assert *which* branch the fill
+    /// took rather than inferring it from the output.
+    #[must_use]
+    pub fn beardifier(&self, cx: i32, cz: i32) -> Beardifier {
+        let refs = self.structure_refs(cx, cz);
+        self.beardifier_for(cx, cz, &refs)
+    }
+
+    /// The registry's unsupported ledger, or an empty map for a generator with no
+    /// structure data.
+    #[must_use]
+    pub fn structure_ledger(&self) -> std::collections::BTreeMap<String, String> {
+        self.structures
+            .as_ref()
+            .map(|r| r.unsupported().clone())
+            .unwrap_or_default()
     }
 }
 

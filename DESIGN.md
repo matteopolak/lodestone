@@ -6774,3 +6774,88 @@ is the place to call it first") — the honest note and the false one were 400 l
   registration; the third is a genuine promise the type system does not check, because `parse` returns
   an erased enum. One execution test per command catches all three, which is why that is the stated bar
   rather than a suggestion.
+
+
+**12.145 The Nether's structure island closed in one file, and the four things that had to be
+dimension-shaped were not the four you would guess. `bastion_remnant` now places 15,405 blocks against
+0 in a structure-free control — and the reason the Nether's biome and bedrock parity is unchanged is a
+branch, not a measurement.** (#514, `dimension:nether_structures`.)
+
+§12.142 diagnosed the island: `bastion_remnant`'s pools load, its assembly is vanilla's, the ledger is
+silent, and it reaches zero blocks because `NetherGenerator` composes no structure stage and its biome
+tag is Nether-only. The fix is composition, and the useful part of it is which pieces turned out to be
+*shared* versus *dimension-shaped*, because the naive split is wrong in both directions.
+
+**Shared, with no change at all:** `overworld/structures.rs`'s `StructureRefs` product (both halves of
+`structures.References` and the beardifier's input, one walk), `REFS_RADIUS = 8`, `BEARD_REACH = 12`,
+`structure::beardifier`, and the whole `StructureRegistry` / `starts_at` / `try_start` path. A file named
+after the Overworld holds the dimension-agnostic product type, which reads wrong and is right — the walk
+is `createReferences`, not an Overworld stage.
+
+**Dimension-shaped, and each one would have produced a plausible wrong world:**
+
+- **Which sets exist here.** `ChunkGeneratorStructureState.createForNormal` filters the *whole*
+  structure-set registry through `hasBiomesForStructureSet` before `createStructures` ever walks it
+  (`ChunkGeneratorStructureState.java:52-67`), and `possibleStructureSets()` is what that walk iterates.
+  So the unfiltered form is not "vanilla plus wasted predicates": it is a Nether generator whose
+  `structure_starts` can report `minecraft:villages` and whose ledger names blockers for structures the
+  dimension could never place. `StructureRegistry::new_for_biomes` is that filter, and the argument that
+  it is *safe* is the load-bearing one: `starts_at` re-seeds its weighted walk **per set**
+  (`set_large_feature_seed(seed, cx, cz)`), so dropping a set shifts no other set's stream, and a dropped
+  set's structures would have failed the biome filter anyway. It therefore cannot change which chunk gets
+  which structure in either direction — only cost, and the cost is every village / `ancient_city` /
+  `trial_chambers` pool graph the Nether was going to parse. The Overworld deliberately stays on the
+  unfiltered constructor: its `possibleBiomes()` would drop exactly the Nether and End sets and change
+  nothing but the `unsupported` keys its own gates pin, so the asymmetry is a second constructor rather
+  than a changed signature.
+- **The height probe.** `NetherStartSampler` samples `AquiferSystem::disabled` over the Nether's own
+  `final_density` at `min_y 0`, height 128. An Overworld-shaped probe is the thing the brief warned about
+  and it fails silently. The non-obvious half is that it reads the **pre-surface fill**, so it never sees
+  the bedrock roof at y 123–127 — which is *vanilla's* `getBaseHeight` behaviour (a fresh `NoiseChunk`,
+  no surface rules), not a gap, and worth writing down because the opposite assumption is the natural one.
+  Bastion probes nothing at all: `start_height: {absolute: 33}`.
+- **`min_y` / `dimension_height` on the `StartContext`.** Left at the trait's Overworld defaults, a
+  `below_top` jigsaw start height resolves against a 384-tall world and lands 256 blocks above the Nether
+  roof. Two one-line methods, and no gate on this dimension would have looked odd.
+- **Memoisation.** A bounded `Mutex<HashMap>` on the generator rather than `overworld::store`, whose entry
+  type *is* the Overworld's stage set and whose retention ceiling is sized against a 37×37 pinned closure.
+  Clearing it wholesale is sound here and would be a silent recomputation bug there, and the distinction
+  is exactly what the store's own doc says: that store holds **stage products** consumed later in the same
+  `column` call; this map holds only starts, each a pure function of `(seed, cx, cz)`, so eviction can cost
+  time and cannot change a byte.
+
+**The negative control is a branch, not a measurement, and that is the strongest form available.**
+`fill_stage` keeps the Overworld's two-loop shape: an empty beardifier takes the loop with no addition at
+all, because `+ 0.0` is the identity for every finite `f64` except `-0.0`, whose sign bit it flips.
+`nether_fossil` (`beard_thin`) is the dimension's **only** adaptation-bearing structure and has no piece
+generator, so the beard is empty for every chunk and the fill provably takes the untouched path. That is
+*why* `nether_gen.rs`'s 17,855/17,856 quarts and 20,480/20,480 bedrock positions are unchanged — by
+construction, not because they were re-run and happened to agree. A test pins the emptiness so a future
+`nether_fossil` generator has to break it deliberately.
+
+**The fortress does not silently become a bastion, and the reason is one enum arm.** `nether_complexes`
+carries `fortress` at weight 2 and `bastion_remnant` at weight 3, and vanilla's weighted walk **breaks on
+the first successful start**. `fortress` has no piece generator, so the tempting conclusion is that our
+walk rejects it, removes its weight, redraws and hands every fortress cell to a bastion — a Nether with
+167% of vanilla's bastions, entirely plausible, and wrong. It does not happen because
+`StructureKind::validity` returns `Unknown` (not `Invalid`) for `Unsupported`, so `try_start` returns
+`Some` with `pieces_complete: false` and the walk stops exactly where vanilla's does. **An "unimplemented"
+kind that returned `Invalid` here would have changed the world map, not just the block count** — the
+placement stream is a shared resource and a rejection is an observable event in it.
+
+**Evidence, and the one search bound that was *not* a trap.** `bastion_remnant` starts at chunk **(8, 7)**
+— grid ring **0**, the first candidate cell, 89 pieces, box `[128,32,67]..[177,87,133]`, **15,405**
+discriminating blocks with structures and **0** without. §12.139/§12.141 recorded 234, 211 and ring-5
+search bounds for the coded Overworld structures, so the expectation going in was a long walk; the reason
+this one is immediate is data, not luck (`has_structure/bastion_remnant` covers four of the dimension's
+five biomes, so the biome filter almost never rejects). Recording *why* is the point — the next reader
+should not infer that the bound is generous.
+
+**The discriminator had to be derived, because the obvious choice fails in the safe-looking direction.**
+`minecraft:blackstone` and `minecraft:basalt` are the names a bastion is made of and are also
+`SurfaceRuleData.nether()` products (basalt deltas' floor and pillars), so a gate counting either would
+have found a non-zero count in the *control* arm and reported a working structure from terrain. The list
+used is the measured with-minus-without palette difference (16 names) narrowed to those a companion test
+proves absent from `noise_settings/nether.json`'s own `surface_rule`, `default_block`, `default_fluid` and
+`configured_carver/nether_cave` — and that companion test also asserts the surface rule *does* still name
+blackstone or basalt, so its own warning cannot go stale silently.

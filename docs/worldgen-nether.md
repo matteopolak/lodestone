@@ -15,14 +15,19 @@ against a real Mojang server's own Nether, not against itself.
 
 | stage | what | source |
 |---|---|---|
+| starts | `createStructures` over the sets this dimension can place | `ChunkGenerator.java`, `ChunkGeneratorStructureState.java:52-67` |
+| refs | `createReferences`' 17×17 walk, widened to the beardifier's reach | `ChunkGenerator.createReferences` |
+| beard | `Beardifier.forStructuresInChunk` — empty today, see below | `Beardifier.java` |
 | fill | `Aquifer.createDisabled` over the interpolated `final_density` | `Aquifer.java:30-41` |
 | biome | one climate sample per horizontal quart → the 5-row parameter list | `MultiNoiseBiomeSource.java:59-67` |
 | surface | `SurfaceRuleData.nether()`, unchanged engine | `SurfaceRuleData.java:300-387` |
 | carve | `applyCarvers` with `NetherWorldCarver` | `NetherWorldCarver.java` |
+| place | every piece intersecting this chunk, `surface_structures` slot | `StructureStart.placeInChunk` |
 
-Nothing memoises across chunks and no stage reads a neighbour's product, so
-`column` is a pure function of `(seed, cx, cz)` and the join scheduler may ask
-for columns in any order on any thread.
+The only thing that memoises across chunks is the starts map (a pure function of
+`(seed, cx, cz)`, so eviction can only cost time), and no stage reads a
+neighbour's *terrain* product, so `column` is a pure function of `(seed, cx, cz)`
+and the join scheduler may ask for columns in any order on any thread.
 
 ### The RNG family is data (the item everything else waited on)
 
@@ -147,7 +152,73 @@ it means y ≤ 31, one below the `sea_level 32` the fill uses. Do not unify them
 `carveBlock` also writes `minecraft:cave_air`, which the Overworld path never
 does (its air comes from the aquifer as plain `minecraft:air`).
 
+### Structures: the stage that was missing, and the one thing it had to do differently
+
+`NetherGenerator` originally composed **no structure stage at all**, and that made
+`bastion_remnant` a textbook island: its template pools loaded, its jigsaw assembly
+was gated, it was absent from the unsupported ledger's per-structure rows, and it
+placed **zero blocks anywhere in the game** — because its biome tag is Nether-only,
+so the Overworld's stage (the only one that existed) could never accept it.
+`fortress`, `nether_fossil` and `ruined_portal_nether` sat in the same position.
+
+The machinery is shared, not new: `overworld/structures.rs`'s `StructureRefs`
+product, `REFS_RADIUS`/`BEARD_REACH`, `structure::beardifier` and
+`StructureRegistry` are all dimension-agnostic. Four things are dimension-shaped
+and live in `nether/mod.rs`:
+
+* **Which sets exist here.** `StructureRegistry::new_for_biomes(seed, resolver,
+  Some(&possible))` is vanilla's `hasBiomesForStructureSet`
+  (`ChunkGeneratorStructureState.java:52-67`), and `possible` is derived from the
+  parameter table's own biome names rather than written down. A filtered Nether
+  registry keeps `nether_complexes`, `nether_fossils` and `ruined_portals` and loads
+  `bastion`'s pool graph only — not every village's. **It cannot change which chunk
+  gets which structure**: `starts_at` re-seeds its weighted walk per set, so
+  dropping a set shifts no other set's stream, and a dropped set's structures would
+  have failed the biome filter anyway. The Overworld deliberately stays on the
+  unfiltered `new`, because there the filter would drop exactly the Nether/End sets
+  and change nothing but the ledger's keys.
+* **The height probe.** `NetherStartSampler` samples `AquiferSystem::disabled` over
+  *this* dimension's `final_density` at `min_y 0`, height 128. An Overworld-shaped
+  probe would site a bastion plausibly and wrongly. Note it reads the **pre-surface
+  fill**, so it never sees the bedrock roof — which is vanilla's own `getBaseHeight`
+  behaviour, not a gap, and bastion probes nothing anyway
+  (`start_height: {absolute: 33}`).
+* **The biome the filter reads.** The `StartContext` spells the sample with the real
+  `quartY`, unlike `biome_quarts`' constant 0; the two agree by the y-invariance
+  `nether_biomes_do_not_vary_with_y` pins, and writing it the vanilla way keeps the
+  structure filter from inheriting a neighbouring optimisation's assumption.
+* **Memoisation.** A bounded `Mutex<HashMap>` on the generator, not the Overworld's
+  staged store (whose entry type is that generator's stage set and whose retention is
+  sized against a 37×37 pinned closure). Clearing it wholesale is sound *here* and
+  would not be there: it holds only starts, each a pure function of `(seed, cx, cz)`,
+  so a miss returns the identical value.
+
+**The beardifier is empty for every Nether chunk today, and that is the negative
+control for the whole change.** `nether_fossil` (`beard_thin`) is the dimension's
+only adaptation-bearing structure and has no piece generator, so `fill_stage` takes
+its no-beard branch — which is *why* the biome and bedrock parity below is unchanged
+by construction rather than by measurement. `the_beardifier_is_empty_because_no_nether_structure_bears_adaptation_yet`
+pins that, so a future `nether_fossil` generator has to update it deliberately.
+
+**Where the fortress goes.** `nether_complexes` carries `fortress` at weight 2 and
+`bastion_remnant` at weight 3. `fortress` has no piece generator, so it yields an
+*advisory* start (`pieces_complete: false`, zero blocks) — and crucially
+`StructureKind::validity` reports `Unknown` rather than `Invalid` for it, so the
+weighted walk **stops** there exactly as vanilla's does. A fortress cell is not
+silently promoted to a bastion, and the RNG stream is vanilla's.
+
 ## Evidence
+
+`crates/lodestone-worldgen/tests/nether_structures.rs` gates the structure stage.
+Measured at seed −195764831: `bastion_remnant` starts at chunk **(8, 7)** — ring 0,
+the first candidate cell, because `has_structure/bastion_remnant` covers four of the
+five Nether biomes — with **89 pieces** in box `[128,32,67]..[177,87,133]`, placing
+**15,405** bastion-only blocks against **0** in a structure-free control over
+identical data. The discriminating names are the *measured* with-minus-without
+palette difference narrowed to those absent from the Nether's own `surface_rule`
+(`basalt`, `blackstone` and `nether_wart` are excluded because a real Nether column
+can produce them, and a gate built on either of the first two would have passed in
+the control arm too).
 
 `crates/lodestone-worldgen/tests/nether_gen.rs`, against
 `tests/support/nether_vanilla_oracle.txt` — extracted from
@@ -259,8 +330,10 @@ a defect.
   composed. All 226 configured and 262 placed features are bundled and the five
   biome documents already carry the step wiring, so this is composition work in
   `crate::feature`, not missing data.
-* **Fortress, bastion, nether fossil, ruined portal** — structures, the structure
-  group's phase S2/S3.
+* **Fortress, nether fossil, ruined portal** — their *placement* is composed and
+  each yields an advisory start; none has a piece generator, so each places zero
+  blocks and each carries its own row on the unsupported ledger. `bastion_remnant`
+  is done (see Structures above).
 * **Reaching it from the game.** `lodestone-server`'s `EmbeddedResolver`
   hardcodes the Overworld documents and `OverworldChunkSource` is the only chunk
   source, so **a portal trip does not land in this terrain yet**: the generator
