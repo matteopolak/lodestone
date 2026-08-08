@@ -1064,7 +1064,13 @@ pub struct FluidMeshes {
 /// `kind` being baked: its own height if it is the same fluid (snapped to `1.0`
 /// when that same fluid continues above), `-1.0` if it is a solid block
 /// (excluded from the average) or `0.0` if it is air-like.
-fn neighbor_height_at(view: &dyn FluidSectionView, kind: FluidKind, x: i32, y: i32, z: i32) -> f32 {
+fn neighbor_height_at<V: FluidSectionView + ?Sized>(
+    view: &V,
+    kind: FluidKind,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> f32 {
     match view.fluid_at(x, y, z) {
         Some(f) if f.kind == kind => {
             let above_same = matches!(view.fluid_at(x, y + 1, z), Some(a) if a.kind == kind);
@@ -1075,8 +1081,8 @@ fn neighbor_height_at(view: &dyn FluidSectionView, kind: FluidKind, x: i32, y: i
 }
 
 /// The [`FlowNeighbor`] describing the cell one step `(dx, dz)` from `(x, y, z)`.
-fn flow_neighbor_at(
-    view: &dyn FluidSectionView,
+fn flow_neighbor_at<V: FluidSectionView + ?Sized>(
+    view: &V,
     kind: FluidKind,
     x: i32,
     y: i32,
@@ -1111,8 +1117,8 @@ fn flow_neighbor_at(
 /// plain opaque cube (the dominant case) and this mirrors the same
 /// approximation `mesh_fluids` already makes for `blocks_motion`/`isSolid` in
 /// [`flow_neighbor_at`]; see `docs/fluid-rendering.md`.
-fn should_render_backward_up_face(
-    view: &dyn FluidSectionView,
+fn should_render_backward_up_face<V: FluidSectionView + ?Sized>(
+    view: &V,
     kind: FluidKind,
     x: i32,
     y: i32,
@@ -1154,8 +1160,24 @@ fn should_render_backward_up_face(
 /// `blockOccludes` general branch does for that scoped shape family. See
 /// `docs/fluid-rendering.md`'s "Known gaps" for what is still unmodelled (shapes
 /// with holes, steps, or a partial footprint — stairs, fences, walls).
+///
+/// # Why this is generic rather than `&dyn`
+///
+/// Every accessor below is called on the order of **fifty times per fluid
+/// cell** (the `nh` corner probes alone are twelve `neighbor_height_at`s, each
+/// two `fluid_at`s), and through a trait object none of them can inline: each
+/// pays an indirect call plus a full re-decode of the coordinate. Taking `V` by
+/// value-type lets the whole neighbourhood walk inline into one loop body. The
+/// `?Sized` bound keeps `mesh_fluids(&dyn FluidSectionView)` compiling for any
+/// caller that genuinely wants the dynamic form (`dyn Trait: Trait` holds), so
+/// this is source-compatible — it just stops being the *default*.
+///
+/// Note this was the *second* axis issue #542 proposed, on the stated grounds
+/// that "`mesh_models` is generic and inlines". **That premise is false** —
+/// `mesh_models` above is `&dyn` too. The conclusion survives (measured 9.5% of
+/// the term, `DESIGN.md` §12.123); the reasoning behind it did not.
 #[must_use]
-pub fn mesh_fluids(view: &dyn FluidSectionView) -> FluidMeshes {
+pub fn mesh_fluids<V: FluidSectionView + ?Sized>(view: &V) -> FluidMeshes {
     let mut out = FluidMeshes::default();
     let n = SECTION_SIZE;
     for y in 0..n {
