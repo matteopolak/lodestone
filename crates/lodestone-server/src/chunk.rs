@@ -862,6 +862,38 @@ pub trait ChunkSource: Send + Sync {
     fn set_retention_radius(&self, view_radius: i32) {
         let _ = view_radius;
     }
+
+    /// The live-world registries this source persists, when it persists any.
+    ///
+    /// A source backed by a world directory owns the *one* block-entity registry
+    /// and scheduled-tick queue its save path reads. A server constructor that
+    /// builds its own `default()` pair instead ticks containers and repeater
+    /// delays that no save can ever see — the island issue #468 named for
+    /// singleplayer, and the same one open-to-LAN had until this accessor
+    /// existed: `open_to_lan` is generic over `S`, so it could not name
+    /// `RegionChunkSource::block_entities` directly.
+    ///
+    /// `None` — the default — is the honest answer for an in-memory source: there
+    /// is nothing on disk, so a private registry loses nothing. Wrappers forward
+    /// through to whatever they wrap; only
+    /// [`RegionChunkSource`](crate::region_source::RegionChunkSource) answers
+    /// `Some`.
+    fn world_registries(&self) -> Option<WorldRegistries> {
+        None
+    }
+}
+
+/// The pair of live registries a persistent [`ChunkSource`] owns, handed to a
+/// server constructor so the tick loop and the save path share one instance.
+///
+/// Both are cheap handles over shared state, so this is a clone of two `Arc`s
+/// rather than a borrow.
+#[derive(Debug, Clone)]
+pub struct WorldRegistries {
+    /// Every container, sign and furnace a player has placed or mutated.
+    pub block_entities: crate::block_entities::BlockEntityHandle,
+    /// Pending scheduled and fluid ticks.
+    pub scheduled: crate::region_source::ScheduledTickHandle,
 }
 
 /// Generates every column in `coords` across scoped OS threads over `&source`,

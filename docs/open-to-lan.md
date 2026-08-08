@@ -114,19 +114,29 @@ The host's own client dials the socket like everybody else. Nothing on this path
 special kind of connection — which is what stops "works in singleplayer, broken over LAN"
 from being possible for anything the host does.
 
-### The autosave is shell-driven, and one half of persistence is still missing
+### The autosave is shell-driven; the registries come off the source
 
 `open_to_lan` sets `save: None`, so it starts no autosave task and flushes nothing at
 shutdown. `net.rs`'s LAN branch therefore wraps the generator in a `RegionChunkSource` itself
 (so a saved world's terrain and edits **load**), holds the `WorldSaveHandle`, writes on the
 same `AUTOSAVE_INTERVAL` singleplayer uses, and writes once more before dropping the handle.
 
-**What still does not persist: block entities and scheduled ticks placed while hosting.**
-`open_to_lan` builds its own `BlockEntityHandle::default()` rather than taking the source's,
-so chest contents animate and furnaces cook but none of it reaches
-`WorldSaveHandle::extras_for`. Closing that is a `crates/lodestone-server` change — `LanConfig`
-growing a world directory and reusing `open_persistent_with_mobs`' save wiring — not a shell
-one.
+**Block entities and scheduled ticks now persist too**, and the mechanism is worth knowing
+because it is not a new `LanConfig` field. `open_to_lan` is generic over `S: ChunkSource`, so it
+could not name `RegionChunkSource::block_entities` — it built a `BlockEntityHandle::default()`
+and a `ScheduledTickHandle::default()`, ticked them faithfully, and lost every chest a guest
+filled, because `WorldSaveHandle::extras_for` reads the *source's* registry. The fix is a
+defaulted trait accessor, `ChunkSource::world_registries -> Option<WorldRegistries>`:
+`RegionChunkSource` is the one implementor that answers `Some`, `ChunkStore` **forwards** it
+(the constructor wraps before asking, so a non-forwarding cache would silently restore the
+bug), and every in-memory source keeps the honest `None` and its private pair.
+
+No shell change was needed and the config surface did not grow — a LAN host that was already
+handed a persistent source now shares its registries by construction. The gotcha for a new
+cache or filter layer in front of a source: **forward `world_registries`**, or the world starts
+losing containers again with nothing failing.
+`integrated.rs`'s `a_persistent_source_hands_its_registries_through_the_chunk_store_wrap`
+asserts the join, since playing cannot reveal it.
 
 ### Teardown uses `drop`, not `shutdown().await`
 
