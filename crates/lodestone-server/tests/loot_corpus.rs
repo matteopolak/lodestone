@@ -159,12 +159,15 @@ fn bundle_root() -> PathBuf {
 }
 
 /// The subset of the corpus this crate is allowed to bundle: every table whose
-/// features the roller fully evaluates.
+/// features the roller either fully evaluates or only fails to *decorate*
+/// (`lodestone_server::loot::DECORATION_ONLY_UNSUPPORTED` — the enchantment,
+/// name, exploration-map and stew-effect functions, whose absence leaves the item
+/// and count correct).
 ///
-/// `LootTableSet::load_bundled` debug-asserts zero unsupported features per
-/// bundled table, so "clean" is not a preference — it is the bundling
-/// precondition. Computed here from the **cache**, never from the bundle, which
-/// is what lets the gate below notice a table falling out of scope.
+/// `LootTableSet::load_bundled` debug-asserts exactly this per bundled table, so
+/// "clean" is not a preference — it is the bundling precondition. Computed here
+/// from the **cache**, never from the bundle, which is what lets the gate below
+/// notice a table falling out of scope.
 fn clean_corpus() -> Vec<(String, String)> {
     let root = corpus_root();
     assert!(
@@ -178,8 +181,11 @@ fn clean_corpus() -> Vec<(String, String)> {
         .into_iter()
         .filter(|(id, contents)| {
             let key: ResourceKey = format!("minecraft:{id}").parse().expect("corpus id");
-            LootTable::from_json(&key, contents)
-                .is_ok_and(|table| table.unsupported_features().is_empty())
+            LootTable::from_json(&key, contents).is_ok_and(|table| {
+                table.unsupported_features().iter().all(|feature| {
+                    lodestone_server::loot::DECORATION_ONLY_UNSUPPORTED.contains(&feature.as_str())
+                })
+            })
         })
         .collect()
 }

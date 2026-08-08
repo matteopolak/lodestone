@@ -2273,6 +2273,7 @@ fn container_title(menu: &str) -> &'static str {
         "minecraft:smoker" => "Smoker",
         "minecraft:blast_furnace" => "Blast Furnace",
         "minecraft:hopper" => "Hopper",
+        "minecraft:generic_9x3" => "Chest",
         _ => "Container",
     }
 }
@@ -3394,6 +3395,23 @@ where
     P: ServerProtocol,
     S: ChunkSource,
 {
+    // Issue #337: a chest that generation placed (a shipwreck's, an igloo's, an
+    // ocean ruin's) lives in the *column*, not in the live registry — nothing has
+    // placed or mutated it. Hydrate it on the first click, so the loot that was
+    // rolled at generation is what opens. Gated on the block actually being one of
+    // the container blocks, so an ordinary right-click never pays for the lookup.
+    let container_here = block_entities.with(|reg| reg.get(pos).is_some());
+    if !container_here {
+        let clicked = source.block_state(pos.x, pos.y, pos.z);
+        let name = clicked.split('[').next().unwrap_or(&clicked);
+        if crate::block_entities::container_type_for_block(name).is_some() {
+            let generated = source
+                .block_entity(pos.x, pos.y, pos.z)
+                .unwrap_or_else(|| BlockEntity::container(name));
+            block_entities.with(|reg| reg.insert(pos, generated));
+        }
+    }
+
     let existing_menu = block_entities.with(|reg| reg.get(pos).and_then(BlockEntity::menu_name));
     if let Some(menu) = existing_menu {
         return open_container_screen(

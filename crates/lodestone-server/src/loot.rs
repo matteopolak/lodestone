@@ -367,6 +367,26 @@ impl LootTableBuilder {
     }
 }
 
+/// Unsupported features a **bundled** table is allowed to use, because each one
+/// only *decorates* an item the roll already produced correctly: an enchantment,
+/// a custom name, an exploration map's target, a suspicious stew's effect. The
+/// item id and the count are right; the decoration is absent.
+///
+/// This is deliberately a short allowlist rather than a blanket relaxation. An
+/// unsupported **condition** *fails*, so a table using one drops items it should
+/// have produced — a silently short chest, not a cosmetically plain one — and an
+/// unsupported entry or number provider is the same class of loss. Those must
+/// still keep a table out of the bundle.
+///
+/// The four structure-chest tables (`chests/shipwreck_{map,supply}`,
+/// `chests/underwater_ruin_{small,big}`) are bundled under exactly this rule.
+pub const DECORATION_ONLY_UNSUPPORTED: &[&str] = &[
+    "function minecraft:enchant_randomly",
+    "function minecraft:exploration_map",
+    "function minecraft:set_name",
+    "function minecraft:set_stew_effect",
+];
+
 /// A loaded set of loot tables, keyed by id. This is the object a server holds
 /// — the analogue of `RecipeBook` — and the provider for [`roll_loot`].
 #[derive(Debug, Default)]
@@ -392,11 +412,14 @@ impl LootTableSet {
         }
         let set = builder.finish();
         for table in &set.tables {
-            debug_assert!(
-                table.unsupported.is_empty(),
-                "bundled table {} uses unsupported features: {table:?}",
-                table.id,
-            );
+            for feature in &table.unsupported {
+                debug_assert!(
+                    DECORATION_ONLY_UNSUPPORTED.contains(&feature.as_str()),
+                    "bundled table {} uses unsupported feature {feature}, which is not \
+                     decoration-only: {table:?}",
+                    table.id,
+                );
+            }
         }
         set
     }
@@ -2033,13 +2056,14 @@ mod tests {
     /// corpus, not a hand-picked handful. Two invariants, and the count is
     /// deliberately exact rather than a floor.
     ///
-    /// `1230` is not a preference: it is the number of tables in
-    /// `.cache/mc/26.2/client-src/data/minecraft/loot_table/` (1,355) whose
-    /// features this roller fully evaluates, measured by
-    /// `tests/loot_corpus.rs`'s own scan. A change to the roller that makes more
-    /// or fewer tables clean must move this number *and* regenerate the bundle
-    /// (`just regen-loot-corpus`), which is what stops the two drifting apart
-    /// silently — the corpus gate asserts the same number from the cache side.
+    /// `1241` is not a preference: it is the number of tables in
+    /// `.cache/mc/26.2/client-src/data/minecraft/loot_table/` (1,355) this roller
+    /// either fully evaluates or only fails to *decorate*
+    /// ([`DECORATION_ONLY_UNSUPPORTED`]), measured by `tests/loot_corpus.rs`'s own
+    /// scan. A change to the roller that makes more or fewer tables clean must
+    /// move this number *and* regenerate the bundle (`just regen-loot-corpus`),
+    /// which is what stops the two drifting apart silently — the corpus gate
+    /// asserts the same number from the cache side.
     ///
     /// **"Rolls something" is not asserted**, and that is a correction rather
     /// than a relaxation: plenty of real tables legitimately roll nothing at a
@@ -2053,17 +2077,18 @@ mod tests {
         let set = LootTableSet::load_bundled();
         assert_eq!(
             set.len(),
-            1230,
+            1241,
             "the bundle is the clean subset of the 1,355-table vanilla corpus; \
              if this moved, regenerate with `just regen-loot-corpus` and say why"
         );
         for table in set.iter() {
-            assert!(
-                table.unsupported_features().is_empty(),
-                "bundled {} must be fully supported, got {:?}",
-                table.id,
-                table.unsupported_features(),
-            );
+            for feature in table.unsupported_features() {
+                assert!(
+                    DECORATION_ONLY_UNSUPPORTED.contains(&feature.as_str()),
+                    "bundled {} uses {feature}, which is not decoration-only",
+                    table.id,
+                );
+            }
         }
         // Every bundled table rolls without panicking, and every stack it
         // produces names a parseable item.

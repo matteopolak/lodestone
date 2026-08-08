@@ -242,12 +242,38 @@ values come from the record: `uniform_bonus_count` (support exactly `1..=1 + M·
 and `binomial_with_bonus_count` (mean `1 + (L + extra)·p`, at `extra = 3, p = 0.5714286` — the corpus's only
 instantiation).
 
+## Mob death loot (#272)
+
+The same chain, one table directory over. `mob_loot_table_id` is
+`LivingEntity.getLootTable`'s default (`entities/<path>`, against
+`block_loot_table_id`'s `blocks/<path>`), and `MobSim::reap_dead` is the call site.
+
+**The call site is the interesting part.** Before it there were four separate
+`self.mobs.retain(|m| m.health > 0.0)` sites in `mobs.rs` — the tick's
+self-damage pass, the explosion pass, a melee kill, a creeper's own detonation —
+each of which dropped a dead mob on the floor. Adding loot to one of them would
+have made a cow killed by a melee hit drop leather while a cow killed by a creeper
+dropped nothing: the same defect in three places, and each looks correct in
+isolation. Every death removal now funnels through `reap_dead`, so a new death
+cause gets drops for free.
+
+Two differences from a block drop, both from vanilla:
+
+* **Position, not `popResource`.** `Entity.spawnAtLocation` puts the item entity at
+  the mob's own position; only the *velocity* is shared (`ItemEntity`'s
+  constructor, factored out as `dropped_item_velocity`). A jittered cell position
+  is a block's geometry, not a mob's.
+* **The empty loot context, so `killed_by_player` is `false`.** Rare drops gated on
+  a player kill do not appear, and `enchanted_count_increase` (looting) contributes
+  nothing. That is honest rather than approximated — `LootContext` has no attacker
+  field to fill.
+
 ## Configuration
 
 * `block_drops::BLOCK_DROPS_BEHAVIOR_SEED` — the per-connection roll/placement seed. Separate from
   `COMPOSTER_BEHAVIOR_SEED` so a composter click cannot shift which drop a later break rolls.
-* `assets/loot_table/` — the bundled corpus (823 KB, 1,230 files), embedded by `build.rs` and parsed once per
-  process behind a `OnceLock`. Measured in release: `load_bundled` plus a roll of all 1,230 tables completes
+* `assets/loot_table/` — the bundled corpus (885 KB, 1,241 files), embedded by `build.rs` and parsed once per
+  process behind a `OnceLock`. Measured in release: `load_bundled` plus a roll of all bundled tables completes
   inside a test that reports `0.01s`, so the first block break of a session carries no visible hitch.
 
 ## Dependencies

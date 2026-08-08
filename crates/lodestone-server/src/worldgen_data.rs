@@ -49,6 +49,22 @@ include!(concat!(env!("OUT_DIR"), "/embedded_worldgen.rs"));
 // `EmbeddedResolver::structure_template`.
 include!(concat!(env!("OUT_DIR"), "/embedded_structures.rs"));
 
+/// The raw `.nbt` bytes of one bundled structure template, borrowed from rodata.
+///
+/// The same table [`EmbeddedResolver::structure_template`] serves the worldgen
+/// engine from, exposed without its owning `Vec` copy because
+/// [`crate::structure_loot`] only reads: it re-parses these bytes for the data
+/// markers the engine's own parser drops. Accepts an id with or without the
+/// `minecraft:` prefix.
+#[must_use]
+pub fn embedded_structure_template(id: &str) -> Option<&'static [u8]> {
+    let name = id.strip_prefix("minecraft:").unwrap_or(id);
+    EMBEDDED_STRUCTURE_TEMPLATES
+        .binary_search_by(|(key, _)| (*key).cmp(name))
+        .ok()
+        .map(|i| EMBEDDED_STRUCTURE_TEMPLATES[i].1)
+}
+
 /// The fallback biome [`OverworldGenerator`] would use if [`EmbeddedResolver`]
 /// supplied no biome-parameter table — it does (see [`EmbeddedResolver::biome_parameters`]),
 /// so real per-column biome variety (issue #405) is what this generator

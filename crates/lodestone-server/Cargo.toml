@@ -68,6 +68,11 @@ lodestone-data = { path = "../lodestone-data" }
 # code and no new transitive graph at all. The `json` feature is what the
 # bundled corpus loader needs.
 lodestone-game = { path = "../lodestone-game", features = ["json"] }
+# The gzip wrapper Mojang ships structure templates with. `structure_loot`
+# re-reads the raw `.nbt` bytes this crate already embeds, because the parsed
+# `StructureTemplate` deliberately drops the per-block NBT the chest markers
+# live in. Same crate `lodestone-worldgen` already uses for the same files.
+flate2 = { workspace = true }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
 # `tracing::warn!` in `tick::run_tick_loop`'s overload path (issue #285) — the

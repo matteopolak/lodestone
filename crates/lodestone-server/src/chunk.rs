@@ -781,6 +781,29 @@ pub trait ChunkSource: Send + Sync {
     /// discard — rather than inherit silence.
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str);
 
+    /// The block entity this source's data carries at `(x, y, z)`, if any —
+    /// a *generated* one, such as a structure chest's rolled contents
+    /// (issue #337) or a bee nest's occupants.
+    ///
+    /// This is not the live world's registry: [`crate::block_entities::BlockEntityRegistry`]
+    /// holds every entity a player has placed or mutated, and is consulted first
+    /// by every caller. This answers the narrower question "what did generation
+    /// put here", which is what lets a chest that has never been opened be
+    /// hydrated into the registry on the first click instead of arriving empty.
+    ///
+    /// Defaulted, because it regenerates a column and an implementor with a
+    /// retained column should override it — unlike [`block_state`](Self::block_state),
+    /// this is called at most once per container click, not every 50 ms, so the
+    /// default is affordable rather than a trap.
+    fn block_entity(&self, x: i32, y: i32, z: i32) -> Option<crate::block_entities::BlockEntity> {
+        let pos = BlockPos::new(x, y, z);
+        self.column(x.div_euclid(16), z.div_euclid(16))
+            .block_entities()
+            .iter()
+            .find(|(at, _)| *at == pos)
+            .map(|(_, entity)| entity.clone())
+    }
+
     /// Tells the source that the column at `(cx, cz)` is no longer resident in
     /// whatever cache sits above it, so a layer that retains state per column
     /// may release it.
@@ -1063,7 +1086,63 @@ impl OverworldChunkSource {
     fn attach_structures(&self, column: &mut ChunkColumn, cx: i32, cz: i32) {
         let starts = self.generator.structure_starts(cx, cz);
         let references = self.generator.structure_references(cx, cz);
+        self.fill_structure_chests(column, cx, cz, &references);
         column.set_structures(starts, references);
+    }
+
+    /// Attaches the filled chests every structure piece reaching this chunk asks
+    /// for (issue #337) — see [`crate::structure_loot`] for the marker pass.
+    ///
+    /// **The starts come from `references`, not from `structure_starts(cx, cz)`.**
+    /// The latter is the starts whose *origin* is this column, and a shipwreck's
+    /// chest is routinely in a neighbouring chunk; `references` is vanilla's own
+    /// "which structures reach here" answer, already narrowed to the chunk box.
+    /// Using the origin list instead loses every chest that crosses a border,
+    /// which is most of them and which no count-the-chests test would notice.
+    fn fill_structure_chests(
+        &self,
+        column: &mut ChunkColumn,
+        cx: i32,
+        cz: i32,
+        references: &std::collections::BTreeMap<String, Vec<i64>>,
+    ) {
+        if references.is_empty() {
+            return;
+        }
+        let mut origins: Vec<(i32, i32)> = references
+            .values()
+            .flatten()
+            .map(|packed| (*packed as u32 as i32, (*packed >> 32) as u32 as i32))
+            .collect();
+        origins.sort_unstable();
+        origins.dedup();
+
+        let mut starts = Vec::new();
+        for (ox, oz) in origins {
+            starts.extend(self.generator.structure_starts(ox, oz));
+        }
+        let chests = crate::structure_loot::chests_for_chunk(
+            &starts,
+            cx,
+            cz,
+            crate::block_drops::bundled_tables(),
+        );
+        if chests.is_empty() {
+            return;
+        }
+        let mut entities = column.block_entities().to_vec();
+        for chest in chests {
+            if let Some(block) = chest.block {
+                column.set_block(
+                    chest.pos.x.rem_euclid(16),
+                    chest.pos.y,
+                    chest.pos.z.rem_euclid(16),
+                    block,
+                );
+            }
+            entities.push((chest.pos, chest.entity));
+        }
+        column.set_block_entities(entities);
     }
 }
 
@@ -1111,10 +1190,10 @@ impl ChunkSource for OverworldChunkSource {
             let mut column = ChunkColumn::from_generated(self.generator.column(cx, cz));
             // Same attachment as `column()`, because an edited column is the one
             // that gets *saved* — dropping the structures here would delete a
-            // village's `starts` from the first chunk a player breaks a block in.
-            let starts = self.generator.structure_starts(cx, cz);
-            let references = self.generator.structure_references(cx, cz);
-            column.set_structures(starts, references);
+            // village's `starts` from the first chunk a player breaks a block in,
+            // and dropping the chests would empty a shipwreck the moment someone
+            // mined a block in its chunk.
+            self.attach_structures(&mut column, cx, cz);
             column
         });
         column.set_block(lx, y, lz, name);

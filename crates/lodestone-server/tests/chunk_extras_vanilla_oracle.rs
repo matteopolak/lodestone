@@ -248,9 +248,16 @@ fn unmodelled_block_entity_ids_are_skipped_rather_than_failing_the_chunk() {
         extras.block_entities[5].1,
         BlockEntity::Hopper(_)
     ));
-    // The chest (unmodelled) is at x=0 and preserved verbatim as Opaque.
+    // The chest is modelled since issue #337 (structure chests need real slots)
+    // and resolves to a `Container`, not `Opaque`.
     assert!(matches!(
         extras.block_entities[0].1,
+        BlockEntity::Container { .. }
+    ));
+    // The vault (still unmodelled) is at x=1 and is preserved verbatim as
+    // Opaque — the arm that keeps a chunk written by a real server loadable.
+    assert!(matches!(
+        extras.block_entities[1].1,
         BlockEntity::Opaque { .. }
     ));
 }

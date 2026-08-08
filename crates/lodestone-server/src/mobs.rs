@@ -2119,7 +2119,7 @@ impl<'w> MobSim<'w> {
                 self.note_vocalisation(id, applied);
             }
         }
-        self.mobs.retain(|m| m.health > 0.0);
+        self.reap_dead();
         self.resolve_breeding(bred);
 
         // Issue #213: `explode`'s exposure/damage maths was already correct
@@ -2581,7 +2581,7 @@ impl<'w> MobSim<'w> {
         for &(id, applied) in &dealt {
             self.note_vocalisation(id, applied);
         }
-        self.mobs.retain(|m| m.health > 0.0);
+        self.reap_dead();
         dealt
     }
 
@@ -2691,7 +2691,10 @@ impl<'w> MobSim<'w> {
         self.note_vocalisation(target_id, damage_dealt);
         let killed = health <= 0.0;
         if killed {
-            self.mobs.retain(|m| m.id != target_id);
+            // Through `reap_dead`, not a bare retain: a melee kill must drop the
+            // same loot an explosion kill does. Health is already `0.0` here, so
+            // the shared reaper picks exactly this mob out.
+            self.reap_dead();
         }
         Some(AttackOutcome {
             health,
@@ -2893,6 +2896,80 @@ impl<'w> MobSim<'w> {
         self.projectiles.get(id).map(|p| p.position)
     }
 
+    /// Removes every mob at or below zero health, rolling its death loot table
+    /// on the way out (issue #272 — the mob half of #337's loot chain).
+    ///
+    /// **This is the crate's only mob-removal-by-death path, deliberately.**
+    /// Before it, four separate `self.mobs.retain(|m| m.health > 0.0)` sites
+    /// dropped a dead mob on the floor, and adding loot to one of them would have
+    /// meant a cow killed by a melee hit dropping leather while a cow killed by a
+    /// creeper dropped nothing — the same defect in three places. Every removal
+    /// now funnels through here, so a new death cause gets drops for free.
+    ///
+    /// Vanilla's chain is `LivingEntity.die` → `dropAllDeathLoot` →
+    /// `dropFromLootTable` → `Entity.spawnAtLocation`: the table is
+    /// `entities/<type>` ([`crate::block_drops::mob_loot_table_id`]) and each
+    /// stack becomes an item entity at the mob's own position with the
+    /// `ItemEntity` constructor's velocity — **not** `popResource`'s jittered
+    /// cell position, which is a block's drop.
+    ///
+    /// Rolls in the **empty** loot context, so `killed_by_player` is `false` and
+    /// `enchanted_count_increase` (looting) contributes nothing: rare drops gated
+    /// on a player kill do not appear. That is honest rather than approximated —
+    /// the context has no attacker field to fill (see [`crate::loot`]).
+    fn reap_dead(&mut self) {
+        let dead: Vec<(ResourceKey, Vec3)> = self
+            .mobs
+            .iter()
+            .filter(|m| m.health <= 0.0)
+            .map(|m| (m.entity_type.clone(), m.position()))
+            .collect();
+        if dead.is_empty() {
+            return;
+        }
+        self.mobs.retain(|m| m.health > 0.0);
+        for (entity_type, position) in dead {
+            self.drop_death_loot(&entity_type, position);
+        }
+    }
+
+    /// Rolls `entity_type`'s death loot table and spawns the result at
+    /// `position`. See [`reap_dead`](Self::reap_dead) for the vanilla chain.
+    ///
+    /// Seeded from the tick count and the position, so a death is deterministic
+    /// for a given world state without threading a connection's RNG into the sim.
+    fn drop_death_loot(&mut self, entity_type: &ResourceKey, position: Vec3) {
+        let Some(table) = crate::block_drops::mob_loot_table_id(entity_type) else {
+            return;
+        };
+        let tables = crate::block_drops::bundled_tables();
+        if tables.get(&table).is_none() {
+            return;
+        }
+        let mut rng = SpawnRng::new(
+            (self.tick_count as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                ^ (position.x.to_bits() ^ position.z.to_bits().rotate_left(31)),
+        );
+        let rolled = tables.roll(&table, &crate::loot::LootContext::default(), &mut rng);
+        for stack in rolled {
+            if stack.count == 0 {
+                continue;
+            }
+            let velocity = crate::block_drops::dropped_item_velocity(&mut rng);
+            let count = u8::try_from(stack.count).unwrap_or(u8::MAX);
+            self.spawn_item(
+                stack.item.clone(),
+                position,
+                velocity,
+                ItemLifecycle::newly_dropped(
+                    count,
+                    lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE,
+                ),
+            );
+        }
+    }
+
     /// Registers a dropped item entity at `position` with fall velocity
     /// `velocity` and lifecycle `lifecycle` (typically
     /// [`ItemLifecycle::newly_dropped`]) so [`tick`](Self::tick) advances its
@@ -2945,6 +3022,19 @@ impl<'w> MobSim<'w> {
     #[must_use]
     pub fn item_position(&self, id: i32) -> Option<Vec3> {
         self.item_state.get(&id).map(|s| s.motion.position)
+    }
+
+    /// Every tracked dropped item as `(item id, count)`, in arbitrary order —
+    /// the pair a caller needs to ask "what did that death drop".
+    #[must_use]
+    pub fn dropped_items(&self) -> Vec<(String, u8)> {
+        self.item_state
+            .iter()
+            .map(|(id, state)| {
+                let count = self.items.get(*id).map_or(0, |lifecycle| lifecycle.count);
+                (state.item.to_string(), count)
+            })
+            .collect()
     }
 
     /// The current age/pickup-delay/count lifecycle of a tracked dropped
@@ -3717,6 +3807,8 @@ pub(crate) async fn run_mob_tick_loop(handle: MobHandle, out: LiveMobSource) {
 /// that bounds target acquisition, and the miss case that made it wrong.
 #[cfg(test)]
 mod follow_range_tests {
+    // Also home to the death-loot gate (issue #272), which reuses this module's
+    // `flat_world` rather than growing a second copy of it.
     use super::*;
 
     /// A floor wide enough for a mob at the origin and a player out past 36
@@ -3756,6 +3848,44 @@ mod follow_range_tests {
             }
         }
         false
+    }
+
+    /// A killed mob drops its loot table's items (issue #272).
+    ///
+    /// The expected values come from vanilla's own `entities/cow.json`, not from
+    /// our roller: two pools of `rolls: 1`, leather `uniform 0..2` and beef
+    /// `uniform 1..3`. So a kill always yields at least the beef, both item ids
+    /// are from that file, and — the part a wrong pool loop gets wrong — the beef
+    /// count is never zero while the leather stack may be absent entirely.
+    #[test]
+    fn a_killed_cow_drops_its_loot_table() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:cow").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+        sim.get_mut(id).expect("alive").set_health(1.0);
+
+        let outcome = sim
+            .attack(id, Vec3::new(1.0, 0.0, 0.0), 100.0, DamageFlags::default(), 0.0)
+            .expect("the cow is a live target");
+        assert!(outcome.killed);
+
+        let dropped = sim.dropped_items();
+        assert!(
+            !dropped.is_empty(),
+            "a cow's death must drop something — entities/cow.json guarantees the beef pool"
+        );
+        for (item, count) in &dropped {
+            assert!(
+                matches!(item.as_str(), "minecraft:leather" | "minecraft:beef"),
+                "cow.json names only leather and beef, got {item}"
+            );
+            assert!(*count > 0, "a zero-count stack must be filtered, got {item}");
+        }
+        assert!(
+            dropped.iter().any(|(item, _)| item == "minecraft:beef"),
+            "the beef pool is `rolls: 1` with `uniform 1..3`, so it is never absent: {dropped:?}"
+        );
     }
 
     const TICKS: usize = 80;
