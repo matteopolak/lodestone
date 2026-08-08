@@ -300,6 +300,63 @@ pub(super) fn recipe_panel_geometry(
     })
 }
 
+/// Whether the recipe-book panel **owns the pointer** at `cursor` this frame —
+/// the draw-side counterpart of [`WindowApp::handle_recipe_panel_click`]'s
+/// "consumed the click".
+///
+/// Feeds [`crate::container::ContainerFrame::with_hover_blocked`], which is what
+/// stops the container's hovered-slot highlight and tooltip resolving to a slot
+/// sitting geometrically *beneath* the book. Before this existed the click path
+/// consumed the pointer over the panel and the draw did not, so hovering the open
+/// book lit up an inventory slot.
+///
+/// Goes through the same [`recipe_panel_layout`] both the click path and the panel
+/// draw use, so all three agree about where the panel is — the standing hazard
+/// `container::layout`'s own docs warn about.
+///
+/// `None` for a menu with no book at all (a chest, an anvil), and — because
+/// [`crate::container::recipe_book_panel_hit_test`] tests the toggle
+/// unconditionally and everything else only while open — `Some(Toggle)` at most
+/// while the panel is shut. A closed panel therefore blocks hover over its 20×18
+/// toggle button and nothing else, which is right: that is a widget, and vanilla
+/// does not highlight a slot under a button either.
+///
+/// Free rather than a method for the same borrow reason as [`recipe_toast_view`]:
+/// `redraw` holds a `&mut` borrow of `self.render` across the whole frame.
+pub(super) fn recipe_panel_pointer_hit(
+    book: Option<&RecipeBook>,
+    panel: &RecipePanelState,
+    menu: &Menu,
+    gui_scale: u32,
+    cursor: (f32, f32),
+    w: u32,
+    h: u32,
+) -> Option<crate::container::RecipeBookPanelHit> {
+    let book_type = recipe_book_type_for(menu)?;
+    let (tab_count, total_pages, _) = recipe_panel_contents(book, panel, menu, book_type);
+    let layout = recipe_panel_layout(
+        panel,
+        menu,
+        gui_scale,
+        w,
+        h,
+        tab_count,
+        total_pages,
+        // Icons only, and the hit-test reads no icons — see `recipe_panel_layout`'s
+        // own doc, and `handle_recipe_panel_click`, which passes the same `&[]`.
+        &[],
+    );
+    crate::container::recipe_book_panel_hit_test_with_scale(
+        &layout,
+        panel.open,
+        gui_scale,
+        w,
+        h,
+        cursor.0,
+        cursor.1,
+    )
+}
+
 /// One toast icon: a single-item [`HotbarSlot`] for `id`.
 ///
 /// `None` for an id the [`ResourceLocation`] parser rejects, which suppresses

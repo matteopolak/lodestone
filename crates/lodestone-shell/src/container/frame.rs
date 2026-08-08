@@ -111,6 +111,26 @@ pub struct ContainerFrame<'a> {
     /// same value to [`super::layout::hit_test_with_book`], or clicks land on the
     /// wrong slot while the screen looks right — this module's standing hazard.
     pub book_open: bool,
+    /// Whether an **overlay above this screen owns the pointer** this frame, so
+    /// no hovered slot resolves under it: no highlight sprites, no tooltip.
+    ///
+    /// `false` (the default) is every existing caller. The one real producer is
+    /// `redraw`, which sets it from the same
+    /// [`recipe_book_panel_hit_test_with_scale`](super::recipe_book_panel_hit_test_with_scale)
+    /// predicate `container_input`'s **click** path already consults *before* the
+    /// container's own hit test. The click path has consumed the pointer over the
+    /// panel since the panel landed; the draw had no equivalent, so the highlight
+    /// and the tooltip resolved to whatever slot happened to sit geometrically
+    /// beneath the book.
+    ///
+    /// # Why this is a separate flag and not "withhold the cursor"
+    ///
+    /// [`cursor`](Self::cursor) also positions the **carried stack**, which must
+    /// keep following the pointer over the panel — vanilla drags a held item
+    /// across the recipe book perfectly happily. Clearing the cursor would
+    /// suppress the hovered slot *and* park the carried stack, so the suppression
+    /// has to be specific to hovered-slot resolution. That is this field.
+    pub hover_blocked: bool,
 }
 
 impl<'a> ContainerFrame<'a> {
@@ -132,6 +152,7 @@ impl<'a> ContainerFrame<'a> {
             xp_level: 0,
             tooltips: None,
             book_open: false,
+            hover_blocked: false,
         }
     }
 
@@ -151,6 +172,7 @@ impl<'a> ContainerFrame<'a> {
             xp_level: 0,
             tooltips: None,
             book_open: false,
+            hover_blocked: false,
         }
     }
 
@@ -188,6 +210,17 @@ impl<'a> ContainerFrame<'a> {
     #[must_use]
     pub fn with_book_open(mut self, open: bool) -> Self {
         self.book_open = open;
+        self
+    }
+
+    /// Declare that an overlay above this screen owns the pointer this frame, so
+    /// no hovered slot resolves under it — see [`Self::hover_blocked`].
+    ///
+    /// Does **not** affect the carried stack, which keeps tracking
+    /// [`cursor`](Self::cursor) over the overlay.
+    #[must_use]
+    pub fn with_hover_blocked(mut self, blocked: bool) -> Self {
+        self.hover_blocked = blocked;
         self
     }
 

@@ -15,7 +15,7 @@ use crate::hud::item_icon::{self, IconAssets, SpecialIconDraw};
 use super::background::ContainerBackground;
 use super::builder::Builder;
 use super::frame::{ContainerFrame, LabelLayout, label_layout, menu_type_title_anchor};
-use super::layout::{MenuHit, Rect, SlotLayout, hit_test_with_scale, panel_origin_with_scale, slot_layout};
+use super::layout::{MenuHit, Rect, SlotLayout, hit_test_with_book, panel_origin_with_scale, slot_layout};
 use super::{
     BG_FLOATS_PER_VERTEX, BLAST_FURNACE_BURN_PROGRESS, BLAST_FURNACE_LIT_PROGRESS,
     BREWING_BREW_PROGRESS, BREWING_BUBBLES, BREWING_FUEL_LENGTH, CELL, FLOATS_PER_VERTEX,
@@ -384,11 +384,26 @@ impl ContainerGeometry {
         // Which slot the pointer is over — vanilla's `hoveredSlot`, set from
         // `getHoveredSlot(mouseX, mouseY)` every frame
         // (`AbstractContainerScreen.java:102`). Derived from the **same**
-        // `hit_test_with_scale` the click path calls, with the same `gui_scale`,
-        // so the highlight cannot land on a different slot than a click would —
-        // the failure mode `hit_test_with_scale`'s own doc comment warns about,
-        // here made impossible by construction rather than by matching two
-        // constants.
+        // `hit_test_with_book` the click path calls, with the same `gui_scale`
+        // *and* the same `book_open`, so the highlight cannot land on a different
+        // slot than a click would — the failure mode `hit_test_with_scale`'s own
+        // doc comment warns about, here made impossible by construction rather
+        // than by matching two constants.
+        //
+        // **This used to call `hit_test_with_scale`, which is
+        // `hit_test_with_book(…, false)`**, and that was the reported defect: the
+        // draw above shifts the whole panel right by `recipe_book_panel_shift`
+        // when the book is open, so an *unshifted* hover resolved the cursor
+        // against slot rects one shift to the left of where they were drawn. The
+        // visible symptom was hovering the open recipe book and watching an
+        // inventory slot light up — the slot that *would* have been under the
+        // cursor with the book closed. The click path and the tooltip were already
+        // book-aware; only the highlight was not.
+        //
+        // `hover_blocked` is the second half of the same fix and a different fault
+        // — the panel not consuming the pointer at all. See
+        // `ContainerFrame::hover_blocked`; note it deliberately does **not** gate
+        // the carried-stack draw below.
         //
         // `isHighlightable()` is not restated: base `Slot` returns `true` and the
         // only override in 26.2 is `NonInteractiveResultSlot` (the crafter and
@@ -396,12 +411,16 @@ impl ContainerGeometry {
         // particular a crafting table's `ResultSlot` does **not** override it, so
         // the result slot *is* highlighted — easy to assume otherwise given how
         // many other branches special-case it.
-        let hovered = frame.cursor.and_then(|[cx, cy]| {
-            match hit_test_with_scale(menu, gui_scale, width, height, cx, cy) {
-                MenuHit::Slot(i) => Some(i),
-                MenuHit::Panel | MenuHit::Outside => None,
-            }
-        });
+        let hovered = if frame.hover_blocked {
+            None
+        } else {
+            frame.cursor.and_then(|[cx, cy]| {
+                match hit_test_with_book(menu, gui_scale, width, height, cx, cy, frame.book_open) {
+                    MenuHit::Slot(i) => Some(i),
+                    MenuHit::Panel | MenuHit::Outside => None,
+                }
+            })
+        };
         let slot_rect = |menu_index: usize| {
             layout
                 .slots
@@ -710,17 +729,23 @@ impl ContainerGeometry {
         // `super::tooltip`'s module doc for why the tail of this stream is what
         // puts it on top, and for the two things it deliberately cannot show
         // (lore, enchantment names). `None` here is every existing caller.
+        //
+        // `hovered` is passed in rather than re-resolved inside `emit_tooltip`: it
+        // used to run its own `hit_test_with_book` here, which is how the tooltip
+        // and the highlight came to be answering the same question with two
+        // different calls — and they *did* disagree, because the highlight's call
+        // was the unshifted one. One resolution, two consumers.
         if let Some(advanced) = frame.tooltips {
             super::tooltip::emit_tooltip(
                 &mut b,
                 menu,
+                hovered,
                 frame.cursor,
                 advanced,
                 gui_scale,
                 width,
                 height,
                 (w, h),
-                frame.book_open,
             );
         }
 
