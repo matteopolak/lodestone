@@ -1,4 +1,4 @@
-//! Issue #26's anti-island gate: each of the eighteen new `ClientEvent`s must
+//! Issue #26's anti-island gate: each of the twenty-four new `ClientEvent`s must
 //! reach a real fold through the **production** `SessionPlugin`, not through a
 //! hand-called `apply`.
 //!
@@ -20,7 +20,7 @@
 //! # The two controls
 //!
 //! * [`route_claims_every_new_event_for_session_and_not_ingest`] checks the fork
-//!   directly, for all eighteen, so a misrouted arm fails here with a clear
+//!   directly, for all of them, so a misrouted arm fails here with a clear
 //!   message rather than as a silently unchanged store.
 //! * [`an_event_no_fold_claims_leaves_every_store_untouched`] pushes an event that
 //!   belongs to none of these stores and requires nothing to change — without it,
@@ -30,12 +30,13 @@
 use bevy_app::App;
 use lodestone_ecs::ingest::IngestQueue;
 use lodestone_ecs::{
-    NetIngest, SessionDebugFeeds, SessionPlugin, SessionServerInfo, SessionStatistics,
-    SessionWaypoints,
+    NetIngest, SessionDebugFeeds, SessionPlugin, SessionRecipeBook, SessionServerInfo,
+    SessionStatistics, SessionTrades, SessionWaypoints,
 };
 use lodestone_model::event::{
-    ChatCompletionsAction, ClientEvent, DebugSampleKind, ServerLink, ServerLinkKind, StatAward,
-    TrackedWaypoint, WaypointId, WaypointOperation, WaypointPosition,
+    ChatCompletionsAction, ClientEvent, DebugSampleKind, MerchantOffer, RecipeBookEntry,
+    ServerLink, ServerLinkKind, StatAward, TrackedWaypoint, WaypointId, WaypointOperation,
+    WaypointPosition,
 };
 use lodestone_model::{BlockPos, ChunkPos};
 
@@ -66,8 +67,8 @@ fn ingest(app: &mut App, events: Vec<ClientEvent>) {
     app.world_mut().run_schedule(NetIngest);
 }
 
-/// Every one of the eighteen, listed once so a new variant cannot be added to the
-/// decode side and forgotten here.
+/// Every one of them, listed once so a new variant cannot be added to the decode
+/// side and forgotten here.
 fn every_new_event() -> Vec<ClientEvent> {
     vec![
         ClientEvent::StatisticsAwarded {
@@ -147,6 +148,47 @@ fn every_new_event() -> Vec<ClientEvent> {
         // Deliberately last, and deliberately after `DialogShown`: it clears the
         // slot, so a fold that ignored ordering would leave a dialog open.
         ClientEvent::DialogCleared,
+        // ---- the recipe/trade tranche ----
+        ClientEvent::RecipeBookAdded {
+            entries: vec![RecipeBookEntry {
+                display_id: 4,
+                result_items: vec![12],
+                notification: true,
+                highlight: false,
+            }],
+            replace: true,
+        },
+        ClientEvent::GhostRecipeShown {
+            window_id: 2,
+            result_items: vec![12],
+        },
+        ClientEvent::RecipePropertySetsUpdated {
+            item_sets: vec![(key("minecraft:furnace_input"), vec![1, 2])],
+            stonecutter_results: vec![vec![3]],
+        },
+        ClientEvent::MerchantOffersReceived {
+            window_id: 5,
+            offers: vec![MerchantOffer {
+                cost_a: (1, 2),
+                cost_b: None,
+                result: None,
+                out_of_stock: false,
+                uses: 0,
+                max_uses: 12,
+                xp: 1,
+                special_price_diff: 0,
+                price_multiplier: 0.05,
+                demand: 0,
+            }],
+            villager_level: 3,
+            villager_xp: 70,
+            show_progress: true,
+            can_restock: true,
+        },
+        // `RecipeBookRemoved` is exercised on its own in
+        // `a_removed_recipe_leaves_has_data_set`, not here: putting it in this
+        // batch would empty the set the positive gate below asserts is non-empty,
+        // which would make that assertion pass for a fold that did nothing.
     ]
 }
 
@@ -233,6 +275,61 @@ fn every_new_event_reaches_its_session_component() {
         .0;
     assert_eq!(waypoints.len(), 1);
     assert_eq!(waypoints.positioned().count(), 1);
+
+    let book = &world
+        .get::<SessionRecipeBook>(entity)
+        .expect("SessionRecipeBook must be inserted")
+        .0;
+    assert!(book.has_data(), "recipe_book_add reached no fold");
+    assert!(book.is_unlocked(4));
+    assert_eq!(book.ghost().map(|ghost| ghost.window_id), Some(2));
+    assert_eq!(book.property_set_count(), 1);
+    assert_eq!(book.stonecutter_results().len(), 1);
+    // The join a panel needs, since a RecipeDisplayId carries no recipe name.
+    assert_eq!(book.unlocked_producing(12).count(), 1);
+
+    let trades = &world
+        .get::<SessionTrades>(entity)
+        .expect("SessionTrades must be inserted")
+        .0;
+    assert_eq!(trades.window_id(), Some(5));
+    assert_eq!(trades.offers().len(), 1);
+    assert!(trades.is_available(0));
+    assert_eq!(trades.villager_level(), 3);
+}
+
+/// `RecipeBookRemoved` gets its own run, because including it in the batch above
+/// would empty the set that gate asserts is populated.
+#[test]
+fn a_removed_recipe_leaves_has_data_set() {
+    let (mut app, entity) = session_app();
+    ingest(
+        &mut app,
+        vec![
+            ClientEvent::RecipeBookAdded {
+                entries: vec![RecipeBookEntry {
+                    display_id: 7,
+                    result_items: vec![1],
+                    notification: false,
+                    highlight: false,
+                }],
+                replace: true,
+            },
+            ClientEvent::RecipeBookRemoved {
+                display_ids: vec![7],
+            },
+        ],
+    );
+    let book = &app
+        .world()
+        .get::<SessionRecipeBook>(entity)
+        .expect("SessionRecipeBook must be inserted")
+        .0;
+    assert!(!book.is_unlocked(7));
+    assert!(
+        book.has_data(),
+        "an emptied set must still report has_data, or a consumer falls back to          showing every recipe unlocked"
+    );
 }
 
 /// The control for the gate above: an event none of these stores claims must
@@ -258,6 +355,11 @@ fn an_event_no_fold_claims_leaves_every_store_untouched() {
         0
     );
     assert!(world.get::<SessionWaypoints>(entity).unwrap().0.is_empty());
+    assert!(!world.get::<SessionRecipeBook>(entity).unwrap().0.has_data());
+    assert_eq!(
+        world.get::<SessionTrades>(entity).unwrap().0.window_id(),
+        None
+    );
 }
 
 /// A cleared debug key must actually disappear from the store *through the

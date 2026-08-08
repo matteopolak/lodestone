@@ -32,10 +32,10 @@ use lodestone_model::{
     EntityInteraction, EntityMetadataUpdate, EntityMovement, EntityVariant, EquipmentSlot,
     GameMode, Hand, ItemComponents,
     ItemEnchantment, ItemPrototype, ItemStack, ItemTool, JigsawJoint, LoginProfile,
-    LookAnchor, MainHand, MapDecoration, MapPatch,
+    LookAnchor, MainHand, MapDecoration, MapPatch, MerchantOffer as ModelMerchantOffer,
     NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
     ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry, PlayerLookAtEntity,
-    RecipeBookType,
+    RecipeBookEntry, RecipeBookType,
     RecipeBookTypeSettings,
     ResourceKey, ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, ServerLink,
     ServerLinkKind, SoundCategory, StatAward,
@@ -5432,9 +5432,310 @@ impl V770Adapter {
             Reader::new(payload).ensure_empty().map_err(dec_err)?;
             return Ok(vec![Directive::Emit(ClientEvent::DialogCleared)]);
         }
+        if packet_id == play::clientbound::RECIPE_BOOK_REMOVE {
+            let mut reader = Reader::new(payload);
+            let count = reader.var_i32().map_err(dec_err)?;
+            let count = usize::try_from(count).map_err(|_| {
+                AdapterError::Decode(format!("invalid recipe_book_remove count {count}"))
+            })?;
+            let mut display_ids = Vec::with_capacity(count.min(4096));
+            for _ in 0..count {
+                display_ids.push(reader.var_i32().map_err(dec_err)?);
+            }
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::RecipeBookRemoved {
+                display_ids,
+            })]);
+        }
+        if packet_id == play::clientbound::RECIPE_BOOK_ADD {
+            return decode_recipe_book_add(payload);
+        }
+        if packet_id == play::clientbound::PLACE_GHOST_RECIPE {
+            let mut reader = Reader::new(payload);
+            let window_id = reader.var_i32().map_err(dec_err)?;
+            let Some(result_items) = read_recipe_display(&mut reader)? else {
+                // An unmodeled nested display: the reader's position is no longer
+                // trustworthy, so drop the packet rather than emit a half-read
+                // event. Same contract as `read_component_patch`'s bail-out.
+                return Ok(Vec::new());
+            };
+            return Ok(vec![Directive::Emit(ClientEvent::GhostRecipeShown {
+                window_id,
+                result_items,
+            })]);
+        }
+        if packet_id == play::clientbound::UPDATE_RECIPES {
+            return decode_update_recipes(payload);
+        }
+        if packet_id == play::clientbound::MERCHANT_OFFERS {
+            return decode_merchant_offers(payload);
+        }
         // Everything else in play is intentionally ignored for now.
         Ok(Vec::new())
     }
+}
+
+/// Registry ids of `minecraft:slot_display`, from `SlotDisplays.java`'s
+/// registration order (and cross-checked against `registries.json`).
+///
+/// A **built-in** registry, so these ids are fixed by the jar rather than synced
+/// during Configuration — the same reason `MAP_DECORATION_TYPE_IDS` is a table.
+mod slot_display {
+    pub const EMPTY: i32 = 0;
+    pub const ANY_FUEL: i32 = 1;
+    pub const WITH_ANY_POTION: i32 = 2;
+    pub const ONLY_WITH_COMPONENT: i32 = 3;
+    pub const ITEM: i32 = 4;
+    pub const ITEM_STACK: i32 = 5;
+    pub const TAG: i32 = 6;
+    pub const DYED: i32 = 7;
+    pub const SMITHING_TRIM: i32 = 8;
+    pub const WITH_REMAINDER: i32 = 9;
+    pub const COMPOSITE: i32 = 10;
+}
+
+/// What walking a `SlotDisplay` yielded.
+///
+/// `complete == false` means the walk hit something this adapter does not model
+/// and **the reader's position is no longer trustworthy** — the caller must
+/// abandon the whole packet rather than continue. Same convention as
+/// [`read_component_patch`]'s second return value, and for the same reason: a
+/// nested union with per-entry codecs cannot be skipped generically, so partial
+/// progress is the honest outcome and silently continuing would misread every
+/// following field.
+#[derive(Debug, Default)]
+struct SlotDisplayItems {
+    /// Item registry ids this display can show, in encounter order.
+    items: Vec<i32>,
+    /// Whether the walk consumed the display exactly.
+    complete: bool,
+}
+
+impl SlotDisplayItems {
+    fn incomplete() -> Self {
+        Self {
+            items: Vec::new(),
+            complete: false,
+        }
+    }
+}
+
+/// Walks one `SlotDisplay` (`SlotDisplay.STREAM_CODEC`), collecting the item ids
+/// it can display.
+///
+/// # This is a byte-exact walk, not a skip
+///
+/// `SlotDisplay` is a **recursive** registry-dispatched union of eleven variants,
+/// four of which contain further `SlotDisplay`s and one of which
+/// (`composite`) contains a list of them. There is no length prefix anywhere, so
+/// there is no way to skip one without decoding it — which is why every consumer
+/// of `RecipeDisplay` in this crate had to wait for this function, and why the
+/// five recipe packets landed together.
+///
+/// `depth` bounds the recursion: a malicious or corrupt payload could otherwise
+/// nest `composite` indefinitely and blow the stack. Vanilla's own nesting is two
+/// or three deep in practice.
+fn read_slot_display(reader: &mut Reader<'_>, depth: u32) -> Result<SlotDisplayItems, AdapterError> {
+    // 16 is far above vanilla's own two-or-three and well below anything that
+    // threatens the stack. Returning `incomplete` rather than erroring keeps a
+    // hostile payload a dropped packet instead of a disconnect.
+    if depth > 16 {
+        return Ok(SlotDisplayItems::incomplete());
+    }
+    let kind = reader.var_i32().map_err(dec_err)?;
+    let mut items = Vec::new();
+    match kind {
+        slot_display::EMPTY | slot_display::ANY_FUEL => {}
+        slot_display::ITEM => {
+            items.push(reader.var_i32().map_err(dec_err)?);
+        }
+        slot_display::ITEM_STACK => {
+            // `ItemStackTemplate.STREAM_CODEC`: item id, count, then a
+            // `DataComponentPatch` — which is exactly what `read_component_patch`
+            // walks, including its bail-out on an unmodeled component type.
+            let item_id = reader.var_i32().map_err(dec_err)?;
+            let _count = reader.var_i32().map_err(dec_err)?;
+            let name = item_name(item_id).unwrap_or("minecraft:air");
+            let (_components, complete) = read_component_patch(reader, name)?;
+            if !complete {
+                return Ok(SlotDisplayItems::incomplete());
+            }
+            items.push(item_id);
+        }
+        slot_display::TAG => {
+            // `TagKey.streamCodec` is one `Identifier` string. The tag's *members*
+            // are not on the wire, so there is no item id to collect — a consumer
+            // that needs one resolves the tag itself.
+            let _tag = reader.string(32767).map_err(dec_err)?;
+        }
+        slot_display::WITH_ANY_POTION => {
+            let inner = read_slot_display(reader, depth + 1)?;
+            if !inner.complete {
+                return Ok(SlotDisplayItems::incomplete());
+            }
+            items.extend(inner.items);
+        }
+        slot_display::ONLY_WITH_COMPONENT => {
+            let inner = read_slot_display(reader, depth + 1)?;
+            if !inner.complete {
+                return Ok(SlotDisplayItems::incomplete());
+            }
+            // `DataComponentType.STREAM_CODEC` is a bare VarInt registry id.
+            let _component_type = reader.var_i32().map_err(dec_err)?;
+            items.extend(inner.items);
+        }
+        slot_display::DYED | slot_display::WITH_REMAINDER => {
+            // Two `SlotDisplay`s. For `dyed` they are (dye, target); for
+            // `with_remainder` (input, remainder). Both halves are walked because
+            // both must be consumed — only the first carries the item a recipe
+            // panel wants, but skipping the second is not an option (no length
+            // prefix).
+            let first = read_slot_display(reader, depth + 1)?;
+            if !first.complete {
+                return Ok(SlotDisplayItems::incomplete());
+            }
+            let second = read_slot_display(reader, depth + 1)?;
+            if !second.complete {
+                return Ok(SlotDisplayItems::incomplete());
+            }
+            items.extend(first.items);
+        }
+        slot_display::SMITHING_TRIM => {
+            for _ in 0..3 {
+                let inner = read_slot_display(reader, depth + 1)?;
+                if !inner.complete {
+                    return Ok(SlotDisplayItems::incomplete());
+                }
+                items.extend(inner.items);
+            }
+            // `TrimPattern.STREAM_CODEC` is `ByteBufCodecs.holder`: `0` means an
+            // inline `TrimPattern` follows, which this adapter does not model, so
+            // that case abandons the packet rather than guessing at its length.
+            let holder = reader.var_i32().map_err(dec_err)?;
+            if holder == 0 {
+                return Ok(SlotDisplayItems::incomplete());
+            }
+        }
+        slot_display::COMPOSITE => {
+            let count = reader.var_i32().map_err(dec_err)?;
+            let count = usize::try_from(count).map_err(|_| {
+                AdapterError::Decode(format!("invalid composite slot display count {count}"))
+            })?;
+            for _ in 0..count {
+                let inner = read_slot_display(reader, depth + 1)?;
+                if !inner.complete {
+                    return Ok(SlotDisplayItems::incomplete());
+                }
+                items.extend(inner.items);
+            }
+        }
+        // An id outside the built-in table means a modded registry entry whose
+        // payload shape is unknown. The reader cannot go on.
+        _ => return Ok(SlotDisplayItems::incomplete()),
+    }
+    Ok(SlotDisplayItems {
+        items,
+        complete: true,
+    })
+}
+
+/// Walks one `RecipeDisplay` and returns the item ids of its **result** slot.
+///
+/// The result is what a recipe panel and a toast both key on; the ingredient
+/// slots are walked only because they must be consumed. Returns `None` when the
+/// walk hit something unmodeled, with the same "abandon the packet" contract as
+/// [`read_slot_display`].
+///
+/// Variant ids are `RecipeDisplays.java`'s registration order: shapeless, shaped,
+/// furnace, stonecutter, smithing.
+fn read_recipe_display(reader: &mut Reader<'_>) -> Result<Option<Vec<i32>>, AdapterError> {
+    let kind = reader.var_i32().map_err(dec_err)?;
+    // Each variant is a fixed sequence of `SlotDisplay`s plus, for two of them,
+    // some scalars. `result_index` is which of the walked displays is the result,
+    // and `station_last` is true for every variant because `craftingStation` is
+    // always the final `SlotDisplay`.
+    let mut walked: Vec<Vec<i32>> = Vec::new();
+    let mut walk = |reader: &mut Reader<'_>, walked: &mut Vec<Vec<i32>>| -> Result<bool, AdapterError> {
+        let display = read_slot_display(reader, 0)?;
+        if !display.complete {
+            return Ok(false);
+        }
+        walked.push(display.items);
+        Ok(true)
+    };
+    let result_index = match kind {
+        // crafting_shapeless: list<SlotDisplay> ingredients, result, station.
+        0 => {
+            let count = reader.var_i32().map_err(dec_err)?;
+            let count = usize::try_from(count).map_err(|_| {
+                AdapterError::Decode(format!("invalid shapeless ingredient count {count}"))
+            })?;
+            for _ in 0..count {
+                if !walk(reader, &mut walked)? {
+                    return Ok(None);
+                }
+            }
+            let ingredients = walked.len();
+            for _ in 0..2 {
+                if !walk(reader, &mut walked)? {
+                    return Ok(None);
+                }
+            }
+            ingredients
+        }
+        // crafting_shaped: width, height, list<SlotDisplay>, result, station.
+        1 => {
+            let _width = reader.var_i32().map_err(dec_err)?;
+            let _height = reader.var_i32().map_err(dec_err)?;
+            let count = reader.var_i32().map_err(dec_err)?;
+            let count = usize::try_from(count).map_err(|_| {
+                AdapterError::Decode(format!("invalid shaped ingredient count {count}"))
+            })?;
+            for _ in 0..count {
+                if !walk(reader, &mut walked)? {
+                    return Ok(None);
+                }
+            }
+            let ingredients = walked.len();
+            for _ in 0..2 {
+                if !walk(reader, &mut walked)? {
+                    return Ok(None);
+                }
+            }
+            ingredients
+        }
+        // furnace: ingredient, fuel, result, station, duration, experience.
+        2 => {
+            for _ in 0..4 {
+                if !walk(reader, &mut walked)? {
+                    return Ok(None);
+                }
+            }
+            let _duration = reader.var_i32().map_err(dec_err)?;
+            let _experience = reader.f32().map_err(dec_err)?;
+            2
+        }
+        // stonecutter: input, result, station.
+        3 => {
+            for _ in 0..3 {
+                if !walk(reader, &mut walked)? {
+                    return Ok(None);
+                }
+            }
+            1
+        }
+        // smithing: template, base, addition, result, station.
+        4 => {
+            for _ in 0..5 {
+                if !walk(reader, &mut walked)? {
+                    return Ok(None);
+                }
+            }
+            3
+        }
+        _ => return Ok(None),
+    };
+    Ok(walked.get(result_index).cloned().or(Some(Vec::new())))
 }
 
 /// Reads a `DebugSubscription.Update`'s dispatch head: the subscription's
@@ -5527,6 +5828,222 @@ fn decode_award_stats(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     Ok(vec![Directive::Emit(ClientEvent::StatisticsAwarded {
         stats,
     })])
+}
+
+/// Consumes a `HolderSet<Item>` (`Ingredient.CONTENTS_STREAM_CODEC`) and returns
+/// the explicit item ids, or an empty list for the tag form.
+///
+/// Same wire shape as [`read_block_holder_set`], one registry over: a VarInt where
+/// `0` means a tag identifier follows and `n` means `n - 1` explicit ids.
+fn read_item_holder_set(reader: &mut Reader<'_>) -> Result<Vec<i32>, AdapterError> {
+    let discriminator = reader.var_i32().map_err(dec_err)?;
+    if discriminator == 0 {
+        let _tag = reader.string(32767).map_err(dec_err)?;
+        return Ok(Vec::new());
+    }
+    let count = usize::try_from(discriminator - 1)
+        .map_err(|_| AdapterError::Decode(format!("invalid item set size {discriminator}")))?;
+    let mut items = Vec::with_capacity(count.min(1024));
+    for _ in 0..count {
+        items.push(reader.var_i32().map_err(dec_err)?);
+    }
+    Ok(items)
+}
+
+/// Decodes `ClientboundRecipeBookAddPacket`.
+///
+/// **The trailing `replace: bool` sits after the entry list**, so the list cannot
+/// be taken as opaque trailing bytes — the whole reason this packet waited for
+/// [`read_slot_display`]. Each entry is a `RecipeDisplayEntry` then an `i8` flags
+/// byte (bit 0 notification, bit 1 highlight).
+///
+/// `RecipeDisplayEntry`'s `group` field is `ByteBufCodecs.OPTIONAL_VAR_INT`: a
+/// single VarInt where `0` is absent and a present value `v` is written `v + 1` —
+/// **not** the usual bool-then-value optional. A bool-prefixed reader would
+/// mis-frame every entry after the first.
+fn decode_recipe_book_add(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let count = reader.var_i32().map_err(dec_err)?;
+    let count = usize::try_from(count)
+        .map_err(|_| AdapterError::Decode(format!("invalid recipe_book_add count {count}")))?;
+    let mut entries = Vec::with_capacity(count.min(4096));
+    for _ in 0..count {
+        let display_id = reader.var_i32().map_err(dec_err)?;
+        let Some(result_items) = read_recipe_display(&mut reader)? else {
+            return Ok(Vec::new());
+        };
+        // `OPTIONAL_VAR_INT`, not a bool-prefixed optional.
+        let _group = reader.var_i32().map_err(dec_err)?;
+        let _category = reader.var_i32().map_err(dec_err)?;
+        if reader.bool().map_err(dec_err)? {
+            let requirement_count = reader.var_i32().map_err(dec_err)?;
+            let requirement_count = usize::try_from(requirement_count).map_err(|_| {
+                AdapterError::Decode(format!(
+                    "invalid crafting requirement count {requirement_count}"
+                ))
+            })?;
+            for _ in 0..requirement_count {
+                let _ingredient = read_item_holder_set(&mut reader)?;
+            }
+        }
+        let flags = reader.i8().map_err(dec_err)?;
+        entries.push(RecipeBookEntry {
+            display_id,
+            result_items,
+            notification: flags & 0x01 != 0,
+            highlight: flags & 0x02 != 0,
+        });
+    }
+    let replace = reader.bool().map_err(dec_err)?;
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(ClientEvent::RecipeBookAdded {
+        entries,
+        replace,
+    })])
+}
+
+/// Decodes `ClientboundUpdateRecipesPacket`: the property sets, then the
+/// stonecutter list.
+///
+/// Despite the name this is **not** the recipe corpus — it is the per-slot "which
+/// items are valid here" sets vanilla's screens grey out against, plus the
+/// stonecutter's own input→result pairs. A `RecipePropertySet` is a VarInt-counted
+/// list of item registry ids and needs no display walk; the stonecutter half does.
+fn decode_update_recipes(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let set_count = reader.var_i32().map_err(dec_err)?;
+    let set_count = usize::try_from(set_count)
+        .map_err(|_| AdapterError::Decode(format!("invalid property set count {set_count}")))?;
+    let mut item_sets = Vec::with_capacity(set_count.min(256));
+    for _ in 0..set_count {
+        let key = reader.string(32767).map_err(dec_err)?;
+        let item_count = reader.var_i32().map_err(dec_err)?;
+        let item_count = usize::try_from(item_count)
+            .map_err(|_| AdapterError::Decode(format!("invalid property item count {item_count}")))?;
+        let mut items = Vec::with_capacity(item_count.min(4096));
+        for _ in 0..item_count {
+            items.push(reader.var_i32().map_err(dec_err)?);
+        }
+        item_sets.push((parse_key(&key, "recipe property set")?, items));
+    }
+    let stonecutter_count = reader.var_i32().map_err(dec_err)?;
+    let stonecutter_count = usize::try_from(stonecutter_count).map_err(|_| {
+        AdapterError::Decode(format!("invalid stonecutter count {stonecutter_count}"))
+    })?;
+    let mut stonecutter_results = Vec::with_capacity(stonecutter_count.min(4096));
+    for _ in 0..stonecutter_count {
+        // `SingleInputEntry`: an `Ingredient` (HolderSet<Item>) then a
+        // `SlotDisplay` — a bare display, not a whole `RecipeDisplay`.
+        let _input = read_item_holder_set(&mut reader)?;
+        let display = read_slot_display(&mut reader, 0)?;
+        if !display.complete {
+            // Emit what was decoded before the unmodeled entry rather than the
+            // whole packet: the property sets above are complete and independently
+            // useful, and they are the half a screen actually reads.
+            return Ok(vec![Directive::Emit(
+                ClientEvent::RecipePropertySetsUpdated {
+                    item_sets,
+                    stonecutter_results,
+                },
+            )]);
+        }
+        stonecutter_results.push(display.items);
+    }
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(
+        ClientEvent::RecipePropertySetsUpdated {
+            item_sets,
+            stonecutter_results,
+        },
+    )])
+}
+
+/// Decodes `ClientboundMerchantOffersPacket`.
+///
+/// # The two traps
+///
+/// **Five of `MerchantOffer`'s fields are big-endian `i32`s, not VarInts** —
+/// `uses`, `maxUses`, `xp`, `specialPriceDiff` and `demand` are all `writeInt`.
+/// Almost every other integer in this protocol is a VarInt, so a
+/// VarInt-by-default reader gets all five wrong *and* desynchronises everything
+/// after them.
+///
+/// **The trailing scalars come after the offer list.** `villagerLevel`,
+/// `villagerXp`, `showProgress` and `canRestock` are all past the offers, so they
+/// are unreachable without parsing every `MerchantOffer` — including each
+/// `ItemCost`'s `DataComponentExactPredicate`, which is a VarInt-counted list of
+/// typed components. That list is `EMPTY` for every vanilla trade; a non-empty one
+/// is unmodeled here and abandons the packet rather than guessing at its length.
+fn decode_merchant_offers(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let window_id = reader.var_i32().map_err(dec_err)?;
+    let count = reader.var_i32().map_err(dec_err)?;
+    let count = usize::try_from(count)
+        .map_err(|_| AdapterError::Decode(format!("invalid merchant offer count {count}")))?;
+    let mut offers = Vec::with_capacity(count.min(64));
+    for _ in 0..count {
+        let Some(cost_a) = read_item_cost(&mut reader)? else {
+            return Ok(Vec::new());
+        };
+        let result = read_item_stack(&mut reader)?.stack;
+        let cost_b = if reader.bool().map_err(dec_err)? {
+            match read_item_cost(&mut reader)? {
+                Some(cost) => Some(cost),
+                None => return Ok(Vec::new()),
+            }
+        } else {
+            None
+        };
+        let out_of_stock = reader.bool().map_err(dec_err)?;
+        // The five `writeInt` fields. Not VarInts.
+        let uses = reader.i32().map_err(dec_err)?;
+        let max_uses = reader.i32().map_err(dec_err)?;
+        let xp = reader.i32().map_err(dec_err)?;
+        let special_price_diff = reader.i32().map_err(dec_err)?;
+        let price_multiplier = reader.f32().map_err(dec_err)?;
+        let demand = reader.i32().map_err(dec_err)?;
+        offers.push(ModelMerchantOffer {
+            cost_a,
+            cost_b,
+            result,
+            out_of_stock,
+            uses,
+            max_uses,
+            xp,
+            special_price_diff,
+            price_multiplier,
+            demand,
+        });
+    }
+    let villager_level = reader.var_i32().map_err(dec_err)?;
+    let villager_xp = reader.var_i32().map_err(dec_err)?;
+    let show_progress = reader.bool().map_err(dec_err)?;
+    let can_restock = reader.bool().map_err(dec_err)?;
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(ClientEvent::MerchantOffersReceived {
+        window_id,
+        offers,
+        villager_level,
+        villager_xp,
+        show_progress,
+        can_restock,
+    })])
+}
+
+/// Reads one `ItemCost`: item registry id, count, then a
+/// `DataComponentExactPredicate`.
+///
+/// Returns `None` when the predicate is non-empty, which this adapter does not
+/// model — see [`decode_merchant_offers`]'s doc. `EMPTY` (a zero count) is what
+/// every vanilla trade sends.
+fn read_item_cost(reader: &mut Reader<'_>) -> Result<Option<(i32, i32)>, AdapterError> {
+    let item_id = reader.var_i32().map_err(dec_err)?;
+    let count = reader.var_i32().map_err(dec_err)?;
+    let predicate_count = reader.var_i32().map_err(dec_err)?;
+    if predicate_count != 0 {
+        return Ok(None);
+    }
+    Ok(Some((item_id, count)))
 }
 
 /// Decodes `ClientboundCustomReportDetailsPacket`: at most 32 `(title,

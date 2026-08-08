@@ -560,3 +560,343 @@ fn test_instance_block_status_has_an_optional_size() {
     };
     assert_eq!(size, Some((1, 2, 3)));
 }
+
+// ---- the recipe/trade tranche ----------------------------------------------
+//
+// All five of these needed `read_slot_display`: `SlotDisplay` is a *recursive*
+// registry-dispatched union of eleven variants with no length prefix anywhere, so
+// there is no way to skip one without decoding it. That is why none of them could
+// land before the walker existed.
+//
+// `SlotDisplay` ids used below (`SlotDisplays.java` registration order):
+//   0 empty, 1 any_fuel, 4 item, 6 tag, 9 with_remainder, 10 composite.
+// `RecipeDisplay` ids (`RecipeDisplays.java`): 0 shapeless, 1 shaped, 3 stonecutter.
+
+/// A `SlotDisplay` of kind `item` holding item registry id `id`.
+fn item_display(id: u8) -> Vec<u8> {
+    vec![0x04, id]
+}
+
+/// An `empty` `SlotDisplay` — zero payload after its id.
+const EMPTY_DISPLAY: [u8; 1] = [0x00];
+
+#[test]
+fn recipe_book_remove_is_a_counted_list_of_display_ids() {
+    let ClientEvent::RecipeBookRemoved { display_ids } =
+        one(play::clientbound::RECIPE_BOOK_REMOVE, &[0x02, 0x07, 0x09])
+    else {
+        panic!("wrong event");
+    };
+    assert_eq!(display_ids, vec![7, 9]);
+}
+
+/// **The trap.** `replace` sits *after* the entry list, so the list cannot be
+/// carried as opaque trailing bytes — you must walk every display to reach it.
+/// This test's `replace` is `true`, and a decoder that grabbed the tail as opaque
+/// would either lose it or read a display byte as the flag.
+#[test]
+fn recipe_book_add_reaches_the_replace_flag_past_the_entry_list() {
+    // count 1; entry = display_id 4, then a shapeless RecipeDisplay
+    // (0 ingredients, result = item 12, station = empty), then group
+    // (OPTIONAL_VAR_INT 0 = absent), category 3, no crafting requirements,
+    // flags 0b11; then replace = true.
+    let payload: Vec<u8> = [
+        &[0x01u8][..],       // entry count
+        &[0x04],             // display_id
+        &[0x00],             // RecipeDisplay kind 0 = crafting_shapeless
+        &[0x00],             // ingredient list count 0
+        &item_display(12),   // result
+        &EMPTY_DISPLAY,      // craftingStation
+        &[0x00],             // group: OPTIONAL_VAR_INT absent
+        &[0x03],             // category registry id
+        &[0x00],             // craftingRequirements absent
+        &[0x03],             // flags: notification | highlight
+        &[0x01],             // replace = true
+    ]
+    .concat();
+    let ClientEvent::RecipeBookAdded { entries, replace } =
+        one(play::clientbound::RECIPE_BOOK_ADD, &payload)
+    else {
+        panic!("wrong event");
+    };
+    assert!(replace, "the trailing flag must be reached, not lost");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].display_id, 4);
+    assert_eq!(
+        entries[0].result_items,
+        vec![12],
+        "the *result* slot's item, not an ingredient's -- shapeless puts the \
+         result after the ingredient list"
+    );
+    assert!(entries[0].notification);
+    assert!(entries[0].highlight);
+}
+
+/// The control for "it really walks the ingredients": the same packet with two
+/// ingredients before the result must still pick the result, and must still land
+/// on the trailing flag. A decoder that took the *first* display as the result
+/// would report item 1 here and item 12 above, passing the test above alone.
+#[test]
+fn a_shapeless_displays_result_is_after_its_ingredients() {
+    let payload: Vec<u8> = [
+        &[0x01u8][..],
+        &[0x04],
+        &[0x00],           // crafting_shapeless
+        &[0x02],           // two ingredients
+        &item_display(1),
+        &item_display(2),
+        &item_display(12), // result
+        &EMPTY_DISPLAY,    // station
+        &[0x00],
+        &[0x03],
+        &[0x00],
+        &[0x00], // flags: neither bit
+        &[0x00], // replace = false
+    ]
+    .concat();
+    let ClientEvent::RecipeBookAdded { entries, replace } =
+        one(play::clientbound::RECIPE_BOOK_ADD, &payload)
+    else {
+        panic!("wrong event");
+    };
+    assert!(!replace);
+    assert_eq!(
+        entries[0].result_items,
+        vec![12],
+        "picked an ingredient instead of the result"
+    );
+    assert!(!entries[0].notification);
+    assert!(!entries[0].highlight);
+}
+
+/// A `shaped` display carries width and height *before* its ingredient list.
+/// Skipping them shifts the whole walk by two bytes.
+#[test]
+fn a_shaped_display_consumes_its_width_and_height() {
+    let payload: Vec<u8> = [
+        &[0x01u8][..],
+        &[0x09],           // display_id
+        &[0x01],           // crafting_shaped
+        &[0x02],           // width
+        &[0x02],           // height
+        &[0x01],           // one ingredient
+        &item_display(5),
+        &item_display(21), // result
+        &EMPTY_DISPLAY,    // station
+        &[0x00],
+        &[0x00],
+        &[0x00],
+        &[0x00],
+        &[0x01], // replace
+    ]
+    .concat();
+    let ClientEvent::RecipeBookAdded { entries, replace } =
+        one(play::clientbound::RECIPE_BOOK_ADD, &payload)
+    else {
+        panic!("wrong event");
+    };
+    assert!(replace);
+    assert_eq!(entries[0].display_id, 9);
+    assert_eq!(entries[0].result_items, vec![21]);
+}
+
+/// A `composite` result collects every nested display's item, and nesting is what
+/// makes the walk recursive rather than a fixed field list.
+#[test]
+fn a_composite_result_collects_every_nested_item() {
+    let payload: Vec<u8> = [
+        &[0x01u8][..],
+        &[0x01],
+        &[0x03], // stonecutter: input, result, station
+        &item_display(1),
+        &[0x0A, 0x02][..], // result = composite of 2
+        &item_display(7),
+        &item_display(8),
+        &EMPTY_DISPLAY, // station
+        &[0x00],
+        &[0x00],
+        &[0x00],
+        &[0x00],
+        &[0x00],
+    ]
+    .concat();
+    let ClientEvent::RecipeBookAdded { entries, .. } =
+        one(play::clientbound::RECIPE_BOOK_ADD, &payload)
+    else {
+        panic!("wrong event");
+    };
+    assert_eq!(entries[0].result_items, vec![7, 8]);
+}
+
+/// An unmodeled `SlotDisplay` id must abandon the packet, not emit a half-read
+/// event: the reader's position is untrustworthy from that point, so anything
+/// after it would be misattributed bytes.
+#[test]
+fn an_unknown_slot_display_drops_the_packet_rather_than_guessing() {
+    let payload: Vec<u8> = [
+        &[0x01u8][..],
+        &[0x01],
+        &[0x03],
+        &[0x7Fu8][..], // slot display id 127: not in the built-in table
+        &[0x00],
+    ]
+    .concat();
+    assert!(
+        decode(play::clientbound::RECIPE_BOOK_ADD, &payload).is_empty(),
+        "an unmodeled nested display must emit nothing"
+    );
+    // The control: the same framing with a *known* display id does emit, so the
+    // assertion above is about the unknown id and not about the framing.
+    let ok: Vec<u8> = [
+        &[0x01u8][..],
+        &[0x01],
+        &[0x03],
+        &item_display(1),
+        &item_display(2),
+        &EMPTY_DISPLAY,
+        &[0x00],
+        &[0x00],
+        &[0x00],
+        &[0x00],
+        &[0x00],
+    ]
+    .concat();
+    assert_eq!(decode(play::clientbound::RECIPE_BOOK_ADD, &ok).len(), 1);
+}
+
+#[test]
+fn place_ghost_recipe_carries_the_window_and_the_result() {
+    let payload: Vec<u8> = [
+        &[0x03u8][..], // window id
+        &[0x03],       // stonecutter display
+        &item_display(1),
+        &item_display(44), // result
+        &EMPTY_DISPLAY,
+    ]
+    .concat();
+    let ClientEvent::GhostRecipeShown {
+        window_id,
+        result_items,
+    } = one(play::clientbound::PLACE_GHOST_RECIPE, &payload)
+    else {
+        panic!("wrong event");
+    };
+    assert_eq!(window_id, 3);
+    assert_eq!(result_items, vec![44]);
+}
+
+/// `update_recipes`' first field is cleanly decodable; the second needs a
+/// `SlotDisplay` walk. The `tag` display is included because it consumes an
+/// `Identifier` string and contributes no item — a walker that assumed every
+/// display yields an item would mis-frame the entry after it.
+#[test]
+fn update_recipes_decodes_property_sets_then_the_stonecutter_list() {
+    let payload: Vec<u8> = [
+        &[0x01u8][..], // one property set
+        &[0x17],       // key length: "minecraft:furnace_input" = 23
+        b"minecraft:furnace_input",
+        &[0x02, 0x05, 0x06], // two item ids
+        &[0x02],             // two stonecutter entries
+        // entry 1: ingredient = holder set of one explicit id, result = item 9
+        &[0x02, 0x03][..],
+        &item_display(9),
+        // entry 2: ingredient = tag form, result = a `tag` display (no item)
+        &[0x00, 0x0E][..],
+        b"minecraft:logs",
+        &[0x06, 0x0E][..],
+        b"minecraft:logs",
+    ]
+    .concat();
+    let ClientEvent::RecipePropertySetsUpdated {
+        item_sets,
+        stonecutter_results,
+    } = one(play::clientbound::UPDATE_RECIPES, &payload)
+    else {
+        panic!("wrong event");
+    };
+    assert_eq!(item_sets.len(), 1);
+    assert_eq!(item_sets[0].0, key("minecraft:furnace_input"));
+    assert_eq!(item_sets[0].1, vec![5, 6]);
+    assert_eq!(stonecutter_results.len(), 2);
+    assert_eq!(stonecutter_results[0], vec![9]);
+    assert!(
+        stonecutter_results[1].is_empty(),
+        "a `tag` display consumes an Identifier and yields no item id"
+    );
+}
+
+/// **Two traps in one packet.** Five `MerchantOffer` fields are big-endian `i32`s
+/// rather than VarInts, and the trailing scalars sit *after* the offer list — so
+/// they are unreachable unless every offer parsed exactly. The values below are
+/// chosen so a VarInt misread cannot coincide with the right answer.
+#[test]
+fn merchant_offers_reads_five_plain_i32s_and_reaches_the_trailing_scalars() {
+    let payload: Vec<u8> = [
+        &[0x05u8][..], // window id
+        &[0x01],       // one offer
+        // cost_a: item 3, count 2, empty component predicate
+        &[0x03, 0x02, 0x00][..],
+        // result: an absent item stack (count 0)
+        &[0x00][..],
+        // cost_b absent
+        &[0x00][..],
+        // out_of_stock
+        &[0x00][..],
+        &4i32.to_be_bytes()[..],   // uses
+        &12i32.to_be_bytes()[..],  // max_uses
+        &2i32.to_be_bytes()[..],   // xp
+        &(-1i32).to_be_bytes()[..], // special_price_diff -- negative, so a VarInt
+                                    // reader cannot land on the same value
+        &0.05f32.to_be_bytes()[..], // price_multiplier
+        &7i32.to_be_bytes()[..],    // demand
+        // trailing scalars, past the list
+        &[0x03][..], // villager_level
+        &[0x46][..], // villager_xp = 70
+        &[0x01][..], // show_progress
+        &[0x01][..], // can_restock
+    ]
+    .concat();
+    let ClientEvent::MerchantOffersReceived {
+        window_id,
+        offers,
+        villager_level,
+        villager_xp,
+        show_progress,
+        can_restock,
+    } = one(play::clientbound::MERCHANT_OFFERS, &payload)
+    else {
+        panic!("wrong event");
+    };
+    assert_eq!(window_id, 5);
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].cost_a, (3, 2));
+    assert_eq!(offers[0].cost_b, None);
+    assert_eq!(offers[0].uses, 4);
+    assert_eq!(offers[0].max_uses, 12);
+    assert_eq!(offers[0].xp, 2);
+    assert_eq!(
+        offers[0].special_price_diff, -1,
+        "a negative writeInt field -- a VarInt reader would produce a huge \
+         positive number here and desynchronise everything after it"
+    );
+    assert_eq!(offers[0].price_multiplier, 0.05);
+    assert_eq!(offers[0].demand, 7);
+    // These four are the proof the offer list parsed exactly: they sit past it.
+    assert_eq!(villager_level, 3);
+    assert_eq!(villager_xp, 70);
+    assert!(show_progress);
+    assert!(can_restock);
+}
+
+/// A non-empty `DataComponentExactPredicate` is unmodeled and must abandon the
+/// packet. Every vanilla trade sends `EMPTY`, so this is the datapack case.
+#[test]
+fn a_merchant_offer_with_a_component_predicate_drops_the_packet() {
+    let payload: Vec<u8> = [
+        &[0x05u8][..],
+        &[0x01],
+        &[0x03, 0x02, 0x01][..], // predicate count 1: unmodeled
+    ]
+    .concat();
+    assert!(decode(play::clientbound::MERCHANT_OFFERS, &payload).is_empty());
+}
