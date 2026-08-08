@@ -169,11 +169,29 @@ again immediately afterwards, so nothing downstream inherits this pass's depth.
   (the right arm's cube origin does not move with the width), also recorded
   there. **The line this bullet used to call "the one line that changes" was
   `const SLIM: bool = false`; it is gone.**
-* **Live pose.** The avatar is `AnimInput::REST` plus the two look angles: no walk
-  cycle, no attack swing, no crouch. Vanilla poses the *live* render state, so a
-  sprinting player's inventory avatar has its arms mid-swing. `gui_entity_anim`
-  takes a `base: AnimInput` precisely so a caller with real `Sim` state can pass it
-  without touching the pose maths.
+* **Live pose — now fed, partially.** `ContainerFrame::with_avatar_pose` →
+  `PlayerAvatar::pose` → `gui_entity_anim`'s `base`, produced in
+  `app/redraw.rs` from `Sim::hand_swing_progress()` and `Sim::tick_count()`. So
+  the **attack swing** reaches the avatar: open your inventory during the tail of
+  a swing and the arm is mid-swing, which is what vanilla does (it poses the real
+  render state).
+
+  **`limb_swing`/`limb_swing_amount` — the walk cycle — are still `REST`, and the
+  reason is a crate boundary rather than an omission.** The walk state lives on
+  `Sim::body_pose`, a private field whose only public reader is
+  `sim/camera.rs::third_person_body_state`, and that returns `None` in first
+  person — the only camera mode the inventory screen is ever open in. The patch
+  is small and belongs in `sim/`: factor the `AnimInput` construction out of
+  `third_person_body_state` into a `pub fn local_body_anim(&self) -> AnimInput`
+  with **no** `camera_type.is_first_person()` early return, and pass it in
+  `redraw.rs` instead of the two-field literal. Nothing else has to change.
+
+  One trap if you touch this: **`attack_anim` is a phase, and `1.0` is a no-op.**
+  `HumanoidModel.setupAttackAnimation` drives it through sines, so phase `1.0` is
+  the rest pose again. A gate written with `1.0` measures a delta of `1.7e-8` and
+  reads as "the pose never arrives" when the pose is arriving perfectly.
+  `the_live_pose_reaches_the_draw_and_moves_the_right_arm` uses `0.5` and asserts
+  the endpoint identity so the property is recorded rather than commented.
 * **Armour, held items and the elytra.** The world path draws all three off the
   wearer's own part matrices (`prepare_armour`, `merge_held_items`); the avatar
   draws the body only. The seam is `avatar_part_matrices`' output — the same

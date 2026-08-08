@@ -146,6 +146,23 @@ pub struct PlayerAvatar {
     /// caller has no cursor, which is [`GuiEntityLook::FORWARD`] — an avatar
     /// looking straight out, not one snapped to a corner.
     pub mouse: [f32; 2],
+    /// The **live pose** to draw over, before the two look angles are folded in.
+    ///
+    /// Vanilla poses the *live* render state — `InventoryScreen` hands
+    /// `extractEntityInInventoryFollowsMouse` the real player entity, so a
+    /// sprinting player's inventory avatar really does have its arms mid-swing.
+    /// [`AnimInput::REST`] is the honest default for a caller with no `Sim`
+    /// (every hermetic gate, and `PlayerAvatar::new`).
+    ///
+    /// **Partially fed today, and the gap is a crate boundary rather than an
+    /// omission.** `attack_anim` and `age_ticks` come off `Sim`'s public
+    /// `hand_swing_progress()`/`tick_count()`; `limb_swing`/`limb_swing_amount`
+    /// (the walk cycle) live on `Sim::body_pose`, a **private** field whose only
+    /// public reader is `sim/camera.rs::third_person_body_state`, and that
+    /// returns `None` in first person — which is the only camera mode the
+    /// inventory screen is ever open in. Reaching it needs a small accessor in
+    /// `sim/`; see `docs/inventory-player-preview.md`.
+    pub pose: AnimInput,
 }
 
 impl PlayerAvatar {
@@ -164,7 +181,11 @@ impl PlayerAvatar {
             h: INVENTORY_RECT_SIZE[1],
         };
         let mouse = cursor_logical.unwrap_or([rect.x + rect.w * 0.5, rect.y + rect.h * 0.5]);
-        Self { rect, mouse }
+        Self {
+            rect,
+            mouse,
+            pose: AnimInput::REST,
+        }
     }
 
     /// `[x, y, w, h]`, the shape `lodestone_render::gui_entity` takes.
@@ -445,6 +466,18 @@ impl PlayerPreview {
     }
 }
 
+impl PlayerAvatar {
+    /// The same avatar posed over a live [`AnimInput`] — see
+    /// [`PlayerAvatar::pose`]. Builder-style so every existing caller keeps
+    /// [`AnimInput::REST`], the same shape `ContainerFrame`'s own `with_*`
+    /// methods take and for the same reason.
+    #[must_use]
+    pub fn with_pose(mut self, pose: AnimInput) -> Self {
+        self.pose = pose;
+        self
+    }
+}
+
 /// The per-part `mesh → clip` matrices the avatar draws with, at
 /// `logical_w × logical_h`.
 ///
@@ -469,7 +502,9 @@ fn avatar_part_matrices(
     logical_h: u32,
 ) -> Vec<Mat4> {
     let look = avatar.look();
-    let anim = gui_entity_anim(&look, AnimInput::REST);
+    // The live pose is the **base**; `gui_entity_anim` overwrites only the two
+    // head angles on top of it, which is exactly why it takes a base at all.
+    let anim = gui_entity_anim(&look, avatar.pose);
     let instance = EntityInstance::new(model, mesh, Vec3::ZERO, look.body_yaw_deg, 1.0, &anim);
     let clip = gui_ortho(logical_w, logical_h) * avatar.view();
     instance
@@ -896,6 +931,102 @@ mod tests {
                  measured almost nothing"
             );
         }
+    }
+
+    /// **The live pose reaches the draw, and it moves the arm that swings.**
+    ///
+    /// `PlayerAvatar::pose` would be indistinguishable from an unread field
+    /// through any count or bind-group check — the seam is one argument deep
+    /// (`gui_entity_anim(&look, base)`), and dropping it compiles. So the
+    /// measurement is on the composed part matrices, and it is a *localised*
+    /// one — "where moved", not "something changed" — with the REST-vs-REST
+    /// control that makes it non-vacuous.
+    ///
+    /// The swinging part is identified by its **rest pivot**, not by a
+    /// remembered index: `player_model` puts the right arm at `x = -5` texels,
+    /// i.e. `-0.3125` blocks, so the mover must sit on the entity's own right.
+    #[test]
+    fn the_live_pose_reaches_the_draw_and_moves_the_right_arm() {
+        let base = PlayerAvatar::new(PANEL.0, PANEL.1, None);
+        let models = EntityModelSet::load();
+        let model = "player_wide";
+        let mesh = models.get(model).expect("a baked player rig");
+        let at = |pose: AnimInput| avatar_part_matrices(mesh, model, &base.with_pose(pose), 854, 480);
+
+        let rest = at(AnimInput::REST);
+        // **`0.5`, not `1.0`.** `attack_anim` is the *phase* of the swing and
+        // `HumanoidModel.setupAttackAnimation` drives it through sines, so the
+        // endpoint `1.0` is the rest pose again — the first version of this test
+        // used `1.0`, measured a delta of `1.7e-8`, and read as "the pose is not
+        // reaching the draw" when the pose was arriving perfectly and the value
+        // was the no-op. The endpoint identity is asserted below, so this is
+        // recorded as a property rather than only as a comment.
+        let swung = at(AnimInput {
+            attack_anim: 0.5,
+            ..AnimInput::REST
+        });
+        assert_eq!(rest.len(), swung.len());
+
+        // The control first: the same pose twice must be bit-identical, so a
+        // non-zero delta below cannot come from nondeterminism in the bake.
+        let control = at(AnimInput::REST);
+        let max_delta = |a: &[Mat4], b: &[Mat4]| {
+            a.iter()
+                .zip(b)
+                .map(|(x, y)| {
+                    (0..4)
+                        .flat_map(|c| (0..4).map(move |r| (c, r)))
+                        .map(|(c, r)| (x.col(c)[r] - y.col(c)[r]).abs())
+                        .fold(0.0_f32, f32::max)
+                })
+                .collect::<Vec<f32>>()
+        };
+        assert_eq!(
+            max_delta(&rest, &control).iter().cloned().fold(0.0_f32, f32::max),
+            0.0,
+            "REST against itself must be identical — otherwise the delta below \
+             measures noise, not the pose"
+        );
+
+        let deltas = max_delta(&rest, &swung);
+        let (worst, worst_delta) = deltas
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).expect("finite"))
+            .expect("at least one part");
+        assert!(
+            *worst_delta > 1e-4,
+            "a full attack swing moved no part at all ({worst_delta}) — \
+             `PlayerAvatar::pose` is not reaching `gui_entity_anim`'s base"
+        );
+
+        // The endpoint identity, which is why the phase above is 0.5: a swing at
+        // phase 1.0 has finished, and finished is rest.
+        let finished = at(AnimInput {
+            attack_anim: 1.0,
+            ..AnimInput::REST
+        });
+        let end_delta = max_delta(&rest, &finished)
+            .iter()
+            .cloned()
+            .fold(0.0_f32, f32::max);
+        assert!(
+            end_delta < 1e-5,
+            "a swing at phase 1.0 should be back at rest, but differs by \
+             {end_delta} — if this fails the curve is not sinusoidal and the \
+             0.5 above may not be near the peak either"
+        );
+
+        // Where: the biggest mover sits on the entity's right, where the pivot
+        // that `player_model` puts at -5 texels is.
+        let pivot_x = mesh.skeleton.rest_pose()[worst].col(3)[0];
+        assert!(
+            pivot_x < -0.2,
+            "the biggest mover under an attack swing is part {worst}, whose rest \
+             pivot is at x = {pivot_x}. The swinging arm's pivot is -0.3125 \
+             blocks (vanilla's -5 texels), so a mover on the other side or at \
+             the centre means the swing is being applied to the wrong part."
+        );
     }
 
     /// The **physical → logical** cursor conversion, which `ContainerGeometry`
