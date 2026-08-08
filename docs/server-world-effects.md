@@ -51,7 +51,14 @@ It is an *outbound* lane, so `BlockTickFeed::subscriber` splits it per-connectio
 exactly as it splits lane 0.
 
 Same single-consumer caveat as every other feed (`ExplosionFeed`, `WeatherFeed`):
-`drain_effects` is drain-all, so exactly one connection task may own an instance.
+`drain_effects_for` is drain-all, so exactly one connection task may own an instance.
+
+Each entry carries an `Option<Uuid>` — vanilla's `except` player, the first argument
+of `Level.playSound(@Nullable Entity except, …)` (`Level.java:436`).
+`drain_effects_for(viewer)` drains everything and returns only what `viewer` should
+hear; `drain_effects_tagged` keeps the tag, for `IntegratedServer::bind`'s relay,
+which re-publishes into each connection's own queue and so cannot resolve the
+exclusion itself.
 
 ### Publishers
 
@@ -60,6 +67,8 @@ Same single-consumer caveat as every other feed (`ExplosionFeed`, `WeatherFeed`)
 | mob hurt / death sound | `MobSim::note_vocalisation`, drained by `run_tick_loop` | `LivingEntity.hurt` / `.die` |
 | door / trapdoor / fence-gate open-close | `tick.rs`'s `publish_openable_sound`, at both scheduled-tick write sites | `DoorBlock.playSound` (`:247`) |
 | grazed-block break particles | `run_tick_loop`'s graze drain | `EatBlockGoal`'s level event 2001 |
+| a player's block break | `server.rs`'s `destroy_block`, excluding the breaker | `Level.destroyBlock`'s level event 2001 |
+| a player's block place | `server.rs`'s `apply_use_item_on`, excluding the placer | `BlockItem.place` (`:87`) |
 
 `MobSim` records vocalisations for the same structural reason it records
 detonations: it holds the world immutably and owns no connection, so it can only
@@ -73,13 +82,16 @@ blow finds no mob to read the species and position from.
 
 **The double-trigger trap is the main one.** `lodestone-shell` predicts its own
 block-break and block-place sounds locally (`block-sound-types.md`,
-`break-particles.md`). Publishing an effect the acting client would also predict
-plays it **twice**, because the feed has no per-connection exclusion the way
-vanilla's `Level.playSound(player, …)` does. So only publish effects whose cause is
-the *server* — which is exactly the set that was silent. That is why break and
-place sounds for a player's own edit are deliberately **not** published, even
-though `effects::block_destroyed`/`block_placed` exist and are ready for the LAN
-case where the acting client is a different connection.
+`break-particles.md`), so an effect the acting client would also predict must not
+reach *that* client — it would play twice. Publish it with
+`publish_effect_except(actor, effect)`, which is vanilla's own `except` argument, and
+every other player still hears it. `publish_effect` is for effects with no acting
+player at all (a mob's death, a redstone-opened door, a grazing sheep).
+
+This is what unblocked the break and place sounds. `effects::block_destroyed` and
+`block_placed` existed and were correct for a session before this, and were
+deliberately left unpublished, because without the exclusion the only client that
+could hear them was the one that had already played them itself.
 
 Other things worth knowing:
 

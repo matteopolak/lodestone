@@ -1247,6 +1247,11 @@ impl IntegratedServer {
                     _ = relay.tick() => {
                         let changes = relay_block_ticks.drain_all();
                         let detonations = relay_explosions.drain_all();
+                        // Issue #530's effect lane, relayed with its `except`
+                        // tag intact: the hub cannot decide the exclusion,
+                        // because "which player is excluded" is only meaningful
+                        // against the connection about to drain it.
+                        let effects = relay_block_ticks.drain_effects_tagged();
                         // Prune first, so a departed player's feed stops
                         // accumulating rather than growing forever.
                         subscribers.retain(LanSubscriber::is_alive);
@@ -1256,6 +1261,14 @@ impl IntegratedServer {
                             }
                             for detonation in &detonations {
                                 subscriber.explosions.publish(*detonation);
+                            }
+                            for (except, effect) in &effects {
+                                match except {
+                                    Some(player) => subscriber
+                                        .block_ticks
+                                        .publish_effect_except(*player, effect.clone()),
+                                    None => subscriber.block_ticks.publish_effect(effect.clone()),
+                                }
                             }
                         }
                     }

@@ -2414,6 +2414,10 @@ async fn apply_block_action<T, P, S>(
     // count ticks with (see `serve_play`'s two definitions); the timing test is
     // then skipped, while the hardness and range tests still apply.
     game_tick: Option<u64>,
+    // Where `destroy_block`'s break level event is published, and the player it
+    // is published *except* for (this connection's own).
+    block_ticks: &BlockTickFeed,
+    breaker: uuid::Uuid,
     action: BlockActionKind,
     pos: BlockPos,
 ) -> Result<(), ServerError>
@@ -2449,6 +2453,8 @@ where
                     mobs,
                     drops_rng,
                     held,
+                    block_ticks,
+                    breaker,
                     pos,
                 )
                 .await?;
@@ -2507,6 +2513,8 @@ where
                 mobs,
                 drops_rng,
                 held,
+                block_ticks,
+                breaker,
                 pos,
             )
             .await?;
@@ -2534,6 +2542,12 @@ async fn destroy_block<T, P, S>(
     mobs: &MobHandle,
     drops_rng: &mut SpawnRng,
     held: Option<&ItemStack>,
+    // The break's own level event (`LevelEvent.PARTICLES_DESTROY_BLOCK`, sound
+    // *and* particles in one packet), published excluding `breaker` — the
+    // acting client predicts its own break sound locally, every other player
+    // must hear it. See `BlockTickFeed::publish_effect_except`.
+    block_ticks: &BlockTickFeed,
+    breaker: uuid::Uuid,
     pos: BlockPos,
 ) -> Result<(), ServerError>
 where
@@ -2549,6 +2563,9 @@ where
     // `getBlockState(pos)`, calls `dropResources` with it, and only
     // then `setBlock(pos, AIR)`).
     let broken = source.block_state(pos.x, pos.y, pos.z);
+    if let Some(effect) = crate::effects::block_destroyed(pos, &broken) {
+        block_ticks.publish_effect_except(breaker, effect);
+    }
     source.set_block(pos.x, pos.y, pos.z, AIR);
     debug_assert!(
         !broken.is_empty(),
@@ -3257,6 +3274,9 @@ async fn apply_use_item_on<T, P, S>(
     // or piston placed while looking down points up). `None` on the same
     // terms as `player_yaw`.
     player_pitch: Option<f32>,
+    // The placing player, for the place sound's `except` argument (see the
+    // `block_placed` call below).
+    placer: uuid::Uuid,
     // `&mut`, not `&`: a brewing-stand insertion consumes one item from the
     // player's selected hotbar stack (issue #252), and only a mutable
     // inventory can write the remainder back.
@@ -3541,6 +3561,17 @@ where
                     None => (block_name.to_string(), Vec::new()),
                 };
             source.set_block(target.x, target.y, target.z, &state);
+            // `BlockItem.place`'s own `level.playSound(player, …)`
+            // (`BlockItem.java:87`) — the placer is vanilla's `except` argument,
+            // and here it must be, because the shell predicts its own place
+            // sound. `roll` stands in for vanilla's per-play `nextLong()`: it is
+            // already a live draw from this connection's `SpawnRng`, one per
+            // right-click, which is exactly the variant-picking seed's shape.
+            if let Some(effect) =
+                crate::effects::block_placed(target, &state, roll.to_bits() as i64)
+            {
+                block_ticks.publish_effect_except(placer, effect);
+            }
             // A door's upper half, a bed's head, a chest partner's re-typing:
             // cells the placement owns but the client did not predict, so each
             // needs its own `block_update` below.
@@ -4463,6 +4494,8 @@ where
                 // (no `PlayerMoved` packet has arrived yet).
                 player_pos.as_ref().map(|&(x, y, z)| Vec3::new(x, y, z)),
                 game_tick,
+                block_ticks,
+                player_uuid,
                 action,
                 pos,
             )
@@ -4497,6 +4530,7 @@ where
                 // arrives — placement then uses the block's default state.
                 player_rot.map(|rotation| rotation.yaw),
                 player_rot.map(|rotation| rotation.pitch),
+                player_uuid,
                 inventory,
                 block_entities,
                 next_window_id,
@@ -5106,6 +5140,8 @@ where
                             mobs,
                             &mut drops_rng,
                             inventory.selected_item(),
+                            block_ticks,
+                            player_uuid,
                             dig.pos,
                         )
                         .await?;
@@ -5202,7 +5238,7 @@ where
                 // could be beaten to death in silence and a redstone door opened
                 // without a click. Single-consumer for the reason the drain above
                 // is; see `BlockTickFeed`'s own doc comment.
-                for effect in block_ticks.drain_effects() {
+                for effect in block_ticks.drain_effects_for(player_uuid) {
                     apply(conn, &mut state, proto.encode_world_effect(&effect)).await?;
                 }
                 // Issue #425: same shape again, one timer tick later —
