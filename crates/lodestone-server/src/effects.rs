@@ -35,10 +35,13 @@
 //! did that this connection must be told about. See that type's own doc.
 //!
 //! The gotcha is **double-triggering**: `lodestone-shell` predicts its own
-//! block-break and block-place sounds locally (`docs/block-sound-types.md`),
-//! so an effect the acting client would also predict must not be published on
-//! the single-consumer feed — it would play twice. Only publish effects whose
-//! cause is the *server*, which is exactly the set that was silent.
+//! block-break and block-place sounds locally (`docs/block-sound-types.md`), so
+//! an effect the acting client would also predict must not reach *that* client.
+//! Publish it through `BlockTickFeed::publish_effect_except` with the
+//! acting player's uuid — vanilla's own `except` argument on
+//! `Level.playSound`/`Level.levelEvent` — and every other player still hears it.
+//! `publish_effect` is for effects with
+//! no acting player at all.
 
 use lodestone_model::{BlockPos, SoundCategory, Vec3, Vec3f};
 
@@ -163,8 +166,8 @@ fn first_real_sound(candidates: &[String]) -> Option<String> {
 /// The level event for a block destroyed at `pos`, or `None` if `state` does not
 /// resolve to a block-state id.
 ///
-/// One packet, not two: see [`PARTICLES_DESTROY_BLOCK`]. **Not** for a break the
-/// acting client predicted itself — see the module doc's double-trigger note.
+/// One packet, not two: see [`PARTICLES_DESTROY_BLOCK`]. Publish it with the
+/// breaker as the `except` player — see the module doc's double-trigger note.
 #[must_use]
 pub fn block_destroyed(pos: BlockPos, state: &str) -> Option<WorldEffect> {
     let id = crate::mobs::block_state_id_or_default(state)?;

@@ -314,7 +314,14 @@ pub struct BlockTickFeed(
     /// this connection has no other way to learn about. Outbound, so it splits
     /// per-connection under [`subscriber`](Self::subscriber) exactly as lane 0
     /// does.
-    Arc<Mutex<Vec<crate::effects::WorldEffect>>>,
+    ///
+    /// The `Option<Uuid>` is vanilla's `except` player — the first argument of
+    /// `Level.playSound(@Nullable Entity except, …)` (`Level.java:436`) and of
+    /// `Level.levelEvent(@Nullable Entity except, …)`. `None` reaches everyone.
+    /// Without it the acting player's own break and place sounds could not be
+    /// published at all, because the shell predicts them locally and would play
+    /// each one twice; see [`drain_effects_for`](Self::drain_effects_for).
+    Arc<Mutex<Vec<(Option<uuid::Uuid>, crate::effects::WorldEffect)>>>,
 );
 
 impl BlockTickFeed {
@@ -334,22 +341,58 @@ impl BlockTickFeed {
         std::mem::take(&mut *self.0.lock().expect("block tick feed lock poisoned"))
     }
 
-    /// Records one world effect (issue #530) for this feed's consumer to learn
-    /// about on their next [`drain_effects`](Self::drain_effects).
-    ///
-    /// Publish only effects the *server* caused: the shell predicts its own
-    /// break and place sounds locally, so an effect the acting client would also
-    /// predict plays twice. See [`crate::effects`]'s module doc.
+    /// Records one world effect (issue #530) for every player to learn about on
+    /// their next [`drain_effects_for`](Self::drain_effects_for) — vanilla's
+    /// `except == null`.
     pub(crate) fn publish_effect(&self, effect: crate::effects::WorldEffect) {
+        self.push_effect(None, effect);
+    }
+
+    /// Records one world effect that `except` must **not** receive — vanilla's
+    /// `Level.playSound(player, …)`, whose first argument is the player to skip.
+    ///
+    /// This is what lets a player's own block break and place sounds be
+    /// published: the acting client predicts them locally
+    /// (`docs/block-sound-types.md`), so it must be excluded while every other
+    /// player still hears them.
+    pub(crate) fn publish_effect_except(
+        &self,
+        except: uuid::Uuid,
+        effect: crate::effects::WorldEffect,
+    ) {
+        self.push_effect(Some(except), effect);
+    }
+
+    fn push_effect(&self, except: Option<uuid::Uuid>, effect: crate::effects::WorldEffect) {
         self.2
             .lock()
             .expect("block tick feed lock poisoned")
-            .push(effect);
+            .push((except, effect));
     }
 
-    /// Drains every world effect published since the last call — single-consumer
-    /// for the same reason [`drain_all`](Self::drain_all) is.
-    pub fn drain_effects(&self) -> Vec<crate::effects::WorldEffect> {
+    /// Drains every world effect published since the last call and returns the
+    /// ones `viewer` should hear — single-consumer for the same reason
+    /// [`drain_all`](Self::drain_all) is.
+    ///
+    /// Draining is unconditional; only the *return* is filtered. An effect this
+    /// viewer is excluded from is dropped rather than left to accumulate, which
+    /// is correct for both shapes this type serves: singleplayer has one
+    /// consumer, and each LAN connection owns its own outbound queue behind
+    /// `IntegratedServer::bind`'s relay.
+    pub fn drain_effects_for(&self, viewer: uuid::Uuid) -> Vec<crate::effects::WorldEffect> {
+        std::mem::take(&mut *self.2.lock().expect("block tick feed lock poisoned"))
+            .into_iter()
+            .filter_map(|(except, effect)| (except != Some(viewer)).then_some(effect))
+            .collect()
+    }
+
+    /// Drains every world effect with its `except` tag intact, for a fan-out
+    /// that must re-publish rather than send — `IntegratedServer::bind`'s relay,
+    /// which copies the hub's effects into each connection's own queue and
+    /// cannot decide the exclusion on the hub's behalf.
+    pub(crate) fn drain_effects_tagged(
+        &self,
+    ) -> Vec<(Option<uuid::Uuid>, crate::effects::WorldEffect)> {
         std::mem::take(&mut *self.2.lock().expect("block tick feed lock poisoned"))
     }
 
@@ -1462,6 +1505,35 @@ mod tests {
             "CONTROL FAILED: a `default()` feed already reaches the hub, so `subscriber()` would \
              not be needed and the LAN gap this documents would not exist"
         );
+    }
+
+    /// The effect lane's `except` player: an effect published against one player
+    /// reaches every other one and never that one, which is what lets a block
+    /// break and place sound be published at all (the acting client predicts
+    /// both locally).
+    #[test]
+    fn an_excluded_player_does_not_receive_their_own_effect() {
+        let actor = uuid::Uuid::from_u128(1);
+        let bystander = uuid::Uuid::from_u128(2);
+        let effect = crate::effects::WorldEffect::LevelEvent {
+            event: crate::effects::PARTICLES_DESTROY_BLOCK,
+            pos: lodestone_model::BlockPos::new(4, 5, 6),
+            data: 1,
+            global: false,
+        };
+
+        let feed = BlockTickFeed::default();
+        feed.publish_effect_except(actor, effect.clone());
+        assert_eq!(feed.drain_effects_for(bystander), vec![effect.clone()]);
+
+        let feed = BlockTickFeed::default();
+        feed.publish_effect_except(actor, effect.clone());
+        assert!(feed.drain_effects_for(actor).is_empty());
+
+        // An untagged effect reaches everyone, including whoever caused the tick.
+        let feed = BlockTickFeed::default();
+        feed.publish_effect(effect.clone());
+        assert_eq!(feed.drain_effects_for(actor), vec![effect]);
     }
 
     /// Predicted value: `now` built as exactly [`overload_threshold`] past
