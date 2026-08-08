@@ -68,7 +68,6 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use lodestone_data::{block_states, collision_shapes, entity_dimensions, entity_types, path_types};
-use lodestone_entity::ai::goals::{RandomLookAroundGoal, RandomStrollGoal};
 use lodestone_entity::ai::roster::{self, SpeciesContext};
 use lodestone_entity::ai::navigating_mob::{
     BABY_START_AGE, DEFAULT_FOLLOW_RANGE, PARENT_AGE_AFTER_BREEDING,
