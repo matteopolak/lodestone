@@ -127,10 +127,11 @@ picks the palette.
   own offset cancels against its own probe, so all three parts land at the same
   surface height. Changing one offset without the other desynchronises the stack.
 * **A structure with `terrain_adaptation: none` needs no beardifier**, which is why
-  these three could land before S3. `Density::Beardifier` is still a constant-zero
-  leaf, so a structure sits on unmodified terrain; every kind wired here is
-  `none`, and `pre_ore_stage`'s `debug_assert!` fails loudly if an
-  adaptation-bearing start ever becomes piece-complete before S3 lands.
+  these three could land before S3. S3 has since landed
+  ([`worldgen-beardifier.md`](./worldgen-beardifier.md)) and the `debug_assert!`
+  that used to guard the gap in `pre_ore_stage` is gone, replaced by the real data
+  dependency; every kind wired here is still `none`, so none of them is affected
+  either way.
 
 ### Gaps, all on the ledger
 

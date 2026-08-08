@@ -5721,3 +5721,80 @@ swept.
   one slot for the same `(x, z)`. A node-sharing (CSE) pass over the `Op` table is that number's
   worth of duplicated subtree evaluation, and it is a serial win.
 
+**12.133 The beardifier's seam is not where the code says it is — `Density::Beardifier` evaluating to
+`0.0` is correct, and the real substitution happens in `NoiseChunk`'s constructor.** Issue #514's S3.
+Three phases of this repo's own written record, plus the issue body, said the beardifier's seam was
+`Density::Beardifier` in `density/mod.rs` (a constant-zero leaf at `:599`) and `OpKind::Beardifier` in
+`engine/field.rs:78`. Both are real, both parse, both return `0.0` — and **neither is ever reached in
+the overworld.** `grep -rn beardifier .cache/mc/26.2` returns exactly one hit across the whole
+decompiled tree and shipped data: `registries.json`'s type list. The string appears in no
+`noise_settings`, no `density_function`, no biome document. The marker is only reachable from data a
+pack author wrote.
+
+What actually happens is in code, two levels away from the data: `NoiseChunk`'s constructor
+(`NoiseChunk.java:155-160`) builds
+`cacheAllInCell(add(wrappedRouter.finalDensity(), BeardifierMarker.INSTANCE)).mapAll(this::wrap)`, and
+`NoiseChunk.wrap` (`:404`) substitutes the real `Beardifier` for the marker on the way through. So the
+beard is **one operand of a plain `add` at the very top of the graph**, and an implementation that
+"filled in" the `OpKind::Beardifier` arm would have adapted terrain for exactly the worlds nobody
+plays and none of the ones they do.
+
+Two things follow, and the second is the useful one:
+
+- **The correct seam was a call site, not a node**, and adding the term there is *exact* rather than
+  approximate: `Ap2(ADD)` is `argument1.compute(ctx) + argument2.compute(ctx)`, so
+  `final_density(x, y, z) + beard` is the same expression in the same order. That also keeps a
+  per-chunk mutable input out of a `Graph` that is shared across 20 workers behind an `Arc` — the
+  problem §12.131 spent a whole unit undoing for `cache_2d`'s `Mutex`. Had the seam been the node,
+  S3 would have had to solve that first.
+- **This is the "authoritative source answering a neighbouring question" failure in its purest
+  form** (CLAUDE.md's §"Data sources"). Nothing about `Density::Beardifier` looks stale or wrong. It
+  is a faithful transcription of `DensityFunctions.java:49`'s registration, it is correctly a no-op
+  for the raw marker, and its doc comment is accurate. The false belief was entirely about *reach*,
+  and no amount of reading either file could have surfaced it — only grepping the shipped data for
+  the string could. **When a seam is described as "already exists as a constant-zero leaf", grep the
+  data for the node's own name before building on it.**
+
+The parity constants worth keeping: `Mth.fastInvSqrt` is Newton's method off the magic integer
+`6910469410427058090`, and its relative error is **~1.7e-3**, not ~1e-16 — three orders of magnitude
+larger than a rounding difference, so `1.0 / x.sqrt()` is not a refactor, it is a different beard
+everywhere. Its eight bit-exact values are pinned rather than tolerance-checked, with a second
+assertion that the error stays in `[1e-4, 2e-3]` precisely so the "cleanup" cannot pass. And the
+13,824-entry kernel is indexed `[zi][xi][yi]` — **Y innermost** — which the loop that builds it does
+not read in that order; a transposed index is symmetric in x/z and passes every value check, so the
+guard is the asymmetry the `+0.5` y-offset creates.
+
+**The negative control, and the two controls on it.** S3 changes terrain, so the load-bearing claim is
+that a chunk with no adaptation-bearing start is untouched. `tests/u15_column_dump.rs` in one
+throwaway `git worktree --detach` at the pre-S3 sha, then the same worktree with only the S3 patch
+applied (same `CARGO_TARGET_DIR`, dumper md5 verified identical on both arms): **45 columns, 5 seeds,
+8,902,157 bytes, 74 distinct block states, 1,414,423 non-air, 0 differing bytes**, compared by a
+program reading both files rather than by a pipeline. Then:
+
+- **The detector fires.** Forcing the per-block branch *and* adding `+0.557` — a real `beard_thin`
+  magnitude at a piece floor — at every block changes the dump, and changes its *length*, so the
+  instrument is not merely insensitive.
+- **Forcing the branch alone changes nothing.** Byte-identical. That is the measurement behind the
+  claim that an empty `Beardifier::compute` returns `0.0` and never `-0.0`; without it, "`x + 0.0` is
+  the identity" is an assertion about the whole downstream pipeline rather than about `f64`.
+- The premise is true: the production generator has structure data, so all 45 columns really run the
+  new `beardifier_for` 17×17 walk and really get an empty answer.
+
+**The positive arm had to use a synthetic start, and that is a phase-order fact rather than a
+shortcut.** All seven adaptation-bearing structures in 26.2 are jigsaw (five villages,
+`pillager_outpost`, `ancient_city`, `trail_ruins`, `trial_chambers` — S4) or coded (`stronghold`,
+`nether_fossil` — S5), so no real start can carry a beard until a later phase lands. Waiting would
+have left the terrain maths ungated for the duration of the largest phase in the group. The
+prediction is exact rather than directional: a `beard_thin` piece whose floor sits 6 blocks above the
+natural surface raises the solid top to **exactly `floor - 1`**, derivable from the sign of
+`-(dyToGround + 0.5)` without running anything — at `y == groundY` the term is −0.557 and at
+`groundY - 1` it is the mirror +0.557, so the foundation stops one block below the floor because the
+piece places its own floor block. Both wrong hypotheses are excluded by the equality: an inverted
+sign digs down, and an off-by-one `dy` lands on `floor` or `floor - 2`.
+
+**And the locality arm is the one that would have caught the plausible bug.** "Terrain changed" is
+satisfied by a uniform density offset, which is what a flipped operand order or a missing
+`affected_box` test produces. Measuring *where* — zero differing cells outside the affected box, with
+>10,000 cells outside so the claim is not vacuous, and a bounding box of the differing cells printed
+on failure — is what separates a beard from a global shift. §12.41's rule, applied before it had a
+chance to bite.

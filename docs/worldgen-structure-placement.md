@@ -17,9 +17,11 @@ answer is **verified in both directions against a vanilla-authored save** — se
 **S2 has since landed** ([`worldgen-structure-templates.md`](./worldgen-structure-templates.md)):
 shipwrecks, ocean ruins and igloos now build template pieces and write blocks, so
 where this document says "no piece generator" read "no piece generator *for this
-structure*" and check `StructureRegistry::unsupported` for which. The beardifier is
-still S3, jigsaw S4, and the coded piece generators (monument, mineshaft,
-stronghold, …) S5.
+structure*" and check `StructureRegistry::unsupported` for which. **S3 has since
+landed too** ([`worldgen-beardifier.md`](./worldgen-beardifier.md)): the beardifier
+is a real evaluator, not a constant-zero leaf, and it consumes exactly the
+`StructureRefs` seam this document describes. Jigsaw is S4 and the coded piece
+generators (monument, mineshaft, stronghold, …) S5.
 
 ## How it works
 
@@ -175,9 +177,11 @@ stub. The section is kept because the *shape* of the wiring is the thing to know
 - **No longer true** as of S2: template pieces exist for shipwreck, ocean ruin and
   igloo, and they do write blocks — a *third* server-side edit is now needed for
   that to happen in the served world (`Resolver::structure_template`, see
-  [`worldgen-structure-templates.md`](./worldgen-structure-templates.md)). Still
-  true: the beardifier is a constant-zero leaf (S3), so nothing flattens terrain
-  under a start.
+  [`worldgen-structure-templates.md`](./worldgen-structure-templates.md)).
+- **Also no longer true** as of S3: the beardifier is a real evaluator
+  ([`worldgen-beardifier.md`](./worldgen-beardifier.md)). Still true in *effect*,
+  for a different reason: every adaptation-bearing structure is jigsaw (S4) or
+  coded (S5), so no real start carries a beard yet and no terrain is flattened.
 
 The original text, for the record:
 

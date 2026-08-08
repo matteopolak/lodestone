@@ -107,6 +107,7 @@
 //! [`lodestone_worldgen_core::rng`] for the seed derivations, and nothing else.
 //! `crate::overworld` supplies the [`StartContext`].
 
+pub mod beardifier;
 pub mod placement;
 pub mod processor;
 pub mod template;
@@ -334,6 +335,11 @@ pub struct StructurePiece {
     /// How to place it, for a template-driven piece. `None` for a coded piece,
     /// which therefore reaches no blocks yet (`minecraft:btp` is the only one).
     pub placement: Option<Arc<PiecePlacement>>,
+    /// The `PoolElementStructurePiece`-only facts the beardifier reads, or `None`
+    /// for a coded piece — which is vanilla's own `else` branch
+    /// (`Beardifier.java:75`: rigid box, `groundLevelDelta` 0, no junctions), not
+    /// an absence of behaviour. See [`beardifier::PieceBeard`].
+    pub beard: Option<beardifier::PieceBeard>,
 }
 
 /// The decoded templates one registry can place, keyed by template id
@@ -828,6 +834,7 @@ impl StructureKind {
                     gen_depth: 0,
                     template: None,
                     placement: None,
+                    beard: None,
                 }])
             }
             // `OceanMonumentPieces` is ~1,400 lines of coded pieces, not
@@ -1216,6 +1223,11 @@ fn template_piece(
             position,
             settings,
         })),
+        // Not a jigsaw piece. Every kind `template_piece` serves is
+        // `terrain_adaptation: none`, so this is doubly inert today — but it is
+        // the field S4's pool pieces fill, and leaving it out of the constructor
+        // would make that a wider change than it needs to be.
+        beard: None,
     }
 }
 

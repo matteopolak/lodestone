@@ -1000,32 +1000,12 @@ impl OverworldGenerator {
         entry.pre_ore.get_or_compute(
             crate::counters::bump_pre_ore,
             || {
-                // Issue #514's S1: the one new upstream edge. `fill_stage`'s
-                // density graph still evaluates `Density::Beardifier` as the
-                // constant-`0.0` leaf it has always been (S3 replaces it), so
-                // reading the context here changes nothing about the output —
-                // but it is what makes the *ordering* real rather than planned,
-                // and `structures::StructureRefs::adaptation_bearing` is the
-                // exact seam S3 plugs its evaluator into.
-                //
-                // Gated on the generator actually having structure data so that
-                // every fixture resolver in this workspace (and therefore all 13
-                // parity binaries) pays literally nothing: no 17×17 walk, no
-                // store probes, no allocation.
-                let beardifier_context = self
-                    .structures
-                    .as_ref()
-                    .map(|_| self.structure_refs_stage(cx, cz));
-                debug_assert!(
-                    beardifier_context
-                        .as_ref()
-                        .is_none_or(|refs| refs.adaptation_bearing().next().is_none()),
-                    "an adaptation-bearing start reached the density graph while \
-                     `Density::Beardifier` is still the constant-zero leaf — S3 \
-                     must land before any such structure gets a piece generator, \
-                     or its terrain silently differs from vanilla's",
-                );
-                drop(beardifier_context);
+                // Issue #514's S1 added the upstream edge to `structure_refs`
+                // here as a placeholder with a `debug_assert` guarding the gap;
+                // **S3 closed it**, and the edge is now a real data dependency
+                // consumed inside `pre_ore_stage_uncached` →
+                // `beardifier_for` → `fill_stage`. Nothing to do at this level
+                // any more, which is why the guard is gone rather than relaxed.
                 self.pre_ore_stage_uncached(cx, cz)
             },
         )
@@ -1084,8 +1064,13 @@ impl OverworldGenerator {
 
         let t_aquifer_start = std::time::Instant::now();
         let aquifer = self.build_aquifer(cx, cz);
+        // Issue #514's S3, inside the *aquifer* timing bucket rather than given one
+        // of its own: for a chunk with no adaptation-bearing start in reach this is
+        // a store read and an empty `Vec`, and the per-block cost it can add lands
+        // in `shape` where it belongs.
+        let beard = self.beardifier_for(cx, cz);
         let t_shape_start = std::time::Instant::now();
-        let field = self.fill_stage(&aquifer, base_x, base_z);
+        let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
         let heights = self.heights_from_field(&field);
         let t_biome_start = std::time::Instant::now();
         // Issue #512: same two-line shape as `pre_ore_stage_uncached` — the 4x4x4

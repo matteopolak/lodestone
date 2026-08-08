@@ -54,7 +54,12 @@ impl OverworldGenerator {
         let base_z = cz * 16;
 
         let aquifer = self.build_aquifer(cx, cz);
-        let field = self.fill_stage(&aquifer, base_x, base_z);
+        // Issue #514's S3. Built here rather than passed in because the *only*
+        // consumer is the fill below, and it must be built from this chunk's own
+        // refs — a beardifier from a neighbouring chunk has a different junction
+        // window and a different affected box.
+        let beard = self.beardifier_for(cx, cz);
+        let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
         let heights = self.heights_from_field(&field);
         // Issue #512: the 4x4x4 grid is now the primary biome product and the
         // 16-entry surface array is read out of it. Two separate sample passes
@@ -109,16 +114,51 @@ impl OverworldGenerator {
     /// replacing the sea-level approximation this generator used before.
     /// Returns a `16×height×16` dense field of [`BlockKind`] indexed by
     /// [`Self::idx`].
-    pub(super) fn fill_stage(&self, aquifer: &AquiferSystem, base_x: i32, base_z: i32) -> Vec<BlockKind> {
+    ///
+    /// # The two loops, and why they are two (issue #514's S3)
+    ///
+    /// `beard` is vanilla's `add(finalDensity, BeardifierMarker)`
+    /// (`NoiseChunk.java:157`). For an **empty** beardifier — every chunk with no
+    /// adaptation-bearing structure within reach, which is the overwhelming
+    /// majority of the world — this runs the *original* loop, calling
+    /// [`AquiferSystem::block_at`] with no addition at all.
+    ///
+    /// That branch is a correctness property, not a micro-optimisation, and it is
+    /// what makes S3's negative control hold **by construction** rather than by
+    /// measurement: adding `0.0` is the identity for every finite `f64` *except*
+    /// `-0.0`, where it flips the sign bit. Nothing downstream distinguishes
+    /// `-0.0` from `0.0` today (`compute_substance` only asks `density > 0.0`), but
+    /// "nothing downstream distinguishes it today" is a claim about the rest of
+    /// the pipeline, and the branch means it never has to be made.
+    pub(super) fn fill_stage(
+        &self,
+        aquifer: &AquiferSystem,
+        base_x: i32,
+        base_z: i32,
+        beard: &crate::structure::beardifier::Beardifier,
+    ) -> Vec<BlockKind> {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Shape);
         let height = self.height as usize;
         let mut field = vec![BlockKind::Air; 16 * 16 * height];
+        if beard.is_empty() {
+            for lz in 0..16i32 {
+                for lx in 0..16i32 {
+                    for ly in 0..self.height {
+                        let wy = self.min_y + ly;
+                        field[Self::idx(lx, ly, lz, self.height)] =
+                            aquifer.block_at(base_x + lx, wy, base_z + lz);
+                    }
+                }
+            }
+            return field;
+        }
         for lz in 0..16i32 {
             for lx in 0..16i32 {
                 for ly in 0..self.height {
                     let wy = self.min_y + ly;
+                    let (wx, wz) = (base_x + lx, base_z + lz);
                     field[Self::idx(lx, ly, lz, self.height)] =
-                        aquifer.block_at(base_x + lx, wy, base_z + lz);
+                        aquifer.block_at_beard(wx, wy, wz, beard.compute(wx, wy, wz));
                 }
             }
         }
@@ -421,8 +461,11 @@ impl OverworldGenerator {
         }
     }
 
+    /// `pub(super)` rather than private so `structures.rs`'s `shape_index` can
+    /// forward to it — see there for why a caller must never restate this
+    /// expression.
     #[inline]
-    fn idx(lx: i32, ly: i32, lz: i32, height: i32) -> usize {
+    pub(super) fn idx(lx: i32, ly: i32, lz: i32, height: i32) -> usize {
         debug_assert!((0..16).contains(&lx) && (0..16).contains(&lz));
         debug_assert!((0..height).contains(&ly));
         ((ly * 16 + lz) * 16 + lx) as usize
