@@ -54,7 +54,7 @@ use crate::border::WorldBorder;
 use crate::chunk::ChunkSource;
 use crate::mobs::{Detonation, LiveMobSource, MobHandle, MobSim};
 use lodestone_entity::ai::mob::EatenBlock;
-use crate::random_tick::{DEFAULT_RANDOM_TICK_SPEED, RandomTickScheduler};
+use crate::random_tick::RandomTickScheduler;
 use crate::scheduled_tick::{ScheduledTick, TickPriority};
 use crate::sleep::{SleepEvent, SleepFeed, SleepState, SleepVote};
 use crate::weather::{WeatherFeed, WeatherState};
@@ -844,6 +844,11 @@ pub(crate) async fn run_tick_loop<W>(
         &SleepVote::new(),
         &SleepFeed::default(),
         scheduled,
+        // A fresh, unshared world state — the same compatibility shape as the
+        // weather feed above. Rules still *apply* here (this loop reads them
+        // every tick), they are just at their defaults with nothing able to
+        // change them, which is exactly the behaviour before #327.
+        crate::world_state::WorldStateHandle::default(),
     )
     .await
 }
@@ -912,6 +917,13 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // sky, every link in the wire green, while the value was wall-clock
     // elapsed-since-join rather than the tick counter.
     scheduled: crate::region_source::ScheduledTickHandle,
+    // Issues #327/#328/#323. The world's shared game rules, difficulty and clock
+    // — the same handle every connection reads (see `crate::world_state`). Four
+    // of this module's own constant-returning stubs (`mob_griefing`,
+    // `advance_weather`, `advance_time`, `players_sleeping_percentage`) existed
+    // *because* there was no registry here; three of them now read this instead,
+    // and the clock is no longer two locals.
+    world_state: crate::world_state::WorldStateHandle,
 ) where
     W: ChunkSource,
 {
@@ -988,6 +1000,23 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // advances once a caller exists to start one.
         border.tick();
         mobs.with(MobSim::tick);
+        // Issue #328's first real enforcement: **Peaceful removes monsters.**
+        // Vanilla does it in `Mob.checkDespawn`, which discards any
+        // `MobCategory.MONSTER` entity when
+        // `level.getDifficulty() == Difficulty.PEACEFUL`; a difficulty that is
+        // stored, broadcast and read by nothing is what #328 reported.
+        //
+        // Also the `mob_drops` rule's carrier: `MobSim` has no handle on the world
+        // store (it is version-free and holds only a `ChunkWorld`), so the loop
+        // hands it the flag each tick rather than the store. One bool copy.
+        let peaceful = !world_state.monsters_may_spawn();
+        let mob_drops = world_state.mob_drops();
+        mobs.with(|sim| {
+            sim.set_mob_drops(mob_drops);
+            if peaceful {
+                sim.remove_monsters();
+            }
+        });
         mob_out.publish(mobs.with(|sim| sim.snapshots()));
         // Issue #425: `MobSim::tick` already calls `MobSim::explode` the
         // tick a creeper's own fuse completes (`1feed17`/`614acb8`), but
@@ -1024,7 +1053,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             // the eat still *happened* (vanilla calls `mob.ate()` either way —
             // see `MobSim::take_grazes`'s own doc comment), so swallowing the
             // queue entry is correct and leaving it to accumulate would not be.
-            if !mob_griefing() {
+            if !world_state.mob_griefing() {
                 continue;
             }
             let (target, state) = match eaten {
@@ -1068,12 +1097,17 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             });
         });
 
-        game_tick += 1;
-        // Issue #325 / `docs/plans/world-state.md` S1: the day clock advances
-        // once per tick, in lockstep with `game_tick` — vanilla's
-        // `ServerLevel.tickTime` increments both (`ServerLevel.java`). The two
-        // diverge only when a passed night-skip vote jumps `day_time` below.
-        day_time += 1;
+        // Issue #323. The clock is the **world's**, not this loop's: one
+        // `tick_time` advances `game_time` unconditionally and `day_time` only
+        // under the `advance_time` rule (`ServerLevel.tickTime`, where `setDayTime`
+        // is gated and `gameTime` is not). The locals below are still the loop's
+        // arithmetic, but they are *sourced* here rather than incremented — which
+        // is the whole of #323's fix, because the connection's periodic
+        // `encode_set_time` now reads the same store instead of wall-clock
+        // elapsed-since-join.
+        let world_time = world_state.tick_time();
+        game_tick = world_time.game_time.max(0) as u64;
+        day_time = world_time.day_time;
         // Issue #324 / `docs/plans/world-state.md` W1: the weather cycle is
         // world-global state, so it belongs to the world tick (not to any
         // connection — the straddle the world-state plan's migration exists
@@ -1100,9 +1134,13 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         let (active, sleeper_ids) = sleep_vote.snapshot();
         sleep_state.reconcile(&sleeper_ids, game_tick);
         if sleep_state.vote_passes(active, players_sleeping_percentage(), game_tick) {
-            if advance_time() {
+            if world_state.advance_time() {
                 let morning = SleepState::morning_after(day_time);
                 day_time = morning;
+                // The jump belongs to the world, not to this loop: the next
+                // `tick_time` must continue from the morning, and every connection's
+                // own broadcast reads the same store.
+                world_state.set_day_time(morning);
                 sleep_feed.publish(SleepEvent::SkippedNight {
                     game_time: game_tick as i64,
                     morning,
@@ -1273,11 +1311,16 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // populate the shared [`ChunkStore`] before any `world.column()` call
         // pays the full per-column generation cost on the core thread. See
         // [`INITIAL_RANDOM_TICK_DEFERRAL_TICKS`] for the arithmetic.
-        if game_tick > INITIAL_RANDOM_TICK_DEFERRAL_TICKS {
+        let tick_speed = world_state.random_tick_speed();
+        if game_tick > INITIAL_RANDOM_TICK_DEFERRAL_TICKS && tick_speed > 0 {
             for cz in tick_cz_range.clone() {
                 for cx in tick_cx_range.clone() {
                     let mut column = world.column(cx, cz);
-                    let events = random_ticks.tick_chunk(&mut column, cx, cz, DEFAULT_RANDOM_TICK_SPEED, &mut block_ticks, game_tick);
+                    // Issue #508: the *rule*, not `DEFAULT_RANDOM_TICK_SPEED`.
+                    // The getter has existed and been tested since #327; this line
+                    // is the reader it was missing, and `/gamerule
+                    // random_tick_speed 0` now really does stop crop growth.
+                    let events = random_ticks.tick_chunk(&mut column, cx, cz, tick_speed, &mut block_ticks, game_tick);
                     for event in events {
                         let (x, y, z) = event.pos;
                         world.set_block(x, y, z, &event.to);
@@ -1999,6 +2042,7 @@ mod tests {
                 &vote,
                 &feed,
                 crate::region_source::ScheduledTickHandle::default(),
+                crate::world_state::WorldStateHandle::default(),
             )
             .await;
         });
@@ -2073,6 +2117,7 @@ mod tests {
                 &vote,
                 &feed,
                 crate::region_source::ScheduledTickHandle::default(),
+                crate::world_state::WorldStateHandle::default(),
             )
             .await;
         });
@@ -2163,6 +2208,7 @@ mod tests {
                 &loop_vote,
                 &loop_feed,
                 crate::region_source::ScheduledTickHandle::default(),
+                crate::world_state::WorldStateHandle::default(),
             )
             .await;
         });

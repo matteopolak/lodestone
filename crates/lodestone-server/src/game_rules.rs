@@ -20,9 +20,14 @@
 //! **Enforcement did not exist at all.** A rule nothing consults is worse than
 //! an absent rule, because it reads as connected: the round trip confirms back
 //! to the client, so the wire looks green while behaviour never changes. The
-//! call sites this module actually reaches are listed in
-//! `docs/game-rules.md`; the two in the world tick loop are the load-bearing
-//! ones, because they run with no connection attached.
+//! call sites this module actually reaches are tabled in `docs/world-state.md`;
+//! the ones in the world tick loop are the load-bearing ones, because they run with
+//! no connection attached.
+//!
+//! **And a third island, bigger than either: this file was never declared as a
+//! module.** None of its lines was in the crate at all — including
+//! `game_rule_defaults_match_the_jar`, so the jar-checked defaults were never
+//! actually checked. `lib.rs` declares it now.
 //!
 //! # The identifiers are snake_case in 26.2, and this is the trap
 //!
@@ -63,8 +68,9 @@
 //! * **Enforcing a rule:** add a typed accessor here, then read it at the
 //!   decision point. The accessor is the cheap half; finding the decision point
 //!   is the work, and a rule with an accessor and no reader is exactly the island
-//!   this module exists to stop creating. Every accessor below has a named
-//!   production reader, and `docs/game-rules.md` tables them.
+//!   this module exists to stop creating. `docs/world-state.md` tables every
+//!   accessor against its production reader, including the two (`spawn_mobs`,
+//!   `keep_inventory`) that still have none and why.
 //! * **Do not split the handle per connection.** `crate::BlockTickFeed` has a
 //!   `subscriber()` that deliberately splits, because its outbound queue is
 //!   drain-all. This type is the opposite: sharing *is* the fix, and a
@@ -73,9 +79,11 @@
 //! # Configuration
 //!
 //! No environment variable and no config file. Defaults come from [`GAME_RULES`];
-//! a running world's overrides come from `SET_GAME_RULE` frames and from
-//! `/gamerule` (`crate::commands`). Persistence to `level.dat` is **not** wired —
-//! see `docs/game-rules.md`'s own gap note.
+//! a running world's overrides come from `SET_GAME_RULE` frames (validated by
+//! `crate::server`'s `apply_game_rule_changed`). Persistence to `level.dat` **is**
+//! wired now, through [`crate::world_state::WorldStateHandle`] — see
+//! `docs/world-state.md`, which also records that `/gamerule`
+//! (`crate::commands`) still has no production constructor: that is #48's wiring.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -321,6 +329,14 @@ pub const SPAWN_MOBS: &str = "spawn_mobs";
 /// `GameRules.KEEP_INVENTORY`.
 pub const KEEP_INVENTORY: &str = "keep_inventory";
 
+/// `block_drops` — pre-26.2 `doTileDrops`. Read by `crate::server`'s block-break
+/// arm, which is where vanilla consults it too
+/// (`Block.dropResources`'s `GameRules.RULE_DOBLOCKDROPS`).
+pub const BLOCK_DROPS: &str = "block_drops";
+
+/// `mob_drops` — pre-26.2 `doMobLoot`. Read by `crate::mobs::MobSim::reap_dead`.
+pub const MOB_DROPS: &str = "mob_drops";
+
 /// Looks a rule's spec up by identifier, tolerating a `minecraft:` namespace.
 ///
 /// The namespace is accepted because the rule *registry* is namespaced
@@ -414,7 +430,7 @@ impl GameRules {
 
     fn boolean(&self, name: &str) -> bool {
         self.get(name)
-            .and_then(GameRuleValue::as_bool)
+            .and_then(|value| value.as_bool())
             .expect("a boolean rule constant always names a boolean rule in GAME_RULES")
     }
 
@@ -445,6 +461,20 @@ impl GameRules {
         self.boolean(KEEP_INVENTORY)
     }
 
+    /// `block_drops` — whether breaking a block drops anything. Read by
+    /// `crate::server`'s block-break arm.
+    #[must_use]
+    pub fn block_drops(&self) -> bool {
+        self.boolean(BLOCK_DROPS)
+    }
+
+    /// `mob_drops` — whether a mob's death drops anything. Read by
+    /// `crate::mobs::MobSim::reap_dead`.
+    #[must_use]
+    pub fn mob_drops(&self) -> bool {
+        self.boolean(MOB_DROPS)
+    }
+
     /// `random_tick_speed` — random ticks per randomly-ticking section per tick.
     /// Read by `crate::tick::run_tick_loop`'s random-tick pass and handed
     /// straight to [`crate::RandomTickScheduler::tick_chunk`].
@@ -458,7 +488,7 @@ impl GameRules {
     #[must_use]
     pub fn random_tick_speed(&self) -> u32 {
         self.get(RANDOM_TICK_SPEED)
-            .and_then(GameRuleValue::as_int)
+            .and_then(|value| value.as_int())
             .unwrap_or(0)
             .max(0) as u32
     }

@@ -67,7 +67,7 @@ use lodestone_core::State;
 use lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE;
 use lodestone_entity::{DamageFlags, ItemLifecycle};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, Difficulty, GameMode, ItemStack, Rotation, Text,
+    BlockActionKind, BlockFace, BlockPos, GameMode, ItemStack, Rotation, Text,
     TextContent, Vec3, Vec3f,
 };
 use lodestone_data::block_items;
@@ -1125,6 +1125,10 @@ where
     S: ChunkSource + 'static,
     E: EntitySource,
 {
+    // Issues #327/#328/#323: a fresh, unshared store — the compatibility shape
+    // this file uses for every feed. Observably identical to a shared one until
+    // something else writes to it, which for this entry point is nothing.
+    let world = &crate::world_state::WorldStateHandle::default();
     serve_connection_inner(
         conn,
         proto,
@@ -1145,6 +1149,7 @@ where
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
+        world,
     )
     .await
 }
@@ -1181,6 +1186,9 @@ pub(crate) async fn serve_connection_with_mob_events_shared<T, P, S, E>(
     // See `serve_connection_inner`'s own parameter comments.
     sleep_vote: &SleepVote,
     sleep_feed: &SleepFeed,
+    // Issues #327/#328/#323: the world's shared scalars, the *same* handle
+    // `run_tick_loop` ticks. See `serve_connection_inner`'s parameter comment.
+    world: &crate::world_state::WorldStateHandle,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1206,6 +1214,7 @@ where
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
+        world,
     )
     .await
 }
@@ -1248,6 +1257,9 @@ pub(crate) async fn serve_connection_with_mob_events_and_commands_shared<T, P, S
     // parameters here and nowhere else.
     resource_packs: &ResourcePackPushFeed,
     plugin_channels: &PluginChannelRegistry,
+    // Issues #327/#328/#323: the world's shared scalars, the *same* handle
+    // `run_tick_loop` ticks. See `serve_connection_inner`'s parameter comment.
+    world: &crate::world_state::WorldStateHandle,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1277,6 +1289,7 @@ where
         &BorderFeed::default(),
         resource_packs,
         plugin_channels,
+        world,
     )
     .await
 }
@@ -1311,6 +1324,10 @@ where
     S: ChunkSource + 'static,
     E: EntitySource,
 {
+    // Issues #327/#328/#323: a fresh, unshared store — the compatibility shape
+    // this file uses for every feed. Observably identical to a shared one until
+    // something else writes to it, which for this entry point is nothing.
+    let world = &crate::world_state::WorldStateHandle::default();
     serve_connection_inner(
         conn,
         proto,
@@ -1332,6 +1349,7 @@ where
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
+        world,
     )
     .await
 }
@@ -1381,6 +1399,10 @@ where
     S: ChunkSource + 'static,
     E: EntitySource,
 {
+    // Issues #327/#328/#323: a fresh, unshared store — the compatibility shape
+    // this file uses for every feed. Observably identical to a shared one until
+    // something else writes to it, which for this entry point is nothing.
+    let world = &crate::world_state::WorldStateHandle::default();
     serve_connection_inner(
         conn,
         proto,
@@ -1404,6 +1426,7 @@ where
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
+        world,
     )
     .await
 }
@@ -1446,6 +1469,10 @@ where
     S: ChunkSource + 'static,
     E: EntitySource,
 {
+    // Issues #327/#328/#323: a fresh, unshared store — the compatibility shape
+    // this file uses for every feed. Observably identical to a shared one until
+    // something else writes to it, which for this entry point is nothing.
+    let world = &crate::world_state::WorldStateHandle::default();
     serve_connection_inner(
         conn,
         proto,
@@ -1467,6 +1494,7 @@ where
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
+        world,
     )
     .await
 }
@@ -1509,6 +1537,10 @@ where
     S: ChunkSource + 'static,
     E: EntitySource,
 {
+    // Issues #327/#328/#323: a fresh, unshared store — the compatibility shape
+    // this file uses for every feed. Observably identical to a shared one until
+    // something else writes to it, which for this entry point is nothing.
+    let world = &crate::world_state::WorldStateHandle::default();
     serve_connection_inner(
         conn,
         proto,
@@ -1530,6 +1562,7 @@ where
         &BorderFeed::default(),
         resource_packs,
         &PluginChannelRegistry::default(),
+        world,
     )
     .await
 }
@@ -1572,6 +1605,10 @@ where
     S: ChunkSource + 'static,
     E: EntitySource,
 {
+    // Issues #327/#328/#323: a fresh, unshared store — the compatibility shape
+    // this file uses for every feed. Observably identical to a shared one until
+    // something else writes to it, which for this entry point is nothing.
+    let world = &crate::world_state::WorldStateHandle::default();
     serve_connection_inner(
         conn,
         proto,
@@ -1593,6 +1630,7 @@ where
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
         plugin_channels,
+        world,
     )
     .await
 }
@@ -1678,6 +1716,14 @@ async fn serve_connection_inner<T, P, S, E>(
     // messaging reaches [`serve_connection_with_plugin_channels`] instead,
     // which carries a live registry.
     plugin_channels: &PluginChannelRegistry,
+    // Issues #327/#328/#323. The world's shared scalars -- game rules, difficulty
+    // and the clock. Same compatibility shape as every feed above: each
+    // pre-existing entry point passes a fresh `WorldStateHandle::default()`, so no
+    // off-limits call site broke, and the two `_shared` wrappers
+    // `IntegratedServer` uses carry the *same* handle `run_tick_loop` ticks. That
+    // sharing is the whole point: a per-connection store is the bug both #327 and
+    // #328 were reported for.
+    world: &crate::world_state::WorldStateHandle,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1826,11 +1872,18 @@ where
                 // Full clock sync at join, mirroring vanilla's
                 // `ServerClockManager::createFullSyncPacket`, sent by
                 // `PlayerList.sendLevelInfo` before chunk streaming starts
-                // (`PlayerList.java:648-651`): anchor a fresh session's
-                // day/night clock at tick 0. This crate has no persisted
-                // world age, so "tick 0" is the session's own join moment,
-                // not a restored save.
-                apply(conn, &mut state, proto.encode_set_time(0, Some(0))).await?;
+                // (`PlayerList.java:648-651`).
+                //
+                // Issue #323: the **world's** clock, not `(0, 0)`. A join no longer
+                // resets the sky to dawn, and a world loaded off disk starts wherever
+                // it left off (`WorldStateHandle::load_level_data`).
+                let joined_at = world.time();
+                apply(
+                    conn,
+                    &mut state,
+                    proto.encode_set_time(joined_at.game_time, Some(joined_at.day_time)),
+                )
+                .await?;
 
                 apply(conn, &mut state, proto.begin_chunk_batch()).await?;
                 // Generation is fanned out over scoped OS threads
@@ -2069,6 +2122,7 @@ where
                     &mut client_channels,
                     plugin_channels,
                     game_mode,
+                    world,
                 )
                 .await;
             }
@@ -2520,6 +2574,9 @@ async fn apply_block_action<T, P, S>(
     // `block_breaking::within_interaction_range` for why `None` permits the break
     // rather than refusing it.
     player_feet: Option<Vec3>,
+    // Issue #327: the world's rules, for the `block_drops` gate below (vanilla's
+    // own gate site, inside `Block.dropResources`).
+    world: &crate::world_state::WorldStateHandle,
     // Issue #531. The server tick this packet is being handled on, for the
     // destroy-progress accounting. `None` on `wasm32`, which has no timer to
     // count ticks with (see `serve_play`'s two definitions); the timing test is
@@ -2572,7 +2629,7 @@ where
                     held,
                     block_ticks,
                     breaker,
-                    !creative,
+                    !creative && world.block_drops(),
                     pos,
                 )
                 .await?;
@@ -2633,7 +2690,7 @@ where
                 held,
                 block_ticks,
                 breaker,
-                !creative,
+                !creative && world.block_drops(),
                 pos,
             )
             .await?;
@@ -2702,13 +2759,11 @@ where
     // what connects a 1,551-line loot module that had no production
     // caller to the wire path mobs already proved reaches a client.
     //
-    // **Not gated on `doTileDrops`.** Vanilla wraps `popResource` in
-    // `level.getGameRules().get(GameRules.BLOCK_DROPS)`, but this
-    // crate has no live game-rule registry to consult —
-    // `crate::game_rules` describes the rules for the wire and
-    // stores no values (`server.rs`'s own three "no `GameRules`
-    // registry" notes). A real registry is the prerequisite, not a
-    // guess here; see `docs/block-drops.md`.
+    // **Gated on `block_drops`** (pre-26.2 `doTileDrops`), which vanilla
+    // consults in the same place — `Block.dropResources` wraps
+    // `popResource` in `level.getGameRules().get(RULE_DOBLOCKDROPS)`.
+    // ~~"this crate has no live game-rule registry to consult"~~ was
+    // true when written; the registry is now `world_state`.
     //
     // **Issue #539: the tool decides both whether anything drops at
     // all and what.** `drops_are_allowed` is vanilla's
@@ -3939,29 +3994,11 @@ where
 /// rather than shared across connections, matching `player_pos`/`vitals`/
 /// `fall`'s existing precedent in [`serve_play`] — a real scope cut for
 /// open-to-LAN (two connections would each hold an independent view, and
-/// neither would see the other's change), documented rather than silent.
-#[derive(Debug)]
-struct WorldAdminState {
-    difficulty: Difficulty,
-    difficulty_locked: bool,
-    game_rules: HashMap<String, String>,
-}
-
-impl Default for WorldAdminState {
-    fn default() -> Self {
-        Self {
-            // Matches `LevelSettings.DEFAULT`'s difficulty
-            // (`.cache/mc/26.2/src/net/minecraft/world/level/levelgen/`
-            // `WorldOptions.java`'s sibling `LevelSettings` default) — a
-            // fresh session's starting point before any
-            // `DifficultyChanged` request rewrites it.
-            difficulty: Difficulty::Normal,
-            difficulty_locked: false,
-            game_rules: HashMap::new(),
-        }
-    }
-}
-
+/// `WorldAdminState` used to live here: a `Difficulty` + lock + a bare
+/// `HashMap<String, String>` of game rules, constructed as a **stack local inside
+/// `serve_play`**. That is one store per accepted socket, so two LAN players each
+/// held a private, divergent view, and nothing anywhere read either. It is now
+/// [`crate::world_state::WorldStateHandle`], shared with the tick loop.
 /// Applies a difficulty-change request (`ServerBound::DifficultyChanged`),
 /// mirroring `ServerGamePacketListenerImpl::handleChangeDifficulty`
 /// (`.cache/mc/26.2/src/net/minecraft/server/network/ServerGamePacketListenerImpl.java:2088-2099`)
@@ -3979,13 +4016,14 @@ async fn apply_difficulty_change<T, P>(
     conn: &mut Connection<T>,
     proto: &P,
     state: &mut State,
-    admin: &mut WorldAdminState,
+    world: &crate::world_state::WorldStateHandle,
 ) -> Result<(), ServerError>
 where
     T: Transport,
     P: ServerProtocol,
 {
-    let directive = proto.encode_change_difficulty(admin.difficulty, admin.difficulty_locked);
+    let (difficulty, locked) = world.difficulty();
+    let directive = proto.encode_change_difficulty(difficulty, locked);
     apply(conn, state, directive).await
 }
 
@@ -4006,17 +4044,32 @@ async fn apply_game_rule_changed<T, P>(
     conn: &mut Connection<T>,
     proto: &P,
     state: &mut State,
-    admin: &mut WorldAdminState,
+    world: &crate::world_state::WorldStateHandle,
     entries: Vec<(String, String)>,
 ) -> Result<(), ServerError>
 where
     T: Transport,
     P: ServerProtocol,
 {
-    for (key, value) in &entries {
-        admin.game_rules.insert(key.clone(), value.clone());
-    }
-    let directive = proto.encode_game_rule_values(&entries);
+    // **Validated now**, which is what vanilla does too
+    // (`BuiltInRegistries.GAME_RULE` lookup + `GameRule<T>::deserialize`). The old
+    // store kept every `(String, String)` verbatim, so `randomTickSpeed` — the
+    // pre-26.2 spelling — was accepted, echoed back, and then never read by
+    // anything, because the reader asks for `random_tick_speed`. The player saw
+    // their rule confirmed and no behaviour change.
+    //
+    // Only the entries that were actually *set* are confirmed back, so a rejected
+    // key is visibly absent from the reply rather than silently agreed with.
+    let accepted: Vec<(String, String)> = entries
+        .iter()
+        .filter_map(|(key, value)| {
+            world
+                .set_rule(key, value)
+                .ok()
+                .map(|parsed| (key.clone(), parsed.serialize()))
+        })
+        .collect();
+    let directive = proto.encode_game_rule_values(&accepted);
     apply(conn, state, directive).await
 }
 
@@ -4086,7 +4139,7 @@ async fn apply_client_command<T, P>(
     // the world spawn is the honest subset, and it is what a player with no bed
     // gets in vanilla too.
     world_spawn: Vec3,
-    admin: &WorldAdminState,
+    world: &crate::world_state::WorldStateHandle,
     advancements: &mut AdvancementManager,
     player_uuid: uuid::Uuid,
     action: i32,
@@ -4118,12 +4171,12 @@ where
             apply(conn, state, proto.encode_award_stats(&snapshot)).await?;
         }
         2 => {
-            let entries: Vec<(String, String)> = admin
-                .game_rules
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect();
-            apply(conn, state, proto.encode_game_rule_values(&entries)).await?;
+            apply(
+                conn,
+                state,
+                proto.encode_game_rule_values(&world.rule_entries()),
+            )
+            .await?;
         }
         _ => {}
     }
@@ -4691,7 +4744,7 @@ async fn dispatch_play_packet<T, P, S>(
     player_rot: &mut Option<Rotation>,
     fall: &mut FallTracker,
     vitals: &mut PlayerVitals,
-    admin: &mut WorldAdminState,
+    world: &crate::world_state::WorldStateHandle,
     inventory: &mut PlayerInventory,
     block_entities: &BlockEntityHandle,
     open_container: &mut Option<OpenContainer>,
@@ -4944,6 +4997,7 @@ where
                 // reads for the bed reach check, and `None` for the same reason
                 // (no `PlayerMoved` packet has arrived yet).
                 player_pos.as_ref().map(|&(x, y, z)| Vec3::new(x, y, z)),
+                world,
                 game_tick,
                 block_ticks,
                 player_uuid,
@@ -4997,15 +5051,19 @@ where
             .await?;
         }
         ServerBound::DifficultyChanged { difficulty } => {
-            admin.difficulty = difficulty;
-            apply_difficulty_change(conn, proto, state, admin).await?;
+            // A **locked** world refuses the change, which vanilla enforces in
+            // `MinecraftServer.setDifficulty`. The confirmation below is sent either
+            // way and carries the value that is actually stored, so a refused
+            // request corrects the client's own UI rather than leaving it wrong.
+            world.set_difficulty(difficulty);
+            apply_difficulty_change(conn, proto, state, world).await?;
         }
         ServerBound::DifficultyLockChanged { locked } => {
-            admin.difficulty_locked = locked;
-            apply_difficulty_change(conn, proto, state, admin).await?;
+            world.set_difficulty_locked(locked);
+            apply_difficulty_change(conn, proto, state, world).await?;
         }
         ServerBound::GameRuleChanged { entries } => {
-            apply_game_rule_changed(conn, proto, state, admin, entries).await?;
+            apply_game_rule_changed(conn, proto, state, world, entries).await?;
         }
         ServerBound::CarriedItemChanged { slot } => {
             apply_carried_item_changed(inventory, slot);
@@ -5094,7 +5152,7 @@ where
                 vitals,
                 fall,
                 world_spawn,
-                admin,
+                world,
                 advancements,
                 player_uuid,
                 action,
@@ -5369,6 +5427,10 @@ async fn serve_play<T, P, S, E>(
     // because the `change_game_mode` and `/gamemode` arms mutate it and nothing
     // outside this loop reads it.
     mut game_mode: GameMode,
+    // Issues #327/#328/#323. The world's shared game rules, difficulty and clock —
+    // the same handle `run_tick_loop` ticks. Replaced the `WorldAdminState` local
+    // that used to be constructed right here, one per accepted socket.
+    world: &crate::world_state::WorldStateHandle,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -5384,7 +5446,6 @@ where
     let mut player_rot: Option<Rotation> = None;
     let mut vitals = PlayerVitals::default();
     let mut fall = FallTracker::default();
-    let mut admin = WorldAdminState::default();
     let mut inventory = PlayerInventory::default();
     let mut open_container: Option<OpenContainer> = None;
     let mut container_sync = ContainerSync::default();
@@ -5487,7 +5548,7 @@ where
                     &mut player_rot,
                     &mut fall,
                     &mut vitals,
-                    &mut admin,
+                    world,
                     &mut inventory,
                     block_entities,
                     &mut open_container,
@@ -5648,8 +5709,25 @@ where
             }
 
             _ = time_sync_tick.tick() => {
-                let game_time = ticks_since(play_start);
-                apply(conn, &mut state, proto.encode_set_time(game_time, None)).await?;
+                // **Issue #323's fix, and it is one line's worth of value.** This
+                // used to send `ticks_since(play_start)` — wall-clock elapsed since
+                // *this connection* joined — with `None` for the day clock. Every
+                // link in the chain was green and a connected client's sky really did
+                // move, which is exactly why `cargo xtask connectedness` is blind to
+                // it: a fully-connected wire carrying the wrong value.
+                //
+                // The world's own clock is the source now, and the `day_time` is sent
+                // rather than left to the client's own extrapolation, because that is
+                // the only way `/gamerule advance_time false` can actually freeze the
+                // sun: an empty map means "keep the anchor you have", and the client
+                // keeps advancing it.
+                let time = world.time();
+                apply(
+                    conn,
+                    &mut state,
+                    proto.encode_set_time(time.game_time, Some(time.day_time)),
+                )
+                .await?;
             }
 
             _ = vitals_tick.tick() => {
@@ -5686,7 +5764,7 @@ where
                             inventory.selected_item(),
                             block_ticks,
                             player_uuid,
-                            !matches!(game_mode, GameMode::Creative),
+                            !matches!(game_mode, GameMode::Creative) && world.block_drops(),
                             dig.pos,
                         )
                         .await?;
@@ -6010,6 +6088,10 @@ async fn serve_play<T, P, S, E>(
     // because the `change_game_mode` and `/gamemode` arms mutate it and nothing
     // outside this loop reads it.
     mut game_mode: GameMode,
+    // Issues #327/#328/#323. The world's shared game rules, difficulty and clock —
+    // the same handle `run_tick_loop` ticks. Replaced the `WorldAdminState` local
+    // that used to be constructed right here, one per accepted socket.
+    world: &crate::world_state::WorldStateHandle,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -6036,7 +6118,6 @@ where
     let mut player_rot: Option<Rotation> = None;
     let mut vitals = PlayerVitals::default();
     let mut fall = FallTracker::default();
-    let mut admin = WorldAdminState::default();
     let mut inventory = PlayerInventory::default();
     // Same gap as `vitals` above, for the same reason: `sync_open_container`
     // (the piece that pushes a furnace's own background-tick mutation to an
@@ -6087,7 +6168,7 @@ where
             &mut player_rot,
             &mut fall,
             &mut vitals,
-            &mut admin,
+            world,
             &mut inventory,
             block_entities,
             &mut open_container,

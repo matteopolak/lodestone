@@ -332,7 +332,9 @@ fn register_gamerule(tree: &mut CommandTree, executors: &mut HashMap<NodeId, Exe
     // thing `crate::server` can supply and a built-in cannot forge, and a
     // command that needs it (`/kill`, `/tp`) should not have to change this
     // struct's shape to get it.
-    let _ = |effects: &CommandEffects<'_>| effects.caller;
+    fn _caller_is_read<'a>(effects: &CommandEffects<'a>) -> &'a CommandCaller {
+        effects.caller
+    }
 }
 
 #[cfg(test)]

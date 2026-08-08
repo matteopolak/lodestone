@@ -72,7 +72,7 @@ use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 // crate's own pre-#284 `HEAD`, not assumed. Fixed here rather than left,
 // since this refactor already touches every one of these imports.
 #[cfg(not(target_arch = "wasm32"))]
-use crate::tick::{run_tick_loop, run_tick_loop_with_weather};
+use crate::tick::run_tick_loop_with_weather;
 // Issue #325: the night-skip vote and its feed, wired into
 // `open_in_memory_with_mobs_using` (singleplayer) — see that constructor and
 // `crate::sleep`'s module doc. Native-only for the same reason the tick-loop
@@ -277,6 +277,10 @@ pub struct IntegratedServer {
     /// lives there rather than in [`TickClock`].
     #[cfg(not(target_arch = "wasm32"))]
     level_dat: Option<std::sync::Arc<crate::region_source::LevelDatHandle>>,
+    /// Issues #327/#328/#323: the world's shared game rules, difficulty and clock.
+    /// The **same** handle the tick loop advances and every connection reads; kept
+    /// here so the persistence path can load it at open and stamp it on save.
+    world_state: crate::world_state::WorldStateHandle,
     /// The RCON listener task (issue #331), `Some` once
     /// [`start_rcon`](Self::start_rcon) has been called.
     ///
@@ -487,6 +491,8 @@ impl IntegratedServer {
                 autosave_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 level_dat: None,
+                // No tick loop here, so there is nothing to share a store *with*.
+                world_state: crate::world_state::WorldStateHandle::default(),
                 // No RCON listener (issue #331) unless the caller starts one
                 // explicitly with `start_rcon` — a listener needs a password
                 // and a command dispatch, which these constructors do not take.
@@ -774,6 +780,16 @@ impl IntegratedServer {
         // passes the same inner handle to `run_tick_loop_with_weather`.
         let conn_sleep_vote = sleep_vote.clone();
         let conn_sleep_feed = sleep_feed.clone();
+        // Issues #327/#328/#323. **One** world state, cloned out here for the same
+        // reason the sleep vote is: a clone made inside the `async move` below would
+        // move the original out of reach of the tick task, and two stores is the bug
+        // — a rule set on the connection has to be the rule the loop reads, and the
+        // clock the loop advances has to be the clock the connection broadcasts.
+        let world_state = crate::world_state::WorldStateHandle::new();
+        let conn_world_state = world_state.clone();
+        // A third clone for the returned handle, so a caller (the persistence path,
+        // a gate) reads and stamps the *same* store the loop advances.
+        let world_state_for_handle = world_state.clone();
         let task = spawn(async move {
             let mut conn = Connection::new(server_end);
             tokio::select! {
@@ -803,6 +819,7 @@ impl IntegratedServer {
                     &conn_explosions,
                     &conn_sleep_vote,
                     &conn_sleep_feed,
+                    &conn_world_state,
                 ) => {}
             }
         });
@@ -857,6 +874,7 @@ impl IntegratedServer {
                 &sleep_vote,
                 &sleep_feed,
                 scheduled,
+                world_state,
             )
             .await;
         });
@@ -877,6 +895,7 @@ impl IntegratedServer {
                 autosave_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 level_dat: None,
+                world_state: world_state_for_handle,
                 #[cfg(not(target_arch = "wasm32"))]
                 rcon_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1002,6 +1021,19 @@ impl IntegratedServer {
 
         let autosave_handle = save.clone();
         let autosave_level_dat = std::sync::Arc::clone(&level_dat);
+        // Issues #327/#328/#323: the world's scalars, loaded off disk **before**
+        // anything can change them and stamped on every autosave.
+        //
+        // Load races the connection's own join by construction (the connection task
+        // is spawned inside the constructor above), and that is tolerable rather than
+        // ignored: the join's `encode_set_time` may carry a zero clock for one
+        // second, and the periodic broadcast corrects it on its next tick. Moving the
+        // load before the constructor needs the store built outside it, which is the
+        // follow-up #300 wants anyway.
+        let autosave_world_state = server.world_state.clone();
+        if let Some(data) = level_dat.data() {
+            autosave_world_state.load_level_data(&data);
+        }
         // Cloned before the `Self` literal for the same reason `tick_clock` is
         // in the constructor above: an `Arc::clone` inside the `async move`
         // would move the binding into the coroutine.
@@ -1030,7 +1062,11 @@ impl IntegratedServer {
                     .as_ref()
                     .map_or(0, |clock| clock.tick_count());
                 let level = std::sync::Arc::clone(&autosave_level_dat);
-                let result = tokio::task::spawn_blocking(move || level.write(ticks)).await;
+                // Issues #327/#328/#323: the rules, difficulty and day clock ride the
+                // same write. Snapshotted here rather than inside the closure because
+                // the closure crosses `spawn_blocking`.
+                let scalars = autosave_world_state.level_data_fields();
+                let result = tokio::task::spawn_blocking(move || level.write(ticks, &scalars)).await;
                 if let Ok(Err(err)) = result {
                     tracing::warn!("autosave could not stamp level.dat: {err}");
                 }
@@ -1044,6 +1080,17 @@ impl IntegratedServer {
         // handle.
         server.autosave_task = Some(autosave_task);
         Ok((server, client_end, world))
+    }
+
+    /// The world's shared game rules, difficulty and clock (issues #327/#328/#323).
+    ///
+    /// The **same** store the tick loop advances and every connection reads, so a
+    /// host can set a rule or read the day time without a packet round trip. A
+    /// constructor with no tick loop returns a private default — there is nothing
+    /// to share one with.
+    #[must_use]
+    pub fn world_state(&self) -> &crate::world_state::WorldStateHandle {
+        &self.world_state
     }
 
     /// Writes every dirty chunk now, on the calling thread, returning how many
@@ -1066,7 +1113,7 @@ impl IntegratedServer {
         // would let a failed chunk save skip the stamp for no benefit.
         if let Some(level) = &self.level_dat {
             let ticks = self.clock.as_ref().map_or(0, |clock| clock.tick_count());
-            if let Err(err) = level.write(ticks) {
+            if let Err(err) = level.write(ticks, &self.world_state.level_data_fields()) {
                 tracing::warn!("could not stamp level.dat: {err}");
             }
         }
@@ -1269,10 +1316,18 @@ impl IntegratedServer {
         let tick_block_entities = block_entities.clone();
         let tick_block_ticks = hub_block_ticks.clone();
         let tick_explosions = hub_explosions.clone();
+        // Issues #327/#328/#323: one store for the LAN world, so a rule a LAN
+        // player sets is the rule the tick loop reads and the clock the loop
+        // advances is the clock every connection broadcasts. `bind` used to give
+        // each accepted socket its own `WorldAdminState` local — two LAN players
+        // each had a private, divergent view, which is what #327 reported.
+        let lan_world_state = crate::world_state::WorldStateHandle::new();
+        let tick_world_state = lan_world_state.clone();
+        let handle_world_state = lan_world_state.clone();
         let tick_task = spawn_tick_task(&shutdown, async move {
             // Owned by the tick task, with no lock, per `docs/server-ecs.md`.
             let _server_world = server_world;
-            run_tick_loop(
+            run_tick_loop_with_weather(
                 tick_mobs,
                 tick_live_mobs,
                 tick_block_entities,
@@ -1292,10 +1347,20 @@ impl IntegratedServer {
                     -LAN_TICK_RADIUS..=LAN_TICK_RADIUS,
                 ),
                 tick_explosions,
+                // Weather is not wired on the LAN path either — a default feed and
+                // state, exactly what the `run_tick_loop` wrapper passed before this
+                // switched variants, so the sky is observably unchanged. The variant
+                // switch buys the world-state parameter and nothing else.
+                WeatherFeed::default(),
+                WeatherState::default(),
+                // Issue #325: LAN stays sleep-free, matching the wrapper.
+                &crate::sleep::SleepVote::new(),
+                &crate::sleep::SleepFeed::default(),
                 // Issue #468: LAN has no world on disk (`save: None` below), so
                 // there is nothing to persist these into — a fresh handle, which
                 // makes the queues behave exactly as the locals they replaced.
                 crate::region_source::ScheduledTickHandle::default(),
+                tick_world_state,
             )
             .await;
         });
@@ -1414,6 +1479,8 @@ impl IntegratedServer {
                         let commands = conn_commands.clone();
                         let resource_packs = conn_resource_packs.clone();
                         let plugin_channels = conn_plugin_channels.clone();
+                        // One clone per accepted socket, all naming the same store.
+                        let world_state = lan_world_state.clone();
                         // Issue #438: the mob source and the shared player
                         // registry, composed. `PlayerAwareSource::snapshots`
                         // still returns only the mobs — the players travel
@@ -1473,7 +1540,7 @@ impl IntegratedServer {
                                 &mut conn, &*protocol, &source, &entities, view_radius,
                                 &block_entities, &mobs,
                                 &conn_block_ticks, &conn_explosions,
-                                &commands, &resource_packs, &plugin_channels,
+                                &commands, &resource_packs, &plugin_channels, &world_state,
                             )
                             .await;
                             // Lets the relay arm above drop this connection's
@@ -1514,6 +1581,7 @@ impl IntegratedServer {
             autosave_task: None,
             #[cfg(not(target_arch = "wasm32"))]
             level_dat: None,
+            world_state: handle_world_state,
             // Set by the `start_rcon` call just below when the caller asked for
             // one (issue #331). It needs a password, so it stays opt-in.
             #[cfg(not(target_arch = "wasm32"))]
@@ -1681,7 +1749,8 @@ impl IntegratedServer {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(level) = self.level_dat.take() {
             let ticks = self.clock.as_ref().map_or(0, |clock| clock.tick_count());
-            match tokio::task::spawn_blocking(move || level.write(ticks)).await {
+            let scalars = self.world_state.level_data_fields();
+            match tokio::task::spawn_blocking(move || level.write(ticks, &scalars)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => tracing::warn!("level.dat stamp on shutdown failed: {err}"),
                 Err(err) => tracing::warn!("level.dat stamp on shutdown panicked: {err}"),

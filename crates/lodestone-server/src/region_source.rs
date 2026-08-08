@@ -323,7 +323,24 @@ impl LevelDatHandle {
         self.writes.load(Ordering::Relaxed)
     }
 
-    /// Stamps `Time` and `LastPlayed` and writes the file back.
+    /// The world's `Data` compound as read at open — what
+    /// [`crate::world_state::WorldStateHandle::load_level_data`] reads its rules,
+    /// difficulty and clock back out of.
+    #[must_use]
+    pub fn data(&self) -> Option<lodestone_core::Nbt> {
+        self.level
+            .lock()
+            .expect("level.dat lock poisoned")
+            .data()
+            .cloned()
+    }
+
+    /// Stamps `Time` and `LastPlayed`, merges `extra` into the `Data` compound, and
+    /// writes the file back.
+    ///
+    /// `extra` is [`crate::world_state::WorldStateHandle::level_data_fields`] —
+    /// game rules, difficulty and the day clock, under vanilla's own field names,
+    /// so a world this server writes is readable by a real 26.2 server.
     ///
     /// `session_ticks` is [`crate::tick::TickClock::tick_count`] — this
     /// session's own ticks, which this adds to the base captured at open.
@@ -334,8 +351,15 @@ impl LevelDatHandle {
     /// # Errors
     ///
     /// [`Error::Anvil`] if the file cannot be encoded or written.
-    pub fn write(&self, session_ticks: u64) -> Result<(), Error> {
+    pub fn write(
+        &self,
+        session_ticks: u64,
+        extra: &[(String, lodestone_core::Nbt)],
+    ) -> Result<(), Error> {
         let mut level = self.level.lock().expect("level.dat lock poisoned");
+        for (field, value) in extra {
+            level.set_data_field(field, value.clone()).map_err(Error::Anvil)?;
+        }
         let total = self
             .base_ticks
             .saturating_add(i64::try_from(session_ticks).unwrap_or(i64::MAX));

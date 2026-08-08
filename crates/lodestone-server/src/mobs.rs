@@ -1632,6 +1632,10 @@ pub struct MobSim<'w> {
     /// see [`set_players`](Self::set_players) for why that made two of the
     /// eight perception methods unreachable, and which one line closes it.
     players: Vec<PlayerPerception>,
+    /// The `mob_drops` game rule, mirrored in by
+    /// [`set_mob_drops`](Self::set_mob_drops). `true` by default, which is vanilla's
+    /// own default and the behaviour before the rule was readable.
+    mob_drops: bool,
 }
 
 /// One detonation [`MobSim::tick`] triggered this tick, for
@@ -1678,6 +1682,7 @@ impl<'w> MobSim<'w> {
             pending_grazes: Vec::new(),
             pending_vocalisations: Vec::new(),
             players: Vec::new(),
+            mob_drops: true,
         }
     }
 
@@ -2896,6 +2901,25 @@ impl<'w> MobSim<'w> {
         self.projectiles.get(id).map(|p| p.position)
     }
 
+    /// Whether a death rolls its loot table — the `mob_drops` game rule, handed in
+    /// by `crate::tick::run_tick_loop` once a tick (this type is version-free and
+    /// holds no world-state handle). Defaults to vanilla's own default, `true`, so a
+    /// sim nobody sets it on behaves exactly as before the rule existed.
+    pub fn set_mob_drops(&mut self, allowed: bool) {
+        self.mob_drops = allowed;
+    }
+
+    /// Discards every hostile mob — vanilla's `Mob.checkDespawn` on Peaceful
+    /// difficulty (issue #328). Returns how many were removed.
+    ///
+    /// Rolls **no** loot: vanilla's peaceful sweep is `discard()`, not a death, so a
+    /// player switching to Peaceful does not get a floor covered in rotten flesh.
+    pub fn remove_monsters(&mut self) -> usize {
+        let before = self.mobs.len();
+        self.mobs.retain(|m| !is_hostile_species(&m.entity_type));
+        before - self.mobs.len()
+    }
+
     /// Removes every mob at or below zero health, rolling its death loot table
     /// on the way out (issue #272 — the mob half of #337's loot chain).
     ///
@@ -2939,6 +2963,9 @@ impl<'w> MobSim<'w> {
     /// Seeded from the tick count and the position, so a death is deterministic
     /// for a given world state without threading a connection's RNG into the sim.
     fn drop_death_loot(&mut self, entity_type: &ResourceKey, position: Vec3) {
+        if !self.mob_drops {
+            return;
+        }
         let Some(table) = crate::block_drops::mob_loot_table_id(entity_type) else {
             return;
         };

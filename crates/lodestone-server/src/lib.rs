@@ -118,6 +118,10 @@ mod chunk_blocks;
 pub mod chunk_nbt;
 mod chunk_store;
 mod command;
+/// The built-in server command tree (`/gamerule`, …) — issue #48. **Was an
+/// orphan file, never declared and therefore never compiled**; see
+/// `docs/game-rules.md`.
+mod commands;
 mod composter;
 /// Server-side `doClick` (the container-click state machine): derives the result
 /// of a click from the slot/button/click-type the wire carries, rather than
@@ -133,6 +137,10 @@ pub mod ecs;
 pub mod effects;
 mod fall;
 mod furnace;
+/// The world's typed game-rule registry (issue #327). **Was an orphan file too**
+/// — none of its 780 lines, including `game_rule_defaults_match_the_jar`, was in
+/// the crate at all.
+pub mod game_rules;
 mod gravity_tick;
 mod growth_tick;
 mod hand_use;
@@ -205,6 +213,10 @@ mod tick;
 mod vitals;
 mod weather;
 mod world_spawn;
+/// One shared, persistable store for the world's scalars — game rules,
+/// difficulty and the clock (issues #327, #328, #323). Public because a host and
+/// the gates both read it.
+pub mod world_state;
 mod worldgen_data;
 
 pub use advancements::{
