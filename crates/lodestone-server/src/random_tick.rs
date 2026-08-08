@@ -130,7 +130,7 @@
 //! [`grass_can_stay_alive`]. It used to be proxied by "the block directly above
 //! is bare air", which killed grass under **any** non-air block including
 //! `minecraft:short_grass`, so every patch of grass the generator decorated
-//! turned to dirt on its first random tick (issue #549). The proxy existed
+//! turned to dirt on its first random tick (issue #544). The proxy existed
 //! because there was no per-state light-dampening census; `lodestone_data::light_props`
 //! is that census, and the predicate is `dampening(above) < 15` with the
 //! snow-layer-1 and full-fluid special cases ahead of it.
@@ -252,7 +252,7 @@ fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
 ///
 /// # The proxy this replaces, and why it was a bug
 ///
-/// Until issue #549 this module used `is_air_variant(above)` for `canStayAlive`,
+/// Until issue #544 this module used `is_air_variant(above)` for `canStayAlive`,
 /// so **any** non-air block above killed the grass. `minecraft:short_grass` is
 /// non-air, and vanilla's own vegetation step places short grass on top of grass
 /// blocks — so every patch of grass the generator decorated turned to dirt on its
@@ -422,10 +422,10 @@ pub enum GrassOutcome {
 /// computes with [`grass_can_stay_alive`]. It used to be the parameter
 /// `above_is_air`, a proxy that killed grass under *any* non-air block —
 /// including `minecraft:short_grass`, which vanilla's own vegetation step
-/// places on top of grass blocks. That is issue #549.
+/// places on top of grass blocks. That is issue #544.
 ///
 /// **`can_stay_alive` still doubles as the `getMaxLocalRawBrightness(pos.above())
-/// >= 9` gate**, which is a *different* simplification from the one #549 removed
+/// >= 9` gate**, which is a *different* simplification from the one #544 removed
 /// and remains: this crate's random-tick driver holds a `ChunkColumn`, not a light
 /// map, so the exact brightness is unavailable rather than approximated. The
 /// consequence is that a live grass block always attempts a spread regardless of
@@ -478,7 +478,7 @@ pub fn grass_random_tick(
 /// which is vanilla's `level.getBlockState(testPos).is(baseBlock)` at the call
 /// site.
 ///
-/// Before issue #549 this was `is_air_variant(above_target_state)`, which
+/// Before issue #544 this was `is_air_variant(above_target_state)`, which
 /// collapsed both conditions into the same proxy [`grass_can_stay_alive`]
 /// documents.
 #[must_use]
@@ -814,7 +814,7 @@ impl RandomTickScheduler {
         let lx = x - min_x;
         let lz = z - min_z;
         let above = column.block_state(lx, y + 1, lz).to_string();
-        // Issue #549: vanilla's real `canStayAlive`, not the old
+        // Issue #544: vanilla's real `canStayAlive`, not the old
         // `is_air_variant` proxy. The proxy killed grass under *any* non-air
         // block, and vanilla's own vegetation step puts `minecraft:short_grass`
         // on top of grass blocks — so every decorated patch turned to dirt on
@@ -1662,7 +1662,7 @@ mod tests {
         assert_eq!(column.block_state(3, 5, 3), GRASS_BLOCK);
     }
 
-    /// **Issue #549: which above-block kills grass, predicted from vanilla's
+    /// **Issue #544: which above-block kills grass, predicted from vanilla's
     /// record and the dampening census rather than from this crate's answer.**
     ///
     /// `SpreadingSnowyBlock.canStayAlive` is, in order: snow with `LAYERS == 1`
@@ -1726,7 +1726,7 @@ mod tests {
             dampening("minecraft:short_grass"),
             0,
             "short grass dampens no light, which is why vanilla's grass survives \
-             under it — the whole of issue #549"
+             under it — the whole of issue #544"
         );
         assert_eq!(dampening("minecraft:stone"), 15, "a full solid is the kill case");
         assert!(
@@ -1804,7 +1804,7 @@ mod tests {
         assert!(can_propagate_onto(DIRT_BLOCK, "minecraft:air"));
         assert!(
             can_propagate_onto(DIRT_BLOCK, "minecraft:short_grass"),
-            "issue #549's other half: grass spreads under short grass too"
+            "issue #544's other half: grass spreads under short grass too"
         );
         assert!(!can_propagate_onto(DIRT_BLOCK, "minecraft:stone"));
         assert!(
@@ -1813,7 +1813,7 @@ mod tests {
         );
     }
 
-    /// **The end-to-end half of #549, through the real `tick_chunk` driver:**
+    /// **The end-to-end half of #544, through the real `tick_chunk` driver:**
     /// grass under short grass must survive, and the draw count must be the
     /// *live* one (12 behaviour draws), not the die branch's zero.
     ///

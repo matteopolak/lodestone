@@ -47,7 +47,7 @@ const INERT_TICKING: &str = "minecraft:oak_sapling[stage=1]";
 /// `canStayAlive` is false, draws zero behaviour values and never spreads — one
 /// event, no new ticking states anywhere.
 ///
-/// "Solid" is load-bearing since issue #549: `canStayAlive` is
+/// "Solid" is load-bearing since issue #544: `canStayAlive` is
 /// `dampening(above) < 15`, not "above is air", so a `short_grass` cap would leave
 /// this grass **alive** and spending 12 behaviour draws per hit. Every fixture
 /// below caps with [`STONE`] for that reason.
@@ -684,10 +684,10 @@ fn corrupting_a_counter_trips_the_consumption_site_tripwire() {
 /// from the production generator, so it exercises mutation shapes (spread into a
 /// neighbouring section, cascades through `propagate_and_react`) that a scripted
 /// column would not contain.
-/// # Why the mutation source is now planted rather than assumed (issue #549)
+/// # Why the mutation source is now planted rather than assumed (issue #544)
 ///
 /// This arm used to rely on "whatever the surface actually holds" producing
-/// mutations, and that premise **silently became false**. Before #549, grass died
+/// mutations, and that premise **silently became false**. Before #544, grass died
 /// to dirt under *any* non-air block, and vanilla's own vegetation step covers
 /// grass with `short_grass` — so a generated surface column mutated constantly, by
 /// accident, because of a bug. With `canStayAlive` modelled properly the surface
