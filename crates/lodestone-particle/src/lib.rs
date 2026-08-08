@@ -102,47 +102,154 @@ pub enum Sheet {
     /// just happens both to be "explosion" *and* to need its own frame count
     /// (16, not the 8 every other multi-frame sheet in this enum uses).
     Explosion,
+    /// `particle/generic_0` … `generic_7` **ascending** — `portal.json` and
+    /// `reverse_portal.json`.
+    ///
+    /// The same eight physical textures as [`Self::Generic`] in the opposite
+    /// order, which is why it has to be its own variant: a sheet's identity here
+    /// is its *frame sequence*, not its pixels. See [`Self::frames`].
+    PortalGeneric,
+    /// `particle/soul_0` … `soul_10` — `soul.json`. Eleven frames, ascending.
+    Soul,
+    /// `particle/soul_fire_flame` — the blue flame over soul fire/soul torches.
+    SoulFireFlame,
+    /// `particle/sga_a` … `sga_z` — `enchant.json`'s twenty-six Standard Galactic
+    /// glyphs. **Not numerically suffixed at all**, which is the reason
+    /// [`Self::frames`] exists rather than a `<stem>_<n>` format string.
+    Enchant,
+    /// `particle/drip_hang` — a drip clinging to the underside of a block
+    /// (`dripping_water`, `dripping_lava`).
+    DripHang,
+    /// `particle/drip_fall` — a drip in free fall (`falling_water`,
+    /// `falling_lava`, `spore_blossom_air`).
+    DripFall,
+    /// `particle/drip_land` — a drip's splash on landing (`landing_lava`).
+    DripLand,
+    /// `particle/big_smoke_0` … `big_smoke_11` — campfire smoke, ascending.
+    BigSmoke,
+    /// `particle/sculk_charge_0` … `sculk_charge_6`, ascending.
+    SculkCharge,
+    /// `particle/gust_0` … `gust_11`, ascending.
+    Gust,
+    /// `particle/sonic_boom_0` … `sonic_boom_15`, ascending.
+    SonicBoom,
+    /// `particle/glow` — the single-frame spark `electric_spark` and `glow` share.
+    Glow,
 }
 
 impl Sheet {
-    /// How many numbered frames the sheet has. A sheet with one frame has no
-    /// numeric suffix in its file name — see [`Self::texture_name`].
+    /// Every frame's file stem under `assets/minecraft/textures/particle/`, **in
+    /// the order the pack's own `particles/<type>.json` lists them**.
+    ///
+    /// # This is a list and not a `<stem>_<n>` format string, for two measured
+    /// reasons
+    ///
+    /// * **Half of vanilla's multi-frame sheets are listed descending.**
+    ///   `smoke.json`, `cloud.json`, `large_smoke.json`, `snowflake.json`,
+    ///   `effect.json`, `witch.json`, `instant_effect.json`, `end_rod.json` and
+    ///   `totem_of_undying.json` all run `…_7` down to `…_0`. A synthesised
+    ///   ascending suffix therefore animated every one of them **backwards** —
+    ///   smoke grew instead of dissipating — and nothing caught it, because a
+    ///   sprite lookup still resolved.
+    /// * **`enchant.json` is not numerically suffixed at all**: its twenty-six
+    ///   frames are `sga_a` … `sga_z`, which no format string can express.
+    ///
+    /// Read off the real `client.jar` rather than transcribed from memory. A sheet
+    /// whose identity is its *sequence* rather than its pixels is why
+    /// [`Self::Generic`] and [`Self::PortalGeneric`] are two variants over the same
+    /// eight textures.
     #[must_use]
-    pub const fn frame_count(self) -> u16 {
+    pub const fn frames(self) -> &'static [&'static str] {
         match self {
-            Self::Explosion => 16,
-            Self::Generic | Self::Effect | Self::Glitter | Self::SweepAttack | Self::Spell => 8,
-            Self::Splash => 4,
-            Self::CriticalHit
-            | Self::EnchantedHit
-            | Self::Flame
-            | Self::Bubble
-            | Self::Note
-            | Self::Heart
-            | Self::Angry
-            | Self::Glint => 1,
+            // Descending, per `smoke.json` / `cloud.json` / `large_smoke.json`.
+            Self::Generic => &[
+                "generic_7", "generic_6", "generic_5", "generic_4", "generic_3", "generic_2",
+                "generic_1", "generic_0",
+            ],
+            Self::PortalGeneric => &[
+                "generic_0", "generic_1", "generic_2", "generic_3", "generic_4", "generic_5",
+                "generic_6", "generic_7",
+            ],
+            Self::CriticalHit => &["critical_hit"],
+            Self::EnchantedHit => &["enchanted_hit"],
+            Self::Flame => &["flame"],
+            Self::SoulFireFlame => &["soul_fire_flame"],
+            Self::Splash => &["splash_0", "splash_1", "splash_2", "splash_3"],
+            Self::Bubble => &["bubble"],
+            Self::Note => &["note"],
+            Self::Heart => &["heart"],
+            // Descending, per `effect.json`.
+            Self::Effect => &[
+                "effect_7", "effect_6", "effect_5", "effect_4", "effect_3", "effect_2", "effect_1",
+                "effect_0",
+            ],
+            // Descending, per `end_rod.json` and `totem_of_undying.json`.
+            Self::Glitter => &[
+                "glitter_7", "glitter_6", "glitter_5", "glitter_4", "glitter_3", "glitter_2",
+                "glitter_1", "glitter_0",
+            ],
+            Self::SweepAttack => &[
+                "sweep_0", "sweep_1", "sweep_2", "sweep_3", "sweep_4", "sweep_5", "sweep_6",
+                "sweep_7",
+            ],
+            // Descending, per `witch.json` and `instant_effect.json`.
+            Self::Spell => &[
+                "spell_7", "spell_6", "spell_5", "spell_4", "spell_3", "spell_2", "spell_1",
+                "spell_0",
+            ],
+            Self::Angry => &["angry"],
+            Self::Glint => &["glint"],
+            Self::Explosion => &[
+                "explosion_0", "explosion_1", "explosion_2", "explosion_3", "explosion_4",
+                "explosion_5", "explosion_6", "explosion_7", "explosion_8", "explosion_9",
+                "explosion_10", "explosion_11", "explosion_12", "explosion_13", "explosion_14",
+                "explosion_15",
+            ],
+            Self::Soul => &[
+                "soul_0", "soul_1", "soul_2", "soul_3", "soul_4", "soul_5", "soul_6", "soul_7",
+                "soul_8", "soul_9", "soul_10",
+            ],
+            Self::Enchant => &[
+                "sga_a", "sga_b", "sga_c", "sga_d", "sga_e", "sga_f", "sga_g", "sga_h", "sga_i",
+                "sga_j", "sga_k", "sga_l", "sga_m", "sga_n", "sga_o", "sga_p", "sga_q", "sga_r",
+                "sga_s", "sga_t", "sga_u", "sga_v", "sga_w", "sga_x", "sga_y", "sga_z",
+            ],
+            Self::DripHang => &["drip_hang"],
+            Self::DripFall => &["drip_fall"],
+            Self::DripLand => &["drip_land"],
+            Self::BigSmoke => &[
+                "big_smoke_0", "big_smoke_1", "big_smoke_2", "big_smoke_3", "big_smoke_4",
+                "big_smoke_5", "big_smoke_6", "big_smoke_7", "big_smoke_8", "big_smoke_9",
+                "big_smoke_10", "big_smoke_11",
+            ],
+            Self::SculkCharge => &[
+                "sculk_charge_0", "sculk_charge_1", "sculk_charge_2", "sculk_charge_3",
+                "sculk_charge_4", "sculk_charge_5", "sculk_charge_6",
+            ],
+            Self::Gust => &[
+                "gust_0", "gust_1", "gust_2", "gust_3", "gust_4", "gust_5", "gust_6", "gust_7",
+                "gust_8", "gust_9", "gust_10", "gust_11",
+            ],
+            Self::SonicBoom => &[
+                "sonic_boom_0", "sonic_boom_1", "sonic_boom_2", "sonic_boom_3", "sonic_boom_4",
+                "sonic_boom_5", "sonic_boom_6", "sonic_boom_7", "sonic_boom_8", "sonic_boom_9",
+                "sonic_boom_10", "sonic_boom_11", "sonic_boom_12", "sonic_boom_13",
+                "sonic_boom_14", "sonic_boom_15",
+            ],
+            Self::Glow => &["glow"],
         }
     }
 
-    /// The file stem under `assets/minecraft/textures/particle/`.
+    /// How many frames the sheet has — always `frames().len()`, never a second
+    /// hand-maintained number.
     #[must_use]
-    pub const fn stem(self) -> &'static str {
-        match self {
-            Self::Generic => "generic",
-            Self::CriticalHit => "critical_hit",
-            Self::EnchantedHit => "enchanted_hit",
-            Self::Flame => "flame",
-            Self::Splash => "splash",
-            Self::Bubble => "bubble",
-            Self::Note => "note",
-            Self::Heart => "heart",
-            Self::Effect => "effect",
-            Self::Glitter => "glitter",
-            Self::SweepAttack => "sweep",
-            Self::Spell => "spell",
-            Self::Angry => "angry",
-            Self::Glint => "glint",
-            Self::Explosion => "explosion",
+    pub const fn frame_count(self) -> u16 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the longest sheet is 26 frames"
+        )]
+        {
+            self.frames().len() as u16
         }
     }
 
@@ -153,12 +260,9 @@ impl Sheet {
     /// not worth aborting a frame over.
     #[must_use]
     pub fn texture_name(self, frame: u16) -> String {
-        if self.frame_count() == 1 {
-            format!("particle/{}", self.stem())
-        } else {
-            let frame = frame.min(self.frame_count() - 1);
-            format!("particle/{}_{frame}", self.stem())
-        }
+        let frames = self.frames();
+        let index = usize::from(frame).min(frames.len().saturating_sub(1));
+        format!("particle/{}", frames[index])
     }
 
     /// Every frame of the sheet, in order. Convenience for atlas construction.
@@ -189,6 +293,18 @@ impl Sheet {
             Self::Angry,
             Self::Glint,
             Self::Explosion,
+            Self::PortalGeneric,
+            Self::Soul,
+            Self::SoulFireFlame,
+            Self::Enchant,
+            Self::DripHang,
+            Self::DripFall,
+            Self::DripLand,
+            Self::BigSmoke,
+            Self::SculkCharge,
+            Self::Gust,
+            Self::SonicBoom,
+            Self::Glow,
         ]
     }
 
@@ -321,6 +437,27 @@ pub enum Behaviour {
     /// opaque, and animates through [`Sheet::Explosion`] every tick via the
     /// same `setSpriteFromAge` call [`Self::AshSmoke`]/[`Self::Spell`] use.
     HugeExplosion,
+    /// `PortalParticle` — the nether-portal shimmer, and the one particle here
+    /// whose position is a **closed-form function of age** rather than an
+    /// integration of velocity.
+    ///
+    /// Its `tick()` recomputes `x/y/z` from the spawn point every tick:
+    /// `pos = age/lifetime`, then `pos = 1 - (-pos + 2*pos²)`, and
+    /// `x = xStart + xd*pos` (with `y` additionally taking `+ (1 - age/lifetime)`,
+    /// so the mote drifts *up* toward the portal's centre as it converges). Since
+    /// nothing integrates, `gravity` and `friction` are never read, and `move` is
+    /// overridden to skip collision. See [`Particle::tick_portal`].
+    Portal,
+    /// `CampfireSmokeParticle` — the tall lazy column over a campfire, cosy or
+    /// signal.
+    ///
+    /// A full `tick()` override: a *tiny* gravity (`3.0e-6`, five orders of
+    /// magnitude below the ordinary `0.04`) applied to `yd` directly rather than
+    /// through the base tick, a per-tick random horizontal nudge that makes the
+    /// column wander, no friction at all, and an alpha fade over the **last 60
+    /// ticks** rather than the back half of life. Getting the fade wrong is what
+    /// makes signal smoke vanish halfway up. See [`Particle::tick_campfire_smoke`].
+    CampfireSmoke,
 }
 
 impl Behaviour {
@@ -350,7 +487,7 @@ impl Behaviour {
     #[must_use]
     pub const fn layer(self) -> Layer {
         match self {
-            Self::SimpleAnimated { .. } | Self::Spell => Layer::Translucent,
+            Self::SimpleAnimated { .. } | Self::Spell | Self::CampfireSmoke => Layer::Translucent,
             Self::Plain
             | Self::Terrain { .. }
             | Self::AshSmoke
@@ -363,7 +500,8 @@ impl Behaviour {
             | Self::Heart
             | Self::Suspended
             | Self::HugeExplosionSeed
-            | Self::HugeExplosion => Layer::Opaque,
+            | Self::HugeExplosion
+            | Self::Portal => Layer::Opaque,
         }
     }
 }
@@ -422,6 +560,14 @@ pub struct Particle {
     pub colour: [f32; 3],
     /// Alpha.
     pub alpha: f32,
+    /// The position the particle was emitted at, for the behaviours whose
+    /// position is a closed-form function of age rather than an integration of
+    /// velocity — [`Behaviour::Portal`]'s `xStart/yStart/zStart`.
+    ///
+    /// Seeded to the spawn position by the constructors and then left alone;
+    /// `xo/yo/zo` cannot serve because those are rewritten every tick for render
+    /// interpolation.
+    pub spawn: [f64; 3],
     /// Roll about the view axis, and its previous-tick value.
     pub roll: f32,
     /// Previous-tick roll.
@@ -466,6 +612,7 @@ impl Particle {
             zd: 0.0,
             bb: Aabb::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
             on_ground: false,
+            spawn: [x, y, z],
             has_physics: true,
             stopped_by_collision: false,
             removed: false,
@@ -637,6 +784,14 @@ impl Particle {
                 let s = normalised();
                 self.quad_size * s.mul_add(-s * 0.5, 1.0)
             }
+            // `PortalParticle.getQuadSize`: `s = 1 - age/lifetime; s *= s;
+            // s = 1 - s` — an ease-*out* growth, so a portal mote appears small,
+            // swells almost immediately and then holds. Reading the two `1 - s`
+            // steps as cancelling gives a linear ramp and a visibly duller portal.
+            Behaviour::Portal => {
+                let s = 1.0 - normalised();
+                self.quad_size * s.mul_add(-s, 1.0)
+            }
             _ => self.quad_size,
         }
     }
@@ -676,6 +831,14 @@ impl Particle {
     /// cannot push a sibling into that same `Vec` from inside its own `tick`.
     pub fn tick(&mut self, view: &dyn CollisionView) -> Vec<(f64, f64, f64, f32)> {
         match self.behaviour {
+            Behaviour::Portal => {
+                self.tick_portal();
+                Vec::new()
+            }
+            Behaviour::CampfireSmoke => {
+                self.tick_campfire_smoke(view);
+                Vec::new()
+            }
             Behaviour::WaterDrop => {
                 self.tick_water_drop(view);
                 Vec::new()
@@ -774,6 +937,84 @@ impl Particle {
                 sheet,
                 frame: sheet.frame_for_age(self.age, self.lifetime),
             };
+        }
+    }
+
+    /// `PortalParticle.tick()` — a full override that **recomputes** the
+    /// position from [`Self::spawn`] rather than integrating velocity.
+    ///
+    /// ```java
+    /// float pos = (float)this.age / this.lifetime;
+    /// float a = pos;
+    /// pos = -pos + pos * pos * 2.0F;
+    /// pos = 1.0F - pos;
+    /// this.x = this.xStart + this.xd * pos;
+    /// this.y = this.yStart + this.yd * pos + (1.0F - a);
+    /// this.z = this.zStart + this.zd * pos;
+    /// ```
+    ///
+    /// `xd/yd/zd` are therefore an **amplitude**, not a speed, and are never
+    /// damped — which is why neither `gravity` nor `friction` is read here. The
+    /// `(1 - a)` on `y` alone is what makes the mote sink toward the portal's
+    /// plane as it converges instead of collapsing straight to a point.
+    fn tick_portal(&mut self) {
+        self.xo = self.x;
+        self.yo = self.y;
+        self.zo = self.z;
+        self.age += 1;
+        if self.age >= self.lifetime {
+            self.remove();
+            return;
+        }
+        #[expect(clippy::cast_precision_loss, reason = "Java computes this in f32")]
+        let a = self.age as f32 / self.lifetime as f32;
+        let pos = f64::from(1.0 - (-a + a * a * 2.0));
+        let [sx, sy, sz] = self.spawn;
+        self.x = sx + self.xd * pos;
+        self.y = sy + self.yd * pos + f64::from(1.0 - a);
+        self.z = sz + self.zd * pos;
+        self.bb = crate::Aabb::new(
+            self.x - f64::from(self.bb_width) / 2.0,
+            self.y,
+            self.z - f64::from(self.bb_width) / 2.0,
+            self.x + f64::from(self.bb_width) / 2.0,
+            self.y + f64::from(self.bb_height),
+            self.z + f64::from(self.bb_width) / 2.0,
+        );
+    }
+
+    /// `CampfireSmokeParticle.tick()` — a full override.
+    ///
+    /// Three things it does *not* do, each visible if copied from the base tick:
+    /// no friction (the column keeps its drift instead of stalling), gravity
+    /// applied straight to `yd` at `3.0e-6` rather than through the `0.04`
+    /// coefficient, and the alpha fade keyed to the **last 60 ticks** of life
+    /// rather than the back half. A signal fire lives ~300 ticks, so a
+    /// back-half fade would make it transparent from halfway up the column.
+    fn tick_campfire_smoke(&mut self, view: &dyn CollisionView) {
+        self.xo = self.x;
+        self.yo = self.y;
+        self.zo = self.z;
+        self.age += 1;
+        if self.age > self.lifetime || self.alpha <= 0.0 {
+            self.remove();
+            return;
+        }
+        // `random.nextFloat() / 5000 * (nextBoolean() ? 1 : -1)` on both
+        // horizontal axes: the wander that keeps a column from being a line.
+        let nudge = |p: &mut Self| {
+            let magnitude = f64::from(p.rng_probe()) / 5000.0;
+            if p.tick_rng().next_bool() { magnitude } else { -magnitude }
+        };
+        let dx = nudge(self);
+        let dz = nudge(self);
+        self.xd += dx;
+        self.zd += dz;
+        self.yd -= f64::from(self.gravity);
+        self.move_by(self.xd, self.yd, self.zd, view);
+        const FADE_TICKS: i32 = 60;
+        if self.age >= self.lifetime - FADE_TICKS && self.alpha > 0.01 {
+            self.alpha -= 0.015;
         }
     }
 
@@ -1261,6 +1502,95 @@ mod tests {
     };
     use lodestone_physics::{Aabb, CollisionView, Vec3d};
 
+    /// The frame order of the sheets whose `particles/*.json` lists them
+    /// **descending** — smoke, spell, effect, glitter.
+    ///
+    /// This was a shipped bug: `texture_name` synthesised an ascending
+    /// `<stem>_<n>`, so frame 0 resolved to `generic_0` where vanilla's frame 0 is
+    /// `generic_7`. Every smoke plume, potion mote, witch mote, end-rod sparkle and
+    /// totem sparkle therefore animated **backwards**, and nothing caught it
+    /// because a sprite lookup still resolved. The expected values here come from
+    /// the 26.2 jar's own JSON, not from our own tables.
+    #[test]
+    fn descending_sheets_start_at_their_last_numbered_frame() {
+        assert_eq!(Sheet::Generic.texture_name(0), "particle/generic_7");
+        assert_eq!(Sheet::Generic.texture_name(7), "particle/generic_0");
+        assert_eq!(Sheet::Spell.texture_name(0), "particle/spell_7");
+        assert_eq!(Sheet::Effect.texture_name(0), "particle/effect_7");
+        assert_eq!(Sheet::Glitter.texture_name(0), "particle/glitter_7");
+        // `portal.json` lists the *same eight textures* ascending, which is why it
+        // is a separate variant rather than a flag on `Generic`.
+        assert_eq!(Sheet::PortalGeneric.texture_name(0), "particle/generic_0");
+        assert_eq!(Sheet::PortalGeneric.texture_name(7), "particle/generic_7");
+    }
+
+    /// `enchant.json`'s frames are letters, which is the case no `<stem>_<n>`
+    /// format string can express at all — and the reason `frames()` is a list.
+    #[test]
+    fn every_sheet_has_frames_and_enchant_is_alphabetic() {
+        for sheet in Sheet::all() {
+            let frames = sheet.frames();
+            assert!(!frames.is_empty(), "{sheet:?} has no frames");
+            assert_eq!(usize::from(sheet.frame_count()), frames.len());
+            // The last frame must be reachable and clamping must not panic.
+            assert_eq!(
+                sheet.texture_name(sheet.frame_count() - 1),
+                format!("particle/{}", frames[frames.len() - 1])
+            );
+            assert_eq!(sheet.texture_name(u16::MAX), sheet.texture_name(sheet.frame_count() - 1));
+        }
+        assert_eq!(Sheet::Enchant.frame_count(), 26);
+        assert_eq!(Sheet::Enchant.texture_name(0), "particle/sga_a");
+        assert_eq!(Sheet::Enchant.texture_name(25), "particle/sga_z");
+    }
+
+    /// `PortalParticle.tick` recomputes position from the spawn point, so a mote
+    /// **converges back onto its origin** as it ages rather than drifting off on
+    /// its velocity. Integrating instead sends portal motes flying away.
+    #[test]
+    fn a_portal_mote_converges_on_its_spawn_point() {
+        let mut engine = ParticleEngine::new();
+        crate::emit::portal(&mut engine, 10.0, 64.0, -3.0, 0.25, 0.0, -0.25);
+        let floor = Floor { floor_y: 0, water_above: false };
+        let start_offset = {
+            let p = &engine.particles()[0];
+            (p.x - p.spawn[0]).abs() + (p.z - p.spawn[2]).abs()
+        };
+        // At age 0 the easing term is 1.0, so the mote sits a full amplitude away.
+        assert!((start_offset - 0.0).abs() < 1.0e-9, "age 0 has not been ticked yet");
+        let lifetime = engine.particles()[0].lifetime;
+        let spawn = engine.particles()[0].spawn;
+        // The easing, recomputed here from the Java expression rather than read
+        // out of the implementation — that is the whole point of predicting it.
+        let easing = |age: i32| {
+            #[expect(clippy::cast_precision_loss, reason = "small tick counts, as Java")]
+            let a = age as f32 / lifetime as f32;
+            f64::from(1.0 - (-a + a * a * 2.0))
+        };
+        let mut horizontal = Vec::new();
+        for age in 1..lifetime {
+            engine.tick(&floor);
+            let p = &engine.particles()[0];
+            // Exact, not a tolerance on a trend: position is a closed form, so a
+            // wrong easing lands somewhere else entirely.
+            assert!(
+                (p.x - (spawn[0] + 0.25 * easing(age))).abs() < 1.0e-9,
+                "age {age}: x was {}",
+                p.x
+            );
+            assert!((p.z - (spawn[2] - 0.25 * easing(age))).abs() < 1.0e-9);
+            horizontal.push((p.x - spawn[0]).abs() + (p.z - spawn[2]).abs());
+        }
+        // And it really does converge rather than fly off, which is the visible
+        // half: the easing is 1.0 at birth and ~0 at death.
+        let first = horizontal[0];
+        let last = *horizontal.last().expect("ticked at least once");
+        assert!(
+            last < first * 0.1,
+            "a portal mote must converge: started {first} away, ended {last}"
+        );
+    }
+
     /// A world that is solid below `floor_y` and empty above.
     struct Floor {
         floor_y: i32,
@@ -1517,7 +1847,12 @@ mod tests {
         assert_eq!(Sheet::Generic.frame_for_age(80, 8), 7);
         // A single-frame sheet has no numeric suffix at all.
         assert_eq!(Sheet::Flame.texture_name(0), "particle/flame");
-        assert_eq!(Sheet::Generic.texture_name(3), "particle/generic_3");
+        // **This line used to read `generic_3`, and that was the bug.** `frame`
+        // is an index into the sheet's own frame list, and `smoke.json` lists
+        // `generic_7` first — so index 3 is `generic_4`, counting down. The
+        // ascending reading is what animated every smoke plume backwards; see
+        // `descending_sheets_start_at_their_last_numbered_frame`.
+        assert_eq!(Sheet::Generic.texture_name(3), "particle/generic_4");
     }
 
     #[test]
