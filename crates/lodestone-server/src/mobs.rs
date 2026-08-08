@@ -1781,6 +1781,21 @@ impl<'w> MobSim<'w> {
         self
     }
 
+    /// The id the next [`spawn`](Self::spawn) call will assign.
+    ///
+    /// The read side of [`set_next_id`](Self::set_next_id), and it answers one
+    /// question nothing else can: **has this sim been reseeded yet?**
+    /// [`MobHandle::reseed`] replaces the whole sim and then calls
+    /// `set_next_id(1000)`, while [`MobSim::new`] starts at `1` — so a caller that
+    /// must not touch a sim about to be thrown away (a saved-entity restore, a
+    /// `/summon` racing world open) can tell the difference. Without it, that
+    /// caller has to guess, and guessing wrong is silent: the work lands in the
+    /// sim that is discarded a moment later.
+    #[must_use]
+    pub fn next_id(&self) -> i32 {
+        self.next_id
+    }
+
     /// Spawns a mob at `pos` with body `shape`, moving `step_per_tick` blocks per
     /// tick (derived from its movement-speed attribute) and an A\* open-set
     /// budget of `visited_budget` (vanilla `floor(followRange * 16)`).
@@ -2792,6 +2807,117 @@ impl<'w> MobSim<'w> {
     /// Iterates the live mobs.
     pub fn iter(&self) -> impl Iterator<Item = &SimMob<'w>> {
         self.mobs.iter()
+    }
+
+    /// Every mob and dropped item in this sim, as the records
+    /// [`crate::entity_storage`] persists (issue #303).
+    ///
+    /// # Why this is not [`snapshots`](Self::snapshots)
+    ///
+    /// [`EntitySnapshot`] is the *wire* view: it carries an `id` (a per-session
+    /// entity id that means nothing across a restart), no health, and no item
+    /// lifecycle. A save built from it would come back as full-health mobs and
+    /// dropped items that never despawn. This is the disk view, and the two
+    /// deliberately do not share a type.
+    ///
+    /// **Projectiles are excluded.** An arrow in flight has no persisted
+    /// identity in this sim (`ProjectileMeta` carries a uuid and a type but the
+    /// registry holds no owner, no pickup state and no damage), so writing one
+    /// would persist an object we could not faithfully restore. Vanilla does
+    /// save them; that is a follow-up, and it is named in `docs/entity-persistence.md`
+    /// rather than left to be discovered as a missing mob.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn saved_entities(&self) -> Vec<crate::entity_storage::SavedEntity> {
+        let mut out: Vec<crate::entity_storage::SavedEntity> = self
+            .mobs
+            .iter()
+            .map(|mob| crate::entity_storage::SavedEntity {
+                id: mob.entity_type.clone(),
+                uuid: mob.uuid,
+                pos: mob.position(),
+                motion: mob.velocity(),
+                rotation: mob.rotation(),
+                health: Some(mob.health),
+                item: None,
+                age: None,
+                pickup_delay: None,
+                extra: Vec::new(),
+            })
+            .collect();
+        for (&id, state) in &self.item_state {
+            let lifecycle = self.items.get(id).copied().unwrap_or_default();
+            out.push(crate::entity_storage::SavedEntity {
+                id: item_entity_type(),
+                uuid: state.uuid,
+                pos: state.motion.position,
+                motion: state.motion.velocity,
+                rotation: Rotation::new(0.0, 0.0),
+                health: None,
+                item: Some((state.item.clone(), lifecycle.count)),
+                age: Some(lifecycle.age),
+                pickup_delay: Some(lifecycle.pickup_delay),
+                extra: Vec::new(),
+            });
+        }
+        out
+    }
+
+    /// Puts saved records back into the sim, returning how many were restored.
+    ///
+    /// A record whose `id` is `minecraft:item` becomes a tracked dropped item;
+    /// anything else becomes a mob through [`spawn_species`](Self::spawn_species),
+    /// so a restored cow gets the same shape, attributes and A\* budget a freshly
+    /// spawned one does — the alternative (a bare position) would restore mobs
+    /// that cannot path.
+    ///
+    /// **The stored uuid is reinstated, not regenerated**, because
+    /// [`crate::entity_storage::EntityStorage::save`] clears stale records by
+    /// uuid identity: a fresh uuid on load would make the next save unable to
+    /// recognise its own entity, and the mob would be duplicated on every
+    /// restart.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn restore_saved(&mut self, entities: &[crate::entity_storage::SavedEntity]) -> usize {
+        let mut restored = 0usize;
+        for saved in entities {
+            if saved.id == item_entity_type() {
+                let Some((item, count)) = saved.item.clone() else {
+                    // An `Item`-less item entity is vanilla's own "empty stack"
+                    // case, which it discards on load too.
+                    continue;
+                };
+                let id = self.spawn_item(
+                    item,
+                    saved.pos,
+                    saved.motion,
+                    ItemLifecycle {
+                        age: saved.age.unwrap_or(0),
+                        pickup_delay: saved.pickup_delay.unwrap_or(0),
+                        count: count.max(1),
+                        ..ItemLifecycle::default()
+                    },
+                );
+                if let Some(state) = self.item_state.get_mut(&id) {
+                    state.uuid = saved.uuid;
+                }
+                restored += 1;
+                continue;
+            }
+            // Checked **before** spawning, not after: a stored `0.0` is a mob
+            // that died in the tick the process was killed, and spawning it to
+            // then skip it would leave a zero-health corpse in the sim that
+            // nothing sweeps, because the death pass only runs on damage.
+            if saved.health.is_some_and(|health| health <= 0.0) {
+                continue;
+            }
+            let mob = self.spawn_species(saved.id.clone(), saved.pos);
+            mob.uuid = saved.uuid;
+            if let Some(health) = saved.health {
+                mob.set_health(health);
+            }
+            restored += 1;
+        }
+        restored
     }
 
     /// Runs one despawn check over every non-persistent mob, given the nearest

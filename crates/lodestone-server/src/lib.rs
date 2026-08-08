@@ -222,6 +222,16 @@ mod redstone_oracle_gate;
 mod redstone_placement_gate;
 mod redstone_torch;
 mod redstone_wire;
+/// Per-player `.dat` persistence (issue #302) — inventory, position, health and
+/// game mode across a disconnect. Native only, for the same reason
+/// `region_source` is: it is a `std::fs` schema over `lodestone-anvil`.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod player_data;
+/// Per-chunk entity persistence (issue #303) — the `entities/` region set that
+/// makes a mob and a dropped item survive a restart. Native only, like
+/// `player_data` and `region_source`.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod entity_storage;
 /// World persistence (issue #437). Native only: a browser singleplayer world
 /// has no filesystem, and `lodestone-anvil` is a `std::fs` crate — see this
 /// crate's `Cargo.toml` for the matching target-gated dependency.

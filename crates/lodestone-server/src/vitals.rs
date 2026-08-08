@@ -566,6 +566,33 @@ impl PlayerVitals {
     pub fn respawn(&mut self) {
         *self = Self::default();
     }
+
+    /// Rebuilds vitals from a saved player file (issue #302).
+    ///
+    /// Both values are **clamped to their legal ranges** rather than trusted:
+    /// they come off disk, and a `.dat` a user has edited (or one this code wrote
+    /// before a range changed) must not put the connection into a state
+    /// [`tick`](Self::tick) cannot leave. `health` above [`MAX_HEALTH`] would make
+    /// the client's hearts overflow their bar; `air_supply` above
+    /// [`MAX_AIR_SUPPLY`] would leave the bubble bar full forever, because the
+    /// refill branch only ever assigns *up to* the maximum.
+    ///
+    /// A stored `0.0` health is preserved as-is: that is a dead player, and
+    /// silently reviving them on load would lose the death the save recorded.
+    /// The caller decides what to do about it — see
+    /// [`crate::player_data::PlayerData::spawn_state`].
+    ///
+    /// The hurt cooldown is *not* restored: an invulnerability frame is a
+    /// sub-second window and there is nothing meaningful to carry across a
+    /// session boundary.
+    #[must_use]
+    pub fn restored(health: f32, air_supply: i32) -> Self {
+        Self {
+            air_supply: air_supply.clamp(-MAX_AIR_SUPPLY, MAX_AIR_SUPPLY),
+            health: health.clamp(0.0, MAX_HEALTH),
+            hurt_cooldown: lodestone_entity::HurtCooldown::default(),
+        }
+    }
 }
 
 #[cfg(test)]
