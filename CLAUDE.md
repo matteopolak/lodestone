@@ -474,6 +474,15 @@ living vs **non**-living, so `entity_census::is_living` is right; index 15 is `M
 Check the dump, then pick the census column that separates the *actual* claimants; **assuming the previous
 collision's guard generalises is how the armour-stand bug would have shipped.** (§12.47)
 
+**The same collision exists in NBT, keyed by field *name* rather than by index, and it silently rewrites
+the world.** `Age` is a `Short` on `minecraft:item` (ticks alive) and an **`Int`** on a mob (breeding age,
+negative for a baby); `Health` is a `Float` on a mob and a constant `Short` on an item. A round-trip that
+decides which fields to carry through by consulting a **static name list** therefore excludes a field it
+failed to decode — so a loaded sheep lost its negative `Age` and **every baby in the world silently became
+an adult**, with a clean parse and no error. The rule: **exclude a field only if the decode actually
+consumed it**, never because its name appears in a modelled-field table. Any name-keyed schema shared
+across entity or block-entity types has this shape; the type is part of the key. (§12.158)
+
 ## Documentation
 
 Keep [`docs/`](./docs/README.md) current: one doc per subsystem, `kebab-case`, named after the feature
