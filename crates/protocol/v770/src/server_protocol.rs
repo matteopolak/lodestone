@@ -82,7 +82,7 @@ use crate::packets::game::{
     LockDifficulty, MOVE_FLAG_ON_GROUND, MovePlayerPos, MovePlayerPosRot, MovePlayerRot,
     MovePlayerStatusOnly, MoveVehicle, PaddleBoat, PickItemFromBlock, PickItemFromEntity,
     PlaceRecipe, PlayerAction, PlayerCommand, PlayerLoaded, RecipeBookChangeSettings,
-    RecipeBookSeenRecipe, RenameItem, SERVERBOUND_ABILITY_FLAG_FLYING, SelectBundleItem,
+    RecipeBookSeenRecipe, RenameItem, Respawn, SERVERBOUND_ABILITY_FLAG_FLYING, SelectBundleItem,
     SelectTrade, ServerboundPlayerAbilities, SetBorderCenter, SetBorderLerpSize,
     SetBorderSize, SetBorderWarningDelay, SetBorderWarningDistance, SetCarriedItem,
     SetCommandBlock, SetCommandMinecart, SetDefaultSpawnPosition, SetGameRule, SetHealth,
@@ -90,6 +90,20 @@ use crate::packets::game::{
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginDisconnect, LoginFinished, LoginHello};
+
+/// The `sea_level` field both the join `login` packet and the post-death
+/// `respawn` packet carry.
+///
+/// Named rather than written twice because the two packets frame the *same*
+/// dimension and a client that is told two different sea levels for one world has
+/// no way to reconcile them. `63` is the value this crate has always sent at join
+/// (`encode_game_login_rest`); it is one above the overworld generator's water
+/// surface of 62, matching vanilla's own off-by-one convention for the field
+/// (`ClientboundLoginPacket`'s `seaLevel` is `level.getSeaLevel()`, which is
+/// `NoiseGeneratorSettings.seaLevel() + 1` for the purposes this client uses it
+/// for). Kept as the pre-existing constant rather than "corrected" here: changing
+/// what the join packet says is a separate, wider change than adding a respawn.
+const OVERWORLD_SEA_LEVEL: i32 = 63;
 
 /// The local player's fixed network entity id, matching
 /// [`begin_play`](V770ServerProtocol::begin_play)'s `GameLogin { entity_id:
@@ -1384,7 +1398,7 @@ fn encode_game_login_rest() -> Vec<u8> {
     w.bool(false); // is_flat
     w.bool(false); // has_last_death_location
     w.var_i32(0); // portal_cooldown
-    w.var_i32(63); // sea_level
+    w.var_i32(OVERWORLD_SEA_LEVEL); // sea_level
     w.bool(false); // online_mode (no auth in the integrated server)
     w.bool(false); // enforces_secure_chat
     w.into_vec()
@@ -3370,6 +3384,75 @@ impl ServerProtocol for V770ServerProtocol {
                 saturation: 5.0,
             },
         )
+    }
+
+    /// The death notification that raises the client's death screen — see
+    /// [`ServerProtocol::encode_player_combat_kill`]'s trait doc comment for why
+    /// `set_health(0.0)` alone does not.
+    ///
+    /// Hand-written, in the same "no existing struct" style as
+    /// [`encode_system_chat`]: the client side only ever *decodes* this packet, and
+    /// that decoder is the mirror-side specification —
+    /// `V770Adapter::handle_play`'s `PLAYER_COMBAT_KILL` arm reads exactly a VarInt
+    /// player id followed by `read_network_nbt`, matching
+    /// `ClientboundPlayerCombatKillPacket`'s own
+    /// `VarInt.STREAM_CODEC` + `ComponentSerialization.TRUSTED_STREAM_CODEC`
+    /// (`.cache/mc/26.2/client-src/net/minecraft/network/protocol/game/ClientboundPlayerCombatKillPacket.java:11`).
+    fn encode_player_combat_kill(&self, player_entity_id: i32, message: &Text) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(player_entity_id);
+        w.bytes(&encode_component_nbt(message));
+        ServerDirective::Send {
+            packet_id: play::clientbound::PLAYER_COMBAT_KILL,
+            payload: w.into_vec(),
+        }
+    }
+
+    /// The respawn pair — see [`ServerProtocol::encode_respawn`]'s trait doc
+    /// comment for why the position packet alone would leave the death screen up.
+    ///
+    /// `data_to_keep` is `0`. `ClientboundRespawnPacket` defines
+    /// `KEEP_ATTRIBUTE_MODIFIERS = 0x01` and `KEEP_ENTITY_DATA = 0x02`, and a real
+    /// **death** respawn keeps neither — `PlayerList.respawn` passes the combined
+    /// `KEEP_ALL_DATA` only for a dimension change. `0` is what makes the client
+    /// rebuild its player state, which is the whole point of the packet.
+    ///
+    /// The fields that are not modelled carry `begin_play_at`'s own join values, so
+    /// a respawn cannot silently change the dimension window a chunk is framed
+    /// against: same `dimension_type` holder id `0`, same `minecraft:overworld`,
+    /// same `game_type` survival, same `sea_level`. `previous_game_type` is `-1`
+    /// ("there was none"), which is what this crate's decoder maps to `None`.
+    fn encode_respawn(&self, spawn: Vec3) -> Vec<ServerDirective> {
+        let respawn = Respawn {
+            dimension_type: 0,
+            dimension: "minecraft:overworld".to_string(),
+            seed: 0,
+            game_type: 0,
+            previous_game_type: -1,
+            is_debug: false,
+            is_flat: false,
+            last_death_location: None,
+            portal_cooldown: 0,
+            sea_level: OVERWORLD_SEA_LEVEL,
+            data_to_keep: 0,
+        };
+        vec![
+            send(play::clientbound::RESPAWN, &respawn),
+            // The placement teleport. `PlayerList.respawn` moves the rebuilt
+            // player entity itself; over the wire that is the same
+            // `player_position` packet `begin_play_at` sends at join, so the two
+            // paths agree by construction rather than by coincidence.
+            ServerDirective::Send {
+                packet_id: play::clientbound::PLAYER_POSITION,
+                payload: encode_player_position_teleport(0, spawn.x, spawn.y, spawn.z, 0.0, 0.0),
+            },
+            // Vanilla's `PlayerList.respawn` also re-sends the player's health,
+            // and the client's `Vitals` component is fed by `set_health` alone —
+            // without this the HUD would keep showing the zero hearts it was left
+            // on. `crate::server::apply_client_command` sends the authoritative
+            // value from `PlayerVitals` immediately after this list, so this is
+            // deliberately *not* duplicated here.
+        ]
     }
 
     /// Issue #268's difficulty confirmation — see

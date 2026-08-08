@@ -190,11 +190,22 @@ impl FallTracker {
         damage
     }
 
-    /// Resets accumulated fall distance outside of landing (a corrective
-    /// teleport or respawn — see this module's doc comment for why nothing
-    /// calls this yet).
+    /// Resets accumulated fall distance outside of landing — a position snap:
+    /// vanilla's `Entity.java:2897`/`:2946` `resetFallDistance()` on teleport.
+    ///
+    /// **Clears `last_y` as well as the distance, and that is the load-bearing
+    /// half.** Zeroing the distance alone leaves the *reference point* at the y
+    /// the player was snapped away from, so the very next sample is diffed
+    /// against it: a player who dies at y = 70 and respawns at y = 64 banks 6
+    /// blocks of fall distance they never fell, and pays for it on their next
+    /// landing. Dropping the reference makes the next sample re-prime instead,
+    /// which is exactly what a freshly-teleported entity should do.
+    ///
+    /// Callers: `crate::server`'s `apply_client_command` respawn arm, and the
+    /// water/boat/powder-snow cancellations in [`Self::cancel`].
     pub fn reset(&mut self) {
         self.fall_distance = 0.0;
+        self.last_y = None;
     }
 }
 

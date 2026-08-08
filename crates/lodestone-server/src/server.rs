@@ -1915,6 +1915,7 @@ where
                     player_ticket,
                     view,
                     username,
+                    spawn.pos,
                     chunks_sent,
                     block_entities,
                     mobs,
@@ -3434,11 +3435,29 @@ where
 /// crate has no such registry (see [`WorldAdminState`]'s own doc comment), so
 /// a rule that was never explicitly set is simply absent from the reply
 /// rather than reported at a registry default.
+#[allow(clippy::too_many_arguments)]
 async fn apply_client_command<T, P>(
     conn: &mut Connection<T>,
     proto: &P,
     state: &mut State,
     vitals: &mut PlayerVitals,
+    // The fall accumulator, reset by the respawn arm. Vanilla resets
+    // `fallDistance` on every position snap (`Entity.java:2897`, `:2946`) and a
+    // respawn is one — `FallTracker::reset`'s own doc comment used to say
+    // "nothing calls this yet", and this is the caller it was waiting for.
+    fall: &mut FallTracker,
+    // The world spawn this connection joined at, resolved once in
+    // `serve_connection`'s `ConfigurationFinished` arm. Vanilla's `PlayerList::
+    // respawn` re-teleports the rebuilt player; without a position the client
+    // would respawn wherever the corpse was, which for a fall death is at the
+    // bottom of whatever killed them.
+    //
+    // The **world** spawn, not the per-player bed point: `RespawnPoint` is
+    // tracked but resolving a death against it needs the placement teleport and
+    // ticket search that `crate::world_spawn`'s module doc scopes to P2. Using
+    // the world spawn is the honest subset, and it is what a player with no bed
+    // gets in vanilla too.
+    world_spawn: Vec3,
     admin: &WorldAdminState,
     advancements: &mut AdvancementManager,
     player_uuid: uuid::Uuid,
@@ -3451,8 +3470,20 @@ where
     match action {
         0 if vitals.health() <= 0.0 => {
             vitals.respawn();
+            // Order matters and mirrors `PlayerList::respawn`: the respawn record
+            // and the placement teleport first, then the vitals the client's HUD
+            // reads. Sending health *before* the respawn packet would refill the
+            // hearts while the death screen was still up.
+            for directive in proto.encode_respawn(world_spawn) {
+                apply(conn, state, directive).await?;
+            }
             apply(conn, state, proto.encode_set_health(vitals.health())).await?;
             apply(conn, state, proto.encode_air_supply_update(vitals.air_supply())).await?;
+            // The teleport above is a position snap, so the next `PlayerMoved`
+            // sample must not be diffed against the y the player died at — a
+            // death at y=70 respawning at y=64 would otherwise bank 6 blocks of
+            // phantom fall distance against the next landing.
+            fall.reset();
         }
         1 => {
             let snapshot = advancements.stats_snapshot(player_uuid);
@@ -3641,6 +3672,53 @@ fn apply_attack(mobs: &MobHandle, player_pos: Option<(f64, f64, f64)>, sprinting
 /// Every other packet decodes to [`ServerBound::Ignored`] in `State::Play`
 /// under the current protocols (no further state transitions are modeled —
 /// no dimension change yet) and is a no-op here.
+/// Publishes the player's post-damage health, **and the death notification when
+/// that damage was the hit that killed them.**
+///
+/// # Why every damage site must go through here
+///
+/// Before this function the five damage sites each sent `encode_set_health` and
+/// nothing else, and `set_health(0.0)` does not raise a death screen — not in
+/// vanilla's client (`ClientPacketListener.handleSetHealth` only calls
+/// `hurtTo`/`setFoodLevel`/`setSaturation`) and not in this workspace's, whose
+/// `NetUpdate::Death` is decoded from `player_combat_kill` alone. The visible
+/// result was a player pinned at zero hearts with no screen and no respawn
+/// button, which reads as the server having hung.
+///
+/// # Why no "already announced" latch is needed
+///
+/// Every [`PlayerVitals`] damage entry point returns `None` once `health <= 0.0`
+/// (its own first guard), so the caller only reaches this function on a hit that
+/// *landed*, and a landed hit can cross zero exactly once per life. The kill
+/// packet therefore fires once, without state to keep. [`PlayerVitals::respawn`]
+/// re-arms it by construction. That is a property of the guards rather than of
+/// this function, so `death_is_announced_exactly_once_per_life` pins it.
+async fn publish_health<T, P>(
+    conn: &mut Connection<T>,
+    state: &mut State,
+    proto: &P,
+    vitals: &PlayerVitals,
+    player_entity_id: i32,
+    username: &str,
+    cause: crate::vitals::DeathCause,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+{
+    apply(conn, state, proto.encode_set_health(vitals.health())).await?;
+    if vitals.health() <= 0.0 {
+        let message = cause.death_message(username);
+        apply(
+            conn,
+            state,
+            proto.encode_player_combat_kill(player_entity_id, &message),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Feeds one `on_ground` sample to the [`FallTracker`] from a movement packet
 /// that carried **no** y coordinate, reusing the last position this connection
 /// reported (issue #262).
@@ -3655,6 +3733,7 @@ fn apply_attack(mobs: &MobHandle, player_pos: Option<(f64, f64, f64)>, sprinting
 /// Returns without touching the tracker when no position has been reported
 /// yet — a status packet before the first movement packet has no y to pair
 /// with, and inventing one (say, the spawn point) would fabricate a fall.
+#[allow(clippy::too_many_arguments)]
 async fn fall_status_sample<T, P>(
     conn: &mut Connection<T>,
     state: &mut State,
@@ -3662,6 +3741,8 @@ async fn fall_status_sample<T, P>(
     player_pos: &Option<(f64, f64, f64)>,
     fall: &mut FallTracker,
     vitals: &mut PlayerVitals,
+    player_entity_id: i32,
+    username: &str,
     on_ground: bool,
 ) -> Result<(), ServerError>
 where
@@ -3674,7 +3755,16 @@ where
     if let Some(raw) = fall.on_player_moved(y, on_ground)
         && vitals.apply_fall_damage(raw as f32).is_some()
     {
-        apply(conn, state, proto.encode_set_health(vitals.health())).await?;
+        publish_health(
+            conn,
+            state,
+            proto,
+            vitals,
+            player_entity_id,
+            username,
+            crate::vitals::DeathCause::Fall,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -3757,6 +3847,13 @@ async fn dispatch_play_packet<T, P, S>(
     // binding and `crate::sleep`'s module doc.
     sleep_vote: &SleepVote,
     player_entity_id: i32,
+    // This connection's login name, for the death message
+    // (`DeathCause::death_message`'s victim argument — vanilla's
+    // `victim.getDisplayName()`).
+    username: &str,
+    // The world spawn resolved at join, for the respawn teleport. See
+    // `apply_client_command`'s own parameter comment.
+    world_spawn: Vec3,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -3842,7 +3939,16 @@ where
             if let Some(raw) = fall.on_player_moved(y, on_ground)
                 && vitals.apply_fall_damage(raw as f32).is_some()
             {
-                apply(conn, state, proto.encode_set_health(vitals.health())).await?;
+                publish_health(
+                    conn,
+                    state,
+                    proto,
+                    vitals,
+                    player_entity_id,
+                    username,
+                    crate::vitals::DeathCause::Fall,
+                )
+                .await?;
             }
         }
         // Issue #262. A player turning on the spot sends `move_player_rot`
@@ -3859,7 +3965,10 @@ where
             on_ground,
         } => {
             *player_rot = Some(Rotation { yaw, pitch });
-            fall_status_sample(conn, state, proto, player_pos, fall, vitals, on_ground).await?;
+            fall_status_sample(
+                conn, state, proto, player_pos, fall, vitals, player_entity_id, username, on_ground,
+            )
+            .await?;
         }
         // Issue #262. Carries nothing but the flags byte, so its whole job is
         // the `on_ground` edge — which is exactly the landing sample
@@ -3867,7 +3976,10 @@ where
         // because a fall that ends with no net position change in its final
         // tick reports the touchdown on *this* packet and no other.
         ServerBound::PlayerStatusOnly { on_ground } => {
-            fall_status_sample(conn, state, proto, player_pos, fall, vitals, on_ground).await?;
+            fall_status_sample(
+                conn, state, proto, player_pos, fall, vitals, player_entity_id, username, on_ground,
+            )
+            .await?;
         }
         ServerBound::BlockAction {
             action,
@@ -3978,8 +4090,19 @@ where
             apply_creative_mode_slot_set(inventory, slot, item);
         }
         ServerBound::ClientCommand { action } => {
-            apply_client_command(conn, proto, state, vitals, admin, advancements, player_uuid, action)
-                .await?;
+            apply_client_command(
+                conn,
+                proto,
+                state,
+                vitals,
+                fall,
+                world_spawn,
+                admin,
+                advancements,
+                player_uuid,
+                action,
+            )
+            .await?;
         }
         ServerBound::ClientInformationChanged { view_distance } => {
             // Clamp against the server's own configured cap (`view_radius`,
@@ -4153,6 +4276,13 @@ async fn serve_play<T, P, S, E>(
     player_ticket: Option<PlayerTicket>,
     mut view: ViewTracker,
     username: String,
+    // Issue #329 / the death-screen respawn. The world spawn `serve_connection`
+    // already resolved for this join, carried forward rather than re-searched:
+    // `find_initial_spawn` is a real spiral over the source, and a respawn is not
+    // a good moment to pay for up to 121 columns again. Read only by
+    // `apply_client_command`'s `PERFORM_RESPAWN` arm — see its own comment for why
+    // it is the *world* spawn and not the per-player bed point.
+    world_spawn: Vec3,
     chunks_sent: usize,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
@@ -4340,6 +4470,8 @@ where
                     &mut respawn,
                     sleep_vote,
                     player_entity_id,
+                    &username,
+                    world_spawn,
                     packet_id,
                     &payload,
                 )
@@ -4496,7 +4628,16 @@ where
                     let border_state = border.get();
                     if let Some(damage) = border_state.damage_for_position(x, z) {
                         if vitals.apply_border_damage(damage).is_some() {
-                            apply(conn, &mut state, proto.encode_set_health(vitals.health())).await?;
+                            publish_health(
+                                conn,
+                                &mut state,
+                                proto,
+                                &vitals,
+                                player_entity_id,
+                                &username,
+                                crate::vitals::DeathCause::OutsideBorder,
+                            )
+                            .await?;
                         }
                     }
 
@@ -4510,7 +4651,16 @@ where
                         apply(conn, &mut state, proto.encode_air_supply_update(air)).await?;
                     }
                     if outcome.damage.is_some() {
-                        apply(conn, &mut state, proto.encode_set_health(vitals.health())).await?;
+                        publish_health(
+                            conn,
+                            &mut state,
+                            proto,
+                            &vitals,
+                            player_entity_id,
+                            &username,
+                            crate::vitals::DeathCause::Drown,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -4675,6 +4825,13 @@ async fn serve_play<T, P, S, E>(
     player_ticket: Option<PlayerTicket>,
     mut view: ViewTracker,
     username: String,
+    // Issue #329 / the death-screen respawn. The world spawn `serve_connection`
+    // already resolved for this join, carried forward rather than re-searched:
+    // `find_initial_spawn` is a real spiral over the source, and a respawn is not
+    // a good moment to pay for up to 121 columns again. Read only by
+    // `apply_client_command`'s `PERFORM_RESPAWN` arm — see its own comment for why
+    // it is the *world* spawn and not the per-player bed point.
+    world_spawn: Vec3,
     chunks_sent: usize,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
@@ -4845,6 +5002,8 @@ where
             &mut respawn,
             sleep_vote,
             player_entity_id,
+            &username,
+            world_spawn,
             packet_id,
             &payload,
         )

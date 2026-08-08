@@ -1140,6 +1140,69 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes the death notification (vanilla `ClientboundPlayerCombatKillPacket`,
+    /// wire id `player_combat_kill`) — **the packet that raises the death screen**.
+    ///
+    /// # Why this exists, and why nothing else does the job
+    ///
+    /// Health reaching `0.0` is *not* what opens the death screen, in vanilla or
+    /// here. `ClientPacketListener.handleSetHealth`
+    /// (`.cache/mc/26.2/client-src/net/minecraft/client/multiplayer/ClientPacketListener.java:1235-1240`)
+    /// only calls `hurtTo`/`setFoodLevel`/`setSaturation`; the screen comes from
+    /// `handlePlayerCombatKill` at `:1845-1855`:
+    ///
+    /// ```java
+    /// if (this.minecraft.player.shouldShowDeathScreen()) {
+    ///    this.minecraft.gui.setScreen(new DeathScreen(packet.message(), …));
+    /// } else {
+    ///    this.minecraft.player.respawn();
+    /// }
+    /// ```
+    ///
+    /// So a server that only sends `set_health(0.0)` leaves a real client — and
+    /// this workspace's own client, whose `Screen::Death` and `death_frame` are
+    /// fully wired and were reaching zero pixels for exactly this reason — sitting
+    /// at zero hearts with no screen, no respawn button and no way out. That reads
+    /// as a server hang, which is how it was reported.
+    ///
+    /// `player_entity_id` is the *victim's* entity id (the client discards it, but
+    /// it is on the wire). `message` is the localized death message, vanilla's
+    /// `DamageSource.getLocalizedDeathMessage` (`DamageSource.java:71-86`):
+    /// `Component.translatable("death.attack." + msgId, victimName)` when nothing
+    /// living gets the kill credit.
+    ///
+    /// The default emits nothing, so a protocol without death support need not
+    /// override it — and its client simply never gets a death screen, which is a
+    /// gap rather than a wrong packet.
+    fn encode_player_combat_kill(&self, player_entity_id: i32, message: &Text) -> ServerDirective {
+        let _ = (player_entity_id, message);
+        ServerDirective::None
+    }
+
+    /// Encodes a post-death respawn (vanilla `ClientboundRespawnPacket` plus the
+    /// placement teleport `PlayerList::respawn` sends after it), moving the client
+    /// off the death screen and to `spawn`.
+    ///
+    /// # Why the respawn packet is not optional
+    ///
+    /// This is the other half of [`encode_player_combat_kill`](Self::encode_player_combat_kill)
+    /// and it fails in a nastier way when missing: the client's `Dead` marker is
+    /// cleared only by `ClientEvent::Respawned`, which its adapter decodes from
+    /// `player_combat_kill`'s counterpart `respawn` — **not** from a
+    /// `set_health(20.0)`. A server that answers `client_command(perform_respawn)`
+    /// by resetting vitals and sending health alone therefore refills the hearts
+    /// and leaves the death screen up forever, with the player's own respawn
+    /// button doing nothing. Sending health without this is strictly worse than
+    /// sending neither, because it looks like it worked.
+    ///
+    /// Returns a directive *list* rather than one directive because the respawn is
+    /// two packets: the dimension/data-to-keep record, then the position. The
+    /// default emits nothing.
+    fn encode_respawn(&self, spawn: Vec3) -> Vec<ServerDirective> {
+        let _ = spawn;
+        Vec::new()
+    }
+
     /// Encodes a difficulty confirmation (vanilla
     /// `ClientboundChangeDifficultyPacket`, wire id `change_difficulty`),
     /// sent back to the requesting connection after
