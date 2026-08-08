@@ -156,6 +156,77 @@ pub fn shard_of(pos: ChunkPos) -> usize {
     ((mixed >> 40) as usize) & (SHARD_COUNT - 1)
 }
 
+/// How often, and for how long, a [`StageSlot`] lookup **waited on another
+/// thread** instead of hitting or computing — process-wide.
+///
+/// # What it separates
+///
+/// The store's once-only guarantee has a cost the `pre_ore_computed` /
+/// `pre_ore_hits` pair structurally cannot show: a thread that arrives at an
+/// empty slot while another thread is inside `get_or_init` is **parked** until
+/// the value lands, and it is counted as a *hit* (deliberately — see
+/// [`StageSlot::get_or_compute`]). Under a spatially contiguous generation
+/// window that is the dominant shape: adjacent columns share 20 of their 25
+/// pre-ore entries, so `window - 1` workers can all be parked on the one entry
+/// the remaining worker is computing, and every counter in
+/// `lodestone_worldgen::counters` reports a perfect once-only sweep while the
+/// machine runs at 1× (`DESIGN.md` §12.131).
+///
+/// # Why a duration is legitimate here
+///
+/// `CLAUDE.md` prefers a counter to a duration, and [`Self::waits`] is that
+/// counter. [`Self::wait_nanos`] is a *summed* blocked time across all workers,
+/// not a wall-clock measurement of work, and its use is a **ratio** against
+/// `workers × wall`: "what fraction of the parallel machine was parked". That
+/// ratio is what a count alone cannot give, because one 400 ms wait and one 400 ns
+/// wait are both one wait.
+///
+/// # Cost
+///
+/// Nothing here runs on the hit path. [`StageSlot::get_or_compute`] pre-checks
+/// the `OnceLock` and returns before touching an `Instant`, so a warm column's
+/// lookups are unchanged; the two `Instant::now()` calls and four `fetch_add`s
+/// are paid only on a real miss, of which a 289-column burst has ~800.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WaitStats {
+    /// Lookups that found an empty slot and were parked while another thread
+    /// computed it. **Exactly 0 in any single-threaded run** — that is this
+    /// instrument's calibration.
+    pub waits: u64,
+    /// Summed nanoseconds spent parked across all threads.
+    pub wait_nanos: u64,
+    /// Lookups that ran the computation themselves.
+    pub computes: u64,
+    /// Summed nanoseconds spent inside those computations.
+    pub compute_nanos: u64,
+}
+
+static WAITS: AtomicU64 = AtomicU64::new(0);
+static WAIT_NANOS: AtomicU64 = AtomicU64::new(0);
+static COMPUTES: AtomicU64 = AtomicU64::new(0);
+static COMPUTE_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// Zeroes the global [`WaitStats`]. Process-global, so a reset/read pair must
+/// bracket work no other test is running concurrently.
+pub fn reset_wait_stats() {
+    for a in [&WAITS, &WAIT_NANOS, &COMPUTES, &COMPUTE_NANOS] {
+        a.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Reads the global [`WaitStats`]. Exact — unlike
+/// [`lodestone_worldgen_core::density::cache_2d_stats`] there is no per-thread
+/// buffering, because the miss path is rare enough to afford a direct atomic.
+#[must_use]
+pub fn wait_stats() -> WaitStats {
+    WaitStats {
+        waits: WAITS.load(Ordering::Relaxed),
+        wait_nanos: WAIT_NANOS.load(Ordering::Relaxed),
+        computes: COMPUTES.load(Ordering::Relaxed),
+        compute_nanos: COMPUTE_NANOS.load(Ordering::Relaxed),
+    }
+}
+
 /// One chunk-stage's memoised product.
 ///
 /// A hit costs an atomic load and an `Arc` bump — no lock. A miss runs `compute`
@@ -193,11 +264,29 @@ impl<T> StageSlot<T> {
         outcome: impl FnOnce(bool),
         compute: impl FnOnce() -> T,
     ) -> Arc<T> {
+        // Fast path first, so the instrument below never runs on a hit — a warm
+        // column's ~26 lookups are all hits and must stay a bare atomic load.
+        if let Some(value) = self.cell.get() {
+            outcome(false);
+            return Arc::clone(value);
+        }
+        let started = std::time::Instant::now();
         let computed = std::cell::Cell::new(false);
         let value = self.cell.get_or_init(|| {
             computed.set(true);
             Arc::new(compute())
         });
+        let elapsed = started.elapsed().as_nanos() as u64;
+        if computed.get() {
+            COMPUTES.fetch_add(1, Ordering::Relaxed);
+            COMPUTE_NANOS.fetch_add(elapsed, Ordering::Relaxed);
+        } else {
+            // The slot was empty when we looked and someone else's closure filled
+            // it, so `get_or_init` parked this thread on `OnceLock`'s queue for
+            // `elapsed`. See [`WaitStats`].
+            WAITS.fetch_add(1, Ordering::Relaxed);
+            WAIT_NANOS.fetch_add(elapsed, Ordering::Relaxed);
+        }
         outcome(computed.get());
         Arc::clone(value)
     }
