@@ -43,9 +43,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{BlockPos, ClientBuilder, Hand, LoginProfile, ServerAddress};
-use lodestone_model::{
-    BlockFace, ClientAction, ContainerClickType, ContainerSlotChange, ItemStack, Vec3f,
-};
+use lodestone_model::{BlockFace, ClientAction, ContainerClickType, ContainerSlotChange, GameMode, ItemStack, Vec3f};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
     BlockEntityHandle, ChunkColumn, ChunkSource, MobHandle, NoEntities, serve_connection,
@@ -171,20 +169,17 @@ async fn every_held_item_places_its_own_block_in_the_servers_own_world() {
 
     // Load the hotbar. Menu slots 36..=44 are native hotbar slots 0..=8 —
     // `PlayerInventory`'s own menu-slot table (`docs/server-inventory.md`).
+    handle
+        .send_action(ClientAction::ChangeGameMode {
+            mode: GameMode::Creative,
+        })
+        .expect("client still connected");
     for (slot, item, _, _) in PLACEMENTS {
         let menu_slot = 36 + i32::from(*slot);
         handle
-            .send_action(ClientAction::ContainerClick {
-                window_id: 0,
-                state_id: 1,
+            .send_action(ClientAction::SetCreativeModeSlot {
                 slot: menu_slot,
-                button: 0,
-                click_type: ContainerClickType::Pickup,
-                changed_slots: vec![ContainerSlotChange {
-                    slot: menu_slot,
-                    item: Some(stack(item)),
-                }],
-                carried_item: None,
+                item: Some(stack(item)),
             })
             .expect("client still connected");
     }

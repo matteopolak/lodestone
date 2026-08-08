@@ -12,6 +12,15 @@ for one round trip. Lives in `crates/lodestone-game/src/{click.rs, menu.rs,
 menus.rs}`. Landed from a line-by-line click audit against 26.2's decompiled
 `AbstractContainerMenu`.
 
+**The server has its own, independent port of the same function** since the
+container-diff trust was closed: `crates/lodestone-server/src/container_click.rs`,
+documented in `docs/server-inventory.md`. Two ports of one Java method is
+deliberate — this one is a *prediction* over a client-side `Menu`, that one is the
+*authority* over the server's real slots, and they must agree without sharing a
+crate (`lodestone-server` is client-free). When they disagree the server sends a
+correcting `container_set_content` and the client reconciles, which is exactly the
+round trip described above.
+
 ## How it works
 
 ### The seven `ContainerInput` modes

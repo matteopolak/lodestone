@@ -41,22 +41,49 @@ carries the shrunk grid cells alongside the emptied result, so consuming again
 would shrink the grid twice; the server applies the cells the client reports and
 re-derives from those.
 
+## The crafting-table menu is a *positionless virtual* menu (step 2)
+
+`open_container_screen` structurally cannot open a crafting table: it is driven
+entirely by a `BlockEntity` found at `pos`, and **a crafting table is not a block
+entity.** Vanilla's `CraftingMenu` builds a `TransientCraftingContainer` +
+`ResultContainer` in its constructor and throws them away on close.
+
+So `open_crafting_table_screen` is the second open path. The grid lives on
+`PlayerInventory::table_crafting` — `Some` exactly while the menu is open, which is
+what makes "is this window a crafting table" answerable without a second registry —
+and `OpenContainer::shape` is `MenuKind::CraftingTable`. `pos` is still carried, but
+only so breaking the table closes the window, exactly as it already does for a
+furnace.
+
+Closing the menu returns the grid **and** the cursor to the player
+(`take_table_crafting` + `ClickState::reset`), with the overflow dropped in the
+world. A grid silently discarded on close deletes items on every close.
+
+## `PLACE_RECIPE` (step 4): the server half is here, and nothing sends it yet
+
+`ServerBound::RecipePlaced` decodes, and `apply_recipe_placed` →
+`crafting::place_recipe` is vanilla's `ServerPlaceRecipe`: the grid goes back to the
+player, then one ingredient per pattern cell is taken out of `items` (`0..36` —
+never armour or the off-hand). `use_max_items` runs as many all-or-nothing rounds as
+the inventory allows; a partially-filled extra round would leave a shape matching no
+recipe.
+
+**`RecipeDisplayId` is an opaque index the *server* assigns**, not a recipe name:
+vanilla sends the whole book with `ClientboundRecipeBookAddPacket` and the client
+echoes back a position in that list. This crate does not encode that packet, so
+`crafting::recipe_at_index` defines the index as the bundled corpus's own id-sorted
+order — the order such an encoder would emit, so the two cannot disagree once it
+exists. Until it does, **no client learns an id and no client sends a valid
+`PLACE_RECIPE`**: this half is complete and unreachable. Closing that needs
+`encode_recipe_book_add` in `lodestone-v770` (the `RecipeDisplay`/`SlotDisplay`
+hierarchy) plus, for *our own* client, a decode in `lodestone-shell`, which already
+has four separate notes saying that decode does not exist.
+
 ## What is not here
 
-Issue #529's steps 2 and 4 are not landed and the issue is still open:
-
-- **No crafting-table menu.** Nothing calls `CraftingState::table()` in
-  production — a crafting table is not a block entity, so `open_container_screen`
-  (which is driven by `BlockEntityHandle`) cannot open one, and a virtual
-  positionless menu is its own landing.
-- **`PLACE_RECIPE` is still discarded.** It needs a `ServerBound` variant, a v770
-  decode arm, and grid-fill-from-inventory logic.
-
-And the wider trust `apply_container_clicked` documents is unchanged: the server
-still applies the client's own slot diff for ordinary inventory slots rather than
-re-running vanilla's `doClick`. That is not crafting-specific and is the same
-scope cut `docs/container-clicks.md` records. What #529 closed is the *result
-slot*, which was the only place a diff could name an item the player never had.
+The wider container-diff trust `apply_container_clicked` used to document is
+**closed** — see `docs/server-inventory.md`'s "the click is derived, not trusted".
+Both the result slot and every ordinary slot are now server-derived.
 
 ## How to change it
 
@@ -67,10 +94,6 @@ or neither — an ingredient spelled `#minecraft:planks` matches nothing without
 tag document, and a **partial** corpus is worse than none: it rejects *valid*
 crafts while every recipe that is present still works, so no test that only asks
 "does crafting work" would notice. That is what the count constant is for.
-
-**Adding the table menu**: `CraftingState::table()` is already the 3×3, and
-`crafting::CraftingState` is `Clone + PartialEq` so it can hang off
-`OpenContainer`. The work is the menu-open path, not the matching.
 
 **Do not write a second matcher.** The client's is version-free game logic and the
 server calls the same one; two independent readings of the recipe format is how the

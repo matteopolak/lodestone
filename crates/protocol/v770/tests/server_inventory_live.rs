@@ -32,7 +32,7 @@
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, ServerAddress};
-use lodestone_model::{ClientAction, ContainerClickType, ContainerSlotChange, ItemStack};
+use lodestone_model::{ClientAction, ContainerClickType, GameMode, ItemStack};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
     BlockEntityHandle, ChunkColumn, ChunkSource, MobHandle, NoEntities, serve_connection,
@@ -124,26 +124,35 @@ async fn real_client_hotbar_select_and_container_click_reach_the_server_model() 
         .send_action(ClientAction::SetCarriedItem { slot: 4 })
         .expect("client still connected");
 
-    // A plain pickup-style click that lands one item in menu slot 9 (native
-    // main-storage slot 9 — see `lodestone_server::PlayerInventory`'s
-    // menu-slot table), with an empty cursor afterward. Shaped exactly like
-    // what `lodestone-game`'s real click predictor would encode for "pick up
-    // a pickaxe from the ground and place it in the first main-storage
-    // slot," not a hand-invented packet.
+    // Two **real** pickup clicks moving a pickaxe from hotbar slot 0 (menu slot 36)
+    // into main storage (menu slot 9): take onto the cursor, then put down. The
+    // server derives both from `(slot, button, click_type)` alone
+    // (`container_click::do_click`) — a diff *claiming* slot 9 now holds a pickaxe
+    // mints nothing, which is what this test used to do.
     handle
-        .send_action(ClientAction::ContainerClick {
-            window_id: 0,
-            state_id: 1,
-            slot: 9,
-            button: 0,
-            click_type: ContainerClickType::Pickup,
-            changed_slots: vec![ContainerSlotChange {
-                slot: 9,
-                item: Some(stack("minecraft:diamond_pickaxe", 1)),
-            }],
-            carried_item: None,
+        .send_action(ClientAction::ChangeGameMode {
+            mode: GameMode::Creative,
         })
         .expect("client still connected");
+    handle
+        .send_action(ClientAction::SetCreativeModeSlot {
+            slot: 36,
+            item: Some(stack("minecraft:diamond_pickaxe", 1)),
+        })
+        .expect("client still connected");
+    for slot in [36, 9] {
+        handle
+            .send_action(ClientAction::ContainerClick {
+                window_id: 0,
+                state_id: 1,
+                slot,
+                button: 0,
+                click_type: ContainerClickType::Pickup,
+                changed_slots: Vec::new(),
+                carried_item: None,
+            })
+            .expect("client still connected");
+    }
 
     // `send_action` only enqueues onto the driver's channel; give the driver
     // task a moment to actually perform the writes before closing the
@@ -167,7 +176,7 @@ async fn real_client_hotbar_select_and_container_click_reach_the_server_model() 
     assert_eq!(
         summary.inventory.native(9),
         Some(&stack("minecraft:diamond_pickaxe", 1)),
-        "CONTAINER_CLICK's changed-slots diff must land in native slot 9"
+        "two derived pickup clicks must move the pickaxe into native slot 9"
     );
 
     // Non-vacuity / negative control: a native slot the click never touched

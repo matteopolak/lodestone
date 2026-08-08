@@ -503,40 +503,66 @@ pub enum ServerBound {
         /// [`Ignored`](Self::Ignored) instead.
         slot: u8,
     },
-    /// A container click the client has already predicted locally
-    /// (`ServerboundContainerClickPacket`). `changed_slots` and
-    /// `carried_item` are the client's own **post-click prediction** — the
-    /// wire packet's `HashedStack` payloads, not raw button/slot input —
-    /// because `lodestone-game`'s `click.rs` already computed the full
-    /// `doClick` result before encoding this packet (issue #27,
-    /// `docs/container-clicks.md`). See `crate::inventory`'s module doc
-    /// comment and `crate::server`'s consumer for why this crate applies
-    /// that diff directly against window `0` (the player's own inventory)
-    /// rather than re-deriving vanilla's click state machine server-side —
-    /// a deliberate, documented scope cut, not an oversight.
+    /// A container click (`ServerboundContainerClickPacket`).
+    ///
+    /// **The button input is what the consumer acts on.** `slot`, `button` and
+    /// `click_type` are the raw click; `crate::container_click::do_click`
+    /// re-derives the whole menu state from them, exactly as vanilla's
+    /// `AbstractContainerMenu.doClick` does. That replaces the earlier scope cut
+    /// in which the client's own `changed_slots` prediction was applied verbatim
+    /// — a hole through which any client could name any item in any slot.
+    ///
+    /// `changed_slots` and `carried_item` are still carried, because the wire
+    /// packet has them and they are the client's post-click prediction (issue #27,
+    /// `docs/container-clicks.md`): the consumer compares them against what it
+    /// derived, purely to decide whether a correcting `container_set_content` is
+    /// worth sending. Nothing is ever *stored* from them.
     ContainerClicked {
-        /// The window the click targeted. Only window `0` (the player's own
-        /// inventory) has a server-side model to apply into today; any
-        /// other id is decoded but dropped by the consumer (see
-        /// `crate::server`'s doc comment on that arm).
+        /// The window the click targeted — `0` for the player's own inventory
+        /// screen, otherwise the id the server handed out in `open_screen`.
         window_id: i32,
         /// The client's menu state id at the time of the click. Decoded for
-        /// parity with the wire packet; not yet validated against a
-        /// server-tracked state id (this crate sends no
-        /// `container_set_slot`/`container_set_content` for the player's own
-        /// inventory to resync from, so there is nothing to validate against
-        /// yet).
+        /// parity with the wire packet; not yet validated against the server's own
+        /// (`OpenContainer::state_id`), which would let the server *reject* a click
+        /// raced against a correction rather than merely overwrite its result.
         state_id: i32,
-        /// Every menu slot whose contents changed, with the new value —
-        /// `None` clears the slot.
+        /// The clicked menu slot. `-999`
+        /// ([`SLOT_OUTSIDE`](crate::container_click::SLOT_OUTSIDE)) is vanilla's
+        /// "outside the window", which drops the cursor into the world.
+        slot: i32,
+        /// `buttonNum`: the mouse button for a pickup/quick-move, the hotbar index
+        /// (or `40` for the off-hand) for a swap, or the drag header/type mask for
+        /// a quick-craft.
+        button: i8,
+        /// `ContainerInput`'s ordinal — `0` pickup, `1` quick-move, `2` swap,
+        /// `3` clone, `4` throw, `5` quick-craft, `6` pickup-all.
+        click_type: i32,
+        /// The client's predicted per-slot result. **Never stored** — see this
+        /// variant's own doc comment.
         changed_slots: Vec<(i32, Option<ItemStack>)>,
-        /// The cursor ("carried") stack after the click. Decoded for parity
-        /// with the wire packet but not yet acted on:
-        /// [`PlayerInventory`](crate::inventory::PlayerInventory) has no
-        /// cursor field, since nothing server-side reads one today (the same
-        /// "decoded but not yet acted on" pattern `BlockAction::sequence`
-        /// already established here).
+        /// The client's predicted cursor stack. **Never stored**, for the same
+        /// reason; the server tracks its own cursor in
+        /// [`ClickState`](crate::container_click::ClickState).
         carried_item: Option<ItemStack>,
+    },
+    /// The client clicked a recipe in the recipe book, asking the server to lay it
+    /// out in the open crafting grid (`ServerboundPlaceRecipePacket`, issue #529
+    /// step 4).
+    ///
+    /// **`recipe_index` is an opaque id the *server* assigns**, not a name: vanilla
+    /// sends the whole book with `ClientboundRecipeBookAddPacket` and the client
+    /// echoes back a position in that list. See
+    /// [`crate::crafting::recipe_at_index`] for the id space this crate defines and
+    /// for the consequence — nothing sends this packet until that clientbound half
+    /// exists.
+    RecipePlaced {
+        /// The window the recipe should be laid into.
+        window_id: i32,
+        /// `RecipeDisplayId.index`.
+        recipe_index: i32,
+        /// `useMaxItems` — shift-clicking the recipe, which fills as many rounds as
+        /// the inventory allows.
+        use_max_items: bool,
     },
     /// The client closed a container screen (`ServerboundContainerClosePacket`).
     /// `window_id` is the id the client had open — vanilla's

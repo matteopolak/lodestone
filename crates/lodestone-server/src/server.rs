@@ -85,10 +85,9 @@ use crate::chunk::{
     is_air_or_fluid, is_water,
 };
 use crate::fall::{FallSample, FallTracker};
-use crate::inventory::{
-    ContainerMenuSlot, PLAYER_CRAFT_RESULT_MENU_SLOT, PlayerInventory, container_menu_slot,
-    window_zero_menu_slot,
-};
+use crate::container_click::{Click, MenuKind, MenuLayout, SlotKind, do_click};
+use crate::crafting::CraftingState;
+use crate::inventory::{PlayerInventory, window_zero_menu_slot};
 use crate::mob_spawn::SpawnRng;
 use crate::mobs::{MobHandle, PlayerPerception};
 use crate::neighbor_update::Direction;
@@ -2098,6 +2097,7 @@ where
             | ServerBound::GameRuleChanged { .. }
             | ServerBound::CarriedItemChanged { .. }
             | ServerBound::ContainerClicked { .. }
+            | ServerBound::RecipePlaced { .. }
             | ServerBound::ContainerClosed { .. }
             | ServerBound::Attack { .. }
             | ServerBound::PlayerInput { .. }
@@ -2165,6 +2165,15 @@ const CONTAINER_SYNC_INTERVAL: Duration = Duration::from_millis(50);
 struct OpenContainer {
     window_id: i32,
     pos: BlockPos,
+    /// Which menu shape this window is, which decides the slot layout and the
+    /// quick-move routing [`crate::container_click`] runs.
+    ///
+    /// A crafting table is [`MenuKind::CraftingTable`] and its `pos` is the
+    /// table's block position — used for nothing but the "did the player break the
+    /// block under the menu" check, because a crafting table is **not** a block
+    /// entity and has no slots at `pos` at all (issue #529 step 2). Its grid lives
+    /// on [`PlayerInventory::table_crafting`].
+    shape: MenuKind,
     container_size: usize,
     /// Vanilla's `AbstractContainerMenu.stateId`, wrapping at `32767`
     /// (`AbstractContainerMenu::incrementStateId`). Bumped by every content/
@@ -2335,6 +2344,9 @@ where
     let mut opened = OpenContainer {
         window_id,
         pos,
+        shape: MenuKind::Container {
+            size: own_slots.len(),
+        },
         container_size: own_slots.len(),
         state_id: 0,
     };
@@ -2360,6 +2372,79 @@ where
         slots: own_slots,
         data,
     };
+    Ok(())
+}
+
+/// Opens a crafting table's `minecraft:crafting` menu — issue #529's step 2, the
+/// **positionless virtual menu**.
+///
+/// [`open_container_screen`] structurally cannot do this: it is driven entirely by
+/// a [`BlockEntity`] at `pos`, and **a crafting table is not a block entity.** Its
+/// slots are scratch space owned by the menu (vanilla's `CraftingMenu` builds a
+/// `TransientCraftingContainer` + `ResultContainer` in its constructor and throws
+/// them away on close), which here is [`PlayerInventory::table_crafting`].
+///
+/// `pos` is still carried on the [`OpenContainer`] — not to find slots, but so
+/// breaking the table closes the window, exactly as it already does for a furnace.
+///
+/// The 46 slots sent are `CraftingMenu`'s own order: result `0`, the 3×3 grid
+/// `1..=9`, main storage `10..=36`, hotbar `37..=45`.
+async fn open_crafting_table_screen<T, P>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    inventory: &mut PlayerInventory,
+    pos: BlockPos,
+    next_window_id: &mut i32,
+    open_container: &mut Option<OpenContainer>,
+    container_sync: &mut ContainerSync,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+{
+    *next_window_id = *next_window_id % 100 + 1;
+    let window_id = *next_window_id;
+
+    inventory.open_table_crafting();
+
+    apply(
+        conn,
+        state,
+        proto.encode_open_screen(window_id, "minecraft:crafting", "Crafting"),
+    )
+    .await?;
+
+    let layout = MenuLayout::crafting_table();
+    let items = read_menu(&layout, inventory, inventory.table_crafting(), &[]);
+
+    let mut opened = OpenContainer {
+        window_id,
+        pos,
+        shape: MenuKind::CraftingTable,
+        // Result + the nine grid cells: the menu's own section, before the player
+        // tail. Only `container_menu_slot`'s legacy callers read this; the click
+        // path uses `shape`.
+        container_size: 10,
+        state_id: 0,
+    };
+    let state_id = opened.next_state_id();
+    apply(
+        conn,
+        state,
+        proto.encode_container_content(
+            window_id,
+            state_id,
+            &items,
+            inventory.click_state().carried.as_ref(),
+        ),
+    )
+    .await?;
+
+    *open_container = Some(opened);
+    // No background mutation to poll — a crafting grid changes only on a click —
+    // so the periodic sync is left with nothing to diff.
+    *container_sync = ContainerSync::default();
     Ok(())
 }
 
@@ -3429,6 +3514,30 @@ where
         .await;
     }
 
+    // Issue #529 step 2: a crafting table opens a *virtual* menu. It is not a block
+    // entity, so the `existing_menu` branch above structurally cannot reach it —
+    // see `open_crafting_table_screen`. Ahead of the placement branch for the same
+    // reason the `hand_use` block is: right-clicking a table while holding a block
+    // opens the table rather than building.
+    if source
+        .block_state(pos.x, pos.y, pos.z)
+        .split('[')
+        .next()
+        .is_some_and(|name| name == "minecraft:crafting_table")
+    {
+        return open_crafting_table_screen(
+            conn,
+            proto,
+            state,
+            inventory,
+            pos,
+            next_window_id,
+            open_container,
+            container_sync,
+        )
+        .await;
+    }
+
     // Issue #252, the missing-consumer half: a right-click on a brewing stand
     // routes the held item into the matching slot (fuel/bottle/ingredient)
     // and consumes one from the player's hand. See
@@ -4043,118 +4152,305 @@ fn apply_carried_item_changed(inventory: &mut PlayerInventory, slot: u8) {
 /// `player.inventoryMenu.getSlot(slotNum)`), so no new mapping is needed.
 /// `slot` values that table does not recognise (`0`, the crafting output; any
 /// negative value, vanilla's "drop into the world" case) are silent no-ops
-/// here, exactly as [`ServerBound::CreativeModeSlotSet`]'s own doc comment
-/// documents — this crate has no world-drop model, and no creative/game-mode
-/// state to gate on either (see that same doc comment for why vanilla's
-/// `hasInfiniteMaterials()` check has nothing to mirror here).
-fn apply_creative_mode_slot_set(inventory: &mut PlayerInventory, slot: i16, item: Option<ItemStack>) {
+/// here — this crate has no world-drop model.
+///
+/// **Gated on creative mode**, which vanilla also does
+/// (`handleSetCreativeModeSlot`'s `player.hasInfiniteMaterials()`). That gate is
+/// load-bearing rather than cosmetic: this packet *is* a mint-anything channel by
+/// design, so leaving it ungated would reopen — through a different packet — the
+/// exact hole `apply_container_clicked` was rewritten to close. A survival client
+/// sending it gets nothing.
+fn apply_creative_mode_slot_set(
+    inventory: &mut PlayerInventory,
+    slot: i16,
+    item: Option<ItemStack>,
+    creative: bool,
+) {
+    if !creative {
+        return;
+    }
     inventory.apply_menu_slot_change(i32::from(slot), item);
 }
 
-/// Applies a `CONTAINER_CLICK` result the client already predicted locally
+/// Reads one menu's slots in menu order, from whichever backing stores its
+/// [`MenuLayout`] names.
+///
+/// `own` is the open block entity's own slots (empty for a menu with none), and
+/// `grid` is the [`CraftingState`] behind the `Grid`/`Result` kinds.
+fn read_menu(
+    layout: &MenuLayout,
+    inventory: &PlayerInventory,
+    grid: Option<&CraftingState>,
+    own: &[Option<ItemStack>],
+) -> Vec<Option<ItemStack>> {
+    layout
+        .iter()
+        .map(|(_, kind)| match kind {
+            SlotKind::Player(native) => inventory.native(native).cloned(),
+            SlotKind::Container(index) => own.get(index).cloned().flatten(),
+            SlotKind::Grid(cell) => grid.and_then(|g| g.input(cell).cloned()),
+            SlotKind::Result => grid.and_then(|g| g.result().cloned()),
+        })
+        .collect()
+}
+
+/// Applies a `CONTAINER_CLICK` by **deriving** its result server-side
 /// (`ServerBound::ContainerClicked`).
 ///
-/// **Scope, stated plainly**: this does not re-run vanilla's `doClick` state
-/// machine server-side. It applies the client's own predicted diff
-/// (`changed_slots`) directly, either into [`PlayerInventory`] (`window_id
-/// == 0`, the player's own inventory) or into the block entity backing the
-/// connection's currently [`OpenContainer`] (any other window, split by
-/// `crate::inventory::container_menu_slot` into "the block entity's own
-/// slot" vs. "the player's standard inventory tail" — see that function's
-/// own doc comment for the layout).
+/// The click's slot/button/click-type go into [`crate::container_click::do_click`],
+/// vanilla's own `AbstractContainerMenu.doClick`, run over the menu read out of
+/// this connection's real state. The client's `changed_slots`/`carried_item`
+/// prediction is **never stored** — it is compared against what was derived, and a
+/// disagreement sends a full corrective `container_set_content`. So an honest
+/// client sees no extra traffic and a client naming an item it does not own is
+/// corrected on the same packet.
 ///
-/// A click against a non-zero `window_id` that does not match the
-/// connection's own tracked [`OpenContainer`] (a stale click for a window
-/// that has since closed or been replaced) is decoded but dropped, not
-/// misapplied to whatever happens to be open now.
+/// That closes the hole this function used to be: it applied the client's diff
+/// verbatim, so any client could mint any item in any slot by claiming it. Issue
+/// #529 had closed the crafting *result* alone; the general case is this.
 ///
-/// This is a deliberate scope cut, not an oversight, and it is *exactly*
-/// consistent with today's actual desync risk: `docs/container-clicks.md`
-/// states plainly that "the client runs exactly this locally to predict the
-/// result of a click before the server confirms it" and that prediction
-/// already ships with **no server confirmation needed to look correct** —
-/// nothing before this landing validated it server-side at all. Applying the
-/// client's own diff verbatim cannot introduce a *new* desync relative to
-/// that baseline (the server model becomes a mirror of what the client
-/// already believes, by construction), where re-deriving `doClick`
-/// server-side and getting one of its seven modes or the quick-craft drag
-/// machine subtly wrong **would** — a wrong from-scratch reimplementation is
-/// strictly worse than an honest passthrough here. A server-authoritative
-/// `doClick` (rejecting an impossible client diff, catching a cheating
-/// client) is real future work, not done by this landing; see
-/// `crate::inventory`'s module doc comment.
+/// A click against a non-zero `window_id` that does not match the connection's
+/// own tracked [`OpenContainer`] (a stale click for a window since closed or
+/// replaced) is dropped rather than misapplied to whatever is open now.
 ///
-/// # The one slot that *is* server-authoritative (issue #529)
+/// Three menu shapes are served, and which one this is comes from the tracked
+/// window rather than from the packet: window `0` is the player screen, an open
+/// crafting table is [`MenuKind::CraftingTable`], anything else is a block-entity
+/// container.
 ///
-/// The passthrough above stops at the crafting **result**. Menu slot `0` of
-/// window `0` is derived by the server from the grid cells (menu `1..=4`, which
-/// land in [`PlayerInventory::crafting`]) and the client's claimed value for it is
-/// never stored — [`PlayerInventory::apply_menu_slot_change`] refuses it. After
-/// applying a click that touched the grid, the server pushes **its own** result
-/// with a `container_set_slot`, exactly as vanilla's `ResultContainer` broadcast
-/// does. So a diff claiming a diamond block out of an empty grid does not mint
-/// one: the claim is dropped and the client is corrected on the same packet.
-///
-/// This is narrower than a full server-side `doClick` and deliberately so — the
-/// remaining trust is "the client moved an item it already owned between slots it
-/// already owned", which mints nothing.
-/// Returns the corrective result-slot push the caller must send, if the click
-/// touched the crafting grid. A directive rather than a send so this stays a pure
-/// function of the click — the three unit tests below drive it with no connection.
+/// Returns the correcting directive to send (if any) and the stacks that left the
+/// menu into the world (a throw, or a click outside the window) for the caller to
+/// spawn. A directive rather than a send, so this stays a pure function of the
+/// click and the unit tests below drive it with no connection.
+#[allow(clippy::too_many_arguments)]
 fn apply_container_clicked<P: ServerProtocol>(
     proto: &P,
     inventory: &mut PlayerInventory,
     block_entities: &BlockEntityHandle,
-    open_container: Option<&OpenContainer>,
+    open_container: Option<&mut OpenContainer>,
     window_id: i32,
-    changed_slots: Vec<(i32, Option<ItemStack>)>,
-) -> Option<ServerDirective> {
-    if window_id == 0 {
-        let mut touched_grid = false;
-        for (menu_slot, item) in changed_slots {
-            if menu_slot == PLAYER_CRAFT_RESULT_MENU_SLOT {
-                // The claim is not stored — the server derives this slot. Note
-                // there is no `consume_one` here and there must not be: the
-                // client's own diff already carries the shrunk grid cells (a take
-                // reports both the emptied result *and* every decremented cell),
-                // so consuming again would shrink the grid twice.
-                touched_grid = true;
-                continue;
-            }
-            touched_grid |= crate::inventory::player_craft_grid_cell(menu_slot).is_some();
-            inventory.apply_menu_slot_change(menu_slot, item);
+    click: Click,
+    claimed_slots: &[(i32, Option<ItemStack>)],
+    claimed_cursor: Option<&ItemStack>,
+    creative: bool,
+) -> (Option<ServerDirective>, Vec<ItemStack>) {
+    // Which menu, and where its non-player slots live.
+    let mut open = open_container;
+    let (layout, pos, uses_table_grid) = if window_id == 0 {
+        (MenuLayout::player(), None, false)
+    } else {
+        let Some(tracked) = open.as_mut() else {
+            return (None, Vec::new());
+        };
+        if tracked.window_id != window_id {
+            return (None, Vec::new());
         }
-        if !touched_grid {
+        match tracked.shape {
+            MenuKind::CraftingTable => (MenuLayout::crafting_table(), Some(tracked.pos), true),
+            _ => (
+                MenuLayout::container(tracked.container_size),
+                Some(tracked.pos),
+                false,
+            ),
+        }
+    };
+
+    let own = match (pos, uses_table_grid) {
+        (Some(pos), false) => block_entities.with(|reg| {
+            reg.get(pos)
+                .map(BlockEntity::container_slots)
+                .unwrap_or_default()
+        }),
+        _ => Vec::new(),
+    };
+    let grid_owner = if uses_table_grid {
+        inventory.table_crafting().cloned()
+    } else if window_id == 0 {
+        Some(inventory.crafting().clone())
+    } else {
+        None
+    };
+
+    let mut slots = read_menu(&layout, inventory, grid_owner.as_ref(), &own);
+    let mut state = inventory.click_state().clone();
+    let dropped = do_click(&layout, &mut slots, &mut state, click, creative);
+    *inventory.click_state_mut() = state;
+
+    // Write back. Grid cells go last and through `set_input`, so the result slot
+    // is re-derived from the grid rather than copied out of `slots` — a stale
+    // result is the same defect as a trusted one.
+    let mut grid_writes: Vec<(usize, Option<ItemStack>)> = Vec::new();
+    let mut own_writes: Vec<(usize, Option<ItemStack>)> = Vec::new();
+    for (index, kind) in layout.iter() {
+        match kind {
+            SlotKind::Player(native) => inventory.set_native(native, slots[index].clone()),
+            SlotKind::Container(own_index) => own_writes.push((own_index, slots[index].clone())),
+            SlotKind::Grid(cell) => grid_writes.push((cell, slots[index].clone())),
+            SlotKind::Result => {}
+        }
+    }
+    if let Some(pos) = pos.filter(|_| !own_writes.is_empty()) {
+        block_entities.with(|reg| {
+            if let Some(entity) = reg.get_mut(pos) {
+                for (index, item) in &own_writes {
+                    entity.set_container_slot(*index, item.clone());
+                }
+            }
+        });
+    }
+    if !grid_writes.is_empty() {
+        let grid = if uses_table_grid {
+            inventory.table_crafting_mut()
+        } else {
+            Some(inventory.crafting_mut())
+        };
+        if let Some(grid) = grid {
+            for (cell, item) in grid_writes {
+                grid.set_input(cell, item);
+            }
+        }
+    }
+
+    // Re-read, so the comparison and the correction both carry the *derived*
+    // result rather than whatever `do_click` left in the result slot.
+    let own = match (pos, uses_table_grid) {
+        (Some(pos), false) => block_entities.with(|reg| {
+            reg.get(pos)
+                .map(BlockEntity::container_slots)
+                .unwrap_or_default()
+        }),
+        _ => Vec::new(),
+    };
+    let grid_owner = if uses_table_grid {
+        inventory.table_crafting().cloned()
+    } else if window_id == 0 {
+        Some(inventory.crafting().clone())
+    } else {
+        None
+    };
+    let derived = read_menu(&layout, inventory, grid_owner.as_ref(), &own);
+
+    // Did the client predict this correctly? Only the slots it claimed plus the
+    // cursor are compared: it does not claim slots it believes unchanged.
+    let cursor = inventory.click_state().carried.clone();
+    let mut agrees = cursor.as_ref() == claimed_cursor;
+    if agrees {
+        for (menu_slot, claimed) in claimed_slots {
+            let index = usize::try_from(*menu_slot).ok().filter(|i| *i < derived.len());
+            match index {
+                Some(index) if derived[index] == *claimed => {}
+                _ => {
+                    agrees = false;
+                    break;
+                }
+            }
+        }
+    }
+    if agrees {
+        return (None, dropped);
+    }
+
+    let state_id = match open.as_mut() {
+        Some(tracked) => tracked.next_state_id(),
+        None => 0,
+    };
+    (
+        Some(proto.encode_container_content(window_id, state_id, &derived, cursor.as_ref())),
+        dropped,
+    )
+}
+
+/// Lays a recipe-book recipe out in the open crafting grid (issue #529 step 4).
+///
+/// Which grid depends on the window: `0` is the player screen's 2×2, an open
+/// crafting table is its 3×3. A 3×3 recipe asked for on the 2×2 screen has no
+/// placement and is refused — [`crate::crafting::place_recipe`] returns `false` and
+/// nothing moves, which is vanilla's behaviour too.
+///
+/// Returns the full `container_set_content` the client needs, because a fill moves
+/// items out of arbitrary inventory slots and there is no diff to send.
+fn apply_recipe_placed<P: ServerProtocol>(
+    proto: &P,
+    inventory: &mut PlayerInventory,
+    open_container: Option<&mut OpenContainer>,
+    window_id: i32,
+    recipe_index: i32,
+    use_max_items: bool,
+) -> Option<ServerDirective> {
+    let index = usize::try_from(recipe_index).ok()?;
+    let (_, recipe) = crate::crafting::recipe_at_index(index)?;
+
+    let mut open = open_container;
+    let (layout, uses_table_grid) = if window_id == 0 {
+        (MenuLayout::player(), false)
+    } else {
+        let tracked = open.as_mut()?;
+        if tracked.window_id != window_id || tracked.shape != MenuKind::CraftingTable {
             return None;
         }
-        let result = inventory.crafting().result().cloned();
-        return Some(proto.encode_container_slot(
-            0,
-            0,
-            PLAYER_CRAFT_RESULT_MENU_SLOT,
-            result.as_ref(),
-        ));
-    }
-    let open = open_container?;
-    if open.window_id != window_id {
+        (MenuLayout::crafting_table(), true)
+    };
+
+    // The grid is moved out and back so `place_recipe` can hold `&mut` on both it
+    // and the inventory — they are two fields of the same struct.
+    let mut grid = if uses_table_grid {
+        inventory.table_crafting()?.clone()
+    } else {
+        inventory.crafting().clone()
+    };
+    if !crate::crafting::place_recipe(inventory, &mut grid, recipe, use_max_items) {
         return None;
     }
-    for (menu_slot, item) in changed_slots {
-        match container_menu_slot(open.container_size, menu_slot) {
-            Some(ContainerMenuSlot::Own(index)) => {
-                block_entities.with(|reg| {
-                    if let Some(entity) = reg.get_mut(open.pos) {
-                        entity.set_container_slot(index, item.clone());
-                    }
-                });
-            }
-            Some(ContainerMenuSlot::Player(native)) => {
-                inventory.set_native(native, item);
-            }
-            None => {}
-        }
+    if uses_table_grid {
+        *inventory.table_crafting_mut()? = grid;
+    } else {
+        *inventory.crafting_mut() = grid;
     }
-    None
+
+    let grid_owner = if uses_table_grid {
+        inventory.table_crafting().cloned()
+    } else {
+        Some(inventory.crafting().clone())
+    };
+    let items = read_menu(&layout, inventory, grid_owner.as_ref(), &[]);
+    let state_id = match open.as_mut() {
+        Some(tracked) => tracked.next_state_id(),
+        None => 0,
+    };
+    Some(proto.encode_container_content(
+        window_id,
+        state_id,
+        &items,
+        inventory.click_state().carried.as_ref(),
+    ))
+}
+
+/// Spawns stacks that left a menu into the world as item entities — vanilla's
+/// `player.drop(stack, true)`, which [`crate::container_click::do_click`] has no
+/// world to make itself.
+///
+/// A connection with no tracked position yet drops nothing rather than spawning at
+/// the origin, the same "no data yet, don't guess" gate [`apply_attack`] uses.
+fn spawn_dropped_stacks(mobs: &MobHandle, player_pos: Option<(f64, f64, f64)>, dropped: Vec<ItemStack>) {
+    if dropped.is_empty() {
+        return;
+    }
+    let Some((x, y, z)) = player_pos else { return };
+    // Vanilla throws from eye height with a forward impulse; this crate tracks no
+    // player facing at the container call sites, so the stack is released at the
+    // eye and left to `ItemMotion`'s own fall dynamics.
+    let position = Vec3::new(x, y + EYE_HEIGHT, z);
+    mobs.with(|sim| {
+        for stack in dropped {
+            let count = u8::try_from(stack.count).unwrap_or(u8::MAX);
+            sim.spawn_item(
+                stack.item.clone(),
+                position,
+                Vec3::new(0.0, 0.0, 0.0),
+                ItemLifecycle::newly_dropped(count, DEFAULT_MAX_STACK_SIZE),
+            );
+        }
+    });
 }
 
 /// Resolves a `minecraft:attack` request (issue #12) against the live mob
@@ -4717,21 +5013,65 @@ where
         ServerBound::ContainerClicked {
             window_id,
             state_id: _,
+            slot,
+            button,
+            click_type,
             changed_slots,
-            carried_item: _,
+            carried_item,
         } => {
-            if let Some(correction) = apply_container_clicked(
+            let (correction, dropped) = apply_container_clicked(
                 proto,
                 inventory,
                 block_entities,
-                open_container.as_ref(),
+                open_container.as_mut(),
                 window_id,
-                changed_slots,
+                Click {
+                    slot,
+                    button,
+                    click_type,
+                },
+                &changed_slots,
+                carried_item.as_ref(),
+                *game_mode == GameMode::Creative,
+            );
+            spawn_dropped_stacks(mobs, *player_pos, dropped);
+            if let Some(correction) = correction {
+                apply(conn, state, correction).await?;
+            }
+        }
+        ServerBound::RecipePlaced {
+            window_id,
+            recipe_index,
+            use_max_items,
+        } => {
+            if let Some(correction) = apply_recipe_placed(
+                proto,
+                inventory,
+                open_container.as_mut(),
+                window_id,
+                recipe_index,
+                use_max_items,
             ) {
                 apply(conn, state, correction).await?;
             }
         }
         ServerBound::ContainerClosed { window_id } => {
+            // Vanilla's `ServerPlayer.doCloseContainer` → `AbstractContainerMenu
+            // ::removed`: the cursor and any crafting grid go back to the player,
+            // and what does not fit hits the floor. Dropping them silently would
+            // delete items every time a player closed a menu mid-drag.
+            let mut returning = inventory.take_table_crafting();
+            if let Some(carried) = inventory.click_state_mut().carried.take() {
+                returning.push(carried);
+            }
+            inventory.click_state_mut().reset();
+            let mut spilled = Vec::new();
+            for stack in returning {
+                if let (_, Some(leftover)) = inventory.add(stack) {
+                    spilled.push(leftover);
+                }
+            }
+            spawn_dropped_stacks(mobs, *player_pos, spilled);
             if open_container.as_ref().is_some_and(|open| open.window_id == window_id) {
                 *open_container = None;
                 *container_sync = ContainerSync::default();
@@ -4744,7 +5084,7 @@ where
             *sprinting = sprint;
         }
         ServerBound::CreativeModeSlotSet { slot, item } => {
-            apply_creative_mode_slot_set(inventory, slot, item);
+            apply_creative_mode_slot_set(inventory, slot, item, *game_mode == GameMode::Creative);
         }
         ServerBound::ClientCommand { action } => {
             apply_client_command(
@@ -6072,6 +6412,7 @@ mod tests {
 
     const SLOT: i32 = 20;
     const DATA: i32 = 21;
+    const CONTENT: i32 = 22;
 
     /// A protocol double whose container encoders tag each directive with a
     /// distinct packet id, `window_id`, and `state_id`/`property` — enough
@@ -6125,12 +6466,32 @@ mod tests {
                 payload: vec![window_id as u8, property as u8, value as u8],
             }
         }
+        fn encode_container_content(
+            &self,
+            window_id: i32,
+            state_id: i32,
+            items: &[Option<ItemStack>],
+            carried: Option<&ItemStack>,
+        ) -> ServerDirective {
+            ServerDirective::Send {
+                packet_id: CONTENT,
+                payload: vec![
+                    window_id as u8,
+                    state_id as u8,
+                    items.len() as u8,
+                    carried.map_or(0, |s| s.count as u8),
+                ],
+            }
+        }
     }
 
     fn open(pos: BlockPos, container_size: usize) -> OpenContainer {
         OpenContainer {
             window_id: 7,
             pos,
+            shape: MenuKind::Container {
+                size: container_size,
+            },
             container_size,
             state_id: 0,
         }
@@ -6232,132 +6593,241 @@ mod tests {
         assert_eq!(o.state_id, 1, "a slot change must bump state_id exactly once");
     }
 
+    /// A real left-click picks a stack up off a native slot and a second one puts
+    /// it down elsewhere — the whole thing derived from `(slot, button, type)`,
+    /// with no item named anywhere in the input.
     #[test]
-    fn container_clicked_against_window_zero_applies_to_player_inventory() {
+    fn container_clicked_against_window_zero_derives_the_move() {
         let mut inventory = PlayerInventory::new();
+        inventory.set_native(9, Some(stack("minecraft:stone", 4)));
         let block_entities = BlockEntityHandle::new();
+
+        // Menu slot 9 is native 9. Left-click: whole stack onto the cursor.
         apply_container_clicked(
             &ContainerTagProto,
             &mut inventory,
             &block_entities,
             None,
             0,
-            vec![(9, Some(stack("minecraft:stone", 1)))],
+            Click { slot: 9, button: 0, click_type: 0 },
+            &[],
+            None,
+            false,
         );
-        assert_eq!(inventory.native(9), Some(&stack("minecraft:stone", 1)));
+        assert_eq!(inventory.native(9), None);
+        assert_eq!(
+            inventory.click_state().carried.as_ref().map(|s| s.count),
+            Some(4)
+        );
+
+        // Menu slot 40 is native 4 (hotbar). Left-click: the whole cursor lands.
+        apply_container_clicked(
+            &ContainerTagProto,
+            &mut inventory,
+            &block_entities,
+            None,
+            0,
+            Click { slot: 40, button: 0, click_type: 0 },
+            &[],
+            None,
+            false,
+        );
+        assert_eq!(inventory.native(4), Some(&stack("minecraft:stone", 4)));
+        assert!(inventory.click_state().carried.is_none());
     }
 
-    /// Issue #529's security property, on the one grid this landing covers: a
-    /// diff claiming a result the grid cannot produce mints nothing, and the
-    /// server answers the same click with a `container_set_slot` carrying **its
-    /// own** result for slot 0.
+    /// **The security property.** A client claiming a slot now holds an item it
+    /// never had mints nothing: the claim is not stored, and the server answers the
+    /// same click with a full `container_set_content` correction.
+    ///
+    /// Both halves are asserted because they fail independently — a server that
+    /// ignored the claim but sent no correction would leave the client believing in
+    /// an item that does not exist.
     #[test]
-    fn a_claimed_crafting_result_is_never_stored_and_the_server_corrects_it() {
+    fn a_claimed_item_is_never_stored_and_the_client_is_corrected() {
         let mut inventory = PlayerInventory::new();
         let block_entities = BlockEntityHandle::new();
 
-        // An empty grid, a claim of a diamond block. The claim is dropped and the
-        // correction says "slot 0 holds nothing" (count byte 0).
-        let correction = apply_container_clicked(
+        // An empty inventory, an empty cursor, a left-click on an empty slot — and
+        // a diff claiming a diamond block appeared there.
+        let (correction, dropped) = apply_container_clicked(
             &ContainerTagProto,
             &mut inventory,
             &block_entities,
             None,
             0,
-            vec![(0, Some(stack("minecraft:diamond_block", 1)))],
+            Click { slot: 9, button: 0, click_type: 0 },
+            &[(9, Some(stack("minecraft:diamond_block", 64)))],
+            None,
+            false,
         );
-        assert_eq!(
-            correction,
-            Some(ServerDirective::Send {
-                packet_id: SLOT,
-                payload: vec![0, 0, 0, 0],
-            })
+        assert_eq!(inventory.native(9), None, "the claim must not be stored");
+        assert!(dropped.is_empty());
+        assert!(
+            matches!(correction, Some(ServerDirective::Send { packet_id, .. }) if packet_id == CONTENT),
+            "a disagreeing claim must be corrected, got {correction:?}"
         );
-        assert!(inventory.crafting().result().is_none());
 
-        // Four planks into the 2x2: the server derives a crafting table itself
-        // and pushes it, without the client having named a result at all.
-        let correction = apply_container_clicked(
+        // And a claim that matches what the server derived sends nothing at all,
+        // so an honest client pays no extra traffic — the control that the
+        // correction above is a comparison rather than an unconditional resend.
+        inventory.set_native(9, Some(stack("minecraft:stone", 1)));
+        let (correction, _) = apply_container_clicked(
             &ContainerTagProto,
             &mut inventory,
             &block_entities,
             None,
             0,
-            (1..=4)
-                .map(|slot| (slot, Some(stack("minecraft:oak_planks", 1))))
-                .collect(),
+            Click { slot: 9, button: 0, click_type: 0 },
+            &[(9, None)],
+            Some(&stack("minecraft:stone", 1)),
+            false,
         );
-        assert_eq!(
-            correction,
-            Some(ServerDirective::Send {
-                packet_id: SLOT,
-                payload: vec![0, 0, 0, 1],
-            }),
-            "the derived crafting table is one item"
-        );
+        assert_eq!(correction, None, "an honest prediction needs no correction");
+    }
+
+    /// Crafting, end to end and server-derived: planks clicked into the 2x2 make
+    /// the server derive a crafting table, and taking the result consumes the grid.
+    /// The client never names a result.
+    #[test]
+    fn the_crafting_result_is_derived_and_taking_it_consumes_the_grid() {
+        let mut inventory = PlayerInventory::new();
+        let block_entities = BlockEntityHandle::new();
+        inventory.click_state_mut().carried = Some(stack("minecraft:oak_planks", 4));
+
+        // Right-click each of the four grid cells: one plank each.
+        for menu_slot in 1..=4 {
+            apply_container_clicked(
+                &ContainerTagProto,
+                &mut inventory,
+                &block_entities,
+                None,
+                0,
+                Click { slot: menu_slot, button: 1, click_type: 0 },
+                &[],
+                None,
+                false,
+            );
+        }
         assert_eq!(
             inventory.crafting().result().map(|r| r.item.to_string()),
-            Some("minecraft:crafting_table".to_string())
+            Some("minecraft:crafting_table".to_string()),
+            "the server derived the result from the grid it now holds"
         );
 
-        // Taking it: a real take reports the emptied result slot *and* the
-        // shrunk grid cells, and the server's re-derivation off the emptied grid
-        // is what the correction carries.
-        let mut take: Vec<(i32, Option<ItemStack>)> =
-            (1..=4).map(|slot| (slot, None)).collect();
-        take.push((0, None));
-        let correction = apply_container_clicked(
+        // Take it. The cursor holds the table and every grid cell is empty again.
+        apply_container_clicked(
             &ContainerTagProto,
             &mut inventory,
             &block_entities,
             None,
             0,
-            take,
+            Click { slot: 0, button: 0, click_type: 0 },
+            &[],
+            None,
+            false,
         );
         assert_eq!(
-            correction,
-            Some(ServerDirective::Send {
-                packet_id: SLOT,
-                payload: vec![0, 0, 0, 0],
-            })
+            inventory
+                .click_state()
+                .carried
+                .as_ref()
+                .map(|s| s.item.to_string()),
+            Some("minecraft:crafting_table".to_string())
         );
-        assert!(inventory.crafting().is_empty());
+        assert!(inventory.crafting().is_empty(), "one craft consumed the grid");
         assert!(inventory.crafting().result().is_none());
     }
 
-    /// A click against the connection's *open* non-zero window splits by
-    /// [`container_menu_slot`]: a low menu index lands in the block entity's
-    /// own slot, a higher one lands in the player's standard inventory tail
-    /// — both through the *same* click, proving the split is real rather
-    /// than one arm being untested.
+    /// A click against the connection's *open* non-zero window reaches both the
+    /// block entity's own slots and the player tail, through the same layout.
     #[test]
-    fn container_clicked_against_an_open_window_splits_own_slot_from_player_tail() {
+    fn container_clicked_against_an_open_window_reaches_both_sections() {
         let mut inventory = PlayerInventory::new();
+        inventory.set_native(9, Some(stack("minecraft:coal", 1)));
         let block_entities = BlockEntityHandle::new();
         let pos = BlockPos::new(1, 2, 3);
         block_entities.with(|reg| {
             reg.insert(pos, BlockEntity::Furnace(Furnace::new(FurnaceKind::Furnace)));
         });
-        let open = open(pos, 3);
+        let mut open = open(pos, 3);
 
+        // Menu slot 3 is the player tail's first entry (native 9): pick the coal up.
         apply_container_clicked(
             &ContainerTagProto,
             &mut inventory,
             &block_entities,
-            Some(&open),
+            Some(&mut open),
             7,
-            vec![
-                (1, Some(stack("minecraft:coal", 1))),  // furnace's own fuel slot
-                (3, Some(stack("minecraft:stone", 1))), // menu slot 3 -> player native 9
-            ],
+            Click { slot: 3, button: 0, click_type: 0 },
+            &[],
+            None,
+            false,
         );
+        assert_eq!(inventory.native(9), None);
 
+        // Menu slot 1 is the furnace's own fuel slot: put it down there.
+        apply_container_clicked(
+            &ContainerTagProto,
+            &mut inventory,
+            &block_entities,
+            Some(&mut open),
+            7,
+            Click { slot: 1, button: 0, click_type: 0 },
+            &[],
+            None,
+            false,
+        );
         let furnace_fuel = block_entities.with(|reg| match reg.get(pos) {
             Some(BlockEntity::Furnace(f)) => f.fuel().cloned(),
             _ => None,
         });
         assert_eq!(furnace_fuel, Some(stack("minecraft:coal", 1)));
-        assert_eq!(inventory.native(9), Some(&stack("minecraft:stone", 1)));
+    }
+
+    /// The crafting **table**'s 3×3 menu, which has no block entity at all (issue
+    /// #529 step 2): clicks reach the table's own grid and the server derives a 3×3
+    /// result the 2×2 player screen structurally cannot make.
+    #[test]
+    fn a_crafting_table_menu_derives_a_3x3_result() {
+        let mut inventory = PlayerInventory::new();
+        inventory.open_table_crafting();
+        let block_entities = BlockEntityHandle::new();
+        let mut open = OpenContainer {
+            window_id: 3,
+            pos: BlockPos::new(0, 64, 0),
+            shape: MenuKind::CraftingTable,
+            container_size: 10,
+            state_id: 0,
+        };
+
+        // Eight planks around an empty centre is a chest — a 3x3-only recipe.
+        inventory.click_state_mut().carried = Some(stack("minecraft:oak_planks", 8));
+        for menu_slot in [1, 2, 3, 4, 6, 7, 8, 9] {
+            apply_container_clicked(
+                &ContainerTagProto,
+                &mut inventory,
+                &block_entities,
+                Some(&mut open),
+                3,
+                Click { slot: menu_slot, button: 1, click_type: 0 },
+                &[],
+                None,
+                false,
+            );
+        }
+        assert_eq!(
+            inventory
+                .table_crafting()
+                .and_then(|g| g.result())
+                .map(|r| r.item.to_string()),
+            Some("minecraft:chest".to_string()),
+            "the table's own 3x3 grid derived the result"
+        );
+        assert!(
+            inventory.crafting().is_empty(),
+            "the player screen's 2x2 must be untouched — they are separate grids"
+        );
     }
 
     /// **Control**: a click carrying the *wrong* (stale) window id must not
@@ -6366,20 +6836,24 @@ mod tests {
     #[test]
     fn container_clicked_against_a_stale_window_id_is_dropped() {
         let mut inventory = PlayerInventory::new();
+        inventory.click_state_mut().carried = Some(stack("minecraft:coal", 1));
         let block_entities = BlockEntityHandle::new();
         let pos = BlockPos::new(1, 2, 3);
         block_entities.with(|reg| {
             reg.insert(pos, BlockEntity::Furnace(Furnace::new(FurnaceKind::Furnace)));
         });
-        let open = open(pos, 3); // window_id 7
+        let mut open = open(pos, 3); // window_id 7
 
         apply_container_clicked(
             &ContainerTagProto,
             &mut inventory,
             &block_entities,
-            Some(&open),
+            Some(&mut open),
             8, // stale/mismatched window id
-            vec![(0, Some(stack("minecraft:coal", 1)))],
+            Click { slot: 0, button: 0, click_type: 0 },
+            &[],
+            None,
+            false,
         );
 
         let furnace_input = block_entities.with(|reg| match reg.get(pos) {
@@ -6387,6 +6861,10 @@ mod tests {
             _ => None,
         });
         assert_eq!(furnace_input, None, "a stale window id must not mutate the block entity");
+        assert!(
+            inventory.click_state().carried.is_some(),
+            "and the cursor is untouched"
+        );
     }
 
     // -- brewing stand interaction (issue #252) --

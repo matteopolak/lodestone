@@ -68,12 +68,13 @@
 //!   comment for the vanilla `Inventory` citation and the menu-slot →
 //!   native-index table it mirrors from `lodestone-game`'s client-side
 //!   `Menu`). `crate::server`'s `dispatch_play_packet` is the consumer:
-//!   [`ServerBound::CarriedItemChanged`] sets the selected hotbar slot,
-//!   [`ServerBound::ContainerClicked`] against window `0` applies the
-//!   client's own predicted per-slot diff directly (see that variant's doc
-//!   comment for why trusting the diff, rather than re-deriving vanilla's
-//!   full `doClick` state machine server-side, is the deliberate scope for
-//!   this landing).
+//!   [`ServerBound::CarriedItemChanged`] sets the selected hotbar slot, and
+//!   [`ServerBound::ContainerClicked`] is **derived** rather than trusted —
+//!   [`container_click::do_click`] re-runs vanilla's
+//!   `AbstractContainerMenu.doClick` from the click's slot/button/type, and the
+//!   client's claimed slot diff is compared against the result and never stored.
+//!   (This replaces an earlier scope cut in which the diff was applied verbatim,
+//!   which let any client name any item in any slot.)
 //! * [`BlockEntityRegistry`] / [`BlockEntityHandle`] — the `BlockPos`-keyed
 //!   home for the four block-entity simulations (`composter`/`furnace`/
 //!   `hopper`/`brewing`, `docs/block-entities.md`), closing that doc's first
@@ -118,6 +119,10 @@ pub mod chunk_nbt;
 mod chunk_store;
 mod command;
 mod composter;
+/// Server-side `doClick` (the container-click state machine): derives the result
+/// of a click from the slot/button/click-type the wire carries, rather than
+/// applying the client's claimed slot diff.
+pub mod container_click;
 /// Issue #529: the server-authoritative crafting grid and the bundled recipe
 /// corpus it re-derives a result from. Public because a host may want to read
 /// the corpus, and because `CraftingState` is named by the container plumbing.

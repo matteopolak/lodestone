@@ -19,9 +19,7 @@
 use std::time::Duration;
 
 use lodestone_client::{BlockPos, ChunkPos, ClientAction, ClientBuilder, Hand, LoginProfile, ServerAddress};
-use lodestone_model::{
-    BlockActionKind, BlockFace, ContainerClickType, ContainerSlotChange, ItemStack, Rotation, Vec3f,
-};
+use lodestone_model::{BlockActionKind, BlockFace, GameMode, ItemStack, Rotation, Vec3f};
 use lodestone_server::{IntegratedServer, overworld_chunk_source};
 use lodestone_data::block_states::{block_name, properties};
 use lodestone_v770::{V770ServerProtocol, adapter};
@@ -271,20 +269,17 @@ async fn dig_and_place_persist_through_forget_and_reload() {
     // surviving a forget/reload) needs a real item in hand. Stone is kept as
     // that item precisely so nothing else about this test changes.
     handle
-        .send_action(ClientAction::ContainerClick {
-            window_id: 0,
-            state_id: 1,
+        .send_action(ClientAction::ChangeGameMode {
+            mode: GameMode::Creative,
+        })
+        .expect("client still connected");
+    handle
+        .send_action(ClientAction::SetCreativeModeSlot {
             slot: 36,
-            button: 0,
-            click_type: ContainerClickType::Pickup,
-            changed_slots: vec![ContainerSlotChange {
-                slot: 36,
-                item: Some(ItemStack::new(
-                    "minecraft:stone".parse().expect("valid resource key"),
-                    1,
-                )),
-            }],
-            carried_item: None,
+            item: Some(ItemStack::new(
+                "minecraft:stone".parse().expect("valid resource key"),
+                1,
+            )),
         })
         .expect("client still connected");
     handle

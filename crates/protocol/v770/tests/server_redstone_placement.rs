@@ -56,9 +56,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{BlockPos, ClientBuilder, Hand, LoginProfile, ServerAddress};
-use lodestone_model::{
-    BlockFace, ClientAction, ContainerClickType, ContainerSlotChange, ItemStack, Vec3f,
-};
+use lodestone_model::{BlockFace, ClientAction, ContainerClickType, ContainerSlotChange, GameMode, ItemStack, Vec3f};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
     BlockEntityHandle, ChunkColumn, ChunkSource, MobHandle, NoEntities, serve_connection,
@@ -273,20 +271,17 @@ async fn place_one_dust_into_the_gap() -> (Vec<(i32, Option<u8>)>, Vec<(i32, Opt
     // `SetCarriedItem` is needed. `minecraft:redstone` is the *item*; the
     // server's own census resolves it to `minecraft:redstone_wire`.
     handle
-        .send_action(ClientAction::ContainerClick {
-            window_id: 0,
-            state_id: 1,
+        .send_action(ClientAction::ChangeGameMode {
+            mode: GameMode::Creative,
+        })
+        .expect("client still connected");
+    handle
+        .send_action(ClientAction::SetCreativeModeSlot {
             slot: 36,
-            button: 0,
-            click_type: ContainerClickType::Pickup,
-            changed_slots: vec![ContainerSlotChange {
-                slot: 36,
-                item: Some(ItemStack::new(
-                    "minecraft:redstone".parse().expect("valid resource key"),
-                    1,
-                )),
-            }],
-            carried_item: None,
+            item: Some(ItemStack::new(
+                "minecraft:redstone".parse().expect("valid resource key"),
+                1,
+            )),
         })
         .expect("client still connected");
 

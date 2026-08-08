@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use lodestone_client::{BlockPos, ClientBuilder, Hand, LoginProfile, ServerAddress};
 use lodestone_data::block_states::{block_name, properties};
-use lodestone_model::{BlockFace, ClientAction, ContainerClickType, ContainerSlotChange, ItemStack, Vec3f};
+use lodestone_model::{BlockFace, ClientAction, ContainerClickType, ContainerSlotChange, GameMode, ItemStack, Vec3f};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
     BlockEntity, BlockEntityHandle, ChunkColumn, ChunkSource, Furnace, FurnaceKind, MobHandle,
@@ -198,17 +198,14 @@ async fn real_client_places_a_furnace_and_the_server_registers_it() {
     // `docs/server-inventory.md`) — the default selected hotbar slot, so no
     // `SetCarriedItem` is needed first.
     handle
-        .send_action(ClientAction::ContainerClick {
-            window_id: 0,
-            state_id: 1,
+        .send_action(ClientAction::ChangeGameMode {
+            mode: GameMode::Creative,
+        })
+        .expect("client still connected");
+    handle
+        .send_action(ClientAction::SetCreativeModeSlot {
             slot: 36,
-            button: 0,
-            click_type: ContainerClickType::Pickup,
-            changed_slots: vec![ContainerSlotChange {
-                slot: 36,
-                item: Some(stack("minecraft:furnace", 1)),
-            }],
-            carried_item: None,
+            item: Some(stack("minecraft:furnace", 1)),
         })
         .expect("client still connected");
 
@@ -371,17 +368,14 @@ async fn placing_with_an_empty_hand_places_nothing_and_registers_nothing() {
     let witness_pos = BlockPos::new(9, 5, 9);
     let furnace_id = resolve_state("minecraft:furnace");
     handle
-        .send_action(ClientAction::ContainerClick {
-            window_id: 0,
-            state_id: 1,
+        .send_action(ClientAction::ChangeGameMode {
+            mode: GameMode::Creative,
+        })
+        .expect("client still connected");
+    handle
+        .send_action(ClientAction::SetCreativeModeSlot {
             slot: 36,
-            button: 0,
-            click_type: ContainerClickType::Pickup,
-            changed_slots: vec![ContainerSlotChange {
-                slot: 36,
-                item: Some(stack("minecraft:furnace", 1)),
-            }],
-            carried_item: None,
+            item: Some(stack("minecraft:furnace", 1)),
         })
         .expect("client still connected");
     handle
@@ -473,17 +467,14 @@ async fn real_client_opens_a_placed_furnace_and_loads_it_via_container_click() {
 
     // Place a furnace at `target_pos`, identical to the placement test above.
     handle
-        .send_action(ClientAction::ContainerClick {
-            window_id: 0,
-            state_id: 1,
+        .send_action(ClientAction::ChangeGameMode {
+            mode: GameMode::Creative,
+        })
+        .expect("client still connected");
+    handle
+        .send_action(ClientAction::SetCreativeModeSlot {
             slot: 36,
-            button: 0,
-            click_type: ContainerClickType::Pickup,
-            changed_slots: vec![ContainerSlotChange {
-                slot: 36,
-                item: Some(stack("minecraft:furnace", 1)),
-            }],
-            carried_item: None,
+            item: Some(stack("minecraft:furnace", 1)),
         })
         .expect("client still connected");
 
@@ -540,39 +531,45 @@ async fn real_client_opens_a_placed_furnace_and_loads_it_via_container_click() {
          (CONTAINER_SET_CONTENT's item count is what sizes the client's menu)"
     );
 
-    // Load one iron ore (ingredient, furnace menu slot 0) and one coal
-    // (fuel, slot 1) via a real `CONTAINER_CLICK` against the window the
-    // server just opened — the same "conjure the exact predicted diff"
-    // convention the placement test above already uses for the furnace item
-    // itself; there is no "mine ore, collect coal" flow in this test's
-    // scope, only the wire path from a client's predicted diff through to
-    // the server's own block entity.
+    // Load one iron ore (ingredient, furnace menu slot 0) and one coal (fuel,
+    // slot 1) with **real clicks**: take the stack off a player-tail slot onto the
+    // cursor, then put it down in the furnace's own slot. The server derives every
+    // one of those four clicks (`container_click::do_click`), so a diff naming the
+    // items would mint nothing — this test used to do exactly that.
+    //
+    // In a 3-slot furnace menu the standard tail puts main storage at 3..30 and
+    // the hotbar at 30..39, so hotbar natives 1 and 2 are menu slots 31 and 32.
     handle
-        .send_action(ClientAction::ContainerClick {
-            window_id: opened.window_id,
-            state_id: 1,
-            slot: 0,
-            button: 0,
-            click_type: ContainerClickType::Pickup,
-            changed_slots: vec![
-                ContainerSlotChange {
-                    slot: 0,
-                    item: Some(stack("minecraft:iron_ore", 1)),
-                },
-                ContainerSlotChange {
-                    slot: 1,
-                    item: Some(stack("minecraft:coal", 1)),
-                },
-            ],
-            carried_item: None,
+        .send_action(ClientAction::SetCreativeModeSlot {
+            slot: 37,
+            item: Some(stack("minecraft:iron_ore", 1)),
         })
         .expect("client still connected");
+    handle
+        .send_action(ClientAction::SetCreativeModeSlot {
+            slot: 38,
+            item: Some(stack("minecraft:coal", 1)),
+        })
+        .expect("client still connected");
+    for (from, to) in [(31, 0), (32, 1)] {
+        for slot in [from, to] {
+            handle
+                .send_action(ClientAction::ContainerClick {
+                    window_id: opened.window_id,
+                    state_id: 1,
+                    slot,
+                    button: 0,
+                    click_type: ContainerClickType::Pickup,
+                    changed_slots: Vec::new(),
+                    carried_item: None,
+                })
+                .expect("client still connected");
+        }
+    }
 
-    // Poll the *server's own* registry, not the client's reconciled menu:
-    // `apply_container_clicked` applies the click's diff directly with no
-    // confirmation packet sent back (`docs/server-inventory.md`'s
-    // established scope, which this landing extends unchanged to non-zero
-    // windows), so the server is the authority to observe here.
+    // Poll the *server's own* registry, not the client's reconciled menu: the
+    // server derived the click and only corrects the client when its prediction
+    // disagrees, so the server is the authority to observe here.
     let loaded = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let ready = block_entities.with(|reg| match reg.get(target_pos) {
