@@ -56,6 +56,11 @@
 //!   read its predicate — the families genuinely differ (a wolf wants
 //!   `WOLVES_SPAWNABLE_ON` and brightness > 8; a bat wants stone below,
 //!   `nextBoolean()`, and brightness ≤ `nextInt(4)`).
+//! * **A predicate that branches over *alternatives* needs [`Special`], not more
+//!   fields.** There is one: `Slime.checkSlimeSpawnRules`, whose swamp-surface and
+//!   slime-chunk arms own a Y band and a set of RNG draws each, so a single row of
+//!   conjoined fields structurally cannot express it —
+//!   [`NaturalSpawner::slime_permits`] and `docs/natural-mob-spawning.md`.
 //! * **A species absent from [`SPAWN_RULES`] cannot spawn**, deliberately. The
 //!   alternative — falling back to "no restrictions" — spawns guardians on land.
 //!   [`spawn_rule`] returning `None` is why a Nether-only species in an overworld
@@ -100,6 +105,19 @@ pub const LIGHT_TTL_TICKS: u64 = 200;
 /// Vanilla `NaturalSpawner.MIN_SPAWN_DISTANCE` squared — a mob never spawns
 /// within 24 blocks of the nearest player.
 const MIN_PLAYER_DIST_SQR: f64 = 576.0;
+
+/// `BiomeTags.ALLOWS_SURFACE_SLIME_SPAWNS`, flattened —
+/// `BiomeTagsProvider.java:266` adds exactly `swamp` and `mangrove_swamp` and
+/// nothing else, so the tag is two names rather than a lookup.
+const SURFACE_SLIME_BIOMES: &[&str] = &["minecraft:swamp", "minecraft:mangrove_swamp"];
+
+/// `DimensionType.MOON_BRIGHTNESS_PER_PHASE` (`DimensionType.java:57`), indexed
+/// by `MoonPhase.index()`.
+const MOON_BRIGHTNESS_PER_PHASE: [f32; 8] = [1.0, 0.75, 0.5, 0.25, 0.0, 0.25, 0.5, 0.75];
+
+/// `Slime.checkSlimeSpawnRules`' slime-chunk ceiling: the slime-chunk arm only
+/// fires strictly below this Y (`Slime.java:94`).
+const SLIME_CHUNK_MAX_Y: i32 = 40;
 
 /// How a species is positioned relative to the candidate block —
 /// `SpawnPlacementTypes`.
@@ -163,6 +181,23 @@ pub enum Chance {
     NotCoinFlip,
 }
 
+/// A predicate whose shape the [`SpawnRule`] fields structurally cannot carry —
+/// one that branches over *alternatives* rather than conjoining conditions, or
+/// that needs a world fact no other row does.
+///
+/// There is exactly one today. The point of naming it rather than widening
+/// [`SpawnRule`] with four more `Option`s is that the alternation, and the RNG
+/// draw order it implies, is *code* in vanilla too; a data row cannot express
+/// "arm A, else arm B" without also encoding which arm consumed which draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Special {
+    /// No special arm: the [`SpawnRule`] fields are the whole predicate.
+    None,
+    /// `Slime.checkSlimeSpawnRules` (`Slime.java:73-99`) — see
+    /// [`NaturalSpawner::slime_permits`].
+    Slime,
+}
+
 /// One species' whole spawn condition: `SpawnPlacements`' registered placement
 /// type plus the `check*SpawnRules` predicate it registered with, reduced to the
 /// checks this server can actually answer.
@@ -180,6 +215,8 @@ pub struct SpawnRule {
     pub needs_sky: bool,
     /// The predicate's own `nextInt` gate.
     pub chance: Chance,
+    /// A predicate arm the fields above cannot express. See [`Special`].
+    pub special: Special,
 }
 
 impl SpawnRule {
@@ -193,6 +230,7 @@ impl SpawnRule {
             y_range: (i32::MIN, i32::MAX),
             needs_sky: false,
             chance: Chance::Always,
+            special: Special::None,
         }
     }
 
@@ -421,14 +459,17 @@ static SPAWN_RULES: &[(&str, SpawnRule)] = &[
     ("sheep", SpawnRule::animal(ANIMALS_ON)),
     ("skeleton", SpawnRule::monster()),
     ("slime", {
-        // `checkSlimeSpawnRules`' *surface* arm: the `ALLOWS_SURFACE_SLIME_SPAWNS`
-        // swamp band `50 < y < 70` with brightness ≤ `nextInt(8)`. The slime-chunk
-        // arm needs `WorldgenRandom.seedSlimeChunk`, which is worldgen RNG this
-        // module has no handle on; a slime chunk therefore does not exist yet, and
-        // that is a deliberate omission rather than a wrong value.
+        // `checkSlimeSpawnRules` is **two alternatives**, not a conjunction, so
+        // none of the fields here can carry it — the Y band and the light test in
+        // particular belong to one arm each. See
+        // [`NaturalSpawner::slime_permits`], and `Special`'s own doc for why the
+        // alternation is code rather than data.
+        //
+        // Everything a slime shares with `checkMobSpawnRules` *is* here: it is
+        // `ON_GROUND` on a valid spawn surface, with no Y band and no light test
+        // of its own at this level.
         SpawnRule {
-            light: LightRule::MaxRandom(8),
-            y_range: (51, 69),
+            special: Special::Slime,
             ..SpawnRule::base()
         }
     }),
@@ -617,6 +658,14 @@ pub struct NaturalSpawner {
     /// [`crate::MobHandle::reseed`] replaces the sim's world, and a spawner
     /// holding the old one would light chunks nothing paths over.
     world: Option<&'static ChunkWorld>,
+    /// The **world generation seed**, which is a different number from the
+    /// spawn-RNG seed `new` takes and is used for exactly one thing:
+    /// `WorldgenRandom.seedSlimeChunk`. See [`with_world_seed`](Self::with_world_seed).
+    world_seed: i64,
+    /// The world clock's `day_time`, for the moon phase
+    /// `SURFACE_SLIME_SPAWN_CHANCE` is keyframed against. See
+    /// [`set_day_time`](Self::set_day_time).
+    day_time: i64,
 }
 
 impl std::fmt::Debug for NaturalSpawner {
@@ -648,7 +697,40 @@ impl NaturalSpawner {
             rng: SpawnRng::new(seed),
             players: Vec::new(),
             world: None,
+            world_seed: 0,
+            day_time: 0,
         }
+    }
+
+    /// Records the **world generation** seed, which is what
+    /// `WorldgenRandom.seedSlimeChunk` mixes and therefore what decides which
+    /// chunks are slime chunks.
+    ///
+    /// Separate from `new`'s `seed` on purpose. That one seeds the spawn RNG
+    /// stream and is a fixed literal in production (`tick::NATURAL_SPAWN_SEED`),
+    /// because the stream only has to be *reproducible*. This one is not free to
+    /// choose: get it wrong and the slime chunks are a different set from the ones
+    /// the terrain was generated for, which is worse than none — a player who
+    /// looks up a slime chunk for their seed would find nothing there.
+    ///
+    /// Defaults to `0`, which is a real seed rather than a sentinel; a spawner
+    /// that is never told the world seed reports the slime chunks of seed 0. That
+    /// is the honest failure and it is why this is a named setter: a caller that
+    /// omits it is visible at the call site.
+    #[must_use]
+    pub fn with_world_seed(mut self, world_seed: i64) -> Self {
+        self.world_seed = world_seed;
+        self
+    }
+
+    /// Sets the world clock's `day_time`, which fixes the moon phase for
+    /// [`surface_slime_spawn_chance`](Self::surface_slime_spawn_chance).
+    ///
+    /// Additive rather than a `begin_cycle` parameter so no existing caller has to
+    /// change; a caller that never calls it runs at `day_time == 0`, i.e. a full
+    /// moon, which is the *most* permissive phase for surface slimes.
+    pub fn set_day_time(&mut self, day_time: i64) {
+        self.day_time = day_time;
     }
 
     /// Starts a cycle at `tick` with `players` as the loaded players, resetting
@@ -832,7 +914,80 @@ impl NaturalSpawner {
                 }
             }
         }
+        match rule.special {
+            Special::None => {}
+            Special::Slime => {
+                if !self.slime_permits(x, y, z, Self::raw_brightness(sky, block)) {
+                    return false;
+                }
+            }
+        }
         true
+    }
+
+    /// The moon-phase `SURFACE_SLIME_SPAWN_CHANCE` at the current `day_time`.
+    ///
+    /// `EnvironmentAttributes.SURFACE_SLIME_SPAWN_CHANCE` (`EnvironmentAttributes.java:144`)
+    /// defaults to **`0.0`** and is raised by exactly one modifier track:
+    /// `Timelines.MOON`'s (`Timelines.java:168-175`), a `FloatModifier.MAXIMUM`
+    /// keyframed `CONSTANT` (so a step function, not a ramp) at each phase start to
+    /// `MOON_BRIGHTNESS_PER_PHASE[phase] * 0.5`. `max(0.0, that)` is `that`, so the
+    /// whole attribute reduces to this expression.
+    ///
+    /// The consequence is worth stating because it is not how older versions
+    /// behaved and it reads as a bug if you do not know it: **at new moon the
+    /// surface arm cannot fire at all** (chance `0.0`, and `nextFloat() < 0.0` is
+    /// never true), and at full moon it is `0.5`. Surface swamp slimes are a
+    /// moon-phase feature in 26.2.
+    #[must_use]
+    fn surface_slime_spawn_chance(&self) -> f32 {
+        // `MoonPhase.PHASE_LENGTH` is 24000 and `MoonPhase.COUNT` is 8; the
+        // timeline's period is `24000 * COUNT` and each phase's `startTick()` is
+        // `index * 24000`.
+        let phase = self.day_time.div_euclid(24_000).rem_euclid(8) as usize;
+        MOON_BRIGHTNESS_PER_PHASE[phase] * 0.5
+    }
+
+    /// `Slime.checkSlimeSpawnRules` (`Slime.java:73-99`), minus the two clauses
+    /// that belong to the caller.
+    ///
+    /// Vanilla's body is **two alternatives in sequence**, and the sequence is
+    /// load-bearing because each arm consumes draws:
+    ///
+    /// 1. **The swamp surface arm.** Biome in
+    ///    [`SURFACE_SLIME_BIOMES`], `50 < y < 70`, then `nextFloat() <
+    ///    surfaceSlimeSpawnChance` and `maxLocalRawBrightness <= nextInt(8)`. The
+    ///    `nextInt(8)` is drawn *only* if the `nextFloat()` passed — vanilla's `&&`
+    ///    short-circuits and so does this.
+    /// 2. **The slime-chunk arm**, reached whenever arm 1 did not return true:
+    ///    `nextInt(10) == 0`, the chunk is a slime chunk, and `y < 40`. That
+    ///    `nextInt(10)` is drawn *before* the slime-chunk test in vanilla too, so
+    ///    it is consumed even in a non-slime chunk.
+    ///
+    /// Both arms then defer to `checkMobSpawnRules`, which is "the block below is a
+    /// valid spawn surface" — already enforced by the row's
+    /// [`Ground::ValidSpawn`], so it is not repeated here.
+    ///
+    /// The two omitted clauses: `level.getDifficulty() != PEACEFUL` (the tick loop
+    /// gates the whole cycle, and `remove_monsters` evicts anything that slips
+    /// through — see the module doc) and the `EntitySpawnReason.isSpawner` early
+    /// return, which cannot apply to a natural spawn.
+    fn slime_permits(&mut self, x: i32, y: i32, z: i32, brightness: u8) -> bool {
+        let surface_band = y > 50 && y < 70;
+        let surface_biome = surface_band
+            && self
+                .world
+                .and_then(|w| w.biome_at(x, y, z))
+                .is_some_and(|b| SURFACE_SLIME_BIOMES.contains(&b.as_str()));
+        if surface_biome {
+            let chance = self.surface_slime_spawn_chance();
+            if self.rng.next_f32() < chance && i32::from(brightness) <= self.rng.next_int(8) {
+                return true;
+            }
+        }
+        self.rng.next_int(10) == 0
+            && lodestone_worldgen::is_slime_chunk(x.div_euclid(16), z.div_euclid(16), self.world_seed)
+            && y < SLIME_CHUNK_MAX_Y
     }
 
     /// One weighted pick out of `category`'s list for the biome at `(x, y, z)`,
@@ -1143,5 +1298,55 @@ mod tests {
         // A guardian is registered in vanilla but appears in no bundled biome
         // list, so it must be absent here rather than fall back to "anywhere".
         assert!(spawn_rule("guardian").is_none());
+    }
+
+    /// Issue #515: the slime row must carry the *alternation*, not one arm of it.
+    ///
+    /// The regression this pins is specific and was the shipped state: the row
+    /// used to be `y_range: (51, 69)` with `LightRule::MaxRandom(8)`, i.e. the
+    /// swamp arm only — and that band **excludes every Y the slime-chunk arm can
+    /// fire at** (`y < 40`), so a working `is_slime_chunk` predicate could not
+    /// have been reached even once.
+    #[test]
+    fn slime_carries_both_arms_not_one() {
+        let slime = spawn_rule("slime").expect("registered");
+        assert_eq!(slime.special, Special::Slime);
+        assert_eq!(
+            slime.y_range,
+            (i32::MIN, i32::MAX),
+            "a Y band on the row would gate both arms; each arm owns its own"
+        );
+        assert_eq!(
+            slime.light,
+            LightRule::Any,
+            "the brightness test belongs to the swamp arm alone"
+        );
+        assert_eq!(slime.ground, Ground::ValidSpawn, "checkMobSpawnRules");
+        assert!(SLIME_CHUNK_MAX_Y < 51, "the two arms' bands must not overlap");
+    }
+
+    /// `SURFACE_SLIME_SPAWN_CHANCE` across a full lunar month, against
+    /// `DimensionType.MOON_BRIGHTNESS_PER_PHASE * 0.5` expanded by hand from the
+    /// record — the expected values come from `DimensionType.java:57` and
+    /// `Timelines.java:168-175`, not from this module.
+    #[test]
+    fn surface_slime_chance_follows_the_moon() {
+        let expected = [0.5f32, 0.375, 0.25, 0.125, 0.0, 0.125, 0.25, 0.375];
+        let mut spawner = NaturalSpawner::new(HashMap::new(), 0);
+        for (phase, want) in expected.iter().enumerate() {
+            // Mid-phase, so a wrong `div`/`rem` order lands on a different phase.
+            spawner.set_day_time(phase as i64 * 24_000 + 12_000);
+            assert!(
+                (spawner.surface_slime_spawn_chance() - want).abs() < f32::EPSILON,
+                "phase {phase}: want {want}, got {}",
+                spawner.surface_slime_spawn_chance()
+            );
+        }
+        // The month wraps, and a negative `day_time` (`/time set` can produce one)
+        // must not index out of bounds.
+        spawner.set_day_time(8 * 24_000);
+        assert!((spawner.surface_slime_spawn_chance() - 0.5).abs() < f32::EPSILON);
+        spawner.set_day_time(-1);
+        let _ = spawner.surface_slime_spawn_chance();
     }
 }

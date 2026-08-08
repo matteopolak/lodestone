@@ -447,8 +447,45 @@ fn overworld_settings() -> &'static Value {
 /// real world. It reuses the parsed settings but rebuilds the seed-dependent
 /// density/noise state per call, so callers should build it once per world and
 /// reuse it across chunks.
+/// The last world seed [`overworld_generator`] was asked for. See
+/// [`active_world_seed`].
+static ACTIVE_WORLD_SEED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// The world seed of the most recently built bundled generator.
+///
+/// **This exists because the world seed does not reach the tick loop by any other
+/// route, and one thing in there needs it**: `WorldgenRandom.seedSlimeChunk`, so
+/// [`crate::natural_spawn::NaturalSpawner`] can tell a slime chunk from an
+/// ordinary one. `crate::tick::run_tick_loop` is handed an `Arc<W: ChunkSource>`,
+/// and [`ChunkSource`](crate::chunk::ChunkSource) has no `world_seed()` — the
+/// generator that knows the number is behind that trait object, built by the
+/// *shell* and passed in already erased.
+///
+/// It is a process-global rather than a parameter deliberately, and the trade is
+/// worth writing down:
+///
+/// * **The right fix is a `ChunkSource::world_seed()` default method**, next to
+///   `world_registries()`, which is the same shape of question. That is a
+///   one-method addition to `crate::chunk` plus one override on
+///   `OverworldChunkSource`, and it would delete this static.
+/// * Threading it as a parameter instead means a new argument on
+///   `run_tick_loop`, `run_tick_loop_with_weather` and all twelve of their call
+///   sites across four files — a much larger diff for the same result.
+/// * **The failure mode of the global is confined and benign.** Two worlds open in
+///   one process (a `bind` LAN world beside an in-memory one, or two tests) leave
+///   the *last* seed here, so a spawn cycle could consult the other world's slime
+///   chunks. Nothing else reads it, so the blast radius is "slimes spawn in the
+///   wrong chunks in the non-last of two simultaneous worlds" — wrong, but not
+///   corrupting, and not reachable from the single-world singleplayer path this
+///   server actually ships.
+#[must_use]
+pub fn active_world_seed() -> i64 {
+    ACTIVE_WORLD_SEED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[must_use]
 pub fn overworld_generator(seed: i64) -> OverworldGenerator {
+    ACTIVE_WORLD_SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
     OverworldGenerator::new(
         seed,
         overworld_settings(),

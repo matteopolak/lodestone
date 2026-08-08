@@ -972,10 +972,18 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // per tick because it owns the per-column light cache — see
     // `crate::natural_spawn`'s module doc for the per-cycle budget and the TTL
     // that keep a 49-column area inside the 50 ms tick budget.
+    //
+    // `with_world_seed` is a *different* seed from `NATURAL_SPAWN_SEED` and both
+    // are needed: the literal seeds the spawn stream (reproducible is all that is
+    // asked of it), while the world seed decides which chunks are **slime
+    // chunks**, which is not free to choose. See
+    // `crate::worldgen_data::active_world_seed` for why the world seed arrives
+    // through a global rather than as a parameter here.
     let mut natural_spawner = crate::natural_spawn::NaturalSpawner::new(
         crate::worldgen_data::bundled_biome_spawners().clone(),
         NATURAL_SPAWN_SEED,
-    );
+    )
+    .with_world_seed(crate::worldgen_data::active_world_seed());
     // The chunks the spawn cycle and the census run over — the same fixed tick
     // area everything else here uses, for the reason this module's own doc gives
     // (there is still no loaded-chunk registry to derive a player-relative one
@@ -1061,6 +1069,15 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 mobs.with(|sim| sim.players().iter().map(|p| p.position).collect());
             if !players.is_empty() {
                 let world = mobs.with(|sim| sim.world());
+                // The moon phase, which in 26.2 is the whole of
+                // `SURFACE_SLIME_SPAWN_CHANCE` (0.0 at new moon, 0.5 at full) —
+                // see `NaturalSpawner::surface_slime_spawn_chance`. This loop's own
+                // lock-free `day_time` mirror rather than `world_state.time()`, so
+                // it costs nothing per tick; it is one tick stale here because
+                // `tick_time()` runs further down, and one tick cannot move a
+                // 24 000-tick phase boundary. This is also the mirror's first
+                // *reader* — until now it was written and never read.
+                natural_spawner.set_day_time(day_time);
                 natural_spawner.begin_cycle(world, game_tick, players.clone());
                 mobs.with(|sim| {
                     let mut state = sim.census(spawnable_chunks);
