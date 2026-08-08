@@ -516,7 +516,11 @@ impl<'a, S: ChunkSource + 'static> SourceRef<'a, S> {
     /// the wire: both arms hand back a `Vec` aligned index-for-index with
     /// `coords`, so which arm a caller is on cannot change the emitted byte
     /// sequence.
-    async fn generate(self, coords: Vec<(i32, i32)>) -> Vec<ChunkColumn> {
+    /// `pub(crate)` rather than private since `crate::join_scheduler`'s
+    /// `JoinChunkStream` finishes a join from `serve_play`, and its borrowed arm
+    /// generates through exactly this method — the alternative was duplicating the
+    /// arm fork, which is the one thing that must not drift.
+    pub(crate) async fn generate(self, coords: Vec<(i32, i32)>) -> Vec<ChunkColumn> {
         match self {
             Self::Shared(source) => generate_columns_offloaded(Arc::clone(source), coords).await,
             Self::Borrowed(source) => generate_columns_parallel(source, &coords),
@@ -640,6 +644,8 @@ impl ViewTracker {
         proto: &P,
         source: SourceRef<'_, S>,
         next: &HashSet<(i32, i32)>,
+        centre: (i32, i32),
+        facing: Option<f32>,
     ) -> Vec<ServerDirective>
     where
         P: ServerProtocol,
@@ -651,8 +657,21 @@ impl ViewTracker {
         // columns can finish in yet another, scheduling-dependent order.
         // Fixing the wire order here is what makes the encoded byte sequence
         // independent of both.
+        //
+        // **Ordered nearest-first, not lexicographically.** It used to be a bare
+        // `sort_unstable()`, i.e. by `cx` then `cz` — a raster walk, so a player
+        // walking east got the newly-visible column strip filled from its
+        // northern end regardless of where along it they actually were. The same
+        // key the join stream uses (`join_scheduler::view_order_key`: distance
+        // from the player's column first, the cone they are looking down second)
+        // makes a *move* behave like a join, which is what the owner asked for —
+        // "if the player moves it should properly generate the closer chunks
+        // first". Still a total order over integers, so the wire order stays a
+        // deterministic function of the pose, not of scheduling.
         let mut added: Vec<(i32, i32)> = next.difference(&self.loaded).copied().collect();
-        added.sort_unstable();
+        added.sort_unstable_by_key(|&coord| {
+            crate::join_scheduler::view_order_key(centre, facing, coord)
+        });
         if added.is_empty() {
             return Vec::new();
         }
@@ -680,12 +699,17 @@ impl ViewTracker {
     /// is already implied here), then every column that left the window is
     /// forgotten, then every column that entered it is sent as one chunk
     /// batch.
+    ///
+    /// `facing` is the player's yaw in degrees where the connection has reported
+    /// one, and only orders the batch (see [`build_batch`](Self::build_batch)) —
+    /// never *which* columns are in it, which is the square alone.
     async fn recenter<P, S>(
         &mut self,
         proto: &P,
         source: SourceRef<'_, S>,
         cx: i32,
         cz: i32,
+        facing: Option<f32>,
     ) -> ViewUpdate
     where
         P: ServerProtocol,
@@ -701,7 +725,9 @@ impl ViewTracker {
         for &(x, z) in self.loaded.difference(&next) {
             immediate.push(proto.encode_forget_chunk(x, z));
         }
-        let batch = self.build_batch(proto, source, &next).await;
+        let batch = self
+            .build_batch(proto, source, &next, (cx, cz), facing)
+            .await;
 
         self.center = (cx, cz);
         self.loaded = next;
@@ -722,6 +748,7 @@ impl ViewTracker {
         proto: &P,
         source: SourceRef<'_, S>,
         radius: i32,
+        facing: Option<f32>,
     ) -> ViewUpdate
     where
         P: ServerProtocol,
@@ -757,7 +784,11 @@ impl ViewTracker {
         for &(x, z) in self.loaded.difference(&next) {
             immediate.push(proto.encode_forget_chunk(x, z));
         }
-        let batch = self.build_batch(proto, source, &next).await;
+        // Centred on the tracker's own centre, which by definition did not move
+        // here — a render-distance change is the one view update with no new pose.
+        let batch = self
+            .build_batch(proto, source, &next, self.center, facing)
+            .await;
 
         self.radius = radius;
         self.loaded = next;
@@ -792,11 +823,13 @@ impl ViewTracker {
 /// on a ring boundary. This function is therefore now purely the **wire order**
 /// — the grouping survives because it is the clearest statement of that order and
 /// because `join_view_rings_partitions_the_square_exactly` gates it, not because
-/// anything synchronises per group. That is
-/// also why this deliberately does not touch `ViewTracker::build_batch`, whose
-/// lexicographic `sort_unstable` exists for byte-reproducibility — proximity
-/// belongs at the enumeration/dispatch layer, and the batch's internal
-/// determinism is left exactly as it was.
+/// anything synchronises per group.
+///
+/// `ViewTracker::build_batch` — the *move*-time counterpart — now orders on the
+/// same distance-first key rather than its old lexicographic `sort_unstable`, so
+/// walking into new terrain fills nearest-first exactly like joining does. That is
+/// a change of key, not a loss of determinism: it is still a total order over
+/// integers derived from the player's pose.
 ///
 /// Vanilla spirals outward for the same reason, and its priority *is* the ticket
 /// level (`ChunkTaskDispatcher.java:62-69`), so there is no separate heuristic
@@ -845,6 +878,48 @@ fn join_view_rings(view_radius: i32) -> Vec<Vec<(i32, i32)>> {
         })
         .collect()
 }
+
+/// How many rings of the join view are sent **before** the play loop starts.
+///
+/// `1` — the player's own column plus its eight neighbours, nine columns of the
+/// 1,089 a `view_radius = 16` join owes. Everything past this streams from
+/// `serve_play` while the player is already able to act.
+///
+/// # Why not `0`, and why not more
+///
+/// Vanilla's answer is essentially "the player's own chunk, then keep sending":
+/// `PlayerList.placeNewPlayer` adds the player to the level and
+/// `PlayerChunkSender` feeds the rest over subsequent ticks. The extra ring here
+/// is the spawn-safety story this crate already paid for once — an earlier defect
+/// spawned the player above terrain, let them fall, and reached zero health with
+/// no death screen — so the ground the player stands on *and* the eight columns
+/// they can step onto exist on the wire before anything they do can matter. Nine
+/// columns is ~0.8% of the burst, so it costs essentially none of the latency the
+/// split buys.
+///
+/// Larger values are a straight trade of interaction latency for that margin;
+/// smaller ones put the player one step from a column the client has not been
+/// sent. Note this is a *wire* bound, not a world bound: the server can already
+/// read any block through `ChunkSource::block_state`, which generates on demand,
+/// so this is about what the **client** can stand on.
+const JOIN_PRESTREAM_RADIUS: i32 = 1;
+
+/// How many columns of the deferred join stream `serve_play` puts in one chunk
+/// batch.
+///
+/// The join used to be a single `begin`/…/`end` pair around the whole view, and
+/// that could not survive a stream that spans ticks: the pair would have to stay
+/// open across everything else the play loop sends. So the deferred half is
+/// batched, which is vanilla's own shape — `ChunkBatchSizeCalculator` exists
+/// precisely to pace a stream of batches, and our own client answers each
+/// `chunk_batch_finished` with a `chunk_batch_received` carrying its desired rate
+/// (`crates/protocol/v770/src/adapter.rs`'s `ChunkBatchState`).
+///
+/// 16 is a compromise with no measurement behind it and does not need one: a
+/// batch marker is two empty-ish packets, so the cost is ~2 packets per 16
+/// columns, and the *only* thing the size changes is the granularity of the
+/// client's own rate estimate.
+const JOIN_STREAM_BATCH_COLUMNS: usize = 16;
 
 /// Applies one [`ViewUpdate`]: the non-batch directives immediately, and the
 /// chunk-batch portion (if any) either right away or queued behind
@@ -2062,23 +2137,61 @@ where
                 // that order, whose width comes from `available_parallelism`
                 // rather than from the view radius — which is the half of
                 // `5104adf` that `4307b59` was right to revert.
+                //
+                // **The owner's report: "I can't break blocks, take damage, etc.
+                // until it finishes."** Everything above was about the *order* of
+                // the burst and none of it about its position in the sequence: all
+                // `(2r + 1)²` columns — 1,089 at `view_radius = 16` — were
+                // generated and encoded here, inline, before control ever reached
+                // the loop that dispatches play packets. So a dig, a hurt, a
+                // container click and every other interaction queued behind the
+                // whole initial generation burst.
+                //
+                // Now only the innermost [`JOIN_PRESTREAM_RADIUS`] rings go out
+                // here; the rest becomes a `JoinChunkStream` that `serve_play`
+                // drains from a `select!` branch beside its socket read. Vanilla's
+                // shape: `PlayerList.placeNewPlayer` adds the player to the level
+                // and `PlayerChunkSender` feeds chunks over subsequent ticks — the
+                // client holds its own loading screen until it has what it needs,
+                // but the server is not blocked.
                 let t_chunks = JoinStopwatch::now();
                 let mut batch_size = 0;
                 let window = crate::join_scheduler::generation_window();
                 let rings = join_view_rings(view_radius);
                 let ring_count = rings.len();
+                // How much has to be on the wire before the player may act. See
+                // `JOIN_PRESTREAM_RADIUS`.
+                let prestream: usize = rings
+                    .iter()
+                    .take(JOIN_PRESTREAM_RADIUS as usize + 1)
+                    .map(Vec::len)
+                    .sum();
+                let join_stream;
                 match &source {
                     SourceRef::Shared(src) => {
                         let coords: Vec<(i32, i32)> = rings.into_iter().flatten().collect();
-                        let mut pipeline = crate::join_scheduler::ColumnPipeline::with_window(
+                        // `prioritised`, not `with_window`: the pending half of
+                        // this pipeline outlives the join now, so it is keyed on
+                        // distance-from-the-player with an in-frustum bonus and
+                        // re-keyed by `serve_play` when the player moves or turns.
+                        // With no rotation known — which is exactly the state at
+                        // join — that key *is* the ring walk, so the sequence this
+                        // emits is unchanged from `join_view_rings` order.
+                        let mut pipeline = crate::join_scheduler::ColumnPipeline::prioritised(
                             Arc::clone(src),
                             coords,
                             window,
+                            (0, 0),
+                            None,
                         );
-                        while let Some(((cx, cz), column)) = pipeline.next().await {
+                        while batch_size < prestream {
+                            let Some(((cx, cz), column)) = pipeline.next().await else {
+                                break;
+                            };
                             apply(conn, &mut state, proto.encode_chunk(cx, cz, &column)).await?;
                             batch_size += 1;
                         }
+                        join_stream = crate::join_scheduler::JoinChunkStream::windowed(pipeline);
                     }
                     SourceRef::Borrowed(_) => {
                         // **Deliberately still per-ring, and this is not the
@@ -2102,6 +2215,17 @@ where
                         // `join_streams_the_view_outward_from_the_players_own_column`
                         // here and `the_shared_arm_streams_the_view_outward_too`
                         // over a real loopback socket.
+                        //
+                        // The pre-stream/defer split lands on a ring boundary on
+                        // this arm precisely because a ring is its unit of work:
+                        // rings `0..=JOIN_PRESTREAM_RADIUS` are generated and
+                        // encoded here, and the rest are handed to `serve_play` as
+                        // whole rings. Same emitted sequence as the other arm, one
+                        // barrier per ring instead of a window.
+                        let mut rings = rings;
+                        let deferred = rings.split_off(
+                            (JOIN_PRESTREAM_RADIUS as usize + 1).min(rings.len()),
+                        );
                         for ring in &rings {
                             let columns = source.generate(ring.clone()).await;
                             for (&(cx, cz), column) in ring.iter().zip(columns.iter()) {
@@ -2109,16 +2233,26 @@ where
                                 batch_size += 1;
                             }
                         }
+                        join_stream = crate::join_scheduler::JoinChunkStream::ringed(deferred);
                     }
                 }
-                apply(conn, &mut state, proto.end_chunk_batch(batch_size)).await?;
+                // `batch_size` is a `usize` because it is compared against
+                // `prestream` above; the wire field is an `i32`.
+                apply(
+                    conn,
+                    &mut state,
+                    proto.end_chunk_batch(i32::try_from(batch_size).unwrap_or(i32::MAX)),
+                )
+                .await?;
                 let chunk_ms = t_chunks.elapsed().as_millis();
-                let chunks_sent = batch_size as usize;
+                let chunks_sent = batch_size;
                 tracing::info!(
-                    "join chunks: {} columns in {}ms ({:.0} col/s), {} rings, window {}",
+                    "join chunks: {} columns inline in {}ms ({:.0} col/s), {} deferred to the \
+                     play loop, {} rings, window {}",
                     chunks_sent,
                     chunk_ms,
                     chunks_sent as f64 / (chunk_ms as f64 / 1000.0),
+                    join_stream.remaining(),
                     ring_count,
                     window,
                 );
@@ -2256,6 +2390,7 @@ where
                     username,
                     spawn.pos,
                     chunks_sent,
+                    join_stream,
                     block_entities,
                     mobs,
                     block_ticks,
@@ -5044,7 +5179,18 @@ where
             // `SectionPos.blockToSectionCoord` (an arithmetic right shift).
             let cx = (x / 16.0).floor() as i32;
             let cz = (z / 16.0).floor() as i32;
-            let update = view.recenter(proto, source, cx, cz).await;
+            let update = view
+                .recenter(
+                    proto,
+                    source,
+                    cx,
+                    cz,
+                    // The pose that arrived with this very packet where it carried
+                    // one, so the newly-visible strip is ordered towards what the
+                    // player is looking at rather than by `cx` then `cz`.
+                    player_rot.map(|rotation| rotation.yaw),
+                )
+                .await;
             // Every recenter: log, so we can see if the server detects boundary crosses
             tracing::info!(
                 "recenter: center=({cx},{cz}) batch_size={} immediate_forgets={}",
@@ -5320,7 +5466,14 @@ where
             // The ceiling now lives on the `ViewTracker` as its own field and
             // `set_view_radius` applies it — see `ViewTracker::max_radius` for
             // the per-path policy and why the two roles had to be separated.
-            let update = view.set_view_radius(proto, source, i32::from(view_distance)).await;
+            let update = view
+                .set_view_radius(
+                    proto,
+                    source,
+                    i32::from(view_distance),
+                    player_rot.map(|rotation| rotation.yaw),
+                )
+                .await;
             send_view_update(conn, state, update, awaiting_chunk_batch_ack, pending_chunk_batches).await?;
         }
         ServerBound::ChunkBatchAcknowledged { .. } => {
@@ -5525,7 +5678,16 @@ async fn serve_play<T, P, S, E>(
     // `apply_client_command`'s `PERFORM_RESPAWN` arm — see its own comment for why
     // it is the *world* spawn and not the per-player bed point.
     world_spawn: Vec3,
-    chunks_sent: usize,
+    mut chunks_sent: usize,
+    // The part of the join view that had **not** gone out when the play loop
+    // started (`JOIN_PRESTREAM_RADIUS`), drained by the `join_stream` arm of the
+    // `select!` below. Owned: it is this connection's view and dies with it.
+    //
+    // This is the whole of the owner's "I can't break blocks until it finishes"
+    // fix. Nothing else in this signature changed, because nothing else had to:
+    // the loop that was already racing a socket read against four timers simply
+    // races one more thing.
+    mut join_stream: crate::join_scheduler::JoinChunkStream<S>,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
     block_ticks: &BlockTickFeed,
@@ -5627,10 +5789,19 @@ where
         player_ticket.as_ref().map_or(LOCAL_PLAYER_ENTITY_ID, |t| t.entity_id());
     // Issue #270's chunk-batch flow-control gate (`ServerBound::
     // ChunkBatchAcknowledged`, see `send_view_update`'s own doc comment):
-    // starts `true` because `serve_connection`'s own initial full-view dump
+    // starts `true` because `serve_connection`'s own initial view burst
     // (sent just before this function was called) is itself an outstanding
     // unacknowledged batch — the first ack this loop receives is for *that*
     // batch, not a later `recenter`/`set_view_radius` one.
+    //
+    // **The deferred join stream is deliberately not gated on this**, and the
+    // reason is that it is not the same kind of send. This gate exists so a
+    // *reactive* stream — one new batch per chunk boundary the player crosses,
+    // unbounded in time — cannot outrun a client. The join stream is a fixed,
+    // finite set the client is already owed and is holding its loading screen
+    // for; gating it would make delivering the world depend on a reply, and every
+    // `ServerProtocol` fixture in this crate's tests answers a batch with silence.
+    // That failure mode is the worst shape available: not a mismatch, a hang.
     let mut awaiting_chunk_batch_ack = true;
     let mut pending_chunk_batches: VecDeque<Vec<ServerDirective>> = VecDeque::new();
     // Issue #469. Filled by `dispatch_play_packet`, drained immediately after
@@ -5677,9 +5848,46 @@ where
     );
     let play_start = tokio::time::Instant::now();
     let mut next_keep_alive_id: i64 = 0;
+    // The deferred join stream's own batch bookkeeping — see
+    // `JOIN_STREAM_BATCH_COLUMNS`. `open` is whether a `begin_chunk_batch` has
+    // been sent whose `end_chunk_batch` has not; `size` is how many columns are
+    // inside it.
+    let mut join_batch_open = false;
+    let mut join_batch_size: i32 = 0;
 
     loop {
         tokio::select! {
+            // The deferred join view (`JOIN_PRESTREAM_RADIUS`), streamed while this
+            // loop goes on servicing everything else — which is the point: a dig,
+            // a hurt or a container click no longer waits behind the burst.
+            //
+            // Disabled once drained, so this is not a branch that returns `None`
+            // forever. `select!` polls its branches in a random order, so a ready
+            // packet is never starved by a ready column.
+            //
+            // Both `JoinChunkStream::next` arms are cancel-safe (see their doc
+            // comments); a column dropped mid-generation here would be a hole in
+            // the world that no test in this crate would notice.
+            chunk = join_stream.next(source), if !join_stream.is_done() => {
+                if let Some(((cx, cz), column)) = chunk {
+                    if !join_batch_open {
+                        apply(conn, &mut state, proto.begin_chunk_batch()).await?;
+                        join_batch_open = true;
+                        join_batch_size = 0;
+                    }
+                    apply(conn, &mut state, proto.encode_chunk(cx, cz, &column)).await?;
+                    chunks_sent += 1;
+                    join_batch_size += 1;
+                    // Close on a full batch or on the last column, whichever comes
+                    // first — the tail batch is short, exactly like vanilla's.
+                    if join_batch_size as usize >= JOIN_STREAM_BATCH_COLUMNS
+                        || join_stream.is_done()
+                    {
+                        apply(conn, &mut state, proto.end_chunk_batch(join_batch_size)).await?;
+                        join_batch_open = false;
+                    }
+                }
+            }
             packet = conn.read_packet() => {
                 let Some((packet_id, payload)) = packet? else {
                     return Ok(ServeSummary { username, chunks_sent, inventory });
@@ -5780,6 +5988,30 @@ where
                     player_pos,
                 ) {
                     registry.set_position(ticket.entity_id(), Vec3::new(x, y, z));
+                }
+                // **"If the player moves it should properly generate the closer
+                // chunks first."** The join stream can now still be draining while
+                // the player walks and turns, so the columns it has *not yet
+                // started* are re-keyed on the pose that packet just delivered:
+                // distance from the player's current column first, the cone they
+                // are looking down second (`join_scheduler::priority_key`).
+                //
+                // Read back from `player_pos`/`player_rot` for the same reason the
+                // republish above is: `dispatch_play_packet` has just updated
+                // whichever of them the packet carried. Cheap on purpose — this
+                // runs on *every* inbound packet, and `reprioritise` does nothing
+                // at all unless the centre chunk or the quantised yaw actually
+                // changed.
+                if !join_stream.is_done() {
+                    if let Some((x, _, z)) = player_pos {
+                        join_stream.reprioritise(
+                            (
+                                (x / 16.0).floor() as i32,
+                                (z / 16.0).floor() as i32,
+                            ),
+                            player_rot.map(|rotation| rotation.yaw),
+                        );
+                    }
                 }
                 // Issue #337: collect any drops this player is now standing in.
                 // Here, and not in `dispatch_play_packet`, for the same reason
@@ -6162,7 +6394,15 @@ async fn serve_play<T, P, S, E>(
     // `apply_client_command`'s `PERFORM_RESPAWN` arm — see its own comment for why
     // it is the *world* spawn and not the per-player bed point.
     world_spawn: Vec3,
-    chunks_sent: usize,
+    mut chunks_sent: usize,
+    // The deferred half of the join view (`JOIN_PRESTREAM_RADIUS`). On the native
+    // loop this is a `select!` branch racing the socket read; **this target has no
+    // `select!` and no second thread**, so there is no concurrency to win and it is
+    // drained inline below, before the packet loop — the unchanged pre-split
+    // behaviour, one batch later in the sequence. A browser world therefore still
+    // pays the whole burst up front; that is the same documented `wasm32` gap as
+    // every timer this loop lacks, not a new one.
+    mut join_stream: crate::join_scheduler::JoinChunkStream<S>,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
     // Same gap as `vitals`/`container_sync` below for the *outbound*
@@ -6302,6 +6542,19 @@ where
     let mut pending_chunk_batches: VecDeque<Vec<ServerDirective>> = VecDeque::new();
     // Issue #469 — see the native loop's identical binding.
     let mut outgoing_chat: Vec<String> = Vec::new();
+
+    // The deferred join view, inline — see this function's `join_stream`
+    // parameter for why this target does not race it against anything.
+    if !join_stream.is_done() {
+        apply(conn, &mut state, proto.begin_chunk_batch()).await?;
+        let mut batch_size: i32 = 0;
+        while let Some(((cx, cz), column)) = join_stream.next(source).await {
+            apply(conn, &mut state, proto.encode_chunk(cx, cz, &column)).await?;
+            chunks_sent += 1;
+            batch_size += 1;
+        }
+        apply(conn, &mut state, proto.end_chunk_batch(batch_size)).await?;
+    }
 
     while let Some((packet_id, payload)) = conn.read_packet().await? {
         dispatch_play_packet(
