@@ -239,6 +239,32 @@ pub enum ClientActionKind {
     CookieResponse,
     /// [`ClientAction::SendCustomPayload`].
     SendCustomPayload,
+    /// [`ClientAction::QueryBlockEntityTag`].
+    QueryBlockEntityTag,
+    /// [`ClientAction::QueryEntityTag`].
+    QueryEntityTag,
+    /// [`ClientAction::ChangeDifficulty`].
+    ChangeDifficulty,
+    /// [`ClientAction::LockDifficulty`].
+    LockDifficulty,
+    /// [`ClientAction::SetGameRules`].
+    SetGameRules,
+    /// [`ClientAction::SetCommandMinecart`].
+    SetCommandMinecart,
+    /// [`ClientAction::SetStructureBlock`].
+    SetStructureBlock,
+    /// [`ClientAction::SetJigsawBlock`].
+    SetJigsawBlock,
+    /// [`ClientAction::GenerateJigsawStructure`].
+    GenerateJigsawStructure,
+    /// [`ClientAction::SetTestBlock`].
+    SetTestBlock,
+    /// [`ClientAction::TestInstanceBlockAction`].
+    TestInstanceBlockAction,
+    /// [`ClientAction::SubscribeDebug`].
+    SubscribeDebug,
+    /// [`ClientAction::CustomClickAction`].
+    CustomClickAction,
 }
 
 impl From<&ClientAction> for ClientActionKind {
@@ -298,6 +324,19 @@ impl From<&ClientAction> for ClientActionKind {
             ClientAction::ChangeGameMode { .. } => Self::ChangeGameMode,
             ClientAction::CookieResponse { .. } => Self::CookieResponse,
             ClientAction::SendCustomPayload { .. } => Self::SendCustomPayload,
+            ClientAction::QueryBlockEntityTag { .. } => Self::QueryBlockEntityTag,
+            ClientAction::QueryEntityTag { .. } => Self::QueryEntityTag,
+            ClientAction::ChangeDifficulty { .. } => Self::ChangeDifficulty,
+            ClientAction::LockDifficulty { .. } => Self::LockDifficulty,
+            ClientAction::SetGameRules { .. } => Self::SetGameRules,
+            ClientAction::SetCommandMinecart { .. } => Self::SetCommandMinecart,
+            ClientAction::SetStructureBlock { .. } => Self::SetStructureBlock,
+            ClientAction::SetJigsawBlock { .. } => Self::SetJigsawBlock,
+            ClientAction::GenerateJigsawStructure { .. } => Self::GenerateJigsawStructure,
+            ClientAction::SetTestBlock { .. } => Self::SetTestBlock,
+            ClientAction::TestInstanceBlockAction { .. } => Self::TestInstanceBlockAction,
+            ClientAction::SubscribeDebug { .. } => Self::SubscribeDebug,
+            ClientAction::CustomClickAction { .. } => Self::CustomClickAction,
         }
     }
 }

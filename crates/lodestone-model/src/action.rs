@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
 use crate::{
-    common::{GameMode, Hand},
+    common::{Difficulty, GameMode, Hand},
     ids::ResourceKey,
     item::ItemStack,
     math::{BlockPos, Rotation, Vec3, Vec3f},
@@ -421,6 +421,333 @@ pub enum ClientAction {
         /// none for `key`.
         payload: Option<Vec<u8>>,
     },
+
+    // ---- issue #304: the operator/debug serverbound set --------------------
+    //
+    // Thirteen packets a vanilla client can send that we could not encode at
+    // all. They divide by *producer*, and the division is the useful part of
+    // this block:
+    //
+    // * three have a real producer in the tree today — `SubscribeDebug` (paired
+    //   with the `debug_*` clientbound values it turns on),
+    //   `CustomClickAction` (the reply to `show_dialog`), and the two tag
+    //   queries (vanilla's F3+I "copy NBT" debug verb, driven from
+    //   `lodestone_ecs::debug_query`);
+    // * `ChangeDifficulty` / `LockDifficulty` are the singleplayer difficulty
+    //   control, wired through `lodestone_ecs::session`;
+    // * the rest — structure block, jigsaw block, test block, test instance,
+    //   command minecart, game rules — belong to **creative-mode editor screens
+    //   that do not exist yet**. Their encoders are here so the screen is the
+    //   only thing missing when someone builds it; `docs/serverbound-coverage.md`
+    //   names each one and its screen. Adding an encoder without saying which
+    //   of these three buckets it is in is how `SetFlying` shipped with four
+    //   encoders and zero producers.
+    /// Ask the server for a block entity's NBT (`block_entity_tag_query`).
+    ///
+    /// Operator-only server-side. Vanilla's producer is the F3+I debug verb.
+    QueryBlockEntityTag {
+        /// Transaction id echoed back on `tag_query`.
+        transaction_id: i32,
+        /// The block entity's position.
+        pos: BlockPos,
+    },
+    /// Ask the server for an entity's NBT (`entity_tag_query`).
+    QueryEntityTag {
+        /// Transaction id echoed back on `tag_query`.
+        transaction_id: i32,
+        /// The entity's network id.
+        entity_id: i32,
+    },
+    /// Request a world difficulty change (`change_difficulty`).
+    ///
+    /// Only honoured in singleplayer / on a LAN world the requester hosts;
+    /// a dedicated server ignores it unless the difficulty is unlocked.
+    ChangeDifficulty {
+        /// Requested difficulty.
+        difficulty: Difficulty,
+    },
+    /// Lock or unlock the world difficulty (`lock_difficulty`).
+    ///
+    /// Vanilla's own button is one-way — locking is permanent — but the wire
+    /// carries a boolean, so this does too.
+    LockDifficulty {
+        /// Whether the difficulty should be locked.
+        locked: bool,
+    },
+    /// Set one or more game rules (`set_game_rule`).
+    ///
+    /// Values are the rule's **string** form on the wire regardless of the
+    /// rule's type: `"true"` for a boolean, `"7"` for an integer. The server
+    /// parses against its own typed registry, so an unparseable value is
+    /// ignored server-side rather than rejected here.
+    SetGameRules {
+        /// `(rule key, value)` pairs, applied in order.
+        entries: Vec<(ResourceKey, String)>,
+    },
+    /// Set a command minecart's command (`set_command_minecart`).
+    SetCommandMinecart {
+        /// Network id of the minecart.
+        entity_id: i32,
+        /// Command text.
+        command: String,
+        /// Whether the last output should be tracked for display.
+        track_output: bool,
+    },
+    /// Submit a structure block's configuration (`set_structure_block`).
+    ///
+    /// `offset` and `size` are **signed bytes** on the wire, not a `Vec3i`:
+    /// vanilla clamps `offset` to `-48..=48` and `size` to `0..=48` on read, so
+    /// a value outside that is silently narrowed rather than refused.
+    SetStructureBlock {
+        /// The structure block's position.
+        pos: BlockPos,
+        /// Which button was pressed.
+        update_type: StructureBlockUpdateType,
+        /// The block's mode.
+        mode: StructureBlockMode,
+        /// Structure name.
+        name: String,
+        /// Relative offset of the captured region, `-48..=48` per axis.
+        offset: (i8, i8, i8),
+        /// Size of the captured region, `0..=48` per axis.
+        size: (i8, i8, i8),
+        /// Mirroring applied on load.
+        mirror: StructureMirror,
+        /// Rotation applied on load.
+        rotation: StructureRotation,
+        /// Free-form data-mode marker string.
+        data: String,
+        /// Load integrity, `0.0..=1.0`.
+        integrity: f32,
+        /// Integrity RNG seed.
+        seed: i64,
+        /// Whether entities in the region are skipped.
+        ignore_entities: bool,
+        /// Whether air blocks are rendered in the preview.
+        show_air: bool,
+        /// Whether the bounding box is rendered.
+        show_bounding_box: bool,
+        /// Whether loading is strict about block-entity data.
+        strict: bool,
+    },
+    /// Submit a jigsaw block's configuration (`set_jigsaw_block`).
+    SetJigsawBlock {
+        /// The jigsaw block's position.
+        pos: BlockPos,
+        /// This jigsaw's own name.
+        name: ResourceKey,
+        /// The name this jigsaw wants to connect to.
+        target: ResourceKey,
+        /// The template pool to draw from.
+        pool: ResourceKey,
+        /// Block state string applied when the jigsaw is consumed.
+        final_state: String,
+        /// Joint type. Serialized as a **string**, not an ordinal — see
+        /// [`JigsawJoint`].
+        joint: JigsawJoint,
+        /// Selection priority.
+        selection_priority: i32,
+        /// Placement priority.
+        placement_priority: i32,
+    },
+    /// Press a jigsaw block's "Generate" button (`jigsaw_generate`).
+    GenerateJigsawStructure {
+        /// The jigsaw block's position.
+        pos: BlockPos,
+        /// How many levels of pieces to place.
+        levels: i32,
+        /// Whether the jigsaw blocks themselves are kept.
+        keep_jigsaws: bool,
+    },
+    /// Submit a test block's configuration (`set_test_block`).
+    SetTestBlock {
+        /// The test block's position.
+        pos: BlockPos,
+        /// The block's mode.
+        mode: TestBlockMode,
+        /// Message shown on log/fail.
+        message: String,
+    },
+    /// Act on a test instance block (`test_instance_block_action`).
+    TestInstanceBlockAction {
+        /// The test instance block's position.
+        pos: BlockPos,
+        /// Which button was pressed.
+        action: TestInstanceAction,
+        /// The block's current configuration, echoed back with the action.
+        data: TestInstanceData,
+    },
+    /// Subscribe to a set of server debug feeds (`debug_subscription_request`).
+    ///
+    /// This is the **producer half** of the `debug_block_value`,
+    /// `debug_chunk_value`, `debug_entity_value` and `debug_event` clientbound
+    /// packets: the server sends none of them until a client asks. Sending an
+    /// empty list unsubscribes from everything, which is how vanilla's debug
+    /// renderer turns a feed off. Capped at 32 entries by the wire.
+    ///
+    /// Keys are `minecraft:debug_subscription` registry identifiers such as
+    /// `minecraft:entity_paths`; the adapter resolves them to network ids and
+    /// **drops any it does not recognise** rather than failing the whole
+    /// subscription.
+    SubscribeDebug {
+        /// Feeds to subscribe to, replacing the previous set.
+        subscriptions: Vec<ResourceKey>,
+    },
+    /// Report a dialog button press back to the server (`custom_click_action`).
+    ///
+    /// The reply half of `show_dialog`: a `custom` dialog action carries an id
+    /// and an optional NBT payload, and this is how the client returns them.
+    /// `payload` is the already-encoded network-NBT body (including the
+    /// leading present/absent byte), opaque to this crate.
+    CustomClickAction {
+        /// The action id declared by the dialog.
+        id: ResourceKey,
+        /// Encoded optional-NBT payload, at most 65536 bytes.
+        payload: Vec<u8>,
+    },
+}
+
+/// A test instance block's configuration, as `set_test_instance_block`'s
+/// `TestInstanceBlockEntity.Data` carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestInstanceData {
+    /// The test to run, or `None` for an unconfigured block.
+    pub test: Option<ResourceKey>,
+    /// Region size in blocks.
+    pub size: (i32, i32, i32),
+    /// Rotation applied to the placed structure.
+    pub rotation: StructureRotation,
+    /// Whether entities are ignored.
+    pub ignore_entities: bool,
+    /// Last run status.
+    pub status: TestInstanceStatus,
+    /// Failure message, if the last run failed. Carried as the already-encoded
+    /// network-NBT `Component` body, opaque to this crate for the same reason
+    /// every other `Text`-on-the-wire field is.
+    pub error_message: Option<Vec<u8>>,
+}
+
+/// Which button of the structure block screen was pressed
+/// (`StructureBlockEntity.UpdateType`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StructureBlockUpdateType {
+    /// Just save the settings.
+    UpdateData,
+    /// Save the region to a structure file.
+    SaveArea,
+    /// Load the named structure.
+    LoadArea,
+    /// Detect the region bounds from corner blocks.
+    ScanArea,
+}
+
+/// A structure block's mode (`StructureMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StructureBlockMode {
+    /// Save mode.
+    Save,
+    /// Load mode.
+    Load,
+    /// Corner marker.
+    Corner,
+    /// Data marker.
+    Data,
+}
+
+/// Mirroring applied when a structure is placed (`Mirror`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StructureMirror {
+    /// No mirroring.
+    None,
+    /// Mirror across the left-right axis.
+    LeftRight,
+    /// Mirror across the front-back axis.
+    FrontBack,
+}
+
+/// Rotation applied when a structure is placed (`Rotation`).
+///
+/// Named `Structure*` because [`crate::math::Rotation`] already means a
+/// yaw/pitch pair; this is the four-way block rotation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StructureRotation {
+    /// No rotation.
+    None,
+    /// 90 degrees clockwise.
+    Clockwise90,
+    /// 180 degrees.
+    Clockwise180,
+    /// 90 degrees counter-clockwise.
+    CounterClockwise90,
+}
+
+/// A jigsaw block's joint type (`JigsawBlockEntity.JointType`).
+///
+/// **Serialized as its lowercase name, not as an ordinal** —
+/// `ServerboundSetJigsawBlockPacket` writes `joint.getSerializedName()` and the
+/// server falls back to [`Self::Aligned`] for anything it does not recognise.
+/// That is the one field of this packet a transliterated "everything is a
+/// VarInt enum" encoder would get wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JigsawJoint {
+    /// `"aligned"`.
+    Aligned,
+    /// `"rollable"`.
+    Rollable,
+}
+
+impl JigsawJoint {
+    /// The wire name.
+    #[must_use]
+    pub const fn serialized_name(self) -> &'static str {
+        match self {
+            Self::Aligned => "aligned",
+            Self::Rollable => "rollable",
+        }
+    }
+}
+
+/// A test block's mode (`TestBlockMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TestBlockMode {
+    /// Starts the test.
+    Start,
+    /// Logs a message.
+    Log,
+    /// Fails the test.
+    Fail,
+    /// Accepts (passes) the test.
+    Accept,
+}
+
+/// Which button of the test instance block screen was pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TestInstanceAction {
+    /// Initialise the region.
+    Init,
+    /// Query the current status.
+    Query,
+    /// Apply the submitted settings.
+    Set,
+    /// Reset the region.
+    Reset,
+    /// Save the region.
+    Save,
+    /// Export the region.
+    Export,
+    /// Run the test.
+    Run,
+}
+
+/// A test instance block's last-run status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TestInstanceStatus {
+    /// Never run, or cleared.
+    Cleared,
+    /// Currently running.
+    Running,
+    /// Finished, successfully or not.
+    Finished,
 }
 
 /// Which recipe book a recipe-book action applies to.

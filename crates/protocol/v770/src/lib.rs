@@ -32,6 +32,15 @@
 #[path = "generated/packet_ids.rs"]
 pub mod packet_ids;
 
+/// Generated `stat_type` / `custom_stat` / `debug_subscription` id tables.
+///
+/// These three registries are carried as bare VarInt ids by `award_stats` and
+/// the `debug_*` packets, so the adapter resolves them here rather than leaking
+/// numbers into version-free state. Unlike the censuses named above they *are*
+/// wire format — the id space is the protocol's, not the game's.
+#[path = "generated/stat_debug_registries.rs"]
+pub mod stat_debug_registries;
+
 pub mod adapter;
 pub mod chunk_batch;
 pub mod entity_variants;

@@ -29,15 +29,17 @@ use lodestone_model::{
     EntityFacts,
     EntityInteraction, EntityMetadataUpdate, EntityMovement, EntityVariant, EquipmentSlot,
     GameMode, Hand, ItemComponents,
-    ItemEnchantment, ItemPrototype, ItemStack, ItemTool, LoginProfile,
+    ItemEnchantment, ItemPrototype, ItemStack, ItemTool, JigsawJoint, LoginProfile,
     LookAnchor, MainHand, MapDecoration, MapPatch,
     NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
     ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry, PlayerLookAtEntity,
     RecipeBookType,
     RecipeBookTypeSettings,
     ResourceKey, ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, SoundCategory,
-    TeamAction, TeamColor, TeamParameters, TeleportFlags, Text, TextColor, ToolBlocks, ToolMining,
-    ToolPatch, ToolRule, Vec3, Vec3f, VersionAdapter, Visibility, WorldSink,
+    StructureBlockMode, StructureBlockUpdateType, StructureMirror, StructureRotation, TeamAction,
+    TeamColor, TeamParameters, TeleportFlags, TestBlockMode as ModelTestBlockMode,
+    TestInstanceAction, TestInstanceData, TestInstanceStatus, Text, TextColor, ToolBlocks,
+    ToolMining, ToolPatch, ToolRule, Vec3, Vec3f, VersionAdapter, Visibility, WorldSink,
 };
 use lodestone_world::{
     BiomePatch, ChunkPos as WorldChunkPos, LightPatch, LoadedChunk, NibbleArray, PalettedContainer,
@@ -64,11 +66,13 @@ use crate::packets::configuration::{
 use crate::packets::entity::{read_lp_vec3, unpack_degrees};
 use crate::packets::game::{
     ABILITY_FLAG_CAN_FLY, ABILITY_FLAG_FLYING, ABILITY_FLAG_INSTABUILD, ABILITY_FLAG_INVULNERABLE,
-    AcceptTeleportation, Attack, COMMAND_BLOCK_FLAG_AUTOMATIC, COMMAND_BLOCK_FLAG_CONDITIONAL,
+    AcceptTeleportation, Attack, BlockEntityTagQuery, COMMAND_BLOCK_FLAG_AUTOMATIC,
+    COMMAND_BLOCK_FLAG_CONDITIONAL,
     COMMAND_BLOCK_FLAG_TRACK_OUTPUT, ChangeGameMode, ChatAck, ChatCommand, ChatMessage,
     ChunkBatchFinished, ChunkBatchReceived, ClientCommand, ClientTickEnd, CommandSuggestion,
     ConfigurationAcknowledged, ContainerButtonClick, ContainerClose, ContainerSlotStateChanged,
-    EditBook, GameEvent, GameLogin, LevelEvent, LevelParticles, MOVE_FLAG_HORIZONTAL_COLLISION,
+    EditBook, EntityTagQuery, GameEvent, GameLogin, LevelEvent, LevelParticles,
+    MOVE_FLAG_HORIZONTAL_COLLISION,
     MOVE_FLAG_ON_GROUND, MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatusOnly,
     MoveVehicle, PaddleBoat, PickItemFromBlock, PickItemFromEntity, PlaceRecipe, PlayerAbilities,
     PlayerAction, PlayerCommand as PlayerCommandPacket, PlayerInput as PlayerInputPacket,
@@ -1847,6 +1851,249 @@ fn encode_seen_advancements(tab: Option<&ResourceKey>) -> Result<Vec<u8>, Adapte
         }
         None => w.var_i32(1), // CLOSED_SCREEN
     }
+    Ok(w.into_vec())
+}
+
+// ---- issue #304: the operator/debug serverbound encoders --------------------
+//
+// Thirteen packets a vanilla client can send that this adapter could not encode
+// at all. Every layout below was read off the record definition in
+// `.cache/mc/26.2/src` — the `write` method or the `StreamCodec` composition, not
+// a summary — because there is no encoder of ours to round-trip against and
+// `decode(encode(x)) == x` would be satisfied by two symmetric misunderstandings.
+//
+// Three of these have a shape a transliterating encoder gets wrong, and each is
+// called out at its own function:
+//
+// * `set_structure_block`'s offset/size are **signed bytes**, not `Vec3i`
+//   VarInts, and its flags byte is **last**;
+// * `set_jigsaw_block`'s `joint` is a **string**, not an enum ordinal;
+// * `custom_click_action`'s payload is **double-framed** — a VarInt byte length
+//   wrapping an optional-NBT body.
+
+/// Maps a [`Difficulty`] to `Difficulty.getId()`, which is what
+/// `ByteBufCodecs.idMapper(Difficulty::byId, Difficulty::getId)` writes — the
+/// declared enum order, `PEACEFUL` first.
+fn difficulty_id(difficulty: Difficulty) -> i32 {
+    match difficulty {
+        Difficulty::Peaceful => 0,
+        Difficulty::Easy => 1,
+        Difficulty::Normal => 2,
+        Difficulty::Hard => 3,
+    }
+}
+
+/// `Rotation`'s wire id, from its own declared order
+/// (`net/minecraft/world/level/block/Rotation.java`).
+fn structure_rotation_id(rotation: StructureRotation) -> i32 {
+    match rotation {
+        StructureRotation::None => 0,
+        StructureRotation::Clockwise90 => 1,
+        StructureRotation::Clockwise180 => 2,
+        StructureRotation::CounterClockwise90 => 3,
+    }
+}
+
+/// Encodes the serverbound `set_game_rule` body: a VarInt-counted list of
+/// `(rule identifier, value string)` pairs.
+///
+/// The value is a `STRING_UTF8` whatever the rule's real type is — the server
+/// parses it against its own typed registry — so nothing here validates it.
+fn encode_set_game_rules(entries: &[(ResourceKey, String)]) -> Result<Vec<u8>, AdapterError> {
+    let mut w = Writer::default();
+    w.var_i32(i32::try_from(entries.len()).map_err(|_| {
+        AdapterError::Encode("set_game_rule entry count exceeds i32".to_owned())
+    })?);
+    for (key, value) in entries {
+        w.string(&key.to_string());
+        w.string(value);
+    }
+    Ok(w.into_vec())
+}
+
+/// Encodes the serverbound `set_structure_block` body
+/// (`ServerboundSetStructureBlockPacket.write`).
+///
+/// **Two traps, both invisible to a round trip against ourselves.** `offset` and
+/// `size` are six `writeByte`s, not a `Vec3i`'s three VarInts each — vanilla
+/// clamps them to `-48..=48` and `0..=48` on read, so an out-of-range value is
+/// narrowed rather than refused, and this encoder narrows the same way rather
+/// than emitting a byte that would wrap. And the flags byte is written **last**,
+/// after `seed`, not next to the booleans it packs.
+#[allow(clippy::too_many_arguments)]
+fn encode_set_structure_block(
+    pos: BlockPos,
+    update_type: StructureBlockUpdateType,
+    mode: StructureBlockMode,
+    name: &str,
+    offset: (i8, i8, i8),
+    size: (i8, i8, i8),
+    mirror: StructureMirror,
+    rotation: StructureRotation,
+    data: &str,
+    integrity: f32,
+    seed: i64,
+    flags: u8,
+) -> Result<Vec<u8>, AdapterError> {
+    let mut w = Writer::default();
+    w.i64(pack_block_pos(pos));
+    w.var_i32(match update_type {
+        StructureBlockUpdateType::UpdateData => 0,
+        StructureBlockUpdateType::SaveArea => 1,
+        StructureBlockUpdateType::LoadArea => 2,
+        StructureBlockUpdateType::ScanArea => 3,
+    });
+    w.var_i32(match mode {
+        StructureBlockMode::Save => 0,
+        StructureBlockMode::Load => 1,
+        StructureBlockMode::Corner => 2,
+        StructureBlockMode::Data => 3,
+    });
+    w.string(name);
+    for axis in [offset.0, offset.1, offset.2] {
+        w.i8(axis.clamp(-48, 48));
+    }
+    for axis in [size.0, size.1, size.2] {
+        w.i8(axis.clamp(0, 48));
+    }
+    w.var_i32(match mirror {
+        StructureMirror::None => 0,
+        StructureMirror::LeftRight => 1,
+        StructureMirror::FrontBack => 2,
+    });
+    w.var_i32(structure_rotation_id(rotation));
+    w.string(data);
+    w.f32(integrity.clamp(0.0, 1.0));
+    w.var_i64(seed);
+    w.u8(flags);
+    Ok(w.into_vec())
+}
+
+/// Encodes the serverbound `set_jigsaw_block` body
+/// (`ServerboundSetJigsawBlockPacket.write`).
+///
+/// The trap is `joint`: vanilla writes `joint.getSerializedName()`, a UTF string,
+/// and falls back to `ALIGNED` for anything it cannot parse. An encoder that
+/// wrote a VarInt ordinal here — the shape every other enum field in this packet
+/// family uses — would produce a packet the server silently reads as a
+/// zero-length name and defaults, i.e. a wrong value on a fully connected wire.
+#[allow(clippy::too_many_arguments)]
+fn encode_set_jigsaw_block(
+    pos: BlockPos,
+    name: &ResourceKey,
+    target: &ResourceKey,
+    pool: &ResourceKey,
+    final_state: &str,
+    joint: JigsawJoint,
+    selection_priority: i32,
+    placement_priority: i32,
+) -> Result<Vec<u8>, AdapterError> {
+    let mut w = Writer::default();
+    w.i64(pack_block_pos(pos));
+    w.string(&name.to_string());
+    w.string(&target.to_string());
+    w.string(&pool.to_string());
+    w.string(final_state);
+    w.string(joint.serialized_name());
+    w.var_i32(selection_priority);
+    w.var_i32(placement_priority);
+    Ok(w.into_vec())
+}
+
+/// Encodes the serverbound `test_instance_block_action` body
+/// (`ServerboundTestInstanceBlockActionPacket` + `TestInstanceBlockEntity.Data`).
+fn encode_test_instance_block_action(
+    pos: BlockPos,
+    action: TestInstanceAction,
+    data: &TestInstanceData,
+) -> Result<Vec<u8>, AdapterError> {
+    let mut w = Writer::default();
+    w.i64(pack_block_pos(pos));
+    w.var_i32(match action {
+        TestInstanceAction::Init => 0,
+        TestInstanceAction::Query => 1,
+        TestInstanceAction::Set => 2,
+        TestInstanceAction::Reset => 3,
+        TestInstanceAction::Save => 4,
+        TestInstanceAction::Export => 5,
+        TestInstanceAction::Run => 6,
+    });
+    match &data.test {
+        Some(key) => {
+            w.bool(true);
+            w.string(&key.to_string());
+        }
+        None => w.bool(false),
+    }
+    w.var_i32(data.size.0);
+    w.var_i32(data.size.1);
+    w.var_i32(data.size.2);
+    w.var_i32(structure_rotation_id(data.rotation));
+    w.bool(data.ignore_entities);
+    w.var_i32(match data.status {
+        TestInstanceStatus::Cleared => 0,
+        TestInstanceStatus::Running => 1,
+        TestInstanceStatus::Finished => 2,
+    });
+    match &data.error_message {
+        Some(component) => {
+            w.bool(true);
+            w.bytes(component);
+        }
+        None => w.bool(false),
+    }
+    Ok(w.into_vec())
+}
+
+/// Encodes the serverbound `debug_subscription_request` body: a VarInt-counted
+/// list of `minecraft:debug_subscription` network ids, capped at 32 by the wire.
+///
+/// Unknown keys are **dropped** rather than failing the whole subscription — a
+/// client asking for a feed this protocol does not have should get the rest,
+/// which is also what makes an empty list (vanilla's "unsubscribe from
+/// everything") indistinguishable from "all keys unknown". The caller sees the
+/// difference through the returned count.
+fn encode_debug_subscription_request(
+    subscriptions: &[ResourceKey],
+) -> Result<Vec<u8>, AdapterError> {
+    let mut ids: Vec<i32> = subscriptions
+        .iter()
+        .filter_map(|key| {
+            crate::stat_debug_registries::debug_subscription_id(&key.to_string())
+        })
+        .collect();
+    ids.truncate(32);
+    let mut w = Writer::default();
+    w.var_i32(i32::try_from(ids.len()).map_err(|_| {
+        AdapterError::Encode("debug subscription count exceeds i32".to_owned())
+    })?);
+    for id in ids {
+        w.var_i32(id);
+    }
+    Ok(w.into_vec())
+}
+
+/// Encodes the serverbound `custom_click_action` body
+/// (`ServerboundCustomClickActionPacket`).
+///
+/// **Double-framed.** The codec is
+/// `optionalTagCodec(...).apply(lengthPrefixed(65536))`: an outer VarInt *byte
+/// length*, and inside it the optional-NBT body. `payload` is already that inner
+/// body (a leading present/absent byte and, if present, the NBT), so this only
+/// adds the length prefix — writing the NBT with no prefix, or prefixing an
+/// element count instead of a byte count, both produce something the server
+/// cannot read.
+fn encode_custom_click_action(id: &ResourceKey, payload: &[u8]) -> Result<Vec<u8>, AdapterError> {
+    if payload.len() > 65536 {
+        return Err(AdapterError::Encode(format!(
+            "custom_click_action payload is {} bytes, over the wire's 65536 limit",
+            payload.len()
+        )));
+    }
+    let mut w = Writer::default();
+    w.string(&id.to_string());
+    w.var_bytes(payload)
+        .map_err(|err| AdapterError::Encode(err.to_string()))?;
     Ok(w.into_vec())
 }
 
@@ -5942,6 +6189,182 @@ impl VersionAdapter for V770Adapter {
                     payload: payload.clone(),
                 };
                 Ok(Some((packet_id, encode_body(&body)?)))
+            }
+
+            // ---- issue #304: the operator/debug set -------------------------
+            ClientAction::QueryBlockEntityTag {
+                transaction_id,
+                pos,
+            } if state == ConnectionState::Play => {
+                let body = BlockEntityTagQuery {
+                    transaction_id: *transaction_id,
+                    pos: pack_block_pos(*pos),
+                };
+                Ok(Some((
+                    play::serverbound::BLOCK_ENTITY_TAG_QUERY,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::QueryEntityTag {
+                transaction_id,
+                entity_id,
+            } if state == ConnectionState::Play => {
+                let body = EntityTagQuery {
+                    transaction_id: *transaction_id,
+                    entity_id: *entity_id,
+                };
+                Ok(Some((
+                    play::serverbound::ENTITY_TAG_QUERY,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::ChangeDifficulty { difficulty } if state == ConnectionState::Play => {
+                let mut w = Writer::default();
+                w.var_i32(difficulty_id(*difficulty));
+                Ok(Some((
+                    play::serverbound::CHANGE_DIFFICULTY,
+                    w.into_vec(),
+                )))
+            }
+            ClientAction::LockDifficulty { locked } if state == ConnectionState::Play => {
+                let mut w = Writer::default();
+                w.bool(*locked);
+                Ok(Some((play::serverbound::LOCK_DIFFICULTY, w.into_vec())))
+            }
+            ClientAction::SetGameRules { entries } if state == ConnectionState::Play => Ok(Some((
+                play::serverbound::SET_GAME_RULE,
+                encode_set_game_rules(entries)?,
+            ))),
+            ClientAction::SetCommandMinecart {
+                entity_id,
+                command,
+                track_output,
+            } if state == ConnectionState::Play => {
+                let mut w = Writer::default();
+                w.var_i32(*entity_id);
+                w.string(command);
+                w.bool(*track_output);
+                Ok(Some((
+                    play::serverbound::SET_COMMAND_MINECART,
+                    w.into_vec(),
+                )))
+            }
+            ClientAction::SetStructureBlock {
+                pos,
+                update_type,
+                mode,
+                name,
+                offset,
+                size,
+                mirror,
+                rotation,
+                data,
+                integrity,
+                seed,
+                ignore_entities,
+                show_air,
+                show_bounding_box,
+                strict,
+            } if state == ConnectionState::Play => {
+                // `ServerboundSetStructureBlockPacket.write`'s flag bits, in the
+                // order the read side unpacks them.
+                let flags = u8::from(*ignore_entities)
+                    | (u8::from(*show_air) << 1)
+                    | (u8::from(*show_bounding_box) << 2)
+                    | (u8::from(*strict) << 3);
+                Ok(Some((
+                    play::serverbound::SET_STRUCTURE_BLOCK,
+                    encode_set_structure_block(
+                        *pos,
+                        *update_type,
+                        *mode,
+                        name,
+                        *offset,
+                        *size,
+                        *mirror,
+                        *rotation,
+                        data,
+                        *integrity,
+                        *seed,
+                        flags,
+                    )?,
+                )))
+            }
+            ClientAction::SetJigsawBlock {
+                pos,
+                name,
+                target,
+                pool,
+                final_state,
+                joint,
+                selection_priority,
+                placement_priority,
+            } if state == ConnectionState::Play => Ok(Some((
+                play::serverbound::SET_JIGSAW_BLOCK,
+                encode_set_jigsaw_block(
+                    *pos,
+                    name,
+                    target,
+                    pool,
+                    final_state,
+                    *joint,
+                    *selection_priority,
+                    *placement_priority,
+                )?,
+            ))),
+            ClientAction::GenerateJigsawStructure {
+                pos,
+                levels,
+                keep_jigsaws,
+            } if state == ConnectionState::Play => {
+                let mut w = Writer::default();
+                w.i64(pack_block_pos(*pos));
+                w.var_i32(*levels);
+                w.bool(*keep_jigsaws);
+                Ok(Some((play::serverbound::JIGSAW_GENERATE, w.into_vec())))
+            }
+            ClientAction::SetTestBlock { pos, mode, message }
+                if state == ConnectionState::Play =>
+            {
+                let mut w = Writer::default();
+                w.i64(pack_block_pos(*pos));
+                w.var_i32(match mode {
+                    ModelTestBlockMode::Start => 0,
+                    ModelTestBlockMode::Log => 1,
+                    ModelTestBlockMode::Fail => 2,
+                    ModelTestBlockMode::Accept => 3,
+                });
+                w.string(message);
+                Ok(Some((play::serverbound::SET_TEST_BLOCK, w.into_vec())))
+            }
+            ClientAction::TestInstanceBlockAction { pos, action, data }
+                if state == ConnectionState::Play =>
+            {
+                Ok(Some((
+                    play::serverbound::TEST_INSTANCE_BLOCK_ACTION,
+                    encode_test_instance_block_action(*pos, *action, data)?,
+                )))
+            }
+            ClientAction::SubscribeDebug { subscriptions } if state == ConnectionState::Play => {
+                Ok(Some((
+                    play::serverbound::DEBUG_SUBSCRIPTION_REQUEST,
+                    encode_debug_subscription_request(subscriptions)?,
+                )))
+            }
+            // Present in Configuration and Play alike: `custom_click_action` is a
+            // `ServerCommonPacketListener` packet, like `custom_payload` itself,
+            // because `show_dialog` can be sent in either state.
+            ClientAction::CustomClickAction { id, payload } => {
+                let packet_id = match state {
+                    ConnectionState::Configuration => {
+                        configuration::serverbound::CUSTOM_CLICK_ACTION
+                    }
+                    ConnectionState::Play => play::serverbound::CUSTOM_CLICK_ACTION,
+                    ConnectionState::Handshaking
+                    | ConnectionState::Status
+                    | ConnectionState::Login => return Ok(None),
+                };
+                Ok(Some((packet_id, encode_custom_click_action(id, payload)?)))
             }
             _ => Ok(None),
         }
