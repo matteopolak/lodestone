@@ -55,6 +55,19 @@ lodestone-model = { path = "../lodestone-model" }
 # protocol one: `ChunkWorld` (mobs.rs) reads it to classify real block states
 # into `PathType`/collision geometry instead of a solid/air guess (issue #204).
 lodestone-data = { path = "../lodestone-data" }
+# The version-free crafting matcher and its datapack-JSON loader
+# (`recipe::RecipeBook`, `recipe_json`) — issue #529's server-authoritative
+# crafting. This crate must NOT grow a second matcher: the client's is already
+# version-free game logic, and two independent readings of the recipe format is
+# exactly how the two ends drift apart.
+#
+# This revisits the "keep `lodestone-game` out of this graph" note above, and
+# the reason it is now the right call is measurable: `lodestone-game`'s own
+# `[dependencies]` are `lodestone-model` + `uuid` (+ optional `serde_json`,
+# which this crate already carries), so the browser bundle gains that crate's
+# code and no new transitive graph at all. The `json` feature is what the
+# bundled corpus loader needs.
+lodestone-game = { path = "../lodestone-game", features = ["json"] }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
 # `tracing::warn!` in `tick::run_tick_loop`'s overload path (issue #285) — the

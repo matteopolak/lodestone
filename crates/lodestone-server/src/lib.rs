@@ -118,6 +118,10 @@ pub mod chunk_nbt;
 mod chunk_store;
 mod command;
 mod composter;
+/// Issue #529: the server-authoritative crafting grid and the bundled recipe
+/// corpus it re-derives a result from. Public because a host may want to read
+/// the corpus, and because `CraftingState` is named by the container plumbing.
+pub mod crafting;
 pub mod ecs;
 /// Issue #530: sounds, particles and level events the server owns. Public
 /// because `ServerProtocol`'s three new encoders name [`effects::WorldEffect`].
@@ -245,6 +249,7 @@ pub use hopper::{
 pub use integrated::IntegratedServer;
 #[cfg(not(target_arch = "wasm32"))]
 pub use integrated::{LanConfig, LanDiscovery};
+pub use crafting::{BUNDLED_CRAFTING_RECIPES, CraftingState, recipe_book};
 pub use inventory::{HOTBAR_SIZE, OFFHAND_NATIVE, PLAYER_NATIVE_SIZE, PlayerInventory};
 pub use loot::{LootContext, LootTable, LootTableBuilder, LootTableResolver, LootTableSet, roll_loot};
 pub use mob_spawn::{
