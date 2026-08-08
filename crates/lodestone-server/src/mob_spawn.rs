@@ -328,33 +328,40 @@ pub fn check_despawn(
 
 /// A concrete mob the caller proposes to spawn at a position.
 ///
-/// The version/terrain-dependent decisions — *which* mob type, at *what* valid
-/// position, with what body — are made by the [`SpawnCandidateSource`]; this is
-/// just the version-free result the spawn driver needs to instantiate a mob.
+/// The version/terrain-dependent decisions — *which* species, at *what* valid
+/// position — are made by the [`SpawnCandidateSource`]; this is just the result
+/// the spawn driver needs to instantiate a mob. The mob's **body** is not here on
+/// purpose: it follows from the species, and
+/// [`MobSim::spawn_species`](crate::MobSim::spawn_species) already resolves it
+/// from the real 26.2 census along with the species' attributes and goal set. A
+/// candidate carrying its own shape invited two answers to one question.
 #[derive(Debug, Clone)]
 pub struct SpawnCandidate {
     /// Where to place the mob (a validated, ground-supported position).
     pub pos: Vec3,
-    /// The mob's collision body (drives path validity).
-    pub shape: MobShape,
-    /// Blocks per tick the follower advances (derived from movement speed).
-    pub step_per_tick: f64,
-    /// A\* open-set budget (`floor(follow_range * 16)`).
-    pub visited_budget: i32,
+    /// Which species — a vanilla entity id such as `minecraft:sheep`.
+    pub entity_type: lodestone_model::ResourceKey,
 }
 
-/// The seam supplying the version/registry/terrain half of natural spawning.
+/// The seam supplying the registry/terrain half of natural spawning.
 ///
-/// Injected by the caller (the singleplayer shell) because "which mob spawns
-/// here, and is this a legal spawn position" needs biome spawn lists, light
-/// levels, and the entity registry — knowledge this version-free crate must not
-/// embed. The driver only ever asks for a candidate *after* it has confirmed the
-/// category is under its cap, so a source need not repeat the cap check.
+/// Injected by the caller because "which mob spawns here, and is this a legal
+/// spawn position" needs biome spawn lists, light levels and the entity registry —
+/// knowledge this module must not embed. [`crate::natural_spawn::NaturalSpawner`]
+/// is the production implementer. The driver only ever asks *after* it has
+/// confirmed the category is under its cap, so a source need not repeat the cap
+/// check.
 pub trait SpawnCandidateSource {
-    /// Propose a mob of `category` to spawn near chunk `(cx, cz)`, or `None` if
-    /// nothing suitable can spawn there this cycle (wrong biome, too bright, no
-    /// valid ground, or simply a declined random roll).
-    fn candidate(&mut self, category: MobCategory, cx: i32, cz: i32) -> Option<SpawnCandidate>;
+    /// Propose the mobs of `category` that spawn in chunk `(cx, cz)` this cycle,
+    /// or an empty vector when nothing can (wrong biome, too bright, no valid
+    /// ground, or simply a declined random roll).
+    ///
+    /// **A group, not a single mob**, because vanilla's
+    /// `NaturalSpawner.spawnCategoryForChunk` is a cluster loop whose RNG draw
+    /// order and count *is* the spawn rate. Returning one mob per call would let
+    /// the driver interleave cap checks into the middle of a group's draws, which
+    /// changes the stream and therefore the rates.
+    fn cluster(&mut self, category: MobCategory, cx: i32, cz: i32) -> Vec<SpawnCandidate>;
 }
 
 /// A tiny deterministic RNG (SplitMix64) for the spawn driver and its tests, so

@@ -15,8 +15,10 @@
 //!
 //! Both are hermetic and deterministic, so they always run (no skip path).
 
+use std::str::FromStr;
+
 use lodestone_entity::pathfinding::MobShape;
-use lodestone_model::Vec3;
+use lodestone_model::{ResourceKey, Vec3};
 use lodestone_server::{
     ChunkWorld, MobCategory, MobSim, SpawnCandidate, SpawnCandidateSource, SpawnRng,
 };
@@ -30,20 +32,20 @@ struct AlwaysSpawns {
 }
 
 impl SpawnCandidateSource for AlwaysSpawns {
-    fn candidate(&mut self, _category: MobCategory, cx: i32, cz: i32) -> Option<SpawnCandidate> {
+    /// One candidate per call, not a real cluster: the cap is what must stop this
+    /// source, so a group would only make the arithmetic harder to read.
+    fn cluster(&mut self, _category: MobCategory, cx: i32, cz: i32) -> Vec<SpawnCandidate> {
         // Spread mobs out so positions are distinct; the value is irrelevant to
         // cap accounting, which is what this source feeds.
         self.next_x += 1.0;
-        Some(SpawnCandidate {
+        vec![SpawnCandidate {
             pos: Vec3::new(
                 self.next_x + f64::from(cx) * 16.0,
                 0.0,
                 f64::from(cz) * 16.0,
             ),
-            shape: MobShape::land(0.6, 1.95),
-            step_per_tick: 0.15,
-            visited_budget: 400,
-        })
+            entity_type: ResourceKey::from_str("minecraft:zombie").expect("static key"),
+        }]
     }
 }
 

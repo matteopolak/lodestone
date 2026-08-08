@@ -62,11 +62,11 @@ with an accessor and no reader is the island this module exists to stop creating
 | `block_drops` | `server.rs`'s block-break arm, vanilla's own gate site inside `Block.dropResources` |
 | `mob_drops` | `MobSim::reap_dead`, via `set_mob_drops` (the sim is version-free and holds no world handle, so the loop hands it the flag) |
 | **difficulty** | `run_tick_loop`: **Peaceful discards every hostile mob**, vanilla's `Mob.checkDespawn`. Difficulty's first real reader ever |
+| `spawn_mobs` | `run_tick_loop`'s natural-spawn cycle (issues #221/#222 — the getter had waited for a pass to gate; see [`natural-mob-spawning.md`](./natural-mob-spawning.md)) |
 
-`spawn_mobs` and `keep_inventory` have accessors and **no** reader, and that is
-recorded rather than hidden: there is no natural-spawn pass in the tick loop to
-gate, and no death-drop path to keep an inventory through. Adding an accessor
-without a decision point is not progress.
+`keep_inventory` has an accessor and **no** reader, and that is recorded rather
+than hidden: there is no death-drop path to keep an inventory through. Adding an
+accessor without a decision point is not progress.
 
 ### Persistence
 

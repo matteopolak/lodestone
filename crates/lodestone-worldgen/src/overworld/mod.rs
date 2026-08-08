@@ -768,6 +768,18 @@ impl OverworldGenerator {
         self.spawners_by_biome.get(biome)
     }
 
+    /// Every biome's parsed `MobSpawnSettings`, biome name to settings.
+    ///
+    /// The whole table, for a runtime spawner that needs it keyed by the biome
+    /// name it reads off a served column rather than one lookup at a time — the
+    /// consumer [`biome_spawners`](Self::biome_spawners)' doc used to say did not
+    /// exist. Borrowed, so a caller that must own it (one holding no generator,
+    /// e.g. a server tick loop) clones deliberately.
+    #[must_use]
+    pub fn all_biome_spawners(&self) -> &HashMap<String, crate::spawners::BiomeSpawners> {
+        &self.spawners_by_biome
+    }
+
     /// `MultiNoiseBiomeSource.getNoiseBiome(qx, qy, qz)` at an arbitrary quart
     /// cell, sampled fresh rather than read out of a generated chunk.
     ///
