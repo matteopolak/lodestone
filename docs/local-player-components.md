@@ -188,6 +188,79 @@ phase. The resource survives as the derived two-bit gate it already was.
   The consequence today: a plugin adding a `GameTick` system has to pick which
   `App`.
 
+## Four driver-pushed resources (issues #201, #206, #208)
+
+`PlayerCollision`, `Profile` and `NearbyEntities` were the original "the driver
+knows this, physics needs it" resources. Four more joined them, all with the same
+shape — the driver writes once per tick before `run_schedule(GameTick)`, a
+`TickSet::Physics` system carries the value into `PlayerState`:
+
+| resource | default | driver source | consumer |
+|---|---|---|---|
+| `AutoJump(bool)` | **`true`** | `Options::auto_jump` | `player_physics` → `PlayerState::auto_jump_enabled` |
+| `GliderEquipped(bool)` | `false` | `Sim::glider_equipped` (chest armour slot) | `update_fall_flying_state` |
+| `FireworkBoost(u32)` | `0` | `Sim::use_item_live` | `tick_firework_boost` |
+| `ItemUseTicks(Option<u32>)` | `None` | `Sim::use_item_live` arms, `Sim::end_use_live` takes | `tick_item_use` |
+
+### `AutoJump` is a bug fix, not a feature (#201)
+
+Auto-jump was **already implemented** — `lodestone_physics::update_auto_jump` is
+a full port of `LocalPlayer.updateAutoJump`, swept look-ahead probe, headroom
+raycast and the `-0.15F` facing-vs-moving dot product included. Its one gate is
+`PlayerState::auto_jump_enabled`, which defaults to `true` and whose only setter
+(`with_auto_jump`) was called **from tests only**. Meanwhile `sim/step.rs` held a
+*second*, deliberately simplified probe in front of it, correctly gated on the
+option.
+
+So the option suppressed the simplification and the real detector armed a jump
+anyway: **auto-jump could not be turned off.** Two implementations, and the
+ungated one won — the same shape as a hand-rolled command parser sitting in front
+of a complete command tree.
+
+The fix is this resource plus one line in `player_physics`, and the deletion of
+the shell probe (and of `InputState::auto_jump_requested`, whose only producer it
+was — an input bit with no producer is the island shape in reverse). The gate is
+`lodestone-physics`' `tests/auto_jump_facing_gate.rs`, which brackets the `-0.15`
+constant from either side, plus
+`player::tests::the_auto_jump_option_off_really_stops_the_detector` here, which is
+the assertion that was impossible to satisfy before.
+
+`true` as the default is deliberate: it is both vanilla's option default and
+`PlayerState`'s own field default, so every harness that adds `LocalPlayerPlugin`
+without pushing the option is bit-identical to before. The *shell's*
+`Options::auto_jump` defaults to `false`; that is the shell's choice, and it now
+actually reaches physics.
+
+### Glide state is client-authoritative on the way in and predicted on the way out (#206)
+
+`update_fall_flying_state` runs **before** `player_physics` (vanilla does both
+before `travel()`) and does two things:
+
+- **start**: on the jump-key rising edge, `lodestone_physics::try_start_fall_flying`
+  — `!isFallFlying() && canGlide() && !isInWater()`. Vanilla's client sets the
+  shared flag itself and tells the server afterwards, which is what
+  `send_fall_flying_command` does.
+- **stop**: `lodestone_physics::update_fall_flying`, the `!canGlide()` branch of
+  `LivingEntity.updateFallFlying`. Vanilla runs that **server-side only** and
+  syncs the cleared flag back; this client has no server that tracks glide state,
+  so it is predicted. Without it, landing leaves `fall_flying` set,
+  `lodestone_physics::tick` keeps routing to `tick_elytra`, and the player can
+  never walk again.
+
+The edge uses its own `WasJumpingGlide` component rather than `WasJumping`,
+because `apply_creative_flight_input` overwrites that one at the end of its body —
+a later system in the same tick would see this tick's value and never observe an
+edge. **Two consumers of one edge need two latches**, and the failure is silent.
+
+`send_fall_flying_command` is registered at the **tail of the `TickSet::Physics`
+chain**, not in `TickSet::Send`. Vanilla sends `START_FALL_FLYING` from inside
+`aiStep`, before `sendPosition()`, so this reproduces the wire order — and
+mechanically it *has* to be here, because it writes `ResMut<ActionQueue>` and this
+crate cannot name `lodestone_controller`'s two `Send` writers to order against
+(the controller depends on this crate). An unordered second `ActionQueue` writer
+in `Send` fails `exactly_one_system_writes_movement_intent`'s ambiguity build,
+which is how it was caught.
+
 ## What deliberately did not move, and why
 
 - **`Mining` and `Placement`.** [`bevy-migration.md`](./bevy-migration.md) Stage 2

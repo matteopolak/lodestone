@@ -232,13 +232,14 @@ is which subsystem each row needs. Measured while wiring #444:
 |---|---|---|
 | `discreteMouseScroll` | **nothing new** — `app`'s wheel boundary already existed | **live since #444** |
 | `toggleAttack`, `toggleUse` | `InputState::set_toggle_modes` widened to four flags, `Sim::set_toggle_modes` to match, then one line in `app/redraw.rs` | `lodestone-controller` + `lodestone-shell/src/sim/**` |
-| `autoJump`, `sprintWindow` | a physics/timing consumer that does not exist yet | `sim/**` |
+| `autoJump` | **live since #201** — the consumer existed all along (`lodestone_physics::update_auto_jump`); what was missing was a seam to its `auto_jump_enabled` gate, now `lodestone_ecs::player::AutoJump`. A *second*, simplified probe in `sim/step.rs` was gated on the option while the real detector was not, so the option could not turn auto-jump off; that probe is deleted | `lodestone-ecs` + `sim/**` |
+| `sprintWindow` | a timing consumer that does not exist yet | `sim/**` |
 | `rawMouseInput`, `allowCursorChanges` | **no subsystem at all** — this shell never changes the OS cursor and has no raw-input mode to toggle | not a wiring job |
 
 The load-bearing correction: **#444's premise that all six rows pass through one
 line (`app/redraw.rs`'s `set_toggle_modes` call) is false.** Only `toggleAttack`
 and `toggleUse` do. `discreteMouseScroll` goes through the wheel handler,
-`autoJump`/`sprintWindow` need sim consumers, and the last two have no consumer to
-reach. So "unblock that one line and wire all six" is not a plan that exists —
+`sprintWindow` needs a sim consumer, `autoJump` needed a *seam* rather than a
+consumer (see its row), and the last two have no consumer to reach. So "unblock that one line and wire all six" is not a plan that exists —
 each tier is separate work, and the bottom tier should be closed as won't-do until
 a subsystem exists rather than given a row.

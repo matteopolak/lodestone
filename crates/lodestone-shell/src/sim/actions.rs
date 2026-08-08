@@ -27,7 +27,26 @@
 
 use super::*;
 // Issue #109's veto registry -- see `attack_entity`.
+use lodestone_ecs::player::{FireworkBoost, ItemUseTicks};
 use lodestone_ecs::veto::{ActionVetoes, VerbContext, Verdict};
+
+/// `TridentItem.THROW_THRESHOLD_TIME` (`TridentItem.java:29`) — how long the use
+/// button must be held before a release does anything at all. Issue #208.
+const RIPTIDE_MIN_HELD_TICKS: u32 = 10;
+
+/// The deterministic part of `FireworkRocketEntity`'s lifetime for a standard
+/// 1-gunpowder rocket: `10 * flightCount` with `flightCount = 1 +
+/// flightDuration = 2` (`FireworkRocketEntity.java:61-69`). See
+/// [`Sim::start_firework_boost_if_gliding`] for the two random terms this
+/// deliberately omits and why. Issue #206.
+const FIREWORK_BOOST_TICKS: u32 = 20;
+
+/// `minecraft:riptide`'s holder id in the synced `minecraft:enchantment`
+/// registry, derived from the alphabetical position of
+/// `data/minecraft/enchantment/riptide.json` among 26.2's 43 built-in
+/// enchantments (33rd, so id `32`). See [`Sim::riptide_level`] for why this is a
+/// derived index rather than a name lookup, and what breaks it. Issue #208.
+const RIPTIDE_ENCHANTMENT_ID: i32 = 32;
 
 impl Sim {
     /// Break the currently targeted block (set it to air) and remesh. Returns
@@ -503,16 +522,224 @@ impl Sim {
     /// the server has no `useItem` in progress — but there is nothing to
     /// justify sending it for.
     pub(crate) fn end_use_live(&mut self) {
-        let was_using = self.write(|w| {
-            let mut using = w.resource_mut::<UsingItem>();
-            std::mem::replace(&mut using.0, false)
+        let (was_using, held_ticks) = self.write(|w| {
+            let was_using = {
+                let mut using = w.resource_mut::<UsingItem>();
+                std::mem::replace(&mut using.0, false)
+            };
+            // Issue #208: taken (not read) whether or not the release is
+            // actionable, so a use that ends for any reason cannot leave a
+            // duration behind for an unrelated later one to inherit.
+            let held = w.resource_mut::<ItemUseTicks>().0.take();
+            (was_using, held)
         });
         if !was_using {
             return;
         }
+        // Issue #208. Before the send, because vanilla's own order is the same:
+        // `MultiPlayerGameMode.releaseUsingItem` runs the client's
+        // `LivingEntity.releaseUsingItem` — which is what calls
+        // `TridentItem.releaseUsing` and applies the launch locally — and the
+        // `RELEASE_USE_ITEM` packet is the server being told afterwards. The
+        // riptide launch is client-predicted in vanilla, which is why it feels
+        // instant, and reproducing that ordering is what keeps our reported
+        // position and the server's replay in step.
+        self.maybe_riptide(held_ticks.unwrap_or(0));
         if let Some(net) = &self.net {
             net.send_action(ClientAction::ReleaseUseItem);
         }
+    }
+
+    /// Native inventory index of the chest armour slot — `36..=39` is
+    /// feet/legs/chest/head in this crate's native ordering (`lodestone_game::
+    /// menu`'s module table), so the chestplate is **38**, not vanilla's own
+    /// `Inventory` index.
+    const CHEST_ARMOUR_NATIVE_INDEX: usize = 38;
+
+    /// Whether some equipment slot holds a glider, for
+    /// [`lodestone_physics::can_glide`] (issue #206).
+    ///
+    /// Vanilla walks every `EquipmentSlot` looking for a
+    /// `DataComponents.GLIDER` component (`LivingEntity.canGlideUsing`,
+    /// `LivingEntity.java:4002`). Two deliberate narrowings:
+    ///
+    /// * **the chest slot only.** Vanilla's loop is over equipment slots, and in
+    ///   practice `minecraft:elytra`'s `minecraft:equippable` names `chest`, so a
+    ///   held elytra does not glide. Checking every slot would need the whole
+    ///   equippable table; checking the backpack would let an elytra in slot 20
+    ///   fly.
+    /// * **the item id, not the component.** This client's [`ItemStack`]
+    ///   components carry damage, enchantments and a custom name, not
+    ///   `minecraft:glider`, so the id is the available proxy. A data pack that
+    ///   puts `minecraft:glider` on something else will not glide here — a
+    ///   feature gap, not a wrong answer, and the fix is a component decode
+    ///   rather than anything in this function.
+    #[must_use]
+    pub(crate) fn glider_equipped(&self) -> bool {
+        self.player_menu()
+            .player_native(Self::CHEST_ARMOUR_NATIVE_INDEX)
+            .filter(|stack| !stack.is_empty())
+            .is_some_and(|stack| stack.item().to_string() == "minecraft:elytra")
+    }
+
+    /// Start a firework-rocket elytra boost if the held item is a rocket and we
+    /// are gliding (issue #206).
+    ///
+    /// # Duration, and the one part of it that cannot be predicted
+    ///
+    /// Vanilla's rocket lives `10 * flightCount + random.nextInt(6) +
+    /// random.nextInt(7)` ticks, `flightCount = 1 + fireworks.flightDuration()`
+    /// (`FireworkRocketEntity.java:57-69`), and boosts on every one of them while
+    /// the holder is fall-flying. The two `nextInt` terms are rolled on the
+    /// **server's** RNG, and the vanilla *client* never computes them at all: its
+    /// copy of the rocket comes from `ClientboundAddEntityPacket` with
+    /// `lifetime = 0`, and `if (life > lifetime && level instanceof ServerLevel)`
+    /// means the client's rocket simply keeps boosting until the server removes
+    /// the entity.
+    ///
+    /// This client tracks no rocket entity (it does not decode
+    /// `DATA_ATTACHED_TO_TARGET`), so it predicts the deterministic floor —
+    /// `10 * flightCount` — and no more. The consequence is a boost about five
+    /// ticks shorter than vanilla's average, never longer; since the player is
+    /// authoritative over their own position there is nothing to desync, only a
+    /// slightly weaker boost. Decoding the rocket's attachment is the real fix
+    /// and it is a protocol change, not one here.
+    ///
+    /// `flightDuration` itself is a `minecraft:fireworks` component this client
+    /// does not decode either, so `flightCount` is the standard 1-gunpowder
+    /// rocket's `2` — 20 ticks.
+    fn start_firework_boost_if_gliding(&mut self) {
+        if !self.player().fall_flying {
+            return;
+        }
+        let held = self
+            .player_menu()
+            .player_native(self.selected_slot())
+            .filter(|stack| !stack.is_empty())
+            .map(|stack| stack.item().to_string());
+        if held.as_deref() != Some("minecraft:firework_rocket") {
+            return;
+        }
+        self.write(|w| w.resource_mut::<FireworkBoost>().0 = FIREWORK_BOOST_TICKS);
+    }
+
+    /// `TridentItem.releaseUsing`'s riptide branch (`TridentItem.java:61-110`),
+    /// issue #208 — the driver `lodestone_physics::apply_riptide` was written
+    /// for and never had.
+    ///
+    /// All three gates vanilla checks before the impulse, evaluated here because
+    /// none of them is physics state:
+    ///
+    /// | vanilla | here |
+    /// |---|---|
+    /// | `timeHeld >= 10` | `held_ticks`, counted by `tick_item_use` |
+    /// | `getTridentSpinAttackStrength(stack, player) > 0` | [`Self::riptide_level`] × [`lodestone_physics::riptide_spin_attack_strength`] |
+    /// | `isInWaterOrRain() && !isPassenger()` | [`Self::is_in_water_or_rain`], and the passenger component |
+    ///
+    /// A dry-land release with a Riptide trident therefore does nothing at all
+    /// here, exactly as in vanilla — the wet gate is a real gate, not a
+    /// decoration on the impulse.
+    fn maybe_riptide(&mut self, held_ticks: u32) {
+        if held_ticks < RIPTIDE_MIN_HELD_TICKS {
+            return;
+        }
+        let level = self.riptide_level();
+        let strength = lodestone_physics::riptide_spin_attack_strength(level);
+        if strength <= 0.0 {
+            return;
+        }
+        if !self.is_in_water_or_rain() {
+            return;
+        }
+        let profile = self.profile();
+        let collision = self.tick_collision();
+        let lodestone_ecs::player::PlayerCollision::View(source) = &collision else {
+            return;
+        };
+        let source = std::sync::Arc::clone(source);
+        let mut player = self.player();
+        source.with_view(&mut |view| {
+            lodestone_physics::apply_riptide(&mut player, view, &profile, strength);
+        });
+        self.player_mut(|p| {
+            p.velocity = player.velocity;
+            p.position = player.position;
+            p.auto_spin_attack_ticks = player.auto_spin_attack_ticks;
+        });
+    }
+
+    /// The Riptide level on the held stack, or `0`.
+    ///
+    /// # Why this is an id comparison against a hardcoded index
+    ///
+    /// [`lodestone_model::ItemEnchantment`] carries the **session-scoped
+    /// `minecraft:enchantment` registry id**, not a name, and nothing in this
+    /// client resolves that registry: the id → name table *is* decoded (the v770
+    /// adapter's `ClientRegistries::entry_names`) but is never emitted as a
+    /// `ClientEvent`, so the shell cannot see it. `crate::entities`' own doc
+    /// records the same gap for the enchantment level a rendered item wants.
+    ///
+    /// Until an `EnchantmentRegistryNames` event exists, the id is derived the
+    /// one way the wire allows: **dynamic registries arrive sorted by resource
+    /// location** (measured on the creative oracle for `dimension_type` — see
+    /// `crates/protocol/v770/src/packets/registry.rs`'s module doc), and 26.2
+    /// ships 43 built-in enchantments, of which `riptide` is the **33rd**
+    /// alphabetically (`data/minecraft/enchantment/*.json`, C-locale sorted) —
+    /// holder id `32`.
+    ///
+    /// **What this is wrong about, and how it fails.** A data pack that adds or
+    /// removes an enchantment sorting before `riptide` shifts every id, and this
+    /// would then read some *other* enchantment's level. It fails toward
+    /// launching on the wrong trident, not toward launching without one, so it is
+    /// a real limitation — recorded in `docs/riptide-and-firework-boost.md` with
+    /// the fix (emit the registry names, then match on `"minecraft:riptide"`).
+    #[must_use]
+    fn riptide_level(&self) -> u32 {
+        let menu = self.player_menu();
+        let Some(stack) = menu
+            .player_native(self.selected_slot())
+            .filter(|stack| !stack.is_empty())
+        else {
+            return 0;
+        };
+        // `minecraft:enchantable/trident` is the supported-items tag; the only
+        // item in it is the trident itself.
+        if stack.item().to_string() != "minecraft:trident" {
+            return 0;
+        }
+        stack
+            .enchantments()
+            .iter()
+            .find(|enchantment| enchantment.id == RIPTIDE_ENCHANTMENT_ID)
+            .map_or(0, |enchantment| enchantment.level)
+    }
+
+    /// `Entity.isInWaterOrRain()` (`Entity.java:1614-1616`), issue #208.
+    ///
+    /// The water half is exact — the same [`lodestone_physics::FluidState`] the
+    /// tick computed. The rain half is `Level.isRainingAt`, which is
+    /// `isRaining() && canSeeSky(pos) && precipitationAt(pos) == RAIN`; this
+    /// client has **no `canSeeSky`** (`crate::app::weather`'s own doc records the
+    /// same gap for the rain-muffling sound path) and no per-position
+    /// precipitation here, so a non-zero rain level stands in for the whole
+    /// predicate.
+    ///
+    /// It fails toward *allowing* a riptide under a roof, where vanilla's server
+    /// would refuse the launch. The cost is one corrective teleport in that case;
+    /// the alternative — refusing in the open, where riptide is actually used —
+    /// would make the feature unreachable.
+    #[must_use]
+    fn is_in_water_or_rain(&self) -> bool {
+        let submerged = self.read(|w| {
+            w.get::<lodestone_ecs::player::Submersion>(self.local)
+                .is_some_and(|fluid| fluid.0.in_water())
+        });
+        if submerged {
+            return true;
+        }
+        self.net
+            .as_ref()
+            .is_some_and(|net| net.shared_weather().snapshot().rain_level > 0.0)
     }
 
     /// Lower a live right-click into the server's `use_item_on` action **and
@@ -573,6 +800,17 @@ impl Sim {
         // branches, and this client has no equivalent per-item hook to mark
         // it from.
         self.write(|w| w.resource_mut::<UsingItem>().0 = true);
+        // Issue #208: arm vanilla's `timeHeld`, which is what
+        // `TridentItem.releaseUsing` compares against its 10-tick threshold on
+        // the release edge. Zero here and advanced by
+        // `lodestone_ecs::player::tick_item_use`, so the count is in 20 Hz ticks
+        // and not in frames — a 200 fps client must not reach the threshold ten
+        // times sooner than a 20 fps one.
+        self.write(|w| w.resource_mut::<ItemUseTicks>().0 = Some(0));
+        // Issue #206: a firework rocket used while gliding is the boost, and it
+        // is not an interaction with anything the branches below resolve — so it
+        // is decided here, before them, off the held stack alone.
+        self.start_firework_boost_if_gliding();
         // **Entity before block, and this branch is the whole of "get in a boat".**
         // Vanilla's `Minecraft.startUseItem` switches on `hitResult.getType()` and
         // `case ENTITY` comes first (`Minecraft.java`'s `useItem`), the identical
