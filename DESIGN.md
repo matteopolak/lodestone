@@ -7547,3 +7547,92 @@ earlier run showed `singleplayer_persistence::a_session_saves_columns_in_proport
 red; it passed in every later run with no change to that path, so it was another agent's mid-edit state,
 not a regression — §12's "re-run a timing-shaped failure alone before calling it a regression", and the
 same caution applies to a *state*-shaped one on a shared checkout.
+
+---
+
+**12.154 Protocol completeness: the four ways a "complete" wire measurement lied, and the two hand-rolled
+scanners that lied back.** Issue #26 took v770 clientbound decode from **118/141 to 141/141** (emits 116 →
+139, decoded-but-stranded 0 throughout) and #304 took serverbound encode from **54/69 to 67/69**, both
+measured with `cargo xtask connectedness` before and after rather than quoted. Five things are worth keeping,
+and only the first is about packets.
+
+*The tool measures encoders, and an encoder is not a feature.* `connectedness`'s serverbound number counts
+arms in `encode_action`. It cannot see a **producer**, so an encoder with nothing upstream counts as
+coverage — the `SetFlying` shape, now measured four times (`SetFlying`, `ChangeGameMode`, `PlaceRecipe`,
+`PlayerCommand::StartFallFlying`). Grepping the rest of the `PlayerCommand` family after the fourth found
+**four more**: `StopSleeping`, `StartRidingJump`, `StopRidingJump`, `OpenInventory`, all keypress verbs with
+zero producers. **The family was worth checking precisely because one member had already been wrong** —
+that is the cheap generalisation, and it paid immediately. `docs/serverbound-coverage.md` and
+`crates/lodestone-ecs/tests/serverbound_producer_census.rs` hold the seventeen-entry snapshot, each with a
+stated blocker; an entry with no blocker is the defect, because it is one nobody decided about.
+
+*Two hand-rolled scanners were wrong in one session, both in the direction that inflates a claim.* CLAUDE.md
+already says a hand-rolled Rust lexer will be wrong; this is two more instances and they failed differently.
+The producer census's first draft tracked `#[cfg(test)]` line by line and the flag was **sticky**, so it
+tripped on a *comment* mentioning `#[cfg(test)]` at `lodestone-shell/src/sim/session.rs:111` and skipped the
+remaining ~800 lines — including the real `ClientAction::ContainerClose` producer at line 899. It reported
+**21 false gaps**. Removing the tracking left 18, and at least one of *those* was also false: `SignUpdate`
+**is** produced, through `submit.into_action()` (`menu/command_block.rs:541`), an indirection no name scanner
+can follow. So the gate's scope was narrowed to the **hand-verified** set and the eighteen were written down
+as a list to *audit by reading call paths*. A 35-entry snapshot with unverified members is the
+confident-and-wrong claim §12 exists to forbid; **the fix for an untrustworthy instrument is a smaller
+claim, not a bigger allowlist.** Two of the eighteen are not screen-blocked and both have a live failure
+mode: `EndClientTick` (vanilla sends it every tick; the only construction found is in a *test*) and
+`ResourcePackResponse` (no construction anywhere — a server with a `required` pack disconnects a client that
+never answers, which is `SetFlying`'s failure mode exactly).
+
+*Hand-built expectation bytes caught the implementation being right.* `Vec3i.STREAM_CODEC` is three plain
+`ByteBufCodecs.VAR_INT`s and is **not** zigzag. The decoder read it correctly and the first draft of the
+*test* assumed zigzag, so the gate went red with the code correct. That is the direction you want the
+disagreement to run, and it is only available because the expectation came from the record definition
+(`.cache/mc/26.2/src`) rather than from our own encoder — for eighteen clientbound packets there is no
+encoder of ours at all, so `decode(encode(x)) == x` was not merely weak but *unavailable*.
+
+*A fixture naming a real packet id has an expiry date.* `join_flow.rs`'s `unknown_play_packet_is_ignored` had
+been rewritten once already (`BUNDLE_DELIMITER` → `AWARD_STATS`) when #299 gave the first a decoder; #26 gave
+the second one. **Each rewrite asserted the exact defect the next issue fixed**, and each was noticed only
+because the test went red. It now uses an id no version of the protocol can assign. Generalise: a negative
+fixture built from a *currently* unimplemented thing is a test that silently inverts its own meaning the day
+someone implements it.
+
+*The routing fork, twice more, and one apparent exception that is not.* All 24 new variants route to
+`session`, so none needed an arm in `net::forward` and the whole issue landed without a shell edit — the
+island count in `docs/event-routing.md` went `29 of 106` → `29 of 130`, numerator unmoved. Two calls worth
+recording: **`DebugEntityValue` names an entity and is still `session`**, because a debug feed is keyed by
+subscription and outlives the entity's ECS row, so folding it as a component would resurrect rows the client
+already dropped — the convention is about what owns the *lifetime*, not which nouns appear in the packet. And
+**`EnchantmentRegistryNames` is `session` although `BiomeRegistryNames` is `shell`**: a `shell` route obliges
+an unconditional `forward` arm or its `debug_assert!` fires, and `BiomeRegistryNames` predates the
+session-fold convention, so it is **not** a precedent to copy.
+
+Also: `lodestone_game::recipe::RecipeUnlockState` and `RecipeToastQueue` **cannot be fed by the packets they
+were built for.** 26.x identifies a recipe by a per-session `RecipeDisplayId` `i32`; both key on
+`Identifier`. They were written against the pre-26 wire shape, and the decode landing does not connect them —
+a reminder that "the consumer already exists" is a claim about a *type*, not about an identity space.
+
+**12.155 Two islands that were one line from working, and the second was hiding a bigger one.** Issue #301's
+`plugin_channel.rs` was complete and thoroughly tested while **no production `App` registered a single
+channel** — every test builds its own `App` and calls `add_plugin_channel` itself, the closed loop CLAUDE.md
+§1 describes, and `crates/plugins/lodestone-server-brand` was a dependency of *nothing*. Behind it sat the
+real cost: `SharedState` caches `game_event_bus_enabled` **once at construction** and only
+`PluginChannelPlugin::build` adds `GameEventBusPlugin`, so the bus resource was absent and
+`push_to_game_event_bus` was skipped for **every `ClientEvent`**, not just `CustomPayload`. One island
+concealed a strictly larger one, and the honest description of the fix is not "brand decoding works" but
+"the client now has a live `GameEvent` bus".
+
+The fix went into `lodestone_app::client_app()` rather than the shell's tuple, using a **built-in** channel in
+`lodestone-ecs` instead of depending on the example plugin — because `lodestone-app`'s manifest is a closed
+allowlist (`tests/renderer_free_graph.rs`) that exists to keep a headless graph small. **Ownership
+constraints produced the better fix**: every headless consumer gets it too, and no other cluster's file was
+touched. The ~20 lines of duplicated decoder are the stated cost.
+
+Same shape twice more in the same session, both from other agents' decode paths and both *decoded data
+thrown away* rather than missing code: `read_add_player` consumed all three fields of every profile property
+into `let _`, so `minecraft:textures` never left the version crate and **no remote player could have a
+skin**; and the `minecraft:enchantment` registry order was decoded by `entry_names` and never handed on, so
+`Sim::riptide_level` resolved `minecraft:riptide` through a **hardcoded holder id of 32** — right against
+vanilla 26.2, silently wrong against any datapack that reorders, because the id stays valid and still names
+*an* enchantment. **Ask what consumes a decode, not only whether it parses.** The `None` vs `Some(vec![])`
+distinction on the properties carrier is the load-bearing part of the first: `None` means the update had no
+`ADD_PLAYER` and must keep the existing skin, and collapsing the two would clear every remote skin on the
+next latency ping.
