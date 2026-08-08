@@ -491,3 +491,33 @@ tree was swept into an unrelated agent's pathspec commit within minutes. (§12.4
 Write down *why*, and especially write down what was measured. **The most valuable thing in this repo is
 not the code — it is the record of beliefs that were confidently held and turned out to be false.** That
 record is [`DESIGN.md`](./DESIGN.md) §12: the rule goes here, the measurement goes there.
+
+### Cite symbols, never line numbers, and stop cross-referencing issues
+
+**Never write a line number for code in this repo.** Not `server.rs:5189`, not `entities.rs:1398`, not
+in a doc, a comment, a commit message or an issue. **Name the symbol path instead** —
+`lodestone_server::commands::ServerCommands::run`, `Density::is_xz_pure`,
+`ViewTracker::build_batch`. A symbol survives every edit above it; a line number is wrong the next time
+anyone inserts a function, and a *plausible* wrong line number is worse than none because it sends the
+reader somewhere real. Maintaining these has been pure cost: the stale claims that repeatedly waste time
+here are almost all drifted citations rather than wrong ideas, and a decomposition invalidates thousands
+at once.
+
+**Do not cross-reference issue numbers from code comments or docs.** `(issue #415)`, `#520's own doc`,
+`the trap #275 names` — all of it goes. A comment should say what the code does and why, in terms a
+reader of *that file* can check. Issue numbers are tracker bookkeeping with a short half-life: they get
+closed, superseded, renumbered, and split, and none of that reaches the comment. Put the reasoning in the
+comment and let the tracker keep its own history. **Commit messages and issue comments may name an issue**
+— that is where cross-references belong.
+
+Two things this does **not** cover:
+
+- **Vanilla record definitions still get cited, by symbol.** `FireBlock.tick`,
+  `LivingEntityRenderer`'s `yRot`, `Mth.clampedLerp` — the decompile under `.cache/mc/26.2/` is a pinned
+  external source and citing it is how the next reader re-verifies a port. **Drop the `:NNN` there too**;
+  a class-and-method name is just as findable and does not rot when the cache is re-extracted.
+- **Measurements keep their numbers.** §12 exists for figures — allocation counts, instruction counts,
+  hit rates, byte totals, md5s. Those are evidence, not citations, and they are the point of the record.
+
+Prose is still wanted; it is the *pointers* that were the tax. When you touch a file, delete the line
+numbers and issue references you pass and leave the reasoning.
