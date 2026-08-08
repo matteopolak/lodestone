@@ -33,8 +33,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Advancements screen](./advancements-screen.md) — Vanilla's `AdvancementsScreen`
   (issue #167), reached from the pause menu's Advancements button: five tabs, the real
   26.2 advancement tree, connector lines, frames, icons, a tiled per-tab background,
-  panning, and a hover title. Built off the data pack rather than the wire —
-  **everything draws, nothing is obtained.**
+  panning, and the full hover tooltip. The tree *shape* comes off the data pack; the
+  *progress* comes off the wire, so completed advancements really do draw their
+  obtained frames.
 - [Ambient sound loops and client-predicted local sounds](./ambient-sounds.md) — Two
   related pieces of the audio layer, both in `crates/lodestone-sound`:
 - [Arm swing animation](./arm-swing-animation.md) — The arm swing you see when you
@@ -476,7 +477,7 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `server.rs` reports the result — including the `player_combat_kill` packet that
   actually raises the client's death screen, and the `respawn` packet that closes it
   again.
-- [Filled map item rendering (issue #184) — the decode has landed](./filled-map-item.md) —
+- [Filled map item rendering (issue #184) — the wire and the fold are landed, the renderer is not](./filled-map-item.md) —
   Issue #184 asks for the filled map item's own visual: the generated per-map pixel
   texture, player/marker icons, and the border frame, whether held, in an item frame,
   or shown as a GUI icon.
@@ -1237,6 +1238,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   Only the **General** tab (vanilla's 77 fixed stats — time, distance, damage,
   counters) is a real scrollable list; **Items** and **Mobs** are
   present-and-inactive.
+- [Structure chests](./structure-chests.md) — The server-side pass that fills a
+  generated structure's chests with rolled loot (issue #337): shipwrecks, ocean ruins
+  and igloos place real blocks since the worldgen `structure` S2 unit, and every one
+  of them arrived with an **empty** chest — or, for an ocean ruin, no chest at all.
+  `crates/lodestone-server/src/structure_loot.rs` is vanilla's
+  `TemplateStructurePiece.postProcess` data-marker pass plus the three
+  `handleDataMarker` overrides it dispatches to.
 - [Swimming](./swimming.md) — The water-movement port: how the client integrates a
   swimming player, and — the actual defect this work started from — why
   sprint-swimming didn't work even though the client believed it was sprinting the
@@ -1385,6 +1393,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `MinecraftServer.setInitialSpawn` plus `PlayerSpawnFinder.getLevelRespawnPos`. It
   also holds the per-player bed respawn point (`RespawnPoint`) and the set-time
   legality check applied before one is accepted.
+- [World state: game rules, difficulty and the clock](./world-state.md) — One
+  shared, persistable store for the world's *scalars* —
+  `crates/lodestone-server/src/world_state.rs` — closing issues #327 (game rules),
+  #328 (difficulty) and #323 (time simulation). Those were the same defect three
+  times: **stored-and-broadcast is not enforced, and per-connection is not stored.**
 - [One bevy `World` — §4.1(c)](./world-unification.md) — Until this change the
   process held **three** `bevy_ecs::World`s: the net thread's
   (`lodestone_client::state::SharedState`, authoritative over the network read-model),
