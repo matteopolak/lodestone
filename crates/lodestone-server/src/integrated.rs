@@ -138,6 +138,44 @@ impl LanSubscriber {
     }
 }
 
+/// Environment variable that re-enables [`crate::mobs::seed_demo_mobs`]'s
+/// population for a debug session. Any value, including empty, enables it.
+pub const DEMO_MOBS_ENV: &str = "LODESTONE_DEMO_MOBS";
+
+/// How many demo mobs a world actually gets, given what its caller asked for.
+///
+/// **Zero, unless [`DEMO_MOBS_ENV`] is set.**
+///
+/// # Why the constructor's own argument is not simply honoured
+///
+/// `seed_demo_mobs` is not spawning; it is a fixed ring of six mobs — zombie, cow,
+/// wolf, blaze, **guardian**, creeper — placed around the world spawn once, at
+/// world open, to give issue #217's computed AI motion something to move (see
+/// `crate::mobs::DEMO_SPECIES`, which says so). It was always a development
+/// fixture, and it shipped: a new singleplayer world greeted the player with a
+/// guardian flopping about on dry land next to a blaze.
+///
+/// The honest end state is that the two production constructors take no such
+/// argument at all, and their `mob_count` parameter is removed along with
+/// `lodestone-shell`'s literal `6` at the call site in `net.rs`. That is a
+/// cross-crate change; this function is the server-side half, and it is complete
+/// on its own — a caller passing `6` now gets zero mobs, so the shell's value has
+/// no effect either way and the two halves can land independently.
+///
+/// Real mob **spawning** (issues #222/#221) is a different feature entirely and is
+/// what should eventually populate a world. `MobSim` and every roster table stay
+/// exactly as they are: this removes a hardcoded fixture, not the simulation.
+/// `MobSim::run_spawn_cycle` is still the seam a real
+/// `SpawnCandidateSource` plugs into.
+#[must_use]
+pub fn demo_mob_count(requested: usize) -> usize {
+    if std::env::var_os(DEMO_MOBS_ENV).is_some() {
+        requested
+    } else {
+        0
+    }
+}
+
 /// Spawns `fut` racing against `shutdown`'s notification — whichever finishes
 /// first ends the task. The unified background tick loop
 /// [`open_in_memory_with_mobs`](IntegratedServer::open_in_memory_with_mobs)
@@ -405,7 +443,12 @@ impl IntegratedServer {
     /// into the sim's `ChunkWorld` snapshot — pick a range that covers
     /// `mob_center` with room to path around in; it does not grow later (see
     /// the scope note on `mobs::run_mob_tick_loop`). `mob_center` is the block
-    /// `(x, z)` mobs are seeded around; `mob_count` is how many.
+    /// `(x, z)` demo mobs are seeded around.
+    ///
+    /// **`mob_count` is a debug request, not an instruction.** It is routed through
+    /// [`demo_mob_count`], which answers `0` unless [`DEMO_MOBS_ENV`] is set, so a
+    /// world opened by a player has no demo population however large a number is
+    /// passed here. Read that function before changing this.
     ///
     /// Native only, like [`bind`](Self::bind) — the tick loop's timer needs
     /// `tokio::time`, unavailable on `wasm32` (see `mobs::run_mob_tick_loop`'s
@@ -608,11 +651,13 @@ impl IntegratedServer {
             // index-for-index with the coordinates it was given, which is what
             // makes this zip correct rather than merely plausible — see its own
             // doc comment on why it returns a `Vec` and not a map.
+            // `demo_mob_count(mob_count)`, not `mob_count`: singleplayer is a game,
+            // not a demo harness. See that function.
             seed_mobs.reseed(
                 ChunkWorld::from_columns(seed_coords.into_iter().zip(columns)),
                 center_x,
                 center_z,
-                mob_count,
+                demo_mob_count(mob_count),
             );
             // Read the clock **once**: the previous form called `elapsed()` twice, so
             // the logged parts did not sum to the logged total. `saturating_sub` for
