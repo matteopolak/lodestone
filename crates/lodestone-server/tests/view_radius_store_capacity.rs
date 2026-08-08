@@ -382,7 +382,7 @@ async fn drive_slider<T: Transport>(
         .await
         .expect("finish configuration");
 
-    let join_columns = drain_one_batch(client).await;
+    let join_columns = drain_join_view(client, view_columns(view_radius)).await;
     ack_batch(client).await;
 
     // The slider goes down, then back up.
@@ -445,6 +445,28 @@ async fn ack_batch<T: Transport>(client: &mut Connection<T>) {
 /// Asserts the marker's own count matches the packets seen: a batch that
 /// silently sent fewer columns than it claimed would make every number below
 /// smaller and read as a pass.
+/// Reads a whole **join** view — which is no longer one batch.
+///
+/// The innermost `JOIN_PRESTREAM_RADIUS` rings are sent before the play loop
+/// starts, so that the player can act while the rest streams from the loop in
+/// `JOIN_STREAM_BATCH_COLUMNS`-sized batches. Every batch's marker is still
+/// checked against the columns inside it (by [`drain_one_batch`], which this
+/// drives); what this adds is "keep going until the view is complete", because a
+/// join's batch *count* is now an implementation detail while its column count is
+/// not.
+async fn drain_join_view<T: Transport>(client: &mut Connection<T>, expected: usize) -> usize {
+    let mut seen = 0usize;
+    while seen < expected {
+        seen += drain_one_batch(client).await;
+    }
+    assert_eq!(
+        seen, expected,
+        "the join's batches must sum to exactly the view — a batch that overshot would mean a \
+         column was sent twice"
+    );
+    seen
+}
+
 async fn drain_one_batch<T: Transport>(client: &mut Connection<T>) -> usize {
     let (id, payload) = client.read_packet().await.expect("read").expect("packet");
     assert_eq!(id, CHUNK_BATCH_START, "a batch must open with its marker");
@@ -810,7 +832,7 @@ async fn join_then_raise_then_probe(join_radius: i32, raised_radius: i32) -> Obs
         .await
         .expect("finish configuration");
 
-    let join_columns = drain_one_batch(&mut client).await;
+    let join_columns = drain_join_view(&mut client, view_columns(join_radius)).await;
     ack_batch(&mut client).await;
 
     // The raise. Everything from ring `join_radius + 1` outward is new, so this

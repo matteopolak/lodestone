@@ -82,9 +82,91 @@ columns, and the join loop generates and encodes one ring before asking for the
 next. So the first chunk is encoded after **one** column of generation instead of
 361, and terrain grows outward from the player rather than inward from a corner.
 
-Still one chunk batch, not one per ring — the `begin_chunk_batch` /
-`end_chunk_batch` markers stay outside the loop, so the client's issue-#270 flow
-control sees exactly the sequence it always did.
+### The join no longer stands in front of the play loop
+
+*"For the integrated server, I don't think it should be generating all chunks on
+join before doing anything else. For example I can't break blocks, take damage,
+etc. until it finishes."* — and that was structural. Everything above is about the
+*order* of the burst; none of it moved the burst out of the way. All `(2r + 1)²`
+columns (1,089 at `view_radius = 16`) were generated **and encoded** inline in
+`serve_connection_inner`'s `ConfigurationFinished` arm, before control ever reached
+`serve_play`, the loop that dispatches play packets. So every interaction queued
+behind the whole initial generation burst.
+
+The split now is:
+
+| | where | how much |
+|---|---|---|
+| pre-stream | inline, before `serve_play` | rings `0..=JOIN_PRESTREAM_RADIUS` — **9 columns** |
+| the rest | a `select!` branch *inside* `serve_play` | everything else, in `JOIN_STREAM_BATCH_COLUMNS`-sized batches |
+
+That is vanilla's shape: `PlayerList.placeNewPlayer` adds the player to the level
+and `PlayerChunkSender` feeds chunks over subsequent ticks. Nine columns rather
+than vanilla's one because this crate has already paid for a spawn-safety bug
+once (player spawns above terrain, falls, reaches zero health with no death
+screen), so the column the player stands on *and* the eight they can step onto are
+on the wire before anything they do can matter.
+
+The carrier is `join_scheduler::JoinChunkStream`, one variant per `SourceRef` arm,
+and `serve_play`'s branch is disabled on `is_done()` so a drained stream is not a
+branch that returns `None` forever. Both arms' `next` had to become
+**cancel-safe**, because a `select!` drops the losing branch's future: the windowed
+arm now awaits its front `JoinHandle` *by reference* and pops only once the column
+is in hand. Popping first — fine while it was only ever driven to completion —
+would silently lose a column from the wire on every cancellation.
+
+**One batch became many, deliberately.** A single `begin`/…/`end` pair cannot span
+a stream that outlives the join without wrapping everything else the play loop
+sends, so the deferred half is batched — which is vanilla's own shape, and what
+`ChunkBatchSizeCalculator` exists to pace (our client answers each
+`chunk_batch_finished` with its desired rate: `ChunkBatchState` in
+`crates/protocol/v770/src/adapter.rs`). The deferred batches are **not** gated on
+`awaiting_chunk_batch_ack`: that gate exists so a *reactive*, unbounded stream
+cannot outrun a client, whereas the join is a finite set the client is already
+owed, and gating it would make delivering the world depend on a reply that no
+`ServerProtocol` fixture in this crate sends — a hang rather than a mismatch.
+
+### Generating where the player is looking, and re-sorting when they move
+
+*"For chunkgen we need it to be smarter — it should generate chunks first where
+the user is looking, and if the player moves it should properly generate the
+closer chunks first."*
+
+Two blockers had to go first: nothing threaded the player's yaw into view
+tracking, and `ColumnPipeline` walked a *fixed* list, so "the player moved,
+re-sort" had nowhere to happen. Both are gone — the pipeline now drains a
+`join_scheduler::ColumnQueue`, and `serve_play` re-keys it from the pose each
+inbound packet delivers.
+
+The key is `(Chebyshev distance, in-frustum penalty, ring-walk index)`:
+
+- **distance is primary, and that is the anti-starvation property.** A column at
+  distance `d` *behind* the player still precedes every column at distance
+  `d + 1`, in view or not. Pure frustum-first would let a slowly spinning player
+  starve what is behind them and then show a hole when they turn round; vanilla is
+  deliberately distance-based for the same reason.
+- **the frustum bonus reorders within a ring only** — a 120° cone (generous
+  against vanilla's ~106° horizontal FOV, so a column about to rotate into view is
+  already generated), with rings 0 and 1 always counted as in view.
+- **the tie-break is the ring-walk index**, which is why *this changed no existing
+  wire order*: with no rotation known — the state at join, and the state of every
+  ordering gate in this crate — the key reduces to the ring walk exactly.
+
+Re-prioritisation is called on every inbound packet and must therefore be cheap:
+it re-sorts only when the player's centre chunk changes or their yaw crosses one
+of 16 quantised sectors, and a sort of ≤ 1,089 integer keys is microseconds. The
+in-flight columns are deliberately not re-ordered — there are at most
+`generation_window()` of them and they were the best choice when they were
+spawned — so the granularity of a re-prioritisation is one window, which is also
+what keeps the emitted order a function of the queue rather than of which worker
+finished first.
+
+`ViewTracker::build_batch` — the move-time counterpart — now orders on the same
+key rather than its old lexicographic `sort_unstable`, so walking into new terrain
+fills nearest-first exactly like joining does.
+
+**Content determinism is untouched by all of this**: a column's content is a
+function of its coordinates and the seed, never of generation order.
 
 ### The recovery loop this also unblocks
 
@@ -103,10 +185,28 @@ either fix.
   *groups* is the half that fixes latency; a flat proximity-sorted `Vec` would
   satisfy every ordering assertion and leave time-to-first-chunk exactly as bad.
   The gate below catches this specifically, via the generation counter.
-- **Do not re-sort `ViewTracker::build_batch`.** Its lexicographic
-  `sort_unstable` is there for byte-reproducibility. Proximity belongs at the
-  enumeration/dispatch layer. The recentring path is left alone deliberately —
-  its diffs are ~19 columns per boundary crossing, not 361.
+- **`ViewTracker::build_batch` orders by distance now, and the old rule here said
+  not to.** It read *"do not re-sort `build_batch`; its lexicographic
+  `sort_unstable` is there for byte-reproducibility"* — which conflated
+  *reproducible* with *lexicographic*. What byte-reproducibility needs is a **total
+  order that is a function of the pose**, and `view_order_key` is one; the
+  lexicographic sort merely happened to be the first such order anyone wrote. If
+  you change this, keep that property: never order by anything a `HashSet`
+  iteration or a completion time can influence.
+- **A join's batch count is an implementation detail; its column count is not.**
+  Any test that reads a fixed number of `CHUNK` packets and then expects the
+  marker is asserting the pre-split shape. Drain until the columns are accounted
+  for instead (`drain_join_view` in `serve_play.rs` and
+  `view_radius_store_capacity.rs`, `collect_join_chunks` for the counter-carrying
+  probe protocol).
+- **Do not gate the deferred join stream on `ChunkBatchAcknowledged`.** It looks
+  like the missing half of issue #270 and it is not — see above. The failure mode
+  is a 30-second test timeout, the least diagnosable shape available.
+- **`JoinChunkStream::next` and `ColumnPipeline::next` are `select!` branches, so
+  cancel safety is a correctness requirement, not a nicety.** Anything that
+  removes work from the stream before that work has been *emitted* loses a column
+  silently: the client is short one chunk, no gate in this crate counts packets
+  per batch on the production path, and the hole appears in the world.
 - **Order within a ring must stay a pure function of `view_radius`.** It is the
   same `dz`-outer/`dx`-inner walk, filtered — which is what keeps the emitted
   byte sequence independent of thread scheduling and of which `SourceRef` arm
@@ -155,6 +255,11 @@ alone on an identical release binary while counts stayed byte-identical.
 | `integrated.rs`: `world_open_generates_no_columns_at_all` | the constructor generates **0** columns | **49** |
 | `integrated.rs`: `seeding_generates_each_tick_area_column_exactly_once` | every tick-area column generated exactly once | 2 each |
 | `serve_play.rs`: `join_streams_the_view_outward_from_the_players_own_column` | `(0, 0)` encoded first; ≤1 column generated when it was; non-decreasing Chebyshev distance | first column `(-9, -9)` |
+| `serve_play.rs`: `a_play_packet_is_serviced_before_the_last_join_chunk` | a difficulty change sent immediately after configuration is answered after **< 40** of 361 join chunks (observed ~9), and the view still arrives whole and in order | **361** — the reply cannot precede the last chunk, because the loop that produces it has not started |
+| `serve_play.rs`: `a_move_streams_the_new_columns_nearest_first` | a diagonal jump's added columns arrive non-decreasing in distance from the *new* centre, nearest first | first column `(4, -1)` at distance 3 |
+| `join_scheduler.rs`: `distance_is_the_primary_key_so_a_spinning_player_cannot_starve_a_ring` | a near column behind the player beats a far one in front | — (unit) |
+| `join_scheduler.rs`: `the_facing_cone_orders_within_a_ring` | the in-frustum half of a ring is its prefix — the control for the row above, which would otherwise pass on an ordering that ignores rotation entirely | — (unit) |
+| `join_scheduler.rs`: `an_unknown_facing_emits_the_ring_order_unchanged` | with no rotation, the priority queue *is* the ring walk — what lets the two wire-order gates keep asserting a fixed sequence | — (unit) |
 | `server.rs`: `join_view_rings_partitions_the_square_exactly` | ring sizes `1, 8, …, 8r` summing to `(2r+1)²`, no column on two rings | — (unit) |
 | `server.rs`: `join_view_rings_at_radius_zero_is_a_single_column`, `…_at_a_negative_radius_is_empty` | the two edge radii | — (unit) |
 

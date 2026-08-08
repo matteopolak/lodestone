@@ -88,20 +88,292 @@
 //! across the two arms is the **wire order**, which is what the client sees and
 //! what both `805a1fb` gates assert.
 //!
-//! # What this module does *not* change
+//! # The wire order, which this module now *does* decide
 //!
-//! The wire order. `crate::server`'s `join_view_rings` still decides it, this
-//! pipeline emits strictly in the order it was handed, and
-//! `the_shared_arm_streams_the_view_outward_too` /
-//! `join_streams_the_view_outward_from_the_players_own_column` still gate it on
-//! both `SourceRef` arms. Emitting in *completion* order would be the natural
-//! mistake and it is what
-//! `tests::control_completion_order_is_not_input_order` exists to reject.
+//! It used to be `crate::server`'s `join_view_rings` alone. Two things changed
+//! that, and neither weakens the property the gates protect:
+//!
+//! * the join no longer finishes before the play loop starts — the innermost
+//!   rings go out inline and the rest becomes a [`JoinChunkStream`] the play loop
+//!   drains, so the *pending* set outlives the moment its order was chosen;
+//! * a pending set that outlives that moment can be re-keyed, which is what
+//!   "generate where the player is looking, and re-sort when they move" needs
+//!   ([`ColumnQueue`], [`priority_key`]).
+//!
+//! So the order is now `(Chebyshev distance, in-frustum bonus, ring-walk index)`.
+//! With **no rotation known** — every client that has not yet sent a movement
+//! packet, which includes every ordering gate in this crate — that key reduces to
+//! the ring walk exactly, because distance *is* the ring index and the tie-break
+//! *is* the given order. Distance stays primary so the frustum bonus can only
+//! reorder within a ring: a near column behind the player always beats a far one
+//! in front, which is what stops a slowly spinning player starving what is behind
+//! them.
+//!
+//! Emitting in *completion* order would still be the natural mistake, and it is
+//! still what `tests::control_completion_order_is_not_input_order` exists to
+//! reject: the pipeline chooses priority at **spawn** time and emits in spawn
+//! order, so the emitted sequence is a function of the queue rather than of which
+//! worker happened to finish first.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::chunk::{ChunkColumn, ChunkSource};
+use crate::server::SourceRef;
+
+/// Half-angle, in degrees, of the horizontal cone counted as "the player is
+/// looking at this column" by [`ColumnQueue`]'s frustum bonus.
+///
+/// Generous on purpose. Vanilla's default 70° *vertical* FOV is roughly 106°
+/// horizontal at 16:9, so a 60° half-angle (120° total) is the real view plus a
+/// margin — a column that is about to rotate into view should already have been
+/// generated. Over-including costs ordering precision within one distance band
+/// and nothing else; under-including shows the player a hole in the direction
+/// they are actually facing, which is the whole complaint this exists to answer.
+const FRUSTUM_HALF_ANGLE_DEGREES: f32 = 60.0;
+
+/// How finely a yaw is quantised before it counts as "the player turned".
+///
+/// 16 sectors of 22.5°. This is a *re-sort trigger*, not part of the ordering:
+/// the frustum test itself uses the raw yaw. Quantising means a player panning
+/// smoothly re-sorts the pending set ~16 times per revolution rather than once
+/// per movement packet, which is the cheap half of "re-prioritisation must be
+/// cheap" (the other half is that a sort of ≤ 1,089 `(i32, u8, u32)` keys is
+/// microseconds).
+const YAW_SECTORS: f32 = 16.0;
+
+/// Chebyshev (chess-king) ring index of `coord` around `centre` — **the same
+/// distance `crate::server`'s `join_view_rings` orders on**, which is what makes
+/// a distance-ordered queue with an unknown facing byte-identical to the fixed
+/// ring walk it replaced.
+#[must_use]
+fn ring_distance(centre: (i32, i32), coord: (i32, i32)) -> i32 {
+    (coord.0 - centre.0).abs().max((coord.1 - centre.1).abs())
+}
+
+/// Whether `coord` lies inside the horizontal cone a player at `centre` facing
+/// `yaw_degrees` can see, in Minecraft's yaw convention (0 = +Z, 90 = −X).
+///
+/// The player's own column and its eight neighbours are always "in view": the
+/// direction vector to them is degenerate or dominated by the player's own
+/// position within the column, and they are the ground under the player's feet
+/// either way.
+#[must_use]
+fn in_frustum(centre: (i32, i32), yaw_degrees: f32, coord: (i32, i32)) -> bool {
+    if ring_distance(centre, coord) <= 1 {
+        return true;
+    }
+    let yaw = yaw_degrees.to_radians();
+    // Minecraft's yaw: 0 looks towards +Z, 90 towards −X.
+    let (fx, fz) = (-yaw.sin(), yaw.cos());
+    let (dx, dz) = (
+        (coord.0 - centre.0) as f32,
+        (coord.1 - centre.1) as f32,
+    );
+    let len = (dx * dx + dz * dz).sqrt();
+    if len == 0.0 {
+        return true;
+    }
+    let cosine = (fx * dx + fz * dz) / len;
+    cosine >= FRUSTUM_HALF_ANGLE_DEGREES.to_radians().cos()
+}
+
+/// The pending-column ordering: **distance first, in-frustum bonus second**.
+///
+/// Returned as a sort key rather than a comparator so the ordering is a total,
+/// deterministic function of integers — `(ring, penalty, given_index)`:
+///
+/// * `ring` — Chebyshev distance from the current view centre. Primary, and that
+///   is the anti-starvation property: a column at distance `d` *behind* the
+///   player (`(d, 1, _)`) still sorts before every column at distance `d + 1`,
+///   in view or not (`(d + 1, 0, _)`). Pure frustum-first would let a slowly
+///   spinning player starve the columns behind them for minutes, and then show a
+///   hole when they turn round.
+/// * `penalty` — `0` in the facing cone, `1` outside it. This is the whole of
+///   what "generate where the user is looking" means here: it reorders *within* a
+///   ring and can never promote a far column over a near one.
+/// * `given_index` — the column's position in the order the queue was handed,
+///   i.e. the fixed outward ring walk. A deterministic tie-break, and the reason
+///   a queue with **no** known facing emits exactly the ring order: with
+///   `penalty` constant, this key is `(ring, 0, ring_walk_index)`, which is the
+///   ring walk.
+#[must_use]
+fn priority_key(
+    centre: (i32, i32),
+    facing: Option<f32>,
+    coord: (i32, i32),
+    given_index: u32,
+) -> (i32, u8, u32) {
+    let (ring, penalty) = distance_and_penalty(centre, facing, coord);
+    (ring, penalty, given_index)
+}
+
+/// [`priority_key`]'s first two components, which are the ordering proper — the
+/// third is only a tie-break, and a caller with no "given order" needs its own.
+#[must_use]
+fn distance_and_penalty(centre: (i32, i32), facing: Option<f32>, coord: (i32, i32)) -> (i32, u8) {
+    let penalty = match facing {
+        Some(yaw) if in_frustum(centre, yaw, coord) => 0,
+        Some(_) => 1,
+        None => 0,
+    };
+    (ring_distance(centre, coord), penalty)
+}
+
+/// [`priority_key`] for a caller ordering a *set* rather than draining a queue —
+/// `crate::server`'s `ViewTracker::build_batch`, which streams the columns that
+/// became visible when the player moved.
+///
+/// Same two leading components, so a move is ordered exactly like a join; the
+/// tie-break is the coordinate itself, because there is no prior order to inherit
+/// and the wire order still has to be a deterministic function of the pose rather
+/// than of `HashSet` iteration.
+#[must_use]
+pub(crate) fn view_order_key(
+    centre: (i32, i32),
+    facing: Option<f32>,
+    coord: (i32, i32),
+) -> (i32, u8, i32, i32) {
+    let (ring, penalty) = distance_and_penalty(centre, facing, coord);
+    (ring, penalty, coord.0, coord.1)
+}
+
+/// How a [`ColumnQueue`] decides what to hand out next.
+#[derive(Debug, Clone, Copy)]
+enum QueueOrder {
+    /// Exactly the order the coordinates were given. Used by the pre-play-loop
+    /// burst and by this module's own gates, where the input order *is* the
+    /// assertion.
+    AsGiven,
+    /// [`priority_key`] around a centre that moves and a facing that turns.
+    Priority {
+        centre: (i32, i32),
+        facing: Option<f32>,
+        /// The quantised yaw the current ordering was computed for — see
+        /// [`YAW_SECTORS`]. `None` means "no rotation known yet", which is a
+        /// distinct state from "any particular sector".
+        sector: Option<i32>,
+    },
+}
+
+/// The set of columns a join still owes the client, in the order it intends to
+/// generate them — and **re-orderable**, which is the property a plain `Vec`
+/// walk could not offer.
+///
+/// Pops from the back of `pending`, so `pending` is always stored worst-first.
+#[derive(Debug)]
+pub(crate) struct ColumnQueue {
+    /// `(coord, given_index)`, worst priority first: [`pop`](Self::pop) takes the
+    /// last element.
+    pending: Vec<((i32, i32), u32)>,
+    order: QueueOrder,
+}
+
+impl ColumnQueue {
+    /// A queue that hands `coords` back in exactly the order given.
+    #[must_use]
+    pub(crate) fn as_given(coords: Vec<(i32, i32)>) -> Self {
+        let mut pending: Vec<((i32, i32), u32)> = coords
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| (c, u32::try_from(i).unwrap_or(u32::MAX)))
+            .collect();
+        pending.reverse();
+        Self {
+            pending,
+            order: QueueOrder::AsGiven,
+        }
+    }
+
+    /// A queue ordered by [`priority_key`] around `centre`, with `facing` in
+    /// degrees of yaw where the player's rotation is known.
+    ///
+    /// `coords` should be given in the fixed outward ring order: it becomes the
+    /// tie-break, so a queue built this way with `facing: None` emits the ring
+    /// order unchanged.
+    #[must_use]
+    pub(crate) fn prioritised(
+        coords: Vec<(i32, i32)>,
+        centre: (i32, i32),
+        facing: Option<f32>,
+    ) -> Self {
+        let mut queue = Self::as_given(coords);
+        queue.order = QueueOrder::Priority {
+            centre,
+            facing,
+            sector: facing.map(yaw_sector),
+        };
+        queue.sort();
+        queue
+    }
+
+    /// Re-keys the pending set for a player who has moved to `centre` or turned
+    /// to `facing`, returning whether anything was actually re-ordered.
+    ///
+    /// A no-op — and specifically **not** a sort — when neither the centre chunk
+    /// nor the quantised yaw changed, which is the common case on a movement
+    /// packet arriving every few ticks. Also a no-op on an [`AsGiven`
+    /// queue](QueueOrder::AsGiven): the pre-play-loop burst and the gates that
+    /// assert a fixed order must not be re-ordered under them.
+    pub(crate) fn reprioritise(&mut self, centre: (i32, i32), facing: Option<f32>) -> bool {
+        let QueueOrder::Priority {
+            centre: current_centre,
+            facing: current_facing,
+            sector: current_sector,
+        } = self.order
+        else {
+            return false;
+        };
+        let sector = facing.map(yaw_sector);
+        if current_centre == centre && current_sector == sector {
+            // Keep the *old* yaw rather than storing the new one: the stored yaw
+            // is what the ordering was computed from, and overwriting it with a
+            // sub-sector nudge would make a later comparison lie.
+            let _ = current_facing;
+            return false;
+        }
+        self.order = QueueOrder::Priority {
+            centre,
+            facing,
+            sector,
+        };
+        self.sort();
+        true
+    }
+
+    /// The next column to generate, or `None` when the queue is empty.
+    pub(crate) fn pop(&mut self) -> Option<(i32, i32)> {
+        self.pending.pop().map(|(coord, _)| coord)
+    }
+
+    /// How many columns have not been handed out yet.
+    #[must_use]
+    pub(crate) fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    fn sort(&mut self) {
+        let QueueOrder::Priority { centre, facing, .. } = self.order else {
+            return;
+        };
+        // Worst first, so `pop` takes the best. `sort_unstable_by_key` on the
+        // reversed key would need a negation that `u32` cannot express, so the
+        // comparison is reversed instead.
+        self.pending.sort_unstable_by(|a, b| {
+            priority_key(centre, facing, b.0, b.1).cmp(&priority_key(centre, facing, a.0, a.1))
+        });
+    }
+}
+
+/// The quantised yaw sector a rotation falls in — see [`YAW_SECTORS`].
+#[must_use]
+fn yaw_sector(yaw_degrees: f32) -> i32 {
+    if !yaw_degrees.is_finite() {
+        return 0;
+    }
+    let wrapped = yaw_degrees.rem_euclid(360.0);
+    (wrapped / (360.0 / YAW_SECTORS)).floor() as i32
+}
 
 /// How many columns the join burst keeps in flight once primed, derived from the
 /// machine rather than from the view.
@@ -162,29 +434,36 @@ pub fn generation_window_for(parallelism: usize) -> usize {
 /// thread. Same as `crate::chunk::generate_columns_offloaded`'s `cfg`.
 pub struct ColumnPipeline<S> {
     source: Arc<S>,
-    coords: Vec<(i32, i32)>,
-    /// Index of the next coordinate to hand to the pool.
-    next_spawn: usize,
-    /// Index of the next coordinate to emit. `coords[next_emit]` is the position
-    /// paired with the front of `inflight`, which is what makes emission order a
-    /// pure function of `coords`.
-    next_emit: usize,
+    /// What to generate next, and in what order — see [`ColumnQueue`]. A queue
+    /// rather than the `Vec` + cursor this held before, because the *pending*
+    /// half of a join must be re-orderable when the player moves or turns while
+    /// it is still draining.
+    queue: ColumnQueue,
+    /// How many columns this pipeline was built with, so
+    /// [`remaining`](Self::remaining) can be answered without the queue and the
+    /// in-flight set having to agree about who owns a column mid-flight.
+    total: usize,
+    emitted: usize,
     window: usize,
     /// Set once the head column has been emitted. Until then the window is 1.
     primed: bool,
+    /// Each entry is the coordinate paired with the worker generating it, so
+    /// **emission order is the order columns were handed to the pool**, not the
+    /// order they finish in. Pairing them here (rather than indexing a `coords`
+    /// vector) is what lets the spawn order itself be dynamic.
     #[cfg(not(target_arch = "wasm32"))]
-    inflight: VecDeque<tokio::task::JoinHandle<ChunkColumn>>,
+    inflight: VecDeque<((i32, i32), tokio::task::JoinHandle<ChunkColumn>)>,
     #[cfg(target_arch = "wasm32")]
-    inflight: VecDeque<ChunkColumn>,
+    inflight: VecDeque<((i32, i32), ChunkColumn)>,
 }
 
 impl<S> std::fmt::Debug for ColumnPipeline<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ColumnPipeline")
-            .field("columns", &self.coords.len())
+            .field("columns", &self.total)
             .field("window", &self.window)
-            .field("spawned", &self.next_spawn)
-            .field("emitted", &self.next_emit)
+            .field("pending", &self.queue.len())
+            .field("emitted", &self.emitted)
             .field("inflight", &self.inflight.len())
             .finish_non_exhaustive()
     }
@@ -201,15 +480,58 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     /// host's core count.
     #[must_use]
     pub fn with_window(source: Arc<S>, coords: Vec<(i32, i32)>, window: usize) -> Self {
+        let total = coords.len();
+        Self::over(source, ColumnQueue::as_given(coords), total, window)
+    }
+
+    /// A pipeline whose *pending* columns are ordered by distance from `centre`
+    /// with an in-frustum bonus, and can be re-ordered later via
+    /// [`reprioritise`](Self::reprioritise).
+    ///
+    /// With `facing: None` this emits exactly the order `coords` was given in
+    /// (see [`priority_key`]), so handing it the fixed outward ring walk makes it
+    /// a drop-in for [`with_window`](Self::with_window) until a rotation is
+    /// known.
+    #[must_use]
+    pub(crate) fn prioritised(
+        source: Arc<S>,
+        coords: Vec<(i32, i32)>,
+        window: usize,
+        centre: (i32, i32),
+        facing: Option<f32>,
+    ) -> Self {
+        let total = coords.len();
+        Self::over(
+            source,
+            ColumnQueue::prioritised(coords, centre, facing),
+            total,
+            window,
+        )
+    }
+
+    fn over(source: Arc<S>, queue: ColumnQueue, total: usize, window: usize) -> Self {
         Self {
             source,
-            coords,
-            next_spawn: 0,
-            next_emit: 0,
+            queue,
+            total,
+            emitted: 0,
             window: window.max(1),
             primed: false,
             inflight: VecDeque::new(),
         }
+    }
+
+    /// Re-keys the columns not yet handed to the pool for a player who has moved
+    /// or turned, returning whether the order actually changed.
+    ///
+    /// The in-flight set is deliberately **not** re-ordered: those columns are
+    /// already being generated, there are at most [`generation_window`] of them,
+    /// and they were the highest-priority columns at the moment they were
+    /// spawned. So the effective granularity of a re-prioritisation is one
+    /// window, not one column — which is also what keeps the emitted order a
+    /// deterministic function of the queue rather than of who finished first.
+    pub(crate) fn reprioritise(&mut self, centre: (i32, i32), facing: Option<f32>) -> bool {
+        self.queue.reprioritise(centre, facing)
     }
 
     /// The window this pipeline was built with.
@@ -221,36 +543,50 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     /// How many columns have yet to be emitted.
     #[must_use]
     pub fn remaining(&self) -> usize {
-        self.coords.len() - self.next_emit
+        self.total - self.emitted
     }
 
-    /// The next column in coordinate order, or `None` once the view is drained.
+    /// The next column in queue order, or `None` once the view is drained.
     ///
     /// Ordering is load-bearing for the wire and is *not* a property of the pool:
-    /// the front of `inflight` always corresponds to `coords[next_emit]`, so a
-    /// column that finishes early simply sits in the queue.
+    /// the front of `inflight` carries its own coordinate, so a column that
+    /// finishes early simply sits in the queue behind the one that was spawned
+    /// before it.
+    ///
+    /// # Cancel safety
+    ///
+    /// **This is now a `select!` branch** (`crate::server`'s `serve_play` races it
+    /// against the socket read), so being dropped mid-`await` has to be free. It
+    /// is: the front entry is awaited *by reference* and only popped once its
+    /// column is in hand, so a cancelled `next` leaves the pipeline exactly as it
+    /// found it and the next call re-awaits the same worker. Popping first — as
+    /// this did while it was only ever driven to completion — would have dropped
+    /// the `JoinHandle` on cancellation and silently lost that column from the
+    /// wire.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn next(&mut self) -> Option<((i32, i32), ChunkColumn)> {
-        if self.next_emit >= self.coords.len() {
+        if self.remaining() == 0 {
             return None;
         }
         // The first top-up is to 1, not to `window`: issue #453's
         // time-to-first-chunk. See the module doc.
         let target = if self.primed { self.window } else { 1 };
-        while self.inflight.len() < target && self.next_spawn < self.coords.len() {
-            let (cx, cz) = self.coords[self.next_spawn];
+        while self.inflight.len() < target {
+            let Some((cx, cz)) = self.queue.pop() else {
+                break;
+            };
             let source = Arc::clone(&self.source);
             self.inflight
-                .push_back(tokio::task::spawn_blocking(move || source.column(cx, cz)));
-            self.next_spawn += 1;
+                .push_back(((cx, cz), tokio::task::spawn_blocking(move || source.column(cx, cz))));
         }
-        let handle = self
+        let (pos, handle) = self
             .inflight
-            .pop_front()
+            .front_mut()
             .expect("the top-up above spawns at least one column while any remain");
+        let pos = *pos;
         let column = handle.await.expect("worldgen join burst panicked");
-        let pos = self.coords[self.next_emit];
-        self.next_emit += 1;
+        self.inflight.pop_front();
+        self.emitted += 1;
         self.primed = true;
         Some((pos, column))
     }
@@ -258,17 +594,171 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     /// wasm32: no blocking pool, so this is the serial path. See the struct doc.
     #[cfg(target_arch = "wasm32")]
     pub async fn next(&mut self) -> Option<((i32, i32), ChunkColumn)> {
-        if self.next_emit >= self.coords.len() {
+        if self.remaining() == 0 {
             return None;
         }
-        let (cx, cz) = self.coords[self.next_spawn];
-        self.next_spawn += 1;
+        let (cx, cz) = self.queue.pop()?;
         let column = self.source.column(cx, cz);
-        let pos = self.coords[self.next_emit];
-        self.next_emit += 1;
+        self.emitted += 1;
         self.primed = true;
         let _ = &self.inflight;
-        Some((pos, column))
+        Some(((cx, cz), column))
+    }
+}
+
+/// The part of a join view that has **not** been sent by the time the play loop
+/// starts, plus how to finish producing it.
+///
+/// This is the seam that stops the join burst standing in front of the play loop:
+/// `crate::server`'s `serve_connection_inner` streams the innermost rings inline
+/// (so the player has ground under their feet before they can act), builds one of
+/// these for the rest, and `serve_play` drains it from a `tokio::select!` branch
+/// alongside the socket read. Vanilla's shape — `PlayerChunkSender` feeding a
+/// player who is already in the level — rather than "generate the whole view,
+/// then let the player exist".
+///
+/// The two variants are the two [`SourceRef`] arms, and they exist for the reason
+/// the module doc already gives: a borrowed source is not `'static`, so it cannot
+/// be spawned and has nothing for a window to overlap. What they hold identical
+/// is the **order**, not the concurrency.
+#[derive(Debug)]
+pub(crate) enum JoinChunkStream<S> {
+    /// Nothing deferred (a view small enough to have gone out inline), or a
+    /// stream that has since drained.
+    Drained,
+    /// [`SourceRef::Shared`]: the same primed window the inline burst used,
+    /// handed on with its remaining columns and re-orderable while it drains.
+    Windowed(ColumnPipeline<S>),
+    /// [`SourceRef::Borrowed`]: whole rings, generated one ring at a time by the
+    /// caller's own blocking source and emitted one column at a time.
+    Ringed {
+        rings: VecDeque<Vec<(i32, i32)>>,
+        ready: VecDeque<((i32, i32), ChunkColumn)>,
+        remaining: usize,
+    },
+}
+
+impl<S: ChunkSource + 'static> JoinChunkStream<S> {
+    /// The deferred half of a [`SourceRef::Shared`] join: whatever the inline
+    /// burst left in `pipeline`.
+    #[must_use]
+    pub(crate) fn windowed(pipeline: ColumnPipeline<S>) -> Self {
+        if pipeline.remaining() == 0 {
+            Self::Drained
+        } else {
+            Self::Windowed(pipeline)
+        }
+    }
+
+    /// The deferred half of a [`SourceRef::Borrowed`] join: the rings the inline
+    /// burst did not reach.
+    #[must_use]
+    pub(crate) fn ringed(rings: Vec<Vec<(i32, i32)>>) -> Self {
+        let remaining: usize = rings.iter().map(Vec::len).sum();
+        if remaining == 0 {
+            return Self::Drained;
+        }
+        Self::Ringed {
+            rings: rings.into(),
+            ready: VecDeque::new(),
+            remaining,
+        }
+    }
+
+    /// How many columns this stream still owes the client.
+    #[must_use]
+    pub(crate) fn remaining(&self) -> usize {
+        match self {
+            Self::Drained => 0,
+            Self::Windowed(pipeline) => pipeline.remaining(),
+            Self::Ringed { remaining, .. } => *remaining,
+        }
+    }
+
+    /// Whether the client has everything this stream was built to send.
+    ///
+    /// The `select!` branch driving [`next`](Self::next) is disabled on this, so
+    /// it must go `true` exactly when the last column has been *emitted* — a
+    /// stream that reported done early would silently truncate the view, and one
+    /// that reported done late would spin the play loop on a branch that
+    /// immediately returns `None`.
+    #[must_use]
+    pub(crate) fn is_done(&self) -> bool {
+        self.remaining() == 0
+    }
+
+    /// Re-keys the pending columns for a player who has moved to chunk `centre`
+    /// or turned to `facing` (degrees of yaw), returning whether anything moved.
+    ///
+    /// A no-op on the [`Ringed`](Self::Ringed) arm, which generates whole rings
+    /// by construction: its unit of work is a ring, so there is no per-column
+    /// order to change without splitting the batches that arm exists to keep.
+    /// That arm serves the `&S`-shaped tests, and with a stationary player both
+    /// arms emit the identical sequence either way (see [`priority_key`]).
+    pub(crate) fn reprioritise(&mut self, centre: (i32, i32), facing: Option<f32>) -> bool {
+        match self {
+            Self::Windowed(pipeline) => pipeline.reprioritise(centre, facing),
+            Self::Drained | Self::Ringed { .. } => false,
+        }
+    }
+
+    /// The next column, or `None` once drained.
+    ///
+    /// `source` is only read on the [`Ringed`](Self::Ringed) arm — the
+    /// [`Windowed`](Self::Windowed) arm owns its own `Arc`. Passing it per call
+    /// rather than storing it is what keeps this type free of the borrowed
+    /// source's lifetime, so it can live in `serve_play`'s frame.
+    ///
+    /// # Cancel safety
+    ///
+    /// Both arms are safe to drop mid-`await`, which they must be to sit in a
+    /// `select!`: [`ColumnPipeline::next`] documents its own, and the `Ringed`
+    /// arm's `generate` is `generate_columns_parallel` — synchronous work inside
+    /// an `async fn`, so it has no suspension point to be cancelled at, and the
+    /// ring is only popped once its columns are buffered.
+    pub(crate) async fn next(
+        &mut self,
+        source: SourceRef<'_, S>,
+    ) -> Option<((i32, i32), ChunkColumn)> {
+        match self {
+            Self::Drained => None,
+            Self::Windowed(pipeline) => {
+                let next = pipeline.next().await;
+                if next.is_none() {
+                    *self = Self::Drained;
+                }
+                next
+            }
+            Self::Ringed {
+                rings,
+                ready,
+                remaining,
+            } => {
+                while ready.is_empty() {
+                    // An exhausted ring list with a non-zero `remaining` cannot
+                    // happen (the count is the rings' own total), but resolving it
+                    // to `Drained` rather than to a bare `None` matters: the
+                    // `select!` branch is disabled on `is_done`, so a stream that
+                    // reported work it could not produce would spin the play loop.
+                    let Some(ring) = rings.front().cloned() else {
+                        *remaining = 0;
+                        *self = Self::Drained;
+                        return None;
+                    };
+                    let columns = source.generate(ring.clone()).await;
+                    for (coord, column) in ring.into_iter().zip(columns) {
+                        ready.push_back((coord, column));
+                    }
+                    rings.pop_front();
+                }
+                let emitted = ready.pop_front()?;
+                *remaining = remaining.saturating_sub(1);
+                if *remaining == 0 {
+                    *self = Self::Drained;
+                }
+                Some(emitted)
+            }
+        }
     }
 }
 
@@ -318,6 +808,160 @@ mod tests {
             .map(|i| Duration::from_millis(((n - i) * 4) as u64))
             .collect();
         (coords, delays)
+    }
+
+    /// The fixed outward ring walk, restated here so the queue gates can be read
+    /// without `crate::server` — and identical to `join_view_rings` flattened,
+    /// which is what makes "no facing emits the ring order" a real claim.
+    fn ring_walk(radius: i32) -> Vec<(i32, i32)> {
+        let mut coords = Vec::new();
+        for r in 0..=radius {
+            for dz in -r..=r {
+                for dx in -r..=r {
+                    if dx.abs().max(dz.abs()) == r {
+                        coords.push((dx, dz));
+                    }
+                }
+            }
+        }
+        coords
+    }
+
+    fn drain(mut queue: ColumnQueue) -> Vec<(i32, i32)> {
+        let mut out = Vec::new();
+        while let Some(coord) = queue.pop() {
+            out.push(coord);
+        }
+        out
+    }
+
+    /// With no rotation known, a prioritised queue is byte-identical to the ring
+    /// walk it was handed. This is what keeps the join's wire order unchanged for
+    /// every client that has not sent a movement packet yet, and it is why the
+    /// frustum bonus could be added without changing what a fresh join looks like.
+    #[test]
+    fn an_unknown_facing_emits_the_ring_order_unchanged() {
+        let coords = ring_walk(4);
+        let queue = ColumnQueue::prioritised(coords.clone(), (0, 0), None);
+        assert_eq!(drain(queue), coords);
+    }
+
+    /// **Distance is the primary key**, so no amount of looking one way can
+    /// starve the other. Asserted as the property rather than as a fixed
+    /// sequence: every popped column is at least as far as the one before it, and
+    /// the ring bands are therefore contiguous.
+    #[test]
+    fn distance_is_the_primary_key_so_a_spinning_player_cannot_starve_a_ring() {
+        let radius = 5;
+        // Yaw 0 is due +Z in Minecraft's convention, so this player is looking at
+        // the columns with positive `dz`.
+        let order = drain(ColumnQueue::prioritised(ring_walk(radius), (0, 0), Some(0.0)));
+        assert_eq!(order.len(), ((2 * radius + 1) * (2 * radius + 1)) as usize);
+
+        let mut previous = 0;
+        for &coord in &order {
+            let distance = ring_distance((0, 0), coord);
+            assert!(
+                distance >= previous,
+                "{coord:?} at distance {distance} follows distance {previous}: an in-frustum \
+                 bonus must never promote a far column over a near one, or a player who turns \
+                 round finds a hole that was deprioritised for minutes"
+            );
+            previous = distance;
+        }
+
+        // The concrete form of the same claim, and the one that fails under a
+        // pure frustum-first scheduler: the *worst* column in ring 3 (directly
+        // behind the player) still precedes the *best* column in ring 4
+        // (directly in front).
+        let behind = order
+            .iter()
+            .position(|&c| c == (0, -3))
+            .expect("the column directly behind the player at distance 3 is in the view");
+        let ahead = order
+            .iter()
+            .position(|&c| c == (0, 4))
+            .expect("the column directly in front of the player at distance 4 is in the view");
+        assert!(
+            behind < ahead,
+            "a near column behind the player must beat a far column in front of them"
+        );
+    }
+
+    /// …and *within* a ring the facing cone really does win, or the whole feature
+    /// is inert. The control for the assertion above: if this failed, the
+    /// distance-monotonicity gate would be satisfied by an ordering that ignores
+    /// the player's rotation entirely.
+    #[test]
+    fn the_facing_cone_orders_within_a_ring() {
+        let order = drain(ColumnQueue::prioritised(ring_walk(5), (0, 0), Some(0.0)));
+        let ring: Vec<(i32, i32)> = order
+            .into_iter()
+            .filter(|&c| ring_distance((0, 0), c) == 5)
+            .collect();
+        let front = ring
+            .iter()
+            .position(|&c| c == (0, 5))
+            .expect("directly in front is in ring 5");
+        let back = ring
+            .iter()
+            .position(|&c| c == (0, -5))
+            .expect("directly behind is in ring 5");
+        assert!(
+            front < back,
+            "within one ring, the column the player is looking at must be generated before the \
+             one behind them; got in-front at {front} and behind at {back}"
+        );
+
+        // The whole in-frustum half of the ring precedes the whole out-of-frustum
+        // half — a single-column comparison could be satisfied by a tie-break
+        // accident.
+        let split = ring
+            .iter()
+            .position(|&c| !in_frustum((0, 0), 0.0, c))
+            .expect("a 120° cone cannot contain a whole ring");
+        assert!(
+            ring[..split].iter().all(|&c| in_frustum((0, 0), 0.0, c)),
+            "the in-frustum columns of a ring must form its prefix"
+        );
+    }
+
+    /// Re-prioritisation is meant to be called on every movement packet, so the
+    /// common case must not sort: it re-sorts when the player crosses a chunk
+    /// boundary or turns into a new yaw sector, and does nothing otherwise.
+    #[test]
+    fn reprioritisation_only_fires_when_the_centre_or_the_sector_moves() {
+        let mut queue = ColumnQueue::prioritised(ring_walk(3), (0, 0), Some(0.0));
+        assert!(
+            !queue.reprioritise((0, 0), Some(0.0)),
+            "an identical centre and yaw must not re-sort"
+        );
+        assert!(
+            !queue.reprioritise((0, 0), Some(10.0)),
+            "a sub-sector nudge (10° of 22.5°) must not re-sort"
+        );
+        assert!(
+            queue.reprioritise((0, 0), Some(90.0)),
+            "a quarter turn is a new sector and must re-sort"
+        );
+        assert!(
+            queue.reprioritise((1, 0), Some(90.0)),
+            "crossing a chunk boundary must re-sort"
+        );
+        // And the new centre is what the order is keyed on afterwards.
+        let order = drain(queue);
+        let mut previous = 0;
+        for &coord in &order {
+            let distance = ring_distance((1, 0), coord);
+            assert!(distance >= previous, "{coord:?} is out of order about (1, 0)");
+            previous = distance;
+        }
+
+        // An `as_given` queue is never re-ordered, whatever it is told: the
+        // pre-play-loop burst and this module's own ordering gates run on one.
+        let mut fixed = ColumnQueue::as_given(ring_walk(2));
+        assert!(!fixed.reprioritise((9, 9), Some(180.0)));
+        assert_eq!(drain(fixed), ring_walk(2));
     }
 
     #[test]

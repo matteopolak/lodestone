@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use lodestone_core::{Reader, State, Writer};
 use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Vec3};
-use lodestone_net::{Connection, NetError, memory_pair};
+use lodestone_net::{Connection, NetError, Transport, memory_pair};
 use lodestone_server::{
     BlockEntityHandle, BlockTickFeed, ChunkColumn, ChunkSource, ChunkWorld, ExplosionFeed,
     MetadataField, MobHandle, MobSim, NoEntities, ServerBound, ServerDirective, ServerError,
@@ -539,19 +539,54 @@ async fn drive_login_and_join(
         "join sequence must send the full time sync before any chunk"
     );
 
-    let (id, payload) = client.read_packet().await.expect("read").expect("packet");
-    assert_eq!(id, CHUNK_BATCH_START);
-    assert!(payload.is_empty());
+    // The view arrives across **one or more** batches: the innermost
+    // `JOIN_PRESTREAM_RADIUS` rings go out before the play loop starts and the
+    // rest streams from it in `JOIN_STREAM_BATCH_COLUMNS`-sized batches, so a
+    // single begin/…/end pair only happens for a view small enough to fit in the
+    // pre-stream. What every caller of this helper needs is unchanged: the whole
+    // view has arrived, accounted for by markers, before the test proper begins.
+    let batches = drain_join_view(client, expected_chunks).await;
+    assert_eq!(
+        batches.iter().sum::<i32>(),
+        expected_chunks as i32,
+        "the join view's batch markers must account for exactly {expected_chunks} columns"
+    );
+}
 
-    for _ in 0..expected_chunks {
-        let (id, _payload) = client.read_packet().await.expect("read").expect("packet");
-        assert_eq!(id, CHUNK);
+/// Reads `expected_chunks` `CHUNK` packets and the batch markers around them,
+/// returning each marker's reported size. Skips anything else the server sends
+/// while the view is streaming.
+///
+/// The payload-blind counterpart of [`collect_join_chunks`], for the `FakeProtocol`
+/// clients whose chunk packets carry no generation counter to read.
+async fn drain_join_view<T: Transport>(
+    client: &mut Connection<T>,
+    expected_chunks: usize,
+) -> Vec<i32> {
+    let mut batches = Vec::new();
+    let mut seen = 0usize;
+    let mut in_batch = 0usize;
+    while seen < expected_chunks {
+        let (id, payload) = client.read_packet().await.expect("read").expect("packet");
+        if id == CHUNK_BATCH_START {
+            assert!(payload.is_empty());
+            in_batch = 0;
+        } else if id == CHUNK {
+            seen += 1;
+            in_batch += 1;
+        } else if id == CHUNK_BATCH_FINISHED {
+            let reported = Reader::new(&payload).var_i32().unwrap();
+            assert_eq!(reported as usize, in_batch, "batch marker/packet mismatch");
+            batches.push(reported);
+        }
     }
-
+    // The marker closing the batch the last column landed in.
     let (id, payload) = client.read_packet().await.expect("read").expect("packet");
-    assert_eq!(id, CHUNK_BATCH_FINISHED);
-    let mut r = Reader::new(&payload);
-    assert_eq!(r.var_i32().unwrap(), expected_chunks as i32);
+    assert_eq!(id, CHUNK_BATCH_FINISHED, "the last batch must be closed");
+    let reported = Reader::new(&payload).var_i32().unwrap();
+    assert_eq!(reported as usize, in_batch);
+    batches.push(reported);
+    batches
 }
 
 /// Reads every packet already available (or that arrives within a short,
@@ -992,6 +1027,92 @@ async fn player_moved_streams_view_across_several_chunk_boundaries() {
         HashSet::from([(12, -1), (12, 0), (12, 1)]),
         "expected exactly the new column to be sent"
     );
+
+    drop(client);
+    let _ = server.await.unwrap();
+}
+
+/// **"If the player moves it should properly generate the closer chunks first."**
+///
+/// A move's newly-visible columns must reach the wire ordered by distance from the
+/// player's *new* column, not lexicographically by `(cx, cz)`.
+///
+/// # The two hypotheses, and why this jump was chosen
+///
+/// The subject is a diagonal jump from chunk `(0, 0)` to `(2, 2)` at
+/// `view_radius = 3`, which is the smallest move whose added set contains columns
+/// at *different* distances — a straight one-axis step adds a single strip, all of
+/// it equidistant, and could not tell the two orderings apart. The added set is
+/// every column of `[-1, 5]²` outside `[-3, 3]²`, whose distances from `(2, 2)`
+/// are 2 and 3.
+///
+/// | ordering | first column sent |
+/// |---|---|
+/// | lexicographic (`sort_unstable`, the old behaviour) | `(4, -1)` — distance **3**, a corner behind the player |
+/// | distance-first (`join_scheduler::view_order_key`) | distance **2** |
+///
+/// So the assertion is on the first column's distance *and* on monotonicity: the
+/// first alone would be satisfied by a shuffle, and monotonicity alone would be
+/// satisfied by a set that happened to be equidistant.
+#[tokio::test]
+async fn a_move_streams_the_new_columns_nearest_first() {
+    let view_radius = 3;
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &source,
+            &NoEntities,
+            view_radius,
+            &BlockEntityHandle::default(),
+            &MobHandle::default(),
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Diagonal", 49).await;
+    send_chunk_batch_received(&mut client, 10.0).await;
+
+    // Block (40, 64, 40) is chunk (2, 2).
+    send_player_moved(&mut client, 40.0, 64.0, 40.0).await;
+    let moved = drain_available(&mut client).await;
+    let added: Vec<(i32, i32)> = moved
+        .iter()
+        .filter(|(id, _)| *id == CHUNK)
+        .map(|(_, payload)| {
+            let mut r = Reader::new(payload);
+            (r.var_i32().unwrap(), r.var_i32().unwrap())
+        })
+        .collect();
+    assert!(
+        !added.is_empty(),
+        "a two-chunk diagonal jump must send new columns"
+    );
+
+    let distance = |(cx, cz): (i32, i32)| (cx - 2).abs().max((cz - 2).abs());
+    assert_eq!(
+        distance(added[0]),
+        2,
+        "the first column of a move must be one of the nearest ones; got {:?} at distance {}. \
+         Lexicographic order would send (4, -1) at distance 3 first",
+        added[0],
+        distance(added[0])
+    );
+    let mut previous = 0;
+    for &coord in &added {
+        let d = distance(coord);
+        assert!(
+            d >= previous,
+            "{coord:?} at distance {d} follows a column at distance {previous}: a move's batch \
+             must be non-decreasing in distance from the player's new column"
+        );
+        previous = d;
+    }
 
     drop(client);
     let _ = server.await.unwrap();
@@ -1835,6 +1956,81 @@ fn chebyshev(cx: i32, cz: i32) -> i32 {
     cx.abs().max(cz.abs())
 }
 
+/// Reads the whole join view off the wire, in wire order, tolerating everything
+/// else the server sends while it is doing so.
+///
+/// Returns `(observed, batch_sizes)` — `observed` is
+/// `(cx, cz, columns_generated_when_encoded)` for [`check_proximity_stream`], and
+/// `batch_sizes` is what each `CHUNK_BATCH_FINISHED` marker *reported*.
+///
+/// # Why this replaced a positional read
+///
+/// The join no longer finishes before the play loop starts: the innermost rings go
+/// out inline and the rest streams from `serve_play` beside everything else it
+/// sends, in batches of `JOIN_STREAM_BATCH_COLUMNS`. So the two things the old
+/// loop assumed — that chunk packets are contiguous, and that one begin/end pair
+/// wraps the lot — are gone *by design*, and a gate asserting them would be
+/// asserting the absence of the fix.
+///
+/// What still has to hold is asserted here rather than dropped:
+///
+/// * every chunk arrives **inside** an open batch (a stray chunk outside a
+///   begin/end pair would break a real client's flow-control accounting);
+/// * each marker's reported size equals the columns actually inside that batch;
+/// * the chunk *order* is untouched, which the caller checks with the same
+///   [`check_proximity_stream`] the pre-fix control is judged by.
+async fn collect_join_chunks<T: Transport>(
+    client: &mut Connection<T>,
+    expected: usize,
+) -> (Vec<(i32, i32, usize)>, Vec<i32>) {
+    let mut observed = Vec::with_capacity(expected);
+    let mut batch_sizes = Vec::new();
+    let mut in_batch = false;
+    let mut counted = 0usize;
+    while observed.len() < expected {
+        let (id, payload) = client
+            .read_packet()
+            .await
+            .expect("read")
+            .expect("the server must not close mid-view");
+        if id == CHUNK_BATCH_START {
+            assert!(!in_batch, "a batch opened inside another batch");
+            in_batch = true;
+            counted = 0;
+        } else if id == CHUNK {
+            assert!(in_batch, "a chunk arrived outside a begin/end batch pair");
+            let mut r = Reader::new(&payload);
+            let cx = r.var_i32().unwrap();
+            let cz = r.var_i32().unwrap();
+            let at = r.var_i32().unwrap() as usize;
+            observed.push((cx, cz, at));
+            counted += 1;
+        } else if id == CHUNK_BATCH_FINISHED {
+            assert!(in_batch, "a batch closed without opening");
+            let reported = Reader::new(&payload).var_i32().unwrap();
+            assert_eq!(
+                reported as usize, counted,
+                "the batch marker reported {reported} columns but {counted} chunk packets \
+                 arrived in it"
+            );
+            batch_sizes.push(reported);
+            in_batch = false;
+        }
+    }
+    // The tail marker for the batch the last chunk landed in.
+    if in_batch {
+        let (id, payload) = client.read_packet().await.expect("read").expect("packet");
+        assert_eq!(
+            id, CHUNK_BATCH_FINISHED,
+            "the last chunk's batch must be closed"
+        );
+        let reported = Reader::new(&payload).var_i32().unwrap();
+        assert_eq!(reported as usize, counted);
+        batch_sizes.push(reported);
+    }
+    (observed, batch_sizes)
+}
+
 /// The detector, factored out so the **same** code judges the real join and the
 /// synthesised pre-fix sequence below.
 ///
@@ -1966,25 +2162,13 @@ async fn join_streams_the_view_outward_from_the_players_own_column() {
 
     let (id, _payload) = client.read_packet().await.unwrap().unwrap();
     assert_eq!(id, SET_TIME_S2C);
-    let (id, _payload) = client.read_packet().await.unwrap().unwrap();
-    assert_eq!(id, CHUNK_BATCH_START);
 
-    let mut observed = Vec::with_capacity(expected_chunks);
-    for _ in 0..expected_chunks {
-        let (id, payload) = client.read_packet().await.unwrap().unwrap();
-        assert_eq!(id, CHUNK);
-        let mut r = Reader::new(&payload);
-        let cx = r.var_i32().unwrap();
-        let cz = r.var_i32().unwrap();
-        let at = r.var_i32().unwrap() as usize;
-        observed.push((cx, cz, at));
-    }
-    let (id, payload) = client.read_packet().await.unwrap().unwrap();
-    assert_eq!(id, CHUNK_BATCH_FINISHED);
+    let (observed, batch_sizes) = collect_join_chunks(&mut client, expected_chunks).await;
     assert_eq!(
-        Reader::new(&payload).var_i32().unwrap(),
+        batch_sizes.iter().sum::<i32>(),
         expected_chunks as i32,
-        "still exactly one batch covering the whole view, one ring at a time"
+        "the batch markers must account for exactly the whole view — no column may be sent \
+         outside one, and none counted twice"
     );
 
     check_proximity_stream(&observed, view_radius).expect("join must stream nearest-first");
@@ -2140,25 +2324,12 @@ async fn the_shared_arm_streams_the_view_outward_too() {
 
     let (id, _) = client.read_packet().await.unwrap().unwrap();
     assert_eq!(id, SET_TIME_S2C);
-    let (id, _) = client.read_packet().await.unwrap().unwrap();
-    assert_eq!(id, CHUNK_BATCH_START);
 
-    let mut observed = Vec::with_capacity(expected_chunks);
-    for _ in 0..expected_chunks {
-        let (id, payload) = client.read_packet().await.unwrap().unwrap();
-        assert_eq!(id, CHUNK);
-        let mut r = Reader::new(&payload);
-        let cx = r.var_i32().unwrap();
-        let cz = r.var_i32().unwrap();
-        let at = r.var_i32().unwrap() as usize;
-        observed.push((cx, cz, at));
-    }
-    let (id, payload) = client.read_packet().await.unwrap().unwrap();
-    assert_eq!(id, CHUNK_BATCH_FINISHED);
+    let (observed, batch_sizes) = collect_join_chunks(&mut client, expected_chunks).await;
     assert_eq!(
-        Reader::new(&payload).var_i32().unwrap(),
+        batch_sizes.iter().sum::<i32>(),
         expected_chunks as i32,
-        "still exactly one batch covering the whole view on this arm too"
+        "the batch markers must account for exactly the whole view on this arm too"
     );
 
     check_proximity_stream(&observed, view_radius)
@@ -2170,6 +2341,128 @@ async fn the_shared_arm_streams_the_view_outward_too() {
         square(0, 0, view_radius),
         "the Shared arm's per-column spawn_blocking fan-out must cover the same square, \
          with no gaps or repeats — awaiting the handles out of ring order would show up here"
+    );
+
+    drop(client);
+    server.shutdown().await;
+}
+
+/// **The owner's report, as a counter: "I can't break blocks, take damage, etc.
+/// until it finishes."**
+///
+/// A play packet sent the instant the client finishes configuration must be
+/// *serviced* — replied to — while the join view is still streaming. Measured on
+/// the production arm (`SourceRef::Shared`, over a real loopback socket) because
+/// the arm is the thing that changed.
+///
+/// # Why a counter and not a stopwatch
+///
+/// This is a latency claim, and a wall-clock one would be attributed to the wrong
+/// cause: this machine's timings reproduce to ~10.8% and several agents run
+/// concurrently. So the instrument is **how many of the view's 361 chunk packets
+/// had arrived when the reply did**, which is a property of the ordering rather
+/// than of the machine:
+///
+/// | hypothesis | count |
+/// |---|---|
+/// | the join burst blocks the play loop (the defect) | **361** — the reply cannot precede the last chunk, because the loop that produces it has not started |
+/// | the burst is deferred past `JOIN_PRESTREAM_RADIUS` (the fix) | **~9** — the nine pre-streamed columns, plus however many the `select!` happened to emit first |
+///
+/// The bound is 40 — comfortably above the second and nowhere near the first, so
+/// it cannot be satisfied by a scheduler that merely reordered the burst. And the
+/// view still has to arrive **whole and in order** afterwards, which the tail of
+/// this test asserts with the same [`check_proximity_stream`] the two ordering
+/// gates use: a "fix" that dropped the rest of the view would otherwise pass.
+#[tokio::test]
+async fn a_play_packet_is_serviced_before_the_last_join_chunk() {
+    let view_radius = 9;
+    let expected_chunks = ((2 * view_radius + 1) * (2 * view_radius + 1)) as usize;
+    let generated = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let server = lodestone_server::IntegratedServer::bind(
+        "127.0.0.1:0",
+        ProbeProto {
+            generated: std::sync::Arc::clone(&generated),
+        },
+        CountingAirSource {
+            generated: std::sync::Arc::clone(&generated),
+        },
+        view_radius,
+    )
+    .await
+    .expect("bind loopback");
+    let addr = server.local_addr().expect("a bound server has an address");
+
+    let mut client = Connection::new(
+        tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client connects"),
+    );
+    client.write_packet(HANDSHAKE, &[2]).await.expect("hs");
+    let mut w = Writer::default();
+    w.string("Impatient");
+    client
+        .write_packet(LOGIN_START, w.as_slice())
+        .await
+        .expect("login start");
+    client.read_packet().await.unwrap().unwrap(); // LOGIN_SUCCESS
+    client
+        .write_packet(LOGIN_ACKNOWLEDGED, &[])
+        .await
+        .expect("login ack");
+    client
+        .write_packet(FINISH_CONFIGURATION, &[])
+        .await
+        .expect("finish configuration");
+    // The interaction, written before a single chunk has been read: a difficulty
+    // change, whose reply is a `change_difficulty` broadcast
+    // (`apply_difficulty_change`). Any play packet with an observable reply would
+    // do — this one is the cheapest in this file's stand-in vocabulary and needs
+    // no world state to succeed.
+    client
+        .write_packet(CHANGE_DIFFICULTY_C2S, &[3])
+        .await
+        .expect("difficulty change");
+
+    let mut chunks_before_reply = None;
+    let mut observed = Vec::with_capacity(expected_chunks);
+    while observed.len() < expected_chunks {
+        let (id, payload) = client
+            .read_packet()
+            .await
+            .expect("read")
+            .expect("the server must not close mid-view");
+        if id == CHUNK {
+            let mut r = Reader::new(&payload);
+            let cx = r.var_i32().unwrap();
+            let cz = r.var_i32().unwrap();
+            let at = r.var_i32().unwrap() as usize;
+            observed.push((cx, cz, at));
+        } else if id == CHANGE_DIFFICULTY_S2C && chunks_before_reply.is_none() {
+            chunks_before_reply = Some(observed.len());
+        }
+    }
+
+    let at = chunks_before_reply.expect(
+        "the difficulty change was never answered: the play loop either never ran or the \
+         packet was consumed without a reply",
+    );
+    assert!(
+        at < 40,
+        "the play packet was answered only after {at} of {expected_chunks} join chunks. \
+         Under the defect this is exactly {expected_chunks} (the play loop cannot run until the \
+         burst finishes); with the burst deferred it is ~{}",
+        9
+    );
+
+    // …and the deferred remainder still arrives, whole and in order.
+    check_proximity_stream(&observed, view_radius)
+        .expect("deferring the burst must not change what the client receives, or in what order");
+    let sent: HashSet<(i32, i32)> = observed.iter().map(|&(cx, cz, _)| (cx, cz)).collect();
+    assert_eq!(
+        sent,
+        square(0, 0, view_radius),
+        "every column of the view must still arrive exactly once"
     );
 
     drop(client);
