@@ -680,22 +680,26 @@ reproduce this otherwise.
 - **U13 (group NE)**: measured blocker inventory (2026-08-07 jar audit — better than previously
   believed): the bundle already carries **all 66 biome documents and all 35 density-function
   files byte-identical to the jar**, including `nether/`, `end/`, `overworld_amplified/` and
-  `overworld_large_biomes/`. Actually missing from the bundle: 6 of 7 `noise_settings`
-  (everything but overworld), the nether multi-noise parameter list (bundle has
-  `overworld`+`overworld_temperature` only), and 2 of 63 noises. Missing from the *engine*:
+  `overworld_large_biomes/`. **Corrected 2026-08-08 (re-measured): the data top-up has since
+  landed** — all 7 `noise_settings`, all 63 noises and `biome_parameters/nether.json` are
+  bundled (#485 `dd40b1f`/`a379f34` plus the corpus sibling `6c6c0e10`); no `[data]` item
+  remains for either dimension. Missing from the *engine*:
   the `minecraft:end_islands` density type (the only DF type used anywhere in vanilla's worldgen
   data that we do not implement — measured by full type census across all 7 noise_settings) and
-  the three non-multi-noise biome sources. So: small data top-up first, then engine instantiation
-  (version/dimension-free by design), then server dimension plumbing (#330: only overworld is
+  the three non-multi-noise biome sources. So: engine instantiation directly — no data top-up
+  remains — then server dimension plumbing (#330: only overworld is
   hosted; portal/dimension-switch is **gameplay**, not worldgen — a Nether generator is testable
-  against oracles without any portal existing).
+  against oracles without any portal existing). **The executable sequence is
+  [`nether-and-end.md`](./nether-and-end.md).**
 - **U14 (group S)**: phased S0–S4 in the [inventory](#full-parity-inventory-jar-derived-262) —
-  S0 ChunkStatus contract, S1 placement/locate (pure math, no blocks), S2 templates (data
-  extraction first: 188 template pools + 40 processor lists + 34 structures + 20 sets, all
-  absent from the bundle, measured), S3 beardifier (currently a constant-0 leaf in
+  S0 ChunkStatus contract, S1 placement/locate (pure math, no blocks), S2 templates (**data
+  extraction done — corrected 2026-08-08**: 188 template pools + 40 processor lists + 34
+  structures + 20 sets + 1,212 `.nbt` templates under `assets/structure/`, landed `6c6c0e10`
+  under #484, byte-identical to the jar), S3 beardifier (currently a constant-0 leaf in
   `density/mod.rs` — a real engine seam, not free), S4 jigsaw. `structure_spawn_overrides` and
   in-structure mob spawning (#221/#222) are **gameplay-blocked**, not worldgen-blocked. Wants
-  its own issue tree; do not execute group S from this document.
+  its own issue tree; do not execute group S from this document. **The executable sequence is
+  [`structures.md`](./structures.md).**
 
 ## Full-parity inventory (jar-derived, 26.2)
 
@@ -724,12 +728,12 @@ order; only the decompiled call path can.
 | placed_feature / configured_feature | 262 / 226 | 262 / 226 | complete |
 | density_function | 35 | 35 | complete, **byte-identical all 35** (diffed) |
 | configured_carver | 4 | 4 | complete |
-| noise | 63 | 61 | 2 missing (dimension-specific) [data] |
-| noise_settings | 7 | 1 | missing nether, end, amplified, caves, floating_islands, large_biomes [data] |
-| multi_noise parameter lists | 2 | overworld + overworld_temperature | nether list missing [data] |
-| structure / structure_set | 34 / 20 | 0 / 0 | all missing [data] |
-| template_pool / processor_list | 188 / 40 | 0 / 0 | all missing [data] |
-| world_preset / flat presets | 7 / 9 | 0 / 0 | all missing [data] |
+| noise | 63 | 63 | complete (was 61; the 2 nether noises landed `dd40b1f`) |
+| noise_settings | 7 | 7 | complete (was 1; `dd40b1f` + the corpus sibling) |
+| multi_noise parameter lists | 2 | nether + overworld (+`overworld_temperature`, provenance unverified — #485) | complete (nether landed `a379f34`) |
+| structure / structure_set | 34 / 20 | 34 / 20 | complete (was 0/0; `6c6c0e10`, #484) |
+| template_pool / processor_list | 188 / 40 | 188 / 40 | complete (was 0/0; `6c6c0e10` — plus 1,212 `.nbt` under `assets/structure/`, not `assets/worldgen/`) |
+| world_preset / flat presets | 7 / 9 | 7 / 9 | complete (was 0/0; `6c6c0e10`) |
 
 **The chunk-status pipeline — the scheduling contract, and a structures prerequisite.**
 Vanilla's progression (read from `chunk/status/ChunkStatus.java`): `EMPTY → STRUCTURE_STARTS →
@@ -765,7 +769,9 @@ multi-noise; single-biome and debug presets need fixed/checkerboard. All three o
 small — each is a page of logic].
 
 **Group NE — Nether.** Terrain: `nether.json` noise settings + nether parameter list + 2 noises
-[data], lava-sea aquifer behaviour (vanilla hardcodes the second fluid as lava — already
+[data — **landed**, #485 `dd40b1f`/`a379f34`; #485 also corrects the lava-sea claim below:
+`aquifers_enabled` is false and the Nether is *not* an aquifer with lava as second fluid],
+lava-sea aquifer behaviour (vanilla hardcodes the second fluid as lava — already
 modelled) and per-dimension surface-rule coverage (the census shows nether/end settings use only
 condition types the overworld also uses, but per-dimension verification is part of the unit)
 [unwritten once data lands]. Biomes (basalt deltas, soul sand valley, crimson/warped forest,
@@ -773,7 +779,8 @@ nether wastes, warped forest) are **already bundled** — 66/66. Fortress and ba
 work, not terrain work. Server-side: dimension registry/travel is #330 [gameplay-adjacent; the
 generator itself is oracle-testable without it].
 
-**Group NE — End.** `TheEndBiomeSource` + `end_islands` DF type [engine]; `end.json` [data];
+**Group NE — End.** `TheEndBiomeSource` + `end_islands` DF type [engine]; `end.json` [data —
+**landed**, #485 `dd40b1f`];
 the obsidian pillars (`end_spike` configured feature) and chorus plants land via U12's
 step-census machinery [unwritten]; end cities + gateways are group S; the dragon fight and
 respawn mechanics are [gameplay], not worldgen.
