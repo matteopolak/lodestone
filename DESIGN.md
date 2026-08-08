@@ -7720,3 +7720,72 @@ states, because the *only* difference is whether something upstream now produces
 about the literal, not the comment: **a default value hardcoded at a consumer is a wire that cannot be
 seen to be disconnected.** Prefer plumbing the real source through as `Default` where nothing produces
 it yet, so the day something does, the value arrives on its own.
+
+**12.158 The same NBT key meant two different things with two different tag types, and a static
+"fields I model" list therefore deleted data silently.** Issues #302/#303/#305, persistence for
+entities and players. `SavedEntity` carries every field it does *not* model in an `extra` vector and
+writes it back verbatim — without that, the first save strips a real vanilla mob of `Brain`,
+`attributes`, `memories` and ~27 more. The obvious way to build `extra` is to filter the source
+compound against a `MODELLED_FIELDS` constant, and that is what shipped first. The vanilla oracle
+failed on its very first run:
+
+```
+re-encoding dropped the field "Age" that a real vanilla server wrote on a "minecraft:sheep"
+```
+
+`Age` is a **`Short`** on `minecraft:item` (ticks alive, feeding the 5-minute despawn) and an
+**`Int`** on a mob (breeding age, negative for a baby). `Health` collides the same way: `Float` on a
+living entity, a constant `Short` 5 on an item entity. The decoder correctly declined to read the
+sheep's `Int` as a `Short` — and then the static list excluded `"Age"` from `extra` anyway, so the
+field vanished. **Every baby sheep in a loaded world would have silently become an adult**, with a
+clean parse, no error, no warning, and a fully green tree.
+
+The fix is one line of principle: **exclude a field from the carried-through set only if the decode
+actually consumed it**, tracked at the decode site rather than declared next to it. This is
+§12.47's entity-metadata-index collision wearing NBT clothes, and it generalises the same way — the
+guard cannot be derived from the key, because *which* classes collide on a given key is not
+knowable from the key. "Which fields do I understand?" is the wrong question; "which fields did I
+just successfully read?" is the right one, and only the second is self-maintaining.
+
+Three more from the same unit.
+
+**A per-chunk version check on a load path that returns `Option` cannot refuse — it can only
+destroy.** #305 asks for a `DataVersion` upgrade path; there is no `DataFixerUpper` here and writing
+one is enormous, so the decision was to refuse an unreadable version loudly. The natural place looked
+like `RegionChunkSource::load`, which is where a chunk's `DataVersion` is in scope. It is exactly
+wrong: `load` returns `Option<LoadedChunk>` and its `None` means "this world never saved this chunk",
+which `ChunkSource::column` answers by **generating fresh terrain**. That regenerated column then
+enters the edit map on the next `set_block` and is written straight over the original. So a
+conscientious per-chunk check would have converted "a world we cannot read" into "a world we
+overwrite with new worldgen". The check has to be at **world open**, before a task spawns and before a
+byte is written, where returning `Err` is total and free. **Ask what the function you are adding a
+guard to does when the guard fires** — a refusal expressed through a value that already means
+something else is not a refusal.
+
+**A stale-record problem that looked like it needed footprint bookkeeping was solved exactly by
+identity.** An entity save must delete a mob's old record when it walks from chunk A to chunk B.
+Rewriting only chunks that now hold entities leaves A's copy and **doubles the population on every
+restart**; rewriting every chunk in the file deletes the 2093 entities of a real vanilla world the
+first time our sim (which holds none of them) saves. Both wrong answers are stable and plausible. The
+right one needs no bookkeeping at all: put every live entity's UUID in a set, drop a stored record
+whose UUID is in it, preserve one whose UUID is not. Exact in both directions, and it is why the
+stored UUID is round-tripped rather than regenerated — a fresh UUID on load would make the next save
+unable to recognise its own mob, which is the duplication bug via a different route.
+
+**Two paths that every pre-1.21 reference gets wrong, and the failure mode is a *successful*
+first join.** Player data is at `<world>/players/data/<uuid>.dat`, **not** `<world>/playerdata/`; the
+oracle world has 287 files under the former and no `playerdata/` directory at all. Entities live in
+`dimensions/<ns>/<dim>/entities/r.<rx>.<rz>.mca`, a sibling of `region/`, **not** in a field of the
+terrain chunk, and their root carries `Position` as an `IntArray[2]` where a terrain chunk carries
+three separate `xPos`/`yPos`/`zPos` ints. Each wrong path fails by finding nothing, and "found
+nothing" is indistinguishable from "this player is new" / "this chunk has no mobs" — the safe-looking
+direction. A POI chunk, for completeness, carries **no** `Position` at all, so the two sibling formats
+do not even agree with each other.
+
+And one deliberate non-implementation, recorded so it does not read as an oversight: **POI storage was
+not built, because nothing in this codebase produces a POI.** No villager professions, no tracked bee
+nests, no registered bed points — a `poi/` store would have had zero producers, which is §12's island.
+It is also not data loss: we never write `poi/`, so a vanilla world's own POI files are untouched by
+our saves. The format is transcribed into `docs/entity-and-player-persistence.md` for whoever lands
+the first producer. **"Implemented and unreachable" is worse than "absent and documented"**, and the
+distinction is only defensible when the absence is written down where the next author will look.
