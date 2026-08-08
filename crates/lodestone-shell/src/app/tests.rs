@@ -2758,3 +2758,58 @@ fn no_command_block_row_hit_tests_off_the_rows_or_off_the_screen() {
          in the world may never resolve to a command block button"
     );
 }
+
+/// F3+F4's cycle visits all four modes and returns, and F3+N's fallback is
+/// vanilla's `firstNonNull(previous, CREATIVE)`.
+///
+/// The cycle is the whole decidable part of the first `ClientAction::ChangeGameMode`
+/// producer in the workspace — the variant was encoded by two protocol families
+/// and constructed by nothing, so the server's own `ServerBound::ChangeGameMode`
+/// arm could never fire.
+#[test]
+fn the_game_mode_cycle_visits_every_mode_and_returns() {
+    use lodestone_model::GameMode;
+    let mut mode = GameMode::Survival;
+    let mut seen = vec![mode];
+    for _ in 0..4 {
+        mode = super::session::next_game_mode(Some(mode));
+        seen.push(mode);
+    }
+    assert_eq!(
+        seen,
+        vec![
+            GameMode::Survival,
+            GameMode::Creative,
+            GameMode::Adventure,
+            GameMode::Spectator,
+            GameMode::Survival,
+        ]
+    );
+    // No session, or a server that has not reported one, starts at creative.
+    assert_eq!(super::session::next_game_mode(None), GameMode::Creative);
+}
+
+/// F3+N and F3+F4 resolve to their own outcomes only while F3 is held, and both
+/// mark the chord used so releasing F3 does not also toggle the debug overlay.
+#[test]
+fn the_game_mode_chords_need_the_debug_modifier() {
+    let held = KeyGate {
+        gameplay: true,
+        debug_held: true,
+        ..KeyGate::default()
+    };
+    assert_eq!(
+        resolve(held, KeyCode::KeyN, true),
+        Some(KeyOutcome::ToggleSpectator)
+    );
+    assert_eq!(
+        resolve(held, KeyCode::F4, true),
+        Some(KeyOutcome::CycleGameMode)
+    );
+    // Without the modifier neither key means anything — the negative half is the
+    // point, since an arm that ignored `debug_held` would fire on every F4.
+    assert_eq!(resolve(playing(), KeyCode::F4, true), None);
+    assert_eq!(resolve(playing(), KeyCode::KeyN, true), None);
+    // Release is not a chord.
+    assert_eq!(resolve(held, KeyCode::F4, false), None);
+}
