@@ -254,10 +254,12 @@ Named rather than left to be discovered:
   threaded through `menu.rs`, `menu/nav.rs` and `menu/render/dispatch.rs` with its
   own pixel gates. So Delete stays present-and-inactive, and `delete_world_in`
   deliberately does not exist — a tested helper with no caller is the island
-  `CLAUDE.md` names. Filed as a follow-up to #468.
+  `CLAUDE.md` names. Filed as
+  [#540](https://github.com/matteopolak/lodestone/issues/540).
 - **The world list does not scroll**, so it is capped at
   `render::world_list_max_rows()` (10 at the reference canvas) and a player with
-  more worlds than that cannot reach the rest. See
+  more worlds than that cannot reach the rest. Filed as
+  [#541](https://github.com/matteopolak/lodestone/issues/541); see
   [`world-select.md`](./world-select.md).
 - **`level.dat` is written and read, but only the server consumes it.**
   `LevelDatHandle` (`region_source.rs`) creates the file at world open, stamps

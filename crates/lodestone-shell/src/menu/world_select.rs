@@ -89,7 +89,8 @@
 //!   nor clickable rather than being drawn over the footer — the same gate
 //!   `server_row_visible` applies. [`max_visible_world_rows`] is how many that
 //!   is, and a player with more worlds than that cannot currently reach the
-//!   rest: a real limitation, filed rather than hidden.
+//!   rest: a real limitation, filed as
+//!   [#541](https://github.com/matteopolak/lodestone/issues/541) rather than hidden.
 //!
 //! ## What consumes it
 //!
@@ -297,8 +298,10 @@ impl WorldSelectButton {
     /// the *ceiling*: `Edit` and `Re-Create` return `false` unconditionally
     /// because there is no `EditWorldScreen` and no re-create flow to open, and
     /// `Delete` returns `false` because deleting a world needs a confirmation
-    /// step this screen does not have yet (see [`crate::saves`]'s module doc for
-    /// why a cheap two-press confirm was rejected rather than shipped).
+    /// step this screen does not have yet — see [`crate::saves`]'s module doc for
+    /// why a cheap two-press confirm was rejected rather than shipped, and
+    /// [#540](https://github.com/matteopolak/lodestone/issues/540) for the real
+    /// one.
     ///
     /// **Read this for "could it ever be active", never for "is it active".**
     /// [`WorldSelectNav::is_active`] is the live fact, and consulting the enum

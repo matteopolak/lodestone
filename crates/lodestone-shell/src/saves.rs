@@ -99,7 +99,8 @@
 //!   screen exactly as it was, and the filesystem half is **not** written here
 //!   either — a tested `delete_world_in` with no caller is the island
 //!   `CLAUDE.md` names, and it costs nothing to write when its screen exists.
-//!   Tracked as a follow-up to #468.
+//!   Tracked as [#540](https://github.com/matteopolak/lodestone/issues/540), whose
+//!   body carries the `ConfirmScreen` shape and the acceptance conditions.
 //! - [`world_dir_in`]'s containment check is what a future `delete_world_in`
 //!   must go through, and it is already load-bearing without it: a
 //!   [`WorldSummary::dir_name`] of `..` reaching [`crate::app`] would otherwise
