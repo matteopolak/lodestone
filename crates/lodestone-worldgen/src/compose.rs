@@ -297,6 +297,161 @@ pub fn build_ore_tag_map(
     map
 }
 
+/// Where chunk-local `(lx, ly, lz)` lands in a column field built by
+/// [`fill_column`] or read back by [`materialize_column`].
+///
+/// **Every caller must go through this rather than restating
+/// `((ly * 16 + lz) * 16 + lx)`.** A restated index that transposed `lx` and `lz`
+/// reads a mirrored column and reports a plausible-looking wrong answer, and the
+/// two spellings could then drift apart independently — which is the same argument
+/// `OverworldGenerator::shape_index` makes for forwarding to its own private `idx`.
+#[must_use]
+pub fn column_index(lx: i32, ly: i32, lz: i32, height: i32) -> usize {
+    debug_assert!((0..height).contains(&ly));
+    ((ly * 16 + lz) * 16 + lx) as usize
+}
+
+/// `fillFromNoise` for one chunk of a **disabled-aquifer** dimension: the
+/// interpolated `final_density` plus the beard term, mapped to
+/// [`BlockKind`](crate::aquifer::BlockKind).
+///
+/// Shared by [`crate::nether::NetherGenerator`] and
+/// [`crate::end::EndGenerator`], which differ only in the settings they hand the
+/// aquifer. The Overworld keeps its own copy because its fill is instrumented by
+/// the allocation-attribution bench and carries a `StageGuard` this one must not.
+///
+/// # The two loops are a correctness property, not a micro-optimisation
+///
+/// An **empty** beardifier takes the loop that calls
+/// [`AquiferSystem::block_at`](crate::aquifer::AquiferSystem::block_at) with no
+/// addition at all. Adding `0.0` is the identity for every finite `f64` *except*
+/// `-0.0`, whose sign bit it flips; nothing downstream distinguishes the two today
+/// (`compute_substance` only asks `density > 0.0`), and the branch means that claim
+/// about the rest of the pipeline never has to be made. It is also what keeps a
+/// dimension with no adaptation-bearing structure bit-identical to the same
+/// dimension before structures existed.
+#[must_use]
+pub fn fill_column(
+    aquifer: &crate::aquifer::AquiferSystem,
+    base_x: i32,
+    base_z: i32,
+    min_y: i32,
+    height: i32,
+    beard: &crate::structure::beardifier::Beardifier,
+) -> Vec<crate::aquifer::BlockKind> {
+    use crate::aquifer::BlockKind;
+    let mut field = vec![BlockKind::Air; 16 * 16 * height as usize];
+    if beard.is_empty() {
+        for lz in 0..16i32 {
+            for lx in 0..16i32 {
+                for ly in 0..height {
+                    field[column_index(lx, ly, lz, height)] =
+                        aquifer.block_at(base_x + lx, min_y + ly, base_z + lz);
+                }
+            }
+        }
+        return field;
+    }
+    for lz in 0..16i32 {
+        for lx in 0..16i32 {
+            for ly in 0..height {
+                let (wx, wy, wz) = (base_x + lx, min_y + ly, base_z + lz);
+                field[column_index(lx, ly, lz, height)] =
+                    aquifer.block_at_beard(wx, wy, wz, beard.compute(wx, wy, wz));
+            }
+        }
+    }
+    field
+}
+
+/// The heightmap the biome and surface stages consume: the highest local
+/// `(lx, lz)` position whose block is *solid* (`BlockKind::Stone` — non-air,
+/// non-fluid), floored at `sea_level - 1`.
+///
+/// This is `ComposedChunkOracle.java`'s `solidTop`, same definition and same
+/// fallback, which is why biome sampling agrees between the two languages.
+///
+/// The floor matters in a dimension with no sea: the End's `sea_level` is `0` and
+/// its `min_y` is `0`, so `sea_level - 1` is `min_y - 1` — the same "nothing solid
+/// in this column" sentinel the loop already produces, rather than a spurious
+/// clamp to a water line that does not exist.
+#[must_use]
+pub fn solid_top_heights(
+    field: &[crate::aquifer::BlockKind],
+    min_y: i32,
+    height: i32,
+    sea_level: i32,
+) -> [i32; 256] {
+    use crate::aquifer::BlockKind;
+    let mut heights = [i32::MIN; 256];
+    for lz in 0..16i32 {
+        for lx in 0..16i32 {
+            let mut top = min_y - 1;
+            for ly in (0..height).rev() {
+                if field[column_index(lx, ly, lz, height)] == BlockKind::Stone {
+                    top = min_y + ly;
+                    break;
+                }
+            }
+            heights[(lz * 16 + lx) as usize] = top.max(sea_level - 1);
+        }
+    }
+    heights
+}
+
+/// Turns a [`fill_column`] field plus a surface diff into the working block grid
+/// the carve and structure stages mutate.
+///
+/// # The loop order is the specification
+///
+/// A [`crate::dense_grid::DenseBlockGrid`]'s palette is built in `set` order, and
+/// `surface_diff` is a hash map whose iteration order is not stable even across two
+/// separately constructed maps with identical content. So the diff is consulted by
+/// **point lookup inside this fixed `(lz, lx, ly)` loop** and never iterated:
+/// iterating it made two independently built generators produce the same terrain
+/// with different bytes, which is a real bug this repo shipped once (see
+/// `overworld/mod.rs`'s own note).
+#[must_use]
+pub fn materialize_column(
+    interner: &std::sync::Arc<crate::interner::StateInterner>,
+    field: &[crate::aquifer::BlockKind],
+    surface_diff: &crate::surface::SurfaceDiff,
+    base_x: i32,
+    base_z: i32,
+    min_y: i32,
+    height: i32,
+    solid: crate::interner::StateId,
+    fluid: crate::interner::StateId,
+) -> crate::dense_grid::DenseBlockGrid {
+    use crate::aquifer::BlockKind;
+    use crate::interner::StateId;
+    let mut world = crate::dense_grid::DenseBlockGrid::with_interner(
+        std::sync::Arc::clone(interner),
+        base_x,
+        min_y,
+        base_z,
+        16,
+        height,
+        16,
+        StateId::AIR,
+    );
+    for lz in 0..16i32 {
+        for lx in 0..16i32 {
+            for ly in 0..height {
+                let y = min_y + ly;
+                let base = match field[column_index(lx, ly, lz, height)] {
+                    BlockKind::Stone => solid,
+                    BlockKind::Water | BlockKind::Lava => fluid,
+                    BlockKind::Air => StateId::AIR,
+                };
+                let state = surface_diff.get(&(lx, y, lz)).copied().unwrap_or(base);
+                world.set_id(base_x + lx, y, base_z + lz, state);
+            }
+        }
+    }
+    world
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
