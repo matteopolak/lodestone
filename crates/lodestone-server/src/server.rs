@@ -1230,7 +1230,6 @@ where
 /// # Errors
 ///
 /// As [`serve_connection`].
-#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve_connection_with_mob_events_and_commands_shared<T, P, S, E>(
     conn: &mut Connection<T>,
@@ -1243,6 +1242,12 @@ pub(crate) async fn serve_connection_with_mob_events_and_commands_shared<T, P, S
     block_ticks: &BlockTickFeed,
     explosions: &ExplosionFeed,
     commands: &CommandDispatch,
+    // Issue #535. The three host-supplied surfaces every other constructor
+    // hardcodes to `::default()`. `IntegratedServer::open_to_lan` is the one
+    // caller that can actually carry a configured one, which is why they are
+    // parameters here and nowhere else.
+    resource_packs: &ResourcePackPushFeed,
+    plugin_channels: &PluginChannelRegistry,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1270,8 +1275,8 @@ where
         &SleepFeed::default(),
         commands,
         &BorderFeed::default(),
-        &ResourcePackPushFeed::default(),
-        &PluginChannelRegistry::default(),
+        resource_packs,
+        plugin_channels,
     )
     .await
 }
