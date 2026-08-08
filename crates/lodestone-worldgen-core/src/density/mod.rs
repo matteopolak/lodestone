@@ -351,6 +351,24 @@ pub trait Resolver {
     fn biome_tag(&self, _id: &str) -> Value {
         Value::Null
     }
+
+    /// `structure/<path>.nbt` — one NBT **structure template**, as the raw file
+    /// bytes (issue #514's S2). `minecraft:shipwreck/with_mast` means
+    /// `assets/structure/shipwreck/with_mast.nbt`.
+    ///
+    /// Returned **exactly as shipped**, gzip wrapper included:
+    /// `lodestone_worldgen::structure::template::StructureTemplate::parse` handles
+    /// both gzipped and bare NBT, so a resolver never has to know which. Handing
+    /// over the bytes rather than a parsed document is what keeps the NBT schema
+    /// in one place instead of once per resolver.
+    ///
+    /// Default: `None` ("no such template"), the same no-data-supplied convention
+    /// as [`biome_parameters`](Self::biome_parameters). A structure whose
+    /// templates are missing is demoted to unsupported and named in
+    /// `StructureRegistry::unsupported` — it never silently places nothing.
+    fn structure_template(&self, _id: &str) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// Evaluation context: a single block position (`SinglePointContext`).

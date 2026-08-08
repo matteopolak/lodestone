@@ -1031,6 +1031,10 @@ impl OverworldGenerator {
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
         let t_carve_start = std::time::Instant::now();
         let world = self.carve_stage(cx, cz, &aquifer, &heights, &biome_quarts, base_x, base_z, world);
+        // The same stage `pre_ore_stage_uncached` runs; timed inside the carve
+        // bucket rather than given one of its own, because for a chunk with no
+        // structure in reach it is a single early return.
+        let world = self.structure_place_stage(cx, cz, world);
         let t_ore_start = std::time::Instant::now();
         let world = self.ore_stage(cx, cz, world, &heights);
         let t_vegetation_start = std::time::Instant::now();

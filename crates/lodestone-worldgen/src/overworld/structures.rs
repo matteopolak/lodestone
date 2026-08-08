@@ -95,9 +95,9 @@ impl StructureRefs {
     /// The starts S3's beardifier will evaluate: adaptation-bearing, piece-complete,
     /// and in reach. **Empty today for every chunk**, because no
     /// adaptation-bearing structure has a piece generator yet (all of them are
-    /// jigsaw, plus stronghold) — which is precisely why this unit changes no
-    /// terrain and why S3 has no structure-positive gate available at its own
-    /// landing.
+    /// jigsaw, plus stronghold; the three S2 kinds are all `terrain_adaptation:
+    /// none`) — which is precisely why S3 has no structure-positive gate available
+    /// at its own landing.
     #[must_use]
     pub fn adaptation_bearing(&self) -> impl Iterator<Item = &Arc<StructureStart>> {
         self.entries
@@ -305,6 +305,59 @@ impl OverworldGenerator {
             }
         }
         narrowed.packed_by_structure()
+    }
+
+    /// Stage 4b (issue #514's S2): writes every template-driven piece that
+    /// touches this chunk into `world`.
+    ///
+    /// # Where this sits, and why
+    ///
+    /// Vanilla places structures inside `applyBiomeDecoration`, per generation
+    /// step, *before* that step's features — and the three kinds wired today are
+    /// all `surface_structures` (step 4), which precedes `underground_ores`
+    /// (step 6) and `vegetal_decoration` (step 9). So this runs at the end of
+    /// [`OverworldGenerator::pre_ore_stage`](super::OverworldGenerator): ore and
+    /// vegetation then see the structure's blocks, exactly as they do in vanilla,
+    /// and the whole thing is memoised once per chunk with the rest of the pre-ore
+    /// product.
+    ///
+    /// # Clipping is the grid, not a box
+    ///
+    /// The working grid spans this chunk's 16×16 columns only and
+    /// [`DenseBlockGrid::set`](crate::dense_grid::DenseBlockGrid::set) ignores a
+    /// write outside it, so a piece that straddles a border writes its own half
+    /// here and the other half when the neighbour generates — vanilla's
+    /// `placeSettings.setBoundingBox(chunkBB)` for free. That is only sound
+    /// because every piece's position is fixed at *start* time and every
+    /// processor draw is position-seeded; see
+    /// [`StructureKind::generate_pieces`](crate::structure::StructureKind).
+    pub(super) fn structure_place_stage(
+        &self,
+        cx: i32,
+        cz: i32,
+        mut world: crate::dense_grid::DenseBlockGrid,
+    ) -> crate::dense_grid::DenseBlockGrid {
+        if self.structures.is_none() {
+            return world;
+        }
+        let (bx, bz) = (cx * 16, cz * 16);
+        for (_, _, start) in &self.structure_refs_stage(cx, cz).entries {
+            if !start.pieces_complete {
+                continue;
+            }
+            for piece in &start.pieces {
+                let Some(placement) = &piece.placement else {
+                    continue;
+                };
+                if !piece.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15) {
+                    continue;
+                }
+                placement
+                    .template
+                    .place(placement.position, &placement.settings, &mut world);
+            }
+        }
+        world
     }
 
     /// The registry's unsupported ledger, or an empty map for a generator with no

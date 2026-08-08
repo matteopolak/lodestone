@@ -10,11 +10,16 @@ Phase **S1** of [`plans/structures.md`](./plans/structures.md) (issue #514),
 built on the corpus that
 [`worldgen-structure-corpus.md`](./worldgen-structure-corpus.md) bundled.
 
-It places, it does not build. Piece generation exists for exactly one structure
-(`buried_treasure`, whose piece is a single coded block); templates are S2,
-the beardifier is S3, jigsaw is S4 and the coded piece generators are S5. What
-S1 delivers is the placement answer, and that answer is **verified in both
-directions against a vanilla-authored save** — see [Evidence](#evidence).
+It places, it does not build. What S1 delivers is the placement answer, and that
+answer is **verified in both directions against a vanilla-authored save** — see
+[Evidence](#evidence).
+
+**S2 has since landed** ([`worldgen-structure-templates.md`](./worldgen-structure-templates.md)):
+shipwrecks, ocean ruins and igloos now build template pieces and write blocks, so
+where this document says "no piece generator" read "no piece generator *for this
+structure*" and check `StructureRegistry::unsupported` for which. The beardifier is
+still S3, jigsaw S4, and the coded piece generators (monument, mineshaft,
+stronghold, …) S5.
 
 ## How it works
 
@@ -167,9 +172,12 @@ stub. The section is kept because the *shape* of the wiring is the thing to know
   `set_block`, so a chunk the player edits keeps its `starts` when saved), because
   a `GeneratedColumn` does not carry its own chunk coordinates and the two
   generator calls need them. `chunk_nbt::structures_to_nbt` is the writer.
-- Still true: **no piece generator (S2)**, so `starts`/`References` appear in the
-  NBT and **no blocks appear in the world**; and the beardifier is still a
-  constant-zero leaf (S3), so nothing flattens terrain under a start.
+- **No longer true** as of S2: template pieces exist for shipwreck, ocean ruin and
+  igloo, and they do write blocks — a *third* server-side edit is now needed for
+  that to happen in the served world (`Resolver::structure_template`, see
+  [`worldgen-structure-templates.md`](./worldgen-structure-templates.md)). Still
+  true: the beardifier is a constant-zero leaf (S3), so nothing flattens terrain
+  under a start.
 
 The original text, for the record:
 
