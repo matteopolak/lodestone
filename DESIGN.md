@@ -7215,3 +7215,80 @@ it worth doing (`ore` 38.7%, `aquifer + shape` 25.6%) and the instruction to pro
   parity decision, not an optimisation. **The honest floor for the current parity model is ~12–13 ms
   serial**, and §12.130's note that throughput is a different question from serial cost is the other
   half of the answer.
+
+**12.149 Three producer-side islands in one session, and the latency the owner reported was protocol
+encode on the task that owed him the reply.** Reported: *"the integrated server definitely has some lag
+spikes. sometimes if i try to break a block it takes a sec for it to work"*, plus *"throwing out items
+doesnt work"* and a recipe-book click that emptied the source slot. The guess accompanying the first —
+*"maybe chunk gen is blocking the tick thread"* — was half right in a way worth separating from what was
+actually measured.
+
+**The measured cause was `encode_chunk` running on the connection task.** Generation had already been
+offloaded (#293), so the remaining serial work on that task was the *encode*: 62 M instructions / ≈2.4 ms
+per column, ≈2.6 s for a 1,089-column view, with `ViewTracker::build_batch` repeating a 33-column strip
+(≈80 ms) on every chunk boundary walked across. The fix is an owned `ChunkEncoder` obtained from the `&P`
+so a `spawn_blocking` closure can hold it — `ServerProtocol` is reached as `&P` everywhere and widening
+that to `Arc<P>` would break every `&P`-shaped call site, the same constraint that produced `SourceRef`.
+
+**The counter, and why the obvious instrument was the wrong one.** The first instrument considered was
+"how many chunk packets arrive between a play packet and its reply", by analogy with
+`a_play_packet_is_serviced_before_the_last_join_chunk`. **It cannot discriminate**: writes are serial on
+both arms, so the count of packets before the reply is roughly the same whether the encode happened on the
+connection task or on a worker. What discriminates is *where the work ran*, and the discriminator that
+works is a `thread_local` flag set by `ServerProtocol::decode` **itself** — `decode` only ever runs on the
+connection task, and `#[tokio::test]`'s current-thread runtime (production's flavour) means that task
+cannot migrate while the blocking pool is disjoint. **Not a captured thread id**: a thread id has to be
+captured somewhere and compared somewhere else, and the capture site is exactly what a refactor moves.
+Measured 361/361 on-task before, **0/361** after, with the control being a protocol whose
+`chunk_encoder()` answers `None` — the trait default, so the control is a live shape rather than a neuter.
+
+Two hypotheses were entertained and abandoned before that, both instructive. A witness keyed on *which
+thread generated column (cx, cz)* is defeated by `ChunkStore` retention: a column already resident is
+never generated during the burst, so it has no witness and the count silently undershoots. And a
+"blocking-pool thread" set built from `column()` calls is polluted by the world-spawn search, which
+probes the source on the connection task before any chunk is encoded.
+
+**§12.117's seam did not fall out of building the `LIGHT_UPDATE` encoder, and the record said it would.**
+`crates/lodestone-server/src/light.rs` named the encoder as the blocker for two open items — light not
+crossing a chunk border, and a Δ5 sky-light border bias — and both survived it. The encoder is a *carrier*;
+those are properties of the **computation**. `compute_column_light_with_neighbours` would fix the centre
+column, but the neighbours' light changes too, so answering one placed torch honestly is nine packets and
+nine 3×3 floods. **The lesson is the shape of the claim, not the numbers**: "blocked on X" was true of the
+transport and false of the semantics, and nothing about the note looked stale.
+
+**All three of the owner's reports were islands on the *producer* side, which is §12.38's shape three more
+times, and no `_ =>` arm was involved in any of them.**
+
+| report | what was missing | where the search would have gone wrong |
+|---|---|---|
+| `Q` does not throw items | `PLAYER_ACTION` ordinals 3/4 hit `_ => ServerBound::Ignored` **at the decode** | grepping the three event routers finds nothing, because no variant existed to route |
+| recipe book empties the source slot | `ClientAction::PlaceRecipe` has **zero producers** outside `crates/protocol/` | `apply_recipe_placed` is fully wired, gated, and unreachable from our own client |
+| lag spikes | — | the *encoders* were all present; the defect was **where** one ran |
+
+The second is the sharpest. `PLACE_RECIPE`'s server half, its `RecipeDisplayId` space and its 1,056-recipe
+corpus all landed and all work; `lodestone-shell`'s recipe book instead synthesises three ordinary container
+clicks per source slot (`left(source)` → `right(cell)`×n → `left(source)`), whose middle state has the whole
+stack on the cursor and the slot empty. So the reported symptom is that sequence's third click not reaching
+the display — and **the two candidate diagnoses on offer were both about code the client never executes**:
+neither the quantity logic in `place_recipe` nor `apply_container_clicked`'s resync comparison is on the
+path. `cargo xtask connectedness` is silent here by construction: it answers "is this *clientbound* packet
+reaching anything". **Ask what *sends* a serverbound action, not only what consumes it** — and when the
+answer is "our own client does not", say so before diagnosing the server.
+
+Two smaller things, both paid for:
+
+* **A red gate in `join_scheduler_gates.rs` was reported as pre-existing and was neither.**
+  `the_per_ring_barrier_is_gone_the_fan_out_is_bounded_and_453_survives` is green — 14 of 14 runs, including
+  eight concurrent copies of the binary under self-inflicted load, reporting the same `rings_in_flight=2
+  max_inflight=8 before_first_emit=1` and control `1 / 64 / 1` every time. It was red because
+  `lodestone-server`'s lib did not build (its own mid-edit, and `lodestone-worldgen`'s `try_place_ore` arity
+  error, which every `lodestone-server` test target inherits). **`cargo test` reports a target that fails to
+  *compile* the same way it reports a failing assertion**, so "a red test in crate X" and "crate X or any of
+  its dependencies is mid-keystroke" are indistinguishable from the summary line. Read the error's path
+  before attributing the failure — and before labelling it pre-existing, which sends the next reader to a
+  reverted commit instead of to a build log.
+* **`ItemLifecycle::newly_dropped`'s 10-tick delay is wrong for a *thrown* stack**, where vanilla's
+  `createItemStackToDrop` sets 40. At 10 a player walking forwards picks their own throw straight back up:
+  the entity spawned, the inventory decremented, every counter agrees, and the symptom is still "throwing
+  does not work". A drop's velocity has the same trap in a second form — the block-pop formula has no notion
+  of facing at all, so reusing it drops the stack at the player's feet.
