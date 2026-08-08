@@ -175,6 +175,56 @@ pub struct SessionMaps(pub lodestone_game::maps::MapStore);
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct SessionAdvancements(pub lodestone_game::advancement::AdvancementStore);
 
+/// The local player's statistics counters, from `ClientEvent::StatisticsAwarded`
+/// (issue #26).
+///
+/// `award_stats` had no decode at all before this, which is why
+/// `lodestone_shell::menu::stats` renders from `StatsSnapshot::default()` — an
+/// empty table its own module doc correctly called "not a placeholder, it is the
+/// state". This component is where the real numbers now arrive; feeding the
+/// screen from it is a shell-side change.
+///
+/// See [`lodestone_game::progress::Statistics`].
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionStatistics(pub lodestone_game::progress::Statistics);
+
+/// The server's own registry orders by holder id, from the `*RegistryNames`
+/// events (issue #26 / the enchantment half).
+///
+/// `minecraft:enchantment` today. The table was already decoded by
+/// `ClientRegistries::entry_names` and never left the version crate, so
+/// `Sim::riptide_level` resolved `minecraft:riptide` through a hardcoded holder
+/// id of 32 -- correct against vanilla 26.2 and silently wrong against any data
+/// pack that reorders. See [`lodestone_game::registry_order::RegistryOrder`].
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionRegistryOrder(pub lodestone_game::registry_order::RegistryOrder);
+
+/// Server debug feeds and NBT query replies, from the `debug_*`, `debug_sample`,
+/// `game_test_highlight_pos`, `test_instance_block_status` and `tag_query`
+/// packets (issue #26).
+///
+/// Empty on every ordinary session and that is correct, not a defect: the server
+/// sends nothing on a debug feed until the client asks with
+/// `ClientAction::SubscribeDebug`. See [`lodestone_game::debug_feeds::DebugFeedStore`].
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct SessionDebugFeeds(pub lodestone_game::debug_feeds::DebugFeedStore);
+
+/// What the server has announced about itself: links, report details, chat
+/// completions, tick rate and the open dialog (issue #26).
+///
+/// See [`lodestone_game::serverinfo::ServerInfoStore`]. Everything in it is
+/// server-authored and untrusted.
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct SessionServerInfo(pub lodestone_game::serverinfo::ServerInfoStore);
+
+/// Tracked waypoints — vanilla's locator bar — from `ClientEvent::WaypointUpdated`
+/// (issue #26).
+///
+/// See [`lodestone_game::waypoints::WaypointStore`], and note the position is a
+/// four-way precision degradation rather than an `Option`.
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct SessionWaypoints(pub lodestone_game::waypoints::WaypointStore);
+
 /// The active boss bars, in server insertion (render) order.
 ///
 /// `lodestone_game::bossbar::BossBarSet` was a fully implemented, unit-tested
@@ -662,7 +712,53 @@ pub fn apply_game_rules(batch: Res<IngestBatch>, mut rules: Query<&mut SessionGa
     }
 }
 
-/// `IngestSet::Apply`: `BossBarUpdate` → [`SessionBossBars`].
+/// `IngestSet::Apply`: `StatisticsAwarded` -> [`SessionStatistics`] (issue #26).
+pub fn apply_statistics(batch: Res<IngestBatch>, mut stats: Query<&mut SessionStatistics>) {
+    for event in batch.events() {
+        for mut table in &mut stats {
+            let _ = table.0.apply_event(event);
+        }
+    }
+}
+
+/// `IngestSet::Apply`: the `*RegistryNames` events -> [`SessionRegistryOrder`].
+pub fn apply_registry_order(batch: Res<IngestBatch>, mut orders: Query<&mut SessionRegistryOrder>) {
+    for event in batch.events() {
+        for mut order in &mut orders {
+            let _ = order.0.apply(event);
+        }
+    }
+}
+
+/// `IngestSet::Apply`: the `debug_*` family -> [`SessionDebugFeeds`] (issue #26).
+pub fn apply_debug_feeds(batch: Res<IngestBatch>, mut feeds: Query<&mut SessionDebugFeeds>) {
+    for event in batch.events() {
+        for mut store in &mut feeds {
+            let _ = store.0.apply(event);
+        }
+    }
+}
+
+/// `IngestSet::Apply`: the server-metadata family -> [`SessionServerInfo`]
+/// (issue #26).
+pub fn apply_server_info(batch: Res<IngestBatch>, mut info: Query<&mut SessionServerInfo>) {
+    for event in batch.events() {
+        for mut store in &mut info {
+            let _ = store.0.apply(event);
+        }
+    }
+}
+
+/// `IngestSet::Apply`: `WaypointUpdated` -> [`SessionWaypoints`] (issue #26).
+pub fn apply_waypoints(batch: Res<IngestBatch>, mut waypoints: Query<&mut SessionWaypoints>) {
+    for event in batch.events() {
+        for mut store in &mut waypoints {
+            let _ = store.0.apply(event);
+        }
+    }
+}
+
+/// `IngestSet::Apply`: `BossBarUpdate` -> [`SessionBossBars`].
 pub fn apply_boss_bars(batch: Res<IngestBatch>, mut bars: Query<&mut SessionBossBars>) {
     for event in batch.events() {
         for mut set in &mut bars {
@@ -1002,6 +1098,15 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             SessionMaps::default(),
             SessionAdvancements::default(),
         ));
+        // A third `insert`: issue #26's four new stores, again only because the
+        // tuple `Bundle` impls stop at arity 15.
+        entity.insert((
+            SessionStatistics::default(),
+            SessionDebugFeeds::default(),
+            SessionServerInfo::default(),
+            SessionWaypoints::default(),
+            SessionRegistryOrder::default(),
+        ));
     }
 }
 
@@ -1050,6 +1155,11 @@ impl Plugin for SessionPlugin {
                 apply_recipe_book_settings,
                 apply_maps,
                 apply_advancements,
+                apply_statistics,
+                apply_registry_order,
+                apply_debug_feeds,
+                apply_server_info,
+                apply_waypoints,
                 apply_local_player_state,
             )
                 .chain()

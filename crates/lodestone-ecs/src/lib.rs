@@ -213,9 +213,11 @@ pub use schedules::{Extract, GameTick, NetIngest, Update};
 pub use session::{
     Abilities, ActionBarOverlay, HudEffects, Phase, RespawnCount, Riding, ServerAlive,
     ServerDifficulty, ServerDimension, ServerEntityId, ServerGameMode, SessionBlockDestruction,
-    SessionBossBars, SessionChat, SessionHudPlugin, SessionMenus, SessionPhase, SessionPlugin,
-    SessionScoreboard, SessionSet, SessionTabList, TitleOverlay, Vitals, Xp,
-    insert_hud_components, insert_session_components, spawn_session,
+    SessionBossBars, SessionChat, SessionDebugFeeds, SessionHudPlugin, SessionMenus, SessionPhase,
+    SessionPlugin, SessionRegistryOrder, SessionScoreboard, SessionServerInfo, SessionSet,
+    SessionStatistics,
+    SessionTabList, SessionWaypoints, TitleOverlay, Vitals, Xp, insert_hud_components,
+    insert_session_components, spawn_session,
 };
 pub use veto::{ActionVetoPlugin, ActionVetoes, Verb, VerbContext, VetoStats};
 pub use sets::{

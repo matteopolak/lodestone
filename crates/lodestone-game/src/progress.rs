@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use lodestone_model::event::ClientEvent;
 use lodestone_model::Identifier;
 
 /// Progress toward one advancement: which of its criteria have been obtained.
@@ -250,6 +251,31 @@ impl Statistics {
         for (key, value) in updates {
             self.values.insert(key, value);
         }
+    }
+
+    /// Folds a [`ClientEvent::StatisticsAwarded`], returning whether the event
+    /// belonged here (issue #26).
+    ///
+    /// This is the `apply(&ClientEvent)` shape every other session store uses, so
+    /// `lodestone_ecs::session` can register it like the rest; [`Self::apply`]
+    /// stays as the version-free iterator form a test or a local prediction uses.
+    ///
+    /// An award whose `value` the adapter could not resolve is **skipped**, not
+    /// stored under a placeholder key: [`StatKey`] has no "unknown value" and a
+    /// synthetic one would collide across every unresolved statistic in the
+    /// batch. The count is lost, which is the right trade — a wrong number on a
+    /// statistics screen is worse than a zero.
+    pub fn apply_event(&mut self, event: &ClientEvent) -> bool {
+        let ClientEvent::StatisticsAwarded { stats } = event else {
+            return false;
+        };
+        for award in stats {
+            if let Some(value) = award.value.clone() {
+                self.values
+                    .insert(StatKey::new(award.stat_type.clone(), value), award.count);
+            }
+        }
+        true
     }
 
     /// Number of non-default statistics tracked.

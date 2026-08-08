@@ -2042,6 +2042,33 @@ pub enum ClientEvent {
         /// or [`Self::BiomeClimates`]'s per-field `Option`s.
         names: Vec<String>,
     },
+    /// The server's `minecraft:enchantment` registry order, emitted at `Login`
+    /// alongside [`Self::BiomeRegistryNames`].
+    ///
+    /// # The latent bug this exists to remove
+    ///
+    /// Exactly [`Self::BiomeRegistryNames`]'s story, one registry over. The table
+    /// was **already decoded** — `ClientRegistries::entry_names` has had it since
+    /// #288 — and was simply never handed past the version crate, so
+    /// `Sim::riptide_level` resolved `minecraft:riptide` through a **hardcoded
+    /// holder id of 32**, derived from `riptide` being the 33rd of 26.2's 43
+    /// built-in enchantments in resource-location-sorted order.
+    ///
+    /// That id is correct against a vanilla 26.2 server and wrong against any data
+    /// pack that adds, removes or reorders an enchantment sorting before
+    /// `riptide` — and it is wrong *silently*, because the id is still valid and
+    /// still resolves to *an* enchantment. Same failure shape as the mesher's
+    /// `FALLBACK_BIOME_NAMES`: the wrong table, not a missing one.
+    ///
+    /// A second consumer is already waiting on it — the enchantment-level gap in
+    /// `crates/lodestone-shell/src/entities.rs`.
+    EnchantmentRegistryNames {
+        /// Each enchantment's registry entry name (e.g. `minecraft:riptide`), at
+        /// its holder id. Empty when the server sent no `minecraft:enchantment`
+        /// registry, which a consumer must treat as "fall back", not as "no
+        /// enchantments exist".
+        names: Vec<String>,
+    },
     /// A win condition was signalled by the server: `ClientboundGameEventPacket`'s
     /// `WIN_GAME` event (code `4`), sent when the local player exits the End
     /// through the exit portal after defeating the ender dragon.
@@ -2127,6 +2154,300 @@ pub enum ClientEvent {
         /// Vanilla's `showAdvancements` flag — whether completions announce.
         show_advancements: bool,
     },
+
+    // ---- issue #26: the remaining clientbound packets ----------------------
+    //
+    // Every variant below routes to `session`, which is deliberate and is the
+    // fork `route`'s doc says has cost work twice. None of them is per-entity
+    // state (`DebugEntityValue` is *about* an entity but is a debug feed keyed by
+    // subscription, not a component hanging off one) and none is block/world
+    // state travelling the shell's own stream — they are session-scoped tables,
+    // the same shape as the scoreboard and the tab list. That also means none of
+    // them needs an arm in `lodestone_shell::net::forward`, so this whole block
+    // lands without a shell edit; a screen reads the session component when
+    // someone builds one.
+    /// The server awarded or resynchronised statistics
+    /// (`ClientboundAwardStatsPacket`).
+    ///
+    /// Sent in full on request (vanilla's `/stats`-equivalent screen opening) and
+    /// incrementally as counters move, so a fold must **overwrite per key**
+    /// rather than accumulate: the wire value is the absolute count.
+    StatisticsAwarded {
+        /// One entry per statistic the server reported.
+        stats: Vec<StatAward>,
+    },
+    /// The server changed the extra names offered in chat tab-completion
+    /// (`ClientboundCustomChatCompletionsPacket`).
+    ChatCompletionsChanged {
+        /// Whether to add to, remove from, or replace the current set.
+        action: ChatCompletionsAction,
+        /// The names this update concerns.
+        entries: Vec<String>,
+    },
+    /// A per-block debug feed value (`ClientboundDebugBlockValuePacket`).
+    ///
+    /// The server sends nothing on any debug feed until the client asks with
+    /// [`crate::ClientAction::SubscribeDebug`] — this and its three siblings are
+    /// the *response* half of that request, which is why neither half is useful
+    /// alone.
+    DebugBlockValue {
+        /// The block this value is about.
+        pos: BlockPos,
+        /// The `minecraft:debug_subscription` this value belongs to.
+        subscription: Identifier,
+        /// The feed's own payload bytes, or `None` when the server is clearing
+        /// this key. **Opaque**: the value codec is per-subscription and the
+        /// seventeen registered ones share no shape (one has a `null` codec), so
+        /// modelling them here would be seventeen decoders for a debug overlay.
+        value: Option<Vec<u8>>,
+    },
+    /// A per-chunk debug feed value (`ClientboundDebugChunkValuePacket`).
+    DebugChunkValue {
+        /// The chunk this value is about.
+        chunk: ChunkPos,
+        /// The `minecraft:debug_subscription` this value belongs to.
+        subscription: Identifier,
+        /// Opaque per-subscription payload; see [`Self::DebugBlockValue::value`].
+        value: Option<Vec<u8>>,
+    },
+    /// A per-entity debug feed value (`ClientboundDebugEntityValuePacket`).
+    ///
+    /// Routed to `session`, not `ingest`, even though it names an entity: it is a
+    /// debug overlay keyed by subscription with no lifetime tied to the entity's
+    /// ECS row, and folding it as a component would resurrect entities the client
+    /// has already forgotten.
+    DebugEntityValue {
+        /// Network id of the entity this value is about.
+        entity_id: i32,
+        /// The `minecraft:debug_subscription` this value belongs to.
+        subscription: Identifier,
+        /// Opaque per-subscription payload; see [`Self::DebugBlockValue::value`].
+        value: Option<Vec<u8>>,
+    },
+    /// A one-shot debug feed event (`ClientboundDebugEventPacket`).
+    ///
+    /// Unlike the three `*Value` packets this carries the payload **without** an
+    /// optional wrapper — an event is always present — so there is no "clear this
+    /// key" form.
+    DebugEvent {
+        /// The `minecraft:debug_subscription` this event belongs to.
+        subscription: Identifier,
+        /// Opaque per-subscription payload; see [`Self::DebugBlockValue::value`].
+        value: Vec<u8>,
+    },
+    /// A batch of server performance samples (`ClientboundDebugSamplePacket`).
+    DebugSample {
+        /// The samples, in nanoseconds for the tick-time kind.
+        sample: Vec<i64>,
+        /// Which sample series this batch belongs to.
+        kind: DebugSampleKind,
+    },
+    /// The server asked the client to highlight a game-test position
+    /// (`ClientboundGameTestHighlightPosPacket`).
+    GameTestHighlightPos {
+        /// Absolute world position.
+        absolute: BlockPos,
+        /// Position relative to the test's own origin.
+        relative: BlockPos,
+    },
+    /// The server is running low on disk space
+    /// (`ClientboundLowDiskSpaceWarningPacket`).
+    ///
+    /// A zero-byte packet — `StreamCodec.unit` — so this variant carries nothing,
+    /// like [`Self::WinGame`].
+    LowDiskSpaceWarning,
+    /// The server sent crash/report metadata for the client to attach to a report
+    /// (`ClientboundCustomReportDetailsPacket`).
+    CustomReportDetails {
+        /// `(title, description)` pairs, at most 32 entries.
+        details: Vec<(String, String)>,
+    },
+    /// The server advertised its links (`ClientboundServerLinksPacket`).
+    ///
+    /// Vanilla shows these on the pause and disconnect screens. Every entry is
+    /// **untrusted** — the label may be an arbitrary server-authored component
+    /// and the URL an arbitrary string — which is why nothing here resolves or
+    /// validates either.
+    ServerLinksReceived {
+        /// The advertised links, in the order sent.
+        links: Vec<ServerLink>,
+    },
+    /// A tracked waypoint was added, updated or removed
+    /// (`ClientboundTrackedWaypointPacket`).
+    WaypointUpdated {
+        /// Whether this is a track, untrack or update.
+        operation: WaypointOperation,
+        /// The waypoint.
+        waypoint: TrackedWaypoint,
+    },
+    /// A reply to a serverbound NBT query (`ClientboundTagQueryPacket`).
+    ///
+    /// The transaction id echoes
+    /// [`crate::ClientAction::QueryEntityTag`]/[`crate::ClientAction::QueryBlockEntityTag`],
+    /// so a consumer can match a reply to its own request and drop a stale one.
+    /// `tag` is `None` when the server had nothing (or refused): the wire carries
+    /// a nullable compound, not an error.
+    TagQueryResponse {
+        /// Transaction id echoed from the request.
+        transaction_id: i32,
+        /// The queried NBT as raw network-NBT bytes, or `None`.
+        tag: Option<Vec<u8>>,
+    },
+    /// The world's tick rate or freeze state changed
+    /// (`ClientboundTickingStatePacket`) — vanilla's `/tick rate` and
+    /// `/tick freeze`.
+    TickingStateChanged {
+        /// Ticks per second the server is targeting.
+        tick_rate: f32,
+        /// Whether the world is frozen.
+        frozen: bool,
+    },
+    /// The server is stepping a frozen world forward
+    /// (`ClientboundTickingStepPacket`) — vanilla's `/tick step`.
+    TickingStepped {
+        /// How many ticks remain to run while frozen.
+        tick_steps: i32,
+    },
+    /// A test instance block reported its status
+    /// (`ClientboundTestInstanceBlockStatus`).
+    TestInstanceBlockStatus {
+        /// Human-readable status line.
+        status: Text,
+        /// Detected region size, when the server has one.
+        size: Option<(i32, i32, i32)>,
+    },
+    /// The server asked the client to open a dialog
+    /// (`ClientboundShowDialogPacket`).
+    ///
+    /// The wire is a `Holder<Dialog>`: either a registry id, or an inline dialog
+    /// as a network-NBT blob. `Dialog` is an NBT `Codec` union of six types with
+    /// nested body/input/action trees — a *schema*, not a `StreamCodec` — so the
+    /// inline form is carried here as raw NBT bytes. A screen that renders
+    /// dialogs parses them; nothing before that point needs to.
+    DialogShown {
+        /// The registry id of a known dialog, when the server referenced one.
+        registry_id: Option<i32>,
+        /// The inline dialog as raw network-NBT bytes, when the server sent one.
+        /// Exactly one of this and `registry_id` is `Some`.
+        inline: Option<Vec<u8>>,
+    },
+    /// The server closed any open dialog (`ClientboundClearDialogPacket`).
+    ///
+    /// Another zero-byte `StreamCodec.unit` packet.
+    DialogCleared,
+}
+
+/// One statistic the server reported, from `ClientboundAwardStatsPacket`.
+///
+/// The wire carries two registry ids — a `stat_type` and a value id whose
+/// registry *depends on that type* (`Stat.STREAM_CODEC` dispatches on it). The
+/// adapter resolves both, and `value` is `None` when the value registry is one
+/// this build has no table for. That is not an error: the count is still usable
+/// and a screen keyed on `stat_type` alone (vanilla's "General" tab is entirely
+/// `minecraft:custom`) does not need it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatAward {
+    /// The `minecraft:stat_type`, e.g. `minecraft:custom` or `minecraft:mined`.
+    pub stat_type: Identifier,
+    /// The statistic's value key, e.g. `minecraft:bell_ring` under
+    /// `minecraft:custom` or `minecraft:stone` under `minecraft:mined`.
+    pub value: Option<Identifier>,
+    /// The absolute count, not a delta.
+    pub count: i32,
+}
+
+/// What a `custom_chat_completions` update does to the current set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChatCompletionsAction {
+    /// Add these entries.
+    Add,
+    /// Remove these entries.
+    Remove,
+    /// Replace the whole set with these entries.
+    Set,
+}
+
+/// Which server sample series a `debug_sample` batch belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DebugSampleKind {
+    /// `RemoteDebugSampleType.TICK_TIME` — the only kind 26.2 defines.
+    TickTime,
+}
+
+/// One entry of `ClientboundServerLinksPacket`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServerLink {
+    /// What kind of link this is.
+    pub kind: ServerLinkKind,
+    /// The URL, exactly as the server sent it. **Not validated** — see
+    /// [`ClientEvent::ServerLinksReceived`].
+    pub url: String,
+}
+
+/// A server link's label: one of vanilla's known kinds, or a custom component.
+///
+/// The wire is `ByteBufCodecs.either`, a boolean where `true` means *Left* — and
+/// Left is the **known** id, not the custom label. Getting that polarity
+/// backwards produces a plausible-looking decode of the wrong half.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ServerLinkKind {
+    /// One of vanilla's ten `KnownLinkType`s, by id.
+    Known(i32),
+    /// A server-authored label.
+    Custom(Text),
+}
+
+/// Whether a `waypoint` packet starts tracking, stops tracking, or updates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WaypointOperation {
+    /// Start tracking.
+    Track,
+    /// Stop tracking.
+    Untrack,
+    /// Update an already-tracked waypoint.
+    Update,
+}
+
+/// One tracked waypoint, from `ClientboundTrackedWaypointPacket`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackedWaypoint {
+    /// The waypoint's identity: a player's UUID, or a free-form string for a
+    /// non-entity waypoint. The wire is a boolean discriminant, `true` for UUID.
+    pub id: WaypointId,
+    /// The icon style, a `minecraft:waypoint_style` key.
+    pub style: Identifier,
+    /// Packed RGB tint, when the server overrode the style's own colour.
+    pub color: Option<u32>,
+    /// Where the waypoint is, at whatever precision the server chose to send.
+    pub position: WaypointPosition,
+}
+
+/// A waypoint's identity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WaypointId {
+    /// An entity's UUID — vanilla's own locator-bar waypoints.
+    Entity(Uuid),
+    /// A free-form name.
+    Named(String),
+}
+
+/// How precisely a waypoint's position is known.
+///
+/// Vanilla degrades deliberately with distance: a nearby waypoint sends exact
+/// coordinates, a distant one only its chunk, and one past the tracking range
+/// only a compass bearing. A consumer must render all four — treating
+/// [`Self::Empty`] or [`Self::Azimuth`] as "no position" would make the locator
+/// bar go blank exactly when it is most useful.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WaypointPosition {
+    /// No position at all.
+    Empty,
+    /// Exact block position.
+    Exact(BlockPos),
+    /// Chunk position only.
+    Chunk(ChunkPos),
+    /// Compass bearing in radians only.
+    Azimuth(f32),
 }
 
 /// One icon drawn over a filled map, from vanilla's `MapDecoration`.
@@ -2656,6 +2977,46 @@ pub fn route(event: &ClientEvent) -> Route {
         // unbuilt.
         ClientEvent::GameRulesChanged { .. } => SESSION,
 
+        // ---- issue #26's remaining clientbound set, all session -------------
+        //
+        // Every one of these folds into a `Session*` component in
+        // `lodestone_ecs::session`, the same way the scoreboard, the tab list,
+        // maps and advancements already do. That is why none of them appears in
+        // `net::forward` and why the `debug_assert!` on its catch-all stays
+        // quiet: `shell` is false on purpose, not by omission.
+        //
+        // `DebugEntityValue` is the one worth arguing about. It names an entity,
+        // and `route`'s convention says per-entity state is `ingest` — but a
+        // debug feed is keyed by *subscription* and outlives the entity's ECS
+        // row, so folding it as a component would resurrect rows the client has
+        // already dropped. It is session state about an entity, not entity state.
+        // The server's own `minecraft:enchantment` order. Routed to `session`
+        // rather than `shell` (where `BiomeRegistryNames` goes) on purpose: a
+        // `shell` route needs an unconditional arm in `net::forward` or its
+        // `debug_assert!` fires, and a session component reaches the same
+        // consumer -- `Sim` holds the session `World` -- with no shell edit and
+        // no second table. `BiomeRegistryNames` predates the session-fold
+        // convention; it is not a precedent to copy.
+        ClientEvent::EnchantmentRegistryNames { .. }
+        | ClientEvent::StatisticsAwarded { .. }
+        | ClientEvent::ChatCompletionsChanged { .. }
+        | ClientEvent::DebugBlockValue { .. }
+        | ClientEvent::DebugChunkValue { .. }
+        | ClientEvent::DebugEntityValue { .. }
+        | ClientEvent::DebugEvent { .. }
+        | ClientEvent::DebugSample { .. }
+        | ClientEvent::GameTestHighlightPos { .. }
+        | ClientEvent::LowDiskSpaceWarning
+        | ClientEvent::CustomReportDetails { .. }
+        | ClientEvent::ServerLinksReceived { .. }
+        | ClientEvent::WaypointUpdated { .. }
+        | ClientEvent::TagQueryResponse { .. }
+        | ClientEvent::TickingStateChanged { .. }
+        | ClientEvent::TickingStepped { .. }
+        | ClientEvent::TestInstanceBlockStatus { .. }
+        | ClientEvent::DialogShown { .. }
+        | ClientEvent::DialogCleared => SESSION,
+
         // ---- claimed by nothing ---------------------------------------------
         //
         // Decoded and tested, consumed nowhere. Each line here is a candidate
@@ -2829,7 +3190,7 @@ mod route_tests {
         // Asserting the two counts agree turns it into evidence a reader can see,
         // and catches a variant named twice.
         assert_eq!(
-            total, 106,
+            total, 125,
             "the `ClientEvent` variant count changed. That is fine and expected — \
              update `docs/event-routing.md` and this number together, which is the \
              whole point of this gate firing."
