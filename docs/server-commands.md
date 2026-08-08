@@ -129,6 +129,125 @@ is the established pattern here (`serve_connection_with_block_ticks`,
 `crates/protocol/v770/tests/*` call the older ones directly, and every added
 parameter would break all of them.
 
+### The built-in tree, and the island it used to be
+
+**The seam above is the *plugin* path. It is no longer the only path, and it is
+no longer the first one consulted.** `lodestone_server::commands::ServerCommands`
+holds the server's own Brigadier tree, and `crate::server`'s `ChatCommand` arm
+asks it before it asks the host sink.
+
+That ordering is the whole fix for a defect worth recording precisely, because it
+is this repo's dominant class in its purest form. `ServerCommands` existed with
+`/gamerule` fully built and tested — and `grep ServerCommands` outside its own
+file returned **zero hits**. Its module doc asserted that this arm consulted it.
+The assertion was stale: the arm ran a hand-rolled `parse_gamemode_command` string
+split and handed everything else to a sink that every real constructor leaves
+empty. So **`/gamerule` typed by a player did nothing at all**, its own tests were
+green, and nothing in the tree was red. `rcon.rs` was worse: it called the host
+sink *only*, so RCON bypassed the built-ins entirely.
+
+Two call sites close it — the `ChatCommand` arm and `rcon.rs::run_command` — and
+the precedence at both is:
+
+| outcome | meaning | the caller does |
+|---|---|---|
+| `Some(outcome)` | a built-in root matched | send its lines, apply its effects; **do not** consult the host |
+| `None` | nothing at the root matched | fall through to `CommandDispatch` |
+
+`None` is keyed on `ParseErrorKind::UnknownCommand` specifically, which the tree
+produces only when *no token matched at the root at all*. `/gamerule nonsense`
+therefore reports its parse error rather than becoming a plugin's problem — the
+alternative tells a player the command does not exist when only their argument was
+wrong.
+
+#### The three pieces underneath
+
+**Typed argument keys.** `Registrar::arg` returns `(NodeId, ArgKey<A::Value>)`
+together, and an `ArgKey<T>` exists *only* as the return value of the call that
+created its node. There is no string to typo and no class to get wrong, which is
+strictly stronger than Brigadier's `getArgument(name, Class)`. Three runtime
+panics remain, all registration bugs that fire on the **first execution** of a
+command: a key from another tree, a key naming a node deeper than the executing
+one, and an `McArg` whose `Value` disagrees with what its parser produced. The
+third is the only real seam and is documented on `McArg` itself.
+
+**Modifiers and forks, built before `/execute` needs them.** A `NodeId`-keyed
+modifier table plus a fork set, and a dispatch walk that threads the source set
+through every modifier on the path and then runs the deepest executor **once per
+surviving source**. A failure aborts an unforked path but only its own branch when
+forked, which is what stops `execute as @a run give @s …` at the first player whose
+inventory is full. Nothing in production drives this yet — that is why
+`crates/lodestone-server/tests/builtin_commands.rs` does, through
+`ServerCommands::from_registrar`. Building it now is the reason a port was chosen
+over a signature-driven macro: a function signature is a list, and the vanilla
+command set is a graph.
+
+**Effects, which are forced rather than stylistic.** `game_mode` and `inventory`
+are `dispatch_play_packet`'s own `&mut` parameters. An executor is a shared `Arc`
+closure inside a process-wide tree and physically cannot write either, nor reach
+`proto` or `conn`. So an executor emits typed `Effect`s and exactly one place
+applies them:
+
+| target | path |
+|---|---|
+| the caller's own connection | `server.rs::apply_own_effect`, inline through `proto` |
+| any other player | a **directed, drained** per-uuid queue on `PlayerRegistry` |
+
+The second is the genuinely new mechanism. Chat is the precedent but chat is a
+*broadcast*: every connection reads every line through its own cursor. An effect
+must reach one player, once, so it is keyed by uuid and **taken** rather than
+cursored — a cursor over a shared log would hand Steve's game-mode change to
+everybody.
+
+#### One tree, three consumers
+
+Execution (`parse_filtered` → executor table), suggestion (`suggest_filtered`) and
+the wire projection (`ServerCommands::wire_tree`) all read one `CommandTree`.
+`Registrar::arg` records the node's `ArgumentParser` **in the same call that
+installs its parser**, from one `McArg` value, so there is no second place a
+node's wire identity could be stated differently. The failure that guards against
+is specific: a client that autocompletes something the server then rejects.
+
+**Nothing sends the projection yet.** No protocol family here has a `COMMANDS`
+(id 16) *encode* arm. Tab completion against the server's own commands does not
+work end to end; what works is that the projection is gated, per command, against
+a real vanilla server's own tree.
+
+#### The commands, and how they are gated
+
+`/gamerule` (one literal per rule, so the value's type comes from the rule's own
+spec), `/gamemode` and `/give`, each read off the decompiled 26.2 source rather
+than from memory. Per-command parity is asserted against
+`crates/protocol/v770/tests/fixtures/command_tree_creative.hex` — 30,248 bytes and
+2,017 nodes captured from a real vanilla 26.2 server — comparing node kinds,
+names, parser variants *including payload flags*, executable bits, restricted
+bits, redirect topology and suggestion ids, recursively and in child order. The
+gate carries its own control: pointing the comparison at two different subtrees
+must panic.
+
+Three shapes the fixture settled that a reconstruction gets wrong:
+
+* `/gamemode`'s mode slot is **one `minecraft:gamemode` parser node, not four
+  literals**. The four-literal shape is from a much older version.
+* `/give`'s `<targets>` comes **before** `<item>` — the opposite of the English
+  reading.
+* An optional trailing argument is **two executable nodes on one path**, not one
+  node with an `Option<T>` parameter. Both `<item>` and `<count>` are executable
+  on the wire; an `Option`-shaped design transmits one.
+
+#### Permission levels
+
+Every built-in root is gated at its vanilla level (2 for all three today) through
+`Registrar::require_level`. `lodestone-command`'s permission seam is a dotted
+*string*, because that crate cannot know what a permission is, so a level is
+encoded as `lodestone.level.N` and read back by `commands::level_filter`. An
+unrecognised permission string fails **closed**.
+
+The level itself is resolved **once**, at the Play handoff, from the connection's
+own authenticated uuid — never from anything in the command text, the same property
+`CommandCaller` exists for. RCON's caller is level 4, matching vanilla's
+`RconConsoleSource` (`Commands.LEVEL_OWNERS`).
+
 ## How to change it
 
 **Adding a host-dispatched packet kind.** Add a method to `CommandSink` **with a
@@ -176,6 +295,41 @@ lives in the plugin API.**
 * **`crates/lodestone-shell/src/.../chat.rs` still carries three hand-rolled
   copies of Brigadier reader/parser logic** (`validate_simple`, `read_quoted`,
   `is_unquoted_string`) which should delegate here. Not done — see *Known gaps*.
+* **Nothing in production calls `AccessLists::set_owner`.** This document's own
+  neighbourhood and `access.rs`'s module doc both claim `server.rs` passes an owner
+  for the in-memory constructors; that claim is **stale**, measured by
+  `grep set_owner crates/lodestone-server/src`. Every connection therefore resolves
+  to `permission_level == 0`, so gating a command at its vanilla level 2 makes it
+  unreachable in singleplayer. `AccessLists::command_permission_level` is the
+  answer: level 4 when *no* operator model is configured at all (no owner **and**
+  no ops), collapsing to `permission_level` the moment a host ops anybody — which
+  is vanilla's LAN behaviour and the posture the empty default already documented.
+  Discovered by the wire gate going red on seven commands at once, not by review.
+* **The built-in tree was pointed at the wrong game-rule store.** The old
+  `CommandEffects` took a `&GameRulesHandle`, but the production rules live inside
+  `WorldStateHandle`. Even fully wired, `/gamerule` would have written a store
+  nothing else reads — an island *behind* an island. Hence the `RuleStore` trait
+  with both implementors, and `IntegratedServer::start_rcon` substituting its own
+  shared handle over whatever the caller put in the config, so a host cannot get it
+  wrong.
+* **26.2's `/gamemode` accepts the four full names and nothing else.**
+  `GameType.byName` is an exact match against `getSerializedName`. The deleted
+  `parse_gamemode_command` accepted `c`/`1`/`sp` as well, i.e. it was *more*
+  permissive than vanilla — and its own test asserted that permissiveness, so
+  nothing was ever red. A faithfulness bug in this direction is invisible to
+  testing: it only ever makes a command work that should have failed.
+* **`CommandWorld::rules` is `&(dyn RuleStore + Sync)`, not `&dyn RuleStore`.** A
+  `CommandWorld` is held across an `await` on a spawned connection task, and a
+  `&dyn Trait` is only `Send` when the trait is `Sync`. Three `integrated.rs` spawn
+  sites report this, not the module under test.
+* **A selector resolves in the order filter → sort → truncate.** Any other order
+  makes `sort=nearest,limit=2` return two arbitrary players sorted among
+  themselves, which looks plausible in any test with fewer than three candidates.
+* **`@s` is exempt from `EntityArgument`'s players-only check.** Vanilla's
+  condition is `includesEntities() && playersOnly && !isSelfSelector()`, and `@s`
+  sets `includesEntities = true` because the caller might not be a player. Without
+  the exemption `/gamemode creative @s` is refused — the single most-used form of
+  the command.
 
 ## Configuration
 
@@ -185,10 +339,16 @@ one thing: whether the host called `serve_connection_with_commands` with a
 
 ## Known gaps
 
-**Nothing installs a sink in production yet, so no real player can run a command
-today.** The seam, the decode, the dispatch and the gate are all in place and
-proven end-to-end; what is missing is host wiring, in three files owned by other
-work:
+**Built-in commands work in production now.** `/gamerule`, `/gamemode` and
+`/give` are reachable by a real player over a real wire with **no host sink
+installed**, which is the shipping configuration —
+`crates/protocol/v770/tests/builtin_commands_wire_path.rs` is the gate, and it
+reads the effect back as a real `game_event`/`container_set_slot` the real client
+decoded rather than as a chat line.
+
+**Plugin commands still have no production sink**, so the paragraph below is about
+the *plugin* half only. What is missing is host wiring, in three files owned by
+other work:
 
 1. `PluginCommandsPlugin` is added in **zero** production code paths (only
    tests), so no production `World` even holds a `CommandRegistry`. The place to
@@ -201,16 +361,56 @@ work:
    the `IntegratedServer` are simultaneously in scope, so it is where the sink
    would be constructed and installed.
 
-Also open: **`/execute` and its subcommand chain** ([#123]) needs a context
-object; **command blocks** do not tick; **selectors** (`@a`/`@e` and their
-filters) are unimplemented; **functions and datapacks** are unimplemented. Those
-are the rest of [#48], and all of them are now unblocked rather than blocked —
-they have a wire to arrive on.
+Still open, and each is now additive rather than blocked:
+
+* **The `COMMANDS` (id 16) encoder.** The projection exists and is gated; nothing
+  transmits it. Until it lands, tab completion against the server's own commands
+  does not work, and `CHAT_COMMAND_SIGNED` stays unreachable (see *Gotchas*).
+* **`/execute`** ([#123]). The modifier/fork substrate it needs is built and
+  gated; what is left is the subcommand tree itself.
+* **A textual SNBT parser.** `ItemArg` v1 refuses a `[…]` component patch by name
+  rather than dropping it, because no textual SNBT parser exists anywhere in this
+  tree (`read_component_patch` is *wire* decode, a different problem). Since
+  `minecraft:item_stack` carries no wire payload, the node, the autocompletion and
+  `/give minecraft:diamond_sword 3` are all complete now, and the later unit
+  replaces exactly one match arm.
+* **Deferred selector options.** `scores`, `nbt`, `advancements`, `predicate`,
+  `tag`, `team`, `level` and the two `*_rotation` options are refused **by name**
+  rather than ignored — a silently widened selector is the worst available
+  failure. Each needs a subsystem that does not exist (a scoreboard, entity NBT,
+  the advancement predicate engine, entity tags, experience levels, per-entity
+  rotation tracking). **None of it is visible on the wire**: `minecraft:entity`
+  carries one flags byte and no option list, so deferring options cannot break
+  tree parity.
+* **`/gamerule` does not have full subtree parity.** Vanilla registers two
+  literals per rule (`keep_inventory` *and* `minecraft:keep_inventory`); we
+  register one. Closing it is one extra `literal` call. Separately, our
+  `GAME_RULES` offers `max_minecart_speed`, which vanilla's tree omits because it
+  is behind `FeatureFlags.MINECART_IMPROVEMENTS` — our table carries no
+  feature-flag concept. Both are pinned by the parity gate.
+* **`PlayerInventory::add` caps every stack at 64** regardless of item, as its own
+  doc comment says. `/give` splits by the item's *real* max stack size before
+  handing stacks over, so `/give @s diamond_sword 3` produces three
+  single-item stacks — but `add` may then merge them into one slot of 3. That is a
+  pre-existing inventory limitation, not a command one.
+* **Command blocks** do not tick; **functions and datapacks** are unimplemented.
 
 ## Dependencies
 
 * `lodestone-command` — the argument tree. **Keep its `[dependencies]` empty**;
-  that property is what made adding it to `lodestone-ecs` risk-free.
+  that property is what made adding it to `lodestone-ecs` risk-free. It now also
+  carries `ParsedValue::Dyn(Arc<dyn AnyValue>)`, the structured-payload variant the
+  typed-key API needs.
+* `lodestone-command-mc` — `McArg` plus `GameModeArg`, `EntityArg` (the selector
+  grammar and its AST), `Vec3Arg`/`BlockPosArg` and `ItemArg`. Separate from
+  `lodestone-command` because an argument type that knows what an item *is* cannot
+  live in a crate that depends on nothing. Names no protocol number: `McArg::wire`
+  returns the *symbolic* `lodestone_model::command_tree::ArgumentParser`, and the
+  numeric registry ids stay in `lodestone-data` and the version crates — which is
+  what keeps the version seam (`cargo check -p lodestone-shell
+  --no-default-features`) intact.
+* `lodestone_server::commands` — `ServerCommands`, `Registrar`, `ArgKey`, `Ctx`,
+  `CommandSource`, `Effect`, and the wire projection.
 * `lodestone-ecs` — `CommandRegistry`, `dispatch`, `Permissions`,
   `PluginCommandsPlugin`. Reached only through the seam, never linked by
   `lodestone-server`.

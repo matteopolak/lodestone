@@ -6664,3 +6664,113 @@ binaries were built once and run **alternately**, ten rounds, in one shell invoc
   lands within 2% of it (17,868 µs against 17,975 µs) — those counts are sweep averages dominated by the
   leading edge filling its 5×5 closure, and the median interior column is not the average. **The control
   is that the parts sum to the whole**, and it is the only thing that distinguished the two.
+
+**12.144 The stalest claim in the repo was a module doc asserting its own consumer, and it hid a
+command tree that had been fully built, fully tested and reached by nobody for its entire life.**
+`crates/lodestone-server/src/commands.rs` carried a complete, vanilla-shaped `/gamerule` — 59 rules,
+118 nodes, seven green tests including a registration gate that proved every rule was reachable
+*through the tree*. Its module doc's second paragraph said: "It is consulted by `crate::server`'s
+`ServerBound::ChatCommand` arm **before** the host-installed `CommandSink`." `grep -rn ServerCommands
+crates/` returned **one file: its own**. The arm actually ran a hand-rolled `parse_gamemode_command`
+string split and fell through to the host sink, and every real constructor passes
+`CommandDispatch::none()` (§12's own #535), so `/gamerule` typed by a player did nothing whatsoever.
+`rcon.rs` was a second instance one layer along: it called the host sink only, so RCON never saw a
+built-in either, and *its* doc said so honestly ("deliberately *not* consulted here … when it is, this
+is the place to call it first") — the honest note and the false one were 400 lines apart.
+
+- **The island was pointed at the wrong store as well, so wiring it alone would not have worked.**
+  `CommandEffects` took a `&GameRulesHandle`. The production rules live inside
+  `WorldStateHandle` (`world_state.rs:207`), which is what `run_tick_loop` and the `SET_GAME_RULE`
+  packet both read. So the fully-connected version of this island would have reported
+  "Gamerule keep_inventory is now set to: true" and written a store nothing else reads — an island
+  *behind* an island, and one that a wiring change plus its own tests would both have called green.
+  Fixed with a two-method `RuleStore` trait implemented for both handles, and by having
+  `IntegratedServer::start_rcon` **substitute** its own shared handle over whatever the caller put in
+  the config rather than assert about it.
+
+- **Gating the command correctly broke it everywhere, and the reason was a second stale doc.**
+  `/gamemode` is `Commands.hasPermission(LEVEL_GAMEMASTERS)` = level 2 in 26.2, and
+  `AccessLists::permission_level` has existed since `77599b1e`. Gating on it turned **seven of eight**
+  end-to-end gates red at once, all with a permission refusal. Cause: `grep set_owner
+  crates/lodestone-server/src` has **no production caller**, while `access.rs`'s module doc says
+  "`server.rs` passes an owner for the in-memory constructors and `None` for a LAN host". Every
+  connection in the shipping product resolves to level **0**. So the faithful gate makes creative mode
+  unreachable in singleplayer — strictly worse than the ungated version it replaced. The resolution is
+  `command_permission_level`: `MAX_PERMISSION_LEVEL` when *no* operator model is configured at all (no
+  owner **and** no ops), collapsing to `permission_level` the moment a host ops anybody. Note which
+  instrument found this: not review, and not any `cargo check` — a wire gate whose expected values were
+  chat lines and packet contents.
+
+- **The captured fixture answered three shape questions that a from-memory port gets wrong, and one of
+  them is a whole design decision.** `command_tree_creative.hex` is 30,248 bytes / 2,017 nodes from a
+  real 26.2 server. Read against it: `/gamemode`'s mode slot is **one `minecraft:gamemode` parser node,
+  not four literals** (nodes 23/148/484); `/give`'s `<targets>` comes **before** `<item>` (25/265/601/853),
+  the opposite of the English reading; and an optional trailing argument is **two executable nodes on one
+  path**, not one node with an `Option<T>` parameter — both `<item>` and `<count>` carry
+  `FLAG_EXECUTABLE`, so an `Option`-shaped handler would transmit a tree that is wrong in a way only a
+  real client would notice. The rule: **for a command, read the *tree* off a capture, not the
+  *signature* off the Java method** — the method body tells you the semantics and the packet tells you
+  the shape, and only the second is what the client parses against.
+
+- **A fourth answer came from arithmetic on the same fixture, and it was a feature flag.** Our
+  `GAME_RULES` has 59 rules; vanilla's `/gamerule` has 58 (×2, because vanilla registers
+  `keep_inventory` **and** `minecraft:keep_inventory`). The extra one is
+  `registerInteger("max_minecart_speed", …, FeatureFlagSet.of(FeatureFlags.MINECART_IMPROVEMENTS))`
+  (`GameRules.java:55-57`) — behind an experimental flag the oracle world does not enable, so vanilla
+  legitimately omits it from the tree it sends and our table has no feature-flag concept at all. The
+  gate asserts the *name* of the extra rule rather than an inequality on the count, so a second
+  divergence appearing later cannot hide inside `(ours - 1) * 2 == theirs`.
+
+- **The deleted parser was *more* permissive than vanilla, and its own test asserted the excess.**
+  `parse_gamemode_command` accepted `gamemode c`, `gamemode 1`, `gamemode sp`; 26.2's `GameType.byName`
+  is `StringRepresentable`'s exact-match codec over the four `getSerializedName` values and accepts
+  none of them. `gamemode_command_parses_names_aliases_and_ids` pinned the aliases *as correct*. This is
+  a faithfulness bug in the direction no test can see: an over-permissive parser only ever makes a
+  command work that should have failed, so there is no failing input to write a test around. The only
+  detector is reading the record — and the record here is four lines of `GameType.java`.
+
+- **`Arc<dyn Trait>` satisfies a blanket impl for its own trait, which silently defeats downcasting.**
+  `ParsedValue::Dyn(Arc<dyn AnyValue>)` with `impl<T: Any + Send + Sync + Debug> AnyValue for T` — then
+  `v.as_any()` on the `Arc` resolves to the **`Arc`'s own** `as_any` before dereferencing, because
+  `Arc<dyn AnyValue>` is itself `Any + Send + Sync + Debug` and therefore also an `AnyValue`. It
+  compiles, and every downcast answers `None`. The fix is `&**v`; the general rule is that a blanket impl
+  over `Any` covers the smart pointer too, so **method resolution on a `&Arc<dyn Trait>` is not
+  dynamic dispatch on the payload** unless you say so.
+
+- **Three transcription errors in one small file, each caught by its own first test run rather than by
+  review, and each in the safe-looking direction.** (1) `@s` is exempt from `EntityArgument`'s
+  players-only check — the real condition is `includesEntities() && playersOnly && !isSelfSelector()`,
+  and `@s` sets `includesEntities = true` because the caller need not be a player, so without the
+  exemption `/gamemode creative @s` is refused: the single most-used form of the command. (2)
+  `LocalCoordinates(left, up, forwards)` — the first `^` component is **left**, with basis
+  `forwards.cross(up).scale(-1.0)`. Reading it as "right" is sign-flipped on exactly one axis and
+  passes any test that only moves forward. Facing +Z, left is **+X**; facing +X, left is **−Z**, and
+  getting the *second* of those right is what proves the first was not the identity case. (3)
+  `WorldCoordinate.parseInt` reads a **double** when the component is relative and an int when it is
+  absolute, so `~1.5` is legal in a block-pos and `1.5` is not — and centre correction (`+0.5` for a
+  component written without a decimal point) applies to `x`/`z` but **never** `y`, because the corner of
+  a block *is* its floor.
+
+- **Build the substrate before its consumer, then gate the substrate directly, or it is the next
+  island.** Brigadier's modifier/fork half has no production caller until `/execute` lands. It went in
+  anyway — a `NodeId`-keyed modifier table, a fork set, and a walk that threads the source set through
+  the modifiers then runs the deepest executor once per surviving source — because a signature-driven
+  macro cannot express `/execute`'s redirect web at all: **a function signature is a list and the vanilla
+  command set is a graph.** But "built for a later unit" is exactly how the thing this subsection is
+  about started, so `ServerCommands::from_registrar` exists purely so a gate can drive it, and the gate
+  asserts the asymmetry that is the whole point: a failure aborts an unforked path but only its own
+  branch when forked. Without that, `execute as @a run give @s …` stops at the first full inventory.
+
+- **The two typed-key panics need a control, for the reason every absence assertion does.** `Ctx::get`
+  panics on a key from another tree and on a key naming a node deeper than the executing one. Two
+  `#[should_panic]` tests are satisfied by a `get` that panics unconditionally, so the third test in that
+  group reads *both* keys off the deep node and asserts the value — which is also the only test that
+  proves the argument-node-to-parsed-value index alignment is right.
+
+- **Where the honest residue is, stated because the design is not total.** Three runtime panics, all
+  registration bugs, all firing on the first *execution* of a command rather than at any `cargo check`:
+  a foreign-tree key, an above-depth key, and an `McArg` whose `Value` disagrees with what its own
+  `parse` puts in the `ParsedValue`. The first two are structurally unreachable from a correct
+  registration; the third is a genuine promise the type system does not check, because `parse` returns
+  an erased enum. One execution test per command catches all three, which is why that is the stated bar
+  rather than a suggestion.
