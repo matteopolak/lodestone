@@ -82,7 +82,7 @@ use crate::chunk::{
     AIR, ChunkColumn, ChunkSource, generate_columns_offloaded, generate_columns_parallel,
     is_air_or_fluid, is_water,
 };
-use crate::fall::FallTracker;
+use crate::fall::{FallSample, FallTracker};
 use crate::inventory::{
     ContainerMenuSlot, PlayerInventory, container_menu_slot, window_zero_menu_slot,
 };
@@ -3672,6 +3672,44 @@ fn apply_attack(mobs: &MobHandle, player_pos: Option<(f64, f64, f64)>, sprinting
 /// Every other packet decodes to [`ServerBound::Ignored`] in `State::Play`
 /// under the current protocols (no further state transitions are modeled —
 /// no dimension change yet) and is a no-op here.
+/// The three world-derived facts [`FallSample`] needs, read off the terrain the
+/// player is standing in (issue #534).
+///
+/// # Which cell each one reads, and why
+///
+/// * `in_water` — the cell at the player's **feet**. Vanilla's `isInWater()` is a
+///   fluid-height test over the whole bounding box; the feet cell is the earliest
+///   part of that box to touch a water surface on the way down, which is the
+///   moment the cancellation must fire. Reading the *eye* instead (which
+///   `crate::vitals` correctly does for drowning, a different question) would
+///   delay the cancellation by the player's height and let a shallow-water landing
+///   still hurt.
+/// * `fall_resetting` — the same feet cell, since a climbable is something the
+///   player is *inside*.
+/// * `block_damage_modifier` — the cell **below** the feet, at `y - 0.2`, which is
+///   vanilla's own `getOnPosLegacy()` offset (`Entity.getOnPos`'s `0.2` epsilon).
+///   A plain `y - 1` is wrong for a player standing exactly on a block boundary.
+///
+/// One `ChunkSource::block_state` call per cell, two cells — and `block_state` is
+/// the cheap single-cell read `ChunkStore` overrides, not a column regeneration
+/// (issue #440). This runs once per movement packet, the same cadence
+/// `view.recenter` already runs at.
+fn fall_sample<S: ChunkSource>(source: &S, x: f64, y: f64, z: f64, on_ground: bool) -> FallSample {
+    let bx = x.floor() as i32;
+    let bz = z.floor() as i32;
+    let feet = source.block_state(bx, y.floor() as i32, bz);
+    let below = source.block_state(bx, (y - 0.2).floor() as i32, bz);
+    FallSample {
+        y,
+        on_ground,
+        // `is_water`, deliberately — **not** `is_air_or_fluid`. Lava does not
+        // cancel a fall in vanilla; see `crate::fall`'s module doc.
+        in_water: is_water(&feet),
+        fall_resetting: crate::fall::is_fall_damage_resetting(&feet),
+        block_damage_modifier: crate::fall::block_damage_modifier(&below),
+    }
+}
+
 /// Publishes the player's post-damage health, **and the death notification when
 /// that damage was the hit that killed them.**
 ///
@@ -3734,10 +3772,14 @@ where
 /// yet — a status packet before the first movement packet has no y to pair
 /// with, and inventing one (say, the spawn point) would fabricate a fall.
 #[allow(clippy::too_many_arguments)]
-async fn fall_status_sample<T, P>(
+async fn fall_status_sample<T, P, S>(
     conn: &mut Connection<T>,
     state: &mut State,
     proto: &P,
+    // Issue #534: the terrain the player is standing in, for the water /
+    // climbable / landing-block facts. `.get()` because this is two single-cell
+    // reads, not a batch — see `SourceRef::get`.
+    source: &S,
     player_pos: &Option<(f64, f64, f64)>,
     fall: &mut FallTracker,
     vitals: &mut PlayerVitals,
@@ -3748,11 +3790,12 @@ async fn fall_status_sample<T, P>(
 where
     T: Transport,
     P: ServerProtocol,
+    S: ChunkSource,
 {
-    let Some((_, y, _)) = *player_pos else {
+    let Some((x, y, z)) = *player_pos else {
         return Ok(());
     };
-    if let Some(raw) = fall.on_player_moved(y, on_ground)
+    if let Some(raw) = fall.on_player_moved(fall_sample(source, x, y, z, on_ground))
         && vitals.apply_fall_damage(raw as f32).is_some()
     {
         publish_health(
@@ -3936,7 +3979,8 @@ where
             );
             send_view_update(conn, state, update, awaiting_chunk_batch_ack, pending_chunk_batches).await?;
 
-            if let Some(raw) = fall.on_player_moved(y, on_ground)
+            if let Some(raw) =
+                fall.on_player_moved(fall_sample(source.get(), x, y, z, on_ground))
                 && vitals.apply_fall_damage(raw as f32).is_some()
             {
                 publish_health(
@@ -3966,7 +4010,16 @@ where
         } => {
             *player_rot = Some(Rotation { yaw, pitch });
             fall_status_sample(
-                conn, state, proto, player_pos, fall, vitals, player_entity_id, username, on_ground,
+                conn,
+                state,
+                proto,
+                source.get(),
+                player_pos,
+                fall,
+                vitals,
+                player_entity_id,
+                username,
+                on_ground,
             )
             .await?;
         }
@@ -3977,7 +4030,16 @@ where
         // tick reports the touchdown on *this* packet and no other.
         ServerBound::PlayerStatusOnly { on_ground } => {
             fall_status_sample(
-                conn, state, proto, player_pos, fall, vitals, player_entity_id, username, on_ground,
+                conn,
+                state,
+                proto,
+                source.get(),
+                player_pos,
+                fall,
+                vitals,
+                player_entity_id,
+                username,
+                on_ground,
             )
             .await?;
         }
