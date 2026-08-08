@@ -232,3 +232,29 @@ oracle-terrain:
 
 oracle-survival:
     ./scripts/live-oracles/survival.sh
+
+# Re-dump the per-block blast-resistance + flammability facts (#312/#313) from
+# the real 26.2 server, over the committed anchor
+# (crates/lodestone-data/tests/support/blast_fire_jvm.txt). Needs Apple
+# `container` (see docs/oracle-runtimes.md). Follow with `just regen-blast-fire`.
+oracle-blast-fire:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CACHE="$(cd .cache/mc/26.2 && pwd)"
+    HERE="$(cd crates/lodestone-data/oracle-java && pwd)"
+    container system start >/dev/null 2>&1 || true
+    container run --rm --memory 3g -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -w /work \
+      eclipse-temurin:25-jdk bash -c '
+        set -e
+        CP="/mc/versions/26.2/server-26.2.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
+        mkdir -p /work && cp /oracle/BlastFireOracle.java /work/
+        javac -cp "$CP" -d /work /work/BlastFireOracle.java
+        java -cp "/work:$CP" BlastFireOracle
+      '
+
+# Regenerate crates/lodestone-data's blast/flammability table
+# (src/generated/block_blast.rs) from the committed JVM dump. Test:
+# crates/lodestone-data/tests/block_blast.rs :: committed_table_matches_dump
+# (#[ignore]d). Re-dump first with `just oracle-blast-fire` after a data bump.
+regen-blast-fire:
+    LODESTONE_REGEN=1 cargo test -p lodestone-data --test block_blast {{jflag}} --target-dir {{tdir}} committed_table_matches_dump -- --ignored --nocapture

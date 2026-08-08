@@ -36,6 +36,8 @@
 
 #[path = "generated/attribute_types.rs"]
 pub(crate) mod generated_attribute_types;
+#[path = "generated/block_blast.rs"]
+pub(crate) mod generated_block_blast;
 #[path = "generated/block_entity_types.rs"]
 pub(crate) mod generated_block_entity_types;
 #[path = "generated/block_items.rs"]
@@ -88,6 +90,7 @@ pub(crate) mod generated_sound_types;
 pub(crate) mod generated_tools;
 
 pub mod attribute_types;
+pub mod block_blast;
 pub mod block_entity_types;
 pub mod block_items;
 pub mod block_solidity;
