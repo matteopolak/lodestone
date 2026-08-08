@@ -443,7 +443,7 @@ async fn two_connections_see_each_other_as_player_entities() {
     // (`.cache/mc/26.2/src/net/minecraft/world/level/chunk/ChunkGenerator.java:432`,
     // a literal `64` that `NoiseBasedChunkGenerator` does not override), which is
     // what `MinecraftServer.setInitialSpawn` pre-seeds the world spawn with. See
-    // DESIGN.md §12.125.
+    // DESIGN.md §12.129.
     //
     // Derived from the jar plus `find_initial_spawn`'s contract, not read off the
     // failure. X and Z stay `8.0`, which is what keeps this assertion able to do

@@ -106,7 +106,7 @@ const GENERATOR_SPAWN_HEIGHT: i32 = 64;
 /// 4. A column with no solid block at all (air/void world) is `None`.
 ///
 /// The two tests are vanilla's own, and **not** [`is_air_or_fluid`]'s negation,
-/// which is what this function used until the measurement in DESIGN.md §12.125:
+/// which is what this function used until the measurement in DESIGN.md §12.129:
 ///
 /// | vanilla expression | here |
 /// |---|---|
@@ -557,7 +557,7 @@ mod tests {
     ///
     /// Both hypotheses are computed from outside constants rather than one being
     /// asserted: `is_air_or_fluid`'s negation (the predicate this function used
-    /// until DESIGN.md §12.125) calls `short_grass` ground and yields `surface +
+    /// until DESIGN.md §12.129) calls `short_grass` ground and yields `surface +
     /// 2`; the jar's `Block.isFaceFull(…, UP)` scans past it and yields `surface +
     /// 1`. A sign-only check ("the spawn is above the surface") passes under
     /// both, which is exactly why the bug survived.
@@ -877,7 +877,7 @@ mod tests {
     /// **The world-species gate.** Every hermetic fixture above is a column this
     /// module's own test code wrote, so none of them can exercise the thing that
     /// actually broke: what the *production generator* leaves at the surface.
-    /// Both defects DESIGN.md §12.125 records were invisible to the whole
+    /// Both defects DESIGN.md §12.129 records were invisible to the whole
     /// fixture suite and visible on the first real seed.
     ///
     /// The expected value originates outside this module in both halves: the

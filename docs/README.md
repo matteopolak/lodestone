@@ -424,6 +424,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   client's event routers claim each `ClientEvent` variant. It exists so that adding a
   variant and forgetting to wire it is a **compile error** (`E0004`) rather than a
   silent nothing.
+- [Fall damage and death](./fall-damage-and-death.md) — The server-side half of the
+  damage→death→respawn loop: `FallTracker` (`crates/lodestone-server/src/fall.rs`)
+  accumulates fall distance from the positions a client reports and turns a landing
+  into damage, `PlayerVitals` (`vitals.rs`) holds the health it comes off, and
+  `server.rs` reports the result — including the `player_combat_kill` packet that
+  actually raises the client's death screen, and the `respawn` packet that closes it
+  again.
 - [Filled map item rendering (issue #184) — blocked on decode](./filled-map-item.md) —
   Issue #184 asks for the filled map item's own visual: the generated per-map pixel
   texture, player/marker icons, and the border frame, whether held, in an item frame,
@@ -1271,6 +1278,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   the six buttons are present and disabled**: Edit and Re-Create have no screen to
   open. Delete is live since issue #540 and opens a real [confirmation
   screen](./confirm-screen.md); the list scrolls since #541.
+- [World spawn](./world-spawn.md) — The server-side search that decides where a
+  fresh player appears in a new world —
+  `crates/lodestone-server/src/world_spawn.rs`, a port of vanilla's
+  `MinecraftServer.setInitialSpawn` plus `PlayerSpawnFinder.getLevelRespawnPos`. It
+  also holds the per-player bed respawn point (`RespawnPoint`) and the set-time
+  legality check applied before one is accepted.
 - [One bevy `World` — §4.1(c)](./world-unification.md) — Until this change the
   process held **three** `bevy_ecs::World`s: the net thread's
   (`lodestone_client::state::SharedState`, authoritative over the network read-model),
