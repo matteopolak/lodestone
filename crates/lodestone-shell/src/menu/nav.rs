@@ -2178,6 +2178,23 @@ impl MenuNav {
         if ui.screen() == Screen::Statistics {
             return self.click_statistics(ui, row);
         }
+        // #391's shape once more, and only while the account screen's offline-name
+        // editor is open. The *list* screen still wants the `hover` + `Enter`
+        // translation below (a click on an account row selects it — see
+        // `AccountsNav::handle_key_with`'s `Enter` arm, which says so at length),
+        // so this is deliberately narrower than the arms above: it fires on the
+        // editor's own frame, where row 0 is an always-focused field with nothing
+        // to move focus *to* (the world list's search row, exactly) and only the
+        // Done button acts. Without it, clicking the field to fix a typo saved the
+        // name instead.
+        if ui.screen() == Screen::Accounts && self.accounts.is_editing_name() {
+            use crate::menu::accounts::AccountsSignal;
+            match self.accounts.click_name_edit_row(row) {
+                AccountsSignal::Back => ui.close_accounts(),
+                AccountsSignal::None => {}
+            }
+            return MenuAction::None;
+        }
         self.hover(ui, row);
         self.key(ui, MenuKey::Enter)
     }
@@ -7882,5 +7899,91 @@ mod tests {
             usize::MAX,
             "a fresh entry must focus nothing again"
         );
+    }
+
+    /// **The island gate for `click`'s `Screen::Accounts` arm.**
+    ///
+    /// `AccountsNav::click_name_edit_row` is unit-tested directly, which proves
+    /// nothing about whether `MenuNav::click` ever calls it — without the arm,
+    /// this file's fall-through translates a click into `hover` + `Enter`, and
+    /// `Enter` on the open editor **commits**. So clicking the text field to fix
+    /// a typo saved the name, which is #391's shape on a sixth screen.
+    ///
+    /// Driven through `click`, the function `app.rs`'s mouse handler calls, with
+    /// the field row and the Done row measured separately: a gate that only
+    /// clicked Done would pass with the arm deleted.
+    #[test]
+    fn clicking_the_offline_name_field_does_not_save_but_clicking_done_does() {
+        use crate::menu::accounts::{NAME_EDIT_DONE_ROW, NAME_EDIT_FIELD_ROW};
+        use crate::offline_identity::OfflineIdentity;
+
+        let (mut nav, path) = nav("offline-name-click");
+        let dir = path.parent().expect("the temp path has a parent");
+        let offline_file = dir.join("offline.json");
+        let mut ui = UiState::new();
+        ui.open_accounts();
+
+        // Open the editor the way a player does: the offline row is row 0 with no
+        // accounts, and the third footer button is the affordance.
+        {
+            let accounts = nav.accounts();
+            let list_len = accounts.rows().len();
+            accounts.hover(list_len + crate::menu::accounts::BUTTON_REMOVE);
+        }
+        nav.key(&mut ui, MenuKey::Enter);
+        assert!(
+            nav.accounts().is_editing_name(),
+            "precondition: the editor must be open"
+        );
+        type_str(&mut nav, &mut ui, "Notch");
+        assert_eq!(
+            nav.accounts()
+                .name_edit_view()
+                .expect("still editing")
+                .edit
+                .value(),
+            // The field was seeded with the persisted name and then typed into,
+            // so this is the default plus what was typed — asserted so the test
+            // is not silently measuring an empty field.
+            format!("{}Notch", crate::offline_identity::DEFAULT_USERNAME),
+        );
+
+        assert_eq!(
+            nav.click(&mut ui, NAME_EDIT_FIELD_ROW),
+            MenuAction::None,
+            "a click on the field must not act"
+        );
+        assert!(
+            nav.accounts().is_editing_name(),
+            "clicking the text field saved the name and closed the editor — \
+             `click`'s Screen::Accounts arm is missing, so the click was \
+             translated into hover + Enter"
+        );
+        assert!(
+            !offline_file.exists(),
+            "clicking the field wrote {}",
+            offline_file.display()
+        );
+
+        // Now Done. This is the control for the assertions above: without it,
+        // "nothing was saved" is equally consistent with a commit path that never
+        // works at all.
+        assert_eq!(nav.click(&mut ui, NAME_EDIT_DONE_ROW), MenuAction::None);
+        assert!(
+            !nav.accounts().is_editing_name(),
+            "the control failed: clicking Done did not close the editor"
+        );
+        assert_eq!(
+            OfflineIdentity::load_from(&offline_file).username(),
+            format!("{}Notch", crate::offline_identity::DEFAULT_USERNAME),
+            "clicking Done did not persist the name to {}",
+            offline_file.display()
+        );
+        assert_eq!(
+            ui.screen(),
+            Screen::Accounts,
+            "neither click may leave the screen"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

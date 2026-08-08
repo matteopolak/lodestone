@@ -2102,6 +2102,211 @@ fn the_account_rows_are_in_the_order_click_assumes() {
     );
 }
 
+/// **The island closed: the offline row's label is the persisted name.**
+///
+/// `crate::offline_identity` shipped the model, the file and the derived UUID with
+/// no reader — this frame hardcoded `"Play offline"`, so the one name every join
+/// in this client uses reached zero pixels. Asserted through the real
+/// `accounts_idle_frame`, not through `AccountsNav::offline_username`, because the
+/// accessor being right is exactly what the bug was compatible with.
+#[test]
+fn the_offline_row_carries_the_persisted_name_through_the_real_frame() {
+    // Called for its side effect: it wipes the temp root and writes a
+    // `profiles.json` there. Dropped immediately — the nav under test is the
+    // second one, built *after* the identity file exists, because `with_path`
+    // reads the identity once at construction.
+    drop(accounts_nav("offline-label", &["Alex"]));
+    // Written to the *same* temp root the nav derives its own offline path from,
+    // so this proves the derivation as well as the label. `MenuNav::with_path`
+    // takes `servers.json`; `AccountsNav::with_path` takes `profiles.json`
+    // beside it; the identity is `offline.json` beside that.
+    let dir = std::env::temp_dir().join(format!(
+        "lodestone-render-accounts-{}-offline-label",
+        std::process::id()
+    ));
+    let mut id = crate::offline_identity::OfflineIdentity::default();
+    id.set_username("Notch").expect("valid fixture name");
+    id.save_to(&dir.join("offline.json")).expect("temp offline.json");
+    let nav = MenuNav::with_path(dir.join("servers.json"));
+
+    let f = accounts_idle_frame(nav.accounts());
+    let offline = f
+        .rows
+        .iter()
+        .find(|r| r.detail == "No sign-in required")
+        .expect("the offline row must exist");
+    assert_eq!(offline.label, "Notch", "the offline row is not showing the persisted name");
+    assert_ne!(
+        offline.label, "Play offline",
+        "the pre-fix literal is still what reaches the frame"
+    );
+
+    // The control: a root with **no** `offline.json` shows the default, so the
+    // assertion above is measuring the file rather than any constant.
+    let fresh = accounts_nav("offline-label-default", &["Alex"]);
+    let g = accounts_idle_frame(fresh.accounts());
+    let fresh_row = g
+        .rows
+        .iter()
+        .find(|r| r.detail == "No sign-in required")
+        .expect("the offline row must exist");
+    assert_eq!(
+        fresh_row.label,
+        crate::offline_identity::DEFAULT_USERNAME,
+        "with no offline.json the row must show the default name"
+    );
+    assert_ne!(
+        fresh_row.label, offline.label,
+        "both roots produced the same label, so neither is reading the file"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **The island gate for the name editor: `frame_for` really reaches it.**
+///
+/// `accounts_name_edit_frame` and every one of `AccountsNav`'s editor tests form
+/// a closed loop — they can all be green while `dispatch.rs`'s `Screen::Accounts`
+/// arm still only ever consults `sign_in_view()`, in which case pressing "Edit
+/// Name" swallows the keyboard and draws the *list* frame underneath it. Nothing
+/// but a gate through `frame_for` — the function `app.rs` calls every frame — can
+/// see that, so this drives that function and nothing else.
+///
+/// It also checks the two things an early `return` out of `frame_for` would have
+/// silently dropped: `gui_scale` and `list` are stamped after the `match`, so an
+/// editor frame produced by a `return` would ignore the GUI-scale setting.
+#[test]
+fn frame_for_reaches_the_name_editor_and_still_stamps_the_frame() {
+    let nav = accounts_nav("editor-dispatch", &[]);
+    // `unavailable_probe`, like every other `frame_for` test here: a real prober
+    // would reach the network from a unit test.
+    let statuses = StatusCache::with_probe(unavailable_probe());
+    let mut fav = FaviconCache::default();
+    let mut ui = UiState::new();
+    ui.open_accounts();
+
+    // Before: the list frame, with the offline row on it.
+    let before = frame_for(&ui, &nav, &statuses, &mut fav).expect("the list frame");
+    assert!(
+        before.rows.iter().any(|r| r.detail == "No sign-in required"),
+        "precondition: the list frame must be what shows before the editor opens"
+    );
+
+    let accounts = nav.accounts();
+    accounts.hover(accounts.rows().len() + crate::menu::accounts::BUTTON_REMOVE);
+    accounts.handle_key(MenuKey::Enter);
+    assert!(
+        accounts.is_editing_name(),
+        "precondition: the editor must be open, or 'the frame changed' is vacuous"
+    );
+
+    let after = frame_for(&ui, &nav, &statuses, &mut fav).expect("the editor frame");
+    assert!(
+        after.rows.iter().any(|r| r.edit.is_some()),
+        "frame_for did not reach the editor: no row carries an EditBox, so the \
+         screen still draws the account list while the keyboard types into an \
+         invisible field. Rows were {:?}",
+        after.rows.iter().map(|r| &r.label).collect::<Vec<_>>()
+    );
+    assert!(
+        !after.rows.iter().any(|r| r.detail == "No sign-in required"),
+        "the list rows are still being drawn, so this is the list frame"
+    );
+    // Stamped, and asserted against `nav`'s own value rather than a literal —
+    // the same source `frame_for`'s tail reads.
+    assert_eq!(after.gui_scale, nav.gui_scale(), "gui_scale was not stamped");
+    // And it really draws: measured through the same `geometry` the screen sweep
+    // uses, at a canvas the whole frame is on.
+    assert!(
+        !geometry(&after, 1280.0, 720.0).is_empty(),
+        "the editor frame draws nothing"
+    );
+}
+
+/// The name editor's frame: a real [`EditBox`] row plus a Done button, with the
+/// UUID of the **typed** name on screen.
+///
+/// The `edit.is_some()` assertion is the island guard `create_world::frame`'s own
+/// doc explains at length: a focusable, typeable box that no row carries draws
+/// nothing at all, and every unit test of the box itself still passes.
+#[test]
+fn the_name_editor_frame_carries_a_real_edit_box_and_the_typed_uuid() {
+    use crate::menu::accounts::{NAME_EDIT_DONE_ROW, NAME_EDIT_FIELD_ROW};
+
+    let nav = accounts_nav("name-editor", &[]);
+    let accounts = nav.accounts();
+    // Open it through the production path: the offline row is row 0 with no
+    // accounts, and the third footer button is the affordance.
+    accounts.hover(accounts.rows().len() + crate::menu::accounts::BUTTON_REMOVE);
+    accounts.handle_key(MenuKey::Enter);
+    for _ in 0..20 {
+        accounts.handle_key(MenuKey::Backspace);
+    }
+    for ch in "Notch".chars() {
+        accounts.handle_key(MenuKey::Char(ch));
+    }
+
+    let view = accounts.name_edit_view().expect("the editor must be open");
+    let f = super::account_screen::accounts_name_edit_frame(&view);
+    assert_eq!(f.rows.len(), 2, "the editor is a field and a Done button");
+    let field = &f.rows[NAME_EDIT_FIELD_ROW];
+    assert!(
+        field.edit.is_some(),
+        "the field row carries no EditBox, so nothing draws the caret, the \
+         selection or the visible slice"
+    );
+    assert!(field.field, "the field row is not drawn as a field");
+    assert_eq!(field.edit.as_ref().unwrap().value(), "Notch");
+    assert_eq!(f.rows[NAME_EDIT_DONE_ROW].label, "Done");
+    assert!(
+        f.rows[NAME_EDIT_DONE_ROW].edit.is_none(),
+        "a button row must not carry an EditBox"
+    );
+    assert_eq!(
+        f.selected, NAME_EDIT_DONE_ROW,
+        "the row cursor must be on Done, not behind the text field"
+    );
+
+    // The UUID line, and its expected value comes from `offline_identity`'s
+    // externally-computed vector rather than from `offline_uuid` re-derived here.
+    const NOTCH: &str = "b50ad385-829d-3141-a216-7e7d7539ba7f";
+    assert!(
+        f.labels.iter().any(|l| l.text.contains(NOTCH)),
+        "the typed name's UUID is not on screen; labels were {:?}",
+        f.labels.iter().map(|l| &l.text).collect::<Vec<_>>()
+    );
+    // Control: the *default* name's UUID must not also be there, or the label
+    // could be showing the saved identity and this would still pass.
+    let player = crate::offline_identity::offline_uuid("Player").to_string();
+    assert!(
+        !f.labels.iter().any(|l| l.text.contains(&player)),
+        "the saved name's UUID is on screen too, so the line is not following \
+         what was typed"
+    );
+
+    // Both rows have a `slot`, and the two must not be the same rect — a field
+    // drawn on top of its own Done button is a screen with one visible widget.
+    let field_slot = field.slot.expect("the field must have a slot");
+    let done_slot = f.rows[NAME_EDIT_DONE_ROW]
+        .slot
+        .expect("Done must have a slot");
+    assert_ne!(field_slot, done_slot);
+    let (fx, fy, fw, fh) = field_slot.resolve(854.0, 480.0);
+    let (dx, dy, dw, dh) = done_slot.resolve(854.0, 480.0);
+    assert!(
+        fy + fh <= dy || dy + dh <= fy,
+        "the field ({fx},{fy},{fw},{fh}) and Done ({dx},{dy},{dw},{dh}) overlap \
+         vertically"
+    );
+    // Both on-canvas, measured rather than assumed: "nothing drew" is free for a
+    // rect that is off the canvas entirely.
+    for (name, (x, y, w, h)) in [("field", (fx, fy, fw, fh)), ("done", (dx, dy, dw, dh))] {
+        assert!(
+            x >= 0.0 && y >= 0.0 && x + w <= 854.0 && y + h <= 480.0,
+            "{name} resolves off-canvas at ({x},{y},{w},{h})"
+        );
+    }
+}
+
 #[test]
 fn an_account_row_draws_inside_its_own_36px_row_and_not_the_one_below() {
     let nav = accounts_nav("rowpixels", &["Alex"]);
