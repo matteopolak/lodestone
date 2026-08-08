@@ -85,7 +85,11 @@ fn the_whole_12x12_sweep_is_byte_identical_on_a_second_generator() {
 /// test rather than hanging silently), or eviction firing mid-burst.
 ///
 /// The eviction assertion is derived, not hopeful: 289 columns close over
-/// 21×21 = 441 chunks and `STORE_RETENTION` is set from exactly that number.
+/// 37×37 = 1,369 chunks at the widest (structure-starts) stage, and
+/// `STORE_RETENTION` is 2,048, sized from `REFS_RADIUS` to clear it. The earlier
+/// "21×21 = 441" here was a single column's closure mistaken for the burst's,
+/// and against the old 512-entry ceiling the burst really was evicting — the
+/// cause of the 4× C_ss regression recorded in `DESIGN.md` §12.130.
 #[test]
 #[ignore = "289 columns x2 of real embedded-data generation; minutes in release"]
 fn a_289_column_concurrent_burst_matches_serial_bytes_with_no_eviction() {
@@ -140,7 +144,8 @@ fn a_289_column_concurrent_burst_matches_serial_bytes_with_no_eviction() {
     assert_eq!(
         parallel.store_evictions(),
         0,
-        "the burst closes over 21x21 = 441 chunks and STORE_RETENTION is derived from that, \
+        "the burst closes over 37x37 = 1369 chunks at the structure-starts stage and \
+         STORE_RETENTION (2048) is derived from REFS_RADIUS to clear that, \
          so nothing may be evicted mid-burst"
     );
 }
