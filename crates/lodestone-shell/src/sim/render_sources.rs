@@ -214,6 +214,23 @@ impl Sim {
         })
     }
 
+    /// This frame's shulker boxes, for
+    /// [`RenderState::set_shulker_source`](crate::gpu::RenderState::set_shulker_source).
+    ///
+    /// The simplest source of the family: no clock, no per-frame animation state,
+    /// and no partial tick — a shulker box's facing and dye colour both come off
+    /// its block state, and its lid animation is not wired (see
+    /// [`lodestone_render::ShulkerSpawn::progress`]). Installed per frame anyway,
+    /// for [`Self::skull_source`]'s reason: a source that outlived a disconnect
+    /// would hand out spawns from a dead world's handle.
+    pub fn shulker_source(
+        &self,
+    ) -> Option<impl Fn(glam::Vec3) -> Vec<lodestone_render::ShulkerSpawn> + Send + Sync + 'static>
+    {
+        let handle = self.net.as_ref()?.shared_handle();
+        Some(move |eye: glam::Vec3| crate::block_entities::shulker_spawns(&handle, eye))
+    }
+
     /// How many chest lids are currently animating or open — for the debug
     /// overlay and for the live gate, which needs to distinguish "the block event
     /// never arrived" from "the lid is drawn shut".

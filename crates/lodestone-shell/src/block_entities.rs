@@ -108,8 +108,9 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 use lodestone_render::{
-    BellShakeDirection, BellSpawn, ChestHalf, ChestMaterial, ChestSpawn, SignOrientation, SignSpawn,
-    SkullOrientation, SkullSpawn, SkullType, horizontal_facing_yaw,
+    BellShakeDirection, BellSpawn, ChestHalf, ChestMaterial, ChestSpawn, SHULKER_COLOURS,
+    ShulkerFacing, ShulkerSpawn, SignOrientation, SignSpawn, SkullOrientation, SkullSpawn,
+    SkullType, horizontal_facing_yaw,
 };
 use lodestone_world::{ChunkPos, SignText, World};
 
@@ -719,6 +720,103 @@ pub fn bell_spawns(
         let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
             .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
         if let Some(spawn) = bell_spawn(block, state_id, light, shakes, partial_tick) {
+            out.push(spawn);
+        }
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
+/// Resolves a block state id into `(dye colour, facing)` for a shulker box, or
+/// `None` if the state is not one.
+///
+/// **The colour is the block *id*, not a property and not NBT.** Vanilla has
+/// seventeen shulker-box blocks (`shulker_box` plus one per dye), so
+/// `minecraft:red_shulker_box` → `Some("red")` and the plain `minecraft:shulker_box`
+/// → `None`, which is the undyed sheet. Reading a `color` property here would find
+/// nothing and draw every box undyed.
+///
+/// `facing` defaults to [`ShulkerFacing::Up`] when the property is missing, which
+/// is `ShulkerBoxRenderer.extractRenderState`'s own `getValueOrElse(FACING, UP)`
+/// — unlike a chest, where a missing `facing` is treated as a failure, because a
+/// shulker box genuinely has a sensible default and vanilla uses it.
+#[must_use]
+fn shulker_orientation(state_id: u32) -> Option<(Option<&'static str>, ShulkerFacing)> {
+    let name = lodestone_data::block_states::block_name(state_id)?;
+    let path = name.strip_prefix("minecraft:").unwrap_or(name);
+    let colour = if path == "shulker_box" {
+        None
+    } else {
+        // `SHULKER_COLOURS`' own entries, so the returned `&'static str` is the
+        // one `shulker_texture_stem` matches against — a `&path[..]` slice would
+        // not outlive this call.
+        let stem = path.strip_suffix("_shulker_box")?;
+        Some(*SHULKER_COLOURS.iter().find(|c| **c == stem)?)
+    };
+    let mut facing = ShulkerFacing::Up;
+    if let Some(props) = lodestone_data::block_states::properties(state_id) {
+        for (name, value) in props {
+            if *name == "facing"
+                && let Some(parsed) = ShulkerFacing::from_name(value)
+            {
+                facing = parsed;
+            }
+        }
+    }
+    Some((colour, facing))
+}
+
+/// One candidate resolved into a [`ShulkerSpawn`], or `None` if the state at that
+/// position is not a shulker box.
+///
+/// `progress` is fixed at `0.0` — closed. See [`ShulkerSpawn::progress`] for why
+/// that is the honest value rather than a placeholder.
+#[must_use]
+pub fn shulker_spawn(block: [i32; 3], state_id: u32, light: u8) -> Option<ShulkerSpawn> {
+    let (colour, facing) = shulker_orientation(state_id)?;
+    Some(ShulkerSpawn {
+        pos: block,
+        facing,
+        colour,
+        progress: 0.0,
+        light,
+    })
+}
+
+/// Every shulker box to draw this frame. Reuses [`chest_candidates`] exactly as
+/// [`skull_spawns`] and [`bell_spawns`] do.
+#[must_use]
+pub fn shulker_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<ShulkerSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+
+    // The guard is taken and dropped *inside* this block, before the light
+    // sampling below — the no-nested-read-lock rule every gather here follows.
+    let candidates = {
+        let world = store.read();
+        chest_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
+
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+
+    let mut out = Vec::new();
+    for (block, state_id) in candidates {
+        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        if let Some(spawn) = shulker_spawn(block, state_id, light) {
             out.push(spawn);
         }
     }
@@ -1461,5 +1559,73 @@ mod sign_tests {
     fn sign_spawns_before_login_is_empty_rather_than_a_panic() {
         let handle: SharedHandle = std::sync::Arc::new(std::sync::OnceLock::new());
         assert!(sign_spawns(&handle, Vec3::ZERO).is_empty());
+    }
+}
+
+/// Shulker boxes (issue #23) — kept in its own module beside `bell_tests` for the
+/// same reason: this file is shared across every block-entity family.
+#[cfg(test)]
+mod shulker_tests {
+    use super::*;
+
+    /// Finds the first state id whose block name matches, against the real 26.2
+    /// table rather than a fixture.
+    fn state_named(name: &str) -> u32 {
+        (0..lodestone_data::block_states::STATE_COUNT)
+            .find(|id| lodestone_data::block_states::block_name(*id) == Some(name))
+            .unwrap_or_else(|| panic!("{name} must be in the 26.2 state table"))
+    }
+
+    /// **The colour is the block id, not a property.** A `color` lookup finds
+    /// nothing on any of the seventeen blocks and would draw every box undyed —
+    /// which looks like a texture-loading problem rather than a resolver bug.
+    #[test]
+    fn the_dye_colour_comes_off_the_block_id_and_the_plain_box_has_none() {
+        let plain = shulker_orientation(state_named("minecraft:shulker_box"))
+            .expect("the plain box resolves");
+        assert_eq!(plain.0, None);
+        for colour in SHULKER_COLOURS {
+            let id = state_named(&format!("minecraft:{colour}_shulker_box"));
+            let (resolved, _) = shulker_orientation(id).expect("a dyed box resolves");
+            assert_eq!(resolved, Some(colour), "{colour} did not resolve");
+        }
+        // Not every block with a `facing` property is a shulker box.
+        assert!(shulker_orientation(state_named("minecraft:chest")).is_none());
+    }
+
+    /// Every `FACING` value resolves, including the two vertical ones a chest
+    /// cannot have — and a state with no `facing` at all takes vanilla's own
+    /// `getValueOrElse(FACING, UP)` default rather than failing.
+    #[test]
+    fn every_facing_resolves_and_a_missing_one_defaults_to_up() {
+        let mut seen = std::collections::HashSet::new();
+        for id in 0..lodestone_data::block_states::STATE_COUNT {
+            if lodestone_data::block_states::block_name(id) != Some("minecraft:shulker_box") {
+                continue;
+            }
+            let (_, facing) = shulker_orientation(id).expect("resolves");
+            seen.insert(facing);
+        }
+        assert_eq!(
+            seen.len(),
+            6,
+            "the plain shulker box should span all six facings, saw {seen:?}"
+        );
+        let spawn = shulker_spawn(
+            [7, 8, 9],
+            state_named("minecraft:shulker_box"),
+            lodestone_render::ENTITY_FULLBRIGHT,
+        )
+        .expect("resolves");
+        assert_eq!(spawn.pos, [7, 8, 9]);
+        assert_eq!(spawn.progress, 0.0, "a box nobody has open is closed");
+    }
+
+    /// The gather is empty rather than a panic before login, matching every other
+    /// family's — the guard that lets the source be installed unconditionally.
+    #[test]
+    fn shulker_spawns_before_login_is_empty_rather_than_a_panic() {
+        let handle: SharedHandle = std::sync::Arc::new(std::sync::OnceLock::new());
+        assert!(shulker_spawns(&handle, Vec3::ZERO).is_empty());
     }
 }

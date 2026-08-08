@@ -59,7 +59,7 @@ pub use occlusion::TerrainOcclusion;
 pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
 pub use sources::{
-    BellSource, BlockEntitySource, EntityLightSource, HandSwingSource, MainHandSource,
+    BellSource, BlockEntitySource, EntityLightSource, HandSwingSource, MainHandSource, ShulkerSource,
     OutlineShapeSource, SignSource, SkullSource, SkyDarkenSource, ThirdPersonBodySource,
     ThirdPersonBodyState,
 };
@@ -319,10 +319,16 @@ pub struct RenderState {
     skull_source: SkullSource,
     /// Where this frame's bells come from. Same "unset means draw nothing"
     /// convention as [`Self::skull_source`], and a separate field for the
-    /// reason [`BellSource`] documents. Unset by every current caller — see
-    /// that source's own doc for why a bell still draws (always at rest)
-    /// rather than not existing at all.
+    /// reason [`BellSource`] documents. Installed per frame from
+    /// `Sim::bell_source`; a bell always draws at rest, because the shake
+    /// trigger has no producer yet.
     bell_source: BellSource,
+    /// Where this frame's shulker boxes come from (issue #23). Same "unset means
+    /// draw nothing" convention as [`Self::skull_source`] — and here that
+    /// degradation is a **hole**, not a missing decoration: a 26.2 shulker box has
+    /// no block model of its own, so an unset source leaves an empty cell where
+    /// every box is, exactly as chest does.
+    shulker_source: ShulkerSource,
     /// World-space sign text (issue #23). Always constructed, like
     /// [`Self::nametag`]: it loads its own jar-sourced font and fail-opens to
     /// drawing nothing. A sign's *board* is a real block model (unlike chest

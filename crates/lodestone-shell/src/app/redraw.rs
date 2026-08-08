@@ -289,6 +289,14 @@ impl WindowApp {
             render.set_bell_source(f);
         }
 
+        // Shulker boxes (issue #23). Same per-frame install as the four above, and
+        // the same reason this call site matters as much as the geometry: a 26.2
+        // shulker box has **no block model**, so without it the terrain mesher
+        // leaves a hole where every box is — the chest failure mode exactly.
+        if let Some(f) = self.sim.shulker_source() {
+            render.set_shulker_source(f);
+        }
+
         // Reconcile fog with the player's bit-exact fluid state each frame,
         // re-uploading only when it changes (crossing a water/lava surface) so a
         // submerged eye dissolves terrain into short water/lava fog and the

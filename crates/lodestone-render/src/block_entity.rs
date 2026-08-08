@@ -834,13 +834,214 @@ pub fn banner_texture_stems() -> Vec<&'static str> {
     vec![BANNER_BASE_TEXTURE_STEM]
 }
 
+/// Model name of a shulker box's shell (lid + base).
+pub const SHULKER_BOX: &str = "shulker_box";
+
+/// Vanilla's sixteen dye colours, in `DyeColor` **ordinal** order — which is
+/// what `Sheets.getShulkerBoxSprite(color)` indexes
+/// (`SHULKER_TEXTURE_LOCATION.get(color.getId())`, `Sheets.java:48,89`).
+///
+/// The order is load-bearing and is *not* alphabetical: reading it off the
+/// texture directory listing gives `black, blue, brown, …` and shifts every
+/// coloured box one sprite along, which draws a plausible wrong colour rather
+/// than nothing.
+pub const SHULKER_COLOURS: [&str; 16] = [
+    "white",
+    "orange",
+    "magenta",
+    "light_blue",
+    "yellow",
+    "lime",
+    "pink",
+    "gray",
+    "light_gray",
+    "cyan",
+    "purple",
+    "blue",
+    "brown",
+    "green",
+    "red",
+    "black",
+];
+
+/// `Sheets.DEFAULT_SHULKER_TEXTURE_LOCATION` — the undyed box's sheet
+/// (`Sheets.SHULKER_MAPPER.defaultNamespaceApply("shulker")`, `Sheets.java:47`).
+pub const SHULKER_DEFAULT_TEXTURE_STEM: &str = "entity/shulker/shulker";
+
+/// The sheet stem for one shulker box, by dye colour name, or the undyed sheet
+/// for `None` — `ShulkerBoxRenderer.submit`'s own `color == null` fork.
+///
+/// An **unrecognised** colour name also falls back to the undyed sheet rather
+/// than being dropped: the caller derives it from a block id, and a plain
+/// `shulker_box` (the uncoloured one) has no colour segment at all.
+#[must_use]
+pub fn shulker_texture_stem(colour: Option<&str>) -> &'static str {
+    let Some(colour) = colour else {
+        return SHULKER_DEFAULT_TEXTURE_STEM;
+    };
+    for name in SHULKER_COLOURS {
+        if name == colour {
+            return shulker_coloured_stem(name);
+        }
+    }
+    SHULKER_DEFAULT_TEXTURE_STEM
+}
+
+/// `entity/shulker/shulker_<colour>` for one of [`SHULKER_COLOURS`].
+///
+/// A `match` rather than a `format!` because the return is `&'static str`: these
+/// stems key the shell's preloaded bind-group map, so an owned `String` here
+/// would mean an allocation per box per frame.
+fn shulker_coloured_stem(colour: &str) -> &'static str {
+    match colour {
+        "white" => "entity/shulker/shulker_white",
+        "orange" => "entity/shulker/shulker_orange",
+        "magenta" => "entity/shulker/shulker_magenta",
+        "light_blue" => "entity/shulker/shulker_light_blue",
+        "yellow" => "entity/shulker/shulker_yellow",
+        "lime" => "entity/shulker/shulker_lime",
+        "pink" => "entity/shulker/shulker_pink",
+        "gray" => "entity/shulker/shulker_gray",
+        "light_gray" => "entity/shulker/shulker_light_gray",
+        "cyan" => "entity/shulker/shulker_cyan",
+        "purple" => "entity/shulker/shulker_purple",
+        "blue" => "entity/shulker/shulker_blue",
+        "brown" => "entity/shulker/shulker_brown",
+        "green" => "entity/shulker/shulker_green",
+        "red" => "entity/shulker/shulker_red",
+        "black" => "entity/shulker/shulker_black",
+        _ => SHULKER_DEFAULT_TEXTURE_STEM,
+    }
+}
+
+/// All seventeen shulker sheet stems — the undyed one plus one per dye colour.
+///
+/// Unlike [`bell_texture_stems`] this really does have variants, and they are
+/// picked by *block id* rather than by NBT (`minecraft:red_shulker_box` is its
+/// own block), which is why [`shulker_texture_stem`] takes a colour name and not
+/// a `DyeColor`-shaped enum.
+#[must_use]
+pub fn shulker_texture_stems() -> Vec<&'static str> {
+    let mut stems = vec![SHULKER_DEFAULT_TEXTURE_STEM];
+    stems.extend(SHULKER_COLOURS.map(shulker_coloured_stem));
+    stems
+}
+
+/// The world placement transform for a shulker box facing `facing` —
+/// `ShulkerBoxRenderer.createModelTransform`
+/// (`ShulkerBoxRenderer.java:110-121`):
+///
+/// ```text
+/// translation(0.5, 0.5, 0.5) · scale(0.9995) · rotate(facing.getRotation())
+///   · scale(1, -1, -1) · translate(0, -1, 0)
+/// ```
+///
+/// **This is not [`block_entity_placement_matrix`] with a yaw.** Three things
+/// differ and each is visible: the pivot is the block's *centre* `(0.5, 0.5,
+/// 0.5)` rather than its floor `(0.5, 0, 0.5)`; a shulker box can face **up or
+/// down**, so the rotation is a full `Direction.getRotation()` quaternion and not
+/// a Y yaw; and it carries the `scale(1, -1, -1)` entity flip and the `-1` lift
+/// that `SkullBlockRenderer` also has and `ChestRenderer` does not. Reusing the
+/// chest matrix draws an upside-down box on the floor for `facing=up`, which is
+/// the common case.
+///
+/// The `0.9995` shrink is vanilla's own z-fighting guard against a neighbouring
+/// full block, not a rounding artefact — keep it.
+#[must_use]
+pub fn shulker_placement_matrix(pos: [i32; 3], facing: ShulkerFacing) -> Mat4 {
+    const SHRINK: f32 = 0.9995;
+    let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
+    Mat4::from_translation(origin + Vec3::splat(0.5))
+        * Mat4::from_scale(Vec3::splat(SHRINK))
+        * facing.rotation()
+        * Mat4::from_scale(Vec3::new(1.0, -1.0, -1.0))
+        * Mat4::from_translation(Vec3::new(0.0, -1.0, 0.0))
+}
+
+/// Which face a shulker box's lid opens toward — `ShulkerBoxBlock.FACING`, one
+/// of all six directions rather than the four horizontals a chest has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ShulkerFacing {
+    /// `Direction.UP`, and `ShulkerBoxRenderer`'s own
+    /// `getValueOrElse(FACING, Direction.UP)` default.
+    #[default]
+    Up,
+    /// `Direction.DOWN`.
+    Down,
+    /// `Direction.NORTH`.
+    North,
+    /// `Direction.SOUTH`.
+    South,
+    /// `Direction.WEST`.
+    West,
+    /// `Direction.EAST`.
+    East,
+}
+
+impl ShulkerFacing {
+    /// `Direction.getRotation()` (`Direction.java:144-153`) as a rotation matrix.
+    ///
+    /// `rotationXYZ(x, y, z)` is JOML's **X then Y then Z** intrinsic order, which
+    /// for the four horizontals here is `Mat4::from_rotation_z * from_rotation_x`
+    /// — the Z term is applied last. Composing them the other way round rotates a
+    /// wall-mounted box about the wrong axis, and the result still looks like a
+    /// box, so this is the line to check first if a side-placed shulker is wrong.
+    #[must_use]
+    pub fn rotation(self) -> Mat4 {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        match self {
+            ShulkerFacing::Up => Mat4::IDENTITY,
+            ShulkerFacing::Down => Mat4::from_rotation_x(PI),
+            ShulkerFacing::North => Mat4::from_rotation_z(PI) * Mat4::from_rotation_x(FRAC_PI_2),
+            ShulkerFacing::South => Mat4::from_rotation_x(FRAC_PI_2),
+            ShulkerFacing::West => {
+                Mat4::from_rotation_z(FRAC_PI_2) * Mat4::from_rotation_x(FRAC_PI_2)
+            }
+            ShulkerFacing::East => {
+                Mat4::from_rotation_z(-FRAC_PI_2) * Mat4::from_rotation_x(FRAC_PI_2)
+            }
+        }
+    }
+
+    /// One of vanilla's six `Direction` names, or `None`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "up" => ShulkerFacing::Up,
+            "down" => ShulkerFacing::Down,
+            "north" => ShulkerFacing::North,
+            "south" => ShulkerFacing::South,
+            "west" => ShulkerFacing::West,
+            "east" => ShulkerFacing::East,
+            _ => return None,
+        })
+    }
+}
+
+/// The lid's `(y_offset, y_rot)` for an open fraction —
+/// `ShulkerBoxRenderer.ShulkerBoxModel.setupAnim` (`:135-138`):
+/// `lid.setPos(0, 24 - progress * 0.5 * 16, 0)` and
+/// `lid.yRot = 270° * progress`.
+///
+/// `24.0` is the part's rest `y`, so the returned offset is absolute and not a
+/// delta. `progress == 0` gives exactly the rest pose, which is why a closed box
+/// needs no override at all.
+#[must_use]
+pub fn shulker_lid_pose(progress: f32) -> (f32, f32) {
+    let progress = progress.clamp(0.0, 1.0);
+    (
+        24.0 - progress * 0.5 * 16.0,
+        (270.0 * progress).to_radians(),
+    )
+}
+
 /// Every sheet stem across every block-entity family — what the shell's
 /// texture loader preloads. Union of [`chest_texture_stems`],
-/// [`skull_texture_stems`], [`bell_texture_stems`] and
-/// [`banner_texture_stems`] rather than the shell iterating each list
-/// itself, so a fifth family only has to update this one function to reach
-/// the loader (see the module doc's "How to change it" — this is the "entry
-/// in the preload list" step, generalised past chest).
+/// [`skull_texture_stems`], [`bell_texture_stems`],
+/// [`banner_texture_stems`] and [`shulker_texture_stems`] rather than the
+/// shell iterating each list itself, so a sixth family only has to update this
+/// one function to reach the loader (see the module doc's "How to change it" —
+/// this is the "entry in the preload list" step, generalised past chest).
 ///
 /// **Does not include a banner's pattern-mask sprites.** Those are a wholly
 /// separate resource (the banner-pattern atlas, `lodestone-assets` work not
@@ -853,6 +1054,7 @@ pub fn block_entity_texture_stems() -> Vec<&'static str> {
     stems.extend(skull_texture_stems());
     stems.extend(bell_texture_stems());
     stems.extend(banner_texture_stems());
+    stems.extend(shulker_texture_stems());
     stems
 }
 
@@ -1009,6 +1211,42 @@ impl BlockEntityModelSet {
         Some(BlockEntityInstance {
             model: BELL,
             texture: BELL_TEXTURE_STEM,
+            transform: placement,
+            part_transforms,
+            aabb_min,
+            aabb_max,
+            light: spawn.light,
+            tint: [255, 255, 255],
+        })
+    }
+
+    /// Resolves one shulker box into a drawable instance, or `None` if the model
+    /// is not in the corpus.
+    ///
+    /// Only `lid` is ever overridden, and only when the box is actually open:
+    /// `progress == 0.0` leaves the rest pose alone, so the common case produces
+    /// an instance whose `part_transforms` depend on nothing but `pos` and
+    /// `facing`.
+    #[must_use]
+    pub fn resolve_shulker(&self, spawn: &ShulkerSpawn) -> Option<BlockEntityInstance> {
+        let mesh = self.get(SHULKER_BOX)?;
+        let placement = shulker_placement_matrix(spawn.pos, spawn.facing);
+
+        let mut overrides = Vec::new();
+        if spawn.progress > 0.0
+            && let Some(index) = mesh.index_of("lid")
+        {
+            let (y, y_rot) = shulker_lid_pose(spawn.progress);
+            let mut pose = mesh.part_rest[index];
+            pose.y = y;
+            pose.y_rot = y_rot;
+            overrides.push((index, pose));
+        }
+        let part_transforms = mesh.part_transforms(placement, &overrides);
+        let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
+        Some(BlockEntityInstance {
+            model: SHULKER_BOX,
+            texture: shulker_texture_stem(spawn.colour),
             transform: placement,
             part_transforms,
             aabb_min,
@@ -1219,6 +1457,53 @@ impl BellSpawn {
         BellSpawn {
             pos,
             shake: None,
+            light: ENTITY_FULLBRIGHT,
+        }
+    }
+}
+
+/// The version-free description of one shulker box to draw this frame.
+///
+/// Three fields and no animation state, which is why this type was the cheapest
+/// one to add after bell: the box's facing and its dye colour both come straight
+/// off the block state (`FACING`, and the block id for the colour), and a closed
+/// box needs no part override — so a shulker box slots into
+/// [`plan_block_entities`]' existing `(model, texture)` batch key untouched.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShulkerSpawn {
+    /// Block position.
+    pub pos: [i32; 3],
+    /// `ShulkerBoxBlock.FACING`, defaulting to [`ShulkerFacing::Up`] the way
+    /// `ShulkerBoxRenderer.extractRenderState`'s `getValueOrElse` does.
+    pub facing: ShulkerFacing,
+    /// The dye colour name (`"red"`, …) or `None` for the undyed box.
+    pub colour: Option<&'static str>,
+    /// `ShulkerBoxBlockEntity.getProgress(partialTicks)` — `0.0` closed, `1.0`
+    /// fully open.
+    ///
+    /// **`0.0` is the only value this pass can produce today.** Progress comes
+    /// from the block entity's own open/close counter, which the server drives
+    /// through the same `BLOCK_EVENT` path a chest lid uses — and unlike a chest,
+    /// nothing in this workspace folds a shulker box's event yet. A closed box is
+    /// what a shulker box looks like whenever nobody has it open, so this is the
+    /// honest state rather than a placeholder; see
+    /// `docs/block-entity-renderers.md`.
+    pub progress: f32,
+    /// Packed sky/block light. Pass [`ENTITY_FULLBRIGHT`] only when there is
+    /// genuinely no world to sample.
+    pub light: u8,
+}
+
+impl ShulkerSpawn {
+    /// A closed, upward-facing, undyed, full-bright box at `pos` — the minimum a
+    /// hermetic gate needs.
+    #[must_use]
+    pub fn at(pos: [i32; 3]) -> Self {
+        ShulkerSpawn {
+            pos,
+            facing: ShulkerFacing::Up,
+            colour: None,
+            progress: 0.0,
             light: ENTITY_FULLBRIGHT,
         }
     }
@@ -1486,8 +1771,9 @@ mod tests {
         let set = set();
         assert_eq!(
             set.len(),
-            8,
-            "3 chest layers + 2 skull canvases + bell + 2 banner parts (body, flag)"
+            9,
+            "3 chest layers + 2 skull canvases + bell + 2 banner parts (body, flag) \
+             + shulker box"
         );
         for (name, mesh) in set.iter() {
             assert!(mesh.quad_count() > 0, "{name} baked no quads");
@@ -2049,6 +2335,151 @@ mod tests {
         let stems = bell_texture_stems();
         assert_eq!(stems, vec![BELL_TEXTURE_STEM]);
         assert!(block_entity_texture_stems().contains(&BELL_TEXTURE_STEM));
+    }
+
+    /// Every stem [`shulker_texture_stem`] can return is preloaded, and the
+    /// colour order is `DyeColor`'s **ordinal** order rather than the
+    /// alphabetical one the texture directory suggests — reading it off the
+    /// listing shifts every dyed box one sprite along, which draws a plausible
+    /// wrong colour instead of nothing.
+    #[test]
+    fn every_shulker_stem_is_in_the_preload_list_in_dye_ordinal_order() {
+        // `DyeColor`'s first four and last, from the enum's own declaration order
+        // (`DyeColor.java`), not from this table.
+        assert_eq!(
+            &SHULKER_COLOURS[..4],
+            &["white", "orange", "magenta", "light_blue"]
+        );
+        assert_eq!(SHULKER_COLOURS[15], "black");
+        assert_eq!(SHULKER_COLOURS.len(), 16);
+
+        let preload = block_entity_texture_stems();
+        assert!(preload.contains(&shulker_texture_stem(None)));
+        for colour in SHULKER_COLOURS {
+            let stem = shulker_texture_stem(Some(colour));
+            assert_ne!(
+                stem, SHULKER_DEFAULT_TEXTURE_STEM,
+                "{colour} fell through to the undyed sheet"
+            );
+            assert!(preload.contains(&stem), "{stem} missing from the preload list");
+        }
+        // An unrecognised name degrades to the undyed sheet rather than being
+        // dropped — a plain `shulker_box` has no colour segment at all.
+        assert_eq!(
+            shulker_texture_stem(Some("chartreuse")),
+            SHULKER_DEFAULT_TEXTURE_STEM
+        );
+    }
+
+    /// An upward-facing shulker box occupies its own block cell and nothing else.
+    ///
+    /// The expectation comes from geometry rather than from the matrix: the box is
+    /// authored as a 16×20 texel stack (`base` 8 tall from y=−8, `lid` 12 tall from
+    /// y=−16, both at pivot y=24), so once vanilla's `scale(1, -1, -1)` and
+    /// `translate(0, -1, 0)` are folded in it must sit in `0..1` on every axis, at
+    /// `0.9995` scale about the block centre. Reusing
+    /// [`block_entity_placement_matrix`] instead (a floor pivot, no flip) puts the
+    /// box a half-block low and upside down — which still looks like a box.
+    #[test]
+    fn an_upward_shulker_sits_inside_its_own_block() {
+        let set = set();
+        let box_at = set.resolve_shulker(&ShulkerSpawn::at([3, 5, -2])).unwrap();
+        let lo = Vec3::from(box_at.aabb_min);
+        let hi = Vec3::from(box_at.aabb_max);
+        let cell = Vec3::new(3.0, 5.0, -2.0);
+        assert!(
+            lo.cmpge(cell - Vec3::splat(0.001)).all() && hi.cmple(cell + Vec3::splat(1.001)).all(),
+            "an up-facing box escaped its own cell: {lo} .. {hi}"
+        );
+        // And it fills nearly all of it — the `0.9995` shrink, not a half-height
+        // box. A `0.5`-tall result is the floor-pivot mistake above.
+        let size = hi - lo;
+        assert!(
+            size.min_element() > 0.99,
+            "the box is not block-sized: {size}"
+        );
+        assert_eq!(box_at.texture, SHULKER_DEFAULT_TEXTURE_STEM);
+    }
+
+    /// A closed box needs no part override at all; an open one moves only `lid`.
+    /// This is what lets a shulker box share the existing `(model, texture)` batch
+    /// key with no per-instance animation state.
+    #[test]
+    fn a_closed_shulker_is_the_rest_pose_and_an_open_one_moves_only_the_lid() {
+        let set = set();
+        let mesh = set.get(SHULKER_BOX).unwrap();
+        let lid = mesh.index_of("lid").expect("the lid part is named `lid`");
+        let base = mesh.index_of("base").expect("the base part is named `base`");
+
+        let closed = set.resolve_shulker(&ShulkerSpawn::at([0, 0, 0])).unwrap();
+        let rest = mesh.part_transforms(shulker_placement_matrix([0, 0, 0], ShulkerFacing::Up), &[]);
+        assert_eq!(closed.part_transforms[lid], rest[lid]);
+
+        let open = set
+            .resolve_shulker(&ShulkerSpawn {
+                progress: 1.0,
+                ..ShulkerSpawn::at([0, 0, 0])
+            })
+            .unwrap();
+        assert_ne!(open.part_transforms[lid], closed.part_transforms[lid]);
+        assert_eq!(
+            open.part_transforms[base], closed.part_transforms[base],
+            "opening a box moved its base"
+        );
+        // `lid.setPos(0, 24 - progress * 0.5 * 16, 0)` and `yRot = 270 * progress`
+        // — predicted from the jar, not read back out of the port.
+        assert_eq!(shulker_lid_pose(0.0), (24.0, 0.0));
+        let (y, y_rot) = shulker_lid_pose(1.0);
+        assert_eq!(y, 16.0);
+        assert!((y_rot - 270.0_f32.to_radians()).abs() < 1e-5, "{y_rot}");
+    }
+
+    /// The six facings are six distinct placements, and a down-facing box is the
+    /// up-facing one turned over — the `Direction.getRotation()` port.
+    #[test]
+    fn every_shulker_facing_is_a_distinct_placement() {
+        let facings = [
+            ShulkerFacing::Up,
+            ShulkerFacing::Down,
+            ShulkerFacing::North,
+            ShulkerFacing::South,
+            ShulkerFacing::West,
+            ShulkerFacing::East,
+        ];
+        let mats: Vec<Mat4> = facings
+            .iter()
+            .map(|f| shulker_placement_matrix([0, 0, 0], *f))
+            .collect();
+        for i in 0..mats.len() {
+            for j in (i + 1)..mats.len() {
+                assert!(
+                    !mats[i].abs_diff_eq(mats[j], 1e-5),
+                    "{:?} and {:?} share a placement",
+                    facings[i],
+                    facings[j]
+                );
+            }
+        }
+        // Every facing still lands the box in its own cell, which is the property
+        // an axis mix-up in `ShulkerFacing::rotation` breaks.
+        let set = set();
+        for facing in facings {
+            let drawn = set
+                .resolve_shulker(&ShulkerSpawn {
+                    facing,
+                    ..ShulkerSpawn::at([0, 0, 0])
+                })
+                .unwrap();
+            let lo = Vec3::from(drawn.aabb_min);
+            let hi = Vec3::from(drawn.aabb_max);
+            assert!(
+                lo.cmpge(Vec3::splat(-0.001)).all() && hi.cmple(Vec3::splat(1.001)).all(),
+                "{facing:?} escaped its own cell: {lo} .. {hi}"
+            );
+        }
+        assert_eq!(ShulkerFacing::from_name("up"), Some(ShulkerFacing::Up));
+        assert_eq!(ShulkerFacing::from_name("sideways"), None);
+        assert_eq!(ShulkerFacing::default(), ShulkerFacing::Up);
     }
 
     /// `BellModel.setupAnim`'s exact formula, predicted independently of the

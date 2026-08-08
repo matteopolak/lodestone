@@ -525,6 +525,32 @@ impl std::fmt::Debug for BellSource {
     }
 }
 
+/// Where this frame's shulker boxes come from — same shape as [`SkullSource`],
+/// and the thinnest of the family: the closure needs no partial tick and no
+/// animation map at all, because a shulker box's whole appearance is a function
+/// of its block state (issue #23).
+#[derive(Default)]
+pub struct ShulkerSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::ShulkerSpawn> + Send + Sync>>,
+);
+
+impl ShulkerSource {
+    /// This frame's shulker boxes, or none when unset.
+    #[must_use]
+    pub(super) fn shulkers(&self, eye: glam::Vec3) -> Vec<lodestone_render::ShulkerSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for ShulkerSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ShulkerSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
+
 /// Where this frame's sign text comes from — same shape as [`SkullSource`],
 /// again an independent source rather than a shared return type:
 /// `crate::block_entities::sign_spawns` reads a different half of a block
