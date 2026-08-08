@@ -4934,3 +4934,99 @@ picks offset `(8, 7)` with 145 block entities across `chest`, `vault`, `trial_sp
 precondition: a section palette of **more than 16 entries**, because every palette of 16 or fewer
 divides 64 evenly and reads correctly under either packing rule, so nothing below that threshold
 exercises the non-spanning rule the whole format hinges on.
+
+**12.127 "The death screen is missing" is entirely a *server* defect: the client's screen has been
+complete since #103, and the brief that asked for it to be built was stale by a whole feature.**
+
+The owner reported no death screen, and a brief followed asking for vanilla's `DeathScreen` to be
+ported — title, score line, Respawn and Title Screen buttons. **All of it already exists.** Measured by
+grep before writing a line: `Screen::Death`, `nav::DeathButton`/`DEATH_BUTTONS`, `render::death_frame`,
+`render::death_slot`, `Origin::DeathTitle` (which is `width / 4`, not the centre, because
+`DeathScreen.visitText` draws the 2.0-scaled title at `middleLine / 2`), the `causeOfDeath != null`
+guard on the message line, `UiState::die`/`is_death`/`respawn_confirmed`, and the overlay draw in
+`app/redraw.rs` that paints it *over* the still-rendering world for the same reason pause is an
+overlay. `app/tests.rs` even drives the whole chain through a real `WindowApp` and a real
+`NetUpdate::Death`, with `without_the_rule_the_same_death_still_raises_the_death_screen` as the control
+for `doImmediateRespawn`. `tests/live_death_respawn.rs` gates it end-to-end against a vanilla oracle.
+
+The chain that is complete: `v770/adapter.rs:3530` decodes `PLAYER_COMBAT_KILL` into
+`ClientEvent::Death` → `net.rs:2188` folds it to `NetUpdate::Death` → `Sim` latches
+`is_dead`/`death_message` → `app/session.rs`'s `drive_ui_from_session` calls `ui.die(..)` → the overlay
+draws. None of the three event routers drops it; `ClientEvent::Death` is in `ingest`'s switch
+(`lodestone-ecs/src/session.rs:826` clears the `Alive` marker) *and* travels the shell stream, and
+`lodestone-model`'s `Route` claims `shell: true` unconditionally for it.
+
+**The gap is that our own server never sends the packet.** `ServerProtocol` has ~60 `encode_*` methods
+and **no `encode_player_combat_kill`** — the string `combat_kill` does not appear anywhere under
+`crates/lodestone-server/`. `vitals.rs`'s own module doc says so in as many words: *"No death screen, no
+respawn packet, no corpse — out of scope for this issue."* So the server really does apply fall damage
+(#265's `FallTracker` → `apply_fall_damage`) and really does push `encode_set_health`, health reaches
+`0.0`, `PlayerVitals::tick` becomes a no-op, and **nothing else happens**: the player stands at zero
+hearts in a world that keeps streaming. That is the owner's "the server hung and then timed out". A
+vanilla client would behave identically, because vanilla raises its death screen off
+`ClientboundPlayerCombatKillPacket` alone and never off health — so *matching vanilla on the client is
+exactly what produces this symptom*, and any client-side "health == 0 means dead" patch would be a
+divergence that also masks the real defect.
+
+**Respawn is a second, independent island, and it is #329's.** `apply_client_command`'s `action == 0`
+arm (`PERFORM_RESPAWN`) guards on `health <= 0.0`, calls `PlayerVitals::respawn`, and replies with
+`encode_set_health` + `encode_air_supply_update` — **no position packet, and `ServerProtocol` has no
+standalone teleport encoder at all** (only `begin_play`/`begin_play_at`, which are login-sequence
+bundles). Meanwhile `world_spawn::RespawnPoint` is *written* at `server.rs:3123` when a bed is clicked
+and read at `3121` **only by its own dedup check** — `apply_client_command` is not even passed it. So
+pressing Respawn refills the hearts and leaves the player standing where they died, and the bed they
+slept in is ignored. Both halves are server patches; neither is expressible from the shell.
+
+**The instrument that would have caught the misdiagnosis is grep for the *producer*, not the consumer.**
+The brief's framing named the shell's three event routers as the likely culprit, which is the right
+instinct and the wrong direction here: `cargo xtask connectedness` answers "is this clientbound packet
+reaching anything" and would report `PLAYER_COMBAT_KILL` green, because it is. The question that
+resolved it in one command was *"who calls the encoder?"* — and the answer was nobody, in a crate the
+brief had already put out of bounds. §12.40's note that connectedness is silent outside its scope has a
+matching corollary: **for a symptom that only appears against our own server, ask what the server
+sends before auditing what the client receives.**
+
+**The editable offline name (`703e6fe9`) is the other half of #12.122, and its measurements are about
+layout arithmetic and two test traps.**
+
+- **A fifth footer button on the accounts screen does not fit, and the number decides the design.**
+  `ACCOUNTS_BUTTON_W` is 74 with `LinearLayout.spacing(4)`: four measure `4 * 74 + 3 * 4 = 308`, inside
+  `config::MIN_SCALED_WIDTH`'s 320 (vanilla's `Window.java:453` floor). Five measure
+  `5 * 74 + 4 * 4 = 386` and hang 33 px off *each* edge at the smallest supported GUI scale — a defect
+  that never appears on the developer's monitor, the same shape as the 4-bind-group shader. The fix was
+  to notice that the **third slot was already dead** for the row that needed the new verb: the offline
+  entry cannot be removed, so `Remove` was drawn inactive whenever the cursor sat on it. One slot, two
+  captions, one shared predicate (`third_button`) so the label and the dispatch cannot drift. The key
+  hint's `Del remove` was also *false* on that row, so making it conditional fixed a pre-existing lie
+  rather than only adding a hint.
+- **An early `return` inside `frame_for` would have shipped one screen that ignored the GUI scale.**
+  The first draft of the dispatch arm was `if let Some(view) = .. { return Some(..) }`. Every arm in
+  that function feeds `let frame = match ..` and a tail `frame.map` that stamps `gui_scale` and `list`;
+  a `return` skips both, silently, on exactly one screen. Caught by reading the function's *tail*
+  rather than its arm — the shape to check whenever a big `match` is assigned rather than returned.
+- **`offline_username() -> &str` is not expressible**, and the brief that specified it asked for one.
+  `AccountsNav`'s state is behind a `RefCell` (deliberately — `frame_for` gets a `&AccountsNav` and
+  `pump` must advance from it), so a borrow cannot outlive the `Ref` guard. Every accessor on the type
+  returns owned values for the same reason; the signature is `-> String`.
+- **A test that read as rigorous measured the wrong thing, and the assertion's *subject* was the tell.**
+  The layered-guard control (Delete must delete a character, not an account) seeded the box with
+  `set_value("abc")` then `set_cursor_position(0)` and asserted `"bc"`. It got `""`:
+  `set_cursor_position` moves the caret and leaves `highlight_pos` at the end, so `"abc"` was a live
+  *selection* and `delete_text` removed all of it. `move_cursor_to(pos, false)` is the one that moves
+  both. The test would have "passed" as a guard against account removal while proving nothing about the
+  field — which is why it asserts the field's new value too, and says so in its own message.
+
+Four controls run and observed, each reverted by `cp` from a scratchpad backup with an md5 check, in a
+throwaway detached worktree (the shared tree could not even build — another agent's `lodestone-assets`
+was mid-keystroke with a `matches!` parse error, which is what the worktree route is for):
+
+| neuter | observed failure |
+|---|---|
+| `label: "Play offline".to_string()` restored | `left: "Play offline", right: "Notch"` |
+| dispatch arm pointed at the list frame | `frame_for did not reach the editor... Rows were ["Player", "Add Account", "Select", "Edit Name", "Back"]` |
+| `third_button` pinned to `Remove` | 6 failures, `the third button did not open the editor` |
+| `click`'s `Screen::Accounts` arm disabled | `clicking the text field saved the name and closed the editor` |
+
+The second is the one that matters: `accounts_name_edit_frame` plus all eight `AccountsNav` editor tests
+are a closed loop that stays green while the screen draws the account list under an invisible field. Only
+a gate through `frame_for` — the function `app.rs` calls every frame — can see it.
