@@ -633,12 +633,30 @@ struct SubmitCost {
     /// Instructions for a frame with no terrain resident: sky, clears, depth,
     /// encoder setup, queue submit. The term culling cannot remove.
     fixed: Delta,
-    /// Instructions for the same frame with every fixture section resident.
+    /// Instructions for the same frame with every fixture section resident and
+    /// the terrain cull **off** — the pre-#543 behaviour, and the arm the
+    /// per-section marginal cost is derived from.
     loaded: Delta,
-    /// Sections the loaded frame actually submitted, from `RenderStats`.
+    /// Sections the no-cull frame submitted, from `RenderStats`.
     sections_drawn: usize,
-    /// Draw calls the loaded frame issued, from `RenderStats`.
+    /// Draw calls the no-cull frame issued, from `RenderStats`.
     draw_calls: usize,
+    /// Instructions for the same resident set with the cull **on**.
+    culled: Delta,
+    /// Sections the culled frame submitted (opaque pass).
+    culled_sections_drawn: usize,
+    /// Draw calls the culled frame issued, both passes.
+    culled_draw_calls: usize,
+    /// Vertex+index buffer-bind pairs the no-cull and culled frames issued. Before
+    /// the shared mesh arena this was exactly one per draw call; it is now one per
+    /// arena block actually drawn from, which is what issue #543's second half
+    /// moves.
+    buffer_binds: (usize, usize),
+    /// The culled frame's three-way cull split (distance, frustum, occlusion),
+    /// opaque pass only — the numbers that must sum with
+    /// [`culled_sections_drawn`](Self::culled_sections_drawn) to the resident set
+    /// with opaque geometry.
+    culled_split: (usize, usize, usize),
 }
 
 /// Renders one frame with no terrain, then the same frame with every section of
@@ -775,6 +793,10 @@ fn measure_draw_submission(
          would read zero for a reason unrelated to submission cost"
     );
 
+    // Arm 2: cull **off**, so this stays comparable with the pre-#543 record and
+    // the per-section marginal rate is derived from a known section count rather
+    // than from whatever this fixture's camera happens to see.
+    state.set_terrain_culling(false);
     let (loaded, stats) = arm(&state, &mut one_frame);
     // `sections_drawn` is incremented only by the **opaque** loop
     // (`frame.rs:480`), and a water-only section — an ocean surface with no solid
@@ -812,11 +834,57 @@ fn measure_draw_submission(
         fixed.instructions
     );
 
+    // Arm 3: the same resident set with the cull **on** (#543). Nothing changes
+    // between the arms but `terrain_culling`, so the difference is the cull and
+    // nothing else.
+    state.set_terrain_culling(true);
+    let (culled, cstats) = arm(&state, &mut one_frame);
+
+    // The invariant, **per pass**. Stated against the no-cull arm's own
+    // `sections_drawn` rather than against `uploaded`, because that is exactly
+    // the resident-with-opaque-geometry set (water-only sections carry
+    // `mesh: None` and appear in neither term — 189 vs 195 on this fixture).
+    // A cull that drops a section without counting it fails here.
+    assert_eq!(
+        cstats.sections_drawn
+            + cstats.sections_culled_distance
+            + cstats.sections_culled_frustum
+            + cstats.sections_culled_occlusion,
+        stats.sections_drawn,
+        "the opaque pass's cull split does not close against the resident set: drew {}, culled \
+         {}/{}/{} (distance/frustum/occlusion) out of {} resident with opaque geometry",
+        cstats.sections_drawn,
+        cstats.sections_culled_distance,
+        cstats.sections_culled_frustum,
+        cstats.sections_culled_occlusion,
+        stats.sections_drawn
+    );
+    assert!(
+        cstats.sections_drawn < stats.sections_drawn,
+        "the cull removed nothing on this fixture ({} drawn either way), so every ratio below \
+         is a measurement of nothing. The camera is at yaw 45 / pitch 15 with columns all \
+         around it, so a wedge of them must be off screen.",
+        cstats.sections_drawn
+    );
+    assert!(
+        cstats.sections_drawn > 0,
+        "the cull removed EVERYTHING, which is the terrain-vanishes bug, not a win"
+    );
+
     SubmitCost {
         fixed,
         loaded,
         sections_drawn: stats.sections_drawn,
         draw_calls: stats.draw_calls,
+        culled,
+        culled_sections_drawn: cstats.sections_drawn,
+        culled_draw_calls: cstats.draw_calls,
+        buffer_binds: (stats.terrain_buffer_binds, cstats.terrain_buffer_binds),
+        culled_split: (
+            cstats.sections_culled_distance,
+            cstats.sections_culled_frustum,
+            cstats.sections_culled_occlusion,
+        ),
     }
 }
 
@@ -1397,6 +1465,24 @@ fn client_chunk_path_cycle_attribution() {
     );
     println!("marginal for those sections   {marginal:>14} instructions");
     println!("per section drawn             {per_section_draw:>14.0} instructions");
+    // The arena's own counter. One bind pair per arena block drawn from, where
+    // before the arena it was one per draw call — stated as a ratio against
+    // `draw_calls` so the number is self-checking.
+    println!(
+        "buffer-bind pairs             {:>14} no-cull / {} culled, against {} / {} draw calls",
+        s4.buffer_binds.0, s4.buffer_binds.1, s4.draw_calls, s4.culled_draw_calls
+    );
+    let (cd, cf, co) = s4.culled_split;
+    println!(
+        "\nsame resident set, cull ON    {:>14} instructions ({} sections, {} draw calls)",
+        s4.culled.instructions, s4.culled_sections_drawn, s4.culled_draw_calls
+    );
+    println!(
+        "  culled: distance {cd}  frustum {cf}  occlusion {co}   -> {:.1}% of sections drawn, \
+         {:.1}% of the frame's instructions",
+        100.0 * s4.culled_sections_drawn as f64 / s4.sections_drawn as f64,
+        100.0 * s4.culled.instructions as f64 / s4.loaded.instructions as f64
+    );
     // The extrapolation to the one recorded live figure. 931 sections / 441k
     // quads at default render distance is `45a93e4`'s commit message — the only
     // measured live section count in the record. Stated as an extrapolation from

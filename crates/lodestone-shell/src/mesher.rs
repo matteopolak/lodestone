@@ -77,6 +77,20 @@ impl SectionKey {
     pub fn origin(&self) -> [i32; 3] {
         [self.cx * 16, self.min_y + self.si as i32 * 16, self.cz * 16]
     }
+
+    /// This section's coordinate on the 16-block section grid — what the
+    /// frustum, distance and occlusion culls are all expressed in
+    /// (`lodestone_render::SectionCoord`).
+    ///
+    /// Derived from [`origin`](Self::origin) with `div_euclid`, not from `si`
+    /// directly: `min_y` is negative in the overworld (`-64`), so a plain `/ 16`
+    /// truncates toward zero and would put the sections either side of `y == 0`
+    /// on the same grid row.
+    #[must_use]
+    pub fn coord(&self) -> lodestone_render::SectionCoord {
+        let [x, y, z] = self.origin();
+        (x.div_euclid(16), y.div_euclid(16), z.div_euclid(16))
+    }
 }
 
 /// Whether the columns a world is meshed from are **all there already** or are

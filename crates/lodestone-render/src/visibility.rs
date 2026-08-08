@@ -66,6 +66,27 @@ impl SectionVisibility {
     pub fn connects(&self, a: Face, b: Face) -> bool {
         self.connected[a.index()][b.index()]
     }
+
+    /// Build a connectivity set from an explicit list of connected face pairs
+    /// (symmetric; every face is connected to itself regardless).
+    ///
+    /// The point of a hand-written constructor is walk-fidelity fixtures: a
+    /// section that connects exactly one axis is trivial to state here and
+    /// awkward to produce by voxelising a corridor and hoping
+    /// [`compute_visibility`]'s sparse shortcut does not simply return
+    /// [`all`](Self::all).
+    #[must_use]
+    pub fn from_pairs(pairs: &[(Face, Face)]) -> Self {
+        let mut connected = [[false; 6]; 6];
+        for (i, row) in connected.iter_mut().enumerate() {
+            row[i] = true;
+        }
+        for (a, b) in pairs {
+            connected[a.index()][b.index()] = true;
+            connected[b.index()][a.index()] = true;
+        }
+        SectionVisibility { connected }
+    }
 }
 
 /// Vanilla's sparse-section threshold. A section with fewer than this many
@@ -229,12 +250,62 @@ const fn step(coord: SectionCoord, face: Face) -> SectionCoord {
     (coord.0 + n[0], coord.1 + n[1], coord.2 + n[2])
 }
 
+/// One section in the BFS: which faces it has been *entered* through so far, and
+/// which exits are still allowed by the never-reverse-an-axis rule.
+#[derive(Debug, Clone, Copy)]
+struct WalkNode {
+    /// Every face this section has been reached through, **accumulated** across
+    /// all paths that reached it before it was dequeued. This is vanilla's
+    /// `Node.sourceDirections` and the reason it is a set rather than one face is
+    /// recorded on [`walk_visible`].
+    source_faces: [bool; 6],
+    /// Exits still permitted: travelling along an axis forbids ever reversing
+    /// along it, so the BFS only expands outward (vanilla's `Node.directions`).
+    exits: [bool; 6],
+    /// The camera's own section passes the connectivity gate unconditionally —
+    /// you can see out of the section you are standing in in every direction,
+    /// whatever its geometry says.
+    is_camera: bool,
+}
+
 /// Walk the section graph from the camera, returning the sections that are
 /// actually reachable through connected open space and pass `in_frustum`.
 ///
 /// `in_frustum(coord)` lets the caller compose frustum culling; pass `|_| true`
 /// to disable it. The camera's own section is always included (you can always
 /// see the section you are standing in).
+///
+/// # Why the entry face is a *set*
+///
+/// The obvious implementation visits each section once, remembering the single
+/// face it was first entered through, and then requires that face to connect to
+/// each exit. **That over-culls**, and it is the "terrain disappears at certain
+/// angles" bug class: a section reachable through both face B and face C, first
+/// visited through C, loses every exit that only B connects to — and which of B
+/// or C is "first" depends on `Face::ALL`'s order and on the camera's position,
+/// so the missing geometry appears and vanishes as you turn.
+///
+/// Vanilla does not do that. `SectionOcclusionGraph.addNeighbors`
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/SectionOcclusionGraph.java:342-344`)
+/// merges the direction into an already-created node —
+///
+/// ```java
+/// } else if (existingNode != null) {
+///     existingNode.addSourceDirection(direction);
+/// }
+/// ```
+///
+/// — and its visibility test (`:288-301`) passes a neighbour if **any**
+/// accumulated source face connects to the exit. This function does the same:
+/// `source_faces` is a 6-bit set, merged on re-reach, and read at *dequeue* time
+/// so every path that arrived first has already contributed.
+///
+/// Like vanilla, an already-**dequeued** node is not re-expanded when a new source
+/// face arrives; `exits` also comes from the first reach only
+/// (`node1.setDirections(node.directions, direction)`). Both are vanilla's own
+/// approximations, kept deliberately: diverging from them would make our cull
+/// differ from the client we are matching, in the direction of drawing *fewer*
+/// sections than vanilla does, which is the direction that loses pixels.
 #[must_use]
 pub fn walk_visible(
     graph: &VisibilityGraph,
@@ -245,38 +316,62 @@ pub fn walk_visible(
     if !graph.contains(camera) {
         return result;
     }
-    let mut visited: HashSet<SectionCoord> = HashSet::new();
-    visited.insert(camera);
+    let mut nodes: HashMap<SectionCoord, WalkNode> = HashMap::new();
+    nodes.insert(
+        camera,
+        WalkNode {
+            source_faces: [false; 6],
+            exits: [true; 6],
+            is_camera: true,
+        },
+    );
     result.push(camera);
 
-    // Queue items: (section, face we entered through, still-allowed exit dirs).
-    let mut queue: VecDeque<(SectionCoord, Option<Face>, [bool; 6])> = VecDeque::new();
-    queue.push_back((camera, None, [true; 6]));
+    let mut queue: VecDeque<SectionCoord> = VecDeque::new();
+    queue.push_back(camera);
 
-    while let Some((coord, entry, dirs)) = queue.pop_front() {
+    while let Some(coord) = queue.pop_front() {
+        let node = nodes[&coord];
         let vis = graph.sections[&coord];
         for face in Face::ALL {
             // Never reverse along an axis we've already travelled.
-            if !dirs[face.index()] {
+            if !node.exits[face.index()] {
                 continue;
             }
-            // Connectivity gate: can we pass from the entry face to this exit
-            // face through this section? The camera section has no entry face.
-            if let Some(e) = entry
-                && !vis.connects(e, face)
+            // Connectivity gate: can we pass from *any* face we entered through
+            // to this exit face? See this function's doc for why "any" rather
+            // than "the first one".
+            if !node.is_camera
+                && !Face::ALL
+                    .iter()
+                    .any(|entry| node.source_faces[entry.index()] && vis.connects(*entry, face))
             {
                 continue;
             }
             let next = step(coord, face);
-            if visited.contains(&next) || !graph.contains(next) || !in_frustum(next) {
+            if !graph.contains(next) || !in_frustum(next) {
                 continue;
             }
-            visited.insert(next);
+            let entry = face.opposite();
+            if let Some(existing) = nodes.get_mut(&next) {
+                // Merge, do not skip: this is the fidelity fix.
+                existing.source_faces[entry.index()] = true;
+                continue;
+            }
+            let mut exits = node.exits;
+            exits[entry.index()] = false;
+            let mut source_faces = [false; 6];
+            source_faces[entry.index()] = true;
+            nodes.insert(
+                next,
+                WalkNode {
+                    source_faces,
+                    exits,
+                    is_camera: false,
+                },
+            );
             result.push(next);
-            // Forbid the reverse direction so the BFS only expands outward.
-            let mut ndirs = dirs;
-            ndirs[face.opposite().index()] = false;
-            queue.push_back((next, Some(face.opposite()), ndirs));
+            queue.push_back(next);
         }
     }
     result
@@ -467,5 +562,61 @@ mod tests {
             !visible.contains(&(1, 1, 0)),
             "the middle section does not connect +X entry to +Y exit"
         );
+    }
+
+    /// The walk-fidelity fixture: a corridor section reachable through **two**
+    /// faces, whose only exit connects to the one the BFS reaches *second*.
+    ///
+    /// This is the over-cull the pre-merge `walk_visible` had, and it is the
+    /// "geometry disappears at certain angles" class: which of the two faces is
+    /// first depends on `Face::ALL`'s order, so the old code lost the far section
+    /// for one of the two arms below and not the other. Both arms are here for
+    /// exactly that reason — a single arm would pass under the old code half the
+    /// time, and which half is an implementation detail of an unrelated array.
+    #[test]
+    fn walk_merges_source_faces_reached_by_a_second_path() {
+        // Arm 1: the corridor at (1,0,1) connects only the X axis, and the target
+        // is further along +X. It is reachable via (1,0,0) (entering through NegZ,
+        // which connects to nothing useful) and via (0,0,1) (entering through
+        // NegX, which does connect to PosX).
+        let corridor_x = SectionVisibility::from_pairs(&[(Face::NegX, Face::PosX)]);
+        let mut g = VisibilityGraph::new();
+        g.insert((0, 0, 0), SectionVisibility::all());
+        g.insert((1, 0, 0), SectionVisibility::all());
+        g.insert((0, 0, 1), SectionVisibility::all());
+        g.insert((1, 0, 1), corridor_x);
+        g.insert((2, 0, 1), SectionVisibility::all());
+        let visible = walk_visible(&g, (0, 0, 0), |_| true);
+        assert!(
+            visible.contains(&(2, 0, 1)),
+            "the X corridor is entered through NegX by the (0,0,1) path, which connects to \
+             PosX, so (2,0,1) is visible however the BFS ordered the two paths"
+        );
+
+        // Arm 2: the mirror image — the corridor connects only the Z axis and the
+        // target is further along +Z.
+        let corridor_z = SectionVisibility::from_pairs(&[(Face::NegZ, Face::PosZ)]);
+        let mut g = VisibilityGraph::new();
+        g.insert((0, 0, 0), SectionVisibility::all());
+        g.insert((1, 0, 0), SectionVisibility::all());
+        g.insert((0, 0, 1), SectionVisibility::all());
+        g.insert((1, 0, 1), corridor_z);
+        g.insert((1, 0, 2), SectionVisibility::all());
+        let visible = walk_visible(&g, (0, 0, 0), |_| true);
+        assert!(
+            visible.contains(&(1, 0, 2)),
+            "mirror image of arm 1: the Z corridor is entered through NegZ by the (1,0,0) path"
+        );
+    }
+
+    #[test]
+    fn from_pairs_is_symmetric_and_self_connected() {
+        let v = SectionVisibility::from_pairs(&[(Face::NegX, Face::PosY)]);
+        assert!(v.connects(Face::NegX, Face::PosY));
+        assert!(v.connects(Face::PosY, Face::NegX));
+        for f in Face::ALL {
+            assert!(v.connects(f, f));
+        }
+        assert!(!v.connects(Face::NegX, Face::PosX));
     }
 }

@@ -51,6 +51,7 @@ pub mod cloud_mesh;
 pub mod crack;
 pub mod crack_pipeline;
 pub mod crack_resolver;
+pub mod cull;
 pub mod device;
 pub mod driver;
 pub mod entity;
@@ -65,6 +66,7 @@ pub mod item_render;
 pub mod light;
 pub mod mesh;
 pub mod mesher;
+pub mod model_arena;
 pub mod model_pipeline;
 pub mod models;
 pub mod scene;
@@ -137,6 +139,7 @@ pub use camera::{
     spyglass_fov_modifier,
 };
 pub use caps::{Backend, GpuCapabilities};
+pub use cull::{CAMERA_CUBE_BLOCKS, CullVerdict, TerrainCull, within_view_distance};
 pub use device::{GpuContext, GpuError};
 pub use driver::{InstanceTable, WorldMesher};
 pub use entity::{
@@ -171,6 +174,7 @@ pub use mesher::{
     BuiltSection, LightGrid, MeshJob, SectionSnapshot, SectionSource, build_batch, column_of,
     dirty_jobs, neighbour_columns, neighbourhood_coords,
 };
+pub use model_arena::{ArenaMesh, ModelMeshArena};
 pub use model_pipeline::{
     GpuModelMesh, ModelCameraUniform, ModelPipeline, ModelSharedCameraUniform,
     SectionOriginUniform, model_anim_buffer, model_camera_buffer, model_camera_buffer_with_fog,

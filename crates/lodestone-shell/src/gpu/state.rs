@@ -202,6 +202,9 @@ impl RenderState {
                 shared_cam_buffer,
                 cam_bind_group,
                 origin_arena,
+                // Lazy: the first block is allocated on the first section upload,
+                // so a run that never loads a world reserves no mesh VRAM.
+                mesh_arena: lodestone_render::ModelMeshArena::new(),
                 hand_cam_buffer,
                 hand_cam_bind_group,
                 sections: HashMap::new(),
@@ -320,7 +323,29 @@ impl RenderState {
             // `set_fog`.
             fog: FogSettings::for_render_distance(SKY_COLOR, DEFAULT_RENDER_DISTANCE_CHUNKS),
             render_distance_chunks: DEFAULT_RENDER_DISTANCE_CHUNKS,
+            // On by default: an off-by-default cull is an island, and this repo
+            // has nine of those.
+            terrain_culling: true,
         }
+    }
+
+    /// Turn the per-frame terrain cull (distance ∩ frustum ∩ occlusion) on or
+    /// off. On by default.
+    ///
+    /// This is vanilla's `smartCull` equivalent and the one-call false-cull
+    /// diagnosis: if missing terrain reappears with culling off, a cull dropped
+    /// it; if it does not, the section was never resident and the bug is
+    /// upstream in streaming or meshing. It is also the A/B lever the
+    /// draw-submission instruction harness measures both arms with
+    /// (`tests/client_chunk_cycles.rs`).
+    pub fn set_terrain_culling(&mut self, enabled: bool) {
+        self.terrain_culling = enabled;
+    }
+
+    /// Whether the per-frame terrain cull is currently enabled.
+    #[must_use]
+    pub fn terrain_culling(&self) -> bool {
+        self.terrain_culling
     }
 
     /// Replace the distance-fog settings (colour + range) **and the sky disc's

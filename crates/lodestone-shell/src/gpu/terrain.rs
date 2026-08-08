@@ -7,9 +7,9 @@ use std::collections::HashMap;
 
 use lodestone_assets::ResourceLocation;
 use lodestone_render::{
-    AnimSlotUniform, ArenaAllocation, ArenaBuffer, GpuAtlas, GpuMesh, GpuModelMesh, ItemVariants,
-    ModelPipeline, SpriteAnimation, crack_pipeline::CrackPipeline, crack_resolver::CrackResolver,
-    write_section_origin,
+    AnimSlotUniform, ArenaAllocation, ArenaBuffer, ArenaMesh, GpuAtlas, GpuMesh, GpuModelMesh,
+    ItemVariants, ModelMeshArena, ModelPipeline, SpriteAnimation,
+    crack_pipeline::CrackPipeline, crack_resolver::CrackResolver, write_section_origin,
 };
 
 use crate::mesher::SectionKey;
@@ -45,16 +45,79 @@ pub(super) struct SectionGpu {
 #[derive(Debug)]
 pub(super) struct ModelSectionGpu {
     /// Opaque block geometry (with lava merged in), if any.
-    pub(super) mesh: Option<GpuModelMesh>,
+    pub(super) mesh: Option<ResidentMesh>,
     pub(super) quad_count: usize,
     /// Translucent water surface geometry for this section, if any. Drawn on the
     /// fluid pass after all opaque geometry so the sea floor shows through.
-    pub(super) water: Option<GpuModelMesh>,
+    pub(super) water: Option<ResidentMesh>,
     pub(super) water_quad_count: usize,
     /// This section's slot in [`ModelRenderer::origin_arena`], written once at
     /// upload. Freed (via [`SectionOriginArena::free`]) when the section is
     /// removed or remeshed away to nothing.
     pub(super) origin_alloc: ArenaAllocation,
+}
+
+/// Where one section's uploaded geometry actually lives.
+///
+/// Almost always [`Arena`](Self::Arena): a span suballocated out of
+/// [`ModelMeshArena`]'s shared blocks, so the draw loop binds vertex and index
+/// buffers **once per block** instead of once per section — 4 encoder calls per
+/// draw down to 2, which is the whole point of issue #543's second half.
+///
+/// [`Dedicated`](Self::Dedicated) is the degrade path, not a second design: an
+/// arena that cannot place a mesh (one larger than a whole block, or a device that
+/// refused another block) returns `None` and this section keeps its own buffer
+/// pair rather than becoming a hole in the world. It costs the old 4 calls for
+/// that one section and nothing else.
+#[derive(Debug)]
+pub(super) enum ResidentMesh {
+    Arena(ArenaMesh),
+    Dedicated(GpuModelMesh),
+}
+
+/// One resolved terrain draw: everything the encoder needs, with the cull
+/// already applied.
+///
+/// Collected into a `Vec` and sorted by [`block`](Self::block) before emission so
+/// that consecutive draws share a buffer bind. Sorting ~3k small structs per frame
+/// costs far less than the binds it removes — and dedicated meshes carry
+/// `block == u32::MAX`, so they sort to the end and never split an arena run.
+pub(super) struct TerrainDraw<'a> {
+    pub(super) block: u32,
+    pub(super) first_index: u32,
+    pub(super) index_count: u32,
+    pub(super) base_vertex: i32,
+    /// This section's dynamic offset into [`SectionOriginArena`].
+    pub(super) origin_offset: u32,
+    /// `Some` only for [`ResidentMesh::Dedicated`], whose buffers are bound
+    /// per draw.
+    pub(super) dedicated: Option<&'a GpuModelMesh>,
+}
+
+/// The `block` sentinel for a mesh in its own buffers — sorts last.
+pub(super) const DEDICATED_BLOCK: u32 = u32::MAX;
+
+impl<'a> TerrainDraw<'a> {
+    pub(super) fn new(mesh: &'a ResidentMesh, origin_offset: u32) -> Self {
+        match mesh {
+            ResidentMesh::Arena(a) => TerrainDraw {
+                block: a.block,
+                first_index: a.first_index,
+                index_count: a.index_count,
+                base_vertex: a.base_vertex,
+                origin_offset,
+                dedicated: None,
+            },
+            ResidentMesh::Dedicated(m) => TerrainDraw {
+                block: DEDICATED_BLOCK,
+                first_index: 0,
+                index_count: m.index_count,
+                base_vertex: 0,
+                origin_offset,
+                dedicated: Some(m),
+            },
+        }
+    }
 }
 
 /// Generous fixed capacity for [`SectionOriginArena`]; see that type's doc for
@@ -266,6 +329,10 @@ pub(super) struct ModelRenderer {
     /// Per-section world origins, addressed by a dynamic offset — see
     /// [`SectionOriginArena`]'s doc.
     pub(super) origin_arena: SectionOriginArena,
+    /// Shared vertex/index arena blocks backing every section's geometry, so the
+    /// per-draw encoder cost is a bind + a draw rather than a bind + two buffer
+    /// binds + a draw (issue #543). See [`ResidentMesh`].
+    pub(super) mesh_arena: ModelMeshArena,
     /// The **first-person held item** pass's own shared-camera buffer + bind
     /// group. Its `view_proj` is [`hand_projection`] *alone* (no view matrix)
     /// because the pose `first_person_item_mesh` bakes in is already
