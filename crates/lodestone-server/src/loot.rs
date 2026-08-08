@@ -109,16 +109,100 @@ use crate::mob_spawn::SpawnRng;
 
 include!(concat!(env!("OUT_DIR"), "/embedded_loot.rs"));
 
-/// The loot context a roll can read. Issue #337's starting point is the empty
+/// The loot context a roll can read. Issue #337's starting point was the empty
 /// context — no entity, no level, no tool, no block state, no explosion —
-/// carrying only luck. Later landings extend this struct (and the condition/
-/// function evaluators) with entity/level state rather than threading new
-/// arguments through every call.
-#[derive(Debug, Clone, Copy, Default)]
+/// carrying only luck; issue #539 added [`tool`](Self::tool). Later landings
+/// extend this struct (and the condition/function evaluators) with entity/level
+/// state rather than threading new arguments through every call.
+///
+/// **Not `Copy`** since #539: [`LootTool`] owns its key and enchantment list.
+/// Every consumer already took `&LootContext`.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct LootContext {
     /// `LootContextParams.luck` — 0 for the empty context. Feeds entry quality
     /// (`weight + quality·luck`) and `bonus_rolls`.
     pub luck: f32,
+    /// `LootContextParams.TOOL` — the item the block was broken with (or the
+    /// weapon, for a mob table). `None` is vanilla's absent parameter, which is
+    /// what a bare hand and a mob death with no attacker both are.
+    ///
+    /// **A present tool changes the RNG stream even at enchantment level 0**,
+    /// which is the single easiest thing to get wrong here: `ApplyBonusCount.run`
+    /// guards on `tool != null`, *not* on `level > 0`, so with a tool in hand
+    /// `uniform_bonus_count` draws `nextInt(1)` and `binomial_with_bonus_count`
+    /// draws `extra` times, both to no effect. See [`BonusFormula`].
+    pub tool: Option<LootTool>,
+}
+
+/// The tool a roll happens with — `LootContextParams.TOOL`, reduced to the three
+/// things vanilla's loot conditions and functions actually read off it.
+///
+/// # Why enchantments are keyed by name and not by id
+///
+/// `lodestone_model::ItemEnchantment` carries a **network registry id**, because
+/// `minecraft:enchantment` is a datapack registry whose ids are assigned per
+/// session at configuration time — it is not in Mojang's `registries.json` at
+/// all, so no static name↔id table exists to generate. This crate is
+/// version-free and cannot resolve one. So the seam is: whoever *has* the
+/// session's registry resolves ids to keys and hands them here, and
+/// [`LootTool::from_held_item`] (which has no registry) builds a tool with an
+/// empty enchantment list — correct for every stack this server can currently
+/// hold, and honest about it. See `docs/loot-tables.md`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LootTool {
+    /// The item's registry key, e.g. `minecraft:diamond_pickaxe`. `None` is
+    /// never a tool — that is [`LootContext::tool`] being `None`.
+    pub item: Option<ResourceKey>,
+    /// Stack size, for `ItemPredicate`'s `count` bounds.
+    pub count: u32,
+    /// Enchantment levels by **key**, e.g. `("minecraft:fortune", 3)`. An
+    /// enchantment absent from this list is level 0, exactly as
+    /// `EnchantmentHelper.getItemEnchantmentLevel` reports it.
+    pub enchantments: Vec<(ResourceKey, u32)>,
+}
+
+impl LootTool {
+    /// A tool holding `item`, one of it, unenchanted.
+    #[must_use]
+    pub fn new(item: ResourceKey) -> Self {
+        Self {
+            item: Some(item),
+            count: 1,
+            enchantments: Vec::new(),
+        }
+    }
+
+    /// Builder: adds (or replaces) an enchantment level.
+    #[must_use]
+    pub fn with_enchantment(mut self, enchantment: ResourceKey, level: u32) -> Self {
+        self.enchantments.retain(|(key, _)| key != &enchantment);
+        self.enchantments.push((enchantment, level));
+        self
+    }
+
+    /// The tool for a held [`ItemStack`], as the server sees it.
+    ///
+    /// Carries **no** enchantments, deliberately and visibly: see this type's
+    /// own doc comment. A stack whose enchantments were resolvable should be
+    /// built with [`with_enchantment`](Self::with_enchantment) instead.
+    #[must_use]
+    pub fn from_held_item(stack: &ItemStack) -> Self {
+        Self {
+            item: Some(stack.item.clone()),
+            count: stack.count,
+            enchantments: Vec::new(),
+        }
+    }
+
+    /// `EnchantmentHelper.getItemEnchantmentLevel` — 0 for an enchantment this
+    /// tool does not carry.
+    #[must_use]
+    pub fn enchantment_level(&self, enchantment: &ResourceKey) -> u32 {
+        self.enchantments
+            .iter()
+            .find(|(key, _)| key == enchantment)
+            .map_or(0, |(_, level)| *level)
+    }
 }
 
 /// Resolves a nested `minecraft:loot_table` entry to its table during a roll.
@@ -849,8 +933,12 @@ enum LootFunction {
     EnchantedCountIncrease {
         conditions: Vec<LootCondition>,
     },
-    /// No tool in the empty context, so no fortune bonus — a no-op.
+    /// `ApplyBonusCount` — a count formula driven by an enchantment level on the
+    /// context's tool. **A no-op with no tool, but not with an unenchanted one:**
+    /// vanilla guards on `tool != null`, not on `level > 0`.
     ApplyBonus {
+        enchantment: ResourceKey,
+        formula: BonusFormula,
         conditions: Vec<LootCondition>,
     },
     /// No explosion in the empty context — a no-op.
@@ -887,7 +975,15 @@ impl LootFunction {
                 Ok(Self::SetItem { item, conditions })
             }
             "minecraft:enchanted_count_increase" => Ok(Self::EnchantedCountIncrease { conditions }),
-            "minecraft:apply_bonus" => Ok(Self::ApplyBonus { conditions }),
+            "minecraft:apply_bonus" => {
+                let enchantment = parse_id(value.get("enchantment"), "enchantment")?;
+                let formula = BonusFormula::from_value(value, audit)?;
+                Ok(Self::ApplyBonus {
+                    enchantment,
+                    formula,
+                    conditions,
+                })
+            }
             "minecraft:explosion_decay" => Ok(Self::ExplosionDecay { conditions }),
             "minecraft:furnace_smelt" => {
                 let use_input_count = value.get("use_input_count").and_then(Value::as_bool).unwrap_or(true);
@@ -918,12 +1014,34 @@ impl LootFunction {
                     stack.item = item.clone();
                 }
             }
-            Self::EnchantedCountIncrease { conditions }
-            | Self::ApplyBonus { conditions }
-            | Self::ExplosionDecay { conditions } => {
+            Self::EnchantedCountIncrease { conditions } | Self::ExplosionDecay { conditions } => {
                 let _ = conditions;
-                // No attacker/tool/explosion in the empty context: each is a
-                // no-op. (A condition gate is still respected for the no-op.)
+                // `EnchantedCountIncrease` reads `ATTACKING_ENTITY`'s weapon and
+                // `ExplosionDecay` reads `EXPLOSION_RADIUS`; neither is ever set
+                // for a block break, and both return the stack untouched and
+                // draw nothing when their parameter is absent. Wiring either
+                // means giving the context that parameter, not changing this.
+            }
+            Self::ApplyBonus {
+                enchantment,
+                formula,
+                conditions,
+            } => {
+                if !conditions.iter().all(|c| c.test(context, rng)) {
+                    return;
+                }
+                // `ApplyBonusCount.run`: **the guard is `tool != null`**, so a
+                // bare hand skips the formula entirely (and draws nothing) while
+                // an unenchanted tool runs it at level 0 — which for two of the
+                // three formulas still consumes draws. Getting this backwards
+                // produces a statistically identical count and desyncs the
+                // stream for every later stack in the same roll.
+                let Some(tool) = context.tool.as_ref() else {
+                    return;
+                };
+                let level = tool.enchantment_level(enchantment);
+                let new_count = formula.calculate(rng, stack.count as i32, level as i32);
+                stack.count = new_count.max(0) as u32;
             }
             Self::FurnaceSmelt { use_input_count, conditions } => {
                 if !conditions.iter().all(|c| c.test(context, rng)) {
@@ -949,6 +1067,119 @@ impl LootFunction {
     }
 }
 
+/// `ApplyBonusCount.Formula` — one of three, dispatched on the `formula` field
+/// with its own `parameters` object.
+///
+/// Every arm is transcribed from the record body in
+/// `.cache/mc/26.2/src/net/minecraft/world/level/storage/loot/functions/ApplyBonusCount.java`,
+/// **not** from a summary of a call site, because two of the three are wrong in a
+/// way that reads plausibly:
+///
+/// * `ore_drops` is commonly restated as `count * max(1, nextInt(level + 2))`.
+///   That is arithmetically right and **draw-count wrong**: the record is
+///   `if (level > 0) { … } else { return count; }`, so at level 0 it draws
+///   *nothing*. The restatement draws `nextInt(2)` and throws it away, shifting
+///   every later draw in the roll.
+/// * `uniform_bonus_count` is `count + nextInt(bonusMultiplier * level + 1)`,
+///   which at level 0 is `nextInt(1)` — **one draw, always zero**. It is not
+///   guarded on the level at all.
+/// * `binomial_with_bonus_count` loops `level + extra` times, so at level 0 it
+///   still makes `extra` draws.
+///
+/// The corpus uses exactly four instantiations, all on `minecraft:fortune`:
+/// `ore_drops` (17), `uniform_bonus_count {bonusMultiplier: 1}` (9),
+/// `binomial_with_bonus_count {extra: 3, probability: 0.5714286}` (4), and
+/// `uniform_bonus_count {bonusMultiplier: 2}` (2).
+#[derive(Debug, Clone, PartialEq)]
+enum BonusFormula {
+    /// `OreDrops`: `level > 0 ? count * (max(nextInt(level + 2) - 1, 0) + 1) : count`.
+    OreDrops,
+    /// `BinomialWithBonusCount`: `level + extra` Bernoulli trials at `probability`,
+    /// each adding one.
+    BinomialWithBonusCount { extra: i32, probability: f32 },
+    /// `UniformBonusCount`: `count + nextInt(bonusMultiplier * level + 1)`.
+    UniformBonusCount { bonus_multiplier: i32 },
+    /// A formula id this build does not evaluate. Leaves the count alone and
+    /// draws nothing; reported by [`LootTable::unsupported_features`].
+    Unsupported,
+}
+
+impl BonusFormula {
+    fn from_value(value: &Value, audit: &mut Vec<String>) -> Result<Self, LootError> {
+        let id = value
+            .get("formula")
+            .and_then(Value::as_str)
+            .ok_or(LootError::MissingField("formula"))?;
+        let parameters = value.get("parameters");
+        match id {
+            "minecraft:ore_drops" => Ok(Self::OreDrops),
+            "minecraft:binomial_with_bonus_count" => {
+                let parameters =
+                    parameters.ok_or(LootError::MissingField("parameters"))?;
+                let extra = parameters
+                    .get("extra")
+                    .and_then(Value::as_i64)
+                    .and_then(|v| i32::try_from(v).ok())
+                    .ok_or(LootError::MissingField("extra"))?;
+                let probability = parse_f32(
+                    parameters
+                        .get("probability")
+                        .ok_or(LootError::MissingField("probability"))?,
+                    "probability",
+                )?;
+                Ok(Self::BinomialWithBonusCount { extra, probability })
+            }
+            "minecraft:uniform_bonus_count" => {
+                let parameters =
+                    parameters.ok_or(LootError::MissingField("parameters"))?;
+                let bonus_multiplier = parameters
+                    .get("bonusMultiplier")
+                    .and_then(Value::as_i64)
+                    .and_then(|v| i32::try_from(v).ok())
+                    .ok_or(LootError::MissingField("bonusMultiplier"))?;
+                Ok(Self::UniformBonusCount { bonus_multiplier })
+            }
+            other => {
+                audit.push(format!("apply_bonus formula {other}"));
+                Ok(Self::Unsupported)
+            }
+        }
+    }
+
+    /// `Formula.calculateNewCount`. Integer arithmetic throughout — a float
+    /// transliteration of `count * (bonus + 1)` would be host-libm dependent at
+    /// the rounding boundary.
+    fn calculate(&self, rng: &mut SpawnRng, count: i32, level: i32) -> i32 {
+        match self {
+            Self::OreDrops => {
+                if level > 0 {
+                    let bonus = (rng.next_int(level + 2) - 1).max(0);
+                    count * (bonus + 1)
+                } else {
+                    count
+                }
+            }
+            Self::BinomialWithBonusCount { extra, probability } => {
+                let mut count = count;
+                let rounds = level + extra;
+                for _ in 0..rounds.max(0) {
+                    if rng.next_f32() < *probability {
+                        count += 1;
+                    }
+                }
+                count
+            }
+            Self::UniformBonusCount { bonus_multiplier } => {
+                // `nextInt(bound)` with `bound <= 0` throws in vanilla; the
+                // corpus never produces one (`bonusMultiplier` is 1 or 2 and
+                // level is non-negative), so `max(1)` is a guard, not a policy.
+                count + rng.next_int((bonus_multiplier * level + 1).max(1))
+            }
+            Self::Unsupported => count,
+        }
+    }
+}
+
 /// A loot condition (`LootItemConditions` dispatch on `condition`).
 ///
 /// Each variant evaluates exactly as vanilla does when its referenced context
@@ -962,12 +1193,22 @@ enum LootCondition {
     },
     KilledByPlayer,
     SurvivesExplosion,
-    MatchTool,
+    /// `MatchTool(Optional<ItemPredicate>)` — `tool != null && (predicate is
+    /// empty || predicate.test(tool))`. **The absent-predicate case is `true`,
+    /// not `false`**: `match_tool` with no `predicate` at all asks only "is
+    /// anything in hand".
+    MatchTool {
+        predicate: Option<ItemPredicate>,
+    },
     EntityProperties,
     BlockStateProperty,
     DamageSourceProperties,
     LocationCheck,
+    /// `BonusLevelTableCondition` — `nextFloat() < chances[min(level, len-1)]`.
+    /// **Always draws**, tool or not, so its draw count does not depend on the
+    /// context; only which chance is compared does.
     TableBonus {
+        enchantment: ResourceKey,
         chances: Vec<f32>,
     },
     Inverted(Box<LootCondition>),
@@ -1001,7 +1242,24 @@ impl LootCondition {
             }
             "minecraft:killed_by_player" => Ok(Self::KilledByPlayer),
             "minecraft:survives_explosion" => Ok(Self::SurvivesExplosion),
-            "minecraft:match_tool" => Ok(Self::MatchTool),
+            "minecraft:match_tool" => match value.get("predicate") {
+                None => Ok(Self::MatchTool { predicate: None }),
+                Some(raw) => match ItemPredicate::from_value(raw)? {
+                    // A predicate shape this build does not model must **fail
+                    // closed**, not match everything: `Unsupported` tests
+                    // `false`, which is what `match_tool` did for every
+                    // predicate before #539. Reporting it as an unsupported
+                    // feature is what keeps such a table out of the curated
+                    // bundle (`LootTableSet::load_bundled`'s debug assertion).
+                    None => {
+                        audit.push("condition minecraft:match_tool (unmodelled predicate)".to_string());
+                        Ok(Self::Unsupported)
+                    }
+                    Some(predicate) => Ok(Self::MatchTool {
+                        predicate: Some(predicate),
+                    }),
+                },
+            },
             "minecraft:entity_properties" => Ok(Self::EntityProperties),
             "minecraft:block_state_property" => Ok(Self::BlockStateProperty),
             "minecraft:damage_source_properties" => Ok(Self::DamageSourceProperties),
@@ -1017,7 +1275,11 @@ impl LootCondition {
                 if chances.is_empty() {
                     return Err(LootError::EmptyTableBonus);
                 }
-                Ok(Self::TableBonus { chances })
+                let enchantment = parse_id(value.get("enchantment"), "enchantment")?;
+                Ok(Self::TableBonus {
+                    enchantment,
+                    chances,
+                })
             }
             "minecraft:inverted" => {
                 let term = Self::from_value(value.get("term").ok_or(LootError::MissingField("term"))?, audit)?;
@@ -1045,19 +1307,279 @@ impl LootCondition {
             // No relevant context param, so vanilla's `hasParameter`/null check
             // reads absent: each is `false`.
             Self::KilledByPlayer
-            | Self::MatchTool
             | Self::EntityProperties
             | Self::BlockStateProperty
             | Self::DamageSourceProperties
             | Self::LocationCheck => false,
             Self::SurvivesExplosion => true,
-            // No tool → fortune level 0 → `values[min(0, len-1)]` = `values[0]`.
-            Self::TableBonus { chances } => rng.next_f32() < chances[0],
+            // `MatchTool.test`: `tool != null && (predicate.isEmpty() ||
+            // predicate.get().test(tool))`. Consumes no RNG either way, so
+            // adding a tool cannot shift the stream through this condition.
+            Self::MatchTool { predicate } => match context.tool.as_ref() {
+                None => false,
+                Some(tool) => predicate.as_ref().is_none_or(|p| p.test(tool)),
+            },
+            // `values[min(level, len-1)]`, where level is 0 with no tool — which
+            // is `values[0]`, the pre-#539 behaviour, reached now by the general
+            // path rather than by assumption.
+            Self::TableBonus {
+                enchantment,
+                chances,
+            } => {
+                let level = context
+                    .tool
+                    .as_ref()
+                    .map_or(0, |tool| tool.enchantment_level(enchantment));
+                let index = (level as usize).min(chances.len() - 1);
+                rng.next_f32() < chances[index]
+            }
             Self::Inverted(term) => !term.test(context, rng),
             Self::AllOf(terms) => terms.iter().all(|t| t.test(context, rng)),
             Self::AnyOf(terms) => terms.iter().any(|t| t.test(context, rng)),
             Self::Unsupported => false,
         }
+    }
+}
+
+/// `advancements/predicates/ItemPredicate` — `(items, count, components)`, of
+/// which this models `items` and `count` plus the one `components.predicates`
+/// entry the 26.2 loot corpus uses.
+///
+/// # What the corpus actually contains
+///
+/// Surveyed across all 1,355 tables: 203 `match_tool` conditions, and the
+/// `predicate` object has exactly **three** shapes — `{"predicates": {…}}` (156,
+/// and the only key ever used inside is `minecraft:enchantments`),
+/// `{"items": […]}` (47), and one of those 47 whose `items` is a `#tag` string.
+/// `components` (the *exact* matcher) never appears, and neither does `count`.
+/// So this models `items`-as-a-list and `enchantments`, and reports anything
+/// else unsupported — which fails the condition closed, exactly as the whole of
+/// `match_tool` did before.
+///
+/// Vanilla's `test` is `items.isEmpty() || stack.is(items)`, then
+/// `count.matches(stack.count())`, then `components.test(stack)` — an AND of all
+/// three, each vacuously true when absent.
+#[derive(Debug, Clone, PartialEq)]
+struct ItemPredicate {
+    /// `Optional<HolderSet<Item>>` in its direct-list form. `None` is the absent
+    /// field, which matches any item.
+    items: Option<Vec<ResourceKey>>,
+    /// `MinMaxBounds.Ints count` — `ANY` when absent.
+    count: IntBounds,
+    /// `components.predicates["minecraft:enchantments"]`, a list every element of
+    /// which must match (vanilla ANDs the `partial` map's values, and the
+    /// enchantments predicate itself ANDs its list — see
+    /// `EnchantmentsPredicate.matches`).
+    enchantments: Vec<EnchantmentPredicate>,
+}
+
+impl ItemPredicate {
+    /// Parses one `predicate` object, or `Ok(None)` if it uses a shape this build
+    /// does not model (the caller turns that into an unsupported, always-failing
+    /// condition rather than a match-everything one).
+    fn from_value(value: &Value) -> Result<Option<Self>, LootError> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| LootError::UnexpectedType("match_tool predicate", "an object"))?;
+        // `components` is the *exact* data-component matcher. Nothing in the
+        // 26.2 loot corpus uses it, and modelling it needs a component-value
+        // vocabulary this crate does not have.
+        if object.contains_key("components") {
+            return Ok(None);
+        }
+        let items = match object.get("items") {
+            None => None,
+            Some(Value::String(one)) => {
+                // A `#tag` needs an item-tag census `lodestone-data` does not
+                // bundle (only block tags). A bare id string is the
+                // single-element `HolderSet` form and is fine.
+                if one.starts_with('#') {
+                    return Ok(None);
+                }
+                Some(vec![one
+                    .parse()
+                    .map_err(|_| LootError::BadIdentifier(one.clone()))?])
+            }
+            Some(Value::Array(list)) => {
+                let mut out = Vec::with_capacity(list.len());
+                for entry in list {
+                    let raw = entry
+                        .as_str()
+                        .ok_or(LootError::UnexpectedType("items entry", "a string"))?;
+                    if raw.starts_with('#') {
+                        return Ok(None);
+                    }
+                    out.push(
+                        raw.parse()
+                            .map_err(|_| LootError::BadIdentifier(raw.to_string()))?,
+                    );
+                }
+                Some(out)
+            }
+            Some(_) => return Err(LootError::UnexpectedType("items", "a string or array")),
+        };
+        let count = match object.get("count") {
+            None => IntBounds::ANY,
+            Some(raw) => IntBounds::from_value(raw)?,
+        };
+        let mut enchantments = Vec::new();
+        if let Some(predicates) = object.get("predicates") {
+            let map = predicates
+                .as_object()
+                .ok_or_else(|| LootError::UnexpectedType("predicates", "an object"))?;
+            for (key, raw) in map {
+                if key != "minecraft:enchantments" {
+                    return Ok(None);
+                }
+                let list = raw
+                    .as_array()
+                    .ok_or(LootError::UnexpectedType("enchantments", "an array"))?;
+                for entry in list {
+                    enchantments.push(EnchantmentPredicate::from_value(entry)?);
+                }
+            }
+        }
+        Ok(Some(Self {
+            items,
+            count,
+            enchantments,
+        }))
+    }
+
+    fn test(&self, tool: &LootTool) -> bool {
+        if let Some(items) = &self.items {
+            match &tool.item {
+                None => return false,
+                Some(held) => {
+                    if !items.contains(held) {
+                        return false;
+                    }
+                }
+            }
+        }
+        if !self.count.matches(i32::try_from(tool.count).unwrap_or(i32::MAX)) {
+            return false;
+        }
+        self.enchantments.iter().all(|p| p.matches(tool))
+    }
+}
+
+/// `advancements/predicates/EnchantmentPredicate` — `(enchantments, level)`.
+///
+/// `containedIn` has three branches, and the two beyond the common one are easy
+/// to miss: with `enchantments` present it is "any listed enchantment is on the
+/// stack at a matching level"; with `enchantments` absent but `levels` set it is
+/// "**any** enchantment on the stack has a matching level"; with both absent it
+/// is "the stack is enchanted at all".
+#[derive(Debug, Clone, PartialEq)]
+struct EnchantmentPredicate {
+    enchantments: Option<Vec<ResourceKey>>,
+    levels: IntBounds,
+}
+
+impl EnchantmentPredicate {
+    fn from_value(value: &Value) -> Result<Self, LootError> {
+        let enchantments = match value.get("enchantments") {
+            None => None,
+            Some(Value::String(one)) => Some(vec![
+                one.parse()
+                    .map_err(|_| LootError::BadIdentifier(one.clone()))?,
+            ]),
+            Some(Value::Array(list)) => {
+                let mut out = Vec::with_capacity(list.len());
+                for entry in list {
+                    let raw = entry
+                        .as_str()
+                        .ok_or(LootError::UnexpectedType("enchantments entry", "a string"))?;
+                    out.push(
+                        raw.parse()
+                            .map_err(|_| LootError::BadIdentifier(raw.to_string()))?,
+                    );
+                }
+                Some(out)
+            }
+            Some(_) => {
+                return Err(LootError::UnexpectedType(
+                    "enchantments",
+                    "a string or array",
+                ));
+            }
+        };
+        let levels = match value.get("levels") {
+            None => IntBounds::ANY,
+            Some(raw) => IntBounds::from_value(raw)?,
+        };
+        Ok(Self {
+            enchantments,
+            levels,
+        })
+    }
+
+    fn matches(&self, tool: &LootTool) -> bool {
+        match &self.enchantments {
+            Some(wanted) => wanted.iter().any(|key| {
+                let level = tool.enchantment_level(key);
+                // `matchesEnchantment`: level 0 means absent, never "matches a
+                // `{max: 0}` bound".
+                level != 0 && (self.levels.is_any() || self.levels.matches(level as i32))
+            }),
+            None if !self.levels.is_any() => tool
+                .enchantments
+                .iter()
+                .any(|(_, level)| self.levels.matches(*level as i32)),
+            None => !tool.enchantments.is_empty(),
+        }
+    }
+}
+
+/// `MinMaxBounds.Ints` — `{min, max}`, either bound optional, **or** a bare
+/// number meaning `exactly(n)` (`Codec.either(rangeCodec, numberCodec)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct IntBounds {
+    min: Option<i32>,
+    max: Option<i32>,
+}
+
+impl IntBounds {
+    const ANY: Self = Self {
+        min: None,
+        max: None,
+    };
+
+    fn from_value(value: &Value) -> Result<Self, LootError> {
+        if let Some(exact) = value.as_i64() {
+            let exact = i32::try_from(exact)
+                .map_err(|_| LootError::UnexpectedType("bounds", "a 32-bit integer"))?;
+            return Ok(Self {
+                min: Some(exact),
+                max: Some(exact),
+            });
+        }
+        let object = value
+            .as_object()
+            .ok_or_else(|| LootError::UnexpectedType("bounds", "a number or object"))?;
+        let bound = |key: &str| -> Result<Option<i32>, LootError> {
+            match object.get(key) {
+                None => Ok(None),
+                Some(raw) => raw
+                    .as_i64()
+                    .and_then(|v| i32::try_from(v).ok())
+                    .map(Some)
+                    .ok_or(LootError::UnexpectedType("bounds entry", "an integer")),
+            }
+        };
+        Ok(Self {
+            min: bound("min")?,
+            max: bound("max")?,
+        })
+    }
+
+    fn is_any(self) -> bool {
+        self.min.is_none() && self.max.is_none()
+    }
+
+    fn matches(self, value: i32) -> bool {
+        self.min.is_none_or(|min| value >= min) && self.max.is_none_or(|max| value <= max)
     }
 }
 
@@ -1534,6 +2056,351 @@ mod tests {
         let mut a = SpawnRng::new(11);
         let mut b = SpawnRng::new(11);
         assert_eq!(roll_loot(&set, &id, &mut a), set.roll(&id, &LootContext::default(), &mut b));
+    }
+
+    /// A synthetic one-item table whose single entry carries `functions`.
+    fn with_functions(functions: &str) -> LootTable {
+        table(
+            "minecraft:test/bonus",
+            &format!(
+                r#"{{
+                  "pools": [{{
+                    "entries": [{{
+                      "type": "minecraft:item",
+                      "name": "minecraft:redstone",
+                      "functions": [{functions}]
+                    }}],
+                    "rolls": 1.0
+                  }}]
+                }}"#
+            ),
+        )
+    }
+
+    fn pickaxe_with(enchantment: &str, level: u32) -> LootContext {
+        LootContext {
+            luck: 0.0,
+            tool: Some(
+                LootTool::new("minecraft:diamond_pickaxe".parse().unwrap())
+                    .with_enchantment(enchantment.parse().unwrap(), level),
+            ),
+        }
+    }
+
+    fn bare_pickaxe() -> LootContext {
+        LootContext {
+            luck: 0.0,
+            tool: Some(LootTool::new("minecraft:diamond_pickaxe".parse().unwrap())),
+        }
+    }
+
+    /// `UniformBonusCount.calculateNewCount` is
+    /// `count + random.nextInt(bonusMultiplier * level + 1)` — **unguarded on the
+    /// level**, unlike `ore_drops`.
+    ///
+    /// So the exact predictions are: at level 0 the count is *always* `1` and
+    /// **one draw happens anyway** (`nextInt(1)`); at level `L` with multiplier
+    /// `M` the support is exactly `1..=1 + M*L`, uniformly. Both the ceiling and
+    /// the *presence* of the top value are asserted, because a port that wrote
+    /// `nextInt(M*L)` would silently lose the top value and one that wrote
+    /// `nextInt(M*L + 1) + 1` would shift the whole support up by one.
+    #[test]
+    fn uniform_bonus_count_matches_the_records_unguarded_uniform_range() {
+        let t = with_functions(
+            r#"{ "function": "minecraft:apply_bonus",
+                 "enchantment": "minecraft:fortune",
+                 "formula": "minecraft:uniform_bonus_count",
+                 "parameters": { "bonusMultiplier": 2 } }"#,
+        );
+        assert!(t.unsupported_features().is_empty());
+
+        // Level 0: always 1, over many seeds. A degenerate exact prediction.
+        for seed in 0..256u64 {
+            let mut rng = SpawnRng::new(seed);
+            let out = t.roll(&bare_pickaxe(), &mut rng);
+            assert_eq!(out[0].count, 1, "nextInt(2*0 + 1) is always 0 (seed {seed})");
+        }
+        // Level 3, multiplier 2: support is exactly 1..=7.
+        let mut seen = std::collections::BTreeSet::new();
+        for seed in 0..8192u64 {
+            let mut rng = SpawnRng::new(seed);
+            let out = t.roll(&pickaxe_with("minecraft:fortune", 3), &mut rng);
+            let count = out[0].count;
+            assert!(
+                (1..=7).contains(&count),
+                "count {count} outside 1..=1 + 2*3 (seed {seed})"
+            );
+            seen.insert(count);
+        }
+        assert_eq!(
+            seen.into_iter().collect::<Vec<_>>(),
+            (1..=7).collect::<Vec<u32>>(),
+            "every value in the record's support must occur; a missing 7 means \
+             `nextInt(M*L)` and a missing 1 means the range was shifted"
+        );
+    }
+
+    /// **A tool present at level 0 still costs `uniform_bonus_count` one draw**,
+    /// which is the draw-count claim the distribution above cannot make.
+    ///
+    /// The observable: roll the same table twice from the same seed, once with no
+    /// tool and once with an unenchanted one, and then draw one more float from
+    /// each stream. Equal counts (both 1) with **different** trailing draws is
+    /// exactly "the formula ran and consumed a draw".
+    #[test]
+    fn a_present_tool_costs_uniform_bonus_count_a_draw_even_at_level_zero() {
+        let t = with_functions(
+            r#"{ "function": "minecraft:apply_bonus",
+                 "enchantment": "minecraft:fortune",
+                 "formula": "minecraft:uniform_bonus_count",
+                 "parameters": { "bonusMultiplier": 1 } }"#,
+        );
+
+        let mut no_tool = SpawnRng::new(0xB0_1234);
+        let a = t.roll(&LootContext::default(), &mut no_tool);
+        let after_no_tool = no_tool.next_f64();
+
+        let mut with_tool = SpawnRng::new(0xB0_1234);
+        let b = t.roll(&bare_pickaxe(), &mut with_tool);
+        let after_with_tool = with_tool.next_f64();
+
+        assert_eq!(a[0].count, b[0].count, "level 0 adds nextInt(1) == 0 either way");
+        assert_ne!(
+            after_no_tool, after_with_tool,
+            "`ApplyBonusCount.run` guards on `tool != null`, not on `level > 0`, \
+             so an unenchanted tool must have consumed exactly one draw here"
+        );
+    }
+
+    /// `BinomialWithBonusCount.calculateNewCount` loops `level + extra` times,
+    /// adding one per `nextFloat() < probability`.
+    ///
+    /// The corpus's only instantiation is `{extra: 3, probability: 0.5714286}` on
+    /// fortune (wheat, carrots, potatoes, beetroots seeds). So at level 0 the
+    /// support is `1..=4` and the mean count is `1 + 3 × 0.5714286 = 2.714`; at
+    /// level 3 it is `1..=7` with mean `1 + 6 × 0.5714286 = 4.429`. Both means are
+    /// computed here from the record's own constants, and the assertion is on the
+    /// **value**, not on "more with fortune".
+    #[test]
+    fn binomial_with_bonus_count_matches_the_records_predicted_mean_and_support() {
+        let t = with_functions(
+            r#"{ "function": "minecraft:apply_bonus",
+                 "enchantment": "minecraft:fortune",
+                 "formula": "minecraft:binomial_with_bonus_count",
+                 "parameters": { "extra": 3, "probability": 0.5714286 } }"#,
+        );
+        assert!(t.unsupported_features().is_empty());
+
+        const SAMPLES: u64 = 16_384;
+        const P: f64 = 0.571_428_6;
+        for level in [0u32, 3] {
+            let rounds = f64::from(level) + 3.0;
+            let predicted_mean = 1.0 + rounds * P;
+            let max = 1 + level + 3;
+            let mut total = 0u64;
+            for seed in 0..SAMPLES {
+                let mut rng = SpawnRng::new(seed);
+                let out = t.roll(&pickaxe_with("minecraft:fortune", level), &mut rng);
+                let count = out[0].count;
+                assert!(
+                    (1..=max).contains(&count),
+                    "level {level}: count {count} outside 1..={max} — the loop runs \
+                     level + extra = {rounds} times, each adding at most one"
+                );
+                total += u64::from(count);
+            }
+            let mean = total as f64 / SAMPLES as f64;
+            // σ of the mean is sqrt(rounds·p·(1-p)/N) ≤ 0.0097, so 0.05 is 5σ.
+            assert!(
+                (mean - predicted_mean).abs() < 0.05,
+                "level {level}: mean count {mean:.4}, the record predicts \
+                 1 + {rounds} × {P} = {predicted_mean:.4}"
+            );
+        }
+    }
+
+    /// A `match_tool` predicate on `items` — the corpus's other shape (47 of 203),
+    /// and the one that is **live today** because it needs no enchantment
+    /// registry, only the held item's key.
+    #[test]
+    fn match_tool_items_predicate_tests_the_held_items_key() {
+        let t = table(
+            "minecraft:test/shears",
+            r#"{
+              "pools": [{
+                "entries": [{
+                  "type": "minecraft:alternatives",
+                  "children": [
+                    { "type": "minecraft:item", "name": "minecraft:oak_leaves",
+                      "conditions": [ { "condition": "minecraft:match_tool",
+                        "predicate": { "items": ["minecraft:shears", "minecraft:diamond_sword"] } } ] },
+                    { "type": "minecraft:item", "name": "minecraft:stick" }
+                  ]
+                }],
+                "rolls": 1.0
+              }]
+            }"#,
+        );
+        assert!(t.unsupported_features().is_empty());
+        let with = |item: &str| {
+            let ctx = LootContext {
+                luck: 0.0,
+                tool: Some(LootTool::new(item.parse().unwrap())),
+            };
+            let mut rng = SpawnRng::new(3);
+            t.roll(&ctx, &mut rng)[0].item.to_string()
+        };
+        assert_eq!(with("minecraft:shears"), "minecraft:oak_leaves");
+        assert_eq!(with("minecraft:diamond_sword"), "minecraft:oak_leaves");
+        assert_eq!(
+            with("minecraft:diamond_axe"),
+            "minecraft:stick",
+            "an item outside the list must fail the predicate, not merely be present"
+        );
+        let mut rng = SpawnRng::new(3);
+        assert_eq!(
+            t.roll(&LootContext::default(), &mut rng)[0].item.to_string(),
+            "minecraft:stick",
+            "no tool at all fails `tool != null` first"
+        );
+    }
+
+    /// `match_tool` with **no** `predicate` field is "is anything in hand", which
+    /// is `true` for any tool — the one case where the absent-optional default is
+    /// permissive rather than restrictive, and the opposite of what
+    /// `Unsupported`'s fail-closed default would give.
+    #[test]
+    fn match_tool_with_no_predicate_is_tool_presence_alone() {
+        let t = table(
+            "minecraft:test/anything",
+            r#"{
+              "pools": [{
+                "conditions": [ { "condition": "minecraft:match_tool" } ],
+                "entries": [ { "type": "minecraft:item", "name": "minecraft:yes" } ],
+                "rolls": 1.0
+              }]
+            }"#,
+        );
+        assert!(t.unsupported_features().is_empty());
+        let mut rng = SpawnRng::new(1);
+        assert_eq!(t.roll(&bare_pickaxe(), &mut rng).len(), 1);
+        assert!(t.roll(&LootContext::default(), &mut rng).is_empty());
+    }
+
+    /// An unmodelled `match_tool` predicate shape must **fail closed** and be
+    /// reported, not match everything. An item `#tag` is the corpus's one such
+    /// case (`brush`'s sand table), and it is the reason that table cannot be
+    /// bundled without an item-tag census.
+    #[test]
+    fn an_unmodelled_match_tool_predicate_fails_closed_and_is_reported() {
+        for predicate in [
+            r##"{ "items": "#minecraft:swords" }"##,
+            r#"{ "components": { "minecraft:damage": 0 } }"#,
+            r#"{ "predicates": { "minecraft:custom_data": {} } }"#,
+        ] {
+            let t = table(
+                "minecraft:test/unmodelled",
+                &format!(
+                    r#"{{
+                      "pools": [{{
+                        "conditions": [ {{ "condition": "minecraft:match_tool", "predicate": {predicate} }} ],
+                        "entries": [ {{ "type": "minecraft:item", "name": "minecraft:yes" }} ],
+                        "rolls": 1.0
+                      }}]
+                    }}"#
+                ),
+            );
+            assert_eq!(
+                t.unsupported_features(),
+                &["condition minecraft:match_tool (unmodelled predicate)".to_string()],
+                "predicate {predicate} must be reported, so a table using it cannot \
+                 slip into the curated bundle"
+            );
+            let mut rng = SpawnRng::new(1);
+            assert!(
+                t.roll(&bare_pickaxe(), &mut rng).is_empty(),
+                "an unmodelled predicate must fail, never match everything"
+            );
+        }
+    }
+
+    /// `EnchantmentPredicate.containedIn`'s three branches, each of which is easy
+    /// to collapse into the first one.
+    #[test]
+    fn the_enchantment_predicate_has_three_distinct_branches() {
+        let gate = |predicate: &str| {
+            let t = table(
+                "minecraft:test/ench",
+                &format!(
+                    r#"{{
+                      "pools": [{{
+                        "conditions": [ {{ "condition": "minecraft:match_tool",
+                          "predicate": {{ "predicates": {{ "minecraft:enchantments": [{predicate}] }} }} }} ],
+                        "entries": [ {{ "type": "minecraft:item", "name": "minecraft:yes" }} ],
+                        "rolls": 1.0
+                      }}]
+                    }}"#
+                ),
+            );
+            assert!(t.unsupported_features().is_empty());
+            move |ctx: &LootContext| {
+                let mut rng = SpawnRng::new(1);
+                !t.roll(ctx, &mut rng).is_empty()
+            }
+        };
+
+        // Branch 1: a named enchantment at a level bound.
+        let named = gate(r#"{ "enchantments": "minecraft:silk_touch", "levels": { "min": 1 } }"#);
+        assert!(named(&pickaxe_with("minecraft:silk_touch", 1)));
+        assert!(!named(&pickaxe_with("minecraft:fortune", 3)));
+        assert!(
+            !named(&bare_pickaxe()),
+            "level 0 is `absent`, and `matchesEnchantment` returns false before \
+             ever consulting the bound"
+        );
+
+        // Branch 2: no `enchantments`, but a level bound — *any* enchantment at
+        // that level. A collapse into branch 1 makes this always false.
+        let any_at_level = gate(r#"{ "levels": { "min": 3 } }"#);
+        assert!(any_at_level(&pickaxe_with("minecraft:fortune", 3)));
+        assert!(!any_at_level(&pickaxe_with("minecraft:fortune", 2)));
+        assert!(!any_at_level(&bare_pickaxe()));
+
+        // Branch 3: neither field — "is enchanted at all".
+        let enchanted = gate("{}");
+        assert!(enchanted(&pickaxe_with("minecraft:mending", 1)));
+        assert!(!enchanted(&bare_pickaxe()));
+    }
+
+    /// `table_bonus` clamps its index to `chances.len() - 1`
+    /// (`values.get(Math.min(level, values.size() - 1))`). A `values[level]`
+    /// transliteration panics on a level above the list, which is reachable:
+    /// Fortune's vanilla max is 3 but a command can set any level.
+    #[test]
+    fn table_bonus_clamps_a_level_above_its_chances_list() {
+        let t = table(
+            "minecraft:test/clamp",
+            r#"{
+              "pools": [{
+                "conditions": [ { "condition": "minecraft:table_bonus",
+                  "enchantment": "minecraft:fortune", "chances": [0.0, 1.0] } ],
+                "entries": [ { "type": "minecraft:item", "name": "minecraft:yes" } ],
+                "rolls": 1.0
+              }]
+            }"#,
+        );
+        let hits = |level: u32| {
+            let ctx = pickaxe_with("minecraft:fortune", level);
+            (0..64u64)
+                .filter(|&seed| {
+                    let mut rng = SpawnRng::new(seed);
+                    !t.roll(&ctx, &mut rng).is_empty()
+                })
+                .count()
+        };
+        assert_eq!(hits(0), 0, "chances[0] = 0.0 never passes");
+        assert_eq!(hits(1), 64, "chances[1] = 1.0 always passes");
+        assert_eq!(hits(9), 64, "level 9 clamps to chances[1], it does not panic");
     }
 
     /// Test helper so a `LootTableBuilder` can be built from owned tables

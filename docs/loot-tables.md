@@ -48,13 +48,64 @@ value, so a table with zero unsupported features rolls correctly:
 | `random_chance_with_enchanted_bonus` | uses `unenchanted_chance` (level 0) | `…Condition.java` |
 | `killed_by_player` | `false` (no killer param) | `…Condition.java` |
 | `survives_explosion` | `true` (no explosion radius) | `ExplosionCondition.java` |
-| `match_tool` / `entity_properties` / `block_state_property` | `false` (no tool/entity/state) | the respective conditions |
+| `entity_properties` / `block_state_property` | `false` (no entity/state) | the respective conditions |
+| `match_tool` | `false` (no tool) | `MatchTool.java` |
 | `table_bonus` | `chances[0]` (fortune level 0) | `BonusLevelTableCondition.java` |
 | `set_count` | rolled | `SetItemCountFunction` |
 | `enchanted_count_increase` | no-op (level 0) | `…Function.java` |
 | `apply_bonus` | no-op (no tool) | `ApplyBonusCount.java` |
 | `explosion_decay` | no-op (no explosion) | `ApplyExplosionDecay.java` |
 | `furnace_smelt` | smelted via `crate::furnace::recipe_for` | `SmeltItemFunction.java` |
+
+### The tool (issue #539)
+
+`LootContext::tool: Option<LootTool>` is `LootContextParams.TOOL`. `None`
+reproduces the empty context exactly; `Some` is what makes Silk Touch, Fortune and
+`match_tool` evaluate at all. `LootTool` carries the item key, the stack count, and
+enchantment levels **by key**.
+
+**A present tool changes the RNG stream even at enchantment level 0.** This is the
+single easiest thing here to get wrong, and it is invisible to any distributional
+test. `ApplyBonusCount.run` guards on `tool != null`, *not* on `level > 0`:
+
+| formula | level 0, no tool | level 0, unenchanted tool | level `L` |
+|---|---|---|---|
+| `ore_drops` | no draw | **no draw** (`if (level > 0)` inside) | 1 draw; `count × max(nextInt(L+2), 1)` |
+| `uniform_bonus_count` | no draw | **1 draw** (`nextInt(M·0 + 1)`) | 1 draw; `count + nextInt(M·L + 1)` |
+| `binomial_with_bonus_count` | no draw | **`extra` draws** | `L + extra` draws |
+
+The commonly-quoted restatement of `ore_drops` as `count * max(1, nextInt(level +
+2))` — including in issue #539's own body — is arithmetically right and
+draw-count **wrong**: it draws at level 0. Gated by
+`an_unenchanted_tool_costs_ore_drops_no_rng_draw_but_fortune_does`, which is the
+only assertion in the suite that catches it; the control observed
+`left: Vec3 { x: 0.382…} , right: Vec3 { x: 0.450… }` while every distribution
+assertion still passed.
+
+`table_bonus` always draws, tool or not — only *which* chance it compares changes
+(`chances[min(level, len - 1)]`, so a level above the list clamps rather than
+panicking).
+
+#### Why enchantments are keyed by name, and what is not yet live
+
+`lodestone_model::ItemEnchantment` carries a **network registry id**, because
+`minecraft:enchantment` is a datapack registry whose ids are assigned per session
+at configuration time. It is **not in Mojang's `registries.json`**, so there is no
+static name↔id table to generate, and this crate is version-free and could not
+consult one anyway. So `LootTool` takes keys and the *producer* resolves.
+
+Consequences, stated rather than hidden:
+
+- **Live today**: the correct-tool gate, and every `match_tool` predicate over
+  `items` (47 of the corpus's 203 `match_tool` conditions) — both need only the
+  held item's key.
+- **Not yet reachable from a real client**: enchantment *levels*.
+  `LootTool::from_held_item` builds an unenchanted tool because no enchanted stack
+  can reach this server — `V770ServerProtocol`'s `read_hashed_stack` rejects any
+  stack whose `DataComponentPatch` is non-empty, and the server sends no
+  enchantment registry. Both are separate work. The logic is complete and gated;
+  what is missing is a producer, so treat this as a known island half and not as
+  "it works".
 
 A feature this module does not recognise is **parsed but marked unsupported**
 ([`LootTable::unsupported_features`]) rather than aborting the load — the same
@@ -92,6 +143,16 @@ loot those JSON files define.
 - **`minecraft:tag` entries are unsupported**: expanding an item tag needs an
   item-tag census, which `lodestone-data` does not bundle. Only one table in the
   26.2 corpus uses one.
+- **An unmodelled `match_tool` predicate must fail *closed*.** Reporting it as
+  unsupported (so `load_bundled` refuses the table) and evaluating it as `false` is
+  the safe pair; making it match-everything would silently turn every silk-touch
+  branch on. The three shapes that fail closed today are `items: "#tag"`, a
+  `components` exact matcher, and any `predicates` key other than
+  `minecraft:enchantments` — none of which occur in the corpus except the one
+  `#tag`.
+- **`match_tool` with no `predicate` field at all is `true` for any tool**, not
+  `false`. It is the one place where the absent-optional default is permissive, and
+  the opposite of what the fail-closed rule above would give.
 
 ## Configuration
 
