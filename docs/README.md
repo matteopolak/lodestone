@@ -721,6 +721,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   measured, attributed and then made unobservable when the diagnostics that produced
   it were deleted, and because the answer it gives is not the one the mesher is
   usually blamed for.
+- [Message translation](./message-translation.md) — How a server-authored `Text`
+  component becomes words on screen: the `en_us.json` table read out of `client.jar`,
+  the `translate`-node resolver that expands it, and where command feedback, colours
+  and italics come from. This is the doc to read before adding a message anywhere, and
+  before assuming a translation table needs building — most of this already exists.
 - [Mob block perception](./mob-block-perception.md) — The seam that lets a mob AI
   goal ask what block it is standing on. `MobController` declared 33 methods and not
   one read a block, so every vanilla goal whose predicate consults the world was
@@ -1093,6 +1098,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   emissive edit now relights. Companion to
   [`server-chunk-light.md`](./server-chunk-light.md), which covers producing the light
   bytes in the first place.
+- [Off-task chunk encode](./server-chunk-encode-offload.md) — `ChunkEncoder` is the
+  seam that moves protocol column encode off the connection task and into the blocking
+  worker that generated the column, so the task that owes a player a reply to their
+  block break never spends 62 M instructions encoding terrain first.
 - [Server chunk generation: fanned out over scoped threads (issue #414)](./server-chunk-generation-parallelism.md) —
   `crates/lodestone-server/src/chunk.rs`'s `generate_columns_parallel` runs a batch of
   `ChunkSource::column()` calls across `std::thread::scope` worker threads and hands
@@ -1494,22 +1503,23 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md); it records a measured
   correction to that plan's U4 row plus the engine shape the correction implies.
 - [Nether and End worldgen](./worldgen-dimensions.md) — The bundled 26.2 data for
-  the Nether and the End, and the precise engine deficit that still stands between
-  that data and a generating dimension. Only the Overworld generates today. This doc
-  is the jar-derived answer to "what is actually missing", per dimension, with each
-  item classed **[data]** (absent from the bundle), **[engine]** (absent engine
-  primitive), **[unwritten]** (nothing blocks it), **[gameplay]** (cannot finish even
-  with perfect worldgen) or **[structures]** (belongs to the structure corpus, not
-  terrain). Phase NE-data of
-  [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md); the data half is landed,
-  the engine half is not started.
-- [End worldgen](./worldgen-end.md) — What the End generates today and what it does
-  not. Two pieces landed — `lodestone_worldgen_core::noise::EndIslandNoise` (the
-  `minecraft:end_islands` algorithm) and `lodestone_worldgen::end::EndBiomeSource`
-  (`TheEndBiomeSource`, complete) — and End *terrain* is blocked on exactly one
-  thing: an `end_islands` leaf in the density interpreter, which lives in another
-  cluster's file. This doc says precisely what that patch is so it can be applied
-  without re-deriving anything.
+  the Nether and the End, and the per-dimension deficit inventory it was written to
+  answer. **All three dimensions generate terrain now** — `NetherGenerator` and
+  `EndGenerator` both landed, the Nether with a structure stage — so what is left
+  here is decoration, the remaining structure piece generators, and the server-side
+  wiring that would let a portal reach either dimension. This doc is the jar-derived
+  answer to "what is actually missing", per dimension, with each item classed
+  **[data]** (absent from the bundle), **[engine]** (absent engine primitive),
+  **[unwritten]** (nothing blocks it), **[gameplay]** (cannot finish even with perfect
+  worldgen) or **[structures]** (belongs to the structure corpus, not terrain). Phase
+  NE-data of [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md); the data half
+  landed first, then the engine half.
+- [End worldgen](./worldgen-end.md) — The composed End generator —
+  `lodestone_worldgen::end::EndGenerator` — plus the two pieces it is built on
+  (`EndIslandNoise`, the `minecraft:end_islands` algorithm, and `EndBiomeSource`,
+  `TheEndBiomeSource`). It is the third dimension this engine produces real terrain
+  for, and the only one with **no vanilla block oracle anywhere**, so this doc is as
+  much about what its gates can and cannot claim as about how it works.
 - [Worldgen fast hashing](./worldgen-fast-hashing.md) — The worldgen engine's
   internal lookup tables use a cheap in-house `FxHash`-style `BuildHasher`
   (`lodestone_worldgen_core::hash::fast`) instead of `std`'s SipHash-1-3
