@@ -126,21 +126,30 @@
 //! }
 //! ```
 //!
-//! `canStayAlive` (`:28-38`) is, modulo the snow-layer special case this
-//! crate's terrain never generates: the block directly above must not be a
-//! full fluid, and must not fully dampen light. This crate has no light
-//! engine (`docs/README.md` has no lighting doc yet), so
-//! [`grass_random_tick`] uses the same proxy for both `canStayAlive` and the
-//! `getMaxLocalRawBrightness(...) >= 9` check: **the block directly above is
-//! bare air** (see [`is_air_variant`]). This is a deliberate, named
-//! simplification — the exact light *value* is unavailable, not
-//! approximated — and it means our version always attempts a spread when
-//! sky-exposed, regardless of time of day. The **draw pattern** is exact
-//! either way: `0` extra draws when not air-exposed (dies to dirt), exactly
-//! `4 * 3 = 12` `next_int` calls when air-exposed (four attempts, three axis
-//! offsets each), matching the jar's own unconditional `for` loop —
-//! regardless of how many of the four attempts actually hit a propagatable
-//! neighbour.
+//! `canStayAlive` (`:29-41`) is now modelled for real — see
+//! [`grass_can_stay_alive`]. It used to be proxied by "the block directly above
+//! is bare air", which killed grass under **any** non-air block including
+//! `minecraft:short_grass`, so every patch of grass the generator decorated
+//! turned to dirt on its first random tick (issue #549). The proxy existed
+//! because there was no per-state light-dampening census; `lodestone_data::light_props`
+//! is that census, and the predicate is `dampening(above) < 15` with the
+//! snow-layer-1 and full-fluid special cases ahead of it.
+//!
+//! **One simplification survives, and it is a different one**: the
+//! `getMaxLocalRawBrightness(pos.above()) >= 9` gate on the *spread* branch.
+//! This driver holds a `ChunkColumn`, not a light map, so the exact brightness
+//! is unavailable rather than approximated, and a live grass block always
+//! attempts a spread regardless of time of day. It can never make grass *die*
+//! wrongly. The **draw pattern** is exact either way: `0` extra draws when
+//! `canStayAlive` is false (dies to dirt), exactly `4 * 3 = 12` `next_int` calls
+//! otherwise (four attempts, three axis offsets each), matching the jar's own
+//! unconditional `for` loop — regardless of how many of the four attempts
+//! actually hit a propagatable neighbour.
+//!
+//! Note this makes the draw count depend on **which** block is above, not merely
+//! on whether one is: grass under short grass now consumes 12 draws where it
+//! consumed 0. That is vanilla's behaviour for the same above-block, which is the
+//! standard here — self-consistency is not.
 
 use crate::gravity_tick;
 use crate::growth_tick;
@@ -181,12 +190,131 @@ fn base_name(state: &str) -> &str {
 
 /// `true` for any air variant (`minecraft:air`/`cave_air`/`void_air`) —
 /// narrower than [`crate::chunk::is_air_or_fluid`], which also counts
-/// fluids. Used as this module's light-level proxy: see the module doc
-/// comment for why "bare air above" stands in for vanilla's real brightness
-/// check.
+/// fluids. Still this module's light-level proxy for **crops and saplings**
+/// (`crate::growth_tick`); grass no longer uses it — see
+/// [`grass_can_stay_alive`].
 #[must_use]
 pub fn is_air_variant(state: &str) -> bool {
     matches!(base_name(state), "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
+}
+
+/// `true` iff `state`'s fluid state is **full** — vanilla's
+/// `BlockState.getFluidState().isFull()`, i.e. `amount == 8`.
+///
+/// Three cases, and the third is the one a `base_name == "water"` test misses:
+///
+/// * a source liquid, `minecraft:water[level=0]` / `minecraft:lava[level=0]`:
+///   `LiquidBlock.getFluidState` maps `level` to `amount = 8 - level` for
+///   `level < 8`, so only `level=0` is full;
+/// * a **falling** liquid, `level=8..=15`: those map to `amount = 8` and are
+///   full, which is why the check cannot be `level == 0`;
+/// * any state carrying `waterlogged=true` — a waterlogged slab, stair or
+///   fence has a full water fluid state even though its *block* is not water.
+///   Vanilla's `canStayAlive` reads the fluid state, not the block, so
+///   waterlogged-anything above grass kills it.
+#[must_use]
+pub fn has_full_fluid(state: &str) -> bool {
+    if property_of(state, "waterlogged") == Some("true") {
+        return true;
+    }
+    if !matches!(base_name(state), "minecraft:water" | "minecraft:lava") {
+        return false;
+    }
+    match property_of(state, "level") {
+        // A bare `minecraft:water` with no properties is the default state,
+        // `level=0`, so full.
+        None => true,
+        Some(level) => level
+            .parse::<u32>()
+            .is_ok_and(|level| level == 0 || level >= 8),
+    }
+}
+
+/// The value of `state`'s `key=` property, if the state string carries one.
+///
+/// Deliberately a substring scan rather than a parse: this module already keys
+/// everything off the canonical state string [`crate::chunk::ChunkColumn`]
+/// stores, and a `key=value` lookup over `a[k=v,k2=v2]` needs no more than
+/// that. Matches on the whole key, so `waterlogged` cannot be found inside
+/// another property's name or value.
+fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
+    let props = state.split_once('[')?.1.strip_suffix(']')?;
+    props.split(',').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k.trim() == key).then_some(v.trim())
+    })
+}
+
+/// Vanilla `SpreadingSnowyBlock.canStayAlive`
+/// (`.cache/mc/26.2/src/net/minecraft/world/level/block/SpreadingSnowyBlock.java:28-41`),
+/// given the canonical state string of the block **directly above** the grass
+/// block.
+///
+/// # The proxy this replaces, and why it was a bug
+///
+/// Until issue #549 this module used `is_air_variant(above)` for `canStayAlive`,
+/// so **any** non-air block above killed the grass. `minecraft:short_grass` is
+/// non-air, and vanilla's own vegetation step places short grass on top of grass
+/// blocks — so every patch of grass the generator decorated turned to dirt on its
+/// first random tick, which is exactly what the owner reported seeing. The
+/// generation side was innocent: `feature/top_layer.rs` and
+/// `feature/vegetation/` place `grass_block` with `short_grass` above it, as
+/// vanilla does.
+///
+/// The proxy existed because there was no dampening census. There is one now
+/// (`lodestone_data::light_props`, landed in `3f26be21`), so this is the real
+/// predicate:
+///
+/// ```text
+/// BlockState aboveState = level.getBlockState(pos.above());
+/// if (aboveState.is(Blocks.SNOW) && aboveState.getValue(LAYERS) == 1) return true;
+/// if (aboveState.getFluidState().isFull()) return false;
+/// int d = LightEngine.getLightDampeningInto(state, aboveState, Direction.UP, aboveState.getLightDampening());
+/// return d < 15;
+/// ```
+///
+/// Note the order: the snow special case wins over the fluid check, and both win
+/// over the dampening comparison. `getLightDampening()` is exactly
+/// [`lodestone_data::light_props::dampening`]'s column, and the comparison is
+/// `< 15` — strictly, so a full solid (15) kills and everything below it does not.
+///
+/// # The one branch not modelled
+///
+/// `getLightDampeningInto` returns a hard `16` — killing the grass — when the two
+/// states' occlusion *shapes* merge to a fully-occluding face. That path is only
+/// reachable when the block above satisfies `canOcclude() &&
+/// useShapeForLightOcclusion()`, i.e. an occluding block that is *not* a full
+/// cube (stairs, some slabs). This crate has no occlusion-shape census — only
+/// collision shapes, which are a different question (glass has a full collision
+/// box and occludes no light) — so those states fall through to their `dampening`
+/// column instead. **This can only ever make grass survive where vanilla would
+/// kill it**, never the reverse, which is the safe direction and is why it is a
+/// documented gap rather than a guess. Adding an occlusion-shape census is the
+/// prerequisite for closing it.
+///
+/// An unresolvable state string is treated as air-like (survives), for the same
+/// reason: it cannot destroy a block the player is looking at.
+#[must_use]
+pub fn grass_can_stay_alive(above_state: &str) -> bool {
+    // 1. `aboveState.is(Blocks.SNOW) && LAYERS == 1` — an explicit `true` that
+    //    precedes both other checks. A single snow layer is *thin enough to see
+    //    through*, so grass under fresh snowfall keeps its `snowy=true` state
+    //    instead of dying.
+    if base_name(above_state) == "minecraft:snow" && property_of(above_state, "layers") == Some("1")
+    {
+        return true;
+    }
+    // 2. `aboveState.getFluidState().isFull()` — drowned grass dies. Checked
+    //    before dampening because water's own dampening is 1, which would
+    //    otherwise pass.
+    if has_full_fluid(above_state) {
+        return false;
+    }
+    // 3. `getLightDampeningInto(...) < 15`.
+    match crate::mobs::block_state_id(above_state) {
+        Some(id) => lodestone_data::light_props::dampening(id) < 15,
+        None => true,
+    }
 }
 
 /// `true` iff `block_state` is one this crate models a random tick for.
@@ -288,22 +416,35 @@ pub enum GrassOutcome {
 }
 
 /// The pure grass ↔ dirt decision — see this module's doc comment for the
-/// jar citation and the light-level proxy this crate substitutes.
+/// jar citation and the one check this crate still cannot make.
 ///
-/// `above_is_air` is vanilla's `canStayAlive`/light-check proxy (`true` when
-/// the block directly above the grass block is bare air). `try_propagate`
-/// is called for each of the four attempts' relative `(dx, dy, dz)` offset
-/// (already drawn from `rng` before the call, exactly like vanilla's
-/// `pos.offset(random.nextInt(3) - 1, ...)`) and must itself decide whether
-/// the target position is a valid spread destination — a `ChunkColumn`
-/// lookup this pure function does not perform, so it stays testable with a
-/// fake world.
+/// `can_stay_alive` is vanilla's `canStayAlive` verdict, which the driver
+/// computes with [`grass_can_stay_alive`]. It used to be the parameter
+/// `above_is_air`, a proxy that killed grass under *any* non-air block —
+/// including `minecraft:short_grass`, which vanilla's own vegetation step
+/// places on top of grass blocks. That is issue #549.
+///
+/// **`can_stay_alive` still doubles as the `getMaxLocalRawBrightness(pos.above())
+/// >= 9` gate**, which is a *different* simplification from the one #549 removed
+/// and remains: this crate's random-tick driver holds a `ChunkColumn`, not a light
+/// map, so the exact brightness is unavailable rather than approximated. The
+/// consequence is that a live grass block always attempts a spread regardless of
+/// time of day, never that it dies wrongly. The **draw pattern** is exact either
+/// way: `0` extra draws when `canStayAlive` is false, exactly `4 * 3 = 12`
+/// `next_int` calls otherwise, matching the jar's unconditional `for` loop.
+///
+/// `try_propagate` is called for each of the four attempts' relative
+/// `(dx, dy, dz)` offset (already drawn from `rng` before the call, exactly like
+/// vanilla's `pos.offset(random.nextInt(3) - 1, ...)`) and must itself decide
+/// whether the target position is a valid spread destination — a `ChunkColumn`
+/// lookup this pure function does not perform, so it stays testable with a fake
+/// world.
 pub fn grass_random_tick(
-    above_is_air: bool,
+    can_stay_alive: bool,
     rng: &mut SpawnRng,
     mut try_propagate: impl FnMut(i32, i32, i32) -> bool,
 ) -> GrassOutcome {
-    if !above_is_air {
+    if !can_stay_alive {
         return GrassOutcome::DiesToDirt;
     }
     let mut spreads = Vec::new();
@@ -323,13 +464,29 @@ pub fn grass_random_tick(
 }
 
 /// `true` iff a dirt block at the target offset can become grass — vanilla's
-/// `canPropagate` (`SpreadingSnowyBlock.java:40-43`) restricted to this
-/// crate's light proxy: the target must currently be dirt, and the block
-/// directly above the target must itself be air (so the new grass block
-/// would immediately satisfy `canStayAlive` too).
+/// `canPropagate` (`SpreadingSnowyBlock.java:43-46`):
+///
+/// ```text
+/// return canStayAlive(state, level, pos) && !level.getFluidState(pos.above()).is(FluidTags.WATER);
+/// ```
+///
+/// So two conditions on the block above the *target*, not one, and the second is
+/// not implied by the first: `canStayAlive` rejects a **full** fluid, while
+/// `canPropagate` additionally rejects any water fluid at all — flowing water
+/// included. Grass therefore does not spread into a shallow stream it *could*
+/// survive under. Plus this crate's own precondition that the target is dirt,
+/// which is vanilla's `level.getBlockState(testPos).is(baseBlock)` at the call
+/// site.
+///
+/// Before issue #549 this was `is_air_variant(above_target_state)`, which
+/// collapsed both conditions into the same proxy [`grass_can_stay_alive`]
+/// documents.
 #[must_use]
 pub fn can_propagate_onto(target_state: &str, above_target_state: &str) -> bool {
-    base_name(target_state) == DIRT_BLOCK && is_air_variant(above_target_state)
+    base_name(target_state) == DIRT_BLOCK
+        && grass_can_stay_alive(above_target_state)
+        && base_name(above_target_state) != "minecraft:water"
+        && property_of(above_target_state, "waterlogged") != Some("true")
 }
 
 /// The random-tick driver: owns the two independent generators
@@ -657,7 +814,12 @@ impl RandomTickScheduler {
         let lx = x - min_x;
         let lz = z - min_z;
         let above = column.block_state(lx, y + 1, lz).to_string();
-        let above_is_air = is_air_variant(&above);
+        // Issue #549: vanilla's real `canStayAlive`, not the old
+        // `is_air_variant` proxy. The proxy killed grass under *any* non-air
+        // block, and vanilla's own vegetation step puts `minecraft:short_grass`
+        // on top of grass blocks — so every decorated patch turned to dirt on
+        // its first random tick.
+        let can_stay_alive = grass_can_stay_alive(&above);
 
         // `try_propagate` only reads `column` (via the immutable reborrow
         // below) — no mutation happens until after `grass_random_tick`
@@ -665,7 +827,7 @@ impl RandomTickScheduler {
         // apply) never overlap.
         let outcome = {
             let column_ref: &crate::chunk::ChunkColumn = column;
-            grass_random_tick(above_is_air, &mut self.behavior_rng, |dx, dy, dz| {
+            grass_random_tick(can_stay_alive, &mut self.behavior_rng, |dx, dy, dz| {
                 let tx = x + dx;
                 let tz = z + dz;
                 let tlx = tx - min_x;
@@ -1498,6 +1660,202 @@ mod tests {
             );
         }
         assert_eq!(column.block_state(3, 5, 3), GRASS_BLOCK);
+    }
+
+    /// **Issue #549: which above-block kills grass, predicted from vanilla's
+    /// record and the dampening census rather than from this crate's answer.**
+    ///
+    /// `SpreadingSnowyBlock.canStayAlive` is, in order: snow with `LAYERS == 1`
+    /// is `true`; a **full** fluid state is `false`; otherwise
+    /// `getLightDampeningInto(...) < 15`, which for two full-cube states is the
+    /// above block's own `getLightDampening()` — exactly
+    /// `lodestone_data::light_props::dampening`'s column.
+    ///
+    /// # The fixture, stated because this is badly exposed to the *world* species
+    ///
+    /// A fixture of only air (survives) and only stone (dies) **cannot see this
+    /// bug at all** — both proxy and real predicate agree on those two — and that
+    /// is precisely the fixture shape the old `is_air_variant` proxy shipped
+    /// under. So the rows below are chosen to *disagree* under the two
+    /// hypotheses, and each row's `dampening` value is asserted as a hard
+    /// precondition so the prediction's basis is visible rather than implied:
+    ///
+    /// | above | dampening | vanilla | the old air proxy |
+    /// |---|---|---|---|
+    /// | `air` | 0 | survives | survives (agrees) |
+    /// | `short_grass` | 0 | **survives** | **dies** ← the reported bug |
+    /// | `oak_leaves` | 1 | survives | dies |
+    /// | `torch` | 0 | survives | dies |
+    /// | `stone` | 15 | dies | dies (agrees) |
+    /// | `snow[layers=1]` | — | **survives** (explicit special case) | dies |
+    /// | `water[level=0]` | 1 | **dies** (full fluid, checked *before* dampening) | dies |
+    /// | `water[level=3]` | 1 | survives (flowing is not full) | dies |
+    /// | waterlogged slab | — | **dies** (its *fluid state* is full) | dies |
+    ///
+    /// The `water[level=0]` row is the one that makes the ordering load-bearing:
+    /// water's dampening is `1`, so a predicate that only compared dampening
+    /// would let grass live under an ocean.
+    #[test]
+    fn grass_survives_exactly_the_above_blocks_vanillas_can_stay_alive_allows() {
+        // Preconditions on the fixture itself. A name this version's census does
+        // not carry would otherwise fall through `grass_can_stay_alive`'s
+        // unknown-state arm and read as "survives" for the wrong reason.
+        for state in [
+            "minecraft:air",
+            "minecraft:short_grass",
+            "minecraft:stone",
+            "minecraft:snow[layers=1]",
+            "minecraft:water[level=0]",
+            "minecraft:water[level=3]",
+            "minecraft:torch",
+        ] {
+            assert!(
+                crate::mobs::block_state_id(state).is_some(),
+                "fixture precondition: {state} must be a real 26.2 block state, or \
+                 this test measures the unknown-state fallback instead"
+            );
+        }
+        let dampening = |state: &str| {
+            let id = crate::mobs::block_state_id(state)
+                .unwrap_or_else(|| panic!("{state} is not a known block state"));
+            lodestone_data::light_props::dampening(id)
+        };
+        // The values the predictions rest on, asserted from the census.
+        assert_eq!(dampening("minecraft:air"), 0);
+        assert_eq!(
+            dampening("minecraft:short_grass"),
+            0,
+            "short grass dampens no light, which is why vanilla's grass survives \
+             under it — the whole of issue #549"
+        );
+        assert_eq!(dampening("minecraft:stone"), 15, "a full solid is the kill case");
+        assert!(
+            dampening("minecraft:water[level=0]") < 15,
+            "water dampens only a little, so the FULL-FLUID check must run before \
+             the dampening comparison or grass survives underwater"
+        );
+
+        for (above, expected) in [
+            ("minecraft:air", true),
+            ("minecraft:short_grass", true),
+            ("minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]", true),
+            ("minecraft:torch", true),
+            ("minecraft:stone", false),
+            ("minecraft:snow[layers=1]", true),
+            ("minecraft:water[level=0]", false),
+            ("minecraft:water[level=3]", true),
+            ("minecraft:oak_slab[type=bottom,waterlogged=true]", false),
+        ] {
+            assert_eq!(
+                grass_can_stay_alive(above),
+                expected,
+                "canStayAlive under {above}: vanilla says {expected}"
+            );
+        }
+    }
+
+    /// The three `isFull()` cases, since `has_full_fluid` is what stops grass
+    /// living under an ocean and a `level == 0` test misses two of them.
+    ///
+    /// `LiquidBlock.getFluidState` maps `level` to `amount = 8 - level` when
+    /// `level < 8` and to `8` (falling) otherwise, and `isFull()` is
+    /// `amount == 8`.
+    #[test]
+    fn a_full_fluid_state_is_source_falling_or_waterlogged() {
+        assert!(has_full_fluid("minecraft:water[level=0]"), "a source block");
+        assert!(has_full_fluid("minecraft:water"), "no properties is the default, level=0");
+        assert!(has_full_fluid("minecraft:lava[level=0]"));
+        assert!(
+            has_full_fluid("minecraft:water[level=8]"),
+            "level 8..=15 is FALLING water, whose amount is 8 — a `level == 0` \
+             test reads this as not full"
+        );
+        assert!(has_full_fluid("minecraft:water[level=15]"));
+        assert!(
+            has_full_fluid("minecraft:oak_slab[type=bottom,waterlogged=true]"),
+            "a waterlogged block's *fluid state* is full even though its block is \
+             not water — canStayAlive reads the fluid state"
+        );
+        assert!(!has_full_fluid("minecraft:water[level=1]"), "flowing, amount 7");
+        assert!(!has_full_fluid("minecraft:water[level=7]"), "flowing, amount 1");
+        assert!(!has_full_fluid("minecraft:air"));
+        assert!(!has_full_fluid("minecraft:oak_slab[type=bottom,waterlogged=false]"));
+        // The whole-key match: a property whose *value* contains the key name
+        // must not be mistaken for it.
+        assert!(!has_full_fluid("minecraft:stone[shape=waterlogged=true]"));
+    }
+
+    /// `canPropagate` is **`canStayAlive` AND not any water fluid**, so grass
+    /// does not spread into a shallow stream it could survive under. The
+    /// `water[level=3]` row is the only one where the two conditions disagree,
+    /// and it is the reason `can_propagate_onto` cannot simply call
+    /// `grass_can_stay_alive`.
+    #[test]
+    fn can_propagate_rejects_flowing_water_that_can_stay_alive_accepts() {
+        let flowing = "minecraft:water[level=3]";
+        assert!(
+            grass_can_stay_alive(flowing),
+            "precondition: flowing water is not a full fluid, so canStayAlive accepts it"
+        );
+        assert!(
+            !can_propagate_onto(DIRT_BLOCK, flowing),
+            "canPropagate additionally rejects any WATER fluid, flowing included"
+        );
+        assert!(can_propagate_onto(DIRT_BLOCK, "minecraft:air"));
+        assert!(
+            can_propagate_onto(DIRT_BLOCK, "minecraft:short_grass"),
+            "issue #549's other half: grass spreads under short grass too"
+        );
+        assert!(!can_propagate_onto(DIRT_BLOCK, "minecraft:stone"));
+        assert!(
+            !can_propagate_onto("minecraft:stone", "minecraft:air"),
+            "the target must be dirt (vanilla's `is(baseBlock)` at the call site)"
+        );
+    }
+
+    /// **The end-to-end half of #549, through the real `tick_chunk` driver:**
+    /// grass under short grass must survive, and the draw count must be the
+    /// *live* one (12 behaviour draws), not the die branch's zero.
+    ///
+    /// This is a paired assertion on purpose. "It did not die" alone is also
+    /// satisfied by the position pick never landing on the block, so the second
+    /// half — that the behaviour RNG advanced — is what proves the tick actually
+    /// ran and took the live branch. The companion
+    /// `a_covered_grass_block_becomes_dirt_after_one_tick_chunk_call` (stone
+    /// above) is the control that the die branch still fires.
+    #[test]
+    fn grass_under_short_grass_survives_the_real_tick_driver_and_takes_the_live_branch() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(3, 5, 3, GRASS_BLOCK);
+        column.set_block(3, 6, 3, "minecraft:short_grass");
+        assert_eq!(
+            column.block_state(3, 6, 3),
+            "minecraft:short_grass",
+            "fixture precondition: the cover is short grass, not air and not stone \
+             — a fixture of either cannot see this bug"
+        );
+
+        let mut scheduler = RandomTickScheduler::new(1, 1);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        for _ in 0..3000 {
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
+            assert!(
+                !events.iter().any(|e| e.to == DIRT_BLOCK),
+                "grass under short grass must never die to dirt"
+            );
+        }
+        assert_eq!(column.block_state(3, 5, 3), GRASS_BLOCK);
+        // The tick really ran: with `tick_speed = 200` over 3,000 calls the
+        // position pick lands on this cell ~146 times, and each landing costs
+        // 12 behaviour draws on the live branch and 0 on the die branch. So a
+        // behaviour RNG that never moved would mean either "never picked"
+        // (P ~ e^-146) or "took the die branch".
+        assert_ne!(
+            scheduler.behavior_rng.next_int(1 << 30),
+            RandomTickScheduler::new(1, 1).behavior_rng.next_int(1 << 30),
+            "the behaviour RNG must have advanced — otherwise this test proves \
+             only that the block was never ticked"
+        );
     }
 
     /// End-to-end spread: a dirt block adjacent to an air-exposed grass

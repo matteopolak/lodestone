@@ -43,9 +43,14 @@ const SECTION_ROWS: i32 = 16;
 /// mutates anything. That makes it the one ticking state a draw-sequence gate
 /// can plant freely without the column changing underneath the replay.
 const INERT_TICKING: &str = "minecraft:oak_sapling[stage=1]";
-/// Grass with something solid above dies to dirt on its first hit and, because
-/// `above_is_air` is false, draws zero behaviour values and never spreads — one
+/// Grass with something **solid** above dies to dirt on its first hit and, because
+/// `canStayAlive` is false, draws zero behaviour values and never spreads — one
 /// event, no new ticking states anywhere.
+///
+/// "Solid" is load-bearing since issue #549: `canStayAlive` is
+/// `dampening(above) < 15`, not "above is air", so a `short_grass` cap would leave
+/// this grass **alive** and spending 12 behaviour draws per hit. Every fixture
+/// below caps with [`STONE`] for that reason.
 const GRASS: &str = "minecraft:grass_block[snowy=false]";
 const STONE: &str = "minecraft:stone";
 const DIRT: &str = "minecraft:dirt";
@@ -128,6 +133,62 @@ fn definitional_booleans(column: &ChunkColumn) -> Vec<bool> {
 fn generated_surface_column(seed: i64, cx: i32, cz: i32) -> ChunkColumn {
     let source = overworld_chunk_source(seed);
     ChunkSource::column(&source, cx, cz)
+}
+
+/// Caps some surface grass with stone and exposes a dirt cell beside other grass,
+/// so a generated column has a **named** reason to mutate under ticking.
+///
+/// See `counters_survive_real_ticking_over_a_generated_column` for why this exists
+/// rather than trusting the terrain. Both triggers are asserted, so a generator
+/// change that stops putting grass at the surface fails here loudly instead of
+/// quietly producing a zero-mutation run.
+fn plant_a_named_mutation_source(column: &mut ChunkColumn) {
+    let top_grass = |column: &ChunkColumn, lx: i32, lz: i32| -> Option<i32> {
+        (column.min_y..column.min_y + column.height)
+            .rev()
+            .find(|&y| column.block_state(lx, y, lz).starts_with("minecraft:grass_block"))
+    };
+
+    // Trigger 1: stone directly above grass. `canStayAlive` is false for a full
+    // solid (dampening 15), so each of these dies to dirt on its first hit —
+    // zero behaviour draws, one event.
+    //
+    // A **6x6 patch**, not three cells, and the size is a probability argument
+    // rather than taste: the caller makes `24 * 64 = 1536` position picks over a
+    // 4,096-cell section, so `n` capped cells give `1536 * n / 4096` expected
+    // deaths. Three cells is `1.1` expected and `P(zero) ~ 33%` — a flaky test.
+    // Thirty-six is `13.5` expected and `P(zero) ~ 1.4e-6`.
+    let mut capped = 0usize;
+    for lx in 2..8 {
+        for lz in 2..8 {
+            if let Some(y) = top_grass(column, lx, lz) {
+                column.set_block(lx, y + 1, lz, STONE);
+                capped += 1;
+            }
+        }
+    }
+    assert!(
+        capped >= 30,
+        "only {capped} of 36 cells in the patch had surface grass to cap; below \
+         ~30 the expected death count drops far enough that a zero-event run \
+         becomes plausible and the assertion downstream turns flaky"
+    );
+
+    // Trigger 2: bare dirt beside live grass, which the spread branch can claim.
+    // Outside the capped patch, so the two triggers cannot be confused.
+    let mut exposed = 0usize;
+    for (lx, lz) in [(11, 11), (11, 12)] {
+        if let Some(y) = top_grass(column, lx, lz) {
+            column.set_block(lx, y + 1, lz, "minecraft:air");
+            column.set_block(lx, y, lz, DIRT);
+            exposed += 1;
+        }
+    }
+    assert!(
+        exposed > 0,
+        "no dirt target could be exposed next to grass, so the spread branch is \
+         unreachable in this fixture"
+    );
 }
 
 /// The world-species precondition, as a hard failure rather than a skip: a
@@ -623,10 +684,27 @@ fn corrupting_a_counter_trips_the_consumption_site_tripwire() {
 /// from the production generator, so it exercises mutation shapes (spread into a
 /// neighbouring section, cascades through `propagate_and_react`) that a scripted
 /// column would not contain.
+/// # Why the mutation source is now planted rather than assumed (issue #549)
+///
+/// This arm used to rely on "whatever the surface actually holds" producing
+/// mutations, and that premise **silently became false**. Before #549, grass died
+/// to dirt under *any* non-air block, and vanilla's own vegetation step covers
+/// grass with `short_grass` — so a generated surface column mutated constantly, by
+/// accident, because of a bug. With `canStayAlive` modelled properly the surface
+/// is stable: grass under short grass survives, and there is no exposed dirt next
+/// to it to spread onto. Twenty-four ticks produced **zero** events and the
+/// assertion below fired.
+///
+/// That is a premise-false control, so the fix is to make the source explicit and
+/// assert it, not to weaken the assertion: the helper caps a few surface grass
+/// blocks with stone (a configuration a player creates constantly) and exposes a
+/// dirt cell beside another, each checked as a precondition. The terrain is still
+/// the production generator's; only the trigger is named.
 #[test]
 fn counters_survive_real_ticking_over_a_generated_column() {
     let mut column = generated_surface_column(1_507, 4, -7);
     assert_fixture_can_exercise_the_counters(&column, "generated column under real ticking");
+    plant_a_named_mutation_source(&mut column);
 
     let mut scheduler = RandomTickScheduler::new(4_242, 4_242);
     let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
@@ -639,10 +717,17 @@ fn counters_survive_real_ticking_over_a_generated_column() {
         compare_counters(&column, &format!("generated column after tick {tick}"))
             .expect("counter parity under real mutations");
     }
+    // `1536` picks over a 4,096-cell section with ~36 capped grass cells gives
+    // ~13.5 expected deaths, so a handful is the prediction and zero would mean
+    // the planted trigger never fired. Not asserted exactly, because the pick
+    // stream is shared with every other ticking state in the column.
     assert!(
-        !events.is_empty(),
-        "24 ticks at tick_speed 64 over a real surface column produced no mutation at all — \
-         this arm would then prove nothing about maintenance under real ticking"
+        events.len() >= 3,
+        "24 ticks at tick_speed 64 over a real surface column with ~36 capped grass \
+         cells produced only {} mutation(s); ~13.5 were predicted, and a near-zero \
+         count means the planted trigger is not firing — this arm would then prove \
+         nothing about maintenance under real ticking",
+        events.len(),
     );
     println!(
         "generated column: {} events over 24 ticks, counters {:?}",

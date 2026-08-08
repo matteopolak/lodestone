@@ -20,9 +20,10 @@ primitive with its own test suite, wired into `tick::run_tick_loop` (issue
   selection (`ServerLevel.java:495-538`) and the position-pick LCG
   (`Level.getBlockRandomPos`, `Level.java:1064-1068`) exactly, and dispatches
   every randomly-ticking block family this crate models to its own handler:
-  grass turning to dirt when covered, and dirt turning to grass when adjacent
-  to an air-exposed grass block (`SpreadingSnowyBlock.randomTick`,
-  `SpreadingSnowyBlock.java:44-64`) directly in this module, plus crop
+  grass turning to dirt when the block above fully dampens light or drowns it,
+  and dirt turning to grass when adjacent to a live grass block
+  (`SpreadingSnowyBlock.randomTick`, `SpreadingSnowyBlock.java:48-64`) directly
+  in this module, plus crop
   growth/sapling growth/leaf decay (issue #310) in
   [`growth_tick.rs`](../crates/lodestone-server/src/growth_tick.rs).
 - [`scheduled_tick.rs`](../crates/lodestone-server/src/scheduled_tick.rs) —
@@ -117,15 +118,46 @@ The real selection, cited directly from the decompiled 26.2 jar
   lava. A comment at the gate site in `tick_chunk` says what a future lava
   handler must add; see `docs/plans/random-tick-counter.md` §"Fluids".
 - **Grass ↔ dirt**, cited from `SpreadingSnowyBlock.randomTick`
-  (`SpreadingSnowyBlock.java:44-64`): not `canStayAlive` (block above is a
-  full fluid, or fully light-dampened) → convert to dirt, zero further draws.
-  `canStayAlive` **and** `getMaxLocalRawBrightness(pos.above()) >= 9` → four
-  spread attempts, three `nextInt` draws each (offset `x/y/z`), regardless of
-  hits. This crate has no light engine, so [`grass_random_tick`] uses **"the
-  block directly above is bare air"** as the proxy for both checks — a named
-  simplification (see [`is_air_variant`]'s doc comment), not a guess: the
-  **draw pattern** (0 draws dead branch, exactly 12 live branch) is exact
-  either way, which is what every test in `random_tick.rs` actually asserts.
+  (`SpreadingSnowyBlock.java:48-64`): not `canStayAlive` → convert to dirt,
+  zero further draws. `canStayAlive` **and**
+  `getMaxLocalRawBrightness(pos.above()) >= 9` → four spread attempts, three
+  `nextInt` draws each (offset `x/y/z`), regardless of hits.
+
+  `canStayAlive` (`:29-41`) is now the **real predicate** (issue #549), in this
+  order: snow with `LAYERS == 1` → alive; a **full** fluid state above → dead;
+  otherwise `getLightDampeningInto(...) < 15`, which for two full-cube states is
+  the above block's own `getLightDampening()` —
+  `lodestone_data::light_props::dampening`'s column exactly.
+
+  It used to be proxied by **"the block directly above is bare air"**, and that
+  proxy was a **shipped, owner-visible bug**: `minecraft:short_grass` is non-air,
+  vanilla's own vegetation step places short grass on top of grass blocks, so
+  every decorated grass patch turned to dirt on its first random tick. The proxy
+  existed because there was no dampening census; `light_props` (landed
+  `3f26be21`) is that census. Generation was innocent — `feature/top_layer.rs`
+  and `feature/vegetation/` place `grass_block` with `short_grass` above it, as
+  vanilla does.
+
+  **A different simplification survives**: the
+  `getMaxLocalRawBrightness(pos.above()) >= 9` gate on the *spread* branch. The
+  driver holds a `ChunkColumn`, not a light map, so a live grass block always
+  attempts a spread regardless of time of day. It can never make grass die
+  wrongly.
+
+  Two consequences worth stating, because both are the kind of thing a
+  self-consistent test hides:
+
+  - **The draw count now depends on which block is above, not merely whether one
+    is.** Grass under short grass consumes 12 behaviour draws where it consumed
+    0. That is vanilla's count *for the same above-block*, which is the standard;
+    self-consistency is not.
+  - **One branch of `getLightDampeningInto` is not modelled**: its hard `16` when
+    the two states' *occlusion shapes* merge to a fully-occluding face, reachable
+    only for an occluding non-full-cube above (stairs, some slabs). This crate has
+    no occlusion-shape census — collision shapes are a different question (glass
+    has a full collision box and occludes no light) — so those fall through to
+    their `dampening` column. That can only make grass **survive** where vanilla
+    kills it, never the reverse.
 
 ### Scheduled ticks (#308)
 
@@ -368,10 +400,15 @@ changes"), here is exactly what does and does not:
   column cache first (`OverworldChunkSource`'s `edits` map only helps
   already-edited columns); this landing deliberately did not build one,
   since #307/#308's job is the scheduler, not chunk-loading infrastructure.
-- **If you add a light engine**: replace `is_air_variant`'s role in
-  `grass_random_tick`/`can_propagate_onto` with a real brightness check —
-  the draw pattern (12 draws in the live branch) does not change, only which
-  positions qualify.
+- **If you make per-position light available to the driver**: replace the
+  remaining `can_stay_alive`-doubles-as-brightness use in `grass_random_tick`
+  with a real `getMaxLocalRawBrightness(pos.above()) >= 9` check. The draw
+  pattern (12 draws in the live branch) does not change, only which positions
+  qualify. `canStayAlive` itself no longer needs anything — it reads
+  `lodestone_data::light_props::dampening` (#549).
+- **If you add an occlusion-shape census**: close `getLightDampeningInto`'s
+  merged-face `16` branch in `grass_can_stay_alive`. Do **not** substitute
+  `collision_shapes` for it; they answer a different question.
 
 ## Configuration
 
