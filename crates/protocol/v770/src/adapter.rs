@@ -15,7 +15,8 @@ use lodestone_model::command_tree::{
     RawCommandNode, StringKind,
 };
 use lodestone_model::{
-    AdapterError, AnimationAction, ArmorTrim, BlockAabb, BlockActionKind, BlockFace, BlockHardness,
+    AdapterError, AdvancementDisplay, AdvancementEntry, AdvancementFrame, AnimationAction,
+    ArmorTrim, BlockAabb, BlockActionKind, BlockFace, BlockHardness,
     BlockPos,
     BossAction,
     BossColor,
@@ -29,7 +30,8 @@ use lodestone_model::{
     EntityInteraction, EntityMetadataUpdate, EntityMovement, EntityVariant, EquipmentSlot,
     GameMode, Hand, ItemComponents,
     ItemEnchantment, ItemPrototype, ItemStack, ItemTool, LoginProfile,
-    LookAnchor, MainHand, NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
+    LookAnchor, MainHand, MapDecoration, MapPatch,
+    NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
     ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry, PlayerLookAtEntity,
     RecipeBookType,
     RecipeBookTypeSettings,
@@ -4944,9 +4946,299 @@ impl V770Adapter {
             reader.ensure_empty().map_err(dec_err)?;
             return Ok(vec![Directive::BundleDelimiter]);
         }
+        if packet_id == play::clientbound::MAP_ITEM_DATA {
+            return decode_map_item_data(payload);
+        }
+        if packet_id == play::clientbound::UPDATE_ADVANCEMENTS {
+            return decode_update_advancements(payload);
+        }
         // Everything else in play is intentionally ignored for now.
         Ok(Vec::new())
     }
+}
+
+/// `minecraft:map_decoration_type` registry paths by numeric id, from
+/// `.cache/mc/26.2/generated/reports/registries.json`.
+///
+/// A **built-in** registry, so the ids are fixed by the jar rather than synced
+/// during Configuration (`MapDecorationType.STREAM_CODEC` is
+/// `ByteBufCodecs.holderRegistry`, a bare VarInt registry id). That is why a
+/// table is correct here where it would be a guess for a dynamic registry — see
+/// [`TRIM_MATERIAL_IDS`] for the contrast.
+const MAP_DECORATION_TYPE_IDS: &[&str] = &[
+    "player",
+    "frame",
+    "red_marker",
+    "blue_marker",
+    "target_x",
+    "target_point",
+    "player_off_map",
+    "player_off_limits",
+    "mansion",
+    "monument",
+    "banner_white",
+    "banner_orange",
+    "banner_magenta",
+    "banner_light_blue",
+    "banner_yellow",
+    "banner_lime",
+    "banner_pink",
+    "banner_gray",
+    "banner_light_gray",
+    "banner_cyan",
+    "banner_purple",
+    "banner_blue",
+    "banner_brown",
+    "banner_green",
+    "banner_red",
+    "banner_black",
+    "red_x",
+    "village_desert",
+    "village_plains",
+    "village_savanna",
+    "village_snowy",
+    "village_taiga",
+    "jungle_temple",
+    "swamp_hut",
+    "trial_chambers",
+];
+
+/// Decodes `ClientboundMapItemDataPacket` (id 51).
+///
+/// Wire shape, from the record's own `STREAM_CODEC`: a VarInt `MapId`, a `byte`
+/// scale, a `bool` locked, `Optional<List<MapDecoration>>`, then
+/// `MapPatch.STREAM_CODEC`'s optional.
+///
+/// Two traps in the patch codec, both from `MapItemSavedData.MapPatch.read`:
+///
+/// * the field order on the wire is **width, height, startX, startY** — *not*
+///   the record's declaration order (`startX, startY, width, height`); and
+/// * the optional has **no boolean tag**. A `width` of zero *is* the absent
+///   case, so the four position bytes and the colour array are only present when
+///   the first byte is non-zero. Reading a leading `bool` here consumes the width.
+fn decode_map_item_data(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let map_id = reader.var_i32().map_err(dec_err)?;
+    let scale = reader.i8().map_err(dec_err)?;
+    let locked = reader.bool().map_err(dec_err)?;
+    let decorations = if reader.bool().map_err(dec_err)? {
+        let count = reader.var_i32().map_err(dec_err)?;
+        let count = usize::try_from(count)
+            .map_err(|_| AdapterError::Decode(format!("invalid map decoration count {count}")))?;
+        let mut list = Vec::with_capacity(count.min(1024));
+        for _ in 0..count {
+            let type_id = reader.var_i32().map_err(dec_err)?;
+            let path = usize::try_from(type_id)
+                .ok()
+                .and_then(|index| MAP_DECORATION_TYPE_IDS.get(index))
+                .ok_or_else(|| {
+                    AdapterError::Decode(format!("unknown map decoration type id {type_id}"))
+                })?;
+            let x = reader.i8().map_err(dec_err)?;
+            let y = reader.i8().map_err(dec_err)?;
+            let rot = reader.i8().map_err(dec_err)?;
+            let name = if reader.bool().map_err(dec_err)? {
+                Some(Text::from_nbt(&read_network_nbt(&mut reader).map_err(dec_err)?))
+            } else {
+                None
+            };
+            list.push(MapDecoration {
+                kind: parse_key(path, "map decoration type")?,
+                x,
+                y,
+                // Vanilla's own record constructor masks this, so the client
+                // never sees a rotation outside 0..=15.
+                #[allow(clippy::cast_sign_loss)]
+                rotation: (rot as u8) & 15,
+                name,
+            });
+        }
+        Some(list)
+    } else {
+        None
+    };
+    let width = reader.u8().map_err(dec_err)?;
+    let color_patch = if width == 0 {
+        None
+    } else {
+        let height = reader.u8().map_err(dec_err)?;
+        let start_x = reader.u8().map_err(dec_err)?;
+        let start_y = reader.u8().map_err(dec_err)?;
+        let colors = reader.var_bytes(1 << 16).map_err(dec_err)?.to_vec();
+        let expected = usize::from(width) * usize::from(height);
+        if colors.len() != expected {
+            return Err(AdapterError::Decode(format!(
+                "map patch {width}x{height} carries {} colour bytes, expected {expected}",
+                colors.len()
+            )));
+        }
+        Some(MapPatch {
+            start_x,
+            start_y,
+            width,
+            height,
+            colors,
+        })
+    };
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(ClientEvent::MapItemData {
+        map_id,
+        scale,
+        locked,
+        decorations,
+        color_patch,
+    })])
+}
+
+/// Reads one `ItemStackTemplate` (`ItemStackTemplate.STREAM_CODEC`).
+///
+/// **Not** the same shape as an `ItemStack`: the template writes the item holder
+/// *first* and the count second, where `ItemStack.OPTIONAL_STREAM_CODEC` leads
+/// with the count and uses `<= 0` as the empty sentinel. A template is never
+/// empty (its constructor rejects air and count 0), so there is no sentinel and
+/// no `Option`.
+fn read_item_stack_template(reader: &mut Reader<'_>) -> Result<ItemStack, AdapterError> {
+    let item_id = reader.var_i32().map_err(dec_err)?;
+    let name = item_name(item_id)
+        .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
+    let count = reader.var_i32().map_err(dec_err)?;
+    let count = u32::try_from(count)
+        .map_err(|_| AdapterError::Decode(format!("invalid item count {count}")))?;
+    let (components, complete) = read_component_patch(reader, name)?;
+    if !complete {
+        return Err(AdapterError::Decode(format!(
+            "advancement icon {name} carries an unmodeled item component, so the rest of the packet is unreadable"
+        )));
+    }
+    Ok(ItemStack {
+        item: parse_key(name, "item")?,
+        count,
+        components,
+    })
+}
+
+/// Decodes `ClientboundUpdateAdvancementsPacket` (id 130).
+///
+/// Wire shape, from the packet's own reader: a `bool` reset, a list of
+/// `AdvancementHolder`, a collection of removed identifiers, a map of
+/// identifier → `AdvancementProgress`, then a `bool` showAdvancements.
+///
+/// `DisplayInfo`'s field order is **the wire's, not the datapack schema's**, and
+/// the two differ (a vendored `minecraft-data` 1.21.9 schema disagrees with 26.2
+/// here): `serializeToNetwork` writes title, description, icon, frame ordinal,
+/// then a **raw big-endian `int`** flag word (`writeInt`, not a byte), then the
+/// background identifier only when bit 0 is set, then x and y as floats.
+/// `announceChat` is not on the wire at all — vanilla's reader hardcodes
+/// `false` — so bit 1 is `showToast` and bit 2 is `hidden` with nothing between.
+fn decode_update_advancements(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let reset = reader.bool().map_err(dec_err)?;
+
+    let added_count = read_count(&mut reader, "advancement")?;
+    let mut added = Vec::with_capacity(added_count.min(4096));
+    for _ in 0..added_count {
+        let id = reader.string(32767).map_err(dec_err)?;
+        let id = parse_key(&id, "advancement")?;
+        let parent = if reader.bool().map_err(dec_err)? {
+            let parent = reader.string(32767).map_err(dec_err)?;
+            Some(parse_key(&parent, "advancement parent")?)
+        } else {
+            None
+        };
+        let display = if reader.bool().map_err(dec_err)? {
+            let title = Text::from_nbt(&read_network_nbt(&mut reader).map_err(dec_err)?);
+            let description = Text::from_nbt(&read_network_nbt(&mut reader).map_err(dec_err)?);
+            let icon = read_item_stack_template(&mut reader)?;
+            let ordinal = reader.var_i32().map_err(dec_err)?;
+            let frame = AdvancementFrame::from_ordinal(ordinal).ok_or_else(|| {
+                AdapterError::Decode(format!("unknown advancement frame ordinal {ordinal}"))
+            })?;
+            let flags = reader.i32().map_err(dec_err)?;
+            let background = if flags & 1 != 0 {
+                let texture = reader.string(32767).map_err(dec_err)?;
+                Some(parse_key(&texture, "advancement background")?)
+            } else {
+                None
+            };
+            let x = reader.f32().map_err(dec_err)?;
+            let y = reader.f32().map_err(dec_err)?;
+            Some(AdvancementDisplay {
+                title,
+                description,
+                icon,
+                frame,
+                background,
+                show_toast: flags & 2 != 0,
+                hidden: flags & 4 != 0,
+                x,
+                y,
+            })
+        } else {
+            None
+        };
+        let group_count = read_count(&mut reader, "requirement group")?;
+        let mut requirements = Vec::with_capacity(group_count.min(4096));
+        for _ in 0..group_count {
+            let names = read_count(&mut reader, "requirement")?;
+            let mut group = Vec::with_capacity(names.min(4096));
+            for _ in 0..names {
+                group.push(reader.string(32767).map_err(dec_err)?);
+            }
+            requirements.push(group);
+        }
+        let sends_telemetry_event = reader.bool().map_err(dec_err)?;
+        added.push(AdvancementEntry {
+            id,
+            parent,
+            display,
+            requirements,
+            sends_telemetry_event,
+        });
+    }
+
+    let removed_count = read_count(&mut reader, "removed advancement")?;
+    let mut removed = Vec::with_capacity(removed_count.min(4096));
+    for _ in 0..removed_count {
+        let id = reader.string(32767).map_err(dec_err)?;
+        removed.push(parse_key(&id, "removed advancement")?);
+    }
+
+    let progress_count = read_count(&mut reader, "advancement progress")?;
+    let mut progress = Vec::with_capacity(progress_count.min(4096));
+    for _ in 0..progress_count {
+        let id = reader.string(32767).map_err(dec_err)?;
+        let id = parse_key(&id, "advancement progress")?;
+        let criteria_count = read_count(&mut reader, "criterion")?;
+        let mut criteria = Vec::with_capacity(criteria_count.min(4096));
+        for _ in 0..criteria_count {
+            let name = reader.string(32767).map_err(dec_err)?;
+            // `CriterionProgress` is a nullable `Instant`: a presence bool then,
+            // if set, epoch millis as a big-endian long (`writeInstant`).
+            let obtained = if reader.bool().map_err(dec_err)? {
+                Some(reader.i64().map_err(dec_err)?)
+            } else {
+                None
+            };
+            criteria.push((name, obtained));
+        }
+        progress.push((id, criteria));
+    }
+
+    let show_advancements = reader.bool().map_err(dec_err)?;
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(ClientEvent::AdvancementsUpdated {
+        reset,
+        added,
+        removed,
+        progress,
+        show_advancements,
+    })])
+}
+
+/// A VarInt collection length, rejected rather than truncated when negative.
+fn read_count(reader: &mut Reader<'_>, what: &str) -> Result<usize, AdapterError> {
+    let count = reader.var_i32().map_err(dec_err)?;
+    usize::try_from(count).map_err(|_| AdapterError::Decode(format!("invalid {what} count {count}")))
 }
 
 impl VersionAdapter for V770Adapter {
