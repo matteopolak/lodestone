@@ -218,7 +218,37 @@ impl Default for DayClock {
 #[derive(Debug)]
 struct ChunkBatchState {
     calculator: ChunkBatchSizeCalculator,
-    batch_start: Instant,
+    /// `None` on `wasm32`, which has no monotonic clock. Without a timing sample
+    /// the calculator keeps its default desired rate, which is a throughput
+    /// *hint* to the server rather than a correctness input — so declining to
+    /// measure costs an adaptive batch size and nothing else.
+    batch_start: Option<Instant>,
+}
+
+/// A monotonic reading where one exists, and `None` on `wasm32`.
+///
+/// `std::time::Instant::now()` **compiles** for `wasm32-unknown-unknown` and
+/// then **panics at runtime** — "time not implemented on this platform". This
+/// one call sat in `V770Adapter::new()`, so a browser session died at adapter
+/// construction, before the first byte reached the wire, and the browser profile
+/// is `panic = "abort"`: no unwind, no error path, just a dead session with
+/// nothing in the log to name it.
+///
+/// Third instance of this defect in one day — the others were three join timers
+/// in `lodestone-server`'s `server.rs` and `hold_read`/`hold_write` in
+/// `lodestone-ecs` (`02d77f85`), the latter on the driver's ingest path, so the
+/// join died on the first event after `Login`. **`tokio::time::Instant` is not
+/// the fix**: rustc's own `help:` offers it, and it bottoms out in
+/// `std::time::Instant::now()` and panics identically.
+fn batch_now() -> Option<Instant> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Some(Instant::now())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
 }
 
 /// Per-connection movement-send tracking, mirroring the fields vanilla's
@@ -266,7 +296,7 @@ impl V770Adapter {
             shape: Arc::new(Mutex::new(ChunkShape::overworld_1_21())),
             batch: Arc::new(Mutex::new(ChunkBatchState {
                 calculator: ChunkBatchSizeCalculator::new(),
-                batch_start: Instant::now(),
+                batch_start: batch_now(),
             })),
             movement: Arc::new(Mutex::new(MovementSendState::default())),
             variants: Arc::new(Mutex::new(HashMap::new())),
@@ -281,7 +311,7 @@ impl V770Adapter {
     /// the matching `chunk_batch_finished` arrives.
     fn begin_chunk_batch(&self) {
         if let Ok(mut state) = self.batch.lock() {
-            state.batch_start = Instant::now();
+            state.batch_start = batch_now();
         }
     }
 
@@ -290,10 +320,12 @@ impl V770Adapter {
     fn finish_chunk_batch(&self, batch_size: i32) -> f32 {
         match self.batch.lock() {
             Ok(mut state) => {
-                let duration_nanos = state.batch_start.elapsed().as_nanos() as f64;
-                state
-                    .calculator
-                    .on_batch_finished(batch_size, duration_nanos);
+                if let Some(start) = state.batch_start {
+                    let duration_nanos = start.elapsed().as_nanos() as f64;
+                    state
+                        .calculator
+                        .on_batch_finished(batch_size, duration_nanos);
+                }
                 state.calculator.desired_chunks_per_tick()
             }
             Err(_) => ChunkBatchSizeCalculator::new().desired_chunks_per_tick(),
