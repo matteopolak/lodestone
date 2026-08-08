@@ -119,7 +119,45 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::chunk::{ChunkColumn, ChunkSource};
+use crate::protocol::{ChunkEncoder, ServerDirective};
 use crate::server::SourceRef;
+
+/// What one pipeline slot hands back: either the wire bytes, already encoded on
+/// the worker that generated the column, or the column itself for a caller with
+/// no off-task encoder.
+///
+/// # Why this is an enum and not just `ServerDirective`
+///
+/// [`ChunkEncoder`] is optional — [`crate::protocol::ServerProtocol::chunk_encoder`]
+/// defaults to `None`, so every test protocol in this workspace and every
+/// legacy family keeps encoding on the connection task exactly as before. The
+/// fallback arm is that path, not a degenerate case: `crate::server`'s
+/// `encode_column` turns either arm into one directive, so the wire is identical
+/// whichever arm a caller is on. That identity is what makes the encoder
+/// adoptable one family at a time.
+#[derive(Debug)]
+pub enum ColumnPayload {
+    /// Encoded on the blocking worker, off the connection task. The win.
+    Encoded(ServerDirective),
+    /// No off-task encoder: the caller encodes this itself, on its own task.
+    Column(ChunkColumn),
+}
+
+impl ColumnPayload {
+    /// The column, for a caller that wants the terrain rather than the bytes —
+    /// `None` once it has been encoded and dropped.
+    ///
+    /// Only the gates in `tests/join_parallel_efficiency.rs` need this (they read
+    /// `solid_count()` to keep the generator's work from being optimised away);
+    /// production only ever writes the directive.
+    #[must_use]
+    pub fn column(&self) -> Option<&ChunkColumn> {
+        match self {
+            Self::Column(column) => Some(column),
+            Self::Encoded(_) => None,
+        }
+    }
+}
 
 /// Half-angle, in degrees, of the horizontal cone counted as "the player is
 /// looking at this column" by [`ColumnQueue`]'s frustum bonus.
@@ -465,6 +503,10 @@ pub fn generation_window_for(parallelism: usize) -> usize {
 /// thread. Same as `crate::chunk::generate_columns_offloaded`'s `cfg`.
 pub struct ColumnPipeline<S> {
     source: Arc<S>,
+    /// Protocol encode, moved **into** the worker that generates the column —
+    /// [`ChunkEncoder`] carries the measurement. `None` restores the pre-existing
+    /// shape, where the caller encodes on its own task; see [`ColumnPayload`].
+    encoder: Option<Arc<dyn ChunkEncoder>>,
     /// What to generate next, and in what order — see [`ColumnQueue`]. A queue
     /// rather than the `Vec` + cursor this held before, because the *pending*
     /// half of a join must be re-orderable when the player moves or turns while
@@ -483,9 +525,9 @@ pub struct ColumnPipeline<S> {
     /// order they finish in. Pairing them here (rather than indexing a `coords`
     /// vector) is what lets the spawn order itself be dynamic.
     #[cfg(not(target_arch = "wasm32"))]
-    inflight: VecDeque<((i32, i32), tokio::task::JoinHandle<ChunkColumn>)>,
+    inflight: VecDeque<((i32, i32), tokio::task::JoinHandle<ColumnPayload>)>,
     #[cfg(target_arch = "wasm32")]
-    inflight: VecDeque<((i32, i32), ChunkColumn)>,
+    inflight: VecDeque<((i32, i32), ColumnPayload)>,
 }
 
 impl<S> std::fmt::Debug for ColumnPipeline<S> {
@@ -543,6 +585,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     fn over(source: Arc<S>, queue: ColumnQueue, total: usize, window: usize) -> Self {
         Self {
             source,
+            encoder: None,
             queue,
             total,
             emitted: 0,
@@ -550,6 +593,21 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
             primed: false,
             inflight: VecDeque::new(),
         }
+    }
+
+    /// Moves protocol encode into this pipeline's workers, so
+    /// [`next`](Self::next) yields wire bytes rather than terrain and the
+    /// connection task only writes frames. See [`ChunkEncoder`].
+    ///
+    /// A builder rather than a constructor parameter because the encoder is
+    /// optional at every call site — `crate::server` passes
+    /// `proto.chunk_encoder()` straight through, and a protocol that has not
+    /// implemented one hands back `None`, restoring the pre-existing shape with
+    /// no branch at the call site.
+    #[must_use]
+    pub fn encoding_with(mut self, encoder: Option<Arc<dyn ChunkEncoder>>) -> Self {
+        self.encoder = encoder;
+        self
     }
 
     /// Re-keys the columns not yet handed to the pool for a player who has moved
@@ -595,7 +653,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     /// the `JoinHandle` on cancellation and silently lost that column from the
     /// wire.
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn next(&mut self) -> Option<((i32, i32), ChunkColumn)> {
+    pub async fn next(&mut self) -> Option<((i32, i32), ColumnPayload)> {
         if self.remaining() == 0 {
             return None;
         }
@@ -607,24 +665,38 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
                 break;
             };
             let source = Arc::clone(&self.source);
-            self.inflight
-                .push_back(((cx, cz), tokio::task::spawn_blocking(move || source.column(cx, cz))));
+            // **Protocol encode happens here, on the worker, not on the caller's
+            // task** — that is the whole point of `encoder`. The column is dropped
+            // inside the closure, so the connection task never even sees the
+            // terrain: it receives ~40 KiB of finished frame instead of a
+            // multi-hundred-KiB column plus 62 M instructions of work to do to it.
+            let encoder = self.encoder.clone();
+            self.inflight.push_back((
+                (cx, cz),
+                tokio::task::spawn_blocking(move || {
+                    let column = source.column(cx, cz);
+                    match encoder {
+                        Some(encoder) => ColumnPayload::Encoded(encoder.encode_chunk(cx, cz, &column)),
+                        None => ColumnPayload::Column(column),
+                    }
+                }),
+            ));
         }
         let (pos, handle) = self
             .inflight
             .front_mut()
             .expect("the top-up above spawns at least one column while any remain");
         let pos = *pos;
-        let column = handle.await.expect("worldgen join burst panicked");
+        let payload = handle.await.expect("worldgen join burst panicked");
         self.inflight.pop_front();
         self.emitted += 1;
         self.primed = true;
-        Some((pos, column))
+        Some((pos, payload))
     }
 
     /// wasm32: no blocking pool, so this is the serial path. See the struct doc.
     #[cfg(target_arch = "wasm32")]
-    pub async fn next(&mut self) -> Option<((i32, i32), ChunkColumn)> {
+    pub async fn next(&mut self) -> Option<((i32, i32), ColumnPayload)> {
         if self.remaining() == 0 {
             return None;
         }
@@ -633,7 +705,10 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
         self.emitted += 1;
         self.primed = true;
         let _ = &self.inflight;
-        Some(((cx, cz), column))
+        // There is no worker to move the encode to, so the arm is the same one a
+        // protocol without a `ChunkEncoder` takes: the caller encodes it. Using
+        // `self.encoder` here would be a lie about where the work happened.
+        Some(((cx, cz), ColumnPayload::Column(column)))
     }
 }
 
@@ -750,7 +825,7 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
     pub(crate) async fn next(
         &mut self,
         source: SourceRef<'_, S>,
-    ) -> Option<((i32, i32), ChunkColumn)> {
+    ) -> Option<((i32, i32), ColumnPayload)> {
         match self {
             Self::Drained => None,
             Self::Windowed(pipeline) => {
@@ -782,12 +857,15 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
                     }
                     rings.pop_front();
                 }
-                let emitted = ready.pop_front()?;
+                let (coord, column) = ready.pop_front()?;
                 *remaining = remaining.saturating_sub(1);
                 if *remaining == 0 {
                     *self = Self::Drained;
                 }
-                Some(emitted)
+                // This arm's source is not `'static` (see the type doc), so there
+                // is no worker to encode on and never was: the caller encodes it,
+                // exactly as it did before `ColumnPayload` existed.
+                Some((coord, ColumnPayload::Column(column)))
             }
         }
     }
@@ -1123,6 +1201,50 @@ mod tests {
             "after priming, more columns must be in flight than have been emitted — \
              otherwise this is the serial shape and the barrier was not removed"
         );
+    }
+
+    /// With a [`ChunkEncoder`] attached the pipeline yields **bytes**, not
+    /// terrain — and the column is dropped on the worker rather than travelling
+    /// to the caller. The counter that says the encode really ran off the calling
+    /// task (rather than merely later) is
+    /// `tests/serve_play.rs`'s `every_join_column_is_encoded_on_its_generating_thread`,
+    /// which has a live negative control; this only fixes the shape.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_attached_encoder_makes_the_pipeline_emit_bytes() {
+        /// Encodes the coordinate pair and nothing else, so the assertion can
+        /// name an exact payload rather than "something non-empty".
+        struct CoordEncoder;
+        impl ChunkEncoder for CoordEncoder {
+            fn encode_chunk(&self, cx: i32, cz: i32, _column: &ChunkColumn) -> ServerDirective {
+                ServerDirective::Send {
+                    packet_id: 7,
+                    payload: vec![cx as u8, cz as u8],
+                }
+            }
+        }
+
+        let coords = vec![(1, 0), (2, 0)];
+        let source = Arc::new(SkewedSource {
+            coords: coords.clone(),
+            delays: vec![Duration::from_millis(0); 2],
+            completed: Arc::new(AtomicUsize::new(0)),
+        });
+        let mut pipeline = ColumnPipeline::with_window(source, coords, 2)
+            .encoding_with(Some(Arc::new(CoordEncoder)));
+
+        let (pos, payload) = pipeline.next().await.expect("a non-empty view emits");
+        assert_eq!(pos, (1, 0));
+        assert!(
+            payload.column().is_none(),
+            "an encoded payload must not also carry the column — the point is that the \
+             connection task never receives the terrain"
+        );
+        match payload {
+            ColumnPayload::Encoded(ServerDirective::Send { packet_id, payload }) => {
+                assert_eq!((packet_id, payload), (7, vec![1, 0]));
+            }
+            other => panic!("an attached encoder must yield encoded bytes, got {other:?}"),
+        }
     }
 
     /// A one-column view still works, and a zero-column view emits nothing rather

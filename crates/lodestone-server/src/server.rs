@@ -676,9 +676,36 @@ impl ViewTracker {
             return Vec::new();
         }
         let mut batch = vec![proto.begin_chunk_batch()];
-        let columns = source.generate(added.clone()).await;
-        for (&(x, z), column) in added.iter().zip(columns.iter()) {
-            batch.push(proto.encode_chunk(x, z, column));
+        // The steady-state half of the owner's latency report: this runs on every
+        // chunk boundary the player walks across, over a strip of `2r + 1`
+        // columns — 33 at `view_radius = 16`, ≈80 ms of encode at the measured
+        // 2.4 ms per column, on the task that owes them a reply. So the encode
+        // moves into the same blocking closure as the generation whenever the
+        // protocol offers a `ChunkEncoder`; see `crate::protocol::ChunkEncoder`
+        // and `generate_and_encode_columns_offloaded`. Only the `Shared` arm can
+        // offload (a borrowed source is not `'static`), which is the same fork
+        // `SourceRef` already encodes, so the fallback below is the unchanged
+        // path rather than a degenerate one — and both emit the same bytes in the
+        // same order.
+        let offloaded = match source {
+            SourceRef::Shared(src) => {
+                crate::chunk::generate_and_encode_columns_offloaded(
+                    Arc::clone(src),
+                    added.clone(),
+                    proto.chunk_encoder(),
+                )
+                .await
+            }
+            SourceRef::Borrowed(_) => None,
+        };
+        match offloaded {
+            Some(frames) => batch.extend(frames),
+            None => {
+                let columns = source.generate(added.clone()).await;
+                for (&(x, z), column) in added.iter().zip(columns.iter()) {
+                    batch.push(proto.encode_chunk(x, z, column));
+                }
+            }
         }
         batch.push(proto.end_chunk_batch(added.len() as i32));
         batch
@@ -1043,6 +1070,30 @@ async fn apply<T: Transport>(
         ServerDirective::None => {}
     }
     Ok(())
+}
+
+/// Turns one [`ColumnPayload`](crate::join_scheduler::ColumnPayload) into the
+/// directive to write, whichever arm it is on.
+///
+/// This is the join path's *only* remaining branch on where encode happened, and
+/// it is deliberately a total function rather than two call sites: the
+/// [`Encoded`](crate::join_scheduler::ColumnPayload::Encoded) arm carries bytes a
+/// blocking worker already produced (the win — see
+/// [`crate::protocol::ChunkEncoder`]), while the
+/// [`Column`](crate::join_scheduler::ColumnPayload::Column) arm is the
+/// pre-existing shape for a protocol with no off-task encoder and for the
+/// non-`'static` [`SourceRef::Borrowed`] arm. Both produce the same bytes, so no
+/// caller has to know which one it is on.
+fn encode_column<P: ServerProtocol>(
+    proto: &P,
+    cx: i32,
+    cz: i32,
+    payload: crate::join_scheduler::ColumnPayload,
+) -> ServerDirective {
+    match payload {
+        crate::join_scheduler::ColumnPayload::Encoded(directive) => directive,
+        crate::join_scheduler::ColumnPayload::Column(column) => proto.encode_chunk(cx, cz, &column),
+    }
 }
 
 /// A shared feed of server-initiated resource pack pushes (issue #334) — the
@@ -2177,18 +2228,28 @@ where
                         // With no rotation known — which is exactly the state at
                         // join — that key *is* the ring walk, so the sequence this
                         // emits is unchanged from `join_view_rings` order.
+                        //
+                        // `encoding_with`: protocol encode runs **inside** the
+                        // per-column `spawn_blocking` closure, so this task only
+                        // writes frames. Measured at 62 M instructions / ≈2.4 ms
+                        // per column, that was ≈2.6 s of serial work on the task
+                        // that owes the player a reply — see
+                        // `crate::protocol::ChunkEncoder`. It cannot change the
+                        // wire, because the emit order is fixed by the queue at
+                        // spawn time and not by which worker finished first.
                         let mut pipeline = crate::join_scheduler::ColumnPipeline::prioritised(
                             Arc::clone(src),
                             coords,
                             window,
                             (0, 0),
                             None,
-                        );
+                        )
+                        .encoding_with(proto.chunk_encoder());
                         while batch_size < prestream {
-                            let Some(((cx, cz), column)) = pipeline.next().await else {
+                            let Some(((cx, cz), payload)) = pipeline.next().await else {
                                 break;
                             };
-                            apply(conn, &mut state, proto.encode_chunk(cx, cz, &column)).await?;
+                            apply(conn, &mut state, encode_column(proto, cx, cz, payload)).await?;
                             batch_size += 1;
                         }
                         join_stream = crate::join_scheduler::JoinChunkStream::windowed(pipeline);
@@ -6101,13 +6162,13 @@ where
             // comments); a column dropped mid-generation here would be a hole in
             // the world that no test in this crate would notice.
             chunk = join_stream.next(source), if !join_stream.is_done() => {
-                if let Some(((cx, cz), column)) = chunk {
+                if let Some(((cx, cz), payload)) = chunk {
                     if !join_batch_open {
                         apply(conn, &mut state, proto.begin_chunk_batch()).await?;
                         join_batch_open = true;
                         join_batch_size = 0;
                     }
-                    apply(conn, &mut state, proto.encode_chunk(cx, cz, &column)).await?;
+                    apply(conn, &mut state, encode_column(proto, cx, cz, payload)).await?;
                     chunks_sent += 1;
                     join_batch_size += 1;
                     // Close on a full batch or on the last column, whichever comes
@@ -6803,8 +6864,8 @@ where
     if !join_stream.is_done() {
         apply(conn, &mut state, proto.begin_chunk_batch()).await?;
         let mut batch_size: i32 = 0;
-        while let Some(((cx, cz), column)) = join_stream.next(source).await {
-            apply(conn, &mut state, proto.encode_chunk(cx, cz, &column)).await?;
+        while let Some(((cx, cz), payload)) = join_stream.next(source).await {
+            apply(conn, &mut state, encode_column(proto, cx, cz, payload)).await?;
             chunks_sent += 1;
             batch_size += 1;
         }

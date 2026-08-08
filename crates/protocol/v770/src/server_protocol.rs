@@ -58,7 +58,8 @@ use lodestone_model::{
     SoundCategory, Text, TextContent, Vec3, Vec3f,
 };
 use lodestone_server::{
-    ABSOLUTE_MAX_SIZE, Abilities, ChunkColumn as ServerChunkColumn, EntitySnapshot, HOTBAR_SIZE,
+    ABSOLUTE_MAX_SIZE, Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, EntitySnapshot,
+    HOTBAR_SIZE,
     MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, MetadataField, PlayerListing, ResourcePackPush, ServerBound,
     ServerDirective, ServerProtocol, WorldBorder, WorldgenScope,
 };
@@ -2345,6 +2346,28 @@ fn encode_registry_data_packet(registry: &str, entries: &[(&str, &[u8])]) -> Ser
     }
 }
 
+/// The single column-encode body in this crate.
+///
+/// It lives on the [`ChunkEncoder`] impl rather than on
+/// [`ServerProtocol::encode_chunk`] because a `ChunkEncoder` is `'static` and
+/// therefore movable into the `spawn_blocking` closure that generated the column
+/// — which is where these 62 M instructions per column belong, and specifically
+/// not on the connection task that owes the player a reply to their block break.
+/// `ServerProtocol::encode_chunk` calls straight through, so the two cannot
+/// drift.
+impl ChunkEncoder for V770ServerProtocol {
+    fn encode_chunk(&self, cx: i32, cz: i32, column: &ServerChunkColumn) -> ServerDirective {
+        let shape = ChunkShape::overworld_1_21();
+        let world_column = build_world_column(&shape, column);
+        let light = compute_served_light(&world_column);
+        let payload = encode_column_body(cx, cz, &shape, &world_column, &light, column);
+        ServerDirective::Send {
+            packet_id: play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
+            payload,
+        }
+    }
+}
+
 impl ServerProtocol for V770ServerProtocol {
     fn decode(&self, state: lodestone_core::State, packet_id: i32, payload: &[u8]) -> ServerBound {
         use lodestone_core::State;
@@ -3405,15 +3428,20 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
+    /// Delegates to this type's own [`ChunkEncoder`] impl so there is exactly one
+    /// column-encode body in this crate. The two must be byte-identical
+    /// ([`ServerProtocol::chunk_encoder`]'s contract) and the only way to
+    /// guarantee that is not to have two.
     fn encode_chunk(&self, cx: i32, cz: i32, column: &ServerChunkColumn) -> ServerDirective {
-        let shape = ChunkShape::overworld_1_21();
-        let world_column = build_world_column(&shape, column);
-        let light = compute_served_light(&world_column);
-        let payload = encode_column_body(cx, cz, &shape, &world_column, &light, column);
-        ServerDirective::Send {
-            packet_id: play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
-            payload,
-        }
+        ChunkEncoder::encode_chunk(self, cx, cz, column)
+    }
+
+    /// `Self`, because this protocol is a stateless unit struct — so the "encoder
+    /// detached from `&self`" this seam asks for costs one `Arc` allocation per
+    /// join and carries nothing. See [`ChunkEncoder`] for why the connection task
+    /// must not do this work.
+    fn chunk_encoder(&self) -> Option<std::sync::Arc<dyn ChunkEncoder>> {
+        Some(std::sync::Arc::new(*self))
     }
 
     fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective {

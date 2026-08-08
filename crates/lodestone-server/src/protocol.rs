@@ -832,6 +832,48 @@ pub enum ServerDirective {
 /// dig or placement back to the acting client). See `crate::server`'s module
 /// docs for the scheduling itself, which is version-free and lives entirely
 /// outside this trait.
+/// One column encoder, owned rather than borrowed — the whole of what a
+/// blocking worker needs to turn a freshly generated column into wire bytes.
+///
+/// # Why this exists as its own trait
+///
+/// Protocol encode used to run on the **connection task**: the join pipeline
+/// awaited a column off the blocking pool and then called
+/// [`ServerProtocol::encode_chunk`] inline, on the same task that owes the player
+/// a reply to their block break. Measured end-to-end, `encode_chunk` is
+/// **62 M instructions / ≈2.4 ms per column**, so a 1,089-column view is about
+/// **2.6 s of serial encode work** interposed between the player's packets and
+/// their answers — and `ViewTracker::build_batch` repeats the same shape every
+/// time the player walks across a chunk boundary (a 33-column strip at
+/// `view_radius = 16`, ≈80 ms).
+///
+/// The fix is to encode **inside** the `spawn_blocking` closure that generated
+/// the column, so the connection task only writes frames. That needs a `'static`
+/// encoder, and [`ServerProtocol`] is reached as `&P` everywhere in
+/// `crate::server` (widening that to `Arc<P>` would break every `&P`-shaped call
+/// site, the same constraint that produced [`crate::server::SourceRef`]). An
+/// `Arc<dyn ChunkEncoder>` obtained *from* the `&P` is the seam that avoids it.
+///
+/// # Ordering is unaffected, and that is why this is safe
+///
+/// Emission order is fixed by `crate::join_scheduler::ColumnQueue` at **spawn**
+/// time, not by completion order: `ColumnPipeline` awaits the front of its
+/// in-flight queue by reference. So moving the encode into the worker changes
+/// *who* runs it and never *when the bytes go out* — the wire stays a pure
+/// function of the queue.
+///
+/// # Implementing it
+///
+/// Implement it on the [`ServerProtocol`] type itself where that type is
+/// stateless (`V770ServerProtocol` is a unit struct), have `encode_chunk`
+/// delegate to it, and return `Some(Arc::new(Self))` from
+/// [`ServerProtocol::chunk_encoder`]. One body, so the two cannot drift.
+pub trait ChunkEncoder: Send + Sync + 'static {
+    /// Encodes one terrain column into a client-bound packet — byte-identical to
+    /// [`ServerProtocol::encode_chunk`] for the same arguments.
+    fn encode_chunk(&self, cx: i32, cz: i32, column: &ChunkColumn) -> ServerDirective;
+}
+
 pub trait ServerProtocol: Send + Sync {
     /// Lifts one inbound (server-bound) packet into [`ServerBound`].
     ///
@@ -1052,6 +1094,29 @@ pub trait ServerProtocol: Send + Sync {
 
     /// Encodes one terrain column into a client-bound packet.
     fn encode_chunk(&self, cx: i32, cz: i32, column: &ChunkColumn) -> ServerDirective;
+
+    /// The same encoder as [`encode_chunk`](Self::encode_chunk), detached from
+    /// `&self` so it can be **moved into the blocking worker that generated the
+    /// column** — see [`ChunkEncoder`] for the measurement that made this
+    /// necessary and `docs/server-chunk-encode-offload.md` for the shape.
+    ///
+    /// The default returns `None`, which means "no off-task encoder": every
+    /// caller then falls back to calling [`encode_chunk`](Self::encode_chunk) on
+    /// its own task, which is exactly what every caller did before this method
+    /// existed. So a family that has not adopted it — and every test protocol in
+    /// this workspace — keeps byte-identical behaviour.
+    ///
+    /// # The one invariant an implementor owes
+    ///
+    /// The returned encoder must produce **byte-identical** output to
+    /// [`encode_chunk`](Self::encode_chunk) for the same arguments. The only
+    /// safe way to guarantee that is to have one body and make one call the
+    /// other; `V770ServerProtocol` implements [`ChunkEncoder`] and its
+    /// `encode_chunk` delegates to it, so there is a single implementation and
+    /// nothing to keep in sync.
+    fn chunk_encoder(&self) -> Option<std::sync::Arc<dyn ChunkEncoder>> {
+        None
+    }
 
     /// Marks the end of a chunk batch of `batch_size` columns (vanilla's
     /// `CHUNK_BATCH_FINISHED`).
@@ -1819,6 +1884,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_chunk(&self, cx: i32, cz: i32, column: &ChunkColumn) -> ServerDirective {
         (**self).encode_chunk(cx, cz, column)
+    }
+
+    fn chunk_encoder(&self) -> Option<std::sync::Arc<dyn ChunkEncoder>> {
+        (**self).chunk_encoder()
     }
 
     fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective {

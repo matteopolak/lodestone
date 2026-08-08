@@ -330,7 +330,14 @@ fn run_arm(
             let mut pipeline =
                 ColumnPipeline::with_window(Arc::clone(&source), coords.to_vec(), window);
             let mut emitted = Vec::with_capacity(coords.len());
-            while let Some((pos, column)) = pipeline.next().await {
+            while let Some((pos, payload)) = pipeline.next().await {
+                // This arm builds the pipeline with no `ChunkEncoder`, so the
+                // payload is always the column — `expect` rather than a
+                // `if let`, because silently skipping the `black_box` would let
+                // the optimiser delete the generation this arm is timing.
+                let column = payload
+                    .column()
+                    .expect("a pipeline with no encoder must yield the column itself");
                 std::hint::black_box(column.solid_count());
                 emitted.push(pos);
             }
