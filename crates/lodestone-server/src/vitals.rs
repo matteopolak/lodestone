@@ -103,17 +103,93 @@
 //!   connected client"). This module is player-only; a mob-drowning ticker
 //!   would be a `MobSim::tick` addition reusing the same pure
 //!   `PlayerVitals`-shaped step function, not a reason to touch this file.
-//! * **Death/respawn.** Vanilla's air/drown block is guarded by
-//!   `this.isAlive()` one level up; [`PlayerVitals::tick`] mirrors that by
-//!   becoming a no-op once `health` reaches `0.0`. No death screen, no
-//!   respawn packet, no corpse — out of scope for this issue, exactly like
-//!   `SetHealth`'s own doc comment already flags for the offline-mode dead-
-//!   player case.
+//! * **Death.** Vanilla's air/drown block is guarded by `this.isAlive()` one
+//!   level up; [`PlayerVitals::tick`] mirrors that by becoming a no-op once
+//!   `health` reaches `0.0`. **The death *screen* is no longer out of scope**:
+//!   every damage site in [`crate::server`] now names its [`DeathCause`], and
+//!   crossing zero sends `ClientboundPlayerCombatKillPacket`
+//!   ([`ServerProtocol::encode_player_combat_kill`](crate::ServerProtocol::encode_player_combat_kill)).
+//!   Still no corpse and no death-location record.
 
 /// Vanilla's `Entity.TOTAL_AIR_SUPPLY` (`Entity.java:194`) — the default
 /// `getMaxAirSupply()` (`Entity.java:2805-2807`) for anything that does not
 /// override it (nothing this crate models does).
 pub const MAX_AIR_SUPPLY: i32 = 300;
+
+/// What killed the player, for the death message on the death screen.
+///
+/// One variant per damage source [`PlayerVitals`] actually has an entry point
+/// for, so the set is closed by construction rather than by convention: adding a
+/// fifth `apply_*` method without a variant here is a compile error at the call
+/// site, not a silently wrong message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeathCause {
+    /// [`PlayerVitals::apply_fall_damage`] — vanilla's `fall` damage type.
+    Fall,
+    /// [`PlayerVitals::tick`]'s drowning hit — vanilla's `drown` damage type.
+    Drown,
+    /// [`PlayerVitals::apply_border_damage`] — vanilla's `outside_border`.
+    OutsideBorder,
+    /// [`PlayerVitals::apply_damage`], the generic melee/mob entry point.
+    Generic,
+}
+
+impl DeathCause {
+    /// Vanilla's `message_id` for this damage type, read off the damage-type
+    /// records in `.cache/mc/26.2/src/data/minecraft/damage_type/*.json` — e.g.
+    /// `fall.json` carries `"message_id": "fall"`.
+    ///
+    /// **Not derived from the variant name, and not from the file name either.**
+    /// Measured, because the first version of this function guessed and was wrong:
+    /// `outside_border.json` carries `"message_id": "outsideBorder"` — camelCase,
+    /// in a directory that is otherwise snake_case — and its neighbour
+    /// `generic_kill.json` is `genericKill` for the same reason, while
+    /// `fall.json`, `drown.json` and `generic.json` match their file names. Any
+    /// snake-case-from-the-variant helper produces `death.attack.outside_border`,
+    /// a key no language file has, and the failure is invisible from here because
+    /// an unknown key renders as itself.
+    #[must_use]
+    pub fn message_id(self) -> &'static str {
+        match self {
+            Self::Fall => "fall",
+            Self::Drown => "drown",
+            Self::OutsideBorder => "outsideBorder",
+            Self::Generic => "generic",
+        }
+    }
+
+    /// The death message vanilla shows on the death screen, mirroring
+    /// `DamageSource.getLocalizedDeathMessage`
+    /// (`.cache/mc/26.2/src/net/minecraft/world/damagesource/DamageSource.java:71-86`):
+    ///
+    /// ```java
+    /// String deathMsg = "death.attack." + this.type().msgId();
+    /// if (this.causingEntity == null && this.directEntity == null) {
+    ///    LivingEntity source = victim.getKillCredit();
+    ///    return source != null
+    ///       ? Component.translatable(deathMsg + ".player", victim.getDisplayName(), source.getDisplayName())
+    ///       : Component.translatable(deathMsg, victim.getDisplayName());
+    /// }
+    /// ```
+    ///
+    /// This crate tracks no kill credit and no causing entity for any of the four
+    /// causes, so it is always the two-argument-free branch:
+    /// `translatable("death.attack.<id>", victimName)`.
+    ///
+    /// A **translatable** component, not a pre-rendered string, because that is
+    /// what vanilla puts on the wire and the client owns the language. Note the
+    /// client currently renders it with `to_plain_string()` and so shows the raw
+    /// key — a client-side gap tracked in `docs/death-screen.md`, and not a
+    /// reason to send the wrong thing from here.
+    #[must_use]
+    pub fn death_message(self, victim: &str) -> lodestone_model::Text {
+        use lodestone_model::Text;
+        Text::translate(
+            format!("death.attack.{}", self.message_id()),
+            vec![Text::literal(victim)],
+        )
+    }
+}
 
 /// Vanilla's `Avatar.DEFAULT_EYE_HEIGHT` (`.cache/mc/26.2/src/net/minecraft/
 /// world/entity/Avatar.java:16`, also `:22`'s `withEyeHeight(1.62F)` on the
@@ -965,5 +1041,66 @@ mod tests {
             lodestone_entity::DamageFlags::default(),
         );
         assert_eq!(dealt, None, "a dead player must not take more damage");
+    }
+
+    /// Every [`DeathCause::message_id`] must equal the `message_id` field of its
+    /// own damage-type record in the 26.2 data pack — read out of the file at
+    /// test time, so the expected value comes from the jar and not from a
+    /// transcription of it.
+    ///
+    /// This is the gate that caught `outsideBorder`: the first version of
+    /// `message_id` returned `outside_border` (snake_case, matching the file
+    /// name), which is a translation key no language file carries, and an unknown
+    /// key renders as itself — so the wrong message would have shipped looking
+    /// exactly like the "client renders keys untranslated" gap already documented
+    /// for the death screen.
+    ///
+    /// Skips rather than fails when the decompiled tree is absent, and says so —
+    /// but the skip is *counted*, so a run where nothing was checked cannot be
+    /// mistaken for a pass.
+    #[test]
+    fn death_cause_message_ids_match_the_jar_damage_type_records() {
+        const CASES: &[(DeathCause, &str)] = &[
+            (DeathCause::Fall, "fall"),
+            (DeathCause::Drown, "drown"),
+            (DeathCause::OutsideBorder, "outside_border"),
+            (DeathCause::Generic, "generic"),
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.cache/mc/26.2/src/data/minecraft/damage_type");
+        if !root.is_dir() {
+            eprintln!("SKIP: {} is absent (no decompiled 26.2 tree)", root.display());
+            return;
+        }
+        let mut checked = 0usize;
+        for &(cause, file) in CASES {
+            let path = root.join(format!("{file}.json"));
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+            let doc: serde_json::Value =
+                serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parsing {file}.json: {e}"));
+            let expected = doc
+                .get("message_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("{file}.json has no message_id"));
+            assert_eq!(
+                cause.message_id(),
+                expected,
+                "{file}.json says message_id = {expected:?}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, CASES.len(), "an audit that checked nothing is not a pass");
+
+        // And the assembled key, because that is what actually goes on the wire.
+        let message = DeathCause::Fall.death_message("Steve");
+        match &message.content {
+            lodestone_model::TextContent::Translate { key, with, .. } => {
+                assert_eq!(key, "death.attack.fall");
+                assert_eq!(with.len(), 1, "vanilla passes the victim's display name");
+                assert_eq!(with[0].to_plain_string(), "Steve");
+            }
+            other => panic!("a death message must be translatable, got {other:?}"),
+        }
     }
 }
