@@ -1581,11 +1581,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   [`worldgen-vegetation-ids.md`](./worldgen-vegetation-ids.md)'s (U8) `Positions`
   shape to the engine U8 did not touch.
 - [Ore placement: lookup cost, and the vein system that is still missing](./worldgen-ore-lookup-cost.md) —
-  The cost model of the `UNDERGROUND_ORES` decoration stage — the single most
-  expensive stage in chunk generation, measured at **43.54%** of stage time — plus
-  the record of what U15 removed from it, why the removal cannot move an RNG draw, and
-  the two non-obvious couplings that any future `OreVeinifier` port has to respect. It
-  is the companion to
+  The cost model of the `UNDERGROUND_ORES` decoration stage — the most expensive
+  stage in chunk generation, **28.7% of a steady-state column** after DESIGN.md
+  §12.149 (38.7% before it, and 43.54% of stage time when this doc was written) —
+  plus the record of what U15 and §12.149 removed from it, why neither removal can
+  move an RNG draw, and the two non-obvious couplings that any future `OreVeinifier`
+  port has to respect. It is the companion to
   [`worldgen-in-place-decoration.md`](./worldgen-in-place-decoration.md) (which owns
   the *medium* decoration writes travel through) and to
   [`worldgen-fast-hashing.md`](./worldgen-fast-hashing.md) (which makes the engine's
