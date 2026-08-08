@@ -2,8 +2,9 @@
 
 use lodestone_assets::Image;
 use lodestone_assets::tint::{
-    BiomeTint, Colormap, DEFAULT_BLEND_RADIUS, GrassColorModifier, Rgb, TintKind, biome_effects,
-    blend_box, colors, redstone_power_color, vanilla_particle_tint_kind, vanilla_tint_kind,
+    BiomeTint, BlendRowCursor, Colormap, DEFAULT_BLEND_RADIUS, GrassColorModifier,
+    MAX_BLEND_RADIUS, Rgb, TintKind, biome_effects, blend_box, colors, redstone_power_color,
+    vanilla_particle_tint_kind, vanilla_tint_kind,
 };
 use lodestone_model::{BlockPos, Identifier};
 use std::collections::BTreeMap;
@@ -520,4 +521,217 @@ fn blend_box_samples_every_cell_of_the_kernel_exactly_once() {
     assert_eq!((c >> 16) & 0xFF, total[0] / 25);
     assert_eq!((c >> 8) & 0xFF, total[1] / 25);
     assert_eq!(c & 0xFF, total[2] / 25);
+}
+
+// --- BlendRowCursor ------------------------------------------------------
+//
+// `blend_box` above is the reference arm for everything here: the cursor exists
+// to replace it, so the correct expected output *is* its output, and it stays
+// alive in the crate for exactly that reason. `DESIGN.md` §12.128.
+
+/// A deterministic colour field with **two** structures a blend can see: a hard
+/// vertical boundary at `x = 0` in the red channel (the biome-boundary shape the
+/// real caller meets) and per-cell hash noise in green/blue (so two adjacent
+/// blends differ, which is what makes the identity assertions non-trivial).
+fn hashed_field(x: i32, z: i32) -> Rgb {
+    let h = (x as u32)
+        .wrapping_mul(2_654_435_761)
+        .rotate_left(13)
+        ^ (z as u32).wrapping_mul(2_246_822_519);
+    let r = if x < 0 { 0x20 } else { 0xC0 };
+    let g = (h >> 7) & 0xFF;
+    let b = (h >> 19) & 0xFF;
+    (r << 16) | (g << 8) | b
+}
+
+/// The load-bearing property: **bit-identical**, not close. Vanilla is not
+/// colour-managed and both tint and shade multiply in gamma space, so a blend
+/// that reassociates its sum or divides early shifts colours by a byte or two —
+/// invisible in a screenshot and wrong.
+///
+/// Every radius the vanilla option exposes, walked forward, backward, revisited
+/// in place, and jumped by exactly `width - 1`, `width` and `width + 1` (the
+/// three cases either side of the slide/rebuild decision) plus a jump far past
+/// the window. Each visited `(x, z)` is compared against `blend_box` at the same
+/// radius.
+#[test]
+fn blend_row_cursor_is_bit_identical_to_blend_box() {
+    // Cumulative x deltas, chosen to cross every branch of the slide decision.
+    // `0` revisits the same centre; the signed values slide both ways.
+    const WALK: [i32; 18] = [0, 1, 1, 1, 1, 0, -1, -1, 2, 3, 4, 5, -5, 6, 7, 15, -40, 1];
+    let mut checked = 0usize;
+    for radius in 0..=MAX_BLEND_RADIUS {
+        let width = 2 * radius + 1;
+        // The interesting jumps are relative to the window width, so add them
+        // per radius rather than hoping the fixed list happens to hit them.
+        let walk: Vec<i32> = WALK
+            .iter()
+            .copied()
+            .chain([width - 1, width, width + 1, -width, 0])
+            .collect();
+        for z in [-9, 0, 41] {
+            let mut cursor = BlendRowCursor::new(radius);
+            assert_eq!(cursor.radius(), radius, "radius must survive construction");
+            let mut x = -3;
+            for step in &walk {
+                x += step;
+                let want = blend_box(x, z, radius, hashed_field);
+                let got = cursor.blend(x, z, hashed_field);
+                assert_eq!(
+                    got, want,
+                    "radius {radius}, z {z}, x {x} (step {step}): the cursor blended \
+                     {got:#08X} where blend_box gives {want:#08X}. These must agree to the \
+                     bit — tint multiplies in gamma space, so a byte of drift is a real \
+                     colour error that no screenshot shows"
+                );
+                checked += 1;
+            }
+            // A `z` change must invalidate rather than reuse the row.
+            let want = blend_box(x, z + 1, radius, hashed_field);
+            assert_eq!(cursor.blend(x, z + 1, hashed_field), want, "z must key the window");
+            // ...and so must an explicit invalidate, which cannot change the value.
+            cursor.invalidate();
+            assert_eq!(cursor.blend(x, z + 1, hashed_field), want, "invalidate must be inert");
+            checked += 2;
+        }
+    }
+    assert!(
+        checked > 400,
+        "only {checked} positions compared; the walk did not run"
+    );
+}
+
+/// Control for the test above: `blend_box` and the cursor agreeing is only
+/// evidence if the field *can* disagree. A uniform field would make every one of
+/// those assertions pass under any window arithmetic at all — the `world` species,
+/// and the one that cannot be found by reading the assertion.
+///
+/// So: compare the cursor at `x` against `blend_box` at `x + 1` over the same
+/// walk, and require that nearly every position separates. Predicted, not merely
+/// asserted non-zero: with hash noise in two channels every adjacent pair should
+/// differ, and the only way one can collide is a floor-division tie, so the floor
+/// is set just below the total rather than at 1.
+#[test]
+fn the_blend_box_reference_arm_is_sensitive_to_a_one_column_shift() {
+    let radius = DEFAULT_BLEND_RADIUS;
+    let mut cursor = BlendRowCursor::new(radius);
+    let (mut same, mut differ) = (0usize, 0usize);
+    for x in -20..20 {
+        let got = cursor.blend(x, 7, hashed_field);
+        if got == blend_box(x + 1, 7, radius, hashed_field) {
+            same += 1;
+        } else {
+            differ += 1;
+        }
+    }
+    assert_eq!(same + differ, 40, "the loop must visit 40 positions");
+    assert!(
+        differ >= 38,
+        "only {differ} of 40 positions distinguish a one-column shift ({same} collided). The \
+         hashed field is too flat to prove anything, so \
+         `blend_row_cursor_is_bit_identical_to_blend_box` would pass under wrong window \
+         arithmetic too"
+    );
+    // And the *uniform* case, which must collide everywhere — the negative half of
+    // the same control, proving the comparison is not simply always unequal.
+    let mut flat = BlendRowCursor::new(radius);
+    for x in -5..5 {
+        assert_eq!(
+            flat.blend(x, 0, |_, _| 0x40_80_C0),
+            blend_box(x + 1, 0, radius, |_, _| 0x40_80_C0),
+            "a uniform field must blend identically everywhere, shift or not"
+        );
+    }
+}
+
+/// The reason the cursor exists, as an exact predicted count rather than "fewer".
+///
+/// At radius 2 the window is 5 columns of 5 samples. Entering a row costs the full
+/// 25; each single-step move retires one column and admits one, so it costs 5;
+/// revisiting the same centre costs 0; and a jump of `width` or more rebuilds, so
+/// it costs 25 again — never *more* than `blend_box`, which is the property that
+/// stops this being a regression on a hostile access pattern.
+#[test]
+fn blend_row_cursor_samples_five_per_step_and_never_more_than_blend_box() {
+    let radius = DEFAULT_BLEND_RADIUS; // 2
+    let width = (2 * radius + 1) as usize; // 5
+    let full = width * width; // 25
+    // `Cell`, not `&mut`: the counter has to be readable *while* the closure that
+    // increments it is still alive, and `blend` holds it for the call.
+    let calls = std::cell::Cell::new(0usize);
+    let counting = |x: i32, z: i32| {
+        calls.set(calls.get() + 1);
+        hashed_field(x, z)
+    };
+    let mut cursor = BlendRowCursor::new(radius);
+
+    cursor.blend(0, 0, counting);
+    assert_eq!(calls.get(), full, "entering a row is the whole box");
+
+    calls.set(0);
+    cursor.blend(0, 0, counting);
+    assert_eq!(calls.get(), 0, "revisiting the same centre must sample nothing");
+
+    calls.set(0);
+    for x in 1..16 {
+        cursor.blend(x, 0, counting);
+    }
+    assert_eq!(
+        calls.get(),
+        15 * width,
+        "15 single steps must cost 15 columns of {width} = {}, not 15 boxes of {full}",
+        15 * width
+    );
+
+    // The two cases either side of the slide/rebuild decision, tracked from an
+    // explicit centre rather than from arithmetic on the loop bound above — the
+    // first draft of this test wrote `15 - width + 1` meaning "width - 1 away
+    // from 15" and measured a one-step slide, which is what predicting the exact
+    // count is for.
+    let mut centre = 15i32;
+    calls.set(0);
+    centre -= width as i32;
+    cursor.blend(centre, 0, counting);
+    assert_eq!(calls.get(), full, "a jump of exactly the window width rebuilds");
+
+    calls.set(0);
+    centre += width as i32 - 1;
+    cursor.blend(centre, 0, counting);
+    assert_eq!(
+        calls.get(),
+        (width - 1) * width,
+        "a jump of width-1 must slide {} columns, not rebuild {full}",
+        width - 1
+    );
+
+    // The whole row, priced against the function it replaces. 16 cells:
+    // 25 + 15*5 = 100 samples against 16*25 = 400.
+    let row_calls = std::cell::Cell::new(0usize);
+    let mut row = BlendRowCursor::new(radius);
+    for x in 0..16 {
+        row.blend(x, 3, |sx, sz| {
+            row_calls.set(row_calls.get() + 1);
+            hashed_field(sx, sz)
+        });
+    }
+    assert_eq!(row_calls.get(), 100, "a 16-cell row must cost 100 samples");
+    assert_eq!(16 * full, 400, "blend_box would cost 400 for the same row");
+}
+
+/// Radius 0 is vanilla's `dist == 0` fast path in both implementations, and the
+/// cursor must not invent a window for it.
+#[test]
+fn blend_row_cursor_radius_zero_is_the_single_sample() {
+    let mut cursor = BlendRowCursor::new(0);
+    let calls = std::cell::Cell::new(0usize);
+    let c = cursor.blend(5, 9, |x, z| {
+        calls.set(calls.get() + 1);
+        assert_eq!((x, z), (5, 9), "radius 0 must sample exactly (x, z)");
+        0x102030
+    });
+    assert_eq!(c, 0x102030);
+    assert_eq!(calls.get(), 1);
+    // A negative radius clamps to 0 rather than panicking on the ring width.
+    assert_eq!(BlendRowCursor::new(-3).radius(), 0);
+    assert_eq!(BlendRowCursor::new(99).radius(), MAX_BLEND_RADIUS);
 }

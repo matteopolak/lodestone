@@ -80,13 +80,24 @@ four-entry memo keyed on the `&'static str`'s data pointer and length — four
 because a radius-2 box can straddle a four-way biome junction and a one-entry memo
 thrashes there. A pointer miss on an equal string is slow, never wrong.
 
-**The root fix is still open and belongs in `lodestone-assets`:** `BIOME_EFFECTS`
-is already alphabetically sorted, so `biome_effects` could be a `binary_search_by`
-— six compares instead of ~33 — which would fix every caller rather than this one.
-Beyond that, the 25 samples of adjacent cells overlap in 20 of 25 columns, so a
-separable sliding-window sum over `blend_box` would be bit-exact (vanilla's
-per-channel floor division happens once, at the end) and roughly 5× again. Neither
-is done.
+**Both root fixes have now landed, and the first one landed as the opposite of what
+this section used to recommend** (`DESIGN.md` §12.128,
+[`docs/biome-tint.md`](./biome-tint.md)):
+
+- `biome_effects` is **not** a `binary_search_by`. That was tried and measured
+  *worse* — 58 → 309 instructions per call for the table's first entry, and
+  `mesh_fluids` regressed 6,629 → 6,815 per fluid cell — because `find`'s
+  `*name == path` compares **lengths** first (8.6 instructions per entry) while an
+  `Ordering` comparator has to `memcmp` on all ~7 probes. A compile-time first-byte
+  bucket index does the job instead: 3.79 compares on an average hit, 6.2× on a late
+  entry and **10× on an absent name**, which is the case the memo cannot help.
+- The sliding blend box is done: `lodestone_assets::tint::BlendRowCursor` plus
+  `lodestone_render::biome_tint::BlendedTintCursor`, held in a `RefCell` on
+  `SnapshotFluidView`. **6,572 → 3,365 instructions per fluid cell (1.95×)**,
+  bit-identical, with the dry arm 3.0% worse for the cursor the view now carries.
+
+The memo below is still in place and still measures as a win; it is simply no longer
+the thing standing between this path and the table.
 
 ### Which face is emitted (read this before changing anything)
 
