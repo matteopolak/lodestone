@@ -153,7 +153,25 @@ as verified until the oracle world is extended under Apple `container`.
   zone points at a set with no zone, so one level is exact. A datapack chaining
   two would be silently under-excluded.
 
-## Not wired to production yet
+## ~~Not wired to production yet~~ — wired (`a617454d`)
+
+**Both edits below have landed**, so `EmbeddedResolver` no longer returns an empty
+`structure_set_ids` and the `structures` compound is no longer a permanently empty
+stub. The section is kept because the *shape* of the wiring is the thing to know:
+
+- `worldgen_data.rs`'s four `Resolver` overrides are the on/off switch for the
+  whole engine. Every **fixture** resolver in the workspace still supplies none of
+  them, deliberately — that is what keeps the 13 parity binaries and the composed
+  seed-42 fixture byte-identical while production places structures.
+- `chunk.rs` attaches the answer at `OverworldChunkSource::column` (and at
+  `set_block`, so a chunk the player edits keeps its `starts` when saved), because
+  a `GeneratedColumn` does not carry its own chunk coordinates and the two
+  generator calls need them. `chunk_nbt::structures_to_nbt` is the writer.
+- Still true: **no piece generator (S2)**, so `starts`/`References` appear in the
+  NBT and **no blocks appear in the world**; and the beardifier is still a
+  constant-zero leaf (S3), so nothing flattens terrain under a start.
+
+The original text, for the record:
 
 The generator computes starts and references, and exposes them as
 `OverworldGenerator::{structure_starts, structure_starts_including_incomplete,
@@ -189,7 +207,8 @@ Until both land, the integrated server's `EmbeddedResolver` returns the default
 empty `structure_set_ids`, the generator's `structures` field is `None`, and the
 whole engine costs zero draws per chunk. That is also why all 13 parity binaries
 and the composed seed-42 fixture are byte-identical: every fixture resolver in
-the workspace supplies no structure data.
+the workspace supplies no structure data. (Both have landed; the parity-fixture
+half of that sentence is still true, because those resolvers are unchanged.)
 
 ## Configuration
 

@@ -91,7 +91,37 @@ resolve bare `minecraft:water`, because the generator emits fluids without their
 gates every state of every surface block, not just the defaults — it found the
 waterlogged case on its first run.
 
+**The search reaching the client is a separate question from the search being
+right, and it was wrong for longer.** `ServerProtocol::begin_play_at` has a
+default that *discards* its `spawn` argument and calls `begin_play`, and the
+`impl ServerProtocol for Box<P>` forwarding block did not override it. Singleplayer
+is the only path that boxes the protocol, so every singleplayer join took that
+default: the spiral ran, `server.rs` passed its answer in, and the box emitted
+`V770ServerProtocol::begin_play`'s hardcoded `(8, 100, 8)` instead. The symptom
+was "I always spawn at y=100 at (8, 8)" with a fully correct search one call frame
+away, and it survived two fixes to the search itself.
+
+The boxed-vs-direct parity test in `protocol.rs` could not see it, for a reason
+worth keeping: it asserted `begin_play` and not `begin_play_at`, and the test
+double had no `begin_play_at` override — so both sides answered through the same
+discarding default and agreed. **A parity test over a trait with defaults is only
+as good as the double's overrides**; the double now folds `spawn` into its answer,
+which is what makes the assertion able to fail. If you add a method to
+`ServerProtocol`, add the forward *and* the double's override, or the test passes
+for the wrong reason.
+
 **Known gaps, in the order they matter:**
+
+- **The persisted world spawn is not read; the search re-runs every join.**
+  `level.dat` carries a `spawn` compound and `lodestone_anvil::level_dat::LevelDat`
+  exposes it, but `server.rs`'s `ConfigurationFinished` arm calls
+  `find_initial_spawn(source.get())` unconditionally. Vanilla reads
+  `LevelData::getSpawnPos` and only searches for a *new* world. For our own worlds
+  the two agree (the search is deterministic over unchanged terrain), so this is
+  invisible today; it diverges the moment a spawn is *moved* — `/setworldspawn`, or
+  a world authored by real vanilla. Closing it needs the `LevelDatHandle` threaded
+  into `serve_connection_inner`, which today takes neither the world directory nor
+  the handle.
 
 - **No climate sampler.** Vanilla's first step is
   `chunkSource.randomState().sampler().findSpawnPosition()`, which picks a spawn
