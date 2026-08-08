@@ -108,6 +108,7 @@
 //! `crate::overworld` supplies the [`StartContext`].
 
 pub mod beardifier;
+pub mod coded;
 pub mod jigsaw;
 pub mod placement;
 pub mod pool;
@@ -329,6 +330,23 @@ pub trait StartContext {
     /// `LevelHeightAccessor.getHeight()`, i.e. `getMaxY() = min_y + height - 1`.
     fn dimension_height(&self) -> i32 {
         384
+    }
+    /// Whether the pre-surface column at `(x, y, z)` is
+    /// `StructurePiece.isReplaceableByStructures` — air or fluid.
+    ///
+    /// The **coded**-piece equivalent of [`Self::first_occupied_height`]: a
+    /// `fillColumnDown` walks downward from a local Y until it hits something
+    /// unreplaceable, so it needs the column's contents and not just its top. What
+    /// it reads is the raw `_WG` shape, so surface rules and carvers are not
+    /// visible — a cave that vanilla's FEATURES-time `postProcess` would fill under
+    /// a pyramid stays open here, the same class of deviation S2 took for template
+    /// piece Y.
+    ///
+    /// Defaulted to `false` ("solid everywhere") so no existing implementor had to
+    /// change; the effect of the default is that a stilt or a foundation column is
+    /// one block long, never that it runs away.
+    fn is_replaceable_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
+        false
     }
 }
 
@@ -709,6 +727,12 @@ pub enum StructureKind {
     /// #514's S4). See [`jigsaw`] for the assembly and for what a
     /// [`JigsawConfig`] refuses to model.
     Jigsaw(Box<JigsawConfig>),
+    /// `minecraft:swamp_hut` — one coded 7x7x9 piece (issue #514's S5). Its only
+    /// RNG draw is the piece's orientation.
+    SwampHut,
+    /// `minecraft:desert_pyramid` — one coded 21x15x21 piece plus a cellar and the
+    /// `afterPlace` suspicious-sand pass.
+    DesertPyramid,
     /// A structure `type` whose generator has not landed. Carries the type id so
     /// the ledger can name it.
     Unsupported(String),
@@ -755,6 +779,8 @@ impl StructureKind {
                 cluster_probability: value["cluster_probability"].as_f64().unwrap_or(0.0) as f32,
             },
             "minecraft:igloo" => Self::Igloo,
+            "minecraft:swamp_hut" => Self::SwampHut,
+            "minecraft:desert_pyramid" => Self::DesertPyramid,
             "minecraft:buried_treasure" => Self::BuriedTreasure,
             "minecraft:ocean_monument" => Self::OceanMonument {
                 surrounding: resolve_biome_set(
@@ -805,6 +831,8 @@ impl StructureKind {
             Self::Jigsaw(_)
             | Self::BuriedTreasure
             | Self::OceanMonument { .. }
+            | Self::SwampHut
+            | Self::DesertPyramid
             | Self::Unsupported(_) => Vec::new(),
         }
     }
@@ -863,7 +891,32 @@ impl StructureKind {
                 let y = ctx.first_occupied_height(middle_x, middle_z, HeightmapKind::OceanFloorWg);
                 Some([middle_x, y, middle_z])
             }
-            Self::Igloo => {
+            Self::Igloo | Self::SwampHut => {
+                let y =
+                    ctx.first_occupied_height(middle_x, middle_z, HeightmapKind::WorldSurfaceWg);
+                Some([middle_x, y, middle_z])
+            }
+            Self::DesertPyramid => {
+                // `SinglePieceStructure.findGenerationPoint`: refuse outright when
+                // the *lowest* of the four corner heights of the (width x depth)
+                // footprint is below sea level, then `onTopOfChunkCenter`. The
+                // corners are sampled at `(minX, minZ)` + `(0|w, 0|d)` — from the
+                // chunk's **min** corner, not its middle, and against
+                // `WORLD_SURFACE_WG` even though the structure sits on land.
+                let (min_x, min_z) = (cx * 16, cz * 16);
+                let lowest = [
+                    (min_x, min_z),
+                    (min_x, min_z + coded::PYRAMID_DEPTH),
+                    (min_x + coded::PYRAMID_WIDTH, min_z),
+                    (min_x + coded::PYRAMID_WIDTH, min_z + coded::PYRAMID_DEPTH),
+                ]
+                .into_iter()
+                .map(|(x, z)| ctx.first_occupied_height(x, z, HeightmapKind::WorldSurfaceWg))
+                .min()
+                .unwrap_or(i32::MIN);
+                if lowest < ctx.sea_level() {
+                    return None;
+                }
                 let y =
                     ctx.first_occupied_height(middle_x, middle_z, HeightmapKind::WorldSurfaceWg);
                 Some([middle_x, y, middle_z])
@@ -963,6 +1016,14 @@ impl StructureKind {
                 let mut random = structure_random(seed, cx, cz);
                 Some(igloo_pieces(cx, cz, ctx, templates, &mut random))
             }
+            Self::SwampHut => {
+                let mut random = structure_random(seed, cx, cz);
+                Some(coded::swamp_hut_pieces(cx, cz, ctx, &mut random))
+            }
+            Self::DesertPyramid => {
+                let mut random = structure_random(seed, cx, cz);
+                Some(coded::desert_pyramid_pieces(cx, cz, ctx, &mut random))
+            }
             Self::BuriedTreasure => {
                 // The piece's own position is `getBlockX(9)`, not the chunk
                 // middle the biome check uses, and its Y is the literal 90 from
@@ -1007,6 +1068,14 @@ impl StructureKind {
             Self::Shipwreck { .. } | Self::OceanRuin { .. } | Self::Igloo => match pieces {
                 Some(p) if !p.is_empty() => Validity::Valid,
                 _ => Validity::Unknown,
+            },
+            // A coded piece needs no template, so an empty list here means its
+            // ground-height rule found no column — vanilla's own `false` from
+            // `updateAverageGroundHeight`, which produces a start with no blocks
+            // rather than no start. `Invalid` is the honest answer.
+            Self::SwampHut | Self::DesertPyramid => match pieces {
+                Some(p) if !p.is_empty() => Validity::Valid,
+                _ => Validity::Invalid,
             },
             // A jigsaw start always has at least its centre piece — `addPieces`
             // returns `Optional.empty()` rather than an empty builder when the
@@ -1676,8 +1745,48 @@ impl StructureRegistry {
             );
             unsupported.insert(
                 "template:mirrored_shape".into(),
-                "a stair/rail `shape` property is not remapped under a mirror; every \
-                 structure placed today uses Mirror.NONE, where it is invariant"
+                "a **rail** `shape` property is not remapped under a mirror. A stair's \
+                 is, since S5's coded pieces gave SOUTH and WEST orientations a real \
+                 LEFT_RIGHT mirror; no structure placed today mirrors a rail"
+                    .into(),
+            );
+            // S5's own gaps. Each is a *deviation* rather than an absence, which is
+            // exactly the kind of thing that disappears from the record if it is not
+            // written down in the same place as the absences.
+            unsupported.insert(
+                "coded:average_ground_height".into(),
+                "`swamp_hut`'s Y averages the heightmap over the **whole** piece box, \
+                 not over its intersection with the decorating chunk: vanilla's own \
+                 answer is chunk-order dependent, so there is no single value to \
+                 reproduce — see docs/worldgen-structure-coded.md"
+                    .into(),
+            );
+            unsupported.insert(
+                "coded:region_random".into(),
+                "`desert_pyramid`'s cellar variant and collapsed-roof rolls come from \
+                 `level.getRandom()` in vanilla — the decorating region's stream, so \
+                 chunk-order dependent. Position-seeded here, like every processor draw"
+                    .into(),
+            );
+            unsupported.insert(
+                "coded:pyramid_roof_seed".into(),
+                "`randomCollapsedRoofPos` and `afterPlace`'s shuffle fork the **world** \
+                 seed positionally, and the piece generator is three layers below the \
+                 start predicate that holds it: a fixed fork seed is used, so those two \
+                 picks are position-dependent but seed-independent"
+                    .into(),
+            );
+            unsupported.insert(
+                "coded:worldgen_entities".into(),
+                "`swamp_hut`'s witch and cat are not spawned, and nothing in worldgen \
+                 can spawn an entity yet (#221/#222)"
+                    .into(),
+            );
+            unsupported.insert(
+                "coded:chests".into(),
+                "`desert_pyramid`'s four trap-room chests and its suspicious sand carry \
+                 loot tables, so the chests are not placed at all and brushing the sand \
+                 yields nothing: needs block entities and loot tables in worldgen"
                     .into(),
             );
         }

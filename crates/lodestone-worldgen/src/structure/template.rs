@@ -288,6 +288,46 @@ impl BlockState {
                 _ => None,
             }
         };
+        // `StairBlock.mirror` — the one place a mirror needs *block-class*
+        // knowledge, and now reachable: a coded piece with a SOUTH or WEST
+        // orientation mirrors LEFT_RIGHT, and both the swamp hut and the pyramids
+        // place stairs with an explicit `shape`. Vanilla applies the shape swap
+        // **only** when the mirror actually moves the facing (LEFT_RIGHT with a Z
+        // facing, FRONT_BACK with an X facing), and the two cases are *not*
+        // symmetric: LEFT_RIGHT swaps all four inner/outer variants, FRONT_BACK
+        // swaps only the outer pair.
+        let is_stair = out.properties.contains_key("shape")
+            && out.properties.contains_key("half")
+            && out.properties.contains_key("facing");
+        if is_stair {
+            let facing = out.properties.get("facing").cloned().unwrap_or_default();
+            let z_axis = facing == "north" || facing == "south";
+            let applies = match mirror {
+                Mirror::LeftRight => z_axis,
+                Mirror::FrontBack => !z_axis,
+                Mirror::None => false,
+            };
+            if applies {
+                if let Some(shape) = out.properties.get("shape").cloned() {
+                    let swapped = match (mirror, shape.as_str()) {
+                        (Mirror::LeftRight, "outer_left") | (Mirror::FrontBack, "outer_left") => {
+                            Some("outer_right")
+                        }
+                        (Mirror::LeftRight, "outer_right") | (Mirror::FrontBack, "outer_right") => {
+                            Some("outer_left")
+                        }
+                        (Mirror::LeftRight, "inner_left") => Some("inner_right"),
+                        (Mirror::LeftRight, "inner_right") => Some("inner_left"),
+                        // FRONT_BACK leaves the inner pair alone — transcribed,
+                        // not tidied.
+                        _ => None,
+                    };
+                    if let Some(swapped) = swapped {
+                        out.properties.insert("shape".into(), swapped.into());
+                    }
+                }
+            }
+        }
         if let Some(facing) = out.properties.get("facing") {
             if let Some(flipped) = flip(facing) {
                 out.properties.insert("facing".into(), flipped.into());
