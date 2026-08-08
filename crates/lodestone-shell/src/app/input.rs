@@ -20,6 +20,16 @@ pub(crate) struct KeyGate {
     pub container_open: bool,
     /// `UiState::accepts_gameplay_input()` — i.e. `screen == Playing`.
     pub gameplay: bool,
+    /// The debug modifier (F3) is currently held, so the next `B`/`G` is a
+    /// **chord** rather than a plain key — issue #197.
+    ///
+    /// Vanilla models this as a second `KeyMapping`, `keyDebugModifier`, bound to
+    /// the *same* keysym as `keyDebugOverlay` (`Options.java:698-725`), plus the
+    /// `modifierAndOverlayIsSame` bookkeeping in `KeyboardHandler`. Here it is a
+    /// gate flag rather than a bindable action, so it lands in `resolve_key`
+    /// where every other input decision already lives instead of behind a driver
+    /// `match` arm this function's tests cannot see.
+    pub debug_held: bool,
 }
 
 /// The single thing a key event means, once precedence has been applied.
@@ -37,6 +47,16 @@ pub(crate) enum KeyOutcome {
     Pause,
     CloseContainer,
     ToggleDebugOverlay,
+    /// The debug modifier (F3) went down (`true`) or up (`false`) — issue #197.
+    ///
+    /// The overlay toggle happens on the **release**, and only when no chord
+    /// consumed the hold; the driver owns that bookkeeping because it is the
+    /// thing that knows whether a chord fired. See [`KeyGate::debug_held`].
+    DebugModifier(bool),
+    /// F3+B — vanilla's `key.debug.showHitboxes`.
+    ToggleHitboxes,
+    /// F3+G — vanilla's `key.debug.showChunkBorders`.
+    ToggleChunkBorders,
     /// `key.screenshot` (issue #16): capture the window's own frame to a PNG.
     ///
     /// **No payload**, and the two things it does not carry are deliberate,
@@ -254,8 +274,22 @@ pub(crate) fn resolve_key(
         } else {
             None
         }
-    } else if binds.is(InputAction::DebugOverlay, code) && pressed {
-        Some(KeyOutcome::ToggleDebugOverlay)
+    } else if binds.is(InputAction::DebugOverlay, code) {
+        // **Both edges**, and the toggle has moved to the release — issue #197's
+        // chords. Vanilla's own rule is
+        // `keyDebugModifier.setDown(!didDebugAction)` at
+        // `KeyboardHandler.java:554-555`: releasing F3 toggles the overlay only
+        // if no chord fired while it was held. Toggling on the *press* (what
+        // this did before) makes F3+B both open the overlay and toggle
+        // hitboxes, which is why the modifier cannot just be a held flag with
+        // the old press-toggle left in place.
+        Some(KeyOutcome::DebugModifier(pressed))
+    } else if gate.debug_held && pressed && code == KeyCode::KeyB {
+        // `key.debug.showHitboxes`, vanilla keysym 66 (`Options.java`).
+        Some(KeyOutcome::ToggleHitboxes)
+    } else if gate.debug_held && pressed && code == KeyCode::KeyG {
+        // `key.debug.showChunkBorders`, vanilla keysym 71.
+        Some(KeyOutcome::ToggleChunkBorders)
     } else if binds.is(InputAction::Screenshot, code) && pressed {
         // Same tier as `DebugOverlay` immediately above, and for the same
         // reason: vanilla's `key.screenshot` is `Category.MISC` and takes no

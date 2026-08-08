@@ -31,6 +31,10 @@ impl WindowApp {
             favicons: crate::menu::render::FaviconCache::new(),
             cursor: (0.0, 0.0),
             show_debug: false,
+            debug_held: false,
+            debug_chord_used: false,
+            debug_hitboxes: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            debug_chunk_borders: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tab_held: false,
             pending_screenshot: false,
             // Read from `options.json` via the same loader the menu uses.
@@ -263,9 +267,43 @@ impl WindowApp {
             return;
         };
         let ecs = self.sim.ecs().clone();
+        // Issue #197's two F3 sub-modes ride this same channel rather than
+        // getting a pass of their own: they are world-space coloured segments,
+        // which is exactly what `DebugLineRenderer` already draws, and it draws
+        // last in the world pass so they read over everything real.
+        let hitboxes = std::sync::Arc::clone(&self.debug_hitboxes);
+        let borders = std::sync::Arc::clone(&self.debug_chunk_borders);
+        // The world column, resolved **now** rather than assumed in the closure:
+        // a nether or custom-height dimension has a different range, and a
+        // hardcoded `-64..320` would silently draw the wrong box there. `None`
+        // (no session yet) falls back to the overworld column, which is what the
+        // dev world is.
+        let (min_y, height) = self
+            .sim
+            .net()
+            .and_then(crate::net::NetClient::world_dimensions)
+            .map_or((-64, 384), |d| (d.min_y, d.height));
+        let local = self.sim.local_entity();
         render.set_debug_lines_source(move || {
+            use std::sync::atomic::Ordering;
             lodestone_ecs::hold_read(&ecs, |world| {
-                crate::gpu::debug_line_vertices(&world.resource::<lodestone_ecs::DebugLines>().0)
+                let mut out = crate::gpu::debug_line_vertices(
+                    &world.resource::<lodestone_ecs::DebugLines>().0,
+                );
+                if hitboxes.load(Ordering::Relaxed) {
+                    out.extend(crate::gpu::entity_hitbox_vertices(
+                        &crate::entities::extracted_entity_draws(world),
+                    ));
+                }
+                if borders.load(Ordering::Relaxed) {
+                    let p = world
+                        .get::<lodestone_ecs::player::PhysicsState>(local)
+                        .map_or([0.0, 0.0, 0.0], |s| {
+                            [s.0.position.x, s.0.position.y, s.0.position.z]
+                        });
+                    out.extend(crate::gpu::chunk_border_vertices(p, min_y, height));
+                }
+                out
             })
         });
     }

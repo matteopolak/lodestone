@@ -381,6 +381,21 @@ struct WindowApp {
     /// (`pos=… fps=… chunks=…`) is unaffected and remains the instrument that
     /// does not depend on anyone having pressed a key.
     show_debug: bool,
+    /// Whether the debug modifier (F3) is currently held — issue #197's chords.
+    /// Fed into [`app::input::KeyGate::debug_held`]; see there for why this is a
+    /// gate flag rather than a second bindable action.
+    debug_held: bool,
+    /// Whether a chord (F3+B/F3+G) fired while the modifier was held. Vanilla's
+    /// `didDebugAction`: on release, the overlay toggles only if this is `false`,
+    /// so F3+B does not also open the overlay.
+    debug_chord_used: bool,
+    /// F3+B — draw entity hitboxes. `Arc<AtomicBool>` because the only consumer
+    /// is the `Send + Sync + 'static` closure `install_debug_lines_source`
+    /// installs, which cannot borrow `self`.
+    debug_hitboxes: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// F3+G — draw the borders of the chunk the player is in. Same `Arc` reason
+    /// as [`Self::debug_hitboxes`].
+    debug_chunk_borders: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Whether the player-list binding is currently held (shows the overlay).
     tab_held: bool,
     /// A `key.screenshot` press waiting to be serviced (issue #16).

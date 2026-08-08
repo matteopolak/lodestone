@@ -676,6 +676,22 @@ impl Sim {
             self.stats.live_columns = self.net.as_ref().map_or(0, |n| n.loaded_chunks().len());
             self.stats.world_bytes = store.read().heap_bytes();
             self.stats.rss_bytes = process_rss_bytes();
+            // Issue #197's light readout. Inside the throttle deliberately: it
+            // is a section fetch under the client world's own lock, which is the
+            // same class of cost as the three above even though it touches one
+            // section rather than all of them. The sky policy comes from
+            // `shared_sky_default`, never from `sky_at` directly — see
+            // `net::entity_light_at`'s doc for the two bugs that produced.
+            self.stats.light = self.net.as_ref().and_then(|net| {
+                let packed = crate::net::entity_light_at(
+                    &net.shared_handle(),
+                    player.position.x.floor() as i32,
+                    player.position.y.floor() as i32,
+                    player.position.z.floor() as i32,
+                    net.shared_sky_default().get(),
+                )?;
+                Some((packed >> 4, packed & 0x0F))
+            });
         }
         // `clone_from` reuses the existing `String`'s buffer, and the comparison
         // skips even that on the overwhelmingly common frame where the status line

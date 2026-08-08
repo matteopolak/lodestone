@@ -1099,6 +1099,17 @@ impl Sim {
     /// liked. `PlayerState` is `Copy`, so this is a register copy and every
     /// existing `sim.player().position`-shaped call site is unchanged.
     #[must_use]
+    /// The local player's ECS entity.
+    ///
+    /// Exists for the `Send + Sync + 'static` render-source closures in
+    /// `app/session.rs`, which hold the shared `World` but cannot hold a `&Sim`
+    /// to ask [`Self::player`]. Everything inside this crate should prefer
+    /// `player()`/`with_player()`.
+    #[must_use]
+    pub fn local_entity(&self) -> Entity {
+        self.local
+    }
+
     pub fn player(&self) -> PlayerState {
         self.read(|w| {
             w.get::<PhysicsState>(self.local)
