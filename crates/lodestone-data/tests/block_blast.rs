@@ -11,10 +11,9 @@
 //! `tests/support/blast_fire_jvm.txt` is an authoritative dump produced by
 //! booting the real 26.2 server (`oracle-java/BlastFireOracle.java`) and reading
 //! four quantities per registered block:
-//! `Block.getExplosionResistance()`, `FireBlock`'s private
-//! `igniteOdds`/`burnOdds` maps (populated by `FireBlock.bootStrap()`, which
-//! `Bootstrap.bootStrap()` calls at `Bootstrap.java:51`), and
-//! `BlockState.ignitedByLava()`.
+//! `Block::getExplosionResistance`, `FireBlock`'s private
+//! `igniteOdds`/`burnOdds` maps (populated by `FireBlock::bootStrap`, which
+//! `Bootstrap::bootStrap` calls), and `BlockStateBase::ignitedByLava`.
 //!
 //! `blocks.json` has none of these fields; the fire odds are not even a block
 //! *property* (they are a side table keyed by `Block`), and
@@ -44,7 +43,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use lodestone_data::block_blast;
+use lodestone_data::{block_blast, block_states};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -195,9 +194,115 @@ fn generate(rows: &[Row]) -> String {
     for (name, entry) in &by_name {
         let _ = writeln!(out, "    ({name:?}, {entry}),");
     }
+    out.push_str("];\n\n");
+
+    // ---- the flat per-block-state resistance table (the ray-walk hot path) ----
+    let by_name_map: BTreeMap<&str, usize> = by_name.iter().copied().collect();
+    let mut value_index: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut values: Vec<u32> = Vec::new();
+    let mut intern = |bits: u32| -> usize {
+        *value_index.entry(bits).or_insert_with(|| {
+            values.push(bits);
+            values.len() - 1
+        })
+    };
+    // `EMPTY_RESISTANCE` is interned first so it is index 0 and the array reads
+    // as "mostly zero means mostly air" at a glance.
+    let empty_index = intern(EMPTY_RESISTANCE_BITS);
+    assert_eq!(empty_index, 0);
+
+    let state_count = block_states::STATE_COUNT;
+    let mut per_state: Vec<usize> = Vec::with_capacity(state_count as usize);
+    for id in 0..state_count {
+        let name = block_states::block_name(id).expect("every state id has a block");
+        let waterlogged = block_states::properties(id)
+            .expect("every state id has properties")
+            .iter()
+            .any(|(key, value)| *key == "waterlogged" && *value == "true");
+        let entry = *by_name_map
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} is not in the dump"));
+        let block_bits = distinct[entry].0;
+        let is_air = matches!(
+            name,
+            "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
+        );
+        let index = if is_air && !waterlogged {
+            empty_index
+        } else {
+            let block = f32::from_bits(block_bits);
+            let effective = if waterlogged {
+                block.max(FLUID_RESISTANCE)
+            } else {
+                block
+            };
+            intern(effective.to_bits())
+        };
+        per_state.push(index);
+    }
+    assert!(
+        u16::try_from(values.len()).is_ok(),
+        "distinct resistance count {} no longer fits a u16 index",
+        values.len()
+    );
+
+    let _ = writeln!(
+        out,
+        "/// Number of block states (ids are `0..STATE_COUNT`).\n\
+         pub const STATE_COUNT: u32 = {state_count};\n"
+    );
+    let _ = writeln!(
+        out,
+        "/// The sentinel [`RESISTANCE_VALUES`] entry standing for vanilla's\n\
+         /// `Optional.empty()` — a cell that is air and holds no fluid, which a blast\n\
+         /// ray pays no resistance term for. A quiet NaN, so it can never collide with\n\
+         /// a real resistance.\n\
+         pub const EMPTY_RESISTANCE: u32 = 0x{EMPTY_RESISTANCE_BITS:08x};\n"
+    );
+    let _ = writeln!(
+        out,
+        "/// De-duplicated `max(block, fluid)` explosion resistances as raw `f32`\n\
+         /// bits ({} of them), including [`EMPTY_RESISTANCE`] at index 0.\n\
+         pub static RESISTANCE_VALUES: [u32; {}] = [",
+        values.len(),
+        values.len()
+    );
+    for &bits in &values {
+        if bits == EMPTY_RESISTANCE_BITS {
+            let _ = writeln!(out, "    0x{bits:08x}, // Optional.empty()");
+        } else {
+            let _ = writeln!(out, "    0x{bits:08x}, // {}", f32::from_bits(bits));
+        }
+    }
+    out.push_str("];\n\n");
+    let _ = writeln!(
+        out,
+        "/// Per-block-state index into [`RESISTANCE_VALUES`], indexed by global\n\
+         /// block-state id. The explosion ray walk's innermost lookup: one bounds-checked\n\
+         /// index, no strings, with the fluid `max` already folded in.\n\
+         pub static STATE_RESISTANCE_ENTRY: [u16; {state_count}] = ["
+    );
+    for chunk in per_state.chunks(32) {
+        out.push_str("    ");
+        for (offset, index) in chunk.iter().enumerate() {
+            if offset > 0 {
+                out.push(' ');
+            }
+            let _ = write!(out, "{index},");
+        }
+        out.push('\n');
+    }
     out.push_str("];\n");
     out
 }
+
+/// The quiet NaN standing for `Optional.empty()`. All-ones is never a real
+/// resistance, and `f32::from_bits` on it is a NaN rather than a plausible
+/// number, so a consumer that forgot the sentinel check fails loudly.
+const EMPTY_RESISTANCE_BITS: u32 = 0xFFFF_FFFF;
+
+/// The resistance both vanilla fluids report, folded into the flat table.
+const FLUID_RESISTANCE: f32 = 100.0;
 
 /// The drift guard: regenerates the committed table from the dump and asserts
 /// byte-for-byte equality, or rewrites it under `LODESTONE_REGEN=1`.
