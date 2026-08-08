@@ -451,6 +451,39 @@ pub struct OverworldGenerator {
     climate_noise: crate::noise::ClimateNoise,
 }
 
+/// Renders a noise-settings block-state object (`{"Name": ..., "Properties": {...}}`)
+/// as this engine's canonical state string, `name[k=v,...]` with properties
+/// **sorted by key**.
+///
+/// The properties are not optional decoration: vanilla's own
+/// `noise_settings/overworld.json` carries
+/// `"default_fluid": {"Name": "minecraft:water", "Properties": {"level": "0"}}`,
+/// and reading only `["Name"]` produces `minecraft:water` — a *different string*
+/// from the `minecraft:water[level=0]` that `crate::carver` writes for the same
+/// block state. One column then holds two palette entries for one state, which
+/// costs a palette slot each (and a bit of index width for the whole section once
+/// the palette crosses 16), and makes every downstream `match` on the full state
+/// string miss for the bare form.
+fn canonical_state_from_settings(value: &Value, fallback: &str) -> String {
+    let Some(name) = value["Name"].as_str() else {
+        return fallback.to_string();
+    };
+    match value["Properties"].as_object() {
+        Some(properties) if !properties.is_empty() => {
+            let mut rendered: Vec<String> = properties
+                .iter()
+                .map(|(key, value)| {
+                    let value = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
+                    format!("{key}={value}")
+                })
+                .collect();
+            rendered.sort();
+            format!("{name}[{}]", rendered.join(","))
+        }
+        _ => name.to_string(),
+    }
+}
+
 impl OverworldGenerator {
     /// Builds the generator for `seed` from a noise-settings `Value` and a
     /// [`Resolver`] that supplies the density functions, noises, carvers,
@@ -492,11 +525,9 @@ impl OverworldGenerator {
             .as_str()
             .unwrap_or("minecraft:stone")
             .to_string();
-        let default_fluid = settings["default_fluid"]["Name"]
-            .as_str()
-            .unwrap_or("minecraft:water")
-            .to_string();
-        let default_lava = "minecraft:lava".to_string();
+        let default_fluid =
+            canonical_state_from_settings(&settings["default_fluid"], "minecraft:water[level=0]");
+        let default_lava = "minecraft:lava[level=0]".to_string();
         let default_block_pre = crate::surface::PreState::from_name(&interner, &default_block);
         let default_fluid_pre = crate::surface::PreState::from_name(&interner, &default_fluid);
         let default_lava_pre = crate::surface::PreState::from_name(&interner, &default_lava);
