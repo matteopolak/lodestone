@@ -55,6 +55,23 @@ pub(crate) fn hud_line_h() -> f32 {
     (font::GLYPH_H as f32 + 2.0) * HUD_TEXT_SCALE
 }
 
+/// `DebugScreenOverlay.MARGIN_LEFT`/`MARGIN_RIGHT`/`MARGIN_TOP`, all `2`
+/// (`DebugScreenOverlay.java:50-52`).
+///
+/// **Not [`HUD_MARGIN`]**: the F3 overlay is vanilla's own screen with vanilla's
+/// own metrics, and it draws in the already-`gui_scale`-divided logical canvas,
+/// so it needs no HUD-side scaling of any kind.
+pub(crate) const DEBUG_MARGIN: f32 = 2.0;
+
+/// The F3 overlay's line pitch — vanilla's literal `9`
+/// (`DebugScreenOverlay.java:278`), not [`hud_line_h`]'s `(GLYPH_H + 2) *
+/// HUD_TEXT_SCALE`.
+///
+/// The overlay used to use the HUD's pitch at the HUD's 2× text scale, which is
+/// what "the text is way too big" was: exactly the mistake the XP level number's
+/// own comment records, one screen over.
+pub(crate) const DEBUG_LINE_H: f32 = 9.0;
+
 /// The plate behind each F3 overlay line — vanilla's
 /// `fill(left - 1, top - 1, left + width + 1, top + height - 1, -1873784752)`,
 /// i.e. `0x90505050` (`DebugScreenOverlay.extractLines`). The shell had no plate
@@ -245,6 +262,22 @@ pub struct DebugStats {
     ///
     /// `(sky, block)`, each `0..=15`.
     pub light: Option<(u8, u8)>,
+    /// Fixed lines describing the graphics adapter and backend, resolved **once**
+    /// from `wgpu::Adapter::get_info()` when the GPU comes up.
+    ///
+    /// The owner's steer on this overlay was "not 1:1 — show information that is
+    /// useful for *this* implementation", and this is the concrete half of it:
+    /// vanilla's right column is full of JVM-shaped fields (GC, Java version,
+    /// allocation rate) that have no analogue here, and printing a number we do
+    /// not have is the same fabrication `menu::options` already refuses for an
+    /// option we do not honour. The adapter, its backend and its reported limits
+    /// *are* true of this client, and one of them has already caused a crash
+    /// class: `max_bind_groups` reads 4 in a browser and 8 on this Mac, which is
+    /// why the model shader is pinned at four groups.
+    ///
+    /// Empty off a GPU-less run (every headless gate), which draws no lines
+    /// rather than placeholders.
+    pub adapter: Vec<String>,
 }
 
 /// All-caps display name for a [`lodestone_model::Difficulty`], matching the
@@ -345,7 +378,7 @@ impl DebugStats {
     /// half vanilla fills from `getSystemInformation`'s descendants.
     #[must_use]
     pub fn right_lines(&self) -> Vec<String> {
-        vec![
+        let mut out = vec![
             format!("FPS {:.0} ({:.2} MS)", self.fps, self.frame_ms),
             format!("F/T {:.2}", self.frames_per_tick),
             format!(
@@ -366,7 +399,16 @@ impl DebugStats {
                 self.world_bytes / 1024,
                 self.rss_bytes / (1024 * 1024)
             ),
-        ]
+        ];
+        if !self.adapter.is_empty() {
+            // A blank spacer, then the fixed adapter block — the same
+            // separated-group shape `DebugScreenOverlay` uses for its own named
+            // groups. Empty lines are skipped by the draw, which is what makes
+            // the spacer a gap rather than an empty plate.
+            out.push(String::new());
+            out.extend(self.adapter.iter().cloned());
+        }
+        out
     }
 
     /// One-line stdout summary (primary evidence in headless / logged runs).
@@ -987,6 +1029,18 @@ impl HudGeometry {
         // instead of off the screen. The width has to come from `b.text_width`,
         // the same measure the draw itself uses — a restated constant would
         // misalign the moment the vanilla font is or is not loaded.
+        //
+        // **Vanilla's own metrics, not the HUD's.** The overlay used to draw at
+        // `HUD_TEXT_SCALE` (2.0) with `hud_line_h()` (18 px), which is exactly
+        // the mistake the XP level number's own comment records one screen over:
+        // this function already draws in the `gui_scale`-divided logical canvas,
+        // so a ×2 on the text made it twice vanilla's size relative to
+        // everything around it. `DebugScreenOverlay` draws at scale 1 with
+        // `MARGIN_LEFT == MARGIN_RIGHT == MARGIN_TOP == 2` and a line height of
+        // `9` (`DebugScreenOverlay.java:50-52`, `:278`).
+        let debug_scale = 1.0;
+        let debug_margin = DEBUG_MARGIN;
+        let debug_line_h = DEBUG_LINE_H;
         if frame.show_debug {
             let mut left = frame.stats.left_lines();
             let mut right = frame.stats.right_lines();
@@ -1011,16 +1065,14 @@ impl HudGeometry {
                     if line.is_empty() {
                         continue;
                     }
-                    let tw = b.text_width(line, scale);
-                    let x = if column { w - margin - tw } else { margin };
-                    let y = margin + i as f32 * line_h;
-                    b.rect_px(
-                        x - 1.0,
-                        y - 1.0,
-                        tw + 2.0,
-                        glyph_h * scale + 2.0,
-                        DEBUG_LINE_BG,
-                    );
+                    let tw = b.text_width(line, debug_scale);
+                    let x = if column {
+                        w - debug_margin - tw
+                    } else {
+                        debug_margin
+                    };
+                    let y = debug_margin + i as f32 * debug_line_h;
+                    b.rect_px(x - 1.0, y - 1.0, tw + 2.0, debug_line_h, DEBUG_LINE_BG);
                 }
             }
             for (column, lines) in [(false, &left), (true, &right)] {
@@ -1029,12 +1081,12 @@ impl HudGeometry {
                         continue;
                     }
                     let x = if column {
-                        w - margin - b.text_width(line, scale)
+                        w - debug_margin - b.text_width(line, debug_scale)
                     } else {
-                        margin
+                        debug_margin
                     };
-                    let y = margin + i as f32 * line_h;
-                    b.text(line, x, y, scale, DEBUG_LINE_INK);
+                    let y = debug_margin + i as f32 * debug_line_h;
+                    b.text(line, x, y, debug_scale, DEBUG_LINE_INK);
                 }
             }
         }

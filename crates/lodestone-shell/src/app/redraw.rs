@@ -48,6 +48,11 @@ impl WindowApp {
         self.sim
             .set_sprint_window_ticks(self.nav.sprint_window_ticks());
         self.sim.set_auto_jump(self.nav.auto_jump());
+        // Render Distance, on vanilla's 600 ms delay rather than per frame —
+        // `WindowApp::render_distance_apply_at`'s doc has the citation and the
+        // reason. Before `step` like the pushes above, so the frame that commits
+        // it also draws with it.
+        self.tick_render_distance(frame_start);
         self.sim.step(dt);
         if !step.render {
             // Unfocused (throttled to ~30 fps) or occluded: skip presenting

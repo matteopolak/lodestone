@@ -327,8 +327,26 @@ impl ApplicationHandler for WindowApp {
                 if crate::menu::nav::routes_menu_input(&self.ui) =>
             {
                 self.cursor = (position.x as f32, position.y as f32);
-                if let Some(row) = self.menu_row_at(self.cursor.0, self.cursor.1) {
-                    self.nav.hover(&self.ui, row);
+                // A slider drag in progress owns the cursor: vanilla's
+                // `AbstractSliderButton.onDrag` keeps calling
+                // `setValueFromMouse` for as long as the button is held, whether
+                // or not the cursor is still inside the widget. Hovering (and
+                // therefore re-highlighting some other row) while dragging would
+                // both move the keyboard cursor mid-drag and, worse, make the
+                // slider stop following once you left its row.
+                match self.menu_slider_drag {
+                    Some(row) => {
+                        if let Some(fraction) =
+                            self.menu_slider_fraction(row, self.cursor.0, self.cursor.1)
+                        {
+                            self.nav.drag_slider(&self.ui, row, fraction);
+                        }
+                    }
+                    None => {
+                        if let Some(row) = self.menu_row_at(self.cursor.0, self.cursor.1) {
+                            self.nav.hover(&self.ui, row);
+                        }
+                    }
                 }
             }
             WindowEvent::MouseInput { state, button, .. }
@@ -361,10 +379,34 @@ impl ApplicationHandler for WindowApp {
                         // a real cursor, so a click now resolves its row to that
                         // row's own control; `MenuNav::click`'s doc has the history.
                         if let Some(row) = self.menu_row_at(self.cursor.0, self.cursor.1) {
-                            let action = self.nav.click(&mut self.ui, row);
-                            self.apply_menu_action(action);
+                            // A slider takes the drag path, and takes it on the
+                            // *press*: vanilla's `onClick` calls
+                            // `setValueFromMouse` too, so a click anywhere on
+                            // the track jumps the handle there rather than
+                            // nudging one step. That is the whole of the
+                            // "sliders just move a tiny bit on click" report —
+                            // every slider used to route through
+                            // `SettingsOutcome::Cycle`, a single wrapping step.
+                            let dragged = self.nav.slider_row(&self.ui, row)
+                                && self
+                                    .menu_slider_fraction(row, self.cursor.0, self.cursor.1)
+                                    .is_some_and(|f| {
+                                        self.nav.drag_slider(&self.ui, row, f)
+                                    });
+                            if dragged {
+                                self.menu_slider_drag = Some(row);
+                            } else {
+                                let action = self.nav.click(&mut self.ui, row);
+                                self.apply_menu_action(action);
+                            }
                         }
                     }
+                }
+                if state == ElementState::Released && button == MouseButton::Left {
+                    // `AbstractSliderButton.onRelease`: the drag ends. Also the
+                    // safety net for a release outside the row, which is where a
+                    // sticky drag would otherwise come from.
+                    self.menu_slider_drag = None;
                 }
                 // Every `owns_frame` action handles its own grab (each of them
                 // either stays on a menu screen, which never grabs, or moves to
@@ -516,10 +558,7 @@ impl ApplicationHandler for WindowApp {
             // move a slot and sensitivity above 1.0 can cross several in one
             // notch — not just a threshold on the existing ±1 step.
             WindowEvent::MouseWheel { delta, .. } if self.ui.accepts_gameplay_input() => {
-                let dy = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
-                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y,
-                };
+                let dy = wheel_notches(delta);
                 let scaled = scale_scroll(dy, self.nav.discrete_mouse_scroll(), self.nav.mouse_wheel_sensitivity());
                 let step = accumulate_scroll(&mut self.scroll_accum, scaled);
                 if step != 0 {
@@ -568,10 +607,7 @@ impl ApplicationHandler for WindowApp {
             WindowEvent::MouseWheel { delta, .. }
                 if crate::menu::render::owns_frame(self.ui.screen()) =>
             {
-                let dy = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
-                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y,
-                };
+                let dy = wheel_notches(delta);
                 // The same boundary transform the hotbar arm above uses, because
                 // vanilla computes it **once** for both: `MouseHandler.onScroll`
                 // (`MouseHandler.java:189-192`) hands one `scaledYOffset` to

@@ -10,6 +10,12 @@ impl WindowApp {
         // Matches the sky fog set at render bring-up, so the fog reconciliation's
         // first above-water frame is a no-op rather than a redundant upload.
         let applied_fog = Some(crate::sim::fog_for_render_distance(config.render_distance));
+        // Read once for both the keybinds and the Render Distance edge detector
+        // below. **The seed is the *persisted* value, not `config`'s**, because
+        // `--render-distance` on argv wins for the run (`Config::resolve_persisted`)
+        // — seeding from `config` would make frame one see a "change" back to the
+        // stored value and quietly undo the flag 600 ms in.
+        let persisted = crate::config::Options::load();
         let mut ecs = lodestone_ecs::app::App::new();
         ecs.add_plugins(lodestone_ecs::CorePlugin);
         Self {
@@ -35,12 +41,15 @@ impl WindowApp {
             debug_chord_used: false,
             debug_hitboxes: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             debug_chunk_borders: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            menu_slider_drag: None,
+            render_distance_seen: persisted.render_distance,
+            render_distance_apply_at: None,
             tab_held: false,
             pending_screenshot: false,
             // Read from `options.json` via the same loader the menu uses.
             // Missing, partial or corrupt is vanilla's defaults, never an error
             // — see `Keybinds::from_json_value`.
-            keybinds: crate::config::Options::load().keybinds,
+            keybinds: persisted.keybinds,
             chat_input: ChatInput::new(),
             chat_wrap: crate::hud::ChatWrapCache::default(),
             menu_input: MenuInput::new(),
@@ -306,6 +315,102 @@ impl WindowApp {
                 out
             })
         });
+    }
+
+    /// Arm and service the deferred Render Distance commit — vanilla's
+    /// `OptionInstance.OptionInstanceSliderButton` `delayedApplyAt` /
+    /// `applyUnsavedValue` pair (`OptionInstance.java:404-409, 429-435`).
+    ///
+    /// Called once per frame from `app/redraw.rs`. The deadline is **re-armed by
+    /// every change**, so a drag that crosses ten values commits once, 600 ms
+    /// after it stops.
+    ///
+    /// # Edge detection, not difference
+    ///
+    /// The trigger is `nav`'s value *changing*, not `nav` disagreeing with
+    /// `config`. A difference test would re-arm on every frame of the 600 ms
+    /// window and the commit would never fire — and it would also fight
+    /// `--render-distance` on argv, which is deliberately allowed to disagree
+    /// with the persisted value for the whole run.
+    pub(super) fn tick_render_distance(&mut self, now: Instant) {
+        let wanted = self.nav.render_distance();
+        if wanted != self.render_distance_seen {
+            self.render_distance_seen = wanted;
+            self.render_distance_apply_at = Some(now + RENDER_DISTANCE_APPLY_DELAY);
+        }
+        if self.render_distance_apply_at.is_none_or(|at| now < at) {
+            return;
+        }
+        self.render_distance_apply_at = None;
+        if wanted == self.config.render_distance {
+            return;
+        }
+        // Both copies. `self.config` is what the fog upload and the render
+        // bring-up read; `self.sim.config` is what the camera's far plane
+        // (`sim/camera.rs`) and the fog helpers read. Leaving either behind is
+        // the "the slider appears to do nothing" report with one symptom fixed.
+        self.config.render_distance = wanted;
+        self.sim.config.render_distance = wanted;
+        // The server side. Vanilla's `Options.broadcastOptions` sends
+        // `ServerboundClientInformationPacket` whenever an option in it changes,
+        // and `viewDistance` is in it — without this the server keeps streaming
+        // the square we asked for at join and the extra rings simply never
+        // arrive, so fog and the far plane would open onto empty space.
+        //
+        // `+ 1` for the mesher's buffer ring, the same reason
+        // `start_singleplayer`'s `view_radius` adds one: the outermost streamed
+        // ring can never be meshed, so asking for exactly `render_distance`
+        // loses the last visible ring.
+        let radius = wanted.saturating_add(1);
+        if let Some(net) = self.sim.net() {
+            net.send_action(lodestone_model::action::ClientAction::SetClientSettings(
+                self.client_settings(radius),
+            ));
+        }
+        // Deliberately **not** `Sim::set_view_radius`: that is the loading
+        // screen's progress denominator (#449), not the streaming radius, and
+        // re-declaring it mid-session would re-baseline a bar for a load that
+        // already finished. Nothing client-side gates chunk *retention* on the
+        // radius — the camera's far plane and the fog do the work, and both read
+        // `config` above.
+    }
+
+    /// The [`lodestone_model::action::ClientSettings`] this client would send
+    /// now, with `view_distance` overridden to `radius` chunks.
+    ///
+    /// Split out because it is the *only* producer of
+    /// [`lodestone_model::action::ClientAction::SetClientSettings`] in the
+    /// workspace — the variant was encoded by four adapters and sent by nothing,
+    /// which is `CLAUDE.md`'s outbound-island shape. Everything but
+    /// `view_distance` and `chat_colors` is vanilla's `ClientInformation`
+    /// default, because this client has no option for it yet; a fabricated value
+    /// would be worse than the default it would replace.
+    fn client_settings(&self, radius: u32) -> lodestone_model::action::ClientSettings {
+        use lodestone_model::action::{
+            ChatMode, ClientSettings, DisplayedSkinParts, MainHand, ParticleStatus,
+        };
+        ClientSettings {
+            locale: "en_us".to_string(),
+            // `ServerboundClientInformationPacket` carries a byte; vanilla clamps
+            // to `2..=32` before sending. Saturating rather than wrapping, or a
+            // radius past 127 would arrive as a negative distance.
+            view_distance: i8::try_from(radius.clamp(2, 32)).unwrap_or(i8::MAX),
+            chat_mode: ChatMode::Full,
+            chat_colors: self.nav.options().chat_colors,
+            skin_parts: DisplayedSkinParts {
+                cape: true,
+                jacket: true,
+                left_sleeve: true,
+                right_sleeve: true,
+                left_pants_leg: true,
+                right_pants_leg: true,
+                hat: true,
+            },
+            main_hand: MainHand::Right,
+            text_filtering: false,
+            allow_server_listing: true,
+            particle_status: ParticleStatus::All,
+        }
     }
 
     /// Start singleplayer and show the loading screen (issue #287).

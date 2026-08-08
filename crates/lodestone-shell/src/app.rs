@@ -281,6 +281,55 @@ fn scale_scroll(dy: f64, discrete: bool, sensitivity: f32) -> f64 {
     d * f64::from(sensitivity)
 }
 
+/// How long after the last Render Distance change the new value goes live —
+/// vanilla's literal `600L` in
+/// `OptionInstance.OptionInstanceSliderButton.applyValue`
+/// (`OptionInstance.java:408`): `this.delayedApplyAt = Util.getMillis() + 600L`.
+pub(crate) const RENDER_DISTANCE_APPLY_DELAY: Duration = Duration::from_millis(600);
+
+/// GLFW's own scale for a **precise** scrolling delta — a trackpad or a Magic
+/// Mouse, as opposed to a notched wheel.
+///
+/// `glfw/src/cocoa_window.m`'s `scrollWheel:` handler:
+///
+/// ```objc
+/// double deltaX = [event scrollingDeltaX];
+/// double deltaY = [event scrollingDeltaY];
+/// if ([event hasPreciseScrollingDeltas]) {
+///     deltaX *= 0.1;
+///     deltaY *= 0.1;
+/// }
+/// _glfwInputScroll(window, deltaX, deltaY);
+/// ```
+///
+/// This is what vanilla's `yoffset` already has applied by the time
+/// `MouseHandler.onScroll` sees it, so it belongs at *our* boundary too rather
+/// than anywhere downstream.
+const PRECISE_SCROLL_SCALE: f64 = 0.1;
+
+/// One winit scroll event as the **notch count** vanilla's `yoffset` carries.
+///
+/// The two delta kinds are different units and were being read as the same one:
+/// `LineDelta` is already notches, but `PixelDelta` is raw points, and a trackpad
+/// event carrying `p.y == 12.0` was arriving as *twelve* notches. Downstream that
+/// is `12 * scrollRate()` — 144 px of a settings list in one event, which is the
+/// owner's "scrolling is a fixed jump" report, and twelve hotbar slots for the
+/// same flick.
+///
+/// [`PRECISE_SCROLL_SCALE`] is the conversion, taken from GLFW rather than tuned:
+/// it is by definition the number vanilla receives for the same physical gesture.
+///
+/// Free function for [`scale_scroll`]'s reason — and applied *before* it, because
+/// `discreteMouseScroll`'s `signum` must see a notch count. Applied after, a
+/// trackpad event would be `signum(12.0) == 1.0` either way and the option would
+/// mask the bug rather than the bug showing.
+fn wheel_notches(delta: winit::event::MouseScrollDelta) -> f64 {
+    match delta {
+        winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+        winit::event::MouseScrollDelta::PixelDelta(p) => p.y * PRECISE_SCROLL_SCALE,
+    }
+}
+
 /// Vanilla's `ScrollWheelHandler.onMouseScroll` (issue #203): folds a
 /// sensitivity-scaled, possibly-fractional scroll offset into a whole number
 /// of hotbar slots, carrying the remainder in `accum` across calls so a
@@ -396,6 +445,35 @@ struct WindowApp {
     /// F3+G — draw the borders of the chunk the player is in. Same `Arc` reason
     /// as [`Self::debug_hitboxes`].
     debug_chunk_borders: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The menu row whose slider the mouse is currently dragging, if any —
+    /// vanilla's `AbstractSliderButton.dragging`.
+    ///
+    /// Holds the **row**, not just a flag, because a drag continues while the
+    /// cursor leaves the row: once it has begun, the row is fixed and only the
+    /// x matters. Cleared on mouse-up.
+    menu_slider_drag: Option<usize>,
+    /// The Render Distance value last seen on [`Self::nav`], for edge detection.
+    ///
+    /// Seeded from the launch config, so the first frame arms nothing.
+    render_distance_seen: u32,
+    /// When the pending Render Distance change becomes live — vanilla's
+    /// `OptionInstance.OptionInstanceSliderButton.delayedApplyAt`.
+    ///
+    /// # Why deferred rather than per-frame
+    ///
+    /// `renderDistance` is the one `IntRange` vanilla builds with
+    /// `applyValueImmediately == false` (`Options.java:1470-1477`), and
+    /// `applyValue` is `this.delayedApplyAt = Util.getMillis() + 600L`
+    /// (`OptionInstance.java:404-409`), committed from the render extract once
+    /// the deadline passes (`:429-435`). Re-armed by *every* change, so the
+    /// commit lands 600 ms after the drag stops, not 600 ms after it starts.
+    ///
+    /// Applying per frame instead would reload chunks on every pixel of the
+    /// drag — which is exactly the cost the delay exists to avoid, and why the
+    /// value being *stored* eagerly (it always was, see
+    /// `config::Options::render_distance`) is not the same thing as it being
+    /// *applied*.
+    render_distance_apply_at: Option<Instant>,
     /// Whether the player-list binding is currently held (shows the overlay).
     tab_held: bool,
     /// A `key.screenshot` press waiting to be serviced (issue #16).

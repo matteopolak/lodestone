@@ -381,6 +381,64 @@ impl LiveOption {
             | LiveOption::ChatColors => None,
         }
     }
+
+    /// The mutable partner of [`Self::unit_double`] — the write side a slider
+    /// **drag** needs (the settings-menu drag work).
+    ///
+    /// Kept immediately beside its reader on purpose: a slider whose handle is
+    /// placed from one field and set on another is the exact class of bug
+    /// `Cell::slider_fraction`'s own doc records, and the two matches being
+    /// adjacent is what makes a mismatch visible on inspection. **Both arms
+    /// must stay exhaustive and must list the same variants**, which the
+    /// compiler enforces for the enum but not for the `Some`/`None` split — see
+    /// `every_unit_double_option_is_readable_and_writable`.
+    pub(super) fn unit_double_mut(
+        self,
+        options: &mut crate::config::Options,
+    ) -> Option<&mut f32> {
+        match self {
+            LiveOption::ChatScale => Some(&mut options.chat_scale),
+            LiveOption::ChatWidth => Some(&mut options.chat_width),
+            LiveOption::ChatHeightFocused => Some(&mut options.chat_height_focused),
+            LiveOption::ChatHeightUnfocused => Some(&mut options.chat_height_unfocused),
+            LiveOption::ChatLineSpacing => Some(&mut options.chat_line_spacing),
+            LiveOption::ChatOpacity => Some(&mut options.chat_opacity),
+            LiveOption::TextBackgroundOpacity => Some(&mut options.chat_background_opacity),
+            LiveOption::Sensitivity => Some(&mut options.sensitivity),
+            LiveOption::RenderDistance
+            | LiveOption::GuiScale
+            | LiveOption::ViewBobbing
+            | LiveOption::ToggleSneak
+            | LiveOption::ToggleSprint
+            | LiveOption::ToggleAttack
+            | LiveOption::ToggleUse
+            | LiveOption::AutoJump
+            | LiveOption::SprintWindow
+            | LiveOption::InvertMouseX
+            | LiveOption::InvertMouseY
+            | LiveOption::DiscreteMouseScroll
+            | LiveOption::MouseWheelSensitivity
+            | LiveOption::ChatColors => None,
+        }
+    }
+
+    /// This option's `IntRange` bounds, for the ones built on one.
+    ///
+    /// Reads [`INT_RANGE_SLIDERS`] by accessor rather than restating the pair,
+    /// so the range a **drag** writes through and the range
+    /// [`Cell::slider_fraction`] places the handle with are one table.
+    #[must_use]
+    pub(super) fn int_range(self) -> Option<SliderRange> {
+        let accessor = match self {
+            LiveOption::RenderDistance => "renderDistance",
+            LiveOption::SprintWindow => "sprintWindow",
+            _ => return None,
+        };
+        INT_RANGE_SLIDERS
+            .iter()
+            .find(|(a, _, _)| *a == accessor)
+            .map(|(_, r, _)| *r)
+    }
 }
 
 /// `ChatComponent.getWidth` (`ChatComponent.java:416-420`):
@@ -722,6 +780,37 @@ impl SliderRange {
         let lo = f64::from(self.min);
         let hi = f64::from(self.max) + 1.0;
         (((v - lo) / (hi - lo)) as f32).clamp(0.0, 1.0)
+    }
+
+    /// `IntRangeBase.fromSliderValue` (`OptionInstance.java:303-309`), the
+    /// inverse a slider **drag** needs:
+    ///
+    /// ```java
+    /// default Integer fromSliderValue(final double value) {
+    ///    return Mth.floor(Mth.map(value, 0.0, 1.0, this.minInclusive(),
+    ///                             this.maxInclusive() + 1.0));
+    /// }
+    /// ```
+    ///
+    /// **The `max + 1` and the `floor` are the bucket model, not a fencepost
+    /// slip** — see [`Self::to_slider_value`]'s doc: an `IntRange` slider selects
+    /// a bucket, so a fraction of exactly `1.0` maps to `max + 1` before the
+    /// floor and has to be clamped back. Without the clamp the top of the track
+    /// would select a value one past the maximum, which for `renderDistance` is
+    /// 33 chunks and for `sprintWindow` is 11 ticks.
+    ///
+    /// Round-trips with [`Self::to_slider_value`] for every value in range,
+    /// which is the property `slider_values_round_trip_through_the_bucket_map`
+    /// asserts — note that is *not* a `decode(encode(x))` tautology here,
+    /// because both directions are transcribed from the jar independently and
+    /// the endpoint special cases only exist in one of them.
+    #[must_use]
+    pub fn from_slider_value(self, fraction: f32) -> i32 {
+        let f = f64::from(fraction.clamp(0.0, 1.0));
+        let lo = f64::from(self.min);
+        let hi = f64::from(self.max) + 1.0;
+        let mapped = lo + f * (hi - lo);
+        (mapped.floor() as i32).clamp(self.min, self.max)
     }
 }
 
@@ -2827,6 +2916,33 @@ impl SettingsNav {
         }
     }
 
+    /// The live slider option at visible row `row`, if that row is one.
+    ///
+    /// The mouse-**drag** half of a slider (vanilla's
+    /// `AbstractSliderButton.onDrag` → `setValueFromMouse`), which this screen
+    /// had no equivalent of at all: `click_row` routed every slider through
+    /// `activate` → `SettingsOutcome::Cycle`, i.e. one wrapping step per click.
+    /// That is why a slider "moved a tiny bit on click" instead of following the
+    /// cursor.
+    ///
+    /// Resolves the row against [`Self::visible`] exactly as [`Self::click_row`]
+    /// does, rather than indexing `all_controls`, for the #391 reason recorded
+    /// there.
+    ///
+    /// `None` for a row that is not a live slider — which is what makes the
+    /// caller fall back to the click path rather than swallowing the click.
+    #[must_use]
+    pub fn slider_row_option(&self, row: usize) -> Option<LiveOption> {
+        let control = self.visible().get(row).copied()?;
+        let Cell::Option(spec) = control.cell else {
+            return None;
+        };
+        if spec.widget != OptionWidget::Slider || !control.cell.is_live() {
+            return None;
+        }
+        spec.live
+    }
+
     /// The one place a control's activation is interpreted.
     ///
     /// An **inactive** control does nothing at all, which is
@@ -3830,6 +3946,85 @@ mod tests {
         );
     }
 
+    /// The read and write sides of a `UnitDouble` slider must agree about which
+    /// options they cover.
+    ///
+    /// The compiler enforces that both `match`es are exhaustive over the enum,
+    /// but not that the `Some`/`None` split is the *same* split — a slider
+    /// readable but not writable silently reverts under the cursor, and one
+    /// writable but not readable moves the world with its handle parked.
+    #[test]
+    fn every_unit_double_option_is_readable_and_writable() {
+        let mut o = crate::config::Options::default();
+        for &live in ALL_LIVE_OPTIONS {
+            let readable = live.unit_double(&o).is_some();
+            let writable = live.unit_double_mut(&mut o).is_some();
+            assert_eq!(
+                readable, writable,
+                "{live:?}: readable {readable}, writable {writable}"
+            );
+        }
+    }
+
+    /// [`SliderRange::from_slider_value`] and [`SliderRange::to_slider_value`]
+    /// are transcribed from the jar independently and only one of them carries
+    /// the endpoint special cases, so this is not a `decode(encode(x))`
+    /// tautology: it is the bucket model agreeing with itself.
+    #[test]
+    fn slider_values_round_trip_through_the_bucket_map() {
+        for (accessor, range, _) in INT_RANGE_SLIDERS {
+            for value in range.min..=range.max {
+                let f = range.to_slider_value(value);
+                let back = range.from_slider_value(f);
+                assert_eq!(
+                    back, value,
+                    "{accessor}: {value} -> fraction {f} -> {back}"
+                );
+            }
+            // Both track ends land on the bounds, never one past them — the
+            // `max + 1` in the bucket map is what makes that need a clamp.
+            assert_eq!(range.from_slider_value(0.0), range.min, "{accessor} low");
+            assert_eq!(range.from_slider_value(1.0), range.max, "{accessor} high");
+        }
+    }
+
+    /// Every [`LiveOption`] there is, hand-listed.
+    ///
+    /// Module-scoped so the reachability sweep and the read/write parity check
+    /// share **one** list: two lists would drift, and the second one to drift
+    /// would pass vacuously. `every_live_option_is_reachable_from_some_row`
+    /// carries the control that proves this is exhaustive over the enum.
+    const ALL_LIVE_OPTIONS: &[LiveOption] = &[
+        LiveOption::GuiScale,
+        LiveOption::ViewBobbing,
+        LiveOption::ToggleSneak,
+        LiveOption::ToggleSprint,
+        LiveOption::ToggleAttack,
+        LiveOption::ToggleUse,
+        LiveOption::InvertMouseX,
+        LiveOption::InvertMouseY,
+        LiveOption::MouseWheelSensitivity,
+        LiveOption::ChatScale,
+        LiveOption::ChatWidth,
+        LiveOption::ChatHeightFocused,
+        LiveOption::ChatHeightUnfocused,
+        LiveOption::ChatLineSpacing,
+        LiveOption::ChatOpacity,
+        LiveOption::TextBackgroundOpacity,
+        LiveOption::ChatColors,
+        // Issue #443's migration: both were on argv-only `Config` and are
+        // now persisted `Options` fields with a real row.
+        LiveOption::Sensitivity,
+        LiveOption::RenderDistance,
+        // Issue #444: the six Controls/Mouse rows. `discreteMouseScroll` was
+        // the first, whose consumer this shell already had — `app`'s wheel
+        // boundary; the other four landed with the toggles/auto-jump/sprint
+        // window. See the variants' own docs.
+        LiveOption::DiscreteMouseScroll,
+        LiveOption::AutoJump,
+        LiveOption::SprintWindow,
+    ];
+
     /// Every [`LiveOption`] must be placed on some page — the island check in
     /// the *outbound* direction.
     ///
@@ -3841,36 +4036,7 @@ mod tests {
     /// to place.
     #[test]
     fn every_live_option_is_reachable_from_some_row() {
-        const ALL: &[LiveOption] = &[
-            LiveOption::GuiScale,
-            LiveOption::ViewBobbing,
-            LiveOption::ToggleSneak,
-            LiveOption::ToggleSprint,
-            LiveOption::ToggleAttack,
-            LiveOption::ToggleUse,
-            LiveOption::InvertMouseX,
-            LiveOption::InvertMouseY,
-            LiveOption::MouseWheelSensitivity,
-            LiveOption::ChatScale,
-            LiveOption::ChatWidth,
-            LiveOption::ChatHeightFocused,
-            LiveOption::ChatHeightUnfocused,
-            LiveOption::ChatLineSpacing,
-            LiveOption::ChatOpacity,
-            LiveOption::TextBackgroundOpacity,
-            LiveOption::ChatColors,
-            // Issue #443's migration: both were on argv-only `Config` and are
-            // now persisted `Options` fields with a real row.
-            LiveOption::Sensitivity,
-            LiveOption::RenderDistance,
-            // Issue #444: the six Controls/Mouse rows. `discreteMouseScroll` was
-            // the first, whose consumer this shell already had — `app`'s wheel
-            // boundary; the other four landed with the toggles/auto-jump/sprint
-            // window. See the variants' own docs.
-            LiveOption::DiscreteMouseScroll,
-            LiveOption::AutoJump,
-            LiveOption::SprintWindow,
-        ];
+        const ALL: &[LiveOption] = ALL_LIVE_OPTIONS;
         let placed: Vec<LiveOption> = PAGES
             .iter()
             .flat_map(|&p| all_controls(p, OUTSIDE_A_WORLD))

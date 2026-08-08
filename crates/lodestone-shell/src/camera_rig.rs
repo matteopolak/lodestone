@@ -674,7 +674,9 @@ pub fn bobbed_camera(cam: Camera, frame: BobFrame, damage_tilt_strength: f32) ->
     // `-Z` (`Camera::forward`'s own definition of forward).
     let position = inv.project_point3(Vec3::ZERO);
     let forward = inv.transform_vector3(Vec3::new(0.0, 0.0, -1.0)).normalize();
-    let (yaw, pitch) = yaw_pitch_from_forward(forward);
+    // `cam.yaw` is the fallback, and it is the *right* answer rather than a
+    // guess: see [`yaw_pitch_from_forward_or`].
+    let (yaw, pitch) = yaw_pitch_from_forward_or(forward, cam.yaw);
     Camera {
         position,
         yaw,
@@ -702,10 +704,69 @@ fn invertible(m: glam::Mat4) -> Option<glam::Mat4> {
 /// so this is `pitch = asin(-y)` and `yaw = atan2(-x, z)`. Derived from that one
 /// expression rather than from a convention, and round-tripped in the tests
 /// against `Camera::forward` itself so the two cannot drift.
+///
+/// **This is the pure inverse and it is degenerate at the poles** — at pitch
+/// `±90` both `x` and `z` are zero and the yaw it returns is meaningless. Use
+/// [`yaw_pitch_from_forward_or`] anywhere the direction comes out of a matrix
+/// rather than out of a `Camera`.
 #[must_use]
 pub fn yaw_pitch_from_forward(forward: Vec3) -> (f32, f32) {
     let pitch = (-forward.y).clamp(-1.0, 1.0).asin().to_degrees();
     let yaw = (-forward.x).atan2(forward.z).to_degrees();
+    (yaw, pitch)
+}
+
+/// The horizontal magnitude below which the `atan2` in
+/// [`yaw_pitch_from_forward`] is reading noise rather than a direction.
+///
+/// `sin(1.5°)`. Sized off the **bob's nod**, not off float epsilon, because the
+/// nod is what perturbs the near-zeros: `BobFrame::view_nod_degrees` is
+/// `|cos(…) · bob| · 5.0` and `bob` is capped at `0.1` by `updateBob`'s
+/// `speed.min(0.1)`, so the nod is at most `0.5°` and 1.5° is three times that.
+/// An epsilon-sized threshold would be the wrong instrument entirely — see
+/// [`yaw_pitch_from_forward_or`].
+const DEGENERATE_HORIZONTAL: f32 = 0.026;
+
+/// [`yaw_pitch_from_forward`] with a caller-supplied yaw for the degenerate
+/// case: when `forward` is within [`DEGENERATE_HORIZONTAL`] of straight up or
+/// straight down, `fallback_yaw` is returned unchanged.
+///
+/// # Why this exists, and why "the bob keeps us off exact vertical" is backwards
+///
+/// `d17c731c` fixed the *view matrix* singularity (`look_to_mat4` with `forward
+/// ∥ Y`). This is the other half, in the *decomposition*: at pitch `±90`
+/// `forward` is `(0, ∓1, 0)`, `forward.x` and `forward.z` are both ~`4e-8`, and
+/// `atan2` of two near-zeros is decided by whichever noise term happens to
+/// dominate. A previous note filed this as latent on the grounds that the bob's
+/// `≤0.5°` nod keeps `forward` off exact vertical — **the nod is the trigger,
+/// not the mitigation.** Look straight down and walk (autojump up a block is the
+/// easy repro) and the nod flips which near-zero dominates every few frames,
+/// swinging the derived yaw through 180°.
+///
+/// # Why `fallback_yaw` is correct rather than a fudge
+///
+/// The bob **cannot change yaw at all.** `BobFrame::eye_transform` is
+/// `T · Rz(roll) · Rx(nod)` in *eye* space, and `Camera` carries no roll, so the
+/// camera's own X axis is always horizontal: `Rx` is a pure pitch delta and `Rz`
+/// does not move the forward vector. So near the pole the caller's existing yaw
+/// is not an approximation of the answer, it *is* the answer, and the `atan2`
+/// result is the approximation. That also means the threshold has to be sized to
+/// the nod (which it is) rather than to float epsilon (which would let the
+/// entire failure through, because the noise the nod injects is ~`0.009`, five
+/// orders of magnitude above epsilon).
+///
+/// The pitch is unaffected and stays derived. When the nod pushes pitch *past*
+/// `±90` the returned pitch reflects back (`89.7` for a true `90.3`) instead of
+/// crossing the pole with a 180° yaw flip — a sub-degree pitch error in place of
+/// a whole-screen swing.
+#[must_use]
+pub fn yaw_pitch_from_forward_or(forward: Vec3, fallback_yaw: f32) -> (f32, f32) {
+    let pitch = (-forward.y).clamp(-1.0, 1.0).asin().to_degrees();
+    let yaw = if forward.x.hypot(forward.z) < DEGENERATE_HORIZONTAL {
+        fallback_yaw
+    } else {
+        (-forward.x).atan2(forward.z).to_degrees()
+    };
     (yaw, pitch)
 }
 
@@ -1321,6 +1382,45 @@ mod tests {
             "the nod lands on pitch as +{:.5} deg",
             dip.view_nod_degrees()
         );
+    }
+
+    /// The owner's repro: look straight down (or up) and walk, and the view used
+    /// to swing.
+    ///
+    /// The bob's nod perturbs `forward.x` and `forward.z` — both ~`4e-8` at
+    /// pitch `±90` — by about `0.009`, and `atan2` of two near-zeros is decided
+    /// by whichever dominates, so the derived yaw flipped 180° as the nod
+    /// oscillated. Walking the phase over a full stride is what makes it
+    /// visible; the earlier note that filed this as latent used an **inert**
+    /// frame, the one case where it structurally cannot appear.
+    #[test]
+    fn a_bobbing_camera_at_the_poles_keeps_its_yaw() {
+        for pitch in [90.0f32, -90.0, 89.999, -89.999] {
+            let cam = Camera {
+                position: Vec3::new(8.5, 65.62, -12.25),
+                yaw: 37.0,
+                pitch,
+                ..Camera::default()
+            };
+            // A full stride at the amplitude ceiling, so every nod sign and
+            // every sway sign is sampled.
+            for step in 0..64 {
+                let frame = BobFrame {
+                    walk_phase: step as f32 / 32.0,
+                    bob: 0.1,
+                    hurt: -1.0,
+                    hurt_dir_degrees: 0.0,
+                };
+                let bobbed = bobbed_camera(cam, frame, 0.0);
+                assert!(
+                    (bobbed.yaw - cam.yaw).abs() < 1e-3,
+                    "pitch {pitch}, phase step {step}: yaw {} -> {} (the bob \
+                     cannot change yaw at all)",
+                    cam.yaw,
+                    bobbed.yaw
+                );
+            }
+        }
     }
 
     #[test]

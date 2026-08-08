@@ -450,16 +450,49 @@ impl Widget {
     /// `AbstractSliderButton.getHandleSprite()`
     /// (`AbstractSliderButton.java:41-43`):
     /// `!isActive() || (!isHovered && !canChangeValue) ? SLIDER_HANDLE :
-    /// SLIDER_HANDLE_HIGHLIGHTED`. `canChangeValue` is the same always-`false`
-    /// keyboard latch [`Self::slider_background_sprite`]'s doc explains, so
-    /// the condition collapses to `isActive() && self.hovered`.
+    /// SLIDER_HANDLE_HIGHLIGHTED`.
     ///
-    /// Note the predicate is **hover**, not focus — the opposite of
-    /// [`Self::slider_background_sprite`]'s track, which highlights on focus
-    /// alone. Both are transcribed as vanilla wrote them, not harmonised.
+    /// # `canChangeValue` is **not** always false, and reading it that way was
+    /// the bug
+    ///
+    /// This used to collapse the condition to `isActive() && self.hovered`,
+    /// borrowing [`Self::slider_background_sprite`]'s claim that
+    /// `canChangeValue` is a latch nothing here sets. Read
+    /// `AbstractSliderButton.setFocused` instead of the summary:
+    ///
+    /// ```java
+    /// public void setFocused(final boolean focused) {
+    ///    super.setFocused(focused);
+    ///    if (!focused) { this.canChangeValue = false; }
+    ///    else {
+    ///       InputType lastInputType = Minecraft.getInstance().getLastInputType();
+    ///       if (lastInputType == InputType.MOUSE || lastInputType == InputType.KEYBOARD_TAB) {
+    ///          this.canChangeValue = true;
+    ///       }
+    ///    }
+    /// }
+    /// ```
+    ///
+    /// A slider focused by mouse or by Tab — i.e. every way a player focuses one
+    /// — has `canChangeValue == true`. So the honest collapse is
+    /// `isActive() && (hovered || focused)`, and the consequence the owner
+    /// reported is real: this screen never populates
+    /// [`super::render::MenuFrame::hovered`] (only `ServerEdit` and
+    /// `WorldSelect` do), so with `hovered` alone the knob could never highlight
+    /// at all, however the row was reached.
+    ///
+    /// # The track's own predicate is left alone, and it is now the odd one
+    ///
+    /// `getSprite()` is `isActive() && isFocused() && !canChangeValue`, so with
+    /// `canChangeValue` true for a focused slider the *track* highlights in
+    /// vanilla essentially never. [`Self::slider_background_sprite`] still
+    /// highlights on focus, which is a knowing divergence: a settings row that
+    /// gave no visual response to the cursor at all would be worse, and the
+    /// owner's report was about the knob. Recorded here rather than silently
+    /// harmonised.
     #[must_use]
     pub fn slider_handle_sprite(&self) -> &'static str {
-        if self.is_active() && self.hovered {
+        if self.is_active() && (self.hovered || self.focused) {
             "widget/slider_handle_highlighted"
         } else {
             "widget/slider_handle"
@@ -1916,19 +1949,24 @@ mod tests {
     }
 
     #[test]
-    fn a_sliders_handle_highlights_on_hover_not_focus() {
-        // The exact opposite predicate from the track's, per
+    fn a_sliders_handle_highlights_on_hover_or_focus() {
         // `AbstractSliderButton.getHandleSprite()`
-        // (`AbstractSliderButton.java:41-43`). Control-by-inversion of
-        // `a_slider_has_a_track_but_no_disabled_track`, so a fix to one that
-        // accidentally copies the other's predicate fails here.
+        // (`AbstractSliderButton.java:41-43`) is
+        // `!isActive() || (!isHovered && !canChangeValue) ? SLIDER_HANDLE : …`,
+        // and `canChangeValue` is `true` for a slider focused by mouse or Tab
+        // (`setFocused`) — **not** the always-false latch the track's own doc
+        // describes. This used to assert focus does *not* highlight the handle,
+        // borrowing that claim; see `Widget::slider_handle_sprite`'s doc for the
+        // Java and for why the consequence was visible (this screen never
+        // populates `MenuFrame::hovered`, so hover alone meant the knob could
+        // never light up at all).
         let mut s = Widget::slider(0.0, 0.0, 150.0, 20.0, "Master Volume");
         assert_eq!(s.slider_handle_sprite(), "widget/slider_handle");
         s.focused = true;
         assert_eq!(
             s.slider_handle_sprite(),
-            "widget/slider_handle",
-            "focus highlights the track, not the handle"
+            "widget/slider_handle_highlighted",
+            "a focused slider has canChangeValue == true, so the handle lights up"
         );
         s.focused = false;
         s.hovered = true;
