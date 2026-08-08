@@ -147,33 +147,24 @@ fn to_world_column(shape: &ChunkShape, src: &lodestone_server::ChunkColumn) -> W
     column
 }
 
-/// Exact-property block-state resolution over the committed census.
+/// Block-state resolution over the committed census — **the production function**,
+/// not a copy of it.
+///
+/// This was a hand-rolled duplicate whose fallback was "the lowest id sharing the
+/// block name". That was the *pre-`43a6e030`* rule, and it is wrong for 661 of the
+/// 797 multi-state blocks: it made bare `minecraft:grass_block` resolve snowy
+/// (#546), bare directionals face whatever the lowest id faced (#475), and
+/// redstone dust render climbing rather than flat. So this helper had already
+/// become a silent caller of a rule the encoder no longer follows — the exact
+/// failure `CLAUDE.md` records, where a *sibling* copy in
+/// `block_entities_live.rs` failed as a 30-second live timeout rather than a
+/// mismatch.
+///
+/// Since the resolver moved into `lodestone-data` there is a public function to
+/// call, and a light oracle that resolved a state differently from the encoder it
+/// is judging would be comparing two different worlds. Do not re-inline this.
 fn resolve_state_id(state: &str) -> u32 {
-    let (name, raw) = match state.split_once('[') {
-        Some((name, rest)) => (name, rest.strip_suffix(']').unwrap_or(rest)),
-        None => (state, ""),
-    };
-    let mut wanted: Vec<(&str, &str)> = if raw.is_empty() {
-        Vec::new()
-    } else {
-        raw.split(',').filter_map(|p| p.split_once('=')).collect()
-    };
-    wanted.sort_unstable();
-    let mut fallback = None;
-    for id in 0..block_states::STATE_COUNT {
-        if block_states::block_name(id) != Some(name) {
-            continue;
-        }
-        if fallback.is_none() {
-            fallback = Some(id);
-        }
-        let mut have: Vec<(&str, &str)> = block_states::properties(id).unwrap_or(&[]).to_vec();
-        have.sort_unstable();
-        if have == wanted {
-            return id;
-        }
-    }
-    fallback.unwrap_or(0)
+    block_states::state_id(state).unwrap_or_else(block_states::air_state_id)
 }
 
 /// The light payload the real encoder put on the wire for `(cx, cz)`.
