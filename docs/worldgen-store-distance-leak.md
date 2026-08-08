@@ -374,6 +374,30 @@ Found while sweeping, plausible, and each is its own unit. Do not treat as estab
   silently defeats a pool a module doc calls load-bearing. Storing the bounds *span* rather than
   the absolute box would fix it; the shapes are already relative.
 
+## Superseded numbers (issue #514 widened the closure)
+
+**Every measurement above is still what it was; three of the constants it is written in have moved.**
+Read this before quoting a figure from it. The record is DESIGN.md §12.130.
+
+| constant | in this doc | now |
+|---|---|---|
+| pin radius | `COLUMN_CLOSURE_RADIUS` = 2 | `STRUCTURE_CLOSURE_RADIUS` = **10** |
+| `STORE_RETENTION` | 512 | **2,048** |
+| one column's closure | 5×5 = 25 | 21×21 = **441** |
+| a 17×17 join view's closure | 21×21 = 441 | 37×37 = **1,369** |
+| entries per chunk of travel | 21 | **37** |
+
+Issue #514 put `structure_starts`/`structure_refs` *above* `pre_ore`, and `structure_refs` walks
+`REFS_RADIUS` = 8 chunks in every direction. So the "21 entries (~7.9 MiB) per chunk of travel" slope
+this doc measured is now ~37 entries per chunk — but only ~5 of those hold a dense grid, the rest being
+structure-starts-only, which is why the ceiling could be raised 4× without a matching memory rise. The
+`kib_per_block` shape and the *mechanism* of the leak are unchanged.
+
+One consequence for the sentence above about the four eviction-is-zero gates: **`staged_store_counters`'
+`256/0` is no longer the right expectation** — the sweep's real working set is its structure closure,
+32×32 = 1,024 — and that gate has been red since #514 landed, for the reason described here rather than
+for a new one. `staged_store_gates`' burst gate still holds (1,369 < 2,048) but its prose says 441.
+
 ## Dependencies
 
 `lodestone-worldgen` (`overworld::OverworldGenerator`, `overworld::store::StagedStore`) and

@@ -5360,3 +5360,123 @@ work claims. The ±5 search box still fails for an ocean origin — seed 1234 ne
 842 columns — and widening it affordably needs vanilla's climate sampler (`findSpawnPosition`), which
 samples noise rather than composing columns; the fallback is now survivable rather than fatal, which is
 the difference between a bad spawn and a world that looks hung.
+
+**12.130 Chunk generation had regressed 4× and the instrument that would have said so was red — and the
+red assertion and the regression turned out to be *the same defect*, seen twice: issue #514 widened one
+column's store closure from 25 chunks to 441 and nothing downstream of that number was re-derived. The
+allocation counter went 64 → 87,882 → 118 without any stage ever being the owner.**
+
+Measured at `ac5391d1`/`8744f380`, release, `lto = "thin"`, embedded server data, 12×12 sweep, seed 42.
+The audit that opened this unit had two numbers: C_ss 15.14 ms (§12.112) → **79.6/79.9 ms**, and
+steady-state heap allocations per column 64 → **87,882**. The second was called "regression-shaped, not
+new-work-shaped", which was right, and the brief named five candidate stages, all of which were wrong.
+
+- **The gate was red because `block_at` had grown a *second consumer*, and the fix is a decomposition
+  rather than a number.** `benches/generation.rs` asserted `block_at == 256 × height × 25 fills =
+  2,457,600` and measured **2,493,803** — 99,752 per fill against 98,304, +1.5%. Not #496's ore veins
+  and not #516's MOTION_BLOCKING heightmap, the two named suspects: `AquiferSystem::block_at` has
+  exactly **two** call sites, and the new one is `StartSampler::first_occupied_height`
+  (`overworld/structures.rs`), which answers a structure-placement heightmap query by scanning a column
+  top-down through the aquifer because the terrain does not exist yet. On a cold column that is **137
+  probes × 264.3 levels = 36,203 calls**, and it is data — how many probes and how deep depends on
+  which structure sets try to place near the origin. The gate now asserts
+  `block_at == fill cells + structure_probe_block_at`, an exhaustive account of both consumers, so the
+  98,304 stays pinned and a *third* consumer still fails. Raising the literal to 99,752 would have made
+  the gate green and destroyed the only thing it measures. **The identity is self-controlling:** if the
+  new counter were dead it would read 0 and the equation would fail by exactly the probe cost, which is
+  how the term was found. `stage_entered[Aquifer]` needed the same treatment — probes build real
+  aquifers for chunks outside the pre-ore closure — and *that* assertion was invisible behind the first
+  one. **A bench aborts at its first failing assertion, so one red assertion hides an unknown number of
+  others.** Two were hiding here, and the second was the diagnosis.
+- **The allocation regression's owner was not a stage. It was `STORE_RETENTION` and the `open_view` pin
+  radius, both still sized for the pre-#514 world.** `pre_ore_stage` reads `structure_refs_stage`,
+  which walks `structure_starts_stage` over `REFS_RADIUS = 8` (vanilla's `createReferences` range). So
+  one `column()` call's closure is `COLUMN_CLOSURE_RADIUS + REFS_RADIUS = 10`, i.e. **21×21 = 441
+  store entries, not 25** — and the pin was still 2, and retention still 512 against a 12×12 sweep
+  whose real working set is 32×32 = **1,024**. The store therefore evicted, oldest-unpinned-first, the
+  neighbours the sweep was about to read back. Fixed by deriving both from `REFS_RADIUS`: pin radius 10,
+  retention 2,048 (the 289-column join burst closes over 37×37 = 1,369). Sweep counters, before → after,
+  each against a prediction computed from the radii and not from the run:
+
+  | counter | predicted | before | after |
+  |---|---|---|---|
+  | `pre_ore_computed` | 256 | **740** (2.9×) | **256** |
+  | `post_ore_computed` | 196 | **416** (2.1×) | **196** |
+  | `structure_starts_computed` | 1,024 | **7,569** (7.4×) | **1,024** |
+  | store evictions | 0 | non-zero | **0** |
+  | steady-state heap allocs/column | 0 + O(1) | **87,882** | **118** |
+  | C_ss median of 100 interior | — | 79,866 µs | **21,045 µs** |
+  | whole 12×12 sweep | — | 12.295 s | **5.024 s** |
+
+  The C_ss and sweep rows are same-machine, same-profile, same-scene ratios out of
+  `bench-results/generation.jsonl` (0.264 and 0.409), not two runs compared by hand.
+- **The allocation counter was measuring the right thing and pointing at nothing.** Its per-stage
+  binning after the fix reads vegetation 58 / intern 40 / other 20 — no structure bin at all. Before the
+  fix the 87,882 were not *in* a stage either; they were the same stages, run 2.9–7.4× too many times.
+  **An 87,882-against-64 allocation counter can be a scheduling defect rather than a representational
+  one, and the per-stage split cannot tell you which** — it answers "which stage allocates", never "how
+  many times did that stage run". The counter that separates them already existed
+  (`store_evictions()`), was documented as "the control that separates each stage computed exactly once
+  from each stage computed once plus however many times eviction silently made us redo it", and **was
+  not asserted anywhere in this bench.** It is now, outside the counters gate, because it needs none.
+- **Every one of the five stages the brief named as suspects was innocent, and the reason is worth
+  keeping.** `feature/vegetation/features.rs`'s 43 `String` sites, the `[(String, bool); 16]` in the
+  pre-ore tuple, `top_layer::StatePredicate`'s String keys and 3-D `BiomeCells` are all real and all
+  still there — they are simply not 87,882 allocations, because the steady-state path runs each of them
+  once. **A code-shaped suspect list and a counter disagree in a predictable direction: the list finds
+  things proportional to *code*, the counter measures things proportional to *executions*.** One run of
+  the repaired instrument was worth more than the whole list, which is what the brief predicted and the
+  reason the gate was worth repairing first.
+- **Instructions retired is now the standing comparator for this bench, and it had to be measured
+  inside the sweep rather than on a repeat.** The easy shape — repeat `column(5, 5)` on the warm
+  generator, take the median — measured **3.6 ms against C_ss's 21.4 ms**, because a repeat re-runs only
+  vegetation/top_layer/intern while the store answers everything else. That is a comparator blind to
+  **83%** of the cost, which is worse than none because it looks like one. I_ss is therefore the median
+  of the *same 100 interior columns* C_ss is the median of, two reads per column costing 0.006% of a
+  column. Baseline: **488,507,564 instructions/column**. Repeatability over 7 repetitions of identical
+  work, both instruments on the same repetitions: **instructions 0.18–0.21%, wall clock 11.6–19.1%** —
+  the §12 figure reproduced rather than quoted. Wall clock is kept, and `insn/µs` is printed, because
+  instructions are blind to locality (§12.120's 490k-instructions-but-7×-the-time case).
+- **Two controls fired on correct code before the instrument was trustworthy, and both were the
+  instrument's own arithmetic being wrong rather than the reading.** (1) The 4×-scaling control read
+  **1304.7×**: `reference_kernel` reads no memory, so LLVM infers `readnone` and CSE'd the warm-up call
+  with the first measured call — `#[inline(never)]` prevents inlining, **not** CSE. Fixed by
+  `black_box`ing the *argument*, not only the result. (2) It then read **3.663×**, because
+  `proc_pid_rusage` itself costs about **80,000 instructions per read** (it walks the task's threads —
+  far more than its ~600 ns wall figure suggests), and that fixed term inflates the smaller arm
+  proportionally more: the true ratio is `(4nk + C)/(nk + C)`. Fixed by raising the loop bound to
+  5,000,000, where the term is 0.4%, and tightening the band to [3.90, 4.10] rather than widening it to
+  hide the residual. **An instruction counter has a floor of tens of thousands of instructions, so
+  nothing smaller than about a millisecond of work can be measured with it directly.**
+- **`instructions` had to be added to the bench harness's own poison list, and it does not belong with
+  the other counts.** `support.rs` refuses to record an absolute timing from a `gen-counters` build
+  because the counters inflate a burst ~3×. `allocs`, `calls` and `draws` are deliberately *exempt* —
+  they count events in the pipeline and the hooks add none. Retired instructions are not that: a `bump`
+  is a `fetch_add` plus a thread-local read at hundreds of thousands of sites per column, so an
+  instruction count from a counters build is inflated by the instrument for a *stronger* reason than a
+  timing is. Without this the first recorded I_ss would have been a counters-build number that
+  `bench-compare` would have ratioed against clean runs forever.
+- **How much of 15 → 80 ms was regression: essentially all of it.** §12.112 measured 15.14 ms; the last
+  recorded run (Aug 7, `8a37e150`) 20.4 ms; HEAD 79.6/79.9 ms; after this fix **21.0 ms**. So the
+  164 commits' legitimate new work — structures S1+S2, 3-D biomes, the OreVeinifier, 8 of 11 decoration
+  steps and 23 feature types, block entities, MOTION_BLOCKING — is the **15.1 → 20.4 ms** step, and the
+  **20.4 → 79.6 ms** step was one under-sized cache ceiling. **The 4× did not arrive with the feature
+  that caused it**; #514 landed the wider closure, and the cost only appeared once the sweep's working
+  set crossed 512, which is a threshold no per-feature review looks at. C_cold is the exception and is
+  genuinely new work: 267 ms (§12.112) → **428 ms**, because a cold column now computes 441 chunks'
+  structure starts before it can fill one.
+- **Determinism, which every claim above is conditional on.** The 45-column/5-seed U15 dump is
+  **byte-identical** across two independently built checkouts (`ac5391d1` in a detached worktree with
+  its own target dir, against this tree): 8,902,157 bytes, md5 `c0ef05ac09ba3f90175a14b0f9a69d50` on
+  both arms, harness md5 `99691bad…` equal on both arms, and a one-flipped-byte control makes `cmp`
+  fire. That is the expected result and it is not trivially so: retention and pin radius change *which
+  entries are resident*, and the whole reason it is safe is that a slot's value is a pure function of
+  its key.
+- **One `#[ignore]`d gate in `lodestone-server` needs a patch this unit could not make, and it was
+  already red before this change.** `tests/staged_store_counters.rs:130` asserts
+  `store_len == PRE_ORE_CLOSURE` (256) and `evictions == 0` after the 12×12 sweep. Both were **already
+  false at `ac5391d1`** — the structure walk created 441-per-column entries via `entry()` and the store
+  was evicting — so this change moves it from wrong-for-a-bad-reason to wrong-for-a-good-reason: the
+  correct expectation is the structure closure, 32×32 = 1,024. `staged_store_gates.rs`'s burst gate
+  still passes (1,369 < 2,048) but its prose says 21×21 = 441. Both files are outside this unit's
+  ownership.

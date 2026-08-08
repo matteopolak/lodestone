@@ -10,6 +10,16 @@ production code paths**. Owner-directed (2026-08-07); written from a read-only
 architecture review at `6803146d`+. Planning artifact only — each build item below is
 separately landable with its own evidence standard.
 
+**Status (2026-08-08): the whole-column half is built.** `benches/generation.rs` now
+reads `ri_instructions` per column *inside* the C_ss sweep and reports
+`i_ss_median_instructions_per_column` (baseline **488,507,564**), with the struct-size
+and 4×-scaling controls, and `benches/support.rs` refuses to record an instruction
+count from a `gen-counters` build. **Per-stage** instruction accounting (the §"Per-stage
+accounting" item below) is *not* built — the stage boundaries would each need a ~80,000
+instruction read, which is the measured cost of a `proc_pid_rusage` call and is larger
+than several of the ten stages. That constraint was not known when this plan was
+written and it changes the per-stage design: see DESIGN.md §12.130.
+
 ## The problem this solves
 
 Nine consecutive units of `docs/plans/worldgen-rewrite.md` declined to claim a

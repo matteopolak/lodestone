@@ -269,6 +269,50 @@ Two practical consequences for a unit written against these counters:
   it improves `C_cold`. Check *which* stages your metric can see before aiming a
   unit at it.
 
+### `I_ss`: instructions retired, the standing before/after comparator
+
+**The problem it solves.** Wall clock in `benches/generation.rs` reproduces to
+~10.8% on this machine (DESIGN.md §12.112), and §12.98 records a 20% swing on an
+*identical binary*. That is wider than most of the wins a later optimisation unit
+will claim, which is why 21 units of the rewrite drive landed against allocation
+counters — and why the headline figure went unmeasured for the whole drive. Once
+allocations reached 118 per column the counters stopped being a proxy for time, and
+nothing had replaced them.
+
+`proc_pid_rusage(getpid(), RUSAGE_INFO_V4, …)`'s `ri_instructions` reproduces to
+**0.18–0.21%** measured over 7 repetitions of identical work in this very bench,
+against **11.6–19.1%** for the wall clock on the same repetitions. It is
+unprivileged, ~600 ns of wall time per read, and the transcription reaches the field
+**by name** out of a field-by-field `#[repr(C)]` struct — the pattern comes from
+`crates/lodestone-shell/tests/client_chunk_cycles.rs`, which is the first customer
+and carries the third (locality) control. Baseline: **488,507,564
+instructions/column**, recorded as `i_ss_median_instructions_per_column`.
+
+**Read it as a pair with the wall clock, never instead of it.** Instructions are
+blind to locality: §12.120 records a case measuring 490k instructions against ~7×
+more time. The bench prints `insn/µs` for exactly this reason — a change that moves
+that ratio while `I_ss` stays flat is a cache story, not a work story.
+
+Three things about it that were paid for (§12.130):
+
+- **Measure it over the same scene the wall-clock metric uses.** The easy shape —
+  repeat one already-warm column and take the median — measured 3.6 ms against
+  C_ss's 21.4 ms, because a repeat re-runs only vegetation/top_layer/intern while
+  the store answers the rest. `I_ss` is therefore the median of the *same 100
+  interior columns* `C_ss` is. **A comparator blind to 83% of the cost is worse
+  than none, because it looks like one.**
+- **The instrument has a floor of tens of thousands of instructions.** A
+  `proc_pid_rusage` read costs about **80,000 instructions** — it walks the task's
+  threads, far more than its wall figure suggests. Nothing under ~1 ms of work can
+  be measured with it directly, and a scaling control needs a loop bound large
+  enough that the fixed term is negligible: at 200,000 iterations the 4× control
+  read **3.663** on a correct reading.
+- **A pure kernel used as a scaling control will be CSE'd.** `#[inline(never)]`
+  prevents inlining, not common-subexpression elimination; a kernel that reads no
+  memory is inferred `readnone`, and two calls with provably equal arguments
+  collapse into one. That made the control read **1304.7×**. `black_box` the
+  *argument*, not only the result.
+
 ### The five traps this cost us to learn
 
 - **A stage-participation counter belongs *below* the stage's no-data early
@@ -307,7 +351,15 @@ Two practical consequences for a unit written against these counters:
   report a 3× "regression" that is pure instrumentation.
 
   The predicate is `support::timing_is_poisoned_by_counters(unit, enabled)`, keyed
-  on **absolute** time units only (`ns`/`us`/`µs`/`ms`/`s`). Ratio, count and size
+  on **absolute** time units (`ns`/`us`/`µs`/`ms`/`s`) **and on units measuring work
+  the process actually performed** (`instructions`/`cycles`, `WORK_PERFORMED_UNITS`).
+  That second list is not a widening of the first — it is the distinction that
+  decides where a new unit goes. `allocs`, `calls` and `draws` count *events in the
+  pipeline*, and the counter hooks add none of those, so they are exempt. Retired
+  instructions count every instruction the **process** executed, and a `bump` is a
+  `fetch_add` plus a thread-local read at hundreds of thousands of sites per column,
+  so an instruction count from a `gen-counters` build is inflated by the instrument
+  for a *stronger* reason than a timing is. Ratio, count and size
   metrics — `stage_<name>_pct` (`%`), `linearity_ratio_vs_expected` (`x`),
   `calibration_*` (`calls`), `region_rss_*` (`bytes`) — still record under
   counters, deliberately: the stage split is one of the things you run *with*
@@ -325,7 +377,11 @@ Two practical consequences for a unit written against these counters:
 
   One honest caveat on the 3× figure: it is a **burst** phenomenon, and the guard
   is deliberately blanket because the inflation is metric-dependent and a bench
-  cannot know which of its numbers is burst-shaped. In the two runs above the
+  cannot know which of its numbers is burst-shaped. Measured for the instruction
+  counter specifically: `i_ss_median_instructions_per_column` reads 500,189,041 with
+  counters on and 488,507,564 with them off, a 2.4% inflation — small, entirely
+  systematic, and 10× the instrument's own 0.21% repeatability, which is exactly the
+  size of thing a comparator exists to see. In the two runs above the
   steady-state `c_ss_median_interior_us` moved only ~1% (19416 → 19624 µs) — but
   those were **separate, non-concurrent processes under different machine load**,
   so per `CLAUDE.md` that ratio is a sample, not a measurement, and it is
@@ -365,10 +421,20 @@ they can be held to:
   single thread, release, embedded data, seed 42. The border chunk ring is
   excluded because its neighbours were computed *by it*, so it carries
   cold-neighbour cost.
+- **I_ss** — the same 100 interior columns, in **instructions retired**. This is
+  the acceptance criterion a later unit should be written in; see
+  [`I_ss` above](#i_ss-instructions-retired-the-standing-beforeafter-comparator).
 - **C_cold** — the first `column()` in a fresh region (25 pre-ore chunks, 9 ore
-  walks from nothing). Needs a **fresh generator**: the memo caches are
-  per-generator, and reusing a warm one is the trap that neutered two determinism
-  gates in this repo already.
+  walks from nothing, **and 441 chunks' structure starts** since issue #514). Needs
+  a **fresh generator**: the memo caches are per-generator, and reusing a warm one
+  is the trap that neutered two determinism gates in this repo already.
+
+The sweep also asserts, in both feature arms, that `store_evictions() == 0`. That is
+not decoration: eviction during the sweep inflates every stage-computation count
+below it, and it is what made `C_ss` read 79.9 ms against 21.0 ms for four months
+without any counter saying so (DESIGN.md §12.130). **A memoisation-bearing benchmark
+needs an eviction control, or its "exactly once" counters are upper bounds it never
+checked.**
 
 Run them:
 
@@ -392,13 +458,14 @@ a recorded false signal from doing that sequentially: a 3/5-vs-0/5 result that w
 - **Run both arms interleaved in one process**, alternating per iteration — not
   arm A to completion then arm B. A machine that gets busy halfway through
   otherwise attributes the change to your diff.
-- **Build a fresh generator per arm.** `OverworldGenerator` holds two
-  512-entry memo caches, so a second arm on the same generator reads the first
+- **Build a fresh generator per arm.** `OverworldGenerator` holds a 2,048-entry
+  staged store, so a second arm on the same generator reads the first
   arm's cached results and agrees with itself no matter what. This already
   neutered two determinism gates here; `bench_stage_split`'s anti-drift control
   carries the same rule for the same reason.
 - **Prefer a counter to a duration**, and when you must report a duration, report
-  the counter beside it so the ratio is machine-independent. The vegetation walk's
+  the counter beside it so the ratio is machine-independent. For whole-column work
+  `I_ss` is now that counter and needs no spec-bound denominator to be comparable. The vegetation walk's
   headline figure is *ns per RNG draw* rather than ms per column precisely so a
   later unit can claim an improvement without reproducing this machine's state.
 - **Re-run a timing-shaped result alone before believing it.** The U2 baseline was
