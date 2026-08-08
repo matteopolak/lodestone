@@ -58,6 +58,19 @@ impl Spline {
         }
     }
 
+    /// Whether no node reachable from this spline reads `ctx.y` — see
+    /// [`Density::is_xz_pure`], which this is the spline half of. Both the
+    /// coordinate and every control point's nested spline have to qualify.
+    #[must_use]
+    pub fn is_xz_pure(&self) -> bool {
+        match self {
+            Spline::Constant(_) => true,
+            Spline::Multipoint { coordinate, points } => {
+                coordinate.is_xz_pure() && points.iter().all(|p| p.value.is_xz_pure())
+            }
+        }
+    }
+
     /// Evaluates the spline at `ctx`, in `f32` to match vanilla exactly.
     #[must_use]
     pub fn compute(&self, ctx: Context) -> f32 {

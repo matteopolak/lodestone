@@ -74,6 +74,7 @@
 
 mod field;
 mod graph;
+pub mod redundancy_probe;
 mod scratch;
 
 pub(crate) use field::Field;
