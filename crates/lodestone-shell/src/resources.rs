@@ -929,7 +929,7 @@ pub fn load_container_background() -> Option<Arc<crate::container::ContainerBack
 ///
 /// Particle sprites need their own stitch: they are unreachable from any
 /// blockstate, so the block atlas the terrain renderer owns never contains
-/// them. Vanilla ships no pre-baked `particles.png` — 26.2 has 289 loose PNGs
+/// them. Vanilla ships no pre-baked `particles.png` — 26.2 has 288 loose PNGs
 /// under `textures/particle/` that the client stitches at runtime, exactly as
 /// it does for blocks and items.
 ///

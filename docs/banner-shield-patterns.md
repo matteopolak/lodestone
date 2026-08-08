@@ -398,27 +398,30 @@ alpha should expect its *effective* coverage in the final image to run
 ahead of its raw stored byte, and should re-measure on their own machine
 rather than trust either backend-implied number above.
 
-**The real pattern-mask atlas is landed; the shell installer and NBT gather
-are not — both squarely issue #23's remaining scope, not #174's.**
+**All three of these are now landed. The list is kept because the shape of
+each hop is still the right description of how a banner reaches the screen —
+only the "not built" verdicts are stale.**
 
-1. **No shell installer.** `RenderState` has no `set_banner_source`
-   (`crates/lodestone-shell/src/gpu.rs`) — the exact shape
-   `set_bell_source`/`set_skull_source` already are. Adding one is small:
-   accept `impl Fn(Vec3) -> Vec<BannerSpawn>`, resolve through
-   `resolve_banner` inside `prepare_block_entities` (append `body`/`flag`
-   into the same `instances` list chests/skulls/bells already share — the
-   batcher is already generic over model name), and issue the
-   `banner_layer_pipeline` draws for `layers` as their own pass, in order,
-   **not** batched (see `BannerLayerDraw`'s own doc for why).
-2. **No NBT gather.** A `BannerSpawn` needs a base colour (the *block's*
-   colour, `AbstractBannerBlock.getColor()` — one banner block per dye
-   colour, not a state property) and a pattern list (`BlockEntity.nbt`'s
-   `"patterns"` key, `BannerPatternLayers.CODEC`). This doc's own
-   "Prerequisite 1 does not block the block-entity consumer" section above
-   already worked out that this needs no `lodestone-game` item-component
-   work at all — it is a direct NBT parse, the same shape
-   `lodestone_world::sign_text::SignText::parse` already is for a sign.
-   Nothing in this pass built that parse.
+1. **Landed: the shell installer.** `RenderState::set_banner_source` exists,
+   `Sim::banner_source` produces it and `app::redraw` re-installs it every
+   frame (it captures the game tick *and* the partial tick, so a stale one
+   freezes every banner's sway — `set_bell_source`'s hazard exactly).
+   `prepare_block_entities` appends `body`/`flag` into the shared `instances`
+   list and returns `layers` as a second, **ordered, unbatched**
+   `Vec<BannerLayerDrawBatch>` that `frame.rs` draws through
+   `banner_layer_pipeline` right after the opaque block entities.
+2. **Landed: the NBT gather.** `block_entities::banner_spawns` reuses the
+   `sign_candidates` shape (the second gather in that module that reads
+   `be.nbt`), with `standing_banner_colour` taking the base colour off the
+   *block name* — sixteen separate banner blocks, not a `color` property, and
+   grepping for a property there is the natural mistake that draws every
+   banner white — and `banner_patterns` parsing the `"patterns"` list.
+   **Both ids are namespace-stripped**: the mask atlas keys on the bare asset
+   id (`"creeper"`), so passing `"minecraft:creeper"` through resolves nothing
+   and drops the layer silently.
+   `*_wall_banner` returns `None` on purpose: its body is
+   `createBodyLayer(false)`, a mesh the corpus does not build, so the standing
+   rig would hang a full pole in mid-air.
 3. **Landed. `lodestone_assets::banner_pattern_atlas::BannerPatternAtlas`**
    loads every real `entity/banner/*.png` mask, discovered through the real
    `atlases/banner_patterns.json` directory-source descriptor (resolved via
@@ -442,10 +445,17 @@ are not — both squarely issue #23's remaining scope, not #174's.**
    this" decision below is unaffected; see that section before assuming this
    changes the calculus.
 
-The shell installer and the mesh work with a hand-built `BannerSpawn` (a
-hermetic pixel gate for the real end-to-end shell path could exist today,
-using the same fallback-texture trick this doc's own gate does for the two
-layers the real atlas does not cover) and neither blocks the other.
+The one join worth a gate, and the one that has one: the sprite key. A
+`BannerLayerDraw::sprite` is a full `minecraft:entity/banner/<id>` location
+while `BannerPatternAtlas` keys on the bare `<id>`, and if the bridge between
+them is wrong every layer is skipped and the banner draws blank white — an
+entirely plausible-looking banner. `gpu::tests::banner_masks_resolve_under_
+the_key_the_draw_site_derives` checks that bridge on a real two-layer pattern
+stack, and also that layer 0 carries the block's dye rather than white.
+
+**Still not built:** wall banners (a second body mesh), and the shield form
+(`shield_pattern_layers` exists and still has no consumer — a shield is an item
+model in the hand, not a block entity, so it is a different pass entirely).
 
 ### The two model classes, decompiled directly
 

@@ -51,10 +51,10 @@ mapping cannot be derived).
 
 ## What does not
 
-* **Trims.** The render/asset capability is built and jar-verified; it draws
-  no pixels yet because the wire component and shell wiring are a separate,
-  named island — see "Trims" below and
-  [#436](https://github.com/matteopolak/lodestone/issues/436).
+* **Trims — landed** (issue #17). See "Trims" below. The one remaining hole is
+  the *local player's own* trim in third person, which is a
+  `lodestone-game` `ComponentMap` gap rather than a rendering one — that
+  boundary drops `trim`, exactly as it drops the local player's dye.
 * **Baby armour meshes**, **enchantment glint**, **`Body`/`Saddle` (animal)
   armour**, **elytra**, **skull/pumpkin heads**. Each is a different vanilla
   layer with its own model; see "Deliberately out of scope".
@@ -529,35 +529,53 @@ vanilla content — the fork still has to exist because `decal` is registry
 data a resource pack or a future version can set, not a constant this engine
 is free to assume.
 
-### What is still missing, and why it is an island rather than half-shipped
+### How a trim reaches the screen — all three hops, landed (issue #17)
 
-Everything above reaches zero pixels without three more things, **all of
-which sit outside this pass's ownership** (`crates/protocol/v770`,
-`crates/lodestone-shell/src/{net.rs,entities.rs,gpu.rs}`):
+**This section used to say all three of these were missing. Every claim in it
+was stale by the time it was read** — most usefully the first, which named a
+decoder that had already landed — so it is rewritten as the live description.
 
-1. **The wire component is still undecoded.** `minecraft:trim` is an
-   `ArmorTrim` record (pattern + material holders); nothing in
-   `crates/protocol/v770` decodes it, and `entity_snapshot` drops unmodelled
-   components anyway — the same gap dye had before `64cfdcb`, one step worse
-   because the component itself has no Rust type yet at all.
-2. **`entities.rs`/`net.rs` need a carry path** for the decoded trim, the
-   same shape `equipment_dye` already has end to end
-   (`EntitySnapshot::equipment_dye` → `RenderEquipmentDye` → `EntityDraw`).
-3. **`gpu.rs`'s `prepare_armour` needs a trim draw pass**: for each equipped
-   piece with a trim, resolve `TrimAtlas::sprite_for` with the *wearer's own*
-   armour material (not the trim's), upload/cache that sprite as a texture,
-   and issue an instanced draw through `armour_pipeline` or
-   `trim_decal_pipeline` per `TrimPattern::decal`.
+1. **The wire component.** `minecraft:trim` decodes into
+   `lodestone_model::ItemComponents::trim` as `ArmorTrim { material, pattern }`,
+   both bare registry paths. It is decoded rather than left unmodelled because
+   the clientbound `DataComponentPatch` codec writes payloads **raw with no
+   length prefix**, so an unknown component truncates the rest of the packet
+   — see `docs/armour-trim-decode.md`.
+2. **The carry path.** `entities::resolve_entity_facts` lifts it beside the
+   dye, and it travels `EntityFacts::equipment_trim` →
+   `RenderEquipmentTrim` → `EntityDraw::equipment_trim`. A *third* component
+   beside `RenderEquipment`/`RenderEquipmentDye` rather than a wider tuple,
+   because a piece can be dyed **and** trimmed at once, and the two reach the
+   GPU by different routes.
+   (`net::entity_snapshot` is gone — issue #36 deleted it; every reference to
+   it in an older revision of this doc is stale.)
+3. **The draw.** `gpu::entities::load_trim_sprites` bakes every trim sprite out
+   of the jar at startup into `EntityRenderer::trim_textures`, keyed by
+   `trim_sprite_id`'s `ResourceLocation`. `prepare_armour` appends one batch per
+   `(slot, trim sprite)` **after** that slot's own armour layers, and `frame.rs`
+   binds it at group 1.
 
-None of the three is optional — a trim decal with no wire data is invisible
-by construction, and building the shell wiring speculatively (without a real
-decoded value ever reaching it) would be exactly the island `CLAUDE.md`'s top
-rule warns about, just moved one layer down. So rather than build (3) against
-a value that can never arrive this pass, or leave (1)-(3) as a vague "future
-work" note, this is filed as a named, scoped island:
-**[#436](https://github.com/matteopolak/lodestone/issues/436)** — the render
-and asset capability is real, tested against the real jar, and reaches zero
-pixels because nothing upstream feeds it yet.
+Three things about (3) are easy to get wrong:
+
+* **A trim is a texture, not a tint**, so it cannot ride an instance row the way
+  the dye does. That is why `ArmourDrawBatch::texture` is an `ArmourTextureKey`
+  enum rather than the old `(&str, ArmourLayerType)` tuple.
+* **Order is load-bearing.** The trim batch must follow its slot's layers or the
+  coplanar `LessEqual` depth compare rejects it. `accum` is an insertion-ordered
+  `Vec`, never a `HashMap`, which is what makes that free.
+* **It draws through `armour_pipeline`, not `trim_decal_pipeline`.** All eighteen
+  of 26.2's trim patterns are `decal: false`; the decal pipeline is the
+  `decal: true` variant (depth `Equal`, no write) and stays selectable and
+  unused. Reading its name as "the pipeline trims use" is the trap.
+* **The trim instances are untinted white.** The sprite is already the
+  material's colour (`TrimAtlas` palette-swaps it), so applying the slot's dye
+  would tint gold trim green on dyed leather.
+
+**Still open within trim scope:** the local player's own trim in third person.
+`ThirdPersonBodyState` reads the inventory through `lodestone_game`'s
+`ComponentMap`, whose `From<&lodestone_model::ItemStack>` sets `trim: None` —
+the same boundary that drops the local player's dye. One shared fix, in a crate
+outside this doc's subject.
 
 ## Deliberately out of scope
 

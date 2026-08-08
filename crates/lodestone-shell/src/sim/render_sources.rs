@@ -231,6 +231,30 @@ impl Sim {
         Some(move |eye: glam::Vec3| crate::block_entities::shulker_spawns(&handle, eye))
     }
 
+    /// This frame's banners, for
+    /// [`RenderState::set_banner_source`](crate::gpu::RenderState::set_banner_source)
+    /// (issue #23).
+    ///
+    /// Captures the game tick *and* the partial tick, like `bell_source` and unlike
+    /// `shulker_source`, because `banner_phase` mixes both into the sway — so this
+    /// must be re-installed every frame or every banner freezes.
+    #[must_use]
+    pub fn banner_source(
+        &self,
+    ) -> Option<impl Fn(glam::Vec3) -> Vec<lodestone_render::BannerSpawn> + Send + Sync + 'static>
+    {
+        let net = self.net.as_ref()?;
+        let handle = net.shared_handle();
+        // `.0` is `game_time`, vanilla's `level.getGameTime()`; `.1` is
+        // `time_of_day`, which wraps every day and would make the sway jump at
+        // dawn.
+        let game_time = handle.get().map_or(0, |c| c.world_time().0);
+        let partial_tick = self.clock().interp_alpha;
+        Some(move |eye: glam::Vec3| {
+            crate::block_entities::banner_spawns(&handle, eye, game_time, partial_tick)
+        })
+    }
+
     /// This frame's filled-map picture, for
     /// [`RenderState::set_map_source`](crate::gpu::RenderState::set_map_source)
     /// (issue #184).

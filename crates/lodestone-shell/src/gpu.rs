@@ -60,7 +60,8 @@ pub use occlusion::TerrainOcclusion;
 pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
 pub use sources::{
-    BellSource, BlockEntitySource, EntityLightSource, HandSwingSource, MainHandSource, MapSource,
+    BannerSource, BellSource, BlockEntitySource, EntityLightSource, HandSwingSource, MainHandSource,
+    MapSource,
     ShulkerSource, OutlineShapeSource, SignSource, SkullSource, SkyDarkenSource,
     ThirdPersonBodySource, ThirdPersonBodyState,
 };
@@ -330,6 +331,12 @@ pub struct RenderState {
     /// no block model of its own, so an unset source leaves an empty cell where
     /// every box is, exactly as chest does.
     shulker_source: ShulkerSource,
+    /// Where this frame's banners come from (issue #23). Same "unset means draw
+    /// nothing" convention as [`Self::skull_source`], and here that degradation is
+    /// merely a missing decoration: a banner's pole and cloth **are** drawn by this
+    /// pass, but the block itself has no terrain model, so an unset source leaves a
+    /// hole exactly as chest and shulker do.
+    banner_source: BannerSource,
     /// Where this frame's filled-map pictures come from (issue #184). Same "unset
     /// means draw nothing" convention as [`Self::skull_source`], and here the
     /// degradation is that a held `filled_map` falls back to its ordinary flat item

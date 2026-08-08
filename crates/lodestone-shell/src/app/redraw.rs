@@ -297,6 +297,14 @@ impl WindowApp {
             render.set_shulker_source(f);
         }
 
+        // Banners (issue #23). The pattern compositing, the mask atlas, the flag
+        // mesh, the sway and the translucent layer pipeline were all landed with
+        // zero consumers; this call site plus `prepare_block_entities`' arm is what
+        // finally puts a banner on screen.
+        if let Some(f) = self.sim.banner_source() {
+            render.set_banner_source(f);
+        }
+
         // Filled maps (issue #184). This is the hop that turns the `SessionMaps`
         // fold from an F3 readout into the picture itself — the palette, the
         // per-map texture and the held/framed quads were all landed with no live

@@ -612,3 +612,29 @@ impl std::fmt::Debug for MapSource {
             .finish()
     }
 }
+
+/// Where this frame's banners come from (issue #23) — the same shape as
+/// [`ShulkerSource`], but the closure must be re-installed every frame for
+/// [`BellSource`]'s reason: it captures the game tick and the partial tick, and a
+/// stale one freezes every banner's sway.
+#[derive(Default)]
+pub struct BannerSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::BannerSpawn> + Send + Sync>>,
+);
+
+impl BannerSource {
+    /// This frame's banners, or none when unset.
+    #[must_use]
+    pub(super) fn banners(&self, eye: glam::Vec3) -> Vec<lodestone_render::BannerSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for BannerSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("BannerSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
