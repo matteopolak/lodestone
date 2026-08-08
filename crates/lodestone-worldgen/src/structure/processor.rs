@@ -35,14 +35,24 @@
 //! * A new `processor_type` belongs in [`ProcessorList::parse`](super::pool::ProcessorList),
 //!   and anything it does not cover must be named in
 //!   [`super::StructureRegistry::unsupported`] — the ledger, not a silent skip.
-//! * `capped` and `block_entity_modifier` are deliberately absent and ledgered:
-//!   the first needs a shuffled-index walk over the whole processed list plus the
-//!   archaeology loot pass, the second needs block entities in worldgen.
+//! * **`capped` is the one processor that is not per-block** ([`Processor::Capped`]).
+//!   It runs in `finalizeProcessing`, over the **whole** processed list, and its
+//!   `evaluatesEntirePieceState` flips vanilla's `processOnlyInCurrentChunk` off —
+//!   so a piece carrying one is processed over its entire footprint and only
+//!   clipped at write time. That is not an optimisation detail: the shuffled index
+//!   walk is over the full list, so clipping first would put a different number of
+//!   suspicious blocks in each chunk a trail-ruins house spans.
+//! * `block_entity_modifier` is honoured only as far as the **block state** goes:
+//!   `append_loot` selects the state (`suspicious_gravel`) and the loot table it
+//!   appends needs block entities in worldgen, which is ledgered under
+//!   `block_entity:append_loot`. Any other modifier type is still refused.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource, get_seed};
+use lodestone_worldgen_core::rng::{
+    LegacyRandomSource, PositionalRandomFactory, RandomSource, get_seed,
+};
 
 use super::template::{BlockNbt, BlockState, nbt_string};
 use crate::dense_grid::DenseBlockGrid;
@@ -64,7 +74,12 @@ impl WorldRead for DenseBlockGrid {
 }
 
 /// One block on its way from a template palette into the world.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` is load-bearing rather than convenient: [`Processor::Capped`]
+/// counts a delegate application as "replaced" only when the returned block
+/// **differs** (`!processedBlockInfo.equals(maybeAltered)`), so a delegate that
+/// matches but changes nothing consumes an index without consuming the cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessedBlock {
     /// The **absolute** world position. A `GravityProcessor` rewrites this.
     pub pos: [i32; 3],
@@ -78,6 +93,12 @@ pub struct ProcessCtx<'a> {
     /// `templateRelativePos` — the block's unrotated, template-local position.
     /// `GravityProcessor` reads its `delta` from this and nothing else does.
     pub local: [i32; 3],
+    /// `referencePos` — `StructureStart.placeInChunk`'s
+    /// `(centre.x, pieces[0].box.minY, centre.z)`, where `centre` is the **first**
+    /// piece's box centre. A whole-*start* fact, not a per-piece one, which is why
+    /// it arrives here rather than living in [`super::template::PlaceSettings`].
+    /// Only a [`PosTest::AxisAlignedLinear`] reads it.
+    pub reference: [i32; 3],
     /// The block's retained `nbt` compound, if it had one.
     pub nbt: Option<&'a BlockNbt>,
     /// The world as it stands *before* this template writes anything.
@@ -136,19 +157,112 @@ impl RuleTest {
     }
 }
 
+/// A `Direction.Axis`, for [`PosTest::AxisAlignedLinear`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    /// `x`.
+    X,
+    /// `y` — `AxisAlignedLinearPosTest`'s default, and the only one bundled.
+    Y,
+    /// `z`.
+    Z,
+}
+
+/// A `PosRuleTest` — the third and last predicate of a [`ProcessorRule`].
+#[derive(Debug, Clone, Copy)]
+pub enum PosTest {
+    /// `always_true` (`PosAlwaysTrueTest`). **Costs no draw**, which is why an
+    /// absent `position_predicate` and a present one are not interchangeable.
+    AlwaysTrue,
+    /// `axis_aligned_linear_pos` — one `nextFloat()` against a chance that ramps
+    /// linearly with the distance from the reference position along one axis.
+    ///
+    /// The only bundled use is `high_rampart` (the bastion's `rampart_degradation`
+    /// sibling): `max_chance 0.05`, `max_dist 100`, axis `Y` by default, so a
+    /// rampart erodes more the further above the start's floor it sits.
+    AxisAlignedLinear {
+        /// `min_chance`, the chance at `min_dist` and below.
+        min_chance: f32,
+        /// `max_chance`, the chance at `max_dist` and above.
+        max_chance: f32,
+        /// `min_dist`.
+        min_dist: i32,
+        /// `max_dist`. Vanilla's constructor throws when `min_dist >= max_dist`.
+        max_dist: i32,
+        /// `axis`.
+        axis: Axis,
+    },
+}
+
+impl PosTest {
+    /// `test(inTemplatePos, worldPos, worldReference, random)`.
+    ///
+    /// The distance is taken along **one** axis only (vanilla multiplies each
+    /// component by that axis' unit step and sums the absolute values, which zeroes
+    /// the other two), and the truncation to `int` before the lerp is vanilla's.
+    #[must_use]
+    pub fn test(
+        &self,
+        _local: [i32; 3],
+        world: [i32; 3],
+        reference: [i32; 3],
+        random: &mut LegacyRandomSource,
+    ) -> bool {
+        match *self {
+            Self::AlwaysTrue => true,
+            Self::AxisAlignedLinear {
+                min_chance,
+                max_chance,
+                min_dist,
+                max_dist,
+                axis,
+            } => {
+                let component = match axis {
+                    Axis::X => 0,
+                    Axis::Y => 1,
+                    Axis::Z => 2,
+                };
+                // `(int)(xd + yd + zd)` where two of the three are exactly 0.0f.
+                let delta = (world[component] - reference[component]).abs();
+                #[allow(clippy::cast_precision_loss)]
+                let dist = delta as f32;
+                let factor = (dist - min_dist as f32) / ((max_dist - min_dist) as f32);
+                let chance = clamped_lerp(factor, min_chance, max_chance);
+                random.next_float() <= chance
+            }
+        }
+    }
+}
+
+/// `Mth.clampedLerp(factor, min, max)` — **factor first**, which is the opposite
+/// of the `lerp(start, end, t)` spelling most APIs use and would silently produce
+/// a constant chance if read the other way round.
+fn clamped_lerp(factor: f32, min: f32, max: f32) -> f32 {
+    if factor < 0.0 {
+        min
+    } else if factor > 1.0 {
+        max
+    } else {
+        min + factor * (max - min)
+    }
+}
+
 /// One `ProcessorRule`: match the template state (and optionally the world state
-/// at the target), emit `output`.
+/// at the target and the position), emit `output`.
 ///
-/// `position_predicate` is **not** represented: the only bundled use is
-/// `axis_aligned_linear_pos` in `high_rampart` (the bastion), and it is named on
-/// the ledger rather than defaulted to true, because defaulting it to true would
-/// change the *draw count* of every later rule in that list.
+/// All three predicates draw from **one** position-seeded stream, in this order,
+/// and Java's `&&` short-circuits — so a rule whose input predicate fails costs
+/// only the input predicate's draws. Defaulting an unmodelled `position_predicate`
+/// to true would therefore shift every later rule's roll, which is why
+/// [`super::pool::PoolStore`] refuses one it does not know rather than ignoring it.
 #[derive(Debug, Clone)]
 pub struct ProcessorRule {
     /// `input_predicate`, tested against the template's state.
     pub input: RuleTest,
     /// `location_predicate`, tested against the world's state at the target.
     pub location: RuleTest,
+    /// `position_predicate`.
+    pub position: PosTest,
     /// `output_state`.
     pub output: BlockState,
 }
@@ -259,6 +373,28 @@ pub enum Processor {
         /// `offset` — `-1` for the projection's own processor.
         offset: i32,
     },
+    /// `CappedProcessor(delegate, limit)` — apply `delegate` to at most `limit`
+    /// blocks of the piece, chosen by a shuffled walk over **every** index of the
+    /// processed list.
+    ///
+    /// The one processor here that is not a per-block function, and the only one
+    /// whose `evaluatesEntirePieceState` is true. Three properties are the
+    /// specification:
+    ///
+    /// * the walk is over the *whole* piece, so it must not be clipped to a chunk
+    ///   first — see [`super::template::StructureTemplate::place`];
+    /// * `limit` is an `IntProvider` sampled **before** the shuffle. Every bundled
+    ///   use is a bare int (`ConstantInt`), which draws nothing; a provider that
+    ///   did draw would shift the whole shuffle, so
+    ///   [`super::pool::PoolStore`] refuses anything else rather than assuming;
+    /// * a delegate that returns the block unchanged consumes an index and **not**
+    ///   the cap.
+    Capped {
+        /// The delegate, applied per selected index.
+        delegate: Box<Processor>,
+        /// `limit`, as the constant it always is in the bundled data.
+        limit: i32,
+    },
 }
 
 impl Processor {
@@ -292,6 +428,9 @@ impl Processor {
                 for rule in rules {
                     if rule.input.test(&block.state, &mut random)
                         && rule.location.test_world(ctx.world, block.pos, &mut random)
+                        && rule
+                            .position
+                            .test(ctx.local, block.pos, ctx.reference, &mut random)
                     {
                         return Some(ProcessedBlock {
                             pos: block.pos,
@@ -336,6 +475,82 @@ impl Processor {
                     state: block.state,
                 })
             }
+            // `CappedProcessor.processBlock` is `StructureProcessor`'s default —
+            // the identity. All of its work is in `finalizeProcessing`, which is
+            // [`Self::finalize`].
+            Self::Capped { .. } => Some(block),
+        }
+    }
+
+    /// `evaluatesEntirePieceState()` — true only for [`Self::Capped`].
+    ///
+    /// The flag vanilla's `processBlockInfos` reads to decide whether to build the
+    /// block list for the whole piece or only for the decorating chunk. It is not a
+    /// performance switch: the capped walk indexes the list, so a shorter list is a
+    /// different structure.
+    #[must_use]
+    pub fn evaluates_entire_piece_state(&self) -> bool {
+        matches!(self, Self::Capped { .. })
+    }
+
+    /// `finalizeProcessing(level, position, referencePos, original, processed,
+    /// settings)` — a no-op for every processor except [`Self::Capped`].
+    ///
+    /// Rewrites `processed` in place. `originals` carries each surviving block's
+    /// template-local position and `nbt`, which is what the delegate's
+    /// `templateRelativePos` argument is (vanilla passes `originalBlockInfo.pos()`,
+    /// and the *original* list holds template-local positions while the processed
+    /// list holds world ones — reading the wrong one is a silent divergence for
+    /// every position-sensitive delegate).
+    pub fn finalize(
+        &self,
+        position: [i32; 3],
+        reference: [i32; 3],
+        seed: i64,
+        originals: &[([i32; 3], Option<Arc<BlockNbt>>)],
+        processed: &mut [ProcessedBlock],
+        world: &dyn WorldRead,
+    ) {
+        let Self::Capped { delegate, limit } = self else {
+            return;
+        };
+        // `this.limit.maxInclusive() != 0 && !processedBlockInfoList.isEmpty()`.
+        if *limit == 0 || processed.is_empty() || originals.len() != processed.len() {
+            return;
+        }
+        // `RandomSource.createThreadLocalInstance(level.getSeed()).forkPositional().at(position)`.
+        // `SingleThreadedRandomSource` is bit-identical to `LegacyRandomSource` —
+        // same LCG, same `next(bits)` — and it forks into the *same*
+        // `LegacyPositionalRandomFactory`, so the derivation is exactly this.
+        let mut random = LegacyRandomSource::new(seed)
+            .fork_positional()
+            .at(position[0], position[1], position[2]);
+        // `ConstantInt.sample` draws nothing; see the variant doc for why nothing
+        // else is accepted.
+        let max_to_replace = (*limit).min(i32::try_from(processed.len()).unwrap_or(i32::MAX));
+        if max_to_replace < 1 {
+            return;
+        }
+        let indices = shuffled_indices(processed.len(), &mut random);
+        let mut replaced = 0;
+        for index in indices {
+            if replaced >= max_to_replace {
+                break;
+            }
+            let (local, nbt) = &originals[index];
+            let ctx = ProcessCtx {
+                local: *local,
+                reference,
+                nbt: nbt.as_deref(),
+                world,
+            };
+            let before = processed[index].clone();
+            if let Some(altered) = delegate.process(&ctx, before.clone()) {
+                if altered != before {
+                    replaced += 1;
+                    processed[index] = altered;
+                }
+            }
         }
     }
 
@@ -355,6 +570,24 @@ impl Processor {
     }
 }
 
+/// `Util.toShuffledList(IntStream.range(0, n), random)` — the **int** overload,
+/// whose swap is `result.set(i - 1, result.set(swapTo, result.getInt(i - 1)))`.
+///
+/// That nested `set` is a swap, so this is the same downward Fisher–Yates as
+/// [`super::pool::shuffle`] and costs `max(0, n - 1)` draws. Written out rather
+/// than reusing that function because the two are separate methods in vanilla and
+/// a future change to either must not silently move the other.
+fn shuffled_indices(n: usize, random: &mut LegacyRandomSource) -> Vec<usize> {
+    let mut out: Vec<usize> = (0..n).collect();
+    let mut i = i32::try_from(n).unwrap_or(i32::MAX);
+    while i > 1 {
+        let swap_to = random.next_int_bounded(i);
+        out.swap((i - 1) as usize, swap_to.clamp(0, i - 1) as usize);
+        i -= 1;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,6 +603,7 @@ mod tests {
     fn ctx<'a>(world: &'a dyn WorldRead, nbt: Option<&'a BlockNbt>) -> ProcessCtx<'a> {
         ProcessCtx {
             local: [0, 0, 0],
+            reference: [0, 0, 0],
             nbt,
             world,
         }
@@ -502,6 +736,7 @@ mod tests {
         let rules = vec![ProcessorRule {
             input: RuleTest::BlockMatch("minecraft:dirt_path".into()),
             location: RuleTest::BlockMatch("minecraft:water".into()),
+            position: PosTest::AlwaysTrue,
             output: BlockState::of("minecraft:oak_planks"),
         }];
         let processor = Processor::Rule(rules);
@@ -541,6 +776,7 @@ mod tests {
                 .process(
                     &ProcessCtx {
                         local: [0, local_y, 0],
+                        reference: [0, 0, 0],
                         nbt: None,
                         world: &world,
                     },
@@ -552,5 +788,180 @@ mod tests {
         // Outside the table the edge value is reused rather than panicking.
         assert_eq!(heights.get(-9, -9), 64);
         assert_eq!(heights.get(99, 99), 64 + 3 + 3);
+    }
+
+    /// `high_rampart`'s own numbers, with the chance **predicted** at four
+    /// distances from `clampedLerp(inverseLerp(d, 0, 100), 0.0, 0.05)` rather than
+    /// asserted to "increase with height".
+    ///
+    /// The wrong-argument-order hypothesis is excluded explicitly: reading
+    /// `clampedLerp` as `lerp(start, end, t)` gives a **constant** `0.0` at every
+    /// distance, so the d=100 row alone falsifies it.
+    #[test]
+    fn axis_aligned_linear_pos_ramps_the_chance_along_one_axis() {
+        let test = PosTest::AxisAlignedLinear {
+            min_chance: 0.0,
+            max_chance: 0.05,
+            min_dist: 0,
+            max_dist: 100,
+            axis: Axis::Y,
+        };
+        // The chance at each distance, recovered by counting acceptances over many
+        // independent streams — each `test` call is exactly one `nextFloat()`, so
+        // the acceptance rate *is* the chance.
+        //
+        // One long stream rather than one fresh `LegacyRandomSource` per trial:
+        // sequentially seeded LCGs are strongly correlated in their first draw, so
+        // the per-seed spelling of this measurement is biased by several σ and
+        // would have to be given a tolerance loose enough to pass under a wrong
+        // chance too.
+        for (dy, expected) in [(0, 0.0_f32), (25, 0.0125), (50, 0.025), (200, 0.05)] {
+            let mut accepted = 0;
+            let trials = 200_000;
+            let mut random = LegacyRandomSource::new(0xBEEF_1234);
+            for _ in 0..trials {
+                if test.test([0, 0, 0], [0, dy, 0], [0, 0, 0], &mut random) {
+                    accepted += 1;
+                }
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let rate = f64::from(accepted) / f64::from(trials);
+            let expected = f64::from(expected);
+            assert!(
+                (rate - expected).abs() < 0.002,
+                "dy {dy}: measured {rate}, predicted {expected}"
+            );
+        }
+        // The axis is honoured: an X offset with an axis-Y test is distance 0.
+        let mut a = LegacyRandomSource::new(5);
+        let mut b = LegacyRandomSource::new(5);
+        assert_eq!(
+            test.test([0, 0, 0], [999, 0, 0], [0, 0, 0], &mut a),
+            test.test([0, 0, 0], [0, 0, 0], [0, 0, 0], &mut b),
+            "an X displacement must not move an axis-Y test"
+        );
+        // Exactly one draw, and `always_true` costs none.
+        let mut drawn = LegacyRandomSource::new(11);
+        let _ = test.test([0, 0, 0], [0, 7, 0], [0, 0, 0], &mut drawn);
+        let mut oracle = LegacyRandomSource::new(11);
+        let _ = oracle.next_float();
+        assert_eq!(drawn.next_int_bounded(1_000_000), oracle.next_int_bounded(1_000_000));
+        let mut untouched = LegacyRandomSource::new(11);
+        let mut control = LegacyRandomSource::new(11);
+        assert!(PosTest::AlwaysTrue.test([0, 0, 0], [0, 7, 0], [0, 0, 0], &mut untouched));
+        assert_eq!(
+            untouched.next_int_bounded(1_000_000),
+            control.next_int_bounded(1_000_000),
+            "always_true consumed a draw"
+        );
+    }
+
+    /// The cap is exact, not approximate: a delegate that would convert every block
+    /// converts **exactly `limit`** of them, and the same piece converts the same
+    /// indices every time.
+    ///
+    /// The magnitude hypothesis this excludes: "capped replaces some blocks". A
+    /// `limit` of 6 over 40 candidates must be 6 — 40 (cap ignored) and 0 (finalize
+    /// never runs) are both plausible bugs that produce a visually fine ruin.
+    #[test]
+    fn capped_replaces_exactly_the_limit_and_is_position_stable() {
+        let delegate = Processor::Rule(vec![ProcessorRule {
+            input: RuleTest::BlockMatch("minecraft:gravel".into()),
+            location: RuleTest::AlwaysTrue,
+            position: PosTest::AlwaysTrue,
+            output: BlockState::of("minecraft:suspicious_gravel"),
+        }]);
+        let capped = Processor::Capped {
+            delegate: Box::new(delegate),
+            limit: 6,
+        };
+        let world = Air;
+        let build = || {
+            (0..40)
+                .map(|i| ProcessedBlock {
+                    pos: [i, 64, 3],
+                    state: BlockState::of("minecraft:gravel"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let originals: Vec<([i32; 3], Option<Arc<BlockNbt>>)> =
+            (0..40).map(|i| ([i, 0, 0], None)).collect();
+
+        let mut processed = build();
+        capped.finalize([16, 64, 0], [20, 60, 4], -195_764_831, &originals, &mut processed, &world);
+        let converted: Vec<i32> = processed
+            .iter()
+            .filter(|b| b.state.name == "minecraft:suspicious_gravel")
+            .map(|b| b.pos[0])
+            .collect();
+        assert_eq!(converted.len(), 6, "converted {converted:?}");
+
+        // Same piece position → same indices. This is what lets two chunks place
+        // two halves of one trail-ruins house and agree.
+        let mut again = build();
+        capped.finalize([16, 64, 0], [20, 60, 4], -195_764_831, &originals, &mut again, &world);
+        assert_eq!(processed, again);
+
+        // A different piece position picks a different set, or the positional fork
+        // is not being used at all.
+        let mut elsewhere = build();
+        capped.finalize([48, 64, 0], [20, 60, 4], -195_764_831, &originals, &mut elsewhere, &world);
+        assert_ne!(processed, elsewhere);
+
+        // A delegate that changes nothing consumes indices and not the cap, so
+        // nothing is converted and nothing panics.
+        let inert = Processor::Capped {
+            delegate: Box::new(Processor::Rule(vec![ProcessorRule {
+                input: RuleTest::BlockMatch("minecraft:cobblestone".into()),
+                location: RuleTest::AlwaysTrue,
+                position: PosTest::AlwaysTrue,
+                output: BlockState::of("minecraft:suspicious_gravel"),
+            }])),
+            limit: 6,
+        };
+        let mut untouched = build();
+        let before = untouched.clone();
+        inert.finalize([16, 64, 0], [20, 60, 4], -195_764_831, &originals, &mut untouched, &world);
+        assert_eq!(untouched, before);
+
+        // A `limit` of 0 is vanilla's own early return.
+        let zero = Processor::Capped {
+            delegate: Box::new(Processor::Rule(vec![ProcessorRule {
+                input: RuleTest::AlwaysTrue,
+                location: RuleTest::AlwaysTrue,
+                position: PosTest::AlwaysTrue,
+                output: BlockState::of("minecraft:suspicious_gravel"),
+            }])),
+            limit: 0,
+        };
+        let mut none = build();
+        zero.finalize([16, 64, 0], [20, 60, 4], -195_764_831, &originals, &mut none, &world);
+        assert_eq!(none, before);
+    }
+
+    /// `Util.toShuffledList`'s int overload is a permutation and costs `n - 1`
+    /// draws, matched against a hand-expanded downward Fisher–Yates.
+    #[test]
+    fn shuffled_indices_is_the_downward_fisher_yates() {
+        let mut oracle = LegacyRandomSource::new(3);
+        let picks = [
+            oracle.next_int_bounded(5),
+            oracle.next_int_bounded(4),
+            oracle.next_int_bounded(3),
+            oracle.next_int_bounded(2),
+        ];
+        let mut expected: Vec<usize> = (0..5).collect();
+        expected.swap(4, picks[0] as usize);
+        expected.swap(3, picks[1] as usize);
+        expected.swap(2, picks[2] as usize);
+        expected.swap(1, picks[3] as usize);
+
+        let mut random = LegacyRandomSource::new(3);
+        assert_eq!(shuffled_indices(5, &mut random), expected);
+        // Stream position: exactly four draws for five indices.
+        assert_eq!(
+            random.next_int_bounded(1_000_000),
+            oracle.next_int_bounded(1_000_000)
+        );
     }
 }

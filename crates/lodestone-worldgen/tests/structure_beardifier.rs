@@ -130,6 +130,7 @@ fn synthetic_start(adjustment: TerrainAdjustment, box_: BoundingBox) -> Structur
             template: None,
             placement: None,
             extra_placements: Vec::new(),
+            blocks: None,
             beard: Some(PieceBeard {
                 rigid: true,
                 ground_level_delta: 0,

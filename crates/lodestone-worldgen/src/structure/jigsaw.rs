@@ -64,10 +64,12 @@
 //!   draws that came before them and none of the ones after, so turning one into
 //!   an early `return` would change every later structure at that seed.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
-use lodestone_worldgen_core::rng::RandomSource;
+use lodestone_worldgen_core::rng::{
+    LegacyRandomSource, PositionalRandomFactory, RandomSource,
+};
 use serde_json::Value;
 
 use super::beardifier::{Junction, PieceBeard};
@@ -367,6 +369,230 @@ impl HeightProvider {
     }
 }
 
+/// One `PoolAliasBinding` — a per-structure-instance redirection of one pool id
+/// to another.
+///
+/// **This is what makes two trial chambers different.** A chamber's templates all
+/// name the *alias* `trial_chambers/spawner/contents/melee`, which is not a
+/// bundled pool at all; the binding maps it to one of
+/// `spawner/melee/{zombie,husk,spider}` for the whole structure, so every spawner
+/// in one chamber holds the same mob. Ignoring the bindings does not produce a
+/// chamber with default spawners — `pools.get(alias)` finds nothing, vanilla warns
+/// and `continue`s, and the chamber assembles with no spawner rooms at all.
+#[derive(Debug, Clone)]
+pub enum PoolAlias {
+    /// `direct` — an unconditional mapping. **No draw.**
+    Direct {
+        /// `alias`.
+        alias: String,
+        /// `target`.
+        target: String,
+    },
+    /// `random` — one weighted choice, **one draw**.
+    Random {
+        /// `alias`.
+        alias: String,
+        /// `targets`, as `(pool id, weight)` in document order.
+        targets: Vec<(String, i32)>,
+    },
+    /// `random_group` — one weighted choice of a *list* of bindings, then each of
+    /// those resolves in turn. One draw for the group, plus whatever its members
+    /// cost.
+    ///
+    /// The reason a chamber's ranged and slow-ranged spawners agree with each other
+    /// (skeleton with skeleton, stray with stray) while its melee spawner is drawn
+    /// independently.
+    RandomGroup {
+        /// `groups`, as `(bindings, weight)` in document order.
+        groups: Vec<(Vec<PoolAlias>, i32)>,
+    },
+}
+
+impl PoolAlias {
+    /// Parses one binding document, or returns why it cannot be modelled.
+    pub fn parse(value: &Value) -> Result<Self, String> {
+        match value["type"].as_str().unwrap_or_default() {
+            "minecraft:direct" => Ok(Self::Direct {
+                alias: field_string(value, "alias")?,
+                target: field_string(value, "target")?,
+            }),
+            "minecraft:random" => Ok(Self::Random {
+                alias: field_string(value, "alias")?,
+                targets: parse_weighted(&value["targets"], |v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| "pool alias target is not a string".to_string())
+                })?,
+            }),
+            "minecraft:random_group" => Ok(Self::RandomGroup {
+                groups: parse_weighted(&value["groups"], |v| {
+                    v.as_array()
+                        .ok_or_else(|| "pool alias group is not a list".to_string())?
+                        .iter()
+                        .map(Self::parse)
+                        .collect()
+                })?,
+            }),
+            other => Err(format!("pool_alias type '{other}'")),
+        }
+    }
+
+    /// `forEachResolved(random, consumer)` — the draws, in vanilla's order.
+    fn for_each_resolved<R: RandomSource>(
+        &self,
+        random: &mut R,
+        out: &mut BTreeMap<String, String>,
+    ) {
+        match self {
+            Self::Direct { alias, target } => {
+                out.insert(alias.clone(), target.clone());
+            }
+            Self::Random { alias, targets } => {
+                if let Some(target) = weighted_pick(targets, random) {
+                    out.insert(alias.clone(), target.clone());
+                }
+            }
+            Self::RandomGroup { groups } => {
+                if let Some(group) = weighted_pick(groups, random) {
+                    // Cloned so the borrow of `groups` ends before the recursion
+                    // takes `random` again; the list is three entries of two.
+                    for binding in group.clone() {
+                        binding.for_each_resolved(random, out);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `allTargets()` — every pool id any resolution of this binding can name.
+    ///
+    /// [`super::StructureRegistry`] loads all of them, because only one is chosen
+    /// per structure instance and which one is not known until start time.
+    pub fn all_targets(&self, out: &mut BTreeSet<String>) {
+        match self {
+            Self::Direct { target, .. } => {
+                out.insert(target.clone());
+            }
+            Self::Random { targets, .. } => {
+                for (target, _) in targets {
+                    out.insert(target.clone());
+                }
+            }
+            Self::RandomGroup { groups } => {
+                for (group, _) in groups {
+                    for binding in group {
+                        binding.all_targets(out);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every id that appears as an `alias`.
+    ///
+    /// Needed by [`super::pool::PoolStore::load`]: an alias is generally **not** a
+    /// bundled pool (`trial_chambers/spawner/contents/melee` has no JSON), so the
+    /// transitive walk would otherwise refuse the structure for a pool that is not
+    /// supposed to exist.
+    pub fn all_aliases(&self, out: &mut BTreeSet<String>) {
+        match self {
+            Self::Direct { alias, .. } | Self::Random { alias, .. } => {
+                out.insert(alias.clone());
+            }
+            Self::RandomGroup { groups } => {
+                for (group, _) in groups {
+                    for binding in group {
+                        binding.all_aliases(out);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn field_string(value: &Value, key: &str) -> Result<String, String> {
+    value[key]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("pool alias has no `{key}`"))
+}
+
+/// A `WeightedList` document: `[{"data": …, "weight": n}, …]`.
+fn parse_weighted<T>(
+    value: &Value,
+    mut item: impl FnMut(&Value) -> Result<T, String>,
+) -> Result<Vec<(T, i32)>, String> {
+    let entries = value
+        .as_array()
+        .ok_or_else(|| "weighted list is not a list".to_string())?;
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        out.push((
+            item(&entry["data"])?,
+            entry["weight"].as_i64().unwrap_or(1) as i32,
+        ));
+    }
+    Ok(out)
+}
+
+/// `WeightedList.getRandomOrThrow(random)` — one `nextInt(totalWeight)`, then the
+/// cumulative walk. `Flat` and `Compact` are the same function of that index, so
+/// there is only one behaviour to reproduce, and a **zero-weight entry is
+/// unreachable** rather than reachable-with-probability-zero.
+fn weighted_pick<'a, T, R: RandomSource>(entries: &'a [(T, i32)], random: &mut R) -> Option<&'a T> {
+    let total: i32 = entries.iter().map(|(_, w)| *w).sum();
+    if total <= 0 {
+        return None;
+    }
+    let mut selection = random.next_int_bounded(total);
+    for (value, weight) in entries {
+        selection -= *weight;
+        if selection < 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// `PoolAliasLookup` — the resolved alias → target map for one structure instance.
+///
+/// # Its random is not the structure's stream
+///
+/// `PoolAliasLookup.create(bindings, startPos, seed)` builds
+/// `RandomSource.create(seed).forkPositional().at(startPos)` — a *positional* fork
+/// of the **world** seed, entirely separate from the `WorldgenRandom` the rest of
+/// jigsaw assembly draws from. So the bindings cost the structure's own stream
+/// nothing, and the map is a pure function of `(world seed, start position)`.
+#[derive(Debug, Clone, Default)]
+pub struct PoolAliasLookup {
+    map: BTreeMap<String, String>,
+}
+
+impl PoolAliasLookup {
+    /// `PoolAliasLookup.create(bindings, pos, seed)`. An empty binding list is
+    /// vanilla's `EMPTY`, i.e. the identity, and derives no random at all.
+    #[must_use]
+    pub fn create(bindings: &[PoolAlias], pos: [i32; 3], seed: i64) -> Self {
+        if bindings.is_empty() {
+            return Self::default();
+        }
+        let mut random = LegacyRandomSource::new(seed)
+            .fork_positional()
+            .at(pos[0], pos[1], pos[2]);
+        let mut map = BTreeMap::new();
+        for binding in bindings {
+            binding.for_each_resolved(&mut random, &mut map);
+        }
+        Self { map }
+    }
+
+    /// `lookup(key)` — `getOrDefault(key, key)`.
+    #[must_use]
+    pub fn lookup<'a>(&'a self, key: &'a str) -> &'a str {
+        self.map.get(key).map_or(key, String::as_str)
+    }
+}
+
 /// One jigsaw structure's `type`-specific configuration.
 #[derive(Debug, Clone)]
 pub struct JigsawConfig {
@@ -394,24 +620,22 @@ pub struct JigsawConfig {
     pub padding_bottom: i32,
     /// `dimension_padding.top`.
     pub padding_top: i32,
+    /// `pool_aliases`, in document order — the order
+    /// [`PoolAliasLookup::create`] resolves them in, which is the draw order.
+    pub pool_aliases: Vec<PoolAlias>,
 }
 
 impl JigsawConfig {
     /// Parses a `minecraft:jigsaw` structure document, or returns why it cannot
     /// be modelled.
     ///
-    /// **Refuses rather than defaults.** `pool_aliases` is the case that matters:
-    /// a trial chamber whose aliases were ignored would place spawners with no
-    /// contents and consume a different number of draws, so it is demoted and
-    /// named instead.
+    /// **Refuses rather than defaults**, for everything it does not model. The
+    /// bundled data needs no such refusal today: `pool_aliases` used to be one and
+    /// is now honoured (see [`PoolAlias`]), which is what closes `trial_chambers`.
     pub fn parse(value: &Value) -> Result<Self, String> {
-        if value["pool_aliases"]
-            .as_array()
-            .is_some_and(|a| !a.is_empty())
-        {
-            return Err("jigsaw `pool_aliases` (a random-group alias binding \
-                        redirects a pool per structure instance)"
-                .to_string());
+        let mut pool_aliases = Vec::new();
+        for binding in value["pool_aliases"].as_array().cloned().unwrap_or_default() {
+            pool_aliases.push(PoolAlias::parse(&binding)?);
         }
         let start_pool = value["start_pool"]
             .as_str()
@@ -463,7 +687,29 @@ impl JigsawConfig {
             waterlogging: value["liquid_settings"].as_str() != Some("ignore_waterlogging"),
             padding_bottom,
             padding_top,
+            pool_aliases,
         })
+    }
+
+    /// Every pool id the aliases can redirect **to**, for eager loading.
+    #[must_use]
+    pub fn alias_targets(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for binding in &self.pool_aliases {
+            binding.all_targets(&mut out);
+        }
+        out
+    }
+
+    /// Every pool id that is an alias, i.e. one the bundle is *not* expected to
+    /// contain a document for.
+    #[must_use]
+    pub fn alias_names(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for binding in &self.pool_aliases {
+            binding.all_aliases(&mut out);
+        }
+        out
     }
 }
 
@@ -495,6 +741,10 @@ pub struct JigsawStub<R> {
     /// `(centerX, centerY, centerZ)` — the stub position the biome filter uses.
     pub position: [i32; 3],
     free: FreeSpace,
+    /// The resolved alias map. Built in [`begin`] because vanilla builds it from
+    /// `startPos`, which only exists there, and carried across the biome filter for
+    /// the same reason `random` is.
+    aliases: PoolAliasLookup,
 }
 
 /// `JigsawPlacement.addPieces`' eager half: everything up to the stub position.
@@ -502,6 +752,7 @@ pub struct JigsawStub<R> {
 /// `Ok(None)` is vanilla's `Optional.empty()` — an empty centre pool, a missing
 /// named start jigsaw, or a centre piece that does not fit the dimension padding.
 /// No start at all, before any biome check.
+#[allow(clippy::too_many_arguments)]
 pub fn begin<R: RandomSource>(
     config: &JigsawConfig,
     pools: &PoolStore,
@@ -509,13 +760,20 @@ pub fn begin<R: RandomSource>(
     cz: i32,
     min_y: i32,
     height: i32,
+    seed: i64,
     ctx: &dyn StartContext,
     mut random: R,
 ) -> Option<JigsawStub<R>> {
     let start_height = config.start_height.sample(&mut random, min_y, height);
     let position = [cx * 16, start_height, cz * 16];
+    // `PoolAliasLookup.create(this.poolAliases, startPos, context.seed())` is an
+    // *argument* to `addPieces`, so it is built after the start height is sampled
+    // and before `Rotation.getRandom`. Its own random is a positional fork of the
+    // world seed, so where it sits in that sequence changes nothing — but the
+    // position it keys on is the pre-adjustment `startPos`, not the centre.
+    let aliases = PoolAliasLookup::create(&config.pool_aliases, position, seed);
     let centre_rotation = Rotation::random(&mut random);
-    let centre_pool = pools.get(&config.start_pool)?;
+    let centre_pool = pools.get(aliases.lookup(&config.start_pool))?;
     let centre_element = centre_pool.random_template(&mut random);
     if matches!(*centre_element, PoolElement::Empty) {
         return None;
@@ -593,6 +851,7 @@ pub fn begin<R: RandomSource>(
         centre,
         position: [centre_x, centre_y, centre_z],
         free,
+        aliases,
     })
 }
 
@@ -612,6 +871,7 @@ pub fn finish<R: RandomSource>(
         mut random,
         centre,
         free,
+        aliases,
         ..
     } = stub;
     let mut placer = Placer {
@@ -621,6 +881,7 @@ pub fn finish<R: RandomSource>(
         pieces: vec![centre],
         frees: vec![free],
         placing: PriorityQueue::default(),
+        aliases,
     };
     if config.max_depth > 0 {
         placer.try_placing_children(0, 0, 0, ctx, &mut random);
@@ -629,6 +890,29 @@ pub fn finish<R: RandomSource>(
         }
     }
     placer.into_pieces(config.waterlogging, ctx)
+}
+
+/// The `referencePos` every piece of a start is processed against:
+/// `StructureStart.placeInChunk`'s
+/// `new BlockPos(centre.getX(), pieces[0].boundingBox.minY(), centre.getZ())`,
+/// where `centre` is the **first** piece's box centre.
+///
+/// A whole-start fact, computed once from the piece list rather than carried by
+/// each piece — which is also why it is public here and consumed by
+/// `structure_place_stage` rather than baked into a [`PiecePlacement`].
+/// `BoundingBox.getCenter()` is `min + (max - min + 1) / 2`, an integer divide, and
+/// it is **not** `(min + max) / 2` for an even span.
+#[must_use]
+pub fn reference_position(pieces: &[StructurePiece]) -> [i32; 3] {
+    let Some(first) = pieces.first() else {
+        return [0, 0, 0];
+    };
+    let b = first.bounding_box;
+    [
+        b.min[0] + (b.max[0] - b.min[0] + 1) / 2,
+        b.min[1],
+        b.min[2] + (b.max[2] - b.min[2] + 1) / 2,
+    ]
 }
 
 /// One entry of `JigsawPlacement.Placer.placing`.
@@ -649,6 +933,10 @@ struct Placer<'a> {
     /// states, and cloning one per state would let two siblings overlap.
     frees: Vec<FreeSpace>,
     placing: PriorityQueue<PieceState>,
+    /// The alias map, applied to **every** `sourceJigsaw.pool()` and to nothing
+    /// else — notably **not** to a pool's `fallback`, which vanilla looks up
+    /// unaliased.
+    aliases: PoolAliasLookup,
 }
 
 impl Placer<'_> {
@@ -685,11 +973,13 @@ impl Placer<'_> {
             let source_jigsaw_local_y = source_jigsaw_pos[1] - source_box_y;
             let mut source_base_height: Option<i32> = None;
 
-            let Some(target_pool) = self.pools.get(&source_jigsaw.pool) else {
+            // `poolAliasLookup.lookup(sourceJigsaw.pool())`.
+            let pool_name = self.aliases.lookup(&source_jigsaw.pool);
+            let Some(target_pool) = self.pools.get(pool_name) else {
                 // "Empty or non-existent pool" — a warn and a `continue`.
                 continue;
             };
-            if target_pool.size() == 0 && source_jigsaw.pool != "minecraft:empty" {
+            if target_pool.size() == 0 && pool_name != "minecraft:empty" {
                 continue;
             }
             let fallback_id = target_pool.fallback.clone();
@@ -921,6 +1211,7 @@ impl Placer<'_> {
                 template: first.as_ref().map(|(id, _)| id.clone()),
                 placement: first.map(|(_, placement)| placement),
                 extra_placements: extra.into_iter().map(|(_, placement)| placement).collect(),
+                blocks: None,
                 beard,
             });
         }
@@ -1110,16 +1401,201 @@ mod tests {
         assert_eq!((config.max_horizontal, config.max_vertical), (116, 4064));
     }
 
-    /// `pool_aliases` is refused, not defaulted — the ledger's job.
-    #[test]
-    fn pool_aliases_are_refused_by_name() {
+    /// `trial_chambers`' own bindings, transcribed: one `random_group` of three
+    /// two-member groups, then two `random` bindings.
+    fn trial_chamber_aliases() -> Vec<PoolAlias> {
         let value: Value = serde_json::from_str(
-            r#"{"start_pool":"minecraft:x","start_height":{"absolute":0},"size":6,
-                "pool_aliases":[{"type":"minecraft:random","alias":"a","targets":[]}]}"#,
+            r#"[
+              {"type":"minecraft:random_group","groups":[
+                {"weight":1,"data":[
+                  {"type":"minecraft:direct","alias":"a:ranged","target":"a:skeleton"},
+                  {"type":"minecraft:direct","alias":"a:slow","target":"a:slow_skeleton"}]},
+                {"weight":1,"data":[
+                  {"type":"minecraft:direct","alias":"a:ranged","target":"a:stray"},
+                  {"type":"minecraft:direct","alias":"a:slow","target":"a:slow_stray"}]},
+                {"weight":1,"data":[
+                  {"type":"minecraft:direct","alias":"a:ranged","target":"a:poison"},
+                  {"type":"minecraft:direct","alias":"a:slow","target":"a:slow_poison"}]}]},
+              {"type":"minecraft:random","alias":"a:melee","targets":[
+                {"weight":1,"data":"a:zombie"},
+                {"weight":1,"data":"a:husk"},
+                {"weight":1,"data":"a:spider"}]},
+              {"type":"minecraft:random","alias":"a:small","targets":[
+                {"weight":1,"data":"a:slime"},
+                {"weight":1,"data":"a:cave_spider"},
+                {"weight":1,"data":"a:silverfish"},
+                {"weight":1,"data":"a:baby_zombie"}]}
+            ]"#,
         )
         .unwrap();
-        let why = JigsawConfig::parse(&value).expect_err("aliases must be refused");
-        assert!(why.contains("pool_aliases"), "{why}");
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| PoolAlias::parse(v).expect("the bundled shapes all parse"))
+            .collect()
+    }
+
+    /// **The draw budget is the specification**, and it is asserted by stream
+    /// position rather than by comparing resolved values: three bindings, of which
+    /// the `random_group` costs one draw (the group) plus zero (two `direct`s) and
+    /// each `random` costs one. Three draws, on a `nextInt(totalWeight)` each.
+    ///
+    /// The two wrong implementations this excludes are the ones with no visible
+    /// symptom: resolving the group's members with a *fresh* random (same map,
+    /// wrong count) and drawing per `direct` binding (5 draws, plausible chamber).
+    #[test]
+    fn pool_alias_draw_counts_are_the_specification() {
+        use lodestone_worldgen_core::rng::{LegacyRandomSource, PositionalRandomFactory};
+        let bindings = trial_chamber_aliases();
+        let seed = -195_764_831_i64;
+        let pos = [16, 32, -48];
+
+        let lookup = PoolAliasLookup::create(&bindings, pos, seed);
+        // Every alias is mapped, and the two members of the chosen group agree —
+        // a `stray` ranged spawner cannot sit beside a `skeleton` slow-ranged one.
+        let ranged = lookup.lookup("a:ranged").to_string();
+        let slow = lookup.lookup("a:slow").to_string();
+        let expected_slow = match ranged.as_str() {
+            "a:skeleton" => "a:slow_skeleton",
+            "a:stray" => "a:slow_stray",
+            "a:poison" => "a:slow_poison",
+            other => panic!("unexpected ranged target {other}"),
+        };
+        assert_eq!(slow, expected_slow);
+        // An unbound id is the identity, which is `getOrDefault(key, key)`.
+        assert_eq!(lookup.lookup("a:unbound"), "a:unbound");
+
+        // Exactly three draws, against a hand-driven stream seeded the same way.
+        let mut oracle = LegacyRandomSource::new(seed)
+            .fork_positional()
+            .at(pos[0], pos[1], pos[2]);
+        let group = oracle.next_int_bounded(3);
+        let melee = oracle.next_int_bounded(3);
+        let small = oracle.next_int_bounded(4);
+        assert_eq!(
+            ranged,
+            ["a:skeleton", "a:stray", "a:poison"][group as usize],
+            "the group index is not the first draw"
+        );
+        assert_eq!(
+            lookup.lookup("a:melee"),
+            ["a:zombie", "a:husk", "a:spider"][melee as usize]
+        );
+        assert_eq!(
+            lookup.lookup("a:small"),
+            ["a:slime", "a:cave_spider", "a:silverfish", "a:baby_zombie"][small as usize]
+        );
+
+        // The map is a function of `(seed, position)` and of nothing else, and a
+        // different position really does move it — otherwise every chamber in the
+        // world would hold the same mob.
+        assert_eq!(
+            PoolAliasLookup::create(&bindings, pos, seed).lookup("a:melee"),
+            lookup.lookup("a:melee")
+        );
+        let distinct = (0..64)
+            .map(|i| {
+                PoolAliasLookup::create(&bindings, [i * 16, 32, -48], seed)
+                    .lookup("a:melee")
+                    .to_string()
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(distinct.len() >= 2, "position does not move the alias map");
+
+        // An empty binding list is `PoolAliasLookup.EMPTY`: identity, no random.
+        assert_eq!(PoolAliasLookup::create(&[], pos, seed).lookup("a:melee"), "a:melee");
+    }
+
+    /// `allTargets` reaches through a `random_group`, and `all_aliases` names the
+    /// ids the bundle deliberately has no document for.
+    #[test]
+    fn alias_targets_and_names_span_the_whole_binding_tree() {
+        let bindings = trial_chamber_aliases();
+        let mut targets = BTreeSet::new();
+        let mut names = BTreeSet::new();
+        for binding in &bindings {
+            binding.all_targets(&mut targets);
+            binding.all_aliases(&mut names);
+        }
+        // 6 from the group + 3 melee + 4 small.
+        assert_eq!(targets.len(), 13, "{targets:?}");
+        assert!(targets.contains("a:slow_poison"), "{targets:?}");
+        assert_eq!(
+            names,
+            ["a:melee", "a:ranged", "a:slow", "a:small"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>()
+        );
+    }
+
+    /// A binding `type` this engine does not know is still refused by name, so a
+    /// future one lands on the ledger instead of silently resolving to nothing.
+    #[test]
+    fn an_unknown_pool_alias_type_is_refused() {
+        let value: Value =
+            serde_json::from_str(r#"{"type":"minecraft:future","alias":"a","target":"b"}"#).unwrap();
+        let why = PoolAlias::parse(&value).expect_err("an unknown type must be refused");
+        assert!(why.contains("minecraft:future"), "{why}");
+    }
+
+    /// `WeightedList.getRandomOrThrow` is one `nextInt(totalWeight)` plus the
+    /// cumulative walk, and a zero-weight entry is unreachable rather than rare.
+    #[test]
+    fn weighted_pick_walks_cumulative_weights() {
+        use lodestone_worldgen_core::rng::LegacyRandomSource;
+        let entries = vec![("a", 1), ("b", 0), ("c", 3)];
+        let mut seen = std::collections::BTreeMap::new();
+        // One stream, not one seed per trial: sequential LCG seeds correlate in
+        // their first draw hard enough that the per-seed spelling of this
+        // measurement reported `a` at 0.0 out of 4,000 with the code correct.
+        let mut random = LegacyRandomSource::new(0xC0FF_EE01);
+        let trials = 40_000;
+        for _ in 0..trials {
+            let pick = weighted_pick(&entries, &mut random).expect("total weight is 4");
+            *seen.entry(*pick).or_insert(0) += 1;
+        }
+        assert_eq!(seen.get("b"), None, "a zero-weight entry was selected");
+        let a = f64::from(*seen.get("a").unwrap_or(&0)) / f64::from(trials);
+        assert!((a - 0.25).abs() < 0.01, "'a' selected {a} of the time, want 0.25");
+        // An all-zero list is `isEmpty()`: no draw, no answer.
+        let empty = vec![("x", 0)];
+        let mut random = LegacyRandomSource::new(1);
+        let mut control = LegacyRandomSource::new(1);
+        assert!(weighted_pick(&empty, &mut random).is_none());
+        assert_eq!(
+            random.next_int_bounded(1_000_000),
+            control.next_int_bounded(1_000_000),
+            "an empty weighted list consumed a draw"
+        );
+    }
+
+    /// `referencePos` is the **first** piece's box centre with its own `minY`, and
+    /// `getCenter` is `min + (max - min + 1) / 2` — not `(min + max) / 2`, which
+    /// differs by one on every even span.
+    #[test]
+    fn reference_position_is_the_first_pieces_centre_column_and_floor() {
+        let piece = |min: [i32; 3], max: [i32; 3]| StructurePiece {
+            id: "minecraft:jigsaw".to_string(),
+            bounding_box: BoundingBox { min, max },
+            orientation: None,
+            gen_depth: 0,
+            template: None,
+            placement: None,
+            extra_placements: Vec::new(),
+            blocks: None,
+            beard: None,
+        };
+        let pieces = vec![
+            piece([10, 60, -20], [19, 70, -11]),
+            piece([100, 100, 100], [101, 101, 101]),
+        ];
+        // x: 10 + (19 - 10 + 1)/2 = 15 (the `(min+max)/2` reading gives 14).
+        // z: -20 + (-11 + 20 + 1)/2 = -15.
+        // y: the box's own minY, not its centre.
+        assert_eq!(reference_position(&pieces), [15, 60, -15]);
+        assert_eq!(reference_position(&[]), [0, 0, 0]);
     }
 
     /// A `uniform` start height costs exactly **one** `nextInt(span)` draw and a

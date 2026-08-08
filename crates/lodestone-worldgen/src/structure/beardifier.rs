@@ -463,6 +463,7 @@ mod tests {
             template: None,
             placement: None,
             extra_placements: Vec::new(),
+            blocks: None,
             beard: None,
         }
     }

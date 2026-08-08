@@ -378,33 +378,54 @@ impl OverworldGenerator {
         cz: i32,
         mut world: crate::dense_grid::DenseBlockGrid,
     ) -> crate::dense_grid::DenseBlockGrid {
-        if self.structures.is_none() {
+        let Some(registry) = &self.structures else {
             return world;
-        }
+        };
         // Below the early return, per this file's own rule about stage guards:
         // a guard above it would count a fixture-tree no-op as a run.
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Structure);
+        let seed = registry.seed();
         let (bx, bz) = (cx * 16, cz * 16);
         for (_, _, start) in &self.structure_refs_stage(cx, cz).entries {
             if !start.pieces_complete {
                 continue;
             }
+            // `StructureStart.placeInChunk` derives one `referencePos` for the whole
+            // start, from its **first** piece's box, before the per-piece loop. It
+            // is not a per-piece value and it is not the chunk — an
+            // `axis_aligned_linear_pos` rule measures from here.
+            let reference = crate::structure::jigsaw::reference_position(&start.pieces);
             for piece in &start.pieces {
-                let Some(placement) = &piece.placement else {
-                    continue;
-                };
                 if !piece.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15) {
                     continue;
                 }
+                // A coded piece writes a pre-resolved block list; a template piece
+                // writes its template. Both are clipped by the grid.
+                if let Some(blocks) = &piece.blocks {
+                    for block in blocks.iter() {
+                        world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
+                    }
+                }
+                let Some(placement) = &piece.placement else {
+                    continue;
+                };
+                let origin = crate::structure::template::PlaceOrigin {
+                    position: placement.position,
+                    reference,
+                    seed,
+                };
                 placement
                     .template
-                    .place(placement.position, &placement.settings, &mut world);
+                    .place(origin, &placement.settings, &mut world);
                 // A `list_pool_element` writes several templates at one position,
                 // in document order — `ListPoolElement.place`'s own loop.
                 for extra in &piece.extra_placements {
-                    extra
-                        .template
-                        .place(extra.position, &extra.settings, &mut world);
+                    let origin = crate::structure::template::PlaceOrigin {
+                        position: extra.position,
+                        reference,
+                        seed,
+                    };
+                    extra.template.place(origin, &extra.settings, &mut world);
                 }
             }
         }

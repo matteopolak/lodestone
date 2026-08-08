@@ -229,9 +229,14 @@ fn every_wired_kind_writes_blocks() {
                 piece.bounding_box.max[2] - piece.bounding_box.min[2] + 1,
                 "minecraft:air",
             );
+            let origin = lodestone_worldgen::structure::template::PlaceOrigin {
+                position: placement.position,
+                reference: lodestone_worldgen::structure::jigsaw::reference_position(&start.pieces),
+                seed: SEED,
+            };
             written += placement
                 .template
-                .place(placement.position, &placement.settings, &mut grid);
+                .place(origin, &placement.settings, &mut grid);
         }
         assert!(
             written > 0,
