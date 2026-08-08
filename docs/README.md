@@ -1492,6 +1492,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   terrain). Phase NE-data of
   [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md); the data half is landed,
   the engine half is not started.
+- [End worldgen](./worldgen-end.md) — What the End generates today and what it does
+  not. Two pieces landed — `lodestone_worldgen_core::noise::EndIslandNoise` (the
+  `minecraft:end_islands` algorithm) and `lodestone_worldgen::end::EndBiomeSource`
+  (`TheEndBiomeSource`, complete) — and End *terrain* is blocked on exactly one
+  thing: an `end_islands` leaf in the density interpreter, which lives in another
+  cluster's file. This doc says precisely what that patch is so it can be applied
+  without re-deriving anything.
 - [Worldgen fast hashing](./worldgen-fast-hashing.md) — The worldgen engine's
   internal lookup tables use a cheap in-house `FxHash`-style `BuildHasher`
   (`lodestone_worldgen_core::hash::fast`) instead of `std`'s SipHash-1-3
@@ -1537,6 +1544,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `src/overworld.rs` (1,873 lines) and `src/feature/vegetation.rs` (3,661) — became
   two directories, by pure move, so the rewrite's engine middle can run at width 2 and
   then 4 instead of width 1.
+- [Nether worldgen](./worldgen-nether.md) — The composed Nether generator —
+  `lodestone_worldgen::nether::NetherGenerator` — and the engine work it needed: a
+  selectable RNG family, the two bespoke Nether biome noises, a disabled-aquifer fill,
+  and the `minecraft:nether_cave` carver. It is the second dimension this engine
+  produces real terrain for, and it is verified against a real Mojang server's own
+  Nether, not against itself.
 - [Ore placement: where its allocations went, and why the ore path was not the biggest one](./worldgen-ore-allocations.md) —
   Unit 18 of [`plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md): the
   `UNDERGROUND_ORES` placement engine's heap traffic, taken from **8,306 allocations
