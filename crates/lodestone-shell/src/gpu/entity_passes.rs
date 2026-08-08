@@ -190,11 +190,6 @@ impl RenderState {
     ///   not carried past `net::entity_snapshot`, so there is no input; they also
     ///   need a stitched trim-sprite atlas and a third depth mode
     ///   (`CompareOp.EQUAL`, no depth write). See `docs/armour-rendering.md`.
-    /// * **A stack's own dye** (`minecraft:dyed_color`). Same reason: the
-    ///   component is dropped at `entity_snapshot`, which narrows a stack to its
-    ///   item id. Leather therefore always draws at
-    ///   `Dyeable.colorWhenUndyed`, which is the correct answer for an undyed
-    ///   piece and the only reachable one for a dyed one.
     /// * **Baby rigs.** Vanilla swaps in a whole second mesh set
     ///   (`createBabyArmorMesh`, `humanoid_baby` sheets, its own deformations);
     ///   a baby zombie wears adult armour scaled by the mob's 0.5 uniform scale

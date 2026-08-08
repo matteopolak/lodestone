@@ -134,87 +134,54 @@ sample from `RenderState`'s `EntityLightSource` — the same source the mobs use
   defined and unused), and the stack count that would drive it — see the next
   bullet.
 
-- **Stack count used to be dropped at the `EntitySnapshot` boundary; it no
-  longer is, though the *draw* still renders exactly one copy.** The count is
-  decoded — it reaches `EntityView::item` as a real `ItemStack` — and
-  `net::entity_snapshot` now reads `stack.count` into `EntitySnapshot::count:
-  u32` (defaulting to `1` whenever there is no reported stack, never `0`, so a
-  consumer that multiplies by count never draws zero copies of nothing).
-  `entities.rs` carries it the rest of the way: `ItemStacks`'s map value
-  widened from a bare `ResourceLocation` to a `TrackedStack { id, count }`,
-  `fold_snapshots` records the real count instead of implicitly always `1`,
-  and `extract_entity_draws` copies it onto `EntityDraw::count`. Hermetic tests
-  (`item_count_reaches_the_draw`, `set_item_stack_with_count_is_recorded_and_reachable`
-  in `entities.rs`; `entity_snapshot_carries_item_count_through` in `net.rs`)
-  pin the chain, including the "no stack at all" control reading `1`.
+- **Stack count reaches the draw, and the draw makes vanilla's 1-5 copies.**
+  The count is decoded into `EntityView::item` as a real `ItemStack`, narrowed
+  onto `EntityFacts::count` (defaulting to `1` whenever there is no reported
+  stack, never `0`), carried by `ItemStacks`'s `TrackedStack { id, count, foil }`
+  and copied onto `EntityDraw::count` by `extract_entity_draws`.
 
-  **The draw itself is still one copy regardless of count** — that half is
-  outside `entities.rs`'s files. `gpu.rs::prepare_item_geometry` is what would
-  turn `EntityDraw::count` into the extra `dropped_item_mesh` calls, and it is
-  held; read from `.cache/mc/26.2/client-src/net/minecraft/client/renderer/entity/{ItemEntityRenderer,state/ItemClusterRenderState}.java`,
-  not summarised:
+  `prepare_item_geometry` (`gpu/world_items.rs`) then draws
+  `lodestone_render::entity::rendered_amount(count)` copies — 1, then 2 above 1,
+  3 above 16, 4 above 32, 5 above 48, transcribed from
+  `ItemClusterRenderState.getRenderedAmount`. Copy `0` is unperturbed, matching
+  vanilla's own first unperturbed `submit`; the rest are offset by
+  `item_cluster_jitter(entity_id, copy, extent)`.
 
-  ```java
-  // ItemClusterRenderState.java
-  public static int getRenderedAmount(final int stackCount) {
-     if (stackCount <= 1) return 1;
-     else if (stackCount <= 16) return 2;
-     else if (stackCount <= 32) return 3;
-     else return stackCount <= 48 ? 4 : 5;
-  }
+  Two things about the branch:
 
-  // ItemEntityRenderer.submitMultipleFromCount, amount = getRenderedAmount(count)
-  if (modelDepth > 0.0625F) {           // FLAT_ITEM_DEPTH_THRESHOLD
-     submit(pose);                      // the first copy, unperturbed
-     for (i in 1..amount) {
-        jitter = random_in(-0.15, 0.15) on each of x, y, z;
-        submit(pose translated by jitter);
-     }
-  } else {                              // a flat sprite: fan along Z instead
-     offsetZ = modelDepth * 1.5;
-     translate(0, 0, -offsetZ * (amount - 1) / 2); submit(pose);
-     for (i in 1..amount) {
-        translate(0, 0, offsetZ);
-        jitter = random_in(-0.075, 0.075) on x, y only;
-        submit(pose translated by jitter);
-     }
-  }
-  ```
+  - **It is the *posed* model's z-depth that picks it**, via
+    `posed_item_z_extent` against `FLAT_ITEM_DEPTH_THRESHOLD` (`0.0625`). A solid
+    model jitters `±0.15` on all three axes; a flat sprite instead **fans** its
+    copies evenly along z at `depth * 1.5`, centred on the entity, and jitters
+    only `±0.075` on x and y. Getting the branch backwards makes a stack of
+    blocks look like a flat fan and a stack of sticks like a cloud.
+  - **The jitter is a hash, not vanilla's RNG.** Vanilla seeds it from a
+    `RandomSource` keyed on `Item.getId(item) + damageValue`, which we cannot
+    observe — the same situation `item_bob_offset` is in for the bob phase. So
+    `item_cluster_jitter` hashes `(entity_id, copy)` for the same *property* (no
+    two drops and no two copies scatter in lockstep) rather than chasing bytes.
+    Do not spend effort trying to match vanilla's output exactly.
 
-  Two things worth knowing before landing it: vanilla branches on the
-  posed model's own Z-depth against `FLAT_ITEM_DEPTH_THRESHOLD` (defined,
-  unused, in `lodestone-render/src/entity.rs`) — a 3-D model jitters in X/Y/Z,
-  a flat sprite instead fans along Z, evenly spaced, with a smaller jitter —
-  and vanilla seeds its per-copy jitter from `RandomSource` keyed on
-  `Item.getId(item) + damageValue`, which we cannot observe or reproduce
-  bit-for-bit any more than `item_bob_offset` can observe the spawn-time RNG
-  for bob phase. The precedent that function set — hash something we *can*
-  see (there, the entity id) for the same *property* (two drops do not pulse
-  in lockstep) rather than the exact bytes — is the right template here too;
-  do not spend effort trying to match vanilla's `RandomSource` output exactly.
-  Data components (dye colour, trim, custom model data) are still discarded at
-  the `net::entity_snapshot` boundary; unlike the count they change how an item
-  looks rather than how many of it there are, and nothing in the item pipeline
-  reads them.
+  Data components other than dye and foil (trim, custom model data) are still
+  discarded before the draw; unlike the count they change how an item looks
+  rather than how many of it there are.
 
-  **What landing it needs, concretely:**
-  1. `lodestone-render/src/entity.rs` — a `posed_item_z_extent(quads, ground) ->
-     (f32, f32)` mirroring `posed_item_y_extent` (same file, ~line 1274), so
-     `prepare_item_geometry` can read the posed model's Z-size and pick the
-     branch above.
-  2. `lodestone-render/src/entity.rs` — a jitter function in
-     [`item_bob_offset`]'s idiom, e.g. `item_cluster_jitter(id: i32, copy: u32)
-     -> Vec3`, hashing `(id, copy)` rather than trying to reproduce
-     `RandomSource`.
-  3. `lodestone-shell/src/gpu.rs::prepare_item_geometry` — where it currently
-     calls `dropped_item_mesh` once per drop, call `rendered_amount(draw.count)`
-     (vanilla's `getRenderedAmount`, transcribed above) and loop that many
-     times, merging one `dropped_item_mesh`-equivalent call per copy at
-     `draw.feet + jitter` (copy `0` unperturbed, matching vanilla's own
-     unperturbed first `submit`). This needs either a new `dropped_item_mesh`
-     overload taking an extra world-space offset, or computing the offset
-     `Vec3` here and adding it to `draw.feet` before the existing call — the
-     latter needs no render-crate signature change at all.
+- **Enchanted drops glint.** `EntityFacts::foil` narrows
+  `lodestone_render::glint::has_foil` off the reported stack's components and
+  rides the same `TrackedStack` -> `EntityDraw` path as the count.
+  `prepare_item_geometry` returns a **second** mesh holding only the enchanted
+  items' quads, and `frame.rs` re-rasterises it through the glint pipeline in the
+  *same* render pass, immediately after the base item draw. Both properties are
+  load-bearing: the glint pipeline compares depth `EQUAL`, so it can only shimmer
+  where the base draw has just written depth, and the two meshes are merged from
+  one `dropped_item_mesh` call per copy so their vertices cannot diverge.
+
+  The glint's group-0 uniform is its **own** buffer
+  (`GlintPass::world_uniform_buffer`), not the hand's. `queue.write_buffer` is
+  ordered against the submit rather than against the encoder, and the world items
+  and the first-person hand draw in different passes of one submit — so a single
+  buffer written twice would hand both passes the last value and the shimmer
+  would land nowhere.
 
 - **Pickup animation — landed** (issue #365), see
   [item-pickup-animation.md](./item-pickup-animation.md). The flight reuses this

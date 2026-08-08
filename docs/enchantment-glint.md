@@ -87,20 +87,35 @@ is recorded in `lodestone-shell`, which is where the remaining work is:
    container-screen producer and *does* have a stack: it wants the same one-line
    change, and was left alone only because it sat outside the wiring task's file
    ownership.
-2. **Record the second pass.** Still open — this is the remaining gap, and
-   `enchanted` currently has **zero readers**, so a foiled stack sets the flag and
-   nothing consumes it. Wherever an item is drawn, re-bind
-   `GlintPipeline` and re-draw the same buffers: dropped items at
-   `crates/lodestone-shell/src/gpu/frame.rs:667-688`, first-person held at
-   `crates/lodestone-shell/src/gpu/first_person.rs:711-735`, GUI icons at
-   `crates/lodestone-shell/src/hud/item_icon.rs:1735-1743`.
-3. **Load the texture.** `glint::textures::ITEM` /
-   `glint::textures::ARMOUR`, uploaded **non-sRGB** (see the gotcha below) with
-   `glint::glint_sampler`.
+   `container/builder.rs` is now wired too, from the same predicate.
+2. ~~**Record the second pass.**~~ **Done for the two world/hand sites.**
+   - First-person held item — `gpu/first_person.rs`, in the hand's own pass.
+   - Dropped items and mobs' held items — `gpu/frame.rs`, in the main pass right
+     after the base item draw. `prepare_item_geometry` returns a *second* mesh
+     carrying only the enchanted items' quads, merged from the same
+     `dropped_item_mesh` output so the two cannot diverge (depth-`EQUAL` rejects
+     any divergence silently). The foil flag rides `EntityFacts::foil` ->
+     `TrackedStack` -> `EntityDraw::foil`, the same path `count` takes; see
+     `dropped-items.md`.
+
+   Each site has its **own** group-0 uniform buffer
+   (`GlintPass::uniform_buffer` for the hand, `world_uniform_buffer` for the
+   world). That is not tidiness: `queue.write_buffer` is ordered against the
+   *submit*, not against the encoder, and the two draws are in different passes of
+   one submit — one buffer written twice hands both passes the last value and the
+   shimmer lands nowhere.
+
+   **The 2-D GUI icon site is still open**, and is the one that matters most; see
+   below for why it is a bigger change than it looks.
+3. ~~**Load the texture.**~~ **Done (#452).** `crate::resources::load_glint_texture`
+   reads `glint::textures::ITEM` out of the jar and `RenderState::install_glint`
+   uploads it **non-sRGB** (see the gotcha below) with `glint::glint_sampler`.
+   `glint::textures::ARMOUR` is still unused — armour glint needs the armour pass
+   to grow a second rasterisation the same way the item pass just did.
 
 The 2-D GUI *sprite* path is a separate problem, and it is the one that matters
 most: flat sprites are the majority of what a hotbar holds (every sword, tool and
-ingot), so the 3-D hook at `item_icon.rs:1735` covers only block and chest icons.
+ingot), so a 3-D hook in `item_icon.rs` would cover only block and chest icons.
 It draws flat quads through `hud_sprite.wgsl`, not the model pipeline, so it needs
 its own glint pipeline over the same quads. `GlintPipeline` **cannot be reused**
 there: it mandates a `depth_format` and depth-`EQUAL`, and its vertex layout is

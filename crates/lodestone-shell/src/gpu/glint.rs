@@ -47,9 +47,19 @@ pub(super) struct GlintPass {
     /// Group 1: the sheet plus [`glint_sampler`], built once and reused by
     /// every glint draw.
     pub(super) texture_bind_group: wgpu::BindGroup,
-    /// Group 0: the [`GlintUniform`] for whichever glint draw runs next.
+    /// Group 0: the [`GlintUniform`] for the **hand** glint draw.
     pub(super) uniform_buffer: wgpu::Buffer,
     pub(super) uniform_bind_group: wgpu::BindGroup,
+    /// Group 0 for the **world** glint draw (dropped enchanted items).
+    ///
+    /// A second buffer rather than a second write of the first, because the two
+    /// draws need different `view_proj` matrices **within one submit**: the world
+    /// items draw in the main pass and the hand in its own pass at the end of the
+    /// frame, and `queue.write_buffer` is ordered against the *submit*, not against
+    /// the encoder — so a single buffer written twice would hand both passes the
+    /// last value and the shimmer would land nowhere.
+    pub(super) world_uniform_buffer: wgpu::Buffer,
+    pub(super) world_uniform_bind_group: wgpu::BindGroup,
 }
 
 impl std::fmt::Debug for GlintPass {
@@ -124,6 +134,14 @@ impl GlintPass {
             mapped_at_creation: false,
         });
         let uniform_bind_group = pipeline.uniform_bind_group(device, &uniform_buffer);
+        let world_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lodestone-glint-uniform-world"),
+            size: std::mem::size_of::<GlintUniform>() as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let world_uniform_bind_group =
+            pipeline.uniform_bind_group(device, &world_uniform_buffer);
 
         Self {
             pipeline,
@@ -131,6 +149,8 @@ impl GlintPass {
             texture_bind_group,
             uniform_buffer,
             uniform_bind_group,
+            world_uniform_buffer,
+            world_uniform_bind_group,
         }
     }
 }

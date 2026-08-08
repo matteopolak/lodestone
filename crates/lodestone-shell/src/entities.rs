@@ -477,10 +477,11 @@ struct EntityFacts {
     /// [`resolve_entity_facts`]; unlike the data components dropped there, it
     /// changes *how many* copies vanilla draws rather than how one looks
     /// (`ItemClusterRenderState::getRenderedAmount`: 1 copy at count ≤ 1, then
-    /// 2, 3, 4, 5 as the count passes 1, 16, 32 and 48) — see
-    /// [`EntityDraw::count`] for where the multi-copy draw itself still needs
-    /// wiring.
+    /// 2, 3, 4, 5 as the count passes 1, 16, 32 and 48).
     count: u32,
+    /// Whether the carried stack has the enchantment foil — `ItemStack.hasFoil`,
+    /// narrowed from `DisplayItem`'s components the same way [`Self::count`] is.
+    foil: bool,
     /// This entity's resolved nametag (issue #100), or `None` when nothing
     /// should draw above it — a mob with no visible custom name, or a player
     /// entity with no matching tab-list entry. See [`NameTag`].
@@ -610,13 +611,14 @@ pub struct EntityDraw {
     /// Meaningless (and left at the neutral `1`) for every entity that is not
     /// a dropped item with a known stack.
     ///
-    /// **Not yet drawn as more than one copy.** Vanilla's
-    /// `ItemClusterRenderState::getRenderedAmount` turns this into 1–5 jittered
-    /// copies (`prepare_item_geometry` in `gpu.rs` still draws exactly one
-    /// regardless of `count`) — see `docs/dropped-items.md`. This field is the
-    /// data half of that gap; the draw half is a specified, unlanded patch to a
-    /// held file.
+    /// `prepare_item_geometry` turns this into vanilla's 1–5 copies via
+    /// `lodestone_render::entity::rendered_amount`, scattered by
+    /// `item_cluster_jitter` — see `docs/dropped-items.md`.
     pub count: u32,
+    /// Whether the carried stack is enchanted, so the drop gets the glint second
+    /// pass (issue #452). `false` for every entity that is not a dropped item
+    /// with a reported stack.
+    pub foil: bool,
     /// Interpolated feet position in world space.
     pub feet: Vec3,
     /// Interpolated body yaw in degrees.
@@ -947,6 +949,8 @@ pub struct ItemCollision(pub PlayerCollision);
 struct TrackedStack {
     id: ResourceLocation,
     count: u32,
+    /// Whether the stack is enchanted, so the drop draws the glint second pass.
+    foil: bool,
 }
 
 /// Which item (and how many) each dropped-item entity is carrying, keyed by
@@ -1032,6 +1036,8 @@ pub struct PickupAnimation {
     pub item: ResourceLocation,
     /// The collected stack size, carried for parity with [`EntityDraw::count`].
     pub count: u32,
+    /// Whether the collected stack was enchanted, so the flying copy glints too.
+    pub foil: bool,
     /// The item's render scale at capture.
     pub scale: f32,
     /// Where the item was **drawn** when the pickup arrived — not its last
@@ -1141,6 +1147,7 @@ pub fn begin_item_pickup(world: &mut World, item_entity_id: i32, collector_id: i
             item_entity_id,
             item: stack.id,
             count: stack.count,
+            foil: stack.foil,
             scale,
             start,
             age_ticks,
@@ -1198,6 +1205,7 @@ pub fn extract_pickup_draws(
             type_path: ITEM_ENTITY_TYPE_PATH.to_string(),
             item: Some(pickup.item.clone()),
             count: pickup.count,
+            foil: pickup.foil,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),
             wool: None,
@@ -1699,6 +1707,7 @@ pub fn extract_entity_draws(
             type_path: kind.0.clone(),
             item: stack.map(|s| s.id.clone()),
             count: stack.map_or(1, |s| s.count),
+            foil: stack.is_some_and(|s| s.foil),
             equipment: equipment.0.clone(),
             equipment_dye: equipment_dye.0.clone(),
             wool: wool.0,
@@ -1851,6 +1860,16 @@ fn resolve_entity_facts(
         Reported::Reported(Some(stack)) => stack.count,
         _ => 1,
     };
+    // The glint gate for a dropped stack. `lodestone_render::glint::has_foil` is
+    // the single owner of what foil means (the HUD's own
+    // `item_icon::stack_has_foil` bridges the *other* stack type to the same
+    // predicate); nothing here re-spells it.
+    let foil = match &display_item {
+        Reported::Reported(Some(stack)) => {
+            lodestone_render::glint::has_foil(&stack.components)
+        }
+        _ => false,
+    };
     // A failed conversion must collapse to `Unreported` ("nothing reported"),
     // never to `Reported(None)`, which downstream reads as the server
     // clearing the stack.
@@ -1952,6 +1971,7 @@ fn resolve_entity_facts(
         equipment_dye,
         variant: entity.get::<Variant>().map(|variant| variant.0.clone()),
         count,
+        foil,
         name_tag,
         creeper_swell_dir: entity.get::<CreeperSwellDir>().map(|dir| dir.0),
     })
@@ -2021,6 +2041,7 @@ pub fn fold_entities(world: &mut World) {
                     TrackedStack {
                         id: item.clone(),
                         count: facts.count,
+                        foil: facts.foil,
                     },
                 );
             }
@@ -2340,7 +2361,7 @@ pub fn set_item_stack_in(world: &mut World, entity_id: i32, item: ResourceLocati
     world
         .resource_mut::<ItemStacks>()
         .0
-        .insert(entity_id, TrackedStack { id: item, count: 1 });
+        .insert(entity_id, TrackedStack { id: item, count: 1, foil: false });
 }
 
 /// Tracks and interpolates every visible entity between server ticks.
@@ -2450,7 +2471,7 @@ impl EntityInterpolator {
         self.world
             .resource_mut::<ItemStacks>()
             .0
-            .insert(entity_id, TrackedStack { id: item, count });
+            .insert(entity_id, TrackedStack { id: item, count, foil: false });
     }
 
     /// Forget the item recorded for `entity_id`, so it draws as an empty stack.

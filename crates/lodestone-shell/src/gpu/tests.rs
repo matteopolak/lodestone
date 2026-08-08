@@ -346,6 +346,7 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
         },
         wool: None,
         count: 1,
+        foil: false,
         name_tag: None,
         item_use: None,
         // Not a creeper: only a creeper ever swells.

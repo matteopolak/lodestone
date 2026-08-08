@@ -1824,6 +1824,72 @@ pub fn posed_item_y_extent(quads: &[BakedQuad], ground: &DisplayTransform) -> (f
     if min > max { (0.0, 0.0) } else { (min, max) }
 }
 
+/// The posed model's `z` extent, the mirror of [`posed_item_y_extent`].
+///
+/// This is the input to vanilla's flat-versus-solid branch in
+/// `ItemEntityRenderer.submitMultipleFromCount`: a model whose depth exceeds
+/// [`FLAT_ITEM_DEPTH_THRESHOLD`] is a block-ish thing whose extra stack copies
+/// jitter in all three axes, while a flat sprite instead fans its copies evenly
+/// along `z`. Measured on the *posed* model for the same reason the `y` version
+/// is — the branch is about the drawn depth, not the model's declared one.
+#[must_use]
+pub fn posed_item_z_extent(quads: &[BakedQuad], ground: &DisplayTransform) -> (f32, f32) {
+    let pose = display_matrix(ground);
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for quad in quads {
+        for p in &quad.positions {
+            let z = pose.transform_point3(Vec3::from(*p)).z;
+            min = min.min(z);
+            max = max.max(z);
+        }
+    }
+    if min > max { (0.0, 0.0) } else { (min, max) }
+}
+
+/// How many copies of a stack vanilla draws — `ItemClusterRenderState
+/// .getRenderedAmount`: 1, then 2 above 1, 3 above 16, 4 above 32, 5 above 48.
+#[must_use]
+pub fn rendered_amount(count: u32) -> u32 {
+    match count {
+        0..=1 => 1,
+        2..=16 => 2,
+        17..=32 => 3,
+        33..=48 => 4,
+        _ => 5,
+    }
+}
+
+/// Per-copy scatter for a stack's extra copies, in the idiom
+/// [`item_bob_offset`] set.
+///
+/// Vanilla seeds this from a `RandomSource` keyed on `Item.getId(item) +
+/// damageValue`, which we cannot observe. So this hashes `(entity_id, copy)` for
+/// the same *property* — no two drops and no two copies scatter in lockstep —
+/// rather than chasing bytes we have no way to reproduce. `copy == 0` is exactly
+/// zero, matching vanilla's unperturbed first `submit`.
+///
+/// `extent` is the half-range on each axis: `0.15` for a solid model (all three
+/// axes), `0.075` for a flat sprite (x and y only, hence the zero `z` the caller
+/// discards).
+#[must_use]
+pub fn item_cluster_jitter(entity_id: i32, copy: u32, extent: f32) -> Vec3 {
+    if copy == 0 {
+        return Vec3::ZERO;
+    }
+    // Three decorrelated hash rounds over the same (id, copy) key — one per
+    // axis, so a copy does not move along the diagonal.
+    let key = (entity_id as u32)
+        .wrapping_mul(0x9E37_79B9)
+        .wrapping_add(copy.wrapping_mul(0x85EB_CA6B));
+    let axis = |salt: u32| {
+        let mixed = key.wrapping_add(salt).wrapping_mul(0xC2B2_AE35);
+        let frac = f32::from(u16::try_from(mixed >> 16).unwrap_or(0)) / 65536.0;
+        (frac * 2.0 - 1.0) * extent
+    };
+    Vec3::new(axis(0x1656_67B1), axis(0x27D4_EB2F), axis(0x1656_67B5))
+}
+
 /// Vanilla's `minOffsetY`: the lift that puts the posed model's lowest point
 /// exactly [`ITEM_MIN_HOVER_HEIGHT`] above the entity's own position.
 #[must_use]

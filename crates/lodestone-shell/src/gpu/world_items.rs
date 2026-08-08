@@ -18,8 +18,9 @@ use lodestone_assets::DisplaySlot;
 use lodestone_render::{
     Camera, ENTITY_FULLBRIGHT, GpuModelMesh, ItemStateContext, ModelMesh,
     entity::{
-        Arm, camera_orientation, dropped_item_mesh, ground_transform, hand_transform,
-        held_item_mesh, item_bob_offset, thrown_item_for, thrown_item_mesh,
+        Arm, FLAT_ITEM_DEPTH_THRESHOLD, camera_orientation, dropped_item_mesh, ground_transform,
+        hand_transform, held_item_mesh, item_bob_offset, item_cluster_jitter,
+        posed_item_z_extent, rendered_amount, thrown_item_for, thrown_item_mesh,
     },
 };
 
@@ -59,16 +60,29 @@ impl RenderState {
     /// closely it is attached to one. The only thing the entity side contributes
     /// is the arm's world matrix, which is why this reads `part_transforms` out
     /// of a freshly resolved instance rather than the other way round.
+    ///
+    /// # Two meshes, because the glint is a second rasterisation of the same quads
+    ///
+    /// The returned pair is `(all items, enchanted items only)`. The glint pipeline
+    /// is depth-`EQUAL`, so it can only shimmer where the base draw already wrote
+    /// depth — which means the enchanted subset has to be a *separate* buffer
+    /// carrying byte-identical vertices, not a filtered range of the first. Both
+    /// halves are merged in the same loop from the same
+    /// [`dropped_item_mesh`] output for exactly that reason: two calls could
+    /// diverge, and the depth compare would then silently reject the shimmer.
     pub(super) fn prepare_item_geometry(
         &self,
         device: &wgpu::Device,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
-    ) -> Option<GpuModelMesh> {
-        let model = self.model.as_ref()?;
+    ) -> (Option<GpuModelMesh>, Option<GpuModelMesh>) {
+        let Some(model) = self.model.as_ref() else {
+            return (None, None);
+        };
         let frustum = camera.frustum();
         let mut combined = ModelMesh::default();
+        let mut foil = ModelMesh::default();
         // `camera.orientation` for every thrown projectile this frame: one
         // matrix, not one per entity — a billboard's rotation depends only on the
         // camera.
@@ -122,23 +136,50 @@ impl RenderState {
             // back to the `GuiLight`-keyed vanilla constants only for a model
             // chain that declares no `ground` at all.
             let ground = ground_transform(&geometry.display, geometry.gui_light);
-            combined.merge(&dropped_item_mesh(
-                &geometry.quads,
-                geometry.gui_light,
-                &ground,
-                draw.feet,
-                draw.anim.age_ticks,
-                item_bob_offset(draw.id),
-                self.entity_light.sample(draw.feet),
-            ));
-            stats.item_drops_drawn += 1;
+            // Vanilla draws a *stack* as up to five copies —
+            // `ItemEntityRenderer.submitMultipleFromCount`. The first is
+            // unperturbed; the rest scatter, and how they scatter depends on the
+            // posed model's own depth: a solid model jitters in all three axes,
+            // a flat sprite instead fans evenly along `z` with a smaller jitter,
+            // centred so the fan grows both ways rather than only backwards.
+            let (min_z, max_z) = posed_item_z_extent(&geometry.quads, &ground);
+            let depth = max_z - min_z;
+            let flat = depth <= FLAT_ITEM_DEPTH_THRESHOLD;
+            let amount = rendered_amount(draw.count);
+            let fan_step = depth * 1.5;
+            let jitter_extent = if flat { 0.075 } else { 0.15 };
+            for copy in 0..amount {
+                let mut offset = item_cluster_jitter(draw.id, copy, jitter_extent);
+                if flat {
+                    // Even spacing along z, centred on the entity, and no z
+                    // jitter — the fan *is* the z placement.
+                    offset.z = fan_step
+                        * (copy as f32 - (amount.saturating_sub(1) as f32) / 2.0);
+                }
+                let mesh = dropped_item_mesh(
+                    &geometry.quads,
+                    geometry.gui_light,
+                    &ground,
+                    draw.feet + offset,
+                    draw.anim.age_ticks,
+                    item_bob_offset(draw.id),
+                    self.entity_light.sample(draw.feet),
+                );
+                if draw.foil {
+                    foil.merge(&mesh);
+                }
+                combined.merge(&mesh);
+                stats.item_drops_drawn += 1;
+            }
         }
-        let mesh = GpuModelMesh::upload(device, &combined)?;
+        let Some(mesh) = GpuModelMesh::upload(device, &combined) else {
+            return (None, None);
+        };
         stats.total_quads += combined.quad_count();
         // No camera write here: dropped items draw through `model.cam_bind_group`,
         // the same shared view_proj+fog buffer every section uses, written once
         // per frame at the top of `render_inner` — not a buffer of their own.
-        Some(mesh)
+        (mesh.into(), GpuModelMesh::upload(device, &foil))
     }
 
     /// Merge one thrown item projectile into `combined` as a camera-facing

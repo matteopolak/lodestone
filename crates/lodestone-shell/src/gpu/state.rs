@@ -645,6 +645,24 @@ impl RenderState {
         }
     }
 
+    /// [`Self::write_glint_uniform`] for the **world** glint draw — enchanted
+    /// dropped items and enchanted items in mobs' hands, which rasterise in the
+    /// main pass rather than the hand's own. Its own buffer for the reason
+    /// `GlintPass::world_uniform_buffer` records.
+    pub(super) fn write_world_glint_uniform(
+        &self,
+        queue: &wgpu::Queue,
+        view_proj: [[f32; 4]; 4],
+    ) {
+        if let Some(glint) = &self.glint {
+            queue.write_buffer(
+                &glint.world_uniform_buffer,
+                0,
+                bytemuck::bytes_of(&super::glint::glint_uniform(view_proj)),
+            );
+        }
+    }
+
     /// Upload this frame's precipitation columns. Must run **before**
     /// [`render`](Self::render), like [`prepare_particles`](Self::prepare_particles)
     /// and for the same reason: buffers cannot be created mid-pass.
