@@ -412,13 +412,18 @@ pub struct OverworldGenerator {
     /// computing a second copy. See [`store`]'s module doc for the full
     /// argument, the exact-key rule, and why eviction is view-scoped.
     store: store::StagedStore<ChunkStages>,
-    /// Per-biome `VEGETAL_DECORATION` list (issue #406), resolved the same
-    /// way and at the same time as `ores_by_biome` — see
-    /// `crate::compose::build_biome_vegetation`. Empty (whole map) when the
-    /// resolver supplies no biome documents with a vegetation step, in
-    /// which case [`Self::vegetation_stage`] is a no-op, matching every
+    /// Per-biome decoration list, resolved the same way and at the same time as
+    /// `ores_by_biome` — see `crate::compose::build_biome_decoration`. Empty
+    /// (whole map) when the resolver supplies no biome documents with any driven
+    /// step, in which case [`Self::vegetation_stage`] is a no-op, matching every
     /// other #295/#406 resolver "no data supplied" convention.
-    vegetation_by_biome: HashMap<String, Vec<(usize, crate::feature::vegetation::PlacedRef)>>,
+    ///
+    /// **Issue #513 widened this from `VEGETAL_DECORATION` alone to every step in
+    /// `crate::compose::DRIVEN_STEPS`**, so entries now carry their own step index
+    /// and the map is no longer one-step-per-biome. The name is unchanged because
+    /// [`Self::vegetation_stage`] is still the one stage that consumes it.
+    vegetation_by_biome:
+        HashMap<String, Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>>,
     /// Block-tag closures [`crate::feature::vegetation`]'s own predicates/
     /// checks need (`supports_vegetation`, `replaceable_by_trees`, `logs`,
     /// `cannot_replace_below_tree_trunk`) — resolved once, analogous to
@@ -613,7 +618,7 @@ impl OverworldGenerator {
             ores_by_biome.insert(name.clone(), crate::compose::build_biome_ores(resolver, name));
             vegetation_by_biome.insert(
                 name.clone(),
-                crate::compose::build_biome_vegetation(resolver, name),
+                crate::compose::build_biome_decoration(resolver, name),
             );
             let document = resolver.biome_document(name);
             if let Some(climate) = crate::feature::top_layer::parse_biome_climate(&document) {

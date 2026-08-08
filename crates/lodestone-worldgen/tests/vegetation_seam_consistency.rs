@@ -109,18 +109,36 @@ const EAST: (i32, i32) = (1, 0);
 /// Total truncated rows with the 5×5 read neighbourhood in place, summed over every
 /// bundled biome. **Measured, and the whole residual is the shared-overlay channel
 /// named in the module doc** — see [`EXPECTED`] for the split.
-const MEASURED_TOTAL: usize = 44;
+///
+/// **Re-baselined by issue #513 (was 44, control was 94).** That issue widened the
+/// engine from 7 feature types and 10 placement modifiers to 30 and 15, so a
+/// `VEGETAL_DECORATION` step that previously dropped `height_range`,
+/// `environment_scan`, `count_on_every_layer`, `noise_based_count`,
+/// `surface_relative_threshold_filter` and `fixed_placement` now runs them — and
+/// each one draws. Every tree downstream of one in the same step therefore lands
+/// somewhere else, and this sweep is a count of *which* canopies happen to straddle
+/// the border. The number moving is the expected consequence; what would be a
+/// regression is the widened arm losing its margin over the narrow control, which
+/// `narrow_read_neighbourhood_is_what_truncates` still asserts directly.
+const MEASURED_TOTAL: usize = 77;
 
 /// Total truncated rows with the read neighbourhood narrowed back to 3×3 — the
 /// control. Must exceed [`MEASURED_TOTAL`] by a wide margin, or the widening bought
-/// nothing.
-const MEASURED_TOTAL_NARROW: usize = 94;
+/// nothing. Re-baselined alongside [`MEASURED_TOTAL`]; see its note.
+const MEASURED_TOTAL_NARROW: usize = 120;
 
 /// Per-biome `(west-half-missing, east-half-missing)` at the fixed arm, for every
 /// biome that is not zero. Predicted values, not a band: a biome appearing here that
 /// should not, or a count moving, is a real change and should fail.
+///
+/// `jungle` is new as of #513 and is the clearest illustration of why: jungle's own
+/// trees are still `ConfiguredFeature::Unsupported` (`GiantTrunkPlacer`), so its 133
+/// border crossings come from features that only started placing in that issue —
+/// `vines` above all, which by construction reads its four horizontal neighbours and
+/// so is exactly the shape this sweep measures.
 const EXPECTED: &[(&str, usize, usize)] = &[
     ("minecraft:flower_forest", 7, 8),
+    ("minecraft:jungle", 26, 7),
     ("minecraft:old_growth_spruce_taiga", 6, 0),
     ("minecraft:windswept_savanna", 17, 6),
 ];

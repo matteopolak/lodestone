@@ -399,7 +399,7 @@ impl OverworldGenerator {
             },
         );
 
-        let features_for_source = |source_x: i32, source_z: i32| -> &[(usize, crate::feature::vegetation::PlacedRef)] {
+        let features_for_source = |source_x: i32, source_z: i32| -> &[(i32, usize, crate::feature::vegetation::PlacedRef)] {
             // Issue #480: resolve the per-source feature list from the source
             // chunk's own SURFACE-HEIGHT biome — [`Self::biome_stage`]'s
             // per-quart map, quart 0 = the source's min-block corner sampled
@@ -429,7 +429,7 @@ impl OverworldGenerator {
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
         if single_source_debug {
             let features = features_for_source(cx, cz);
-            crate::feature::vegetation::apply_vegetal_decoration_step(
+            crate::feature::vegetation::apply_decoration_steps(
                 &mut random,
                 self.seed,
                 cx,
@@ -439,7 +439,7 @@ impl OverworldGenerator {
                 features,
             );
         } else {
-            crate::feature::vegetation::apply_vegetal_decoration_step_3x3_per_source(
+            crate::feature::vegetation::apply_decoration_steps_3x3_per_source(
                 &mut random,
                 self.seed,
                 cx,

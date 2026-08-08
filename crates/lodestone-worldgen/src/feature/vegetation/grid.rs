@@ -557,6 +557,12 @@ pub mod census {
         pub random_selector: usize,
         /// [`super::ConfiguredFeature::SimpleRandomSelector`] traversals.
         pub simple_random_selector: usize,
+        /// Issue #513: dispatches into any of the 24 feature types added beyond
+        /// the original seven, terminals and traversals together. One shared
+        /// counter rather than 24 fields — the question this census answers is
+        /// "did decoration reach a modelled body", and `unsupported` already
+        /// names the ones it did not.
+        pub other_feature: usize,
         /// Unmodelled terminal dispatches, **keyed by the reason string**
         /// [`super::ConfiguredFeature::Unsupported`] carries. This is the loud
         /// part: a new unimplemented feature type shows up here as a named,
@@ -609,7 +615,7 @@ pub mod census {
         /// Terminal dispatches that reached a placer this engine implements.
         #[must_use]
         pub fn modelled_terminals(&self) -> usize {
-            self.simple_block + self.tree + self.block_column
+            self.simple_block + self.tree + self.block_column + self.other_feature
         }
     }
 
