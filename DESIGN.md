@@ -3832,3 +3832,108 @@ comment did not say, and could not have.
   derives `Copy` is a latent constraint on every future field: it silently forbids any field carrying an
   owned value, and the cost is only discovered by the first feature that needs one.** Recorded with the
   exact two-file patch in `docs/block-drops.md` rather than half-landed.
+
+**12.117 Issue #517's island closed at the encoder, and the two things that decided the design were both discovered
+by *printing a counter next to a green assertion*: the fixture every neighbouring test uses is a vacuous world for
+light, and the wire form the bug shipped renders **bright**, not dark.**
+
+The census in the issue body was accurate — `crates/lodestone-world/src/lighting.rs` really is a 1,105-line
+`LightEngine` port whose only production caller was `lodestone-shell/src/worldgen.rs`, and
+`server_protocol.rs`'s `encode_column_body` really did send `ColumnLight::new(section_count)` for every column.
+Landed as `3f26be21` (the props census) + `9ae07b8e` (the wiring and its gate).
+
+- **`LightData::Missing` is full daylight, not darkness, and the issue body recorded the client-side consequence as
+  "undetermined".** It is determined by reading two files: `lodestone_render::WorldSectionLight` applies
+  `SkyDefault` **only** to `Missing` sky data, and `mesher.rs`'s `sky_default_for` resolves the overworld to
+  `SkyDefault::Full`. Vanilla's own client does the same — `ClientPacketListener::readSectionList` queues nothing
+  for a section in neither mask, and `SkyLightSectionStorage` answers 15 above the topmost known section. So the
+  shipped symptom was a **uniformly bright** world: lit caves, lit sealed rooms, no night. **Establishing the
+  direction of a visual defect before fixing it is not ceremony — someone hunting this by looking for blackness
+  searches the wrong subsystem indefinitely.**
+
+- **The obvious fixture is a *world*-species vacuous test, and only a printed counter showed it.** Seed 1234,
+  chunk (0, 0) is what `encode_chunk_carries_real_block_states_including_a_fluid` and `tests/block_edit.rs`
+  already use, so reusing it looked like good hygiene. It is **ocean**: sky 15 above the water, a purely
+  *vertical* 15→14→13… decay through it, and nothing else. Surveyed over five chunks at each of two seeds, seed
+  1234 produced **`horiz = 0` at all five** (cells whose sky level differs from their `+x` neighbour at the same
+  `y`) and **0 block-lit cells at four of five**. A gate on it would have exercised neither horizontal
+  propagation nor emission while asserting exact per-cell levels and reading as rigorous. The first draft's
+  non-vacuity guard was `1..=14` sky cells — it reported **3584** and passed, because vertical decay through
+  water satisfies it. **"Intermediate values exist" is not evidence that sideways propagation was exercised;
+  count the axis you actually care about.** The gate now uses seed 42, chunk (−9, 4) (`horiz = 1113`) and
+  *places its own emitter* rather than hoping generated lava lands in frame.
+
+- **The same class caught a second time, one level down, in the props table's own tests.**
+  `first_id_named("minecraft:stone_slab")` returns whichever state sorts first — `type=top, waterlogged=true`,
+  dampening 1 — not the `bottom`/`waterlogged=false` state the assertion's justification described. It cost one
+  red run. **When a per-state table is under test, name the state; a block name is not a fixture.**
+
+- **Where light is computed, and why not where it belongs.** `ServerProtocol::encode_chunk(&self, cx, cz,
+  &ChunkColumn)` is handed one column and has no access to the `ChunkSource` its neighbours live in, and
+  `V770ServerProtocol` is a unit struct the registry constructs. Even a cache inside it would not help: at join
+  `join_scheduler::ColumnPipeline` yields columns in spiral **ring** order, so a column's *outward* neighbours do
+  not exist yet when it is encoded, and lighting against only the neighbours seen so far biases every column's
+  outward edge dark — worse than a symmetric residual, because the bias is directional and therefore visible as a
+  consistent stripe. So the shipped compute is `compute_column_light` (isolated) and the residual is gated rather
+  than described. **Measured, not assumed:** over ten served chunks the isolated compute differs from the exact
+  3×3 compute at **0 cells on seven of them**, worst case **121 of 212,992 (0.057%)**, always in the
+  never-brighter direction, bounding box `x 0..15 / y 75..82 / z 0..15` — a hillside's sky gradient running
+  across a column border at the surface, worst cell sky 6 against 11.
+
+- **Cost inverted the intuition, and only measuring both computes made the design obvious.** Release, same
+  process: `compute_column_light` **1.0 ms/column**, `compute_column_light_with_neighbours` **9.7 ms/column**,
+  column *generation* **61 ms/column**. So light is 1.6% of generation, ~2% of a 50 ms tick and 6.6% of §12.112's
+  15.14 ms C_ss — and the *exact* compute, the one that looks expensive, is still only 16% of generation. The
+  9× version is therefore perfectly affordable **in the chunk source** next to generation on the blocking pool,
+  and unaffordable on the net task where `encode_chunk` runs (361 columns × 9.7 ms = 3.5 s of join latency). The
+  place a computation runs decided its viability entirely; its own cost did not.
+
+- **The debug-build ratio was 0.94 and nearly became the gate.** The first cost test compared light against
+  `build_world_column`'s 98,304 state resolutions and asserted `ratio < 1.0` — it passed at **0.939**, one
+  scheduling hiccup from red, and it was comparing against the wrong denominator anyway. Re-pointed at generation
+  it reads 0.056 in debug and 0.016 in release. **A ratio whose passing value sits at 94% of its own threshold is
+  a coin flip wearing a measurement's clothes**; §12.19's "prefer a counter over a duration" needs a corollary —
+  when the quantity really is a duration, pick a denominator large enough that the verdict is not a race.
+
+- **The light props census could not be a JVM dump, and the reason is a property of the game code rather than of
+  this machine.** Every neighbouring per-block-state table in `lodestone-data` is dumped from the real jar, and
+  `docs/` says to prefer that over any community dataset. Neither light quantity is reachable that way without
+  *running* it: `lightEmission` is a private `ToIntFunction<BlockState>` (`BlockBehaviour.java:980`, read into a
+  private field at `:463`) and `getLightDampening` is a protected method with per-block overrides
+  (`:298-305`, overridden by `LeavesBlock` and `TintedGlassBlock`). Neither appears in Mojang's
+  `generated/reports/blocks.json` — grepped, zero hits. So the table comes from
+  `vendor/minecraft-data 1.21.11`'s `filterLight`/`emitLight`, **cross-checked against vanilla's own formula**
+  (`isSolidRender() ? 15 : propagatesSkylightDown() ? 0 : 1`) on the eight cases that formula discriminates:
+  `stone` 15, `stone_slab` 0, `water` 1, `tinted_glass` 15, `oak_leaves` 1, `ice` 1, `glass` 0, `air` 0. Two
+  independent readings of the same vanilla behaviour agreeing is the evidence; one source restating itself would
+  not be. **No Java runtime is installed on this machine** (`java -version` → "Unable to locate a Java Runtime"),
+  which is worth recording because the whole `oracle-java` regeneration path in `CLAUDE.md` is unavailable until
+  that changes — and `oracle-java/` is not at the repo root, it is per-crate
+  (`crates/lodestone-data/oracle-java/`, `crates/lodestone-render/oracle-java/`).
+
+- **The per-block source is wrong per *state* in three ways that are derivable, and one of the three corrections
+  is the only thing keeping an existing live gate's soundness argument intact.** `blocks.json` records the
+  block's **default** state, so `type=double` slabs read 0 where they are full cubes, `waterlogged=true` reads 0
+  where the non-empty fluid state costs 1, and `redstone_torch[lit=false]` reads **7**. That last one is the
+  dangerous direction: `live_terrain_light.rs` proves the engine against a real vanilla server by asserting we
+  never produce *more* light than it does, which is sound **only** because a props shortfall can only darken us.
+  A table that over-claims emission would leave that gate green while destroying its argument. All three
+  corrections and every residual gap now move darker or more-occluding, and that invariant is written into
+  `light_props.rs`'s "how to change it" section as the thing not to helpfully fix.
+
+- **The 30 blocks 26.2 adds that 1.21.11 lacks are all cinnabar/sulfur plus `golden_dandelion`, and the control
+  on that gap is the useful part.** Their dampening was read out of `Blocks.java` (nine plain `Properties.of()`
+  full cubes → 15; eighteen `registerSlab`/`registerStair`/`registerWall` copies → 0; `FlowerBlock`,
+  `FlowerPotBlock` and the `noOcclusion()`+`dynamicShape()` `SULFUR_SPIKE` → 0) and **not one calls
+  `.lightLevel(...)`**, so every emission is 0. `unmapped_block_set_is_exactly_the_known_26_2_additions` asserts
+  the unmapped set is exactly those 30 and prints the symmetric difference, so a version bump that adds an
+  emitter fails loudly instead of silently shipping it as opaque and unlit. **A data-gap fallback needs a control
+  on the gap's membership, not just on its size** — 24 distinct `(dampening, emission)` pairs across 32,366
+  states, u8 index, zero heap.
+
+- **The other agent's crate was uncompilable for part of the run, and the right response was to reorder rather
+  than wait.** `cargo check -p lodestone-server` failed twice with different errors (`mobs.rs`'s
+  `merge_neighbouring_items`, then an `E0308`) while `lodestone-server`'s owner worked in it, which blocks every
+  `lodestone-v770` target since v770 depends on it. Building the `lodestone-data` census first — a crate with a
+  disjoint dependency cone — kept the run productive and landed a reviewable commit in the gap. **Dependency
+  order is a scheduling tool when the tree is shared.**

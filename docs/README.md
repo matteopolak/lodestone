@@ -961,6 +961,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   a connection asks for a burst of terrain: `serve_connection`'s initial `view_radius`
   join, and `ViewTracker::recenter`'s "chunks that entered the view" diff (both in
   `crates/lodestone-server/src/server.rs`).
+- [Server chunk light](./server-chunk-light.md) — How the integrated server computes
+  the sky and block light it puts on the wire, and where the per-block-state light
+  census that feeds it comes from. Issue #517: until this landed, every column
+  `V770ServerProtocol::encode_chunk` sent carried `ColumnLight::new(section_count)`
+  — all-`Missing`, both layers, every section — while a full `LightEngine` port
+  sat in `lodestone-world` with the client's singleplayer worldgen as its only
+  production caller.
 - [Server-side command execution](./server-commands.md) — The path a `/command`
   typed by a player takes from a serverbound `chat_command` frame to a registered
   plugin command's handler and back as system chat — and, more importantly, the
