@@ -1585,7 +1585,7 @@ impl LightProperties for V770LightProps {
 /// with a full 3×3 neighbourhood and fails, printing a bounding box, if the two
 /// disagree anywhere. The day the generator grows terrain whose light genuinely
 /// spans a seam, that gate goes red and the fix is the brokered
-/// `lodestone-server` patch recorded in `DESIGN.md` §12.114: compute light in the
+/// `lodestone-server` patch recorded in `DESIGN.md` §12.117: compute light in the
 /// chunk source, where the neighbourhood is already resident, and carry it on
 /// [`ServerChunkColumn`].
 fn compute_served_light(column: &WorldChunkColumn) -> ColumnLight {
