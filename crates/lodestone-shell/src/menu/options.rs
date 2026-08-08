@@ -4322,6 +4322,128 @@ mod tests {
         }
     }
 
+    /// **The wheel arm, measured on the *draw* rather than on frame data.**
+    ///
+    /// `arrowing_to_the_end_of_the_video_page_reaches_its_last_control_at_every_canvas`
+    /// drives the keyboard and reads `list_cell_origin`. This drives the wheel to
+    /// its clamp and reads `render::row_rect` off a real `settings_frame` — the
+    /// expression `render::draw` positions each row with, and the band it clips
+    /// to. That distinction is not pedantry: the resource-pack screen had a fully
+    /// green suite while drawing the wrong thing, because every test asserted on
+    /// frame data and nothing asserted on the draw.
+    ///
+    /// What it pins, on every page at four canvases: 200 wheel notches down land
+    /// exactly on `max_scroll` (the end is *reachable*), and the last list row is
+    /// then wholly inside the clip band, ending `LIST_CONTENT_PADDING` above its
+    /// bottom — vanilla's trailing padding, and a **predicted** value rather than
+    /// "somewhere legal".
+    #[test]
+    fn wheeling_to_the_clamp_puts_the_last_row_at_the_end_of_the_band() {
+        let options = crate::config::Options::default();
+        let mut pages_measured = 0;
+        for page in PAGES {
+            if page.entries().is_empty() {
+                continue;
+            }
+            for height in [crate::config::MIN_SCALED_HEIGHT as f32, 318.0, 480.0, 720.0] {
+                let width = 854.0;
+                let mut nav = SettingsNav::new();
+                nav.open_at(false, page);
+                // Far more notches than any page needs (one notch is
+                // `floor(25/2)` = 12 px against a worst case of 330), so this
+                // measures the clamp and not the loop bound.
+                for _ in 0..200 {
+                    nav.scroll_by(-1.0, height);
+                }
+                let max = list_spec(page, 0.0)
+                    .model(height)
+                    .map_or(0.0, |l| l.max_scroll());
+                assert_eq!(
+                    nav.scroll(), max,
+                    "{page:?} at {height} px: the wheel stopped at {} of a {max} px \
+                     maximum — the end is unreachable",
+                    nav.scroll()
+                );
+                if max == 0.0 {
+                    continue;
+                }
+                pages_measured += 1;
+
+                let frame = settings_frame(&nav, &options, None);
+                // `settings_frame` deliberately leaves `MenuFrame::list` unset —
+                // `render::dispatch` stamps `nav.active_list(ui)` onto it — so the
+                // band comes from the same `list_spec` that arm returns, which is
+                // what the draw clips to and what the wheel clamped through above.
+                let list = list_spec(page, nav.scroll())
+                    .model(height)
+                    .expect("a scrollable page has a band at this canvas");
+                // The **last row the draw clips to the band**, found the way
+                // `render::draw` decides what to clip, not by index arithmetic.
+                let (last, rect) = (0..frame.rows.len())
+                    .rev()
+                    .filter(|&i| {
+                        frame.rows[i]
+                            .slot
+                            .is_some_and(|s| s.origin.is_scrolling_list_row())
+                    })
+                    .find_map(|i| {
+                        crate::menu::render::row_rect(&frame.rows, i, width, height).map(|r| (i, r))
+                    })
+                    .expect("a settings page draws list rows");
+                let (_, y, _, h) = rect;
+                assert!(
+                    y >= list.top() && y + h <= list.bottom(),
+                    "{page:?} at {height} px: row {last} draws at {y}..{} outside the \
+                     band {}..{} — this is the 'scrolling does not reach the end' shape",
+                    y + h,
+                    list.top(),
+                    list.bottom()
+                );
+                // Predicted exactly: at `max_scroll` the last *entry box* ends
+                // `LIST_CONTENT_PADDING` above the band's bottom, and the widget
+                // inside it is inset a further `ENTRY_CONTENT_INSET` at the top,
+                // so a 20 px widget in a 25 px entry ends 5 px above that.
+                let entries = page.entries();
+                let entry_bottom = y - ENTRY_CONTENT_INSET + entry_height(entries, entries.len() - 1);
+                assert_eq!(
+                    entry_bottom,
+                    list.bottom() - crate::menu::widget::LIST_CONTENT_PADDING,
+                    "{page:?} at {height} px: the last entry ends at {entry_bottom}, not \
+                     {} — vanilla's contentHeight() reserves exactly \
+                     LIST_CONTENT_PADDING below the last entry",
+                    list.bottom() - crate::menu::widget::LIST_CONTENT_PADDING
+                );
+
+                // **The two expressions for one quantity, made to agree.**
+                // `list_cell_origin` walks `LIST_TOP_INSET + entry_offset +
+                // ENTRY_CONTENT_INSET` while the band, the scrollbar and the clip
+                // walk `ScrollList::row_top` (`first_entry_y + row_offset`). Every
+                // other list in this tree derives both from one expression; this
+                // page cannot, because its `entry_height` table is `OptionsList`'s
+                // and not the primitive's. They agree today — `LIST_TOP_INSET` and
+                // `LIST_CONTENT_PADDING` are both 2 px, and `entry_offset` is the
+                // same sum `with_heights` was handed — and this is what keeps them
+                // agreeing, since a drift shows up as "scrolling does not reach the
+                // end" with nothing wrong at either site on its own.
+                for entry in 0..entries.len() {
+                    let (_, cell_y) =
+                        list_cell_origin(page, entry, nav.scroll(), 0, width, height);
+                    assert_eq!(
+                        cell_y,
+                        list.row_top(entry) + ENTRY_CONTENT_INSET,
+                        "{page:?} at {height} px, entry {entry}: `list_cell_origin` and \
+                         `ScrollList::row_top` disagree about where the row is"
+                    );
+                }
+            }
+        }
+        assert!(
+            pages_measured >= 4,
+            "premise: at least four (page, canvas) pairs must actually overflow their \
+             band, or this measured no scrolling at all — got {pages_measured}"
+        );
+    }
+
     /// The clamp itself, both hypotheses computed from outside constants.
     ///
     /// At the shortest canvas the Video page's band is `240 - 33 - 33` = 174 and

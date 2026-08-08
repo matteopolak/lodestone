@@ -617,6 +617,38 @@ other way round: the cursor's row is always inside the band, and
 is the gate, swept over four canvases with the control count asserted as a
 precondition off the page's own control list.
 
+**Re-measured 2026-08-08, on the wheel arm and on the *draw*, and the list does
+reach its end.** The gate above drives the keyboard and reads `list_cell_origin`;
+`wheeling_to_the_clamp_puts_the_last_row_at_the_end_of_the_band` drives 200 wheel
+notches on every page at four canvases and reads `render::row_rect` off a real
+`settings_frame`, against the band `list_spec` hands the clip. That distinction is
+why it was worth re-running: the resource-pack screen had a fully green suite
+while drawing the wrong thing, because every test asserted on frame data and
+nothing asserted on the draw. What it found:
+
+| page/canvas | result |
+|---|---|
+| Video 240 / 318 / 480 | wheel lands on `max_scroll` exactly (330 / 252 / 90) |
+| Key Binds 240 / 318 / 480 / 720 | the same, at 530 / 452 / 290 / 50 |
+| every scrollable page, every canvas | the last entry box ends exactly `LIST_CONTENT_PADDING` (2 px) above the band's bottom — vanilla's own trailing padding |
+
+So the remaining suspicion — that `list_cell_origin`'s
+`LIST_TOP_INSET + entry_offset + ENTRY_CONTENT_INSET` walk and
+`ScrollList::row_top`'s `first_entry_y + row_offset` are **two expressions for one
+quantity**, unlike every other list in this tree — is real as a *risk* and is not
+a defect: `LIST_TOP_INSET` and `LIST_CONTENT_PADDING` are both 2 px and
+`entry_offset` is the same sum `with_heights` was handed. The same gate now asserts
+`list_cell_origin(entry) == row_top(entry) + ENTRY_CONTENT_INSET` for **every**
+entry of every page at four canvases, which is what keeps them agreeing: a drift
+between them presents as "scrolling does not reach the end" with nothing visibly
+wrong at either site on its own.
+
+Language could not be measured hermetically — a default `LanguageNav` has one
+entry, so its list does not scroll and the measurement is a vacuous
+*precondition* rather than a pass. Its geometry is Key Binds' algebra exactly
+(a uniform `ListSpec`, `row_y = first_entry_y + row * ROW_H - scroll`), and that
+one is measured.
+
 **The parity half of the same report — *"I don't see options in the same places as
 26.2 vanilla"* and *"I don't see the render distance option"* — was audited and
 found to be the same defect, not a composition one.** Every page's entry order
