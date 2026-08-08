@@ -103,7 +103,9 @@
 //! (The cell interpolation `interpolated` drives inside a real `NoiseChunk` is
 //! a separate, later stage — [`NoiseChunkSampler`], not this module.)
 
+use std::cell::Cell;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 
@@ -115,6 +117,120 @@ mod chunk;
 mod spline;
 pub use chunk::NoiseChunkSampler;
 pub use spline::{Spline, SplinePoint};
+
+/// The three outcomes of a [`Cache2DSlot`] lookup, process-wide.
+///
+/// # Why this is always on, and not behind `gen-counters`
+///
+/// A `try_lock` outcome is a **timing-dependent** observable: it depends on how
+/// many threads are inside the slot at that instant. `crate::counters` inflates a
+/// generation burst ~3× (see its module doc), which changes the very quantity
+/// being measured — a `gen-counters` build would report the contention of a
+/// different system. So this instrument has to survive into a clean release
+/// build, which means it must be cheap enough to be invisible.
+///
+/// # How it is cheap
+///
+/// The hot path is a **thread-local** `Cell<u64>` triple with no atomic and no
+/// shared cache line, flushed into the globals every [`FLUSH_EVERY`] lookups.
+/// That matters: the slots are reached on the order of 10^4–10^5 times per chunk,
+/// so three `Relaxed` `fetch_add`s per lookup would be tens of millions of writes
+/// to three shared lines per burst — an instrument that manufactures the
+/// contention it exists to measure. The cost is ~4 instructions per lookup, and
+/// the bound is checked against measured instructions/column in
+/// `DESIGN.md` §12.131.
+///
+/// # Reading it
+///
+/// [`reset_cache_2d_stats`] then [`cache_2d_stats`], exactly as
+/// `crate::counters`. Both are process-global, so the reset/read pair must
+/// bracket work that no other test is running concurrently. The residue in each
+/// thread's unflushed buffer is at most `FLUSH_EVERY - 1` per live thread, which
+/// is why nothing here is exact and why nothing asserts an exact total; the
+/// **ratio** is the observable. `contended` under a single-threaded sweep is the
+/// one exact value: a `try_lock` cannot fail with no other thread, so it is
+/// exactly 0, and that is this instrument's calibration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Cache2DStats {
+    /// Lookups whose slot already held this exact `(x, z)`.
+    pub hits: u64,
+    /// Lookups that took the lock and found a different `(x, z)` (or none) — a
+    /// real cache miss, the same one a serial run pays.
+    pub misses: u64,
+    /// Lookups whose `try_lock` failed because another thread held the slot.
+    /// Recomputed rather than waited, so this is **redundant work**, and it is
+    /// exactly 0 in any single-threaded run.
+    pub contended: u64,
+}
+
+/// Thread-local lookups between flushes into [`CACHE_2D`]. A power of two so the
+/// flush test is a mask, and large enough that the flush is ~0.1% of the bumps.
+const FLUSH_EVERY: u64 = 1024;
+
+static CACHE_2D_HITS: AtomicU64 = AtomicU64::new(0);
+static CACHE_2D_MISSES: AtomicU64 = AtomicU64::new(0);
+static CACHE_2D_CONTENDED: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static LOCAL_HITS: Cell<u64> = const { Cell::new(0) };
+    static LOCAL_MISSES: Cell<u64> = const { Cell::new(0) };
+    static LOCAL_CONTENDED: Cell<u64> = const { Cell::new(0) };
+    static LOCAL_PENDING: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Bumps one thread-local bucket and flushes the triple every [`FLUSH_EVERY`]
+/// lookups. `#[inline]` because it is called from the innermost spline leaf.
+#[inline]
+fn bump_cache_2d(bucket: &'static std::thread::LocalKey<Cell<u64>>) {
+    bucket.with(|b| b.set(b.get() + 1));
+    let pending = LOCAL_PENDING.with(|p| {
+        let n = p.get() + 1;
+        p.set(n);
+        n
+    });
+    if pending & (FLUSH_EVERY - 1) == 0 {
+        flush_cache_2d();
+    }
+}
+
+/// Moves this thread's buffered counts into the globals.
+fn flush_cache_2d() {
+    for (local, global) in [
+        (&LOCAL_HITS, &CACHE_2D_HITS),
+        (&LOCAL_MISSES, &CACHE_2D_MISSES),
+        (&LOCAL_CONTENDED, &CACHE_2D_CONTENDED),
+    ] {
+        let n = local.with(Cell::take);
+        if n != 0 {
+            global.fetch_add(n, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Zeroes the global [`Cache2DStats`]. Does **not** clear other threads'
+/// unflushed buffers — see [`Cache2DStats`] on why the residue is bounded and
+/// why only ratios are read from this.
+pub fn reset_cache_2d_stats() {
+    CACHE_2D_HITS.store(0, Ordering::Relaxed);
+    CACHE_2D_MISSES.store(0, Ordering::Relaxed);
+    CACHE_2D_CONTENDED.store(0, Ordering::Relaxed);
+}
+
+/// Flushes the calling thread's buffer and reads the global [`Cache2DStats`].
+///
+/// Call this after the measured work has been **joined**: a worker thread that is
+/// still alive holds up to `FLUSH_EVERY - 1` unreported lookups, and a worker
+/// that has exited holds none only because it flushed on its last multiple, not
+/// because exiting flushes.
+#[must_use]
+pub fn cache_2d_stats() -> Cache2DStats {
+    flush_cache_2d();
+    Cache2DStats {
+        hits: CACHE_2D_HITS.load(Ordering::Relaxed),
+        misses: CACHE_2D_MISSES.load(Ordering::Relaxed),
+        contended: CACHE_2D_CONTENDED.load(Ordering::Relaxed),
+    }
+}
 
 /// A single-slot last-value `(x, z) -> f64` cache backing [`Density::Cache2D`]
 /// — see the `## Caching` section on [`Density`] for which vanilla node kinds
@@ -182,14 +298,17 @@ impl Cache2DSlot {
             })
         else {
             // Another thread holds the slot. Recompute rather than wait.
+            bump_cache_2d(&LOCAL_CONTENDED);
             return f();
         };
         if let Some((cached_x, cached_z, value)) = *slot
             && cached_x == x
             && cached_z == z
         {
+            bump_cache_2d(&LOCAL_HITS);
             return value;
         }
+        bump_cache_2d(&LOCAL_MISSES);
         let value = f();
         *slot = Some((x, z, value));
         value
