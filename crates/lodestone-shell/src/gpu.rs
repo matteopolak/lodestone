@@ -37,6 +37,7 @@ mod first_person;
 mod frame;
 mod glint;
 mod nametag;
+mod occlusion;
 mod outline;
 mod screen_effects;
 mod sections;
@@ -54,6 +55,7 @@ mod tests;
 pub use debug_lines::{
     DebugLineVertex, chunk_border_vertices, debug_line_vertices, entity_hitbox_vertices,
 };
+pub use occlusion::TerrainOcclusion;
 pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
 pub use sources::{
@@ -217,6 +219,24 @@ pub struct RenderState {
     /// section submits a draw at every heading, which is the pre-#543 behaviour
     /// and the A/B arm the instruction harness measures against.
     terrain_culling: bool,
+    /// The section occlusion graph (U3): one [`SectionVisibility`] per section
+    /// the mesher has produced, maintained by `upload_section`/`remove_section`.
+    ///
+    /// Sections with **no** geometry are in here too — a fully-enclosed
+    /// underground section meshes to nothing and is exactly the blocker that
+    /// makes the underground free. All-*air* sections are not, and must not be:
+    /// they never reach a mesh worker at all, which is why the walk defaults an
+    /// absent in-bounds coord to open (see `walk_visible_bounded`).
+    vis_graph: lodestone_render::VisibilityGraph,
+    /// This frame's reachable set and the key it was walked for. `RefCell`
+    /// because `render_inner` takes `&self` (as `flame_frame_counter` already
+    /// does), and cached because vanilla's cadence is to re-walk only on an
+    /// 8-block camera-cell crossing or a graph change — never on rotation, which
+    /// is what keeps mouse movement off the walk.
+    occlusion: std::cell::RefCell<occlusion::OcclusionCache>,
+    /// Whether the reachable set culls, only counts, or is not walked at all.
+    /// See [`RenderState::set_terrain_occlusion`].
+    occlusion_mode: TerrainOcclusion,
     /// How each mob's world light is sampled. Full-bright until the shell wires
     /// a real world in via [`RenderState::set_entity_light_source`].
     entity_light: EntityLightSource,

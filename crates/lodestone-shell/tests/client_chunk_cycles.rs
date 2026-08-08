@@ -657,6 +657,21 @@ struct SubmitCost {
     /// [`culled_sections_drawn`](Self::culled_sections_drawn) to the resident set
     /// with opaque geometry.
     culled_split: (usize, usize, usize),
+    /// Instructions with the occlusion graph **also** on (U3), same resident set
+    /// and same camera. [`culled`](Self::culled) is the frustum ∩ distance arm.
+    occluded: Delta,
+    /// Sections the occlusion arm submitted (opaque pass), and how many the graph
+    /// removed on top of frustum ∩ distance.
+    occluded_sections_drawn: usize,
+    occluded_by_graph: usize,
+    /// Sections in the occlusion graph, which must be **at least** the resident
+    /// count: the graph holds every meshed section, geometry or not. A smaller
+    /// number is the silent-degradation failure this whole unit's gotcha is about.
+    occlusion_graph_sections: usize,
+    /// The shadow arm's `sections_occlusion_shadow`, which must equal
+    /// [`occluded_by_graph`](Self::occluded_by_graph) exactly — the same walk, the
+    /// same camera, one arm drawing them and one not.
+    shadow_would_cull: usize,
 }
 
 /// Renders one frame with no terrain, then the same frame with every section of
@@ -775,16 +790,27 @@ fn measure_draw_submission(
             };
             let opaque = mesh_snapshot_models(&snap, models);
             let water = mesh_snapshot_fluids(&snap, models).water;
-            if opaque.quad_count() == 0 && water.quad_count() == 0 {
-                continue;
-            }
+            let has_geometry = opaque.quad_count() > 0 || water.quad_count() > 0;
+            // Sections with **no** geometry are uploaded too, and that is the
+            // whole occlusion-graph gotcha: a fully-enclosed underground section
+            // meshes to nothing, so a fixture that skipped it would hand the walk
+            // a world with no floor, the walk would reach every section, and the
+            // occlusion arm below would measure a cull that culls nothing while
+            // looking healthy. `upload_section` records the connectivity before it
+            // decides there is no geometry to keep. `uploaded` still counts only
+            // the sections that draw, since that is what the 90% floor below is
+            // about.
             state.upload_section(
                 device,
                 queue,
                 key,
-                &SectionGeometry::Model { opaque, water },
+                &SectionGeometry::Model {
+                    opaque,
+                    water,
+                    visibility: lodestone::mesher::snapshot_visibility(&snap, models),
+                },
             );
-            uploaded += 1;
+            uploaded += usize::from(has_geometry);
         }
     }
     assert!(
@@ -834,10 +860,12 @@ fn measure_draw_submission(
         fixed.instructions
     );
 
-    // Arm 3: the same resident set with the cull **on** (#543). Nothing changes
-    // between the arms but `terrain_culling`, so the difference is the cull and
-    // nothing else.
+    // Arm 3: the same resident set with the cull **on** (#543), occlusion graph
+    // explicitly **off** — frustum ∩ distance alone, which is what #543 measured
+    // and the baseline the occlusion arm below is a delta against. Nothing changes
+    // between arms 2 and 3 but `terrain_culling`.
     state.set_terrain_culling(true);
+    state.set_terrain_occlusion(lodestone::gpu::TerrainOcclusion::Off);
     let (culled, cstats) = arm(&state, &mut one_frame);
 
     // The invariant, **per pass**. Stated against the no-cull arm's own
@@ -870,6 +898,85 @@ fn measure_draw_submission(
         cstats.sections_drawn > 0,
         "the cull removed EVERYTHING, which is the terrain-vanishes bug, not a win"
     );
+    assert_eq!(
+        cstats.sections_culled_occlusion, 0,
+        "the occlusion graph is switched off in this arm and still reported {} culls",
+        cstats.sections_culled_occlusion
+    );
+
+    // Arm 4: the occlusion graph in **shadow** mode. No instruction measurement —
+    // the point is only that the walk's verdict is identical whether or not it is
+    // enforced, which is what makes the shadow counter trustworthy as a live soak
+    // instrument. Both hypotheses: `sections_drawn` must match arm 3 exactly (a
+    // shadow arm that culls anything is not a shadow arm) while
+    // `sections_occlusion_shadow` must match arm 5's `sections_culled_occlusion`.
+    state.set_terrain_occlusion(lodestone::gpu::TerrainOcclusion::Shadow);
+    let shadow_stats = {
+        let mut last = None;
+        for _ in 0..3 {
+            last = Some(one_frame(&state));
+        }
+        last.expect("three shadow frames")
+    };
+    assert_eq!(
+        shadow_stats.sections_drawn, cstats.sections_drawn,
+        "shadow mode changed what was drawn ({} against {}), so it is not a shadow",
+        shadow_stats.sections_drawn, cstats.sections_drawn
+    );
+    assert!(
+        !shadow_stats.occlusion_active,
+        "shadow mode reported the cull as active"
+    );
+
+    // Arm 5: the occlusion graph enforcing (U3). The graph is the *only* thing
+    // that changes from arm 3.
+    state.set_terrain_occlusion(lodestone::gpu::TerrainOcclusion::On);
+    let (occluded, ostats) = arm(&state, &mut one_frame);
+    assert!(
+        ostats.occlusion_active,
+        "the occlusion graph produced no reachable set, so this arm silently measured \
+         frustum ∩ distance again. `occlusion_graph_sections` was {} against {} resident \
+         sections — if that is small, the graph is missing its empty (fully solid) sections \
+         and the walk had no floor to stop at.",
+        ostats.occlusion_graph_sections,
+        state.section_count()
+    );
+    assert!(
+        ostats.occlusion_graph_sections >= state.section_count(),
+        "the occlusion graph holds {} sections but {} are resident with geometry. The graph \
+         must hold every *meshed* section, which is strictly more (empty ones included), so \
+         this means entries are being dropped and the walk is working from a world with holes.",
+        ostats.occlusion_graph_sections,
+        state.section_count()
+    );
+    // The per-pass invariant again, now with a non-zero occlusion term.
+    assert_eq!(
+        ostats.sections_drawn
+            + ostats.sections_culled_distance
+            + ostats.sections_culled_frustum
+            + ostats.sections_culled_occlusion,
+        stats.sections_drawn,
+        "the opaque pass's cull split does not close with occlusion on: drew {}, culled \
+         {}/{}/{} out of {} resident with opaque geometry",
+        ostats.sections_drawn,
+        ostats.sections_culled_distance,
+        ostats.sections_culled_frustum,
+        ostats.sections_culled_occlusion,
+        stats.sections_drawn
+    );
+    assert_eq!(
+        shadow_stats.sections_occlusion_shadow, ostats.sections_culled_occlusion,
+        "the shadow arm predicted {} occlusion culls and the enforcing arm made {}. Same \
+         walk, same camera — a disagreement means the shadow counter is not reporting the \
+         set that actually culls, so the live soak would be measuring nothing.",
+        shadow_stats.sections_occlusion_shadow, ostats.sections_culled_occlusion
+    );
+    assert!(
+        ostats.sections_drawn > 0,
+        "the occlusion walk removed EVERYTHING, which is the terrain-vanishes bug, not a win. \
+         The camera's own section is unconditionally reachable, so this can only happen if the \
+         walk never ran over the camera's coord."
+    );
 
     SubmitCost {
         fixed,
@@ -885,6 +992,11 @@ fn measure_draw_submission(
             cstats.sections_culled_frustum,
             cstats.sections_culled_occlusion,
         ),
+        occluded,
+        occluded_sections_drawn: ostats.sections_drawn,
+        occluded_by_graph: ostats.sections_culled_occlusion,
+        occlusion_graph_sections: ostats.occlusion_graph_sections,
+        shadow_would_cull: shadow_stats.sections_occlusion_shadow,
     }
 }
 
@@ -1482,6 +1594,19 @@ fn client_chunk_path_cycle_attribution() {
          {:.1}% of the frame's instructions",
         100.0 * s4.culled_sections_drawn as f64 / s4.sections_drawn as f64,
         100.0 * s4.culled.instructions as f64 / s4.loaded.instructions as f64
+    );
+    // U3. Gated on section counts, not on this instruction figure: the submission
+    // term reproduces to only ~3.1% across processes (the Metal driver's own
+    // threads retire instructions asynchronously inside the window), while the
+    // counts are exact.
+    println!(
+        "same set, + occlusion graph   {:>14} instructions ({} sections, {} more culled by the \
+         graph)",
+        s4.occluded.instructions, s4.occluded_sections_drawn, s4.occluded_by_graph
+    );
+    println!(
+        "  graph holds {} sections; shadow mode predicted {} culls",
+        s4.occlusion_graph_sections, s4.shadow_would_cull
     );
     // The extrapolation to the one recorded live figure. 931 sections / 441k
     // quads at default render distance is `45a93e4`'s commit message — the only

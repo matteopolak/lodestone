@@ -1118,6 +1118,29 @@ pub fn mesh_snapshot_models(snapshot: &SectionSnapshot, models: &BlockModels) ->
     mesh_models(&view)
 }
 
+/// This section's face connectivity for the occlusion graph (U3) — the producer
+/// half of `lodestone_render::visibility`.
+///
+/// Computed here, in the mesh worker, for the reason vanilla computes its
+/// `VisGraph` at compile time: the flood is once per remesh and off the render
+/// thread, and both of `compute_visibility`'s shortcuts (fewer than 256 opaque
+/// cells → fully connected; fully opaque → connects nothing) mean most sections
+/// never flood at all.
+///
+/// Reads the **centre** section only, through the same
+/// `BlockModels::occludes` predicate `SnapshotModelView::occludes_at` uses for
+/// face culling — vanilla's `isSolidRender` family, which is what feeds its own
+/// `VisGraph.setOpaque`. A block this answers "not opaque" for only ever
+/// *connects* more faces, i.e. draws more, which is the safe direction.
+#[must_use]
+pub fn snapshot_visibility(
+    snapshot: &SectionSnapshot,
+    models: &BlockModels,
+) -> lodestone_render::SectionVisibility {
+    let centre = snapshot.at(0, 0, 0);
+    lodestone_render::compute_visibility_from(|x, y, z| models.occludes(centre.get_block(x, y, z)))
+}
+
 /// The mesher's fluid view over a snapshot: resolves each cell's fluid (if any)
 /// and occlusion out of the paletted sections, and reads the centre section's
 /// light. Fluids need the same signed neighbourhood as the model path (one cell
@@ -1308,6 +1331,18 @@ pub enum SectionGeometry {
         opaque: ModelMesh,
         /// Translucent water surface geometry.
         water: ModelMesh,
+        /// This section's face connectivity for the occlusion graph (U3), from
+        /// [`snapshot_visibility`].
+        ///
+        /// It rides on the *geometry* rather than on [`Meshed`] deliberately, and
+        /// that is load-bearing rather than tidy: `RenderState::upload_section`
+        /// takes `&SectionGeometry`, so putting it here reaches the graph with
+        /// **no** change to the three `upload_section` call sites in
+        /// `app/{redraw,runners,lifecycle}.rs`. It also means a section whose
+        /// geometry is *empty* still carries its connectivity — which is the
+        /// whole point for a fully-enclosed underground section, the very
+        /// sections that block the walk and make the underground free.
+        visibility: lodestone_render::SectionVisibility,
     },
 }
 
@@ -1317,7 +1352,9 @@ impl SectionGeometry {
     pub fn quad_count(&self) -> usize {
         match self {
             SectionGeometry::Packed(m) => m.quad_count(),
-            SectionGeometry::Model { opaque, water } => opaque.quad_count() + water.quad_count(),
+            SectionGeometry::Model { opaque, water, .. } => {
+                opaque.quad_count() + water.quad_count()
+            }
         }
     }
 }
@@ -1440,6 +1477,7 @@ impl MeshScheduler {
                             SectionGeometry::Model {
                                 opaque,
                                 water: fluids.water,
+                                visibility: snapshot_visibility(&snap, models),
                             }
                         }
                         None => SectionGeometry::Packed(mesh_snapshot(&snap, &classifier)),

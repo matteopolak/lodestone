@@ -139,7 +139,10 @@ pub use camera::{
     spyglass_fov_modifier,
 };
 pub use caps::{Backend, GpuCapabilities};
-pub use cull::{CAMERA_CUBE_BLOCKS, CullVerdict, TerrainCull, within_view_distance};
+pub use cull::{
+    CAMERA_CUBE_BLOCKS, CullVerdict, OcclusionMode, TerrainCull, reachable_from_camera,
+    section_coord_of, within_view_distance,
+};
 pub use device::{GpuContext, GpuError};
 pub use driver::{InstanceTable, WorldMesher};
 pub use entity::{
@@ -234,7 +237,8 @@ pub use texture::{
 pub use translucency::{RenderLayer, SortViewpoint, TranslucentMesh};
 pub use vertex::{BYTES_PER_VERTEX, PackedVertex, VertexFields};
 pub use visibility::{
-    SectionCoord, SectionVisibility, VisibilityGraph, compute_visibility, walk_visible,
+    SectionCoord, SectionVisibility, VisibilityGraph, compute_visibility, compute_visibility_from,
+    walk_visible, walk_visible_bounded,
 };
 pub use weather::{
     DEFAULT_WEATHER_RADIUS, FullBrightRainProbe, LIGHTNING_FLASH_TICKS, Precipitation,

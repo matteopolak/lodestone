@@ -92,6 +92,11 @@ pub(super) struct TerrainDraw<'a> {
     /// `Some` only for [`ResidentMesh::Dedicated`], whose buffers are bound
     /// per draw.
     pub(super) dedicated: Option<&'a GpuModelMesh>,
+    /// Squared distance from the camera to this section's centre, for the
+    /// translucent pass's back-to-front order (U5). Left at `0.0` by the opaque
+    /// pass, which orders by [`block`](Self::block) instead — see
+    /// [`sort_back_to_front`].
+    pub(super) sort_dist2: f32,
 }
 
 /// The `block` sentinel for a mesh in its own buffers — sorts last.
@@ -107,6 +112,7 @@ impl<'a> TerrainDraw<'a> {
                 base_vertex: a.base_vertex,
                 origin_offset,
                 dedicated: None,
+                sort_dist2: 0.0,
             },
             ResidentMesh::Dedicated(m) => TerrainDraw {
                 block: DEDICATED_BLOCK,
@@ -115,9 +121,39 @@ impl<'a> TerrainDraw<'a> {
                 base_vertex: 0,
                 origin_offset,
                 dedicated: Some(m),
+                sort_dist2: 0.0,
             },
         }
     }
+}
+
+/// Squared distance from `camera` to the centre of the section at `coord`.
+///
+/// The centre, not the near corner: vanilla sorts its translucent sections on
+/// `RenderSection`'s own centre distance, and a near-corner metric flips the order
+/// of two sections whose corners and centres disagree — which is a visible seam
+/// rather than a subtle one, since the two draws blend into each other.
+#[must_use]
+pub(super) fn section_center_distance_sq(
+    coord: lodestone_render::SectionCoord,
+    camera: glam::Vec3,
+) -> f32 {
+    let centre = glam::Vec3::new(
+        coord.0 as f32 * 16.0 + 8.0,
+        coord.1 as f32 * 16.0 + 8.0,
+        coord.2 as f32 * 16.0 + 8.0,
+    );
+    (centre - camera).length_squared()
+}
+
+/// Order a translucent pass's draws **farthest first** (U5).
+///
+/// `total_cmp` rather than `partial_cmp().unwrap()`: a `NaN` here would panic
+/// inside the frame loop, and there is no sensible camera position that should
+/// take the renderer down. `total_cmp` orders NaN deterministically instead, so
+/// the worst case is one badly ordered water section.
+pub(super) fn sort_back_to_front(draws: &mut [TerrainDraw<'_>]) {
+    draws.sort_unstable_by(|a, b| b.sort_dist2.total_cmp(&a.sort_dist2));
 }
 
 /// Generous fixed capacity for [`SectionOriginArena`]; see that type's doc for
@@ -351,6 +387,69 @@ pub(super) struct ModelRenderer {
 /// (`1..=len`) is slot `s`, its sampled region resolved into a V offset by the
 /// slot's normalised frame height. Always yields at least the sentinel, so the
 /// uniform buffer is never zero-sized.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn draw(block: u32, sort_dist2: f32) -> TerrainDraw<'static> {
+        TerrainDraw {
+            block,
+            first_index: 0,
+            index_count: 6,
+            base_vertex: 0,
+            origin_offset: 0,
+            dedicated: None,
+            sort_dist2,
+        }
+    }
+
+    /// U5: the translucent pass must submit **farthest first**, and it must do so
+    /// regardless of the order the `HashMap` walk handed the sections over in —
+    /// which is the actual bug, since that order changes when a chunk loads rather
+    /// than when the camera moves.
+    #[test]
+    fn water_draws_are_ordered_farthest_first_from_any_input_order() {
+        // Two input permutations of the same three distances. Both must come out
+        // identical. The arena blocks are assigned so that block order and
+        // distance order genuinely **disagree** — block 1 holds the nearest
+        // section — which is what makes the second assertion below a real control
+        // rather than a coincidence. (An earlier draft numbered the blocks in
+        // distance order and the control passed vacuously.)
+        let expected = [400.0_f32, 100.0, 25.0];
+        for input in [
+            vec![draw(1, 25.0), draw(4, 400.0), draw(7, 100.0)],
+            vec![draw(7, 100.0), draw(1, 25.0), draw(4, 400.0)],
+        ] {
+            let mut draws = input;
+            sort_back_to_front(&mut draws);
+            let order: Vec<f32> = draws.iter().map(|d| d.sort_dist2).collect();
+            assert_eq!(order, expected);
+            // The both-hypotheses half: the opaque pass's own order is a different
+            // permutation, so this assertion cannot pass by accident on a sort that
+            // was never changed.
+            let mut by_block = draws;
+            by_block.sort_unstable_by_key(|d| d.block);
+            let block_order: Vec<f32> = by_block.iter().map(|d| d.sort_dist2).collect();
+            assert_ne!(block_order, expected);
+        }
+    }
+
+    /// The metric is the section **centre**, and the expected values are computed
+    /// here from the grid arithmetic rather than from the function.
+    #[test]
+    fn section_centre_distance_is_measured_from_the_centre() {
+        // Section (0,0,0) spans blocks 0..16, so its centre is (8,8,8).
+        let camera = glam::Vec3::new(8.0, 8.0, 8.0);
+        assert_eq!(section_center_distance_sq((0, 0, 0), camera), 0.0);
+        // Section (1,0,0)'s centre is (24,8,8): 16 blocks away, 256 squared.
+        assert_eq!(section_center_distance_sq((1, 0, 0), camera), 256.0);
+        // Negative rows too — `min_y` is negative in the overworld, and a
+        // truncating divide here would put two rows on top of each other.
+        // Section (0,-1,0)'s centre is (8,-8,8): also 16 away.
+        assert_eq!(section_center_distance_sq((0, -1, 0), camera), 256.0);
+    }
+}
+
 pub(super) fn anim_slots_at(animations: &[(SpriteAnimation, f32)], tick: u64) -> Vec<AnimSlotUniform> {
     let mut slots = Vec::with_capacity(animations.len() + 1);
     slots.push(AnimSlotUniform::static_slot());

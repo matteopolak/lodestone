@@ -36,7 +36,7 @@ use glam::Vec3;
 
 use crate::camera::{Camera, Frustum};
 use crate::section::SECTION_SIZE;
-use crate::visibility::SectionCoord;
+use crate::visibility::{SectionCoord, VisibilityGraph};
 
 /// The half-section cell vanilla aligns its camera cube to
 /// (`SectionOcclusionGraph`'s 8-block invalidation grid, and the argument to
@@ -74,6 +74,68 @@ pub fn within_view_distance(
     dx * dx + dz * dz < rd * rd
 }
 
+/// The section-grid coordinate containing a world position.
+#[must_use]
+pub fn section_coord_of(position: Vec3) -> SectionCoord {
+    let size = SECTION_SIZE as f32;
+    (
+        (position.x / size).floor() as i32,
+        (position.y / size).floor() as i32,
+        (position.z / size).floor() as i32,
+    )
+}
+
+/// The occlusion graph's reachable set for a camera at `position` — the whole of
+/// U3's per-frame decision, minus the caching.
+///
+/// This lives here rather than in the shell so the angle-sweep gate
+/// (`tests/occlusion_angle_sweep.rs`) drives **the production function** and not a
+/// re-derivation of its bounds. A gate that rebuilds the walk's bounds itself can
+/// agree with a wrong production bound perfectly.
+///
+/// # The bounds
+///
+/// Horizontally, vanilla's own circular view membership
+/// ([`within_view_distance`]) — the very predicate [`TerrainCull`] culls on, so
+/// the walk can never bound tighter than the cull that consumes it. Vertically,
+/// the graph's [`y_extent`](VisibilityGraph::y_extent) widened to include the
+/// camera's own row, which is above the terrain whenever you fly. Both are needed:
+/// [`walk_visible_bounded`] has no node cap and this finite region is its only
+/// termination condition.
+///
+/// `None` (leaving the caller at frustum ∩ distance) for an empty graph or
+/// `render_distance_chunks == 0`. Zero is what an uninitialised state holds and
+/// there is no honest finite cylinder without it — a cull that blanks the world on
+/// a default-constructed state is indistinguishable from a broken renderer.
+///
+/// The frustum is deliberately absent: reachability is cached across frames and
+/// the frustum is applied per frame over the cached set, which is what makes
+/// rotation free. See `SectionOcclusionGraph`'s own frustum/walk split.
+#[must_use]
+pub fn reachable_from_camera(
+    graph: &VisibilityGraph,
+    position: Vec3,
+    render_distance_chunks: u32,
+) -> Option<std::collections::HashSet<SectionCoord>> {
+    if render_distance_chunks == 0 {
+        return None;
+    }
+    let (y_lo_graph, y_hi_graph) = graph.y_extent()?;
+    let camera = section_coord_of(position);
+    let camera_chunk = (camera.0, camera.2);
+    let y_lo = y_lo_graph.min(camera.1);
+    let y_hi = y_hi_graph.max(camera.1);
+    Some(
+        crate::visibility::walk_visible_bounded(graph, camera, |coord| {
+            coord.1 >= y_lo
+                && coord.1 <= y_hi
+                && within_view_distance(camera_chunk, (coord.0, coord.2), render_distance_chunks)
+        })
+        .into_iter()
+        .collect(),
+    )
+}
+
 /// Why a section was not drawn, or that it was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CullVerdict {
@@ -89,6 +151,23 @@ pub enum CullVerdict {
     Occlusion,
 }
 
+/// What an installed reachable set is allowed to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OcclusionMode {
+    /// Reject unreachable sections: [`CullVerdict::Occlusion`].
+    Enforce,
+    /// Count them and draw them anyway.
+    ///
+    /// The soak arm: the walk runs, the counter says what it *would* have
+    /// removed, and nothing can disappear while you watch it. This is how the
+    /// reachable set is compared against reality before it is trusted with
+    /// pixels, and it stays in the tree afterwards because it is also the only
+    /// A/B that keeps everything else about the frame identical — unlike
+    /// [`disabled`](TerrainCull::disabled), which turns distance and frustum off
+    /// too. See [`TerrainCull::shadow_would_cull`].
+    Shadow,
+}
+
 /// One frame's terrain cull: the frustum (already camera-cube-offset) plus the
 /// camera's chunk column and render distance.
 #[derive(Debug, Clone)]
@@ -97,9 +176,15 @@ pub struct TerrainCull {
     camera_chunk: (i32, i32),
     view_distance: u32,
     /// `None` disables the reachability test entirely (the pre-U3 behaviour and
-    /// the permanent behaviour whenever the occlusion graph has no entry for the
-    /// camera's own section — see [`with_reachable`](Self::with_reachable)).
-    reachable: Option<std::collections::HashSet<SectionCoord>>,
+    /// the permanent behaviour whenever the occlusion graph is too small to walk
+    /// — see [`with_reachable`](Self::with_reachable)).
+    ///
+    /// `Arc` because this is rebuilt per frame from a set cached across frames
+    /// (the walk only re-runs on an 8-block camera-cell crossing), and cloning a
+    /// several-thousand-entry `HashSet` every frame would put back a slice of
+    /// the per-frame cost the cull exists to remove.
+    reachable: Option<std::sync::Arc<std::collections::HashSet<SectionCoord>>>,
+    occlusion_mode: OcclusionMode,
     /// `false` makes every [`classify`](Self::classify) return
     /// [`CullVerdict::Visible`] — see [`disabled`](Self::disabled).
     enabled: bool,
@@ -126,6 +211,7 @@ impl TerrainCull {
             ),
             view_distance: render_distance_chunks,
             reachable: None,
+            occlusion_mode: OcclusionMode::Enforce,
             enabled: true,
         }
     }
@@ -151,19 +237,58 @@ impl TerrainCull {
     /// silently degrades draws *more*, never less.
     #[must_use]
     pub fn with_reachable(
+        self,
+        reachable: Option<std::sync::Arc<std::collections::HashSet<SectionCoord>>>,
+    ) -> Self {
+        self.with_reachable_mode(reachable, OcclusionMode::Enforce)
+    }
+
+    /// [`with_reachable`](Self::with_reachable), choosing whether the set culls
+    /// or only counts — see [`OcclusionMode::Shadow`].
+    #[must_use]
+    pub fn with_reachable_mode(
         mut self,
-        reachable: Option<std::collections::HashSet<SectionCoord>>,
+        reachable: Option<std::sync::Arc<std::collections::HashSet<SectionCoord>>>,
+        mode: OcclusionMode,
     ) -> Self {
         self.reachable = reachable;
+        self.occlusion_mode = mode;
         self
     }
 
-    /// Whether a reachable set is installed (i.e. whether occlusion culling is
-    /// actually in force this frame, as opposed to having degraded to
-    /// frustum ∩ distance).
+    /// Whether a reachable set is installed **and enforcing** (i.e. whether
+    /// occlusion culling is actually in force this frame, as opposed to having
+    /// degraded to frustum ∩ distance or being in shadow mode).
     #[must_use]
     pub fn occlusion_active(&self) -> bool {
-        self.enabled && self.reachable.is_some()
+        self.enabled
+            && self.reachable.is_some()
+            && self.occlusion_mode == OcclusionMode::Enforce
+    }
+
+    /// Whether a reachable set is installed but only *counting* this frame.
+    #[must_use]
+    pub fn occlusion_shadowing(&self) -> bool {
+        self.enabled
+            && self.reachable.is_some()
+            && self.occlusion_mode == OcclusionMode::Shadow
+    }
+
+    /// In [`OcclusionMode::Shadow`], whether this section is being drawn even
+    /// though the reachable set says the camera cannot see it.
+    ///
+    /// Only meaningful for a coord [`classify`](Self::classify) called
+    /// [`CullVerdict::Visible`]: it deliberately does **not** re-run the distance
+    /// or frustum tests, so calling it on an off-screen section would attribute
+    /// that section to occlusion. Always `false` when enforcing, where the same
+    /// sections land in [`CullVerdict::Occlusion`] instead.
+    #[must_use]
+    pub fn shadow_would_cull(&self, coord: SectionCoord) -> bool {
+        self.occlusion_shadowing()
+            && self
+                .reachable
+                .as_ref()
+                .is_some_and(|reachable| !reachable.contains(&coord))
     }
 
     /// The camera-cube-offset frustum, for callers that need it directly.
@@ -186,7 +311,8 @@ impl TerrainCull {
         if !self.frustum.section_visible(coord) {
             return CullVerdict::Frustum;
         }
-        if let Some(reachable) = &self.reachable
+        if self.occlusion_mode == OcclusionMode::Enforce
+            && let Some(reachable) = &self.reachable
             && !reachable.contains(&coord)
         {
             return CullVerdict::Occlusion;
@@ -338,9 +464,33 @@ mod tests {
         let base = TerrainCull::new(&cam(Vec3::new(8.0, 40.0, 8.0), 0.0), 32);
         assert_eq!(base.classify((0, 2, 2)), CullVerdict::Visible);
         assert!(!base.occlusion_active());
-        let cull = base.with_reachable(Some([(0, 2, 0)].into_iter().collect()));
+        let cull = base.with_reachable(Some(std::sync::Arc::new(
+            [(0, 2, 0)].into_iter().collect(),
+        )));
         assert!(cull.occlusion_active());
         assert_eq!(cull.classify((0, 2, 2)), CullVerdict::Occlusion);
         assert_eq!(cull.classify((0, 2, 0)), CullVerdict::Visible);
+    }
+
+    #[test]
+    fn shadow_mode_counts_without_culling() {
+        let reachable: std::sync::Arc<std::collections::HashSet<SectionCoord>> =
+            std::sync::Arc::new([(0, 2, 0)].into_iter().collect());
+        let base = TerrainCull::new(&cam(Vec3::new(8.0, 40.0, 8.0), 0.0), 32);
+        let shadow = base
+            .clone()
+            .with_reachable_mode(Some(reachable.clone()), OcclusionMode::Shadow);
+        // The whole contract: identical verdicts to no reachable set at all…
+        assert_eq!(shadow.classify((0, 2, 2)), CullVerdict::Visible);
+        assert_eq!(base.classify((0, 2, 2)), CullVerdict::Visible);
+        assert!(!shadow.occlusion_active());
+        assert!(shadow.occlusion_shadowing());
+        // …while still reporting what enforcing would have removed. Both
+        // hypotheses: the enforcing arm of the *same* set culls it.
+        assert!(shadow.shadow_would_cull((0, 2, 2)));
+        assert!(!shadow.shadow_would_cull((0, 2, 0)));
+        let enforcing = base.with_reachable(Some(reachable));
+        assert_eq!(enforcing.classify((0, 2, 2)), CullVerdict::Occlusion);
+        assert!(!enforcing.shadow_would_cull((0, 2, 2)));
     }
 }

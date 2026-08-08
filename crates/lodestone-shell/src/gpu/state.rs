@@ -326,6 +326,14 @@ impl RenderState {
             // On by default: an off-by-default cull is an island, and this repo
             // has nine of those.
             terrain_culling: true,
+            vis_graph: lodestone_render::VisibilityGraph::new(),
+            occlusion: std::cell::RefCell::default(),
+            // Likewise on by default, for the same reason — and it is harmless
+            // until something populates the graph: an empty graph produces no
+            // reachable set, which is the pre-U3 cull exactly. See
+            // `TerrainOcclusion` for the two weaker settings and when to reach
+            // for them.
+            occlusion_mode: super::TerrainOcclusion::On,
         }
     }
 
