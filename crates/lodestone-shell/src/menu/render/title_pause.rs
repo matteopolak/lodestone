@@ -65,9 +65,16 @@ fn title_menu_column() -> layout::LinearLayout {
 /// control #394 asks for — change one `LayoutSettings` padding value and watch the
 /// rect assertions go red — against the real builder rather than a copy of it.
 ///
-/// The full-width Options row is the `else` of vanilla's `hasSingleplayerServer()`
-/// fork (`:157-163`); this client has no integrated server, so that branch is the
-/// right one, and the grid therefore has five rows.
+/// The Options row takes vanilla's **`hasSingleplayerServer()`** branch
+/// (`:157-160`): two half-width buttons, Options and Open to LAN, rather than one
+/// full-width Options. This client does host its own worlds (issue #287), and
+/// since issue #535 the second button has something to do — the previous version
+/// of this comment said "this client has no integrated server" and had been stale
+/// since singleplayer landed.
+///
+/// Vanilla takes the *other* branch on a remote server, hiding Open to LAN
+/// entirely. This layout is static and always shows it; see
+/// [`PauseButton::OpenToLan`](super::nav::PauseButton::OpenToLan).
 pub(super) fn pause_menu_grid_with(menu_padding_top: i32) -> layout::GridLayout {
     let button = |w: f32, h: f32| -> Box<dyn widget::LayoutElement> {
         Box::new(Widget::button(0.0, 0.0, w, h, ""))
@@ -99,8 +106,10 @@ pub(super) fn pause_menu_grid_with(menu_padding_top: i32) -> layout::GridLayout 
     }
     let centred = helper.new_cell_settings().align_horizontally_center();
     helper.add_child_with(Box::new(icons), PAUSE_COLUMNS, centred);
-    // Options, then Disconnect: both full width.
-    helper.add_spanning(button(PAUSE_BUTTON_FULL_W, WIDGET_H), PAUSE_COLUMNS);
+    // Options and Open to LAN share a row, one column each — vanilla's
+    // singleplayer branch. Then Disconnect, full width.
+    helper.add_child(button(PAUSE_BUTTON_HALF_W, WIDGET_H));
+    helper.add_child(button(PAUSE_BUTTON_HALF_W, WIDGET_H));
     helper.add_spanning(button(PAUSE_BUTTON_FULL_W, WIDGET_H), PAUSE_COLUMNS);
     drop(helper);
     grid.arrange_elements();
@@ -152,8 +161,16 @@ fn title_block() -> &'static MenuBlock {
 /// The pause-screen grid, arranged once. See [`title_block`].
 fn pause_block() -> &'static MenuBlock {
     static BLOCK: std::sync::OnceLock<MenuBlock> = std::sync::OnceLock::new();
-    // All nine of `PAUSE_BUTTONS`, four of them inside the nested icon row.
-    BLOCK.get_or_init(|| MenuBlock::of(&pause_menu_grid_with(PAUSE_MENU_PADDING_TOP), 9))
+    // Every one of `PAUSE_BUTTONS`, four of them inside the nested icon row.
+    // Derived from the table rather than restated: the count moved from 9 to 10
+    // when Open to LAN landed (issue #535), and a literal here is a second place
+    // to forget.
+    BLOCK.get_or_init(|| {
+        MenuBlock::of(
+            &pause_menu_grid_with(PAUSE_MENU_PADDING_TOP),
+            super::nav::PAUSE_BUTTONS.len(),
+        )
+    })
 }
 
 /// The arranged pause grid's own `(width, height)` — what
@@ -255,7 +272,8 @@ pub fn pause_slot(button: PauseButton) -> Slot {
         PauseButton::Friends => 5,
         PauseButton::PlayerReporting => 6,
         PauseButton::Options => 7,
-        PauseButton::QuitToTitle => 8,
+        PauseButton::OpenToLan => 8,
+        PauseButton::QuitToTitle => 9,
     };
     let (dx, dy, w, h) = pause_block().cells[index];
     Slot {

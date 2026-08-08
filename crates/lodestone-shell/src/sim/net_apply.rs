@@ -363,6 +363,15 @@ impl Sim {
                     // screen not already being `Credits`).
                     self.won = true;
                 }
+                NetUpdate::LanOpened { port } => {
+                    // Vanilla's `menu.multiplayerOptions.publish.started.lan`,
+                    // which is a chat line rather than a toast — the port has to
+                    // stay readable while the host reads it out, and a toast
+                    // expires in five seconds.
+                    tracing::info!(target: "chat", "Local game hosted on port {port}");
+                    self.push_local_chat(format!("Local game hosted on port {port}"));
+                    self.status = format!("open to LAN on {port}");
+                }
                 NetUpdate::Sound {
                     name,
                     category,

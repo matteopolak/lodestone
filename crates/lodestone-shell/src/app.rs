@@ -665,6 +665,13 @@ struct WindowApp {
     /// The live advancement progress snapshot plus the completion-toast queue
     /// (issue #167) — see [`AdvancementsFeed`](advancements_screen::AdvancementsFeed).
     advancement_feed: advancements_screen::AdvancementsFeed,
+    /// The world this process is *hosting*, if any (issue #535).
+    ///
+    /// Set by [`WindowApp::begin_singleplayer`] and cleared on quit-to-title, and
+    /// read by exactly one thing: the pause menu's Open to LAN, which republishes
+    /// the same launch on a TCP port. `None` for a multiplayer session, which is
+    /// what makes that button honest there — there is no world of ours to publish.
+    hosted_world: Option<crate::menu::nav::SingleplayerLaunch>,
 }
 
 #[cfg(test)]

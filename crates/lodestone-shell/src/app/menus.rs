@@ -100,6 +100,11 @@ impl WindowApp {
                 // `Sim` so a fresh connect afterward starts clean; see
                 // `Sim::end_session` for exactly what resets vs. persists.
                 self.sim.end_session();
+                // Issue #535: there is no hosted world any more, so Open to LAN
+                // must stop claiming there is one. Cleared here rather than in
+                // `end_session` because `Sim` does not know how the session was
+                // obtained — that is exactly what this field records.
+                self.hosted_world = None;
                 // The pause/death screen already released the pointer on
                 // entry, so this is normally a no-op; cheap insurance against
                 // a future caller reaching `QuitToTitle` some other way.
@@ -141,6 +146,13 @@ impl WindowApp {
                     net.send_action(submit.into_action());
                 }
             }
+            // The pause menu's Open to LAN (issue #535). Native only: there is no
+            // TCP listener to bind in a browser, which is the same reason
+            // `Origin::Integrated`'s `lan_port` is `cfg`'d out there.
+            #[cfg(not(target_arch = "wasm32"))]
+            MenuAction::OpenToLan => self.open_current_world_to_lan(),
+            #[cfg(target_arch = "wasm32")]
+            MenuAction::OpenToLan => {}
         }
     }
 

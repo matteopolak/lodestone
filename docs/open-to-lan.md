@@ -9,8 +9,9 @@ GameSpy4/UT3 query listener (#332), resource-pack pushes (#334), plugin channels
 commands (#48). Adds vanilla's LAN-discovery broadcast so the world shows up in a client's
 multiplayer list without anyone typing an address.
 
-**This is issue #535's scope 2 and 3. Scope 1 — a production caller — is still open**; see
-"Known gaps".
+Scopes 1, 2 and 3 of issue #535 are all closed: the pause menu's **Open to LAN** button
+(vanilla's `menu.multiplayerOptions.button`, whose `en_us` value really is "Open to LAN") is
+the production caller.
 
 ## How it works
 
@@ -90,16 +91,62 @@ before — so a LAN player heard no server-caused sounds at all.
   `shutdown`. Join it only if it races the `shutdown` notify and returns promptly (like the
   query listener); abort an infinite timer loop, or `shutdown` hangs.
 
+## The shell caller
+
+`PauseButton::OpenToLan` → `MenuAction::OpenToLan` → `WindowApp::open_current_world_to_lan`
+(`app/session.rs`) → `NetClient::open_to_lan` → `net.rs`'s `open_lan_world`.
+
+### It reopens the world instead of publishing the live handle
+
+`open_to_lan` **constructs** a server — it binds the listener, builds the `ChunkStore` and
+spawns the tick loop. There is no `publish()` on a running `IntegratedServer`, so the only
+way to get a socket in front of the world you are in is to end the current session and open
+the same launch again with LAN on. `WindowApp::hosted_world` remembers the launch for exactly
+that; the player sees the loading screen briefly and then rejoins over `127.0.0.1`.
+
+`Sim::end_session` runs **first**, and the order is load-bearing: the running server holds the
+world's region directory, and binding a second one over the same files is two writers to the
+same chunks.
+
+### One transport, no privileged host
+
+The host's own client dials the socket like everybody else. Nothing on this path is a second,
+special kind of connection — which is what stops "works in singleplayer, broken over LAN"
+from being possible for anything the host does.
+
+### The autosave is shell-driven, and one half of persistence is still missing
+
+`open_to_lan` sets `save: None`, so it starts no autosave task and flushes nothing at
+shutdown. `net.rs`'s LAN branch therefore wraps the generator in a `RegionChunkSource` itself
+(so a saved world's terrain and edits **load**), holds the `WorldSaveHandle`, writes on the
+same `AUTOSAVE_INTERVAL` singleplayer uses, and writes once more before dropping the handle.
+
+**What still does not persist: block entities and scheduled ticks placed while hosting.**
+`open_to_lan` builds its own `BlockEntityHandle::default()` rather than taking the source's,
+so chest contents animate and furnaces cook but none of it reaches
+`WorldSaveHandle::extras_for`. Closing that is a `crates/lodestone-server` change — `LanConfig`
+growing a world directory and reusing `open_persistent_with_mobs`' save wiring — not a shell
+one.
+
+### Teardown uses `drop`, not `shutdown().await`
+
+`shutdown().await` joins the accept loop, which parks in `accept()` where the shutdown notify
+cannot reach it; it hung indefinitely for a `view_radius: 0` handle while #535's own gate was
+written. `net.rs`'s teardown drops the handle (which aborts both loops) and then runs the
+explicit flush described above.
+
 ## Known gaps
 
-* **Still zero production callers.** `open_to_lan` is reachable in one call, but nothing in
-  `crates/lodestone-shell/` makes it — `net.rs` only ever constructs the in-memory server, and
-  `menu/nav.rs` says "There is no LAN discovery here" out loud. That is #535's scope 1 and it
-  is a shell change: a menu item that calls `open_to_lan` with the same protocol and source
-  singleplayer already uses, and holds the handle for the session.
-* **`shutdown().await` on a LAN handle joins the accept loop and the tick loop**, which can
-  take a while (it hung indefinitely for a `view_radius: 0` handle while writing the gate
-  above). `drop` aborts everything and is what a test should use.
+* **No port field, no game mode, no allow-commands toggle.** Vanilla's
+  `MultiplayerOptionsScreen` is a form; this publishes straight away on
+  `net::LAN_DEFAULT_PORT` (25565). A port already in use fails the publish loudly rather than
+  sliding to another, because a host who reads "opened on 25565" and is actually on 25566 has
+  been given a wrong answer.
+* **The button is always present**, where vanilla hides the whole half-width row on a remote
+  server. `PauseButton::enabled` is a pure function of the variant at every call site, so the
+  "there is nothing of ours to publish" case is stated in chat instead.
+* **The LAN world has no mob population.** `open_to_lan` seeds no `MobSim` (its own comment
+  says so); the tick loop ticks whatever is there, and nothing puts anything there.
 * **The query listener's reported player count comes from the shared `PlayerRegistry`**, so an
   in-memory singleplayer world served alongside is not counted.
 

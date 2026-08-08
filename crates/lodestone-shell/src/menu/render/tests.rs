@@ -2801,33 +2801,41 @@ fn frame_for_defers_to_an_overlay_for_in_world_settings() {
 }
 
 #[test]
-fn pause_frame_builds_vanillas_nine_widgets_in_order_and_tracks_the_highlight() {
+fn pause_frame_builds_vanillas_ten_widgets_in_order_and_tracks_the_highlight() {
     use crate::menu::nav::{PAUSE_BUTTONS, PauseButton};
 
     let mut nav = test_nav("pause-frame");
     let mut ui = UiState::new();
     ui.enter_dev_world();
     ui.pause();
-    // Index 8, not 1: this screen now reproduces vanilla's whole grid, so
-    // Disconnect is the ninth widget rather than the third. The old version
-    // of this test asserted a three-row stack.
+    // The last index, not 1: this screen reproduces vanilla's whole grid, so
+    // Disconnect is the last widget rather than the third. The old version of this
+    // test asserted a three-row stack.
     nav.hover(&ui, PAUSE_BUTTONS.len() - 1);
 
     let f = pause_frame(&nav);
     assert!(f.overlay, "the pause menu must draw as an overlay");
     assert!(f.vanilla, "and it must be laid out from vanilla's arithmetic");
-    assert_eq!(f.rows.len(), 9, "vanilla's pause grid has nine widgets");
+    // Ten since issue #535 put vanilla's singleplayer Open to LAN button beside
+    // Options. Read from the button table rather than restated, so the two cannot
+    // drift.
+    assert_eq!(f.rows.len(), PAUSE_BUTTONS.len());
     assert_eq!(f.rows[0].label, PauseButton::BackToGame.label());
     assert_eq!(f.rows[1].label, PauseButton::Advancements.label());
     assert_eq!(f.rows[2].label, PauseButton::Statistics.label());
     assert_eq!(f.rows[7].label, PauseButton::Options.label());
-    assert_eq!(f.rows[8].label, PauseButton::QuitToTitle.label());
-    assert_eq!(f.selected, 8, "selection follows the nav's pause_index");
-    // Six are live: the three with actions, plus Advancements, Statistics and
-    // Player Reporting since issues #167/#188/#189 built the screens behind them
-    // (see `PauseButton::enabled`'s own doc for each — what each screen
-    // shows is honest-but-limited, not what made the button liveness
-    // conditional).
+    assert_eq!(f.rows[8].label, PauseButton::OpenToLan.label());
+    assert_eq!(f.rows[9].label, PauseButton::QuitToTitle.label());
+    assert_eq!(
+        f.selected,
+        PAUSE_BUTTONS.len() - 1,
+        "selection follows the nav's pause_index"
+    );
+    // Seven are live: the three with actions, plus Advancements, Statistics and
+    // Player Reporting since issues #167/#188/#189 built the screens behind them,
+    // and Open to LAN since #535 gave `IntegratedServer::open_to_lan` a caller
+    // (see `PauseButton::enabled`'s own doc for each — what each screen shows is
+    // honest-but-limited, not what made the button liveness conditional).
     let live: Vec<&str> = f
         .rows
         .iter()
@@ -2842,6 +2850,7 @@ fn pause_frame_builds_vanillas_nine_widgets_in_order_and_tracks_the_highlight() 
             "Statistics",
             "Player Reporting",
             "Options...",
+            "Open to LAN",
             "Disconnect"
         ]
     );
@@ -2926,7 +2935,13 @@ fn the_pause_screen_rects_are_vanillas_own() {
         (B::Feedback, (gx + 84.0, gy + 98.0, 20.0, 20.0)),
         (B::Friends, (gx + 108.0, gy + 98.0, 20.0, 20.0)),
         (B::PlayerReporting, (gx + 132.0, gy + 98.0, 20.0, 20.0)),
-        (B::Options, (gx + 4.0, gy + 122.0, 204.0, 20.0)),
+        // Issue #535: the Options row is now vanilla's `hasSingleplayerServer()`
+        // branch (`:157-160`) — two half-width cells, same 8 px gutter and same
+        // row `y` as the Advancements/Statistics pair two rows up. The grid's five
+        // row offsets and its 212x166 size are unchanged, which is why this repair
+        // touches three lines and not the table.
+        (B::Options, (gx + 4.0, gy + 122.0, 98.0, 20.0)),
+        (B::OpenToLan, (gx + 110.0, gy + 122.0, 98.0, 20.0)),
         (B::QuitToTitle, (gx + 4.0, gy + 146.0, 204.0, 20.0)),
     ];
     for (button, want) in expected {

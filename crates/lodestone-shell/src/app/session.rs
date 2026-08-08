@@ -71,6 +71,7 @@ impl WindowApp {
             creative: crate::container::CreativeState::default(),
             advancements_drag: None,
             advancement_feed: super::advancements_screen::AdvancementsFeed::default(),
+            hosted_world: None,
         }
     }
 
@@ -390,6 +391,77 @@ impl WindowApp {
         // `config` above.
     }
 
+    /// The pause menu's **Open to LAN** (issue #535's scope 1): republish the
+    /// world this process is hosting on a TCP port, so other machines can join it.
+    ///
+    /// The first production caller of `IntegratedServer::open_to_lan` — which was
+    /// built, gated, documented and reachable in one call, with nothing in the
+    /// shell making it. `docs/open-to-lan.md`'s "Known gaps" named exactly this.
+    ///
+    /// # It reopens the world rather than publishing the live handle
+    ///
+    /// `open_to_lan` *constructs* a server: it binds the listener, builds the
+    /// `ChunkStore` and spawns the tick loop. There is no `publish()` on a running
+    /// `IntegratedServer`, so the only way to get a socket in front of the world
+    /// you are in is to close the current session and open the same launch again
+    /// with LAN on. The player sees the loading screen for as long as the world
+    /// takes to open, then rejoins over loopback like any other LAN client.
+    ///
+    /// `Sim::end_session` first, and the order matters: the running server holds
+    /// the world's region directory, and binding a second one over the same files
+    /// would give two writers to the same chunks.
+    ///
+    /// Off a hosted world this says so in chat instead of doing nothing —
+    /// `PauseButton::OpenToLan` is enabled unconditionally (see its doc), so this
+    /// is where "there is nothing of ours to publish" gets stated.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn open_current_world_to_lan(&mut self) {
+        use crate::menu::nav::SingleplayerLaunch;
+        let Some(launch) = self.hosted_world.clone() else {
+            self.sim
+                .push_local_chat("Only a world you are hosting can be opened to LAN");
+            return;
+        };
+        let world_dir = Some(match &launch {
+            SingleplayerLaunch::Open(dir) => dir.clone(),
+            SingleplayerLaunch::Created { world_dir, .. } => world_dir.clone(),
+        });
+        // Republishing an existing directory, so the world's **stored** seed wins
+        // and the typed one is irrelevant — `resolve_launch_seed(None)` for both
+        // arms, unlike `begin_singleplayer`'s fork.
+        let seed = resolve_launch_seed(None);
+        let view_radius = i32::try_from(self.config.render_distance)
+            .unwrap_or(i32::MAX)
+            .saturating_add(1);
+
+        self.sim.end_session();
+        self.ui.begin(crate::menu::SessionKind::Singleplayer);
+        let session = Some((self.sim.ecs().clone(), self.sim.local_player()));
+        let Some(server_protocol) =
+            lodestone_registry::server_protocol_for_protocol(self.config.protocol)
+        else {
+            self.ui.session_failed(
+                super::LaunchError::NoVersionFamily {
+                    protocol: self.config.protocol,
+                }
+                .to_string(),
+            );
+            return;
+        };
+        self.sim.attach_net(crate::net::NetClient::open_to_lan(
+            server_protocol,
+            self.config.protocol,
+            seed,
+            view_radius,
+            session,
+            world_dir,
+            crate::net::LAN_DEFAULT_PORT,
+        ));
+        self.sim
+            .set_view_radius(u32::try_from(view_radius).unwrap_or(0));
+        self.install_session_render_sources();
+    }
+
     /// Vanilla's `key.debug.spectate` (F3+N): drop into spectator, or come back
     /// out of it (`KeyboardHandler.java:222-231`).
     ///
@@ -504,6 +576,7 @@ impl WindowApp {
     /// about — every HUD accessor would read an empty default.
     pub(super) fn begin_singleplayer(&mut self, launch: crate::menu::nav::SingleplayerLaunch) {
         use crate::menu::nav::SingleplayerLaunch;
+        let launch_for_lan = launch.clone();
         self.ui.begin(crate::menu::SessionKind::Singleplayer);
         // Issue #468's reading (2): the world is a **directory the menu chose**,
         // and the two arms differ only in whether a typed seed is honoured.
@@ -577,6 +650,10 @@ impl WindowApp {
             // better than a world that silently never loads.
             Err(e) => self.ui.session_failed(e.to_string()),
         }
+        // Remembered for Open to LAN (issue #535), which republishes this exact
+        // launch on a TCP port. Recorded even on the error arm above: a failed
+        // launch left no session, and the field is only ever read behind one.
+        self.hosted_world = Some(launch_for_lan);
     }
 
     /// Open a live connection to `host:port` and show the loading screen.
