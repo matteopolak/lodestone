@@ -1514,6 +1514,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   (`structure_starts`, `structure_refs`) that carry the answer. Phase **S1** of
   [`plans/structures.md`](./plans/structures.md) (issue #514), built on the corpus
   that [`worldgen-structure-corpus.md`](./worldgen-structure-corpus.md) bundled.
+- [Structure templates and processors (worldgen phase S2)](./worldgen-structure-templates.md) —
+  The engine that turns a structure *start* into actual blocks: a reader for the 1212
+  bundled `.nbt` structure templates, the processors vanilla runs between a template's
+  palette and the world, and the generation stage that writes the result into a chunk.
+  Phase **S2** of issue #514 — S0 staged the chunk statuses, S1 decided *where*
+  structures go, and until this landed nothing wrote a block.
 - [Surface-stage state ids](./worldgen-surface-ids.md) — The surface stage carries
   **interned `StateId`s** rather than `String`s across every seam: the pre-surface
   callback, the rule interpreter's result states, the clay-band table and the sparse
