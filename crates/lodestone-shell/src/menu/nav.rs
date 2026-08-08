@@ -831,6 +831,11 @@ impl PauseButton {
                 | PauseButton::PlayerReporting
                 // Issue #188: likewise.
                 | PauseButton::Statistics
+                // Issue #167: the Advancements screen now exists. Its tree is the
+                // real data pack's; nothing is obtained because nothing decodes
+                // `UPDATE_ADVANCEMENTS`, which is the same honest zero
+                // `Statistics` shows — see `menu::advancements`' module docs.
+                | PauseButton::Advancements
         )
     }
 
@@ -1107,6 +1112,12 @@ pub struct MenuNav {
     /// The Statistics screen's own scroll cursor (issue #188). No persisted
     /// state of its own — see [`crate::menu::stats::StatsNav`]'s doc.
     stats: crate::menu::stats::StatsNav,
+    /// The Advancements screen's selected tab and per-tab scroll (issue #167).
+    /// Held here for [`Self::stats`]' reason: `Screen::Advancements` is one screen
+    /// however far its tree is panned, and `UiState` models legal screen edges
+    /// only. Reset on every entry from the pause menu, matching vanilla's
+    /// per-screen `AdvancementTab` lifetime.
+    advancements: crate::menu::advancements::AdvancementsState,
     /// The World Creation screen's own widgets, focus and collected config
     /// (issue #190). Held here for the same reason [`Self::form`] is: it owns
     /// real [`EditBox`] state that cannot be rebuilt per frame.
@@ -1240,6 +1251,7 @@ impl MenuNav {
             settings: crate::menu::options::SettingsNav::new(),
             social: crate::menu::social::SocialNav::with_path(hidden_players_path),
             stats: crate::menu::stats::StatsNav::default(),
+            advancements: crate::menu::advancements::AdvancementsState::default(),
             create_world: crate::menu::create_world::CreateWorldNav::new(),
             // A placeholder: nothing reads it until `Screen::Confirm` is
             // reached, and `apply_world_select`'s Delete arm builds the real one
@@ -1460,6 +1472,20 @@ impl MenuNav {
 
     /// The Statistics screen's own state (issue #188).
     #[must_use]
+    /// The Advancements screen's own tab/scroll state (issue #167), for the draw
+    /// and hit-test paths in `app`.
+    #[must_use]
+    pub fn advancements(&self) -> &crate::menu::advancements::AdvancementsState {
+        &self.advancements
+    }
+
+    /// [`advancements`](Self::advancements), mutably — the layout centres a tab on
+    /// first read, so even the *draw* needs `&mut` here (vanilla's own `centered`
+    /// latch does the same).
+    pub fn advancements_mut(&mut self) -> &mut crate::menu::advancements::AdvancementsState {
+        &mut self.advancements
+    }
+
     pub fn stats(&self) -> &crate::menu::stats::StatsNav {
         &self.stats
     }
@@ -3629,8 +3655,16 @@ impl MenuNav {
                         ui.open_statistics_from_pause();
                         MenuAction::None
                     }
-                    PauseButton::Advancements
-                    | PauseButton::ReportBugs
+                    // Issue #167 — same shape as the two above. `advancements`
+                    // is reset on entry so a reopened screen starts on the
+                    // default tab with each tab freshly centred, matching
+                    // vanilla's per-screen `AdvancementTab` lifetime.
+                    PauseButton::Advancements => {
+                        self.advancements = crate::menu::advancements::AdvancementsState::default();
+                        ui.open_advancements_from_pause();
+                        MenuAction::None
+                    }
+                    PauseButton::ReportBugs
                     | PauseButton::Feedback
                     | PauseButton::Friends => MenuAction::None,
                 }
@@ -4106,6 +4140,11 @@ pub fn routes_menu_input(ui: &UiState) -> bool {
         || ui.is_paused()
         || ui.is_death()
         || ui.is_command_block_open()
+        // Issue #167. Advancements is not `owns_frame` (it is an overlay drawn
+        // through `ContainerRenderer`), but Escape has to close it, and the
+        // `_` arm of `MenuNav::key` routes exactly that through
+        // `UiState::on_escape`.
+        || ui.is_advancements()
 }
 
 /// Steps `i` one row in `forward`'s direction, wrapping, and keeps stepping
@@ -6468,8 +6507,11 @@ mod tests {
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.pause_button(), PauseButton::BackToGame);
         nav.key(&mut ui, MenuKey::Down);
-        // Issue #188: Statistics is now live, so it is the next stop rather
-        // than Player Reporting.
+        // Issue #167: Advancements is now live, so it is the first stop below
+        // Back to Game.
+        assert_eq!(nav.pause_button(), PauseButton::Advancements);
+        nav.key(&mut ui, MenuKey::Down);
+        // Issue #188: Statistics is live too.
         assert_eq!(nav.pause_button(), PauseButton::Statistics);
         nav.key(&mut ui, MenuKey::Down);
         // Issue #189: likewise, Player Reporting rather than Options.
@@ -6500,11 +6542,11 @@ mod tests {
         let mut ui = UiState::new();
         ui.enter_dev_world();
         ui.pause();
-        // BackToGame -> Statistics -> Player Reporting -> Options (#188/#189
-        // made the two middle stops live).
-        nav.key(&mut ui, MenuKey::Down);
-        nav.key(&mut ui, MenuKey::Down);
-        nav.key(&mut ui, MenuKey::Down);
+        // BackToGame -> Advancements -> Statistics -> Player Reporting -> Options
+        // (#167/#188/#189 made the three middle stops live).
+        for _ in 0..4 {
+            nav.key(&mut ui, MenuKey::Down);
+        }
         assert_eq!(nav.pause_button(), PauseButton::Options);
 
         assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
@@ -6584,11 +6626,13 @@ mod tests {
         nav.hover(&ui, last);
         assert_eq!(nav.pause_button(), PauseButton::QuitToTitle);
 
-        // Now click Advancements (index 1, disabled).
-        nav.hover(&ui, 1);
+        // Now click Report Bugs (index 3, disabled). This used to probe
+        // Advancements at index 1, which #167 made live — the subject has to be a
+        // button that is genuinely still disabled or the test proves nothing.
+        nav.hover(&ui, 3);
         assert_eq!(
             nav.pause_button(),
-            PauseButton::Advancements,
+            PauseButton::ReportBugs,
             "a disabled button is still hovered, exactly as in vanilla"
         );
         assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
@@ -6651,7 +6695,7 @@ mod tests {
         ui.enter_dev_world();
         ui.pause();
         let mut seen = vec![nav.pause_button()];
-        for _ in 0..4 {
+        for _ in 0..5 {
             nav.key(&mut ui, MenuKey::Down);
             seen.push(nav.pause_button());
         }
@@ -6659,6 +6703,7 @@ mod tests {
             seen,
             vec![
                 PauseButton::BackToGame,
+                PauseButton::Advancements,
                 PauseButton::Statistics,
                 PauseButton::PlayerReporting,
                 PauseButton::Options,

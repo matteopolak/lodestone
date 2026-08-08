@@ -40,6 +40,15 @@
 //! doing nothing.
 
 pub mod accounts;
+/// Vanilla 26.2's advancement tree as data (issue #167) — 126 advancements over
+/// 5 roots, extracted from the data pack's own JSONs. Read by
+/// [`advancements`] and positioned by [`advancement_tree`].
+pub mod advancement_data;
+/// Vanilla's `TreeNodePosition` (issue #167): the tidy-tree layout that decides
+/// where each advancement widget sits. 26.2's JSON carries no `x`/`y`, so this
+/// has to be run client-side — see the module doc.
+pub mod advancement_tree;
+pub mod advancements;
 pub mod command_block;
 pub mod confirm;
 pub mod create_world;
@@ -256,6 +265,16 @@ pub enum Screen {
     /// so [`stats::StatsSnapshot::default`] is not a placeholder, it is the
     /// only data that has ever existed here.
     Statistics,
+    /// The Advancements screen (issue #167): vanilla's `AdvancementsScreen`.
+    /// Reached from the pause menu's Advancements button
+    /// ([`nav::PauseButton::Advancements`], now live); Escape returns to
+    /// [`Screen::Paused`].
+    ///
+    /// The real 26.2 tree — 126 advancements over 5 tabs, laid out by our port of
+    /// vanilla's own `TreeNodePosition` — with **everything unobtained**, because
+    /// nothing decodes `UPDATE_ADVANCEMENTS`. Same trade [`Screen::Statistics`]
+    /// made, and the same honest zero: see [`advancements`]'s module docs.
+    Advancements,
     /// The World Creation screen (issue #190): vanilla's `CreateWorldScreen`,
     /// reduced to one flat hand-placed list (see [`create_world`]'s module
     /// docs for why). Reached from [`Screen::WorldSelect`]'s "Create New
@@ -322,7 +341,7 @@ impl Screen {
     /// residue is real; it is stated rather than papered over. If a third
     /// consumer ever needs this, a derive is the fix, not another hand-written
     /// list.
-    pub const ALL: [Screen; 19] = [
+    pub const ALL: [Screen; 20] = [
         Screen::MainMenu,
         Screen::ServerList,
         Screen::ServerEdit,
@@ -340,6 +359,7 @@ impl Screen {
         Screen::Credits,
         Screen::Social,
         Screen::Statistics,
+        Screen::Advancements,
         Screen::CreateWorld,
         Screen::Confirm,
     ];
@@ -418,6 +438,18 @@ impl UiState {
     #[must_use]
     pub fn is_paused(&self) -> bool {
         self.screen == Screen::Paused
+    }
+
+    /// Whether the Advancements screen (issue #167) is up.
+    ///
+    /// Its own predicate rather than an `owns_frame` membership, because it draws
+    /// as an **overlay** through `ContainerRenderer` rather than through
+    /// `menu::render`'s row/label frame — the same shape in-world Settings and the
+    /// command block editor take. [`nav::routes_menu_input`] includes it so Escape
+    /// still closes it.
+    #[must_use]
+    pub fn is_advancements(&self) -> bool {
+        self.screen == Screen::Advancements
     }
 
     /// Whether the death screen is up.
@@ -624,6 +656,9 @@ impl UiState {
                     | Screen::Social
                     // Same reasoning, for Statistics (#188).
                     | Screen::Statistics
+                    // And for Advancements (#167), whose tree is data-pack data
+                    // but whose *progress* belongs to a session.
+                    | Screen::Advancements
             )
         {
             self.death_message = None;
@@ -796,6 +831,23 @@ impl UiState {
     /// Back to the pause menu from Statistics.
     pub fn close_statistics(&mut self) {
         if self.screen == Screen::Statistics {
+            self.screen = Screen::Paused;
+        }
+    }
+
+    /// Open the Advancements screen (issue #167) from the pause menu's
+    /// Advancements button. Only from [`Screen::Paused`], for the same reason
+    /// [`Self::open_statistics_from_pause`] is: vanilla has no title-screen entry
+    /// point for it.
+    pub fn open_advancements_from_pause(&mut self) {
+        if self.screen == Screen::Paused {
+            self.screen = Screen::Advancements;
+        }
+    }
+
+    /// Back to the pause menu from Advancements.
+    pub fn close_advancements(&mut self) {
+        if self.screen == Screen::Advancements {
             self.screen = Screen::Paused;
         }
     }
@@ -975,6 +1027,8 @@ impl UiState {
             Screen::Social => self.close_social(),
             // Same reasoning as `Screen::Social` immediately above.
             Screen::Statistics => self.close_statistics(),
+            // Same reasoning again, for Advancements (#167).
+            Screen::Advancements => self.close_advancements(),
             // Same reasoning again — back to the world list.
             Screen::CreateWorld => self.close_create_world(),
             // In practice `MenuNav::key_confirm` intercepts Escape before this is

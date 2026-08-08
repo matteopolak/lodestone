@@ -63,6 +63,7 @@ use lodestone_game::click::{Click, PlayerCtx};
 use lodestone_game::menu::Menu;
 use lodestone_game::recipe::RecipeBook;
 
+mod advancements_screen;
 mod container_input;
 mod creative_screen;
 mod input;
@@ -80,6 +81,8 @@ mod weather;
 // `allow` is because a name only the owning submodule and the `#[cfg(test)]`
 // modules read still has to keep its `app::X` path, and a non-test build then
 // sees the re-export as unused.
+#[allow(unused_imports)]
+use advancements_screen::{advancements_panel_geometry, advancements_title};
 #[allow(unused_imports)]
 pub(crate) use creative_screen::CreativeSearchEdit;
 #[allow(unused_imports)]
@@ -651,6 +654,14 @@ struct WindowApp {
     /// [`WindowApp::creative_screen_open`], derived from the container flag plus
     /// the player's own abilities, so the two can never disagree.
     creative: crate::container::CreativeState,
+    /// The Advancements screen's in-flight viewport drag (issue #167): the cursor
+    /// position the last pan was measured from, in physical pixels.
+    ///
+    /// The *screen* state (tab, per-tab scroll) lives on [`MenuNav`] beside every
+    /// other menu screen's; only the drag is here, because it is a property of the
+    /// mouse rather than of the screen — the same split
+    /// [`menu_slider_drag`](Self::menu_slider_drag) already makes.
+    advancements_drag: Option<(f32, f32)>,
 }
 
 #[cfg(test)]

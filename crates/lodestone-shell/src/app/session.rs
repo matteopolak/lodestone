@@ -69,6 +69,7 @@ impl WindowApp {
             // `install_session_render_sources`.
             weather: None,
             creative: crate::container::CreativeState::default(),
+            advancements_drag: None,
         }
     }
 

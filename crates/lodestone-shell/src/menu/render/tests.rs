@@ -256,6 +256,11 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
                 ui.pause();
                 ui.open_statistics_from_pause();
             }
+            Screen::Advancements => {
+                ui.enter_dev_world();
+                ui.pause();
+                ui.open_advancements_from_pause();
+            }
             Screen::CreateWorld => {
                 ui.open_world_select();
                 ui.open_create_world();
@@ -2818,8 +2823,8 @@ fn pause_frame_builds_vanillas_nine_widgets_in_order_and_tracks_the_highlight() 
     assert_eq!(f.rows[7].label, PauseButton::Options.label());
     assert_eq!(f.rows[8].label, PauseButton::QuitToTitle.label());
     assert_eq!(f.selected, 8, "selection follows the nav's pause_index");
-    // Five are live: the three with actions, plus Statistics and Player
-    // Reporting since issues #188/#189 built the screens behind them
+    // Six are live: the three with actions, plus Advancements, Statistics and
+    // Player Reporting since issues #167/#188/#189 built the screens behind them
     // (see `PauseButton::enabled`'s own doc for each — what each screen
     // shows is honest-but-limited, not what made the button liveness
     // conditional).
@@ -2833,6 +2838,7 @@ fn pause_frame_builds_vanillas_nine_widgets_in_order_and_tracks_the_highlight() 
         live,
         vec![
             "Back to Game",
+            "Advancements",
             "Statistics",
             "Player Reporting",
             "Options...",
@@ -3264,16 +3270,26 @@ fn the_highlighted_pause_button_is_visibly_different_from_its_neighbours() {
     // Negative control 2: a *disabled* row is a third, distinct colour and
     // never picks up the selected fill even when it is the selection —
     // vanilla's `WidgetSprites::get` gives disabled priority over hovered.
+    //
+    // The subject is **Report Bugs (index 3)**, not Advancements (index 1):
+    // #167 made that one live, and a control pointed at an enabled row measures
+    // nothing. Report Bugs has no screen behind it and no plan for one, so it is
+    // the stable choice.
+    let disabled_row = 3;
+    assert!(
+        !crate::menu::nav::PAUSE_BUTTONS[disabled_row].enabled(),
+        "this control needs a row that is genuinely disabled"
+    );
     let mut on_disabled = pause_frame(&nav);
-    on_disabled.selected = 1; // Advancements
+    on_disabled.selected = disabled_row;
     let on_disabled = geometry(&on_disabled, w, h);
     assert!(
-        coverage_of(&on_disabled, w, h, inside(1), ROW_OFF) > 0.9,
+        coverage_of(&on_disabled, w, h, inside(disabled_row), ROW_OFF) > 0.9,
         "a disabled row must keep the disabled fill even while highlighted: {}",
-        coverage_of(&on_disabled, w, h, inside(1), ROW_OFF)
+        coverage_of(&on_disabled, w, h, inside(disabled_row), ROW_OFF)
     );
     assert!(
-        coverage_of(&on_disabled, w, h, inside(1), ROW_SEL) < 0.05,
+        coverage_of(&on_disabled, w, h, inside(disabled_row), ROW_SEL) < 0.05,
         "a disabled row must never draw the selected fill"
     );
     // And the three colours really are distinguishable, so the three

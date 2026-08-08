@@ -30,7 +30,11 @@
 //! occupied slot.
 
 mod background;
-mod builder;
+/// The shared GUI vertex builder — colour, item-sprite, glint, block-model and
+/// background streams. `pub(crate)` because it now has three consumers: the
+/// container screen, the creative screen (#158) and the Advancements screen
+/// (#167), all of which draw through `ContainerRenderer`'s passes.
+pub(crate) mod builder;
 mod creative;
 /// Vanilla's creative-inventory tab contents (issue #158) — a hand-transcription
 /// of the decompiled `CreativeModeTabs.java`, cross-checked against
@@ -163,6 +167,9 @@ fn all_gui_sprites() -> impl Iterator<Item = &'static str> {
         .copied()
         .chain(creative::CREATIVE_TAB_SPRITES)
         .chain(creative::CREATIVE_SCROLLER_SPRITES)
+        // The Advancements screen's 13 sprites (issue #167) — `advancements/**`,
+        // also `gui/sprites/**`, so they ride this atlas too.
+        .chain(crate::menu::advancements::ADVANCEMENT_SPRITES)
 }
 
 const CONTAINER_WGSL: &str = include_str!("shaders/container.wgsl");

@@ -81,6 +81,25 @@ impl WindowApp {
         let creative_open = self.creative_screen_open();
         let creative_title = self.creative_frame_title().unwrap_or_default();
         let creative_menu = creative_open.then(|| self.sim.player_menu());
+        // Advancements (#167). Same pre-split resolution, and the hover has to be
+        // computed here too: `advancements_layout` centres a tab on first read, so
+        // it needs `&mut self.nav` — which the geometry call below also needs, and
+        // two `&mut` borrows in one expression will not do.
+        let advancements_open = self.ui.is_advancements();
+        let advancements_hover = advancements_open
+            .then(|| {
+                self.target
+                    .as_ref()
+                    .map(RenderTarget::size)
+                    .and_then(|(w, h)| self.advancements_hover(w, h))
+            })
+            .flatten();
+        let advancements_title = advancements_open
+            .then(|| {
+                let translate = self.sim.translator();
+                advancements_title(self.nav.advancements(), translate.as_ref())
+            })
+            .unwrap_or_default();
 
         let (Some(gpu), Some(target), Some(render), Some(hud), Some(container_renderer)) = (
             self.gpu.as_ref(),
@@ -895,6 +914,41 @@ impl WindowApp {
         {
             let pause_frame = crate::menu::render::pause_frame(&self.nav);
             menu.render_overlay(device, queue, frame.view(), &pause_frame, w, h);
+        }
+
+        // The Advancements screen (issue #167), drawn over the still-rendering
+        // paused world for the same reason the pause overlay above is: it is
+        // reached from the pause menu and vanilla keeps the world behind it.
+        //
+        // Through `ContainerRenderer` rather than `MenuRenderer` — see
+        // `crate::menu::advancements`' module doc. That is also why
+        // `menu::render::owns_frame` deliberately excludes it and
+        // `frame_for` returns `None`: without this block that `None` would mean
+        // "invisible", the same trap in-world Settings and the command block
+        // editor were both caught by.
+        let gui_scale_now = self.nav.gui_scale();
+        if advancements_open
+            && let Some(geo) = advancements_panel_geometry(
+                self.nav.advancements_mut(),
+                advancements_hover.as_ref().map(|(i, t)| (*i, t.as_str())),
+                &advancements_title,
+                container_renderer,
+                item_models,
+                gui_scale_now,
+                w,
+                h,
+            )
+        {
+            container_renderer.render_geometry_scaled(
+                device,
+                queue,
+                frame.view(),
+                Some(render.depth_view()),
+                &geo,
+                gui_scale_now,
+                w,
+                h,
+            );
         }
 
         // The death screen (issue #103) follows exactly the same overlay

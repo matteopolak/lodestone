@@ -1537,6 +1537,20 @@ fn synthetic_background() -> ContainerBackground {
             solid_png(256, 256),
         );
     }
+    // The Advancements screen's loose art (issue #167): the `256 x 256` window
+    // sheet and the five `16 x 16` tab backgrounds, keyed by the same ids
+    // `ContainerBackground::build` loads.
+    src.insert(
+        "assets/minecraft/textures/gui/advancements/window.png".to_string(),
+        solid_png(256, 256),
+    );
+    for id in super::background::ADVANCEMENT_TILE_IDS {
+        let path = id.strip_prefix("minecraft:").unwrap_or(id);
+        src.insert(
+            format!("assets/minecraft/textures/{path}.png"),
+            solid_png(16, 16),
+        );
+    }
     // Every id in `GUI_SPRITES`, at its real vanilla size so a test asserting
     // a `dst` rect is asserting the blit and not the stand-in: the highlight
     // pair is natively 24x24 and the five placeholders are 16x16. Built from
@@ -1572,6 +1586,15 @@ fn synthetic_background() -> ContainerBackground {
         } else if id.starts_with("container/creative_inventory/scroller") {
             // `12 x 15` (`:753`).
             (12, 15)
+        } else if id.starts_with("advancements/tab_") {
+            // `28 x 32` for `AdvancementTabType.ABOVE` (`AdvancementTabType.java:19-20`).
+            (28, 32)
+        } else if id.ends_with("_frame_obtained") || id.ends_with("_frame_unobtained") {
+            // `26 x 26` (`AdvancementWidget.java:164`).
+            (26, 26)
+        } else if id == "advancements/title_box" {
+            // `200 x 26` — `BOX_WIDTH` by `HEIGHT` (`AdvancementWidget.java:26-28`).
+            (200, 26)
         } else {
             (CELL as u32, CELL as u32)
         };
