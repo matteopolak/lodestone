@@ -42,7 +42,15 @@
 //! [`V770Adapter`]'s own decode logic for those same packets, which is the
 //! best available specification for their wire layout.
 
-use std::collections::HashMap;
+/// The chunk-encode boundary's byte-identity gate (`DESIGN.md` §12.131): the
+/// string path [`build_world_column`] used to be, kept as a control and asserted
+/// to encode byte-identical payloads. A submodule rather than lines in this
+/// file's own `mod tests` because it needs the pre-change body verbatim and this
+/// file is already 5,000 lines that several agents edit concurrently. The
+/// instructions-retired half is `tests/chunk_encode_cycles.rs` — it needs
+/// `proc_pid_rusage`, and this crate is `#![forbid(unsafe_code)]`.
+#[cfg(test)]
+mod chunk_encode_identity;
 
 use lodestone_core::{Ctx, Decode, Encode, Nbt, NbtTag, Reader, Writer, write_network_nbt};
 use lodestone_model::{
@@ -65,6 +73,12 @@ use lodestone_world::{
 };
 use uuid::Uuid;
 
+// Test-only since the string→id resolver moved into `lodestone-data`
+// (`block_states::state_id`): this module's production code no longer reads the
+// forward table at all — `resolve_state_id` and `air_id` are one-line wrappers —
+// while `stone_id` and the resolver's own gates below still walk it by name
+// rather than trusting a literal id.
+#[cfg(test)]
 use lodestone_data::block_states::{block_name, properties};
 use lodestone_data::entity_types::entity_type_id;
 use lodestone_data::items::{item_id, item_name};
@@ -238,14 +252,16 @@ fn stone_id() -> u32 {
     )
 }
 
-/// Fallback: the block-state id for `minecraft:air`, resolved the same way as
-/// [`stone_id`] and for the same reason. Used both as
-/// [`resolve_state_id`]'s no-match fallback and, indirectly, wherever this
-/// module needs air's id without hardcoding registry id `0`.
+/// Fallback: the block-state id for `minecraft:air`, resolved by name for the
+/// same reason [`stone_id`] is rather than hardcoded as registry id `0`. Used
+/// both as [`resolve_state_id`]'s no-match fallback and, indirectly, wherever
+/// this module needs air's id.
+///
+/// Delegates to [`lodestone_data::block_states::air_state_id`], which caches it.
+/// This used to be a 32,366-row scan **per call**, and one of those calls is on
+/// the per-column encode path.
 fn air_id() -> u32 {
-    (0..).find(|&id| block_name(id) == Some("minecraft:air")).expect(
-        "generated block-state table has no `minecraft:air` entry — regenerate or fix the table",
-    )
+    lodestone_data::block_states::air_state_id()
 }
 
 /// `ParticleTypes.EXPLOSION_EMITTER`'s network registry id, restated for the
@@ -447,60 +463,29 @@ fn resolve_biome_id(name: &str) -> u32 {
     }) as u32
 }
 
+/// `ClientboundGameEventPacket.CHANGE_GAME_MODE`'s own event code.
+const GAME_EVENT_CHANGE_GAME_MODE: u8 = 3;
+
 /// Resolves a canonical block-state string ([`ServerChunkColumn`]'s own
 /// vocabulary, e.g. `"minecraft:water[level=0]"`, `"minecraft:stone"`) to its
-/// protocol-776 registry id, via a linear scan matching both the block name
-/// and its property values against the generated state table —
-/// [`stone_id`]/[`air_id`] special-case the two propertyless states this
-/// module writes unconditionally; this is the general form needed for
-/// [`V770ServerProtocol::encode_block_update`] (which must echo back
-/// whatever pre-existing, possibly-propertied state already occupied a
-/// placement's neighbour cell) and for [`build_world_column`] (which must
-/// carry the real per-block state a whole-column send resolves for every
-/// cell). `O(`[`lodestone_data::block_states::STATE_COUNT`]`)` per call —
-/// [`build_world_column`] memoizes it per distinct string it sees in a
-/// column rather than calling it per block; do not reach for this function
-/// itself in a true per-block hot path without the same memoization.
+/// protocol-776 registry id, falling back to air for a block name this table
+/// does not carry.
 ///
-/// # Three-tier fallback: exact, default-plus-overrides, then the default state
+/// **The resolution itself now lives in
+/// [`lodestone_data::block_states::state_id`]** — the three-tier
+/// exact/default-plus-overrides/default algorithm, its synthetic-property drop
+/// and the reason the default state is not the lowest id are all documented
+/// there, and so is the index that makes it `O(log 1196)` plus one scan of *that
+/// block's* states rather than the 32,366-row scan with a string compare per row
+/// this function used to be. This wrapper is the air fallback and nothing else.
 ///
-/// 1. **Exact match** — name and every property value agree. The common case
-///    for anything decoded off a real edit or a fully-qualified generator
-///    state (`"minecraft:deepslate[axis=y]"`).
-/// 2. **The block's default state with the named properties written over it** —
-///    vanilla's own `defaultBlockState().setValue(k, v)…`. Every property the
-///    caller did *not* name keeps its vanilla default, and any property no real
-///    state of this block carries (a *synthetic* one — see below) is dropped.
-///    Since a block's state set is the full cross product of its properties'
-///    domains, the merged set always names a real state unless a value is
-///    outside its domain.
-/// 3. **The default state alone** — a bare name, or a named value outside its
-///    property's domain. Falls back to air if the block name is unknown.
-///
-/// # The default state is *not* the lowest id, and assuming it was caused three bugs
-///
-/// This used to fall back to the **lowest** id sharing `name`, which happens to
-/// be right for water (`86`, `level=0`) and lava (`102`) — the fluids issue #363
-/// added the tier for — and wrong for 661 of the 797 multi-state blocks in
-/// `blocks.json`. Three shipped consequences: bare `minecraft:grass_block`
-/// resolved to id `8`, `snowy=true`, so every blade of spread grass rendered
-/// snowy (#546); bare directional blocks came out at whatever the lowest id's
-/// `facing` happened to be (#475); and dust's four connection properties came
-/// out `up` rather than `none`, so wire rendered climbing rather than flat.
-///
-/// The default is now read from [`lodestone_data::snow_support::is_default_state`]
-/// — `state == state.getBlock().defaultBlockState()` dumped from the real 26.2
-/// server, exactly one id per block.
-///
-/// # Synthetic properties
-///
-/// This server's own state strings can carry a property vanilla keeps outside
-/// the block state: `redstone_diode::set_comparator` emits
-/// `minecraft:comparator[…,output=N]` while vanilla keeps `output` in a
-/// `ComparatorBlockEntity` (issue #476). Such a property matches no real state,
-/// so it is dropped during the merge rather than sinking the whole lookup. The
-/// drop lives here, at the encode boundary, so the server model keeps its
-/// synthetic properties for its own use and every future one is covered.
+/// Moving it was a performance change with a correctness dividend: `lodestone-server`'s
+/// [`ServerChunkColumn`] resolves its own block palette through the *same*
+/// function now (`palette_state_ids`), so [`build_world_column`] indexes integers
+/// instead of hashing 98,304 strings per column, and the two paths cannot drift
+/// into two different understandings of what a bare block name means. Both
+/// remaining string callers ([`V770ServerProtocol::encode_block_update`] and
+/// `encode_block_update_body`) are per-*edit*, not per-block.
 ///
 /// A block-update confirmation is best-effort feedback (see
 /// `docs/block-edit.md`), not the server's authoritative state — that stays
@@ -508,82 +493,8 @@ fn resolve_biome_id(name: &str) -> u32 {
 /// reads. The air fallback exists so a state string this version's table cannot
 /// parse back at all degrades to a visibly-wrong confirmation rather than a
 /// panic or a corrupted wire id.
-/// `ClientboundGameEventPacket.CHANGE_GAME_MODE`'s own event code.
-const GAME_EVENT_CHANGE_GAME_MODE: u8 = 3;
-
 fn resolve_state_id(state: &str) -> u32 {
-    let (name, raw_props) = match state.split_once('[') {
-        Some((name, rest)) => (name, rest.strip_suffix(']').unwrap_or(rest)),
-        None => (state, ""),
-    };
-    let mut wanted: Vec<(&str, &str)> = if raw_props.is_empty() {
-        Vec::new()
-    } else {
-        raw_props
-            .split(',')
-            .filter_map(|pair| pair.split_once('='))
-            .collect()
-    };
-    wanted.sort_unstable();
-
-    // Tier 1, plus the bookkeeping tiers 2 and 3 need: this block's id range and
-    // its vanilla default state.
-    let mut first_id: Option<u32> = None;
-    let mut last_id: Option<u32> = None;
-    let mut default_id: Option<u32> = None;
-    for id in 0..lodestone_data::block_states::STATE_COUNT {
-        if block_name(id) != Some(name) {
-            continue;
-        }
-        first_id.get_or_insert(id);
-        last_id = Some(id);
-        if lodestone_data::snow_support::is_default_state(id) == Some(true) {
-            default_id = Some(id);
-        }
-        let have_raw = properties(id).unwrap_or(&[]);
-        let mut have: Vec<(&str, &str)> = have_raw.to_vec();
-        have.sort_unstable();
-        if have == wanted {
-            return id;
-        }
-    }
-
-    // Tier 3's value, and tier 2's base. `first_id` only backstops a table whose
-    // default column has somehow lost this block.
-    let Some(base) = default_id.or(first_id) else {
-        return air_id();
-    };
-    if wanted.is_empty() {
-        return base;
-    }
-
-    // Tier 2: `defaultBlockState().setValue(k, v)…` for every property the block
-    // really has, dropping any synthetic one.
-    let mut merged: Vec<(&str, &str)> = properties(base).unwrap_or(&[]).to_vec();
-    let mut overridden = false;
-    for &(key, value) in &wanted {
-        if let Some(slot) = merged.iter_mut().find(|(have_key, _)| *have_key == key) {
-            if slot.1 != value {
-                slot.1 = value;
-                overridden = true;
-            }
-        }
-    }
-    if !overridden {
-        return base;
-    }
-    merged.sort_unstable();
-    let (Some(start), Some(end)) = (first_id, last_id) else {
-        return base;
-    };
-    for id in start..=end {
-        let mut have: Vec<(&str, &str)> = properties(id).unwrap_or(&[]).to_vec();
-        have.sort_unstable();
-        if have == merged {
-            return id;
-        }
-    }
-    base
+    lodestone_data::block_states::state_id(state).unwrap_or_else(air_id)
 }
 
 /// Unpacks vanilla's `BlockPos.asLong` form (the inverse of
@@ -1842,31 +1753,34 @@ fn encode_game_login_rest() -> Vec<u8> {
 /// deepslate, gravel, water, …) rather than a solid/air classification —
 /// see issue #363 — and, since issue #405, the source's real per-quart
 /// biome assignment rather than one constant id everywhere. Every block
-/// cell is resolved via [`ServerChunkColumn::block_state`] (the same string
-/// source [`V770ServerProtocol::encode_block_update`] already reads for a
-/// single cell) through [`resolve_state_id`]; every biome **cell** via
-/// [`ServerChunkColumn::biome_cell_index`] through [`resolve_biome_id`] —
-/// a real per-`y` grid since issue #512, not one surface sample broadcast
-/// down the column.
+/// cell is read as an **integer** via [`ServerChunkColumn::block_state_id`];
+/// every biome **cell** via [`ServerChunkColumn::biome_cell_index`] through
+/// [`resolve_biome_id`] — a real per-`y` grid since issue #512, not one surface
+/// sample broadcast down the column.
 ///
-/// # Why this does not cost a linear scan per block
+/// # This function does no string work at all, and that is recent
 ///
-/// [`resolve_state_id`] is `O(STATE_COUNT)` (~32k) per call, and a column is
-/// 98,304 cells — calling it unmemoized here would be billions of
-/// comparisons per column, every join and every view-tracker resend. `seen`
-/// memoizes by the block-state string itself: a real column's *distinct*
-/// state strings number in the dozens (`docs/chunk-memory-pool-footprint.md`
-/// records live sections as 4-bit indirect palettes with at most 6 entries
-/// each), so the expensive scan runs once per distinct string, not once per
-/// block. The map borrows its keys from `source` and is not carried across
-/// calls — the columns a server sends are different data every time (edits,
-/// different chunk coordinates), so there is nothing durable to cache
-/// across them without the source outliving one `encode_chunk` call.
+/// It used to read [`ServerChunkColumn::block_state`] — a `&str` — 98,304 times
+/// per column, probe each through a per-column `HashMap<&str, u32>` (std's
+/// SipHash), and resolve each *distinct* entry through what was then a
+/// 32,366-row scan doing a string compare per row: order 10⁶ string comparisons
+/// per served column, paid on every join and every view-tracker resend. It was
+/// invisible to the 21-unit worldgen optimisation drive because the generation
+/// cost metric excludes protocol encode by definition.
+///
+/// The resolution now happens **once per palette entry, on the server side**, at
+/// column-adoption time (`ChunkColumn::palette_state_ids`), so the inner loop
+/// here is a range check and two array indexes. `resolve_state_id` still exists
+/// for the per-*edit* callers and is the same `lodestone_data` function the
+/// palette resolves through, so the two cannot drift. `DESIGN.md` §12.131 has
+/// the measurement.
+///
 /// [`resolve_biome_id`] is a 55-entry linear scan, and it is called once per
 /// entry in the column's own biome *palette* (`biome_palette_ids` below) — a
 /// handful, measured in single digits — never once per cell. That is what makes
 /// a 1,536-cell 3-D grid cost strictly less than the 16 calls the old
-/// vertically-broadcast surface array made.
+/// vertically-broadcast surface array made. It is now the only string work left
+/// in this function.
 ///
 /// Iterates section-major (matching wire order) and skips sections that end
 /// up entirely default (air-only, default biome), since
@@ -1880,8 +1794,6 @@ fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldCh
         shape.air_id,
         shape.biome_id,
     );
-
-    let mut seen: HashMap<&str, u32> = HashMap::new();
 
     // This column's real 3-D biome grid (issue #512). The column stores its
     // cells as indices into a small per-column palette — a handful of entries,
@@ -1908,10 +1820,7 @@ fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldCh
             let wy = base_y + ly as i32;
             for lz in 0..ChunkSection::EDGE {
                 for lx in 0..ChunkSection::EDGE {
-                    let state = source.block_state(lx as i32, wy, lz as i32);
-                    let id = *seen
-                        .entry(state)
-                        .or_insert_with(|| resolve_state_id(state));
+                    let id = source.block_state_id(lx as i32, wy, lz as i32);
                     // `air_id` is already the container's own default (see
                     // `ChunkSection::new`), so a cell resolving to it needs
                     // no explicit write — same short-circuit the old

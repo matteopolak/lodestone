@@ -109,6 +109,50 @@ architectural dead end — see `docs/roadmap/server-entities.md`.
   (`lodestone-shell`, `lodestone-physics`) already used before this move and
   still uses unchanged.
 
+### `block_states::state_id` — the one reverse map, and why it is derived rather than generated
+
+`block_name`/`properties` answer id → (block, properties) in O(1). `state_id`
+answers the other direction — a canonical state string such as
+`"minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"`
+→ its global 26.2 state id — and it is the only lookup here that is **not** a
+direct index into a generated array.
+
+It is not a second generated table either, deliberately. Its whole index is
+derived from the tables already committed, once per process behind a `OnceLock`:
+
+| structure | size | built from |
+|---|---|---|
+| `spans[block]` — `{first, last, default}` | 1,196 × 12 B | one walk of `STATES` plus `snow_support::is_default_state` |
+| `by_name` — block indices sorted by name | 1,196 × 2 B | `BLOCK_NAMES`, sorted at build time |
+
+That is ~17 KB and ~32k iterations, once. Generating an equivalent static table
+through the `LODESTONE_REGEN=1` pattern the other dumps use would add a **drift
+surface for data that is already in the tree** — the reverse map would then have to
+be regenerated in lockstep with `block_states.rs` and `snow_support.rs`, and a
+stale one fails in the worst possible way (plausible-looking wrong ids). Deriving
+it means the only source of truth stays the jar dump.
+
+Two things the build asserts, so a table that stops satisfying them fails loudly
+at first use rather than resolving into a neighbouring block's states:
+
+- **every block owns a *contiguous* id span** — true because vanilla builds
+  `Block.BLOCK_STATE_REGISTRY` block by block, and `state_id` scans `first..=last`
+  rather than all 32,366 rows *because* of it;
+- **every block has at least one state.**
+
+`by_name` is built rather than assumed sorted. `BLOCK_NAMES` happens to be
+alphabetical today (it comes from a JSON object's keys), but nothing in the
+generator promises that, and a silently unsorted array would make `binary_search`
+return wrong answers instead of failing.
+
+The resolver's three tiers — exact, default-plus-named-overrides, default alone —
+and the reason the default is **not** the lowest id are documented on `state_id`
+itself. That logic used to live in `lodestone-v770`'s `server_protocol.rs`; it
+moved here so `lodestone-server`'s `ChunkColumn` could resolve its own block
+palette without crossing the protocol-family feature seam, which is what took
+98,304 string hashes per column out of the chunk encode path (see
+[`chunk-column-encoding.md`](./chunk-column-encoding.md) for the measurement).
+
 ## How to change it, and the gotchas
 
 - **Add a new census the same way the existing ones were added**: a dump
@@ -116,6 +160,11 @@ architectural dead end — see `docs/roadmap/server-entities.md`.
   function, a `src/generated/X.rs` raw table, and a `src/X.rs` lookup API. Wire
   it into `src/lib.rs`'s two `pub(crate) mod generated_X;` /
   `pub mod X;` declarations.
+- **Never hand-duplicate `block_states::state_id`'s fallback.** Two test helpers
+  copied an older version of it ("the lowest id sharing the block name") and became
+  silent callers when the real one was corrected at `43a6e030`; one of them failed
+  as a 30-second live timeout rather than a mismatch. If you need the id for a
+  state string, call the function.
 - **`block_registry` has no lookup-API wrapper file** — same as before the
   move. It is reached directly as `crate::generated_block_registry::*` from
   `block_states.rs` and `tool.rs`, the only two consumers.

@@ -39,32 +39,31 @@ unanticipated angle. See "Two bugs, not one" below.
 
 ## How it works
 
-`build_world_column` now resolves each cell's **real** block-state id, via
-`ServerChunkColumn::block_state(x, y, z) -> &str` (already used, at a single
-coordinate, by `V770ServerProtocol::encode_block_update`) and this module's
-existing `resolve_state_id`, a linear scan over the generated ~32k-entry
-protocol-776 state table matching both block name and property values.
+`build_world_column` resolves each cell's **real** block-state id, and since the
+string-work unit below it does so without touching a string at all:
 
 ```rust
-let state = source.block_state(lx as i32, wy, lz as i32);
-let id = *seen.entry(state).or_insert_with(|| resolve_state_id(state));
+let id = source.block_state_id(lx as i32, wy, lz as i32);
 if id != shape.air_id {
     section.set_block(lx, ly, lz, id);
 }
 ```
 
-`resolve_state_id` alone is too expensive to call once per block: a column is
-16×16×384 = 98,304 cells, and a linear scan is `O(STATE_COUNT)` (~32k), so an
-unmemoized call site would be billions of comparisons per column, on every join
-and every view-tracker resend. `seen: HashMap<&str, u32>` memoizes by the
-block-state string itself, local to one `build_world_column` call: a real
-column's *distinct* strings number in the dozens
-([`docs/chunk-memory-pool-footprint.md`](./chunk-memory-pool-footprint.md)
-records live sections as 4-bit indirect palettes with at most 6 entries each), so
-the expensive scan runs once per distinct string, not once per block. The map is
-not carried across calls — different columns are different data, so there is
-nothing durable to cache across them without the source outliving one
-`encode_chunk` call.
+`ChunkColumn::block_state_id` (`crates/lodestone-server/src/chunk.rs`) is a range
+check plus two array indexes: the column stores its blocks as indices into a
+small per-column palette, and `palette_state_ids[i]` is `palette[i]` already
+resolved to a global 26.2 state id. The resolution happens **once per palette
+entry**, when the entry is appended (`intern`) or when a whole generated palette
+is adopted (`from_generated` → `recalc_ticking_counts`) — the same append-only
+argument that makes `palette_ticking` sound.
+
+The string resolver, `lodestone_data::block_states::state_id`, is still what
+computes those ids, and `V770ServerProtocol`'s `resolve_state_id` is now a
+one-line wrapper around it that supplies the air fallback. Its remaining callers
+are per-*edit*, not per-block: `encode_block_update` echoing a neighbour cell's
+existing state, and `encode_block_update_body`. Because the palette and the
+encoder resolve through the same function, they cannot drift into two different
+understandings of what a bare block name means.
 
 Once a real id reaches `ChunkSection::set_block`
 (`crates/lodestone-world/src/section.rs`), the underlying
@@ -149,29 +148,72 @@ Checked, not assumed, before changing this:
 The collapse was, as its own function name suggested, a bring-up shortcut that
 outlived its purpose — not load-bearing for anything else in the pipeline.
 
+## The per-block string work, and how it was removed
+
+**Measured, both arms in one process, release, seed 1234, 8 real generated
+columns × 5 repeats** (`crates/protocol/v770/tests/chunk_encode_cycles.rs`,
+`cargo test --release -p lodestone-v770 --test chunk_encode_cycles -- --ignored
+--nocapture`). Instructions retired, not wall clock: `DESIGN.md` §12.130 measured
+this machine at 0.16–0.21% for instructions against 11.6–19.1% for wall clock,
+with other agents always compiling.
+
+| arm | insn/column | ns/column | spread |
+|---|---|---|---|
+| cell loop, string path (before) | 39,524,010 | 1,460,864 | 0.07% |
+| cell loop, integer path (after) | 14,936,763 | 569,974 | 0.26% |
+| whole `encode_chunk`, after | 39,963,080 | — | 0.08% |
+
+24,587,247 instructions per column removed — **250 per cell**, a 2.65× cut on the
+cell loop and **38% of what a served column cost end to end**. The version that
+paid it did three things per cell that are all gone:
+
+1. read a block-state **`&str`** (98,304 per column);
+2. probed it through a per-column `HashMap<&str, u32>` — std's SipHash, per cell;
+3. resolved each *distinct* entry through a scan of all 32,366 rows of the
+   generated state table with a property-vector compare per name match. The
+   8-column fixture has 225 palette entries, so that alone is ~900k row visits
+   per column.
+
+It survived the 21-unit worldgen optimisation drive
+([`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md)) because the
+generation cost metric excludes protocol encode **by definition** — no instrument
+in that drive could see this code.
+
+Two gates hold it:
+
+- `src/server_protocol/chunk_encode_identity.rs` keeps the pre-change body
+  *verbatim* as a control and asserts the two paths encode **byte-identical**
+  `level_chunk_with_light` payloads for real columns, reporting a cell coordinate
+  when they differ. Negative control run: perturbing
+  `lodestone_data::block_states::state_id` by one id fails it at
+  `chunk (0, 0) cell (0, -64, 0): integer path says 84, string path says 85
+  (state string "minecraft:bedrock")`.
+- `palette_state_ids_agree_with_the_jar_derived_dump` in the same file checks the
+  ids against `block_name`/`properties`/`is_default_state` — jar dumps, read
+  directly, never through either resolver. That is the outside expectation a
+  two-implementation diff cannot supply.
+
 ## How to change it, and the gotchas
 
-- **Don't call `resolve_state_id` per-block without memoizing.** See the
-  performance section above; the whole point of `seen` is amortizing the linear
-  scan. If a future change needs per-block resolution somewhere else *not*
-  already inside a `build_world_column`-style loop, either add the same
-  local-`HashMap` pattern or push a name→id index into `lodestone_data` — don't
-  reach for the bare linear scan in a true hot path.
-- **`resolve_state_id` has three fallback tiers now, not two** — exact match,
-  same-name lowest-id state, then air; see its own doc comment ("Two bugs, not
-  one" above). Only a name with *zero* matches in the table (an unknown block,
-  or a name typo) reaches air; a known block with the wrong/missing properties
-  gets its lowest-id same-name state instead. Never a panic either way — a bad
-  string degrades to a visibly-wrong-at-worst block rather than crashing the
-  connection.
-- **"Lowest id" is not "default" in general — verified false for 661/797
-  multi-state blocks.** It is only confirmed correct for the two fluids this
-  fallback can currently reach (water, lava). **Do not extend this fallback's
-  reach to a new bare, property-requiring block name without checking
-  `blocks.json`'s own `"default": true` marker for that specific block
-  first.** If a future caller wants a bare name to resolve to a block's *real*
-  default and that block is not water or lava, verify it the same way — do
-  not assume the lowest id is right.
+- **Never resolve a state string per block again.** The palette is the boundary:
+  if you need a per-cell id, call `ChunkColumn::block_state_id`, or take
+  `palette_state_ids()` and walk the index grid with `append_section_cells`. A
+  local `HashMap<&str, u32>` memo is *not* good enough — hashing 98,304 strings
+  was itself a measurable part of the 250 insn/cell removed above, independent of
+  the scan it was memoizing.
+- **`resolve_state_id`'s semantics live in `lodestone-data` now, and it is not
+  "lowest id".** A bare block name resolves to the block's **jar-marked default
+  state** with the caller's named properties written over it, per
+  `lodestone_data::block_states::state_id`'s three tiers. The older "lowest id
+  sharing the name" version shipped three bugs at once — snowy spread grass
+  (#546), wrong-facing directionals (#475), and redstone dust rendering as
+  climbing rather than flat. **Do not hand-duplicate the fallback.** Two test
+  helpers did, became silent callers when it changed at `43a6e030`, and one failed
+  as a 30-second live timeout rather than a mismatch.
+- **A property no real state of the block carries is *synthetic* and dropped**
+  (this server's `minecraft:comparator[…,output=N]`, which vanilla keeps in a
+  block entity). That drop is in `state_id`, so every future synthetic property is
+  covered without a new special case.
 - **`stone_id()` is now `#[cfg(test)]`-only.** It was `encode_chunk`'s literal
   fallback before this fix; the only remaining reference is
   `encode_block_update_wire_layout`'s pinning assertion. Do not resurrect it as
@@ -190,11 +232,15 @@ indirect, 15-bit direct — sized for the ~32k-entry protocol-776 global registr
 
 ## Dependencies
 
-- `crates/lodestone-server/src/chunk.rs`'s `ChunkColumn::block_state` — the real
-  per-cell string source this encoder now reads instead of `is_solid`.
-- `crates/lodestone-data/src/block_states.rs`'s `block_name`/`properties`/
-  `STATE_COUNT` — the generated protocol-776 state table `resolve_state_id`
-  scans.
+- `crates/lodestone-server/src/chunk.rs`'s `ChunkColumn::block_state_id` /
+  `palette_state_ids` — the real per-cell **integer** source this encoder reads,
+  and the palette-resolution point that keeps it integer. `block_state` (the
+  `&str` form) is still there for the save, NBT and debug seams.
+- `crates/lodestone-data/src/block_states.rs`'s `state_id` (the reverse map) plus
+  `block_name`/`properties`/`air_state_id` — the generated protocol-776 state
+  table and the resolver over it. `crates/lodestone-data/src/snow_support.rs`'s
+  `is_default_state` supplies the jar's own default-state column, which is what
+  makes tier 2/3 right.
 - `crates/lodestone-world/src/{container.rs,section.rs}` — the paletted-container
   strategies and non-air bookkeeping that already handled arbitrary content
   correctly; unmodified by this fix.

@@ -5480,3 +5480,92 @@ new-work-shaped", which was right, and the brief named five candidate stages, al
   correct expectation is the structure closure, 32×32 = 1,024. `staged_store_gates.rs`'s burst gate
   still passes (1,369 < 2,048) but its prose says 21×21 = 441. Both files are outside this unit's
   ownership.
+
+**12.131 The chunk pipeline's last per-block string work was at the *protocol encode* boundary, not in
+the generator — 98,304 `&str` reads and SipHash probes per served column, each distinct one resolved by
+a 32,366-row scan with a string compare per row. 39.5M → 14.9M instructions per column, 38% of a served
+column's total encode cost, and byte-identical wire output. It survived the 21-unit worldgen drive
+because the generation cost metric excludes protocol encode by definition.**
+
+Measured at release, seed 1234, 8 real generated columns × 5 repeats, both arms in one process
+(`crates/protocol/v770/tests/chunk_encode_cycles.rs`). Instructions retired, per §12.130's standing
+comparator; the wall-clock column is printed but not asserted on.
+
+| arm | insn/column | ns/column | insn spread |
+|---|---|---|---|
+| cell loop, string path (before) | 39,524,010 | 1,460,864 | **0.07%** |
+| cell loop, integer path (after) | 14,936,763 | 569,974 | **0.26%** |
+| whole `encode_chunk`, after | 39,963,080 | — | 0.08% |
+
+24,587,247 instructions per column removed — **250 per cell**, 2.65× on the loop, 38% of what a served
+column cost end to end. The wall-clock spread on the *same* repetitions was 2.64% against instructions'
+0.07%, reproducing §12.130's figure rather than quoting it.
+
+- **The unmeasured layer was structural, not an oversight.** `docs/plans/worldgen-rewrite.md`'s 21 units
+  all landed against a generation cost metric that stops at `GeneratedColumn`. `build_world_column` runs
+  *after* that, on the same 98,304 cells, and its cost is paid again on every view-tracker resend where
+  generation is paid zero. **Ask what the instrument's boundary excludes, not only what it measures** —
+  the same question §12.130 asked of a repeat-based comparator that was blind to 83% of the cost.
+- **The fix is not a faster resolver, it is moving the resolution to the palette.** `ChunkColumn`
+  already stored blocks as indices into a per-column string palette; it now carries
+  `palette_state_ids: Vec<u32>` beside `palette_ticking`, computed by the same append-only argument, in
+  the same two places (`intern`, `recalc_ticking_counts`). The encoder reads
+  `block_state_id(x, y, z)` — a range check and two array indexes. The remaining 14.9M is
+  `PalettedContainer::set_block`, which is a different unit.
+- **Both halves of the string cost mattered, and one of them looks free.** The 32k scan is the obvious
+  one (225 palette entries across the fixture ⇒ ~900k row visits per column). But the `HashMap<&str, u32>`
+  that *existed to amortise it* was itself hashing 98,304 strings per column with SipHash. **A memo over
+  a hot per-cell key is not a fix, it is a cheaper leak** — an `O(1)`-per-cell memo still costs a
+  string hash per cell, and the doc comment justifying it had been correct about the scan and silent
+  about the hash for three issues running.
+- **`resolve_state_id` moved into `lodestone-data` as `block_states::state_id`, which is the correctness
+  dividend.** `lodestone-server` cannot call a `lodestone-v770` function — that is the version seam — so
+  before this change the *only* way to resolve a state string on the server side was to copy the
+  algorithm. Two test helpers had done exactly that, with the pre-`43a6e030` "lowest id sharing the
+  name" fallback, and became silent callers when it was corrected; one failed as a **30-second live
+  timeout rather than a mismatch**. There is now one definition, in the crate that is deliberately
+  outside the family feature seam, and `cargo check -p lodestone-shell --no-default-features` still
+  passes — a numeric 26.2 state id in `lodestone-server` is not a seam crossing, because 26.2 *is* the
+  canonical internal version (#343).
+- **The reverse map is derived, not generated, and that was the right call.** The brief proposed a sorted
+  static table or a PHF regenerated through `LODESTONE_REGEN=1`. What shipped is a `OnceLock` index built
+  from the tables already committed: `spans[block] = {first, last, default}` (1,196 × 12 B) plus block
+  indices sorted by name (1,196 × 2 B), ~17 KB and ~32k iterations once per process. A separately
+  generated table would add a **drift surface for data already in the tree**, and a stale one fails in
+  the worst direction — plausible-looking wrong ids. Lookup is `O(log 1196)` for the name plus one scan
+  of *that block's* span (27 states on average) instead of 32,366 rows.
+- **Two invariants had to be asserted rather than assumed, and both are cheap.** `state_id` scans
+  `first..=last` only because every block owns a **contiguous** id span (vanilla builds
+  `BLOCK_STATE_REGISTRY` block by block); the index build asserts `last - first + 1 == count` per block,
+  so a table that ever stopped being block-major fails at first use instead of resolving into a
+  neighbour's states. And `by_name` is *sorted at build time* rather than trusting `BLOCK_NAMES`'
+  alphabetical order — it comes from a JSON object's keys, nothing promises it, and a silently unsorted
+  array makes `binary_search` return wrong answers rather than fail.
+- **The acceptance criterion is byte identity, and the control is the old code kept verbatim.**
+  `src/server_protocol/chunk_encode_identity.rs` runs the pre-change `build_world_column` and
+  `resolve_state_id` — copied, unmodified — beside the new one over real columns and diffs the whole
+  `level_chunk_with_light` payload, light included, reporting a cell coordinate on mismatch. This is a
+  *control*, not the silent-caller pattern above: the duplicate is asserted equal, so a semantic change
+  fails here loudly instead of drifting. **Negative control run and observed to fail**: perturbing
+  `state_id` by one id gives `chunk (0, 0) cell (0, -64, 0): integer path says 84, string path says 85
+  (state string "minecraft:bedrock")`, and the jar gate independently reports
+  `minecraft:bedrock resolved to id 84, whose block name is Some("minecraft:mangrove_propagule")`.
+- **A two-implementation diff is `decode(encode(x)) == x` wearing different clothes, so it is not the
+  only gate.** `palette_state_ids_agree_with_the_jar_derived_dump` never calls either resolver: for every
+  palette entry of every real column it checks the resolved id against `block_name`, `properties` and
+  `snow_support::is_default_state` — dumps of `Block.BLOCK_STATE_REGISTRY` and `defaultBlockState()` out
+  of the real 26.2 server. One assertion per tier, including the bare-name → jar-default claim whose
+  older wrong version shipped snowy grass (#546), wrong-facing directionals (#475) and climbing redstone
+  dust. Its own control counts the bare and propertied entries it actually checked, because a palette
+  with neither would pass every assertion.
+- **`#![forbid(unsafe_code)]` cannot be `#[allow]`ed, which decided where the instrument lives.**
+  `lodestone-v770` forbids unsafe crate-wide, so the `proc_pid_rusage` FFI cannot sit in the lib at any
+  lint level — the measurement is `tests/chunk_encode_cycles.rs`, its own binary crate, where the
+  crate-root `#![allow(unsafe_code)]` cannot reach the library. The byte-identity gate stays in the lib
+  because it needs private `build_world_column`/`encode_column_body` and needs no unsafe. **A `forbid`
+  is a placement constraint, not a lint to argue with.**
+- **The counter is read once per sweep of 8 columns, not once per column.** §12.130 measured
+  `proc_pid_rusage` at ~80,000 instructions per read; against a 14.9M arm that is 0.5%, and it inflates
+  the *smaller* arm proportionally more, which is exactly how §12.130's 4×-scaling control read 3.663×.
+  Amortised over 8 columns it is ~10k. The gate also asserts both arms' spreads stay under 5%, so a
+  median gathered on a loaded machine is refused rather than quoted.

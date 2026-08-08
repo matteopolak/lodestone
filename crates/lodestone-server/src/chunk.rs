@@ -99,6 +99,22 @@ pub(crate) fn is_water(name: &str) -> bool {
     name.split('[').next().unwrap_or(name) == "minecraft:water"
 }
 
+/// One palette entry's canonical state string → its global 26.2 block-state id,
+/// with air for a block name the generated table does not carry.
+///
+/// The **single** definition of that fallback on this side of the seam, and
+/// deliberately the same function `lodestone-v770`'s `resolve_state_id` is now a
+/// one-line wrapper around — the reason a palette resolved here and a state
+/// string resolved at the encoder cannot disagree about what a bare block name
+/// means. Two test helpers had hand-duplicated an *older* version of that
+/// fallback ("the lowest id sharing the name") and became silent callers when it
+/// changed; one of them failed as a 30-second live timeout rather than a
+/// mismatch. Do not copy this logic — call it.
+fn resolve_palette_state_id(state: &str) -> u32 {
+    lodestone_data::block_states::state_id(state)
+        .unwrap_or_else(lodestone_data::block_states::air_state_id)
+}
+
 /// A decoded chunk column: the block state of every block in a 16×`height`×16
 /// prism whose bottom is at `min_y`.
 ///
@@ -137,6 +153,29 @@ pub struct ChunkColumn {
     /// — property-sensitive families like `leaves_should_decay` included — so a
     /// per-entry classification is exact, not an approximation.
     palette_ticking: Vec<bool>,
+    /// `palette_state_ids[id]` is `palette[id]`'s **global 26.2 block-state id**
+    /// (`lodestone_data::block_states::state_id`, air for a name the table does
+    /// not carry), computed once per palette entry as that entry is appended —
+    /// sound for exactly the reason [`palette_ticking`](Self::palette_ticking)
+    /// is, and maintained in the same two places.
+    ///
+    /// **This is the string→id boundary, and it exists so the protocol encoder
+    /// never crosses it per block.** `V770ServerProtocol::encode_chunk` used to
+    /// call [`block_state`](Self::block_state) 98,304 times per column and probe
+    /// each `&str` through a per-column `HashMap<&str, u32>` (SipHash), with each
+    /// distinct entry then resolved by a 32,366-row scan doing a string compare
+    /// per row — order 10⁶ string comparisons per served column, outside every
+    /// worldgen instrument because generation cost excludes protocol encode by
+    /// definition. Resolving the *palette* instead makes that a handful of
+    /// lookups per column and turns the per-cell work into one array index. See
+    /// `docs/chunk-column-encoding.md` and `DESIGN.md` §12.131.
+    ///
+    /// 26.2 is the one canonical internal version (#343) and `lodestone-data` is
+    /// deliberately outside the protocol-family feature seam, so holding a
+    /// numeric id here is not a version-seam crossing: no `lodestone-v770`
+    /// dependency is implied, and `cargo check -p lodestone-shell
+    /// --no-default-features` still passes.
+    palette_state_ids: Vec<u32>,
     /// How many cells in each implicit 16-row window hold a randomly-ticking
     /// state — vanilla's `LevelChunkSection.tickingBlockCount`
     /// (`LevelChunkSection.java:16`), one entry per section, `len =
@@ -242,6 +281,11 @@ impl ChunkColumn {
             // through the predicate rather than hardcoded `false`, so the
             // table cannot drift from the definition.
             palette_ticking: vec![crate::random_tick::is_randomly_ticking(AIR)],
+            // Routed through the resolver rather than written as `0` for the
+            // same reason the line above routes through the predicate: a
+            // regenerated table that renumbered air must not silently desync
+            // this from the real registry id.
+            palette_state_ids: vec![resolve_palette_state_id(AIR)],
             section_ticking: vec![0u16; (height as usize).div_ceil(SECTION_ROWS)],
             biome_quarts: std::array::from_fn(|_| DEFAULT_BIOME.to_string()),
             biome_palette: vec![DEFAULT_BIOME.to_string()],
@@ -312,6 +356,7 @@ impl ChunkColumn {
             // `recalcBlockCounts`, called from exactly the analogous
             // constructor (`LevelChunkSection.java:33`).
             palette_ticking: Vec::new(),
+            palette_state_ids: Vec::new(),
             section_ticking: Vec::new(),
             biome_quarts,
             biome_palette,
@@ -491,6 +536,15 @@ impl ChunkColumn {
             .iter()
             .map(|state| crate::random_tick::is_randomly_ticking(state))
             .collect();
+        // The other per-palette-entry derived table, rebuilt here for the same
+        // reason and by the same argument — this is the one constructor that
+        // adopts an already-populated palette, so it is the one place the
+        // append-time computation in `intern` cannot have run.
+        self.palette_state_ids = self
+            .palette
+            .iter()
+            .map(|state| resolve_palette_state_id(state))
+            .collect();
         let sections = (self.height as usize).div_ceil(SECTION_ROWS);
         let mut counts = vec![0u16; sections];
         for s in 0..sections {
@@ -520,10 +574,19 @@ impl ChunkColumn {
         // with **no** string predicate evaluation at all.
         self.palette_ticking
             .push(crate::random_tick::is_randomly_ticking(name));
+        // Same argument, same place: resolve the string→id map once per entry so
+        // the protocol encoder can index it 98,304 times without ever seeing a
+        // string. See `palette_state_ids`.
+        self.palette_state_ids.push(resolve_palette_state_id(name));
         debug_assert_eq!(
             self.palette.len(),
             self.palette_ticking.len(),
             "palette and its ticking classification must stay the same length"
+        );
+        debug_assert_eq!(
+            self.palette.len(),
+            self.palette_state_ids.len(),
+            "palette and its resolved state ids must stay the same length"
         );
         (self.palette.len() - 1) as u16
     }
@@ -584,6 +647,35 @@ impl ChunkColumn {
             return AIR;
         }
         &self.palette[self.blocks.get(x, y_local, z) as usize]
+    }
+
+    /// The **global 26.2 block-state id** at a local `(x, z)` in `0..16` and
+    /// world `y` — the integer form of [`block_state`](Self::block_state), and
+    /// what a protocol encoder should call. Out-of-range Y is air's id, exactly as
+    /// `block_state` returns `"minecraft:air"`.
+    ///
+    /// Two array indexes and a range check: no string, no hash, no scan. The
+    /// resolution happened once per palette entry — see
+    /// [`palette_state_ids`](Self::palette_state_ids).
+    #[must_use]
+    pub fn block_state_id(&self, x: i32, y: i32, z: i32) -> u32 {
+        let y_local = y - self.min_y;
+        if !(0..self.height).contains(&y_local) {
+            return lodestone_data::block_states::air_state_id();
+        }
+        self.palette_state_ids[self.blocks.get(x, y_local, z) as usize]
+    }
+
+    /// This column's palette resolved to global 26.2 block-state ids, parallel to
+    /// [`raw_palette`](Self::raw_palette).
+    ///
+    /// Exists for an encoder that walks the index grid section-by-section
+    /// (`append_section_cells`) rather than cell-by-cell, and as the observable a
+    /// gate uses to check these ids against the jar-derived dump without
+    /// re-deriving them.
+    #[must_use]
+    pub fn palette_state_ids(&self) -> &[u32] {
+        &self.palette_state_ids
     }
 
     /// Returns solidity at a local `(x, z)` in `0..16` and world `y`. A block is
