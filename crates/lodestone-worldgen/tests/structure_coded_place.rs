@@ -302,9 +302,27 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
         "coded:chest_reorient",
         "coded:decoration_random",
         "coded:buried_treasure_chest",
+        "dimension:nether_structures",
     ] {
         assert!(ledger.contains_key(key), "{key} is not on the ledger");
     }
+    // `bastion_remnant` is **supported** (its pools load, it assembles) and reaches
+    // zero blocks in a served world, because it is Nether-only and `NetherGenerator`
+    // has no structure stage. Both halves are asserted: the structure absent from
+    // the per-structure rows, *and* the reachability row present naming it. A gate
+    // that only checked the first would report a healthy bastion, which is what
+    // every other instrument here already does.
+    assert!(
+        !ledger.contains_key("minecraft:bastion_remnant"),
+        "bastion_remnant assembles; its problem is reachability, not support"
+    );
+    let nether_row = ledger
+        .get("dimension:nether_structures")
+        .expect("the Nether reachability gap must be named");
+    assert!(
+        nether_row.contains("bastion_remnant") && nether_row.contains("NetherGenerator"),
+        "the row must name the structure and where the fix goes: {nether_row}"
+    );
     // The two rows S6 corrected. `template:data_markers` claimed shipwreck / igloo /
     // ocean-ruin loot chests were not placed at all; `lodestone_server`'s
     // `structure_loot` has been rolling them since #337, so the row named a closed

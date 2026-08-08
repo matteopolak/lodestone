@@ -1897,13 +1897,34 @@ impl StructureRegistry {
             );
             unsupported.insert(
                 "coded:buried_treasure_chest".into(),
-                "`buried_treasure` places a start and a bounding box but **zero blocks**: \
-                 `BuriedTreasurePieces.postProcess` walks a cursor down until the block \
-                 *below* it is sandstone/stone/andesite/granite/diorite, then writes up \
-                 to five neighbours and one chest. Every one of those is a \
-                 `getBlockState`, and `StartContext` offers only `is_replaceable_at` \
-                 (air-or-fluid). The blocker is one method: a `BlockKind`-at-position \
-                 read, which `ruined_portal` needs too"
+                "`buried_treasure` places a start and a bounding box but **zero blocks**. \
+                 `BuriedTreasurePieces.postProcess` walks a cursor down from the ocean \
+                 floor until the block *below* it is \
+                 sandstone/stone/andesite/granite/diorite, then writes five neighbours \
+                 and one chest. Not merely a missing `BlockKind` read: the sand it \
+                 burrows through is a **surface-rule** product and the granite/diorite/\
+                 andesite are **ore-blob** products, so the answer only exists at a stage \
+                 the eager start pass sits above. In the pre-surface `_WG` column every \
+                 solid block is `BlockKind::Stone`, so the walk would stop on its first \
+                 iteration and put the chest on top of the beach instead of under it — \
+                 which is why it places nothing rather than something wrong"
+                    .into(),
+            );
+        }
+        // Reachability, not mechanism — and the one class of row that looks like no
+        // row is needed, because every *other* instrument says these are fine.
+        if !structures.is_empty() {
+            unsupported.insert(
+                "dimension:nether_structures".into(),
+                "**`bastion_remnant`, `fortress`, `nether_fossil` and \
+                 `ruined_portal_nether` reach zero blocks in a served world regardless \
+                 of their piece generators**: their biome tags are Nether-only \
+                 (`bastion_remnant` is crimson_forest / nether_wastes / \
+                 soul_sand_valley / warped_forest) and `NetherGenerator` has **no \
+                 structure stage at all** — no starts, no refs, no place, no beardifier. \
+                 `bastion_remnant` therefore assembles correctly, is absent from every \
+                 other row here, and is invisible in the Overworld because its biome \
+                 filter can never pass. The fix is in `nether/mod.rs`, not here"
                     .into(),
             );
         }

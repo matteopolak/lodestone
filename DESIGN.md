@@ -6482,3 +6482,65 @@ data), which means a red server lib makes `cargo test -p lodestone-worldgen` ref
 no worldgen test touches it. Both cleared inside bounded re-polling in one shell invocation — three and
 four polls at 45–50s. Worth recording because the *symptom* is a worldgen failure and the cause is in
 another crate that worldgen does not depend on at all in the shipped graph.
+
+**12.142 `bastion_remnant` is on every "placing now" list and reaches zero blocks in any served world,
+because it is Nether-only and `NetherGenerator` has no structure stage at all. Nothing was wrong: the
+pools load, the assembly is vanilla's, the ledger is silent, and every instrument that exists says it is
+healthy. The missing question is not "is this supported" but "supported *through to what*".** (#514 S6.)
+
+`crates/lodestone-server/assets/worldgen/tags/worldgen/biome/has_structure/bastion_remnant.json` is
+`crimson_forest`, `nether_wastes`, `soul_sand_valley`, `warped_forest` — four Nether biomes and nothing
+else. `crates/lodestone-worldgen/src/nether/mod.rs` composes no structure stage: its own module doc says
+so (*"neither are the fortress/bastion/nether-fossil/ruined-portal structures"*), and `grep -n structure
+crates/lodestone-worldgen/src/nether/mod.rs` returns three hits, all comments. So the Overworld pipeline
+runs the structure engine and the biome filter rejects `bastion_remnant` at every chunk in it, and the
+Nether pipeline would accept it and never asks.
+
+**The whole instrument set reports green, and each report is individually correct:**
+
+- `cargo xtask connectedness` answers "is this clientbound packet reaching anything" and this is not a
+  packet question.
+- `StructureRegistry::unsupported()` keys on **mechanism** — an unloadable pool, an unimplemented
+  processor, a missing piece generator. Reachability is not a mechanism, so there was no row and no branch
+  that could add one. Same shape as §12.139's `minecraft:monument`, which fell through both demotion
+  branches; the generalisation is: **ask which code path *adds* a row, and then ask what kind of defect
+  has no path at all.**
+- The S4 gate (`structure_jigsaw.rs:175`) asserts `bastion_remnant` is *absent* from the ledger, which is
+  true and is the strongest claim anything in the tree makes about it. `grep -rn bastion --include=*.rs
+  crates/` returns nothing else in any test.
+- `nether_gen.rs` compares stored biome containers and bedrock masks against a real vanilla Nether, is a
+  genuinely strong gate, and says in its own header that structures are out of scope.
+
+So this is the island in its purest form: **a subsystem individually built, individually tested, reaching
+zero pixels because a *dimension* never calls it.** The three routers CLAUDE.md lists are event routers;
+this is the same defect one level up, where the "router" is which generator a dimension constructs. Two
+generators, one structure engine, and only one of them wired.
+
+Now `dimension:nether_structures`, and the gate asserts **both** halves — `bastion_remnant` absent from
+the per-structure rows *and* the reachability row present naming both the structure and `nether/mod.rs`.
+Asserting only the first is what every existing instrument already did.
+
+**The corollary for the other three.** `fortress` and `ruined_portal_nether` were already `Unsupported`,
+so the reachability gap is invisible behind a mechanism gap that would be the *second* thing to fix.
+`nether_fossil` is the cheapest structure left in the corpus by a wide margin — 178 Java lines across two
+files, one already-implemented processor (`BlockIgnoreProcessor.STRUCTURE_AND_AIR`), a `uniform`
+`HeightProvider`, and a column walk that `is_replaceable_at` almost answers — and writing it would still
+have produced zero blocks. **Cost of the piece generator is not cost to the screen**, and the order of
+those two questions is the whole point: reachability first.
+
+**`buried_treasure`'s blocker was overstated in the *same commit* that recorded it, and the correction is
+instructive.** The first version of `coded:buried_treasure_chest` said the blocker was "one method: a
+`BlockKind`-at-position read, which `ruined_portal` needs too". That is false, and it is false in the
+optimistic direction. `BuriedTreasurePieces.postProcess` walks down from the ocean floor until the block
+*below* the cursor is sandstone/stone/andesite/granite/diorite. The sand it burrows through is a
+**surface-rule** product; the granite/diorite/andesite are **ore-blob** products. Both stages run *after*
+the eager start pass that resolves a coded piece's block list, and in the pre-surface `_WG` column every
+solid block is a single `BlockKind::Stone`. So a `block_kind_at` method would make the walk terminate on
+its **first** iteration and put the chest on top of the beach rather than three blocks under it — worse
+than placing nothing, and it would have passed a "buried_treasure places a chest" gate. The blocker is
+stage ordering, not a missing accessor. Adding the accessor would have been an island *and* a regression.
+
+The rule this pays for: **when a ledger row names a blocker, name the *stage* the answer lives at, not
+just the function signature that would return it.** `ruined_portal` genuinely does only need
+`block_kind_at`, because its obsidian/lava test is over the four-way pre-surface kinds the aquifer already
+computes — two rows one line apart, the same-looking blocker, and only one of them true.
