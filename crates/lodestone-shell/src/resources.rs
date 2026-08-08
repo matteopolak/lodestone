@@ -1083,12 +1083,22 @@ fn recipe_entry_id(path: &str, kind: &str) -> Option<lodestone_model::Identifier
     lodestone_model::Identifier::new(namespace, rest).ok()
 }
 
-/// Gate helper: open the vanilla `client.jar` as a [`ResourceManager`],
-/// version-free, using the same discovery as the atlas loaders. Returns `None`
-/// when no pack is found so gates can fail *closed and loud* rather than
-/// silently skipping. Lets a GPU gate build a [`GuiAtlas`] and read the raw
-/// sprite PNGs from one manager, to compare rendered pixels against source art.
-#[cfg(test)]
+/// Open the vanilla `client.jar` as a [`ResourceManager`], version-free, using
+/// the same discovery as the atlas loaders. Returns `None` when no pack is found,
+/// so a caller fails *closed and loud* rather than silently substituting
+/// something.
+///
+/// Used by GPU gates (build a [`GuiAtlas`] and read the raw sprite PNGs from one
+/// manager, to compare rendered pixels against source art) **and** by production
+/// loaders that need a jar-backed manager of their own —
+/// `gpu::entities::load_trim_sprites` is the first.
+///
+/// **This was `#[cfg(test)]` and that is why three copies of its pack-discovery
+/// rule exist** in `gpu::entities::load_humanoid_armour_textures`,
+/// `gpu::entities::load_sheep_wool_texture` and `hud::vanilla_font::jar_manager`,
+/// each with a comment asking for exactly this attribute change. Point new callers
+/// here; the three copies are safe to collapse into it whenever someone is already
+/// editing those functions.
 pub(crate) fn vanilla_manager() -> Option<ResourceManager> {
     let root = asset_root()?;
     let jar = root.join("client.jar");

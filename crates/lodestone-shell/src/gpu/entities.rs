@@ -58,6 +58,20 @@ pub(super) struct EntityRenderer {
     pub(super) armour_models: ArmourModelSet,
     pub(super) armour_gpu: Vec<(ArmourSlot, GpuEntityModel)>,
     pub(super) armour_textures: HashMap<(&'static str, ArmourLayerType), wgpu::BindGroup>,
+    /// Smithing-table armour trims (issue #17): one texture bind group per
+    /// **trim sprite**, keyed by `lodestone_assets::trim::trim_sprite_id`'s
+    /// output — `(pattern, material suffix, layer type)`, which is the granularity
+    /// vanilla's palette swap actually produces.
+    ///
+    /// Drawn through [`Self::armour_pipeline`], **not**
+    /// `EntityPipeline::trim_decal_pipeline`: that pipeline is the `decal: true`
+    /// variant (depth `Equal`, no write) and all eighteen of 26.2's trim patterns
+    /// are `decal: false`, so it stays selectable and unused. Reading the pipeline
+    /// name as "the pipeline trims use" is the trap.
+    ///
+    /// Empty without a vanilla pack, and trims then draw nothing — the same
+    /// deliberate asymmetry [`Self::armour_textures`] documents.
+    pub(super) trim_textures: HashMap<lodestone_assets::ResourceLocation, wgpu::BindGroup>,
     /// The sheep wool layer (issue #53): the one baked mesh on the CPU (needed
     /// per frame to pair each part with the wearer's own part index, the same
     /// as `armour_models`), its GPU upload, and its one texture bind group.
@@ -148,6 +162,19 @@ impl EntityRenderer {
                 .map(|(key, img)| {
                     let view = entity_texture_from_image(device, queue, img);
                     (*key, pipeline.texture_bind_group(device, &view, &sampler))
+                })
+                .collect();
+        // The trim sprites (issue #17). Palette-swapped per material by
+        // `TrimAtlas`, so this is one bind group per `(pattern, suffix, layer
+        // type)` — 576 against the real jar, each a full-size sheet rather than a
+        // sub-rect of a stitched atlas, which is why they key on a
+        // `ResourceLocation` rather than joining `armour_textures`' tuple key.
+        let trim_textures: HashMap<lodestone_assets::ResourceLocation, wgpu::BindGroup> =
+            load_trim_sprites()
+                .into_iter()
+                .map(|(id, img)| {
+                    let view = entity_texture_from_image(device, queue, &img);
+                    (id, pipeline.texture_bind_group(device, &view, &sampler))
                 })
                 .collect();
 
@@ -254,6 +281,7 @@ impl EntityRenderer {
             armour_models,
             armour_gpu,
             armour_textures,
+            trim_textures,
             wool_models,
             wool_gpu,
             wool_texture,
@@ -365,6 +393,60 @@ pub(super) fn load_humanoid_armour_textures()
         loaded = out.len(),
         "loaded vanilla humanoid armour sheets"
     );
+    out
+}
+
+/// Bake every armour-trim sprite out of the vanilla `client.jar`, keyed by
+/// `trim_sprite_id`'s `ResourceLocation` (issue #17).
+///
+/// `TrimAtlas::load` does the real work — it reads `atlases/armor_trims.json`,
+/// palette-swaps each of the eighteen patterns into each of the eleven materials'
+/// suffixes for both layer types, and hands back decoded [`Image`]s. This is only
+/// the pack discovery plus the key derivation, and it is the **entry point that did
+/// not exist**: `lodestone_assets::trim` was complete with zero callers, so a
+/// trimmed chestplate rendered as an untrimmed one.
+///
+/// Empty (and trims silently absent) with no pack, per
+/// [`EntityRenderer::trim_textures`].
+///
+/// [`Image`]: lodestone_assets::Image
+pub(super) fn load_trim_sprites() -> HashMap<lodestone_assets::ResourceLocation, lodestone_assets::Image> {
+    use lodestone_assets::equipment::ARMOUR_ASSETS;
+    use lodestone_assets::trim::{TRIM_MATERIALS, TRIM_PATTERNS, TrimAtlas, trim_sprite_id};
+
+    let mut out = HashMap::new();
+    let Some(manager) = crate::resources::vanilla_manager() else {
+        return out;
+    };
+    let atlas = match TrimAtlas::load(&manager) {
+        Ok(atlas) => atlas,
+        Err(e) => {
+            tracing::warn!(target: "assets", "load armour trims: {e}");
+            return out;
+        }
+    };
+    // The keys have to be derived the same way the draw site derives them, so
+    // both go through `trim_sprite_id`. Walking the armour assets (rather than a
+    // fixed suffix list) is what makes `suffix_for`'s per-wearer override —
+    // diamond trim on diamond armour is `diamond_darker` — actually reachable.
+    for pattern in TRIM_PATTERNS {
+        for material in TRIM_MATERIALS {
+            for asset in ARMOUR_ASSETS {
+                for layer_type in [ArmourLayerType::Humanoid, ArmourLayerType::HumanoidLeggings] {
+                    let Ok(id) = trim_sprite_id(pattern, material, layer_type, asset.id) else {
+                        continue;
+                    };
+                    if out.contains_key(&id) {
+                        continue;
+                    }
+                    if let Some(img) = atlas.sprite_for(pattern, material, layer_type, asset.id) {
+                        out.insert(id, img.clone());
+                    }
+                }
+            }
+        }
+    }
+    tracing::info!(target: "assets", loaded = out.len(), "loaded vanilla armour trim sprites");
     out
 }
 

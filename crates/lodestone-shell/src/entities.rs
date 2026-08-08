@@ -454,6 +454,13 @@ struct EntityFacts {
     /// from "reported, and it was zero" the way [`Self::equipment`] does for
     /// item identity.
     equipment_dye: Vec<(EquipmentSlot, u32)>,
+    /// Per-slot `minecraft:trim` (issue #17), narrowed exactly as
+    /// [`Self::equipment_dye`] is and additive for the same reason.
+    ///
+    /// Trim is a *texture* rather than a tint, so unlike dye it cannot ride an
+    /// instance row — it forces its own batch. That is a renderer concern; here it
+    /// is just one more per-slot fact off the same `ItemStack`.
+    equipment_trim: Vec<(EquipmentSlot, lodestone_model::item::ArmorTrim)>,
     /// The entity's decoded cosmetic variant (sheep dye/shear, villager type,
     /// horse markings, …), as last reported.
     ///
@@ -595,6 +602,16 @@ pub struct EntityDraw {
     /// narrows [`EntityFacts::equipment`] — see that field's doc for why
     /// this is additive rather than folded into `equipment`'s own tuple.
     pub equipment_dye: Vec<(EquipmentSlot, u32)>,
+    /// Per-slot `minecraft:trim` (issue #17), mirroring
+    /// [`EntityFacts::equipment_trim`] and narrowed exactly as
+    /// [`Self::equipment_dye`] is.
+    ///
+    /// Additive rather than folded into [`Self::equipment`]'s tuple for that
+    /// field's reason, and additive rather than folded into `equipment_dye`'s
+    /// because an item can carry both: trimmed leather armour is dyed *and*
+    /// trimmed, and the two reach the GPU differently — dye as an instance tint,
+    /// trim as its own texture and therefore its own batch.
+    pub equipment_trim: Vec<(EquipmentSlot, lodestone_model::item::ArmorTrim)>,
     /// This entity's wool state, when [`Self::type_path`] is `"sheep"` and a
     /// variant has been reported — `None` for every other entity type
     /// unconditionally, per [`sheep_wool`]'s gate.
@@ -894,6 +911,12 @@ pub struct RenderEquipment(pub Vec<(EquipmentSlot, ResourceLocation)>);
 /// reason the snapshot field is additive; see that field's doc.
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
 pub struct RenderEquipmentDye(pub Vec<(EquipmentSlot, u32)>);
+
+/// Per-slot `minecraft:trim`, narrowed from [`EntityFacts::equipment_trim`] — a
+/// third component beside [`RenderEquipment`] and [`RenderEquipmentDye`] for
+/// their reason, and because a piece can be dyed and trimmed at once (issue #17).
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct RenderEquipmentTrim(pub Vec<(EquipmentSlot, lodestone_model::item::ArmorTrim)>);
 
 /// This entity's sheep-wool state, narrowed from [`EntityFacts::variant`] by
 /// [`sheep_wool`].
@@ -1208,6 +1231,7 @@ pub fn extract_pickup_draws(
             foil: pickup.foil,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),
+            equipment_trim: Vec::new(),
             wool: None,
             feet,
             yaw: 0.0,
@@ -1619,6 +1643,7 @@ pub fn extract_entity_draws(
         &WalkAnim,
         &RenderEquipment,
         &RenderEquipmentDye,
+        &RenderEquipmentTrim,
         &RenderWool,
         &RenderNameTag,
         // `Option`, not `&CreeperFuse` bare: present only on creepers, same
@@ -1634,8 +1659,21 @@ pub fn extract_entity_draws(
     // player with, which is the point of §4.1(c).
     let partial_tick = clock.interp_alpha.clamp(0.0, 1.0);
     out.0.clear();
-    for (id, kind, scale, from, to, clock, walk, equipment, equipment_dye, wool, name_tag, fuse) in
-        &tracks
+    for (
+        id,
+        kind,
+        scale,
+        from,
+        to,
+        clock,
+        walk,
+        equipment,
+        equipment_dye,
+        equipment_trim,
+        wool,
+        name_tag,
+        fuse,
+    ) in &tracks
     {
         // One lookup, not two: `item` and `count` both come from the same
         // recorded stack, and a drop with no stack yet must not manufacture a
@@ -1710,6 +1748,7 @@ pub fn extract_entity_draws(
             foil: stack.is_some_and(|s| s.foil),
             equipment: equipment.0.clone(),
             equipment_dye: equipment_dye.0.clone(),
+            equipment_trim: equipment_trim.0.clone(),
             wool: wool.0,
             feet: render_feet(from, to, clock),
             yaw: render_yaw(from, to, clock),
@@ -1920,6 +1959,18 @@ fn resolve_entity_facts(
             Some((eq.slot, stack.components.dyed_color?))
         })
         .collect();
+    // `minecraft:trim`, narrowed identically (issue #17). Kept out of
+    // `equipment_dye`'s tuple deliberately: an item can carry both, and the two
+    // reach the GPU by different routes — dye as an instance tint, trim as its own
+    // texture and therefore its own batch.
+    let equipment_trim = raw_equipment
+        .iter()
+        .filter_map(|eq| {
+            let stack = eq.item.as_ref()?;
+            ResourceLocation::new(stack.item.namespace(), stack.item.path()).ok()?;
+            Some((eq.slot, stack.components.trim.clone()?))
+        })
+        .collect();
 
     // Nametag resolution (issue #100). Two entirely different rules, per the
     // real 26.2 client — see the historical `net::entity_snapshot` doc this
@@ -1969,6 +2020,7 @@ fn resolve_entity_facts(
         on_ground: entity.get::<OnGround>().is_some_and(|grounded| grounded.0),
         equipment,
         equipment_dye,
+        equipment_trim,
         variant: entity.get::<Variant>().map(|variant| variant.0.clone()),
         count,
         foil,
@@ -2108,6 +2160,7 @@ fn spawn_track(world: &mut World, snap: &EntityFacts) {
         },
         RenderEquipment(occupied_equipment(&snap.equipment)),
         RenderEquipmentDye(snap.equipment_dye.clone()),
+        RenderEquipmentTrim(snap.equipment_trim.clone()),
         RenderWool(sheep_wool(&snap.type_path, snap.variant.as_ref())),
         RenderNameTag(snap.name_tag.clone()),
     ));
@@ -2153,6 +2206,11 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
     }
     if let Some(mut dye) = entity.get_mut::<RenderEquipmentDye>() {
         dye.0.clone_from(&snap.equipment_dye);
+    }
+    // Same reasoning: a smithing table can trim a piece a player is already
+    // wearing, which does not move them.
+    if let Some(mut trim) = entity.get_mut::<RenderEquipmentTrim>() {
+        trim.0.clone_from(&snap.equipment_trim);
     }
     // Same reasoning as equipment, outside the `moved || turned` gate: a sheep
     // can be sheared, or a plugin can dye one, while it stands still.

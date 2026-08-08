@@ -223,6 +223,7 @@ impl ThirdPersonBodyState {
             // omission: our own third-person leather armour draws undyed
             // until that source is wired too.
             equipment_dye: Vec::new(),
+            equipment_trim: Vec::new(),
             feet: self.feet,
             yaw: self.body_yaw_deg,
             // Absolute head yaw, for API parity with a network `EntityDraw`
@@ -575,6 +576,38 @@ impl SignSource {
 impl std::fmt::Debug for SignSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("SignSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
+
+/// Where this frame's filled-map pictures come from (issue #184).
+///
+/// Unlike the block-entity sources this takes a **map id** rather than an eye
+/// position, because a map is keyed by id and not by where it is: the same map
+/// can be in a hand and in three item frames at once. `None` asks for the
+/// lowest-numbered known map — see `Sim::map_source` for why that fallback exists
+/// and what removes it.
+///
+/// Unset yields no picture and nothing draws, which is the behaviour before maps
+/// rendered at all.
+#[derive(Default)]
+pub struct MapSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<Box<dyn Fn(Option<i32>) -> Option<Vec<u8>> + Send + Sync>>,
+);
+
+impl MapSource {
+    /// One map's raw 128×128 packed colour grid, or none when unset or unknown.
+    #[must_use]
+    pub(super) fn picture(&self, id: Option<i32>) -> Option<Vec<u8>> {
+        self.0.as_ref().and_then(|f| f(id))
+    }
+}
+
+impl std::fmt::Debug for MapSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("MapSource")
             .field(&if self.0.is_some() { "set" } else { "empty" })
             .finish()
     }

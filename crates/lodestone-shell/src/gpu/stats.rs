@@ -109,6 +109,15 @@ pub struct RenderStats {
     /// `entities_drawn`, and a silently-broken equipment chain would otherwise
     /// look exactly like a server that sent no equipment.
     pub held_items_drawn: usize,
+    /// Filled-map pictures drawn this frame — the held one counts 1, plus one per
+    /// item frame carrying a map (issue #184).
+    ///
+    /// Its own counter for the reason [`item_drops_drawn`](Self::item_drops_drawn)
+    /// has one, plus one specific to maps: a map whose colour grid is entirely
+    /// `MapColor.NONE` draws a fully transparent quad, so "the map is unexplored"
+    /// and "the map never reached the pipeline" are the same number of visible
+    /// pixels. This counter separates them.
+    pub filled_maps_drawn: usize,
     /// Humanoid armour **layers** drawn this frame — one per
     /// `(wearer, slot, texture layer)`, so a leather chestplate counts 2 (its
     /// dyeable base and its overlay) and a diamond one counts 1.
@@ -122,6 +131,14 @@ pub struct RenderStats {
     ///
     /// Zero with no vanilla pack: armour has no synthetic-texture fallback.
     pub armour_layers_drawn: usize,
+    /// Armour **trims** drawn this frame — one per `(wearer, slot)` carrying a
+    /// `minecraft:trim`, so a leather piece counts 1 even though its armour is 2
+    /// layers (issue #17).
+    ///
+    /// Its own counter because a trim is subtle by design: a gold-trimmed diamond
+    /// chestplate whose trim never reached the pipeline looks like a plain
+    /// chestplate, which is a perfectly plausible thing for a mob to be wearing.
+    pub armour_trims_drawn: usize,
     /// Sheep wool layers drawn this frame — one per unsheared sheep whose
     /// wool attached to its own body (issue #53). Mirrors
     /// [`armour_layers_drawn`](Self::armour_layers_drawn)'s role: a sheared

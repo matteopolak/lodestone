@@ -360,6 +360,10 @@ impl RenderState {
         // like a mob's does, for free.
         let (item_mesh, item_glint_mesh) =
             self.prepare_item_geometry(device, camera, entities, &mut stats);
+        // Maps in item frames (issue #184). Built here rather than inside the pass
+        // for the reason above — it creates a texture and a bind group — and kept
+        // separate from `item_mesh` because it draws with a different group 1.
+        let framed_maps = self.prepare_framed_maps(device, queue, camera, entities);
         // The world glint's group 0, written here (the `&self` + queue point of the
         // frame) and consumed inside the pass below. Item geometry bakes world
         // positions into its vertices, so the matrix is the plain camera one — the
@@ -656,7 +660,20 @@ impl RenderState {
                     let Some(model) = self.entities.armour_model(batch.slot) else {
                         continue;
                     };
-                    let Some(texture) = self.entities.armour_textures.get(&batch.texture) else {
+                    // A material sheet or a trim sprite (issue #17) — the same
+                    // pipeline, the same mesh and the same parts, differing only in
+                    // which bind group lands at group 1. A trim batch is always
+                    // ordered after its slot's own layers, which is what lets the
+                    // coplanar `LessEqual` compare accept it.
+                    let texture = match &batch.texture {
+                        crate::gpu::ArmourTextureKey::Sheet(key) => {
+                            self.entities.armour_textures.get(key)
+                        }
+                        crate::gpu::ArmourTextureKey::Trim(id) => {
+                            self.entities.trim_textures.get(id)
+                        }
+                    };
+                    let Some(texture) = texture else {
                         continue;
                     };
                     pass.set_bind_group(1, texture, &[]);
@@ -804,6 +821,24 @@ impl RenderState {
                         pass.draw_indexed(0..glint_mesh.index_count, 0, 0..1);
                         stats.draw_calls += 1;
                     }
+                }
+
+                // Filled maps hanging in item frames (issue #184). Same pipeline
+                // and same three shared bind groups as the dropped items above,
+                // with **group 1 swapped** to the map's own 128×128 texture — the
+                // model shader is at the 4-group floor, so a map texture has to
+                // replace the atlas rather than join it.
+                if let Some((mesh, texture)) = &framed_maps {
+                    pass.set_pipeline(&model.pipeline.pipeline);
+                    pass.set_bind_group(0, &model.cam_bind_group, &[model.origin_arena.zero_offset()]);
+                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_bind_group(2, &model.palette_bind_group, &[]);
+                    pass.set_bind_group(3, &model.anim_bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    stats.draw_calls += 1;
+                    stats.filled_maps_drawn += mesh.index_count as usize / 6;
                 }
 
                 // Mining-crack overlays, drawn after the opaque terrain they sit
