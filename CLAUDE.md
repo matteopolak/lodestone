@@ -419,8 +419,29 @@ instance. Fixtures should use RFC 2606 `.invalid` hostnames as a second layer. (
 and no `destroySpeed`. Per-block-state tables come from booting the real server headlessly
 (`SharedConstants.tryDetectVersion(); Bootstrap.bootStrap();`) and walking `Block.BLOCK_STATE_REGISTRY` —
 see `crates/lodestone-data/tests/{collision_shapes,hardness}.rs` for the generate-or-assert +
-`LODESTONE_REGEN=1` pattern, and `oracle-java/` for the dump programs. Both are `#[ignore]`d, so
-`just regen-collision` / `just regen-hardness` is how you run them.
+`LODESTONE_REGEN=1` pattern, and the dump programs for the crate you are working in. Both are
+`#[ignore]`d, so `just regen-collision` / `just regen-hardness` is how you run them.
+
+**`oracle-java/` is NOT at the repo root, and this document said otherwise until it cost an agent time.**
+It is **per-crate** — `crates/lodestone-{data,render,physics,canonical}/oracle-java/` — so a root-relative
+path in a brief or a doc resolves to nothing. Find the one belonging to your crate.
+
+**There is no Java runtime installed on this machine.** `java -version` reports *"Unable to locate a Java
+Runtime"*. So **every instruction to "verify against a JVM oracle" is currently unexecutable**, including
+the ones in this file, and an agent handed one will either burn time discovering that or silently
+substitute a weaker check. Two consequences, and the second is the one that matters:
+
+- The **committed dumps are still the outside source** — they were generated when a JVM was available, and
+  a generate-or-assert gate asserting against a committed dump is as good as it ever was. What is
+  unavailable is producing a *new* fixture for a case nobody has dumped yet.
+- **For a new parity question, say so and pick a different outside source** rather than treating "no oracle
+  available" as licence to compare our output against our own. The alternatives that keep the
+  expected-value-from-outside rule intact: the decompiled 26.2 source read as a *record definition* and
+  hand-expanded; captured bytes from a live vanilla server (`scripts/live-oracles/*.sh`, which need Docker
+  running — also verify that before promising it); or a **cross-arm invariant** whose expectation comes from
+  geometry or arithmetic rather than from either implementation. Measured while wiring server light
+  (§12.117): a seam survey comparing isolated against exact 3×3 computation is a legitimate outside
+  expectation, because the two arms are independent constructions of the same physical rule.
 
 **Never hand-count an entity metadata index. Run `EntityDataIndexOracle.java`.** It dumps every
 `EntityDataAccessor` sorted by index, so collisions land on adjacent lines; its first run found **two
