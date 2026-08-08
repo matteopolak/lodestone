@@ -97,12 +97,43 @@ table does not know is inert rather than wrong, and
 
 | vanilla behaviour | why not modelled |
 |---|---|
-| slime chunks | needs `WorldgenRandom.seedSlimeChunk`, worldgen RNG this module has no handle on. Only the swamp-surface arm (`50 < y < 70`) exists |
 | `MORE_FREQUENT_DROWNED_SPAWNS` | a biome tag this crate has no table for. The rarer `nextInt(40)` arm is modelled, so drowned under-spawn rather than over-spawn |
 | `REDUCED_WATER_AMBIENT_SPAWNS` | same |
 | nether-fortress spawn list override | needs a live structure manager at the position |
 | `spawn_costs` (the potential calculator) | parsed by `lodestone_worldgen::spawners` and still unread; Nether-only |
 | ambient sky darkening | there is no world clock in the spawner, so `getMaxLocalRawBrightness` returns the **daytime** answer. Conservative: a brighter reading only ever suppresses a spawn, so surface night spawning is rarer than vanilla's, never commoner |
+
+### Slime chunks, and the two seeds
+
+`Slime.checkSlimeSpawnRules` is the one predicate in the table that is **two alternatives rather than
+a conjunction**, so no `SpawnRule` field can carry it. It lives in `Special::Slime`, evaluated by
+`NaturalSpawner::slime_permits`, and the alternation is the point: each arm owns its own Y band and
+its own draws.
+
+| arm | condition | draws |
+|---|---|---|
+| swamp surface | biome in `ALLOWS_SURFACE_SLIME_SPAWNS` (`swamp`, `mangrove_swamp`), `50 < y < 70` | `nextFloat() < surfaceSlimeSpawnChance`, then — only if that passed — `brightness <= nextInt(8)` |
+| slime chunk | `seedSlimeChunk(cx, cz, worldSeed, 987234911).nextInt(10) == 0` and `y < 40` | `nextInt(10) == 0`, drawn **before** the slime-chunk test and so consumed in an ordinary chunk too |
+
+Two traps here.
+
+**The row used to be the swamp arm only, with `y_range: (51, 69)`** — and that band excludes every Y
+the slime-chunk arm can fire at, so `lodestone_worldgen::is_slime_chunk` was a working predicate with
+no reachable consumer. `slime_carries_both_arms_not_one` pins the shape back.
+
+**`SURFACE_SLIME_SPAWN_CHANCE` is a moon-phase attribute in 26.2**, not a constant. It defaults to
+`0.0` and the only thing that raises it is `Timelines.MOON`'s `FloatModifier.MAXIMUM` track, keyframed
+`CONSTANT` to `MOON_BRIGHTNESS_PER_PHASE[phase] * 0.5`. So the chance is `0.5` at full moon and
+**exactly `0.0` at new moon**, where the surface arm cannot fire at all. If surface swamp slimes look
+broken, check the moon before the code.
+
+**Two different seeds reach the spawner and both are load-bearing.** `NaturalSpawner::new`'s `seed`
+is `tick::NATURAL_SPAWN_SEED`, a fixed literal, because the spawn stream only has to be reproducible.
+`with_world_seed` is the **world generation** seed, and it is not free to choose — a wrong value gives
+a *different set* of slime chunks from the ones the terrain was generated for, which is worse than
+none. It arrives through `worldgen_data::active_world_seed()`, a process-global, because
+`ChunkSource` has no `world_seed()` and the tick loop is handed an already-erased `Arc<W>`. That
+function's own doc carries the trade and names the one-method fix that would delete it.
 
 **Sea level is the `SEA_LEVEL` constant (63).** The tick loop holds a `ChunkSource`, not a generator,
 so there is nothing to ask. Right for every overworld preset; a custom `sea_level` shifts the
