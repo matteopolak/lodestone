@@ -46,17 +46,17 @@ use std::collections::HashMap;
 
 use lodestone_core::{Ctx, Decode, Encode, Nbt, NbtTag, Reader, Writer, write_network_nbt};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, ResourceKey, Rotation, Text,
-    TextContent, Vec3,
+    BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, ResourceKey, Rotation,
+    SoundCategory, Text, TextContent, Vec3, Vec3f,
 };
 use lodestone_server::{
     ABSOLUTE_MAX_SIZE, ChunkColumn as ServerChunkColumn, EntitySnapshot, HOTBAR_SIZE,
-    MetadataField, PlayerListing, ResourcePackPush, ServerBound, ServerDirective, ServerProtocol,
-    WorldBorder, WorldgenScope,
+    MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, MetadataField, PlayerListing, ResourcePackPush, ServerBound,
+    ServerDirective, ServerProtocol, WorldBorder, WorldgenScope,
 };
 use lodestone_world::{
-    ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmaps, LightProperties,
-    compute_column_light,
+    ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmap, Heightmaps,
+    LightProperties, compute_column_light,
 };
 use uuid::Uuid;
 
@@ -288,6 +288,57 @@ fn explosion_sound_registry_id() -> i32 {
         )
 }
 
+/// The fixed-point scale for `sound` packet positions: coordinates go on the
+/// wire as `(int)(block * 8)`, so each unit is `1/8` of a block. Vanilla's
+/// `ClientboundSoundPacket.LOCATION_ACCURACY`; restated here for the same reason
+/// [`PARTICLE_ID_EXPLOSION_EMITTER`] is — [`crate::adapter`]'s own copy is
+/// private to that module.
+const SOUND_POSITION_SCALE: f64 = 8.0;
+
+/// The `minecraft:sound_event` registry id for `name` (issue #530), or `None` if
+/// 26.2 has no such sound.
+///
+/// Indexed once into a `name -> id` map rather than scanned per call: a busy tick
+/// can carry several sounds and the table is ~1,500 entries. The `None` is
+/// load-bearing — see [`V770ServerProtocol::encode_sound`].
+fn sound_event_registry_id(name: &str) -> Option<i32> {
+    static INDEX: std::sync::OnceLock<std::collections::HashMap<&'static str, i32>> =
+        std::sync::OnceLock::new();
+    INDEX
+        .get_or_init(|| {
+            (0..lodestone_data::sound_events::SOUND_EVENT_COUNT as i32)
+                .filter_map(|id| {
+                    lodestone_data::sound_events::sound_event_name(id).map(|name| (name, id))
+                })
+                .collect()
+        })
+        .get(name)
+        .copied()
+}
+
+/// The `minecraft:particle_type` registry id for `name` (issue #530), or `None`
+/// for an unknown one.
+///
+/// Named "simple" as a warning rather than a filter: this crate has no census of
+/// *which* particle types carry option bytes, so the id it returns is only safe
+/// to send for an argument-less `SimpleParticleType`. Every producer in
+/// `lodestone_server::effects` is one; a future option-carrying particle needs
+/// the options written too, not just this id.
+fn simple_particle_registry_id(name: &str) -> Option<i32> {
+    static INDEX: std::sync::OnceLock<std::collections::HashMap<&'static str, i32>> =
+        std::sync::OnceLock::new();
+    INDEX
+        .get_or_init(|| {
+            (0..)
+                .map_while(|id| {
+                    lodestone_data::particle_types::particle_type_name(id).map(|name| (name, id))
+                })
+                .collect()
+        })
+        .get(name)
+        .copied()
+}
+
 /// This port's own biome registry id space (issue #405) — index in this
 /// **sorted** array is the wire id [`resolve_biome_id`] uses. Regenerable
 /// with `awk '/^row\./{print $2}' scripts/worldgen-oracle/biome_java.txt |
@@ -405,48 +456,52 @@ fn resolve_biome_id(name: &str) -> u32 {
 /// column rather than calling it per block; do not reach for this function
 /// itself in a true per-block hot path without the same memoization.
 ///
-/// # Four-tier fallback: exact, subset, real-property subset, then same-name default, then air
+/// # Three-tier fallback: exact, default-plus-overrides, then the default state
 ///
 /// 1. **Exact match** — name and every property value agree. The common case
 ///    for anything decoded off a real edit or a fully-qualified generator
 ///    state (`"minecraft:deepslate[axis=y]"`).
-/// 2. **Same block name, any properties** — falls back to the **lowest-id**
-///    state sharing `name`. This exists for issue #363's own fluid case:
-///    `lodestone-worldgen`'s `OverworldGenerator` writes its default fluid as
-///    the bare literal `"minecraft:water"`
-///    (`crates/lodestone-worldgen/src/overworld.rs`'s `default_fluid`), with
-///    **no `level` property** — and real water has no propertyless state at
-///    all (every one of ids `86..=101` carries `level=0..15`).
+/// 2. **The block's default state with the named properties written over it** —
+///    vanilla's own `defaultBlockState().setValue(k, v)…`. Every property the
+///    caller did *not* name keeps its vanilla default, and any property no real
+///    state of this block carries (a *synthetic* one — see below) is dropped.
+///    Since a block's state set is the full cross product of its properties'
+///    domains, the merged set always names a real state unless a value is
+///    outside its domain.
+/// 3. **The default state alone** — a bare name, or a named value outside its
+///    property's domain. Falls back to air if the block name is unknown.
 ///
-///    "Lowest id" happens to equal water's real default (`86`, `level=0`,
-///    `blocks.json`'s own `"default": true` entry for `minecraft:water`,
-///    `.cache/mc/26.2/generated/reports/blocks.json`) — **but this is not a
-///    general vanilla-registration guarantee**, and was checked, not
-///    assumed: a one-off scan of that same `blocks.json` found the
-///    lowest-id state disagrees with the marked default for 661 of 797
-///    multi-state blocks (e.g. `minecraft:acacia_button`'s default is id
-///    `10780`, not its lowest id `10771`). It happens to hold for both
-///    fluids this codebase's fallback can currently reach (water: `86`
-///    lowest = `86` default; lava: `102` lowest = `102` default) — confirmed
-///    directly, not inferred from a pattern. **Do not extend this fallback's
-///    coverage to a new bare, property-requiring block name without
-///    checking `blocks.json`'s own `"default"` marker for that specific
-///    block first** — "lowest id" is a coincidence here, not a rule.
+/// # The default state is *not* the lowest id, and assuming it was caused three bugs
 ///
-///    Before this tier existed, any bare block name for a block that
-///    *requires* properties (water chief among them) fell straight to air —
-///    the exact trap `CLAUDE.md` and issue #363 flag: "a fix that only
-///    thinks about solids will leave \[fluids\] broken and still look like
-///    progress."
-/// 3. **No name match at all** — falls back to air.
+/// This used to fall back to the **lowest** id sharing `name`, which happens to
+/// be right for water (`86`, `level=0`) and lava (`102`) — the fluids issue #363
+/// added the tier for — and wrong for 661 of the 797 multi-state blocks in
+/// `blocks.json`. Three shipped consequences: bare `minecraft:grass_block`
+/// resolved to id `8`, `snowy=true`, so every blade of spread grass rendered
+/// snowy (#546); bare directional blocks came out at whatever the lowest id's
+/// `facing` happened to be (#475); and dust's four connection properties came
+/// out `up` rather than `none`, so wire rendered climbing rather than flat.
+///
+/// The default is now read from [`lodestone_data::snow_support::is_default_state`]
+/// — `state == state.getBlock().defaultBlockState()` dumped from the real 26.2
+/// server, exactly one id per block.
+///
+/// # Synthetic properties
+///
+/// This server's own state strings can carry a property vanilla keeps outside
+/// the block state: `redstone_diode::set_comparator` emits
+/// `minecraft:comparator[…,output=N]` while vanilla keeps `output` in a
+/// `ComparatorBlockEntity` (issue #476). Such a property matches no real state,
+/// so it is dropped during the merge rather than sinking the whole lookup. The
+/// drop lives here, at the encode boundary, so the server model keeps its
+/// synthetic properties for its own use and every future one is covered.
 ///
 /// A block-update confirmation is best-effort feedback (see
 /// `docs/block-edit.md`), not the server's authoritative state — that stays
 /// in [`ServerChunkColumn`]'s own string form, which this function only
-/// reads. Tier 3 exists so a state string this version's table cannot parse
-/// back at all (an unknown name, or a property spelling/order drift on a
-/// nonexistent variant) degrades to a visibly-wrong confirmation rather than
-/// a panic or a corrupted wire id.
+/// reads. The air fallback exists so a state string this version's table cannot
+/// parse back at all degrades to a visibly-wrong confirmation rather than a
+/// panic or a corrupted wire id.
 fn resolve_state_id(state: &str) -> u32 {
     let (name, raw_props) = match state.split_once('[') {
         Some((name, rest)) => (name, rest.strip_suffix(']').unwrap_or(rest)),
@@ -462,99 +517,64 @@ fn resolve_state_id(state: &str) -> u32 {
     };
     wanted.sort_unstable();
 
-    let mut same_name_default: Option<u32> = None;
-    let mut subset_match: Option<u32> = None;
+    // Tier 1, plus the bookkeeping tiers 2 and 3 need: this block's id range and
+    // its vanilla default state.
+    let mut first_id: Option<u32> = None;
     let mut last_id: Option<u32> = None;
-    // Real property keys for this block name — populated during the scan so tier
-    // 3 (below) can distinguish a synthetic property that no state carries from a
-    // real one the caller omitted.
-    let mut real_keys: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut default_id: Option<u32> = None;
     for id in 0..lodestone_data::block_states::STATE_COUNT {
         if block_name(id) != Some(name) {
             continue;
         }
+        first_id.get_or_insert(id);
         last_id = Some(id);
-        if same_name_default.is_none() {
-            same_name_default = Some(id);
+        if lodestone_data::snow_support::is_default_state(id) == Some(true) {
+            default_id = Some(id);
         }
         let have_raw = properties(id).unwrap_or(&[]);
-        for (k, _) in have_raw {
-            real_keys.insert(k);
-        }
         let mut have: Vec<(&str, &str)> = have_raw.to_vec();
         have.sort_unstable();
         if have == wanted {
             return id;
         }
-        // Tier 2, issue #465. This server's own state strings carry only the
-        // properties it models, so an exact-set match can be structurally
-        // impossible: `redstone_wire::set_power` emits
-        // `minecraft:redstone_wire[power=N]` while the real block carries five
-        // properties across 1296 states. `have == wanted` was therefore never
-        // true for any dust state, and every update fell through to the
-        // lowest id — `4011`, whose `power` is **0**.
-        //
-        // So the whole redstone subsystem computed correct signals and
-        // delivered zero, from placement, random ticks and scheduled ticks
-        // alike, since it was written. A fully-connected wire carrying the
-        // wrong value, which `cargo xtask connectedness` cannot see.
-        //
-        // Prefer the lowest id agreeing on every property the caller *did*
-        // specify. `wanted.is_empty()` is excluded so a bare name keeps its
-        // existing same-name-default behaviour rather than matching everything.
-        if subset_match.is_none()
-            && !wanted.is_empty()
-            && wanted
-                .iter()
-                .all(|(k, v)| have_raw.iter().any(|(hk, hv)| hk == k && hv == v))
-        {
-            subset_match = Some(id);
-        }
     }
-    // Tier 3, issue #476. A synthetic property — one that no state of this
-    // block actually carries — makes a Tier-2 subset match structurally
-    // impossible. `redstone_diode::set_comparator` emits
-    // `minecraft:comparator[…,output=N]`; vanilla keeps `output` in a
-    // `ComparatorBlockEntity`, not as a block-state property, so `output` does
-    // not appear on any of the ~16 real comparator states. Tier 2 therefore
-    // never matched, and every comparator fell through to the lowest id — whose
-    // `powered` and `mode` are wrong.
-    //
-    // Strip synthetic properties and re-scan. The strip is at the encode
-    // boundary rather than at the call site so the server model can keep its
-    // synthetic properties for its own use, and so every future synthetic
-    // property is covered without a per-occurrence fix.
-    if subset_match.is_none() && !wanted.is_empty() {
-        let filtered: Vec<(&str, &str)> = wanted
-            .iter()
-            .filter(|(k, _)| real_keys.contains(k))
-            .copied()
-            .collect();
-        if filtered.len() < wanted.len() {
-            // Some wanted property is synthetic — re-scan over this block's id
-            // range only (same_name_default..=last_id).
-            if let (Some(start), Some(end)) = (same_name_default, last_id) {
-                for id in start..=end {
-                    let have_raw = properties(id).unwrap_or(&[]);
-                    if filtered
-                        .iter()
-                        .all(|(k, v)| have_raw.iter().any(|(hk, hv)| hk == k && hv == v))
-                    {
-                        subset_match = Some(id);
-                        break;
-                    }
-                }
+
+    // Tier 3's value, and tier 2's base. `first_id` only backstops a table whose
+    // default column has somehow lost this block.
+    let Some(base) = default_id.or(first_id) else {
+        return air_id();
+    };
+    if wanted.is_empty() {
+        return base;
+    }
+
+    // Tier 2: `defaultBlockState().setValue(k, v)…` for every property the block
+    // really has, dropping any synthetic one.
+    let mut merged: Vec<(&str, &str)> = properties(base).unwrap_or(&[]).to_vec();
+    let mut overridden = false;
+    for &(key, value) in &wanted {
+        if let Some(slot) = merged.iter_mut().find(|(have_key, _)| *have_key == key) {
+            if slot.1 != value {
+                slot.1 = value;
+                overridden = true;
             }
         }
     }
-    // Known cosmetic caveat, kept deliberately: this picks the lowest id among
-    // the matching states, and lowest-id is not the marked default for 661 of
-    // 797 multi-state blocks (see this file's own doc). For dust the four
-    // connection properties come out `up` rather than `none`, so the wire
-    // renders climbing rather than flat. `power` — the load-bearing half — is
-    // now exact. Getting the shape right too is the connection-graph work,
-    // which nothing models yet.
-    subset_match.or(same_name_default).unwrap_or_else(air_id)
+    if !overridden {
+        return base;
+    }
+    merged.sort_unstable();
+    let (Some(start), Some(end)) = (first_id, last_id) else {
+        return base;
+    };
+    for id in start..=end {
+        let mut have: Vec<(&str, &str)> = properties(id).unwrap_or(&[]).to_vec();
+        have.sort_unstable();
+        if have == merged {
+            return id;
+        }
+    }
+    base
 }
 
 /// Unpacks vanilla's `BlockPos.asLong` form (the inverse of
@@ -1515,10 +1535,15 @@ fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldCh
 /// block-state container then the biome container), the block-entity list
 /// ([`encode_block_entities`]), then the trailing light payload.
 ///
-/// Heightmaps are still sent empty: a valid, decodable wire form (confirmed
-/// against `Heightmaps`'s own encode logic), so the client accepts the column
-/// even though heightmap computation is not implemented yet — a documented gap,
-/// not a hidden one.
+/// Heightmaps now carry the generator's real `MOTION_BLOCKING` map when the
+/// column has one (issue #516) — `Heightmap::new(world_height)` picks its own
+/// 9-bit width from `height_bits`, so no width is chosen here. A column from
+/// anywhere but the generator (`ChunkColumn::new`, a region-file load) still
+/// sends the zero-entry NBT it always sent: valid and decodable, simply empty.
+/// The other three sent maps (`WORLD_SURFACE`, `OCEAN_FLOOR`,
+/// `MOTION_BLOCKING_NO_LEAVES`) are deliberately still absent — see
+/// `docs/motion-blocking-heightmap.md` for why sending `NO_LEAVES` today would
+/// send a knowingly wrong map.
 ///
 /// **`light` is no longer all-`Missing`** (issue #517). It is the caller's
 /// computed [`ColumnLight`]; see [`compute_served_light`] for where it comes
@@ -1535,7 +1560,17 @@ fn encode_column_body(
     w.i32(cx);
     w.i32(cz);
 
-    Heightmaps::new().encode(&mut w);
+    let mut heightmaps = Heightmaps::new();
+    if let Some(stored) = source.motion_blocking() {
+        let mut map = Heightmap::new(source.height as u32);
+        for lz in 0..16usize {
+            for lx in 0..16usize {
+                map.set(lx, lz, u32::from(stored[lx + lz * 16]));
+            }
+        }
+        heightmaps.insert(MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, map);
+    }
+    heightmaps.encode(&mut w);
 
     let mut section_blob = Writer::default();
     for section_index in 0..shape.section_count {
@@ -3426,6 +3461,105 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
+    /// `ClientboundSoundPacket` (issue #530), the exact inverse of
+    /// [`crate::adapter`]'s own `decode_sound`.
+    ///
+    /// Two byte-level details, both restated from the decode side rather than
+    /// guessed:
+    ///
+    /// * the `Holder<SoundEvent>` is sent in the **registry-reference** form a
+    ///   real vanilla server sends — `registryId + 1`, `0` being reserved to
+    ///   introduce an inline definition. Same encoding
+    ///   [`Self::encode_explode`] already uses for its own baked-in sound;
+    /// * the position is fixed-point, `(int)(block * 8)`
+    ///   (`LOCATION_ACCURACY`), **not** three `f64`s.
+    ///
+    /// A sound name outside 26.2's registry emits nothing rather than a
+    /// packet the client cannot decode — `lodestone_server::effects` validates
+    /// every name it derives, so this is a second line of defence, not the
+    /// first.
+    fn encode_sound(
+        &self,
+        sound: &str,
+        category: SoundCategory,
+        pos: Vec3,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) -> ServerDirective {
+        let Some(registry_id) = sound_event_registry_id(sound) else {
+            return ServerDirective::None;
+        };
+        let mut w = Writer::default();
+        w.var_i32(registry_id + 1); // Holder::REFERENCE: registryId + 1.
+        w.var_i32(i32::from(category.ordinal()));
+        w.i32((pos.x * SOUND_POSITION_SCALE) as i32);
+        w.i32((pos.y * SOUND_POSITION_SCALE) as i32);
+        w.i32((pos.z * SOUND_POSITION_SCALE) as i32);
+        w.f32(volume);
+        w.f32(pitch);
+        w.i64(seed);
+        ServerDirective::Send {
+            packet_id: play::clientbound::SOUND,
+            payload: w.into_vec(),
+        }
+    }
+
+    /// `ClientboundLevelEventPacket` (issue #530) — the event code, the packed
+    /// position, the event-specific data, then the global flag, matching
+    /// [`crate::packets::game::LevelEvent`]'s own field order.
+    fn encode_level_event(&self, event: i32, pos: BlockPos, data: i32, global: bool) -> ServerDirective {
+        let mut w = Writer::default();
+        w.i32(event);
+        w.i64(pack_block_pos(pos.x, pos.y, pos.z));
+        w.i32(data);
+        w.bool(global);
+        ServerDirective::Send {
+            packet_id: play::clientbound::LEVEL_EVENT,
+            payload: w.into_vec(),
+        }
+    }
+
+    /// `ClientboundLevelParticlesPacket` (issue #530), mirroring
+    /// [`crate::packets::game::LevelParticles`]'s field order.
+    ///
+    /// The trailing particle field is a `minecraft:particle_type` registry id
+    /// followed by that type's own option bytes. Only argument-less
+    /// (`SimpleParticleType`) particles are sent, whose stream codec writes
+    /// **no** further bytes — so the packet ends at the id. A type that does
+    /// carry options (`dust`, `block`, `item`) would need those bytes and is
+    /// rejected here rather than sent truncated, which the client would read as
+    /// a misparse of the *next* packet.
+    fn encode_level_particles(
+        &self,
+        particle: &str,
+        pos: Vec3,
+        offset: Vec3f,
+        max_speed: f32,
+        count: i32,
+        long_distance: bool,
+    ) -> ServerDirective {
+        let Some(particle_id) = simple_particle_registry_id(particle) else {
+            return ServerDirective::None;
+        };
+        let mut w = Writer::default();
+        w.bool(long_distance); // overrideLimiter
+        w.bool(false); // alwaysShow
+        w.f64(pos.x);
+        w.f64(pos.y);
+        w.f64(pos.z);
+        w.f32(offset.x);
+        w.f32(offset.y);
+        w.f32(offset.z);
+        w.f32(max_speed);
+        w.i32(count);
+        w.var_i32(particle_id);
+        ServerDirective::Send {
+            packet_id: play::clientbound::LEVEL_PARTICLES,
+            payload: w.into_vec(),
+        }
+    }
+
     /// Re-sends `SET_HEALTH` with the new health — the same packet and
     /// struct [`begin_play`](Self::begin_play) already sends once at join.
     /// `food`/`saturation` are resent at the same fresh-spawn constants
@@ -3890,6 +4024,37 @@ mod block_edit_tests {
         );
     }
 
+    /// Issue #546. A bare name must resolve to the block's **default** state,
+    /// not to its lowest id — and `grass_block` is the case where those differ
+    /// visibly: `blocks.json` marks `snowy=false` (id 9) default while id 8 is
+    /// `snowy=true`, so the old lowest-id fallback put every spread grass block
+    /// on the wire as snowy. `lodestone-data`'s jar-derived default-state column
+    /// supplies the expected id; nothing here asks the resolver what it thinks
+    /// the default is.
+    ///
+    /// Also pins the property-override tier on the same block, since a merge
+    /// that silently ignored the caller's value would still pass the first half.
+    #[test]
+    fn resolve_state_id_resolves_a_bare_name_to_the_jar_marked_default_state() {
+        let lowest = (0..lodestone_data::block_states::STATE_COUNT)
+            .find(|&id| block_name(id) == Some("minecraft:grass_block"))
+            .expect("no grass_block in the generated table");
+        let jar_default = (0..lodestone_data::block_states::STATE_COUNT)
+            .find(|&id| {
+                block_name(id) == Some("minecraft:grass_block")
+                    && lodestone_data::snow_support::is_default_state(id) == Some(true)
+            })
+            .expect("no default grass_block state in the jar-derived column");
+
+        assert_ne!(jar_default, lowest, "grass_block's default is not its lowest id");
+        assert_eq!(resolve_state_id("minecraft:grass_block"), jar_default);
+        assert_eq!(properties(jar_default), Some([("snowy", "false")].as_slice()));
+        assert_eq!(
+            properties(resolve_state_id("minecraft:grass_block[snowy=true]")),
+            Some([("snowy", "true")].as_slice())
+        );
+    }
+
     /// The hermetic half of issue #363's gate: a whole-column `encode_chunk`
     /// send, decoded back through the real wire codec
     /// ([`crate::packets::chunk::LevelChunkWithLight::decode`], the same
@@ -3970,6 +4135,68 @@ mod block_edit_tests {
         // terrain) still reads as air — the fix does not smear a stray
         // non-air write across cells the source itself reports as air.
         assert_eq!(decoded.column.get_block(5, 300, 5), air_id());
+    }
+
+    /// Issue #516's wire half: a served column carries the generator's real
+    /// `MOTION_BLOCKING` map, not the zero-entry NBT this encoder sent for every
+    /// column until now. The expected values come from the **generator's own**
+    /// array through a second, independently constructed source — nothing here
+    /// re-derives a height.
+    #[test]
+    fn a_served_column_carries_the_generators_motion_blocking_heightmap() {
+        use crate::packets::chunk::LevelChunkWithLight;
+        use lodestone_server::{ChunkSource, overworld_chunk_source};
+
+        let seed: i64 = 1234;
+        let expected = *lodestone_server::overworld_generator(seed)
+            .column(0, 0)
+            .motion_blocking_heightmap()
+            .expect("the bundled generator computes MOTION_BLOCKING");
+
+        let source = overworld_chunk_source(seed);
+        let directive = V770ServerProtocol.encode_chunk(0, 0, &source.column(0, 0));
+        let payload = match directive {
+            ServerDirective::Send { payload, .. } => payload,
+            other => panic!("expected Send, got {other:?}"),
+        };
+
+        let shape = ChunkShape::overworld_1_21();
+        let mut r = Reader::new(&payload);
+        let decoded = LevelChunkWithLight::decode(&mut r, &shape).expect("decode column");
+        r.ensure_empty().expect("no trailing bytes");
+
+        let map = decoded
+            .heightmaps
+            .get(MOTION_BLOCKING_HEIGHTMAP_TYPE_ID)
+            .expect("MOTION_BLOCKING must be on the wire");
+        for lz in 0..16usize {
+            for lx in 0..16usize {
+                assert_eq!(
+                    map.get(lx, lz),
+                    u32::from(expected[lx + lz * 16]),
+                    "at ({lx}, {lz})"
+                );
+            }
+        }
+        // Non-degenerate: an all-zero map is what an empty `Heightmaps` would
+        // decode to under a bug that framed 256 entries of nothing, so the
+        // element-wise check above must be comparing real heights. (Chunk (0, 0)
+        // at this seed is an ocean surface, so the values are *uniform* — a
+        // variance assertion here would be false, not stronger.)
+        assert!(expected.iter().all(|&h| h > 0), "{expected:?}");
+
+        // An all-air column has no generated map at all, and still frames a
+        // valid zero-entry NBT.
+        let empty = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        let directive = V770ServerProtocol.encode_chunk(0, 0, &empty);
+        let payload = match directive {
+            ServerDirective::Send { payload, .. } => payload,
+            other => panic!("expected Send, got {other:?}"),
+        };
+        let mut r = Reader::new(&payload);
+        let decoded = LevelChunkWithLight::decode(&mut r, &shape).expect("decode empty column");
+        r.ensure_empty().expect("no trailing bytes");
+        assert!(decoded.heightmaps.is_empty());
     }
 
     /// Issue #405's own island check: real per-quart biome assignment must

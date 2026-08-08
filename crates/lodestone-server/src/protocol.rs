@@ -10,7 +10,8 @@
 
 use lodestone_core::State;
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, ResourceKey, Rotation, Text, Vec3,
+    BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, ResourceKey, Rotation, SoundCategory,
+    Text, Vec3, Vec3f,
 };
 use uuid::Uuid;
 
@@ -1045,6 +1046,98 @@ pub trait ServerProtocol: Send + Sync {
     fn encode_explode(&self, centre: Vec3, radius: f32) -> ServerDirective {
         let _ = (centre, radius);
         ServerDirective::None
+    }
+
+    /// Encodes a positioned sound (issue #530; vanilla
+    /// `ClientboundSoundPacket`, wire id `sound`).
+    ///
+    /// `sound` is a `minecraft:sound_event` registry id
+    /// ([`crate::effects`] validates every name it derives against the real
+    /// registry before it reaches here, so an implementor may send the
+    /// registry-reference holder form rather than an inline definition).
+    /// `seed` picks between a sound event's variants — vanilla's per-play
+    /// `random.nextLong()`.
+    ///
+    /// The default emits nothing, so a protocol without sound support need not
+    /// override it and the world is simply silent for that client, which is
+    /// exactly the state every protocol here was in before this method existed.
+    fn encode_sound(
+        &self,
+        sound: &str,
+        category: SoundCategory,
+        pos: Vec3,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) -> ServerDirective {
+        let _ = (sound, category, pos, volume, pitch, seed);
+        ServerDirective::None
+    }
+
+    /// Encodes one of vanilla's numbered composite effects (issue #530;
+    /// `ClientboundLevelEventPacket`, wire id `level_event`) — see
+    /// [`crate::effects::PARTICLES_DESTROY_BLOCK`], which is a sound *and* a
+    /// particle burst in one packet. The default emits nothing.
+    fn encode_level_event(&self, event: i32, pos: BlockPos, data: i32, global: bool) -> ServerDirective {
+        let _ = (event, pos, data, global);
+        ServerDirective::None
+    }
+
+    /// Encodes a particle burst (issue #530; `ClientboundLevelParticlesPacket`,
+    /// wire id `level_particles`).
+    ///
+    /// `particle` is a `minecraft:particle_type` registry id. Only
+    /// argument-less (`SimpleParticleType`) particles are expressible: the
+    /// per-type option payload — dust colour, block state, item stack — has no
+    /// representation here, the same scope
+    /// [`crate::effects::WorldEffect::Particles`] carries and the same one the
+    /// v770 *decoder* already declares. The default emits nothing.
+    fn encode_level_particles(
+        &self,
+        particle: &str,
+        pos: Vec3,
+        offset: Vec3f,
+        max_speed: f32,
+        count: i32,
+        long_distance: bool,
+    ) -> ServerDirective {
+        let _ = (particle, pos, offset, max_speed, count, long_distance);
+        ServerDirective::None
+    }
+
+    /// Encodes one [`crate::effects::WorldEffect`] by dispatching to whichever
+    /// of the three encoders above it names.
+    ///
+    /// Provided rather than required: it is pure dispatch, so no implementor
+    /// should override it, and it is the only method a *publisher* has to know
+    /// about — `serve_play`'s drain calls this and nothing else, so adding a
+    /// fourth effect kind is a change here plus one encoder, never a change at
+    /// every drain site.
+    fn encode_world_effect(&self, effect: &crate::effects::WorldEffect) -> ServerDirective {
+        match effect {
+            crate::effects::WorldEffect::Sound {
+                sound,
+                category,
+                pos,
+                volume,
+                pitch,
+                seed,
+            } => self.encode_sound(sound, *category, *pos, *volume, *pitch, *seed),
+            crate::effects::WorldEffect::LevelEvent {
+                event,
+                pos,
+                data,
+                global,
+            } => self.encode_level_event(*event, *pos, *data, *global),
+            crate::effects::WorldEffect::Particles {
+                particle,
+                pos,
+                offset,
+                max_speed,
+                count,
+                long_distance,
+            } => self.encode_level_particles(particle, *pos, *offset, *max_speed, *count, *long_distance),
+        }
     }
 
     /// Encodes a server-initiated keep-alive challenge (vanilla

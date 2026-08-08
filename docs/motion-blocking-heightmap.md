@@ -1,16 +1,17 @@
-# The `MOTION_BLOCKING` heightmap: generator half
+# The `MOTION_BLOCKING` heightmap
 
 Issue [#516](https://github.com/matteopolak/lodestone/issues/516) (partial — the
-generator side only; the encoder patch is described below and not yet applied).
+generator and encoder halves for `MOTION_BLOCKING`; the other three sent maps
+remain, which is why the issue stays open).
 
 ## What it is
 
-Every served chunk used to carry a well-framed, **zero-entry** heightmap NBT:
-`crates/protocol/v770/src/server_protocol.rs:1465` writes
-`Heightmaps::new().encode(&mut w)`, which is an empty `Vec<(u32, Heightmap)>`.
-`lodestone-worldgen` now computes the real `MOTION_BLOCKING` map per column and
-exposes it on `GeneratedColumn`, so the value exists; **nothing consumes it yet**,
-because `ChunkColumn` and the encoder are in another cluster.
+Every served chunk used to carry a well-framed, **zero-entry** heightmap NBT —
+`encode_column_body` wrote `Heightmaps::new().encode(&mut w)`, an empty
+`Vec<(u32, Heightmap)>`. `lodestone-worldgen` computes the real `MOTION_BLOCKING`
+map per column and exposes it on `GeneratedColumn`; `ChunkColumn` now carries it
+across the generator/server seam and `encode_column_body` packs it into the chunk
+packet, so a client receives a real map instead of an empty one.
 
 ## How it works
 
@@ -66,18 +67,21 @@ heightmap. That direction matters: the save-parity work found vanilla *adds* a
 heightmap for any type we omit but **trusts** one we send, so a wrong heightmap is
 worse than none.
 
-## The encoder patch, for whoever owns `crates/protocol/v770/src`
+## The encoder, and the two places it crosses a seam
 
-Three lines and a plumb. The only non-obvious part is the registry id, which is
-exported as `lodestone_worldgen::overworld::MOTION_BLOCKING_HEIGHTMAP_TYPE_ID`
-(`= 4`) so it is not retyped from memory:
+Landed. Three links, and each one exists because the previous one could not reach
+further. The registry id is never retyped: it is
+`lodestone_worldgen::overworld::MOTION_BLOCKING_HEIGHTMAP_TYPE_ID` (`= 4`),
+re-exported from `lodestone-server` because `lodestone-worldgen` is only a
+*dev*-dependency of `lodestone-v770` and the encoder cannot name it at its source.
 
-1. **`ChunkColumn`** (`crates/lodestone-server/src/chunk.rs`) grows an
-   `Option<[u16; 256]>`, filled in `from_generated` from
-   `column.motion_blocking_heightmap()`. Note this **cannot** ride `into_raw` —
-   that tuple's own doc forbids widening it, and `biome_cells`/`block_entities`
-   already established the opt-in accessor pattern.
-2. **`server_protocol.rs:1465`**, replacing `Heightmaps::new().encode(&mut w)`:
+1. **`ChunkColumn`** (`crates/lodestone-server/src/chunk.rs`) carries an
+   `Option<Box<[u16; 256]>>`, filled in `from_generated` from
+   `column.motion_blocking_heightmap()` and read back through the
+   `ChunkColumn::motion_blocking()` accessor. It deliberately does **not** ride
+   `into_raw` — that tuple's own doc forbids widening it, and
+   `biome_cells`/`block_entities` already established the opt-in accessor pattern.
+2. **`encode_column_body`**, replacing `Heightmaps::new().encode(&mut w)`:
 
    ```rust
    let mut maps = Heightmaps::new();
@@ -96,8 +100,17 @@ exported as `lodestone_worldgen::overworld::MOTION_BLOCKING_HEIGHTMAP_TYPE_ID`
    `Heightmap::new(world_height)` sizes itself with `height_bits(world_height)` =
    9 bits for the overworld's 384, the same `ceillog2(getHeight() + 1)` vanilla's
    own `BitStorage` uses — so no width is chosen here either.
-3. The **empty** case stays exactly as it is today (a zero-entry NBT), so a
-   generator with no `block_freeze_facts` regresses nothing.
+3. The **empty** case is unchanged (a zero-entry NBT), so a column from anywhere
+   but the generator — `ChunkColumn::new`, a region-file load, a generator with no
+   `block_freeze_facts` — regresses nothing.
+
+**The field is a snapshot, not a maintained map.** `ChunkColumn::set_block` does
+not move it, so a player edit leaves it stale, and that is deliberate: `chunk_nbt`
+omits heightmaps from the Anvil write and relies on vanilla's
+`Heightmap.primeHeightmaps` to re-derive on load, so nothing persists a stale
+value. Only the first send after generation carries it — which is exactly the send
+a client has no other way to derive one for. Maintaining it incrementally is
+scope 1 of #516, and the prerequisite for the vegetation cost-per-draw work.
 
 **Not in scope, deliberately:** the other three sent maps
 (`WORLD_SURFACE`, `OCEAN_FLOOR`, `MOTION_BLOCKING_NO_LEAVES`).

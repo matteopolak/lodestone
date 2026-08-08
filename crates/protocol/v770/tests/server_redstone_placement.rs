@@ -448,11 +448,14 @@ async fn placing_dust_into_a_gap_powers_the_whole_run_in_the_servers_own_world()
 /// it the one-line proof that the fix reaches a player rather than only the
 /// server's own state.
 ///
-/// Note what remains cosmetically wrong and is deliberately not asserted here:
-/// lowest-id is not the marked default for 661 of 797 multi-state blocks, so
-/// dust resolves with its four connection properties `up` rather than `none`
-/// and renders climbing rather than flat. `power` — the load-bearing half, and
-/// the only thing this gate reads — is exact.
+/// The cosmetic half that *used* to remain wrong is now right too, and by a
+/// different mechanism than the one described above: since issue #546 the
+/// fallback is the block's **jar-marked default state with the caller's named
+/// properties written over it** — vanilla's own `defaultBlockState().setValue`
+/// — rather than the lowest id agreeing on them. Dust's four connection
+/// properties therefore come out `none`, its real default, so it renders flat
+/// instead of climbing. `power` — the load-bearing half, and the only thing this
+/// gate reads — was already exact and is unchanged.
 ///
 /// `x = PLACE_X` is skipped: the client predicts its own placement there, so
 /// that one cell cannot distinguish "a packet arrived" from "nothing arrived".

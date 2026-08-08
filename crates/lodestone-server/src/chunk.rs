@@ -199,6 +199,27 @@ pub struct ChunkColumn {
     /// Structure id → packed origin-chunk keys. See
     /// [`structure_starts`](Self::structure_starts).
     structure_references: std::collections::BTreeMap<String, Vec<i64>>,
+    /// Issue #516: the generator's `MOTION_BLOCKING` heightmap in vanilla's
+    /// **stored** form (`topY + 1`, `0` for an all-air column), indexed
+    /// `lx + lz * 16` — see
+    /// [`lodestone_worldgen::overworld::GeneratedColumn::motion_blocking_heightmap`].
+    ///
+    /// `None` for a column that came from anywhere but the real generator
+    /// (`new`, a region-file load); `encode_chunk` then sends the zero-entry
+    /// heightmap NBT it has always sent, which is well-framed and simply carries
+    /// no map. It rides an accessor rather than `GeneratedColumn::into_raw`,
+    /// whose own doc forbids widening that tuple — the same reason
+    /// [`biome_cells`](Self::biome_cells) and
+    /// [`block_entities`](Self::block_entities) are copied across.
+    ///
+    /// **Not maintained by [`set_block`](Self::set_block).** It is the
+    /// generator's snapshot, so a player edit does not move it; `chunk_nbt`
+    /// deliberately omits heightmaps from the Anvil write and relies on
+    /// vanilla's `Heightmap.primeHeightmaps` to re-derive on load, so nothing
+    /// persists a stale value either. Only the first send after generation
+    /// carries it, which is exactly the send a client has no other way to
+    /// derive one for.
+    motion_blocking: Option<Box<[u16; 256]>>,
 }
 
 impl ChunkColumn {
@@ -228,6 +249,7 @@ impl ChunkColumn {
             block_entities: Vec::new(),
             structure_starts: Vec::new(),
             structure_references: std::collections::BTreeMap::new(),
+            motion_blocking: None,
         }
     }
 
@@ -267,6 +289,9 @@ impl ChunkColumn {
             .iter()
             .map(crate::chunk_nbt::generated_block_entity)
             .collect();
+        // Issue #516. Copied before `into_raw` consumes the column, for the same
+        // reason the two above are.
+        let motion_blocking = column.motion_blocking_heightmap().map(|map| Box::new(*map));
 
         let (min_y, height, palette, blocks, biome_quarts) = column.into_raw();
         debug_assert_eq!(
@@ -294,6 +319,7 @@ impl ChunkColumn {
             block_entities,
             structure_starts: Vec::new(),
             structure_references: std::collections::BTreeMap::new(),
+            motion_blocking,
         };
         column.recalc_ticking_counts();
         debug_assert_eq!(
@@ -394,6 +420,15 @@ impl ChunkColumn {
     /// cannot desync the block grid.
     pub fn set_block_entities(&mut self, entities: Vec<(BlockPos, BlockEntity)>) {
         self.block_entities = entities;
+    }
+
+    /// This column's `MOTION_BLOCKING` heightmap in vanilla's stored form, or
+    /// `None` if it did not come from the generator — see
+    /// [`motion_blocking`](Self::motion_blocking) for the whole contract and
+    /// `docs/motion-blocking-heightmap.md` for the `+1`.
+    #[must_use]
+    pub fn motion_blocking(&self) -> Option<&[u16; 256]> {
+        self.motion_blocking.as_deref()
     }
 
     /// The structure starts originating in this column (issue #514's S1).

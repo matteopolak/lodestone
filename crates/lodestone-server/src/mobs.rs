@@ -1616,6 +1616,14 @@ pub struct MobSim<'w> {
     /// `Below` is one down. Storing the mob's cell keeps the arithmetic with the
     /// consumer that knows what each variant means.
     pending_grazes: Vec<(BlockPos, EatenBlock)>,
+    /// Hurt and death sounds awaiting the driver (issue #530), the same handoff
+    /// shape as the two above and for the same reason: this sim owns no
+    /// connection. Drained by [`take_vocalisations`](Self::take_vocalisations).
+    ///
+    /// Before this, `apply_damage` damaged and killed mobs with **no audible
+    /// result at all** — the `ServerProtocol` trait had no sound encoder, so a
+    /// player could beat a cow to death in silence.
+    pending_vocalisations: Vec<crate::effects::WorldEffect>,
     /// Every connected player's perception-relevant state, refreshed by a
     /// driver through [`set_players`](Self::set_players) and consumed by
     /// [`tick`](Self::tick) to feed each mob's `nearest_player`/`temptation`.
@@ -1668,6 +1676,7 @@ impl<'w> MobSim<'w> {
             tick_count: 0,
             pending_detonations: Vec::new(),
             pending_grazes: Vec::new(),
+            pending_vocalisations: Vec::new(),
             players: Vec::new(),
         }
     }
@@ -2092,8 +2101,9 @@ impl<'w> MobSim<'w> {
             if let Some(target_id) = target_id
                 && let Some(target) = self.mobs.iter_mut().find(|m| m.id == target_id)
             {
-                target.apply_damage(raw_damage, DamageFlags::default());
+                let applied = target.apply_damage(raw_damage, DamageFlags::default());
                 target.mob.note_hurt(Some(attacker_pos));
+                self.note_vocalisation(target_id, applied);
             }
         }
         // Issue #458, primitive 4: self-inflicted damage — the bee's sting
@@ -2105,7 +2115,8 @@ impl<'w> MobSim<'w> {
         // tick, exactly as a fatal melee hit does.
         for (id, amount) in self_damage {
             if let Some(m) = self.get_mut(id) {
-                m.apply_damage(amount, DamageFlags::default());
+                let applied = m.apply_damage(amount, DamageFlags::default());
+                self.note_vocalisation(id, applied);
             }
         }
         self.mobs.retain(|m| m.health > 0.0);
@@ -2436,6 +2447,51 @@ impl<'w> MobSim<'w> {
         std::mem::take(&mut self.pending_detonations)
     }
 
+    /// Drains every hurt/death sound recorded since the last call (issue #530).
+    ///
+    /// Drained rather than read for [`take_detonations`](Self::take_detonations)'
+    /// reason — a slow consumer must not play the same hit twice.
+    pub fn take_vocalisations(&mut self) -> Vec<crate::effects::WorldEffect> {
+        std::mem::take(&mut self.pending_vocalisations)
+    }
+
+    /// Records the hurt or death sound for a hit that landed on mob `id`
+    /// (issue #530) — vanilla's `LivingEntity.hurt`/`die` playing
+    /// `getHurtSound()`/`getDeathSound()`.
+    ///
+    /// Called from every funnel that applies damage rather than from
+    /// [`SimMob::apply_damage`] itself, because the queue lives on the sim and
+    /// `apply_damage` holds only the one mob. `applied <= 0.0` (a hit fully
+    /// swallowed by i-frames or absorption) is silent, matching vanilla's own
+    /// `hurtServer` returning before the sound.
+    ///
+    /// **Must be called before the end-of-tick `retain`**, or a killing blow
+    /// finds no mob to read the species and position from and dies silently.
+    fn note_vocalisation(&mut self, id: i32, applied: f32) {
+        if applied <= 0.0 {
+            return;
+        }
+        let Some(mob) = self.mobs.iter().find(|m| m.id == id) else {
+            return;
+        };
+        // Vanilla draws pitch from the level RNG; this sim's only clock is
+        // `tick_count`, and consuming from a shared generator here would shift
+        // every other draw. Mixed with the id so two mobs hit in one tick differ.
+        let phase = (self.tick_count.wrapping_mul(31).wrapping_add(id as u64)) % 21;
+        let pitch = 0.9 + phase as f32 * 0.01;
+        let effect = crate::effects::mob_vocalisation(
+            mob.entity_type.to_string().as_str(),
+            mob.position(),
+            mob.health <= 0.0,
+            mob.category == MobCategory::Monster,
+            pitch,
+            self.tick_count as i64,
+        );
+        if let Some(effect) = effect {
+            self.pending_vocalisations.push(effect);
+        }
+    }
+
     /// Drains every graze [`tick`](Self::tick) has recorded since the last call
     /// (issue #456), as `(mob block position, which block)`.
     ///
@@ -2517,6 +2573,13 @@ impl<'w> MobSim<'w> {
             if applied > 0.0 {
                 dealt.push((m.id, applied));
             }
+        }
+        // Issue #530, after the loop rather than inside it: `note_vocalisation`
+        // needs `&mut self` while the loop holds `&mut self.mobs`, and it must
+        // still precede the retain below so a mob the blast killed is read for
+        // its death sound before it leaves.
+        for &(id, applied) in &dealt {
+            self.note_vocalisation(id, applied);
         }
         self.mobs.retain(|m| m.health > 0.0);
         dealt
@@ -2623,6 +2686,9 @@ impl<'w> MobSim<'w> {
             }
             (mob.health(), mob.velocity(), damage_dealt)
         };
+        // Issue #530: before the removal below, so a killing blow is read for
+        // its death sound rather than finding no mob.
+        self.note_vocalisation(target_id, damage_dealt);
         let killed = health <= 0.0;
         if killed {
             self.mobs.retain(|m| m.id != target_id);

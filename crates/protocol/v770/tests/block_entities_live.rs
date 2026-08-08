@@ -92,17 +92,24 @@ fn stack(name: &str, count: u32) -> ItemStack {
 }
 
 /// Resolves a **full** block-state string to its protocol-776 registry id —
-/// duplicated from `block_edit.rs`'s own `resolve_state` (same three-tier
-/// algorithm `server_protocol.rs`'s private `resolve_state_id` uses: exact
-/// match, then the lowest-id state sharing the block name — its default —
-/// then air) rather than exposed from `lodestone-v770`'s public API. Needed
+/// duplicated rather than exposed from `lodestone-v770`'s public API. Needed
 /// here because `apply_use_item_on` writes the *bare* `"minecraft:furnace"`
-/// string (no `facing`/`lit` properties — this crate's placement has no
-/// per-block orientation rules, see `docs/block-edit.md`), and real furnace
+/// string (no `facing`/`lit` properties — a furnace is not one of the families
+/// `placed_block_state` orients, see `docs/block-edit.md`), and real furnace
 /// states always carry both properties, so the wire id the client actually
-/// receives is the block's **default** state (tier two), not an exact match
-/// (tier one) — this helper has to compute the same fallback the server
-/// does, not just look up an exact string.
+/// receives is the block's **default** state, not an exact match.
+///
+/// # This helper's own history is the reason it now reads the jar column
+///
+/// It used to compute "the lowest id sharing the block name", the same thing
+/// `server_protocol.rs`'s `resolve_state_id` used to do — and it broke, with a
+/// 30-second *timeout* rather than a mismatch, the moment issue #546 fixed that
+/// fallback to resolve a bare name to the block's real default state. Lowest-id
+/// disagrees with the marked default for 661 of 797 multi-state blocks, and
+/// `minecraft:furnace` is one of them. So the expectation now comes from
+/// `lodestone_data::snow_support::is_default_state` — vanilla's own
+/// `state == block.defaultBlockState()`, dumped from the 26.2 server — which is
+/// *outside* the resolver under test rather than a second copy of it.
 fn resolve_state(state: &str) -> u32 {
     let (name, raw_props) = match state.split_once('[') {
         Some((name, rest)) => (name, rest.strip_suffix(']').unwrap_or(rest)),
@@ -118,13 +125,13 @@ fn resolve_state(state: &str) -> u32 {
     };
     wanted.sort_unstable();
 
-    let mut same_name_default: Option<u32> = None;
+    let mut jar_default: Option<u32> = None;
     for id in 0..lodestone_data::block_states::STATE_COUNT {
         if block_name(id) != Some(name) {
             continue;
         }
-        if same_name_default.is_none() {
-            same_name_default = Some(id);
+        if lodestone_data::snow_support::is_default_state(id) == Some(true) {
+            jar_default = Some(id);
         }
         let mut have: Vec<(&str, &str)> = properties(id).unwrap_or(&[]).to_vec();
         have.sort_unstable();
@@ -132,7 +139,7 @@ fn resolve_state(state: &str) -> u32 {
             return id;
         }
     }
-    same_name_default.unwrap_or_else(|| {
+    jar_default.unwrap_or_else(|| {
         (0..)
             .find(|&id| block_name(id) == Some("minecraft:air"))
             .expect("generated table has an air entry")
