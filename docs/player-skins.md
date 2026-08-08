@@ -16,7 +16,8 @@ Two halves, in two crates, plus a hole between them:
 |---|---|---|
 | **decode** | `lodestone-assets/src/skin.rs` | landed — `decode_textures_property` |
 | **render** | `lodestone-shell/src/container/player_preview.rs` | landed — a runtime `PlayerModelType`, both rigs reachable |
-| **fetch** | `lodestone-client`/`protocol/v770`/`lodestone-auth` | **not built** — see [What is missing](#what-is-missing) |
+| **fetch (our own)** | `lodestone-auth/src/texture.rs` + `lodestone-shell/src/skin_fetch.rs` | landed — see [Fetching our own skin](#fetching-our-own-skin) |
+| **fetch (remote players)** | `protocol/v770`/`lodestone-model`/`lodestone-game` | the properties now survive `ADD_PLAYER`; nothing draws them yet |
 
 ### The decode, and where its record definition comes from
 
@@ -123,30 +124,104 @@ the workspace had ever selected the slim rig.
 above from the jar and asserts the inner-edge invariant, with the legs, body and
 head as a control on the branch's scope.
 
+## Fetching our own skin
+
+The signed-in account's own skin, end to end. Three pieces:
+
+```text
+lodestone_auth::flow::fetch_profile                 -- keeps the `skins` array
+  -> Profile { skin: Some(ProfileSkin { url, variant }) }
+menu::accounts worker (device-code and loopback, both)
+  -> skin_fetch::fetch_own_skin
+       -> lodestone_auth::texture::fetch_texture    -- TextureUrlChecker, then GET
+       -> Image::decode_png
+       -> <data_dir>/skin.png + skin.model          -- the *next* launch's path
+       -> skin_fetch::publish                       -- *this* session's path
+ContainerRenderer::render_geometry_scaled
+  -> skin_fetch::take_pending -> set_player_skin
+```
+
+### The host restriction is the security-relevant part
+
+A texture URL arrives over the network, so it is screened by
+`lodestone_auth::texture::is_allowed_texture_domain` — authlib's
+`TextureUrlChecker.isAllowedTextureDomain`, transcribed from the **bytecode** of
+`com/mojang/authlib/yggdrasil/TextureUrlChecker.class` in the jar 26.2 resolves.
+The full transcription is that module's doc; the rule is *scheme ∈ {http, https}*
+and *host exactly `textures.minecraft.net`*, and the two clauses worth knowing
+here are the ones the constant pool alone does not reveal:
+
+* the host must **already be lower-case** (`lowerCaseDomain.equals(decodedDomain)`
+  compares the lowered host against the *unlowered* one and returns `false` when
+  they differ), and `java.net.URI.getScheme()` is likewise case-preserving — so
+  `HTTPS://TEXTURES.MINECRAFT.NET/…` is *refused*, not folded;
+* `ALLOWED_DOMAINS` is exact-match set membership on the whole host, so
+  `sub.textures.minecraft.net` is not allowed either — a suffix rule would have
+  been both laxer and wrong.
+
+**This is why the check is not built on `Url`'s parsed values alone.** The `url`
+crate normalises the scheme and the host to lower-case while parsing, which is
+exactly the question vanilla asks case-sensitively, so a check written against
+`host_str()` accepts all four upper-case spellings.
+`an_unlowered_host_or_scheme_is_refused_not_folded` computes that wrong
+hypothesis in the same run and asserts it *would* have passed, so the rejection
+is evidence of the case rule rather than of some unrelated malformedness. The
+structural parse is still `Url`'s, because that is what gets `userinfo` right —
+`https://textures.minecraft.net@evil.example.invalid/x` has host
+`evil.example.invalid` — and the raw-string layer on top can only ever *add* a
+rejection.
+
+Two deliberate divergences, both **stricter**: no `IDN.toUnicode` (any `xn--`
+label or non-ASCII byte is refused outright, which cannot lose a legitimate URL
+because the one allowed domain is pure lower-case ASCII), and a
+`MAX_TEXTURE_BYTES` cap vanilla does not have.
+
+### Where the response shape does and does not come from an outside record
+
+The `textures` **property** payload is pinned by authlib (see above). The
+services `/minecraft/profile` response's `skins` array is **not** — authlib never
+calls that endpoint, the launcher does, so there is nothing in the jar to check
+it against. That is why every field of `SkinResponse` is `Option` and the array
+is `#[serde(default)]`: a shape change at Mojang's end must degrade to "no skin",
+never to a failed sign-in over a cosmetic field. `active_skin` picks the `ACTIVE`
+entry (an account keeps its previously-worn skins in the same array, so "take the
+first" draws the wrong one) and falls back to the first entry with a URL.
+
+`variant` is `CLASSIC`/`SLIM` — a **different vocabulary** from the
+`default`/`slim` a `textures` property uses. `SkinVariant::legacy_services_id`
+is the single bridge, so `PlayerModelType::by_legacy_services_name` stays the one
+parse for all three sources, and `<data_dir>/skin.model` is written in the
+*property* spelling because that is what `local_skin_override` reads. The
+inverse, `PlayerModelType::legacy_services_id`, was added for that write: the
+obvious `serialized_name()` produces `"wide"`, which the parse does not recognise
+— and since its fallback *is* wide, a Steve round-trips correctly and only an
+Alex is wrong.
+
+### Why it lands on the frame and not at construction
+
+`PlayerPreview` is built **once**, during `app::lifecycle`'s resume, and never
+re-reads the cache. Sign-in happens in the main menu and the inventory is opened
+later in the same run, so writing only the cache would have deferred the entire
+visible effect of the fetch to the next launch — an island in all but name.
+`ContainerRenderer::render_geometry_scaled` therefore drains
+`skin_fetch::take_pending()` at the top of every container frame: one uncontended
+`Mutex::lock`, `None` on all but the one frame after a fetch lands. The slot is a
+slot rather than a queue on purpose — a second fetch replaces an undrained first,
+because only the newest skin matters.
+
+Every failure inside the fetch is a `warn!` and a `false`, including the refused
+host: a dead texture CDN must not fail an otherwise-successful login.
+
 ## What is missing
 
-**The fetch, entirely.** Three separate discards, in three crates, none of them
-in the rendering cluster:
-
-1. **`crates/protocol/v770/src/packets/player_info.rs`** — `read_add_player`
-   decodes each profile property and throws all three fields away
-   (`let _prop_name`, `let _prop_value`, `let _signature`). This is where a
-   remote player's skin would come from.
-2. **`crates/lodestone-model/src/event.rs`** — `PlayerListEntry` has no
-   properties carrier, so even a decoded property has nowhere to go.
-   `lodestone-game/src/tablist.rs:220-223` already names this gap in a comment:
-   *"the model's `PlayerListEntry` carries no profile properties, so a folded
-   profile has no `textures` (skin) blob yet. When impl-model adds a properties
-   carrier, seed it here"*.
-3. **`crates/lodestone-auth/src/flow.rs`** — `fetch_profile` deserialises only
-   `id` and `name` from `api.minecraftservices.com/minecraft/profile`, discarding
-   its `skins` array (`{url, variant: "CLASSIC"|"SLIM", state}`). This is where
-   **our own** skin would come from, and `ProfileMetadata::skin_url` already
-   exists as a field with nothing ever writing it.
-
-Plus the HTTP GET of the texture URL itself, which must apply vanilla's own host
-restriction (`com/mojang/authlib/yggdrasil/TextureUrlChecker`) rather than
-fetching an arbitrary URL a server hands us.
+**Remote players' skins.** The properties now survive the wire —
+`read_add_player` keeps them and `PlayerListEntry::properties` carries them
+(`None` means "this update had no `ADD_PLAYER`, keep the existing skin", which is
+distinct from `Some(vec![])`) — but nothing turns one into a bound texture yet.
+The render-side piece is the one named in #62's investigation: `EntityBatch`
+keys a texture by the `&'static str` model name, so every player collapses into
+one `player_wide` batch sharing one bind group, and per-player sheets need a
+`(model, texture)` composite key plus interning for runtime names.
 
 Also not built, each deliberately:
 
@@ -174,6 +249,12 @@ Also not built, each deliberately:
 | `<data_dir>/skin.model` | `slim` or `default` (legacy services ids), default wide |
 | `LODESTONE_DATA_DIR` | moves both of the above, per `lodestone_auth::paths::data_dir` |
 
+Both files are **written** by the fetch as well as read, so signing in overwrites
+a hand-placed override. Nothing else is env-driven; the allow list and the size
+cap are constants (`ALLOWED_TEXTURE_DOMAIN`, `MAX_TEXTURE_BYTES`) and are
+deliberately not configurable — a knob that widened the allow list would be the
+whole vulnerability back.
+
 No `client.jar` and no local override means `PlayerPreview::new` returns `None`
 and the recess stays empty — the same deliberate no-synthetic-fallback the rest
 of the container renderer takes.
@@ -184,8 +265,10 @@ of the container renderer takes.
   `entity::player_model` (the two rigs).
 * `lodestone-render` — `entity::player_model_name`, `EntityModelSet`,
   `EntityPipeline`, `GpuEntityModel`.
-* `lodestone-auth` — `paths::data_dir` only, read-only. The fetch would live
-  here.
+* `lodestone-auth` — `paths::data_dir`, plus `texture::fetch_texture` (the host
+  allow list and the GET) and `flow::{Profile, ProfileSkin, SkinVariant}`. Uses
+  `reqwest::Url` for the structural parse, which needs no manifest change since
+  `reqwest` is already a direct dependency.
 * `crate::gpu::entities::entity_texture_from_image` — shared with the world
   entity pass, not copied.
 

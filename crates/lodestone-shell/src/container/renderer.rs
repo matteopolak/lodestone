@@ -558,6 +558,21 @@ impl ContainerRenderer {
         width: u32,
         height: u32,
     ) {
+        // A skin fetched after startup (issue #62) lands here, not at
+        // construction: `PlayerPreview` is built once during `app::lifecycle`'s
+        // resume and never re-reads the cache, while sign-in happens later in the
+        // same run. Draining on the frame is what makes the fetch reach pixels
+        // without a restart — see `crate::skin_fetch`. Cheap: one uncontended
+        // `Mutex::lock` per container frame, `None` on all but one of them.
+        if let Some((model, sheet)) = crate::skin_fetch::take_pending() {
+            let applied = self.set_player_skin(device, queue, model, Some(&sheet));
+            tracing::info!(
+                target: "assets",
+                model = model.serialized_name(),
+                applied,
+                "bound the fetched skin to the inventory avatar"
+            );
+        }
         // `geo.special` counts too — see the same guard in
         // `HudRenderer::render_with_item_models`. A frame whose only content is a
         // chest icon must not be discarded before it reaches `upload`.

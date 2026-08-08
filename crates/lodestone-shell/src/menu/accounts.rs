@@ -1210,6 +1210,12 @@ fn run_device_code_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
                             return;
                         }
                     };
+                    // Issue #62: the profile now carries its skin, so fetch it
+                    // here — this is the only place in the process with both the
+                    // services profile and an HTTP client. Never fatal: every
+                    // failure inside is a `warn!`, because a dead texture CDN
+                    // must not fail an otherwise successful sign-in.
+                    crate::skin_fetch::fetch_own_skin(&client, &session.profile).await;
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_secs())
@@ -1217,7 +1223,7 @@ fn run_device_code_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
                     let profile = AccountProfile {
                         profile_id: session.profile.id,
                         username: session.profile.name.clone(),
-                        skin_url: None,
+                        skin_url: session.profile.skin.as_ref().map(|s| s.url.clone()),
                         last_used: now,
                     };
                     let _ = tx.send(WorkerMsg::SignedIn(profile));
@@ -1372,6 +1378,9 @@ async fn finish_ms_token(
                 return;
             }
         };
+    // Issue #62, as in `run_device_code_login` — both flows reach the same
+    // services profile, so both fetch. Never fatal.
+    crate::skin_fetch::fetch_own_skin(client, &session.profile).await;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1379,7 +1388,7 @@ async fn finish_ms_token(
     let _ = tx.send(WorkerMsg::SignedIn(AccountProfile {
         profile_id: session.profile.id,
         username: session.profile.name.clone(),
-        skin_url: None,
+        skin_url: session.profile.skin.as_ref().map(|s| s.url.clone()),
         last_used: now,
     }));
 }
