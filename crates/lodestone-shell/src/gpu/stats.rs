@@ -18,6 +18,32 @@ pub struct RenderStats {
     /// is false, which is how a walk that silently degraded to pure frustum is
     /// told apart from one that found nothing to cull.
     pub sections_culled_occlusion: usize,
+    /// Opaque sections the occlusion walk **would** have culled, and which drew
+    /// anyway because the graph is in [`TerrainOcclusion::Shadow`]
+    /// (`crate::gpu::TerrainOcclusion`). Always `0` when enforcing, where the
+    /// same sections are in
+    /// [`sections_culled_occlusion`](Self::sections_culled_occlusion) instead.
+    ///
+    /// This is the soak counter: it says what flipping the cull on would remove,
+    /// on the real world you are standing in, while nothing can yet disappear.
+    pub sections_occlusion_shadow: usize,
+    /// Whether the occlusion graph produced a reachable set that is **culling**
+    /// this frame.
+    ///
+    /// The discriminator the silent-degradation failure mode needs: every way the
+    /// walk can go wrong draws *more*, so `sections_culled_occlusion == 0` on its
+    /// own cannot tell "an open surface with nothing occluded" from "the graph
+    /// refused to walk and the cull has quietly been frustum-only all session".
+    pub occlusion_active: bool,
+    /// Sections in the occlusion graph — every section the mesher has produced,
+    /// **including the ones with no geometry**, which is strictly more than
+    /// `section_count()`. A value that tracks `sections_drawn` instead means the
+    /// empty (fully-solid) sections are missing and the walk cannot see a floor.
+    pub occlusion_graph_sections: usize,
+    /// Camera walks performed this session (cumulative, not per frame — the claim
+    /// the cadence makes is that this does *not* increment while you turn on the
+    /// spot, and a per-frame counter cannot express that).
+    pub occlusion_walks: u64,
     /// Sections with **water** geometry drawn this frame.
     ///
     /// Its own counter because the invariant only closes per pass: a water-only

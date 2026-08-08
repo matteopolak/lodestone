@@ -106,7 +106,19 @@ impl RenderState {
         }
         match mesh {
             SectionGeometry::Packed(mesh) => self.upload_packed_section(device, queue, key, mesh),
-            SectionGeometry::Model { opaque, water } => {
+            SectionGeometry::Model {
+                opaque,
+                water,
+                visibility,
+            } => {
+                // The occlusion graph (U3), recorded **before** the early
+                // returns below and regardless of whether this section has any
+                // geometry at all. A fully-enclosed underground section meshes to
+                // nothing and is dropped from `model.sections` — and it is
+                // precisely the section whose connectivity (nothing connects to
+                // anything) stops the camera walk from descending. Recording only
+                // sections that draw would leave the walk a world of open air.
+                self.record_section_visibility(key.coord(), *visibility);
                 let Some(model) = self.model.as_mut() else {
                     return;
                 };
@@ -223,6 +235,11 @@ impl RenderState {
 
     /// Remove a section (e.g. an unloaded chunk).
     pub fn remove_section(&mut self, key: &SectionKey) {
+        // Drop its occlusion-graph entry too, or the graph is the one structure
+        // here that only ever grows — the same shape as the leak issue #479 fixed
+        // for `model.sections` and the origin arena. An absent coord reads as open
+        // to the walk, so over-removing draws more and never less.
+        self.forget_section_visibility(key.coord());
         if let Some(old) = self.sections.remove(key) {
             self.packed_origin_arena.free(old.origin_alloc);
         }

@@ -104,6 +104,23 @@ pub const SPARSE_OPAQUE_MAX: usize = 256;
 /// fully connected ([`SectionVisibility::all`]). Everything in between floods.
 #[must_use]
 pub fn compute_visibility(section: &dyn SectionView) -> SectionVisibility {
+    compute_visibility_from(|x, y, z| section.cell(x, y, z).occludes)
+}
+
+/// [`compute_visibility`] over a bare opacity predicate rather than a
+/// [`SectionView`].
+///
+/// The producer side of the graph lives in the mesh worker, which already has a
+/// cheap `(x,y,z) -> bool` occlusion lookup (`SnapshotModelView::occludes_at`,
+/// vanilla's `isSolidRender` family) and no `SectionView` at all — resolving one
+/// would mean resolving a sprite id and a light level per cell to throw both
+/// away. Erring toward "not opaque" only ever *connects* more faces, which only
+/// ever draws more; that is the safe direction and why the mesher's face-culling
+/// predicate is a legitimate stand-in here.
+#[must_use]
+pub fn compute_visibility_from(
+    opaque: impl Fn(usize, usize, usize) -> bool,
+) -> SectionVisibility {
     let n = SECTION_SIZE;
     let total = n * n * n;
 
@@ -113,7 +130,7 @@ pub fn compute_visibility(section: &dyn SectionView) -> SectionVisibility {
     for x in 0..n {
         for y in 0..n {
             for z in 0..n {
-                if section.cell(x, y, z).occludes {
+                if opaque(x, y, z) {
                     opaque_count += 1;
                 }
             }
@@ -130,7 +147,6 @@ pub fn compute_visibility(section: &dyn SectionView) -> SectionVisibility {
 
     // Union-find over non-opaque cells.
     let mut parent: Vec<usize> = (0..n * n * n).collect();
-    let opaque = |x: usize, y: usize, z: usize| section.cell(x, y, z).occludes;
 
     fn find(parent: &mut [usize], mut i: usize) -> usize {
         while parent[i] != i {
@@ -206,6 +222,13 @@ pub fn compute_visibility(section: &dyn SectionView) -> SectionVisibility {
 #[derive(Debug, Clone, Default)]
 pub struct VisibilityGraph {
     sections: HashMap<SectionCoord, SectionVisibility>,
+    /// Bumped on every insert and every real removal, so a consumer caching a
+    /// walk can tell "the camera has not moved and neither has the world" from
+    /// "the world changed under me". See [`generation`](Self::generation).
+    generation: u64,
+    /// Inclusive section-grid row range covering every coord ever inserted.
+    /// **Monotonically widened, never narrowed** — see [`y_extent`](Self::y_extent).
+    y_extent: Option<(i32, i32)>,
 }
 
 impl VisibilityGraph {
@@ -218,12 +241,47 @@ impl VisibilityGraph {
     /// Insert or replace a section's visibility.
     pub fn insert(&mut self, coord: SectionCoord, vis: SectionVisibility) {
         self.sections.insert(coord, vis);
+        self.generation = self.generation.wrapping_add(1);
+        self.y_extent = Some(match self.y_extent {
+            Some((lo, hi)) => (lo.min(coord.1), hi.max(coord.1)),
+            None => (coord.1, coord.1),
+        });
     }
 
     /// Remove a section (e.g. on chunk unload). Returns its visibility if it was
     /// present, so callers can tell a real eviction from a no-op.
     pub fn remove(&mut self, coord: SectionCoord) -> Option<SectionVisibility> {
-        self.sections.remove(&coord)
+        let previous = self.sections.remove(&coord);
+        if previous.is_some() {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        previous
+    }
+
+    /// How many times this graph has changed. The invalidation key for a cached
+    /// [`walk_visible_bounded`] result, alongside the camera's 8-block cell.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// A section's connectivity, if it is loaded.
+    #[must_use]
+    pub fn get(&self, coord: SectionCoord) -> Option<SectionVisibility> {
+        self.sections.get(&coord).copied()
+    }
+
+    /// The inclusive section-grid row range to walk, or `None` for an empty
+    /// graph. This is the vertical half of [`walk_visible_bounded`]'s bounds.
+    ///
+    /// **It only ever widens.** Recomputing it on removal would mean a scan of
+    /// every key on every chunk unload, and a too-wide range costs a few extra
+    /// all-air rows in the walk (which *draws more*, never less) and converges
+    /// on the dimension's real height within one column's worth of inserts
+    /// anyway — the overworld is 24 rows, full stop.
+    #[must_use]
+    pub fn y_extent(&self) -> Option<(i32, i32)> {
+        self.y_extent
     }
 
     /// Whether a section is loaded.
@@ -312,10 +370,52 @@ pub fn walk_visible(
     camera: SectionCoord,
     in_frustum: impl Fn(SectionCoord) -> bool,
 ) -> Vec<SectionCoord> {
-    let mut result = Vec::new();
     if !graph.contains(camera) {
-        return result;
+        return Vec::new();
     }
+    walk_visible_bounded(graph, camera, |coord| {
+        graph.contains(coord) && in_frustum(coord)
+    })
+}
+
+/// [`walk_visible`], but the graph is allowed to be **sparse**: a coord inside
+/// `in_bounds` with no entry is treated as fully open
+/// ([`SectionVisibility::all`]) rather than as a wall.
+///
+/// # Why this exists, and why the strict version is the trap
+///
+/// [`walk_visible`] stops at any coord the graph does not hold, and **all-air
+/// sections are never meshed** — the shell's `snapshot_section_in` returns
+/// `SnapshotOutcome::Empty` for them, so they never reach a mesh worker and can
+/// have no computed connectivity. A graph built only from meshed sections
+/// therefore dies at the first air gap above the terrain, the walk returns a
+/// handful of coords, the reachable set is discarded as degenerate, and the cull
+/// silently runs as pure frustum ∩ distance **forever**: it looks like it works
+/// and costs exactly what it cost before.
+///
+/// Treating an absent in-bounds coord as air is not a workaround, it is vanilla's
+/// own model: `ViewArea` holds a `SectionRenderDispatcher.RenderSection` for
+/// *every* section in the render-distance cylinder regardless of content, and
+/// `SectionOcclusionGraph` walks those. An all-air section there has an empty
+/// `VisibilitySet`, which is `all()` here.
+///
+/// `in_bounds` **must be finite** — this walk has no node cap and its only
+/// termination condition is running out of in-bounds coords. The production
+/// caller passes the render-distance cylinder (vanilla's circular view
+/// membership × the graph's [`y_extent`](VisibilityGraph::y_extent)).
+///
+/// The frustum is deliberately *not* passed here in production: reachability is
+/// cached across frames and re-walked only on an 8-block camera-cell crossing or
+/// a graph change (vanilla's `invalidateIfNeeded`), while the frustum is applied
+/// per frame over the cached set. Folding the frustum in would make every mouse
+/// movement a re-walk.
+#[must_use]
+pub fn walk_visible_bounded(
+    graph: &VisibilityGraph,
+    camera: SectionCoord,
+    in_bounds: impl Fn(SectionCoord) -> bool,
+) -> Vec<SectionCoord> {
+    let mut result = Vec::new();
     let mut nodes: HashMap<SectionCoord, WalkNode> = HashMap::new();
     nodes.insert(
         camera,
@@ -332,7 +432,8 @@ pub fn walk_visible(
 
     while let Some(coord) = queue.pop_front() {
         let node = nodes[&coord];
-        let vis = graph.sections[&coord];
+        // An in-bounds coord with no entry is air — see this function's doc.
+        let vis = graph.get(coord).unwrap_or_else(SectionVisibility::all);
         for face in Face::ALL {
             // Never reverse along an axis we've already travelled.
             if !node.exits[face.index()] {
@@ -349,7 +450,7 @@ pub fn walk_visible(
                 continue;
             }
             let next = step(coord, face);
-            if !graph.contains(next) || !in_frustum(next) {
+            if !in_bounds(next) {
                 continue;
             }
             let entry = face.opposite();
@@ -607,6 +708,70 @@ mod tests {
             visible.contains(&(1, 0, 2)),
             "mirror image of arm 1: the Z corridor is entered through NegZ by the (1,0,0) path"
         );
+    }
+
+    /// The trap this whole `_bounded` variant exists for, stated as a test:
+    /// a graph holding only *meshed* sections, with an air gap between the camera
+    /// and the terrain. The strict walk dies at the gap; the bounded one crosses
+    /// it and still stops at the solid section.
+    #[test]
+    fn bounded_walk_crosses_an_unmeshed_air_gap_and_the_strict_one_does_not() {
+        // Terrain at x==3 (solid, meshed); x==1 and x==2 are all-air and hence
+        // absent from the graph entirely. Camera at x==0, which is also air.
+        let mut g = VisibilityGraph::new();
+        g.insert((0, 0, 0), SectionVisibility::all());
+        g.insert((3, 0, 0), SectionVisibility::NONE);
+        g.insert((4, 0, 0), SectionVisibility::all());
+
+        let bounds = |c: SectionCoord| (0..=4).contains(&c.0) && c.1 == 0 && c.2 == 0;
+        let visible = walk_visible_bounded(&g, (0, 0, 0), bounds);
+        assert!(visible.contains(&(1, 0, 0)), "the air gap is reachable");
+        assert!(visible.contains(&(2, 0, 0)));
+        assert!(visible.contains(&(3, 0, 0)), "the terrain itself is drawn");
+        assert!(
+            !visible.contains(&(4, 0, 0)),
+            "the solid section still blocks — treating air as open must not \
+             open a path *through* real geometry"
+        );
+
+        // The control: the same graph under the strict walk reaches the camera's
+        // own section and nothing else, which is exactly the silent degradation
+        // (`reachable` too small to be believed → fall back to pure frustum).
+        let strict = walk_visible(&g, (0, 0, 0), |_| true);
+        assert_eq!(strict, vec![(0, 0, 0)]);
+    }
+
+    #[test]
+    fn generation_and_y_extent_track_inserts() {
+        let mut g = VisibilityGraph::new();
+        assert_eq!(g.y_extent(), None);
+        let g0 = g.generation();
+        g.insert((0, -4, 0), SectionVisibility::all());
+        g.insert((0, 19, 0), SectionVisibility::all());
+        assert_eq!(g.y_extent(), Some((-4, 19)));
+        assert_ne!(g.generation(), g0);
+        // A removal bumps the generation; a no-op removal does not.
+        let g1 = g.generation();
+        assert!(g.remove((0, 19, 0)).is_some());
+        assert_ne!(g.generation(), g1);
+        let g2 = g.generation();
+        assert!(g.remove((7, 7, 7)).is_none());
+        assert_eq!(g.generation(), g2);
+        // Monotonic by design: still (-4, 19) after the removal.
+        assert_eq!(g.y_extent(), Some((-4, 19)));
+    }
+
+    #[test]
+    fn compute_visibility_from_matches_the_section_view_form() {
+        // Same wall, expressed as a predicate rather than a `SectionView`.
+        let from_view = compute_visibility(&Wall);
+        let from_pred = compute_visibility_from(|x, _y, _z| x == 8);
+        for a in Face::ALL {
+            for b in Face::ALL {
+                assert_eq!(from_view.connects(a, b), from_pred.connects(a, b));
+            }
+        }
+        assert!(!from_pred.connects(Face::NegX, Face::PosX));
     }
 
     #[test]

@@ -261,9 +261,27 @@ impl RenderState {
         // is a post-projection screen distortion with no live producer, and
         // culling against a warped frustum would drop geometry the warp pulls back
         // into view. `camera.frustum()` is the honest view volume.
+        //
+        // The reachable set is the occlusion graph's camera walk (U3), cached
+        // across frames and re-walked only on an 8-block camera-cell crossing or
+        // a graph change — vanilla's cadence, and the reason rotation is free.
+        // `None` (no graph yet, the packed demo path, render distance 0, or
+        // `TerrainOcclusion::Off`) leaves the cull at distance ∩ frustum, which
+        // draws *more*; `occlusion_active` is what tells that apart from a frame
+        // with nothing occluded. See `gpu/occlusion.rs`.
+        let reachable = self.frame_reachable(camera);
+        let occlusion_mode = match self.terrain_occlusion() {
+            super::TerrainOcclusion::Shadow => lodestone_render::OcclusionMode::Shadow,
+            super::TerrainOcclusion::Off | super::TerrainOcclusion::On => {
+                lodestone_render::OcclusionMode::Enforce
+            }
+        };
         let terrain_cull = TerrainCull::new(camera, self.render_distance_chunks)
-            .with_reachable(None)
+            .with_reachable_mode(reachable, occlusion_mode)
             .disabled(!self.terrain_culling);
+        stats.occlusion_active = terrain_cull.occlusion_active();
+        stats.occlusion_graph_sections = self.occlusion_graph_sections();
+        stats.occlusion_walks = self.occlusion_walks();
 
         // The local player's own third-person body, if a caller has wired one
         // in (see `set_third_person_body_source`). `None` — true for every
@@ -526,7 +544,16 @@ impl RenderState {
                     // counters == resident sections with opaque geometry` — and
                     // only that; the water pass closes against its own set below.
                     match terrain_cull.classify(key.coord()) {
-                        CullVerdict::Visible => {}
+                        CullVerdict::Visible => {
+                            // Shadow mode: this section is on screen and in range,
+                            // the walk says it is unreachable, and we draw it
+                            // anyway. Only asked in the `Visible` arm — see
+                            // `shadow_would_cull`'s doc for why asking it of an
+                            // off-screen section would misattribute the cull.
+                            if terrain_cull.shadow_would_cull(key.coord()) {
+                                stats.sections_occlusion_shadow += 1;
+                            }
+                        }
                         CullVerdict::Distance => {
                             stats.sections_culled_distance += 1;
                             continue;
@@ -547,8 +574,13 @@ impl RenderState {
                     stats.sections_drawn += 1;
                     stats.total_quads += section.quad_count;
                 }
+                // Opaque terrain is order-independent (depth sorts it), so this
+                // pass orders by arena block — the grouping that removes buffer
+                // binds. The water pass below must order by *distance* instead and
+                // pays for it; see there.
+                draws.sort_unstable_by_key(|d| d.block);
                 stats.draw_calls += draws.len();
-                stats.terrain_buffer_binds += emit_terrain_draws(&mut pass, model, &mut draws);
+                stats.terrain_buffer_binds += emit_terrain_draws(&mut pass, model, &draws);
             }
 
             // Entities share the terrain depth buffer (depth test + write on, so
@@ -793,10 +825,33 @@ impl RenderState {
                 pass.set_pipeline(&model.water_pipeline.pipeline);
                 pass.set_bind_group(1, &model.atlas_bind_group, &[]);
                 pass.set_bind_group(2, &model.water_anim_bind_group, &[]);
-                // Same collect-then-emit-by-block shape as the opaque pass above;
-                // water shares the arena, so a water span and an opaque span from
-                // the same section usually land in the same block and share its
-                // bind.
+                // Same collect-then-emit shape as the opaque pass above, but
+                // ordered **back to front by section**, not by arena block.
+                //
+                // This is a correctness fix, not a perf one (U5). `model.sections`
+                // is a `HashMap`, so before this the translucent water of every
+                // section was submitted in *hash iteration order*: alpha blending
+                // is order-dependent, so two water surfaces overlapping along the
+                // view axis composited in whatever order the hasher happened to
+                // produce, and that order changes when a section is added or
+                // removed rather than when the camera moves. Vanilla sorts its
+                // translucent sections by distance every frame
+                // (`LevelRenderer`'s `TRANSLUCENT` pass walks the visible list in
+                // reverse); this does the same on section centres.
+                //
+                // It costs the block grouping for this pass — a back-to-front
+                // order interleaves arena blocks — which is exactly the trade the
+                // culling work bought room for: `water_sections_drawn` is a small
+                // fraction of the resident set now, so the extra binds are on a
+                // set that culling already shrank. Correctness wins the tie.
+                //
+                // Vanilla's *intra*-section resort (`TranslucentMesh`/
+                // `SortViewpoint`, re-uploading a section's index order on octant
+                // change) is deliberately **not** here: water quads within one
+                // section are near-coplanar top faces in the overwhelming case, so
+                // the cross-section order is the half that produces the visible
+                // artefact, and re-uploading an index span that now lives inside a
+                // shared arena block is a separate unit.
                 let mut water_draws: Vec<TerrainDraw> =
                     Vec::with_capacity(model.sections.len() / 4);
                 for (key, section) in &model.sections {
@@ -808,15 +863,17 @@ impl RenderState {
                         continue;
                     }
                     stats.water_sections_drawn += 1;
-                    water_draws.push(TerrainDraw::new(
-                        water,
-                        section.origin_alloc.offset() as u32,
-                    ));
+                    let mut draw =
+                        TerrainDraw::new(water, section.origin_alloc.offset() as u32);
+                    draw.sort_dist2 =
+                        super::terrain::section_center_distance_sq(key.coord(), camera.position);
+                    water_draws.push(draw);
                     stats.total_quads += section.water_quad_count;
                 }
+                super::terrain::sort_back_to_front(&mut water_draws);
                 stats.draw_calls += water_draws.len();
                 stats.terrain_buffer_binds +=
-                    emit_terrain_draws(&mut pass, model, &mut water_draws);
+                    emit_terrain_draws(&mut pass, model, &water_draws);
             }
 
             // The *translucent* half of the debris last among the world geometry
@@ -946,16 +1003,19 @@ impl RenderState {
 /// number of buffer-bind *pairs* issued — the counter that says whether the
 /// grouping is actually working.
 ///
-/// `draws` is sorted in place: [`DEDICATED_BLOCK`] is `u32::MAX`, so the rare
-/// section that fell back to its own buffers sorts to the end and never splits an
-/// arena run. A dedicated draw always pays its own bind pair, which is exactly the
-/// pre-arena cost for that one section.
+/// `draws` arrives **already ordered**, and the two passes order it differently:
+/// opaque sorts by block (grouping is free, since depth sorts the pixels), water
+/// sorts back to front (the order is the correctness requirement — see the water
+/// pass). Sorting here instead would silently undo the water order, which is why
+/// it moved out. [`DEDICATED_BLOCK`] is `u32::MAX`, so under the opaque order the
+/// rare section that fell back to its own buffers sorts to the end and never
+/// splits an arena run; under the water order it pays its own bind pair wherever
+/// it lands, which is exactly the pre-arena cost for that one section.
 fn emit_terrain_draws(
     pass: &mut wgpu::RenderPass<'_>,
     model: &super::terrain::ModelRenderer,
-    draws: &mut [TerrainDraw<'_>],
+    draws: &[TerrainDraw<'_>],
 ) -> usize {
-    draws.sort_unstable_by_key(|d| d.block);
     let mut bound: Option<u32> = None;
     let mut bind_pairs = 0usize;
     for draw in draws.iter() {
