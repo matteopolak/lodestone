@@ -284,11 +284,17 @@ impl RenderState {
         stats.occlusion_walks = self.occlusion_walks();
 
         // The local player's own third-person body, if a caller has wired one
-        // in (see `set_third_person_body_source`). `None` — true for every
-        // caller today, since no third-person camera exists — reproduces this
+        // in (see `set_third_person_body_source`). `None` reproduces this
         // function's behaviour before this existed exactly: `entities` passes
         // straight through unmodified and the arm draws unconditionally
         // below.
+        //
+        // `None` is `CameraType::isFirstPerson()`, which is **not** "there is no
+        // third-person camera" — that note was true when this was written and is
+        // not now. `Sim::third_person_body_state` returns `Some` in *both* of
+        // vanilla's detached modes, back and front, so `third_person_body_drawn`
+        // below correctly suppresses the arm and the first-person overlay group
+        // in the front view too.
         let body_state = self.third_person_body.sample();
         stats.third_person_body_drawn = body_state.is_some();
         let mut entities_with_body: Vec<EntityDraw>;

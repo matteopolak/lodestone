@@ -142,14 +142,39 @@ alone, which is what the pre-existing winding gates covered.
 The two things the section below used to describe as missing now exist, both
 in `crates/lodestone-shell`:
 
-1. **The camera-mode toggle** is `Sim::third_person: bool`
-   (`crates/lodestone-shell/src/sim.rs`), flipped by `Sim::toggle_third_person`
-   and bound to `F5` in `app.rs`'s `WindowEvent::KeyboardInput` arm — vanilla's
-   own key for the same toggle. Exactly one bool, per
-   `ThirdPersonBodySource`'s own design note quoted below: there is still no
-   richer "camera mode" enum anywhere, because `Sim::render_camera` and
-   `Sim::third_person_body_state` both read this one flag and a `None`/`Some`
-   split from the latter *is* the toggle as far as `gpu.rs` is concerned.
+1. **The camera mode** is `Sim::camera_type: camera_rig::CameraType`
+   (`crates/lodestone-shell/src/sim.rs`), advanced by `Sim::cycle_camera_type`
+   and bound to `F5` in `app/lifecycle.rs`'s `KeyOutcome::TogglePerspective` arm
+   — vanilla's own key.
+
+   **This was a `bool` and this paragraph argued no richer enum was needed.**
+   That argument was half right and shipped a missing feature: vanilla's
+   `CameraType` has *three* states (`FIRST_PERSON`, `THIRD_PERSON_BACK`,
+   `THIRD_PERSON_FRONT`), so a bool simply had no front view — the owner
+   reported it as "the other third-person perspective is missing". The part that
+   was right is the seam: `ThirdPersonBodySource`'s `None`/`Some` split is still
+   the whole of what `gpu.rs` knows about camera mode, because it answers
+   `CameraType::isFirstPerson()`, and that genuinely is two-valued.
+
+   The distinction that matters when you touch a consumer:
+
+   | ask | who asks it | why |
+   |---|---|---|
+   | `is_first_person()` | `Sim::render_camera`'s early return, `Sim::third_person_body_state`, and hence `RenderStats::third_person_body_drawn` → the first-person arm and the first-person screen-overlay group in `gpu/frame.rs`, and the spyglass FOV zoom | "is the camera in the player's head". Vanilla's own predicate at every one of these sites |
+   | `is_mirrored()` | `camera_rig::third_person_camera` **only** | "is this the front view", exactly as in `Camera.alignWithEntity`'s detached branch |
+
+   Asking "is the camera *behind* me" at an `is_first_person` site is how the
+   first-person arm and the pumpkin/underwater overlays reappear in the front
+   view. No `cargo check` sees that — the bool still compiles.
+
+   The front view itself is not a second camera: `Camera.java:266-271` is
+   `setRotation(this.yRot + 180.0F, -this.xRot)` followed by the *same*
+   `move(-getMaxZoom(...), 0, 0)` pullback, so `third_person_camera` mirrors the
+   two angles by field assignment and then reads `forward()` back off the
+   mirrored camera. The angles are left **unwrapped**, as vanilla leaves them;
+   an earlier draft wrapped into `-180..180` and got the wrap backwards, mapping
+   a yaw of `0` to `0` — i.e. no mirror at all at the one heading a spot check
+   is most likely standing on.
 2. **The collision-aware pullback** is
    `crate::camera_rig::{third_person_camera, collision_pullback}`
    (`crates/lodestone-shell/src/camera_rig.rs`). `collision_pullback` marches
@@ -250,6 +275,30 @@ reachable in principle, but on the one path a shipped binary actually runs.
   first-person arm's own documented gaps (`prepare_first_person_arm`'s doc
   comment). Adding them is a shell-side animation-input concern, not a change
   to this bridge.
+- **The sneak pose is wired, and it is the pose and not the shift key.**
+  `AnimInput::crouching` drives `Skeleton::pose`'s humanoid crouch branch
+  (`HumanoidModel.java:274-284`: `body.xRot = 0.5F`, arms `+= 0.4F` pitch and
+  `+= 3.2` texels down, legs `z += 4.0`, head `y += 4.2`, body `y += 3.2` —
+  assigning the body pitch, adding everything else). It sits after the attack
+  swing and before the idle arm bob, which is vanilla's order and is observable
+  in both directions: the swing twists `body.y_rot` while the crouch assigns
+  `body.x_rot`, and the bob still rides on top of the lowered arms.
+
+  Two producers feed it, and both had to be right about *which* flag:
+  `Sim::third_person_body_state` reads `PlayerState::pose == Pose::Crouching`
+  (the fit-gated pose `lodestone_physics::pose::update_player_pose` already
+  writes every tick — the same thing that lowers the eye to `1.27`), and
+  `entities.rs`'s `extract_entity_draws` reads the `Pose` ingest component, which
+  ingest had been folding and *nothing* had been reading. Neither reads
+  `EntityFlags & 0x02`: vanilla's `isCrouching()` is `hasPose(Pose.CROUCHING)`
+  and the shift bit is `isShiftKeyDown()`/`isDiscrete()` — which is what the
+  nametag see-through gate reads, correctly, since `shouldShowName` really does
+  ask `isDiscrete()`. Two questions, two fields; shift-held in a one-block gap
+  is `SWIMMING`, not `CROUCHING`.
+
+  Still unmodelled, because `ArmPose` does not carry the poses that need it:
+  `HumanoidModel.java:370`'s extra `-PI/12` on a crouching `TOOT_HORN`/`BRUSH`
+  arm.
 - **Head yaw never diverges from body yaw.** `Sim::third_person_body_state`
   always passes `head_yaw_deg: 0.0` — vanilla's independent
   head-turn-then-body-catches-up (`LivingEntity.tickHeadTurn`) is not modelled
@@ -272,7 +321,7 @@ reachable in principle, but on the one path a shipped binary actually runs.
 
 ## Configuration
 
-No feature flag or env var. In-game, `F5` toggles `Sim::third_person`, which is
+No feature flag or env var. In-game, `F5` cycles `Sim::camera_type`, which is
 the entire "camera mode" state — `ThirdPersonBodySource` unset (`gpu.rs`'s
 constructed default) is no longer reachable in a real session once `app.rs`
 installs the per-frame source at first draw, but remains the correct "feature

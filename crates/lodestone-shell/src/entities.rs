@@ -140,7 +140,7 @@ use glam::Vec3;
 use lodestone_assets::ResourceLocation;
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::entity::{
-    AttackSwing, EntityFlags, EntityIndex, HurtTime, ItemUse, MinecraftEntityId, MobState,
+    AttackSwing, EntityFlags, EntityIndex, HurtTime, ItemUse, MinecraftEntityId, MobState, Pose,
 };
 use lodestone_ecs::player::{
     CollisionSource, LocalPlayer, PhysicsState, PlayerCollision, Profile,
@@ -1317,6 +1317,12 @@ fn render_pitch(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
 /// through [`EntityIndex`] the same way `swing_progress` is (issue #379). It was a
 /// hardcoded `false` here, which made the zombie arm lift in
 /// `Skeleton::animate_zombie_arms` unreachable.
+///
+/// `crouching` is `Entity.isCrouching()` — the [`Pose`] component at metadata
+/// index 6, **not** the shift-key bit of the shared-flags byte; see the `poses`
+/// query in [`extract_entity_draws`] for why the two are not interchangeable.
+/// It drives `Skeleton::pose`'s humanoid crouch branch, so a sneaking remote
+/// player hunches exactly as the local self-avatar does.
 fn render_anim(
     from: &InterpFrom,
     to: &InterpTo,
@@ -1326,6 +1332,7 @@ fn render_anim(
     swing_progress: f32,
     arm_pose: ArmPoseChoice,
     aggressive: bool,
+    crouching: bool,
 ) -> AnimInput {
     let body = render_yaw(from, to, clock);
     let head = clamp_head_to_body(body, render_head_yaw(from, to, clock), MAX_HEAD_YAW);
@@ -1339,6 +1346,7 @@ fn render_anim(
         aggressive,
         arm_pose: arm_pose.pose,
         arm_pose_left_hand: arm_pose.left_hand,
+        crouching,
     }
 }
 
@@ -1580,6 +1588,19 @@ pub fn extract_entity_draws(
     // `Mob.isAggressive()` into a drawn bow and into a zombie's raised arms — see
     // `arm_pose_for` and issue #379.
     mob_states: Query<&MobState>,
+    // `Pose` lives on the ingest entity too (`apply_entity_metadata` inserts it
+    // from the pose accessor at index 6 — a *separate* field from the shared-flags
+    // byte `EntityFlags` carries), bridged the same way. It was folded and read by
+    // nothing: this is the query that turns it into a sneaking player's crouch.
+    //
+    // **Deliberately not `EntityFlags & 0x02`.** Vanilla's `isCrouching()` is
+    // `hasPose(Pose.CROUCHING)` (`Entity.java:2711-2713`) and the shift-key bit is
+    // `isShiftKeyDown()`/`isDiscrete()` (`:2691-2705`) — which is what the
+    // *nametag* see-through gate below reads, correctly, because
+    // `EntityRenderer.shouldShowName` really does ask `isDiscrete()`. Two
+    // questions, two fields; a shift-key-down player whose standing box does not
+    // fit is `SWIMMING`, not `CROUCHING`.
+    poses: Query<&Pose>,
     tracks: Query<(
         &MinecraftEntityId,
         &RenderKind,
@@ -1647,6 +1668,14 @@ pub fn extract_entity_draws(
             .and_then(|entity| item_uses.get(entity).ok())
             .map(|item_use| *item_use);
         let arm_pose = arm_pose_for(&kind.0, &equipment.0, item_use, aggressive);
+        // `Entity.isCrouching()`. `false` for an entity that has never reported
+        // the pose accessor (`Pose` absent) — which is every entity that has
+        // never left `STANDING`, since the server only sends metadata that
+        // differs from the default.
+        let crouching = index
+            .get(id.0)
+            .and_then(|entity| poses.get(entity).ok())
+            .is_some_and(|pose| pose.0 == lodestone_model::EntityPose::Crouching);
         // `0.0` (and hence a bit-identical `pose_swelling` to `pose`, per that
         // function's own doc) for every non-creeper — `fuse` is `None` — and
         // for a creeper whose fuse has never moved off idle. Vanilla's own
@@ -1687,6 +1716,7 @@ pub fn extract_entity_draws(
                 swing_progress,
                 arm_pose,
                 aggressive,
+                crouching,
             ),
             name_tag: name_tag.0.clone(),
             hurt,

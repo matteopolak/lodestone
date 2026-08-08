@@ -114,23 +114,135 @@ pub const THIRD_PERSON_DISTANCE: f32 = 4.0;
 /// way (`partialTickTime` clip step 0.1).
 pub const COLLISION_MARGIN: f32 = 0.1;
 
+/// Vanilla's `net.minecraft.client.CameraType`, transcribed from the enum rather
+/// than from a call site — the three states `F5` cycles through.
+///
+/// ```java
+/// // CameraType.java
+/// FIRST_PERSON(true, false),
+/// THIRD_PERSON_BACK(false, false),
+/// THIRD_PERSON_FRONT(false, true);
+/// ```
+///
+/// # The two predicates are not complements, and that is the whole point
+///
+/// Vanilla asks [`is_first_person`](Self::is_first_person) — "is the camera in
+/// the player's head" — everywhere it gates the hand, the screen overlays and
+/// the FOV zoom, and [`is_mirrored`](Self::is_mirrored) in exactly one place,
+/// `Camera.alignWithEntity`'s detached branch. A call site that means "the
+/// camera is not in the head" and asks "is it *behind* them" ships the
+/// first-person arm and the pumpkin/underwater overlays back into the front
+/// view — which is why this carries two named predicates rather than one bool
+/// plus an ad-hoc comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum CameraType {
+    /// `FIRST_PERSON` — the true eye. The default, as in vanilla's `Options`.
+    #[default]
+    FirstPerson,
+    /// `THIRD_PERSON_BACK` — pulled straight backward along the view direction.
+    ThirdPersonBack,
+    /// `THIRD_PERSON_FRONT` — the same rig with the rotation mirrored, so the
+    /// camera ends up in front of the player looking back at them.
+    ThirdPersonFront,
+}
+
+impl CameraType {
+    /// `CameraType.isFirstPerson()`. **This, not "is it third person", is what
+    /// almost every consumer wants** — see the type's own docs.
+    #[must_use]
+    pub const fn is_first_person(self) -> bool {
+        matches!(self, Self::FirstPerson)
+    }
+
+    /// `CameraType.isMirrored()` — true for the front view alone. Read by
+    /// [`third_person_camera`] and nothing else, exactly as in vanilla.
+    #[must_use]
+    pub const fn is_mirrored(self) -> bool {
+        matches!(self, Self::ThirdPersonFront)
+    }
+
+    /// `CameraType.cycle()` — `VALUES[(ordinal() + 1) % VALUES.length]`, i.e.
+    /// what `F5` does. First → back → front → first.
+    #[must_use]
+    pub const fn cycle(self) -> Self {
+        match self {
+            Self::FirstPerson => Self::ThirdPersonBack,
+            Self::ThirdPersonBack => Self::ThirdPersonFront,
+            Self::ThirdPersonFront => Self::FirstPerson,
+        }
+    }
+}
+
 /// Builds the render camera for the current camera mode: the true first-person
-/// eye when `third_person` is `false`, or that same eye pulled straight
+/// eye for [`CameraType::FirstPerson`], or that same eye pulled straight
 /// backward along its own view direction — vanilla's actual "back" mode
 /// algorithm, not an approximation of it — clamped so it never passes through
-/// real collision geometry.
+/// real collision geometry. For [`CameraType::ThirdPersonFront`] the rotation is
+/// mirrored *first* and the pullback then runs along the mirrored view
+/// direction, so the camera lands in front of the player facing them.
 ///
 /// `view` is whichever [`CollisionView`] adapter the caller already has live
 /// (`LiveCollision` on a server, `WorldCollision` on the offline fixture) —
 /// this function is generic over it so it needs no dependency on
 /// `crate::collision`'s concrete types.
+///
+/// # The mirror is a field write, deliberately, and not a decomposition
+///
+/// `Camera.alignWithEntity` (`Camera.java:266-271`) is:
+///
+/// ```java
+/// this.detached = !this.minecraft.options.getCameraType().isFirstPerson();
+/// if (this.detached) {
+///    if (this.minecraft.options.getCameraType().isMirrored()) {
+///       this.setRotation(this.yRot + 180.0F, -this.xRot);
+///    }
+///    ...
+///    this.move(-this.getMaxZoom(...), 0.0F, 0.0F);
+/// }
+/// ```
+///
+/// so it is `yaw + 180`, `-pitch`, applied to the *angles* and never to a
+/// direction vector. Writing `Camera::yaw`/`pitch` directly keeps it that way:
+/// there is no `atan2` here, so the pole hazard [`yaw_pitch_from_forward_or`]
+/// exists for cannot be reintroduced by this path. Only `forward()` is read back
+/// afterwards, and that is a pure sin/cos of the two angles.
+///
+/// # One recorded divergence in ordering
+///
+/// Vanilla mirrors and pulls back in `Camera.setup`, then folds the bob into the
+/// *projection* in `GameRenderer.renderLevel`, so its bob acts in the final
+/// (already-mirrored) eye space. `Sim::render_camera` folds the bob into the
+/// eye camera *before* calling this, so in the front view the bob's ≤`0.05`-block
+/// sway is mirrored along with everything else. That inherits the back view's
+/// existing bob-then-pullback ordering rather than restructuring shared
+/// behaviour for a term below noticing; it is not a claim that the orders agree.
 #[must_use]
-pub fn third_person_camera(eye: Camera, third_person: bool, view: &impl CollisionView) -> Camera {
-    if !third_person {
+pub fn third_person_camera(
+    eye: Camera,
+    camera_type: CameraType,
+    view: &impl CollisionView,
+) -> Camera {
+    if camera_type.is_first_person() {
         return eye;
     }
-    let back = -eye.forward();
-    let clamped = collision_pullback(eye.position, back, THIRD_PERSON_DISTANCE, view);
+    let mut cam = eye;
+    if camera_type.is_mirrored() {
+        // `setRotation(this.yRot + 180.0F, -this.xRot)`, and **unwrapped**,
+        // exactly as `Camera.setRotation` leaves it: it is a plain field
+        // assignment there too. The first version of this line wrapped into
+        // `-180..180` for tidiness and got the wrap itself wrong — `(yaw + 180)
+        // .rem_euclid(360) - 180` maps a yaw of `0` straight back to `0`, i.e.
+        // silently no mirror at all at the one heading a spot check is most
+        // likely to be standing on. `Camera::forward` is periodic in yaw, so
+        // there is nothing for a wrap to buy here.
+        cam.yaw = eye.yaw + 180.0;
+        cam.pitch = -eye.pitch;
+    }
+    // Read off `cam`, not `eye`: in the front view the pullback has to run along
+    // the *mirrored* forward, which is what puts the camera in front of the
+    // player rather than doubling the distance behind them.
+    let back = -cam.forward();
+    let clamped = collision_pullback(cam.position, back, THIRD_PERSON_DISTANCE, view);
     // The margin only matters once something real was actually hit: in open
     // air `clamped` already equals the desired distance exactly, and shaving
     // a further 0.1 off *that* would make third person sit permanently 0.1
@@ -140,7 +252,6 @@ pub fn third_person_camera(eye: Camera, third_person: bool, view: &impl Collisio
     } else {
         clamped
     };
-    let mut cam = eye;
     cam.position += back * distance;
     cam
 }
@@ -1577,8 +1688,93 @@ mod tests {
             ..Camera::default()
         };
         let world = empty_world();
-        let cam = third_person_camera(eye, false, &world);
+        let cam = third_person_camera(eye, CameraType::FirstPerson, &world);
         assert_eq!(cam.position, eye.position);
+    }
+
+    #[test]
+    fn f5_cycles_first_back_front_and_wraps() {
+        // `CameraType.cycle()` is `VALUES[(ordinal() + 1) % 3]`, so three presses
+        // return to where they started — the property a bool cannot have.
+        let mut t = CameraType::default();
+        assert_eq!(t, CameraType::FirstPerson, "vanilla's Options default");
+        t = t.cycle();
+        assert_eq!(t, CameraType::ThirdPersonBack);
+        t = t.cycle();
+        assert_eq!(t, CameraType::ThirdPersonFront);
+        t = t.cycle();
+        assert_eq!(t, CameraType::FirstPerson);
+        // The two predicates are not complements: exactly one state is first
+        // person, exactly one is mirrored, and they are different states.
+        for (ty, first, mirrored) in [
+            (CameraType::FirstPerson, true, false),
+            (CameraType::ThirdPersonBack, false, false),
+            (CameraType::ThirdPersonFront, false, true),
+        ] {
+            assert_eq!(ty.is_first_person(), first, "{ty:?}");
+            assert_eq!(ty.is_mirrored(), mirrored, "{ty:?}");
+        }
+    }
+
+    #[test]
+    fn the_front_view_lands_in_front_of_the_player_facing_back_at_them() {
+        let eye = Camera {
+            position: Vec3::new(0.0, 0.0, 0.0),
+            yaw: 0.0, // forward = +Z
+            pitch: 20.0,
+            ..Camera::default()
+        };
+        let world = empty_world();
+        let front = third_person_camera(eye, CameraType::ThirdPersonFront, &world);
+        let back = third_person_camera(eye, CameraType::ThirdPersonBack, &world);
+
+        // `setRotation(yRot + 180, -xRot)`: the two angles, not a direction, and
+        // unwrapped. `yaw: 0` is the case a wrap gets wrong in the invisible
+        // direction — it lands back on `0` and mirrors nothing — so it is the yaw
+        // this test uses.
+        assert!((front.yaw - 180.0).abs() < 1e-4, "yaw {}", front.yaw);
+        assert!((front.pitch - -20.0).abs() < 1e-4, "pitch {}", front.pitch);
+
+        // The two third-person modes must sit on **opposite** sides of the eye,
+        // which is the assertion a "same rig, flipped angles" bug would fail
+        // while still producing a plausible-looking detached camera: with the
+        // pullback read off the *unmirrored* forward, `front.position` would
+        // equal `back.position` exactly.
+        assert!(
+            front.position.z > 0.0 && back.position.z < 0.0,
+            "front {} vs back {}",
+            front.position.z,
+            back.position.z
+        );
+        assert!(
+            (front.position.z - -back.position.z).abs() < 1e-3,
+            "same distance, other side: front {} back {}",
+            front.position.z,
+            back.position.z
+        );
+        // And it looks back at the eye it came from: the vector from the camera
+        // to the player must point along the camera's own forward.
+        let to_player = (eye.position - front.position).normalize();
+        assert!(
+            to_player.dot(front.forward()) > 0.99,
+            "front camera must face the player, dot = {}",
+            to_player.dot(front.forward())
+        );
+        // The control is on *orientation*, not on "does it look at the player" —
+        // that premise was false and failed here on the first run: a back camera
+        // sits behind the player looking forward, so it looks at (through) them
+        // too, and `to_player · forward` is `+1` for both modes. What actually
+        // separates them is that the back view leaves the eye's orientation
+        // untouched while the front view inverts it.
+        assert!(
+            (back.forward() - eye.forward()).length() < 1e-5,
+            "control: the back view must not rotate the camera at all"
+        );
+        assert!(
+            front.forward().dot(eye.forward()) < -0.99,
+            "the front view looks the opposite way from the eye, dot = {}",
+            front.forward().dot(eye.forward())
+        );
     }
 
     #[test]
@@ -1590,7 +1786,7 @@ mod tests {
             ..Camera::default()
         };
         let world = empty_world();
-        let cam = third_person_camera(eye, true, &world);
+        let cam = third_person_camera(eye, CameraType::ThirdPersonBack, &world);
         // Pulled *backward*, i.e. -Z, by the full desired distance with
         // nothing to collide against.
         assert!((cam.position.z - (-THIRD_PERSON_DISTANCE)).abs() < 1e-4);
@@ -1616,7 +1812,7 @@ mod tests {
             }
         }
         let world = FakeWorld(blocks);
-        let cam = third_person_camera(eye, true, &world);
+        let cam = third_person_camera(eye, CameraType::ThirdPersonBack, &world);
         assert!(
             (cam.position.z - -(1.0 - COLLISION_MARGIN)).abs() < 1e-4,
             "got {}",
