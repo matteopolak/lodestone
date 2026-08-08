@@ -53,7 +53,8 @@ use crate::mobs::{LiveMobSource, MobHandle};
 use crate::players::{PlayerAwareSource, PlayerRegistry};
 use crate::protocol::ServerProtocol;
 use crate::server::{
-    EntitySource, NoEntities, serve_connection_shared, serve_connection_with_mob_events_shared,
+    EntitySource, NoEntities, serve_connection_shared,
+    serve_connection_with_mob_events_and_commands_shared, serve_connection_with_mob_events_shared,
 };
 use crate::spawn::{Task, spawn};
 use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
@@ -296,6 +297,78 @@ pub struct IntegratedServer {
     /// and the UDP port is released before `shutdown()` returns.
     #[cfg(not(target_arch = "wasm32"))]
     query_task: Option<Task>,
+    /// The LAN-discovery multicast broadcaster (issue #535), `Some` only when
+    /// [`LanConfig::discovery`] asked for one and the UDP bind succeeded.
+    /// Joined on shutdown for the same reason `query_task` is.
+    #[cfg(not(target_arch = "wasm32"))]
+    discovery_task: Option<Task>,
+}
+
+/// Everything an open-to-LAN host can configure (issue #535).
+///
+/// Four subsystems here were implemented, gated and then unreachable, because
+/// [`IntegratedServer::bind`] took no way to say anything about them and every
+/// other constructor passed `::default()`/`::none()`. This is the "config
+/// surface" half of that issue: RCON (#331), the query listener (#332),
+/// resource-pack pushes (#334), plugin channels (#335) and commands (#48).
+///
+/// `Default` reproduces `bind`'s pre-#535 behaviour exactly — the query
+/// listener on, everything else off — so `bind` is now a thin wrapper over
+/// [`IntegratedServer::open_to_lan`] and no existing caller changes behaviour.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default)]
+pub struct LanConfig {
+    /// The server's own view-distance cap. Every connection's requested
+    /// distance is clamped to it (#545).
+    pub view_radius: i32,
+    /// Start an RCON listener (#331). `None` — the default — leaves the port
+    /// closed. The password is in the config; a `port` of `0` lets the OS
+    /// choose, and the chosen address comes back from `local_rcon_addr`.
+    pub rcon: Option<crate::rcon::RconConfig>,
+    /// Serve the GameSpy4/UT3 query protocol on the same port's UDP space
+    /// (#332). On by default, matching what `bind` has always done.
+    pub query: bool,
+    /// Announce this world on the LAN discovery multicast group so it appears
+    /// in a vanilla client's multiplayer list without being typed in (#535
+    /// scope 3). Off by default — it is a broadcast, and a caller should opt in.
+    pub discovery: Option<LanDiscovery>,
+    /// The command dispatcher every accepted connection's `/`-commands reach
+    /// (#48). `CommandDispatch::none()` by default, which **refuses** rather
+    /// than permits.
+    pub commands: crate::command::CommandDispatch,
+    /// Server-initiated resource-pack pushes (#334).
+    pub resource_packs: crate::server::ResourcePackPushFeed,
+    /// The wire-level plugin-channel registry (#335).
+    pub plugin_channels: crate::plugin_channels::PluginChannelRegistry,
+}
+
+/// How to announce a LAN world on vanilla's discovery multicast group.
+///
+/// Vanilla's `ServerStatusPinger`/`LanServerDetection` listens on UDP
+/// `224.0.2.60:4445` for a `[MOTD]<name>[/MOTD][AD]<port>[/AD]` string and
+/// re-broadcasts every 1.5 s (`LanServerPinger.PING_INTERVAL`). That literal
+/// format is the whole protocol — there is no handshake and no reply.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub struct LanDiscovery {
+    /// The world name shown in the multiplayer list's LAN section.
+    pub motd: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl LanDiscovery {
+    /// Vanilla's `LanServerPinger` group and port.
+    pub const GROUP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(224, 0, 2, 60);
+    /// See [`GROUP`](Self::GROUP).
+    pub const PORT: u16 = 4445;
+    /// `LanServerPinger.PING_INTERVAL`.
+    pub const INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
+
+    /// The exact datagram body vanilla parses.
+    #[must_use]
+    pub fn payload(&self, port: u16) -> String {
+        format!("[MOTD]{}[/MOTD][AD]{port}[/AD]", self.motd)
+    }
 }
 
 impl IntegratedServer {
@@ -423,6 +496,8 @@ impl IntegratedServer {
                 // `bind` path, which is the host-facing entry point.
                 #[cfg(not(target_arch = "wasm32"))]
                 query_task: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                discovery_task: None,
             },
             client_end,
         )
@@ -806,6 +881,8 @@ impl IntegratedServer {
                 rcon_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 query_task: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                discovery_task: None,
             },
             client_end,
         )
@@ -1046,6 +1123,56 @@ impl IntegratedServer {
         P: ServerProtocol + 'static,
         S: ChunkSource + 'static,
     {
+        Self::open_to_lan(
+            addr,
+            protocol,
+            source,
+            LanConfig {
+                view_radius,
+                // `bind`'s pre-#535 behaviour, verbatim: query on, nothing else.
+                query: true,
+                ..LanConfig::default()
+            },
+        )
+        .await
+    }
+
+    /// [`bind`](Self::bind) with everything an open-to-LAN host can configure
+    /// (issue #535) — RCON, the query listener, LAN discovery, commands,
+    /// resource-pack pushes and plugin channels. See [`LanConfig`].
+    ///
+    /// This is the entry point a "Open to LAN" menu item calls. It is one call:
+    /// build a [`LanConfig`], hand it the same protocol and source singleplayer
+    /// already uses, and hold the returned handle for the session.
+    ///
+    /// # Errors
+    ///
+    /// The [`std::io::Error`] from binding the TCP listener, or from binding the
+    /// RCON listener when [`LanConfig::rcon`] is set. A failed **query** or
+    /// **discovery** bind is deliberately non-fatal and logged instead: neither
+    /// is needed to play, and taking the whole world down for a busy UDP port
+    /// would be the wrong trade.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn open_to_lan<A, P, S>(
+        addr: A,
+        protocol: P,
+        source: S,
+        config: LanConfig,
+    ) -> std::io::Result<Self>
+    where
+        A: tokio::net::ToSocketAddrs,
+        P: ServerProtocol + 'static,
+        S: ChunkSource + 'static,
+    {
+        let LanConfig {
+            view_radius,
+            rcon,
+            query,
+            discovery,
+            commands,
+            resource_packs,
+            plugin_channels,
+        } = config;
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr().ok();
 
@@ -1176,6 +1303,12 @@ impl IntegratedServer {
         let relay_block_ticks = hub_block_ticks.clone();
         let relay_explosions = hub_explosions.clone();
         let relay_mobs = live_mobs.clone();
+        // Issue #535's config surface, cloned out here for the same reason the
+        // six above are: the accept arm lives inside an `async move`, so a
+        // `.clone()` written there would move the original in.
+        let conn_commands = commands;
+        let conn_resource_packs = resource_packs;
+        let conn_plugin_channels = plugin_channels;
         // Issue #438: **one** registry for every connection this listener
         // accepts, created out here for the same reason the tick loop above is
         // spawned out here. A registry per connection would make each player
@@ -1195,7 +1328,7 @@ impl IntegratedServer {
         // holds the port's UDP space) the game still serves; the query side
         // just does not come up, and the failure is logged once rather than
         // taking the whole `bind` down with it.
-        let query_task = match local_addr {
+        let query_task = match local_addr.filter(|_| query) {
             Some(query_addr) => {
                 let query_config = crate::query::QueryConfig {
                     host_ip: query_addr.ip().to_string(),
@@ -1278,6 +1411,9 @@ impl IntegratedServer {
                         let source = source.clone();
                         let block_entities = block_entities.clone();
                         let mobs = mobs.clone();
+                        let commands = conn_commands.clone();
+                        let resource_packs = conn_resource_packs.clone();
+                        let plugin_channels = conn_plugin_channels.clone();
                         // Issue #438: the mob source and the shared player
                         // registry, composed. `PlayerAwareSource::snapshots`
                         // still returns only the mobs — the players travel
@@ -1286,7 +1422,18 @@ impl IntegratedServer {
                         // See `crate::players`' own module docs.
                         let entities =
                             PlayerAwareSource::new(relay_mobs.clone(), relay_players.clone());
-                        let subscriber = LanSubscriber::default();
+                        // Issue #465's LAN half, the one line `BlockTickFeed`'s
+                        // own doc comment names: `subscriber()` keeps the
+                        // outbound queue per-connection (the relay's drain-all
+                        // depends on it) while **sharing** the inbound one, so a
+                        // LAN player placing a repeater or a redstone torch
+                        // actually reaches the tick loop that hosts its
+                        // scheduled recheck. `default()` shared neither, and
+                        // dropped every such placement silently.
+                        let subscriber = LanSubscriber {
+                            block_ticks: hub_block_ticks.subscriber(),
+                            ..LanSubscriber::default()
+                        };
                         let conn_block_ticks = subscriber.block_ticks.clone();
                         let conn_explosions = subscriber.explosions.clone();
                         let alive = Arc::clone(&subscriber.alive);
@@ -1315,12 +1462,18 @@ impl IntegratedServer {
                             // keeps `MAX_CAPACITY` on this path — a host spends
                             // memory and bandwidth on behalf of players who did
                             // not choose the setting.
-                            let _ = serve_connection_with_mob_events_shared(
+                            // Issue #535: the *commands* variant, so a LAN
+                            // host's `CommandDispatch` (and its resource-pack
+                            // and plugin-channel surfaces) reach the
+                            // connection. `bind` used the plain
+                            // `..._mob_events_shared` wrapper, which hardcodes
+                            // all three to `::default()` — which is exactly
+                            // what left #48/#334/#335 unreachable.
+                            let _ = serve_connection_with_mob_events_and_commands_shared(
                                 &mut conn, &*protocol, &source, &entities, view_radius,
-                                view_radius,
                                 &block_entities, &mobs,
                                 &conn_block_ticks, &conn_explosions,
-                                &SleepVote::new(), &SleepFeed::default(),
+                                &commands, &resource_packs, &plugin_channels,
                             )
                             .await;
                             // Lets the relay arm above drop this connection's
@@ -1332,7 +1485,20 @@ impl IntegratedServer {
             }
         });
 
-        Ok(Self {
+        // Issue #535 scope 3. Non-fatal on failure for the same reason the query
+        // bind is: a world nobody can *discover* is still a world you can join
+        // by typing the address.
+        let discovery_task = match (discovery, local_addr) {
+            (Some(discovery), Some(bound)) => {
+                match spawn_lan_discovery(&shutdown, &discovery, bound.port()) {
+                    Some(task) => Some(task),
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+
+        let mut server = Self {
             local_addr,
             shutdown,
             task,
@@ -1348,17 +1514,25 @@ impl IntegratedServer {
             autosave_task: None,
             #[cfg(not(target_arch = "wasm32"))]
             level_dat: None,
-            // No RCON listener (issue #331) unless the caller starts one
-            // explicitly — it needs a password and a command dispatch, which
-            // `bind` does not take.
+            // Set by the `start_rcon` call just below when the caller asked for
+            // one (issue #331). It needs a password, so it stays opt-in.
             #[cfg(not(target_arch = "wasm32"))]
             rcon_task: None,
-            // `bind` starts the query listener (issue #332) automatically;
-            // `None` only if the UDP bind failed and the warning above was
-            // logged.
+            // `LanConfig::query` (issue #332), on by default; `None` also when
+            // the UDP bind failed and the warning above was logged.
             #[cfg(not(target_arch = "wasm32"))]
             query_task,
-        })
+            #[cfg(not(target_arch = "wasm32"))]
+            discovery_task,
+        };
+        // After the `Self` literal, because `start_rcon` needs the handle's
+        // shutdown signal — and propagating with `?` here is deliberate: a
+        // caller that asked for RCON and did not get it has a security-relevant
+        // surprise, unlike the two UDP listeners above.
+        if let Some(rcon) = rcon {
+            server.start_rcon(rcon)?;
+        }
+        Ok(server)
     }
 
     /// Returns the bound socket address, if this server was started with
@@ -1492,6 +1666,10 @@ impl IntegratedServer {
         if let Some(mut query_task) = self.query_task.take() {
             query_task.join().await;
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(mut discovery_task) = self.discovery_task.take() {
+            discovery_task.join().await;
+        }
         // The final flush, **after** the tick and connection tasks have
         // stopped. Ordering is load-bearing: saving first would race a tick
         // that mutates a block between the write and the shutdown, and that
@@ -1544,7 +1722,56 @@ impl Drop for IntegratedServer {
         if let Some(query_task) = &self.query_task {
             query_task.abort();
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(discovery_task) = &self.discovery_task {
+            discovery_task.abort();
+        }
     }
+}
+
+/// Spawns vanilla's `LanServerPinger`: one `[MOTD]…[/MOTD][AD]port[/AD]`
+/// datagram to the discovery multicast group every 1.5 s, until shutdown.
+///
+/// `None` (with a warning) if the UDP socket cannot be created or the group
+/// cannot be reached — a world nobody can discover is still a world you can join
+/// by typing the address, so this is not worth failing `open_to_lan` for.
+///
+/// The send is `try_send_to`-shaped rather than awaited-with-backpressure: a
+/// datagram nobody is listening for must never hold up the loop, and a dropped
+/// ping is re-sent 1.5 s later by construction.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_lan_discovery(shutdown: &Arc<Notify>, discovery: &LanDiscovery, port: u16) -> Option<Task> {
+    let socket = match std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)) {
+        Ok(socket) => socket,
+        Err(err) => {
+            tracing::warn!("LAN discovery disabled (UDP bind failed): {err}");
+            return None;
+        }
+    };
+    if let Err(err) = socket.set_nonblocking(true) {
+        tracing::warn!("LAN discovery disabled (non-blocking mode failed): {err}");
+        return None;
+    }
+    let socket = match tokio::net::UdpSocket::from_std(socket) {
+        Ok(socket) => socket,
+        Err(err) => {
+            tracing::warn!("LAN discovery disabled (socket registration failed): {err}");
+            return None;
+        }
+    };
+    let target = std::net::SocketAddrV4::new(LanDiscovery::GROUP, LanDiscovery::PORT);
+    let payload = discovery.payload(port);
+    Some(spawn_tick_task(shutdown, async move {
+        let mut ticker = tokio::time::interval(LanDiscovery::INTERVAL);
+        loop {
+            ticker.tick().await;
+            if let Err(err) = socket.send_to(payload.as_bytes(), target).await {
+                // Logged at debug: a laptop with no route to the multicast group
+                // would otherwise warn every 1.5 s forever.
+                tracing::debug!("LAN discovery ping failed: {err}");
+            }
+        }
+    }))
 }
 
 /// Issue #454's gate: **world open must generate nothing at all.**
@@ -1712,6 +1939,61 @@ mod tests {
              {} would mean mob seeding is back inside the constructor (issue #454).",
             (2 * MOB_RADIUS + 1) * (2 * MOB_RADIUS + 1)
         );
+        drop(server);
+    }
+
+    /// The discovery datagram body is the *whole* LAN-discovery protocol —
+    /// vanilla's `LanServerDetection` parses this literal string and nothing
+    /// else, so an off-by-one in the markers is a world that never appears in
+    /// the multiplayer list with no error anywhere.
+    #[test]
+    fn lan_discovery_payload_is_vanillas_literal_format() {
+        let discovery = LanDiscovery {
+            motd: "Matthew's World".to_string(),
+        };
+        assert_eq!(
+            discovery.payload(25565),
+            "[MOTD]Matthew's World[/MOTD][AD]25565[/AD]"
+        );
+        assert_eq!(LanDiscovery::PORT, 4445);
+        assert_eq!(LanDiscovery::GROUP.octets(), [224, 0, 2, 60]);
+    }
+
+    /// Issue #535's config surface: RCON came up because `LanConfig` asked for
+    /// it, not because a test called `start_rcon` by hand — which is the whole
+    /// distinction the issue is about, since `start_rcon`'s only caller was its
+    /// own test.
+    #[tokio::test]
+    async fn open_to_lan_starts_rcon_from_its_config() {
+        let calls = Arc::new(Mutex::new(HashMap::new()));
+        let source = CountingSource::new(&calls);
+        let server = IntegratedServer::open_to_lan(
+            "127.0.0.1:0",
+            Silent,
+            source,
+            LanConfig {
+                view_radius: 0,
+                rcon: Some(crate::rcon::RconConfig {
+                    addr: (std::net::Ipv4Addr::LOCALHOST, 0).into(),
+                    password: "hunter2".to_string(),
+                    commands: crate::command::CommandDispatch::none(),
+                }),
+                // Off, so this gate measures the RCON wiring alone and binds no
+                // UDP port a parallel test could contend for.
+                query: false,
+                ..LanConfig::default()
+            },
+        )
+        .await
+        .expect("open_to_lan must bind");
+        assert!(server.local_addr().is_some());
+        assert!(
+            server.rcon_task.is_some(),
+            "`LanConfig::rcon` must start the listener that `bind` never could"
+        );
+        // Dropped rather than `shutdown().await`ed: `Drop` aborts every task,
+        // where `shutdown` *joins* the accept loop and the tick loop, and this
+        // gate has no reason to wait out a tick.
         drop(server);
     }
 

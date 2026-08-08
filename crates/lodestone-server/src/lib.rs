@@ -243,6 +243,8 @@ pub use hopper::{
     TRANSFER_COOLDOWN_TICKS as HOPPER_TRANSFER_COOLDOWN_TICKS, try_move_one_item,
 };
 pub use integrated::IntegratedServer;
+#[cfg(not(target_arch = "wasm32"))]
+pub use integrated::{LanConfig, LanDiscovery};
 pub use inventory::{HOTBAR_SIZE, OFFHAND_NATIVE, PLAYER_NATIVE_SIZE, PlayerInventory};
 pub use loot::{LootContext, LootTable, LootTableBuilder, LootTableResolver, LootTableSet, roll_loot};
 pub use mob_spawn::{
