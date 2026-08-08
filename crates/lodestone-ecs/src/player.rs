@@ -71,7 +71,7 @@ use bevy_ecs::world::World;
 use lodestone_entity::attribute::{
     attribute_value, movement_speed_key, sprinting_modifier_id, water_movement_efficiency_key,
 };
-use lodestone_model::{ClientAction, PlayerInput};
+use lodestone_model::{ClientAction, PlayerCommand, PlayerInput};
 use lodestone_physics::{
     CollisionView, FluidState, MovementInput, NearbyEntity, PhysicsProfile, PlayerState, PushSelf,
     Vec3d, compute_fluid_state, tick_among_entities,
@@ -810,6 +810,101 @@ impl Default for Profile {
 #[derive(Resource, Debug, Clone, Default)]
 pub struct NearbyEntities(pub Vec<NearbyEntity>);
 
+/// Vanilla's `Options.autoJump`, pushed down by the driver once per tick and
+/// carried into [`PlayerState::auto_jump_enabled`] by [`player_physics`] —
+/// **issue #201's actual defect**.
+///
+/// # Why this resource exists at all
+///
+/// `lodestone_physics`'s [`update_auto_jump`](lodestone_physics) is a complete,
+/// exact port of `LocalPlayer.updateAutoJump`, and its one gate is
+/// `PlayerState::auto_jump_enabled` — which defaults to `true` (vanilla's own
+/// default) and whose only setter, `PlayerState::with_auto_jump`, was called
+/// **from tests only**. So the shell's settings toggle read OFF, the shell's own
+/// *second*, simplified probe was correctly suppressed by it, and the real
+/// detector armed a jump anyway: the option could not turn auto-jump off. The
+/// duplicate probe is gone and this is the one seam.
+///
+/// # Default is `true`, deliberately
+///
+/// It matches both vanilla's option default and [`PlayerState`]'s own field
+/// default, so a harness that adds [`LocalPlayerPlugin`] without pushing the
+/// option (`lodestone-controller`'s tests, the offline fixture world, every
+/// golden trace) behaves exactly as it did before this resource existed. The
+/// *shell's* `Options::auto_jump` defaults to `false`; that is the shell's
+/// choice to make, and it now actually reaches here.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoJump(pub bool);
+
+impl Default for AutoJump {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+/// Whether some equipment slot currently holds a glider (an elytra), pushed
+/// down by the driver once per tick — the one conjunct of
+/// [`lodestone_physics::can_glide`] that is equipment data rather than physics
+/// state (issue #206).
+///
+/// Vanilla walks `EquipmentSlot.VALUES` looking for a `DataComponents.GLIDER`
+/// component (`LivingEntity.canGlideUsing`, `LivingEntity.java:4002`); the
+/// driver resolves that from whatever inventory model it has and hands the
+/// answer here. Default `false` — a harness that never pushes it simply never
+/// glides, which is the safe direction.
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GliderEquipped(pub bool);
+
+/// Ticks of firework-rocket boost still owed to a gliding player (issue #206).
+///
+/// Set by the driver when the local player uses a firework rocket while
+/// gliding; spent one per tick by [`tick_firework_boost`], which calls
+/// [`lodestone_physics::apply_firework_boost`] for as long as it is non-zero
+/// **and** the player is still fall-flying.
+///
+/// # Why a countdown and not a tracked entity
+///
+/// Vanilla's boost is applied by the `FireworkRocketEntity`'s own `tick`
+/// (`FireworkRocketEntity.java:122-137`) for as long as that entity is attached
+/// and alive, and the client learns the attachment from the rocket's
+/// `DATA_ATTACHED_TO_TARGET` entity data. This client does not decode that
+/// field, so the duration is predicted locally instead — see the driver's own
+/// doc for the exact lifetime it uses and what part of vanilla's is
+/// unpredictable.
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FireworkBoost(pub u32);
+
+/// How many ticks the local player has been holding the use button *with an
+/// item in progress*, or `None` when nothing is being used (issue #208).
+///
+/// This is `getUseDuration() - getUseItemRemainingTicks()` — vanilla's
+/// `timeHeld`, which `TridentItem.releaseUsing` compares against its `10`-tick
+/// `THROW_THRESHOLD_TIME` (`TridentItem.java:63-67`). The driver arms it at the
+/// press edge and reads it at the release edge; [`tick_item_use`] advances it.
+///
+/// A **count of ticks, not a clock**: `Instant::now()` panics on wasm32 under
+/// this workspace's `panic = "abort"` browser profile, and every duration in
+/// the tick domain here is measured in 20 Hz ticks for that reason.
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ItemUseTicks(pub Option<u32>);
+
+/// Edge tracker for the glide start: last tick's jump input, as
+/// `LocalPlayer.aiStep` holds `wasJumping` (`LocalPlayer.java:850`).
+///
+/// A **separate** latch from [`WasJumping`], which
+/// [`apply_creative_flight_input`] overwrites at the end of its own body — a
+/// later system in the same tick reading that one would see this tick's value
+/// and never observe an edge at all. Two consumers of the same edge need two
+/// latches.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WasJumpingGlide(pub bool);
+
+/// Whether the `START_FALL_FLYING` player command for the current glide has
+/// been sent, so [`send_fall_flying_command`] sends exactly one per glide —
+/// the same shape as [`LastSprintingSent`].
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FallFlyingSent(pub bool);
+
 /// The one sanctioned egress: actions produced by systems this tick, drained
 /// by the driver and handed to the socket.
 ///
@@ -999,6 +1094,7 @@ pub fn player_physics(
     collision: Res<PlayerCollision>,
     profile: Res<Profile>,
     nearby: Res<NearbyEntities>,
+    auto_jump: Res<AutoJump>,
     mut players: Query<
         (
             &mut PhysicsState,
@@ -1033,6 +1129,20 @@ pub fn player_physics(
         // own `None`.
         let abilities = abilities.copied().unwrap_or_default();
         *player = player.with_flight(abilities.flying, abilities.flying_speed);
+
+        // **Issue #201's one real line.** Same shape as `with_flight` above, and
+        // for the same reason: the option lives outside physics, physics owns the
+        // detector, and this is the seam. Pushed every tick rather than at spawn
+        // so toggling Auto-Jump in the settings screen applies on the very next
+        // one — and, more importantly, so nothing can leave the field at its
+        // `true` default while the option reads OFF, which is exactly what made
+        // auto-jump un-disableable. See [`AutoJump`].
+        //
+        // Note this is applied **before** the `flying` / `NoWorld` early returns
+        // below on purpose: those paths do not run the detector at all, so the
+        // field's value there is unobservable, but a `continue` above the write
+        // would leave a stale value behind for the tick flight ends.
+        *player = player.with_auto_jump(auto_jump.0);
 
         if flying.0 {
             // The *debug* free-fly camera, not creative flight — see [`Flying`].
@@ -1274,6 +1384,160 @@ pub fn cancel_flight_on_landing(
     }
 }
 
+/// `TickSet::Physics`, **before** [`player_physics`]: start an elytra glide on
+/// the jump-key rising edge, and end one whose preconditions have lapsed
+/// (issue #206).
+///
+/// Two halves of one vanilla pair, deliberately in one system because they must
+/// see the same `on_ground`:
+///
+/// * the **start** is `LocalPlayer.aiStep`'s `if (input.jump() && !wasJumping &&
+///   !onClimbable() && tryToStartFallFlying())` (`LocalPlayer.java:850-852`),
+///   which is client-authoritative — the client sets the shared flag itself and
+///   tells the server afterwards ([`send_fall_flying_command`] is that telling);
+/// * the **stop** is `LivingEntity.updateFallFlying`'s `!canGlide()` branch,
+///   which vanilla runs server-side and syncs back. This client has no server
+///   that tracks glide state at all (issue #206's residue names that gap), so it
+///   is predicted here. Without it a landing player keeps `fall_flying` set,
+///   [`lodestone_physics::tick`] keeps routing to `tick_elytra`, and they can
+///   never walk again.
+///
+/// # Ordering
+///
+/// **After [`apply_creative_flight_input`]** so `state.0.flying` already carries
+/// this tick's toggle: `can_glide` is `!flying && …`, which is what makes a
+/// mayfly player's jump press toggle flight rather than start a glide. Vanilla
+/// additionally suppresses the glide attempt on the tick flight is toggled
+/// *off* (`justToggledCreativeFlight`); that one-tick creative-only difference
+/// is not modelled.
+///
+/// **Before [`player_physics`]** because vanilla's `aiStep` does both before
+/// `travel()`, so the `on_ground` both halves read is the previous tick's move —
+/// exactly as here.
+///
+/// # `onClimbable`
+///
+/// Not tested here. [`lodestone_physics::tick_elytra`] already ends a glide on a
+/// climbable on its very first tick (its `is_climbable` branch clears
+/// `fall_flying` and falls through to `tick_air`), so the outcome is the same
+/// one tick later, and this system has no `CollisionView` to ask.
+pub fn update_fall_flying_state(
+    glider: Res<GliderEquipped>,
+    mut players: Query<
+        (
+            &mut PhysicsState,
+            &MovementIntent,
+            &mut WasJumpingGlide,
+            &Submersion,
+            Option<&Dead>,
+        ),
+        With<LocalPlayer>,
+    >,
+) {
+    for (mut state, intent, mut was_jumping, fluid, dead) in &mut players {
+        let jump = intent.0.jump;
+        if dead.is_none() && jump && !was_jumping.0 {
+            lodestone_physics::try_start_fall_flying(
+                &mut state.0,
+                glider.0,
+                fluid.0.in_water(),
+            );
+        }
+        was_jumping.0 = jump;
+        lodestone_physics::update_fall_flying(&mut state.0, glider.0);
+    }
+}
+
+/// `TickSet::Physics`, **before** [`player_physics`]: spend one tick of
+/// firework-rocket boost (issue #206).
+///
+/// `FireworkRocketEntity.tick`'s attached branch is gated on
+/// `attachedToEntity.isFallFlying()` (`FireworkRocketEntity.java:122-123`) — a
+/// rocket attached to a player who stops gliding stops boosting, but keeps
+/// ticking down, which is why the countdown is spent whether or not the impulse
+/// lands.
+///
+/// # Why before the move rather than after
+///
+/// Vanilla pins no order here: the rocket is an ordinary entity ticked in the
+/// level's entity-iteration order, which is not defined relative to the
+/// player's own tick (see [`lodestone_physics::apply_firework_boost`]'s doc).
+/// Applying it before the move integrates the impulse on the same tick it is
+/// produced, which is the lower-latency of the two indistinguishable choices.
+pub fn tick_firework_boost(
+    mut boost: ResMut<FireworkBoost>,
+    mut players: Query<&mut PhysicsState, With<LocalPlayer>>,
+) {
+    if boost.0 == 0 {
+        return;
+    }
+    boost.0 -= 1;
+    for mut state in &mut players {
+        if state.0.fall_flying {
+            lodestone_physics::apply_firework_boost(&mut state.0);
+        }
+    }
+}
+
+/// `TickSet::Physics`: advance vanilla's `timeHeld` for an in-progress item use
+/// (issue #208). See [`ItemUseTicks`].
+pub fn tick_item_use(mut ticks: ResMut<ItemUseTicks>) {
+    if let Some(held) = &mut ticks.0 {
+        *held = held.saturating_add(1);
+    }
+}
+
+/// Tell the server a glide started, exactly once per glide (issue #206).
+///
+/// Registered at the tail of the `TickSet::Physics` chain rather than in
+/// `TickSet::Send`, for two reasons the plugin's own comment carries: vanilla
+/// sends it from inside `aiStep`, *before* the tick's movement packet, and this
+/// crate cannot order against `lodestone_controller`'s `ActionQueue` writers.
+///
+/// `LocalPlayer.aiStep` sends one `ServerboundPlayerCommandPacket(
+/// START_FALL_FLYING)` on the tick `tryToStartFallFlying()` returns true
+/// (`LocalPlayer.java:850-852`) and never resends it — the server owns the
+/// shared flag from then on. [`FallFlyingSent`] is that once-per-glide latch,
+/// the same shape [`LastSprintingSent`] gives the sprint edge.
+///
+/// **`ClientAction::PlayerCommand`'s `StartFallFlying` had no producer anywhere
+/// in this tree before this system** — four adapters encode it and nothing sent
+/// it, the `SetFlying` shape exactly. Without it the server keeps simulating a
+/// falling player while we glide, and its own `handleMovePlayer` replay
+/// diverges from the position we report.
+pub fn send_fall_flying_command(
+    egress: Res<Egress>,
+    mut queue: ResMut<ActionQueue>,
+    mut players: Query<
+        (
+            &PhysicsState,
+            &crate::session::ServerEntityId,
+            &mut FallFlyingSent,
+        ),
+        With<LocalPlayer>,
+    >,
+) {
+    for (state, entity_id, mut sent) in &mut players {
+        if !state.0.fall_flying {
+            // Rearm for the next glide. Done regardless of `egress` so a glide
+            // that ended while disconnected cannot latch the next one shut.
+            sent.0 = false;
+            continue;
+        }
+        if sent.0 || !(egress.in_world && egress.live) {
+            continue;
+        }
+        let Some(entity_id) = entity_id.0 else {
+            continue;
+        };
+        sent.0 = true;
+        queue.0.push(ClientAction::PlayerCommand {
+            entity_id,
+            command: PlayerCommand::StartFallFlying,
+        });
+    }
+}
+
 /// `TickSet::Physics`, **last in the chain**: while the local player is a
 /// passenger, snap them onto their seat and clear the state a walking player
 /// would have written — `Entity.rideTick` + `Entity.positionRider`
@@ -1489,6 +1753,11 @@ pub fn spawn_local_player(world: &mut World, state: PlayerState) -> Entity {
                 JumpTriggerTime(0),
                 WasJumping(false),
                 PlaceOutcome::default(),
+                // Issue #206. `WasJumpingGlide` starts cleared for the same
+                // reason `WasJumping` does; `FallFlyingSent` starts cleared
+                // because no glide is in progress to have announced.
+                WasJumpingGlide(false),
+                FallFlyingSent(false),
             ),
         ))
         .id()
@@ -1530,6 +1799,11 @@ pub fn reset_local_player(world: &mut World, entity: Entity, state: PlayerState)
             JumpTriggerTime(0),
             WasJumping(false),
             PlaceOutcome::default(),
+            // Issue #206: a quit-to-title must not leave a glide announced
+            // (the next session's server has never heard of it) or a stale
+            // jump edge behind.
+            WasJumpingGlide(false),
+            FallFlyingSent(false),
         ),
     ));
     entity.remove::<Dead>();
@@ -1570,6 +1844,14 @@ impl Plugin for LocalPlayerPlugin {
         app.init_resource::<PlayerCollision>();
         app.init_resource::<Profile>();
         app.init_resource::<NearbyEntities>();
+        // Issues #201/#206/#208. All four default to "as before this plugin
+        // gained them": auto-jump on (vanilla's default, and `PlayerState`'s),
+        // no glider, no boost owed, nothing being used. A driver that pushes
+        // none of them is bit-identical to one built before they existed.
+        app.init_resource::<AutoJump>();
+        app.init_resource::<GliderEquipped>();
+        app.init_resource::<FireworkBoost>();
+        app.init_resource::<ItemUseTicks>();
         // [`pin_passenger_to_vehicle`] resolves the ride's vehicle id through it,
         // and this plugin is usable **without** `crate::ingest::IngestPlugin` — a
         // headless physics harness, `lodestone-controller`'s own tests, and the
@@ -1631,9 +1913,35 @@ impl Plugin for LocalPlayerPlugin {
             GameTick,
             (
                 apply_creative_flight_input,
+                // Issue #206, both **before** `player_physics` and in this
+                // order: the glide decision is `aiStep`'s (pre-`travel`) and
+                // the rocket impulse has to be on the velocity this tick's
+                // travel integrates. `tick_item_use` (issue #208) joins the
+                // chain rather than floating so the use-duration a release
+                // edge reads is deterministic relative to the move.
+                update_fall_flying_state,
+                tick_firework_boost,
+                tick_item_use,
                 player_physics,
                 cancel_flight_on_landing,
                 pin_passenger_to_vehicle,
+                // Issue #206's outbound half, and **`TickSet::Physics` is where
+                // vanilla puts it**: `LocalPlayer.aiStep` sends
+                // START_FALL_FLYING inline (`LocalPlayer.java:851`), and
+                // `sendPosition()` runs afterwards from `LocalPlayer.tick` — so
+                // the command precedes the tick's movement packet on the wire,
+                // which queueing it here reproduces and queueing it in
+                // `TickSet::Send` would not.
+                //
+                // It also has to be in *this* chain rather than `TickSet::Send`
+                // for a mechanical reason: it writes `ResMut<ActionQueue>`,
+                // which `lodestone_controller`'s two `Send` systems also write,
+                // and this crate cannot name them to order against (the
+                // controller depends on this crate, not the reverse). An
+                // unordered second writer in `Send` fails
+                // `exactly_one_system_writes_movement_intent`'s ambiguity build
+                // — which is how this was caught.
+                send_fall_flying_command,
             )
                 .chain()
                 .in_set(TickSet::Physics),
@@ -2779,5 +3087,280 @@ mod tests {
              got y={}",
             state.position.y
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #201: the Auto-Jump option actually reaching the detector
+    // -----------------------------------------------------------------------
+
+    /// A floor at `y = 0` plus a full-height step at `z = 1`, `y = 1` — the
+    /// same 1.0 rise `lodestone-physics`' own auto-jump gate uses, which is
+    /// above the 0.6 auto-step and inside the 1.2 jump ceiling.
+    #[derive(Debug)]
+    struct FloorWithStep;
+
+    impl CollisionView for FloorWithStep {
+        fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
+            let solid = y == 0 || (y == 1 && z == 1);
+            if solid {
+                out.push(Aabb {
+                    min_x: f64::from(x),
+                    min_y: f64::from(y),
+                    min_z: f64::from(z),
+                    max_x: f64::from(x) + 1.0,
+                    max_y: f64::from(y) + 1.0,
+                    max_z: f64::from(z) + 1.0,
+                });
+            }
+        }
+    }
+
+    impl CollisionSource for FloorWithStep {
+        fn with_view(&self, f: &mut dyn FnMut(&dyn CollisionView)) {
+            f(self);
+        }
+    }
+
+    /// Walks forward into the step for 30 ticks and reports the highest feet `y`.
+    fn peak_y_walking_into_a_step(auto_jump: bool) -> f64 {
+        let mut app = App::new();
+        app.add_plugins((crate::CorePlugin, LocalPlayerPlugin));
+        app.insert_resource(PlayerCollision::View(Arc::new(FloorWithStep)));
+        app.insert_resource(AutoJump(auto_jump));
+        let mut state = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0);
+        state.on_ground = true;
+        let entity = spawn_local_player(app.world_mut(), state);
+        set_input(
+            &mut app,
+            entity,
+            MovementInput {
+                forward: 1.0,
+                ..MovementInput::NONE
+            },
+        );
+        let mut peak = 1.0f64;
+        for _ in 0..30 {
+            // `MovementIntent` is not recomputed here (no controller plugin), so
+            // the input set once above persists across ticks.
+            run_tick(&mut app);
+            peak = peak.max(feet_y(&app, entity));
+        }
+        peak
+    }
+
+    /// **Issue #201's defect, at the layer that had it.** The option is the
+    /// shell's; the detector is physics'; this resource is the only thing
+    /// joining them, and before it existed the field sat at its `true` default
+    /// for the whole session no matter what the settings screen said.
+    #[test]
+    fn the_auto_jump_option_off_really_stops_the_detector() {
+        let on = peak_y_walking_into_a_step(true);
+        assert!(
+            on > 1.9,
+            "control: with the option ON the player must clear the 1.0 step. If \
+             this fails the scenario is wrong, not the option; peak y = {on}"
+        );
+        let off = peak_y_walking_into_a_step(false);
+        assert!(
+            off < 1.05,
+            "with the option OFF the player must stop at the step. This is the \
+             assertion that was impossible to satisfy before AutoJump existed; \
+             peak y = {off}"
+        );
+    }
+
+    #[test]
+    fn auto_jump_defaults_on_so_an_unpushed_harness_is_unchanged() {
+        // `LocalPlayerPlugin` alone, nothing inserted: the golden traces and the
+        // offline fixture world both look like this, and they were written
+        // against `PlayerState`'s own `true` default.
+        let (app, _) = app_with_player(PlayerCollision::NoWorld);
+        assert!(app.world().resource::<AutoJump>().0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #206: glide state and the firework boost
+    // -----------------------------------------------------------------------
+
+    /// An airborne player with no floor at all, so `on_ground` stays false and
+    /// `canGlide`'s first conjunct holds.
+    fn app_with_airborne_player() -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins((crate::CorePlugin, LocalPlayerPlugin));
+        app.insert_resource(PlayerCollision::View(Arc::new(Void)));
+        let mut state = PlayerState::at(Vec3d::new(0.5, 200.0, 0.5), 0.0);
+        state.on_ground = false;
+        let entity = spawn_local_player(app.world_mut(), state);
+        crate::session::insert_session_components(app.world_mut(), entity);
+        (app, entity)
+    }
+
+    /// Nothing solid anywhere.
+    #[derive(Debug)]
+    struct Void;
+
+    impl CollisionView for Void {
+        fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<Aabb>) {}
+    }
+
+    impl CollisionSource for Void {
+        fn with_view(&self, f: &mut dyn FnMut(&dyn CollisionView)) {
+            f(self);
+        }
+    }
+
+    fn gliding(app: &App, entity: Entity) -> bool {
+        app.world().get::<PhysicsState>(entity).unwrap().0.fall_flying
+    }
+
+    #[test]
+    fn a_jump_edge_with_an_elytra_starts_a_glide_and_queues_the_command() {
+        let (mut app, entity) = app_with_airborne_player();
+        app.insert_resource(GliderEquipped(true));
+        app.insert_resource(Egress {
+            in_world: true,
+            live: true,
+        });
+        app.world_mut()
+            .get_mut::<crate::session::ServerEntityId>(entity)
+            .unwrap()
+            .0 = Some(7);
+        set_input(
+            &mut app,
+            entity,
+            MovementInput {
+                jump: true,
+                ..MovementInput::NONE
+            },
+        );
+        run_tick(&mut app);
+        assert!(gliding(&app, entity), "the glide must start on the jump edge");
+        // The outbound half: `PlayerCommand::StartFallFlying` had no producer
+        // anywhere in this tree before this system, the `SetFlying` shape
+        // exactly. Without it the server keeps simulating a falling player.
+        let queued = std::mem::take(&mut app.world_mut().resource_mut::<ActionQueue>().0);
+        assert!(
+            queued.contains(&ClientAction::PlayerCommand {
+                entity_id: 7,
+                command: PlayerCommand::StartFallFlying,
+            }),
+            "START_FALL_FLYING must be queued exactly once per glide; queue was {queued:?}"
+        );
+        // Held, not tapped: a second tick must not re-announce it.
+        run_tick(&mut app);
+        let queued = std::mem::take(&mut app.world_mut().resource_mut::<ActionQueue>().0);
+        assert!(
+            !queued.iter().any(|action| matches!(
+                action,
+                ClientAction::PlayerCommand {
+                    command: PlayerCommand::StartFallFlying,
+                    ..
+                }
+            )),
+            "one command per glide, not one per tick"
+        );
+    }
+
+    #[test]
+    fn no_elytra_means_no_glide() {
+        // The control that makes the test above about the *elytra* rather than
+        // about pressing jump. `GliderEquipped` defaults to `false`, so this is
+        // also the shape every harness that never pushes it sees.
+        let (mut app, entity) = app_with_airborne_player();
+        set_input(
+            &mut app,
+            entity,
+            MovementInput {
+                jump: true,
+                ..MovementInput::NONE
+            },
+        );
+        run_tick(&mut app);
+        assert!(!gliding(&app, entity));
+    }
+
+    /// The boost's magnitude, predicted from `FireworkRocketEntity.tick`'s own
+    /// line rather than asserted as "faster".
+    ///
+    /// From rest, looking straight down the `+Z` axis (yaw 0, pitch 0), the look
+    /// vector is exactly `(0, 0, 1)` and the impulse is
+    /// `movement.add(look * 0.1 + (look * 1.5 - movement) * 0.5)`, i.e.
+    /// `0 + (0.1 + (1.5 - 0) * 0.5) = 0.85` on Z alone. `tick_elytra` then
+    /// applies `updateFallFlyingMovement`'s `0.99` horizontal drag plus the lift
+    /// terms, so the *post-tick* velocity is not 0.85 — but it must be far above
+    /// the unboosted arm, and the unboosted arm from rest is essentially zero on
+    /// Z. Both arms are measured, so the difference is attributable to the boost
+    /// term and nothing else.
+    #[test]
+    fn a_firework_boost_accelerates_a_gliding_player_along_the_look_vector() {
+        let z_after = |boost: u32| {
+            let (mut app, entity) = app_with_airborne_player();
+            app.world_mut()
+                .get_mut::<PhysicsState>(entity)
+                .unwrap()
+                .0
+                .fall_flying = true;
+            app.insert_resource(GliderEquipped(true));
+            app.insert_resource(FireworkBoost(boost));
+            run_tick(&mut app);
+            app.world().get::<PhysicsState>(entity).unwrap().0.velocity.z
+        };
+        let boosted = z_after(20);
+        let unboosted = z_after(0);
+        assert!(
+            unboosted.abs() < 0.01,
+            "control: an unboosted glide from rest has no forward speed to \
+             explain the boosted arm away, got {unboosted}"
+        );
+        // 0.85 impulse × the glide's own 0.99 horizontal drag and 0.1 look-lerp
+        // is comfortably above 0.8; a boost applied *after* the move, or one
+        // scaled by the wrong power constant, would not land here.
+        assert!(
+            boosted > 0.8,
+            "the boost must add ~0.85 along +Z before drag, got {boosted}"
+        );
+    }
+
+    #[test]
+    fn a_firework_boost_is_spent_and_does_nothing_when_not_gliding() {
+        let (mut app, entity) = app_with_airborne_player();
+        app.insert_resource(FireworkBoost(3));
+        // Not gliding: `FireworkRocketEntity.tick`'s attached branch is gated on
+        // `attachedToEntity.isFallFlying()`, so the rocket keeps ticking down
+        // while boosting nothing.
+        for _ in 0..3 {
+            run_tick(&mut app);
+        }
+        assert_eq!(app.world().resource::<FireworkBoost>().0, 0);
+        let velocity = app.world().get::<PhysicsState>(entity).unwrap().0.velocity;
+        assert!(
+            velocity.z.abs() < 1e-9,
+            "a non-gliding player must get no impulse, got z={}",
+            velocity.z
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #208: the use-duration counter riptide's release edge reads
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn item_use_ticks_counts_ticks_and_only_while_armed() {
+        let (mut app, _) = app_with_player(PlayerCollision::NoWorld);
+        // Unarmed: nothing counts, so a release with no press cannot ever reach
+        // the 10-tick threshold.
+        run_tick(&mut app);
+        assert_eq!(app.world().resource::<ItemUseTicks>().0, None);
+        // Armed at the press edge, as `Sim::use_item_live` does.
+        app.world_mut().resource_mut::<ItemUseTicks>().0 = Some(0);
+        for expected in 1..=10 {
+            run_tick(&mut app);
+            assert_eq!(
+                app.world().resource::<ItemUseTicks>().0,
+                Some(expected),
+                "the count is in 20 Hz ticks, so ten ticks is exactly \
+                 TridentItem's THROW_THRESHOLD_TIME"
+            );
+        }
     }
 }
