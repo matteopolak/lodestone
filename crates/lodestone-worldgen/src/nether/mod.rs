@@ -118,7 +118,7 @@ use crate::biome::{BiomeTable, ClimateSampler};
 use crate::carver::{CarveGrid, CarverConfig, NoObserver};
 use crate::density::{Builder, Resolver};
 use crate::engine::Program;
-use crate::interner::{StateId, StateInterner};
+use crate::interner::StateInterner;
 use crate::overworld::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
 use crate::structure::beardifier::Beardifier;
 use crate::structure::{HeightmapKind, StartContext, StructureRegistry, StructureStart};
@@ -455,21 +455,17 @@ impl NetherGenerator {
     }
 
     fn idx(lx: i32, ly: i32, lz: i32, height: i32) -> usize {
-        debug_assert!((0..height).contains(&ly));
-        ((ly * 16 + lz) * 16 + lx) as usize
+        crate::compose::column_index(lx, ly, lz, height)
     }
 
-    /// `fillFromNoise`, i.e. `add(finalDensity, BeardifierMarker)`.
+    /// `fillFromNoise`, i.e. `add(finalDensity, BeardifierMarker)` —
+    /// [`crate::compose::fill_column`], which carries the two-loop rule and the
+    /// `-0.0` argument for it.
     ///
-    /// **Two loops, and the empty-beard one is a correctness property rather than a
-    /// micro-optimisation** — the same reasoning `overworld::fill::fill_stage`
-    /// records. Adding `0.0` is the identity for every finite `f64` *except*
-    /// `-0.0`, whose sign bit it flips; nothing downstream distinguishes the two
-    /// today, and the branch means that claim never has to be made. It is also what
-    /// keeps every Nether column with no adaptation-bearing start in reach —
-    /// which, while `nether_fossil` is the dimension's only adaptation-bearing
-    /// structure *and* has no piece generator, is every column — bit-identical to
-    /// the pre-structure generator.
+    /// The property that matters *here* is what an empty beard means for this
+    /// dimension: `nether_fossil` is the Nether's only adaptation-bearing structure
+    /// and has no piece generator, so every column takes the no-addition loop and is
+    /// bit-identical to the pre-structure generator.
     fn fill_stage(
         &self,
         aquifer: &AquiferSystem,
@@ -477,47 +473,13 @@ impl NetherGenerator {
         base_z: i32,
         beard: &Beardifier,
     ) -> Vec<BlockKind> {
-        let mut field = vec![BlockKind::Air; 16 * 16 * self.height as usize];
-        if beard.is_empty() {
-            for lz in 0..16i32 {
-                for lx in 0..16i32 {
-                    for ly in 0..self.height {
-                        field[Self::idx(lx, ly, lz, self.height)] =
-                            aquifer.block_at(base_x + lx, self.min_y + ly, base_z + lz);
-                    }
-                }
-            }
-            return field;
-        }
-        for lz in 0..16i32 {
-            for lx in 0..16i32 {
-                for ly in 0..self.height {
-                    let (wx, wy, wz) = (base_x + lx, self.min_y + ly, base_z + lz);
-                    field[Self::idx(lx, ly, lz, self.height)] =
-                        aquifer.block_at_beard(wx, wy, wz, beard.compute(wx, wy, wz));
-                }
-            }
-        }
-        field
+        crate::compose::fill_column(aquifer, base_x, base_z, self.min_y, self.height, beard)
     }
 
     /// Highest solid Y per column, floored at `sea_level - 1` — the same
     /// `solidTop` definition the Overworld path and `ComposedChunkOracle` use.
     fn heights_from_field(&self, field: &[BlockKind]) -> [i32; 256] {
-        let mut heights = [i32::MIN; 256];
-        for lz in 0..16i32 {
-            for lx in 0..16i32 {
-                let mut top = self.min_y - 1;
-                for ly in (0..self.height).rev() {
-                    if field[Self::idx(lx, ly, lz, self.height)] == BlockKind::Stone {
-                        top = self.min_y + ly;
-                        break;
-                    }
-                }
-                heights[(lz * 16 + lx) as usize] = top.max(self.sea_level - 1);
-            }
-        }
-        heights
+        crate::compose::solid_top_heights(field, self.min_y, self.height, self.sea_level)
     }
 
     /// One climate sample per horizontal quart, `Climate.Sampler.sample(quartX,
@@ -606,35 +568,20 @@ impl NetherGenerator {
         base_x: i32,
         base_z: i32,
     ) -> crate::dense_grid::DenseBlockGrid {
-        let mut world = crate::dense_grid::DenseBlockGrid::with_interner(
-            Arc::clone(&self.interner),
+        // Point lookups into `surface_diff` in a fixed order, never iteration — see
+        // [`crate::compose::materialize_column`] for the palette-order rule and the
+        // bug that established it.
+        crate::compose::materialize_column(
+            &self.interner,
+            field,
+            &surface_diff,
             base_x,
-            self.min_y,
             base_z,
-            16,
+            self.min_y,
             self.height,
-            16,
-            StateId::AIR,
-        );
-        // Point lookups into `surface_diff` in this fixed order, never iteration
-        // — a `DenseBlockGrid`'s palette is built in `set` order, and iterating a
-        // hash map here would make two independently built generators produce the
-        // same terrain with different bytes (the bug `overworld::fill` records).
-        for lz in 0..16i32 {
-            for lx in 0..16i32 {
-                for ly in 0..self.height {
-                    let y = self.min_y + ly;
-                    let base = match field[Self::idx(lx, ly, lz, self.height)] {
-                        BlockKind::Stone => self.default_block_pre.state,
-                        BlockKind::Water | BlockKind::Lava => self.default_fluid_pre.state,
-                        BlockKind::Air => StateId::AIR,
-                    };
-                    let state = surface_diff.get(&(lx, y, lz)).copied().unwrap_or(base);
-                    world.set_id(base_x + lx, y, base_z + lz, state);
-                }
-            }
-        }
-        world
+            self.default_block_pre.state,
+            self.default_fluid_pre.state,
+        )
     }
 
     /// `applyCarvers` over the post-surface column.

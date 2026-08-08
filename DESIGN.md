@@ -6859,3 +6859,196 @@ used is the measured with-minus-without palette difference (16 names) narrowed t
 proves absent from `noise_settings/nether.json`'s own `surface_rule`, `default_block`, `default_fluid` and
 `configured_carver/nether_cave` — and that companion test also asserts the surface rule *does* still name
 blackstone or basalt, so its own warning cannot go stale silently.
+
+
+**12.146 The End generates, and with no oracle in existence the strongest gate available turned out to
+be a closed-form prediction from the router read as a tree — one that is provably independent of the
+island noise, the seed, and the 17,292 draws nobody can check. Its first control had a false premise and
+failed in the unsafe direction.** (#485's End half.)
+
+`EndGenerator` is `NetherGenerator` with four substitutions, exactly as the previous agent's recipe said:
+`EndBiomeSource` for the multi-noise table, `BlockKind::Air` for the fluid, `cell_geometry`'s 8×4 (the
+*transpose* of the Nether's 4×8, which is why that function exists), and no carver. Nothing about the
+composition was surprising. What is worth recording is the evidence, because the constraint here is
+absolute and it forced a better gate than a comparison would have been.
+
+**The constraint.** `.cache/mc/survival/world/dimensions/minecraft/the_end/` has a `data/` directory and
+**no `region/`**: not one vanilla-generated End chunk exists on this machine, and no `container` run
+produces one without generating a new world. So there is no arm to compare against, and comparing our
+output to our own is the closed loop the evidence section forbids.
+
+**The gate that came out of that, and why it is stronger than a comparison would have been.**
+`end.json`'s `final_density`, read as a tree rather than as a value, is
+
+```text
+squeeze(interpolated(0.64 * blend_density(
+    -0.234375 + g1(y) * (0.234375 + (-23.4375 + g2(y) * (23.4375 + end/sloped_cheese))))))
+  g1 = y_clamped_gradient(from_value 0.0 @ from_y 4, to_value 1.0 @ to_y 32)
+```
+
+`Mth.clampedMap` clamps below `from_y` to `from_value`, so `g1(y) = 0.0` **exactly** for every `y <= 4`,
+and `DensityFunctions.Ap2.Mul` short-circuits on `argument1 == 0.0` without evaluating `argument2`. So at
+those heights the island field, `base_3d_noise` and the seed are *structurally* not consulted, and the
+whole expression collapses to `squeeze(0.64 × −0.234375) = squeeze(−0.15) = −0.07485938 <= 0` → the
+disabled aquifer's global fluid → air. The cell height is 4, so the interpolation's bracketing corners are
+`y = 0` and `y = 4` and both hold that constant. **Every block at y ∈ [0,4], everywhere in the End, at
+every seed, is air** — 25,600 positions swept across 2 seeds × 10 chunks spanning the main island, the
+void and the small-island region.
+
+That prediction fails on a swapped `from_y`/`to_y`, a swapped `from_value`/`to_value`, a misread
+`mul`/`add` nesting, a wrong constant, or an off-by-one in the fill's `y`, and it needs to know **nothing**
+about `EndIslandNoise`. A block-for-block comparison against an oracle would have subsumed it, but no
+oracle exists; the general lesson is that **a dimension with no oracle still has closed forms in it, and
+they live where a gradient clamps or a multiply short-circuits.** Look for the positions at which the
+expression stops depending on anything.
+
+**Its first control was premise-false, and failed in the *unsafe* direction.** The control was "look one
+cell higher, where `g1` is unclamped, and require a mixture of solid and air". It failed: the End's terrain
+is a slab around y 12–62, so y 5..11 is empty for a reason with nothing to do with the gradient. Had the
+End happened to have low terrain it would have **passed while measuring nothing** — §12.41's shape, second
+instance in this one dimension (the plateau test's diagonal-corner window was the first). The control now
+**mutates the record**: it swaps `from_value` and `to_value` on `g1` — the single most natural
+transcription error, and the one a reader of `0.0 @ 4 → 1.0 @ 32` actually makes — builds a second
+generator from the mutated settings, and requires the band to become island-*dependent* (some solid **and**
+some air; uniformly solid would mean the mutation reached something else). **The general form: when a
+control cannot be built out of a neighbouring position, build it by driving the wrong hypothesis through
+the real code.**
+
+**The other expectations, and one that had to come from another dimension.** `the_end_generates_no_fluid_anywhere`
+is arithmetic: `createFluidPicker`'s deep-lava branch needs `y < min(-54, seaLevel)` and against
+`min_y 0` / `sea_level 0` it is unreachable, so the sea status is `FluidStatus(fluid_level = 0, …)` and
+`FluidStatus.at(y)` returns its type only for `y < 0`, i.e. never — the answer is air at every position
+*whatever* `default_fluid` says, which is why air here is a real answer and not a missing one. But a zero
+count is an absence, and its detector had to be proved: the control runs the **same**
+`AquiferSystem::disabled` path over `nether.json` and requires lava. A cross-*dimension* control, because
+within the End there is nothing that could produce a fluid to detect. Same shape for bedrock: the End's
+rule has no `vertical_gradient`, and the gate additionally asserts the *Nether's* rule still does, so the
+reading of an absence cannot go stale silently.
+
+**Two places copying the Nether would have been actively wrong**, and both look like nothing:
+
+- **Bedrock.** The Nether's floor and roof are `vertical_gradient` surface rules. The End has none and must
+  have none. A generator that inherited the Nether's surface handling wholesale is not the risk — the rules
+  are data — but a *gate* that asserted "y 0 is bedrock" by analogy would have been.
+- **The heightmap floor.** `solid_top_heights` floors at `sea_level - 1`. For the Nether that is 31; for the
+  End `sea_level` is 0 and `min_y` is 0, so it is `min_y - 1` — which is the same "nothing solid here"
+  sentinel the loop already produces, rather than a clamp to a water line that does not exist. Correct by
+  arithmetic, and worth checking rather than assuming.
+
+**The refactor that landed with it.** `fill_column`, `solid_top_heights` and `materialize_column` moved
+from `nether/mod.rs`'s private methods into `crate::compose`, so the two disabled-aquifer dimensions cannot
+drift apart about the `-0.0` branch (an empty beardifier must take the loop with *no addition*, because
+`+ 0.0` flips `-0.0`'s sign bit) or about the palette-order rule (the surface diff is consulted by point
+lookup inside a fixed loop and never iterated — the bug this repo shipped once). The Overworld deliberately
+keeps its own copies: its fill carries a `StageGuard` and is the subject of the allocation-attribution
+bench, and merging them would put instrumentation in the Nether's and End's hot loop. `nether_gen.rs`'s
+17,855/17,856 quarts and 20,480/20,480 bedrock positions were re-run after the extraction and are unchanged.
+
+**What is ungated, stated because it will otherwise be assumed gated.** `consumeCount(17292)` — and not by
+accident: **not one prediction in `end_gen.rs` depends on the island field's value**, which is exactly what
+makes them robust and exactly what makes them blind to it. The dead band is structurally independent of it,
+the fluid and bedrock gates are about the settings, and the terrain profile (main island at (0,0):
+12,146/32,768 solid over y 12..60; an `end_midlands` chunk at (400,400): 10,000 over y 14..62; every
+sampled `small_end_islands` chunk and the void inside the radius-64 `the_end` biome: **0**, which is right
+because small end islands are a *feature*, not terrain) is an `#[ignore]`d diagnostic and is **not**
+evidence. The one thing that would close it is a `DensityOracle` dump of `end_islands` at known
+coordinates; `scripts/worldgen-oracle/DensityOracle.java` and `run.sh` exist and run under Apple
+`container`, so it is small and unblocked, and it is now the *only* thing blocking a real End parity claim.
+
+**12.147 One reported symptom, two independent faults, and the owner's guess at the cause was half right
+where the brief that corrected him was also half right.** Reported: *"when i open up the recipe book it
+seems like the inventory ui thinks the inventory is in the old place (with the recipe book closed), as if i
+hover on the recipe book it shows an inventory slot highlighted."* The brief dispatching the fix said that
+diagnosis was wrong and named a different cause — the panel not consuming the pointer — citing as evidence
+that `redraw.rs` passes `.with_book_open` and `container/tooltip.rs` resolves through `hit_test_with_book`.
+Both citations were true. **The conclusion did not follow, because neither cited file is where the highlight
+is resolved.** `container/geometry.rs`'s `build_inner` had its own third call, `hit_test_with_scale`, which
+*is* `hit_test_with_book(…, false)` — so the layout really was book-unaware for the highlight, exactly as
+reported, while being book-aware for the click and the tooltip. Two earlier fixes had each converted the
+call in front of them and neither swept for the others.
+
+- **The displacement is 77 logical pixels at 1280×720**, derived not guessed: `recipe_book_panel_shift` is
+  `177 + floor((426.67 − 176 − 200)/2) − floor((426.67 − 176)/2)` = `202 − 125`. That is **more than four
+  whole 18 px cells**, which is why the symptom was legible at all rather than reading as a one-pixel
+  inset — the highlight landed four columns away, and hovering the book's page resolved into the unshifted
+  panel's second column.
+- **The second fault is real and the first fix does not cover it**, which is the part worth keeping.
+  Book-awareness alone fixes the wide canvas because the shifted panel no longer overlaps the book
+  (book `53..200`, shifted panel `202..378` at this canvas). Below `RECIPE_BOOK_MIN_WIDTH` = 379 the shift
+  is **deliberately zero** — vanilla's own `else` branch accepts the overlap — so a fully book-aware hover
+  still resolves to the slot under the book. `ContainerFrame::with_hover_blocked` is that half, fed by the
+  same `recipe_book_panel_hit_test_with_scale` predicate the *click* path has consulted since the panel
+  landed. **The click path consuming the pointer and the draw not consuming it is a class, not an
+  instance**: ask of any overlay whether its "consumed" predicate has a draw-side counterpart.
+- **The trap in the obvious fix.** `ContainerFrame::cursor` positions the hovered slot *and* the carried
+  stack. Withholding the cursor over the panel suppresses the highlight and simultaneously parks a held item
+  in mid-air, which vanilla does not do — it drags across the book perfectly happily. The suppression has to
+  be specific to hovered-slot resolution, which is why it is a separate flag; the gate asserts the carried
+  stack's stream is byte-identical between the blocked and unblocked frames, with a `>` against a
+  cursor-less frame so that equality cannot be satisfied by two frames that both drew nothing.
+- **The structural fix, not just the behavioural one.** `emit_tooltip` was running its *own*
+  `hit_test_with_book`, so the tooltip and the highlight answered the same question with two calls — and
+  they disagreed, because one of the two was the unshifted one. `build_inner` now resolves `hovered` once
+  and hands it to both. Three call sites answering one question is how the third one stays wrong.
+- **Survey of the same class: the recipe book is the only overlay over a container.** The creative screen
+  *replaces* the container pass (`container_menu.is_some() && !creative_open`) and draws no hovered-slot
+  highlight at all (`creative.rs`: "No hovered-slot highlight on this screen"); `Screen::Advancements` and
+  `Screen::Container` are two values of one field and cannot coexist. So the survey came back with one
+  instance, which is worth recording as a *measurement* rather than leaving the next reader to redo it.
+- Four gates, all on `bg_verts`/the colour stream rather than on frame data — the blind spot that produced a
+  green suite over a wrong resource-pack draw twice in one day. Control: neutering both halves fails all
+  four (`77 passed; 4 failed`), restored and green (`81 passed`).
+
+**12.148 The "we have no translation table" premise was false, the file that would have proved it exists,
+and `find crates -name en_us.json` returning nothing is why it survived.** Briefed as: no language table is
+bundled, command feedback must be made to emit vanilla keys, the client must be *made* to resolve translate
+components with `%s`/`%1$s` substitution and style inheritance. Measured: **every one of those already
+exists and is already wired.** `lodestone-assets/src/lang.rs`'s `Language` parses the table;
+`resources.rs`'s `try_vanilla` reads `assets/minecraft/lang/en_us.json` out of the same `client.jar` every
+texture comes from — **8,123 keys, 519,377 bytes** in 26.2; `Sim::translator()` hands it out;
+`lodestone-game/src/text.rs`'s `resolve` does `%s`, `%N$s`, `%%`, **recursive** argument resolution,
+`fallback`, key-as-last-resort and `TextStyle::inherit`; `sim/net_apply.rs`'s chat arm calls it at arrival;
+`hud/vanilla_font.rs` really draws italic and bold. The negative search was accurate and its subject was
+the wrong one: **the table is read at runtime from a jar the repo already requires, so it is correctly
+absent from `crates/`.** §12.144's shape — a true citation answering a neighbouring question — one layer
+out.
+
+- **Do not bundle it, and the reasoning is the deliverable.** 519 KB duplicating a hard dependency, needing
+  its own drift gate, and it can only ever be *en_us* — zero value toward the actual goal. The runtime path
+  already degrades honestly (no table → `None` → `fallback` → raw key, which is vanilla's own behaviour and
+  right because it makes a miss *visible*).
+- **What was genuinely missing was the outside expectation.** Every existing text test used a hand-written
+  stub table, so the resolver was verified against tables the tests also authored. The gate added
+  (`tests/command_message_translation.rs`) transcribes 13 patterns from the jar's `en_us.json`, cites the
+  decompiled command line each key and **argument order** came from, and expands the expected sentence **by
+  hand** — because feeding the jar's pattern to the resolver and asserting agreement with the jar's pattern
+  is `decode(encode(x)) == x`. An `#[ignore]`d gate then checks the transcription against the real file;
+  control run with one pattern corrupted reports `container.inventory: transcribed "Inventoryy", jar
+  "Inventory"`.
+- **The nesting is the whole point and a plausible wrong answer exists.** `/gamemode`'s argument is
+  `translatable("gameMode.creative")`, so a resolver that substituted without recursing yields *"Set own
+  game mode to gameMode.creative"* — computed rather than described in the gate. `/gamemode` on another
+  player has two same-typed arguments in a pattern grammatical **either way round** ("Set Steve's game mode
+  to Survival Mode" / "Set Survival Mode's game mode to Steve"), so both hypotheses are computed and the
+  measurement must land on one.
+- **Where vanilla's italics actually are, since the report asked for them.** Not in command feedback:
+  `CommandSourceStack.java:495` sends a failure as `RED`, upright. The italics are the **op broadcast**,
+  `:480` — `translatable("chat.type.admin", …).withStyle(GRAY, ITALIC)`, `chat.type.admin` = `"[%s: %s]"`.
+  So the nested feedback message must *inherit* grey italic; a resolver resetting style per substituted
+  argument leaves the sentence upright inside italic brackets, which reads as "nearly right". The gate
+  asserts every span, with a control that the same message outside the wrapper is **not** italic.
+- **26.2's `GiveCommand` passes `commands.give.success.single` in *both* branches** (`:98` and `:102`),
+  with `players.size()` as the third argument in the multi-target case, so that line reads "Gave 3 Diamond
+  Sword to 2". `commands.give.success.multiple` exists in `en_us.json` and is unused there. Transcribed as
+  the record says, not corrected — a record definition is not a proposal.
+- **"Can we just pull the languages out" is no for 141 of 142, and the blocker is a manifest, not a
+  parser.** `en_us` is **jar-only and absent from the asset index**; the other **142** `minecraft/lang/*.json`
+  are index objects totalling **86.6 MB** (median 580 KB), **0** present locally. The language *manifest* is
+  **`pack.mcmeta`, 19,652 bytes, index-only — the jar has no `pack.mcmeta` at all** — read by
+  `LanguageManager.extractLanguages` as each pack's `LanguageMetadataSection`. **This corrects
+  `docs/language-screen.md`**, which records that the display names are "public vanilla knowledge, not
+  jar-verified" because 26.2 ships no `languages.json`: true, and the real manifest is obtainable anyway.
+  Both halves of the machinery already exist — `asset_objects.rs` reads the hash-addressed store,
+  `xtask`'s `download_verified_file`/`fetch-sounds` do verified index downloads — so the work is fetch
+  `pack.mcmeta` eagerly (19.6 KB) plus each `lang/<code>.json` lazily on selection (~580 KB), not 86.6 MB
+  up front and not a new reader.

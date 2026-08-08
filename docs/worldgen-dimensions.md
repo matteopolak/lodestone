@@ -2,15 +2,17 @@
 
 ## What it is
 
-The bundled 26.2 data for the Nether and the End, and the precise engine deficit
-that still stands between that data and a generating dimension. Only the
-Overworld generates today. This doc is the jar-derived answer to "what is
-actually missing", per dimension, with each item classed **[data]** (absent from
-the bundle), **[engine]** (absent engine primitive), **[unwritten]** (nothing
-blocks it), **[gameplay]** (cannot finish even with perfect worldgen) or
-**[structures]** (belongs to the structure corpus, not terrain). Phase NE-data
-of [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md); the data half is
-landed, the engine half is not started.
+The bundled 26.2 data for the Nether and the End, and the per-dimension deficit
+inventory it was written to answer. **All three dimensions generate terrain now** —
+`NetherGenerator` and `EndGenerator` both landed, the Nether with a structure stage —
+so what is left here is decoration, the remaining structure piece generators, and the
+server-side wiring that would let a portal reach either dimension. This doc is the
+jar-derived answer to "what is actually missing", per dimension, with each item
+classed **[data]** (absent from the bundle), **[engine]** (absent engine primitive),
+**[unwritten]** (nothing blocks it), **[gameplay]** (cannot finish even with perfect
+worldgen) or **[structures]** (belongs to the structure corpus, not terrain). Phase
+NE-data of [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md); the data half
+landed first, then the engine half.
 
 **The headline: after this phase there is no `[data]` item left for either
 dimension.** Every remaining gap is engine or gameplay. That is a narrower

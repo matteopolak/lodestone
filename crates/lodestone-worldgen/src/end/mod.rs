@@ -1,39 +1,48 @@
-//! The End: `TheEndBiomeSource`, plus a precise statement of the one thing still
-//! between this engine and End terrain.
+//! The End: `TheEndBiomeSource` and [`EndGenerator`], the third dimension this
+//! engine produces real terrain for.
 //!
 //! # What it is
 //!
 //! [`EndBiomeSource`] is the complete port of vanilla's `TheEndBiomeSource`
 //! (`TheEndBiomeSource.java:60-81`) — the End's whole biome layout, and it works
-//! **today**, without the density interpreter, because the only thing it samples is
+//! without the density interpreter, because the only thing it samples is
 //! the router's `erosion` channel and for the End that channel is exactly
 //! `cache_2d(end_islands)` (`NoiseRouterData.java:433,443`; confirmed against the
 //! bundled `noise_settings/end.json`, whose `erosion` is literally
 //! `{"type": "minecraft:cache_2d", "argument": {"type": "minecraft:end_islands"}}`).
 //! So it is built straight on [`crate::noise::EndIslandNoise`].
 //!
-//! # What is missing, exactly
+//! [`EndGenerator`] is [`crate::nether::NetherGenerator`] with **four
+//! substitutions**, every one of which is data rather than code:
 //!
-//! **End *terrain* needs one thing: a `minecraft:end_islands` leaf in the density
-//! interpreter.** `noise_settings/end.json`'s `final_density` reaches
-//! `density_function/end/sloped_cheese.json`, which is
-//! `add(end_islands, end/base_3d_noise)`, so `density::Builder::build` panics on the
-//! unknown type and there is no `EndGenerator` here. Everything *else* the End needs
-//! already landed with the Nether:
+//! | | Nether | End |
+//! |---|---|---|
+//! | biome | 5-row multi-noise parameter table | [`EndBiomeSource`] — one erosion sample per *chunk* |
+//! | `default_fluid` | `minecraft:lava[level=0]`, `sea_level 32` | **`minecraft:air`**, `sea_level 0` — the End has no fluid at all |
+//! | cell geometry | `size_horizontal 1, size_vertical 2` → 4×8 | **`2, 1`** → **8×4** |
+//! | carver | `nether_cave` | **none** — `configured_carver` has four entries and no End biome document names one |
 //!
-//! | need | state |
-//! |---|---|
-//! | `legacy_random_source` | [`crate::rng::Algorithm`], landed |
-//! | `aquifers_enabled: false` | [`crate::aquifer::AquiferSystem::disabled`], landed |
-//! | `default_fluid: air` | `aquifer::fluid_from_settings`, landed |
-//! | 8-wide/4-tall cells (`size_horizontal 2, size_vertical 1`) | `aquifer::cell_geometry`, landed |
-//! | surface rule | a single `minecraft:block` end_stone rule — the engine's simplest case |
-//! | `TheEndBiomeSource` | **here** |
-//! | `end_islands` as a `Density` leaf | **not landed** — the density interpreter is another cluster's file |
-//! | `end_islands` the algorithm | [`crate::noise::EndIslandNoise`], landed and gated |
+//! Everything else is shared: `legacy_random_source: true` through
+//! [`crate::rng::Algorithm`], `aquifers_enabled: false` through
+//! [`crate::aquifer::AquiferSystem::disabled`], and the fill / heightmap /
+//! materialise stages through [`crate::compose`].
 //!
-//! The leaf patch is three lines of `Density`/`OpKind` plumbing plus a `Builder`
-//! arm; see `docs/worldgen-end.md` for the exact shape.
+//! # What is *not* here, and it is not terrain
+//!
+//! * **The central island's furniture.** Obsidian pillars, the exit portal, the
+//!   gateway and the dragon are structure/entity work, and three of the four are
+//!   *not worldgen at all* despite looking like it: `EndPodiumFeature` is never
+//!   registered in `Feature.java`, the pillars and the end platform each have a
+//!   gameplay placer as well as a worldgen one, and only `end_gateway_return`
+//!   (rarity 700 in `end_highlands`) is reached from a biome document.
+//! * **Decoration.** All the End's placed features are bundled and the five biome
+//!   documents carry the step wiring, so that is `crate::feature` step work with
+//!   zero data missing.
+//! * **`end_city`**, a template-piece structure, and therefore not a terrain gap.
+//! * **A structure stage.** Unlike the Nether, the End composes none — deliberately,
+//!   because `end_city` is the only End structure and it has no piece generator, so
+//!   a stage today would place starts nothing could build. The Nether's stage is the
+//!   template when it lands.
 //!
 //! # How it works
 //!
@@ -66,11 +75,32 @@
 //! object and its five holders come from the registry (`TheEndBiomeSource.java:14-23`),
 //! so they are constants here too rather than a resolver lookup.
 //!
+//! **There is no End block oracle anywhere**, and that bounds what any gate here can
+//! claim. `.cache/mc/survival/world/dimensions/minecraft/the_end/` has a `data/`
+//! directory and **no `region/`** — the world's End was never visited, so not one
+//! generated End chunk exists on this machine. Comparing End output against our own
+//! output is the closed loop the evidence rules forbid, so every gate in
+//! `tests/end_gen.rs` derives its expectation from **geometry, arithmetic, or a
+//! record definition read out of `.cache/mc/26.2/src`**, and `docs/worldgen-end.md`
+//! names the one thing that leaves ungated (`consumeCount(17292)`). Do not add a
+//! gate here whose expected value came from this code.
+//!
 //! # Dependencies
 //!
-//! [`crate::noise::EndIslandNoise`] only. Nothing version-specific, no resolver.
+//! [`crate::aquifer`], [`crate::compose`], [`crate::surface`],
+//! [`crate::dense_grid`], [`crate::interner`], [`crate::noise::EndIslandNoise`] and
+//! `lodestone-worldgen-core`'s density interpreter. Nothing version-specific.
 
+use std::sync::Arc;
+
+use serde_json::Value;
+
+use crate::aquifer::{AquiferSystem, BlockKind};
+use crate::density::{Builder, Resolver};
+use crate::engine::Program;
+use crate::interner::StateInterner;
 use crate::noise::EndIslandNoise;
+use crate::surface::{PreState, SurfaceDiff, SurfaceSystem, identity_canon};
 
 /// `Biomes.THE_END`.
 pub const THE_END: &str = "minecraft:the_end";
@@ -161,6 +191,343 @@ impl EndBiomeSource {
         std::array::from_fn(|i| {
             self.biome_at_quart(cx * 4 + (i % 4) as i32, 0, cz * 4 + (i / 4) as i32)
         })
+    }
+}
+
+/// One generated End chunk: the block column plus its 16 horizontal biome quarts.
+///
+/// All 16 quarts are always equal — the erosion sample is at the chunk centre, which
+/// is vanilla's behaviour and not a simplification — and the array shape is kept so a
+/// caller building a biome container writes the same loop it writes for the Nether.
+#[derive(Debug, Clone)]
+pub struct EndColumn {
+    min_y: i32,
+    height: i32,
+    palette: Vec<String>,
+    blocks: Vec<u16>,
+    biome_quarts: [&'static str; 16],
+}
+
+impl EndColumn {
+    /// World Y of the lowest block row (0 for the End).
+    #[must_use]
+    pub fn min_y(&self) -> i32 {
+        self.min_y
+    }
+
+    /// Number of block rows (128 for the End).
+    #[must_use]
+    pub fn height(&self) -> i32 {
+        self.height
+    }
+
+    /// Canonical block-state string at local `(lx, lz)` in `0..16` and world `y`.
+    /// Out-of-range Y is `"minecraft:air"`.
+    #[must_use]
+    pub fn block_state(&self, lx: usize, y: i32, lz: usize) -> &str {
+        let ly = y - self.min_y;
+        if !(0..self.height).contains(&ly) {
+            return "minecraft:air";
+        }
+        let idx = ((ly * 16 + lz as i32) * 16 + lx as i32) as usize;
+        &self.palette[self.blocks[idx] as usize]
+    }
+
+    /// The biome at horizontal quart `(qx, qz)`, both in `0..4`.
+    #[must_use]
+    pub fn biome_at_quart(&self, qx: usize, qz: usize) -> &'static str {
+        self.biome_quarts[qz * 4 + qx]
+    }
+
+    /// The biome covering local column `(lx, lz)`.
+    #[must_use]
+    pub fn biome_at(&self, lx: usize, lz: usize) -> &'static str {
+        self.biome_at_quart(lx >> 2, lz >> 2)
+    }
+
+    /// Count of non-air blocks — the cheapest "did this actually generate terrain"
+    /// question, and the one an empty-column bug fails.
+    #[must_use]
+    pub fn non_air_count(&self) -> usize {
+        let air = self
+            .palette
+            .iter()
+            .position(|s| s == "minecraft:air")
+            .map(|i| i as u16);
+        match air {
+            Some(air) => self.blocks.iter().filter(|&&b| b != air).count(),
+            None => self.blocks.len(),
+        }
+    }
+
+    /// The raw parts, for a caller building a chunk packet or a region file.
+    #[must_use]
+    pub fn into_raw(self) -> (i32, i32, Vec<String>, Vec<u16>, [&'static str; 16]) {
+        (
+            self.min_y,
+            self.height,
+            self.palette,
+            self.blocks,
+            self.biome_quarts,
+        )
+    }
+}
+
+/// A composed, reusable End generator. Build once per seed; call
+/// [`column`](Self::column) per chunk.
+///
+/// **Demand-ordered and order-independent.** Nothing memoises across chunks and no
+/// stage reads a neighbouring chunk's product — there is no carver here, so not even
+/// the Nether's 17×17 re-derivation — so `column` is a pure function of
+/// `(seed, cx, cz)` and columns may be requested in any order, on any thread,
+/// without changing a byte.
+#[allow(missing_debug_implementations)]
+pub struct EndGenerator {
+    slot_count: usize,
+    interner: Arc<StateInterner>,
+    surface: SurfaceSystem,
+    /// `noise_router.final_density`, compiled once. Cloning it per chunk is an `Arc`
+    /// bump.
+    final_density: Program,
+    biomes: EndBiomeSource,
+    min_y: i32,
+    height: i32,
+    sea_level: i32,
+    cell_width: i32,
+    cell_height: i32,
+    default_block: String,
+    default_block_pre: PreState,
+    /// The dimension's `default_fluid` as a [`BlockKind`]. **`Air` is a real answer
+    /// here, not a missing one** — the End has no fluid, and `sea_level 0` against
+    /// `min_y 0` makes every `FluidStatus::at` return air anyway. A generator that
+    /// "helpfully" defaulted this to water would flood the End below y 0, which is
+    /// nowhere, and then look correct.
+    default_fluid: BlockKind,
+    default_fluid_pre: PreState,
+}
+
+impl EndGenerator {
+    /// Builds the generator for `seed` from `noise_settings/end.json` and a
+    /// [`Resolver`] carrying the End's density functions and noises.
+    ///
+    /// Takes **no** biome parameter table, unlike the Nether: the End's biome layout
+    /// is `TheEndBiomeSource`, which serialises to an empty object, so there is
+    /// nothing for a resolver to supply and nothing that can be misconfigured. That
+    /// is also why there is no equivalent of the Nether's empty-table panic.
+    ///
+    /// # Panics
+    /// Panics if the settings do not set `legacy_random_source: true`. Every noise
+    /// value in the dimension is wrong under xoroshiro, and it would look like
+    /// terrain.
+    #[must_use]
+    pub fn new(seed: i64, settings: &Value, resolver: &dyn Resolver) -> Self {
+        let builder =
+            Builder::with_algorithm(seed, crate::rng::Algorithm::from_settings(settings), resolver);
+        assert!(
+            builder.algorithm().is_legacy(),
+            "noise_settings for the End must set legacy_random_source: true; \
+             with xoroshiro every noise value in the dimension is wrong"
+        );
+
+        let router = &settings["noise_router"];
+        let interner = Arc::new(StateInterner::new());
+        let canon = identity_canon(settings);
+        let final_density = Program::compile(&builder.build(&router["final_density"]));
+        let surface = SurfaceSystem::new(settings, &builder, &canon, &interner);
+
+        let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(0) as i32;
+        let height = settings["noise"]["height"].as_i64().unwrap_or(128) as i32;
+        let sea_level = settings["sea_level"].as_i64().unwrap_or(0) as i32;
+        let (cell_width, cell_height) = crate::aquifer::cell_geometry(settings);
+
+        let default_block = settings["default_block"]["Name"]
+            .as_str()
+            .unwrap_or("minecraft:end_stone")
+            .to_string();
+        let default_fluid = crate::aquifer::fluid_from_settings(settings);
+        let default_block_pre = PreState::from_name(&interner, &default_block);
+        // Read through the same `BlockKind` the fill will produce, so the two cannot
+        // disagree about what "the fluid" is in a dimension whose fluid is air.
+        let default_fluid_pre = PreState::from_name(
+            &interner,
+            match default_fluid {
+                BlockKind::Air => "minecraft:air",
+                BlockKind::Water => "minecraft:water[level=0]",
+                BlockKind::Lava => "minecraft:lava[level=0]",
+                BlockKind::Stone => panic!("default_fluid is not a fluid: Stone"),
+            },
+        );
+
+        let slot_count = builder.slot_count();
+
+        Self {
+            slot_count,
+            interner,
+            surface,
+            final_density,
+            biomes: EndBiomeSource::new(seed),
+            min_y,
+            height,
+            sea_level,
+            cell_width,
+            cell_height,
+            default_block,
+            default_block_pre,
+            default_fluid,
+            default_fluid_pre,
+        }
+    }
+
+    /// World Y of the lowest generated block row.
+    #[must_use]
+    pub fn min_y(&self) -> i32 {
+        self.min_y
+    }
+
+    /// Number of block rows generated per column.
+    #[must_use]
+    pub fn height(&self) -> i32 {
+        self.height
+    }
+
+    /// The dimension's biome source, for a caller that needs a biome without
+    /// generating a column.
+    #[must_use]
+    pub fn biome_source(&self) -> &EndBiomeSource {
+        &self.biomes
+    }
+
+    /// The generated column for chunk `(cx, cz)`.
+    ///
+    /// Vanilla's stage order, minus the two stages this dimension has none of: fill,
+    /// biome, surface, materialise. No carve step (no End biome document names a
+    /// carver) and no structure stage (see the module doc).
+    #[must_use]
+    pub fn column(&self, cx: i32, cz: i32) -> EndColumn {
+        let base_x = cx * 16;
+        let base_z = cz * 16;
+
+        let aquifer = self.build_fill(cx, cz);
+        // `Beardifier::empty()` rather than an `Option`: it takes
+        // `fill_column`'s no-addition loop, so the End's density is the interpolated
+        // `final_density` untouched — not `final_density + 0.0`.
+        let field = crate::compose::fill_column(
+            &aquifer,
+            base_x,
+            base_z,
+            self.min_y,
+            self.height,
+            &crate::structure::beardifier::Beardifier::empty(),
+        );
+        let heights =
+            crate::compose::solid_top_heights(&field, self.min_y, self.height, self.sea_level);
+        let biome_quarts = self.biomes.chunk_quarts(cx, cz);
+        let surface_diff = self.surface_stage(&field, &heights, &biome_quarts, base_x, base_z);
+        let world = crate::compose::materialize_column(
+            &self.interner,
+            &field,
+            &surface_diff,
+            base_x,
+            base_z,
+            self.min_y,
+            self.height,
+            self.default_block_pre.state,
+            self.default_fluid_pre.state,
+        );
+
+        let (palette, blocks) = world.into_palette_and_blocks();
+        EndColumn {
+            min_y: self.min_y,
+            height: self.height,
+            palette,
+            blocks,
+            biome_quarts,
+        }
+    }
+
+    /// `Aquifer.createDisabled` bound to this chunk — the End's whole fill decision,
+    /// and with `default_fluid` air it reduces to "solid where the interpolated
+    /// density is positive, air everywhere else".
+    fn build_fill(&self, cx: i32, cz: i32) -> AquiferSystem {
+        AquiferSystem::disabled(
+            self.final_density.clone(),
+            self.slot_count,
+            self.sea_level,
+            self.default_fluid,
+            self.min_y,
+            self.height,
+            cx,
+            cz,
+            self.cell_width,
+            self.cell_height,
+        )
+    }
+
+    /// The pre-surface shape field for `(cx, cz)`, as
+    /// [`BlockKind`]s — the seam a gate drives the End's density through without
+    /// paying for the surface pass or the palette.
+    ///
+    /// Index it with [`crate::compose::column_index`] rather than restating the
+    /// layout.
+    #[must_use]
+    pub fn shape_field(&self, cx: i32, cz: i32) -> Vec<BlockKind> {
+        let aquifer = self.build_fill(cx, cz);
+        crate::compose::fill_column(
+            &aquifer,
+            cx * 16,
+            cz * 16,
+            self.min_y,
+            self.height,
+            &crate::structure::beardifier::Beardifier::empty(),
+        )
+    }
+
+    /// `buildSurface`.
+    ///
+    /// **The End's surface rule is `{"type": "minecraft:block", "result_state":
+    /// end_stone}` — unconditional, and therefore a no-op**, because
+    /// `default_block` is already `end_stone` and vanilla's own scan only rewrites a
+    /// position holding the default block. It is composed anyway rather than skipped:
+    /// the rule is data, a datapack may replace it, and a generator that special-cased
+    /// "the End has no surface rules" would be encoding today's `end.json` as an
+    /// assumption. There is no bedrock here either — no `vertical_gradient` anywhere
+    /// in the End's rule — which is correct and is the one place the Nether's shape
+    /// would have been actively wrong.
+    fn surface_stage(
+        &self,
+        field: &[BlockKind],
+        heights: &[i32; 256],
+        biome_quarts: &[&'static str; 16],
+        base_x: i32,
+        base_z: i32,
+    ) -> SurfaceDiff {
+        // Re-derived rather than reasoned about: a wrong `PreClass` changes which
+        // surface rules fire and still produces a plausible column.
+        debug_assert_eq!(
+            self.default_block_pre,
+            PreState::from_name(&self.interner, &self.default_block),
+        );
+
+        let pre = |lx: i32, y: i32, lz: i32| -> PreState {
+            let ly = y - self.min_y;
+            if !(0..self.height).contains(&ly) {
+                return PreState::AIR;
+            }
+            match field[crate::compose::column_index(lx, ly, lz, self.height)] {
+                BlockKind::Stone => self.default_block_pre,
+                BlockKind::Water | BlockKind::Lava => self.default_fluid_pre,
+                BlockKind::Air => PreState::AIR,
+            }
+        };
+        let heightmap = |lx: i32, lz: i32| -> i32 { heights[(lz * 16 + lx) as usize] };
+        // Every End biome declares `temperature: 0.5`, so `cold_enough_to_snow` is
+        // false, and nothing in the End's rule tree reads it — there is no
+        // temperature condition to read it with.
+        let biome_at =
+            |lx: i32, lz: i32| -> (&str, bool) { (biome_quarts[((lz >> 2) * 4 + (lx >> 2)) as usize], false) };
+
+        self.surface
+            .build_surface(&pre, &heightmap, &biome_at, base_x, base_z)
     }
 }
 
