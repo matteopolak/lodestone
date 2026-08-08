@@ -79,6 +79,15 @@ pub struct ItemComponents {
     /// black (`Some(0)`), which vanilla also treats as "undyed" downstream
     /// (see `armour_layer_tint_with_dye`'s own doc for that quirk).
     pub dyed_color: Option<u32>,
+    /// `minecraft:trim`'s material and pattern, when the patch carries one — a
+    /// smithing-table armour trim.
+    ///
+    /// `None` for untrimmed armour and for every non-armour item. Trim is
+    /// **decoded rather than treated as unmodeled** because the component patch's
+    /// clientbound codec cannot skip an unknown component (see
+    /// [`has_unmodeled`](Self::has_unmodeled)): a trimmed stack used to truncate
+    /// decoding of the rest of the packet, not just lose its trim.
+    pub trim: Option<ArmorTrim>,
     /// What this stack's component *patch* said about `minecraft:tool`.
     ///
     /// Almost always [`ToolPatch::Inherited`] — see that type's docs; a plain
@@ -141,6 +150,25 @@ pub struct ItemComponents {
     /// the item's prototype value, which is the best available answer, but is not
     /// guaranteed to be the effective one.
     pub has_unmodeled: bool,
+}
+
+/// A smithing-table armour trim — vanilla's `ArmorTrim` record
+/// (`world/item/equipment/trim/ArmorTrim.java:21`), which is a
+/// `Holder<TrimMaterial>` plus a `Holder<TrimPattern>`.
+///
+/// Both are carried as bare registry **paths** (`"iron"`, `"sentry"`), the form
+/// `lodestone_assets::trim::{trim_material, trim_pattern}` keys its sprite tables
+/// by, so a renderer can go straight from this to a trim sprite. Neither holder's
+/// *value* is kept: `TrimMaterial` is an asset-suffix group plus a description
+/// component and `TrimPattern` is an asset id plus a description and a `decal`
+/// flag, all of which the asset layer already has statically for the eleven
+/// materials and eighteen patterns 26.2 ships.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ArmorTrim {
+    /// Trim material registry path, e.g. `"netherite"`.
+    pub material: String,
+    /// Trim pattern registry path, e.g. `"silence"`.
+    pub pattern: String,
 }
 
 /// What a stack's `DataComponentPatch` said about `minecraft:tool`.
