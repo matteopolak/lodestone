@@ -64,6 +64,14 @@ const PLAINS_FALLBACK: BiomeEffects = BiomeEffects {
     grass_modifier: GrassColorModifier::None,
 };
 
+/// How many distinct biome names the per-instance name→effects memo holds.
+///
+/// Four, because that is what a blend box straddling a biome boundary needs:
+/// vanilla's radius-2 box is 25 samples over a 5×5 column footprint, and a
+/// four-way biome junction is the worst real case. A one-entry memo thrashes
+/// there and degrades to the linear scan it exists to avoid.
+const EFFECTS_MEMO: usize = 4;
+
 /// A [`BiomeTint`] backed by a per-position biome **name** lookup (`F`) plus
 /// [`biome_effects`]'s static vanilla table.
 ///
@@ -71,8 +79,39 @@ const PLAINS_FALLBACK: BiomeEffects = BiomeEffects {
 /// lookup (`ChunkSection::biome_at_block` plus an id→name table) lives with
 /// whoever owns the world data — `crates/lodestone-shell/src/mesher.rs`'s
 /// `SnapshotModelView`/`SnapshotFluidView` today.
+///
+/// # The memo, and why it is here rather than in `biome_effects`
+///
+/// [`biome_effects`] is a **linear scan of 66 `(&str, BiomeEffects)` entries
+/// with a string compare per entry**, and this type calls it once per
+/// [`BiomeTint`] method call — which [`resolve_blended_tint`] makes 25 times per
+/// tinted quad (vanilla's radius-2 blend box), and up to four times *per sample*
+/// for grass (`grass_override` + `temperature` + `downfall` + `grass_modifier`).
+/// Measured on the fluid path: one `water_tint_at` cost **6,263 instructions, of
+/// which 97.8% was `biome_effects`** — 46% of `mesh_fluids`'s entire per-cell
+/// cost, and a term issue #542's own diagnosis did not name (`DESIGN.md`
+/// §12.123).
+///
+/// A blend box covers 25 columns and terrain has *one or two* biomes there, so
+/// the same handful of names is re-scanned dozens of times. This memo keys on
+/// the `&'static str`'s **data pointer and length**, not its contents: names come
+/// from static tables, so the same biome yields the same pointer. A pointer miss
+/// on an equal string is merely slow, never wrong — the fallback is the real
+/// [`biome_effects`] call.
+///
+/// Making the scan itself `O(log n)` (the table *is* alphabetically sorted, so a
+/// `binary_search_by` is a few lines) would fix every caller rather than this
+/// one, and is the better long-term change; it lives in `lodestone-assets`.
 pub struct NamedBiomeTint<F> {
     biome_name_at: F,
+    /// `(ptr, len, effects)` for the last few resolved names. `Cell` rather than
+    /// `RefCell`: every field is `Copy`, so there is nothing to borrow. The
+    /// pointer is held as a `usize` and never dereferenced — a raw pointer field
+    /// would make this type `!Send`, and it is built on rayon mesh workers.
+    memo: std::cell::Cell<[Option<(usize, usize, &'static BiomeEffects)>; EFFECTS_MEMO]>,
+    /// Where the next miss writes. Round-robin, so a boundary that cycles
+    /// through `EFFECTS_MEMO` names keeps hitting.
+    next: std::cell::Cell<usize>,
 }
 
 impl<F> std::fmt::Debug for NamedBiomeTint<F> {
@@ -87,13 +126,36 @@ impl<F: Fn(BlockPos) -> Option<&'static str>> NamedBiomeTint<F> {
     /// [`biome_effects`]) — `None` falls back to [`PLAINS_FALLBACK`].
     #[must_use]
     pub fn new(biome_name_at: F) -> Self {
-        Self { biome_name_at }
+        Self {
+            biome_name_at,
+            memo: std::cell::Cell::new([None; EFFECTS_MEMO]),
+            next: std::cell::Cell::new(0),
+        }
     }
 
     fn effects(&self, pos: BlockPos) -> &'static BiomeEffects {
-        (self.biome_name_at)(pos)
-            .and_then(biome_effects)
-            .unwrap_or(&PLAINS_FALLBACK)
+        let Some(name) = (self.biome_name_at)(pos) else {
+            return &PLAINS_FALLBACK;
+        };
+        let key = (name.as_ptr() as usize, name.len());
+        let memo = self.memo.get();
+        for slot in memo.iter().flatten() {
+            if slot.0 == key.0 && slot.1 == key.1 {
+                return slot.2;
+            }
+        }
+        // Miss: the real lookup, exactly as before. An unresolvable name is
+        // deliberately NOT memoised — it costs one scan and would otherwise
+        // evict a name that is paying for itself.
+        let Some(effects) = biome_effects(name) else {
+            return &PLAINS_FALLBACK;
+        };
+        let mut memo = memo;
+        let i = self.next.get();
+        memo[i] = Some((key.0, key.1, effects));
+        self.memo.set(memo);
+        self.next.set((i + 1) % EFFECTS_MEMO);
+        effects
     }
 }
 
@@ -231,6 +293,97 @@ mod tests {
         });
         assert_eq!(tint.water_color(BlockPos::new(-5, 64, 0)), 0x3F76E4);
         assert_eq!(tint.water_color(BlockPos::new(5, 64, 0)), 0x617B64);
+    }
+
+    /// The memo must be **transparent**, including when more distinct biomes
+    /// pass through it than it has slots — the case where a wrong eviction
+    /// returns another biome's effects.
+    ///
+    /// Eight names cycle through a four-slot memo, so every lookup after the
+    /// first four evicts something, and the walk is repeated twice so the second
+    /// pass reads whatever the first left behind. The expected water colour of
+    /// each name comes from `biome_effects` **directly**, not from this type, so
+    /// the expectation does not share the mechanism under test.
+    #[test]
+    fn the_effects_memo_is_transparent_under_eviction() {
+        // Eight names with eight *distinct* water colours, so a wrong hit shows
+        // up as a wrong colour rather than an accidental match.
+        const NAMES: [&str; 8] = [
+            "minecraft:swamp",
+            "minecraft:cold_ocean",
+            "minecraft:warm_ocean",
+            "minecraft:frozen_ocean",
+            "minecraft:meadow",
+            "minecraft:cherry_grove",
+            "minecraft:pale_garden",
+            "minecraft:mangrove_swamp",
+        ];
+        assert!(
+            NAMES.len() > EFFECTS_MEMO,
+            "the fixture must overflow the memo, or eviction is never exercised"
+        );
+        let distinct: std::collections::BTreeSet<Rgb> = NAMES
+            .iter()
+            .map(|n| biome_effects(n).expect("a known biome").water_color)
+            .collect();
+        assert_eq!(
+            distinct.len(),
+            NAMES.len(),
+            "the fixture's water colours must all differ, or a wrong hit could pass"
+        );
+
+        // `x` picks the name; the closure is position-dependent, exactly as the
+        // real snapshot lookup is.
+        let tint = NamedBiomeTint::new(|pos: BlockPos| {
+            Some(NAMES[pos.x.rem_euclid(NAMES.len() as i32) as usize])
+        });
+        for _pass in 0..2 {
+            for (i, name) in NAMES.iter().enumerate() {
+                let want = biome_effects(name).expect("a known biome");
+                let pos = BlockPos::new(i as i32, 64, 0);
+                assert_eq!(
+                    tint.water_color(pos),
+                    want.water_color,
+                    "{name} resolved to the wrong water colour through the memo"
+                );
+                assert_eq!(tint.temperature(pos), want.temperature, "{name} temperature");
+                assert_eq!(tint.grass_modifier(pos), want.grass_modifier, "{name} modifier");
+            }
+        }
+    }
+
+    /// Control: the memo must actually *hit*, or it is dead weight and the
+    /// measured saving in `DESIGN.md` §12.123 could not have come from here.
+    ///
+    /// Counts calls to the name closure and to a hand-rolled resolver standing
+    /// in for the scan: a radius-2 blend over a single biome is 25 name lookups,
+    /// and exactly **one** of them may reach the table.
+    #[test]
+    fn the_effects_memo_reaches_the_table_once_per_blend_box() {
+        use std::cell::Cell;
+        let name_calls = Cell::new(0usize);
+        let tint = NamedBiomeTint::new(|_pos: BlockPos| {
+            name_calls.set(name_calls.get() + 1);
+            Some("minecraft:swamp")
+        });
+        let colormaps = tiny_colormaps();
+        let before = tint.memo.get().iter().flatten().count();
+        assert_eq!(before, 0, "the memo must start empty");
+        let c = resolve_blended_tint(TintKind::Water, &colormaps, &tint, 2, 0, 64, 0)
+            .expect("water blends");
+        assert_eq!(c, 0x617B64, "the blended swamp water colour must be unchanged");
+        assert_eq!(
+            name_calls.get(),
+            25,
+            "a radius-2 blend box is 25 samples; the memo must not change how many \
+             positions are consulted, only how many reach the 66-entry scan"
+        );
+        assert_eq!(
+            tint.memo.get().iter().flatten().count(),
+            1,
+            "25 samples of one biome must leave exactly one memo entry — more means the \
+             memo is not being consulted and every sample re-scanned the table"
+        );
     }
 
     #[test]

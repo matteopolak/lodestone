@@ -142,10 +142,15 @@ without a per-draw CPU loop anyway (strategy.rs).
 **Expected win (counter).** `sections_drawn` drops from *all resident* to *resident ∩
 frustum*. At 70° vertical FOV / 16:9 (≈102° horizontal), a surface camera at a fixed
 heading should submit roughly 30–40% of resident sections (horizontal wedge + conservative
-straddle). Predict per-fixture exactly in the gate; in live F3, the invariant is the claim:
-`sections_drawn + sections_culled_frustum == resident_with_geometry` (new `RenderStats`
-fields, both terms surfaced in F3 — the on-screen consumer that keeps this unit from being
-an island even before U2/U3 land).
+straddle). Predict per-fixture exactly in the gate; in live F3, the invariant is the claim —
+**per pass**, which is the correction item 2 below asked for:
+`sections_drawn + sections_culled_frustum == resident_with_OPAQUE_geometry`, and a matching
+`water_sections_drawn + water_sections_culled_frustum == resident_with_WATER_geometry`.
+Written against a single `resident_with_geometry` it is simply false: `sections_drawn` is
+incremented only by the opaque loop (`frame.rs:480`), so a **water-only** section (`mesh:
+None`, still issuing a water draw at `frame.rs:720`) appears in neither term — measured 189
+`sections_drawn` against 195 uploads. New `RenderStats` fields, both pairs surfaced in F3 —
+the on-screen consumer that keeps this unit from being an island even before U2/U3 land.
 
 **Gate.** Headless GPU test (pattern: `gpu/pixel_gates.rs`): build 4 sections at hand-chosen
 coords — dead ahead, dead behind, far left outside the wedge, straddling the near plane.
@@ -536,14 +541,15 @@ Three consequences for the units above:
    instructions/frame** — more than an order of magnitude beyond every per-frame F3 field
    combined.
 
-2. **U1's stated invariant will not hold as written.** `sections_drawn` is incremented only by
-   the opaque loop (`frame.rs:480`), and a water-only section carries `mesh: None` there while
-   still issuing a water draw at `frame.rs:720` — measured **189** `sections_drawn` against
-   **195** uploads and **304** `draw_calls`. So
-   `sections_drawn + sections_culled_frustum == resident_with_geometry` needs either a
-   water-only term or a `resident_with_geometry` defined against the opaque table. Fix it in the
-   gate before it is written, or it reads 189 against 195 and looks like a cull bug. The
-   189-vs-304 gap is also, directly, U4's target quantified.
+2. **U1's stated invariant would not have held as written — now corrected above.** `sections_drawn`
+   is incremented only by the opaque loop (`frame.rs:480`), and a water-only section carries
+   `mesh: None` there while still issuing a water draw at `frame.rs:720` — measured **189**
+   `sections_drawn` against **195** uploads and **304** `draw_calls`. A single
+   `sections_drawn + sections_culled_frustum == resident_with_geometry` therefore reads 189
+   against 195 and looks exactly like a cull bug. U1's paragraph now states the invariant
+   **per pass** (opaque and water each closing against their own resident set), so the gate
+   cannot be built on the false premise. The 189-vs-304 gap is also, directly, U4's target
+   quantified.
 
 3. **Gate U1–U3 on section counts, not on instructions.** The per-column terms in that harness
    reproduce to 0.01–0.02% across processes; the submission term reproduces to only **3.1%**,

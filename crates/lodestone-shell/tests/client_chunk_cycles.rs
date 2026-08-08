@@ -1148,10 +1148,26 @@ fn client_chunk_path_cycle_attribution() {
     if !wet.is_empty() {
         row("sections WITH fluid", s3_fluids_wet, wet.len() as f64);
     }
+    if fluid_cells > 0 {
+        // The terrain-independent figure, printed rather than divided by hand:
+        // the 58.8% share belongs to *this* water-bearing column, but the
+        // per-fluid-cell cost is the number a fix is judged on. Cycles too,
+        // because a locality change can move them without moving instructions
+        // — see "Where instructions understate" in `docs/client-chunk-cycles.md`.
+        let cells = fluid_cells as f64;
+        println!(
+            "per FLUID cell (wet arm)       {:>14.0} {:>14.0} {:>6.2}",
+            s3_fluids_wet.instructions as f64 / cells,
+            s3_fluids_wet.cycles as f64 / cells,
+            s3_fluids_wet.instructions as f64 / s3_fluids_wet.cycles as f64
+        );
+    }
     println!(
-        "dry sections {} of {sections}; the dry arm is pure 4096-cell scan with every cell \n\
-         hitting the `continue` at models.rs:1166 — whatever it costs is removable by a \n\
-         palette-level `contains no fluid` precheck.",
+        "dry sections {} of {sections}. The dry arm is the 4096-cell scan with every cell \n\
+         empty. It is NOT free and it is NOT the target: issue #542 measured a palette-level \n\
+         `contains no fluid` precheck at ~2% of the term. `FluidGrid::any_fluid` now gives \n\
+         that precheck away as a by-product of the fill — but the fill itself is what makes \n\
+         this arm move, so watch it when changing `cell_at` (DESIGN.md §12.123).",
         dry.len()
     );
     println!(
