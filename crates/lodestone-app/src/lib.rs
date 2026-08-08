@@ -122,6 +122,21 @@ pub fn client_app() -> App {
         lodestone_ecs::session::SessionHudPlugin,
         lodestone_ecs::ingest::IngestPlugin,
         lodestone_ecs::SessionPlugin,
+        // Issue #301. Without this line the whole `custom_payload` dispatch is an
+        // island *and so is the `GameEvent` bus underneath it*: `SharedState`
+        // caches `game_event_bus_enabled` once at construction and only
+        // `PluginChannelPlugin::build` (which `add_plugin_channel` installs)
+        // adds `GameEventBusPlugin`, so with no channel registered anywhere in
+        // the shipped `App` the bus resource was absent and
+        // `push_to_game_event_bus` ran for **no `ClientEvent` at all**.
+        //
+        // It goes here rather than in the shell's own tuple so every headless
+        // consumer gets it too, and it is `lodestone-ecs`'s built-in channel
+        // rather than `crates/plugins/lodestone-server-brand` because this
+        // manifest's dependency list is a closed allowlist
+        // (`tests/renderer_free_graph.rs`) — see `lodestone_ecs::brand`'s module
+        // doc for why the duplication is the cheaper of the two costs.
+        lodestone_ecs::ServerBrandChannelPlugin,
     ));
     app
 }

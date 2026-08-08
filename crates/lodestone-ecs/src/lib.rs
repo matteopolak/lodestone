@@ -127,6 +127,7 @@
 //! suppress.
 
 pub mod async_task;
+pub mod brand;
 pub mod chunks;
 pub mod commands;
 pub mod egress;
@@ -191,6 +192,9 @@ pub use player::{
     Profile, SelectedSlot, SprintKeyHeld, Submersion, WasJumping, apply_creative_flight_input,
     apply_look_intent, cancel_flight_on_landing, clear_debug_lines, pin_passenger_to_vehicle,
     reset_local_player, spawn_local_player, tick_attack_strength,
+};
+pub use brand::{
+    ReportedServerBrand, ServerBrandChannelPlugin, ServerBrandPayload, record_server_brand,
 };
 pub use plugin::CorePlugin;
 pub use plugin_channel::{

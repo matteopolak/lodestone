@@ -8,6 +8,44 @@ packet to a plugin. A plugin declares a channel by implementing
 type, calls `add_plugin_channel::<T>()` in its `Plugin::build`, and reads decoded
 `T`s with an ordinary `MessageReader<T>`. Issue #301.
 
+## What was an island until the built-in channel landed
+
+Everything below was true and tested for a whole release cycle while **no
+production `App` in the workspace registered a single channel**. Every test in
+`plugin_channel.rs` builds its own `App` and calls `add_plugin_channel` itself —
+a closed loop — and `crates/plugins/lodestone-server-brand` was added by exactly
+one integration test and was not a dependency of `lodestone-shell` or
+`lodestone-app` at all.
+
+That hid a second, larger island behind it. `GameEventBusPlugin` is opt-in and
+`lodestone_client::SharedState` caches `game_event_bus_enabled` **once, at
+construction**; only `PluginChannelPlugin::build` adds the bus. With no channel
+anywhere in the shipped `App`, the `GameEventBus` resource was absent and
+`push_to_game_event_bus` was skipped for **every `ClientEvent`**, not just for
+`CustomPayload`. The diagram's second arrow was dead in production.
+
+`lodestone_ecs::brand::ServerBrandChannelPlugin` — a built-in `minecraft:brand`
+channel — is now installed by `lodestone_app::client_app()`, which is what
+`Sim::client_app()` and every headless consumer start from. It is a near-duplicate
+of `lodestone-server-brand`, on purpose: that crate is the *worked example* proving
+a third party needs no privileged access, and `lodestone-app`'s manifest is a
+closed allowlist (`crates/lodestone-app/tests/renderer_free_graph.rs`) so adding
+it as a dependency would have to punch a hole in the gate that keeps a headless
+graph small. See `lodestone_ecs::brand`'s module doc. **The two transcribe the
+same one-line vanilla codec independently and nothing enforces agreement** — if
+`BrandPayload` grows a field, fix both.
+
+`crates/lodestone-app/tests/custom_payload_dispatch_is_installed.rs` is the gate,
+with a `CorePlugin`-only negative control that must find neither resource.
+
+**Still inert: the server half.** Inbound `custom_payload` is decoded and
+dispatched in the live per-connection loop (Configuration and Play both), but
+every production call site passes `PluginChannelRegistry::default()` — zero
+handlers, empty broadcast queue. Open-to-LAN is the only path that *can* thread a
+caller-supplied registry (`LanConfig::plugin_channels`), and the shell's sole
+`LanConfig` construction takes the default; singleplayer's duplex path has no such
+field at all. See `docs/open-to-lan.md` and `docs/server-plugin-channels.md`.
+
 ## How it works
 
 ```text
