@@ -1428,6 +1428,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   driver's (`lodestone_shell::sim::Sim`). It now holds **one**, behind
   `lodestone_ecs::EcsHandle = Arc<parking_lot::RwLock<World>>`, and that one `World`
   carries **one** `GameTick` schedule driven by **one** 20 Hz accumulator.
+- [The beardifier — terrain adaptation under structures (worldgen phase S3)](./worldgen-beardifier.md) —
+  The density term that reshapes terrain under an adaptation-bearing structure: it
+  grows a flat foundation ("beard") up to a village house's floor, and swallows a
+  stronghold or a trial chamber whole ("bury"/"encapsulate"). Phase **S3** of issue
+  #514, and the only structures phase that changes *terrain* rather than adding blocks
+  on top of it. Vanilla's
+  [`Beardifier`](../.cache/mc/26.2/src/net/minecraft/world/level/levelgen/Beardifier.java);
+  ours is
+  [`crates/lodestone-worldgen/src/structure/beardifier.rs`](../crates/lodestone-worldgen/src/structure/beardifier.rs).
 - [3-D biome cells and ore veins](./worldgen-biome-cells-and-veins.md) — Two
   independent worldgen additions that share a page because both changed what a
   generated column *contains* rather than how it is driven: the full 4×4×4 biome
