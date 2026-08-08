@@ -10,8 +10,58 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
-use std::time::{Duration, Instant};
+use std::time::Instant;
+
+/// The join path's `PERF INSTRUMENT` clock, which exists so those timers do not
+/// break the `wasm32` build.
+///
+/// `std::time::Instant::now()` **panics on `wasm32`** — there is no monotonic
+/// clock behind it — so three bare `Instant::now()` calls in the join sequence
+/// made the whole crate unbuildable for the browser while the `Instant` import
+/// itself was already `cfg`-gated. The compile error named the import, not the
+/// call sites, which is why it read as a missing feature rather than three
+/// diagnostics that had outlived their debugging session.
+///
+/// **Do not "fix" this with `tokio::time::Instant`.** rustc's own `help:`
+/// suggests it beside `std`'s, and `serve_play` a few hundred lines below
+/// already uses it, so it reads as established precedent. It is not: it bottoms
+/// out in `std::time::Instant::now()` (tokio 1.53.1, `src/time/clock.rs:16`) and
+/// panics identically. That substitution trades a compile error for a runtime
+/// crash in a browser, which is strictly worse — the error moves from the one
+/// place that reports it to the one place nobody is watching.
+///
+/// The `wasm32` arm holds no clock and reports `Duration::ZERO`. These are
+/// `tracing::info!` lines about join latency; a zero on a target that cannot
+/// measure is the honest reading, and it is deliberately *not* a plausible
+/// fabricated number for the same reason `menu::options` refuses to print a
+/// value for an option it does not honour.
+#[derive(Clone, Copy)]
+pub(crate) struct JoinStopwatch {
+    #[cfg(not(target_arch = "wasm32"))]
+    started: Instant,
+}
+
+impl JoinStopwatch {
+    pub(crate) fn now() -> Self {
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            started: Instant::now(),
+        }
+    }
+
+    pub(crate) fn elapsed(&self) -> Duration {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.started.elapsed()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Duration::ZERO
+        }
+    }
+}
 
 use lodestone_core::State;
 use lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE;
@@ -1618,7 +1668,7 @@ where
             }
             ServerBound::ConfigurationFinished => {
                 // PERF INSTRUMENT: timing the whole configuration→play transition
-                let t_cfg = Instant::now();
+                let t_cfg = JoinStopwatch::now();
                 // Issue #329: the world spawn point is a *search*, not a
                 // fixed local `(8, 8)` in the origin column. Vanilla's
                 // `MinecraftServer.setInitialSpawn` walks a ±5-chunk spiral
@@ -1689,7 +1739,7 @@ where
                 // that order, whose width comes from `available_parallelism`
                 // rather than from the view radius — which is the half of
                 // `5104adf` that `4307b59` was right to revert.
-                let t_chunks = Instant::now();
+                let t_chunks = JoinStopwatch::now();
                 let mut batch_size = 0;
                 let window = crate::join_scheduler::generation_window();
                 let rings = join_view_rings(view_radius);
@@ -1750,7 +1800,7 @@ where
                     window,
                 );
 
-                let t_welcome = Instant::now();
+                let t_welcome = JoinStopwatch::now();
                 for directive in proto.welcome_message() {
                     apply(conn, &mut state, directive).await?;
                 }
