@@ -52,7 +52,7 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
 use lodestone_model::event::{ClientEvent, DebugSampleKind};
-use lodestone_model::{BlockPos, ChunkPos, Identifier, Text};
+use lodestone_model::{BlockPos, Identifier, Text};
 
 /// How many `debug_event`s are retained. Vanilla's own renderers keep a
 /// comparable short history; the number matters only as a bound.

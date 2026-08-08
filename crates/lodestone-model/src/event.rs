@@ -660,6 +660,44 @@ pub struct PlayerListEntry {
     pub display_name: Option<Text>,
     /// Whether the player should be listed when present in the update.
     pub listed: Option<bool>,
+    /// Profile properties from `ADD_PLAYER`, when the update carried it.
+    ///
+    /// **This is where a remote player's skin comes from**, and it was decoded and
+    /// thrown away until now: `v770`'s `read_add_player` consumed all three fields
+    /// of every property into `let _`, so `minecraft:textures` never left the
+    /// version crate and no remote player could have a skin.
+    /// `lodestone_game::tablist` had a comment asking for exactly this carrier.
+    ///
+    /// `None` means the update did not include `ADD_PLAYER`; `Some(vec![])` means
+    /// it did and the profile genuinely has no properties (an offline-mode server).
+    /// The distinction matters because a tab-list fold merges partial updates — an
+    /// absent field must keep the existing value rather than clear it.
+    pub properties: Option<Vec<ProfileProperty>>,
+}
+
+/// One entry of a player profile's property multimap, as `ADD_PLAYER` carries it.
+///
+/// The one that matters is `minecraft:textures`, whose `value` is base64 of a JSON
+/// blob holding the skin URL and its model declaration. **Two traps live in that
+/// blob rather than here**, both recorded because they cost time:
+///
+/// * the wide player model is spelled **`default`**, not `wide`. Reading it as
+///   `wide` resolves *every* skin as wide, including slim ones, and the only
+///   symptom is slightly-too-thick arms — no error and no blank texture.
+/// * the payload's shape is **not** in the decompiled client; it lives in the
+///   authlib jar's constant pool.
+///
+/// Nothing here parses or validates the value: it is server-supplied, and on an
+/// online-mode server it is Mojang-signed, which is what [`Self::signature`] is
+/// for. A consumer that trusts the URL should check the signature first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileProperty {
+    /// Property name, e.g. `textures`.
+    pub name: String,
+    /// Property value. Base64 for `textures`.
+    pub value: String,
+    /// Mojang's signature over the value, present only in online mode.
+    pub signature: Option<String>,
 }
 
 /// A Minecraft sound source category.
