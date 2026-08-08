@@ -74,10 +74,18 @@
 //!   which is what the ore engine already computes. `VegGrid` is the absolute
 //!   coordinate adapter over the same idea and translates at its own boundary.
 //!   Do not add an absolute-coordinate method here; add it there.
-//! * **[`source_slot`] is the only place the 3×3 routing is written**, and
-//!   [`RegionView::over_sources`] fills the slots *through the same function* it
-//!   later reads them with, so a slot-order convention cannot drift between the
-//!   two halves. Do not index `sources` directly.
+//! * **This file holds *two* routing tables and they are not interchangeable.**
+//!   [`source_slot`] is the only place the **3×3** routing is written — the ore
+//!   engine's, sized to the `[`[`REGION_MIN`]`, `[`REGION_MAX`]`)` box its
+//!   `RegionHeights` table and [`crate::feature::OreInput::region_local`] clamp
+//!   share. [`wide_source_slot`] is the only place the **5×5** routing is written —
+//!   vegetation's *read* neighbourhood, widened because a source's own pass must not
+//!   depend on which column is the centre (see [`WIDE_RADIUS`]). Each fills its
+//!   slots *through the same function* it later reads them with
+//!   ([`RegionView::over_sources`] and
+//!   [`crate::feature::vegetation::VegGrid::with_sources`] respectively), so a
+//!   slot-order convention cannot drift between the two halves. Do not index
+//!   `sources` directly, and do not reach for the wrong table's width.
 //! * A boundary-write control is a permanent requirement of this file, not a
 //!   one-off: a feature that legitimately spills across the seam must be asserted
 //!   **present on both sides**. `region_view_carries_a_write_across_the_chunk_seam`
@@ -88,6 +96,13 @@
 //!   tests here fail, and the production control drops from 20 crossings to 0).
 //!   Treat those names as claims and grep for them — the predecessor of the
 //!   production control was deleted while a comment went on naming it.
+//! * **"Present on both sides" is a weaker claim than "the same tree on both
+//!   sides", and only the second one is what the player sees.** Both controls above
+//!   pass while the two chunks either side of a seam disagree about the tree
+//!   crossing it — the defect the owner reported in-game. The gate for *that* is
+//!   `crates/lodestone-worldgen/tests/vegetation_seam_consistency.rs`, and
+//!   `docs/worldgen-seam-consistency.md` records what it measures and what is still
+//!   open. Note the ore driver has the same structural exposure and is untouched.
 //!
 //! # Configuration
 //!
@@ -389,6 +404,66 @@ pub fn source_slot(lx: i32, lz: i32) -> Option<usize> {
 fn slot_of_offset(dx: i32, dz: i32) -> usize {
     ((dx + 1) * 3 + (dz + 1)) as usize
 }
+
+/// Chebyshev chunk radius of the **read** neighbourhood vegetal decoration routes
+/// through, and therefore the half-width of [`wide_source_slot`]'s 5×5 table.
+///
+/// **Two, not one, and the reason is a measured defect rather than a margin.**
+/// Every one of the nine sources the 3×3 driver decorates can write into the
+/// centre, so each one's placement decisions have to be a function of that source
+/// alone — otherwise the chunk on each side of a seam computes a *different*
+/// version of the same tree and one half is never served. A source sitting at
+/// offset `(-1, 0)` reads up to [`super::VEG_PADDING`] blocks past its own west
+/// edge, which is chunk offset `-2` from the centre. With a radius-1 read table
+/// those columns have no slot and answer **air**, and where that boundary falls
+/// depends on which column is the centre — so the same source's pass diverges.
+/// Measured on a flat 5×5 fixture over all 66 bundled biomes: **94 seam rows
+/// carried a canopy that one drive placed across the border and the served world
+/// lost a half of; widening this read radius to 2 removed 50 of them** (see
+/// `crates/lodestone-worldgen/tests/vegetation_seam_consistency.rs`).
+///
+/// It is a **read** radius only. Decoration still runs for the inner 3×3, writes
+/// are still bounded by `VegGrid`'s own footprint, and only the centre is folded
+/// back — so nothing about which chunk owns which write changed.
+pub const WIDE_RADIUS: i32 = 2;
+
+/// Which of the 25 chunks of `centre ± `[`WIDE_RADIUS`] owns centre-relative
+/// local column `(lx, lz)`, or `None` outside that.
+///
+/// The wide twin of [`source_slot`], kept in this file **beside** it rather than
+/// next to its caller, because this module's own doc makes "the 3×3 routing is
+/// written in exactly one place" a rule and a second routing convention living
+/// somewhere else is how the two drift apart. `div_euclid` for the same reason
+/// [`source_slot`] uses it: local coordinates are negative across the west and
+/// north thirds and truncating division folds `-1` onto offset `0`.
+///
+/// Ore still routes through [`source_slot`]'s 3×3 — deliberately. Ore's own read
+/// region is the 48×48 `[`[`REGION_MIN`]`, `[`REGION_MAX`]`)` box its heightmap
+/// table and `OreInput::region_local` clamp are sized to, and widening it is a
+/// separate change with its own parity surface. See `DESIGN.md` §12.118.
+#[must_use]
+pub fn wide_source_slot(lx: i32, lz: i32) -> Option<usize> {
+    let dx = lx.div_euclid(16);
+    let dz = lz.div_euclid(16);
+    if !(-WIDE_RADIUS..=WIDE_RADIUS).contains(&dx) || !(-WIDE_RADIUS..=WIDE_RADIUS).contains(&dz) {
+        return None;
+    }
+    Some(wide_slot_of_offset(dx, dz))
+}
+
+/// The slot index for chunk offset `(dx, dz)` ∈ `[-`[`WIDE_RADIUS`]`, `[`WIDE_RADIUS`]`]²`.
+///
+/// Private for the same reason [`slot_of_offset`] is: the only filler
+/// ([`crate::feature::vegetation::VegGrid::with_sources`]) derives the index by
+/// asking [`wide_source_slot`] about that offset's own origin column, so fill and
+/// lookup cannot disagree.
+pub(crate) fn wide_slot_of_offset(dx: i32, dz: i32) -> usize {
+    let side = (WIDE_RADIUS * 2 + 1) as usize;
+    (dx + WIDE_RADIUS) as usize * side + (dz + WIDE_RADIUS) as usize
+}
+
+/// How many slots [`wide_source_slot`] can return — `(2 · WIDE_RADIUS + 1)²`.
+pub(crate) const WIDE_SLOTS: usize = ((WIDE_RADIUS * 2 + 1) * (WIDE_RADIUS * 2 + 1)) as usize;
 
 /// How many recycled buffers of each shape (overlay map, write log) this thread
 /// currently holds — for a gate that needs to tell "the free-list served this
@@ -707,6 +782,104 @@ mod tests {
              CENTRE, or the exhaustive routing test proves nothing about div_euclid",
         );
         assert_ne!(source_slot(-1, -1), truncating(-1, -1));
+    }
+
+    /// The 5×5 read routing, against an independently written band table over the
+    /// whole range vegetal decoration can address — its padded footprint plus a
+    /// ring on both sides, so the `None` arm is exercised too.
+    ///
+    /// The expectation is a hand-written five-band walk rather than `div_euclid`
+    /// again, so this is not `f(x) == f(x)`. The two halves of the convention are
+    /// checked against each other as well: every offset's own origin column must
+    /// route to that offset's slot.
+    #[test]
+    fn wide_source_slot_routes_every_local_column_in_the_five_by_five() {
+        let pad = super::super::VEG_PADDING;
+        let lo = REGION_MIN - pad - 16;
+        let hi = REGION_MAX + pad + 16;
+        let band = |v: i32| -> Option<i32> {
+            match v {
+                -32..=-17 => Some(-2),
+                -16..=-1 => Some(-1),
+                0..=15 => Some(0),
+                16..=31 => Some(1),
+                32..=47 => Some(2),
+                _ => None,
+            }
+        };
+        let mut inside = 0u32;
+        for lx in lo..hi {
+            for lz in lo..hi {
+                let expected = match (band(lx), band(lz)) {
+                    (Some(dx), Some(dz)) => {
+                        inside += 1;
+                        Some((dx + 2) as usize * 5 + (dz + 2) as usize)
+                    }
+                    _ => None,
+                };
+                assert_eq!(
+                    wide_source_slot(lx, lz),
+                    expected,
+                    "local column ({lx}, {lz}) routed to the wrong source chunk",
+                );
+            }
+        }
+        // Non-vacuity: the walk really covered the whole 80×80 box, and 48×48 of
+        // it really was inside the 5×5 rather than every column answering `None`.
+        assert_eq!(inside, 80 * 80, "the 5x5 must cover 80x80 local columns");
+        assert_eq!(WIDE_SLOTS, 25);
+        // Fill convention and lookup convention agree, for all 25 offsets.
+        for dx in -WIDE_RADIUS..=WIDE_RADIUS {
+            for dz in -WIDE_RADIUS..=WIDE_RADIUS {
+                assert_eq!(
+                    wide_source_slot(dx * 16, dz * 16),
+                    Some(wide_slot_of_offset(dx, dz)),
+                    "offset ({dx}, {dz})'s own origin column must route to its own slot",
+                );
+            }
+        }
+        // Every slot is claimed exactly once — a table that collided would send
+        // two chunks to one grid and read like a plausible world.
+        let claimed: std::collections::HashSet<usize> = (-WIDE_RADIUS..=WIDE_RADIUS)
+            .flat_map(|dx| (-WIDE_RADIUS..=WIDE_RADIUS).map(move |dz| (dx, dz)))
+            .map(|(dx, dz)| wide_slot_of_offset(dx, dz))
+            .collect();
+        assert_eq!(claimed.len(), WIDE_SLOTS, "the slot table collides");
+    }
+
+    /// The negative control for the test above: the 3×3 table really does answer
+    /// `None` where the 5×5 answers a rim chunk, so a caller that kept using
+    /// [`source_slot`] would read **air** over exactly the columns this widening
+    /// exists to supply. Without this, the exhaustive test could pass for reasons
+    /// unrelated to the radius actually having widened.
+    #[test]
+    fn the_narrow_table_answers_air_where_the_wide_one_answers_a_rim_chunk() {
+        let pad = super::super::VEG_PADDING;
+        // The rim columns a source at offset (-1, 0) reads past its own west edge.
+        let mut rim = 0u32;
+        for lx in (REGION_MIN - pad)..REGION_MIN {
+            assert_eq!(
+                source_slot(lx, 0),
+                None,
+                "control: the 3x3 table must have no slot at local x={lx}, or the \
+                 widening supplies nothing new",
+            );
+            assert!(
+                wide_source_slot(lx, 0).is_some(),
+                "the 5x5 table must own local x={lx}",
+            );
+            rim += 1;
+        }
+        assert_eq!(rim, pad as u32, "the control must have walked the whole pad ring");
+        // …and the two tables agree everywhere the narrow one has an answer.
+        for lx in REGION_MIN..REGION_MAX {
+            for lz in REGION_MIN..REGION_MAX {
+                assert!(
+                    source_slot(lx, lz).is_some() && wide_source_slot(lx, lz).is_some(),
+                    "both tables must own the 3x3 at ({lx}, {lz})",
+                );
+            }
+        }
     }
 
     /// A recycled buffer must be indistinguishable from a fresh one. This is the

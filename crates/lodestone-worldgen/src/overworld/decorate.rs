@@ -149,7 +149,9 @@ impl OverworldGenerator {
                 } else {
                     pre_sources[Self::region_slot(dx, dz)]
                         .as_ref()
-                        .map(|neighbour| &neighbour.0)
+                        // `&*` because `PreOreResult`'s world is now an `Arc` — see
+                        // that alias's own doc. Still a borrow, still no copy.
+                        .map(|neighbour| &*neighbour.0)
                 }
             },
         );
@@ -361,12 +363,38 @@ impl OverworldGenerator {
                     Some(Arc::clone(&world))
                 } else if single_source_debug {
                     None
-                } else {
+                } else if dx.abs() <= 1 && dz.abs() <= 1 {
+                    // The eight chunks the driver actually decorates. Post-ore,
+                    // because decoration reads *and writes* against that terrain.
                     // Recurses into that neighbour's own 3×3 ore composition,
                     // memoised in the store — the same call the seeding loop made,
                     // in the same `dx` outer / `dz` inner order, just without the
                     // copy that followed it.
                     Some(self.post_ore_world(cx + dx, cz + dz))
+                } else {
+                    // The 16 rim chunks of the 5×5 **read** neighbourhood — new,
+                    // and the fix for the cut-off-at-the-border trees the owner
+                    // reported. Nothing decorates here; these exist so that a
+                    // source at offset (±1, ±1) reading `VEG_PADDING` blocks past
+                    // its own edge sees real terrain instead of air. Where that
+                    // air boundary fell used to depend on which column was the
+                    // centre, so a source's own pass — and therefore a tree
+                    // straddling a seam — differed between the two chunks that
+                    // recompute it. See `region_view::WIDE_RADIUS`.
+                    //
+                    // **Pre-ore, deliberately, and it costs nothing.** A column's
+                    // pre-ore closure is already exactly this 5×5
+                    // (`COLUMN_CLOSURE_RADIUS`, and `open_view` already pins it),
+                    // so all 25 of these are already memoised for every served
+                    // column and this is a store hit plus an `Arc` clone. Asking
+                    // for `post_ore_world` here instead would widen the closure to
+                    // 7×7 — 49 pre-ore chunks per column instead of 25 — for a
+                    // difference that cannot move either heightmap (ore *replaces*
+                    // blocks, so the topmost non-air `y` is identical) and can only
+                    // affect a state-identity read landing on an ore cell at least
+                    // 16 blocks from the chunk being served. See
+                    // `VegGrid::with_sources`.
+                    Some(Arc::clone(&self.pre_ore_stage(cx + dx, cz + dz).0))
                 }
             },
         );

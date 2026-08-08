@@ -1350,6 +1350,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   [`worldgen-fast-hashing.md`](./worldgen-fast-hashing.md) (which makes the engine's
   remaining lookup tables cheaper); this doc is about the lookups the ore engine
   stopped performing at all.
+- [Cross-seam decoration consistency](./worldgen-seam-consistency.md) — Why a tree
+  that straddles a chunk border comes out whole rather than sliced flat along it, and
+  what still does not. The 3×3 decoration driver serves chunk `C` by re-running all
+  nine of `C ± 1`'s own decoration passes and keeping only what lands in `C`, so a
+  tree standing in `A` and spilling into `B` is **computed twice** — once with `A`
+  as the centre and once with `B`. Each drive supplies the half in its own chunk.
+  Nothing about the driver forces those two computations to agree, and when they
+  disagree the served world keeps one half and drops the other. That is the "trees cut
+  off at chunk borders" defect the owner reported in-game, and this doc is the record
+  of which of its two causes is closed and which is not.
 - [Worldgen SIMD kernels: what vectorising the noise actually bought](./worldgen-simd-kernels.md) —
   The `std::simd` vectorisation of `lodestone-worldgen-core`'s noise kernels — Unit
   5 of [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md) — and, more

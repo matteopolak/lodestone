@@ -62,7 +62,10 @@ impl OverworldGenerator {
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
         let world = self.carve_stage(cx, cz, &aquifer, &heights, &biome_quarts, base_x, base_z, world);
 
-        (world, heights, biome_quarts)
+        // `Arc` because `PreOreResult` hands this world out to
+        // `vegetation_stage`'s rim sources rather than only into a mutating
+        // consumer — see that alias's own doc.
+        (Arc::new(world), heights, biome_quarts)
     }
 
     /// Builds a fresh, chunk-bound [`AquiferSystem`] from this generator's

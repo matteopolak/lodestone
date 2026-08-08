@@ -227,7 +227,19 @@ pub use self::output::StageTimes;
 /// own post-carve world, heightmap and biome quarts (stages 1-4). Named so
 /// [`OverworldGenerator::pre_ore_cache`]'s value type reads as "one chunk's
 /// pre-ore result", not an anonymous 3-tuple.
-type PreOreResult = (crate::dense_grid::DenseBlockGrid, [i32; 256], [(String, bool); 16]);
+///
+/// The world is an `Arc` so it can be *handed out* rather than copied. Two callers
+/// want it that way: [`OverworldGenerator::vegetation_stage`] supplies the 16 rim
+/// chunks of its 5×5 read neighbourhood straight from here (see
+/// [`crate::feature::region_view::WIDE_RADIUS`]), and it must not pay 16 dense-grid
+/// memcpys per column to do so. Every pre-existing consumer that needs to *mutate*
+/// it still clones out of the `Arc` — the same clone it already made, moved one
+/// deref inward.
+type PreOreResult = (
+    Arc<crate::dense_grid::DenseBlockGrid>,
+    [i32; 256],
+    [(String, bool); 16],
+);
 
 /// One chunk's memoised intermediate products — the payload of a
 /// [`store::StagedStore`] entry, one [`store::StageSlot`] per stage of the
@@ -257,6 +269,15 @@ struct ChunkStages {
 /// pre-ore world of *its own* 3×3 — so one column's pre-ore closure is 5×5,
 /// radius **2**. If a driver's neighbourhood ever widens, this widens with it or
 /// the pin below stops covering the request that needs it.
+///
+/// **`vegetation_stage` now also reads that 5×5 rim directly**, rather than only
+/// reaching it transitively through the eight neighbours' own `ore_stage` calls:
+/// its read neighbourhood is [`crate::feature::region_view::WIDE_RADIUS`] = 2, and
+/// the 16 rim chunks are supplied from `pre_ore_stage` (see that stage for why
+/// pre-ore and not post-ore). That does **not** move this constant — the closure
+/// was already exactly this set, which is precisely what makes the wider read free
+/// — but it does mean two independent drivers now depend on this radius being 2.
+/// Narrowing it would break vegetation's seam consistency as well as the pin.
 const COLUMN_CLOSURE_RADIUS: i32 = 2;
 
 /// Soft ceiling on entries retained by [`OverworldGenerator::store`].
@@ -781,7 +802,7 @@ impl OverworldGenerator {
         let entry = self.store.entry((cx, cz));
         entry.post_ore.get_or_compute(crate::counters::bump_post_ore, || {
             let pre = self.pre_ore_stage(cx, cz);
-            self.ore_stage(cx, cz, pre.0.clone(), &pre.1)
+            self.ore_stage(cx, cz, (*pre.0).clone(), &pre.1)
         })
     }
 
