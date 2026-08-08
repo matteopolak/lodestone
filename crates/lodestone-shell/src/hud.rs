@@ -49,6 +49,16 @@ pub(crate) const HUD_TEXT_SCALE: f32 = 2.0;
 /// Padding between a HUD panel's edge and its content.
 pub(crate) const HUD_MARGIN: f32 = 6.0;
 
+/// Padding above and below the chat input's text inside its background strip,
+/// in unscaled logical pixels.
+///
+/// Vanilla's input band is `fill(2, height - 14, width - 2, height - 2, …)`
+/// (`ChatScreen.java:272`) around an `EditBox` whose text sits at `height - 12`
+/// (`:56`) — 2px above the text and 2px below it. It is scaled by the chat pose
+/// scale at every use, alongside the glyph height, so the strip stays wrapped
+/// around the text at any chat scale.
+const INPUT_STRIP_PAD: f32 = 2.0;
+
 /// Vertical pitch between two HUD text lines.
 #[must_use]
 pub(crate) fn hud_line_h() -> f32 {
@@ -1250,11 +1260,25 @@ impl HudGeometry {
             // reuses `chat_bg_opacity` rather than inventing an unread
             // constant, since it is the same "background behind chat text"
             // concept as the scrollback rows just below.
+            // Derived from the *same* `input_y` and `chat_pose_scale` the text
+            // draw below uses, so the strip and the glyphs cannot disagree.
+            // Vanilla's band is `fill(2, height - 14, width - 2, height - 2, …)`
+            // (`ChatScreen.java:272`) with the `EditBox`'s text at `height - 12`
+            // (`:56`) — i.e. symmetric 2px padding around the text — so the
+            // padding is 2 units, scaled with everything else.
+            //
+            // The previous version was `input_y - 3.0` tall by `chat_line_h`, and
+            // was wrong twice: the `-3.0` was **unscaled** while the height was
+            // scaled, so the band drifted off the text as chat scale rose; and it
+            // began *above* `input_y`, which is where the scrollback's own
+            // translucent rows end, so the two blacks overlapped and that seam
+            // rendered at double opacity while the last rows of the glyph box had
+            // no background at all.
             b.rect_px(
                 0.0,
-                input_y - 3.0,
+                input_y - INPUT_STRIP_PAD * chat_pose_scale,
                 chat_box_w,
-                chat_line_h,
+                glyph_h * chat_pose_scale + 2.0 * INPUT_STRIP_PAD * chat_pose_scale,
                 [0.0, 0.0, 0.0, chat_bg_opacity],
             );
             // No leading `>` — vanilla's `ChatScreen`/`EditBox` draws no
@@ -1278,7 +1302,15 @@ impl HudGeometry {
                 [1.0, 1.0, 1.0, 1.0],
             );
         }
-        let chat_bottom = if chat_open { input_y } else { b.h - margin };
+        // The scrollback stacks upward from here, so while the input is open this
+        // must be the **top of the input strip**, not the text's own top. Using
+        // `input_y` let the strip's padding overlap the last scrollback row, and
+        // two translucent blacks over one another read as a brighter seam.
+        let chat_bottom = if chat_open {
+            input_y - INPUT_STRIP_PAD * chat_pose_scale
+        } else {
+            b.h - margin
+        };
         // How many visual rows fit the configured box height — vanilla's
         // `ChatComponent.getLinesPerPage` (`ChatComponent.java:434-436`,
         // `height / lineHeight`), derived from the same `chat_box_h`/
