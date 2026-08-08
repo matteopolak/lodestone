@@ -113,11 +113,7 @@
 /// item whose icon labels its button, which row/column of the tab strip it sits
 /// in, and its item list in vanilla's own order.
 ///
-/// `allow(dead_code)` is temporary and scoped to this type: the screen that reads
-/// it is the remaining half of issue #158. It is here rather than at the module
-/// declaration so that the day a consumer lands, deleting one attribute is the
-/// whole change — and so the allow cannot quietly cover anything else added here.
-#[allow(dead_code)]
+/// Read by [`super::creative`], the screen this table was transcribed for.
 #[derive(Debug)]
 pub(crate) struct CreativeTab {
     pub(crate) id: &'static str,
@@ -131,8 +127,6 @@ pub(crate) struct CreativeTab {
 /// Every tab, in `CreativeModeTabs.bootstrap` registration order — which is also
 /// tab-strip order once `top_row`/`column` are applied.
 ///
-/// See [`CreativeTab`] for why this is unread today.
-#[allow(dead_code)]
 pub(crate) static CREATIVE_TABS: &[CreativeTab] = &[
     CreativeTab {
         id: "minecraft:building_blocks",

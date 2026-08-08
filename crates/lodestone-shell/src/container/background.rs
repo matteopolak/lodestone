@@ -6,6 +6,7 @@ use lodestone_assets::{Atlas, AtlasBuilder, AtlasError, ResourceLocation, Resour
 use lodestone_game::menu::{Menu, MenuKind, SpecialLayout};
 use lodestone_render::GuiSpriteQuad;
 
+#[cfg(doc)]
 use super::GUI_SPRITES;
 
 /// A GUI sprite id (`container/slot/helmet`) as the texture location it lives at
@@ -61,6 +62,16 @@ pub struct ContainerBackground {
     /// [`SpecialLayout::Dispenser`]'s doc comment.
     dispenser: ResourceLocation,
     hopper: ResourceLocation,
+    /// The creative screen's three sheets (issue #158) — `tab_items`,
+    /// `tab_item_search`, `tab_inventory`. Same family as every sheet above:
+    /// loose `textures/gui/container/**` art with no `.mcmeta` and no
+    /// `GuiScaling`, blitted at native size. See
+    /// [`Self::creative_quad`].
+    creative_items: ResourceLocation,
+    /// See [`Self::creative_items`](Self::creative_quad).
+    creative_search: ResourceLocation,
+    /// See [`Self::creative_items`](Self::creative_quad).
+    creative_inventory: ResourceLocation,
 }
 
 /// Which vanilla `container/*.png` sheet a menu's background draws from, and
@@ -186,6 +197,19 @@ impl ContainerBackground {
         // list's doc comment (see `SpecialLayout::Hopper`).
         let hopper = ResourceLocation::new("minecraft", "gui/container/hopper")
             .expect("hardcoded location is always valid");
+        // The creative screen's three sheets (issue #158). Unlike the tab-button
+        // and scroller art — which is `gui/sprites/**` and rides `GUI_SPRITES`
+        // below — these are loose `gui/container/**` textures, so they need their
+        // own locations exactly as the sixteen above do.
+        let creative_items =
+            ResourceLocation::new("minecraft", "gui/container/creative_inventory/tab_items")
+                .expect("hardcoded location is always valid");
+        let creative_search =
+            ResourceLocation::new("minecraft", "gui/container/creative_inventory/tab_item_search")
+                .expect("hardcoded location is always valid");
+        let creative_inventory =
+            ResourceLocation::new("minecraft", "gui/container/creative_inventory/tab_inventory")
+                .expect("hardcoded location is always valid");
         let mut builder = AtlasBuilder::new();
         builder.load(manager, &generic)?;
         builder.load(manager, &crafting)?;
@@ -203,6 +227,9 @@ impl ContainerBackground {
         builder.load(manager, &cartography_table)?;
         builder.load(manager, &dispenser)?;
         builder.load(manager, &hopper)?;
+        builder.load(manager, &creative_items)?;
+        builder.load(manager, &creative_search)?;
+        builder.load(manager, &creative_inventory)?;
         // The hover highlight and the empty-slot placeholders (issue #376) ride
         // in this same atlas rather than a second one. They are ordinary
         // textures with an ordinary `.png.mcmeta`, so `AtlasBuilder` needs no
@@ -215,9 +242,9 @@ impl ContainerBackground {
         // A missing sprite is a hard error here, matching the sheets above, so
         // a pack that drops one **names the sprite** instead of silently
         // drawing an empty cell.
-        for id in GUI_SPRITES {
+        for id in super::all_gui_sprites() {
             let loc = sprite_location(id).ok_or_else(|| AtlasError::TextureMissing {
-                location: (*id).to_string(),
+                location: id.to_string(),
             })?;
             builder.load(manager, &loc)?;
         }
@@ -240,6 +267,43 @@ impl ContainerBackground {
             cartography_table,
             dispenser,
             hopper,
+            creative_items,
+            creative_search,
+            creative_inventory,
+        })
+    }
+
+    /// The creative screen's own background blit (issue #158) —
+    /// `graphics.blit(..., selectedTab.getBackgroundTexture(), leftPos, topPos,
+    /// 0, 0, imageWidth, imageHeight, 256, 256)`
+    /// (`CreativeModeInventoryScreen.java:742-744`), i.e. the top-left
+    /// `195 x 136` window of a `256 x 256` sheet.
+    ///
+    /// A separate entry point from [`Self::quads`] rather than a
+    /// [`BackgroundKind`] arm, because the creative screen has no
+    /// [`Menu`] to dispatch on — see `super::creative`'s module doc.
+    #[must_use]
+    pub(super) fn creative_quad(
+        &self,
+        kind: super::creative::CreativeBackground,
+        x: f32,
+        y: f32,
+    ) -> Option<GuiSpriteQuad> {
+        use super::creative::{CREATIVE_PANEL_H, CREATIVE_PANEL_W, CreativeBackground};
+        let loc = match kind {
+            CreativeBackground::Items => &self.creative_items,
+            CreativeBackground::ItemSearch => &self.creative_search,
+            CreativeBackground::Inventory => &self.creative_inventory,
+        };
+        let sprite = self.atlas.sprite(loc)?;
+        let (aw, ah) = (self.atlas.width as f32, self.atlas.height as f32);
+        Some(GuiSpriteQuad {
+            dst: [x, y, CREATIVE_PANEL_W, CREATIVE_PANEL_H],
+            uv_min: [sprite.x as f32 / aw, sprite.y as f32 / ah],
+            uv_max: [
+                (sprite.x as f32 + CREATIVE_PANEL_W) / aw,
+                (sprite.y as f32 + CREATIVE_PANEL_H) / ah,
+            ],
         })
     }
 

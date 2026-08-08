@@ -1435,6 +1435,7 @@ fn a_menu_screen_outranks_the_chat_prompt_and_everything_below_it() {
         gameplay: true,
         debug_held: true,
         recipe_search: true,
+        creative_search: true,
     };
     assert_eq!(resolve(both, KeyCode::KeyW, true), Some(KeyOutcome::Menu));
     assert_eq!(resolve(both, KeyCode::Escape, true), Some(KeyOutcome::Menu));

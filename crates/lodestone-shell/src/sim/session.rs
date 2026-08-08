@@ -1135,6 +1135,29 @@ impl Sim {
         }
     }
 
+    /// Set a container slot's contents by creative fiat — vanilla's
+    /// `ServerboundSetCreativeModeSlotPacket`, sent by the creative-inventory
+    /// screen (issue #158).
+    ///
+    /// The **producer** half of a round trip whose encoder already existed:
+    /// [`ClientAction::SetCreativeModeSlot`] is encoded by every protocol family
+    /// and had no shell caller at all — the outbound-island shape
+    /// `ClientAction::SetFlying` was caught in.
+    ///
+    /// `slot` is a window-0 container index (`36 + n` for hotbar slot `n`), and a
+    /// negative value is vanilla's own "drop this stack" encoding. Sent directly
+    /// rather than queued through `ActionQueue`, like
+    /// [`Self::send_recipe_book_settings`]: this is a discrete click, not a
+    /// per-tick state.
+    pub fn send_creative_slot(&self, slot: i16, item: lodestone_model::Identifier, count: u32) {
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::SetCreativeModeSlot {
+                slot: i32::from(slot),
+                item: Some(lodestone_model::item::ItemStack::new(item, count)),
+            });
+        }
+    }
+
     /// The server's game rules, as `GAME_EVENT`/`CHANGE_GAME_STATE` last
     /// reported them (issue #436's `SessionGameRules` island).
     ///

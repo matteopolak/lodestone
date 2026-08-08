@@ -64,6 +64,7 @@ use lodestone_game::menu::Menu;
 use lodestone_game::recipe::RecipeBook;
 
 mod container_input;
+mod creative_screen;
 mod input;
 mod launch;
 mod lifecycle;
@@ -79,6 +80,10 @@ mod weather;
 // `allow` is because a name only the owning submodule and the `#[cfg(test)]`
 // modules read still has to keep its `app::X` path, and a non-test build then
 // sees the re-export as unused.
+#[allow(unused_imports)]
+pub(crate) use creative_screen::CreativeSearchEdit;
+#[allow(unused_imports)]
+use creative_screen::creative_panel_geometry;
 #[allow(unused_imports)]
 pub(crate) use input::{KeyGate, KeyOutcome, drop_selected_action, offhand_swap_action, resolve_key};
 #[allow(unused_imports)]
@@ -634,6 +639,18 @@ struct WindowApp {
     /// `CLAUDE.md`'s island rule: an unused field reads as an oversight, a named
     /// blocker does not.
     weather: Option<Arc<WeatherTracker>>,
+    /// The creative-inventory screen's own UI state (issue #158): selected tab,
+    /// scroll offset, search text.
+    ///
+    /// Persisted across open/close for the same reason
+    /// [`recipe_panel`](Self::recipe_panel) is — vanilla's `selectedTab` is a
+    /// `static` field on `CreativeModeInventoryScreen`, so reopening the screen
+    /// returns to the tab you left it on.
+    ///
+    /// Whether the screen is *showing* is not stored here: it is
+    /// [`WindowApp::creative_screen_open`], derived from the container flag plus
+    /// the player's own abilities, so the two can never disagree.
+    creative: crate::container::CreativeState,
 }
 
 #[cfg(test)]
