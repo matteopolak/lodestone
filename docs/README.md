@@ -889,6 +889,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   registry of connected players, a per-connection tab-list diff, and the two
   `ServerProtocol` encoders that put both on the wire. Before it, two players on one
   server — including over LAN — were completely invisible to one another.
+- [Player skins](./player-skins.md) — The `textures` profile property — base64 →
+  JSON → a URL plus a **wide/slim rig declaration** — and the render half that
+  draws the declared rig, for issue
+  [#62](https://github.com/matteopolak/lodestone/issues/62). The decode and the render
+  are landed; **the fetch is not**, and the three patches it needs all sit outside the
+  rendering cluster, so they are named below rather than half-built.
 - [The plugin API](./plugin-api.md) — The surface a third-party bevy plugin uses to
   do everything native Lodestone code can do — read world/entity/player state, write
   intent, order systems against internal ones, and observe events — specified
@@ -1227,6 +1233,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   server emitted no `sound`, no `level_event` and no `level_particles` packet, ever,
   and anything the client could not predict for itself was silent and invisible. A
   player could beat a cow to death without a sound.
+- [Serverbound coverage: encoders versus producers](./serverbound-coverage.md) — The
+  record of which serverbound packets this client can **encode** and which it actually
+  **produces**, and why those are two different numbers. Issue #304 is the encoder
+  half; this doc exists because the encoder half is the half that is easy to measure
+  and the wrong one to trust.
 - [v770 serverbound `play` packet wiring, and why decoding is not the bar](./serverbound-packet-wiring.md) —
   The measured state of protocol 776's **serverbound** `play` packets on the hosting
   side — what `V770ServerProtocol::decode` understands, what actually reaches a
