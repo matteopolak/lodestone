@@ -102,7 +102,7 @@
 //! world tick thread. `Level::getBlockState`'s own first line is the same guard.
 
 use lodestone_data::block_blast;
-use lodestone_model::BlockPos;
+use lodestone_model::{BlockPos, Difficulty};
 
 use crate::chunk::ChunkSource;
 use crate::mob_spawn::SpawnRng;
@@ -178,7 +178,52 @@ pub struct FireEnv {
     pub increased_burnout: bool,
 }
 
+/// Seed for the fire behaviour RNG.
+///
+/// A **distinct stream** from the random-tick scheduler's, deliberately: one fire
+/// tick draws eight or more values, so sharing the scheduler's generator would
+/// make a fire in one corner of the world decide which grass block spreads in
+/// another. The tick loop owns one of these for the whole run.
+pub const FIRE_BEHAVIOR_SEED: u64 = 0xF12E_B10C_5EED_0001;
+
+/// `Difficulty::getId` — peaceful 0, easy 1, normal 2, hard 3, the value
+/// [`spread_odds`]'s `difficulty * 7` term reads.
+#[must_use]
+pub fn difficulty_id(difficulty: Difficulty) -> i32 {
+    match difficulty {
+        Difficulty::Peaceful => 0,
+        Difficulty::Easy => 1,
+        Difficulty::Normal => 2,
+        Difficulty::Hard => 3,
+    }
+}
+
 impl FireEnv {
+    /// The overworld shape of a real column, at the world's live difficulty and
+    /// rain state.
+    ///
+    /// The constructor the tick loop uses, so the mapping from
+    /// `world_state`/`weather` into this value lives here rather than in the loop.
+    /// `min_y`/`height` come from a real [`crate::chunk::ChunkColumn`] rather than
+    /// from 26.2 literals, for the same reason [`crate::fluid::FluidEnv`] does.
+    ///
+    /// `spread_allowed` is left `true`: 26.2's
+    /// `fire_spread_radius_around_player` defaults to 128 and this crate's
+    /// random-tick area is already player-centred within that, so the gate is
+    /// satisfied wherever a fire can be ticking at all. Pass a `FireEnv` built by
+    /// hand to freeze fire.
+    #[must_use]
+    pub fn overworld_in(min_y: i32, height: i32, difficulty: Difficulty, raining: bool) -> FireEnv {
+        FireEnv {
+            min_y,
+            height,
+            difficulty_id: difficulty_id(difficulty),
+            raining,
+            spread_allowed: true,
+            increased_burnout: false,
+        }
+    }
+
     /// 26.2's overworld at normal difficulty, dry, with fire spreading — the
     /// shape every test here uses and a sensible default for a caller with no
     /// column in hand.
@@ -821,6 +866,25 @@ mod tests {
         assert_eq!(spread_rate(2), 200);
         assert_eq!(spread_rate(3), 300);
         assert_eq!(spread_rate(4), 400);
+    }
+
+    /// `Difficulty::getId`, which the odds arithmetic multiplies by 7.
+    #[test]
+    fn difficulty_ids_match_vanilla() {
+        assert_eq!(difficulty_id(Difficulty::Peaceful), 0);
+        assert_eq!(difficulty_id(Difficulty::Easy), 1);
+        assert_eq!(difficulty_id(Difficulty::Normal), 2);
+        assert_eq!(difficulty_id(Difficulty::Hard), 3);
+    }
+
+    /// `overworld_in` must agree with the hand-built `OVERWORLD` constant every
+    /// test here uses, or the two shapes silently diverge.
+    #[test]
+    fn overworld_in_matches_the_test_constant() {
+        assert_eq!(
+            FireEnv::overworld_in(-64, 384, Difficulty::Normal, false),
+            FireEnv::OVERWORLD
+        );
     }
 
     /// The infiniburn tag is netherrack and magma block, **not** bedrock. Read out

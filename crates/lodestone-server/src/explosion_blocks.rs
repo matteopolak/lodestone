@@ -183,7 +183,22 @@ pub struct BlastEnv {
     pub height: i32,
 }
 
+/// Seed for the blast RNG the tick loop owns.
+///
+/// A distinct stream from every other behaviour generator: one blast draws
+/// [`RAY_COUNT`] values, so sharing would make a creeper decide which grass block
+/// spreads.
+pub const EXPLOSION_BEHAVIOR_SEED: u64 = 0xB1A5_7000_5EED_0001;
+
 impl BlastEnv {
+    /// The build height of a real [`crate::chunk::ChunkColumn`] — the constructor
+    /// the tick loop uses, for the same reason [`crate::fluid::FluidEnv`] has one:
+    /// this crate's overworld shape is the column's, not a constant's.
+    #[must_use]
+    pub fn in_column(min_y: i32, height: i32) -> BlastEnv {
+        BlastEnv { min_y, height }
+    }
+
     /// 26.2's overworld, for tests and for a caller with no column in hand.
     pub const OVERWORLD: BlastEnv = BlastEnv {
         min_y: -64,
