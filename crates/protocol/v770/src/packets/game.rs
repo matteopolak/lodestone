@@ -644,7 +644,7 @@ pub struct AcceptTeleportation {
 ///
 /// Wire layout: an unsigned byte event code followed by a big-endian `f32`
 /// parameter whose meaning depends on the code.
-#[derive(Debug, Clone, PartialEq, Decode)]
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct GameEvent {
     /// Event code (see the vanilla `ClientboundGameEventPacket` type table).
     pub event: u8,
@@ -687,7 +687,7 @@ pub const ABILITY_FLAG_INSTABUILD: u8 = 0x08;
 ///
 /// Wire layout: a single flags byte (see the `ABILITY_FLAG_*` constants) then
 /// big-endian `f32` flying speed and walking speed.
-#[derive(Debug, Clone, PartialEq, Decode)]
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct PlayerAbilities {
     /// Packed ability flags (see the `ABILITY_FLAG_*` constants).
     pub flags: u8,

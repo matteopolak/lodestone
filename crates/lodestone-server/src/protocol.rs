@@ -10,12 +10,68 @@
 
 use lodestone_core::State;
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, ResourceKey, Rotation, SoundCategory,
-    Text, Vec3, Vec3f,
+    BlockActionKind, BlockFace, BlockPos, Difficulty, GameMode, ItemStack, ResourceKey, Rotation,
+    SoundCategory, Text, Vec3, Vec3f,
 };
 use uuid::Uuid;
 
 use crate::chunk::ChunkColumn;
+
+/// The local player's movement abilities — vanilla's `Player.Abilities`, as
+/// carried by `ClientboundPlayerAbilitiesPacket`.
+///
+/// This is the packet that actually grants creative flight and instant build.
+/// A client told "you are in creative" through
+/// [`ServerProtocol::encode_game_mode`] alone still cannot fly, because
+/// permission lives here — which is why `ServerPlayer.setGameMode` sends both.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Abilities {
+    /// Takes no damage.
+    pub invulnerable: bool,
+    /// Currently flying (as opposed to merely permitted to).
+    pub flying: bool,
+    /// Permitted to fly.
+    pub may_fly: bool,
+    /// Breaks blocks instantly and has infinite materials.
+    pub instabuild: bool,
+    /// Permitted to place and break at all — `false` only in adventure and
+    /// spectator (`GameType.isBlockPlacingRestricted`).
+    pub may_build: bool,
+    /// Flight speed multiplier; vanilla's `Abilities` default is `0.05`.
+    pub flying_speed: f32,
+    /// Walk speed multiplier; vanilla's `Abilities` default is `0.1`.
+    pub walking_speed: f32,
+}
+
+impl Abilities {
+    /// Vanilla's `Abilities` field defaults (`Abilities.java`).
+    pub const DEFAULT_FLYING_SPEED: f32 = 0.05;
+    /// See [`DEFAULT_FLYING_SPEED`](Self::DEFAULT_FLYING_SPEED).
+    pub const DEFAULT_WALKING_SPEED: f32 = 0.1;
+
+    /// `GameType.updatePlayerAbilities` (`GameType.java:62-80`), verbatim:
+    /// creative may fly and instabuilds and is invulnerable; spectator may fly,
+    /// *is* flying and is invulnerable but does not instabuild; survival and
+    /// adventure get none of it. `may_build` is `!isBlockPlacingRestricted()`,
+    /// which is false for adventure and spectator.
+    #[must_use]
+    pub fn for_mode(mode: GameMode) -> Self {
+        let (may_fly, instabuild, invulnerable, flying) = match mode {
+            GameMode::Creative => (true, true, true, false),
+            GameMode::Spectator => (true, false, true, true),
+            GameMode::Survival | GameMode::Adventure => (false, false, false, false),
+        };
+        Self {
+            invulnerable,
+            flying,
+            may_fly,
+            instabuild,
+            may_build: matches!(mode, GameMode::Survival | GameMode::Creative),
+            flying_speed: Self::DEFAULT_FLYING_SPEED,
+            walking_speed: Self::DEFAULT_WALKING_SPEED,
+        }
+    }
+}
 
 /// A version-free description of one entity's wire-relevant state at a moment in
 /// time, handed to a [`ServerProtocol`] so it can encode spawn/move/remove
@@ -369,6 +425,19 @@ pub enum ServerBound {
         /// [`BlockAction::sequence`](Self::BlockAction) for why it is
         /// decoded but not yet acted on).
         sequence: i32,
+    },
+    /// The client asked to change its own game mode
+    /// (`ServerboundChangeGameModePacket` — the F4 switcher a
+    /// singleplayer/LAN host with cheats sends).
+    ///
+    /// The server stays authoritative: this is a *request*, and
+    /// `crate::server` answers it by echoing the mode it actually applied
+    /// through [`ServerProtocol::encode_game_mode`] plus
+    /// [`encode_player_abilities`](ServerProtocol::encode_player_abilities), so
+    /// a client that guessed wrong is corrected rather than trusted.
+    ChangeGameMode {
+        /// The requested mode.
+        mode: GameMode,
     },
     /// The client sent a player-command packet
     /// (`ServerboundPlayerCommandPacket`, issue #325). The packet's action
@@ -921,9 +990,34 @@ pub trait ServerProtocol: Send + Sync {
     /// The default delegates to [`begin_play`](Self::begin_play), so a family
     /// that has not adopted terrain-derived spawn yet keeps its existing
     /// hardcoded join behaviour unchanged.
-    fn begin_play_at(&self, view_radius: i32, spawn: Vec3) -> Vec<ServerDirective> {
-        let _ = spawn;
+    fn begin_play_at(&self, view_radius: i32, spawn: Vec3, mode: GameMode) -> Vec<ServerDirective> {
+        let _ = (spawn, mode);
         self.begin_play(view_radius)
+    }
+
+    /// Encodes a game-mode change for the local player (vanilla
+    /// `ClientboundGameEventPacket` with `CHANGE_GAME_MODE`, whose float
+    /// parameter is the `GameType` id).
+    ///
+    /// This is *only* the mode; the abilities it implies travel in
+    /// [`encode_player_abilities`](Self::encode_player_abilities), exactly as
+    /// vanilla sends two packets from `ServerPlayer.setGameMode`. The default
+    /// emits nothing.
+    fn encode_game_mode(&self, mode: GameMode) -> ServerDirective {
+        let _ = mode;
+        ServerDirective::None
+    }
+
+    /// Encodes the local player's movement abilities (vanilla
+    /// `ClientboundPlayerAbilitiesPacket`) — what actually grants creative
+    /// flight and instant build on the client.
+    ///
+    /// Sent at join and on every game-mode change. Without it a client told it
+    /// is in creative still cannot fly, because flight permission lives in this
+    /// packet and not in the mode. The default emits nothing.
+    fn encode_player_abilities(&self, abilities: Abilities) -> ServerDirective {
+        let _ = abilities;
+        ServerDirective::None
     }
 
     /// Marks the start of a chunk batch (vanilla's `CHUNK_BATCH_START`, an
@@ -1633,8 +1727,19 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
     // protocol, so the symptom was "every join lands at y=100 at (8, 8)" with a
     // fully correct spawn search sitting one call frame away — and no live
     // oracle covers the boxed path, which is what the parity test below is for.
-    fn begin_play_at(&self, view_radius: i32, spawn: Vec3) -> Vec<ServerDirective> {
-        (**self).begin_play_at(view_radius, spawn)
+    fn begin_play_at(&self, view_radius: i32, spawn: Vec3, mode: GameMode) -> Vec<ServerDirective> {
+        (**self).begin_play_at(view_radius, spawn, mode)
+    }
+
+    // Forwarded for the same reason `begin_play_at` is: both have defaults that
+    // emit nothing, so a missing forward here would silently mute the game-mode
+    // and abilities packets on the singleplayer (boxed) path alone.
+    fn encode_game_mode(&self, mode: GameMode) -> ServerDirective {
+        (**self).encode_game_mode(mode)
+    }
+
+    fn encode_player_abilities(&self, abilities: Abilities) -> ServerDirective {
+        (**self).encode_player_abilities(abilities)
     }
 
     fn begin_chunk_batch(&self) -> ServerDirective {
@@ -1842,10 +1947,25 @@ mod tests {
         /// Without this override both sides would answer `send(100 + radius)` and
         /// the parity assertion would pass with the forward missing — which is
         /// exactly how #329's bug survived this test file.
-        fn begin_play_at(&self, view_radius: i32, spawn: Vec3) -> Vec<ServerDirective> {
+        fn begin_play_at(&self, view_radius: i32, spawn: Vec3, mode: GameMode) -> Vec<ServerDirective> {
+            let mode = match mode {
+                GameMode::Survival => 0,
+                GameMode::Creative => 1,
+                GameMode::Adventure => 2,
+                GameMode::Spectator => 3,
+            };
             vec![send(
-                300 + view_radius + spawn.x as i32 + spawn.y as i32 + spawn.z as i32,
+                300 + view_radius + spawn.x as i32 + spawn.y as i32 + spawn.z as i32 + mode,
             )]
+        }
+        // Overridden for the same reason `begin_play_at` is: both have
+        // emit-nothing defaults, so a missing forward on the box would pass a
+        // parity assertion built on the defaults.
+        fn encode_game_mode(&self, _mode: GameMode) -> ServerDirective {
+            send(401)
+        }
+        fn encode_player_abilities(&self, _abilities: Abilities) -> ServerDirective {
+            send(402)
         }
         fn begin_chunk_batch(&self) -> ServerDirective {
             send(5)
@@ -2029,8 +2149,17 @@ mod tests {
         // exists.
         let spawn = Vec3::new(-101.0, 71.0, 202.0);
         assert_eq!(
-            boxed.begin_play_at(7, spawn),
-            direct.begin_play_at(7, spawn)
+            boxed.begin_play_at(7, spawn, GameMode::Creative),
+            direct.begin_play_at(7, spawn, GameMode::Creative)
+        );
+        assert_eq!(
+            boxed.encode_game_mode(GameMode::Creative),
+            direct.encode_game_mode(GameMode::Creative)
+        );
+        let abilities = Abilities::for_mode(GameMode::Creative);
+        assert_eq!(
+            boxed.encode_player_abilities(abilities),
+            direct.encode_player_abilities(abilities)
         );
         assert_eq!(boxed.begin_chunk_batch(), direct.begin_chunk_batch());
         assert_eq!(

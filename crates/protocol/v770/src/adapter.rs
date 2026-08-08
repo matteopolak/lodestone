@@ -735,7 +735,10 @@ fn encode_container_click(
 }
 
 /// Maps a vanilla game-mode ordinal to the canonical [`GameMode`], if valid.
-fn game_mode_from_ordinal(ordinal: i32) -> Option<GameMode> {
+///
+/// `pub(crate)` because `server_protocol` decodes the *serverbound*
+/// `change_game_mode` with it — the same id table, the other direction.
+pub(crate) fn game_mode_from_ordinal(ordinal: i32) -> Option<GameMode> {
     match ordinal {
         0 => Some(GameMode::Survival),
         1 => Some(GameMode::Creative),
@@ -747,7 +750,7 @@ fn game_mode_from_ordinal(ordinal: i32) -> Option<GameMode> {
 
 /// Maps the canonical [`GameMode`] to vanilla's `GameType` id, the inverse of
 /// [`game_mode_from_ordinal`].
-fn game_mode_to_ordinal(mode: GameMode) -> i32 {
+pub(crate) fn game_mode_to_ordinal(mode: GameMode) -> i32 {
     match mode {
         GameMode::Survival => 0,
         GameMode::Creative => 1,

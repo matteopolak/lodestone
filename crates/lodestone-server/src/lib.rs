@@ -263,8 +263,8 @@ pub use plugin_channels::{
     UNREGISTER_CHANNEL,
 };
 pub use protocol::{
-    EntitySnapshot, MetadataField, PlayerListing, ResourcePackPush, ServerBound, ServerDirective,
-    ServerProtocol, WorldgenScope,
+    Abilities, EntitySnapshot, MetadataField, PlayerListing, ResourcePackPush, ServerBound,
+    ServerDirective, ServerProtocol, WorldgenScope,
 };
 pub use random_tick::{
     DEFAULT_RANDOM_TICK_SPEED, GrassOutcome, RandomTickEvent, RandomTickScheduler,

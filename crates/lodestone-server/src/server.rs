@@ -67,8 +67,8 @@ use lodestone_core::State;
 use lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE;
 use lodestone_entity::{DamageFlags, ItemLifecycle};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Rotation, Text, TextContent, Vec3,
-    Vec3f,
+    BlockActionKind, BlockFace, BlockPos, Difficulty, GameMode, ItemStack, Rotation, Text,
+    TextContent, Vec3, Vec3f,
 };
 use lodestone_data::block_items;
 use lodestone_net::{Connection, NetError, Transport};
@@ -94,7 +94,7 @@ use crate::neighbor_update::Direction;
 use crate::players::{ChatLine, PlayerListStreamer, PlayerRegistry, PlayerTicket};
 use crate::plugin_channels::{ClientChannels, PluginChannelRegistry};
 use crate::protocol::{
-    EntitySnapshot, ResourcePackPush, ServerBound, ServerDirective, ServerProtocol,
+    Abilities, EntitySnapshot, ResourcePackPush, ServerBound, ServerDirective, ServerProtocol,
 };
 use crate::redstone::{COMPARATOR, OBSERVER, REPEATER};
 use crate::redstone_diode::{set_comparator, set_repeater};
@@ -1700,6 +1700,11 @@ where
     // `ServerBound::CustomPayload` arm in `dispatch_play_packet`. It is the
     // per-connection filter the broadcast drain in `serve_play` applies.
     let mut client_channels = ClientChannels::default();
+    // The mode this connection joins in. Survival — this crate persists no
+    // per-player game type and reads none from `level.dat` — and a runtime
+    // switch (the `change_game_mode` packet, or `/gamemode`) moves it from
+    // there. `serve_play` takes ownership of it at the Play handoff.
+    let game_mode = GameMode::Survival;
 
     while let Some((packet_id, payload)) = conn.read_packet().await? {
         match proto.decode(state, packet_id, &payload) {
@@ -1797,9 +1802,21 @@ where
                 let spawn = find_initial_spawn(source.get());
 
                 state = State::Play;
-                for directive in proto.begin_play_at(view_radius, spawn.pos) {
+                for directive in proto.begin_play_at(view_radius, spawn.pos, game_mode) {
                     apply(conn, &mut state, directive).await?;
                 }
+                // Vanilla's `PlayerList.placeNewPlayer` sends the abilities
+                // packet right after the login packet, and it is not optional:
+                // the login packet's `game_type` tells the client *what* mode it
+                // is in, while flight permission and instant build live only
+                // here. Sending one without the other is how "creative mode that
+                // cannot fly" happens.
+                apply(
+                    conn,
+                    &mut state,
+                    proto.encode_player_abilities(Abilities::for_mode(game_mode)),
+                )
+                .await?;
 
                 // Full clock sync at join, mirroring vanilla's
                 // `ServerClockManager::createFullSyncPacket`, sent by
@@ -2046,6 +2063,7 @@ where
                     resource_packs,
                     &mut client_channels,
                     plugin_channels,
+                    game_mode,
                 )
                 .await;
             }
@@ -2068,6 +2086,7 @@ where
             | ServerBound::PlayerStatusOnly { .. }
             | ServerBound::BlockAction { .. }
             | ServerBound::UseItemOn { .. }
+            | ServerBound::ChangeGameMode { .. }
             | ServerBound::DifficultyChanged { .. }
             | ServerBound::DifficultyLockChanged { .. }
             | ServerBound::GameRuleChanged { .. }
@@ -2418,6 +2437,10 @@ async fn apply_block_action<T, P, S>(
     // is published *except* for (this connection's own).
     block_ticks: &BlockTickFeed,
     breaker: uuid::Uuid,
+    // Issue: creative mode. `ServerPlayerGameMode.handleBlockBreakAction`'s very
+    // first branch is `if (this.isCreative()) { destroyAndAck(...); return; }` —
+    // no hardness clock and no drops, whatever the block or the tool.
+    creative: bool,
     action: BlockActionKind,
     pos: BlockPos,
 ) -> Result<(), ServerError>
@@ -2438,9 +2461,11 @@ where
             // `None` is a state neither census knows — our gap, not a cheat, so
             // it is priced as an ordinary progressive dig that the `None`-clock
             // branch of `may_break_at` will accept on any `StopDestroy`.
-            if per_tick.is_some_and(|per| per >= 1.0) {
+            if creative || per_tick.is_some_and(|per| per >= 1.0) {
                 // Vanilla's `"insta mine"` exit: the block is gone now, and no
                 // `StopDestroy` is coming for it. This is the one-shot-block fix.
+                // Creative takes the same exit for *every* block, which is what
+                // makes a creative dig instant rather than merely fast.
                 *pending_break = None;
                 destroy_block(
                     conn,
@@ -2455,6 +2480,7 @@ where
                     held,
                     block_ticks,
                     breaker,
+                    !creative,
                     pos,
                 )
                 .await?;
@@ -2515,6 +2541,7 @@ where
                 held,
                 block_ticks,
                 breaker,
+                !creative,
                 pos,
             )
             .await?;
@@ -2548,6 +2575,10 @@ async fn destroy_block<T, P, S>(
     // must hear it. See `BlockTickFeed::publish_effect_except`.
     block_ticks: &BlockTickFeed,
     breaker: uuid::Uuid,
+    // `false` in creative — `ServerPlayerGameMode.destroyBlock` calls
+    // `removeBlock(pos, false)` there, so a creative break drops nothing and
+    // rolls no loot at all (which also means it consumes no RNG draws).
+    drop_loot: bool,
     pos: BlockPos,
 ) -> Result<(), ServerError>
 where
@@ -2597,7 +2628,7 @@ where
     // then rides into the roll as `LootContextParams.TOOL`, which is
     // what makes `match_tool`, `apply_bonus` and `table_bonus`
     // evaluate against a real item instead of an absent one.
-    let popped = if crate::block_drops::drops_are_allowed(&broken, held) {
+    let popped = if drop_loot && crate::block_drops::drops_are_allowed(&broken, held) {
         crate::block_drops::drop_block_loot(
             crate::block_drops::bundled_tables(),
             &broken,
@@ -2771,6 +2802,53 @@ where
         }
     }
     crate::block_placement::placement(block, ctx, block_at)
+}
+
+/// The two packets `ServerPlayer.setGameMode` sends: the mode itself, then the
+/// abilities it implies.
+///
+/// One helper because the pair must never be split — a client told it is in
+/// creative without the abilities packet is in creative and cannot fly, which
+/// is the exact defect this batch was reported as.
+fn game_mode_directives<P: ServerProtocol>(proto: &P, mode: GameMode) -> [ServerDirective; 2] {
+    [
+        proto.encode_game_mode(mode),
+        proto.encode_player_abilities(Abilities::for_mode(mode)),
+    ]
+}
+
+/// Parses a `/gamemode …` command body.
+///
+/// `None` means "not a `/gamemode` command, hand it to the host's sink";
+/// `Some(None)` means it was one but the argument was missing or unknown, so
+/// the caller answers with usage rather than silently doing nothing.
+///
+/// The body arrives **without** the leading slash (vanilla's
+/// `ServerboundChatCommandPacket` strips it), and vanilla accepts both the
+/// full name and the `s`/`c`/`a`/`sp` abbreviations
+/// (`GameType.byName`'s aliases).
+fn parse_gamemode_command(command: &str) -> Option<Option<GameMode>> {
+    let mut parts = command.trim().split_whitespace();
+    if parts.next()? != "gamemode" {
+        return None;
+    }
+    Some(parts.next().and_then(|arg| match arg {
+        "survival" | "s" | "0" => Some(GameMode::Survival),
+        "creative" | "c" | "1" => Some(GameMode::Creative),
+        "adventure" | "a" | "2" => Some(GameMode::Adventure),
+        "spectator" | "sp" | "3" => Some(GameMode::Spectator),
+        _ => None,
+    }))
+}
+
+/// The vanilla translation-key stem for a mode, for the chat confirmation.
+fn gamemode_name(mode: GameMode) -> &'static str {
+    match mode {
+        GameMode::Survival => "Survival Mode",
+        GameMode::Creative => "Creative Mode",
+        GameMode::Adventure => "Adventure Mode",
+        GameMode::Spectator => "Spectator Mode",
+    }
 }
 
 /// `SlabBlock.canBeReplaced` (`SlabBlock.java:84-97`) for the clicked block:
@@ -4203,6 +4281,12 @@ async fn fall_status_sample<T, P, S>(
     player_entity_id: i32,
     username: &str,
     on_ground: bool,
+    // `Abilities.invulnerable` — creative and spectator. `fall` is not in
+    // `#minecraft:bypasses_invulnerability` (only `out_of_world` and
+    // `generic_kill` are), so an invulnerable player takes none of it. The
+    // *tracker* still samples, so the fall is still tracked; only the hit is
+    // skipped, which is `Player.isInvulnerableTo`'s own placement.
+    invulnerable: bool,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -4213,6 +4297,7 @@ where
         return Ok(());
     };
     if let Some(raw) = fall.on_player_moved(fall_sample(source, x, y, z, on_ground))
+        && !invulnerable
         && vitals.apply_fall_damage(raw as f32).is_some()
     {
         publish_health(
@@ -4294,6 +4379,11 @@ async fn dispatch_play_packet<T, P, S>(
     // to dispatch ordinary payloads on.
     client_channels: &mut ClientChannels,
     plugin_channels: &PluginChannelRegistry,
+    // This connection's current game mode, `&mut` because the
+    // `ChangeGameMode` arm and the built-in `/gamemode` both rewrite it — and
+    // because the creative consequences below (instant break, damage immunity)
+    // read it on later packets.
+    game_mode: &mut GameMode,
     // Issue #329. The player's per-player respawn point, written by the bed
     // arm of `apply_use_item_on` and threaded through `serve_play`'s session
     // state. Read back by no caller yet — the placement half of P2 is the
@@ -4405,6 +4495,7 @@ where
 
             if let Some(raw) =
                 fall.on_player_moved(fall_sample(source.get(), x, y, z, on_ground))
+                && !Abilities::for_mode(*game_mode).invulnerable
                 && vitals.apply_fall_damage(raw as f32).is_some()
             {
                 publish_health(
@@ -4444,6 +4535,7 @@ where
                 player_entity_id,
                 username,
                 on_ground,
+                Abilities::for_mode(*game_mode).invulnerable,
             )
             .await?;
         }
@@ -4464,6 +4556,7 @@ where
                 player_entity_id,
                 username,
                 on_ground,
+                Abilities::for_mode(*game_mode).invulnerable,
             )
             .await?;
         }
@@ -4496,6 +4589,7 @@ where
                 game_tick,
                 block_ticks,
                 player_uuid,
+                matches!(*game_mode, GameMode::Creative),
                 action,
                 pos,
             )
@@ -4647,9 +4741,49 @@ where
         // property `dispatch_refuses_rather_than_ungates_when_permissions_are_missing`
         // holds one layer in.
         ServerBound::ChatCommand { command } => {
+            // `/gamemode` is answered here rather than by the sink, because
+            // the mode is *this loop's* state — no host dispatcher can reach
+            // `game_mode` — and because every real constructor passes
+            // `CommandDispatch::none()` (issue #535), so routing it to the sink
+            // would make creative mode unreachable in the shipping product.
+            if let Some(requested) = parse_gamemode_command(&command) {
+                match requested {
+                    Some(mode) => {
+                        *game_mode = mode;
+                        for directive in game_mode_directives(proto, mode) {
+                            apply(conn, state, directive).await?;
+                        }
+                        let line = format!("Set own game mode to {}", gamemode_name(mode));
+                        apply(conn, state, proto.encode_system_chat(&line)).await?;
+                    }
+                    None => {
+                        apply(
+                            conn,
+                            state,
+                            proto.encode_system_chat(
+                                "Usage: /gamemode <survival|creative|adventure|spectator>",
+                            ),
+                        )
+                        .await?;
+                    }
+                }
+                return Ok(());
+            }
             let response = commands.dispatch.run(&commands.caller, &command);
             for line in response.lines() {
                 apply(conn, state, proto.encode_system_chat(line)).await?;
+            }
+        }
+        // The F4 switcher. A *request*, not an instruction: the two directives
+        // below echo the mode this server actually applied, so a client that
+        // guessed is corrected. Nothing gates it today because this crate has
+        // no permission model at all (see the `ChatCommand` arm) — the same
+        // posture `/gamemode` above takes, and the honest one for a
+        // singleplayer/LAN host.
+        ServerBound::ChangeGameMode { mode } => {
+            *game_mode = mode;
+            for directive in game_mode_directives(proto, mode) {
+                apply(conn, state, directive).await?;
             }
         }
         // Issue #469. Nothing is written to the wire here: the message is
@@ -4826,6 +4960,10 @@ async fn serve_play<T, P, S, E>(
     // borrowed: it was created here for this connection and dies with it.
     client_channels: &mut ClientChannels,
     plugin_channels: &PluginChannelRegistry,
+    // The mode this connection joined in (`serve_connection_inner`'s own), owned
+    // because the `change_game_mode` and `/gamemode` arms mutate it and nothing
+    // outside this loop reads it.
+    mut game_mode: GameMode,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -4963,6 +5101,7 @@ where
                     &mut drops_rng,
                     client_channels,
                     plugin_channels,
+                    &mut game_mode,
                     &mut respawn,
                     sleep_vote,
                     player_entity_id,
@@ -5142,6 +5281,7 @@ where
                             inventory.selected_item(),
                             block_ticks,
                             player_uuid,
+                            !matches!(game_mode, GameMode::Creative),
                             dig.pos,
                         )
                         .await?;
@@ -5166,7 +5306,10 @@ where
                     // `damage_for_position` is always `None`: nothing is sent
                     // and this costs one clone + one distance scan per 50ms.
                     let border_state = border.get();
-                    if let Some(damage) = border_state.damage_for_position(x, z) {
+                    let invulnerable = Abilities::for_mode(game_mode).invulnerable;
+                    if let Some(damage) =
+                        border_state.damage_for_position(x, z).filter(|_| !invulnerable)
+                    {
                         if vitals.apply_border_damage(damage).is_some() {
                             publish_health(
                                 conn,
@@ -5186,7 +5329,12 @@ where
                         (y + EYE_HEIGHT).floor() as i32,
                         z.floor() as i32,
                     );
-                    let outcome = vitals.tick(is_water(&eye_state));
+                    // `!invulnerable &&`: a creative player's air bar does not
+                    // deplete and they never drown. Suppressed here rather than
+                    // at the damage below because `PlayerVitals` is mode-free by
+                    // design, and a depleting bar that can never hurt is worse
+                    // than no bar at all.
+                    let outcome = vitals.tick(!invulnerable && is_water(&eye_state));
                     if let Some(air) = outcome.air_changed {
                         apply(conn, &mut state, proto.encode_air_supply_update(air)).await?;
                     }
@@ -5453,6 +5601,10 @@ async fn serve_play<T, P, S, E>(
     // shared registry.
     client_channels: &mut ClientChannels,
     plugin_channels: &PluginChannelRegistry,
+    // The mode this connection joined in (`serve_connection_inner`'s own), owned
+    // because the `change_game_mode` and `/gamemode` arms mutate it and nothing
+    // outside this loop reads it.
+    mut game_mode: GameMode,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -5549,6 +5701,7 @@ where
             &mut drops_rng,
             client_channels,
             plugin_channels,
+            &mut game_mode,
             &mut respawn,
             sleep_vote,
             player_entity_id,
@@ -6668,6 +6821,30 @@ mod tests {
         // Wraps around rather than clamping at ±180.
         assert_eq!(horizontal_look_direction(450.0), Direction::West);
         assert_eq!(horizontal_look_direction(-450.0), Direction::East);
+    }
+
+    /// `/gamemode` is the reachable switch today (nothing produces the F4
+    /// packet client-side yet), so its parsing is worth pinning — including the
+    /// two answers that are *not* a mode: not-my-command, and my-command-but-bad.
+    #[test]
+    fn gamemode_command_parses_names_aliases_and_ids() {
+        assert_eq!(
+            parse_gamemode_command("gamemode creative"),
+            Some(Some(GameMode::Creative))
+        );
+        assert_eq!(parse_gamemode_command("gamemode c"), Some(Some(GameMode::Creative)));
+        assert_eq!(parse_gamemode_command("gamemode 1"), Some(Some(GameMode::Creative)));
+        assert_eq!(
+            parse_gamemode_command("  gamemode   spectator  "),
+            Some(Some(GameMode::Spectator))
+        );
+        // A `/gamemode` with no or an unknown argument: mine, but unusable, so
+        // the caller answers with usage instead of falling through to the sink.
+        assert_eq!(parse_gamemode_command("gamemode"), Some(None));
+        assert_eq!(parse_gamemode_command("gamemode wizard"), Some(None));
+        // Not mine: the host's sink must still see it.
+        assert_eq!(parse_gamemode_command("gamerule doDaylightCycle false"), None);
+        assert_eq!(parse_gamemode_command(""), None);
     }
 
     /// The three redstone families keep the full property set the signal model

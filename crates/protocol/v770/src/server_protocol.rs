@@ -46,11 +46,11 @@ use std::collections::HashMap;
 
 use lodestone_core::{Ctx, Decode, Encode, Nbt, NbtTag, Reader, Writer, write_network_nbt};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, ResourceKey, Rotation,
+    BlockActionKind, BlockFace, BlockPos, Difficulty, GameMode, ItemStack, ResourceKey, Rotation,
     SoundCategory, Text, TextContent, Vec3, Vec3f,
 };
 use lodestone_server::{
-    ABSOLUTE_MAX_SIZE, ChunkColumn as ServerChunkColumn, EntitySnapshot, HOTBAR_SIZE,
+    ABSOLUTE_MAX_SIZE, Abilities, ChunkColumn as ServerChunkColumn, EntitySnapshot, HOTBAR_SIZE,
     MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, MetadataField, PlayerListing, ResourcePackPush, ServerBound,
     ServerDirective, ServerProtocol, WorldBorder, WorldgenScope,
 };
@@ -77,11 +77,12 @@ use crate::packets::game::{
     ChangeDifficultyServerbound, ChangeGameMode, ChatCommand, ChatMessage, ChunkBatchReceived,
     ClientCommand, ClientTickEnd,
     ConfigurationAcknowledged, ContainerButtonClick, ContainerSlotStateChanged, EditBook,
-    EntityTagQuery, GameLogin, GameRuleEntry, GameRuleValues, GlobalPos, InitializeBorder,
-    JigsawGenerate,
+    ABILITY_FLAG_CAN_FLY, ABILITY_FLAG_FLYING, ABILITY_FLAG_INSTABUILD,
+    ABILITY_FLAG_INVULNERABLE, EntityTagQuery, GameEvent, GameLogin, GameRuleEntry, GameRuleValues,
+    GlobalPos, InitializeBorder, JigsawGenerate,
     LockDifficulty, MOVE_FLAG_ON_GROUND, MovePlayerPos, MovePlayerPosRot, MovePlayerRot,
     MovePlayerStatusOnly, MoveVehicle, PaddleBoat, PickItemFromBlock, PickItemFromEntity,
-    PlaceRecipe, PlayerAction, PlayerCommand, PlayerLoaded, RecipeBookChangeSettings,
+    PlaceRecipe, PlayerAbilities, PlayerAction, PlayerCommand, PlayerLoaded, RecipeBookChangeSettings,
     RecipeBookSeenRecipe, RenameItem, Respawn, SERVERBOUND_ABILITY_FLAG_FLYING, SelectBundleItem,
     SelectTrade, ServerboundPlayerAbilities, SetBorderCenter, SetBorderLerpSize,
     SetBorderSize, SetBorderWarningDelay, SetBorderWarningDistance, SetCarriedItem,
@@ -502,6 +503,9 @@ fn resolve_biome_id(name: &str) -> u32 {
 /// reads. The air fallback exists so a state string this version's table cannot
 /// parse back at all degrades to a visibly-wrong confirmation rather than a
 /// panic or a corrupted wire id.
+/// `ClientboundGameEventPacket.CHANGE_GAME_MODE`'s own event code.
+const GAME_EVENT_CHANGE_GAME_MODE: u8 = 3;
+
 fn resolve_state_id(state: &str) -> u32 {
     let (name, raw_props) = match state.split_once('[') {
         Some((name, rest)) => (name, rest.strip_suffix(']').unwrap_or(rest)),
@@ -2616,8 +2620,15 @@ impl ServerProtocol for V770ServerProtocol {
             // *initial* configuration handshake, which is a different wire
             // packet from this one).
             State::Play if packet_id == play::serverbound::CHANGE_GAME_MODE => {
-                let _ = decode_full::<ChangeGameMode>(payload);
-                ServerBound::Ignored
+                match decode_full::<ChangeGameMode>(payload)
+                    .and_then(|p| crate::adapter::game_mode_from_ordinal(p.mode))
+                {
+                    Some(mode) => ServerBound::ChangeGameMode { mode },
+                    // An id outside `0..=3` is malformed; dropped rather than
+                    // guessed, and the server's authoritative echo then puts the
+                    // client back where it was.
+                    None => ServerBound::Ignored,
+                }
             }
             State::Play if packet_id == play::serverbound::CONFIGURATION_ACKNOWLEDGED => {
                 let _ = decode_full::<ConfigurationAcknowledged>(payload);
@@ -2932,10 +2943,10 @@ impl ServerProtocol for V770ServerProtocol {
         // Issue #461: the pre-#461 hardcoded spawn — see the module doc
         // comment for why these unitless numbers existed. Delegates to
         // `begin_play_at` so the body lives in one place.
-        self.begin_play_at(view_radius, Vec3::new(8.0, 100.0, 8.0))
+        self.begin_play_at(view_radius, Vec3::new(8.0, 100.0, 8.0), GameMode::Survival)
     }
 
-    fn begin_play_at(&self, view_radius: i32, spawn: Vec3) -> Vec<ServerDirective> {
+    fn begin_play_at(&self, view_radius: i32, spawn: Vec3, mode: GameMode) -> Vec<ServerDirective> {
         let login = GameLogin {
             entity_id: LOCAL_PLAYER_ENTITY_ID,
             hardcore: false,
@@ -2949,7 +2960,9 @@ impl ServerProtocol for V770ServerProtocol {
             dimension_type: 0,
             dimension: "minecraft:overworld".to_string(),
             seed: 0,
-            game_type: 0, // survival
+            // `GameLogin::game_type` is the unsigned byte the wire carries, and
+            // the ordinal table is `0..=3`, so the cast is total.
+            game_type: crate::adapter::game_mode_to_ordinal(mode) as u8,
             rest: encode_game_login_rest(),
         };
 
@@ -3014,6 +3027,49 @@ impl ServerProtocol for V770ServerProtocol {
                 },
             ),
         ]
+    }
+
+    /// `ClientboundGameEventPacket(CHANGE_GAME_MODE, id)` — event code `3`,
+    /// whose `f32` parameter is the `GameType` id
+    /// (`ClientboundGameEventPacket.java`'s own `CHANGE_GAME_MODE`).
+    fn encode_game_mode(&self, mode: GameMode) -> ServerDirective {
+        send(
+            play::clientbound::GAME_EVENT,
+            &GameEvent {
+                event: GAME_EVENT_CHANGE_GAME_MODE,
+                param: crate::adapter::game_mode_to_ordinal(mode) as f32,
+            },
+        )
+    }
+
+    /// `ClientboundPlayerAbilitiesPacket` — the flags byte then flying and
+    /// walking speed. `may_build` has **no wire bit**: vanilla's
+    /// `Abilities.mayBuild` is server-side only and is not in the packet
+    /// (`ServerboundPlayerAbilitiesPacket`/`ClientboundPlayerAbilitiesPacket`
+    /// carry the four `ABILITY_FLAG_*` bits and nothing more), so it is
+    /// deliberately dropped here rather than folded into a spare bit.
+    fn encode_player_abilities(&self, abilities: Abilities) -> ServerDirective {
+        let mut flags = 0u8;
+        if abilities.invulnerable {
+            flags |= ABILITY_FLAG_INVULNERABLE;
+        }
+        if abilities.flying {
+            flags |= ABILITY_FLAG_FLYING;
+        }
+        if abilities.may_fly {
+            flags |= ABILITY_FLAG_CAN_FLY;
+        }
+        if abilities.instabuild {
+            flags |= ABILITY_FLAG_INSTABUILD;
+        }
+        send(
+            play::clientbound::PLAYER_ABILITIES,
+            &PlayerAbilities {
+                flags,
+                flying_speed: abilities.flying_speed,
+                walking_speed: abilities.walking_speed,
+            },
+        )
     }
 
     fn begin_chunk_batch(&self) -> ServerDirective {
@@ -3919,6 +3975,73 @@ mod block_edit_tests {
             let decoded = proto.decode(State::Play, play::serverbound::PLAYER_ACTION, &body);
             assert_eq!(decoded, ServerBound::Ignored, "ordinal {ordinal}");
         }
+    }
+
+    /// The two packets a game-mode change writes, byte-exact. The flags byte is
+    /// the whole reason creative flight works or does not: `0x0D` is
+    /// `invulnerable | can_fly | instabuild`, and `flying` is deliberately
+    /// **not** set for creative (`GameType.updatePlayerAbilities` sets it only
+    /// for spectator). A fully-connected wire carrying the wrong byte here looks
+    /// identical to a correct one from every coverage angle.
+    #[test]
+    fn encode_creative_writes_game_event_3_and_abilities_flags() {
+        let proto = V770ServerProtocol;
+        let ServerDirective::Send { packet_id, payload } =
+            proto.encode_game_mode(GameMode::Creative)
+        else {
+            panic!("game-mode change must be a Send");
+        };
+        assert_eq!(packet_id, play::clientbound::GAME_EVENT);
+        // `u8` event code then a big-endian `f32` parameter: code 3, param 1.0.
+        assert_eq!(payload, vec![3, 0x3F, 0x80, 0x00, 0x00]);
+
+        let ServerDirective::Send { packet_id, payload } =
+            proto.encode_player_abilities(Abilities::for_mode(GameMode::Creative))
+        else {
+            panic!("abilities must be a Send");
+        };
+        assert_eq!(packet_id, play::clientbound::PLAYER_ABILITIES);
+        assert_eq!(payload[0], 0x0D, "invulnerable | can_fly | instabuild");
+
+        // Survival is the negative arm: same two packets, no flags at all.
+        let ServerDirective::Send { payload, .. } =
+            proto.encode_player_abilities(Abilities::for_mode(GameMode::Survival))
+        else {
+            panic!("abilities must be a Send");
+        };
+        assert_eq!(payload[0], 0x00);
+
+        // Spectator is the one mode that ships `flying` already set.
+        let ServerDirective::Send { payload, .. } =
+            proto.encode_player_abilities(Abilities::for_mode(GameMode::Spectator))
+        else {
+            panic!("abilities must be a Send");
+        };
+        assert_eq!(payload[0], 0x07, "invulnerable | flying | can_fly");
+    }
+
+    /// The F4 switcher round-trips into a real `ServerBound` variant rather than
+    /// the `Ignored` it used to decode to, and an out-of-range id is dropped.
+    #[test]
+    fn decode_change_game_mode() {
+        let proto = V770ServerProtocol;
+        for (id, mode) in [
+            (0, GameMode::Survival),
+            (1, GameMode::Creative),
+            (2, GameMode::Adventure),
+            (3, GameMode::Spectator),
+        ] {
+            let body = encode(&ChangeGameMode { mode: id });
+            assert_eq!(
+                proto.decode(State::Play, play::serverbound::CHANGE_GAME_MODE, &body),
+                ServerBound::ChangeGameMode { mode }
+            );
+        }
+        let body = encode(&ChangeGameMode { mode: 9 });
+        assert_eq!(
+            proto.decode(State::Play, play::serverbound::CHANGE_GAME_MODE, &body),
+            ServerBound::Ignored
+        );
     }
 
     /// `USE_ITEM_ON` round-trips into `ServerBound::UseItemOn`, including a
