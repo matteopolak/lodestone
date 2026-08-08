@@ -3094,8 +3094,64 @@ where
         *open_container = None;
         *container_sync = ContainerSync::default();
     }
+    // Fluid spread's seeding hook (`crate::fluid`). Breaking a block is the
+    // single most common way a player starts a fluid moving — mine the floor of
+    // an ocean, or the block beside a spring — and it is exactly vanilla's
+    // `neighborChanged` case: the *water* did not change, so only a notification
+    // can wake it. `ticks_after_edit` covers this cell and its six neighbours and
+    // reads none of them, so it works across a chunk border; a position holding
+    // no fluid is a silent no-op when the tick drains.
+    //
+    // Deliberately **not** folded into `propagate_placement`, whose return value
+    // several gates assert on exactly. This is its own request against the same
+    // feed, and `run_tick_loop`'s rebase loop routes it to the fluid queue.
+    block_ticks.request_scheduled_ticks(crate::fluid::ticks_after_edit(pos));
     let directive = proto.encode_block_update(pos.x, pos.y, pos.z, AIR);
     apply(conn, state, directive).await?;
+    // Breaking a light source has to darken the column, and the `BLOCK_UPDATE`
+    // above carries no light. See `crate::light` for why this is a column resend
+    // rather than a `LIGHT_UPDATE`.
+    resend_column_for_light(conn, proto, source, state, &broken, AIR, pos).await?;
+    Ok(())
+}
+
+/// Re-sends the column owning `pos` when an edit changed the light that cell
+/// emits, so the client's block light follows a placed or broken torch.
+///
+/// A no-op unless [`crate::light::should_relight`] fires — read that module's doc
+/// comment first: it records what the served-light path was measured to actually
+/// compute, why the fix is a whole-column resend rather than the `LIGHT_UPDATE`
+/// packet that would be cheaper, and the two gaps this leaves (sky light after an
+/// edit, and light crossing a column border).
+///
+/// `source.column(cx, cz)` reflects the `set_block` the caller already performed
+/// — `ChunkSource::column`'s own contract — so `encode_chunk` recomputes light
+/// over terrain that contains the torch. The batch wrapper is the same
+/// `begin_chunk_batch`/`end_chunk_batch` pair every other chunk send in this
+/// module uses; vanilla's `PlayerChunkSender` flow control counts *batches*, so a
+/// bare `encode_chunk` outside one would leave the client's accounting short.
+async fn resend_column_for_light<T, P, S>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    state: &mut State,
+    old_state: &str,
+    new_state: &str,
+    pos: BlockPos,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource,
+{
+    if !crate::light::should_relight(old_state, new_state) {
+        return Ok(());
+    }
+    let (cx, cz) = (pos.x.div_euclid(16), pos.z.div_euclid(16));
+    let column = source.column(cx, cz);
+    apply(conn, state, proto.begin_chunk_batch()).await?;
+    apply(conn, state, proto.encode_chunk(cx, cz, &column)).await?;
+    apply(conn, state, proto.end_chunk_batch(1)).await?;
     Ok(())
 }
 
@@ -4144,6 +4200,10 @@ where
             // instead, so gating on a synchronous change would drop precisely
             // the placements this exists for.
             block_ticks.request_scheduled_ticks(scheduled);
+            // And the same seeding hook `destroy_block` performs, for the same
+            // reason: a block placed into a flow, or beside a source, has to
+            // start it re-evaluating. See `crate::fluid::ticks_after_edit`.
+            block_ticks.request_scheduled_ticks(crate::fluid::ticks_after_edit(target));
         }
     }
     // `pos`/`neighbour` first (the clicked face and the placed cell, which the
@@ -4159,6 +4219,17 @@ where
         let current = source.block_state(p.x, p.y, p.z);
         let directive = proto.encode_block_update(p.x, p.y, p.z, &current);
         apply(conn, state, directive).await?;
+    }
+    // Placing a torch has to light the column, and the `block_update` packets
+    // above carry no light. Read back out of `source` rather than reusing the
+    // placed state string, because the fan-out may have rewritten the cell since
+    // (and because `placed_block_state`'s own result is shadowed inside the
+    // placement block above). `target_state` is the cell as it was *before* the
+    // placement, captured before the `set_block`.
+    {
+        let placed_state = source.block_state(target.x, target.y, target.z);
+        resend_column_for_light(conn, proto, source, state, &target_state, &placed_state, target)
+            .await?;
     }
     Ok(())
 }

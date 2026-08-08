@@ -110,7 +110,7 @@ pub(crate) fn is_water(name: &str) -> bool {
 /// fallback ("the lowest id sharing the name") and became silent callers when it
 /// changed; one of them failed as a 30-second live timeout rather than a
 /// mismatch. Do not copy this logic — call it.
-fn resolve_palette_state_id(state: &str) -> u32 {
+pub(crate) fn resolve_palette_state_id(state: &str) -> u32 {
     lodestone_data::block_states::state_id(state)
         .unwrap_or_else(lodestone_data::block_states::air_state_id)
 }

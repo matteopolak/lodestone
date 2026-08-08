@@ -141,6 +141,10 @@ pub mod ecs;
 /// because `ServerProtocol`'s three new encoders name [`effects::WorldEffect`].
 pub mod effects;
 mod fall;
+/// Water and lava spread on the scheduled-tick queue (`docs/fluid-spread.md`).
+/// Public because the tick loop is not the only intended caller: any code that
+/// edits a block owes [`fluid::ticks_after_edit`] for that position.
+pub mod fluid;
 mod furnace;
 /// The world's typed game-rule registry (issue #327). **Was an orphan file too**
 /// — none of its 780 lines, including `game_rule_defaults_match_the_jar`, was in
