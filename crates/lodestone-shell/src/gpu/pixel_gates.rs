@@ -654,6 +654,7 @@ fn entity_renders_to_pixels_through_shell_path() {
             equipment: Vec::new(),
             // No equipment above, so nothing here could carry a dye.
             equipment_dye: Vec::new(),
+            equipment_trim: Vec::new(),
             wool: None,
             count: 1,
             foil: false,
@@ -680,6 +681,7 @@ fn entity_renders_to_pixels_through_shell_path() {
             equipment: Vec::new(),
             // No equipment above, so nothing here could carry a dye.
             equipment_dye: Vec::new(),
+            equipment_trim: Vec::new(),
             wool: None,
             count: 1,
             foil: false,
@@ -859,6 +861,7 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         equipment: Vec::new(),
         // No equipment above, so nothing here could carry a dye.
         equipment_dye: Vec::new(),
+            equipment_trim: Vec::new(),
         wool: None,
         count: 1,
         foil: false,

@@ -122,6 +122,7 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         // item's own ground pose, not a held-item layer.
         equipment: Vec::new(),
         equipment_dye: Vec::new(),
+        equipment_trim: Vec::new(),
         // Not a sheep, and a single-item stack: `count` above 1 asks for
         // vanilla's 1-5 jittered copies, which would widen the silhouette this
         // gate measures. `1` keeps it a single-copy measurement.'
@@ -461,6 +462,7 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
         anim: AnimInput::REST,
         equipment: Vec::new(),
         equipment_dye: Vec::new(),
+        equipment_trim: Vec::new(),
         wool: None,
         count: 1,
         foil: false,

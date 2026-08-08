@@ -40,7 +40,8 @@ use super::terrain::{
 use super::{
     BellSource, BlockEntityRenderer, BlockEntitySource, DEFAULT_RENDER_DISTANCE_CHUNKS, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
-    HandSwingSource, MainHandSource, NameTagRenderer, OutlineRenderer, OutlineShapeSource,
+    HandSwingSource, MainHandSource, MapSource, NameTagRenderer, OutlineRenderer,
+    OutlineShapeSource,
     RenderState, SKY_COLOR, SignSource, SignTextRenderer, SkullSource, SkyDarkenSource,
     ThirdPersonBodySource, ThirdPersonBodyState, TimeOfDaySource, transparent_placeholder_atlas,
 };
@@ -296,6 +297,8 @@ impl RenderState {
             bell_source: BellSource::default(),
             // Likewise `set_shulker_source`.
             shulker_source: ShulkerSource::default(),
+            // Likewise `set_map_source` (issue #184).
+            map_source: MapSource::default(),
             sign_text,
             // No signs until the shell installs a world source; see
             // `set_sign_source`.
@@ -975,6 +978,19 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::ShulkerSpawn> + Send + Sync + 'static,
     ) {
         self.shulker_source = ShulkerSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's filled-map pictures (issue #184).
+    ///
+    /// Re-installed every frame like the block-entity sources, and for a sharper
+    /// reason than theirs: the closure captures a **snapshot** of `SessionMaps`, so
+    /// one installed at login would show a map frozen at whatever the server had
+    /// sent by then and would never fill in as the player explored.
+    pub fn set_map_source(
+        &mut self,
+        f: impl Fn(Option<i32>) -> Option<Vec<u8>> + Send + Sync + 'static,
+    ) {
+        self.map_source = MapSource(Some(Box::new(f)));
     }
 
     /// Install the source for this frame's sign text — same shape as

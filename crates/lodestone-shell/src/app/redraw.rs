@@ -297,6 +297,15 @@ impl WindowApp {
             render.set_shulker_source(f);
         }
 
+        // Filled maps (issue #184). This is the hop that turns the `SessionMaps`
+        // fold from an F3 readout into the picture itself — the palette, the
+        // per-map texture and the held/framed quads were all landed with no live
+        // producer, so without this call a map draws its blank inventory sprite.
+        // Re-installed per frame because the closure snapshots the store.
+        if let Some(f) = self.sim.map_source() {
+            render.set_map_source(f);
+        }
+
         // Reconcile fog with the player's bit-exact fluid state each frame,
         // re-uploading only when it changes (crossing a water/lava surface) so a
         // submerged eye dissolves terrain into short water/lava fog and the

@@ -37,11 +37,96 @@ use crate::entities::EntityDraw;
 
 use super::block_entities::BlockEntityDrawBatch;
 use super::{
-    ArmourAccum, ArmourDrawBatch, ArmourPartAccum, EntityDrawBatch, FlameBatch, RenderState,
-    RenderStats, WoolPartAccum, humanoid_armour_slot,
+    ArmourAccum, ArmourDrawBatch, ArmourPartAccum, ArmourTextureKey, EntityDrawBatch, FlameBatch,
+    RenderState, RenderStats, WoolPartAccum, humanoid_armour_slot,
 };
 
+/// Fold one layer's instances into `accum`, finding-or-creating the
+/// `(slot, texture)` group and, within it, the per-part row.
+///
+/// Shared by the armour-sheet and trim arms of [`RenderState::prepare_armour`]
+/// **so the two cannot diverge**: they must produce byte-identical transforms for
+/// the same wearer or the trim would sit a fraction off the piece it decorates.
+/// Insertion order is preserved, which is what keeps a slot's trim after that
+/// slot's layers — see [`ArmourDrawBatch`].
+fn push_armour_instances(
+    accum: &mut Vec<ArmourAccum>,
+    slot: ArmourSlot,
+    texture: ArmourTextureKey,
+    attached: &[(lodestone_render::PartRange, usize)],
+    instance: &lodestone_render::entity::EntityInstance,
+    light: u32,
+    tint: InstanceTint,
+) {
+    let group = match accum
+        .iter_mut()
+        .position(|a| a.slot == slot && a.texture == texture)
+    {
+        Some(i) => &mut accum[i],
+        None => {
+            accum.push(ArmourAccum {
+                slot,
+                texture,
+                parts: Vec::new(),
+            });
+            accum.last_mut().expect("just pushed")
+        }
+    };
+    for (range, wearer_index) in attached {
+        let Some(transform) = instance.part_transforms.get(*wearer_index) else {
+            continue;
+        };
+        let part = match group.parts.iter_mut().position(|p| p.range == *range) {
+            Some(i) => &mut group.parts[i],
+            None => {
+                group.parts.push(ArmourPartAccum {
+                    range: *range,
+                    transforms: Vec::new(),
+                    lights: Vec::new(),
+                    tints: Vec::new(),
+                });
+                group.parts.last_mut().expect("just pushed")
+            }
+        };
+        part.transforms.push(*transform);
+        part.lights.push(light);
+        part.tints.push(tint);
+    }
+}
+
 impl RenderState {
+
+    /// The trim sprite this wearer's `slot` should draw over its armour, or `None`
+    /// for an untrimmed piece, an unknown pattern/material, or no pack (issue #17).
+    ///
+    /// The `wearer_asset_id` argument to `trim_sprite_id` is the **armour's own**
+    /// material id, not the trim's, and it is load-bearing:
+    /// `TrimMaterial::suffix_for` overrides the suffix when the two coincide, so
+    /// diamond trim on diamond armour resolves `diamond_darker` and is visible
+    /// instead of vanishing into the piece. `armour_layers` cannot supply it — it
+    /// discards the `ArmourAsset` — which is why this goes back to
+    /// `equipment::armour_item`.
+    fn trim_sprite_for(
+        &self,
+        draw: &EntityDraw,
+        slot: ArmourSlot,
+        item_path: &str,
+    ) -> Option<lodestone_assets::ResourceLocation> {
+        use lodestone_assets::trim::{trim_material, trim_pattern, trim_sprite_id};
+
+        if self.entities.trim_textures.is_empty() {
+            return None;
+        }
+        let (_, trim) = draw
+            .equipment_trim
+            .iter()
+            .find(|(s, _)| humanoid_armour_slot(*s) == Some(slot))?;
+        let pattern = trim_pattern(&trim.pattern)?;
+        let material = trim_material(&trim.material)?;
+        let (_, asset) = lodestone_assets::equipment::armour_item(item_path)?;
+        let id = trim_sprite_id(pattern, material, slot.layer_type(), asset.id).ok()?;
+        self.entities.trim_textures.contains_key(&id).then_some(id)
+    }
 
     /// Resolve each interpolated entity into a renderable instance, frustum-cull
     /// and group them by model, upload one instance buffer per surviving model,
@@ -186,10 +271,20 @@ impl RenderState {
     ///
     /// # What is deliberately not handled
     ///
-    /// * **Trims** (`minecraft:trim`). Not decoded anywhere in this engine and
-    ///   not carried past `net::entity_snapshot`, so there is no input; they also
-    ///   need a stitched trim-sprite atlas and a third depth mode
-    ///   (`CompareOp.EQUAL`, no depth write). See `docs/armour-rendering.md`.
+    /// * **Trims are handled here now** (issue #17), and the note this bullet used
+    ///   to carry was stale in all three of its claims: `minecraft:trim` *is*
+    ///   decoded (`read_component_patch`'s own arm), `net::entity_snapshot` no
+    ///   longer exists (`entities::resolve_entity_facts` lifts it beside the dye),
+    ///   and `TrimAtlas` needs **no** stitching — it hands back one full-size
+    ///   palette-swapped sheet per `(pattern, suffix, layer type)`. Nor is a third
+    ///   depth mode involved: all eighteen of 26.2's patterns are `decal: false`,
+    ///   so a trim draws through `armour_pipeline` like any other layer, and
+    ///   `EntityPipeline::trim_decal_pipeline` stays selectable and unused.
+    /// * **The local player's own trim, in third person.** `ThirdPersonBodyState`
+    ///   reads the inventory through `lodestone_game`'s `ComponentMap`, which drops
+    ///   `trim` at its `From<&lodestone_model::ItemStack>` boundary — the same
+    ///   boundary that drops the local player's dye. One shared fix, in a crate
+    ///   this pass does not own.
     /// * **Baby rigs.** Vanilla swaps in a whole second mesh set
     ///   (`createBabyArmorMesh`, `humanoid_baby` sheets, its own deformations);
     ///   a baby zombie wears adult armour scaled by the mob's 0.5 uniform scale
@@ -272,10 +367,11 @@ impl RenderState {
                     continue;
                 }
                 for layer in layers {
-                    let texture = (layer.texture, slot.layer_type());
-                    if !self.entities.armour_textures.contains_key(&texture) {
+                    let sheet = (layer.texture, slot.layer_type());
+                    if !self.entities.armour_textures.contains_key(&sheet) {
                         continue;
                     }
+                    let texture = ArmourTextureKey::Sheet(sheet);
                     // Vanilla's overlay is sampled by every layer of a
                     // `LivingEntityRenderer`'s model, armour included — a hurt
                     // mob whose breastplate stayed its own colour would read as
@@ -293,41 +389,39 @@ impl RenderState {
                         .map(|(_, dye)| *dye);
                     let tint =
                         InstanceTint::rgb(armour_layer_tint_with_dye(layer, dye)).with_hurt(draw.hurt);
-                    let group = match accum
-                        .iter_mut()
-                        .position(|a| a.slot == slot && a.texture == texture)
-                    {
-                        Some(i) => &mut accum[i],
-                        None => {
-                            accum.push(ArmourAccum {
-                                slot,
-                                texture,
-                                parts: Vec::new(),
-                            });
-                            accum.last_mut().expect("just pushed")
-                        }
-                    };
-                    for (range, wearer_index) in &attached {
-                        let Some(transform) = instance.part_transforms.get(*wearer_index) else {
-                            continue;
-                        };
-                        let part = match group.parts.iter_mut().position(|p| p.range == *range) {
-                            Some(i) => &mut group.parts[i],
-                            None => {
-                                group.parts.push(ArmourPartAccum {
-                                    range: *range,
-                                    transforms: Vec::new(),
-                                    lights: Vec::new(),
-                                    tints: Vec::new(),
-                                });
-                                group.parts.last_mut().expect("just pushed")
-                            }
-                        };
-                        part.transforms.push(*transform);
-                        part.lights.push(light);
-                        part.tints.push(tint);
-                    }
+                    push_armour_instances(
+                        &mut accum,
+                        slot,
+                        texture,
+                        &attached,
+                        &instance,
+                        light,
+                        tint,
+                    );
                     stats.armour_layers_drawn += 1;
+                }
+
+                // This slot's trim, **after** its own layers so the coplanar
+                // `LessEqual` depth test lets it win. Once per slot rather than
+                // once per layer: vanilla's `HumanoidArmorLayer` draws the trim as
+                // a single pass over the slot, so a leather piece (two layers) still
+                // gets one trim.
+                //
+                // Untinted white, and that is not an oversight: the sprite is
+                // *already* the material's colour (`TrimAtlas` palette-swaps it per
+                // material), so multiplying by a dye would tint gold trim green on
+                // dyed leather.
+                if let Some(sprite) = self.trim_sprite_for(draw, slot, id.path()) {
+                    push_armour_instances(
+                        &mut accum,
+                        slot,
+                        ArmourTextureKey::Trim(sprite),
+                        &attached,
+                        &instance,
+                        light,
+                        InstanceTint::rgb([255, 255, 255]).with_hurt(draw.hurt),
+                    );
+                    stats.armour_trims_drawn += 1;
                 }
             }
         }

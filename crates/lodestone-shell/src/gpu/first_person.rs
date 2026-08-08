@@ -250,7 +250,7 @@ impl HeldItemEquip {
     /// The item to **draw** this frame — vanilla's `mainHandItem`, not the selected
     /// one — plus its enchantment-foil flag (the glint gate, issue #452). `None`
     /// draws the bare arm.
-    fn visible(&self) -> Option<&(ResourceLocation, bool)> {
+    pub(super) fn visible(&self) -> Option<&(ResourceLocation, bool)> {
         self.visible.as_ref()
     }
 }
@@ -377,6 +377,11 @@ pub(super) enum FirstPersonHand<'a> {
     /// re-rasterises the same mesh through the glint pipeline in the same pass
     /// (issue #452).
     Item(GpuModelMesh, bool),
+    /// A held **filled map** (issue #184): one quad drawn through the same model
+    /// pipeline as [`Self::Item`], with group 1 swapped from the block atlas to the
+    /// map's own 128×128 texture. The bind group travels with the mesh because the
+    /// two are meaningless apart — see `super::maps`.
+    Map(GpuModelMesh, wgpu::BindGroup),
     /// The bare arm, drawn through the *entity* pipeline.
     Arm(FirstPersonArm<'a>),
 }
@@ -515,6 +520,15 @@ impl RenderState {
         // `ARM.display_slot(true)` — the same expression `hand_transform` below
         // reads the pose from, so the resolved variant and its transform cannot
         // disagree about which slot this pass is.
+        // A filled map first (issue #184): vanilla forks *before* the ordinary
+        // item pose too — `renderArmWithItem` tests `MapItem.isFilledMap` and
+        // calls `renderMap`, which is a textured quad and not the item's baked
+        // model. Falling through would draw `item/filled_map`'s flat blank sprite,
+        // which looks like a working map until you notice it has no terrain on it.
+        if let Some((mesh, texture)) = self.prepare_held_map(device, queue, inverse_arm_height) {
+            return Some(FirstPersonHand::Map(mesh, texture));
+        }
+
         let hand_ctx = ItemStateContext::new(ARM.display_slot(true));
         if let Some((item, foil)) = self.equip.visible()
             && let Some(model) = self.model.as_ref()
@@ -820,6 +834,27 @@ impl RenderState {
                         pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                         stats.draw_calls += 1;
                     }
+                }
+            }
+            // A filled map: the same four bind groups as the item branch with
+            // **group 1 swapped** to the map's own texture. No glint second pass —
+            // vanilla's `renderMap` draws no foil, and a map is not enchantable.
+            FirstPersonHand::Map(mesh, texture) => {
+                if let Some(model) = self.model.as_ref() {
+                    pass.set_pipeline(&model.pipeline.pipeline);
+                    pass.set_bind_group(
+                        0,
+                        &model.hand_cam_bind_group,
+                        &[model.origin_arena.zero_offset()],
+                    );
+                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_bind_group(2, &model.palette_bind_group, &[]);
+                    pass.set_bind_group(3, &model.anim_bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    stats.draw_calls += 1;
+                    stats.filled_maps_drawn += 1;
                 }
             }
             FirstPersonHand::Arm(arm) => {

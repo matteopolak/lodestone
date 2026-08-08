@@ -36,6 +36,7 @@ mod entity_passes;
 mod first_person;
 mod frame;
 mod glint;
+mod maps;
 mod nametag;
 mod occlusion;
 mod outline;
@@ -59,9 +60,9 @@ pub use occlusion::TerrainOcclusion;
 pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
 pub use sources::{
-    BellSource, BlockEntitySource, EntityLightSource, HandSwingSource, MainHandSource, ShulkerSource,
-    OutlineShapeSource, SignSource, SkullSource, SkyDarkenSource, ThirdPersonBodySource,
-    ThirdPersonBodyState,
+    BellSource, BlockEntitySource, EntityLightSource, HandSwingSource, MainHandSource, MapSource,
+    ShulkerSource, OutlineShapeSource, SignSource, SkullSource, SkyDarkenSource,
+    ThirdPersonBodySource, ThirdPersonBodyState,
 };
 pub use stats::RenderStats;
 
@@ -329,6 +330,12 @@ pub struct RenderState {
     /// no block model of its own, so an unset source leaves an empty cell where
     /// every box is, exactly as chest does.
     shulker_source: ShulkerSource,
+    /// Where this frame's filled-map pictures come from (issue #184). Same "unset
+    /// means draw nothing" convention as [`Self::skull_source`], and here the
+    /// degradation is that a held `filled_map` falls back to its ordinary flat item
+    /// model rather than showing a blank map, because the map branch declines
+    /// before it builds any geometry.
+    map_source: MapSource,
     /// World-space sign text (issue #23). Always constructed, like
     /// [`Self::nametag`]: it loads its own jar-sourced font and fail-opens to
     /// drawing nothing. A sign's *board* is a real block model (unlike chest
@@ -402,16 +409,33 @@ struct EntityDrawBatch {
 #[derive(Debug)]
 struct ArmourDrawBatch {
     slot: ArmourSlot,
-    texture: (&'static str, ArmourLayerType),
+    texture: ArmourTextureKey,
     /// `(index range, instance buffer, instance count)` per armour part that
     /// anything in this group used.
     parts: Vec<(lodestone_render::PartRange, wgpu::Buffer, u32)>,
 }
 
+/// Which sheet an [`ArmourDrawBatch`] samples: a material's own armour sheet, or a
+/// smithing-table trim sprite drawn over it (issue #17).
+///
+/// One enum rather than two parallel batch lists, because the two share
+/// everything else — the same four meshes, the same parts, the same wearer
+/// matrices, the same pipeline — and, critically, the same **order**: a slot's
+/// trim has to be drawn after that slot's own layers or the `LessEqual` depth
+/// test rejects it as coplanar. Keeping them in one insertion-ordered `Vec` is
+/// what makes that free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArmourTextureKey {
+    /// A material layer's sheet, keyed as [`EntityRenderer::armour_textures`] is.
+    Sheet((&'static str, ArmourLayerType)),
+    /// A trim sprite, keyed as [`EntityRenderer::trim_textures`] is.
+    Trim(lodestone_assets::ResourceLocation),
+}
+
 /// Per-part instance accumulation for one `(slot, texture)` group, before upload.
 struct ArmourAccum {
     slot: ArmourSlot,
-    texture: (&'static str, ArmourLayerType),
+    texture: ArmourTextureKey,
     parts: Vec<ArmourPartAccum>,
 }
 

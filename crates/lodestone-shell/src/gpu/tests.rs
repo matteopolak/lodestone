@@ -277,6 +277,45 @@ fn every_humanoid_armour_sheet_decodes_from_the_real_jar() {
     assert_eq!(sheets.len(), 17, "expected 9 humanoid + 8 leggings sheets");
 }
 
+/// The trim-sprite loader against the real jar (issue #17) — the entry point that
+/// did not exist while `lodestone_assets::trim` had zero callers.
+///
+/// Asserts the two things that would silently produce untrimmed armour: that the
+/// bake is non-empty, and that the keys it stores are the *same*
+/// `trim_sprite_id` outputs `RenderState::trim_sprite_for` derives at draw time. A
+/// loader keyed on anything else would look healthy here and miss every lookup.
+#[test]
+#[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+fn trim_sprites_bake_and_key_the_way_the_draw_site_looks_them_up() {
+    use lodestone_assets::equipment::{ArmourLayerType, ArmourSlot, armour_item};
+    use lodestone_assets::trim::{trim_material, trim_pattern, trim_sprite_id};
+
+    let sprites = super::entities::load_trim_sprites();
+    assert!(
+        !sprites.is_empty(),
+        "no trim sprites loaded; set LODESTONE_ASSETS to a pack root with client.jar"
+    );
+
+    // Gold `sentry` on a diamond chestplate, derived exactly as the draw site
+    // derives it — including the wearer's own asset id, which is what makes
+    // `suffix_for`'s same-material override reachable.
+    let pattern = trim_pattern("sentry").expect("sentry is a 26.2 pattern");
+    let material = trim_material("gold").expect("gold is a 26.2 trim material");
+    let (_, asset) = armour_item("diamond_chestplate").expect("diamond chestplate is armour");
+    let id = trim_sprite_id(pattern, material, ArmourSlot::Chest.layer_type(), asset.id)
+        .expect("a well-formed sprite id");
+    assert!(sprites.contains_key(&id), "{id} was not baked");
+
+    // The same-material override is a *different* sprite, not the same one: a
+    // loader that ignored `suffix_for` would collapse the two and diamond trim
+    // would vanish into diamond armour.
+    let diamond = trim_material("diamond").expect("diamond is a 26.2 trim material");
+    let plain = trim_sprite_id(pattern, diamond, ArmourLayerType::Humanoid, "iron").unwrap();
+    let darker = trim_sprite_id(pattern, diamond, ArmourLayerType::Humanoid, "diamond").unwrap();
+    assert_ne!(plain, darker);
+    assert!(sprites.contains_key(&plain) && sprites.contains_key(&darker));
+}
+
 /// Hermetic (no GPU): the whole armour resolution chain a live frame runs,
 /// from the `EntityDraw` the extract system produces through to the
 /// `(index range, wearer part)` pairs `prepare_armour` uploads.
@@ -329,6 +368,7 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
         // an absent dye is `armour_layer_tint_with_dye`'s own "undyed"
         // case (`docs/armour-rendering.md`).
         equipment_dye: Vec::new(),
+            equipment_trim: Vec::new(),
         feet: Vec3::new(4.0, 70.0, -2.0),
         yaw: 41.0,
         head_yaw: 0.0,

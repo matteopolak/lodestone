@@ -231,6 +231,38 @@ impl Sim {
         Some(move |eye: glam::Vec3| crate::block_entities::shulker_spawns(&handle, eye))
     }
 
+    /// This frame's filled-map picture, for
+    /// [`RenderState::set_map_source`](crate::gpu::RenderState::set_map_source)
+    /// (issue #184).
+    ///
+    /// Takes an optional map id and yields that map's raw 128×128 packed colour
+    /// grid, cloned out of [`SessionMaps`](lodestone_ecs::session::SessionMaps).
+    ///
+    /// # Why the id is optional, and what to change when it stops being
+    ///
+    /// **`minecraft:map_id` is not decoded**, so a `filled_map` in hand or in a
+    /// frame carries no id we can read: `ItemComponents` has no field for it and
+    /// `read_component_patch`'s `other =>` arm cannot skip its payload, so the
+    /// component actually truncates the rest of that packet. Until it is modelled
+    /// alongside `minecraft:trim`, `None` means "the lowest-numbered map the
+    /// server has sent" — exactly right in the overwhelmingly common
+    /// one-map-in-inventory case, and the wrong picture when a player carries two.
+    /// The moment the component decodes, callers pass `Some(id)` and this needs no
+    /// change at all.
+    #[must_use]
+    pub fn map_source(
+        &self,
+    ) -> Option<impl Fn(Option<i32>) -> Option<Vec<u8>> + Send + Sync + 'static> {
+        // Off a live server the store is always empty, so a source would only
+        // ever answer `None`; skip it as the block-entity sources do.
+        self.net.as_ref()?;
+        let store = self.maps();
+        Some(move |id: Option<i32>| {
+            let id = id.or_else(|| store.ids().next())?;
+            Some(store.get(id)?.colors.clone())
+        })
+    }
+
     /// How many chest lids are currently animating or open — for the debug
     /// overlay and for the live gate, which needs to distinguish "the block event
     /// never arrived" from "the lid is drawn shut".

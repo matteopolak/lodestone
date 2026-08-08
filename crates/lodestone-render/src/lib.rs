@@ -64,6 +64,7 @@ pub mod glint;
 pub mod gui_atlas;
 pub mod item_render;
 pub mod light;
+pub mod map_item;
 pub mod mesh;
 pub mod mesher;
 pub mod model_arena;
@@ -179,6 +180,10 @@ pub use mesh::{Mesh, MeshStats, face_winding_is_outward, mesh_greedy, mesh_simpl
 pub use mesher::{
     BuiltSection, LightGrid, MeshJob, SectionSnapshot, SectionSource, build_batch, column_of,
     dirty_jobs, neighbour_columns, neighbourhood_coords,
+};
+pub use map_item::{
+    MAP_BRIGHTNESS, MAP_COLOR_BASE, MAP_SIZE as MAP_TEXTURE_SIZE, map_color_rgba, map_quad_mesh,
+    map_texture_rgba,
 };
 pub use model_arena::{ArenaMesh, ModelMeshArena};
 pub use model_pipeline::{
