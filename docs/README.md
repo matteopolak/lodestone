@@ -1640,6 +1640,16 @@ of these caught the *brief* being wrong rather than the code.
   same day at `e2508e3` — by which point **units U1, U2 and U3 had already landed**
   (`3ba959a`, `02b8053`, `fa75f38`); every "X exists / X is missing" claim below was
   re-checked rather than copied forward.
+- [The Nether and the End: the group NE issue tree](./plans/nether-and-end.md) — The
+  executable unit sequence for unit group **NE** of
+  [`worldgen-rewrite.md`](./worldgen-rewrite.md) (its U13 row): Nether and End terrain
+  — legacy RNG wiring, the bespoke noise instantiations, the `nether_cave` carver,
+  the disabled-aquifer fluid picker, the Nether multi-noise biome source, the
+  `end_islands` density type, `TheEndBiomeSource`, End cell geometry, and the serve
+  seam that keeps any of it from being an island. Written 2026-08-08 against `HEAD`
+  `5f37fb83`. Engine work only: **the data phase is complete** (verified below), and
+  portals/dimension travel (#330) are gameplay, out of scope — a Nether generator is
+  oracle-testable with no portal existing.
 - [Backing Paper's NMS calls with Rust: census and feasibility](./plans/paper-nms-bridge.md) —
   The feasibility census issue
   [#341](https://github.com/matteopolak/lodestone/issues/341) asked for before any
@@ -1683,6 +1693,14 @@ of these caught the *brief* being wrong rather than the code.
   2026-08-04 against a re-verified tree; the state census in "The census" below is the
   core deliverable, and every phase names its files, its choke-point patch, its gate,
   its negative control, its performance gate, and the downstream epic it unblocks.
+- [Structures: the group S issue tree](./plans/structures.md) — The executable unit
+  sequence for unit group **S** of [`worldgen-rewrite.md`](./worldgen-rewrite.md) (its
+  U14 row): the structure engine — placement, templates, beardifier, jigsaw and the
+  coded piece generators — turned from the rewrite plan's phase sketch (S0–S4)
+  into landable units, each with its gate, its control, its outside evidence source
+  and its cost stated as a counter against the serve-path budget. Written 2026-08-08
+  against `HEAD` `5f37fb83`; refines and partially supersedes issue **#514** (see
+  [Relationship to #514](#relationship-to-514)).
 - [Plan: world state — time, weather, sleeping, border, rules, difficulty, spawn, dimensions (epic #340)](./plans/world-state.md) —
   The implementation plan for epic #340's eight children (#323–#330): the
   server-authoritative world-state systems, each planned end-to-end from ECS placement
