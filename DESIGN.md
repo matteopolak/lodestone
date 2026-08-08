@@ -6210,3 +6210,59 @@ already green.
   **and** `ChunkStore::set_block` must invalidate it — both write blocks into a retained column without
   touching anything derived from them. Stale light survives the edit, the wire looks correct, the client
   re-meshes, and nothing changes on screen.
+
+**12.139 Structures: three "blockers" were each one small function, and the ledger had an island inside
+it. Also: two vanilla behaviours have *no* answer to reproduce, and copying either would have been
+wrong.** (#514 S5, `afb517ed`/`1762faa1`.)
+
+- **A "blocker" that closes a structure can be 60 lines, and being blocked is not evidence of size.**
+  `trial_chambers`, `trail_ruins` and `bastion_remnant` had been demoted for four phases behind
+  `PoolAliasLookup`, `CappedProcessor` and `AxisAlignedLinearPosTest`. All three together are under 300
+  lines including tests. The ledger's value is exactly this: each row named the *one* function, so the
+  cost of closing it was legible before starting rather than after.
+- **Two claimants, one row.** `processor:minecraft:capped` was blocking trail ruins' archaeology lists
+  *and* ocean ruins' coded `archyRuleProcessor`. A ledger keyed by mechanism rather than by structure is
+  what made that visible; keyed by structure it would have been two rows and looked like two units.
+- **The ledger had an unnamed island inside its own construction.** `minecraft:monument` fell through
+  *both* branches of `StructureRegistry::new`'s demotion logic — it is not a template-driven kind
+  (so the template-failure branch skips it) and it is not `Unsupported` (it has its own variant with a
+  real 29-block biome survey), so it got no row for three phases while placing nothing. And
+  `structure_placement_oracle.rs` actively asserted it was *absent* from the ledger, because
+  `CLOSED_SET_STRUCTURES` is a list of structures whose **placement** is closed and was read as a list of
+  structures with **piece generators**. The instrument that exists to find islands had one, and a test
+  was holding it in place. Ask of any "what is missing" table: which code path *adds* a row, and is there
+  a kind that takes neither?
+- **`Mth.clampedLerp(factor, min, max)` takes the factor first**, which is the opposite of every
+  `lerp(start, end, t)` API. Read the other way round, `high_rampart`'s erosion chance is a constant
+  `0.0` at every distance — a rampart that never erodes, which looks like a rampart. Gated by predicting
+  the chance at four distances and requiring the measurement to land on the correct hypothesis, not by
+  asserting it rises.
+- **Sequentially seeded LCGs are strongly correlated in their first draw, and a "measure the rate over N
+  fresh randoms" test is biased by several σ because of it.** Two probability measurements written that
+  way failed with the code correct: a weighted pick reported its 25% option at **0 / 4,000**, and an
+  `axis_aligned_linear_pos` chance measured 0.0558 against a true 0.05 over 20,000 trials. The fix is one
+  long stream, not a looser tolerance — a tolerance wide enough to absorb the bias is also wide enough to
+  pass under a wrong chance. **`for i in 0..n { Random::new(i) }` is not n samples.**
+- **Two vanilla behaviours are genuinely chunk-order dependent, so there is no vanilla answer to
+  reproduce and "be faithful" is not a decision procedure.** `ScatteredFeaturePiece.updateAverageGroundHeight`
+  averages the heightmap over the box ∩ *the decorating chunk*, and `DesertPyramidPiece` draws its cellar
+  variant and collapsed-roof rolls from `level.getRandom()`. A hut spanning two chunks therefore has two
+  vanilla heights and vanilla keeps whichever chunk ran first, in `HPos`. Copying the expression
+  faithfully imports the ambiguity; the deviations chosen (average over the **whole** box;
+  position-seed the rolls) are each identical to vanilla in the single-chunk case and are pure functions
+  of `(seed, chunk)` otherwise. **When the source is ambiguous, say which ambiguity you resolved and how
+  — the ledger rows `coded:average_ground_height` and `coded:region_random` exist for exactly that, and
+  they are deviations rather than absences, which is the class that vanishes from the record first.**
+- **A gate whose search bound is a guess reports "not implemented" for working code.** The nearest chunk
+  where the biome filter lets a `desert_pyramid` through at the oracle seed is **234 candidate placement
+  cells** out from the origin (211 for `swamp_hut`), so a 12-ring and then a 200-ring search both failed
+  on a correct generator. Worse, the first version of that search broke on the first start of *any*
+  structure in the candidate chunk and reported `village_plains` — a filter bug that looks like the
+  subject being absent. Measure the distance, then hard-code it as a constant with the measurement in its
+  doc.
+- **Predict the count from a different stage, not from the world you are measuring.** The pyramid's
+  block gate expects the world to hold **exactly** the number of signature blocks the piece's own
+  last-write-wins map carries (403 at the gated chunk). A literal `> 500` was a guess and failed; a
+  literal `> 300` would have passed with two thirds of the pyramid missing. The piece list is produced by
+  the *start* stage and the measurement comes from the *placement* stage, which is what makes the
+  equality meaningful rather than circular.
