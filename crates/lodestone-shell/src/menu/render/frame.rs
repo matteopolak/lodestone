@@ -142,6 +142,42 @@ pub struct MenuRow {
     /// [`Self::entry`]'s reason: a list entry is not a button, and the row column
     /// is `floor(w / 2) - floor(305 / 2)`, which a `Slot` cannot express.
     pub account: Option<AccountEntryView>,
+    /// Set on a [`super::Screen::WorldSelect`] **world-list** row (the save
+    /// list): which row it is and whether it is the list's selection.
+    ///
+    /// Routes the row to [`draw_world_entry`] and, in [`row_rect`], to
+    /// [`world_list_row_rect`] — both tested *before* `slot`, for [`Self::entry`]'s
+    /// reason twice over: a list entry is not a button, and `getRowLeft()` is
+    /// `floor(w / 2) - floor(270 / 2)`, two integer divisions a `Slot` cannot
+    /// express.
+    ///
+    /// The three text lines are the row's own `label` / `detail` / `trailing`,
+    /// exactly as an account row reads `label`/`detail` off the row rather than
+    /// duplicating them here — so this view carries only what has nowhere else to
+    /// live.
+    pub world: Option<WorldEntryView>,
+}
+
+/// One world-list row's state (the save list, issue #468's reading 2).
+///
+/// Two fields, for [`AccountEntryView`]'s reason: the display name is the row's
+/// `label`, `folder (last played)` is its `detail`, and the game-mode/version
+/// info line is its `trailing`. Duplicating any of them here is how a row and its
+/// draw end up disagreeing.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WorldEntryView {
+    /// The row's index in the **filtered** list, which is what
+    /// [`world_list_row_rect`] positions from.
+    pub index: usize,
+    /// Whether this is `WorldSelectionList.getSelectedOpt()`'s entry, which gets
+    /// `AbstractSelectionList.extractItem`'s 1 px outline plus black interior
+    /// (`AbstractSelectionList.java:354-370`).
+    ///
+    /// A different question from [`MenuFrame::selected`], which on this screen
+    /// carries the **focused** row, and from [`MenuFrame::hovered`], which carries
+    /// the row the mouse is over. All three are visible at once and mean different
+    /// things — the same split `world_select`'s own module doc argues for.
+    pub selected: bool,
 }
 
 /// One account-list row's state (issues #66/#402).

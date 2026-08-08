@@ -2992,6 +2992,7 @@ dependencies = [
  "criterion",
  "crossbeam-channel",
  "glam 0.33.2",
+ "lodestone-anvil",
  "lodestone-app",
  "lodestone-assets",
  "lodestone-auth",

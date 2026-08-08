@@ -279,9 +279,34 @@ impl WindowApp {
     /// `NetClient::open_singleplayer` into `ClientBuilder::ecs` (§4.1(c)).
     /// Attaching without it is the silent failure `Sim::connect`'s docs warn
     /// about — every HUD accessor would read an empty default.
-    pub(super) fn begin_singleplayer(&mut self, config: Option<crate::menu::create_world::WorldCreationConfig>) {
+    pub(super) fn begin_singleplayer(&mut self, launch: crate::menu::nav::SingleplayerLaunch) {
+        use crate::menu::nav::SingleplayerLaunch;
         self.ui.begin(crate::menu::SessionKind::Singleplayer);
-        let seed = resolve_launch_seed(config.as_ref());
+        // Issue #468's reading (2): the world is a **directory the menu chose**,
+        // and the two arms differ only in whether a typed seed is honoured.
+        //
+        // `Open` resolves through `resolve_launch_seed(None)` and the value is then
+        // *discarded* by `resolve_world_seed`, which reads the world's stored seed
+        // — a requested seed is a creation parameter for an existing world. That is
+        // not a wire carrying the wrong value, it is a parameter with no effect on
+        // this path, and it is why `SingleplayerLaunch::Open` carries no seed of
+        // its own to imply otherwise. The one case where it *does* matter is a
+        // directory whose `world_gen_settings.dat` is missing, which
+        // `resolve_world_seed` then creates from it — see
+        // `world_select::BUNDLED_WORLD`.
+        //
+        // `Created`'s directory already exists (the menu made it, with the player's
+        // typed name in its `level.dat`) and has **no** settings file yet, so this
+        // is the arm where `config.seed` reaches the generator.
+        #[cfg(not(target_arch = "wasm32"))]
+        let world_dir = Some(match &launch {
+            SingleplayerLaunch::Open(dir) => dir.clone(),
+            SingleplayerLaunch::Created { world_dir, .. } => world_dir.clone(),
+        });
+        let seed = match &launch {
+            SingleplayerLaunch::Open(_) => resolve_launch_seed(None),
+            SingleplayerLaunch::Created { config, .. } => resolve_launch_seed(Some(config)),
+        };
         let session = Some((self.sim.ecs().clone(), self.sim.local_player()));
         // Vanilla streams `simulationDistance`/`viewDistance` chunks around the
         // player; ours is the same number the camera's far plane and the mesher
@@ -303,13 +328,6 @@ impl WindowApp {
         let view_radius = i32::try_from(self.config.render_distance)
             .unwrap_or(i32::MAX)
             .saturating_add(1);
-        // Issue #468: singleplayer now opens **one implicit persistent world**
-        // rather than a fresh in-memory one per launch. The choice of "one
-        // world" over "a save list" is a product decision, argued in
-        // `crate::saves`' module doc — read that before adding a second world
-        // here. `seed` only takes effect if this world does not exist yet.
-        #[cfg(not(target_arch = "wasm32"))]
-        let world_dir = Some(crate::saves::default_world_dir());
         match launch_singleplayer(
             self.config.protocol,
             view_radius,

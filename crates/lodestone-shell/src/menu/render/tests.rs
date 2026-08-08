@@ -3764,6 +3764,47 @@ fn world_select_nav(tag: &str) -> (MenuNav, UiState) {
     (nav, ui)
 }
 
+/// The same, with `names` planted in this nav's own (temp) saves root first —
+/// so the list the screen enumerates is non-empty.
+///
+/// The worlds are written with the **production** codec
+/// (`lodestone_anvil::level_dat`), because `crate::saves`' enumeration reads them
+/// with it: a hand-rolled fixture here would be testing the fixture. `LastPlayed`
+/// counts *down* with the index so `names[0]` sorts to row 0 under
+/// `WorldSummary::cmp_for_list` (last played descending) — otherwise the row
+/// order would depend on the write order, which is not what the screen sorts by.
+fn world_select_nav_with_worlds(tag: &str, names: &[&str]) -> (MenuNav, UiState) {
+    let nav = test_nav(tag);
+    for (i, name) in names.iter().enumerate() {
+        let dir = nav.saves_root().join(name);
+        std::fs::create_dir_all(&dir).expect("create world dir");
+        let mut level = lodestone_anvil::level_dat::LevelDat::for_new_world(
+            name,
+            &lodestone_anvil::level_dat::Spawn::default(),
+            0,
+        );
+        level
+            .set_last_played(1_700_000_000_000 - i as i64 * 1000)
+            .expect("sets LastPlayed");
+        lodestone_anvil::level_dat::write_to_file(
+            &level,
+            &lodestone_anvil::level_dat::path_in(&dir),
+        )
+        .expect("write level.dat");
+    }
+    let mut nav = nav;
+    let mut ui = UiState::new();
+    let action = nav.key(&mut ui, MenuKey::Enter);
+    assert_eq!(action, crate::menu::nav::MenuAction::None);
+    assert_eq!(ui.screen(), Screen::WorldSelect);
+    assert_eq!(
+        nav.world_select().shown_len(),
+        names.len(),
+        "premise: opening the screen enumerated every planted world"
+    );
+    (nav, ui)
+}
+
 fn world_select_frame(nav: &MenuNav, ui: &UiState) -> MenuFrame<'static> {
     let statuses = StatusCache::with_probe(unavailable_probe());
     let mut fav = FaviconCache::new();
@@ -3918,23 +3959,27 @@ fn the_world_select_frame_is_the_screen_vanilla_draws() {
             "Back",
         ]
     );
-    // Three disabled, three enabled — #397's headline, with #287's launch
-    // and #190's screen both live on top. Edit/Delete/Re-Create are
-    // *present* and inactive, which is what makes the footer's shape
-    // vanilla's; Play is active because the list has a world and Create
-    // is active because issue #190 built the screen behind it.
+    // **Four** disabled here, not three, and that is the empty-list state rather
+    // than a regression: `test_nav` points this nav at a temp data directory whose
+    // `saves/` does not exist, so there is nothing selected and
+    // `updateButtonStatus(null)` greys Play as well as Edit/Delete/Re-Create.
+    // Create and Back stay live, which is what keeps a fresh install off a dead
+    // end. `the_world_select_frame_with_worlds_lists_them_all` is the populated
+    // arm, and between them they are also each other's control: the same frame
+    // builder must answer differently for the two.
     let enabled: Vec<&str> = f.rows[1..]
         .iter()
         .filter(|r| r.enabled)
         .map(|r| r.label.as_str())
         .collect();
-    assert_eq!(
-        enabled,
-        vec!["Play Selected World", "Create New World", "Back"]
-    );
+    assert_eq!(enabled, vec!["Create New World", "Back"]);
     assert!(
         !f.rows[WorldSelectButton::Edit.row()].enabled,
         "Edit must be present and disabled"
+    );
+    assert!(
+        !f.rows[WorldSelectButton::Play.row()].enabled,
+        "Play must be present and disabled with nothing to play"
     );
 
     // Every row's rect is the slot the layout placed it in, through the same
@@ -3951,15 +3996,118 @@ fn the_world_select_frame_is_the_screen_vanilla_draws() {
         );
     }
 
-    // The two free-standing strings: the title, and the one list row.
+    // The two free-standing strings: the title, and `NoWorldsEntry`'s notice —
+    // which is what keeps "no worlds" apart from "the list failed to draw".
     let texts: Vec<&str> = f.labels.iter().map(|l| l.text.as_str()).collect();
     assert_eq!(
         texts,
         vec![
             crate::menu::world_select::WORLD_SELECT_TITLE,
-            crate::menu::world_select::BUNDLED_WORLD.label,
+            crate::menu::world_select::NO_WORLDS_LABEL,
         ]
     );
+}
+
+/// **The populated arm of the frame gate**: N worlds on disk become N rows, at
+/// the rects `app.rs` hit-tests, carrying the three text lines
+/// `WorldListEntry` draws.
+///
+/// This is the anti-island assertion for the save list: `crate::saves` can
+/// enumerate perfectly and reach zero pixels if `frame_for` never emits a row for
+/// a world. It also pins the **row order** — the ids run search → buttons →
+/// worlds, which is *not* the on-screen order, and getting that wrong is #391 at
+/// list scale (every click one control off).
+#[test]
+fn the_world_select_frame_with_worlds_lists_them_all() {
+    use crate::menu::world_select::{FIRST_WORLD_ROW, WORLD_SELECT_BUTTONS, WorldSelectButton};
+    let (nav, ui) = world_select_nav_with_worlds("ws-frame-worlds", &["alpha", "bravo"]);
+    let f = world_select_frame(&nav, &ui);
+
+    assert_eq!(
+        f.rows.len(),
+        1 + WORLD_SELECT_BUTTONS.len() + 2,
+        "search field + six footer buttons + one row per world"
+    );
+    // The footer band is untouched by the list: every button is still at its own
+    // slot, which is what would break if the world rows had been inserted between
+    // the search field and the buttons.
+    for button in WORLD_SELECT_BUTTONS {
+        assert_eq!(
+            row_rect(&f.rows, button.row(), V_W, V_H),
+            Some(world_select_slot(button).resolve(V_W, V_H)),
+            "{button:?}'s row moved when the list gained rows"
+        );
+    }
+    // Play is live now, and Edit/Delete/Re-Create still are not.
+    assert!(f.rows[WorldSelectButton::Play.row()].enabled);
+    assert!(!f.rows[WorldSelectButton::Edit.row()].enabled);
+    assert!(!f.rows[WorldSelectButton::Delete.row()].enabled);
+    assert!(!f.rows[WorldSelectButton::ReCreate.row()].enabled);
+
+    // No `NoWorldsEntry` notice — the list is not empty.
+    let texts: Vec<&str> = f.labels.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(texts, vec![crate::menu::world_select::WORLD_SELECT_TITLE]);
+
+    for row in 0..2 {
+        let entry = &f.rows[FIRST_WORLD_ROW + row];
+        let view = entry
+            .world
+            .as_ref()
+            .expect("a world row must carry its WorldEntryView, or nothing draws");
+        assert_eq!(view.index, row);
+        assert_eq!(
+            view.selected,
+            row == 0,
+            "row 0 is the selection (most recently played); row 1 is not"
+        );
+        assert!(entry.slot.is_none(), "a list entry is not a slotted button");
+        // The three lines: display name, `folder (last played)`, `mode, Version`.
+        let world = nav.world_select().world_at(row).expect("row exists");
+        assert_eq!(entry.label, world.display_name);
+        assert_eq!(entry.detail, world.detail_line());
+        assert_eq!(entry.trailing, world.info_line());
+        assert!(
+            entry.detail.starts_with(&world.dir_name),
+            "line 2 opens with the folder name: {:?}",
+            entry.detail
+        );
+        assert!(
+            entry.trailing.contains("Version: 26.2"),
+            "line 3 carries the world version: {:?}",
+            entry.trailing
+        );
+        // The rect is the list geometry, not a slot — and it is the same one the
+        // hit-test reads.
+        assert_eq!(
+            row_rect(&f.rows, FIRST_WORLD_ROW + row, V_W, V_H),
+            Some(world_list_row_rect(row, V_W)),
+            "world row {row} is not at its list rect"
+        );
+    }
+    // `alpha` was planted first and therefore has the later `LastPlayed`, so it
+    // sorts to row 0. Asserted so the ordering is not merely "some order".
+    assert_eq!(f.rows[FIRST_WORLD_ROW].label, "alpha");
+    assert_eq!(f.rows[FIRST_WORLD_ROW + 1].label, "bravo");
+
+    // -- control ---------------------------------------------------------
+    // A row beyond the list must report no rect at all, or a click below the last
+    // world would hit-test onto a row that is nowhere near the cursor.
+    assert_eq!(
+        row_rect(&f.rows, FIRST_WORLD_ROW + 2, V_W, V_H),
+        None,
+        "there are only two worlds"
+    );
+    // And the visibility gate really does reject: at a canvas too short for row
+    // 1, row 1 has no rect while row 0 still does.
+    let short = world_list_row_top(1) + 40.0;
+    assert!(
+        world_list_row_visible(0, V_H) && !world_list_row_visible(1, short),
+        "the visibility gate does not discriminate: rows visible at {V_H} = {}, \
+         at {short} = {}",
+        world_list_visible_rows(V_H),
+        world_list_visible_rows(short)
+    );
+    assert_eq!(row_rect(&f.rows, FIRST_WORLD_ROW + 1, V_W, short), None);
 }
 
 /// Every world-select button draws the sprite the widget layer picks, at the
@@ -4102,8 +4250,13 @@ fn a_disabled_world_select_label_lands_on_vanillas_grey() {
 /// on the **title screen** must be empty too (so it is not measuring
 /// something every menu draws there).
 #[test]
-fn the_world_list_draws_its_one_row_inside_row_zeros_content_rect() {
+fn the_empty_world_list_draws_its_notice_inside_row_zeros_content_rect() {
     let (nav, ui) = world_select_nav("ws-row");
+    assert_eq!(
+        nav.world_select().shown_len(),
+        0,
+        "premise: this nav's temp saves root is empty, so the notice is what draws"
+    );
     let frame = world_select_frame(&nav, &ui);
     let colour = geometry(&frame, V_W, V_H);
 
@@ -4111,10 +4264,10 @@ fn the_world_list_draws_its_one_row_inside_row_zeros_content_rect() {
     let inside = band_coverage(&colour, V_W, V_H, band);
     assert!(
         inside.count > 0,
-        "the world-list row reached no pixels inside {band:?}"
+        "the empty-list notice reached no pixels inside {band:?}"
     );
     let bounds = inside.bounds.expect("a non-empty band has bounds");
-    // It is a line of text, not a full-height fill: the row label is 9 px of
+    // It is a line of text, not a full-height fill: the notice is 9 px of
     // glyphs centred in a 32 px box, so its vertical extent must be well
     // short of the band's.
     assert!(
@@ -4125,7 +4278,7 @@ fn the_world_list_draws_its_one_row_inside_row_zeros_content_rect() {
     // And it is centred, so it must straddle the screen's own centre line.
     assert!(
         bounds.0 < V_W * 0.5 && bounds.2 > V_W * 0.5,
-        "the row label is not centred: bounds {bounds:?}"
+        "the notice is not centred: bounds {bounds:?}"
     );
 
     // -- control 1: the row below it is empty ----------------------------
@@ -4157,20 +4310,183 @@ fn the_world_list_draws_its_one_row_inside_row_zeros_content_rect() {
     );
 }
 
-/// The list row's label fits the row it is centred in.
+/// **The save list reaches pixels, one band per world.**
+///
+/// This is the re-derivation of `the_world_list_draws_its_one_row_…` for N rows,
+/// and it is a strictly stronger gate rather than the same one loosened: the
+/// single-row version could not distinguish "the list drew" from "row 0 drew",
+/// which is exactly the failure a hardcoded row has. Every row's band is measured
+/// separately, so a list that draws only its first entry fails.
+///
+/// Three things are asserted per row, and the second is what a coverage *fraction*
+/// could never see:
+///
+/// 1. ink inside that row's own content rect;
+/// 2. the ink starts to the **right** of the reserved 32 px icon column
+///    (`getTextX() = contentX + 32 + 3`) — measured by location, not by amount,
+///    which is `CLAUDE.md`'s "ask where, not what";
+/// 3. it is three short lines of text, not a fill: the vertical extent spans more
+///    than one 9 px line and less than the band.
+///
+/// The controls: the band **after** the last world must be empty (so the bands
+/// discriminate at all), and the same bands on the title screen must be empty (so
+/// this is not measuring something every menu paints there — the question
+/// `CLAUDE.md` says to ask before believing a control).
+#[test]
+fn every_world_in_the_list_draws_inside_its_own_row_band() {
+    use crate::menu::render::WORLD_LIST_TEXT_DX;
+    let names = ["alpha", "bravo", "charlie"];
+    let (nav, ui) = world_select_nav_with_worlds("ws-rows-pixels", &names);
+    let frame = world_select_frame(&nav, &ui);
+    let colour = geometry(&frame, V_W, V_H);
+
+    for row in 0..names.len() {
+        let band = world_list_row_content_rect(row, V_W);
+        let inside = band_coverage(&colour, V_W, V_H, band);
+        assert!(
+            inside.count > 0,
+            "world row {row} reached no pixels inside {band:?}"
+        );
+        let bounds = inside.bounds.expect("a non-empty band has bounds");
+        // (2) The text column starts past the icon column, for **every** row
+        // including the selected one: `extractItem`'s outline is drawn at the *row*
+        // rect's edge, which is `CONTENT_PADDING` outside this band, and its
+        // interior fill is black — so the leftmost thing inside a content rect is
+        // always `getTextX()`. That equality is checked rather than an inequality
+        // where it can be: `getTextX()` is `contentX + 32 + 3` exactly.
+        assert!(
+            bounds.0 >= band.0 + WORLD_LIST_TEXT_DX,
+            "row {row}'s text must start past the {WORLD_LIST_TEXT_DX} px icon \
+             column: leftmost ink at {} for a band starting at {}",
+            bounds.0,
+            band.0
+        );
+        // (3) Three lines of 9 px text in a 32 px box: taller than one line,
+        // shorter than the band.
+        let ink_h = bounds.3 - bounds.1;
+        assert!(
+            ink_h > 9.0 && ink_h <= band.3,
+            "row {row} drew {ink_h} px vertically in a {} px band — three text \
+             lines measure more than one line and no more than the band",
+            band.3
+        );
+    }
+
+    // The selection outline — `AbstractSelectionList.extractItem` (`:354-370`) —
+    // is drawn for the selected row **only**, at the row rect's own left edge.
+    // Sampled by colour at a 1 px column there, which is a different measurement
+    // from the vertex bands above and is the one that discriminates a selected row
+    // from an unselected one. Its own control is the second assertion: row 1 is not
+    // selected and must not have it.
+    let selected_edge = |row: usize| {
+        let (rx, ry, _, rh) = world_list_row_rect(row, V_W);
+        coverage_of(&colour, V_W, V_H, (rx, ry + 2.0, 1.0, rh - 4.0), [1.0, 1.0, 1.0, 1.0])
+    };
+    assert!(
+        selected_edge(0) > 0.5,
+        "row 0 is the selection and must draw `extractItem`'s white outline at the \
+         row's left edge: coverage {}",
+        selected_edge(0)
+    );
+    assert!(
+        selected_edge(1) < 0.1,
+        "row 1 is not selected and must have no outline: coverage {}",
+        selected_edge(1)
+    );
+
+    // -- control 1: the band after the last world is empty ---------------
+    let after = world_list_row_content_rect(names.len(), V_W);
+    let empty = band_coverage(&colour, V_W, V_H, after);
+    assert_eq!(
+        empty.count, 0,
+        "something drew in the band after the last world, so the per-row bands are \
+         not discriminators: {:?}",
+        empty.bounds
+    );
+
+    // -- control 2: the same bands on the title screen are empty ---------
+    // Asked of *every* band this test measures, not only row 0's: rows 1 and 2 sit
+    // lower on screen, where the title screen's button column begins at y 168, so
+    // "what else already paints here" has a different answer per row.
+    let title_nav = test_nav("ws-rows-pixels-control");
+    let title_ui = UiState::new();
+    let statuses = StatusCache::with_probe(unavailable_probe());
+    let mut fav = FaviconCache::new();
+    let title = frame_for(&title_ui, &title_nav, &statuses, &mut fav).expect("title frame");
+    let title_colour = geometry(&title, V_W, V_H);
+    for row in 0..names.len() {
+        let band = world_list_row_content_rect(row, V_W);
+        let painted = band_coverage(&title_colour, V_W, V_H, band);
+        assert_eq!(
+            painted.count, 0,
+            "the title screen already paints in row {row}'s band {band:?}, so this \
+             test's assertion for that row measures nothing: {:?}",
+            painted.bounds
+        );
+    }
+}
+
+/// The empty-list notice fits the row it is centred in.
 ///
 /// Vanilla's `NoWorldsEntry` gives its `StringWidget` no `maxWidth`
 /// (`WorldSelectionList.java:382-384`), so nothing clips it and a longer
 /// string would overhang the row. Measured with [`text_px`], the same
 /// fixed-advance measure the jar-less draw uses — the real vanilla font is
 /// narrower, so this is the conservative direction.
+///
+/// `BUNDLED_WORLD.label` is measured too even though nothing draws it any more:
+/// its length was the reason that constant was written the way it was, and the
+/// measurement is the only place that fact survives.
 #[test]
 fn the_world_list_row_label_fits_the_row_it_is_centred_in() {
     let (.., content_w, _) = world_list_row_content_rect(0, V_W);
-    let measured = text_px(crate::menu::world_select::BUNDLED_WORLD.label, 1.0);
+    for label in [
+        crate::menu::world_select::NO_WORLDS_LABEL,
+        crate::menu::world_select::BUNDLED_WORLD.label,
+    ] {
+        let measured = text_px(label, 1.0);
+        assert!(
+            measured <= content_w,
+            "{label:?} measures {measured} px in a {content_w} px row"
+        );
+    }
+}
+
+/// A world row's three lines are clipped to `WorldListEntry`'s own
+/// `maxTextWidth`, so a long name cannot overhang the row.
+///
+/// Unlike the notice above, these lines *are* clipped in vanilla
+/// (`StringWidget.setMaxWidth`, `WorldSelectionList.java:418`), so the assertion
+/// is about the **draw** rather than about the string: a 200-character world name
+/// must still paint nothing outside its row.
+#[test]
+fn a_long_world_name_is_clipped_to_its_row_rather_than_overhanging_it() {
+    let long: String = std::iter::repeat_n('W', 200).collect();
+    let (nav, ui) = world_select_nav_with_worlds("ws-long-name", &[long.as_str()]);
+    let frame = world_select_frame(&nav, &ui);
+    let colour = geometry(&frame, V_W, V_H);
+
+    let (rx, ry, rw, rh) = world_list_row_rect(0, V_W);
+    // The band immediately to the right of the row must be untouched.
+    let right_of = (rx + rw, ry, 80.0, rh);
+    let spill = band_coverage(&colour, V_W, V_H, right_of);
+    assert_eq!(
+        spill.count, 0,
+        "a long world name spilled out of its row into {right_of:?}: {:?}",
+        spill.bounds
+    );
+
+    // -- control ---------------------------------------------------------
+    // The band it must *not* spill into has to be one this frame could paint in,
+    // or the assertion is vacuous. The row itself is inked, and the clip width is
+    // less than the row width — so there is real text being cut.
     assert!(
-        measured <= content_w,
-        "the world-list row label measures {measured} px in a {content_w} px row"
+        band_coverage(&colour, V_W, V_H, world_list_row_content_rect(0, V_W)).count > 0,
+        "the row drew nothing at all, so the no-spill assertion measures nothing"
+    );
+    assert!(
+        text_px(&long, 1.0) > crate::menu::render::world_list_text_width(),
+        "the name is not actually long enough to be clipped, so nothing was cut"
     );
 }
 

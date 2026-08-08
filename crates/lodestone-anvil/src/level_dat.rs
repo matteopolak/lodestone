@@ -356,6 +356,53 @@ impl LevelDat {
         }
     }
 
+    /// `Version.Name` — the human version string a real file carries
+    /// (`"26.2"` in every 26.2 world measured above), or `None` when the
+    /// nested `Version` compound is absent or carries no `Name`.
+    ///
+    /// **Not [`DATA_VERSION_26_2`] and not the lowercase `version` field.**
+    /// All three coexist in one file and mean different things (see the module
+    /// doc's table); this is the only one that is a *display* string, which is
+    /// what vanilla's `LevelSummary.getWorldVersionName` shows on a
+    /// world-select row. A `None` here is vanilla's
+    /// `selectWorld.versionUnknown`, not an error.
+    #[must_use]
+    pub fn version_name(&self) -> Option<&str> {
+        let version = compound_field(self.data()?, "Version")?;
+        match compound_field(version, "Name") {
+            Some(Nbt::String(name)) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// `allowCommands` — vanilla's `LevelSummary.hasCommands()`, which decides
+    /// whether a world-select row says "Cheats". Absent or mistyped is
+    /// `false`, matching a fresh world.
+    #[must_use]
+    pub fn allow_commands(&self) -> bool {
+        matches!(
+            self.data().and_then(|d| compound_field(d, "allowCommands")),
+            Some(Nbt::Byte(b)) if *b != 0
+        )
+    }
+
+    /// The `hardcore` byte inside `difficulty_settings` — vanilla's
+    /// `LevelSummary.isHardcore()`.
+    ///
+    /// Nested beside [`Self::difficulty`] rather than flat: 26.2 moved both
+    /// into `difficulty_settings`, so code ported from a pre-1.21 schema looks
+    /// for a top-level `hardcore` that is not there.
+    #[must_use]
+    pub fn hardcore(&self) -> bool {
+        let Some(settings) = self
+            .data()
+            .and_then(|d| compound_field(d, DIFFICULTY_SETTINGS_FIELD))
+        else {
+            return false;
+        };
+        matches!(compound_field(settings, "hardcore"), Some(Nbt::Byte(b)) if *b != 0)
+    }
+
     /// The world spawn, or `None` if the `spawn` compound is absent or does
     /// not carry a 3-entry `pos`.
     #[must_use]
@@ -602,6 +649,17 @@ mod tests {
         assert_eq!(level.last_played(), Some(1_785_182_459_463));
         assert_eq!(level.difficulty(), Some("easy"));
         assert_eq!(level.data_version().expect("has DataVersion"), 4903);
+        // The three world-select fields (`LevelSummary.getWorldVersionName`,
+        // `hasCommands`, `isHardcore`), read out of this same file by the same
+        // foreign parser: `Version = {Snapshot: 0, Series: "main", Id: 4903,
+        // Name: "26.2"}`, `allowCommands = 0`, `difficulty_settings.hardcore = 0`.
+        // All three land on the *default*-looking answer here, which is why
+        // `the_hardcore_and_cheats_detectors_fire_on_a_world_that_has_them` is
+        // the control: without it "false" is equally consistent with an
+        // accessor that always says false.
+        assert_eq!(level.version_name(), Some("26.2"));
+        assert!(!level.allow_commands());
+        assert!(!level.hardcore());
         let spawn = level.spawn().expect("has a spawn compound");
         assert_eq!(spawn.pos, [0, -60, 0]);
         assert_eq!(spawn.dimension, "minecraft:overworld");
@@ -763,6 +821,50 @@ mod tests {
                 "unmodelled field {name} changed across a read/modify/write"
             );
         }
+    }
+
+    /// **The control** for the three assertions the real-file gate makes in
+    /// the false direction.
+    ///
+    /// A real vanilla world is `allowCommands = 0`, `hardcore = 0` and does
+    /// carry a `Version.Name`, so that gate cannot distinguish a working
+    /// accessor from one that returns `false`/`None` unconditionally. This
+    /// drives the *other* branch of each: a world that really is hardcore with
+    /// cheats on and no `Version` compound at all.
+    #[test]
+    fn the_hardcore_and_cheats_detectors_fire_on_a_world_that_has_them() {
+        let level = LevelDat::from_data(Nbt::Compound(vec![
+            (
+                DIFFICULTY_SETTINGS_FIELD.to_string(),
+                Nbt::Compound(vec![
+                    ("difficulty".to_string(), Nbt::String("hard".to_string())),
+                    ("hardcore".to_string(), Nbt::Byte(1)),
+                ]),
+            ),
+            ("allowCommands".to_string(), Nbt::Byte(1)),
+        ]));
+        assert!(level.hardcore(), "the hardcore detector never fires");
+        assert!(level.allow_commands(), "the cheats detector never fires");
+        assert_eq!(
+            level.version_name(),
+            None,
+            "a file with no Version compound must report no version name, \
+             not a fabricated one"
+        );
+        // And a `Version` compound whose `Name` is present is read from
+        // `Name`, never from `Id`/`Series` — the three coexist.
+        let mut with_version = level;
+        with_version
+            .set_data_field(
+                "Version",
+                Nbt::Compound(vec![
+                    ("Id".to_string(), Nbt::Int(1)),
+                    ("Series".to_string(), Nbt::String("main".to_string())),
+                    ("Name".to_string(), Nbt::String("1.21.11".to_string())),
+                ]),
+            )
+            .expect("inserts");
+        assert_eq!(with_version.version_name(), Some("1.21.11"));
     }
 
     #[test]

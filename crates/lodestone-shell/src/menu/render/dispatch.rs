@@ -338,16 +338,22 @@ pub fn frame_for<'a>(
                 ..Default::default()
             })
         }
-        // Vanilla's `SelectWorldScreen` (issue #397, then #287): the title, the
-        // search box, the six footer buttons — **four of them present and
-        // disabled**, Create New World among them, with Play Selected World live
-        // since #287 — and the one list row the list has. See
-        // `super::world_select` for what is disabled and why, and
-        // `world_select_slot` for the geometry.
+        // Vanilla's `SelectWorldScreen` (issues #397, #287, then #468's real save
+        // list): the title, the search box, the six footer buttons — three still
+        // present and disabled — and **one row per world in `saves/`**. See
+        // `super::world_select` for what is disabled and why, `world_select_slot`
+        // for the footer geometry and `world_list_row_rect` for the rows'.
+        //
+        // **The row order is the focus-id order, not the on-screen order**, and it
+        // has to be: `MenuFrame::selected`/`hovered` and `app.rs`'s hit-test all
+        // index `rows` by focus id (`world_select`'s `SEARCH_FIELD`,
+        // `FIRST_BUTTON_ROW`, `FIRST_WORLD_ROW`), so this pushes search → buttons →
+        // worlds even though the worlds draw above the buttons. Getting it wrong is
+        // #391's shape at list scale: every click one control off.
         Screen::WorldSelect => {
-            use super::world_select::WORLD_SELECT_BUTTONS;
+            use super::world_select::{FIRST_WORLD_ROW, WORLD_SELECT_BUTTONS};
             let ws = nav.world_select();
-            let mut rows = Vec::with_capacity(1 + WORLD_SELECT_BUTTONS.len());
+            let mut rows = Vec::with_capacity(1 + WORLD_SELECT_BUTTONS.len() + ws.shown_len());
             rows.push(MenuRow {
                 // Not drawn: `draw_edit_box` reads the widget. Populated for the
                 // same reason the edit form's is — the frame-shape tests read it.
@@ -369,6 +375,28 @@ pub fn frame_for<'a>(
                     ..Default::default()
                 });
             }
+            // One row per **filtered** world, in list order — the three text lines
+            // come off `WorldSummary` here rather than in the draw, so the draw
+            // decides nothing except where (the same division `ServerEntryView`
+            // documents).
+            for row in 0..ws.shown_len() {
+                let world = ws
+                    .world_at(row)
+                    .expect("shown_len() rows are exactly the rows world_at answers");
+                rows.push(MenuRow {
+                    label: world.display_name.clone(),
+                    detail: world.detail_line(),
+                    trailing: world.info_line(),
+                    // `LevelSummary.primaryActionActive` — a corrupt world's row is
+                    // listed and not openable.
+                    enabled: ws.is_active(FIRST_WORLD_ROW + row),
+                    world: Some(crate::menu::render::WorldEntryView {
+                        index: row,
+                        selected: ws.selected_row() == Some(row),
+                    }),
+                    ..Default::default()
+                });
+            }
             Some(MenuFrame {
                 rows,
                 // The *focused* row. `usize::MAX` when nothing is focused, which
@@ -378,13 +406,18 @@ pub fn frame_for<'a>(
                 selected: ws.focused_row().unwrap_or(usize::MAX),
                 hovered: ws.hovered(),
                 vanilla: true,
-                labels: vec![
-                    world_select_title_label(),
-                    // The one world the list has (#287), read off the nav so the
-                    // row drawn and the world **Play Selected World** launches
-                    // are the same fact rather than two constants.
-                    world_list_row_label(ws.world_row_label()),
-                ],
+                labels: {
+                    let mut labels = vec![world_select_title_label()];
+                    // `NoWorldsEntry` — the empty-list row, and **only** when the
+                    // list really is empty. This is what keeps "no worlds" apart
+                    // from "the list failed to draw": with no label at all the two
+                    // are the same picture.
+                    if let Some(text) = ws.empty_label() {
+                        labels.push(world_list_row_label(text));
+                    }
+                    labels
+                },
+                message: ws.error().map(str::to_string),
                 ..Default::default()
             })
         }

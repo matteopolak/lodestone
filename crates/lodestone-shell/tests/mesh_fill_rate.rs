@@ -76,9 +76,11 @@
 //!   Run it with `--release` or the generation cost dominates the mesh cost and
 //!   the answer is about the wrong subsystem.
 //! * It writes to its own directory under `std::env::temp_dir()` and **never**
-//!   `saves::default_world_dir()`, so it cannot touch the developer's real
-//!   world. A fresh directory means every column generates cold, which is the
-//!   honest first-join case.
+//!   anywhere under `lodestone::saves`' real root, so it cannot touch the
+//!   developer's own worlds. A fresh directory means every column generates cold,
+//!   which is the honest first-join case.
+//!   `tests/no_test_touches_the_real_saves_dir.rs` is what enforces that across
+//!   the whole crate rather than one file at a time.
 //! * The render distance is read from `Config::default()`, not hardcoded, so
 //!   this measures whatever the shipped default actually is.
 //!
