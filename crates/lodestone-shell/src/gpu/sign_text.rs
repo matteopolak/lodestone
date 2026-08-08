@@ -51,7 +51,9 @@
 
 use glam::Vec3;
 use lodestone_assets::font::RasterFont;
-use lodestone_render::{DEPTH_FORMAT, SignOrientation, SignSpawn, TEXT_LINE_HEIGHT, sign_side_color, sign_text_transform};
+use lodestone_render::{
+    DEPTH_FORMAT, SignKind, SignOrientation, SignSpawn, sign_side_color, sign_text_transform,
+};
 use lodestone_world::SignSide;
 
 /// Same vertex shape as `gpu/nametag.rs`'s own `NameTagVertex` — kept as its
@@ -222,6 +224,7 @@ impl SignTextRenderer {
                 &self.ink,
                 &spawn.front,
                 spawn.pos,
+                spawn.kind,
                 spawn.orientation,
                 true,
                 &mut vertices,
@@ -231,6 +234,7 @@ impl SignTextRenderer {
                 &self.ink,
                 &spawn.back,
                 spawn.pos,
+                spawn.kind,
                 spawn.orientation,
                 false,
                 &mut vertices,
@@ -261,11 +265,13 @@ impl SignTextRenderer {
 /// for a side whose four lines are all empty — vanilla's own font-split of
 /// an empty string contributes no ink either, so this is an optimisation,
 /// not a behaviour change.
+#[allow(clippy::too_many_arguments)]
 fn push_side_quads(
     raster: &RasterFont,
     ink: &super::nametag::InkLayoutCache,
     side: &SignSide,
     pos: [i32; 3],
+    kind: SignKind,
     orientation: SignOrientation,
     is_front: bool,
     out: &mut Vec<SignTextVertex>,
@@ -273,12 +279,14 @@ fn push_side_quads(
     if side.lines.iter().all(String::is_empty) {
         return;
     }
-    let matrix = sign_text_transform(pos, orientation, is_front);
+    let matrix = sign_text_transform(pos, kind, orientation, is_front);
     let color = sign_side_color(side);
     // `AbstractSignRenderer.submitSignText`: `signMidpoint = 4 *
     // textLineHeight / 2`, i.e. two full lines — line `i`'s top sits at
-    // `i * textLineHeight - signMidpoint`.
-    let sign_midpoint = 2.0 * TEXT_LINE_HEIGHT;
+    // `i * textLineHeight - signMidpoint`. The height is the **block
+    // entity's**, not a constant: a hanging sign overrides it to 9.
+    let line_height = kind.text_line_height();
+    let sign_midpoint = 2.0 * line_height;
     for (i, line) in side.lines.iter().enumerate() {
         if line.is_empty() {
             continue;
@@ -288,7 +296,7 @@ fn push_side_quads(
         // Each line is centred independently, matching `x1 =
         // -font.width(line) / 2` — not all four lines sharing one width.
         let x1 = -total_width / 2.0;
-        let y_off = i as f32 * TEXT_LINE_HEIGHT - sign_midpoint;
+        let y_off = i as f32 * line_height - sign_midpoint;
         for rect in rects {
             let lx = rect.x + x1;
             let ly = rect.y + y_off;
@@ -343,6 +351,7 @@ mod tests {
             &ink,
             &spawn.front,
             spawn.pos,
+            spawn.kind,
             spawn.orientation,
             true,
             &mut out,
@@ -352,6 +361,7 @@ mod tests {
             &ink,
             &spawn.back,
             spawn.pos,
+            spawn.kind,
             spawn.orientation,
             false,
             &mut out,
@@ -375,6 +385,7 @@ mod tests {
             &ink,
             &spawn.front,
             spawn.pos,
+            spawn.kind,
             spawn.orientation,
             true,
             &mut front,
@@ -387,6 +398,7 @@ mod tests {
             &ink,
             &spawn.back,
             spawn.pos,
+            spawn.kind,
             spawn.orientation,
             false,
             &mut back,

@@ -212,8 +212,8 @@ pub use screen_effects::{
 pub use section::{Cell, Face, SECTION_SIZE, SectionNeighborhood, SectionView, SpriteId, Surface};
 pub use section_arena::{INDEX_SIZE, SectionArena, draw_region_for};
 pub use sign::{
-    SignOrientation, SignSpawn, TEXT_LINE_HEIGHT, dye_text_color_rgb, sign_side_color,
-    sign_text_transform,
+    HANGING_TEXT_LINE_HEIGHT, SignKind, SignOrientation, SignSpawn, TEXT_LINE_HEIGHT,
+    dye_text_color_rgb, sign_side_color, sign_text_transform,
 };
 pub use sky::{
     CLOUD_CELL_BLOCKS, CLOUD_FANCY_RADIUS_CELLS, CLOUD_FANCY_THICKNESS, CLOUD_HEIGHT,

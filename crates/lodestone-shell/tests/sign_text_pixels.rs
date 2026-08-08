@@ -39,7 +39,9 @@
 //! ```
 
 use lodestone::gpu::{RenderState, SKY_COLOR};
-use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget, SignOrientation, SignSpawn};
+use lodestone_render::{
+    Camera, GpuContext, HeadlessTarget, RenderTarget, SignKind, SignOrientation, SignSpawn,
+};
 use lodestone_world::SignSide;
 
 const W: u32 = 320;
@@ -55,6 +57,8 @@ const NON_SKY: i32 = 60;
 /// Vanilla's `SignBlockEntity.MAX_TEXT_LINE_WIDTH` — the real constant that
 /// bounds how wide one line's local-space glyphs can be, used here only to
 /// size a generous expected rect, not to wrap anything.
+/// (Kept for the plain-sign rect; the hanging gate reads
+/// `SignKind::max_text_line_width()` instead, which is 60.)
 const MAX_TEXT_LINE_WIDTH: f32 = 90.0;
 
 fn sky_bytes() -> [u8; 3] {
@@ -182,10 +186,22 @@ fn project(view_proj: glam::Mat4, world: glam::Vec3) -> (f32, f32) {
 /// `gpu/sign_text.rs::push_side_quads` computes it with, transcribed here
 /// rather than imported because that function is private to the shell
 /// crate's `gpu` module).
-fn expected_text_rect(pos: [i32; 3], orientation: SignOrientation, is_front: bool, view_proj: glam::Mat4) -> Rect {
-    let matrix = lodestone_render::sign_text_transform(pos, orientation, is_front);
-    let half_w = MAX_TEXT_LINE_WIDTH / 2.0;
-    let half_h = 2.0 * lodestone_render::TEXT_LINE_HEIGHT;
+fn expected_text_rect(
+    pos: [i32; 3],
+    kind: SignKind,
+    orientation: SignOrientation,
+    is_front: bool,
+    view_proj: glam::Mat4,
+) -> Rect {
+    let matrix = lodestone_render::sign_text_transform(pos, kind, orientation, is_front);
+    // Both metrics come from the kind, so a hanging sign's rect is narrower
+    // and shorter *and* sits somewhere else — the same expression the draw
+    // uses, never a literal.
+    let half_w = match kind {
+        SignKind::Plain => MAX_TEXT_LINE_WIDTH / 2.0,
+        SignKind::Hanging => kind.max_text_line_width() / 2.0,
+    };
+    let half_h = 2.0 * kind.text_line_height();
     let corners = [
         glam::Vec3::new(-half_w, -half_h, 0.0),
         glam::Vec3::new(half_w, -half_h, 0.0),
@@ -243,6 +259,7 @@ fn sign_with_text() -> SignSpawn {
     front.glowing = true;
     SignSpawn {
         pos: SIGN,
+        kind: SignKind::Plain,
         orientation: SignOrientation::Ground { rotation_segment: 0 },
         front,
         back: SignSide::default(),
@@ -261,7 +278,13 @@ fn a_sign_draws_text_pixels_in_its_projected_area_where_no_board_could() {
     let camera = camera();
     let view_proj = camera.view_projection();
 
-    let front_rect = expected_text_rect(SIGN, SignOrientation::Ground { rotation_segment: 0 }, true, view_proj);
+    let front_rect = expected_text_rect(
+        SIGN,
+        SignKind::Plain,
+        SignOrientation::Ground { rotation_segment: 0 },
+        true,
+        view_proj,
+    );
     println!("expected front-text rect (from the real placement transform): {front_rect:?}");
     assert!(
         front_rect.area() > 200,
@@ -362,6 +385,7 @@ fn front_and_back_text_project_to_different_areas() {
         let spawn = if front_text {
             SignSpawn {
                 pos: SIGN,
+                kind: SignKind::Plain,
                 orientation: SignOrientation::Ground { rotation_segment: 0 },
                 front: side,
                 back: SignSide::default(),
@@ -370,6 +394,7 @@ fn front_and_back_text_project_to_different_areas() {
         } else {
             SignSpawn {
                 pos: SIGN,
+                kind: SignKind::Plain,
                 orientation: SignOrientation::Ground { rotation_segment: 0 },
                 front: SignSide::default(),
                 back: side,
@@ -388,6 +413,100 @@ fn front_and_back_text_project_to_different_areas() {
         .expect("front-only and back-only text produced pixel-identical frames");
     println!("front-vs-back changed bbox {diff_rect:?} ({diff_count} px)");
     assert!(diff_count > 0);
+}
+
+/// A **hanging** sign's text draws, and draws somewhere a plain sign's does
+/// not — the real-pixel proof that [`SignKind`] is threaded all the way from
+/// the spawn to the vertex, not merely accepted and ignored.
+///
+/// This is the assertion that matters for the hanging port, and it is
+/// deliberately cross-arm rather than "some pixels appeared": both kinds
+/// produce ink at the same block position, so a `SignKind` that reached the
+/// transform as a no-op would pass every count-based check. The two projected
+/// rects are computed from the real transform (hand-checked in
+/// `lodestone-render`'s `hanging_transform_origin_matches_the_hand_computed_expression`:
+/// `y = 0.305` against the plain sign's `0.83333`) and required to be
+/// **disjoint in `y`**, then each arm's ink is required to land in its *own*
+/// rect and nothing to land in the other's.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_hanging_signs_text_draws_in_its_own_area_and_not_the_plain_ones() {
+    let ctx = gpu();
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let camera = camera();
+    let view_proj = camera.view_projection();
+    let orientation = SignOrientation::Ground { rotation_segment: 0 };
+
+    let plain_rect = expected_text_rect(SIGN, SignKind::Plain, orientation, true, view_proj);
+    let hanging_rect = expected_text_rect(SIGN, SignKind::Hanging, orientation, true, view_proj);
+    println!("plain {plain_rect:?} hanging {hanging_rect:?}");
+    assert!(
+        hanging_rect.y0 > plain_rect.y1,
+        "the two kinds' text planes must project to disjoint screen bands for \
+         this gate to separate them (hanging text sits lower in the world, so \
+         lower on screen means a *larger* y). plain {plain_rect:?} hanging \
+         {hanging_rect:?} — if these overlap, the camera is wrong, not the \
+         renderer."
+    );
+    assert!(hanging_rect.area() > 200, "hanging rect too small: {hanging_rect:?}");
+
+    // Differential against a sign-free frame, not an absolute count in each
+    // band: the first-person arm paints unconditionally and low on screen,
+    // which is exactly where a hanging sign's text lands. An absolute
+    // "nothing else in this band" assertion would therefore be measuring the
+    // arm — the premise-false control failure `CLAUDE.md` records. Every
+    // count below is "what changed when the source was installed".
+    let shoot = |kind: Option<SignKind>| -> (Vec<u8>, u32) {
+        let mut target = HeadlessTarget::new(device, W, H, format);
+        let mut state = RenderState::new(device, queue, format, W, H, None);
+        if let Some(kind) = kind {
+            let spawn = SignSpawn { kind, ..sign_with_text() };
+            state.set_sign_source(move |_eye| vec![spawn.clone()]);
+        }
+        let frame = target.acquire().expect("headless acquire");
+        let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
+        (target.read_texels(device, queue), stats.sign_text_vertices)
+    };
+
+    let (control_px, control_verts) = shoot(None);
+    let (plain_px, plain_verts) = shoot(Some(SignKind::Plain));
+    let (hanging_px, hanging_verts) = shoot(Some(SignKind::Hanging));
+    assert_eq!(control_verts, 0);
+    assert!(plain_verts > 0 && hanging_verts > 0, "{plain_verts} / {hanging_verts}");
+
+    let inside = |changed: Rect, rect: Rect| {
+        let allowed = rect.padded(2);
+        allowed.x0 <= changed.x0
+            && allowed.y0 <= changed.y0
+            && changed.x1 <= allowed.x1
+            && changed.y1 <= allowed.y1
+    };
+
+    let (plain_changed, plain_count) = changed_bbox(&plain_px, &control_px)
+        .expect("a plain sign changed no pixel at all");
+    let (hanging_changed, hanging_count) = changed_bbox(&hanging_px, &control_px)
+        .expect("a hanging sign changed no pixel at all — the kind reaches the \
+                 spawn but nothing draws");
+    println!("plain changed {plain_changed:?} ({plain_count} px)");
+    println!("hanging changed {hanging_changed:?} ({hanging_count} px)");
+    assert!(plain_count > 20 && hanging_count > 20);
+
+    assert!(
+        inside(plain_changed, plain_rect),
+        "plain ink {plain_changed:?} outside the plain rect {plain_rect:?}"
+    );
+    assert!(
+        inside(hanging_changed, hanging_rect),
+        "hanging ink {hanging_changed:?} is outside the hanging rect \
+         {hanging_rect:?}. If it lands in the *plain* rect ({plain_rect:?}) \
+         instead, `SignKind` reached the spawn but not the transform."
+    );
+    // And the negation, which is what a no-op `SignKind` fails: the hanging
+    // ink is not inside the plain band, nor vice versa.
+    assert!(!inside(hanging_changed, plain_rect));
+    assert!(!inside(plain_changed, hanging_rect));
 }
 
 /// What else already paints here — **measured**, not assumed. Mirrors
@@ -422,6 +541,7 @@ fn the_first_person_arm_is_somewhere_else() {
 
     let front_rect = expected_text_rect(
         SIGN,
+        SignKind::Plain,
         SignOrientation::Ground { rotation_segment: 0 },
         true,
         camera.view_projection(),

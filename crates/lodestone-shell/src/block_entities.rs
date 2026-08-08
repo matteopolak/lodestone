@@ -109,8 +109,8 @@ use std::collections::HashMap;
 use glam::Vec3;
 use lodestone_render::{
     BannerSpawn, BellShakeDirection, BellSpawn, ChestHalf, ChestMaterial, ChestSpawn,
-    SHULKER_COLOURS, ShulkerFacing, ShulkerSpawn, SignOrientation, SignSpawn, SkullOrientation,
-    SkullSpawn, SkullType, horizontal_facing_yaw,
+    SHULKER_COLOURS, ShulkerFacing, ShulkerSpawn, SignKind, SignOrientation, SignSpawn,
+    SkullOrientation, SkullSpawn, SkullType, horizontal_facing_yaw,
 };
 use lodestone_render::banner_pattern::{DyeColor, StoredPatternLayer};
 use lodestone_world::{ChunkPos, SignText, World};
@@ -825,28 +825,39 @@ pub fn shulker_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<ShulkerSpawn> {
     out
 }
 
-/// Resolves a block's registry path into whether it is a ported *plain*
-/// (standing/wall) sign — `None` for anything that is not a sign at all, or
-/// that is a **hanging** sign (a different model set again, deferred: see
-/// `docs/block-entity-renderers.md`'s Sign section).
+/// Resolves a block's registry path into which of vanilla's two sign
+/// renderers applies — `None` for anything that is not a sign at all.
 ///
-/// Every plain sign block path ends in `_sign`, including the wall variant
-/// (`oak_wall_sign`); a hanging one always contains `hanging`
-/// (`oak_hanging_sign`, `oak_wall_hanging_sign`) — checked first so it is
-/// never mistaken for a plain sign by the shared `_sign` suffix.
+/// Every sign block path ends in `_sign`, including both wall variants
+/// (`oak_wall_sign`, `oak_wall_hanging_sign`); a hanging one always contains
+/// `hanging` (`oak_hanging_sign`, `oak_wall_hanging_sign`) — checked first,
+/// since the two families share that `_sign` suffix and their text
+/// transforms differ (see [`SignKind`]).
+///
+/// **This used to return a bool and decline hanging signs outright**, on the
+/// recorded belief that they needed "a different model set again (chains, a
+/// bar)". They do not: 26.2's `HangingSignRenderer` declares no model, and
+/// the chains and bar are real block-model geometry the terrain mesher
+/// already draws. See [`SignKind`]'s own doc for the measurement.
 #[must_use]
-fn is_plain_sign_path(path: &str) -> bool {
-    !path.contains("hanging") && path.ends_with("_sign")
+fn sign_kind_for_path(path: &str) -> Option<SignKind> {
+    if !path.ends_with("_sign") {
+        return None;
+    }
+    Some(if path.contains("hanging") {
+        SignKind::Hanging
+    } else {
+        SignKind::Plain
+    })
 }
 
-/// Resolves one block state id into whether it names a ported plain sign —
-/// `None` for anything else, including a hanging sign (see
-/// [`is_plain_sign_path`]).
+/// Resolves one block state id into which sign renderer it uses — `None` for
+/// anything that is not a sign (see [`sign_kind_for_path`]).
 #[must_use]
-fn sign_kind_for_state(state_id: u32) -> Option<()> {
+fn sign_kind_for_state(state_id: u32) -> Option<SignKind> {
     let name = lodestone_data::block_states::block_name(state_id)?;
     let path = name.strip_prefix("minecraft:").unwrap_or(name);
-    is_plain_sign_path(path).then_some(())
+    sign_kind_for_path(path)
 }
 
 /// Reads a plain sign's placement — `rotation` (`0..16`, ground) or `facing`
@@ -916,16 +927,17 @@ fn sign_candidates(
 }
 
 /// One candidate resolved into a [`SignSpawn`], or `None` if the state at
-/// that position is not a ported plain sign. Same shape as [`chest_spawn`]/
+/// that position is not a sign. Same shape as [`chest_spawn`]/
 /// [`skull_spawn`]: the block **state** is the truth about whether this is a
 /// sign at all and how it sits, so a stale or orphan record whose state is
 /// not a sign draws nothing.
 #[must_use]
 fn sign_spawn(block: [i32; 3], state_id: u32, text: SignText, light: u8) -> Option<SignSpawn> {
-    sign_kind_for_state(state_id)?;
+    let kind = sign_kind_for_state(state_id)?;
     let orientation = sign_orientation(state_id)?;
     Some(SignSpawn {
         pos: block,
+        kind,
         orientation,
         front: text.front,
         back: text.back,
@@ -1678,13 +1690,18 @@ mod sign_tests {
         }
     }
 
-    /// Hanging signs are a real, present block family this renderer declines
-    /// (deferred — see `docs/block-entity-renderers.md`). Mirrors
-    /// `declined_skull_types_are_present_but_resolve_to_nothing`: this is
-    /// testing the decline, not a stale block name, so the block must exist
-    /// in the table and still resolve to nothing.
+    /// Hanging signs now resolve — as [`SignKind::Hanging`], **not** as
+    /// plain. This test replaces `hanging_signs_are_present_but_declined`,
+    /// which asserted the opposite: the decline was recorded as needing "a
+    /// different model set again (chains, a bar)", and that was 1.20's shape,
+    /// not 26.2's (see [`SignKind`]'s doc).
+    ///
+    /// The load-bearing half is the *kind*, not the `is_some()`: the two
+    /// families share the `_sign` suffix, so a name check that forgot to look
+    /// for `hanging` first would pass an `is_some()` assertion and draw every
+    /// hanging sign's text at a plain sign's height and scale.
     #[test]
-    fn hanging_signs_are_present_but_declined() {
+    fn hanging_signs_resolve_as_hanging_and_plain_ones_as_plain() {
         for path in [
             "oak_hanging_sign",
             "oak_wall_hanging_sign",
@@ -1695,10 +1712,55 @@ mod sign_tests {
             let found = (0..lodestone_data::block_states::STATE_COUNT)
                 .find(|id| lodestone_data::block_states::block_name(*id) == Some(name.as_str()));
             let id = found.unwrap_or_else(|| panic!("{name} is not in the 26.2 state table"));
-            assert!(
-                sign_kind_for_state(id).is_none(),
-                "{name} unexpectedly resolved as a plain sign"
+            assert_eq!(
+                sign_kind_for_state(id),
+                Some(SignKind::Hanging),
+                "{name} (state {id}) must resolve as a hanging sign"
             );
+            assert!(
+                sign_orientation(id).is_some(),
+                "{name} (state {id}) resolved no orientation"
+            );
+        }
+        for path in ["oak_sign", "oak_wall_sign"] {
+            let name = format!("minecraft:{path}");
+            let id = (0..lodestone_data::block_states::STATE_COUNT)
+                .find(|id| lodestone_data::block_states::block_name(*id) == Some(name.as_str()))
+                .unwrap_or_else(|| panic!("{name} is not in the 26.2 state table"));
+            assert_eq!(sign_kind_for_state(id), Some(SignKind::Plain), "{name}");
+        }
+    }
+
+    /// Every hanging sign block in the real 26.2 table — every wood, both
+    /// ceiling and wall — resolves with a kind *and* an orientation, and the
+    /// wall variant resolves as [`SignOrientation::Wall`] while the ceiling
+    /// one resolves as [`SignOrientation::Ground`]. The orientation fork is
+    /// the part that could silently go wrong: a ceiling hanging sign carries
+    /// `attached` and `rotation`, a wall one carries `facing`, and
+    /// [`sign_orientation`] returns on whichever it meets first.
+    #[test]
+    fn every_hanging_sign_block_in_the_real_table_resolves_with_the_right_fork() {
+        for wood in [
+            "oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry",
+            "pale_oak", "bamboo", "crimson", "warped",
+        ] {
+            for (suffix, wall) in [("hanging_sign", false), ("wall_hanging_sign", true)] {
+                let name = format!("minecraft:{wood}_{suffix}");
+                let ids: Vec<u32> = (0..lodestone_data::block_states::STATE_COUNT)
+                    .filter(|id| {
+                        lodestone_data::block_states::block_name(*id) == Some(name.as_str())
+                    })
+                    .collect();
+                assert!(!ids.is_empty(), "{name} is not in the 26.2 state table");
+                for id in ids {
+                    assert_eq!(sign_kind_for_state(id), Some(SignKind::Hanging), "{name}");
+                    match sign_orientation(id) {
+                        Some(SignOrientation::Wall { .. }) if wall => {}
+                        Some(SignOrientation::Ground { .. }) if !wall => {}
+                        other => panic!("{name} (state {id}) resolved {other:?}, wall={wall}"),
+                    }
+                }
+            }
         }
     }
 
