@@ -498,6 +498,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   neighbourhood the mesher gathers for it (`mesh_fluids` in
   `crates/lodestone-render/src/models.rs`), and — the part that has already been
   wrong once and is the reason this doc exists — **which faces get emitted at all**.
+- [Fluid spread](./fluid-spread.md) — Water and lava flowing on the integrated
+  server: a port of 26.2's `FlowingFluid` family into
+  `crates/lodestone-server/src/fluid.rs`, driven by the scheduled-tick queue, so a
+  water source spreads seven cells on flat ground, a broken block under an ocean
+  floods, and lava meeting water makes obsidian, cobblestone or stone.
 - [Distance fog](./fog.md) — The linear ramp that fades distant geometry into a flat
   colour, so the loaded world does not end in a hard wall of terrain against the sky.
   This doc owns the **distance math** — where the ramp starts, how wide it is, and
@@ -1082,6 +1087,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `apply_block_action`. It fixes two defects that were opposite ends of one missing
   computation: a zero-hardness block (grass, flowers, sugar cane) could not be broken
   *at all*, and any block — bedrock included — could be broken *instantly*.
+- [Server block-light updates](./server-block-light-updates.md) — Why a torch placed
+  after join emitted no light, what the served-light path was actually measured to
+  compute, and the column resend `crates/lodestone-server/src/light.rs` gates so an
+  emissive edit now relights. Companion to
+  [`server-chunk-light.md`](./server-chunk-light.md), which covers producing the light
+  bytes in the first place.
 - [Server chunk generation: fanned out over scoped threads (issue #414)](./server-chunk-generation-parallelism.md) —
   `crates/lodestone-server/src/chunk.rs`'s `generate_columns_parallel` runs a batch of
   `ChunkSource::column()` calls across `std::thread::scope` worker threads and hands
