@@ -7052,3 +7052,166 @@ out.
   `xtask`'s `download_verified_file`/`fetch-sounds` do verified index downloads — so the work is fetch
   `pack.mcmeta` eagerly (19.6 KB) plus each `lang/<code>.json` lazily on selection (~580 KB), not 86.6 MB
   up front and not a new reader.
+
+**12.149 `ore` was 38.7% of a column and 37% of *that* was string handling the interner had already
+built a table to avoid — a table whose own doc names `feature::try_place_ore` as one of the five
+call sites it exists to replace. Removing it is −13.54% of a column's instructions, byte-identical,
+and it is the largest single-unit delta this pipeline has recorded. The 9× neighbour recomputation
+is real and is **not** collectable, for a reason in the code rather than in a measurement.**
+
+Measured at `9a4c28b1`, release, `lto = "thin"`, embedded server data, seed 42, the 12×12 sweep whose
+100 interior columns define `C_ss`/`I_ss`. Both arms are **one** `git worktree --detach 9a4c28b1` with
+its **own** `CARGO_TARGET_DIR`; the two bench binaries were built there, copied out, and run
+**alternately**, eight rounds, in one shell invocation. §12.143 handed this unit the number that made
+it worth doing (`ore` 38.7%, `aquifer + shape` 25.6%) and the instruction to profile before changing.
+
+- **Where the cycles were, and it took two instruments to see it.** `column()`'s own profile spends
+  most of its samples in `shape`/`vegetation`, so the stage was isolated:
+  `OverworldGenerator::ore_stage_for_profiling` runs `ore_stage` alone against the already-memoised
+  pre-ore world, and `tests/ore_stage_profile.rs` warms the store with `column()` first — the same
+  load-bearing warm-up §12.143 records, for the same reason. `samply` 0.13.1 at 999 Hz, self-time
+  restricted to that subtree (3,308 samples):
+
+  | self share of the ore stage | frame |
+  |---|---|
+  | 62.12% | `place_placed_feature::recurse` (`do_place`/`try_place_ore`/`RegionView` inlined) |
+  | **11.15%** | `core::hash::sip::Hasher::write` |
+  | **7.32%** | `hash_one::<&str>` |
+  | 4.20% | `StateInterner::id_of` |
+  | 3.51% | `_platform_memcmp` |
+  | 2.51% | `ore_stage`'s `in_tag` closure |
+  | 3.48% | the centre fold-back (`centre_writes_in_scan_order` + its sort) |
+
+  **`scripts/profile-cost-table.py` cannot read a samply 0.13.1 profile** (the caveat already recorded
+  in `docs/worldgen-ore-lookup-cost.md`: it targets the hoisted `profile["shared"]` layout of
+  processed-profile ≥ 56 and samply 0.13.1 emits 55 with per-thread tables), and
+  `--unstable-presymbolicate` resolves symbols but carries **no line or inline information**, so a
+  62% frame with everything inlined into it is opaque. What opened it was
+  `xcrun atos -o <bin> -arch arm64 -offset -i` over the **address histogram** of that frame's own
+  self-samples: `memchr` — i.e. `current.split('[')` — is ~13% of it, and hashbrown another ~23%.
+  Note `-offset` and **hex** addresses are both required; decimal addresses silently symbolise to
+  an unrelated anonymous section rather than failing.
+- **The event counts, per interior column, which are what made the fix designable.** A new
+  `feature::ore_probe` (thread-local, `gen-counters`-gated, inert otherwise):
+
+  | event | /column | event | /column |
+  |---|---|---|---|
+  | source passes | 9 | candidates (`try_place_ore`) | 79,148 |
+  | features emitted | 2,541 | candidates already tested | **208,580** |
+  | …of those culled by the height probe | 1,579 | region reads | 83,504 |
+  | height-probe columns | **215,607** | …answered by the write overlay | 14,699 |
+  | blobs (`do_place`) | 962 | **target tests, all `TagMatch`** | **81,316** |
+  | spheres | 17,717 | air checks | 735 |
+  | writes | 62,796 | | |
+
+  Three of those reframe the stage. **81,316 target tests, every one a tag test** — two SipHashes of a
+  *string* each (`ore_tag_map.get(tag)`, then `members.contains(base)`) — plus one `split('[')` per
+  candidate, all answering the same question about the same handful of terrain states.
+  **62,796 writes each interning the target's state string through `StateInterner::id_of`.** And
+  **735 air checks against 79,148 candidates**: `is_adjacent_to_air` is 0.9% of the stage and was left
+  completely untouched, which is where the correctness risk was concentrated.
+- **The fix, and why a per-blob cache rather than the thread-local this repo usually reaches for.**
+  `TargetCache` in `feature/mod.rs`: 16 slots direct-mapped on the raw `StateId` with a full key
+  compare, holding a **bitmask** of which of `config.targets` match that state, plus each target's own
+  interned `StateId` resolved on first write. Constructed inside `do_place`, which handles exactly one
+  `OreConfig` — **so the config is not part of the key, and a stack-local cache is what makes that
+  true by construction.** Hoisting it to a `thread_local!` (the shape `BLOB_DATA` next to it uses)
+  would be wrong in §12.143's exact way — a value from a *different function*, at a plausible
+  magnitude — unless config identity entered the key and was cleared between generators.
+  **The mask is a bitmask and not a first-match index, and that is the whole draw-order argument:**
+  `canPlaceOre` can refuse a matching target, and vanilla then continues to the *next* matching one,
+  drawing again. Consuming set bits in ascending order reproduces the name-based loop's sequence of
+  matching targets exactly. `match_targets_by_name` is the original test, moved out verbatim, and is
+  still the only implementation of it — the cache cannot diverge from a path that does not exist twice.
+  A config with more than `MAX_CACHED_TARGETS = 8` targets bypasses the cache entirely; vanilla's
+  widest `UNDERGROUND_ORES` config has **two**.
+- **The controls, and the event counts are a better one than the byte comparison.** Twelve of the
+  fourteen probe rows are **digit-identical** across the change — blobs 962, spheres 17,717,
+  candidates 79,148, deduped 208,580, height probes 215,607, region reads 83,504, overlay-answered
+  reads 14,699, writes 62,796, air checks 735 — while `target_tests` goes **81,316 → 3,113**. So the
+  placement walk did not move at all and only the string tests were removed, at a **96.2%** cache hit
+  rate. (`region_reads_overlay` is the row that had to be repaired to say this: `try_place_ore`
+  changed from `RegionView::get` to `get_id`, so the counter was added to *both*, and its equality
+  across the change is then a claim about the read pattern rather than an artefact of where the hook
+  sits.) Byte identity: 45-column/5-seed U15 dump, **8,902,157 bytes, md5
+  `c0ef05ac09ba3f90175a14b0f9a69d50`** on both arms — the value §12.130, §12.132, §12.134, §12.140 and
+  §12.143 recorded, reproduced rather than quoted — harness md5 `99691badc02cca288a9071f0491d2fa7`
+  equal on both arms, and a one-flipped-byte control makes `cmp` fire (exit 1, `char 4000001`, md5
+  `b2bf654b…`).
+- **The numbers, and this time the prediction held — because it came from a measured share and not
+  from a back-derived unit cost.** Eight interleaved rounds:
+
+  | quantity | before | after | delta |
+  |---|---|---|---|
+  | `I_ss` mean of eight rounds | 429,998,204 | **371,799,524** | **−13.535%** |
+  | `I_ss` min of eight rounds | 429,801,452 | 371,596,041 | −13.542% |
+  | within-arm `I_ss` spread | 0.152% | 0.102% | — |
+  | `C_ss` mean of eight rounds | 18,873.5 µs | 16,534.6 µs | −12.39% |
+  | `C_ss` min of eight rounds | 17,490.1 µs | 15,350.5 µs | −12.23% |
+  | `ore` stage median (wall) | 6,918 µs | **4,959 µs** | −28.3% |
+  | ore-subtree samples (samply) | 3,308 | 2,349 | −29.0% |
+  | target tests / column | 81,316 | 3,113 | −96.2% |
+
+  Eight of eight rounds negative. The prediction was **−14.2% of a column**, computed as (the profile's
+  measured 36.8% string share of the stage) × (§12.143's measured 38.7% stage share); the measurement
+  is −13.54%, i.e. **within 5% of the prediction**. §12.143's was off by 40× because it derived a
+  kernel's unit cost by dividing a previous unit's aggregate delta by a previous unit's event count.
+  The difference is not care — it is that **a share read off a profile of the thing you are about to
+  change is a measurement, and a unit cost divided out of somebody else's total is a choice.**
+- **The "ore composition recomputes neighbours 9× per chunk" claim is true, is worth ~9× of the
+  largest stage in the generator, and is structurally uncollectable while bytes must not move.** Every
+  chunk's own `UNDERGROUND_ORES` pass really is run nine times across a swept world: once as the
+  centre of its own `ore_stage`, and once as a source inside each of its eight neighbours'. The RNG is
+  **not** the obstacle — `apply_one_source` re-seeds from the source chunk's own origin, so the nine
+  streams are independent — and neither is memoisation, which already exists (`post_ore` in the store)
+  and is one layer too coarse. The obstacle is one line: **`OreInput::region_local` clamps every read
+  and write into the *driving* chunk's 48×48 box**, so a source at offset (−1,−1) reading past its own
+  edge sees a boundary whose position depends on which chunk is the centre. `apply_one_source(S)` is
+  therefore not a function of `S` alone and its write-set cannot be cached per source. A second,
+  independent barrier is unmeasured and would have to be settled too: all nine passes share one write
+  overlay and later passes read earlier passes' writes (14,699 overlay-answered reads per column, not
+  split by writing source). `region_view.rs`'s `WIDE_RADIUS` doc already names the first barrier's
+  cure — widening ore's read region to 5×5, which is a **world change with its own parity surface**,
+  exactly as it says. **Vegetation has already paid that price** (`WIDE_RADIUS = 2`, for the seam
+  defect in §12.118), which makes vegetation, not ore, the place where per-source caching might be
+  reachable without changing the world.
+- **The new stage shares, so the next unit is aimed rather than assumed.** Same probe, same warm store,
+  median of the same 100 interior columns:
+
+  | stage | share (was) | | stage | share (was) |
+  |---|---|---|---|---|
+  | **ore** | **28.7%** (38.7) | | vegetation | 15.1% (13.0) |
+  | **shape** | **26.5%** (22.5) | | top_layer | 9.0% (7.8) |
+  | biome | 5.1% (4.3) | | surface | 5.4% (4.7) |
+  | materialize | 4.9% (4.2) | | aquifer | 3.3% (3.0) |
+  | carve | 1.7% (1.5) | | intern | 0.2% (0.2) |
+
+  Parts still sum to the whole (17,268 µs of stages against `column_timed`'s own 17,128 µs total),
+  which is what makes this an attribution. Nothing but `ore` changed in absolute terms; the other nine
+  rows moved only because the denominator did.
+- **What is left in `ore`, with a number rather than a hunch.** 85.1% of the stage is now inside the
+  one inlined frame, and the address histogram splits it: ~45% is `do_place`'s sphere arithmetic and
+  its triple loop, ~5.6% `VisitedBox::insert`, and **~23.7% is hashbrown — `RegionView`'s write
+  overlay**, i.e. **~20% of the stage and ~5.8% of a column**. That overlay is a
+  `FastMap<(i32,i32,i32), StateId>` taking 83,504 probes and 62,796 inserts per column and growing to
+  tens of thousands of live entries, so every probe is a cache miss. The dense form is a
+  48×48×`height` presence bitset (110 KB, cache-resident, and it answers the 82% of reads that *miss*
+  the overlay) over a dense `u16` value array (1.77 MB), both recycled per thread and cleared through
+  a write log. Two properties make it safe and neither is obvious: the flat index
+  `((y − min_y) · 48 + lz) · 48 + lx` is **monotone in `(y, lz, lx)`**, so sorting by it *is*
+  `centre_writes_in_scan_order`'s existing sort and the palette-order argument gets shorter rather than
+  longer; and a write log admits duplicate keys where a `HashMap` does not, so the fold-back must read
+  each cell's **final** value out of the dense array — otherwise two log entries for one cell sort
+  against each other and the served palette depends on `sort_unstable`'s tie-breaking. Note the
+  `Overlay` free-list is shared with `VegGrid`, whose footprint is 80×80 rather than 48×48, so the
+  dense form belongs to `RegionView` alone.
+- **Whether 5–10 ms serial is reachable: not by constant factors, and the arithmetic says so.**
+  `C_ss` is now ~15.4–16.5 ms. Zeroing *every* remaining identified non-arithmetic cost in the
+  generator — the ore overlay (5.8%), the whole density engine (§12.143's ≤25.6%, now ~29.8% as an
+  upper bound) — leaves ~10 ms, and that is the sum of two things nobody knows how to make free. The
+  one change that reaches the target is structural: `ore` and `vegetation` together are **43.8% of a
+  column** and both are 9-pass drivers, so collecting the 9× would take a column to ~9.4 ms in one
+  step. That is the same work item as the paragraph above about `region_local`, and its price is a
+  parity decision, not an optimisation. **The honest floor for the current parity model is ~12–13 ms
+  serial**, and §12.130's note that throughput is a different question from serial cost is the other
+  half of the answer.

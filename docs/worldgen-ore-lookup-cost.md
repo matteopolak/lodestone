@@ -2,9 +2,10 @@
 
 ## What it is
 
-The cost model of the `UNDERGROUND_ORES` decoration stage — the single most expensive stage in
-chunk generation, measured at **43.54%** of stage time — plus the record of what U15 removed from
-it, why the removal cannot move an RNG draw, and the two non-obvious couplings that any future
+The cost model of the `UNDERGROUND_ORES` decoration stage — the most expensive stage in chunk
+generation, **28.7% of a steady-state column** after DESIGN.md §12.149 (38.7% before it, and 43.54%
+of stage time when this doc was written) — plus the record of what U15 and §12.149 removed from it,
+why neither removal can move an RNG draw, and the two non-obvious couplings that any future
 `OreVeinifier` port has to respect. It is the companion to
 [`worldgen-in-place-decoration.md`](./worldgen-in-place-decoration.md) (which owns the *medium*
 decoration writes travel through) and to [`worldgen-fast-hashing.md`](./worldgen-fast-hashing.md)
@@ -88,13 +89,61 @@ lookup written out longhand, and its control perturbs the **stitch**, which does
 container here, ask what the control would have to perturb to be observed — not merely whether a
 control exists.
 
-**The next lookup on this path is `in_tag`, and it is not done.** `try_place_ore` still resolves
-`RuleTest::TagMatch` through a `HashMap<String, HashSet<String>>` — two string hashes per target
-test — and the profile attributes **10.58% inclusive** of the ore subtree to that closure. U3
-interned every block state as a `u16` and U8 already built the id-keyed answer for the vegetation
-tags (`feature/vegetation/ids.rs`, whose `the_bitset_answers_what_the_string_path_answers` gate is
-the shape to copy). Doing the same for the ore targets is the remaining structural win here, and it
-is parity-safe for the same reason the three above are: a `RuleTest` never draws.
+**`in_tag` is done, and it was worth −13.54% of a whole column** (DESIGN.md §12.149). This section
+used to end "the next lookup on this path is `in_tag`, and it is not done", and it was right about
+both the target and the fix: `try_place_ore` resolved `RuleTest::TagMatch` through a
+`HashMap<String, HashSet<String>>`, two string hashes per target test, **81,316 target tests per
+interior column, every one a tag test**. `TargetCache` now answers it from a `u16` compare:
+
+* 16 slots direct-mapped on the raw `StateId`, full key compare, holding a **bitmask** of which of
+  `config.targets` match that state — plus each target's own interned `StateId`, which removes the
+  other string cost, one `StateInterner::id_of` per write over **62,796 writes per column**.
+* Built inside `do_place`, which handles exactly one `OreConfig`, so the config is not in the key.
+  **Do not hoist it to a `thread_local!`**: without config identity in the key and a clear between
+  generators, that is DESIGN.md §12.143's stale-scratch failure — a value from a *different
+  function*, at a plausible magnitude.
+* `match_targets_by_name` is the original name-based test, moved out verbatim and still the only
+  implementation of it, so the cached and uncached paths cannot drift.
+
+**Why a bitmask and not a "first matching target" index.** `canPlaceOre` can refuse a matching
+target, and vanilla then continues to the *next* matching one, drawing another `nextFloat`. Only a
+mask consumed in ascending order reproduces the sequence of matching targets, and therefore the draw
+sequence, exactly. A config wider than `MAX_CACHED_TARGETS = 8` bypasses the cache; vanilla's widest
+`UNDERGROUND_ORES` config has two targets.
+
+`is_adjacent_to_air` was deliberately **not** converted. It runs 735 times per column against 79,148
+candidates — 0.9% of the stage — and it is where the correctness risk was concentrated.
+
+### What the measurement was, and the control that is better than the byte comparison
+
+`feature::ore_probe` (thread-local, `gen-counters`-gated, inert otherwise) reports fourteen event
+counts per column. **Twelve are digit-identical across the change** — blobs 962, spheres 17,717,
+candidates 79,148, already-tested 208,580, height probes 215,607, region reads 83,504,
+overlay-answered reads 14,699, writes 62,796, air checks 735 — while `target_tests` goes
+**81,316 → 3,113**, a 96.2% cache hit rate. So the placement walk did not move and only the string
+tests were removed. The U15 dump is byte-identical on top of that (8,902,157 bytes, md5
+`c0ef05ac09ba3f90175a14b0f9a69d50`, with a one-flipped-byte control), and `I_ss` fell
+**429,998,204 → 371,799,524** over eight interleaved rounds, eight of eight negative.
+
+### The remaining cost, and the one that is structural
+
+`ore` is now **28.7%** of a steady-state column (was 38.7%), and ~85% of it is the single inlined
+`place_placed_feature::recurse` frame. Its address histogram splits as ~45% `do_place` sphere
+arithmetic, ~5.6% `VisitedBox::insert`, and **~23.7% hashbrown — `RegionView`'s write overlay**,
+which is ~5.8% of a column. See DESIGN.md §12.149 for the dense form and the two non-obvious
+properties that make it safe (the flat index is monotone in `(y, lz, lx)`, so it *is* the fold-back's
+sort; and a write log admits duplicate keys where a `HashMap` does not, so the fold-back must read
+each cell's final value out of the array).
+
+**The 9× is real and is not collectable.** Every chunk's own `UNDERGROUND_ORES` pass runs nine times
+across a swept world — once as its own centre, once per neighbour. The RNG is not the obstacle
+(`apply_one_source` re-seeds from the source's own origin, so the nine streams are independent) and
+neither is memoisation (`post_ore` already exists, one layer too coarse). The obstacle is
+`OreInput::region_local`: it clamps into the **driving** chunk's box, so `apply_one_source(S)` is not
+a function of `S` alone and its write-set cannot be cached per source. Widening ore's read region to
+5×5 is the cure `region_view.rs`'s `WIDE_RADIUS` doc already names, and it is a world change with its
+own parity surface. Vegetation has already paid that price, which makes vegetation — not ore — the
+place where per-source caching may be reachable without changing the world.
 
 ## The ore-vein system is still missing, and here is what a port must respect
 
