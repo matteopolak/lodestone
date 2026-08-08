@@ -44,6 +44,7 @@ use lodestone_worldgen::density::{Context, Density};
 use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
 
 use crate::block_entities::BlockEntity;
+use crate::chunk_blocks::SectionedBlocks;
 
 pub(crate) const AIR: &str = "minecraft:air";
 pub(crate) const STONE: &str = "minecraft:stone";
@@ -113,8 +114,18 @@ pub struct ChunkColumn {
     pub height: i32,
     /// Block-state palette; `palette[0]` is always `"minecraft:air"`.
     palette: Vec<String>,
-    /// `blocks[(y_local * 16 + z) * 16 + x]` indexes into `palette`.
-    blocks: Vec<u16>,
+    /// Palette indices for every cell, one bit-packed 16-row section at a time
+    /// (`crate::chunk_blocks`). Logically the same
+    /// `blocks[(y_local * 16 + z) * 16 + x]` grid this used to be a flat
+    /// `Vec<u16>` of; an all-air section now allocates nothing and a populated
+    /// one packs to the width its ids need instead of 16 bits.
+    ///
+    /// **This field was the server's whole render-distance memory bill** —
+    /// 192 KiB of the 195.5 KiB `crate::chunk_store` measures per retained
+    /// column, so 867 MiB at `render_distance` 32. See `chunk_blocks`'s module
+    /// docs for the representation and for why it is not
+    /// `lodestone_world::PalettedContainer`.
+    blocks: SectionedBlocks,
     /// `palette_ticking[id] == crate::random_tick::is_randomly_ticking(&palette[id])`,
     /// computed once per palette entry as that entry is appended.
     ///
@@ -201,7 +212,7 @@ impl ChunkColumn {
             min_y,
             height,
             palette: vec![AIR.to_string()],
-            blocks: vec![0u16; 16 * 16 * height as usize],
+            blocks: SectionedBlocks::new_air(height),
             // All-air, so every section count is zero and every palette entry
             // is classified — correct by construction with no counting pass,
             // exactly like vanilla's empty-section constructor
@@ -220,10 +231,17 @@ impl ChunkColumn {
         }
     }
 
-    /// Adopts a [`GeneratedColumn`] from the real worldgen pipeline. Zero-copy
-    /// for the bulk: the palette and block grid are moved as-is (their index
-    /// layout is the same), including the real per-quart biome data (issue
+    /// Adopts a [`GeneratedColumn`] from the real worldgen pipeline: the palette
+    /// moves as-is, and the flat block grid is *packed* into
+    /// [`SectionedBlocks`] — one pass over the cells the caller has just written,
+    /// which is also the pass that discards the ~160 KiB of it that is air (see
+    /// `crate::chunk_blocks`). Real per-quart biome data comes across too (issue
     /// #405).
+    ///
+    /// The grid used to move by value rather than be repacked. The move was
+    /// cheaper per column and is what made the *retained* cost 192 KiB each;
+    /// `chunk_store`'s 909 ms-per-column generation figure is the scale this one
+    /// extra sequential pass is measured against.
     ///
     /// The 3-D biome grid (issue #512) and the block-entity list (issue #520)
     /// are *copied* rather than moved, because `GeneratedColumn::into_raw`
@@ -256,6 +274,7 @@ impl ChunkColumn {
             Some(AIR),
             "generated palette must start with air"
         );
+        let blocks = SectionedBlocks::from_flat(height, &blocks);
         let mut column = Self {
             min_y,
             height,
@@ -409,14 +428,6 @@ impl ChunkColumn {
         self.structure_references = references;
     }
 
-    #[inline]
-    fn index(&self, x: i32, y_local: i32, z: i32) -> usize {
-        debug_assert!((0..16).contains(&x));
-        debug_assert!((0..16).contains(&z));
-        debug_assert!((0..self.height).contains(&y_local));
-        ((y_local * 16 + z) * 16 + x) as usize
-    }
-
     /// Which 16-row window a `y - min_y` offset falls in. The windows are
     /// measured from `min_y`, not from world y = 0, which is the same
     /// arithmetic [`recalc_ticking_counts`](Self::recalc_ticking_counts) and
@@ -445,13 +456,19 @@ impl ChunkColumn {
             .iter()
             .map(|state| crate::random_tick::is_randomly_ticking(state))
             .collect();
-        let mut counts = vec![0u16; (self.height as usize).div_ceil(SECTION_ROWS)];
-        for (cell, &id) in self.blocks.iter().enumerate() {
-            if self.palette_ticking[id as usize] {
-                // `blocks[(y_local * 16 + z) * 16 + x]`, so `cell / 256` is
-                // `y_local` and `cell / 4096` is its 16-row window.
-                counts[cell / (256 * SECTION_ROWS)] += 1;
-            }
+        let sections = (self.height as usize).div_ceil(SECTION_ROWS);
+        let mut counts = vec![0u16; sections];
+        for s in 0..sections {
+            let mut count = 0u16;
+            // Per section rather than over one flat grid, because the sections
+            // *are* the storage now — and a uniform (usually all-air) section
+            // reads without touching any cell memory at all.
+            self.blocks.for_each_in_section(s, |_, id| {
+                if self.palette_ticking[id as usize] {
+                    count += 1;
+                }
+            });
+            counts[s] = count;
         }
         self.section_ticking = counts;
     }
@@ -480,9 +497,8 @@ impl ChunkColumn {
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, name: &str) {
         let id = self.intern(name);
         let y_local = y - self.min_y;
-        let i = self.index(x, y_local, z);
-        let old = self.blocks[i];
-        self.blocks[i] = id;
+        let old = self.blocks.get(x, y_local, z);
+        self.blocks.set(x, y_local, z, id);
 
         // Vanilla's `LevelChunkSection.setBlockState` (`:58-102`) maintains
         // `tickingBlockCount` exactly here: decrement for the state leaving the
@@ -532,7 +548,7 @@ impl ChunkColumn {
         if !(0..self.height).contains(&y_local) {
             return AIR;
         }
-        &self.palette[self.blocks[self.index(x, y_local, z)] as usize]
+        &self.palette[self.blocks.get(x, y_local, z) as usize]
     }
 
     /// Returns solidity at a local `(x, z)` in `0..16` and world `y`. A block is
@@ -546,10 +562,23 @@ impl ChunkColumn {
     /// Total number of solid (non-air, non-fluid) blocks.
     #[must_use]
     pub fn solid_count(&self) -> usize {
-        self.blocks
+        // Classify the palette once, then count integers — the same argument
+        // `raw_palette` and `recalc_ticking_counts` already make. Previously this
+        // ran the string predicate on all 98,304 cells.
+        let solid: Vec<bool> = self
+            .palette
             .iter()
-            .filter(|&&id| !is_air_or_fluid(&self.palette[id as usize]))
-            .count()
+            .map(|state| !is_air_or_fluid(state))
+            .collect();
+        let mut count = 0usize;
+        for s in 0..self.blocks.section_count() {
+            self.blocks.for_each_in_section(s, |_, id| {
+                if solid[id as usize] {
+                    count += 1;
+                }
+            });
+        }
+        count
     }
 
     /// The column-wide block-state palette, borrowed.
@@ -563,14 +592,40 @@ impl ChunkColumn {
         &self.palette
     }
 
-    /// The raw palette-index grid, `blocks[(y_local * 16 + z) * 16 + x]`.
-    ///
-    /// Same rationale as [`raw_palette`](Self::raw_palette). The layout is
-    /// deliberately identical to a vanilla section's `(y << 8) | (z << 4) | x`
-    /// order restricted to a 16-row window, so `chunk_nbt` slices it directly.
+    /// 16-row sections in this column — `height / 16`, rounded up. The same
+    /// windows [`section_ticking_counts`](Self::section_ticking_counts) indexes.
     #[must_use]
-    pub fn raw_blocks(&self) -> &[u16] {
-        &self.blocks
+    pub fn section_count(&self) -> usize {
+        self.blocks.section_count()
+    }
+
+    /// Appends section `s`'s palette indices to `out`, in vanilla's own
+    /// `(y_in_section << 8) | (z << 4) | x` order — so `crate::chunk_nbt` builds a
+    /// region file's per-section container straight from it.
+    ///
+    /// Same rationale as [`raw_palette`](Self::raw_palette): going through
+    /// [`block_state`](Self::block_state) instead would mean 98,304 string lookups
+    /// and a fresh `String` per block for every column saved.
+    ///
+    /// **This replaced a `raw_blocks() -> &[u16]` over the whole column**, which
+    /// could not survive the sectioned representation (`crate::chunk_blocks`) —
+    /// there is no longer one contiguous grid to borrow, and materialising one
+    /// would reintroduce the 192 KiB the change exists to remove. Callers that
+    /// walked the flat grid section-by-section (all of them did) want this;
+    /// `out` is reused across sections so the whole save path is one allocation.
+    pub fn append_section_cells(&self, s: usize, out: &mut Vec<u16>) {
+        self.blocks.append_section_cells(s, out);
+    }
+
+    /// Heap bytes this column's block grid owns.
+    ///
+    /// A **count**, so a gate can assert the representation's cost without an RSS
+    /// reading and without depending on machine load: the flat `Vec<u16>` this
+    /// replaced was unconditionally `16 × 16 × height × 2`, and
+    /// `tests/chunk_memory.rs` predicts both numbers from outside constants.
+    #[must_use]
+    pub fn blocks_heap_bytes(&self) -> usize {
+        self.blocks.heap_bytes()
     }
 
     /// `LevelChunkSection::isRandomlyTicking`'s boolean for the 16-row window
@@ -607,7 +662,8 @@ impl ChunkColumn {
     /// positive ([`section_is_randomly_ticking`](Self::section_is_randomly_ticking)).
     /// This exists for the permanent parity gate
     /// (`tests/random_tick_section_counters.rs`), which compares every count
-    /// against an independent recount walking [`raw_blocks`](Self::raw_blocks)
+    /// against an independent recount walking
+    /// [`append_section_cells`](Self::append_section_cells)
     /// — a *boolean*-only accessor would let a count drift by any amount
     /// without the gate noticing as long as it stayed on the same side of zero.
     #[must_use]
@@ -714,6 +770,39 @@ pub trait ChunkSource: Send + Sync {
     /// the last large performance defect in this crate.
     fn unload(&self, cx: i32, cz: i32) {
         let _ = (cx, cz);
+    }
+
+    /// Tells the source that a connection's view radius is now `view_radius`, so
+    /// a layer that *retains* columns can resize its bound to match.
+    ///
+    /// The default is a no-op, correct for every source that retains nothing per
+    /// view. [`crate::chunk_store::ChunkStore`] is the one implementor that acts
+    /// on it.
+    ///
+    /// # Why this exists (issue #551)
+    ///
+    /// `ChunkStore`'s capacity was fixed at construction from the radius the
+    /// connection *joined* with. Since `0c09f576` a client can raise its render
+    /// distance mid-session and the server honours it — so the streamed view then
+    /// exceeds the cache bound, and the LRU victim under a short capacity is the
+    /// **innermost** ring, because `crate::server`'s `join_view_rings` streams
+    /// outward and leaves ring 0 with the oldest stamp. Raising render distance
+    /// therefore worked while quietly regenerating the ground under the player's
+    /// feet at 909 ms a column. See `chunk_store`'s
+    /// `integrated_capacity_for_view_radius` for the full argument.
+    ///
+    /// # This is a hint, not an instruction, and it is monotonic in practice
+    ///
+    /// Like [`unload`](Self::unload), an implementor must stay correct if it
+    /// ignores this. It is called from `ViewTracker::set_view_radius` — after the
+    /// clamp, so the value never exceeds what the connection may actually be
+    /// served — on every radius change, lowering included. A store is free to
+    /// treat a *lowering* as advisory rather than immediately evicting; see
+    /// `ChunkStore::set_retention_radius` for what it does and why.
+    ///
+    /// **Do no I/O here**, for the same reason `unload` says so.
+    fn set_retention_radius(&self, view_radius: i32) {
+        let _ = view_radius;
     }
 }
 
@@ -1142,8 +1231,17 @@ mod tests {
             out.extend_from_slice(&(s.len() as u32).to_le_bytes());
             out.extend_from_slice(s.as_bytes());
         }
-        for &id in &col.blocks {
-            out.extend_from_slice(&id.to_le_bytes());
+        // Section by section, which is also the storage order — the bytes are
+        // identical to the flat `Vec<u16>` walk this replaced, because
+        // `append_section_cells` emits the same
+        // `(y_local * 16 + z) * 16 + x` sequence.
+        let mut cells = Vec::new();
+        for s in 0..col.section_count() {
+            cells.clear();
+            col.append_section_cells(s, &mut cells);
+            for &id in &cells {
+                out.extend_from_slice(&id.to_le_bytes());
+            }
         }
         for s in &col.biome_quarts {
             out.extend_from_slice(&(s.len() as u32).to_le_bytes());

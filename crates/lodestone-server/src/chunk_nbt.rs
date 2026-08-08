@@ -346,12 +346,16 @@ pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &Chunk
     let min_section = column.min_y.div_euclid(16);
     let section_count = (column.height as usize).div_ceil(SECTION_EDGE);
     let palette = column.raw_palette();
-    let blocks = column.raw_blocks();
+    // Reused across sections: `append_section_cells` materialises one section at a
+    // time (`crate::chunk_blocks` has no flat grid to borrow), so this is one
+    // allocation for the whole column rather than one per section.
+    let mut section_cells: Vec<u16> = Vec::with_capacity(SECTION_VOLUME);
 
     let mut sections = Vec::with_capacity(section_count);
     for s in 0..section_count {
-        let base = s * SECTION_VOLUME;
-        let cells = &blocks[base..(base + SECTION_VOLUME).min(blocks.len())];
+        section_cells.clear();
+        column.append_section_cells(s, &mut section_cells);
+        let cells = &section_cells[..];
 
         // Remap the column-wide palette down to just the states this section
         // actually uses. Vanilla's containers are per-section, and a

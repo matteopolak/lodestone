@@ -108,6 +108,11 @@ pub mod block_drops;
 mod border;
 mod brewing;
 mod chunk;
+/// Bit-packed per-section block storage for [`chunk::ChunkColumn`] — issue #551,
+/// unit U8 of `docs/plans/chunk-lifecycle.md`. Private: the representation is an
+/// implementation detail of `ChunkColumn`, which exposes it only as
+/// `append_section_cells`/`blocks_heap_bytes`.
+mod chunk_blocks;
 pub mod chunk_nbt;
 mod chunk_store;
 mod command;
@@ -266,6 +271,10 @@ pub use random_tick::{
 pub use rcon::{DEFAULT_RCON_PORT, RconConfig};
 pub use scheduled_tick::{ScheduledTick, ScheduledTickQueue, TickPriority};
 pub use server::{
+    // Issue #551's gate in `tests/view_radius_store_capacity.rs` asserts at compile
+    // time that the radius it raises the slider to is one `ViewTracker::max_radius`
+    // actually permits — a premise it must not restate as a literal.
+    MAX_CLIENT_VIEW_RADIUS,
     EntitySource, NoEntities, ResourcePackPushFeed, ServeSummary, ServerError, serve_connection,
     serve_connection_with_commands, serve_connection_with_mob_events,
     serve_connection_with_plugin_channels, serve_connection_with_resource_pack,

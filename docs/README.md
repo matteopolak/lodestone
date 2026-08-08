@@ -202,6 +202,17 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `encode_column_body` serialises as the `level_chunk_with_light` packet body: the
   whole-column send every client gets at join, and that `ViewTracker` resends as a
   player walks (`crates/lodestone-server/src/server.rs`).
+- [Server-side chunk column storage](./chunk-column-storage.md) — `SectionedBlocks`
+  (`crates/lodestone-server/src/chunk_blocks.rs`) is how a server-side `ChunkColumn`
+  stores its block-state indices: one bit-packed 16-row section at a time, each either
+  a single repeated value or a packed array sized to the palette ids that section
+  actually uses. It replaced a flat `Vec<u16>` over the column's full height, which
+  was **192 KiB of the 195.5 KiB** the chunk store measured per retained column. It is
+  the storage half of unit **U8** of
+  [`plans/chunk-lifecycle.md`](./plans/chunk-lifecycle.md), issue #551, and it cut
+  per-column residency to **31.1 KiB, measured** — so the singleplayer store at
+  `render_distance` 32 went from **867 MiB to 139.2 MiB**, both measured under
+  `/usr/bin/time -l`.
 - [Chunk section memory: pool footprint measurement (issue #362)](./chunk-memory-pool-footprint.md) —
   Issue #362 proposed a size-classed buffer pool with handles for chunk section data
   (the `Vec<u64>` behind [`PackedArray`](../crates/lodestone-world/src/packed.rs) and

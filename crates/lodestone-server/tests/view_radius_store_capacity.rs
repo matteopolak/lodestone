@@ -729,3 +729,262 @@ async fn the_regeneration_curve_across_the_render_distance_slider() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #551: the capacity must follow a *live* radius change, not only the one
+// the connection joined with.
+// ---------------------------------------------------------------------------
+
+/// The radius the #551 arms **join** at: the shell's own default
+/// (`render_distance` 8), whose derived capacity is the [`STORE_CAPACITY_FLOOR`]
+/// literal. Joining here is the point — this is the store every singleplayer
+/// session starts with.
+const JOIN_RADIUS: i32 = 9;
+
+/// The radius the #551 arms **raise to** after joining. Past
+/// `integrated_capacity_for_view_radius(JOIN_RADIUS)`, so the join-time capacity
+/// genuinely cannot hold the raised view; the compile-time premises below are what
+/// hold it to that rather than this comment.
+const RAISED_RADIUS: i32 = 15;
+
+const _: () = assert!(
+    RAISED_RADIUS <= lodestone_server::MAX_CLIENT_VIEW_RADIUS,
+    "the raise must be a value `ViewTracker::max_radius` actually permits, or the \
+     server clamps it back and both arms measure the join radius"
+);
+const _: () = assert!(
+    view_columns(RAISED_RADIUS) > integrated_capacity_for_view_radius(JOIN_RADIUS),
+    "the raised view must exceed the capacity derived at the JOIN radius, or a store \
+     whose capacity never moved would pass this gate and it would measure nothing"
+);
+const _: () = assert!(
+    view_columns(RAISED_RADIUS) + CONCURRENT_SCAN_COLUMNS
+        <= integrated_capacity_for_view_radius(RAISED_RADIUS),
+    "the derivation at the raised radius must cover the raised view, or even a \
+     correct implementation cannot reach zero"
+);
+
+/// Joins at `join_radius`, raises the slider to `raised_radius`, then drags it to
+/// 0 and back to `raised_radius`. Returns the observation from that final re-grow.
+///
+/// # Why the second sweep is the measurement and the raise is not
+///
+/// The raise **alone** cannot see the bug, and this is the trap worth writing
+/// down. `ViewTracker::set_view_radius` diffs the window, so it asks the source
+/// for each newly-visible column exactly once; even a store whose capacity is
+/// hopelessly short therefore reports one generation per column during the raise,
+/// with no repeats. The harm of a short capacity is not paid at the moment of the
+/// raise — it is paid by whatever asks *again*, and by the join's outward ring
+/// order the columns that are gone are the **innermost** ones.
+///
+/// So the probe is a second down-and-up sweep, which is the same instrument
+/// [`stream_view_then_reshrink_and_regrow`] uses and reads the same property:
+/// residency. Zero regenerations on the final re-grow means the store really is
+/// holding the raised view.
+async fn join_then_raise_then_probe(join_radius: i32, raised_radius: i32) -> Observation {
+    let counting = CountingSource::new();
+    let calls = Arc::clone(&counting.calls);
+    let per_chunk = Arc::clone(&counting.per_chunk);
+
+    // `open_in_memory` is the constructor singleplayer uses, and it passes
+    // `MAX_CLIENT_VIEW_RADIUS` as the ceiling (issue #545) — which is what makes
+    // raising above `join_radius` possible at all.
+    let (server, client_end) = IntegratedServer::open_in_memory(FakeProtocol, counting, join_radius);
+    let mut client = Connection::new(client_end);
+
+    client.write_packet(HANDSHAKE, &[2]).await.expect("handshake");
+    let mut w = Writer::default();
+    w.string("Rd551");
+    client
+        .write_packet(LOGIN_START, w.as_slice())
+        .await
+        .expect("login start");
+    let (id, _) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, LOGIN_SUCCESS, "login must succeed before the join view");
+    client
+        .write_packet(LOGIN_ACKNOWLEDGED, &[])
+        .await
+        .expect("login ack");
+    client
+        .write_packet(FINISH_CONFIGURATION, &[])
+        .await
+        .expect("finish configuration");
+
+    let join_columns = drain_one_batch(&mut client).await;
+    ack_batch(&mut client).await;
+
+    // The raise. Everything from ring `join_radius + 1` outward is new, so this
+    // emits a batch of its own that has to be drained and acked.
+    set_view_distance(&mut client, raised_radius).await;
+    let raised_columns = drain_one_batch(&mut client).await;
+    ack_batch(&mut client).await;
+    assert_eq!(
+        join_columns + raised_columns,
+        view_columns(raised_radius),
+        "precondition: the join plus the raise must together have streamed the whole \
+         raised square, or the probe below is pointed at a view that was never served"
+    );
+
+    // The probe: down to 0, back up to the raised radius.
+    set_view_distance(&mut client, 0).await;
+    set_view_distance(&mut client, raised_radius).await;
+    let regrow_columns = drain_one_batch(&mut client).await;
+
+    drop(client);
+    server.shutdown().await;
+
+    let (regenerated, worst_coord, worst) = regenerations(&per_chunk);
+    Observation {
+        join_columns,
+        regrow_columns,
+        regenerated,
+        worst: (worst_coord, worst),
+        total_generations: calls.load(Ordering::Relaxed),
+    }
+}
+
+/// **Issue #551's subject.** A connection that joins at the default render
+/// distance and then *raises* it must end up with a store that holds the raised
+/// view — zero regenerations on a probe of it.
+///
+/// # Predicting the value, not the sign
+///
+/// Both hypotheses are computed from the policy's own constants:
+///
+/// * **Fixed capacity** (the bug): the store is built from `JOIN_RADIUS` and stays
+///   there, so it holds `integrated_capacity_for_view_radius(9)` = 512 of the
+///   raised view's `view_columns(15)` = 961 columns. 449 are already gone before
+///   the probe starts, and the probe is a cyclic re-scan of 960 columns through a
+///   512-entry LRU — LRU's worst case, so 449 is a floor and not the figure.
+/// * **Capacity follows the radius** (fixed): the store is resized to
+///   `integrated_capacity_for_view_radius(15)` = 1,011 ≥ 961 + 50, every column of
+///   the raised view is resident, and the probe generates **0**.
+///
+/// 0 against a computed floor of 449. The assertion is `== 0`, and
+/// [`a_fixed_capacity_store_cannot_hold_a_raised_view`] below is the arm that
+/// lands on the other hypothesis.
+///
+/// # Which implementation does this resolve to?
+///
+/// `IntegratedServer::open_in_memory` over `memory_pair()` — production
+/// singleplayer's own constructor and its own transport, not a double, and
+/// `ServerBound::ClientInformationChanged` is the real render-distance slider on
+/// the wire.
+#[tokio::test]
+async fn raising_the_render_distance_mid_session_resizes_the_store() {
+    let observed = join_then_raise_then_probe(JOIN_RADIUS, RAISED_RADIUS).await;
+
+    // Preconditions, failing rather than skipping: both would make `== 0`
+    // trivially true.
+    assert_eq!(
+        observed.join_columns,
+        view_columns(JOIN_RADIUS),
+        "the join must stream the whole {JOIN_RADIUS}-radius square"
+    );
+    assert_eq!(
+        observed.regrow_columns,
+        view_columns(RAISED_RADIUS) - view_columns(0),
+        "the probe's re-grow must re-request the whole raised view bar the centre \
+         column, or it is not probing the band a short capacity drops"
+    );
+
+    let ((wx, wz), worst) = observed.worst;
+    assert_eq!(
+        worst, 1,
+        "chunk ({wx}, {wz}) was generated {worst} times: the store did not resize when \
+         the render distance was raised from {JOIN_RADIUS} to {RAISED_RADIUS}, so the \
+         {}-column view is being held in a {}-entry cache",
+        view_columns(RAISED_RADIUS),
+        integrated_capacity_for_view_radius(JOIN_RADIUS),
+    );
+    assert_eq!(
+        observed.regenerated, 0,
+        "capacity {} covers the {}-column raised view, so nothing may be generated \
+         twice; got {} regenerations",
+        integrated_capacity_for_view_radius(RAISED_RADIUS),
+        view_columns(RAISED_RADIUS),
+        observed.regenerated,
+    );
+    assert_eq!(
+        observed.total_generations,
+        view_columns(RAISED_RADIUS) as u64,
+        "the whole session must cost exactly one generation per column of the raised \
+         view"
+    );
+}
+
+/// **The negative control, and it must fail the assertion above.**
+///
+/// Reproduces the pre-#551 behaviour as a real *configuration* of the shipped
+/// type rather than as a temporary neuter: a store whose capacity is fixed at the
+/// join radius's derivation and never moves is exactly
+/// `ChunkStore::with_capacity(source, integrated_capacity_for_view_radius(9))`,
+/// which is [`CapacityPolicy::Fixed`] and therefore ignores
+/// `set_retention_radius` by construction.
+///
+/// It cannot be driven through `IntegratedServer` — every production constructor
+/// derives from a radius, which is issue #505's fix stated as a type signature —
+/// so this arm drives the store directly and reproduces the access *pattern*
+/// instead: the raised view's columns in ring order, twice. That is a weaker rig
+/// than the subject's (it restates the pattern rather than measuring it off the
+/// wire) and it is the right trade for a control, whose only job is to show the
+/// comparison can fail.
+#[test]
+fn a_fixed_capacity_store_cannot_hold_a_raised_view() {
+    let join_capacity = integrated_capacity_for_view_radius(JOIN_RADIUS);
+    let raised = view_columns(RAISED_RADIUS);
+    assert!(
+        raised > join_capacity,
+        "control premise: {raised} columns must exceed the {join_capacity}-entry cache"
+    );
+
+    // Ring order outward from the centre, matching `join_view_rings` — the order
+    // that makes the innermost ring the LRU victim.
+    let mut coords = Vec::with_capacity(raised);
+    for r in 0..=RAISED_RADIUS {
+        for dz in -r..=r {
+            for dx in -r..=r {
+                if dx.abs().max(dz.abs()) == r {
+                    coords.push((dx, dz));
+                }
+            }
+        }
+    }
+    assert_eq!(coords.len(), raised, "the ring walk must cover the whole square");
+
+    let mut generated: HashMap<(i32, i32), u64> = HashMap::new();
+    let mut cache: Vec<(i32, i32)> = Vec::new();
+    for pass in 0..2 {
+        for &coord in &coords {
+            if let Some(at) = cache.iter().position(|&c| c == coord) {
+                // A hit refreshes the entry's recency.
+                let entry = cache.remove(at);
+                cache.push(entry);
+                continue;
+            }
+            *generated.entry(coord).or_insert(0) += 1;
+            cache.push(coord);
+            if cache.len() > join_capacity {
+                cache.remove(0);
+            }
+        }
+        let _ = pass;
+    }
+
+    let regenerated: u64 = generated.values().filter(|&&n| n > 1).count() as u64;
+    assert!(
+        regenerated >= (raised - join_capacity) as u64,
+        "control: a {join_capacity}-entry cache re-scanned over {raised} columns must \
+         regenerate at least {} of them; got {regenerated}. If this is 0 the control \
+         has stopped reproducing the bug and the subject above proves nothing.",
+        raised - join_capacity
+    );
+    // And the *centre* column specifically, which is the whole reason a short
+    // capacity here is worse than it looks: ring order makes the player's own
+    // column the oldest entry by the end of a pass.
+    assert!(
+        generated.get(&(0, 0)).copied().unwrap_or(0) > 1,
+        "control: the centre column (the player's own feet) must be among the \
+         regenerated ones — that is the harm, not the horizon"
+    );
+}
