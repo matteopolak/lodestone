@@ -191,6 +191,21 @@ fn block_state_index() -> &'static BlockStateIndex {
                 span
             })
             .collect();
+        // Licenses `state_id`'s allocation-free property comparison: every
+        // generated set is already sorted by key, so a candidate's static slice
+        // can be compared directly against the caller's sorted `wanted` instead
+        // of being copied into a `Vec` and sorted per candidate row. Keys are
+        // unique within a set, so key order and `(key, value)` tuple order are
+        // the same order. 6,454 sets checked once per process; without this the
+        // comparison would silently compare unequal orderings the day the
+        // generator's output order changed.
+        for (set_index, set) in table::PROPERTY_SETS.iter().enumerate() {
+            assert!(
+                set.windows(2).all(|w| w[0].0 < w[1].0),
+                "generated PROPERTY_SETS[{set_index}] is not strictly sorted by property name \
+                 ({set:?}); `state_id` compares these slices directly and would stop matching"
+            );
+        }
         let mut by_name: Vec<u16> = (0..block_count as u16).collect();
         by_name.sort_unstable_by_key(|&b| table::BLOCK_NAMES[b as usize]);
         BlockStateIndex {
@@ -291,13 +306,16 @@ pub fn state_id(state: &str) -> Option<u32> {
     };
     wanted.sort_unstable();
 
-    let span = block_state_index().spans[block_index(name)? as usize];
+    let index = block_state_index();
+    let span = index.spans[block_index(name)? as usize];
 
-    // Tier 1.
+    // Tier 1. Compares the candidate's *static* slice against `wanted` with no
+    // copy and no per-row sort — licensed by the sortedness assertion in
+    // `block_state_index`, which is why that assertion is not decoration. This
+    // used to `to_vec()` and sort per candidate row: one small allocation per row
+    // scanned, so ~750 per column at `ChunkColumn::from_generated` time.
     for id in span.first..=span.last {
-        let mut have: Vec<(&str, &str)> = properties(id).unwrap_or(&[]).to_vec();
-        have.sort_unstable();
-        if have == wanted {
+        if properties(id).unwrap_or(&[]) == wanted.as_slice() {
             return Some(id);
         }
     }
@@ -323,11 +341,14 @@ pub fn state_id(state: &str) -> Option<u32> {
     if !overridden {
         return Some(base);
     }
+    // `merged` started as a (sorted) static set and only had *values* written
+    // over it, so it is still sorted by key; the sort is kept because it is
+    // free at this point (one call per unresolved state, not per row) and
+    // because it makes the direct slice comparison below true by construction
+    // rather than by an argument about `overridden`.
     merged.sort_unstable();
     for id in span.first..=span.last {
-        let mut have: Vec<(&str, &str)> = properties(id).unwrap_or(&[]).to_vec();
-        have.sort_unstable();
-        if have == merged {
+        if properties(id).unwrap_or(&[]) == merged.as_slice() {
             return Some(id);
         }
     }
