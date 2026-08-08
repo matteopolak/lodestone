@@ -260,10 +260,13 @@ pub enum Screen {
     /// Only the General tab (vanilla's 77 fixed stats) is a real list; Items
     /// and Mobs are present-and-inactive, which is not an approximation —
     /// see [`stats`]'s module docs for why vanilla's own screen would show
-    /// exactly that given the same (zero) data. Every value on every tab
-    /// reads zero: nothing in this workspace decodes the statistics packet,
-    /// so [`stats::StatsSnapshot::default`] is not a placeholder, it is the
-    /// only data that has ever existed here.
+    /// exactly that given the same data.
+    ///
+    /// **The General tab now shows real counters.** `award_stats` is decoded and
+    /// folded into `lodestone_ecs::SessionStatistics`, and `app::session`
+    /// refreshes `MenuNav`'s snapshot from it once per frame. This doc used to
+    /// say every value read zero because nothing decoded the packet; that was
+    /// true and is not any more.
     Statistics,
     /// The Advancements screen (issue #167): vanilla's `AdvancementsScreen`.
     /// Reached from the pause menu's Advancements button

@@ -536,14 +536,16 @@ pub fn frame_for<'a>(
         // Social Interactions (#189) — see `super::social::frame`'s own doc
         // for the singleplayer/multiplayer fork.
         Screen::Social => Some(super::social::frame(nav.social(), ui.kind())),
-        // Statistics (#188) — `StatsSnapshot::default()` is not a
-        // placeholder, it is the only data that has ever existed: see
-        // `super::stats`'s module docs on why nothing decodes the packet
-        // that would populate one yet.
-        Screen::Statistics => Some(super::stats::frame(
-            nav.stats(),
-            &super::stats::StatsSnapshot::default(),
-        )),
+        // Statistics (#188). This used to pass `StatsSnapshot::default()` — a
+        // literal, unconditionally — with a comment explaining that an empty
+        // table was the only data that had ever existed. `award_stats` is
+        // decoded now, so the empty literal became an island: the numbers
+        // arrive in `lodestone_ecs::SessionStatistics` and the screen showed
+        // zeros regardless. `app::session` refreshes `StatsNav`'s own snapshot
+        // once per frame (`MenuNav::refresh_stats`), for the same reason
+        // `Screen::Social` reads its roster off `nav` — this dispatcher cannot
+        // reach the session world.
+        Screen::Statistics => Some(super::stats::frame(nav.stats(), nav.stats_snapshot())),
         // World Creation (issue #190) — see `super::create_world`'s own doc
         // for why this is one flat hand-placed list rather than vanilla's
         // three tabs.

@@ -1143,6 +1143,14 @@ pub struct MenuNav {
     /// The Statistics screen's own scroll cursor (issue #188). No persisted
     /// state of its own — see [`crate::menu::stats::StatsNav`]'s doc.
     stats: crate::menu::stats::StatsNav,
+    /// The counters the Statistics screen draws, refreshed once per frame from
+    /// `lodestone_ecs::SessionStatistics` by `app::session`.
+    ///
+    /// Beside `StatsNav` rather than inside it, because `StatsNav` is `Copy` and a
+    /// sparse counter map is not — and because the *lifetimes* differ: the scroll
+    /// and focus reset when the screen opens, while the counters belong to the
+    /// session. Empty is the honest default outside one.
+    stats_snapshot: crate::menu::stats::StatsSnapshot,
     /// The Advancements screen's selected tab and per-tab scroll (issue #167).
     /// Held here for [`Self::stats`]' reason: `Screen::Advancements` is one screen
     /// however far its tree is panned, and `UiState` models legal screen edges
@@ -1282,6 +1290,7 @@ impl MenuNav {
             settings: crate::menu::options::SettingsNav::new(),
             social: crate::menu::social::SocialNav::with_path(hidden_players_path),
             stats: crate::menu::stats::StatsNav::default(),
+            stats_snapshot: crate::menu::stats::StatsSnapshot::default(),
             advancements: crate::menu::advancements::AdvancementsState::default(),
             create_world: crate::menu::create_world::CreateWorldNav::new(),
             // A placeholder: nothing reads it until `Screen::Confirm` is
@@ -1499,6 +1508,25 @@ impl MenuNav {
     /// everything else is either persisted or pure.
     pub fn refresh_social(&mut self, entries: Vec<crate::menu::social::SocialEntry>) {
         self.social.refresh(entries);
+    }
+
+    /// Replaces the counters the Statistics screen shows — the same shape, and
+    /// for the same reason, as [`Self::refresh_social`] above: `menu::render`'s
+    /// dispatcher cannot reach the session world, so the live data is pushed in
+    /// from `app::session`'s per-frame reconciliation.
+    ///
+    /// Before this the screen drew `StatsSnapshot::default()` unconditionally and
+    /// so showed zeros forever, which was correct while nothing decoded
+    /// `award_stats` and became an island the moment something did.
+    pub fn refresh_stats(&mut self, snapshot: crate::menu::stats::StatsSnapshot) {
+        self.stats_snapshot = snapshot;
+    }
+
+    /// The counters the Statistics screen should draw. See
+    /// [`Self::refresh_stats`].
+    #[must_use]
+    pub fn stats_snapshot(&self) -> &crate::menu::stats::StatsSnapshot {
+        &self.stats_snapshot
     }
 
     /// The Statistics screen's own state (issue #188).

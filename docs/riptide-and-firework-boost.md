@@ -130,23 +130,25 @@ the wet gate is a gate, not a decoration on the impulse.
   predicate. It fails toward *allowing* a riptide under a roof, costing one
   corrective teleport in that case. Refusing in the open — where riptide is
   actually used — would make the feature unreachable, which is the worse error.
-- **`riptide_level` compares a hardcoded registry id.** `ItemEnchantment` carries
-  the session-scoped `minecraft:enchantment` registry id, not a name, and nothing
-  in this client surfaces that registry: the id → name table *is* decoded (the
-  v770 adapter's `ClientRegistries::entry_names`) but is never emitted as a
-  `ClientEvent`. So the id is derived the one way the wire allows — dynamic
-  registries arrive **sorted by resource location** (measured on the creative
-  oracle for `dimension_type`, see `crates/protocol/v770/src/packets/registry.rs`),
-  and `riptide` is the 33rd of 26.2's 43 built-in enchantments alphabetically,
-  holder id **32**.
+- ~~**`riptide_level` compares a hardcoded registry id.**~~ **Fixed.** This entry
+  used to describe a derived index: `ItemEnchantment` carries the session-scoped
+  `minecraft:enchantment` registry id rather than a name, the id → name table was
+  decoded by the v770 adapter's `ClientRegistries::entry_names` and never emitted,
+  so the id was derived from alphabetical position (`riptide` is the 33rd of 26.2's
+  43 built-in enchantments — holder id **32**). A data pack that added or removed
+  an enchantment sorting before `riptide` shifted every id, and this then read some
+  *other* enchantment's level, failing toward launching on the **wrong** trident.
 
-  A data pack that adds or removes an enchantment sorting before `riptide` shifts
-  every id, and this would then read some other enchantment's level — failing
-  toward launching on the *wrong* trident. **The fix is a protocol change, not a
-  change here**: emit `ClientEvent::EnchantmentRegistryNames { names }` at Login
-  from `registries.entry_names("minecraft:enchantment")`, exactly as
-  `BiomeRegistryNames` already does, then match on `"minecraft:riptide"` and
-  delete the constant.
+  The predicted fix is exactly what landed: `ClientEvent::EnchantmentRegistryNames`
+  is emitted at Login and folded into `lodestone_ecs::SessionRegistryOrder`, and
+  `Sim::riptide_enchantment_id` asks it for `"minecraft:riptide"`.
+
+  **The constant is still there, deliberately.** The table is empty until the
+  server sends it, so a pre-`Login` call needs a fallback — and the *emptiness*
+  check is what makes the fallback safe: `RegistryOrder::enchantment_id` returns
+  `None` both for "no table yet" and for "this server has no riptide", and only
+  the first should fall back. Collapsing them would resolve id 32 — some
+  arbitrary other enchantment — on a server whose registry genuinely lacks it.
 
 #### Elytra firework boost: the use edge
 

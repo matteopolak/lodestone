@@ -1219,6 +1219,29 @@ impl Sim {
         })
     }
 
+    /// The local player's statistics counters, as `award_stats` last reported
+    /// them.
+    ///
+    /// Cloned for [`Self::advancements`]' reason: handing out a reference hands
+    /// out a live read guard. The map is sparse and holds only what the server has
+    /// actually awarded, and the one caller
+    /// (`app::session`'s reconciliation, which projects it onto
+    /// `crate::menu::stats::StatsSnapshot`) is gated on being in a session — the
+    /// same shape and the same cost as the `tab_list()` clone the Social
+    /// Interactions roster takes every frame.
+    ///
+    /// This exists because the Statistics screen drew `StatsSnapshot::default()`
+    /// unconditionally: the decode landed and nothing read it.
+    #[must_use]
+    pub fn statistics(&self) -> lodestone_game::progress::Statistics {
+        self.read(|w| {
+            w.get::<lodestone_ecs::session::SessionStatistics>(self.local)
+                .expect("the local player always carries SessionStatistics")
+                .0
+                .clone()
+        })
+    }
+
     /// Every filled map the server has sent contents for, as `MAP_ITEM_DATA`
     /// last reported them (issue #184).
     ///

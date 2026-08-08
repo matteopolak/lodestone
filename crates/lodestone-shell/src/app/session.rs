@@ -187,6 +187,21 @@ impl WindowApp {
             let entries =
                 crate::menu::social::entries_from_tablist(&tab_list, self.sim.local_uuid());
             self.nav.refresh_social(entries);
+
+            // The Statistics screen (#188), for exactly the same reason and in
+            // exactly the same shape. `award_stats` is decoded and folded into
+            // `lodestone_ecs::SessionStatistics`, and `menu::render::dispatch`
+            // passed `StatsSnapshot::default()` — a literal — into the frame, so
+            // every counter read zero no matter what the server sent. This is the
+            // read that was missing.
+            //
+            // Every frame rather than only while the screen is open, matching the
+            // roster above: the projection walks the screen's fixed 77 ids against
+            // a sparse map, and refreshing only-while-open would show one stale
+            // frame on open.
+            let stats = self.sim.statistics();
+            self.nav
+                .refresh_stats(crate::menu::stats::StatsSnapshot::from_statistics(&stats));
         }
     }
 

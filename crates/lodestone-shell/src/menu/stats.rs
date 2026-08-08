@@ -18,25 +18,34 @@
 //! screen would show given the same (zero) underlying data, not an
 //! approximation of it.
 //!
-//! ## Why every value is zero
+//! ## Where the numbers come from — **this section used to say they were all zero**
 //!
-//! **Nothing in this workspace decodes the `award_stats`/statistics packet.**
-//! `/usr/bin/grep -rln 'award_stats\|AwardStats\|ClientboundAwardStatsPacket'`
-//! over `crates/` finds nothing, and `cargo xtask connectedness` names no stat
-//! packet either — confirmed rather than assumed, since decoding it is
-//! `crates/protocol/*` work, out of this batch's file ownership (see the
-//! issue's own scope note: "decode... if not already reachable"). So
-//! [`StatsSnapshot::default`] — an empty table, [`StatsSnapshot::get`]
-//! returning `0` for everything — is not a placeholder standing in for real
-//! data; it is *the* data, because nothing has ever populated anything else.
+//! It was true when written: nothing decoded `award_stats`, so
+//! `StatsSnapshot::default()` was not a placeholder standing in for real data,
+//! it was *the* data. That changed, and the moment it did the empty literal
+//! `menu::render::dispatch` passed in became an island — the counters arrived in
+//! `lodestone_ecs::SessionStatistics` and this screen kept drawing zeros.
 //!
-//! This is a different situation from a settings row showing a fabricated
-//! "ON" for a feature that does not work (`docs/settings-screen.md`'s
-//! departure 1): a stat reading zero is the **true** state of "nothing has
-//! been decoded yet", the same way a freshly created vanilla world's own
-//! Statistics screen reads zero for everything a player has not yet done.
-//! Nothing here claims a stat is being tracked that is not — it is simply
-//! that *no* stat is tracked yet, uniformly and honestly.
+//! The live path now:
+//!
+//! ```text
+//! award_stats -> lodestone_game::progress::Statistics (SessionStatistics)
+//!   -> Sim::statistics()
+//!   -> StatsSnapshot::from_statistics        -- projection onto GENERAL_STATS
+//!   -> MenuNav::refresh_stats                -- app::session, once per frame
+//!   -> dispatch: stats::frame(nav.stats(), nav.stats_snapshot())
+//! ```
+//!
+//! An empty table is still the correct state *outside* a session, and still the
+//! correct state for a fresh world where nothing has happened yet — a stat
+//! reading zero is honest in a way a settings row showing a fabricated "ON" is
+//! not (`docs/settings-screen.md`'s departure 1). What is no longer true is that
+//! zero is the *only* state reachable.
+//!
+//! **The Items and Mobs tabs are still present-and-inactive**, and that part is
+//! unchanged: they need per-block and per-entity id tables this screen's flat
+//! 77-row model does not have, so a `minecraft:mined` counter is deliberately
+//! dropped by the projection rather than squeezed onto a General row.
 //!
 //! Consequently Items and Mobs are always empty too: both are filtered to
 //! non-zero counts (`ItemStatisticsList`'s own constructor loop, `:0` skips
@@ -276,11 +285,24 @@ pub static GENERAL_STATS: &[(&str, &str, StatFormat)] = &[
     ("interact_with_smithing_table", "Interactions with Smithing Table", StatFormat::Default),
 ];
 
-/// The live values behind [`GENERAL_STATS`]. Always empty in production
-/// today — see the module docs on why that is correct rather than a
-/// placeholder. A sparse map (not a `[i32; 77]`) so a future decoder can
-/// populate only the ids it has actually seen, exactly mirroring vanilla's
-/// own `StatsCounter`, which is sparse for the same reason.
+/// The statistic category every id in [`GENERAL_STATS`] lives in.
+///
+/// Vanilla's General tab is `Stats.CUSTOM` — a `StatType` whose registry is
+/// `minecraft:custom_stat` — so `"sleep_in_bed"` on the screen is the wire's
+/// `StatKey { category: "minecraft:custom", value: "minecraft:sleep_in_bed" }`.
+/// The category id is the **stat type's** registry name, not the tab's.
+const CUSTOM_STAT_CATEGORY: &str = "minecraft:custom";
+
+/// The live values behind [`GENERAL_STATS`]. A sparse map (not a `[i32; 77]`)
+/// so only the ids the server has actually awarded are stored, exactly
+/// mirroring vanilla's own `StatsCounter`, which is sparse for the same reason.
+///
+/// **This is no longer always empty.** `award_stats` is decoded and folded into
+/// `lodestone_ecs::SessionStatistics`, and
+/// [`from_statistics`](Self::from_statistics) is the projection onto this
+/// screen's fixed 77 ids; `app::session`'s per-frame reconciliation pushes it in
+/// through `MenuNav::refresh_stats`. The module docs above describe the state
+/// before that and are corrected there.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StatsSnapshot {
     values: std::collections::HashMap<&'static str, i32>,
@@ -292,8 +314,48 @@ impl StatsSnapshot {
         self.values.get(id).copied().unwrap_or(0)
     }
 
-    /// Test/oracle-only setter — no production code path writes into this
-    /// yet (see the module docs).
+    /// Project a folded [`lodestone_game::progress::Statistics`] onto this
+    /// screen's fixed id list.
+    ///
+    /// Driven by [`GENERAL_STATS`] rather than by the store's own keys, for two
+    /// reasons. The screen can only display these 77 ids, so a mined-block or
+    /// mob-kill counter has nowhere to go (they are the Items and Mobs tabs,
+    /// which are present-and-inactive). And the map's keys are `&'static str`,
+    /// so they must come from the table, not from a server-supplied string.
+    ///
+    /// Absent stays absent rather than being stored as `0`: [`Self::get`]
+    /// already reads a missing id as zero, and storing zeros would make
+    /// "awarded, and the value is 0" indistinguishable from "never awarded" for
+    /// any future consumer.
+    #[must_use]
+    pub fn from_statistics(stats: &lodestone_game::progress::Statistics) -> Self {
+        use std::str::FromStr as _;
+
+        let mut values = std::collections::HashMap::new();
+        // Parsed once: an invalid category would make every lookup miss, and
+        // that would look exactly like "the server awarded nothing".
+        let Ok(category) = lodestone_model::Identifier::from_str(CUSTOM_STAT_CATEGORY) else {
+            return Self::default();
+        };
+        for &(id, _, _) in GENERAL_STATS {
+            // Every id in the table is a bare path; `Identifier`'s parse
+            // defaults the namespace to `minecraft`, so it is not restated.
+            let Ok(value_id) = lodestone_model::Identifier::from_str(id) else {
+                continue;
+            };
+            let value = stats.get(&lodestone_game::progress::StatKey::new(
+                category.clone(),
+                value_id,
+            ));
+            if value != 0 {
+                values.insert(id, value);
+            }
+        }
+        Self { values }
+    }
+
+    /// Test/oracle-only setter. Production writes go through
+    /// [`from_statistics`](Self::from_statistics).
     #[cfg(test)]
     fn set(&mut self, id: &'static str, value: i32) {
         self.values.insert(id, value);
@@ -699,6 +761,57 @@ mod tests {
         let rows = general_rows(&snapshot);
         let jump_row = rows.iter().find(|(c, _)| *c == "Jumps").unwrap();
         assert_eq!(jump_row.1, "42");
+    }
+
+    /// The projection off the real folded store, which is what the screen now
+    /// draws from. The load-bearing part is the **key shape**: the screen's ids
+    /// are bare paths, and the wire key is
+    /// `minecraft:custom` / `minecraft:<path>`. Writing the category as the *tab*
+    /// name, or leaving the value's namespace off, misses every lookup — and a
+    /// total miss is indistinguishable from "the server awarded nothing", which
+    /// is exactly the state this screen was stuck in before.
+    #[test]
+    fn the_projection_reads_the_custom_category_and_the_namespaced_value() {
+        use lodestone_game::progress::{StatKey, Statistics};
+        use std::str::FromStr as _;
+
+        let key = |ns: &str, path: &str| {
+            StatKey::new(
+                lodestone_model::Identifier::from_str(ns).unwrap(),
+                lodestone_model::Identifier::from_str(path).unwrap(),
+            )
+        };
+
+        let mut stats = Statistics::new();
+        stats.set(key("minecraft:custom", "minecraft:jump"), 42);
+        // A stat outside the General tab's 77 — a mined block — which must be
+        // ignored rather than mis-projected onto some row.
+        stats.set(key("minecraft:mined", "minecraft:stone"), 999);
+
+        let snapshot = StatsSnapshot::from_statistics(&stats);
+        assert_eq!(snapshot.get("jump"), 42);
+        let rows = general_rows(&snapshot);
+        assert_eq!(rows.iter().find(|(c, _)| *c == "Jumps").unwrap().1, "42");
+        // …and nothing else moved off zero, so the `minecraft:mined` entry did
+        // not leak into a row.
+        let non_zero: Vec<&str> = GENERAL_STATS
+            .iter()
+            .filter(|&&(id, _, _)| snapshot.get(id) != 0)
+            .map(|&(id, _, _)| id)
+            .collect();
+        assert_eq!(non_zero, vec!["jump"]);
+
+        // The wrong-hypothesis control: the plausible key shapes both miss, so
+        // the assertion above is measuring the key and not just "any lookup".
+        let mut wrong = Statistics::new();
+        wrong.set(key("minecraft:custom", "minecraft:jump"), 0);
+        wrong.set(key("minecraft:general", "minecraft:jump"), 42);
+        wrong.set(key("minecraft:custom", "minecraft:jumps"), 42);
+        assert_eq!(
+            StatsSnapshot::from_statistics(&wrong).get("jump"),
+            0,
+            "a wrong category or a wrong value path must not resolve"
+        );
     }
 
     // -- the frame --------------------------------------------------------
