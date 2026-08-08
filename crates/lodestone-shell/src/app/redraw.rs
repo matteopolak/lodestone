@@ -903,18 +903,22 @@ impl WindowApp {
                 // this — is fed `AnimInput::REST` forever and the avatar is a
                 // mannequin.
                 //
-                // **`limb_swing`/`limb_swing_amount` are still `REST`**, and the
-                // reason is a crate boundary, not an oversight: the walk state
-                // lives on `Sim::body_pose`, a private field whose only public
-                // reader is `sim/camera.rs::third_person_body_state`, which
-                // returns `None` in first person — the only camera mode the
-                // inventory screen is ever open in. `hand_swing_progress` and
-                // `tick_count` are the two pose inputs `Sim` does publish.
-                .with_avatar_pose(lodestone_render::AnimInput {
-                    attack_anim: self.sim.hand_swing_progress(),
-                    age_ticks: self.sim.tick_count() as f32,
-                    ..lodestone_render::AnimInput::REST
-                })
+                // **The walk cycle now arrives too.** This used to be a two-field
+                // literal over `AnimInput::REST` with a note that
+                // `limb_swing`/`limb_swing_amount` were unreachable: the walk state
+                // lives on `Sim::body_pose`, whose only public reader was
+                // `third_person_body_state`, and that returns `None` in first
+                // person — the only camera mode the inventory screen is ever open
+                // in. The obstacle was that early return, not the private field, so
+                // `Sim::local_body_anim` is the same construction without it, and
+                // the avatar now walks, crouches and pitches its head exactly as
+                // the third-person body does.
+                //
+                // `hand_swing_progress`/`tick_count` are gone from here on purpose:
+                // `local_body_anim` reads `attack_anim` and `age_ticks` off the
+                // *same* `body_pose.render(partial_tick)` call as the limb swing, so
+                // the swing and the walk cannot drift by a frame.
+                .with_avatar_pose(self.sim.local_body_anim())
                 // The anvil's XP cost and the enchanting table's three level
                 // costs (`docs/container-cost-screens.md`'s "What is not yet
                 // wired" gap). `&[]` on the player-inventory screen (no

@@ -482,6 +482,31 @@ impl Sim {
     ///   inventory index `40`; the armour slots are native indices
     ///   `39/38/37/36` for head/chest/legs/feet (`lodestone_game::menu`'s own
     ///   table, `Menu::player`).
+    /// The local player's own animation state for this frame — the walk cycle,
+    /// the arm swing, the head pitch, the crouch — with **no camera-mode gate**.
+    ///
+    /// [`Self::third_person_body_state`] is this plus placement and equipment, and
+    /// its `None`-in-first-person early return is a *drawing* decision: the body
+    /// must not be drawn when the camera is inside its head. The pose itself is
+    /// camera-independent, and one consumer needs it precisely when the camera is
+    /// first-person — the **inventory avatar**, which is only ever opened in first
+    /// person. That is the whole reason this exists as its own method: the
+    /// obstacle was never access to `Sim`'s private `body_pose`, it was that early
+    /// return.
+    ///
+    /// Fed to `ContainerFrame::with_avatar_pose` → `gui_entity_anim`'s `base` in
+    /// `app/redraw.rs`; see `docs/inventory-player-preview.md`.
+    ///
+    /// **`attack_anim` here is a phase, not a fraction.** `1.0` is the rest pose
+    /// again, because `HumanoidModel.setupAttackAnimation` drives it through sines
+    /// and `sin(π) == 0` — so a consumer that substitutes `1.0` for "fully
+    /// swung" measures no movement at all and reads as unwired.
+    #[must_use]
+    pub fn local_body_anim(&self) -> AnimInput {
+        let partial_tick = self.clock().interp_alpha;
+        self.body_anim(&self.interpolated_player(), &self.body_pose.render(partial_tick))
+    }
+
     #[must_use]
     pub fn third_person_body_state(&self) -> Option<ThirdPersonBodyState> {
         // `isFirstPerson()`, so the body draws in **both** detached modes. This
@@ -539,54 +564,68 @@ impl Sim {
         Some(ThirdPersonBodyState {
             feet,
             body_yaw_deg: interp.yaw,
-            anim: AnimInput {
-                head_yaw_deg: 0.0,
-                head_pitch_deg: interp.pitch,
-                limb_swing: walk.limb_swing,
-                limb_swing_amount: walk.limb_swing_amount,
-                // The self-avatar's *body* half of the swing:
-                // `HumanoidModel.setupAttackAnimation`, via
-                // `lodestone_render::entity_anim::Skeleton::pose`. The same scalar
-                // the first-person arm pass polls through
-                // `Sim::hand_swing_progress`, but a completely different pose
-                // function — see `ThirdPersonBodyState`'s docs on why the two must
-                // never share one.
-                //
-                // `walk.attack_anim` rather than `self.hand_swing_progress()`: both
-                // are `body_pose.attack_anim_lerp(partial_tick)`, and this one is
-                // already in hand from the `render` call above at the *same*
-                // partial tick, so the arm and the body cannot drift by a frame.
-                attack_anim: walk.attack_anim,
-                age_ticks: walk.age,
-                aggressive: false,
-                // **Not wired for the local player yet (issue #57).** Remote
-                // entities get their bow/crossbow pose from
-                // `entities::arm_pose_for`, driven by the `ItemUse` component that
-                // `ingest::apply_entity_item_use` folds off the living-flags byte.
-                // The local player cannot use that path: it has no `EntityKind`/
-                // `Position`/`Rotation`/`HeadYaw` (deliberately — that absence is
-                // what keeps a self-model off `ClientHandle::entities()`), so
-                // `entity_view()`'s early `?` returns before the flags are read,
-                // exactly as it does for `Vitals::on_fire`. Reaching it needs a
-                // session-scoped fold and a `PlayerSnapshot` field, the same shape
-                // `apply_local_player_on_fire` has. Left explicit rather than
-                // spread with `..AnimInput::REST` so the gap is visible here.
-                arm_pose: lodestone_render::ArmPose::Empty,
-                arm_pose_left_hand: false,
-                // `Entity.isCrouching()` is `hasPose(Pose.CROUCHING)` — the
-                // *pose*, not the shift-key flag (`Entity.java:2711-2713`), and
-                // the two genuinely differ: holding shift in a one-block gap
-                // leaves you shift-key-down and `SWIMMING`. For the local player
-                // the pose is already authoritative and already fit-gated —
-                // `lodestone_physics::pose::update_player_pose` writes
-                // `PlayerState::pose` as the tail of every tick — so this reads
-                // it directly rather than re-deriving a crouch from input.
-                crouching: interp.pose == lodestone_physics::pose::Pose::Crouching,
-            },
+            anim: self.body_anim(&interp, &walk),
             scale: 1.0,
             slim: false,
             equipment,
         })
+    }
+
+    /// The `AnimInput` half of [`Self::third_person_body_state`], taking the two
+    /// values that caller already has in hand so nothing is interpolated twice at
+    /// a different partial tick.
+    ///
+    /// Split out for [`Self::local_body_anim`] — see its doc for why.
+    #[must_use]
+    fn body_anim(
+        &self,
+        interp: &PlayerState,
+        walk: &lodestone_entity::pose::RenderPose,
+    ) -> AnimInput {
+        AnimInput {
+            head_yaw_deg: 0.0,
+            head_pitch_deg: interp.pitch,
+            limb_swing: walk.limb_swing,
+            limb_swing_amount: walk.limb_swing_amount,
+            // The self-avatar's *body* half of the swing:
+            // `HumanoidModel.setupAttackAnimation`, via
+            // `lodestone_render::entity_anim::Skeleton::pose`. The same scalar
+            // the first-person arm pass polls through
+            // `Sim::hand_swing_progress`, but a completely different pose
+            // function — see `ThirdPersonBodyState`'s docs on why the two must
+            // never share one.
+            //
+            // `walk.attack_anim` rather than `self.hand_swing_progress()`: both
+            // are `body_pose.attack_anim_lerp(partial_tick)`, and this one is
+            // already in hand from the `render` call above at the *same*
+            // partial tick, so the arm and the body cannot drift by a frame.
+            attack_anim: walk.attack_anim,
+            age_ticks: walk.age,
+            aggressive: false,
+            // **Not wired for the local player yet (issue #57).** Remote
+            // entities get their bow/crossbow pose from
+            // `entities::arm_pose_for`, driven by the `ItemUse` component that
+            // `ingest::apply_entity_item_use` folds off the living-flags byte.
+            // The local player cannot use that path: it has no `EntityKind`/
+            // `Position`/`Rotation`/`HeadYaw` (deliberately — that absence is
+            // what keeps a self-model off `ClientHandle::entities()`), so
+            // `entity_view()`'s early `?` returns before the flags are read,
+            // exactly as it does for `Vitals::on_fire`. Reaching it needs a
+            // session-scoped fold and a `PlayerSnapshot` field, the same shape
+            // `apply_local_player_on_fire` has. Left explicit rather than
+            // spread with `..AnimInput::REST` so the gap is visible here.
+            arm_pose: lodestone_render::ArmPose::Empty,
+            arm_pose_left_hand: false,
+            // `Entity.isCrouching()` is `hasPose(Pose.CROUCHING)` — the
+            // *pose*, not the shift-key flag (`Entity.java:2711-2713`), and
+            // the two genuinely differ: holding shift in a one-block gap
+            // leaves you shift-key-down and `SWIMMING`. For the local player
+            // the pose is already authoritative and already fit-gated —
+            // `lodestone_physics::pose::update_player_pose` writes
+            // `PlayerState::pose` as the tail of every tick — so this reads
+            // it directly rather than re-deriving a crouch from input.
+            crouching: interp.pose == lodestone_physics::pose::Pose::Crouching,
+        }
     }
 }
 
