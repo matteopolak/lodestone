@@ -1419,20 +1419,17 @@ fn section_has_randomly_ticking_block(
     section_min_y: i32,
     mask: &[bool],
 ) -> bool {
-    let max_y = (section_min_y + 16).min(column.min_y + column.height);
-    let blocks = column.raw_blocks();
-    for y in section_min_y..max_y {
-        // `blocks[(y_local * 16 + z) * 16 + x]`, so one y-row is the 256
-        // contiguous entries at `y_local * 256`.
-        let base = (y - column.min_y) as usize * 256;
-        let Some(row) = blocks.get(base..base + 256) else {
-            continue;
-        };
-        if row.iter().any(|&id| mask[id as usize]) {
-            return true;
-        }
+    // Section-indexed rather than y-row-indexed since issue #551 packed the grid
+    // per section (`crate::chunk_blocks`): `section_min_y` is a section boundary by
+    // construction at every call site, so this is the same 4,096 cells the y-row
+    // walk covered, reached through the accessor that now exists.
+    let y_local = section_min_y - column.min_y;
+    if y_local < 0 || y_local >= column.height {
+        return false;
     }
-    false
+    let mut cells = Vec::with_capacity(4096);
+    column.append_section_cells(y_local as usize / 16, &mut cells);
+    cells.iter().any(|&id| mask[id as usize])
 }
 
 #[cfg(test)]

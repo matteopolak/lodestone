@@ -7,7 +7,8 @@
 //! # Why the recount here is hand-written
 //!
 //! Every expected value below is produced by code in *this file*, written
-//! against `ChunkColumn`'s two raw accessors (`raw_blocks`/`raw_palette`) and
+//! against `ChunkColumn`'s two raw accessors
+//! (`append_section_cells`/`raw_palette`) and
 //! the public `is_randomly_ticking` predicate — deliberately **not** by calling
 //! `random_tick`'s own scan helpers. A shared bookkeeping bug cannot then pass
 //! both arms. The predicate itself *is* shared, disclosed: it is the spec's
@@ -15,10 +16,13 @@
 //! bookkeeping, not the classification.
 //!
 //! The cell layout the recount walks is restated from
-//! `ChunkColumn::raw_blocks`'s own documented formula
-//! (`blocks[(y_local * 16 + z) * 16 + x]`) rather than reusing production's
-//! flattened `cell / 4096` shortcut, so an arithmetic slip in production's
-//! section indexing shows up here as a disagreement instead of being copied.
+//! `ChunkColumn::append_section_cells`'s own documented formula
+//! (`(y_in_section * 16 + z) * 16 + x`) rather than reusing production's own
+//! section walk, so an arithmetic slip in production's section indexing shows up
+//! here as a disagreement instead of being copied. It also reads the sections
+//! back in a **separate** loop from production's, which matters more since issue
+//! #551: the grid is now bit-packed per section, so a packing bug that dropped or
+//! shifted cells would show up here as a counter disagreement too.
 //!
 //! # The three controls, and what each proves
 //!
@@ -68,15 +72,27 @@ fn recount_sections(column: &ChunkColumn) -> Vec<u32> {
         .iter()
         .map(|state| is_randomly_ticking(state))
         .collect();
-    let blocks = column.raw_blocks();
     let sections = (column.height as usize).div_ceil(SECTION_ROWS as usize);
+    assert_eq!(
+        column.section_count(),
+        sections,
+        "the recount's own section arithmetic must agree with the column's, or every \
+         count below is indexed into the wrong slot"
+    );
     let mut counts = vec![0u32; sections];
-    for y_local in 0..column.height {
-        for z in 0..16i32 {
-            for x in 0..16i32 {
-                let cell = ((y_local * 16 + z) * 16 + x) as usize;
-                if ticking[blocks[cell] as usize] {
-                    counts[(y_local / SECTION_ROWS) as usize] += 1;
+    for s in 0..sections {
+        let mut cells = Vec::new();
+        column.append_section_cells(s, &mut cells);
+        // Indexed by the documented formula rather than iterated, so a
+        // transposition inside `append_section_cells` is visible here.
+        let rows = (column.height as usize - s * SECTION_ROWS as usize).min(SECTION_ROWS as usize);
+        for y in 0..rows {
+            for z in 0..16usize {
+                for x in 0..16usize {
+                    let cell = (y * 16 + z) * 16 + x;
+                    if ticking[cells[cell] as usize] {
+                        counts[s] += 1;
+                    }
                 }
             }
         }

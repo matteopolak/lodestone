@@ -98,26 +98,21 @@
 //!
 //! # The memory this costs, and how to change it
 //!
-//! `ChunkColumn` is a dense `Vec<u16>` over full world height
-//! (`crate::chunk`), i.e. `16 × 384 × 16 × 2 B` ≈ **192 KiB** per column —
-//! free today precisely *because* nothing retained it. Retention turns that
-//! into real resident memory, which is
+//! Retention turns a column's representation into real resident memory, which is
 //! `docs/plans/chunk-lifecycle.md`'s top risk and the reason this type is
 //! bounded rather than a plain `HashMap`.
 //!
 //! **Measured, not assumed** (the plan's U2 question, answered here because
 //! this is the unit that creates the cost). `/usr/bin/time -l` on the release
-//! test binary, one arm per configuration:
+//! lib-test binary, one arm per configuration, `measure_rss_without_retention`
+//! the shared control.
 //!
-//! | arm | peak RSS |
-//! |---|---|
-//! | 512 columns retained | 105.4 MiB |
-//! | same 512 touched, retention off | 7.8 MiB |
-//! | **delta** | **97.6 MiB**, i.e. 195.5 KiB per column |
+//! ## Before issue #551: a dense `Vec<u16>` over full world height
 //!
-//! Re-read while sizing issue #505's cap, with a third arm at [`MAX_CAPACITY`]
-//! (`measure_rss_at_the_capacity_cap`) so the ceiling rests on a measurement
-//! rather than on a 2.5× extrapolation of the rate above:
+//! `16 × 384 × 16 × 2 B` = **192 KiB** per column, unconditionally — a column of
+//! solid stone and a column of pure air cost the same. Three arms, the third at
+//! [`MAX_CAPACITY`] so the ceiling rested on a measurement rather than on a 2.5×
+//! extrapolation:
 //!
 //! | arm | peak RSS | delta | per column |
 //! |---|---|---|---|
@@ -125,19 +120,43 @@
 //! | 512 retained | 105.4 MiB | 97.4 MiB | 194.8 KiB |
 //! | **1,275 retained** ([`MAX_CAPACITY`]) | **250.1 MiB** | **242.0 MiB** | 194.4 KiB |
 //!
-//! The 512 row reproduces the original to 0.2 MiB, and the rate is flat across
-//! the 2.5× range, so residency is linear in the retained count.
+//! ## After issue #551: bit-packed per section (`crate::chunk_blocks`)
 //!
-//! The delta lands within 2% of the 192 KiB arithmetic, the remainder being the
-//! palette and biome `String`s and the map itself. The two arms are also each
-//! other's control: a delta near zero would mean the columns were dropped in
-//! both arms, or that the pages were never faulted in, and the run would be a
-//! failure to measure rather than evidence that residency is free. See
-//! `touched_column`, which exists because `alloc_zeroed` pages that are never
-//! written do not show up in RSS.
+//! Same three arms, same command, same box:
 //!
-//! [`capacity_for_view_radius`] is the knob, and 97.6 MiB is what it buys at the
-//! default render distance. Lowering it to 128 (~24 MiB) **still fixes the
+//! | arm | peak RSS | delta | per column |
+//! |---|---|---|---|
+//! | retention off (the shared control) | 8.4 MiB | — | — |
+//! | 512 retained | 24.0 MiB | 15.5 MiB | **31.1 KiB** |
+//! | **1,275 retained** ([`MAX_CAPACITY`]) | **47.3 MiB** | **38.9 MiB** | **31.2 KiB** |
+//!
+//! **195.5 KiB → 31.1 KiB per retained column, a 6.3× cut**, and the rate is
+//! again flat across the 2.5× range (31.1 vs 31.2), so residency stays linear in
+//! the retained count. Of the 31.1 KiB, `ChunkColumn::blocks_heap_bytes` accounts
+//! for ~24 KiB and the rest is the palette `String`s, the 3-D biome grid (~3 KiB,
+//! issue #512 — now the *second* largest term and the next thing to look at) and
+//! the map entry.
+//!
+//! ## Comparing the two tables is sound, and it is worth saying why
+//!
+//! `touched_column` had to change: its old 48-writes-per-column shape faulted
+//! every page of a contiguous 192 KiB allocation but packs to ~12 KiB under the
+//! new representation, which would have reported a saving no real column gets (see
+//! that function's own doc — it is a worked example of CLAUDE.md's *world* species
+//! of vacuous test). The two tables are nonetheless directly comparable **because
+//! the old representation's cost was independent of a column's content**: 192 KiB
+//! was `vec![0u16; 16 * 16 * height]` whatever went in it, so the 194.8 KiB row is
+//! valid for the new fixture too. The new fixture is calibrated against four
+//! *real* generated columns (mean 24,112 packed bytes), so the after-table is not
+//! flattered by its input either.
+//!
+//! The two arms of each table are also each other's control: a delta near zero
+//! would mean the columns were dropped in both arms, or that the pages were never
+//! faulted in, and the run would be a failure to measure rather than evidence that
+//! residency is free.
+//!
+//! [`capacity_for_view_radius`] is the knob, and 15.5 MiB is what it buys at the
+//! default render distance. Lowering it to 128 (~4 MiB) **still fixes the
 //! originally reported bug completely** — the starvation fix needs only the
 //! 49-column `tick_area` resident, and everything beyond that is avoided
 //! *re*-generation as a player walks back over ground they have seen. 512 was
@@ -167,8 +186,10 @@
 //! # Two policies, because the ceiling is a question about whose memory it is
 //!
 //! The ceiling is **not** applied to singleplayer. `render_distance` 32 sizes the
-//! store at 4,539 columns, i.e. **867 MiB** at the 195.5 KiB per column measured
-//! above — large, but it is the memory of the person who moved the slider, and
+//! store at 4,539 columns, i.e. **139.2 MiB — measured directly** by
+//! `measure_rss_at_the_singleplayer_slider_maximum` rather than extrapolated (it
+//! was 867 MiB before issue #551) — the memory of the person who moved the
+//! slider, and
 //! truncating the cache under a view they are already being streamed only buys
 //! them re-generation of the ground under their feet (see
 //! [`integrated_capacity_for_view_radius`] for why *innermost* rings are what a
@@ -180,17 +201,22 @@
 //! | singleplayer (`open_in_memory*`) | `ChunkStore::for_integrated_view_radius` | uncapped, floored at [`DEFAULT_CAPACITY`] |
 //! | open-to-LAN (`IntegratedServer::bind`) | `ChunkStore::for_view_radius` | capped at [`MAX_CAPACITY`] |
 //!
-//! To reduce the cost rather than the count, the prior art is
-//! `lodestone-world`'s `PalettedContainer` over `PackedArray` plus
-//! `Arc<ChunkSection>` copy-on-write sections — that is unit **U8** of the
-//! plan, deliberately gated on a *measurement* rather than on the arithmetic
-//! above.
+//! **Reducing the cost rather than the count is done** — unit **U8** of the plan,
+//! issue #551, `crate::chunk_blocks`, and the after-table above is the measurement
+//! it was gated on. What U8 still leaves on the table is `Arc<ChunkSection>`
+//! copy-on-write sharing between the store and the wire encoder; the remaining
+//! per-column terms are now the biome grid (~3 KiB) and the palette `String`s
+//! rather than the block grid.
 //!
 //! # The clone this keeps, deliberately
 //!
 //! [`ChunkSource::column`] returns a `ChunkColumn` **by value**, so a store
-//! read is a ~192 KiB `memcpy` (measured in the gate below, tens of
-//! microseconds) rather than a refcount bump. Handing back
+//! read is a deep copy (measured in the gate below, tens of microseconds) rather
+//! than a refcount bump. Since issue #551 it copies ~24 KiB of packed sections
+//! instead of a flat 192 KiB, so this trade got cheaper by the same factor the
+//! residency did — but it is now `sections.len()` separate `Vec` allocations
+//! rather than one, which is the term to watch if the clone ever shows up in a
+//! profile. Handing back
 //! `Arc<ChunkColumn>` instead — which the plan asks for, and which U8 wants —
 //! cannot be done without either changing that signature or lending `&mut`
 //! from inside the lock.
@@ -218,9 +244,10 @@ use crate::chunk::{ChunkColumn, ChunkSource};
 /// The floor under [`capacity_for_view_radius`], and the capacity a radius-less
 /// `ChunkStore::new` store retains before evicting the least-recently-used one.
 ///
-/// 512 dense full-height columns measured **97.6 MiB** of resident memory (see
+/// 512 packed full-height columns measured **15.5 MiB** of resident memory (see
 /// this module's memory section for the paired `/usr/bin/time -l` arms — that is
-/// a measurement, not the 96 MiB arithmetic). It holds `run_tick_loop`'s
+/// a measurement, not arithmetic; it was 97.6 MiB before issue #551 packed the
+/// grid per section). It holds `run_tick_loop`'s
 /// 49-column `tick_area` plus the default streamed view (`render_distance` 8 ⇒
 /// `view_radius` 9 ⇒ 361 columns) with room to spare.
 ///
@@ -231,7 +258,8 @@ use crate::chunk::{ChunkColumn, ChunkSource};
 /// [`crate::integrated`] now goes through. This constant survives as that
 /// function's **floor**, so the derivation can only ever move capacity *up*
 /// from what was measured here, never down: at the default radius the store is
-/// byte-for-byte the 512-column, 97.6 MiB configuration it has always been.
+/// byte-for-byte the 512-column configuration it has always been (15.5 MiB since
+/// issue #551, 97.6 MiB before it).
 pub const DEFAULT_CAPACITY: usize = 512;
 
 /// The columns in a square view of `radius`: the `[-radius, radius]²` window
@@ -323,28 +351,38 @@ pub const CONCURRENT_SCAN_COLUMNS: usize = view_columns(CONCURRENT_TICK_RADIUS) 
 /// (`crates/lodestone-shell/src/config.rs`'s `MAX_RENDER_DISTANCE`). **The cap
 /// is a memory decision and the number is the whole argument.** Both ends of the
 /// table are `/usr/bin/time -l` readings on the release lib-test binary rather
-/// than arithmetic — `measure_rss_without_retention` (8.1 MiB) is the control
-/// both are differenced against:
+/// than arithmetic — `measure_rss_without_retention` (8.4 MiB) is the control
+/// both are differenced against. **Re-measured for issue #551**, which packed the
+/// block grid per section and cut the per-column rate 6.3×; the pre-#551 column
+/// is kept because the argument for the number was made against it:
 ///
-/// | `render_distance` | `view_radius` | view columns | capacity | resident |
-/// |---|---|---|---|---|
-/// | 8 (default) | 9 | 361 | 512 (floor) | **97.4 MiB, measured** |
-/// | 10 | 11 | 529 | 579 | 110 MiB |
-/// | 12 (vanilla default) | 13 | 729 | 779 | 148 MiB |
-/// | 16 | 17 | 1225 | 1275 | **242.0 MiB, measured** |
-/// | 24 | 25 | 2601 | 1275 (capped) | 242.0 MiB |
-/// | 32 (slider max) | 33 | 4489 | 1275 (capped) | 242.0 MiB |
+/// | `render_distance` | `view_radius` | view columns | capacity | resident | pre-#551 |
+/// |---|---|---|---|---|---|
+/// | 8 (default) | 9 | 361 | 512 (floor) | **15.5 MiB, measured** | 97.4 MiB |
+/// | 10 | 11 | 529 | 579 | 17.6 MiB | 110 MiB |
+/// | 12 (vanilla default) | 13 | 729 | 779 | 23.7 MiB | 148 MiB |
+/// | 16 | 17 | 1225 | 1275 | **38.9 MiB, measured** | 242.0 MiB |
+/// | 24 | 25 | 2601 | 1275 (capped) | 38.9 MiB | 242.0 MiB |
+/// | 32 (slider max) | 33 | 4489 | 1275 (capped) | 38.9 MiB | 242.0 MiB |
 ///
-/// The two measured rows are 194.8 and 194.4 KiB per column, so residency is
+/// The two measured rows are 31.1 and 31.2 KiB per column, so residency is
 /// linear in the count across a 2.5× range and the interpolated rows are safe to
 /// read. That linearity is not a given and is why the cap row was measured
 /// instead of extrapolated: a `HashMap` growing through several rehash thresholds
-/// with 192 KiB values in it could plausibly have been superlinear.
+/// with large values in it could plausibly have been superlinear.
 ///
 /// An *un*capped derivation costs 4,539 columns at `render_distance` 32, i.e.
-/// **867 MiB** of resident chunk cache inside a process that also holds meshes,
-/// textures and a GPU allocator, on a machine whose whole budget this repo's own
-/// operational notes put at 16 GB shared with everything else.
+/// **139.2 MiB, measured,** of resident chunk cache (867 MiB pre-#551) inside a process that
+/// also holds meshes, textures and a GPU allocator, on a machine whose whole
+/// budget this repo's own operational notes put at 16 GB shared with everything
+/// else.
+///
+/// **The cap is a much weaker call than it was.** It was defending against 867
+/// MiB; it now defends against 139 MiB, which is within what a hosted server can
+/// reasonably spend. Nothing here has been changed on that basis — moving a policy
+/// constant is a separate decision from changing a representation — but a future
+/// reader asking "why is this 17 and not 33?" should know the answer is now
+/// "history", not "867 MiB".
 ///
 /// **That is now the singleplayer policy** — see
 /// [`integrated_capacity_for_view_radius`], which is that same derivation with
@@ -395,7 +433,9 @@ pub const MAX_CAPACITY: usize =
 ///   not a subset of the view;
 /// * the **floor** keeps every existing measurement in this module valid, since
 ///   the derivation can then only move capacity up;
-/// * the **ceiling** stops a CPU cliff being traded for an 866 MiB memory one.
+/// * the **ceiling** stops a CPU cliff being traded for a memory one — 139 MiB at
+///   `render_distance` 32 since issue #551, and 866 MiB before it, which is why
+///   the ceiling's own doc now argues from a much smaller number than it used to.
 ///
 /// `const fn` deliberately: `MAX_CAPACITY` is derived from it in a const
 /// context, and `tests/view_radius_store_capacity.rs` computes both of its
@@ -430,25 +470,33 @@ pub const fn capacity_for_view_radius(view_radius: i32) -> usize {
 ///
 /// # The number, so the choice is informed
 ///
-/// This store costs a measured **195.5 KiB per retained column** (the module
-/// docs' table, `/usr/bin/time -l` on the release lib-test binary). The streamed
-/// set is `(2 × (rd + 1) + 1)²`, and capacity is that plus
-/// [`CONCURRENT_SCAN_COLUMNS`]:
+/// This store costs a measured **31.1 KiB per retained column** since issue #551
+/// packed the block grid per section (the module docs' before/after tables,
+/// `/usr/bin/time -l` on the release lib-test binary). The streamed set is
+/// `(2 × (rd + 1) + 1)²`, and capacity is that plus [`CONCURRENT_SCAN_COLUMNS`]:
 ///
-/// | `render_distance` | view columns | capacity | resident |
-/// |---|---|---|---|
-/// | 8 (our default) | 361 | 512 (floor) | 97.4 MiB, measured |
-/// | 12 (vanilla default) | 729 | 779 | 148 MiB |
-/// | 16 | 1,225 | 1,275 | 242.0 MiB, measured |
-/// | 24 | 2,601 | 2,651 | 506 MiB |
-/// | **32 (slider max)** | **4,489** | **4,539** | **867 MiB** |
+/// | `render_distance` | view columns | capacity | resident | pre-#551 |
+/// |---|---|---|---|---|
+/// | 8 (our default) | 361 | 512 (floor) | 15.5 MiB, measured | 97.4 MiB |
+/// | 12 (vanilla default) | 729 | 779 | 23.7 MiB | 148 MiB |
+/// | 16 | 1,225 | 1,275 | 38.9 MiB, measured | 242.0 MiB |
+/// | 24 | 2,601 | 2,651 | 80.5 MiB | 506 MiB |
+/// | **32 (slider max)** | **4,489** | **4,539** | **139.2 MiB, measured** | 867 MiB |
 ///
-/// Residency measured flat at 194.4–194.8 KiB per column across a 2.5× range, so
-/// the interpolated rows are safe to read; the last row is a 3.6× extrapolation
-/// of that rate and is the one to re-measure if it ever matters. 867 MiB inside a
-/// client process that also holds meshes, textures and a GPU allocator is large,
-/// on a machine this repo's operational notes budget at 16 GB — **large, and the
-/// user's call**, which is the whole difference from the hosted policy.
+/// Residency measured flat at 31.1–31.4 KiB per column across a **8.9×** range —
+/// the last row used to be a 3.6× extrapolation and is now
+/// `measure_rss_at_the_singleplayer_slider_maximum`, an arm that only became
+/// affordable to run *because* of issue #551. It landed within 1% of the
+/// extrapolation, which is the retrospective justification for reading the
+/// interpolated rows.
+///
+/// **This table is the whole reason issue #551 was worth doing**, and it is worth
+/// saying what changed about the *argument* rather than only about the numbers.
+/// The uncapped policy used to be a genuine trade — 867 MiB is a real cost to a
+/// client process that also holds meshes, textures and a GPU allocator, on a
+/// machine this repo's operational notes budget at 16 GB, and "the user's call"
+/// was doing load-bearing work in justifying it. At 139 MiB it is barely a trade
+/// at all. The per-column rate, not the policy, was the thing worth fixing.
 ///
 /// # Why the ceiling existed, so it is not reintroduced by accident
 ///
@@ -475,8 +523,44 @@ struct Entry {
     last_used: u64,
 }
 
+/// Which derivation a store re-applies when a connection changes its view radius
+/// mid-session ([`ChunkStore::set_retention_radius`], issue #551).
+///
+/// The store has to *remember* which of the two policies built it, because the two
+/// differ (`MAX_CAPACITY` ceiling or not) and "whose memory is this" does not
+/// change when the slider moves. A third arm is needed for the explicit-capacity
+/// constructor, which must never resize at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapacityPolicy {
+    /// [`capacity_for_view_radius`] — the hosted (open-to-LAN) ceiling applies.
+    Hosted,
+    /// [`integrated_capacity_for_view_radius`] — singleplayer, uncapped.
+    Integrated,
+    /// A capacity named outright by [`ChunkStore::with_capacity`], which a radius
+    /// change must **not** override.
+    ///
+    /// Load-bearing rather than merely tidy: the negative control in this module
+    /// is `with_capacity(source, 0)`, a store that retains nothing. If a radius
+    /// change re-derived its capacity it would silently become a retaining store
+    /// mid-test, the control would stop reproducing the pre-store behaviour, and
+    /// the positive gate above it would stop measuring anything.
+    ///
+    /// `#[cfg(test)]` for the same reason [`ChunkStore::new`] is: every production
+    /// constructor names a *radius*, so a fixed-capacity store cannot exist outside
+    /// a gate, and saying so in a `cfg` is what stops a new call site
+    /// reintroducing one by accident.
+    #[cfg(test)]
+    Fixed,
+}
+
 struct Cache {
     columns: HashMap<(i32, i32), Entry>,
+    /// The eviction bound. **Inside the mutex since issue #551**, because a live
+    /// render-distance change re-derives it — see
+    /// [`ChunkStore::set_retention_radius`]. It was a plain `usize` field behind
+    /// the `Arc`, i.e. immutable for the life of the store, which is exactly why
+    /// raising render distance mid-session over-subscribed the cache.
+    capacity: usize,
     /// Monotonic counter handed out by [`Cache::next_stamp`]. Not a tick count
     /// and not comparable to anything outside this struct.
     stamp: u64,
@@ -494,7 +578,7 @@ impl Cache {
         self.stamp
     }
 
-    /// Drops least-recently-used entries until `len() <= capacity`.
+    /// Drops least-recently-used entries until `len() <= self.capacity`.
     ///
     /// Linear scan per eviction rather than an intrusive LRU list: it runs only
     /// on a **miss**, which has just paid a generation three to four orders of
@@ -505,7 +589,8 @@ impl Cache {
     /// from in here would call out into the source while holding this mutex,
     /// which is both a lock-ordering hazard and a way to put the source's own
     /// work on the critical section every miss pays.
-    fn evict_down_to(&mut self, capacity: usize) -> Vec<(i32, i32)> {
+    fn evict_down_to_capacity(&mut self) -> Vec<(i32, i32)> {
+        let capacity = self.capacity;
         let mut evicted = Vec::new();
         while self.columns.len() > capacity {
             let Some(victim) = self
@@ -527,7 +612,11 @@ impl Cache {
 /// A [`ChunkSource`] that retains what it generates. See the module docs.
 pub(crate) struct ChunkStore<S> {
     source: S,
-    capacity: usize,
+    /// Which derivation [`set_retention_radius`](Self::set_retention_radius)
+    /// re-applies. Immutable for the life of the store, unlike the capacity it
+    /// produces — the *policy* is a question about whose memory this is, and that
+    /// does not change when the slider moves.
+    policy: CapacityPolicy,
     cache: Mutex<Cache>,
 }
 
@@ -557,7 +646,11 @@ impl<S> ChunkStore<S> {
     /// that the number and the radius it was chosen for lived in two different
     /// files.
     pub(crate) fn for_view_radius(source: S, view_radius: i32) -> Self {
-        Self::with_capacity(source, capacity_for_view_radius(view_radius))
+        Self::with_policy(
+            source,
+            CapacityPolicy::Hosted,
+            capacity_for_view_radius(view_radius),
+        )
     }
 
     /// [`for_view_radius`](Self::for_view_radius) for the **integrated** server:
@@ -568,18 +661,29 @@ impl<S> ChunkStore<S> {
     /// [`integrated_capacity_for_view_radius`] for the numbers. Singleplayer is
     /// this one; open-to-LAN (`IntegratedServer::bind`) is the capped one.
     pub(crate) fn for_integrated_view_radius(source: S, view_radius: i32) -> Self {
-        Self::with_capacity(source, integrated_capacity_for_view_radius(view_radius))
+        Self::with_policy(
+            source,
+            CapacityPolicy::Integrated,
+            integrated_capacity_for_view_radius(view_radius),
+        )
     }
 
-    /// Wraps `source` with an explicit capacity. A capacity of 0 disables
+    /// Wraps `source` with an explicit capacity that **no later radius change
+    /// overrides** ([`CapacityPolicy::Fixed`]). A capacity of 0 disables
     /// retention entirely, which is the pre-store behaviour and is what the
     /// gate below uses as its negative control.
+    #[cfg(test)]
     pub(crate) fn with_capacity(source: S, capacity: usize) -> Self {
+        Self::with_policy(source, CapacityPolicy::Fixed, capacity)
+    }
+
+    fn with_policy(source: S, policy: CapacityPolicy, capacity: usize) -> Self {
         Self {
             source,
-            capacity,
+            policy,
             cache: Mutex::new(Cache {
                 columns: HashMap::new(),
+                capacity,
                 stamp: 0,
                 generated: 0,
                 evicted: 0,
@@ -604,10 +708,11 @@ impl<S> ChunkStore<S> {
         self.lock().columns.len()
     }
 
-    /// The eviction bound this store was built with.
+    /// The store's **current** eviction bound. No longer "what it was built
+    /// with": [`set_retention_radius`](Self::set_retention_radius) moves it.
     #[cfg(test)]
     pub(crate) fn capacity(&self) -> usize {
-        self.capacity
+        self.lock().capacity
     }
 
     /// Cumulative calls that reached the inner source's `column()`.
@@ -635,7 +740,8 @@ impl<S> std::fmt::Debug for ChunkStore<S> {
         let cache = self.lock();
         f.debug_struct("ChunkStore")
             .field("resident", &cache.columns.len())
-            .field("capacity", &self.capacity)
+            .field("capacity", &cache.capacity)
+            .field("policy", &self.policy)
             .field("generated", &cache.generated)
             .field("evicted", &cache.evicted)
             .finish_non_exhaustive()
@@ -678,7 +784,7 @@ impl<S: ChunkSource> ChunkStore<S> {
         let cache = &mut *guard;
         cache.generated += 1;
         let stamp = cache.next_stamp();
-        if self.capacity == 0 {
+        if cache.capacity == 0 {
             return Some(fresh);
         }
         match cache.columns.entry((cx, cz)) {
@@ -692,7 +798,7 @@ impl<S: ChunkSource> ChunkStore<S> {
                 });
             }
         }
-        let evicted = cache.evict_down_to(self.capacity);
+        let evicted = cache.evict_down_to_capacity();
         drop(guard);
         // Outside the lock, deliberately: see `evict_down_to`. This is what
         // lets the layer beneath release a column it has already written, so
@@ -750,6 +856,65 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         }
         self.read(cx, cz, |column| column.block_state(lx, y, lz).to_string())
             .unwrap_or_else(|| self.source.block_state(x, y, z))
+    }
+
+    /// Re-derives the capacity for `view_radius` under this store's
+    /// [`CapacityPolicy`], evicting down to it if it shrank — issue #551's
+    /// second half.
+    ///
+    /// # Why this is the fix and not a nice-to-have
+    ///
+    /// The whole of [`integrated_capacity_for_view_radius`]'s "why the ceiling
+    /// existed" section applies to an *over-subscribed* store just as it does to a
+    /// capped one, because they are the same condition: capacity below the streamed
+    /// view. `crate::server`'s `join_view_rings` streams outward, so the
+    /// least-recently-used entry is the **innermost** ring — the column the player
+    /// is standing in, which `vitals_tick` probes every 50 ms and `run_tick_loop`
+    /// random-ticks. Raising render distance mid-session therefore produced exactly
+    /// the LRU collapse the fixed literal produced before issue #505: the horizon
+    /// arrived and the ground underfoot was regenerated at ~909 ms a column.
+    ///
+    /// # Grow-only: capacity follows the session's **high-water mark**
+    ///
+    /// A *lowering* is recorded as nothing at all. That looks like a missed
+    /// opportunity to hand memory back and it is a deliberate choice, because a
+    /// shrinking policy is not the safe-looking option it appears to be:
+    ///
+    /// * `tests/view_radius_store_capacity.rs`'s subject drags the slider **down
+    ///   to 0 and back up** and asserts the re-grow costs **zero** regenerations.
+    ///   A store that shrank on the way down would evict 217 of the 729 columns at
+    ///   the subject radius — and by `join_view_rings`' outward order those 217 are
+    ///   the *innermost* rings, the player's own feet. That gate's `== 0` would
+    ///   become a non-zero, and it would be right to: nudging the render-distance
+    ///   slider would cost a regeneration of the ground you are standing on. The
+    ///   gate is not in the way of a shrinking policy; it is the argument against
+    ///   one.
+    /// * The memory it would reclaim is now small. Before issue #551 the ceiling
+    ///   was 867 MiB and handing it back mattered; the same ceiling is 139 MiB
+    ///   packed, and it is only reached by a player who *did* ask for
+    ///   `render_distance` 32 at some point in the session.
+    ///
+    /// So the residual cost is explicit and bounded: **a session that ever raised
+    /// render distance to `N` keeps `N`'s capacity for the rest of the session.**
+    /// If that ever needs to change, the thing to add is a shrink that refuses to
+    /// drop any column *inside the current view* — not a plain `evict_down_to`,
+    /// which drops exactly the wrong ones.
+    ///
+    /// Because it only grows, this never evicts, so there is no `unload`
+    /// notification to make and no lock-ordering hazard to route around — unlike
+    /// [`ensure`](Self::ensure), which does both.
+    ///
+    /// [`CapacityPolicy::Fixed`] stores ignore this entirely — see that variant.
+    fn set_retention_radius(&self, view_radius: i32) {
+        let want = match self.policy {
+            CapacityPolicy::Hosted => capacity_for_view_radius(view_radius),
+            CapacityPolicy::Integrated => integrated_capacity_for_view_radius(view_radius),
+            #[cfg(test)]
+            CapacityPolicy::Fixed => return,
+        };
+
+        let mut cache = self.lock();
+        cache.capacity = cache.capacity.max(want);
     }
 
     /// Writes through to the inner source **first**, then to the retained
@@ -1264,10 +1429,16 @@ mod tests {
         assert_eq!(store.capacity(), CAPACITY);
 
         // Not an assertion on wall-clock — a recorded measurement, printed
-        // with `--nocapture`. A dense full-height column is ~192 KiB, so the
-        // clone `column()` returns is a memcpy of that; the point of recording
-        // it is that it is microseconds against the 909 ms it replaces.
-        let column = ChunkColumn::new(REAL_MIN_Y, REAL_HEIGHT);
+        // with `--nocapture`. The point of recording it is that it is
+        // microseconds against the 909 ms it replaces.
+        //
+        // `touched_column`, not `ChunkColumn::new`: since issue #551 an all-air
+        // column's clone allocates *nothing* (every section is `Uniform`), so
+        // timing a blank column would report the cost of cloning a `Vec` of 24
+        // enum discriminants and call it the store's read cost. That is the
+        // fixture-premise trap `touched_column`'s own doc describes, in a second
+        // place.
+        let column = touched_column(REAL_MIN_Y, REAL_HEIGHT);
         let started = std::time::Instant::now();
         const CLONES: u32 = 200;
         for _ in 0..CLONES {
@@ -1437,21 +1608,82 @@ mod tests {
         }
     }
 
-    /// A full-height column with every memory page actually **written**.
+    /// A full-height column shaped like real terrain, so its **representation
+    /// cost** is the one production pays.
     ///
-    /// `ChunkColumn::new` allocates through `vec![0u16; …]`, i.e. `alloc_zeroed`,
-    /// and at 192 KiB that can be served by lazily-zeroed pages the process
-    /// never faults in — so a store full of *untouched* columns would understate
-    /// resident memory and the RSS measurement below would be a
-    /// world-species vacuity (measuring an allocation pattern production never
-    /// has, since a generated column is fully written). One write per 8 y-rows
-    /// is enough to touch every page at any plausible page size.
+    /// # This fixture's premise was falsified once, and reading it is the lesson
+    ///
+    /// It used to write **one cell per 8 y-rows** — 48 writes in a 98,304-cell
+    /// column — and that was exactly right for what it was built against: a flat
+    /// `vec![0u16; 98304]` is `alloc_zeroed`, which macOS can serve from
+    /// lazily-zeroed pages the process never faults in, so an *untouched* column
+    /// understated RSS. 48 scattered writes faulted every page of a contiguous
+    /// 192 KiB allocation, and the column's cost was independent of its content.
+    ///
+    /// Issue #551 made the cost a **function of the content** (see
+    /// `crate::chunk_blocks`), and that premise died silently and in the
+    /// *safe*-looking direction: the fixture still runs, still faults its pages,
+    /// still produces a plausible non-zero delta — but 48 writes over 24 sections
+    /// leaves every section holding two distinct ids, which packs to **1 bit**,
+    /// about 12 KiB a column. It would have reported a spectacular saving that no
+    /// real column gets. That is CLAUDE.md's *world* species of vacuity: the flaw
+    /// is in the input data, not in any assertion, and nothing about the code
+    /// looks wrong.
+    ///
+    /// # What it models now
+    ///
+    /// Terrain below a surface, air above it, with the block-state variety a real
+    /// column has — which is what decides both savings: how many sections collapse
+    /// to uniform air, and how wide the rest have to pack. The states are real
+    /// vanilla ids from the generator's own surface/stone rules rather than
+    /// `set_solid`'s stone-or-air pair, because a two-state palette is precisely
+    /// the input that would flatter the packing.
+    ///
+    /// It remains a *model*, but a **calibrated** one rather than a plausible
+    /// one. Four real generated columns measured
+    /// `ChunkColumn::blocks_heap_bytes` at 22,640 / 23,328 / 23,728 / 26,752
+    /// bytes (mean **24,112**, against the flat grid's 196,608). This fixture is
+    /// shaped to land on that: 12 states plus air is 4 bits, and a surface at
+    /// `min_y + height / 2` leaves 12 packed sections of `4096 × 4 / 8` = 2,048
+    /// bytes plus 12 uniform air sections, i.e. **24,576 bytes** — within 2% of
+    /// the real mean. Getting that agreement is the point; a fixture that
+    /// understated it would make every RSS row below optimistic.
     fn touched_column(min_y: i32, height: i32) -> ChunkColumn {
+        // Real ids the overworld generator emits, so the palette width the
+        // sections pack to is the production one. 12 states + air = 13 => 4 bits
+        // for a section drawing from all of them, and the surface band draws
+        // from more of them than the deep band, exactly as real terrain does.
+        const STATES: [&str; 12] = [
+            "minecraft:stone",
+            "minecraft:deepslate",
+            "minecraft:dirt",
+            "minecraft:gravel",
+            "minecraft:andesite",
+            "minecraft:diorite",
+            "minecraft:granite",
+            "minecraft:grass_block[snowy=false]",
+            "minecraft:water[level=0]",
+            "minecraft:coal_ore",
+            "minecraft:iron_ore",
+            "minecraft:sand",
+        ];
+        // Surface at the midpoint: 12 packed sections and 12 uniform air ones,
+        // which is the split that reproduces the measured real figure (see the
+        // doc comment — this constant is calibrated, not chosen).
+        let surface = min_y + height / 2;
         let mut column = ChunkColumn::new(min_y, height);
-        let mut y = min_y;
-        while y < min_y + height {
-            column.set_solid(y.rem_euclid(16), y, 0, true);
-            y += 8;
+        for y in min_y..surface {
+            for z in 0..16 {
+                for x in 0..16 {
+                    // Deterministic but content-varying, so no section is
+                    // accidentally uniform. Cheap: this runs 512 to 1,275 times.
+                    let n = (x as usize)
+                        .wrapping_mul(31)
+                        .wrapping_add((z as usize).wrapping_mul(7))
+                        .wrapping_add((y - min_y) as usize);
+                    column.set_block(x, y, z, STATES[n % STATES.len()]);
+                }
+            }
         }
         column
     }
@@ -1532,7 +1764,7 @@ mod tests {
     /// **Retained arm at the cap** — what issue #505's ceiling actually costs,
     /// measured rather than extrapolated.
     ///
-    /// [`FULLY_RESIDENT_VIEW_RADIUS`]'s memory table is arithmetic off the 195.5
+    /// [`FULLY_RESIDENT_VIEW_RADIUS`]'s memory table is arithmetic off the 31.1
     /// KiB per column the pair above measured at 512, and a 2.5× extrapolation of
     /// a measured rate is still an extrapolation — the map's own growth, its
     /// rehashing and the allocator's fragmentation are all superlinear in
@@ -1562,6 +1794,41 @@ mod tests {
             16 * REAL_HEIGHT * 16 * 2 / 1024,
             FULLY_RESIDENT_VIEW_RADIUS - 1,
             (MAX_CAPACITY as i32 * 16 * REAL_HEIGHT * 16 * 2) / (1024 * 1024)
+        );
+        std::hint::black_box(&store);
+    }
+
+    /// **The owner's own scenario**, measured rather than extrapolated: the
+    /// singleplayer store at `render_distance` 32, the slider's maximum.
+    ///
+    /// This is the row every table in this module extrapolates to, and it was the
+    /// only figure in them that had never been read directly — 4,539 columns is a
+    /// 3.6× extrapolation of the rate measured at 1,275, and issue #551's whole
+    /// motivation was the owner asking about RSS at high render distance. It is
+    /// affordable now precisely *because* of #551: at the pre-#551 rate this arm
+    /// would have needed 867 MiB on a 16 GB box shared with other work.
+    ///
+    /// ```text
+    /// cargo test --release -p lodestone-server --lib -- --ignored --nocapture \
+    ///     --exact chunk_store::tests::measure_rss_at_the_singleplayer_slider_maximum
+    /// ```
+    #[test]
+    #[ignore = "measurement tool; run in --release under /usr/bin/time -l"]
+    fn measure_rss_at_the_singleplayer_slider_maximum() {
+        // Derived from the policy, not restated: `render_distance` 32 is
+        // `view_radius` 33 (the shell serves `render_distance + 1`).
+        const SLIDER_MAX_VIEW_RADIUS: i32 = 33;
+        let capacity = integrated_capacity_for_view_radius(SLIDER_MAX_VIEW_RADIUS);
+        let store = fill_and_hold(capacity, capacity);
+        assert_eq!(store.len(), capacity);
+        println!(
+            "retained {} columns of {REAL_HEIGHT} rows — the singleplayer store at \
+             render_distance {} (view_radius {SLIDER_MAX_VIEW_RADIUS}, view \
+             {} columns); pre-#551 arithmetic for the same set was {} MiB",
+            store.len(),
+            SLIDER_MAX_VIEW_RADIUS - 1,
+            view_columns(SLIDER_MAX_VIEW_RADIUS),
+            (capacity as i32 / 1024) * 16 * REAL_HEIGHT * 16 * 2 / 1024,
         );
         std::hint::black_box(&store);
     }
@@ -2038,7 +2305,7 @@ mod tests {
             });
 
             // A shorter column than `full_height` for this arm alone: the
-            // over-capacity band generates ~31,200 columns, and at 192 KiB each
+            // over-capacity band generates ~31,200 columns, and even packed
             // that is allocation churn the measurement does not need. The count
             // is what is under test, not the column's size.
             let counting = CountingSource::sized(0, 128);

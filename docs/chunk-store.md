@@ -100,10 +100,12 @@ skips a cache update on genuine contention and then serves a stale block, which
 is worse than the deadlock.
 
 **The clone is deliberate and measured.** `ChunkSource::column` returns by
-value, so a store read is a ~192 KiB `memcpy` — **3.1 µs**, measured, against
-the 909 ms it replaces. To make reads a refcount bump instead, the trait
-signature has to change; that is the plan's U8, together with sectioned
-storage.
+value, so a store read is a deep copy — **3.1 µs**, measured, against the 909 ms
+it replaces. Since issue #551 it copies ~24 KiB of packed sections rather than a
+flat 192 KiB, so the trade got cheaper by the same factor residency did; it is now
+`sections.len()` separate `Vec` allocations rather than one, which is the term to
+watch if it ever shows up in a profile. To make reads a refcount bump instead, the
+trait signature has to change — the remaining half of the plan's U8.
 
 ## Configuration
 
@@ -137,37 +139,63 @@ every 50 ms.) A hosted server is the opposite case: the memory is an operator's,
 spent on behalf of players who did not choose the setting, so `bind` keeps the
 ceiling.
 
-**The price of the uncapped path**, at the measured 195.5 KiB per retained column:
+**The price of the uncapped path**, at the measured **31.1 KiB** per retained
+column (it was 195.5 KiB before issue #551 packed the block grid per section —
+see [`chunk-column-storage.md`](./chunk-column-storage.md)):
 
-| `render_distance` | view columns | capacity | resident |
-|---|---|---|---|
-| 8 (our default) | 361 | 512 (floor) | 97.4 MiB, measured |
-| 12 (vanilla default) | 729 | 779 | 148 MiB |
-| 16 | 1,225 | 1,275 | 242.0 MiB, measured |
-| 24 | 2,601 | 2,651 | 506 MiB |
-| **32 (slider max)** | **4,489** | **4,539** | **867 MiB** |
+| `render_distance` | view columns | capacity | resident | pre-#551 |
+|---|---|---|---|---|
+| 8 (our default) | 361 | 512 (floor) | 15.5 MiB, measured | 97.4 MiB |
+| 12 (vanilla default) | 729 | 779 | 23.7 MiB | 148 MiB |
+| 16 | 1,225 | 1,275 | 38.9 MiB, measured | 242.0 MiB |
+| 24 | 2,601 | 2,651 | 80.5 MiB | 506 MiB |
+| **32 (slider max)** | **4,489** | **4,539** | **139.2 MiB, measured** | 867 MiB |
 
-Large but not fatal on a 16 GB machine, and it is the user's call. The last row is
-a 3.6× extrapolation of a rate measured flat across 2.5×; re-measure it before
-relying on it for anything.
+The rate is flat at 31.1–31.4 KiB per column across an **8.9×** range. The last
+row used to be a 3.6× extrapolation and is now measured directly
+(`measure_rss_at_the_singleplayer_slider_maximum`) — an arm that only became
+affordable to run *because* of #551, and which landed within 1% of the
+extrapolation it replaced.
 
-Measured cost, by `/usr/bin/time -l` on the release lib-test binary:
+**This table is why #551 was worth doing, and the change is in the argument as
+much as in the numbers.** The uncapped singleplayer policy used to be a real
+trade — 867 MiB is a genuine cost to a client process that also holds meshes,
+textures and a GPU allocator — and "it is the user's call" was doing load-bearing
+work. At 139 MiB it is barely a trade. The per-column *rate*, not the policy, was
+the thing worth fixing.
 
-| arm | peak RSS |
-|---|---|
-| 512 columns retained | 105.4 MiB |
-| the same 512 touched, retention off | 7.8 MiB |
-| **delta** | **97.6 MiB**, i.e. 195.5 KiB per column |
+Measured cost, by `/usr/bin/time -l` on the release lib-test binary, before and
+after:
 
-That is within 2% of the 192 KiB `size_of` arithmetic; the remainder is the
-palette and biome `String`s and the map. **The two arms are each other's
-control** — a delta near zero would mean the columns were dropped in both arms,
-or that the pages were never faulted in, and the run would be a failure to
-measure rather than evidence that residency is free. `touched_column` in the
-test module exists for that second reason: `ChunkColumn::new` allocates through
-`alloc_zeroed`, and pages that are never written do not appear in RSS.
+| arm | pre-#551 peak RSS | post-#551 peak RSS |
+|---|---|---|
+| 512 columns retained | 105.4 MiB | 24.0 MiB |
+| the same 512 touched, retention off | 7.8 / 8.1 MiB | 8.4 MiB |
+| **delta** | **97.6 MiB** = 195.5 KiB/column | **15.5 MiB** = **31.1 KiB/column** |
 
-Lowering the capacity to 128 (~24 MiB) **still fixes the originally reported bug
+Of the 31.1 KiB, `ChunkColumn::blocks_heap_bytes` is ~24 KiB; the rest is the
+palette `String`s, the 3-D biome grid (~3 KiB — now the *second* largest term and
+the next thing to look at) and the map entry.
+
+**The two arms are each other's control** — a delta near zero would mean the
+columns were dropped in both arms, or that the pages were never faulted in, and
+the run would be a failure to measure rather than evidence that residency is free.
+
+**`touched_column`'s premise was falsified by #551, and that is worth reading.**
+It wrote one cell per 8 y-rows — exactly right against a flat `vec![0u16; 98304]`,
+which `alloc_zeroed` can serve from pages the process never faults in, so 48
+scattered writes faulted every page of a contiguous 192 KiB allocation and the
+column's cost was independent of its content. #551 made cost a *function* of
+content, and the old fixture then packed to ~12 KiB a column: it would have
+reported a saving no real column gets, while still running, still faulting pages
+and still producing a plausible delta. That is CLAUDE.md's **world** species of
+vacuity — the flaw is in the input data, not in any assertion. The fixture is now
+terrain-shaped and *calibrated* against four real generated columns (mean 24,112
+packed bytes). The two tables above remain directly comparable because the old
+representation's cost did not depend on content, so the 195.5 KiB row is valid for
+the new fixture too.
+
+Lowering the capacity to 128 (~4 MiB) **still fixes the originally reported bug
 completely**: the starvation fix needs only the 49-column `tick_area` resident.
 
 ### Why the capacity is a function of the view radius (issue #505)
@@ -199,21 +227,23 @@ hold. The three terms of the replacement:
   49 columns *after* the poll and leaves the polled column holding the oldest
   stamp in the map;
 - **the `DEFAULT_CAPACITY` floor** means the derivation can only move capacity
-  *up*, so the default configuration is byte-for-byte the 512-column, 97.6 MiB
-  store every measurement in this doc was taken against;
+  *up*, so the default configuration is byte-for-byte the 512-column store every
+  measurement in this doc was taken against;
 - **the `MAX_CAPACITY` ceiling** stops the CPU cliff being traded for a memory
-  one — `render_distance` 32 sizes the store at 4,539 columns ≈ 867 MiB. It now
-  applies to the **hosted** path only; see the fork at the top of this section.
+  one — `render_distance` 32 sizes the store at 4,539 columns, which was ≈867 MiB
+  and is now 139.2 MiB measured. It applies to the **hosted** path only; see the fork at the
+  top of this section. **A reader asking "why 17 and not 33?" should know the
+  answer is now history, not 867 MiB.**
 
 The cap's own cost was measured rather than extrapolated, since a `HashMap`
-growing through several rehash thresholds with 192 KiB values could plausibly
-have been superlinear:
+growing through several rehash thresholds with large values could plausibly have
+been superlinear:
 
-| arm | peak RSS | delta | per column |
-|---|---|---|---|
-| retention off (shared control) | 8.1 MiB | — | — |
-| 512 retained | 105.4 MiB | 97.4 MiB | 194.8 KiB |
-| **1,275 retained (`MAX_CAPACITY`)** | **250.1 MiB** | **242.0 MiB** | 194.4 KiB |
+| arm | peak RSS | delta | per column | pre-#551 per column |
+|---|---|---|---|---|
+| retention off (shared control) | 8.4 MiB | — | — | — |
+| 512 retained | 24.0 MiB | 15.5 MiB | 31.1 KiB | 194.8 KiB |
+| **1,275 retained (`MAX_CAPACITY`)** | **47.3 MiB** | **38.9 MiB** | **31.2 KiB** | 194.4 KiB |
 
 It is not: the rate is flat across a 2.5× range, so the interpolated rows in
 `FULLY_RESIDENT_VIEW_RADIUS`'s table are safe to read.
@@ -230,8 +260,49 @@ bounded and localised; `tests/view_radius_store_capacity.rs` measures it as this
 subsystem's permanent negative control.
 
 To raise the cap, raise `FULLY_RESIDENT_VIEW_RADIUS`, re-run the RSS pair, and
-put the new numbers in its table. To reduce the cost per column instead, that is
-unit U8 of `docs/plans/chunk-lifecycle.md`.
+put the new numbers in its table. Reducing the cost per column instead is unit U8
+of [`plans/chunk-lifecycle.md`](./plans/chunk-lifecycle.md), and the storage half
+of it is **done** — see [`chunk-column-storage.md`](./chunk-column-storage.md).
+
+### The capacity follows a live radius change (issue #551)
+
+Capacity used to be fixed at construction from the radius the connection
+*joined* with, as a plain `usize` behind the `Arc`. Since `0c09f576` a client can
+raise its render distance mid-session and the server honours it — so the streamed
+view then exceeded the cache bound, and **the LRU victim under a short capacity is
+the innermost ring**, because `join_view_rings` streams outward and leaves ring 0
+holding the oldest stamp. Raising render distance therefore worked while quietly
+regenerating the ground under the player's feet at ~909 ms a column.
+
+The capacity now lives **inside the cache mutex**, and `ChunkSource` carries a
+`set_retention_radius(view_radius)` hint (default: a no-op, exactly like
+`unload`) that `ViewTracker::set_view_radius` calls after its clamp and *before*
+streaming the new view — so `build_batch` never evicts a column it is about to
+need. The store remembers which of the two capacity policies built it, in a
+private `CapacityPolicy`, because "whose memory is this" does not change when the
+slider moves.
+
+**It grows only: capacity follows the session's high-water mark.** A lowering is
+recorded as nothing, and that is deliberate rather than lazy. A shrinking policy
+would evict 217 of the 729 columns at `view_radius` 13 — and by ring order those
+217 are the innermost ones — so
+`regrowing_the_render_distance_regenerates_nothing_at_vanillas_default`'s `== 0`
+would become a non-zero, and rightly: nudging the slider down and back up would
+cost a regeneration of the ground you are standing on. The gate is the argument
+against a shrinking policy, not an obstacle to one. The memory it would reclaim is
+also now small (139 MiB at the extreme, and only for a session that *did* ask for
+`render_distance` 32). If it ever needs to change, the thing to add is a shrink
+that refuses to drop a column *inside the current view* — not a plain
+`evict_down_to`, which drops exactly the wrong ones.
+
+Gated by `raising_the_render_distance_mid_session_resizes_the_store`
+(`tests/view_radius_store_capacity.rs`): join at radius 9, raise to 15, then probe
+residency with a down-and-up sweep, asserting **0** regenerations against a
+computed floor of 449. The raise *alone* cannot see the bug — `set_view_radius`
+diffs the window, so it asks for each newly-visible column exactly once and even a
+hopelessly short store reports no repeats; the harm is paid by whatever asks
+again. Confirmed by neutering `set_retention_radius` in place: the gate fails,
+naming a twice-generated chunk.
 
 ## Gates
 

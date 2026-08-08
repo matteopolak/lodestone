@@ -740,6 +740,17 @@ impl ViewTracker {
             return ViewUpdate::default();
         }
 
+        // Issue #551: resize the retention bound *before* streaming the new view,
+        // not after. `ChunkStore`'s capacity used to be fixed at construction from
+        // the radius the connection joined with, so raising render distance
+        // mid-session over-subscribed the cache — and because `join_view_rings`
+        // streams outward, the LRU victim is the **innermost** ring, i.e. the
+        // ground under the player's feet at ~909 ms a column to regenerate. Doing
+        // it first means `build_batch` below never evicts a column it is about to
+        // need. A no-op for every source that retains nothing per view; see
+        // `ChunkSource::set_retention_radius`.
+        source.get().set_retention_radius(radius);
+
         let next = Self::window(self.center, radius);
         let mut immediate = Vec::new();
         for &(x, z) in self.loaded.difference(&next) {
