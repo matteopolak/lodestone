@@ -982,6 +982,28 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // pays a single column clone — the same cost the block drain above already
     // pays *per due tick*.
     let mut fluid_env: Option<crate::fluid::FluidEnv> = None;
+    // `crate::fire`'s behaviour stream, and its lazily-resolved vertical extent.
+    //
+    // One stream for the whole world, not one per fire block: `FireBlock::tick`
+    // draws from `level.random`, which is shared across every block tick in
+    // vanilla too, so a per-cell RNG would produce a *different* world rather
+    // than a more deterministic one. The draw count per tick is the
+    // specification (`crate::fire`'s own tests gate it against a reference
+    // generator), and that only holds if the arm below is the single consumer.
+    //
+    // The extent is lazy for exactly `fluid_env`'s reason above, and it matters
+    // more here: `fire::block_at` answers air outside build height, so a fire on
+    // the world floor reading `min_y - 1` needs the real bounds rather than
+    // `FireEnv::OVERWORLD`'s 26.2 literals, which no test double matches.
+    let mut fire_rng = crate::mob_spawn::SpawnRng::new(crate::fire::FIRE_BEHAVIOR_SEED);
+    let mut fire_env: Option<(i32, i32)> = None;
+    let mut fire_changes: Vec<(BlockPos, String)> = Vec::new();
+    // `crate::explosion_blocks`' behaviour stream, drawn once per ray of a blast
+    // (1,352 rays) plus one per `createFire` candidate. Separate from `fire_rng`
+    // so a blast cannot shift the fire stream, and from `random_ticks`' own
+    // behaviour seed for the same reason.
+    let mut blast_rng =
+        crate::mob_spawn::SpawnRng::new(crate::explosion_blocks::EXPLOSION_BEHAVIOR_SEED);
     let (tick_cx_range, tick_cz_range) = tick_area;
     // Issues #221/#222: the natural-spawn driver. Long-lived rather than built
     // per tick because it owns the per-column light cache — see
@@ -1113,6 +1135,36 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // one production path that turns "a creeper detonated" into an
         // `EXPLODE` packet reaching a connection at all.
         for detonation in mobs.with(MobSim::take_detonations) {
+            // The block half of the blast (`crate::explosion_blocks`), run before
+            // the `EXPLODE` packet so the crater and the packet land in the same
+            // tick. `destroy_blocks` writes air through `world` itself and hands
+            // back only the cells that actually changed.
+            //
+            // Vanilla runs `calculateExplodedPositions` *before* `hurtEntities`,
+            // and `MobSim::explode` has already done the entity half by the time
+            // a detonation reaches this drain — the swap is unobservable, because
+            // entity exposure ray-casts against the collision world for line of
+            // sight rather than against the destroyed set.
+            //
+            // Drops are absent by design, not omission: vanilla rolls
+            // `onExplosionHit` with the blast radius in the loot context, and
+            // without that parameter every destroyed block would drop at *full*
+            // rate instead of vanilla's `1/radius`. See `crate::loot`'s
+            // `explosion_radius` parameter for the half that closes it.
+            let probe = world.column(
+                (detonation.centre.x.floor() as i32).div_euclid(16),
+                (detonation.centre.z.floor() as i32).div_euclid(16),
+            );
+            let env = crate::explosion_blocks::BlastEnv::in_column(probe.min_y, probe.height);
+            for (at, new_state) in crate::explosion_blocks::destroy_blocks(
+                &*world,
+                env,
+                detonation.centre,
+                detonation.radius,
+                &mut blast_rng,
+            ) {
+                block_tick_out.publish(at.x, at.y, at.z, new_state);
+            }
             explosion_out.publish(detonation);
         }
         // Issue #456: the world half of a grazing sheep, and the same shape as
@@ -1325,6 +1377,46 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // invoking its callback once per due entry, in `DRAIN_ORDER`.
         for due in block_ticks.drain_due(game_tick, MAX_SCHEDULED_TICKS_PER_TICK) {
             let (x, y, z) = due.pos;
+            // Fire, **before** the column work below and not through it. A fire
+            // tick spreads two cells horizontally and four up, so it crosses
+            // chunk borders exactly as fluid spread does, and a
+            // `ChunkColumn`-bounded reaction would stop dead at the seam. So this
+            // arm runs against `world` in world coordinates and returns early;
+            // `fire::run_scheduled_tick` writes each change through `world`
+            // itself (vanilla's immediate `setBlock`, which the spread loop then
+            // reads back), so the loop only forwards what changed.
+            //
+            // Fire is not random-ticked — `FireBlock::tick`'s first statement is
+            // its own reschedule — so this arm is the only thing keeping a fire
+            // alive at all. `random_tick::react_at_placement` seeds the first
+            // pending tick for any fire a world edit writes; a fire that loses
+            // its queue entry is inert forever.
+            if due.kind == crate::fire::TICK_FIRE {
+                let (min_y, height) = *fire_env.get_or_insert_with(|| {
+                    let probe = world.column(x.div_euclid(16), z.div_euclid(16));
+                    (probe.min_y, probe.height)
+                });
+                let env = crate::fire::FireEnv::overworld_in(
+                    min_y,
+                    height,
+                    world_state.difficulty().0,
+                    weather.raining,
+                );
+                fire_changes.clear();
+                crate::fire::run_scheduled_tick(
+                    &*world,
+                    env,
+                    BlockPos::new(x, y, z),
+                    block_ticks,
+                    game_tick,
+                    &mut fire_rng,
+                    &mut fire_changes,
+                );
+                for (at, new_state) in fire_changes.drain(..) {
+                    block_tick_out.publish(at.x, at.y, at.z, new_state);
+                }
+                continue;
+            }
             let cx = x.div_euclid(16);
             let cz = z.div_euclid(16);
             let min_x = cx * 16;
@@ -2378,6 +2470,142 @@ mod tests {
         assert!(
             vote.snapshot().1.is_empty(),
             "the passed vote's roster must be cleared by the skip"
+        );
+    }
+    // ---------------------------------------------------------------------
+    // The fire arm of the block-tick drain. `crate::fire`'s own tests gate
+    // `run_scheduled_tick`'s behaviour against a reference generator; these two
+    // gate the *wiring* — that the loop dispatches `TICK_FIRE` at all, and that
+    // what it writes reaches the wire feed. Without them the arm is the island
+    // shape CLAUDE.md's rule 1 names: `fire.rs` entirely green, zero blocks
+    // changed in a running world.
+    // ---------------------------------------------------------------------
+
+    /// A `ChunkSource` with real storage, because a fire tick reads back the
+    /// cells it writes and reads the cell *below* itself. `RecordingWorld`
+    /// answers air for every read no matter what was set, which cannot express
+    /// "fire over netherrack".
+    struct OverlayWorld(Arc<Mutex<std::collections::HashMap<(i32, i32, i32), String>>>);
+
+    impl OverlayWorld {
+        fn with(cells: &[((i32, i32, i32), &str)]) -> Arc<Self> {
+            let map = cells
+                .iter()
+                .map(|&(pos, state)| (pos, state.to_owned()))
+                .collect();
+            Arc::new(Self(Arc::new(Mutex::new(map))))
+        }
+
+        fn get(&self, pos: (i32, i32, i32)) -> String {
+            self.0
+                .lock()
+                .expect("overlay world lock poisoned")
+                .get(&pos)
+                .cloned()
+                .unwrap_or_else(|| crate::chunk::AIR.to_owned())
+        }
+    }
+
+    impl ChunkSource for OverlayWorld {
+        fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
+            crate::chunk::ChunkColumn::new(0, 16)
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            self.get((x, y, z))
+        }
+
+        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+            self.0
+                .lock()
+                .expect("overlay world lock poisoned")
+                .insert((x, y, z), name.to_owned());
+        }
+    }
+
+    /// Runs the loop for a handful of ticks with one `TICK_FIRE` already due at
+    /// `pos`, and reports `(the cell afterwards, everything published)`.
+    async fn fire_tick_once(
+        below: &str,
+        pos: (i32, i32, i32),
+    ) -> (String, Vec<(i32, i32, i32, String)>) {
+        let (x, y, z) = pos;
+        let world = OverlayWorld::with(&[
+            ((x, y, z), "minecraft:fire[age=0]"),
+            ((x, y - 1, z), below),
+        ]);
+        let scheduled = crate::region_source::ScheduledTickHandle::default();
+        // Due at tick 1, which is the first tick the loop drains.
+        scheduled.with(|queues| {
+            queues.block.schedule(
+                pos,
+                crate::fire::TICK_FIRE.to_owned(),
+                1,
+                TickPriority::Normal,
+            );
+        });
+        let feed = BlockTickFeed::default();
+        let (mobs, out, block_entities) = handles();
+        tokio::spawn(run_tick_loop(
+            mobs,
+            out,
+            block_entities,
+            Arc::new(TickClock::new()),
+            Arc::clone(&world),
+            feed.clone(),
+            (0..=0, 0..=0),
+            ExplosionFeed::default(),
+            scheduled,
+        ));
+        tokio::task::yield_now().await;
+
+        let mut published = Vec::new();
+        for _ in 0..4 {
+            tokio::time::advance(TICK_PERIOD).await;
+            tokio::task::yield_now().await;
+            published.extend(feed.drain_all());
+        }
+        (world.get(pos), published)
+    }
+
+    /// A fire with nothing under it and nothing flammable beside it fails
+    /// `FireBlock`'s `canSurvive` and is removed — and that removal happens
+    /// **before any RNG draw**, so the predicted cell state is exactly
+    /// `minecraft:air` with no distribution involved. It must also reach
+    /// `BlockTickFeed`, or a connected client keeps rendering a fire the server
+    /// has already deleted.
+    #[tokio::test(start_paused = true)]
+    async fn the_loop_runs_a_due_fire_tick_and_publishes_the_change() {
+        let pos = (3, 5, 3);
+        let (cell, published) = fire_tick_once(crate::chunk::AIR, pos).await;
+        assert_eq!(
+            cell, "minecraft:air",
+            "an unsupported fire fails canSurvive and must be removed; if the cell still \
+             holds fire, the drain never dispatched TICK_FIRE at all"
+        );
+        assert!(
+            published.contains(&(pos.0, pos.1, pos.2, "minecraft:air".to_owned())),
+            "the removal must reach the wire feed: published = {published:?}"
+        );
+    }
+
+    /// **The control**, and the reason the assertion above is about fire rather
+    /// than about "the loop clears cells": identical loop, identical schedule,
+    /// identical position — netherrack underneath. `face_sturdy_up` is then true,
+    /// so `canSurvive` passes and the cell must still hold fire. Netherrack is
+    /// also `#infiniburn_overworld`, which suppresses the rain-out draw, so this
+    /// arm has no way to reach air at all.
+    ///
+    /// Only the age may move (`min(15, age + nextInt(3) / 2)`), so the assertion
+    /// is on the block rather than the whole state string.
+    #[tokio::test(start_paused = true)]
+    async fn a_supported_fire_survives_its_tick() {
+        let pos = (3, 5, 3);
+        let (cell, _) = fire_tick_once("minecraft:netherrack", pos).await;
+        assert!(
+            cell.starts_with("minecraft:fire"),
+            "fire over netherrack passes canSurvive and must persist, got {cell:?} — if this \
+             is air, the arm is removing fire unconditionally rather than running FireBlock::tick"
         );
     }
 }
