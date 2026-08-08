@@ -1318,6 +1318,99 @@ fn react_to_notification(
             return Vec::new();
         }
 
+        // 3b-bis. Pistons (#316). `PistonBaseBlock.neighborChanged` calls
+        // `checkIfExtend`, which is **immediate** — it fires a block event rather
+        // than scheduling a tick, so the move happens in the same neighbour pass
+        // that noticed the signal. That is why this arm mutates here and returns a
+        // fan-out rather than scheduling.
+        //
+        // The signal test is `piston::has_extend_signal`, which includes
+        // **quasi-connectivity** — see its own doc comment for why that is not a
+        // bug to be fixed.
+        //
+        // What this does *not* do is vanilla's two-phase `moving_piston`
+        // transition: the move is applied in one step, so a 0-tick pulse cannot
+        // work and entities in the path are not shoved. Both are named in
+        // `crate::piston`'s module doc; #316 stays open on them.
+        if crate::piston::is_piston(&state) {
+            let facing = crate::piston::piston_facing(&state);
+            let extended = crate::piston::piston_extended(&state);
+            let want_extended =
+                crate::piston::has_extend_signal(&redstone::make_lookup(column, min_x, min_z), n.pos, facing);
+            if want_extended != extended {
+                let sticky = crate::piston::is_sticky_piston(&state);
+                let resolution = crate::piston::resolve(
+                    &redstone::make_lookup(column, min_x, min_z),
+                    n.pos,
+                    facing,
+                    want_extended,
+                );
+                // A retraction always happens (the head comes back even with
+                // nothing to pull); an extension only happens if the run resolves.
+                // That asymmetry is vanilla's: `checkIfExtend` gates the *extend*
+                // event on `resolve()` and the contract event on nothing.
+                let resolution = match (want_extended, resolution) {
+                    (true, None) => return Vec::new(),
+                    (_, Some(resolution)) => resolution,
+                    (false, None) => crate::piston::Resolution {
+                        to_push: Vec::new(),
+                        to_destroy: Vec::new(),
+                        push_direction: facing.opposite(),
+                    },
+                };
+                // A sticky piston pulls; a normal one only drops its head.
+                let resolution = if want_extended || sticky {
+                    resolution
+                } else {
+                    crate::piston::Resolution { to_push: Vec::new(), ..resolution }
+                };
+                let writes = crate::piston::apply_move(
+                    &redstone::make_lookup(column, min_x, min_z),
+                    &resolution,
+                    n.pos,
+                    facing,
+                    want_extended,
+                    sticky,
+                );
+                let mut fan_out = Vec::new();
+                for write in writes {
+                    let wlx = write.pos.x - min_x;
+                    let wlz = write.pos.z - min_z;
+                    if !(0..16).contains(&wlx)
+                        || !(0..16).contains(&wlz)
+                        || write.pos.y < column.min_y
+                        || write.pos.y >= column.min_y + column.height
+                    {
+                        continue;
+                    }
+                    let from = column.block_state(wlx, write.pos.y, wlz).to_string();
+                    if from == write.to {
+                        continue;
+                    }
+                    column.set_block(wlx, write.pos.y, wlz, &write.to);
+                    events.push(RandomTickEvent {
+                        pos: (write.pos.x, write.pos.y, write.pos.z),
+                        from,
+                        to: write.to.clone(),
+                    });
+                    fan_out.push(Notification { pos: write.pos, from: Direction::Down });
+                }
+                let new_state = redstone::with_property(
+                    &state,
+                    "extended",
+                    if want_extended { "true" } else { "false" },
+                );
+                column.set_block(tlx, n.pos.y, tlz, &new_state);
+                events.push(RandomTickEvent {
+                    pos: (n.pos.x, n.pos.y, n.pos.z),
+                    from: state,
+                    to: new_state,
+                });
+                return fan_out;
+            }
+            return Vec::new();
+        }
+
         // 3c. Comparators (#315).
         if redstone::is_comparator(&state) {
             let facing = redstone::diode_facing(&state);

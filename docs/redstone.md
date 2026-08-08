@@ -311,6 +311,20 @@ Tables live in `redstone_diode_oracle_gate.rs`; the summary:
 | observer pulse | back face high on ticks **2 and 3**, i.e. starts at 2 and is **2 game ticks** wide |
 | observer trigger | block placed, block removed **and** a pure block-state change all pulse identically; a change behind it does not, and a no-op `setblock` does not |
 
+## Pistons are a separate module
+
+`crate::piston` (issue #316) reaches its signal test through this module's `signal_at`, and its
+reaction arm sits beside the repeater and comparator arms in `random_tick.rs`. Two things worth
+knowing from here:
+
+* **`has_extend_signal` is not `best_neighbor_signal`.** A piston's `getNeighborSignal` excludes the
+  push direction and additionally reads `pos.above()` — quasi-connectivity. Reaching for the general
+  best-neighbour query there is the mistake.
+* **`minecraft:redstone_block` is not a signal source in this module**, noticed while writing the
+  piston gates. It is a gap here, not there.
+
+See [`redstone-pistons.md`](./redstone-pistons.md) for what is and is not modelled.
+
 ## Configuration
 
 No new constants beyond each family's own vanilla-cited literals: torch

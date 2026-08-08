@@ -169,6 +169,10 @@ mod mobs;
 /// and biome spawn lists. Driven by `tick::run_tick_loop`.
 pub mod natural_spawn;
 mod neighbor_update;
+/// Pistons (issue #316): the structure resolver, the quasi-connectivity signal
+/// rule, and the move. Public because the resolver's order is the behaviour and
+/// gates outside this crate assert it.
+pub mod piston;
 mod players;
 mod plugin_channels;
 mod protocol;
