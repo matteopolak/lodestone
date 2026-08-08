@@ -71,6 +71,7 @@
 //! browser", nothing more.
 
 mod input;
+mod multiplayer;
 mod singleplayer;
 mod terrain;
 
@@ -81,6 +82,7 @@ use std::time::Duration;
 use glam::Vec3;
 use input::{Controls, FlyCamera};
 use lodestone_assets::{ResourceManager, ZipSource};
+use lodestone_client::ChunkPos;
 use lodestone_net::WsWebTransport;
 // `shared_camera_buffer` + `section_origin_buffer`, not the old
 // `camera_buffer(device, CameraUniform)`. Issue #76 split group 0 into a shared
@@ -396,6 +398,11 @@ struct LoadedTerrain {
     chunks: Vec<terrain::DecodedChunk>,
     pack_len: usize,
     fixture_len: usize,
+    /// The raw pack bytes, kept so a live join can rebuild the atlas and
+    /// classifier for whatever blocks the *server* turns out to send. `ZipSource`
+    /// consumes its bytes, so re-parsing needs a second copy; the trimmed pack is
+    /// ~6 KB, so keeping one is cheaper than a second `fetch`.
+    pack_bytes: Rc<Vec<u8>>,
 }
 
 /// Loads the real terrain path end to end: fetch the trimmed pack and the
@@ -406,6 +413,7 @@ struct LoadedTerrain {
 async fn load_terrain() -> Result<LoadedTerrain, String> {
     let pack = fetch_bytes(PACK_URL).await?;
     let pack_len = pack.len();
+    let pack_bytes = Rc::new(pack.clone());
     let source = ZipSource::from_bytes(pack).map_err(|e| format!("zip parse: {e}"))?;
     let manager = ResourceManager::new(vec![Box::new(source)]);
 
@@ -420,6 +428,7 @@ async fn load_terrain() -> Result<LoadedTerrain, String> {
         chunks,
         pack_len,
         fixture_len,
+        pack_bytes,
     })
 }
 
@@ -517,6 +526,355 @@ fn extract_after(haystack: &str, needle: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Live multiplayer: a real browser join, rendered.
+// ---------------------------------------------------------------------------
+
+/// Columns either side of the player that the live scene meshes. A flat creative
+/// world is ~2 non-empty sections per column, so 9×9 columns is a cheap scene;
+/// normal terrain is much heavier, which is why this is small rather than the
+/// server's whole view distance.
+const LIVE_VIEW_RADIUS: i32 = 4;
+
+/// How often the live scene is rebuilt from the client's chunk store.
+const LIVE_POLL_MS: u32 = 500;
+
+// One session at a time. A second click while a session is live would spawn a
+// second driver against the same relay, and the two would fight over the scene.
+thread_local! {
+    static SESSION_LIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Uploads a scene and swaps it into the live [`RENDER_STATE`], returning
+/// `(sections, quads)`.
+///
+/// `assets` re-uploads the atlas and its UV table (a live world's block set is
+/// whatever the *server* sends, so the atlas is not fixed at startup like the
+/// fixture path's). `view` reseats the camera from a world-space AABB; pass it
+/// only once per session, or the camera snaps back on every chunk batch.
+fn install_scene(
+    meshes: &[terrain::SectionMesh],
+    assets: Option<&terrain::TerrainAssets>,
+    view: Option<([f32; 3], [f32; 3])>,
+) -> Result<(usize, usize), String> {
+    // `wgpu::Device`/`Queue` are `Arc`-backed and `Clone`, so cloning them out
+    // releases the `RENDER_STATE` borrow before the uploads — which matters,
+    // because the install below needs it mutably.
+    let (device, queue) = RENDER_STATE
+        .with_borrow(|slot| {
+            slot.as_ref()
+                .map(|state| (state.ctx.device().clone(), state.ctx.queue().clone()))
+        })
+        .ok_or("render state not initialised yet")?;
+
+    let mut uploaded = Vec::with_capacity(meshes.len());
+    let mut quads = 0usize;
+    for section in meshes {
+        quads += section.mesh.quad_count();
+        if let Some(gpu) = GpuMesh::upload(&device, &section.mesh) {
+            uploaded.push((gpu, section.origin));
+        }
+    }
+
+    let atlas_pair = assets.map(|assets| {
+        let atlas = GpuAtlas::from_rgba(
+            &device,
+            &queue,
+            assets.atlas.width,
+            assets.atlas.height,
+            &assets.atlas.rgba,
+            &[],
+        );
+        let uv = sprite_uv_buffer(&device, &assets.uv_rects);
+        (atlas, uv)
+    });
+
+    RENDER_STATE.with_borrow_mut(|slot| {
+        let state = slot.as_mut().ok_or("render state vanished")?;
+        let sections = uploaded.len();
+        state.meshes = uploaded;
+        if let Some((atlas, uv)) = atlas_pair {
+            state.atlas = atlas;
+            state.uv = uv;
+        }
+        if let Some((min, max)) = view {
+            let centre = Vec3::new(
+                (min[0] + max[0]) * 0.5,
+                (min[1] + max[1]) * 0.5,
+                (min[2] + max[2]) * 0.5,
+            );
+            let extent = Vec3::new(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+            let radius = (extent.length() * 0.9).max(24.0);
+            let eye = centre + Vec3::new(radius * 0.7, radius * 0.6, radius * 0.7);
+            state.fly = FlyCamera::looking_at(eye, centre);
+        }
+        Ok((sections, quads))
+    })
+}
+
+/// Rebuilds the atlas and classifier for the block ids a *live* world actually
+/// contains, tolerating blocks the trimmed pack has no assets for.
+fn build_live_assets(pack_bytes: &[u8], ids: &[u32]) -> Result<terrain::TerrainAssets, String> {
+    let source =
+        ZipSource::from_bytes(pack_bytes.to_vec()).map_err(|error| format!("zip parse: {error}"))?;
+    let manager = ResourceManager::new(vec![Box::new(source)]);
+    terrain::build_terrain_assets_with(&manager, ids, true)
+}
+
+/// Joins a server through the relay and keeps the drawn scene in sync with the
+/// world the server streams.
+///
+/// The scene is rebuilt by *querying* the client's chunk store rather than by
+/// folding `ChunkLoaded` events, so it converges no matter when this loop starts
+/// relative to the stream (see `multiplayer`'s module docs).
+async fn run_multiplayer(target: multiplayer::JoinTarget, pack_bytes: Rc<Vec<u8>>) {
+    if SESSION_LIVE.get() {
+        set_line("world", "live world: a session is already running (reload to rejoin)");
+        return;
+    }
+    SESSION_LIVE.set(true);
+
+    set_line(
+        "mp",
+        &format!(
+            "join: opening {} (advertising {}:{}) as {} …",
+            target.relay_url, target.host, target.port, target.username
+        ),
+    );
+
+    let (handle, mut events) = match multiplayer::join(&target).await {
+        Ok(pair) => pair,
+        Err(error) => {
+            set_line("mp", &format!("join FAILED — {error}"));
+            SESSION_LIVE.set(false);
+            return;
+        }
+    };
+    set_line(
+        "mp",
+        &format!("join: relay socket open — logging in as {} …", target.username),
+    );
+
+    // Draining the event stream is load-bearing, not bookkeeping: the channel is
+    // bounded, and a full channel stalls the driver that fills it.
+    spawn_local(async move {
+        let mut keep_alives = 0usize;
+        while let Some(event) = events.recv().await {
+            match event {
+                lodestone_client::ClientEvent::Login { entity_id, .. } => set_line(
+                    "mp",
+                    &format!("join: Play reached (entity id {entity_id}) — streaming world…"),
+                ),
+                lodestone_client::ClientEvent::KeepAlive { .. } => {
+                    keep_alives += 1;
+                    if keep_alives == 1 {
+                        log::info!("[mp] first keep-alive — session is live");
+                    }
+                }
+                lodestone_client::ClientEvent::Disconnect { reason } => set_line(
+                    "mp",
+                    &format!(
+                        "join: server disconnected us — {}",
+                        reason.to_plain_string()
+                    ),
+                ),
+                _ => {}
+            }
+        }
+        log::info!("[mp] event stream ended after {keep_alives} keep-alive(s)");
+    });
+
+    let mut assets: Option<terrain::TerrainAssets> = None;
+    let mut asset_ids: Vec<u32> = Vec::new();
+    let mut last_signature = (usize::MAX, usize::MAX);
+    let mut seated = false;
+    let start = now_ms();
+
+    loop {
+        gloo_timers::future::TimeoutFuture::new(LIVE_POLL_MS).await;
+
+        if handle.is_finished() {
+            set_line("world", "live world: session ended (see the join line)");
+            SESSION_LIVE.set(false);
+            return;
+        }
+
+        let centre = handle
+            .position()
+            .map(|pos| ChunkPos::new((pos.x.floor() as i32) >> 4, (pos.z.floor() as i32) >> 4))
+            .unwrap_or_else(|| ChunkPos::new(0, 0));
+
+        let Some(live) = multiplayer::collect_sections(&handle, centre, LIVE_VIEW_RADIUS) else {
+            set_line(
+                "world",
+                &format!(
+                    "live world: waiting for the first column ({:.0}s elapsed)…",
+                    (now_ms() - start) / 1000.0
+                ),
+            );
+            continue;
+        };
+
+        let signature = (live.columns, live.sections.len());
+        if signature == last_signature {
+            continue;
+        }
+        last_signature = signature;
+        if live.sections.is_empty() {
+            continue;
+        }
+
+        let ids = live.distinct_block_ids();
+        if assets.is_none() || ids != asset_ids {
+            match build_live_assets(&pack_bytes, &ids) {
+                Ok(built) => {
+                    asset_ids = ids;
+                    assets = Some(built);
+                }
+                Err(error) => {
+                    set_line("world", &format!("live world: asset build failed — {error}"));
+                    continue;
+                }
+            }
+        }
+        let assets = assets.as_ref().expect("assets built above");
+
+        let (meshes, min, max) = terrain::mesh_live_sections(
+            &live.sections,
+            live.min_y,
+            live.section_count,
+            &assets.classifier,
+        );
+        let view = if seated { None } else { Some((min, max)) };
+        match install_scene(&meshes, Some(assets), view) {
+            Ok((sections, quads)) => {
+                seated = true;
+                set_line(
+                    "world",
+                    &format!(
+                        "LIVE world from {}:{} — {} of {} columns, {sections} sections, {quads} greedy quads | player chunk ({}, {}) | {}",
+                        target.host,
+                        target.port,
+                        live.columns,
+                        live.loaded_columns,
+                        centre.x,
+                        centre.z,
+                        assets.summary,
+                    ),
+                );
+            }
+            Err(error) => set_line("world", &format!("live world: install failed — {error}")),
+        }
+    }
+}
+
+/// Reads a join target from the page's query string
+/// (`?relay=…&host=…&port=…&name=…&join=1`), falling back to the defaults.
+///
+/// Returns the target plus whether `join` was present, i.e. whether to join
+/// without waiting for a click — which is what lets a harness drive a join with
+/// no UI interaction.
+fn target_from_query() -> (multiplayer::JoinTarget, bool) {
+    let mut target = multiplayer::JoinTarget::default_target();
+    let mut auto_join = false;
+    if let Some(win) = window()
+        && let Ok(search) = win.location().search()
+        && let Ok(params) = web_sys::UrlSearchParams::new_with_str(&search)
+    {
+        if let Some(value) = params.get("relay").filter(|v| !v.is_empty()) {
+            target.relay_url = value;
+        }
+        if let Some(value) = params.get("host").filter(|v| !v.is_empty()) {
+            target.host = value;
+        }
+        if let Some(value) = params.get("port").and_then(|v| v.parse::<u16>().ok()) {
+            target.port = value;
+        }
+        if let Some(value) = params.get("name").filter(|v| !v.is_empty()) {
+            target.username = value;
+        }
+        auto_join = params.get("join").is_some();
+    }
+    (target, auto_join)
+}
+
+/// Reads one text input by id, or `None` when it is absent or blank.
+fn input_value(id: &str) -> Option<String> {
+    window()?
+        .document()?
+        .get_element_by_id(id)?
+        .dyn_into::<web_sys::HtmlInputElement>()
+        .ok()
+        .map(|input| input.value().trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Writes one text input by id, ignoring a missing element.
+fn set_input_value(id: &str, value: &str) {
+    if let Some(input) = window()
+        .and_then(|w| w.document())
+        .and_then(|doc| doc.get_element_by_id(id))
+        .and_then(|el| el.dyn_into::<web_sys::HtmlInputElement>().ok())
+    {
+        input.set_value(value);
+    }
+}
+
+/// Prefills the join form, wires its button, and honours `?join=1`.
+fn install_join_ui(pack_bytes: Rc<Vec<u8>>) {
+    let (target, auto_join) = target_from_query();
+
+    set_input_value("relay", &target.relay_url);
+    set_input_value("host", &target.host);
+    set_input_value("port", &target.port.to_string());
+    set_input_value("name", &target.username);
+    set_line(
+        "mp",
+        "join: enter a relay URL and press Join (or load with ?join=1 to join on start)",
+    );
+
+    if let Some(button) = window()
+        .and_then(|w| w.document())
+        .and_then(|doc| doc.get_element_by_id("join"))
+        .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let pack = pack_bytes.clone();
+        let closure = Closure::<dyn FnMut()>::new(move || {
+            // Re-read the form on every click: the point of the inputs is that the
+            // target is not baked in at startup.
+            let mut target = multiplayer::JoinTarget::default_target();
+            if let Some(value) = input_value("relay") {
+                target.relay_url = value;
+            }
+            if let Some(value) = input_value("host") {
+                target.host = value;
+            }
+            if let Some(value) = input_value("port").and_then(|v| v.parse::<u16>().ok()) {
+                target.port = value;
+            }
+            if let Some(value) = input_value("name") {
+                target.username = value;
+            }
+            spawn_local(run_multiplayer(target, pack.clone()));
+        });
+        button.set_onclick(Some(closure.as_ref().unchecked_ref()));
+        // The button outlives this function, so the closure must too.
+        closure.forget();
+    }
+
+    if auto_join {
+        spawn_local(run_multiplayer(target, pack_bytes));
+    }
+}
+
+/// `performance.now()` in milliseconds, or 0 where it is unavailable.
+fn now_ms() -> f64 {
+    window()
+        .and_then(|w| w.performance())
+        .map(|perf| perf.now())
+        .unwrap_or(0.0)
+}
+
 async fn run() {
     let win = window().expect("no window");
     let doc = win.document().expect("no document");
@@ -538,7 +896,23 @@ async fn run() {
     // line. NOTE: worldgen column generation is synchronous and single-threaded,
     // so it briefly blocks the event loop while it runs (a real UX finding,
     // surfaced as the timing number).
-    spawn_local(async {
+    //
+    // Skipped when the page was loaded with `?join=1`. In-browser worldgen is
+    // synchronous and single-threaded, so it blocks the event loop for seconds at
+    // a time — which starves the live session's WebSocket and can get us timed
+    // out by the server. The two probes compete for the one thread; a live join
+    // wins.
+    let skip_singleplayer = target_from_query().1;
+    if skip_singleplayer {
+        set_line(
+            "singleplayer",
+            "singleplayer: skipped (?join=1) — synchronous worldgen would stall the live session",
+        );
+    }
+    spawn_local(async move {
+        if skip_singleplayer {
+            return;
+        }
         set_line("singleplayer", "singleplayer: fetching worldgen data…");
         let bytes = match fetch_bytes(WORLDGEN_URL).await {
             Ok(b) => b,
@@ -766,6 +1140,10 @@ async fn run() {
     // state — that is what makes the render path measurable from a harness (see
     // `RENDER_STATE`).
     RENDER_STATE.set(Some(state));
+
+    // The live multiplayer join. It is wired *after* the state is parked because
+    // it swaps the drawn scene for the served world, which needs a scene to swap.
+    install_join_ui(loaded.pack_bytes.clone());
 
     // Standard wasm-bindgen requestAnimationFrame loop.
     let cb = Rc::new(RefCell::new(None));

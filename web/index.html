@@ -53,6 +53,30 @@
         border: 1px solid #333;
         image-rendering: pixelated;
       }
+      #joinform {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: center;
+      }
+      #joinform input {
+        background: #14141f;
+        color: #cfe;
+        border: 1px solid #333;
+        padding: 3px 5px;
+        font: inherit;
+      }
+      #joinform button {
+        background: #1d3a1d;
+        color: #cfe;
+        border: 1px solid #2ea22e;
+        padding: 3px 10px;
+        font: inherit;
+        cursor: pointer;
+      }
+      #joinform label {
+        color: #7a8;
+      }
     </style>
   </head>
   <body>
@@ -60,6 +84,23 @@
       <p id="status">initialising…</p>
       <p id="assets">assets: —</p>
       <p id="net">net: —</p>
+      <!-- The live multiplayer join: browser WebSocket -> lodestone-relay -> a real
+           server. `host`/`port` are what the handshake *advertises*; where the bytes
+           actually go is the relay's `--target`. Prefilled from the query string
+           (?relay=…&host=…&port=…&name=…), and `?join=1` joins without a click. -->
+      <div id="joinform">
+        <label for="relay">relay</label>
+        <input id="relay" size="24" />
+        <label for="host">host</label>
+        <input id="host" size="12" />
+        <label for="port">port</label>
+        <input id="port" size="5" />
+        <label for="name">name</label>
+        <input id="name" size="12" />
+        <button id="join">Join</button>
+      </div>
+      <p id="mp">join: —</p>
+      <p id="world">live world: —</p>
       <p id="singleplayer">singleplayer: —</p>
       <p id="frame">clock: —</p>
       <p id="controls">controls: —</p>

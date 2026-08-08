@@ -94,6 +94,11 @@ web-sys = { version = "0.3", features = [
   "EventTarget",
   "KeyboardEvent",
   "MouseEvent",
+  # The multiplayer join form: text inputs for the relay/host/port/name, plus the
+  # query string (`?relay=…&join=1`) so a harness can drive a join with no clicks.
+  "HtmlInputElement",
+  "Location",
+  "UrlSearchParams",
 ] }
 console_error_panic_hook = "0.1"
 log = "0.4"

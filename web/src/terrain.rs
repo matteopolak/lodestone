@@ -170,6 +170,25 @@ pub fn build_terrain_assets(
     manager: &ResourceManager,
     ids: &[u32],
 ) -> Result<TerrainAssets, String> {
+    build_terrain_assets_with(manager, ids, false)
+}
+
+/// As [`build_terrain_assets`], but `skip_missing` tolerates ids the pack has no
+/// assets for instead of failing the whole build.
+///
+/// The fixture path wants the strict behaviour: its pack was trimmed to exactly
+/// the blocks the fixture contains, so a missing asset is a real defect. A **live
+/// join** cannot want it — the server decides what blocks exist, and the trimmed
+/// pack covers three of them, so one unexpected block would otherwise mean an
+/// empty screen. Skipped ids classify as non-occluding empty cells, i.e. they
+/// render as holes and their neighbours' faces stay visible; the count is
+/// reported in [`TerrainAssets::summary`] so "the world looks patchy" is never
+/// mistaken for a decode or transport fault.
+pub fn build_terrain_assets_with(
+    manager: &ResourceManager,
+    ids: &[u32],
+    skip_missing: bool,
+) -> Result<TerrainAssets, String> {
     let resolver = ModelResolver::new(manager);
 
     // Assign a SpriteId per unique texture location, and remember each block's
@@ -192,7 +211,12 @@ pub fn build_terrain_assets(
         s
     };
 
-    for &id in ids {
+    // Resolve one block's six face textures *without* touching the sprite tables,
+    // so a block that turns out to be unresolvable leaves no orphan sprite behind
+    // (an orphan whose PNG is missing would fail the atlas stitch below, turning a
+    // skippable block into a fatal one). Interning happens only after all six
+    // locations are known good.
+    let resolve_faces = |id: u32| -> Result<[ResourceLocation; 6], String> {
         let name = block_name(id).ok_or_else(|| format!("unknown block id {id}"))?;
         let loc = ResourceLocation::parse(name).map_err(|e| format!("bad loc {name}: {e}"))?;
 
@@ -242,7 +266,7 @@ pub fn build_terrain_assets(
             })
             .cloned();
 
-        let mut sprites = [0u16; 6];
+        let mut locations: [Option<ResourceLocation>; 6] = Default::default();
         for face in Face::ALL {
             let dir = face_to_direction(face);
             let tex_loc = element
@@ -251,7 +275,33 @@ pub fn build_terrain_assets(
                 .cloned()
                 .or_else(|| fallback.clone())
                 .ok_or_else(|| format!("no texture for {name} face {face:?}"))?;
-            sprites[face.index()] = intern(&tex_loc, &mut sprite_index, &mut sprite_locs);
+            // The atlas stitch reads this PNG; check it exists here so a missing
+            // texture is a *skippable* per-block error rather than a fatal one.
+            if manager.read_asset(&tex_loc, "textures", "png").is_none() {
+                return Err(format!("missing texture {tex_loc} for {name}"));
+            }
+            locations[face.index()] = Some(tex_loc);
+        }
+        Ok(locations.map(|slot| slot.expect("every face resolved above")))
+    };
+
+    let mut skipped: Vec<String> = Vec::new();
+    for &id in ids {
+        let locations = match resolve_faces(id) {
+            Ok(locations) => locations,
+            Err(error) if skip_missing => {
+                skipped.push(error);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let mut sprites = [0u16; 6];
+        for face in Face::ALL {
+            sprites[face.index()] = intern(
+                &locations[face.index()],
+                &mut sprite_index,
+                &mut sprite_locs,
+            );
         }
         faces_by_id.insert(id, sprites);
     }
@@ -297,13 +347,22 @@ pub fn build_terrain_assets(
         );
     }
 
-    let summary = format!(
+    let mut summary = format!(
         "atlas: real vanilla pack, {} blocks → {} sprites, {}×{} px (deflate+PNG decoded in-browser)",
         faces_by_id.len(),
         sprite_locs.len(),
         atlas.width,
         atlas.height,
     );
+    if !skipped.is_empty() {
+        // Named, not just counted: "the world has holes" must be traceable to the
+        // trimmed pack rather than read as a decode or transport fault.
+        let example = skipped.first().map(String::as_str).unwrap_or("");
+        summary.push_str(&format!(
+            " | {} block(s) skipped — no assets in the trimmed pack (e.g. {example})",
+            skipped.len(),
+        ));
+    }
 
     Ok(TerrainAssets {
         classifier: MapClassifier { cells },
@@ -389,6 +448,80 @@ pub fn mesh_chunks(
             meshes.push(SectionMesh { origin, mesh });
         }
     }
+    if meshes.is_empty() {
+        min = [0.0; 3];
+        max = [0.0; 3];
+    }
+    (meshes, min, max)
+}
+
+/// Meshes a live world: the same greedy path as [`mesh_chunks`], but reading the
+/// `Arc<ChunkSection>` snapshots a joined [`crate::multiplayer`] session pulls
+/// out of the client-owned store.
+///
+/// The only structural difference is the input shape. `mesh_chunks` walks whole
+/// `ChunkColumn`s decoded from a fixture; here the client hands out *sections*
+/// keyed by `(chunk_x, chunk_z, section_index)`, with all-air sections simply
+/// absent. Neighbour lookup is therefore a map hit rather than a column index,
+/// and `min_y` has to come in from the dimension (`WorldDimensions::min_y`)
+/// because a bare section carries no anchor.
+///
+/// Light is [`UniformLight`], as in the fixture path — the live per-section light
+/// the client also serves is a follow-up, and using it would change what the
+/// fixture path renders too.
+pub fn mesh_live_sections(
+    sections: &HashMap<(i32, i32, usize), std::sync::Arc<lodestone_world::ChunkSection>>,
+    min_y: i32,
+    section_count: usize,
+    classifier: &MapClassifier,
+) -> (Vec<SectionMesh>, [f32; 3], [f32; 3]) {
+    let light = UniformLight::default();
+    let mut meshes = Vec::new();
+    let mut min = [f32::MAX; 3];
+    let mut max = [f32::MIN; 3];
+
+    for (&(cx, cz, si), _) in sections {
+        let mut views: Vec<(i32, i32, i32, ChunkSectionView<'_, MapClassifier, UniformLight>)> =
+            Vec::new();
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                for dy in -1..=1 {
+                    let nsi = si as i32 + dy;
+                    if nsi < 0 || nsi as usize >= section_count {
+                        continue;
+                    }
+                    if let Some(section) = sections.get(&(cx + dx, cz + dz, nsi as usize)) {
+                        views.push((
+                            dx,
+                            dy,
+                            dz,
+                            ChunkSectionView::new(section.as_ref(), classifier, &light),
+                        ));
+                    }
+                }
+            }
+        }
+
+        let mut hood = SectionNeighborhood::default();
+        for (dx, dy, dz, view) in &views {
+            hood.set(*dx, *dy, *dz, Some(view));
+        }
+        let mesh = mesh_greedy(&hood);
+        if mesh.quad_count() == 0 {
+            continue;
+        }
+        let origin = [
+            (cx * 16) as f32,
+            (min_y + (si as i32) * 16) as f32,
+            (cz * 16) as f32,
+        ];
+        for k in 0..3 {
+            min[k] = min[k].min(origin[k]);
+            max[k] = max[k].max(origin[k] + 16.0);
+        }
+        meshes.push(SectionMesh { origin, mesh });
+    }
+
     if meshes.is_empty() {
         min = [0.0; 3];
         max = [0.0; 3];

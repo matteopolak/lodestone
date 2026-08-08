@@ -4,7 +4,7 @@
     {
       "name": "web",
       "runtimeExecutable": "trunk",
-      "runtimeArgs": ["serve", "--config", "web/Trunk.toml"],
+      "runtimeArgs": ["serve", "--release", "--config", "web/Trunk.toml"],
       "port": 8080
     }
   ]
