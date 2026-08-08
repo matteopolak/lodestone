@@ -723,9 +723,15 @@ impl<S: ChunkSource> RegionChunkSource<S> {
             .ok()??;
         let mut reader = Reader::new(&raw);
         let (_, nbt) = read_named_nbt(&mut reader).ok()?;
-        let column =
+        let mut column =
             chunk_nbt::column_from_nbt(&nbt, self.state.min_y, self.state.height).ok()?;
         let extras = chunk_nbt::extras_from_nbt(&nbt);
+        // The column carries its own copy so `encode_chunk` can put them on the
+        // wire (issue #520). Before this, a chest read off disk reached the tick
+        // loop's registry and nothing else — the chunk packet claimed the chunk
+        // had no block entities at all. The registry stays the authority for
+        // *saving*, because a live furnace is newer than the disk one.
+        column.set_block_entities(extras.block_entities.clone());
         let restored = self.restore_block_entities(&extras);
         let ticks = self
             .state

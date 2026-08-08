@@ -215,6 +215,51 @@ impl Resolver for EmbeddedResolver {
         self.try_json(&format!("tags/block/{name}"))
     }
 
+    /// Every bundled `worldgen/structure_set/*.json` id (issue #514's S1).
+    ///
+    /// **This method is the entry point to the whole structure engine.** The
+    /// default is an empty list, and a resolver returning nothing here places no
+    /// structures at all — which is exactly the state the integrated server was
+    /// in while the placement engine sat fully built and unreachable. Every
+    /// fixture resolver in the workspace still returns nothing, deliberately, so
+    /// the parity fixtures stay byte-identical; this is the one resolver that
+    /// opts production in.
+    ///
+    /// Derived from the embedded table rather than a hand-written list, so adding
+    /// a `structure_set/*.json` to `assets/worldgen/` is the whole change. Order
+    /// is not significant — `StructureRegistry` re-orders into vanilla's
+    /// `StructureSets.bootstrap` order.
+    fn structure_set_ids(&self) -> Vec<String> {
+        EMBEDDED_WORLDGEN
+            .iter()
+            .filter_map(|(id, _)| id.strip_prefix("structure_set/"))
+            .map(|name| format!("minecraft:{name}"))
+            .collect()
+    }
+
+    /// `worldgen/structure_set/<name>.json` — 20 files.
+    fn structure_set(&self, id: &str) -> Value {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        self.try_json(&format!("structure_set/{name}"))
+    }
+
+    /// `worldgen/structure/<name>.json` — 34 files.
+    fn structure(&self, id: &str) -> Value {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        self.try_json(&format!("structure/{name}"))
+    }
+
+    /// `tags/worldgen/biome/<name>.json`. Load-bearing rather than a nicety:
+    /// every bundled structure spells its `biomes` field as a single tag
+    /// reference (`"#minecraft:has_structure/shipwreck"`), so without this every
+    /// structure's biome predicate is empty and no start is ever valid — the
+    /// engine would run and place nothing, which looks identical to it not
+    /// running.
+    fn biome_tag(&self, id: &str) -> Value {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        self.try_json(&format!("tags/worldgen/biome/{name}"))
+    }
+
     /// The five per-block-state predicates `freeze_top_layer` needs (issue
     /// #404's U2), built from [`lodestone_data`]'s jar-dumped censuses rather
     /// than from an embedded JSON asset.

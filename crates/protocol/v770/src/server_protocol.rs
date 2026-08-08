@@ -1412,8 +1412,10 @@ fn encode_game_login_rest() -> Vec<u8> {
 /// biome assignment rather than one constant id everywhere. Every block
 /// cell is resolved via [`ServerChunkColumn::block_state`] (the same string
 /// source [`V770ServerProtocol::encode_block_update`] already reads for a
-/// single cell) through [`resolve_state_id`]; every biome quart via
-/// [`ServerChunkColumn::biome_state`] through [`resolve_biome_id`].
+/// single cell) through [`resolve_state_id`]; every biome **cell** via
+/// [`ServerChunkColumn::biome_cell_index`] through [`resolve_biome_id`] —
+/// a real per-`y` grid since issue #512, not one surface sample broadcast
+/// down the column.
 ///
 /// # Why this does not cost a linear scan per block
 ///
@@ -1428,10 +1430,11 @@ fn encode_game_login_rest() -> Vec<u8> {
 /// calls — the columns a server sends are different data every time (edits,
 /// different chunk coordinates), so there is nothing durable to cache
 /// across them without the source outliving one `encode_chunk` call.
-/// [`resolve_biome_id`] is a 55-entry linear scan and biome only varies at
-/// 16-per-column quart resolution, so it is resolved once per column
-/// (`biome_ids` below), not memoized per section — 16 calls per column is
-/// already cheaper than memoizing would be.
+/// [`resolve_biome_id`] is a 55-entry linear scan, and it is called once per
+/// entry in the column's own biome *palette* (`biome_palette_ids` below) — a
+/// handful, measured in single digits — never once per cell. That is what makes
+/// a 1,536-cell 3-D grid cost strictly less than the 16 calls the old
+/// vertically-broadcast surface array made.
 ///
 /// Iterates section-major (matching wire order) and skips sections that end
 /// up entirely default (air-only, default biome), since
@@ -1448,17 +1451,18 @@ fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldCh
 
     let mut seen: HashMap<&str, u32> = HashMap::new();
 
-    // This column's 16 real biome ids (issue #405), row-major `qz * 4 + qx`
-    // — constant across every section (biome is broadcast vertically, see
-    // `ChunkColumn::biome_state`'s doc comment), so resolved once up front
-    // rather than recomputed per section.
-    let mut biome_ids = [0u32; 16];
-    for qz in 0..4i32 {
-        for qx in 0..4i32 {
-            let name = source.biome_state(qx * 4, qz * 4);
-            biome_ids[(qz * 4 + qx) as usize] = resolve_biome_id(name);
-        }
-    }
+    // This column's real 3-D biome grid (issue #512). The column stores its
+    // cells as indices into a small per-column palette — a handful of entries,
+    // never the 1,536 cells — so resolving that palette once and indexing per
+    // cell is *cheaper* than the 16 `resolve_biome_id` calls this replaced,
+    // while carrying a per-`y` answer instead of one broadcast vertically.
+    // Broadcasting was what erased `lush_caves`/`dripstone_caves`/`deep_dark`
+    // from every column the server sent.
+    let biome_palette_ids: Vec<u32> = source
+        .biome_cell_palette()
+        .iter()
+        .map(|name| resolve_biome_id(name))
+        .collect();
 
     for section_index in 0..shape.section_count {
         let base_y = shape.min_y + (section_index * ChunkSection::EDGE) as i32;
@@ -1487,11 +1491,12 @@ fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldCh
                 }
             }
         }
-        for qz in 0..4usize {
-            for qx in 0..4usize {
-                let id = biome_ids[qz * 4 + qx];
-                for qy in 0..4usize {
-                    section.set_biome(qx, qy, qz, id);
+        for qy in 0..4usize {
+            let column_qy = section_index * 4 + qy;
+            for qz in 0..4usize {
+                for qx in 0..4usize {
+                    let cell = source.biome_cell_index(qx, column_qy, qz) as usize;
+                    section.set_biome(qx, qy, qz, biome_palette_ids[cell]);
                 }
             }
         }
@@ -1507,8 +1512,8 @@ fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldCh
 /// mirroring `LevelChunkWithLight`'s decode in `packets::chunk` exactly:
 /// `x`, `z`, empty heightmaps, the length-prefixed section blob (per section
 /// two leading shorts — non-air count then fluid count, always `0` — then the
-/// block-state container then the biome container), an empty block-entity
-/// list, then the trailing light payload.
+/// block-state container then the biome container), the block-entity list
+/// ([`encode_block_entities`]), then the trailing light payload.
 ///
 /// Heightmaps are still sent empty: a valid, decodable wire form (confirmed
 /// against `Heightmaps`'s own encode logic), so the client accepts the column
@@ -1524,6 +1529,7 @@ fn encode_column_body(
     shape: &ChunkShape,
     column: &WorldChunkColumn,
     light: &ColumnLight,
+    source: &ServerChunkColumn,
 ) -> Vec<u8> {
     let mut w = Writer::default();
     w.i32(cx);
@@ -1558,7 +1564,7 @@ fn encode_column_body(
     w.var_i32(section_bytes.len() as i32);
     w.bytes(&section_bytes);
 
-    w.var_i32(0); // block entities: none generated yet
+    encode_block_entities(&mut w, source);
 
     debug_assert_eq!(
         light.light_section_count(),
@@ -1568,6 +1574,60 @@ fn encode_column_body(
     light.encode(&mut w);
 
     w.into_vec()
+}
+
+/// Resolves a `minecraft:block_entity_type` registry key to its protocol-776
+/// registry id, or `None` for a key this version does not have.
+///
+/// A 49-entry linear scan over [`lodestone_data::block_entity_types`]'s own
+/// name table, in the same shape as [`resolve_biome_id`] — the table is indexed
+/// *by* id, and there is no reverse map in `lodestone-data`. Called once per
+/// block entity in a column, of which the overwhelming majority have zero, so a
+/// map would cost more to build than the scans it saves.
+fn resolve_block_entity_type_id(name: &str) -> Option<u32> {
+    (0..lodestone_data::block_entity_types::TYPE_COUNT as u32)
+        .find(|&id| lodestone_data::block_entity_types::block_entity_type_name(id) == Some(name))
+}
+
+/// Writes the chunk packet's block-entity array (issue #520): a VarInt count
+/// then, per entry, the section-relative XZ packed into one byte (`x << 4 | z`),
+/// the **absolute** Y as a big-endian short, the block-entity type's registry id
+/// as a VarInt, and the network-NBT payload. Exactly the layout
+/// [`lodestone_world::BlockEntity::decode`] reads back.
+///
+/// This used to be a hardcoded `var_i32(0)` — every chunk claiming it held no
+/// block entities at all, so a generated bee nest arrived as a decorative block
+/// with nothing inside it and a chest loaded off disk arrived empty.
+///
+/// An entry is **skipped** — count included — when its type key does not resolve
+/// in this version's registry, or when its NBT does not serialize. Both are
+/// filtered *before* the count is written, which is the whole reason the payload
+/// is built into a scratch buffer per entry rather than straight into `w`: a
+/// wrong VarInt type id merely mis-draws one entity, while a count that does not
+/// match the records that follow desynchronises the stream and takes the
+/// connection down. An `Opaque` entity's tree comes from a region file we did
+/// not write, so "this NBT does not encode" is a real input, not an invariant to
+/// `expect` on.
+fn encode_block_entities(w: &mut Writer, source: &ServerChunkColumn) {
+    let entries: Vec<(lodestone_model::BlockPos, u32, Vec<u8>)> = source
+        .block_entities()
+        .iter()
+        .filter_map(|(pos, entity)| {
+            let type_id = resolve_block_entity_type_id(entity.type_id())?;
+            let nbt = lodestone_server::chunk_nbt::block_entity_to_nbt(*pos, entity);
+            let mut body = Writer::default();
+            write_network_nbt(&mut body, &nbt).ok()?;
+            Some((*pos, type_id, body.into_vec()))
+        })
+        .collect();
+
+    w.var_i32(entries.len() as i32);
+    for (pos, type_id, nbt) in entries {
+        w.u8((((pos.x & 15) << 4) | (pos.z & 15)) as u8);
+        w.i16(pos.y as i16);
+        w.var_i32(type_id as i32);
+        w.bytes(&nbt);
+    }
 }
 
 /// The 26.2 [`LightProperties`] the served-chunk light engine runs against:
@@ -2927,7 +2987,7 @@ impl ServerProtocol for V770ServerProtocol {
         let shape = ChunkShape::overworld_1_21();
         let world_column = build_world_column(&shape, column);
         let light = compute_served_light(&world_column);
-        let payload = encode_column_body(cx, cz, &shape, &world_column, &light);
+        let payload = encode_column_body(cx, cz, &shape, &world_column, &light, column);
         ServerDirective::Send {
             packet_id: play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
             payload,
