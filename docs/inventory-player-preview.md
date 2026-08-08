@@ -169,22 +169,26 @@ again immediately afterwards, so nothing downstream inherits this pass's depth.
   (the right arm's cube origin does not move with the width), also recorded
   there. **The line this bullet used to call "the one line that changes" was
   `const SLIM: bool = false`; it is gone.**
-* **Live pose — now fed, partially.** `ContainerFrame::with_avatar_pose` →
-  `PlayerAvatar::pose` → `gui_entity_anim`'s `base`, produced in
-  `app/redraw.rs` from `Sim::hand_swing_progress()` and `Sim::tick_count()`. So
-  the **attack swing** reaches the avatar: open your inventory during the tail of
-  a swing and the arm is mid-swing, which is what vanilla does (it poses the real
-  render state).
+* ~~**Live pose — now fed, partially.**~~ **Fed whole.**
+  `ContainerFrame::with_avatar_pose` → `PlayerAvatar::pose` → `gui_entity_anim`'s
+  `base`, produced in `app/redraw.rs` from **`Sim::local_body_anim()`** — the walk
+  cycle, the arm swing, the head pitch and the crouch, the same `AnimInput` the
+  third-person body draws with.
 
-  **`limb_swing`/`limb_swing_amount` — the walk cycle — are still `REST`, and the
-  reason is a crate boundary rather than an omission.** The walk state lives on
-  `Sim::body_pose`, a private field whose only public reader is
-  `sim/camera.rs::third_person_body_state`, and that returns `None` in first
-  person — the only camera mode the inventory screen is ever open in. The patch
-  is small and belongs in `sim/`: factor the `AnimInput` construction out of
-  `third_person_body_state` into a `pub fn local_body_anim(&self) -> AnimInput`
-  with **no** `camera_type.is_first_person()` early return, and pass it in
-  `redraw.rs` instead of the two-field literal. Nothing else has to change.
+  **This entry used to say `limb_swing`/`limb_swing_amount` were unreachable
+  because of a crate boundary. They were not, and the diagnosis of *which*
+  obstacle mattered is the useful part.** The walk state does live on
+  `Sim::body_pose`, a private field whose only public reader was
+  `third_person_body_state` — but `sim/camera.rs` is *inside* `sim`, so access was
+  never the problem. The obstacle was that reader's
+  `camera_type.is_first_person()` **early return**, which is a *drawing* decision
+  (do not draw a body the camera is inside) wrongly gating a *pose* that is
+  camera-independent. `local_body_anim` is the same construction without it, and
+  `third_person_body_state` now calls the shared `body_anim` so the two cannot
+  diverge.
+
+  The consumer needs the pose precisely when the gate said no: the inventory
+  screen is only ever opened in first person.
 
   One trap if you touch this: **`attack_anim` is a phase, and `1.0` is a no-op.**
   `HumanoidModel.setupAttackAnimation` drives it through sines, so phase `1.0` is
@@ -192,6 +196,11 @@ again immediately afterwards, so nothing downstream inherits this pass's depth.
   reads as "the pose never arrives" when the pose is arriving perfectly.
   `the_live_pose_reaches_the_draw_and_moves_the_right_arm` uses `0.5` and asserts
   the endpoint identity so the property is recorded rather than commented.
+
+  `hand_swing_progress()`/`tick_count()` are deliberately **no longer** read at
+  the call site: `local_body_anim` takes `attack_anim` and `age_ticks` off the
+  *same* `body_pose.render(partial_tick)` call as the limb swing, so the swing and
+  the walk cannot drift by a frame.
 * **Armour, held items and the elytra.** The world path draws all three off the
   wearer's own part matrices (`prepare_armour`, `merge_held_items`); the avatar
   draws the body only. The seam is `avatar_part_matrices`' output — the same

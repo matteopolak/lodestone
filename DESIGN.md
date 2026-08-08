@@ -7673,3 +7673,50 @@ had `by_legacy_services_name` and `serialized_name`, and the fetch has to *write
 `by_legacy_services_name` does not recognise — and because its fallback *is* wide, a Steve round-trips
 correctly and only an Alex is wrong. `legacy_services_id()` exists so the producer cannot pick the wrong one
 of the two names.
+
+**12.157 An "unreachable because of a crate boundary" blocker where the boundary was not the obstacle,
+and an early return that gated the wrong thing.** The inventory avatar's walk cycle was recorded — in
+`docs/inventory-player-preview.md`, in `PlayerAvatar::pose`'s own doc, and in a comment at the
+`app/redraw.rs` call site — as blocked by a private field: the walk state lives on `Sim::body_pose`,
+"a private field whose only public reader is `sim/camera.rs::third_person_body_state`". Every word of
+that was true and it was the wrong diagnosis, because **`sim/camera.rs` is a descendant module of
+`sim`** and has had full access to `Sim`'s private fields since the decomposition — its own module doc
+says so. The real obstacle was one line *inside* that reader: `if self.camera_type.is_first_person()
+{ return None; }`.
+
+That early return is a **drawing** decision — do not draw a body the camera is inside — sitting in
+front of a **pose**, which is camera-independent. The one consumer that needs the pose needs it
+precisely when the gate says no, because the inventory screen is only ever opened in first person. The
+fix was to factor the `AnimInput` construction into a shared `body_anim` and add `local_body_anim`
+without the return; `third_person_body_state` now calls the same function, so the avatar and the
+third-person body cannot diverge.
+
+**The general shape: when a note says "X is unreachable because of a boundary", check whether the thing
+actually stopping you is a *policy* on the near side of it.** A privacy boundary is a fact about the
+compiler and is easy to verify; an early return that means something adjacent to what you want is not,
+and reads as part of the boundary. The tell here was that the blocker note named a *file* rather than a
+compiler error.
+
+Two smaller ones from the same session, both the §12.150 producer-side island shape:
+
+**`ClientAction::EndClientTick` was constructed in exactly one place: a test.** Four adapters knew about
+it, v770 encoded it, and nothing sent it. It is not cosmetic and the cost is invisible from our side:
+`ServerGamePacketListenerImpl.handleClientTickEnd` sets `knownMovement` to `Vec3.ZERO` **only when no
+movement packet arrived that tick**, so with no tick tail the server keeps the last movement vector
+forever — `resetLastActionTime` (the AFK clock) and every server-side `getKnownMovement()` reader see a
+player still travelling after they stop. Note the gate matters: it belongs on `Egress::in_world`, the
+*movement* packet's condition, not on `send_player_input`'s stricter `in_world && live` — vanilla's
+send site is guarded by `connection != null && !this.pause` inside `if (this.level != null)` and has
+nothing to do with whether an atlas resolved. Adding it also reddened three tests that counted actions
+as a **total**; the fix was to count by variant, which is the assertion those tests meant all along.
+
+**An empty literal at a call site is an island that looks exactly like an honest zero.** The Statistics
+screen passed `StatsSnapshot::default()` into its frame, with a comment — a correct, well-reasoned,
+citation-carrying comment — explaining that an empty table was not a placeholder but *the* data, since
+nothing decoded `award_stats`. When the decode landed, the numbers arrived in `SessionStatistics` and
+the screen kept drawing zeros, and **nothing anywhere reported a problem**: a zero on a statistics
+screen is a legitimate value. There is no diff, no test and no coverage tool that distinguishes the two
+states, because the *only* difference is whether something upstream now produces data. The lesson is
+about the literal, not the comment: **a default value hardcoded at a consumer is a wire that cannot be
+seen to be disconnected.** Prefer plumbing the real source through as `Default` where nothing produces
+it yet, so the day something does, the value arrives on its own.

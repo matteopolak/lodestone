@@ -5379,3 +5379,64 @@ fn folded_spawn_point_and_game_rules_reach_the_shells_own_accessors() {
         "the folded spawn position must reach the accessor the HUD reads"
     );
 }
+
+/// The inventory avatar's walk cycle: `Sim::local_body_anim` must report a live
+/// limb swing **while the camera is first-person**, which is the only mode the
+/// inventory screen is ever open in.
+///
+/// The wrong hypothesis is computed in the same run rather than described:
+/// `third_person_body_state()` is asserted to be `None` here, which is what the
+/// avatar used to be fed through (and what made the walk cycle read as blocked by
+/// a crate boundary). So a regression that put the `is_first_person()` early
+/// return back cannot pass — the two arms disagree by construction.
+///
+/// A `limb_swing_amount` of exactly `0.0` before any movement is the control:
+/// without it, "greater than zero after walking" is satisfied by a rig that
+/// reports a constant.
+#[test]
+fn the_avatar_pose_carries_the_walk_cycle_in_first_person() {
+    let mut sim = Sim::new(test_config());
+    // Settle one tick so `body_pose` has a previous position to measure against.
+    sim.step(1.0 / 20.0);
+
+    assert!(
+        sim.camera_type().is_first_person(),
+        "precondition: a fresh Sim starts in first person"
+    );
+    assert!(
+        sim.third_person_body_state().is_none(),
+        "premise: the third-person reader returns None here — this is the gate \
+         that made the walk cycle look unreachable"
+    );
+    let at_rest = sim.local_body_anim();
+    assert_eq!(
+        at_rest.limb_swing_amount, 0.0,
+        "control: a standing player's limb swing amount is exactly zero, so the \
+         assertion below is not satisfiable by a constant"
+    );
+
+    // Walk. `body_pose.tick` measures the *travelled* horizontal distance, so the
+    // player has to actually move — driving the input alone would not do it.
+    sim.input_mut(|i| i.set(lodestone_controller::Action::Forward, true));
+    for _ in 0..10 {
+        sim.step(1.0 / 20.0);
+    }
+
+    let walking = sim.local_body_anim();
+    assert!(
+        walking.limb_swing_amount > 0.0,
+        "a walking player's avatar must have a non-zero limb swing amount, got {}",
+        walking.limb_swing_amount
+    );
+    assert!(
+        walking.limb_swing > 0.0,
+        "…and the stride phase must have advanced, got {}",
+        walking.limb_swing
+    );
+    // Still first person, so the old path is still `None`: the pose is reaching a
+    // consumer the gated reader structurally could not serve.
+    assert!(
+        sim.third_person_body_state().is_none(),
+        "the camera must not have changed mode under us"
+    );
+}
