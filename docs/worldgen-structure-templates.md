@@ -140,15 +140,32 @@ picks the palette.
 
 | key | why |
 |---|---|
-| `block_entity:append_loot` | a `capped` archaeology rule *does* place its `suspicious_sand`/`suspicious_gravel` block now (ocean ruins, trail ruins), but the loot table its `append_loot` modifier attaches needs block entities in worldgen: brushing one yields nothing. Replaced `processor:minecraft:capped`, which is closed |
-| `template:data_markers` | `structure_block` `DATA` markers are dropped, so template loot chests (shipwreck supply/treasure/map, ocean ruin chest) are not placed: needs block entities and loot tables in worldgen |
+| `block_entity:append_loot` | a `capped` archaeology rule *does* place its `suspicious_sand`/`suspicious_gravel` block (ocean ruins, trail ruins, desert pyramid) and its `append_loot` table **is** bundled, but **nothing in the game brushes**: no `brushable_block` block entity and no brush interaction. The blocker is gameplay-side, not in worldgen. Corrected in S6 — the earlier wording blamed worldgen |
+| `template:block_entity_nbt` | **132 bundled templates** carry a chest/barrel/dispenser/decorated pot whose `LootTable` lives in that *block's own* `nbt` compound (village 62, bastion 26, trial_chambers 19, ruined_portal 13, ancient_city 10, pillager_outpost 2). A **different mechanism** from a `structure_block` DATA marker, and the one `lodestone_server::structure_loot` does not read: the blocks are placed and the containers are empty. Replaced `template:data_markers`, which named the three structures whose markers **do** get rolled |
 | `template:mirrored_shape` | a **rail** `shape` is not remapped under a mirror. A stair's is, as of S5: a coded piece with a SOUTH or WEST orientation carries a real `LEFT_RIGHT` mirror, so this stopped being inert — see `docs/worldgen-structure-coded.md` |
 | `minecraft:ruined_portal` | still `Unsupported`: its own vertical placement, air pocket, and blackstone/lava/`block_age` processors are a unit of their own |
 | `minecraft:monument` | pieces are **coded**, not templated (~2,000 lines of `OceanMonumentPieces`). Placement and the 29-block biome survey are complete; only the pieces are missing, and this row did not exist until S5 went looking for it |
+| `coded:buried_treasure_chest` | `buried_treasure` produces a start and a bounding box and places **zero blocks**. `postProcess` walks a cursor down until the block *below* is sandstone/stone/andesite/granite/diorite, then writes five neighbours and one chest — all `getBlockState` reads, and `StartContext` has only `is_replaceable_at`. Same missing method `ruined_portal` needs |
+| `coded:chests` | a coded piece's containers (`desert_pyramid` ×4, `jungle_temple` 2 chests + 2 dispensers) place their **block** and carry their table and roll seed on `StructurePiece::loot`, but nothing reads that list: `structure_loot` resolves loot from a template's raw bytes and a coded piece has no template |
+| `coded:chest_reorient` | `StructurePiece.reorient` picks a chest's `facing` from its four horizontal neighbours' render-solidity *as written so far*; no block-state read exists on `StartContext`, so a coded chest keeps `facing=north`. Cosmetic |
+| `coded:decoration_random` | `postProcess`'s `random` is the **decorating chunk's** stream, so vanilla's own answer is chunk-order dependent — `jungle_temple`'s 1,522 selector draws and every container roll seed. Taken from the structure's own per-chunk stream here, in vanilla's order and count |
 
-Entities in templates are parsed and not placed, for the same reason as loot
-chests. Igloo's "cap the shaft with snow when there is no ladder below" fix-up is
-not implemented.
+Entities in templates are parsed and not placed. Igloo's "cap the shaft with snow
+when there is no ladder below" fix-up is not implemented.
+
+**Two of those rows were wrong for five phases, and the correction is the point.**
+Both `block_entity:append_loot` and the old `template:data_markers` said the gap
+"needs block entities and loot tables in worldgen". Neither is true: `lodestone-worldgen`
+has had a block-entity layer since #520 (`overworld::block_entities`), and
+`lodestone-server` has had a loot roller plus `structure_loot` since #337 — which
+re-reads a template piece's raw bytes, finds its `structure_block` DATA markers,
+rolls the table the marker names and attaches a **filled** container. A shipwreck
+generated today arrives with 4–11 rolled stacks in its chests. So the DATA-marker
+path is *closed*, and the row describing it as open was hiding the two gaps that
+really are open: the 132 templates whose loot lives in a block's own `nbt`, and the
+absence of any brush interaction. A ledger row that names the wrong gap is worse
+than no row — it makes the right one invisible to exactly the reader who came
+looking.
 
 ## Configuration
 

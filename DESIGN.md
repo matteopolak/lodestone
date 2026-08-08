@@ -6385,3 +6385,100 @@ bench binaries were built once and then run **alternately**, ten rounds, in one 
   aquifer's own `final_density` sampler recompute each other's corners. That is worth ~1,000 `BlendedNoise`
   evaluations per column and it needs a shared scratch, i.e. a change in `aquifer/mod.rs` and
   `overworld/mod.rs` rather than in `engine/`.
+
+**12.141 Three ledger rows described the wrong gap, all in the same direction: "worldgen has no block
+entities and no loot tables" was false when written down and false for five phases afterwards. Loot has
+been rolling into generated shipwreck chests since #337. What is actually missing is a *different
+mechanism* — 132 templates whose `LootTable` lives in a block's own `nbt` compound rather than in a
+`structure_block` DATA marker — plus, separately, the fact that nothing in the game brushes. Also:
+`buried_treasure` places **zero blocks** and nothing said so, and `jungle_pyramid` is 1,531 primitive
+draws.** (#514 S6.)
+
+The handoff into this unit named "no block entities and no loot tables" as the largest remaining gap. Two
+minutes of grep falsified it, and the falsification is the whole record:
+
+- `crates/lodestone-worldgen/src/overworld/output.rs` carries `block_entities: Vec<GeneratedBlockEntity>`
+  with a public accessor, and #520 — "the generator has no block-entity layer" — is **closed**.
+- `crates/lodestone-server/src/structure_loot.rs` is vanilla's `TemplateStructurePiece.postProcess`
+  data-marker pass, on the server side of the seam: it re-reads a piece's raw `.nbt` bytes (the parser
+  drops each block's `nbt` and `BlockIgnoreProcessor` drops the marker block, both correctly, so the
+  metadata survives only in the file), resolves the loot table the marker names, rolls it and attaches a
+  **filled** `BlockEntity::Container`. Its own gate reads a shipwreck at the oracle world's own start.
+
+**So the ledger's three rows were each wrong in a way that made the real gap invisible**, which is the
+expensive failure mode: a reader who came looking for "what is missing" was told to build machinery that
+existed, and told nothing about the mechanism that does not.
+
+| row | said | is |
+|---|---|---|
+| `template:data_markers` | DATA markers dropped, so shipwreck/igloo/ocean-ruin chests are not placed | **closed**, and the three structures it named are precisely the three that work. Row deleted |
+| `block_entity:append_loot` | suspicious sand's loot "needs block entities in worldgen" | the block places, the `archaeology/` tables are bundled, and **nothing brushes** — no `brushable_block` entity, no brush interaction. A gameplay blocker misfiled as a worldgen one |
+| `coded:chests` | the pyramid's four chests "are not placed at all: needs block entities and loot tables" | outcome right, cause wrong. A coded piece has no template, so the marker pass structurally cannot see it. Corrected, and the chests now place with their table and vanilla's `nextLong()` seed on `StructurePiece::loot` |
+
+**The gap that had no row at all.** Measured by gunzipping all 1,212 bundled templates and grepping the
+decompressed bytes: **132** of them carry a chest/barrel/dispenser/decorated pot whose `LootTable` is a
+field of *that block's* `nbt` compound — village 62, bastion 26, trial_chambers 19, ruined_portal 13,
+ancient_city 10, pillager_outpost 2. Spot-checking `village/desert/houses/desert_tool_smith_1.nbt`,
+`ancient_city/structures/barracks.nbt`, `trial_chambers/chests/supply.nbt` and `ruined_portal/portal_1.nbt`
+finds `LootTable` and **no** `structure_block` and **no** `metadata` in any of them, while
+`shipwreck/with_mast.nbt` is the mirror image. Two mechanisms, and the engine implements exactly one.
+Now `template:block_entity_nbt`, with the count in the row so the next reader can check whether it went
+stale. Adjacent, and part of the same brokered patch: only **17 of vanilla's 29** `chests/` loot tables
+are bundled, so `chests/jungle_temple`, `ancient_city`, `bastion_*`, `buried_treasure` and
+`pillager_outpost` would miss even with a consumer — `build.rs` collects that directory recursively, so it
+is a file copy and no code change.
+
+**`buried_treasure` was on the "placing" side of every summary and places nothing.** Its
+`StructurePiece` is constructed with `blocks: None`: a real start, a real bounding box, zero writes.
+`BuriedTreasurePieces.postProcess` walks a cursor down until the block *below* it is
+sandstone/stone/andesite/granite/diorite, then writes up to five neighbours and one chest — every
+decision a `getBlockState`, and `StartContext` exposes only `is_replaceable_at`, which answers
+air-or-fluid and cannot tell sandstone from granite. **The absence looked like presence because the
+placement half is complete and the ledger keys on mechanism, not on "does this structure reach a pixel".**
+Ask of a "supported" list: supported *through to what*? Ledgered as `coded:buried_treasure_chest`; the
+blocker is one method and `ruined_portal` needs the same one.
+
+**`jungle_pyramid`: the transcription was the easy half and the draw count is the specification.**
+`MossStoneSelector` draws one `nextFloat()` per position in the box, *before* the write and regardless of
+`chunkBB`, so a box of `n` positions costs `n` draws. Summed over the 43 selector `generateBox` call sites
+with the four loops expanded — by a script over the Java, not by hand — that is **1,522**; plus the
+orientation `nextInt(4)` and four `nextLong()`s at two `next(32)` each, the piece advances
+`WorldgenRandom::count()` by exactly **1,531**. A temple that consults its selector only for served
+positions, or re-seeds between chunk halves, is still temple-shaped and still passes every "a temple
+assembled" assertion. Two more details with no plausible symptom:
+
+- **`createChest` calls `level.setBlock` directly; `createDispenser` goes through `placeBlock`.** So a
+  SOUTH- or WEST-oriented piece mirrors the dispenser's `facing` and *not* the chest's. Reading them as
+  the same helper is one line and rotates a chest that has no visible wrongness.
+- **`reorient` has no eager analogue and the honest answer was to ledger it.** It reads the four
+  horizontal neighbours' render-solidity *of the world as written so far*; there is no block-state read
+  on `StartContext` and no solidity table in `lodestone-worldgen`. `facing=north` is kept and
+  `coded:chest_reorient` names it — the alternative, a plausible-looking solidity predicate over the
+  dozen block names this one piece happens to place, would have been a private fork of a vanilla table.
+
+The cobble/mossy gate is the *magnitude* species in the shape §12.139 asks for: `nextFloat() < 0.4F`
+selects **cobblestone**, so the inverted reading predicts 0.6, and the test computes **both** hypotheses
+from outside constants and requires the measurement to land on one and exclude the other. The first
+version of it also got the arithmetic wrong in a way that is worth keeping: 12 of the temple's
+`mossy_cobblestone` writes are unconditional `placeBlock` statements rather than selector draws, and
+predicting 11 of them failed the exact-count assertion — which is what an exact count is for. A
+`> 0.35` assertion would have passed with either number.
+
+**And the search bound was a per-structure measurement in the other direction this time.** §12.139
+recorded the desert pyramid at 234 candidate cells and the swamp hut at 211, both far enough out that two
+bounded searches reported a working generator missing. The jungle temple at the same seed is at grid ring
+**5** — chunk (−152, −160). A bound tuned to the pyramid finds it; a bound tuned to ring 4 does not; the
+lesson is not "search further" but "the bound is data, measure it". The `#[ignore]`d search that produced
+all three walks **placement cells** rather than chunks (one candidate per `spacing²`, so 224 million
+chunks become 234 cells) and gets each candidate from `Placement::potential_structure_chunk` —
+production's own function. Re-deriving the grid maths in the helper is what turns a failing gate into a
+hanging one. It also doubles as its own control: the search reproduces §12.139's two published constants
+before reporting the new one.
+
+**Operational.** The neighbouring commands agent's `lodestone-command-mc` extraction broke
+`lodestone-server`'s lib twice during verification, and `lodestone-worldgen` **dev**-depends on
+`lodestone-server` (for `benches/generation.rs`, so that the benchmark measures the embedded production
+data), which means a red server lib makes `cargo test -p lodestone-worldgen` refuse to build even though
+no worldgen test touches it. Both cleared inside bounded re-polling in one shell invocation — three and
+four polls at 45–50s. Worth recording because the *symptom* is a worldgen failure and the cause is in
+another crate that worldgen does not depend on at all in the shipped graph.

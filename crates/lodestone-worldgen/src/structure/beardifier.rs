@@ -464,6 +464,7 @@ mod tests {
             placement: None,
             extra_placements: Vec::new(),
             blocks: None,
+            loot: Vec::new(),
             beard: None,
         }
     }

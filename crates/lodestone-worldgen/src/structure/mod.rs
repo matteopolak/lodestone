@@ -388,6 +388,33 @@ pub struct CodedBlock {
     pub state: String,
 }
 
+/// A loot table a **coded** piece attached to a container it placed —
+/// `StructurePiece.createChest`/`createDispenser`'s
+/// `blockEntity.setLootTable(table, random.nextLong())`.
+///
+/// # Why this is a side list rather than a field on [`CodedBlock`]
+///
+/// A desert pyramid's block list is ~7k entries and exactly **four** of them are
+/// chests, so an `Option<String>` per block would cost ~170 KiB per piece to carry
+/// four values. It is also a different *kind* of fact: `state` goes to the block
+/// field, this goes to whatever builds block entities — today
+/// `lodestone_server::structure_loot`, which reads a **template** piece's raw
+/// `structure_block` DATA markers and has no equivalent source for a coded piece,
+/// since a coded piece has no template to re-read. This list is that source.
+///
+/// The `seed` is vanilla's `random.nextLong()`, drawn from the same stream the
+/// piece's other draws come from and in source order, so it is part of the
+/// stream-position specification whether or not anything rolls with it yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodedLoot {
+    /// Absolute world position of the container block.
+    pub pos: [i32; 3],
+    /// The loot table id, e.g. `minecraft:chests/jungle_temple`.
+    pub table: String,
+    /// `random.nextLong()` — vanilla's per-container roll seed.
+    pub seed: i64,
+}
+
 /// One piece of a structure start — the unit vanilla persists under
 /// `structures.starts.<id>.Children`.
 #[derive(Debug, Clone)]
@@ -419,6 +446,11 @@ pub struct StructurePiece {
     /// [`Self::placement`] is: a start is cloned into every chunk that references
     /// it, and a pyramid's 7k blocks must be a refcount bump rather than a copy.
     pub blocks: Option<Arc<Vec<CodedBlock>>>,
+    /// The containers a **coded** piece attached a loot table to, in the order
+    /// vanilla's `postProcess` created them. Empty for every template piece (whose
+    /// loot lives in the template's own bytes) and for a coded piece with no
+    /// container. See [`CodedLoot`].
+    pub loot: Vec<CodedLoot>,
     /// The `PoolElementStructurePiece`-only facts the beardifier reads, or `None`
     /// for a coded piece — which is vanilla's own `else` branch
     /// (`Beardifier.java:75`: rigid box, `groundLevelDelta` 0, no junctions), not
@@ -733,6 +765,10 @@ pub enum StructureKind {
     /// `minecraft:desert_pyramid` — one coded 21x15x21 piece plus a cellar and the
     /// `afterPlace` suspicious-sand pass.
     DesertPyramid,
+    /// `minecraft:jungle_temple` — one coded 12x10x15 piece, two tripwire traps and
+    /// a piston puzzle. Same `SinglePieceStructure` footprint refusal as
+    /// [`Self::DesertPyramid`], with a 12x15 footprint instead of 21x21.
+    JunglePyramid,
     /// A structure `type` whose generator has not landed. Carries the type id so
     /// the ledger can name it.
     Unsupported(String),
@@ -781,6 +817,7 @@ impl StructureKind {
             "minecraft:igloo" => Self::Igloo,
             "minecraft:swamp_hut" => Self::SwampHut,
             "minecraft:desert_pyramid" => Self::DesertPyramid,
+            "minecraft:jungle_temple" => Self::JunglePyramid,
             "minecraft:buried_treasure" => Self::BuriedTreasure,
             "minecraft:ocean_monument" => Self::OceanMonument {
                 surrounding: resolve_biome_set(
@@ -833,6 +870,7 @@ impl StructureKind {
             | Self::OceanMonument { .. }
             | Self::SwampHut
             | Self::DesertPyramid
+            | Self::JunglePyramid
             | Self::Unsupported(_) => Vec::new(),
         }
     }
@@ -896,19 +934,30 @@ impl StructureKind {
                     ctx.first_occupied_height(middle_x, middle_z, HeightmapKind::WorldSurfaceWg);
                 Some([middle_x, y, middle_z])
             }
-            Self::DesertPyramid => {
+            Self::DesertPyramid | Self::JunglePyramid => {
                 // `SinglePieceStructure.findGenerationPoint`: refuse outright when
                 // the *lowest* of the four corner heights of the (width x depth)
                 // footprint is below sea level, then `onTopOfChunkCenter`. The
                 // corners are sampled at `(minX, minZ)` + `(0|w, 0|d)` — from the
                 // chunk's **min** corner, not its middle, and against
                 // `WORLD_SURFACE_WG` even though the structure sits on land.
+                //
+                // The footprint is the *structure*'s `(width, depth)` pair, which
+                // for the jungle temple is `(12, 15)` and not the pyramid's
+                // `(21, 21)`: sharing this arm without parameterising it would
+                // silently refuse jungle temples on any 12x15-flat-but-21x21-broken
+                // site.
+                let (width, depth) = if matches!(self, Self::JunglePyramid) {
+                    (coded::JUNGLE_WIDTH, coded::JUNGLE_DEPTH)
+                } else {
+                    (coded::PYRAMID_WIDTH, coded::PYRAMID_DEPTH)
+                };
                 let (min_x, min_z) = (cx * 16, cz * 16);
                 let lowest = [
                     (min_x, min_z),
-                    (min_x, min_z + coded::PYRAMID_DEPTH),
-                    (min_x + coded::PYRAMID_WIDTH, min_z),
-                    (min_x + coded::PYRAMID_WIDTH, min_z + coded::PYRAMID_DEPTH),
+                    (min_x, min_z + depth),
+                    (min_x + width, min_z),
+                    (min_x + width, min_z + depth),
                 ]
                 .into_iter()
                 .map(|(x, z)| ctx.first_occupied_height(x, z, HeightmapKind::WorldSurfaceWg))
@@ -1024,6 +1073,10 @@ impl StructureKind {
                 let mut random = structure_random(seed, cx, cz);
                 Some(coded::desert_pyramid_pieces(cx, cz, ctx, &mut random))
             }
+            Self::JunglePyramid => {
+                let mut random = structure_random(seed, cx, cz);
+                Some(coded::jungle_pyramid_pieces(cx, cz, ctx, &mut random))
+            }
             Self::BuriedTreasure => {
                 // The piece's own position is `getBlockX(9)`, not the chunk
                 // middle the biome check uses, and its Y is the literal 90 from
@@ -1043,9 +1096,15 @@ impl StructureKind {
                     placement: None,
                     extra_placements: Vec::new(),
                     // `BuriedTreasurePiece.postProcess` walks down to stone and
-                    // places one chest, which needs a block entity and a loot
-                    // table — ledgered, not emitted.
+                    // places one chest plus up to five *neighbour* blocks, and
+                    // every one of those decisions is a `level.getBlockState` on
+                    // the six neighbours of a walking cursor. `StartContext` has
+                    // no block-state read (only [`StartContext::is_replaceable_at`],
+                    // which answers air-or-fluid and cannot tell sandstone from
+                    // granite), so the walk's terminating condition cannot be
+                    // evaluated. Ledgered as `coded:buried_treasure_chest`.
                     blocks: None,
+                    loot: Vec::new(),
                     beard: None,
                 }])
             }
@@ -1073,7 +1132,7 @@ impl StructureKind {
             // ground-height rule found no column — vanilla's own `false` from
             // `updateAverageGroundHeight`, which produces a start with no blocks
             // rather than no start. `Invalid` is the honest answer.
-            Self::SwampHut | Self::DesertPyramid => match pieces {
+            Self::SwampHut | Self::DesertPyramid | Self::JunglePyramid => match pieces {
                 Some(p) if !p.is_empty() => Validity::Valid,
                 _ => Validity::Invalid,
             },
@@ -1509,6 +1568,10 @@ fn template_piece(
         // Only a `list_pool_element` (S4) needs more than one.
         extra_placements: Vec::new(),
         blocks: None,
+        // A template piece's loot lives in the template's own bytes, which
+        // `lodestone_server::structure_loot` re-reads; this list is the coded-piece
+        // channel only.
+        loot: Vec::new(),
         // Not a jigsaw piece. Every kind `template_piece` serves is
         // `terrain_adaptation: none`, so this is doubly inert today — but it is
         // the field S4's pool pieces fill, and leaving it out of the constructor
@@ -1728,19 +1791,36 @@ impl StructureRegistry {
         // structure id (the placement oracle asserts implemented structures are
         // *absent* from this map).
         if !templates.is_empty() {
+            // **These two rows overstated the gap for five phases and were corrected
+            // in S6 by measurement.** Both said "needs block entities and loot tables
+            // in worldgen"; both machineries already exist. `lodestone-worldgen` has a
+            // block-entity layer (`overworld::block_entities`, #520) and
+            // `lodestone-server` has a loot roller plus `structure_loot`, which
+            // re-reads a template piece's raw bytes, finds its DATA markers, rolls and
+            // attaches a filled container. So the *marker* path is closed and the real
+            // gaps are narrower and different. Recording the correction here rather
+            // than deleting the rows, because a row that describes the wrong gap is
+            // worse than no row: it makes the right one invisible.
             unsupported.insert(
                 "block_entity:append_loot".into(),
                 "a `capped` archaeology rule places its `suspicious_sand`/\
-                 `suspicious_gravel` block (ocean ruins, trail ruins), but the loot \
-                 table its `append_loot` modifier attaches needs block entities in \
-                 worldgen: brushing one yields nothing"
+                 `suspicious_gravel` block (ocean ruins, trail ruins, desert pyramid) \
+                 and its `append_loot` table is bundled \
+                 (`assets/loot_table/archaeology/`), but **nothing in the game brushes**: \
+                 there is no `brushable_block` block entity and no brush interaction, so \
+                 the blocker is gameplay-side and not in worldgen at all"
                     .into(),
             );
             unsupported.insert(
-                "template:data_markers".into(),
-                "structure_block DATA markers are dropped, so template loot chests \
-                 (shipwreck supply/treasure/map, ocean ruin chest) are not placed: \
-                 needs block entities and loot tables in worldgen"
+                "template:block_entity_nbt".into(),
+                "**132 bundled templates** carry a chest/barrel/dispenser/decorated pot \
+                 whose `LootTable` lives in that *block's own* `nbt` compound (village \
+                 62, bastion 26, trial_chambers 19, ruined_portal 13, ancient_city 10, \
+                 pillager_outpost 2) — a different mechanism from a `structure_block` \
+                 DATA marker, and the one `lodestone_server::structure_loot` does not \
+                 read. The blocks are placed; the containers are empty. Replaced \
+                 `template:data_markers`, which named the three structures \
+                 (shipwreck, igloo, ocean ruin) whose markers **do** get rolled"
                     .into(),
             );
             unsupported.insert(
@@ -1782,11 +1862,48 @@ impl StructureRegistry {
                  can spawn an entity yet (#221/#222)"
                     .into(),
             );
+            // S6's corrected form of the S5 row. The chest **blocks** are placed now
+            // and their tables travel on [`StructurePiece::loot`] with vanilla's own
+            // `nextLong()` seed; what is missing is a *consumer*, on the server side of
+            // the seam, next to `structure_loot`'s existing DATA-marker pass.
             unsupported.insert(
                 "coded:chests".into(),
-                "`desert_pyramid`'s four trap-room chests and its suspicious sand carry \
-                 loot tables, so the chests are not placed at all and brushing the sand \
-                 yields nothing: needs block entities and loot tables in worldgen"
+                "a coded piece's containers (`desert_pyramid` ×4, `jungle_temple` \
+                 2 chests + 2 dispensers) place their **block** and carry their loot \
+                 table and roll seed on `StructurePiece::loot`, but nothing reads that \
+                 list yet: `lodestone_server::structure_loot` resolves loot from a \
+                 template's raw bytes and a coded piece has no template. So a coded \
+                 chest opens empty"
+                    .into(),
+            );
+            unsupported.insert(
+                "coded:chest_reorient".into(),
+                "`StructurePiece.reorient` picks a chest's `facing` from the \
+                 render-solidity of its four horizontal neighbours *in the world as \
+                 written so far*; `StartContext` has no block-state read and this crate \
+                 has no solidity table, so a coded chest keeps `facing=north`. Cosmetic, \
+                 and the only coded-piece property that is knowingly not vanilla's"
+                    .into(),
+            );
+            unsupported.insert(
+                "coded:decoration_random".into(),
+                "`postProcess`'s `random` is the **decorating chunk's** feature stream, \
+                 so vanilla's own answer is chunk-order dependent — `jungle_temple`'s \
+                 ~5,600 `MossStoneSelector` draws and every `createChest`/\
+                 `createDispenser` seed. They come out of the structure's own per-chunk \
+                 stream here, in vanilla's order and count, which makes the piece a pure \
+                 function of `(seed, chunk)`"
+                    .into(),
+            );
+            unsupported.insert(
+                "coded:buried_treasure_chest".into(),
+                "`buried_treasure` places a start and a bounding box but **zero blocks**: \
+                 `BuriedTreasurePieces.postProcess` walks a cursor down until the block \
+                 *below* it is sandstone/stone/andesite/granite/diorite, then writes up \
+                 to five neighbours and one chest. Every one of those is a \
+                 `getBlockState`, and `StartContext` offers only `is_replaceable_at` \
+                 (air-or-fluid). The blocker is one method: a `BlockKind`-at-position \
+                 read, which `ruined_portal` needs too"
                     .into(),
             );
         }
