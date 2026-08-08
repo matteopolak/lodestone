@@ -18,8 +18,30 @@ methods:
   `TARGET`, `LIGHT`, `DIFFICULTY`, the status line, and the conditional `spawn`
   diagnostic.
 - `right_lines()` — engine internals: `FPS`, `F/T`, chunk/section/quad counts,
-  live columns and mesh drops, particles, VRAM/world/RSS, and the conditional
-  `recipes=`/`border ` diagnostics.
+  live columns and mesh drops, particles, the `OCCL` occlusion-cull split,
+  VRAM/world/RSS, and the conditional `recipes=`/`border ` diagnostics.
+
+The `OCCL` line reads
+`OCCL <graph nodes> NODES <n> CULL <n> SHADOW <ACTIVE|OFF> WALKS <n>`, folded in
+`app/redraw.rs` from `RenderStats` (see [terrain culling](./terrain-culling.md)).
+Three things about it are worth knowing before reading the numbers:
+
+- **`ACTIVE`/`OFF` is the load-bearing token.** Every failure mode of this cull
+  draws *more*, so a `CULL` of `0` cannot on its own tell an open surface from a
+  graph that refused to walk. Without the flag on screen a silently-dead graph
+  looks identical to a correct one on a clear day.
+- **`CULL 0` is often correct.** At a near-horizontal camera the frustum has
+  already removed the subsurface and the graph has nothing left to take. It
+  shows up looking steeply down or underground — measured 191 → 59 sections at
+  pitch 75.
+- **`WALKS` is session-cumulative, and must not increment while you turn on the
+  spot.** That is the invalidation cadence's whole claim (8-block cell crossings,
+  frustum decoupled from reachability), and it is only readable across two
+  frames. Rising while standing still is a bug, not activity.
+
+`NODES` is deliberately larger than `SECTIONS`: the graph includes sections with
+no geometry, and a `NODES` that tracks `SECTIONS` instead means the fully-solid
+sections are missing and the walk has no floor to see.
 
 `lines()` is the concatenation of the two, so `one_line()` and anything else
 wanting "every line" needs no knowledge of the split, and a line added to either

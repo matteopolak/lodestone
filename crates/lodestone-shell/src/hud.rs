@@ -233,6 +233,43 @@ pub struct DebugStats {
     /// Entity instances drawn this frame (post-frustum-cull). `0` while
     /// disconnected or when no mobs are in view.
     pub entities_drawn: usize,
+    /// Sections in the occlusion graph — [`crate::gpu::RenderStats::
+    /// occlusion_graph_sections`], which is strictly **more** than
+    /// [`Self::section_count`] because it includes sections with no geometry. A
+    /// value that tracks `SECTIONS` instead means the fully-solid sections are
+    /// missing and the walk has no floor to see.
+    pub occlusion_graph_sections: usize,
+    /// Sections the occlusion graph rejected this frame
+    /// ([`crate::gpu::RenderStats::sections_culled_occlusion`]).
+    ///
+    /// **Zero is often correct.** At a near-horizontal camera the frustum has
+    /// already removed the subsurface and the graph has nothing left to take;
+    /// it only shows up looking steeply down or underground (measured 191 → 59
+    /// sections at pitch 75). Read it next to [`Self::occlusion_active`], never
+    /// alone.
+    pub sections_culled_occlusion: usize,
+    /// Sections the walk **would** have culled but drew anyway, because the graph
+    /// is in shadow mode ([`crate::gpu::RenderStats::sections_occlusion_shadow`]).
+    /// The soak counter: what flipping the cull on would remove, on the world you
+    /// are standing in, while nothing can disappear yet.
+    pub sections_occlusion_shadow: usize,
+    /// Whether the graph is actually culling this frame
+    /// ([`crate::gpu::RenderStats::occlusion_active`]).
+    ///
+    /// **The load-bearing one on this line.** Every failure mode of this cull
+    /// draws *more*, so a zero cull count cannot by itself tell an open surface
+    /// from a graph that refused to walk — without this flag on screen, a
+    /// silently-dead graph looks identical to a correct one on a clear day.
+    pub occlusion_active: bool,
+    /// Camera walks this **session** (cumulative, not per frame —
+    /// [`crate::gpu::RenderStats::occlusion_walks`]).
+    ///
+    /// Cumulative on purpose: the claim the invalidation cadence makes is that
+    /// this does *not* increment while you turn on the spot (8-block cell
+    /// crossings, frustum decoupled from reachability), and only a counter read
+    /// across two frames can express that. A number rising while you stand still
+    /// is a bug, not activity.
+    pub occlusion_walks: u64,
     /// Live particles in the simulation this frame.
     pub particles_alive: usize,
     /// Particle billboards actually submitted to the GPU.
@@ -392,6 +429,18 @@ impl DebugStats {
             format!(
                 "PARTICLES {}/{} UNRESOLVED {}",
                 self.particles_drawn, self.particles_alive, self.particles_unresolved
+            ),
+            // The occlusion-cull split. `ACTIVE`/`OFF` is the load-bearing
+            // token — see `DebugStats::occlusion_active`: the other four
+            // numbers cannot distinguish an open surface from a dead graph, and
+            // every failure mode here draws *more* rather than less.
+            format!(
+                "OCCL {} NODES {} CULL {} SHADOW {} WALKS {}",
+                self.occlusion_graph_sections,
+                self.sections_culled_occlusion,
+                self.sections_occlusion_shadow,
+                if self.occlusion_active { "ACTIVE" } else { "OFF" },
+                self.occlusion_walks
             ),
             format!(
                 "MESH VRAM {} KB WORLD {} KB RSS {} MB",
