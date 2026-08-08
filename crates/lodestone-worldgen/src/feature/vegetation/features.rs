@@ -18,8 +18,8 @@
 //!
 //! | vanilla concept | here | why |
 //! |---|---|---|
-//! | `isFaceSturdy(UP)` | "not air and not a fluid" | no per-state occlusion table in this crate |
-//! | `state.isSolid()` | "not air and not a fluid" | same |
+//! | `isFaceSturdy(UP)` | "not air, not a fluid, and [`blocks_motion`]" | no per-state occlusion table in this crate |
+//! | `state.isSolid()` | same | same |
 //! | `canSurvive` | the target's own family rule, or "support below is not air" | see [`super::config::BlockPredicate`]'s own doc for the same narrowing |
 //! | `level.getSeaLevel()` | [`SEA_LEVEL`] | the overworld constant; a preset that moves it would need this parameterised |
 //! | `scheduleTick` | dropped | there is no tick queue at generation time; the *block* still lands |
@@ -47,7 +47,7 @@ use crate::feature::{BlockPos, IntProvider};
 use crate::rng::RandomSource;
 
 use super::config::{
-    BlockPredicate, BlockStateProvider, PlacedRef, VegTags, is_air, is_fluid,
+    BlockPredicate, BlockStateProvider, PlacedRef, VegTags, blocks_motion, is_air, is_fluid,
 };
 use super::grid::VegGrid;
 
@@ -64,10 +64,15 @@ fn air_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
 }
 
 /// `state.isSolid()` / `isFaceSturdy` — narrowed to "occupied by something that is
-/// not a fluid". See this module's doc table.
+/// not a fluid and does block motion". See this module's doc table.
+///
+/// The motion test is the same fix as [`VegGrid::height_ocean_floor`]'s and matters
+/// for the same reason: without it an already-placed seagrass reads as a sturdy
+/// support, so [`place_seagrass`]'s `canSurvive` stand-in would let a second plant
+/// stack on the first even once the heightmap stopped pointing there.
 fn sturdy_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
     let base = base_at(grid, x, y, z);
-    !is_air(base) && !is_fluid(base)
+    !is_air(base) && !is_fluid(base) && blocks_motion(base)
 }
 
 fn water_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {

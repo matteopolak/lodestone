@@ -158,6 +158,15 @@ pub(super)     height: i32,
     /// three integer compares rather than an interner read guard. See
     /// [`Self::is_air_id`] for why an id comparison is exact for air. Unit 8.
     air_ids: [StateId; 3],
+    /// Issue #520: block entities decoration produced, with **absolute** world
+    /// positions, in write order. Alongside [`Self::dirty`] for the same reason
+    /// that is a `Vec` and not a map: insertion order carries no ambiguity, and a
+    /// generated column has at most a handful.
+    ///
+    /// Every constructor leaves this empty and only [`Self::push_block_entity`]
+    /// ever grows it, so a fixture that never decorates a beehive sees exactly the
+    /// pre-#520 behaviour.
+    block_entities: Vec<crate::overworld::block_entities::GeneratedBlockEntity>,
 }
 
 impl VegGrid {
@@ -222,6 +231,7 @@ impl VegGrid {
             local_lo,
             local_hi,
             air_ids,
+            block_entities: Vec::new(),
         }
     }
 
@@ -298,6 +308,24 @@ impl VegGrid {
     #[must_use]
     pub fn interner(&self) -> &Arc<StateInterner> {
         &self.interner
+    }
+
+    /// Issue #520: records a block entity decoration produced, at an **absolute**
+    /// world position. Unbounded by the grid's footprint on purpose — the caller
+    /// filters to the served chunk, exactly as it does for [`Self::dirty_cells`].
+    pub fn push_block_entity(
+        &mut self,
+        entity: crate::overworld::block_entities::GeneratedBlockEntity,
+    ) {
+        self.block_entities.push(entity);
+    }
+
+    /// Takes the recorded block entities, leaving the list empty. Draining rather
+    /// than borrowing because the one consumer moves them into the served column.
+    pub fn take_block_entities(
+        &mut self,
+    ) -> Vec<crate::overworld::block_entities::GeneratedBlockEntity> {
+        std::mem::take(&mut self.block_entities)
     }
 
     /// Positions written by `set_if_in_bounds` since construction, in write
@@ -478,8 +506,16 @@ impl VegGrid {
         self.air_ids.contains(&id)
     }
 
-    /// `Heightmap.Types.OCEAN_FLOOR`/`OCEAN_FLOOR_WG` — topmost non-air,
-    /// non-fluid. `x`/`z` are absolute world coordinates.
+    /// `Heightmap.Types.OCEAN_FLOOR`/`OCEAN_FLOOR_WG` — topmost **motion-blocking**
+    /// block, plus one. `x`/`z` are absolute world coordinates.
+    ///
+    /// It used to be "topmost non-air, non-fluid", which is not the same predicate
+    /// and produced stacked, floating seagrass: seagrass is neither air nor fluid, so
+    /// an already-placed plant counted as the floor and the next placement on that
+    /// column started on top of it. See
+    /// [`super::config::blocks_motion`] for the whole story, for why the deny-list
+    /// there defaults to "blocks motion" (it makes every unlisted block behave
+    /// exactly as before), and for what stands in for vanilla's per-block flag.
     #[must_use]
     pub fn height_ocean_floor(&self, x: i32, z: i32) -> i32 {
         let (lx, lz) = self.to_local_clamped(x, z);
@@ -492,7 +528,11 @@ impl VegGrid {
             if self.is_air_id(id) {
                 continue;
             }
-            if !is_fluid(base_id(self.interner.name_of(id))) {
+            // The name is resolved here either way, so testing two predicates on it
+            // instead of one costs nothing: only cells already known to be non-air
+            // reach this line.
+            let base = base_id(self.interner.name_of(id));
+            if !is_fluid(base) && super::config::blocks_motion(base) {
                 return y + 1;
             }
         }

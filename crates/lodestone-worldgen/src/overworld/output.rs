@@ -18,6 +18,7 @@ impl OverworldGenerator {
         world: crate::dense_grid::DenseBlockGrid,
         biome_quarts: [(String, bool); 16],
         biome_cells: super::BiomeCells,
+        block_entities: Vec<super::block_entities::GeneratedBlockEntity>,
     ) -> GeneratedColumn {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Intern);
         debug_assert_eq!(world.bounds().3, 16, "centre chunk width must be 16");
@@ -32,6 +33,7 @@ impl OverworldGenerator {
             blocks,
             biome_quarts: biome_quarts.map(|(name, _)| name),
             biome_cells,
+            block_entities,
         }
     }
 }
@@ -151,6 +153,9 @@ pub struct GeneratedColumn {
     /// and what a per-section biome container on the wire or in a region file
     /// must be built from. See [`super::biome_cells`].
     biome_cells: super::BiomeCells,
+    /// Issue #520: block entities decoration produced inside this chunk, in write
+    /// order. Empty for every chunk with no bee nest, which is nearly all of them.
+    block_entities: Vec<super::block_entities::GeneratedBlockEntity>,
 }
 
 impl GeneratedColumn {
@@ -237,6 +242,18 @@ impl GeneratedColumn {
     #[must_use]
     pub fn biome_cells(&self) -> &super::BiomeCells {
         &self.biome_cells
+    }
+
+    /// Issue #520: the block entities this chunk's decoration produced, with
+    /// absolute world positions.
+    ///
+    /// **Nothing downstream consumes this yet.** `ChunkColumn` has no block-entity
+    /// field and the chunk-data packet writes a hardcoded `var_i32(0)`, both outside
+    /// this crate — so a generated bee nest still reaches the client empty until
+    /// that lands. See #520.
+    #[must_use]
+    pub fn block_entities(&self) -> &[super::block_entities::GeneratedBlockEntity] {
+        &self.block_entities
     }
 
     /// The 16 surface quarts — see the field's own doc for when this is the wrong

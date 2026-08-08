@@ -110,7 +110,14 @@ const EAST: (i32, i32) = (1, 0);
 /// bundled biome. **Measured, and the whole residual is the shared-overlay channel
 /// named in the module doc** — see [`EXPECTED`] for the split.
 ///
-/// **Re-baselined by issue #513 (was 44, control was 94).** That issue widened the
+/// **Re-baselined twice in one session, and the second move is an improvement.**
+/// Issue #513 took it 44 → 77 (control 94 → 120); the `height_ocean_floor`
+/// motion-blocking predicate fix in the same batch then took it 77 → **64** while
+/// the control went 120 → **129**, i.e. the two arms moved *further apart*, which is
+/// the direction that says the 5×5 read neighbourhood still buys what it claims.
+/// `windswept_savanna` went to exactly zero and left [`EXPECTED`] entirely.
+///
+/// #513 widened the
 /// engine from 7 feature types and 10 placement modifiers to 30 and 15, so a
 /// `VEGETAL_DECORATION` step that previously dropped `height_range`,
 /// `environment_scan`, `count_on_every_layer`, `noise_based_count`,
@@ -120,16 +127,19 @@ const EAST: (i32, i32) = (1, 0);
 /// the border. The number moving is the expected consequence; what would be a
 /// regression is the widened arm losing its margin over the narrow control, which
 /// `narrow_read_neighbourhood_is_what_truncates` still asserts directly.
-const MEASURED_TOTAL: usize = 77;
+const MEASURED_TOTAL: usize = 64;
 
 /// Total truncated rows with the read neighbourhood narrowed back to 3×3 — the
 /// control. Must exceed [`MEASURED_TOTAL`] by a wide margin, or the widening bought
 /// nothing. Re-baselined alongside [`MEASURED_TOTAL`]; see its note.
-const MEASURED_TOTAL_NARROW: usize = 120;
+const MEASURED_TOTAL_NARROW: usize = 129;
 
 /// Per-biome `(west-half-missing, east-half-missing)` at the fixed arm, for every
 /// biome that is not zero. Predicted values, not a band: a biome appearing here that
 /// should not, or a count moving, is a real change and should fail.
+///
+/// Three biomes, down from four: `windswept_savanna` reached zero with the
+/// `blocks_motion` height fix and is no longer listed.
 ///
 /// `jungle` is new as of #513 and is the clearest illustration of why: jungle's own
 /// trees are still `ConfiguredFeature::Unsupported` (`GiantTrunkPlacer`), so its 133
@@ -138,9 +148,8 @@ const MEASURED_TOTAL_NARROW: usize = 120;
 /// so is exactly the shape this sweep measures.
 const EXPECTED: &[(&str, usize, usize)] = &[
     ("minecraft:flower_forest", 7, 8),
-    ("minecraft:jungle", 26, 7),
-    ("minecraft:old_growth_spruce_taiga", 6, 0),
-    ("minecraft:windswept_savanna", 17, 6),
+    ("minecraft:jungle", 21, 7),
+    ("minecraft:old_growth_spruce_taiga", 11, 10),
 ];
 
 /// Biomes this landing takes to exactly zero, asserted individually. Under the

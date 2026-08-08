@@ -295,6 +295,114 @@ pub fn is_fluid(base: &str) -> bool {
     matches!(base, "minecraft:water" | "minecraft:lava")
 }
 
+/// `BlockStateBase.blocksMotion()` — the predicate
+/// `Heightmap.Types.OCEAN_FLOOR`/`MOTION_BLOCKING` actually test, as opposed to
+/// "is not air and is not a fluid".
+///
+/// # Why this exists: stacked, floating seagrass
+///
+/// [`VegGrid::height_ocean_floor`] used to answer "topmost non-air, non-fluid",
+/// and seagrass is neither air nor fluid — so **an already-placed seagrass counted
+/// as the ocean floor**, and the next `seagrass` placement on the same column
+/// started one block higher and stacked on top of it. Two blocks is the plant's
+/// maximum height, so the result read as seagrass floating in open water. It needed
+/// two placements to land on one column, which is why it was intermittent.
+///
+/// Vanilla has no such problem: `OCEAN_FLOOR` tests `blocksMotion()`, seagrass does
+/// not block motion, so every placement on a column resolves to the same real
+/// floor. The heightmap scans here read the *currently mutating* grid by design
+/// (that is what gives a later feature write-visibility of an earlier one), which is
+/// exactly what let a wrong predicate compound instead of merely being wrong once.
+///
+/// # What this is, given there is no `blocksMotion` table in this crate
+///
+/// `blocksMotion` is a `BlockBehaviour.Properties` flag, per block, and this crate
+/// carries no per-block-state property table at all — `lodestone-data` has the
+/// collision shapes but wiring that dependency in here is a bigger change than the
+/// defect. So this is a **deny-list**, and the default direction is deliberate:
+/// **anything not listed blocks motion**, which is byte-for-byte the previous
+/// behaviour. Only the listed states change, so the ripple is bounded to blocks
+/// this engine can actually write.
+///
+/// The list is the 26 non-air, non-fluid members of vanilla's own
+/// `#minecraft:replaceable` tag (read from
+/// `assets/worldgen/../tags/block/replaceable.json`, not from memory) plus the
+/// non-motion-blocking states the decoration engine places that the tag happens not
+/// to include — kelp, sea pickles, sugar cane, the flower set, nether vines and
+/// mushrooms. To extend it, add the state and say where you checked.
+#[must_use]
+pub fn blocks_motion(base: &str) -> bool {
+    !matches!(
+        base,
+        // `#minecraft:replaceable`, minus air and the two fluids (callers test
+        // those separately and more cheaply).
+        "minecraft:short_grass"
+            | "minecraft:fern"
+            | "minecraft:dead_bush"
+            | "minecraft:bush"
+            | "minecraft:short_dry_grass"
+            | "minecraft:tall_dry_grass"
+            | "minecraft:seagrass"
+            | "minecraft:tall_seagrass"
+            | "minecraft:fire"
+            | "minecraft:soul_fire"
+            | "minecraft:snow"
+            | "minecraft:vine"
+            | "minecraft:glow_lichen"
+            | "minecraft:resin_clump"
+            | "minecraft:light"
+            | "minecraft:tall_grass"
+            | "minecraft:large_fern"
+            | "minecraft:structure_void"
+            | "minecraft:bubble_column"
+            | "minecraft:warped_roots"
+            | "minecraft:nether_sprouts"
+            | "minecraft:crimson_roots"
+            | "minecraft:leaf_litter"
+            | "minecraft:hanging_roots"
+            // Placed by this engine, non-motion-blocking, absent from that tag.
+            | "minecraft:kelp"
+            | "minecraft:kelp_plant"
+            | "minecraft:sea_pickle"
+            | "minecraft:sugar_cane"
+            | "minecraft:twisting_vines"
+            | "minecraft:twisting_vines_plant"
+            | "minecraft:weeping_vines"
+            | "minecraft:weeping_vines_plant"
+            | "minecraft:sculk_vein"
+            | "minecraft:brown_mushroom"
+            | "minecraft:red_mushroom"
+            | "minecraft:crimson_fungus"
+            | "minecraft:warped_fungus"
+            | "minecraft:nether_wart"
+            | "minecraft:dandelion"
+            | "minecraft:poppy"
+            | "minecraft:blue_orchid"
+            | "minecraft:allium"
+            | "minecraft:azure_bluet"
+            | "minecraft:red_tulip"
+            | "minecraft:orange_tulip"
+            | "minecraft:white_tulip"
+            | "minecraft:pink_tulip"
+            | "minecraft:oxeye_daisy"
+            | "minecraft:cornflower"
+            | "minecraft:lily_of_the_valley"
+            | "minecraft:wither_rose"
+            | "minecraft:torchflower"
+            | "minecraft:closed_eyeblossom"
+            | "minecraft:open_eyeblossom"
+            | "minecraft:pink_petals"
+            | "minecraft:wildflowers"
+            | "minecraft:sunflower"
+            | "minecraft:lilac"
+            | "minecraft:rose_bush"
+            | "minecraft:peony"
+            | "minecraft:spore_blossom"
+            | "minecraft:cave_vines"
+            | "minecraft:cave_vines_plant"
+    )
+}
+
 /// `net.minecraft.world.level.levelgen.feature.stateproviders.BlockStateProvider`
 /// (the subset grass/flower/tree configs use). Parsing degrades to `None`
 /// on an unsupported provider type or a sub-provider that itself failed to

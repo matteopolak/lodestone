@@ -201,6 +201,7 @@
 
 mod biome;
 pub mod biome_cells;
+pub mod block_entities;
 mod decorate;
 mod fill;
 mod output;
@@ -222,6 +223,7 @@ use self::biome::DynamicBiome;
 use self::fill::AquiferTrees;
 
 pub use self::biome_cells::BiomeCells;
+pub use self::block_entities::{BeeOccupant, GeneratedBlockEntity};
 pub use self::output::GeneratedColumn;
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::output::StageTimes;
@@ -793,14 +795,14 @@ impl OverworldGenerator {
         // handed over intact so the pre-vegetation content can double as the
         // centre source of the in-place region view, and the private mutable copy
         // is taken once at the end. Same one clone, one stage later.
-        let world = self.vegetation_stage(cx, cz, self.post_ore_world(cx, cz));
+        let (world, block_entities) = self.vegetation_stage(cx, cz, self.post_ore_world(cx, cz));
         // Issue #404's U2: `TOP_LAYER_MODIFICATION` is vanilla's LAST decoration
         // step (index 10) and must run after vegetation, because the
         // `MOTION_BLOCKING` height it reads includes leaves and logs — snow sits
         // on a spruce canopy. Running it before vegetation would put snow at the
         // pre-tree surface and then bury it.
         let (world, _) = self.top_layer_stage(cx, cz, world, &cached.2);
-        self.intern_from_dense(world, cached.2.clone(), (*cached.3).clone())
+        self.intern_from_dense(world, cached.2.clone(), (*cached.3).clone(), block_entities)
     }
 
     /// Stages 1-4 (fill/aquifer, biome, surface, carve) for chunk `(cx, cz)` —
@@ -924,7 +926,7 @@ impl OverworldGenerator {
         // so wrapping it is a pointer move, not a copy. `vegetation_stage` takes
         // the shared form because in `column` the centre's post-ore grid really is
         // shared — see there.
-        let world = self.vegetation_stage(cx, cz, Arc::new(world));
+        let (world, block_entities) = self.vegetation_stage(cx, cz, Arc::new(world));
         let t_top_layer_start = std::time::Instant::now();
         // Issue #404's U2. This call is why `StageTimes` grew a field rather
         // than folding another stage into `intern`: `top_layer_stage` is the
@@ -932,7 +934,7 @@ impl OverworldGenerator {
         // believed, and `docs/plans/worldgen-parity.md` §6 predicts <5% for it.
         let (world, _) = self.top_layer_stage(cx, cz, world, &biome_quarts);
         let t_intern_start = std::time::Instant::now();
-        let col = self.intern_from_dense(world, biome_quarts, biome_cells);
+        let col = self.intern_from_dense(world, biome_quarts, biome_cells, block_entities);
         let t_end = std::time::Instant::now();
 
         (
