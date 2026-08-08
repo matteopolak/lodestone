@@ -27,7 +27,7 @@
 //! What was missing is the *update*. Light is computed once per column at serve
 //! time, and after join nothing re-sends it:
 //!
-//! | link | state before this module |
+//! | link | state when this module was written |
 //! |---|---|
 //! | `LIGHT_UPDATE` (packet 48) client decode | **present** — `v770/src/adapter.rs` reads all six fields and calls `World::merge_light` |
 //! | `LightPatch::from_light_masks` merge semantics | **present**, gated |
@@ -39,41 +39,74 @@
 //! (the client got a `BLOCK_UPDATE` and drew the torch) and could not change the
 //! light, because the packet that carries light never left the server.
 //!
-//! # How the fix here works, and why it is a column resend
+//! # The ninth link now exists
 //!
-//! [`crate::server`] answers an emission-changing edit by re-sending that whole
-//! column through the `begin_chunk_batch`/`encode_chunk`/`end_chunk_batch`
-//! sequence it already uses when a player walks into a new column. `encode_chunk`
-//! recomputes light from the column it is handed — which now contains the torch —
-//! so the light arrives correct with **no new encoder and no new trait method**.
-//! The client's `level_chunk_with_light` arm replaces the chunk and emits
-//! `ChunkLoaded`, the same re-mesh signal the `LIGHT_UPDATE` arm emits.
+//! [`crate::protocol::ServerProtocol::encode_light_update`] plus
+//! [`compute_column_light`](crate::protocol::ServerProtocol::compute_column_light),
+//! with the v770 overrides beside `encode_chunk`. So
+//! [`crate::server`]'s `resend_column_for_light` sends a real light-only packet: a
+//! few KiB of nibble arrays, no chunk batch (vanilla's `PlayerChunkSender` flow
+//! control counts chunk *batches*, and a `light_update` is not one), and none of
+//! `encode_column_body`'s palette/heightmap/NBT work.
 //!
-//! That is a deliberately blunt instrument and the cost is honest: a full column
-//! (a few tens of KiB) per emissive edit, rather than the 2 KiB nibble array a
-//! `LIGHT_UPDATE` would carry. It is affordable **because [`should_relight`] is
-//! narrow** — it fires only when emission actually changes, which is torches,
-//! lanterns, glowstone, sea lanterns, campfires, a furnace lighting, and little
-//! else. It does not fire when you mine a wall and let daylight in; see the gaps
-//! below.
+//! `tests/light_update.rs`'s `encode_light_update_matches_the_golden_wire_body`
+//! pins the encoder against the hand-written golden body the *decode* arm was
+//! already gated on — an outside expectation, and the only kind that can catch
+//! the real trap here: the wire order is sky / block / empty-sky / empty-block
+//! masks then the two array lists, which is **not**
+//! `LightPatch::from_light_masks`' argument order. A transposition there is a
+//! well-formed packet the client mis-merges in silence, so a round-trip through
+//! our own decoder cannot see it.
+//!
+//! ## The column resend it replaced, kept as the fallback
+//!
+//! Before that, [`crate::server`] answered an emission-changing edit by re-sending
+//! the whole column through `begin_chunk_batch`/`encode_chunk`/`end_chunk_batch`.
+//! That still runs for a family implementing neither new method (both default to
+//! "nothing"), so adoption is per family and the old path stays correct — but it
+//! cost a full column, a few tens of KiB and 62 M instructions of `encode_chunk`,
+//! per placed torch.
+//!
+//! Either way it is affordable **because [`should_relight`] is narrow** — it fires
+//! only when emission actually changes, which is torches, lanterns, glowstone, sea
+//! lanterns, campfires, a furnace lighting, and little else. It does not fire when
+//! you mine a wall and let daylight in; see the gaps below.
+//!
+//! **What is still on the connection task is the `source.column(cx, cz)` fetch**,
+//! and it is now the dominant cost of this path: a retained-column clone warm, a
+//! full generation cold. Making that cheap is the same change gap 2 below needs —
+//! light computed in the chunk source and carried on the column.
 //!
 //! # The named gaps, and the patch that closes them
 //!
+//! **Both survived the encoder, and that is worth stating plainly**: the encoder
+//! was the blocker named for each of them, and neither fell out of building it,
+//! because neither is a *transport* problem. `light_update` is a cheaper carrier
+//! for the same values, not a better computation.
+//!
 //! **1. Sky light does not follow an edit.** [`should_relight`] compares
 //! *emission* only, not dampening, so breaking a roof does not re-send the
-//! column's sky light. Widening it to `dampening` as well would fire on nearly
-//! every placement and turn every block placed into a column resend, which is
-//! not affordable at this granularity. The right fix is the `LIGHT_UPDATE`
-//! encoder, not a wider predicate here.
+//! column's sky light. Widening it to `dampening` as well fires on nearly every
+//! placement — and even at `light_update`'s size that is a full
+//! `compute_column_light` (a `build_world_column` state-id resolution plus the
+//! flood) per block placed, on the connection task. So the encoder made this
+//! *cheaper* without making it affordable. What it needs is **incremental**
+//! re-propagation from the changed cell, which vanilla has and this crate does
+//! not.
 //!
 //! **2. Light does not cross a chunk border**, so a torch at local `x = 15` does
 //! not light its eastern neighbour at all. This is *not* a gap in this module: it
-//! is `compute_served_light` running the **isolated** compute, and it is the same
-//! open item `docs/server-chunk-light.md` records as a measured **Δ5** sky-light
-//! dark bias at column borders. Its fix needs the brokered
-//! `crates/protocol/v770/src/server_protocol.rs` change that plan's step 4
-//! describes — plus one trap that plan does not mention, recorded here because
-//! it would make the fix look like it worked and serve stale light:
+//! is the **isolated** compute, and it is the same open item
+//! `docs/server-chunk-light.md` records as a measured **Δ5** sky-light dark bias
+//! at column borders. `lodestone_world::compute_column_light_with_neighbours` is
+//! exact for a centre column and would fix it — but it costs ~9× one column, and
+//! the *neighbours'* light changes too, so answering one torch honestly means nine
+//! packets and nine 3×3 floods. That is not something to do on the connection
+//! task, and the shape that makes it affordable is the same one §12.117 already
+//! names: compute light in the chunk source, where the neighbourhood is already
+//! resident, and carry it on [`crate::ChunkColumn`] — plus one trap that plan does
+//! not mention, recorded here because it would make the fix look like it worked
+//! and serve stale light:
 //!
 //! > If `ChunkColumn` carries a precomputed `light`, then
 //! > `ChunkColumn::set_block` and `ChunkStore::set_block` **must invalidate it**.
@@ -82,7 +115,7 @@
 //! > above serve the light the column had *before* the torch was placed — a
 //! > correct-looking wire, a re-meshed client, and no change on screen.
 //!
-//! **3. Only the acting connection is told.** The resend rides that
+//! **3. Only the acting connection is told.** The update rides that
 //! connection's own `Connection`, like every other confirmation in
 //! `dispatch_play_packet`. On a singleplayer integrated server that is every
 //! player; on open-to-LAN a second player sees the torch and not its light until

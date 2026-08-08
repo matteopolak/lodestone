@@ -3201,11 +3201,37 @@ where
 /// edit, and light crossing a column border).
 ///
 /// `source.column(cx, cz)` reflects the `set_block` the caller already performed
-/// — `ChunkSource::column`'s own contract — so `encode_chunk` recomputes light
-/// over terrain that contains the torch. The batch wrapper is the same
-/// `begin_chunk_batch`/`end_chunk_batch` pair every other chunk send in this
-/// module uses; vanilla's `PlayerChunkSender` flow control counts *batches*, so a
-/// bare `encode_chunk` outside one would leave the client's accounting short.
+/// — `ChunkSource::column`'s own contract — so the light is computed over terrain
+/// that contains the torch.
+///
+/// # It is a `light_update` now, not a column resend
+///
+/// The stopgap this replaces re-encoded the **whole column**: ~40 KiB on the wire
+/// and 62 M instructions of `encode_chunk`, per placed torch, on the connection
+/// task. `ServerProtocol::encode_light_update` is the real packet — a few KiB of
+/// nibble arrays — and it needs no chunk batch, because vanilla's
+/// `PlayerChunkSender` flow control counts chunk *batches* and `light_update` is
+/// not one. Vanilla sends it the same way, ungated, from
+/// `ChunkMap`'s light listener.
+///
+/// The column resend survives as the fallback for a family that implements
+/// neither method (both default to "nothing"), so adopting the encoder is per
+/// family and the old behaviour is still reachable and still correct.
+///
+/// # What this does *not* fix
+///
+/// `compute_column_light` is the **isolated** compute, so light still does not
+/// cross a column border and the measured Δ5 sky-light dark bias at borders is
+/// unchanged — this is a cheaper carrier for the same values, not a better
+/// computation. And `should_relight` still compares emission only, so breaking a
+/// roof does not re-send sky light. Both need light computed where the 3×3
+/// neighbourhood is resident (the chunk source) and carried on the column; see
+/// `crate::light` and `docs/server-chunk-light.md`, including the invalidation
+/// trap that makes stale light look like a working fix.
+///
+/// The remaining cost on this task is the `source.column(cx, cz)` fetch itself —
+/// a retained-column clone warm, a full generation cold — which is why the
+/// predicate stays narrow.
 async fn resend_column_for_light<T, P, S>(
     conn: &mut Connection<T>,
     proto: &P,
@@ -3225,6 +3251,20 @@ where
     }
     let (cx, cz) = (pos.x.div_euclid(16), pos.z.div_euclid(16));
     let column = source.column(cx, cz);
+    // Both halves have to be present for the cheap path: a family that can
+    // compute light but not encode the packet (or the reverse) would otherwise
+    // silently send nothing, which is the exact island this replaces.
+    if let Some(light) = proto.compute_column_light(&column) {
+        let directive = proto.encode_light_update(cx, cz, &light);
+        if !matches!(directive, ServerDirective::None) {
+            apply(conn, state, directive).await?;
+            return Ok(());
+        }
+    }
+    // Fallback: the whole-column resend, inside the same
+    // `begin_chunk_batch`/`end_chunk_batch` pair every other chunk send in this
+    // module uses — vanilla's flow control counts batches, so a bare
+    // `encode_chunk` outside one leaves the client's accounting short.
     apply(conn, state, proto.begin_chunk_batch()).await?;
     apply(conn, state, proto.encode_chunk(cx, cz, &column)).await?;
     apply(conn, state, proto.end_chunk_batch(1)).await?;
