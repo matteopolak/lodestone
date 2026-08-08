@@ -417,6 +417,19 @@ pub struct AnimInput {
     /// like a bow draw, which is why it is a named field rather than an
     /// assumption.
     pub arm_pose_left_hand: bool,
+    /// Vanilla's `HumanoidRenderState.isCrouching`, i.e. `Entity.isCrouching()`
+    /// — `hasPose(Pose.CROUCHING)` (`Entity.java:2711-2713`).
+    ///
+    /// **Not the shift-key flag.** `isShiftKeyDown()` is shared-flags bit `0x02`
+    /// and `isCrouching()` is the pose at metadata index 6; holding shift while a
+    /// standing box does not fit gives you the former without the latter. Both are
+    /// decoded in this workspace, so a consumer that reaches for the flag because
+    /// it is closer to hand is choosing the wrong one.
+    ///
+    /// Drives [`Skeleton::pose`]'s [`AnimFamily::Humanoid`] crouch branch — the
+    /// forward body pitch, the lowered head, and the legs stepping back — which
+    /// vanilla applies *after* the attack swing and *before* the idle arm bob.
+    pub crouching: bool,
 }
 
 impl AnimInput {
@@ -431,6 +444,7 @@ impl AnimInput {
         aggressive: false,
         arm_pose: ArmPose::Empty,
         arm_pose_left_hand: false,
+        crouching: false,
     };
 }
 
@@ -893,8 +907,9 @@ impl Skeleton {
                 }
             }
 
-            // HumanoidModel.setupAnim, minus the swim/crouch/ride/item-pose
-            // branches whose state we do not decode yet.
+            // HumanoidModel.setupAnim, minus the swim/ride branches whose state
+            // we do not decode yet. The item-pose branch landed with #57
+            // (`pose_arms_for_item`) and the crouch branch is below.
             AnimFamily::Humanoid => {
                 let arm = |phase: f32| (pos * WALK_FREQ + phase).cos() * 2.0 * amt * 0.5;
                 let leg = |phase: f32| (pos * WALK_FREQ + phase).cos() * 1.4 * amt;
@@ -925,6 +940,60 @@ impl Skeleton {
                 self.pose_arms_for_item(poses, input);
 
                 self.attack_anim(poses, input);
+
+                // `HumanoidModel.setupAnim`'s crouch branch
+                // (`HumanoidModel.java:274-284`), transcribed exactly:
+                //
+                // ```java
+                // if (state.isCrouching) {
+                //    this.body.xRot = 0.5F;
+                //    this.rightArm.xRot += 0.4F;   this.leftArm.xRot += 0.4F;
+                //    this.rightLeg.z += 4.0F;      this.leftLeg.z += 4.0F;
+                //    this.head.y += 4.2F;          this.body.y += 3.2F;
+                //    this.leftArm.y += 3.2F;       this.rightArm.y += 3.2F;
+                // }
+                // ```
+                //
+                // Three things this position in the sequence is load bearing for,
+                // all of them vanilla's ordering rather than the readable one:
+                //
+                // * It is **after** `setupAttackAnimation`, so a crouched swing
+                //   keeps the body pitch — the attack twists `body.y_rot` and this
+                //   assigns `body.x_rot`, two different axes, so neither erases the
+                //   other.
+                // * It is **before** `bobModelPart`, so the idle arm bob rides on
+                //   top of the lowered arms rather than being replaced by them.
+                // * The arm `x_rot` and both leg/head/body translations **add**;
+                //   only `body.x_rot` assigns. Making the whole block assign would
+                //   flatten the walk swing out of a crouch-walk, which reads as
+                //   "sneaking has no animation" rather than as a wrong pose.
+                //
+                // Translations are in model texels because `PartPose` is
+                // (`Affine::of_pose` is `translate(pivot/16) ∘ rotZYX ∘ scale`,
+                // matching `ModelPart.translateAndRotate`), so no unit or sign
+                // conversion applies — vanilla's model space is the same Y-down
+                // texel space ours is, and the flip to world orientation happens
+                // once, downstream of every pose.
+                if input.crouching {
+                    if let Some(i) = s.body {
+                        poses[i].x_rot = 0.5;
+                        poses[i].y += 3.2;
+                    }
+                    for arm in [s.right_arm, s.left_arm] {
+                        if let Some(i) = arm {
+                            poses[i].x_rot += 0.4;
+                            poses[i].y += 3.2;
+                        }
+                    }
+                    for leg in [s.right_leg, s.left_leg] {
+                        if let Some(i) = leg {
+                            poses[i].z += 4.0;
+                        }
+                    }
+                    if let Some(i) = s.head {
+                        poses[i].y += 4.2;
+                    }
+                }
 
                 match self.arms {
                     // AnimationUtils.bobModelPart on each arm, opposite signs.
@@ -1876,6 +1945,128 @@ mod tests {
         assert!(
             animated >= 60,
             "only {animated} of the corpus animates — classification is too narrow"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The crouch (`HumanoidModel.setupAnim`'s `state.isCrouching` branch)
+    // -----------------------------------------------------------------------
+
+    /// **The expected values are `HumanoidModel.java:274-284`'s literals**, not a
+    /// restatement of the port: `body.xRot = 0.5F` (an assign), `arm.xRot += 0.4F`,
+    /// `leg.z += 4.0F`, `head.y += 4.2F`, `body.y += 3.2F`, `arm.y += 3.2F`.
+    ///
+    /// Read off the *uncomposed* poses, in texels, so a unit error (texels vs
+    /// blocks — a factor of 16) or a sign error is a numeric disagreement here
+    /// rather than a model that still looks vaguely hunched in a screenshot.
+    #[test]
+    fn the_crouch_matches_vanillas_humanoid_setup_anim_constants() {
+        let skel = skeleton_for("player_wide");
+        let idx = |n: &str| skel.index_of(n).unwrap_or_else(|| panic!("no {n}"));
+        let rest = skel.posed(&AnimInput::REST);
+        let crouched = skel.posed(&AnimInput {
+            crouching: true,
+            ..AnimInput::REST
+        });
+
+        // `body.xRot = 0.5F` — an **assignment**, so it is the absolute value and
+        // not a delta off whatever the rig authored.
+        let body = idx("body");
+        assert!(
+            (crouched[body].x_rot - 0.5).abs() < 1e-6,
+            "body pitch {} != 0.5",
+            crouched[body].x_rot
+        );
+        assert!(
+            (crouched[body].y - rest[body].y - 3.2).abs() < 1e-4,
+            "body y moved by {}, want 3.2 texels",
+            crouched[body].y - rest[body].y
+        );
+        for arm in ["right_arm", "left_arm"] {
+            let i = idx(arm);
+            assert!(
+                (crouched[i].x_rot - rest[i].x_rot - 0.4).abs() < 1e-4,
+                "{arm} pitch moved by {}, want += 0.4",
+                crouched[i].x_rot - rest[i].x_rot
+            );
+            assert!(
+                (crouched[i].y - rest[i].y - 3.2).abs() < 1e-4,
+                "{arm} y moved by {}, want 3.2 texels",
+                crouched[i].y - rest[i].y
+            );
+        }
+        for leg in ["right_leg", "left_leg"] {
+            let i = idx(leg);
+            assert!(
+                (crouched[i].z - rest[i].z - 4.0).abs() < 1e-4,
+                "{leg} z moved by {}, want 4.0 texels",
+                crouched[i].z - rest[i].z
+            );
+        }
+        let head = idx("head");
+        assert!(
+            (crouched[head].y - rest[head].y - 4.2).abs() < 1e-4,
+            "head y moved by {}, want 4.2 texels",
+            crouched[head].y - rest[head].y
+        );
+
+        // The control: `crouching: false` must be bit-identical to `REST`, or the
+        // above is measuring something other than the flag. This is also what
+        // keeps `pose(&AnimInput::REST) == rest_pose()` — and hence every
+        // model's cull AABB — untouched by this branch.
+        let standing = skel.posed(&AnimInput {
+            crouching: false,
+            ..AnimInput::REST
+        });
+        assert_eq!(standing, rest, "crouching: false must change nothing");
+    }
+
+    /// The crouch sits **after** the attack swing and **before** the idle bob, and
+    /// both orderings are observable rather than a matter of taste.
+    #[test]
+    fn the_crouch_layers_over_the_attack_swing_and_under_the_idle_bob() {
+        let skel = skeleton_for("player_wide");
+        let body = skel.index_of("body").expect("body");
+        let arm = skel.index_of("right_arm").expect("right arm");
+
+        // After `setupAttackAnimation`: that twists `body.y_rot`, this assigns
+        // `body.x_rot`. Two axes, so a mid-swing crouch keeps both.
+        let swinging = AnimInput {
+            attack_anim: 0.5,
+            ..AnimInput::REST
+        };
+        let swing_only = skel.posed(&swinging);
+        assert!(
+            swing_only[body].y_rot.abs() > 0.01,
+            "precondition: this swing really does twist the body"
+        );
+        let both = skel.posed(&AnimInput {
+            crouching: true,
+            ..swinging
+        });
+        assert!(
+            (both[body].y_rot - swing_only[body].y_rot).abs() < 1e-6,
+            "the crouch must not erase the attack twist"
+        );
+        assert!((both[body].x_rot - 0.5).abs() < 1e-6, "and must still pitch the body");
+
+        // Before `bobModelPart`: the age-driven bob is still layered on top, so a
+        // crouching idle arm is not frozen. `age_ticks` alone must still move it.
+        let crouched_early = skel.posed(&AnimInput {
+            crouching: true,
+            age_ticks: 0.0,
+            ..AnimInput::REST
+        });
+        let crouched_later = skel.posed(&AnimInput {
+            crouching: true,
+            age_ticks: 9.0,
+            ..AnimInput::REST
+        });
+        assert!(
+            (crouched_early[arm].z_rot - crouched_later[arm].z_rot).abs() > 1e-4,
+            "the idle bob must survive the crouch: {} vs {}",
+            crouched_early[arm].z_rot,
+            crouched_later[arm].z_rot
         );
     }
 

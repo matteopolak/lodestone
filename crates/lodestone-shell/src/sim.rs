@@ -526,16 +526,25 @@ pub struct Sim {
     /// there is no per-session state to fold it into. Reset by
     /// [`Self::end_session`] so a later session starts un-won.
     won: bool,
-    /// The camera mode: `false` is first person (the only mode that existed
-    /// before this field), `true` is third person. There is deliberately no
-    /// richer enum — [`RenderState::set_third_person_body_source`]'s own doc
-    /// says the closure's `None`/`Some` *is* the camera-mode toggle, and this
-    /// bool is the one thing that decides which of the two it returns each
-    /// frame (see [`Self::third_person_body_state`] and
-    /// [`Self::render_camera`]).
+    /// The camera mode — vanilla's [`CameraType`](crate::camera_rig::CameraType),
+    /// all three states, cycled by `F5` through [`Self::cycle_camera_type`].
+    ///
+    /// This was a plain `bool` and the doc here argued no richer enum was needed,
+    /// on the grounds that
+    /// [`RenderState::set_third_person_body_source`]'s closure returning
+    /// `None`/`Some` *is* the camera-mode toggle. That part is still true and is
+    /// still the seam the renderer sees — but it is a two-state seam because it
+    /// answers `isFirstPerson()`, and vanilla's own state has three. The front
+    /// view was simply missing, not implemented-and-unwired.
+    ///
+    /// Every consumer here asks
+    /// [`CameraType::is_first_person`](crate::camera_rig::CameraType::is_first_person)
+    /// rather than comparing against a variant; only
+    /// [`crate::camera_rig::third_person_camera`] cares which of the two detached
+    /// modes it is.
     ///
     /// [`RenderState::set_third_person_body_source`]: crate::gpu::RenderState::set_third_person_body_source
-    third_person: bool,
+    camera_type: crate::camera_rig::CameraType,
     /// The local player's own walk/head-look/**arm-swing** animation clock,
     /// driven once per physics tick from its real position/orientation exactly the
     /// way `entities.rs` drives an [`EntityPose`] for a tracked network entity

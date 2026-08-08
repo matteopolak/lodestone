@@ -278,17 +278,35 @@ impl Sim {
         )
     }
 
-    /// Flips the camera mode (vanilla's `F5`): first person ↔ third person.
+    /// Advances the camera mode one step (vanilla's `F5`, i.e.
+    /// `CameraType.cycle()`): first person → third person back → third person
+    /// **front** → first person.
     ///
-    /// This one bool is the entire "camera mode" state in this shell —
+    /// [`Self::render_camera`] and [`Self::third_person_body_state`] are the two
+    /// halves of
     /// [`RenderState::set_third_person_body_source`](crate::gpu::RenderState::set_third_person_body_source)'s
-    /// own doc says the closure's `None`/`Some` split *is* the camera-mode
-    /// toggle by design, and [`Self::render_camera`] /
-    /// [`Self::third_person_body_state`] are exactly that closure's two
-    /// halves: the same flag decides both, so they can never disagree about
-    /// which mode is active this frame.
+    /// closure, and both read this one field, so they can never disagree about
+    /// which mode is active this frame. They ask *different questions* of it,
+    /// though: the body state (and hence every screen-overlay and first-person-arm
+    /// gate downstream of `RenderStats::third_person_body_drawn`) is keyed on
+    /// `is_first_person`, and only the camera itself distinguishes back from
+    /// front.
+    pub fn cycle_camera_type(&mut self) {
+        self.camera_type = self.camera_type.cycle();
+    }
+
+    /// The camera mode this frame — all three of vanilla's states.
+    #[must_use]
+    pub fn camera_type(&self) -> crate::camera_rig::CameraType {
+        self.camera_type
+    }
+
+    /// The pre-front-view name for [`Self::cycle_camera_type`], kept so
+    /// `app/lifecycle.rs`'s `KeyOutcome::TogglePerspective` arm still compiles.
+    /// **It no longer toggles** — there are three states — so the call site
+    /// should be renamed to [`Self::cycle_camera_type`] and this removed.
     pub fn toggle_third_person(&mut self) {
-        self.third_person = !self.third_person;
+        self.cycle_camera_type();
     }
 
     /// The camera the frame is actually **drawn** from: [`Self::camera`]
@@ -398,7 +416,12 @@ impl Sim {
             // into that hook. See `docs/view-bobbing.md`.
             0.0,
         );
-        if !self.third_person {
+        // `is_first_person`, not "is it the back view": vanilla's own predicate
+        // here is `!getCameraType().isFirstPerson()` (`Camera.java:266`, the
+        // `detached` assignment), so the front view takes the *same* pullback
+        // path as the back view and differs only by the mirror inside
+        // `third_person_camera`.
+        if self.camera_type.is_first_person() {
             // Issue #154: vanilla's FOV zoom is gated on `firstPerson &&
             // isScoping()` (`AbstractClientPlayer.getFieldOfViewModifier`,
             // `AbstractClientPlayer.java:92-114`) — a third-person camera
@@ -406,16 +429,17 @@ impl Sim {
             // first-person return, not the two third-person branches below.
             return apply_spyglass_fov(eye, self.spyglass_scoping());
         }
+        let camera_type = self.camera_type;
         if self.is_live() {
             match self.live_collision() {
-                Some(view) => third_person_camera(eye, true, &view),
-                None => third_person_camera(eye, true, &NoCollision),
+                Some(view) => third_person_camera(eye, camera_type, &view),
+                None => third_person_camera(eye, camera_type, &NoCollision),
             }
         } else {
             let store = self.chunk_world();
             let world = store.read();
             let view = WorldCollision::new(&world);
-            third_person_camera(eye, true, &view)
+            third_person_camera(eye, camera_type, &view)
         }
     }
 
@@ -468,7 +492,13 @@ impl Sim {
     ///   table, `Menu::player`).
     #[must_use]
     pub fn third_person_body_state(&self) -> Option<ThirdPersonBodyState> {
-        if !self.third_person {
+        // `isFirstPerson()`, so the body draws in **both** detached modes. This
+        // is also what suppresses the first-person arm and the pumpkin/underwater
+        // overlays in the front view: `gpu/frame.rs` derives both from
+        // `RenderStats::third_person_body_drawn`, which is this `Option`'s
+        // `is_some()`. Asking "is the camera behind me" here instead would put
+        // the arm back on screen in front view.
+        if self.camera_type.is_first_person() {
             return None;
         }
         let partial_tick = self.clock().interp_alpha;
@@ -551,6 +581,15 @@ impl Sim {
                 // spread with `..AnimInput::REST` so the gap is visible here.
                 arm_pose: lodestone_render::ArmPose::Empty,
                 arm_pose_left_hand: false,
+                // `Entity.isCrouching()` is `hasPose(Pose.CROUCHING)` — the
+                // *pose*, not the shift-key flag (`Entity.java:2711-2713`), and
+                // the two genuinely differ: holding shift in a one-block gap
+                // leaves you shift-key-down and `SWIMMING`. For the local player
+                // the pose is already authoritative and already fit-gated —
+                // `lodestone_physics::pose::update_player_pose` writes
+                // `PlayerState::pose` as the tail of every tick — so this reads
+                // it directly rather than re-deriving a crouch from input.
+                crouching: interp.pose == lodestone_physics::pose::Pose::Crouching,
             },
             scale: 1.0,
             slim: false,
