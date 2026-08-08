@@ -2711,6 +2711,16 @@ name = "lodestone-command"
 version = "0.1.0"
 
 [[package]]
+name = "lodestone-command-mc"
+version = "0.1.0"
+dependencies = [
+ "lodestone-command",
+ "lodestone-data",
+ "lodestone-model",
+ "uuid",
+]
+
+[[package]]
 name = "lodestone-controller"
 version = "0.1.0"
 dependencies = [
@@ -2954,6 +2964,7 @@ dependencies = [
  "lodestone-anvil",
  "lodestone-client",
  "lodestone-command",
+ "lodestone-command-mc",
  "lodestone-core",
  "lodestone-data",
  "lodestone-entity",
