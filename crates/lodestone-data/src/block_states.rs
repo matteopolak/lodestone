@@ -104,6 +104,236 @@ pub fn properties(id: u32) -> Option<&'static [(&'static str, &'static str)]> {
     Some(table::PROPERTY_SETS[set as usize])
 }
 
+/// One block's contiguous span of state ids plus its jar-marked default state —
+/// the whole of the reverse map's index, 1,196 entries of 12 bytes.
+///
+/// `first..=last` is a *contiguous* range because vanilla builds
+/// `Block.BLOCK_STATE_REGISTRY` block by block; `block_state_index` asserts that
+/// when it builds this, so a table that ever stopped being block-major fails
+/// loudly at first use rather than silently resolving into a neighbouring
+/// block's states.
+#[derive(Debug, Clone, Copy)]
+struct BlockSpan {
+    first: u32,
+    last: u32,
+    /// The id `is_default_state` marks, i.e. vanilla's
+    /// `defaultBlockState()`. `first` only when the default column has somehow
+    /// lost this block — see [`state_id`]'s tier 3.
+    default: u32,
+}
+
+/// The reverse map's index: one [`BlockSpan`] per block, in
+/// [`table::BLOCK_NAMES`] order, plus that order's names sorted for binary
+/// search.
+struct BlockStateIndex {
+    spans: Box<[BlockSpan]>,
+    /// Block indices sorted by name. Built rather than assumed: `BLOCK_NAMES`
+    /// happens to be alphabetical today (it comes from a JSON object's keys),
+    /// but nothing in the generator promises it stays that way, and a silently
+    /// unsorted array would make `binary_search` return wrong answers rather
+    /// than fail.
+    by_name: Box<[u16]>,
+}
+
+/// Builds [`BlockStateIndex`] once per process by walking the 32,366-row static
+/// table. ~32k iterations and two small allocations (14 KB + 2.4 KB), amortised
+/// over the whole process.
+fn block_state_index() -> &'static BlockStateIndex {
+    static INDEX: std::sync::OnceLock<BlockStateIndex> = std::sync::OnceLock::new();
+    INDEX.get_or_init(|| {
+        let block_count = table::BLOCK_NAMES.len();
+        let mut spans: Vec<Option<BlockSpan>> = vec![None; block_count];
+        let mut counts: Vec<u32> = vec![0; block_count];
+        for id in 0..table::STATE_COUNT {
+            let (block, _) = table::STATES[id as usize];
+            let block = block as usize;
+            counts[block] += 1;
+            let is_default = crate::snow_support::is_default_state(id) == Some(true);
+            match &mut spans[block] {
+                Some(span) => {
+                    span.last = id;
+                    if is_default {
+                        span.default = id;
+                    }
+                }
+                slot @ None => {
+                    *slot = Some(BlockSpan {
+                        first: id,
+                        last: id,
+                        default: id,
+                    });
+                }
+            }
+        }
+        let spans: Box<[BlockSpan]> = spans
+            .into_iter()
+            .enumerate()
+            .map(|(block, span)| {
+                let span = span.unwrap_or_else(|| {
+                    panic!(
+                        "generated block-state table has no state for block `{}` — regenerate or \
+                         fix the table",
+                        table::BLOCK_NAMES[block]
+                    )
+                });
+                assert_eq!(
+                    span.last - span.first + 1,
+                    counts[block],
+                    "block `{}`'s states are not contiguous in the generated table \
+                     ({}..={} spans {} ids but the block owns {}); `state_id` scans the span, so \
+                     a non-block-major table would resolve into a neighbour's states",
+                    table::BLOCK_NAMES[block],
+                    span.first,
+                    span.last,
+                    span.last - span.first + 1,
+                    counts[block]
+                );
+                span
+            })
+            .collect();
+        let mut by_name: Vec<u16> = (0..block_count as u16).collect();
+        by_name.sort_unstable_by_key(|&b| table::BLOCK_NAMES[b as usize]);
+        BlockStateIndex {
+            spans,
+            by_name: by_name.into_boxed_slice(),
+        }
+    })
+}
+
+/// The block index in [`table::BLOCK_NAMES`] whose identifier is `name`, or
+/// `None`. `O(log 1196)`.
+fn block_index(name: &str) -> Option<u16> {
+    let index = block_state_index();
+    index
+        .by_name
+        .binary_search_by_key(&name, |&b| table::BLOCK_NAMES[b as usize])
+        .ok()
+        .map(|slot| index.by_name[slot])
+}
+
+/// The block-state id for `minecraft:air`, resolved by name rather than
+/// hardcoded as registry id `0`, and cached.
+///
+/// Every caller that needs a "nothing here" / unresolvable-state fallback wants
+/// this. It used to be a 32,366-row scan per call in
+/// `lodestone-v770`'s `server_protocol.rs`.
+///
+/// # Panics
+/// Panics if the generated table has no `minecraft:air` state (a corrupt table,
+/// not a runtime condition).
+#[must_use]
+pub fn air_state_id() -> u32 {
+    static AIR: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *AIR.get_or_init(|| {
+        state_id("minecraft:air").expect(
+            "generated block-state table has no `minecraft:air` entry — regenerate or fix the table",
+        )
+    })
+}
+
+/// The **reverse** of [`block_name`]/[`properties`]: resolves a canonical
+/// block-state string — `"minecraft:stone"`, `"minecraft:water[level=0]"`,
+/// `"minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"`
+/// — to its protocol-776 global state id, or `None` if the block name is not in
+/// the table at all.
+///
+/// `O(log 1196)` for the name plus at most one scan of *that block's* states
+/// (27 on average, 1,296 at the worst) — never the 32,366-row scan with a string
+/// compare per row this replaced. See `docs/lodestone-data-crate.md` for the
+/// index and `docs/chunk-column-encoding.md` for the measurement that motivated
+/// it.
+///
+/// # Three-tier fallback: exact, default-plus-overrides, then the default state
+///
+/// 1. **Exact match** — name and every property value agree. The common case for
+///    anything decoded off a real edit or a fully-qualified generator state.
+/// 2. **The block's default state with the named properties written over it** —
+///    vanilla's own `defaultBlockState().setValue(k, v)…`. Every property the
+///    caller did *not* name keeps its vanilla default, and any property no real
+///    state of this block carries (a *synthetic* one, e.g. this server's
+///    `minecraft:comparator[…,output=N]`, which vanilla keeps in a block entity)
+///    is dropped rather than sinking the whole lookup. Since a block's state set
+///    is the full cross product of its properties' domains, the merged set always
+///    names a real state unless a value is outside its domain.
+/// 3. **The default state alone** — a bare name, or a named value outside its
+///    property's domain.
+///
+/// # The default state is *not* the lowest id, and assuming it was caused three bugs
+///
+/// This logic used to live in `lodestone-v770`'s `server_protocol.rs` and, before
+/// `43a6e030`, fell back to the **lowest** id sharing the name — right for water
+/// (`86`, `level=0`) and lava (`102`), wrong for 661 of the 797 multi-state
+/// blocks. Three shipped consequences: bare `minecraft:grass_block` resolved to
+/// id `8`, `snowy=true`, so every blade of spread grass rendered snowy (#546);
+/// bare directional blocks came out at whatever the lowest id's `facing` happened
+/// to be (#475); and redstone dust's four connection properties came out `up`
+/// rather than `none`, so wire rendered climbing rather than flat. The default is
+/// read from [`crate::snow_support::is_default_state`] — `state ==
+/// state.getBlock().defaultBlockState()` dumped from the real 26.2 server,
+/// exactly one id per block.
+///
+/// # Panics
+/// Panics if the generated table is not block-major (see [`BlockSpan`]) or has a
+/// block with no states — both generation-time invariants.
+#[must_use]
+pub fn state_id(state: &str) -> Option<u32> {
+    let (name, raw_props) = match state.split_once('[') {
+        Some((name, rest)) => (name, rest.strip_suffix(']').unwrap_or(rest)),
+        None => (state, ""),
+    };
+    let mut wanted: Vec<(&str, &str)> = if raw_props.is_empty() {
+        Vec::new()
+    } else {
+        raw_props
+            .split(',')
+            .filter_map(|pair| pair.split_once('='))
+            .collect()
+    };
+    wanted.sort_unstable();
+
+    let span = block_state_index().spans[block_index(name)? as usize];
+
+    // Tier 1.
+    for id in span.first..=span.last {
+        let mut have: Vec<(&str, &str)> = properties(id).unwrap_or(&[]).to_vec();
+        have.sort_unstable();
+        if have == wanted {
+            return Some(id);
+        }
+    }
+
+    // Tier 3's value, and tier 2's base.
+    let base = span.default;
+    if wanted.is_empty() {
+        return Some(base);
+    }
+
+    // Tier 2: `defaultBlockState().setValue(k, v)…` for every property the block
+    // really has, dropping any synthetic one.
+    let mut merged: Vec<(&str, &str)> = properties(base).unwrap_or(&[]).to_vec();
+    let mut overridden = false;
+    for &(key, value) in &wanted {
+        if let Some(slot) = merged.iter_mut().find(|(have_key, _)| *have_key == key) {
+            if slot.1 != value {
+                slot.1 = value;
+                overridden = true;
+            }
+        }
+    }
+    if !overridden {
+        return Some(base);
+    }
+    merged.sort_unstable();
+    for id in span.first..=span.last {
+        let mut have: Vec<(&str, &str)> = properties(id).unwrap_or(&[]).to_vec();
+        have.sort_unstable();
+        if have == merged {
+            return Some(id);
+        }
+    }
+    Some(base)
+}
+
 /// A [`BlockStateRegistry`] implementation for protocol 776.
 ///
 /// Holds the owned [`Identifier`]/`BTreeMap` layer that the trait's borrowing
