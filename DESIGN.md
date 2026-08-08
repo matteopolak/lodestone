@@ -4362,3 +4362,116 @@ menu/render/*}`.
   said *"if scrolling lands, the clip has to land with it — a pixel-granular offset without one paints over
   the footer buttons"*. That comment is why this landing needed no rediscovery, and it is the best argument
   in this file for writing down the consequence of a limitation at the site of the limitation.
+
+**12.123 Finishing block drops: an invisible drop was one `Copy` derive, six of 1,207 loot tables were
+bundled because an `#[ignore]`d oracle gate had *never run*, the issue body's own restatement of
+`ore_drops` was draw-count wrong, and the grass-to-dirt bug the owner reported was a proxy that only
+ever churned the world *because* it was wrong.**
+
+Four landings: `cf9f711b` (#537, item metadata), `5f37fb83` (#539, tool predicates), `970fe6e5` (#538,
+the corpus), `d5dc529f` + `e23a50b3` (#544, grass). Seven controls run and observed failing; their exact
+text is in `docs/block-drops.md` and `docs/tick-scheduling.md`. What follows is what the three issue
+bodies could not have said.
+
+- **The index-8 collision needed a *third* answer, and the honest one was "no census column".**
+  `ItemEntity.DATA_ITEM` is index 8, serializer 7, read off `tests/support/entity_data_index_jvm.txt:55`
+  and independently confirmed by a captured vanilla packet. Index 8 is the most contended index in the
+  dump — **nineteen** claimants. §12.47's rule is that the guard depends on which classes collide, and
+  both recorded precedents are useless here: `entity_census::is_living` (index 8's living-vs-arrow split)
+  and `is_mob` (index 15's mob-vs-armour-stand split) both report **false** for `minecraft:item`, which
+  does not separate it from `AbstractArrow` or `PrimedTnt`. The encoder needs no column at all, and the
+  reason is structural rather than lucky: the field list is built by `MobSim::snapshots`' *item* loop, so
+  every `MetadataField::Item` belongs to a `minecraft:item` entity by construction. **The generalisation
+  worth keeping is that "which census column separates the claimants?" has a fourth answer — *none, and
+  here is the producer-side invariant instead* — and that answer is only available when exactly one call
+  site constructs the value.** It is now written at both ends.
+- **The `Copy` derive was the whole cost, and it was paid in the shape of a missing feature rather than a
+  compile error.** `MetadataField` derived `Copy`, which silently forbids every future field carrying an
+  owned value; `ResourceKey` is not `Copy`, so the one field that makes a dropped item *visible* could not
+  exist. The bill arrives as "dropped items do not draw", not as a type error, and nothing in the enum's
+  own definition looks wrong. Dropping the derive cost one character per implementor (`match *field` →
+  `match field`). **A `Copy` derive on a vocabulary type is a forward-compatibility decision disguised as
+  an ergonomics one.**
+- **The `#[ignore]`d corpus gate had never run once, and the failure mode was a *failing precondition*
+  rather than a silent skip — which is worse, because nobody was there to see it fail.**
+  `loot_corpus.rs`'s `corpus_root()` joined `../../..` to `CARGO_MANIFEST_DIR`, which is the repo's
+  *parent*, so both of its tests aborted on their own `root.is_dir()` assert. It had been claiming, since
+  the day it was written, to prove that every bundled table was byte-identical to Mojang's data and that
+  all 1,355 corpus tables parse. **CLAUDE.md's precondition species assumes the vacuous test *passes*; an
+  `#[ignore]`d test that fails its precondition is the same defect with a louder symptom and the same zero
+  observations.** The generalisable fix is not the path: it is that **every `#[ignore]`d gate needs a named
+  `just` recipe**, because that is the only thing that makes "has anyone ever run this?" answerable. Three
+  of the tree's other regen gates had one; this had none.
+- **The corpus was a *feature-support* question, not a curation question, and the answer was 1,230 of
+  1,355 (823 KB).** `load_bundled` debug-asserts zero unsupported features per bundled table, so "clean"
+  *is* the bundling precondition, and the excluded 125 are exactly the tables using `copy_components` (71),
+  `enchant_randomly` (52), `set_potion` (48), `enchant_with_levels` (34), `set_damage` (28), one
+  `minecraft:tag` and one `minecraft:dynamic`. Teaching the roller one of those moves tables in
+  automatically. **The gate has to compare against the cache in *both* directions** — every clean cache
+  table is bundled, and nothing bundled is unclean — because the interesting failure is a table falling
+  into or out of scope, which a bundle-vs-itself check cannot see (the §12 docs-index-drift shape again).
+- **A test's subject can stop exercising the branch it was written for without changing a line.**
+  `a_block_with_no_bundled_table_drops_nothing` named `minecraft:deepslate_emerald_ore` — a block that
+  merely *happened* not to be bundled. Bundling the corpus made it bundled, and the test failed. Its
+  subjects are now six blocks **vanilla itself ships no loot table for** (`bedrock`, `barrier`, the fluids,
+  `cave_air`, `end_portal`), each asserted absent from the bundle as a precondition. **Pick a fixture whose
+  membership in the class under test is a property of the game, not of our current configuration.**
+- **`ApplyBonusCount`'s guard is `tool != null`, not `level > 0`, and #539's own body restated `ore_drops`
+  in a way that is arithmetically identical and draw-count wrong.** The body offered
+  `count * max(1, nextInt(fortune + 2))`. The record is `if (level > 0) { … } else { return count; }`, so
+  at level 0 it draws **nothing** while the restatement draws once and discards it. Every distribution
+  assertion in the suite passes under the restatement; exactly one assertion fails — a cross-arm equality
+  on `popResource`'s *placement*, which is drawn from the same stream after the roll, so a swallowed draw
+  moves the item. Observed: `left: Vec3 { x: 0.3820… }, right: Vec3 { x: 0.4504… }`. **This is §12.116's
+  draw-count lesson arriving from the opposite direction: there the danger was drawing for a constant, here
+  it is a *summary* of a record that preserves the arithmetic and loses the draw.** Note also that a
+  present-but-unenchanted tool *does* cost `uniform_bonus_count` one draw and
+  `binomial_with_bonus_count` `extra` draws — so "no tool" and "tool at level 0" are different streams, and
+  a port that treats them alike is wrong in the direction no distribution can see.
+- **`hasCorrectToolForDrops` is not a loot condition, and folding it into the roll is wrong twice.** It is
+  `ServerPlayerGameMode.destroyBlock:295`, consulted *before* `dropResources` is called at all. Inside the
+  roll it would (a) still consume the roll's draws, shifting the next break's stream, and (b) consult a
+  table that has no `match_tool` branch. The computation already existed —
+  `lodestone_data::tool::mining(held, state_id).correct_tool` *is* this flag, already folded with the
+  block's own `requiresCorrectToolForDrops` — so the only new plumbing was `mobs::block_state_id`, the
+  name→state-id bridge every id-keyed census needs from a world that stores canonical strings. **Three
+  id-keyed censuses now want that bridge; it should be looked for before being rebuilt.**
+- **Two of the three issue bodies asserted infrastructure that does not exist, in the confident direction.**
+  #539 said "`apply_block_action` already has `inventory` in scope at the `StopDestroy` arm" — it does not;
+  `inventory` is a parameter of the *caller*, and the held stack had to be threaded. #538 named
+  `loot_corpus.rs` as "already reads the full corpus", which was true of the source and false of the
+  behaviour, per the path bug above. **Both were written by an agent that had read the files. Reading a
+  file tells you what it says, not whether it runs.**
+- **Enchantment levels cannot reach this server at all, and saying so was the deliverable.**
+  `minecraft:enchantment` is a datapack registry whose ids are assigned per session; it is **not in
+  Mojang's `registries.json`**, so there is no static name↔id table to generate, and `LootTool` therefore
+  keys enchantments by name and leaves resolution to whoever holds the session registry. Live today: the
+  correct-tool gate, and every `match_tool` predicate over `items` (47 of the corpus's 203 `match_tool`
+  conditions). Not reachable: enchantment levels, because `read_hashed_stack` rejects any non-empty
+  `DataComponentPatch` and the server sends no enchantment registry. **An honest "half of this is an island,
+  here is which half and why" is a better hand-off than a coverage number**, and it is the form §12's
+  staleness entries keep asking for.
+- **The grass-to-dirt bug was a proxy whose own doc comment described it accurately, and the world only
+  churned *because* the proxy was wrong.** `grass_random_tick` used "the block directly above is bare air"
+  for `canStayAlive`; `minecraft:short_grass` is non-air and vanilla's own vegetation step puts short grass
+  on grass blocks, so every decorated patch died on its first random tick. Generation was innocent. The
+  proxy existed because there was no dampening census; `light_props` (`3f26be21`) is one, and
+  `dampening(above) < 15` with the snow-layer-1 and full-fluid cases ahead of it is the real predicate.
+  **The instructive part is what fixing it broke**: `counters_survive_real_ticking_over_a_generated_column`
+  asserted "real ticking mutates" over production terrain and dropped to **zero** events, because the only
+  thing that had ever mutated that terrain was the bug. That is a control whose premise was true only while
+  the defect was present — a new corner of §12.41 — and the fix is to plant and *assert* the trigger (a 6×6
+  stone cap sized by a `P(zero)` argument, plus one exposed dirt cell: 12 events observed against ~13.5
+  predicted), never to lower the bar to whatever the new behaviour produces.
+- **The fixture that cannot see the bug is the fixture the bug shipped under.** Air-above and stone-above
+  give the *same* verdict under both the proxy and the real predicate. Every fixture in the tree used one
+  or the other. The nine-row matrix that discriminates (`short_grass`, `oak_leaves`, `torch`,
+  `snow[layers=1]`, `water[level=0]`, `water[level=3]`, a waterlogged slab) asserts each row's `dampening`
+  from the census as a precondition, so the prediction's basis is visible rather than implied — and the
+  `water[level=0]` row is what makes the *ordering* load-bearing, since water's dampening is `1` and a
+  dampening-only predicate lets grass live under an ocean.
+- **A `#549` that did not exist.** Fifteen call-outs in `d5dc529f` cited an issue number written before
+  checking; `gh` answered "Could not resolve to an issue or pull request with the number of 549". Corrected
+  by a follow-up (`e23a50b3`) rather than an amend. **A cross-reference is a claim like any other and this
+  document's own §12.2 rule applies to it: verify before relying on it — including when you are the one
+  writing it.**
