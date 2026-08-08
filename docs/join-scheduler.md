@@ -66,14 +66,35 @@ wire order.
 order the pool finished them in — which is what keeps the emitted byte sequence a pure function
 of `view_radius`.
 
-`generation_window()` is `2 × available_parallelism`, floored at 2:
+`generation_window()` is `available_parallelism`, floored at 2 — **one in-flight column per
+hardware thread**:
 
-* **the factor of 2** is the encode overlap. The caller awaits a column then writes it to the
-  socket; at a window of exactly `parallelism` the pool is idle for the whole of that write.
 * **the floor of 2** is what makes a window a window, and stops the ring-overlap detector in the
   gates being vacuous on a single-core host.
 * **there is no ceiling, deliberately.** Growth with cores rather than with radius is the entire
   difference from the reverted commit.
+
+It was `2 × available_parallelism` until §12.132, where the factor of 2 turned out to cost a
+third of the burst's throughput. It was there for encode overlap — the caller awaits a column then
+writes it to the socket, and at a window of exactly `parallelism` the pool is idle for that
+write — which is a real effect and much smaller than what the extra concurrency spends. A window
+sweep over the real 289-column burst, **instructions retired flat to 1.4% across every arm** so
+the comparison is of scheduling rather than of work:
+
+| window | wall | speedup over serial | cycles/col vs serial | IPC |
+|---|---|---|---|---|
+| 4 | 4.78 s | 2.00× | 1.01× | 5.27 |
+| 6 | 4.19 s | 2.28× | 1.05× | 5.09 |
+| **8** | **3.67 s** | **2.60×** | 1.26× | 4.25 |
+| 10 (`P`) | 4.28 s | 2.23× | 1.96× | 2.73 |
+| 12 | 4.87 s | 1.96× | 2.54× | 2.11 |
+| 20 (`2P`) | 6.43 s | **1.49×** | **4.39×** | **1.23** |
+
+A U with a steep right-hand side. The cause is **cache capacity**, not a lock: instructions are
+flat, cycle inflation is negligible up to a window of 4, and normalising each arm by its own
+single-threaded IPC puts a shared generator's collapse at 1.59× against 1.40× for a private
+generator per column. `tests/join_parallel_efficiency.rs` is the sweep and
+`the_production_window_sits_at_the_measured_optimum` is the standing gate.
 
 ### Why "primed"
 
@@ -155,6 +176,18 @@ declined. The acceptance is the counters, which are arithmetic.
 
 - **The window's width is the one tuning knob, and it must stay a function of cores.** Making it
   a function of the view is `5104adf`. `the_window_never_scales_with_the_view` fails if it does.
+- **Do not widen the window to buy throughput without re-running the sweep.** The curve above is
+  a U, the coefficient is a *proxy* for a cache bound this code cannot query, and the measured
+  floor on the reference machine is 8–10 against an `available_parallelism()` of 10 — because that
+  call counts 4 efficiency cores alongside 6 performance ones. `the_production_window_sits_at_the_measured_optimum`
+  compares against the same run's best arm, so it gives a verdict on any machine without this file
+  knowing anything about it.
+- **The remaining loss is parking, not contention.** 24–37% of pool capacity across the whole
+  sweep sits parked on the staged store's per-entry `OnceLock`, because a contiguous window means
+  adjacent columns want the same pre-ore entries. `store::wait_stats()` counts and times it and
+  reads exactly 0 single-threaded. Reducing it means changing what the parallel unit *is* —
+  scheduling store entries rather than columns — which no ordering-preserving tweak to this file
+  reaches.
 - **Do not remove the priming.** A plain window is one line shorter and silently regresses #453
   from one column to `window` columns of generation before the first chunk reaches the client.
   `exactly_one_column_is_generated_before_the_first_emit` is the guard.
@@ -176,7 +209,7 @@ declined. The acceptance is the counters, which are arithmetic.
 
 | knob | where | note |
 |---|---|---|
-| window width | `generation_window()` in `join_scheduler.rs` | `2 × available_parallelism`, floor 2, no ceiling |
+| window width | `generation_window()` in `join_scheduler.rs` | `available_parallelism`, floor 2, no ceiling (was `2 ×` until §12.132) |
 | wire order | `join_view_rings` in `server.rs` | Chebyshev rings outward; the scheduler never reorders |
 | `GATE_WINDOW` | `tests/join_scheduler_gates.rs` | 8, fixed so the structural counters do not vary with the host |
 | `gen-counters` | `lodestone-worldgen` feature, default **off** | required for the counter arm; inflates a burst ~3× |

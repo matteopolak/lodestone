@@ -251,13 +251,20 @@ impl Program {
     /// Counts `cache_2d` nodes nested inside this graph's point-evaluated
     /// leaves.
     ///
-    /// Load-bearing for the sharing decision, not a curiosity: a
-    /// [`Density::Cache2D`] carries a `Mutex`-backed last-value slot, so if any
-    /// existed under a leaf, `Arc`-sharing one graph across threads would turn
-    /// a per-chunk cold cache into a contended shared one. Value-invariant
-    /// either way (the memo is keyed on an exact `(x, z)` and the function is
-    /// pure), but a lock is not free, so the count is asserted rather than
-    /// assumed — see `docs/worldgen-density-engine.md`.
+    /// Load-bearing for the sharing decision, and the count that convicted it.
+    /// A [`Density::Cache2D`] used to carry a `Mutex`-backed last-value slot, so
+    /// `Arc`-sharing one graph across threads turned a per-chunk cold cache into
+    /// **708 slots contended by every generating worker**. §12.132 measured the
+    /// consequence — instructions flat, IPC 5.46 → 1.32 at a window of 20 — and
+    /// the memo is gone; the node is transparent in both evaluators.
+    ///
+    /// The count is still worth having, because it now measures something else:
+    /// how many *duplicated expansions* of vanilla's shared `cache_2d` nodes sit
+    /// under the leaves. 708 against vanilla's handful is the compiler expanding
+    /// a DAG into a tree, which is why the memo could never hit — each parent got
+    /// its own copy, so no two parents ever asked one slot for the same `(x, z)`.
+    /// A node-sharing (CSE) pass over the `Op` table is the open work that number
+    /// is the size of; see `docs/worldgen-density-engine.md`.
     #[must_use]
     pub fn cache_2d_under_leaves(&self) -> usize {
         self.graph
@@ -721,7 +728,6 @@ mod tests {
                 OpKind::Cache2D,
                 Density::Cache2D {
                     inner: b(Density::Const(0.0)),
-                    cache: Default::default(),
                 },
             ),
             (OpKind::Marker, Density::Marker(b(Density::Const(0.0)))),

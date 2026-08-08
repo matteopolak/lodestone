@@ -408,12 +408,17 @@ fn the_window_never_scales_with_the_view() {
     for parallelism in [1usize, 2, 4, 8, 10, 16, 64] {
         let window = generation_window_for(parallelism);
         assert!(window >= 2, "a window of {window} is not a window");
-        assert_eq!(window, 2 * parallelism.max(1));
+        // One in-flight column per hardware thread. It was `2 ×` this until
+        // §12.132, where a sweep over the real 289-column burst measured the
+        // doubled value at 1.49× against the floor's 2.60× — instructions retired
+        // flat to 1.4% across every arm, so the loss was scheduling and the cause
+        // was cache capacity rather than any lock.
+        assert_eq!(window, parallelism.max(2));
     }
     // At every plausible core count this machine or CI could report, the window
     // stays well under the view — which is the whole difference from the reverted
-    // commit. 144 cores would be needed before a 289-column join burst put 289
-    // columns in flight, and at 144 cores that is not the same defect.
+    // commit. 289 cores would be needed before a 289-column join burst put 289
+    // columns in flight, and at 289 cores that is not the same defect.
     for parallelism in [1usize, 2, 4, 8, 16, 32] {
         assert!(
             generation_window_for(parallelism) < COLUMNS,

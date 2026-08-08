@@ -67,6 +67,22 @@ Why it cannot meaningfully contend, stated as an argument rather than a hope:
 closure, so `pre_ore_computed` is the number of distinct chunks whose stages really ran; a thread that
 loses the race is counted as a hit, which the old `bump(true)`-then-compute shape could not express.
 
+**The wait is real, it is now measured, and it is the largest remaining loss in the join burst.**
+A thread that arrives at an empty slot mid-computation is *parked* — correct, and deliberately
+counted as a hit, so no counter in `lodestone_worldgen::counters` can see it. `store::wait_stats()`
+can: `waits` / `wait_nanos` / `computes` / `compute_nanos`, process-global, nothing on the hit path
+(`StageSlot::get_or_compute` pre-checks the `OnceLock` and returns before touching an `Instant`, so
+the ~800 real misses in a 289-column burst pay for it and the ~26 hits per column do not).
+
+`waits` is **exactly 0** in any single-threaded run, which is its calibration; §12.132 measured it
+at **24–37% of pool capacity** (`wait_nanos / (window × wall)`) across every window from 4 to 20 on
+the 289-column burst. The cause is structural rather than a defect: the generation window is
+spatially *contiguous*, so adjacent in-flight columns share 20 of their 25 pre-ore entries and
+`window - 1` workers can all be parked on the one entry the remaining worker is computing. That
+sharing is exactly what makes them hits rather than cold computes, so it is a trade and not a bug —
+but reducing it means making the parallel unit a **store entry** rather than a column, which is
+open work. `crates/lodestone-server/tests/join_parallel_efficiency.rs` reports it per window.
+
 **Deadlock-freedom is a rule, not luck.** `post_ore` may call `pre_ore` for any chunk; `pre_ore` calls
 nothing in the store; no stage re-enters its own slot. The wait-for graph only points downward and its
 lowest layer never waits. `get_or_init` *does* deadlock on self-reentry, so this ordering is

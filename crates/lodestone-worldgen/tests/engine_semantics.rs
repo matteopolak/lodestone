@@ -270,11 +270,20 @@ fn flat_cache_snaps_xz_to_the_quart_grid_and_ignores_y() {
 // Semantic 4 — cache_2d / cache_once scoping
 // =========================================================================
 
-/// `cache_2d` is a real last-`(x, z)` memo in the **point** interpreter and
-/// **transparent** in the block field. Both halves asserted on one tree, because
-/// the interesting claim is that the two evaluators deliberately disagree.
+/// `cache_2d` is **transparent in both evaluators**, which is what vanilla's
+/// unwrapped `DensityFunctions.Marker.compute` does
+/// (`return this.wrapped.compute(context);`, `DensityFunctions.java:793-797`).
+///
+/// This gate used to assert the opposite for the point interpreter, because that
+/// interpreter carried a single-slot last-`(x, z)` memo. §12.132 retired it: over a
+/// 289-column burst the memo hit **0.12%** of its 19.9M lookups, and the 708 copies
+/// of it inside the `Arc`-shared graph collapsed IPC from 5.46 to 1.32 under a
+/// 20-column generation window. The fixture below is the same y-dependent subtree
+/// as before — deliberately violating `cache_2d`'s own contract, which is what
+/// makes any memo *visible* — so it is still the strongest available detector of
+/// one being reintroduced, only with the expectation flipped.
 #[test]
-fn cache_2d_memoises_in_the_point_interpreter_and_is_transparent_in_the_field() {
+fn cache_2d_is_transparent_in_both_evaluators() {
     let r = resolver();
     let b = Builder::new(SEED, &r);
     let tree = b.build(&json!({"type": "minecraft:cache_2d", "argument": noise3()}));
@@ -291,27 +300,32 @@ fn cache_2d_memoises_in_the_point_interpreter_and_is_transparent_in_the_field() 
          where vanilla's NoiseChunk does not"
     );
 
-    // Point interpreter: a real memo keyed on (x, z) only, so the *second* query
-    // at the same (x, z) and a different y deliberately returns the first value.
-    // This is vanilla's own behaviour (`Cache2D.compute` ignores y outright), and
-    // it is sound because the node marks a subtree that cannot depend on y — the
-    // fixture violates that on purpose, which is what makes the memo visible.
+    // Point interpreter: also transparent, so the same (x, z) at a different y must
+    // track y rather than return a memoised first value. A reintroduced memo fails
+    // exactly here, and it can only be seen because the fixture's subtree depends on
+    // y — which a real cache_2d's never does (every one in 26.2's shipped data wraps
+    // shift_a / blend_alpha / a spline over continents, all xz-only).
     let p0 = tree.compute(Context::new(3, 0, 3));
     let p1 = tree.compute(Context::new(3, 40, 3));
-    assert_eq!(
+    assert_ne!(
         p1.to_bits(),
         p0.to_bits(),
-        "cache_2d must memoise in the point interpreter: y=40 at the same (x, z) \
-         returned {p1} rather than the cached {p0}"
+        "cache_2d must be transparent in the point interpreter, but y=40 at the same \
+         (x, z) returned the y=0 value {p0} — a last-(x, z) memo is back"
     );
-    // Control: moving in (x, z) must miss the memo, or "memoises" is
-    // indistinguishable from "returns a constant".
-    let p2 = tree.compute(Context::new(9, 40, 9));
-    assert_ne!(
-        p2.to_bits(),
+    // Control: the field and point evaluators must now *agree*, which is the
+    // positive half. Without it, "tracks y" is satisfied by any two different
+    // numbers, including a broken evaluator.
+    assert_eq!(
         p0.to_bits(),
-        "control: a different (x, z) returned the cached value, so the memo \
-         assertion above is vacuous"
+        f0.to_bits(),
+        "the two evaluators disagree at (3, 0, 3): point {p0} against field {f0}. \
+         cache_2d is transparent in both, so they must be bit-identical"
+    );
+    assert_eq!(
+        p1.to_bits(),
+        f1.to_bits(),
+        "the two evaluators disagree at (3, 40, 3): point {p1} against field {f1}"
     );
 }
 

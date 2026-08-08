@@ -132,19 +132,56 @@ Two consequences worth keeping:
   property this relies on already lives there, in the generator's own
   positional seeding, and it needed no change for this to be safe.
 
-### Watch, don't pre-optimise
+### The ceiling is the machine, not a lock — measured, §12.132
 
-Two contention points a prior review flagged, both currently harmless:
+Both contention points a prior review flagged here have since been resolved, and
+neither was what limited throughput:
 
-- The shared climate `Density` trees hit `Cache2DSlot(Mutex<Option<(x,z,f64)>>)`
-  (`lodestone-worldgen`'s `density/mod.rs:140`) from every worker thread. At 16
-  climate samples/chunk today that's negligible; if biomes ever go 3-D
-  (1536 samples/chunk), the single-entry cache will thrash under concurrent
-  access. Not worth restructuring ahead of that.
-- `OverworldGenerator::column` deep-clones the full `final_density` box-tree
-  per chunk (`overworld.rs:239`) — allocation churn per chunk per thread. An
-  `Arc`-per-worker restructure is only worth it if a profile actually shows
-  this as hot; it wasn't measured to be so here.
+- The `Cache2DSlot(Mutex<Option<(x,z,f64)>>)` in the shared `Density` trees **is
+  gone**. It was measured at a 0.12% hit rate over a 289-column burst and deleted;
+  removing it moved the burst's cycles-per-column ratio from 4.19× to 4.35×, i.e.
+  not at all. See `worldgen-density-engine.md`.
+- `OverworldGenerator::column`'s per-chunk deep clone of `final_density` was
+  replaced by an `Arc<Graph>` in U4 (`worldgen-density-engine.md`).
+
+What actually limits the burst, from `crates/lodestone-server/tests/join_parallel_efficiency.rs`
+on the 10-core reference machine (6 P-cores + 4 E-cores), 289 columns, fresh
+generator per arm:
+
+| window | wall | speedup | cycles/col vs serial | IPC | pool parked |
+|---|---|---|---|---|---|
+| serial | 9.55 s | 1.00× | 1.00× | 5.33 | — |
+| 4 | 4.78 s | 2.00× | 1.01× | 5.27 | 32% |
+| 8 | 3.67 s | **2.60×** | 1.26× | 4.25 | 32% |
+| 10 (`P`, current) | 4.28 s | 2.23× | 1.96× | 2.73 | 29% |
+| 20 (`2P`, until §12.132) | 6.43 s | 1.49× | 4.39× | 1.23 | 24% |
+
+**Instructions retired are flat to 1.4% across every arm**, so none of that is
+redundant work — it is the same instructions taking more cycles.
+
+It is **not a lock**, and the discriminator is the shape of the curve rather than a
+bespoke control: a lock contended by 20 workers is contended by 4, so it would inflate
+cycles at every window, whereas cache capacity costs nothing until the working sets stop
+fitting. Cycle inflation at a window of 4 measured **1.01–1.15× over five runs** against
+2.6–4.4× at 20, growing super-linearly in between — a threshold, not a constant tax.
+`a_small_window_shows_no_lock_on_the_shared_generator` is that assertion, with the widest
+window's own reading as its control. (Two purpose-built shared-vs-private-generator
+controls were tried and both withdrawn; §12.132 records why, and the second is a good
+example of a control whose premise was false in the safe-looking direction.)
+
+So the mechanism is cache capacity: each in-flight column carries a multi-megabyte
+working set, and past roughly the core count they stop fitting together.
+
+Two consequences for anyone tuning this:
+
+- **Do not raise the window to buy throughput.** The curve is a U with a steep
+  right-hand side. `join_scheduler::generation_window` is now `available_parallelism`,
+  not twice it.
+- **The remaining headroom is the ~30% of pool capacity parked** on the staged
+  store's per-entry `OnceLock` — a spatially contiguous window means adjacent columns
+  want the same pre-ore entries, so `window - 1` workers can be waiting on the one
+  that is computing. `store::wait_stats()` counts and times those parks; it reads
+  exactly 0 single-threaded, which is its calibration.
 
 `OverworldChunkSource::edits` (`chunk.rs:289`, a `Mutex<HashMap>`) is held only
 for a lookup/insert per column and isn't a real bottleneck at the concurrency
@@ -172,12 +209,21 @@ No feature flag: this is always the code path, not an opt-in.
   every repeat — a fan-out that silently dropped a chunk (e.g. an off-by-one in
   the batch split) would fail here even if the content of every chunk it *did*
   return were correct.
-- **Speedup**: recorded into the gitignored `bench-results/generation.jsonl` by
-  `examples/bench_worldgen.rs` (`parallel_speedup_vs_serial`, unit `x`) — run it
-  yourself with `cargo run --release -p lodestone-server --example
-  bench_worldgen`. Per `CLAUDE.md`'s evidence standard this repo measures ratios
-  on a shared, variably-loaded machine, never an absolute-ms threshold; treat
-  any single number here as a spot check, not a regression gate.
+- **Speedup**: use `crates/lodestone-server/tests/join_parallel_efficiency.rs`
+  (`cargo test --release -p lodestone-server --test join_parallel_efficiency --
+  --ignored --nocapture`), which builds a **fresh generator per arm** and compares
+  instructions retired alongside wall clock.
+
+  `examples/bench_worldgen.rs`'s `parallel_speedup_vs_serial` is **not** comparable
+  to it and should not be quoted: it runs its parallel arm on the generator the
+  serial arm just warmed, so the parallel arm answers ~83% of every column out of the
+  store (§12.130) and is measuring a different, much cheaper program. That is why its
+  standing 2.4–2.9× and this file's 2.60× are not the same quantity.
+
+  Per `CLAUDE.md`'s evidence standard this repo measures ratios on a shared,
+  variably-loaded machine, never an absolute-ms threshold — and prefers a counter to
+  a duration, which is why instructions retired is the comparator and wall clock is
+  the accompaniment.
 
 ## Dependencies
 
