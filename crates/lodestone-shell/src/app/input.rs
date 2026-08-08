@@ -6,7 +6,7 @@ use super::*;
 
 /// Which input surface owns the keyboard this instant.
 ///
-/// The four flags [`resolve_key`] needs, read off [`crate::menu::UiState`] at
+/// The flags [`resolve_key`] needs, read off [`crate::menu::UiState`] at
 /// the call site. Split out as plain data so the precedence below is testable
 /// without a window, a GPU or a `Sim`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -30,6 +30,23 @@ pub(crate) struct KeyGate {
     /// where every other input decision already lives instead of behind a driver
     /// `match` arm this function's tests cannot see.
     pub debug_held: bool,
+    /// The recipe book's search box has keyboard focus
+    /// (`RecipePanelState::search_focused`), so it owns every key except Escape.
+    ///
+    /// Vanilla's `RecipeBookComponent.keyPressed` (`:437`):
+    /// `else if (this.searchBox.isFocused() && this.searchBox.isVisible() &&
+    /// !event.isEscape()) { return true; }` — a focused box swallows the key
+    /// whether or not the box wanted it, which is what stops a hotbar number key
+    /// selecting a slot while you are typing `stone`.
+    ///
+    /// **Escape is excluded, and that is vanilla for our layout.** The branch
+    /// above it closes the *book* on Escape only when
+    /// `!isOffsetNextToMainGUI()`, i.e. when the book overlays the main GUI. This
+    /// client always draws the book beside the panel (see
+    /// `container::recipe_book`'s module doc), so we are always in the offset
+    /// case and Escape falls through — to `InputAction::Pause`, which closes the
+    /// screen, exactly as it did before this existed.
+    pub recipe_search: bool,
 }
 
 /// The single thing a key event means, once precedence has been applied.
@@ -57,6 +74,13 @@ pub(crate) enum KeyOutcome {
     ToggleHitboxes,
     /// F3+G — vanilla's `key.debug.showChunkBorders`.
     ToggleChunkBorders,
+    /// A key aimed at the recipe book's focused search box — see
+    /// [`KeyGate::recipe_search`].
+    ///
+    /// Carries no payload: the driver already holds the `KeyEvent` and needs its
+    /// `text` for the character, which this enum (deliberately `Copy` and
+    /// `'static`) cannot hold. Same shape as [`Self::Menu`].
+    RecipeSearch,
     /// F3+H — vanilla's `key.debug.advancedTooltips`.
     ///
     /// Unlike its two siblings above this does **not** toggle a render flag: it
@@ -237,6 +261,13 @@ pub(crate) fn resolve_key(
     let code = code?;
     if binds.is(InputAction::Pause, code) && pressed {
         Some(KeyOutcome::Pause)
+    } else if gate.recipe_search && pressed {
+        // **Before the container swallow, after Pause.** Order is the whole
+        // content of this arm: `gate.container_open` below returns `None` for
+        // anything it does not recognise, so a search box placed after it would
+        // never see a single key — and `Pause` above it is Escape, which vanilla
+        // deliberately does not route into the box (see `KeyGate::recipe_search`).
+        Some(KeyOutcome::RecipeSearch)
     } else if gate.container_open && pressed {
         // Vanilla's order, from `AbstractContainerScreen.keyPressed`
         // (`AbstractContainerScreen.java:489-503`): the inventory binding closes

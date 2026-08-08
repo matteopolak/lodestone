@@ -48,7 +48,7 @@ use lodestone_game::item::ItemStack;
 use lodestone_game::menu::Menu;
 
 use super::builder::Builder;
-use super::layout::{MenuHit, hit_test_with_scale};
+use super::layout::{MenuHit, hit_test_with_book};
 
 /// `TooltipRenderUtil.MOUSE_OFFSET` (`TooltipRenderUtil.java:12`) — the tooltip's
 /// text origin sits `(+12, -12)` from the cursor
@@ -178,13 +178,20 @@ pub(super) fn emit_tooltip(
     width: u32,
     height: u32,
     canvas: (f32, f32),
+    book_open: bool,
 ) {
     let Some([cx, cy]) = cursor else { return };
     if menu.carried().is_some() {
         return;
     }
     let Some(font) = b.font else { return };
-    let MenuHit::Slot(index) = hit_test_with_scale(menu, gui_scale, width, height, cx, cy) else {
+    // **Book-aware**, because an open recipe book shifts the panel
+    // (`layout::recipe_book_panel_shift`) and an unshifted hit-test would name the
+    // slot one panel-offset to the left — a tooltip describing the wrong item is
+    // worse than none.
+    let MenuHit::Slot(index) =
+        hit_test_with_book(menu, gui_scale, width, height, cx, cy, book_open)
+    else {
         return;
     };
     let Some(stack) = menu.slot_item(index) else {

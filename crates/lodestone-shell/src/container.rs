@@ -47,8 +47,9 @@ pub use frame::{
 pub use geometry::ContainerGeometry;
 pub use input::{MenuButton, MenuContext, MenuInput, MenuKey};
 pub use layout::{
-    MenuHit, Rect, SlotLayout, SlotRect, hit_test, hit_test_with_scale, panel_origin,
-    panel_origin_with_scale, slot_layout,
+    MenuHit, RECIPE_BOOK_MIN_WIDTH, RECIPE_BOOK_X_OFFSET, Rect, SlotLayout, SlotRect, hit_test,
+    hit_test_with_book, hit_test_with_scale, panel_origin, panel_origin_with_scale,
+    recipe_book_panel_shift, recipe_book_width_too_narrow, slot_layout,
 };
 pub use recipe_book::{
     RECIPE_BUTTON_SIZE, RECIPE_FILTER_BUTTON, RECIPE_GRID_COLS, RECIPE_GRID_ORIGIN,

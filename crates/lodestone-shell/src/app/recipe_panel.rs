@@ -47,6 +47,9 @@ pub(super) struct RecipePanelState {
     pub(super) restored_type: Option<lodestone_model::RecipeBookType>,
 }
 
+/// `searchBox.setMaxLength(50)` (`RecipeBookComponent.java:126`).
+pub(super) const RECIPE_SEARCH_MAX_LEN: usize = 50;
+
 /// Wall-clock milliseconds for the recipe-toast window.
 ///
 /// [`lodestone_game::recipe::RecipeToastQueue`] takes "now" from its caller and
@@ -131,6 +134,7 @@ pub(super) fn recipe_panel_layout(
         tab_count,
         panel.page > 0,
         panel.page + 1 < total_pages,
+        panel.open,
     );
     // The geometry layer has no panel state, so the filter art is selected
     // here — see `RecipeBookPanelLayout::filtering`'s own doc. Set in the
@@ -147,6 +151,13 @@ pub(super) fn recipe_panel_layout(
         .unwrap_or_default();
     layout.search = panel.search.clone();
     layout.search_focused = panel.search_focused;
+    // The `x / y` readout. `page` is clamped by
+    // `recipe_book_panel_contents_filtered` on read, so a stale page left over
+    // from a wider search shows the last real page rather than a number past the
+    // end — the layout carries whatever the panel state says and the contents
+    // query is the one that clamps.
+    layout.page = panel.page.min(total_pages.saturating_sub(1));
+    layout.total_pages = total_pages;
     layout
 }
 

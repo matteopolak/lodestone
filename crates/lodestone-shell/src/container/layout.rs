@@ -365,6 +365,83 @@ pub fn panel_origin_with_scale(
     )
 }
 
+/// `AbstractRecipeBookScreen.widthTooNarrow`'s threshold —
+/// `this.widthTooNarrow = this.width < 379`
+/// (`AbstractRecipeBookScreen.java:30`).
+///
+/// **379 is not a round number, it is the exact fit**, and reading it that way is
+/// what makes the rest of this arithmetic checkable. At `w == 379` the book's own
+/// origin is `(379 - 147) / 2 - 86 = 30`, its category tabs sit 30 px further
+/// left at exactly `0`, its right edge is `30 + 147 = 177`, and the shifted
+/// container panel starts at `177 + (379 - 176 - 200) / 2 = 178`. Every one of
+/// `147`, `86`, `30` and `177` locks into that single pixel. Below it, nothing
+/// fits and vanilla stops offsetting at all (`xOffset = 0`) and accepts the
+/// overlap.
+pub const RECIPE_BOOK_MIN_WIDTH: f32 = 379.0;
+
+/// `RecipeBookComponent.xOffset`'s wide-screen value, `86`
+/// (`RecipeBookComponent.java:117`) — how far left of screen-centre the book's
+/// own 147-wide page is drawn.
+pub const RECIPE_BOOK_X_OFFSET: f32 = 86.0;
+
+/// The `177` and `200` in `RecipeBookComponent.updateScreenPosition`
+/// (`:173-180`).
+const RECIPE_BOOK_SCREEN_LEFT: f32 = 177.0;
+/// See [`RECIPE_BOOK_SCREEN_LEFT`].
+const RECIPE_BOOK_SCREEN_SPAN: f32 = 200.0;
+
+/// Whether the canvas is too narrow for the book to sit beside the container
+/// panel — see [`RECIPE_BOOK_MIN_WIDTH`].
+#[must_use]
+pub fn recipe_book_width_too_narrow(canvas_w: f32) -> bool {
+    canvas_w < RECIPE_BOOK_MIN_WIDTH
+}
+
+/// How far **right** the container panel moves when the recipe book is open —
+/// `RecipeBookComponent.updateScreenPosition` (`:173-180`):
+///
+/// ```java
+/// if (this.isVisible() && !this.widthTooNarrow) {
+///    leftPos = 177 + (width - imageWidth - 200) / 2;
+/// } else {
+///    leftPos = (width - imageWidth) / 2;
+/// }
+/// ```
+///
+/// Returned as a **delta** from [`panel_origin_with_scale`]'s own centring rather
+/// than as an absolute `leftPos`, so every caller that does not know about the
+/// book keeps the origin it already had and the ones that do add one number. That
+/// is the whole reason this is a separate function instead of two more parameters
+/// on `panel_origin_with_scale`, which has 24 call sites across 14 files.
+///
+/// Zero when the book is closed **or** the canvas is too narrow, which is exactly
+/// vanilla's `else` branch — the narrow case accepts the overlap rather than
+/// shifting, and that is a decision vanilla makes, not a gap here.
+///
+/// # Why the book was overlapping before
+///
+/// `container::recipe_book` used to place the book *relative to the container
+/// panel* (`mx - 147 - 8`, floored at 4) and clamp the tabs to the same floor. So
+/// on a narrow canvas the four category tabs stacked on top of the page and the
+/// page slid under the panel — the owner's "the four buttons on the side get
+/// squished into the menu". Vanilla never places the book relative to the panel
+/// at all: the book is **screen**-centred (`(width - 147) / 2 - xOffset`) and the
+/// *panel* is what moves. Getting that backwards is why no amount of clamping
+/// could make it fit.
+#[must_use]
+pub fn recipe_book_panel_shift(canvas_w: f32, panel_w: f32, book_open: bool) -> f32 {
+    if !book_open || recipe_book_width_too_narrow(canvas_w) {
+        return 0.0;
+    }
+    // Both halves use Java integer division on the same expression, so both are
+    // floored before the subtraction — computing the delta in floats and flooring
+    // once would be off by a pixel on odd canvases.
+    let shifted = RECIPE_BOOK_SCREEN_LEFT
+        + ((canvas_w - panel_w - RECIPE_BOOK_SCREEN_SPAN) * 0.5).floor();
+    let centred = ((canvas_w - panel_w) * 0.5).floor();
+    shifted - centred
+}
+
 /// What a viewport pixel is over, in an open menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuHit {
@@ -413,8 +490,33 @@ pub fn hit_test_with_scale(
     x: f32,
     y: f32,
 ) -> MenuHit {
+    hit_test_with_book(menu, gui_scale, width, height, x, y, false)
+}
+
+/// As [`hit_test_with_scale`], with the recipe book's own panel shift applied —
+/// see [`recipe_book_panel_shift`].
+///
+/// The split keeps every existing caller on the unshifted answer (which is the
+/// correct one with the book closed, and what every pixel gate measures) while the
+/// driver's real click path passes the live flag. **`book_open` here must be the
+/// same bool `ContainerFrame::with_book_open` was given for the frame that was
+/// drawn**, for exactly the reason this module's `gui_scale` warning gives: a
+/// hit-test shifted differently from the draw sends every click to the wrong slot
+/// while the screen still looks right.
+#[must_use]
+pub fn hit_test_with_book(
+    menu: &Menu,
+    gui_scale: u32,
+    width: u32,
+    height: u32,
+    x: f32,
+    y: f32,
+    book_open: bool,
+) -> MenuHit {
     let layout = slot_layout(menu);
     let (px, py) = panel_origin_with_scale(&layout, gui_scale, width, height);
+    let (cw, _) = crate::menu::render::logical_canvas(gui_scale, width, height);
+    let px = px + recipe_book_panel_shift(cw, layout.width, book_open);
     let scale = crate::config::calculate_gui_scale(gui_scale, width, height).max(1) as f32;
     let local_x = x / scale - px;
     let local_y = y / scale - py;

@@ -102,6 +102,15 @@ pub struct ContainerFrame<'a> {
     /// "which flag" are always decided together: `advanced` alone could not
     /// express "no tooltip", and the pair could disagree.
     pub tooltips: Option<bool>,
+    /// Whether the recipe book's panel is open, which **moves the container
+    /// panel** — vanilla's `RecipeBookComponent.updateScreenPosition`. See
+    /// [`super::layout::recipe_book_panel_shift`].
+    ///
+    /// `false` (the default) is the unshifted centring every existing caller and
+    /// every pixel gate already measures. A caller that sets this **must** pass the
+    /// same value to [`super::layout::hit_test_with_book`], or clicks land on the
+    /// wrong slot while the screen looks right — this module's standing hazard.
+    pub book_open: bool,
 }
 
 impl<'a> ContainerFrame<'a> {
@@ -122,6 +131,7 @@ impl<'a> ContainerFrame<'a> {
             has_infinite_materials: false,
             xp_level: 0,
             tooltips: None,
+            book_open: false,
         }
     }
 
@@ -140,6 +150,7 @@ impl<'a> ContainerFrame<'a> {
             has_infinite_materials: false,
             xp_level: 0,
             tooltips: None,
+            book_open: false,
         }
     }
 
@@ -169,6 +180,14 @@ impl<'a> ContainerFrame<'a> {
     #[must_use]
     pub fn with_tooltips(mut self, advanced: bool) -> Self {
         self.tooltips = Some(advanced);
+        self
+    }
+
+    /// Shift the container panel right for an open recipe book — see
+    /// [`Self::book_open`].
+    #[must_use]
+    pub fn with_book_open(mut self, open: bool) -> Self {
+        self.book_open = open;
         self
     }
 

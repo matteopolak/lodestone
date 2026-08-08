@@ -24,32 +24,38 @@ use super::FLOATS_PER_VERTEX;
 // `file:line`, under `.cache/mc/26.2/client-src/net/minecraft/client/gui/
 // screens/recipebook/`.
 //
-// **One deliberate, documented simplification**: this does *not* replicate
-// `RecipeBookComponent.updateScreenPosition` — vanilla shifts the *main*
-// container screen rightward when the book opens so the two never overlap
-// (`RecipeBookComponent.java:173-182`). Doing that here would mean threading
-// an "is the book open" flag through `panel_origin`/`hit_test`/
-// `ContainerGeometry::build_inner`, which *every* container screen already
-// calls, for a change scoped to two of them. Instead the book panel is
-// clamped to a minimum left margin ([`RECIPE_PANEL_MIN_X`]) and may overlap
-// the main panel's own left edge at narrow canvases rather than displacing
-// it — a bounded, visible cosmetic gap, not a crash or a hidden control.
+// **The screen shift is now real, and this note used to say it was not.** The
+// old text read "this does *not* replicate `RecipeBookComponent.
+// updateScreenPosition` ... Instead the book panel is clamped to a minimum left
+// margin and may overlap the main panel's own left edge at narrow canvases".
+// The owner reported the consequence: "when the screen isn't wide enough the
+// four buttons on the side get squished into the menu". They were the four
+// category tabs, all clamped to the same 4 px floor and stacked on the page.
+//
+// The clamp could never have worked, because the layout it was compensating for
+// was inverted. Vanilla does not place the book relative to the container panel
+// — the **book is screen-centred** (`getXOrigin()` is `(width - 147) / 2 -
+// xOffset`) and the **panel is what moves** (`updateScreenPosition`). Both live
+// in `super::layout` now: `recipe_book_panel_shift` and
+// `recipe_book_width_too_narrow`, whose docs carry the arithmetic showing every
+// constant meets at one pixel at `w == 379`.
+//
+// Threading the flag turned out not to need the 24 `panel_origin` call sites the
+// old note feared: the shift is a *delta* a caller adds, so only the two places
+// that know whether the book is open pass it (`ContainerFrame::with_book_open`
+// for the draw, `layout::hit_test_with_book` for clicks).
 
 /// `RecipeBookComponent.IMAGE_WIDTH`/`IMAGE_HEIGHT` (`RecipeBookComponent.
 /// java:63-64`) — the panel's own background art size.
 pub const RECIPE_PANEL_W: f32 = 147.0;
 /// See [`RECIPE_PANEL_W`].
 pub const RECIPE_PANEL_H: f32 = 166.0;
-/// The gap this module keeps between the book panel and the (unshifted, see
-/// the module doc above) main panel — vanilla's `BORDER_WIDTH`
-/// (`RecipeBookComponent.java:66`), reused here for a different purpose than
-/// vanilla's own (which is a widget-inset constant, not a screen gap) because
-/// it is the nearest real vanilla constant for "how much breathing room
-/// around this panel", and picking an unrelated number would be a guess.
+/// `RecipeBookComponent.BORDER_WIDTH` (`RecipeBookComponent.java:66`).
+///
+/// Kept because it is a real vanilla constant and is re-exported, but **no longer
+/// used as a screen gap**: the book's x comes from `getXOrigin()` now, not from
+/// the container panel minus a margin. See the module doc.
 pub const RECIPE_PANEL_GAP: f32 = 8.0;
-/// Floor for the book panel's left edge in logical pixels — see the module
-/// doc's "deliberate simplification".
-const RECIPE_PANEL_MIN_X: f32 = 4.0;
 
 /// The screen-toggle button, in **local coordinates off the main container
 /// panel's own origin** (not the book panel's). Derived, not guessed:
@@ -250,6 +256,16 @@ pub struct RecipeBookPanelLayout {
     pub search: String,
     /// See [`Self::search`].
     pub search_focused: bool,
+    /// The zero-based page shown and the total page count, for the `x / y`
+    /// readout between the two arrows.
+    ///
+    /// Same carrying argument as [`Self::tab_icons`] — the geometry layer is given
+    /// no [`RecipeBookPanelContents`]. `(0, 1)` is the default and draws nothing,
+    /// because vanilla only shows the readout at all when `totalPages > 1`
+    /// (`RecipeBookPage.java:113`).
+    pub page: usize,
+    /// See [`Self::page`].
+    pub total_pages: usize,
 }
 
 /// The item icon(s) one recipe-book category tab draws — vanilla's
@@ -363,6 +379,7 @@ pub fn recipe_book_panel_layout(
         tab_count,
         has_prev_page,
         has_next_page,
+        false,
     )
 }
 
@@ -370,6 +387,7 @@ pub fn recipe_book_panel_layout(
 /// auto) — must be called with the same `gui_scale` the frame was last drawn
 /// with, exactly like [`hit_test_with_scale`]'s own warning.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn recipe_book_panel_layout_with_scale(
     menu: &Menu,
     gui_scale: u32,
@@ -378,16 +396,32 @@ pub fn recipe_book_panel_layout_with_scale(
     tab_count: usize,
     has_prev_page: bool,
     has_next_page: bool,
+    book_open: bool,
 ) -> RecipeBookPanelLayout {
     let main_layout = slot_layout(menu);
     let (mx, my) = panel_origin_with_scale(&main_layout, gui_scale, width, height);
+    // The container panel's **shifted** x, which is what the toggle button hangs
+    // off — vanilla's `updateScreenPosition`. Zero delta with the book closed, so
+    // the toggle is where it always was until the panel actually moves.
+    let (canvas_w, _) = crate::menu::render::logical_canvas(gui_scale, width, height);
+    let mx = mx + super::layout::recipe_book_panel_shift(canvas_w, main_layout.width, book_open);
     // Vertically, vanilla's book and every screen this applies to share the
     // exact same `(canvas_h - 166) / 2` centring when both are 166 tall
     // (true for the crafting table and the whole furnace family — see
     // `slot_layout`'s own `height: 166.0` for both); the extra term below is
     // `0` for those two and keeps this correct if either ever isn't.
     let by = my + (main_layout.height - RECIPE_PANEL_H) * 0.5;
-    let bx = (mx - RECIPE_PANEL_W - RECIPE_PANEL_GAP).max(RECIPE_PANEL_MIN_X);
+    // **Screen**-centred, then shifted left by `xOffset` — `getXOrigin()` is
+    // `(this.width - 147) / 2 - this.xOffset` (`RecipeBookComponent.java:167-169`)
+    // and `xOffset` is `widthTooNarrow ? 0 : 86` (`:117`). It is *not* placed
+    // relative to the container panel, which is what this used to do; see
+    // `layout::recipe_book_panel_shift`'s own doc for why that could never fit.
+    let x_offset = if super::layout::recipe_book_width_too_narrow(canvas_w) {
+        0.0
+    } else {
+        super::layout::RECIPE_BOOK_X_OFFSET
+    };
+    let bx = ((canvas_w - RECIPE_PANEL_W) * 0.5).floor() - x_offset;
 
     let at = |r: Rect| Rect { x: bx + r.x, y: by + r.y, w: r.w, h: r.h };
     let main_at = |r: Rect| Rect { x: mx + r.x, y: my + r.y, w: r.w, h: r.h };
@@ -400,18 +434,17 @@ pub fn recipe_book_panel_layout_with_scale(
         filter_button: at(RECIPE_FILTER_BUTTON),
         tabs: (0..tab_count)
             .map(|i| Rect {
-                // Tabs sit left of the panel at `bx + RECIPE_TAB_X` (`-30`),
-                // so once `bx` itself has hit the `RECIPE_PANEL_MIN_X` floor
-                // above, an *unclamped* tab x would land at `4.0 - 30.0 ==
-                // -26.0` — off-canvas and unclickable, not merely
-                // overlapping the panel as the module doc's "clamped, may
-                // overlap" simplification describes. Clamping the tab's own
-                // x to the same floor keeps every tab visible and hit-
-                // testable (overlapping the panel body instead), which is
-                // the "dead control is worse than a missing one" rule: a
-                // tab nobody can click is worse than one drawn atop the
-                // panel it belongs to.
-                x: (bx + RECIPE_TAB_X).max(RECIPE_PANEL_MIN_X),
+                // `xPosTab = xo - 30` (`RecipeBookComponent.java:253`), and
+                // **no longer clamped**. The clamp existed because `bx` was
+                // panel-relative and could be pushed to a 4 px floor, which put
+                // every tab at `-26` and then stacked them all at `4` on top of
+                // the page — the owner's "squished into the menu". With `bx`
+                // screen-centred these fit by construction: at
+                // `RECIPE_BOOK_MIN_WIDTH` the leftmost tab pixel is exactly `0`,
+                // and below that width `x_offset` is `0`, which moves the tabs
+                // *right* by 86. So the floor is unreachable, and keeping it
+                // would only hide a future layout error.
+                x: bx + RECIPE_TAB_X,
                 y: by + RECIPE_TAB_Y0 + RECIPE_TAB_SPACING * i as f32,
                 w: RECIPE_TAB_W,
                 h: RECIPE_TAB_H,
@@ -427,6 +460,8 @@ pub fn recipe_book_panel_layout_with_scale(
         tab_icons: Vec::new(),
         search: String::new(),
         search_focused: false,
+        page: 0,
+        total_pages: 1,
     }
 }
 
@@ -782,6 +817,17 @@ impl RecipeBookPanelGeometry {
     }
 }
 
+/// The page readout's own anchor — `xo - pWidth / 2 + 73`, `yo + 141`
+/// (`RecipeBookPage.java:116`). The `73` is measured from the book page's local
+/// origin and the `- pWidth / 2` centres the string on it, which puts it midway
+/// between the back arrow (local x `38`) and the forward arrow (local x `93`).
+const PAGE_TEXT_CENTRE_X: f32 = 73.0;
+/// See [`PAGE_TEXT_CENTRE_X`].
+const PAGE_TEXT_Y: f32 = 141.0;
+/// The readout's colour — `graphics.text(..., -1)` (`RecipeBookPage.java:116`),
+/// i.e. opaque white.
+const PAGE_TEXT_COLOUR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
 /// `EditBox`'s bordered text inset — `textX = getX() + 4`
 /// (`EditBox.java:490`).
 const SEARCH_TEXT_INSET: f32 = 4.0;
@@ -1098,6 +1144,28 @@ fn recipe_book_panel_geometry_inner(
     // shows the cursor instead, which is how a player can tell typing will land
     // here. Italic is not modelled — this font has no italic variant, and a
     // fabricated slant would be worse than upright grey.
+    // The `x / y` readout between the two arrows — `RecipeBookPage.java:113-117`,
+    // which the panel had nothing for at all ("the page numbers are missing in
+    // between the arrows"). Gated on `total_pages > 1` exactly as vanilla is, so a
+    // single-page result shows bare page rather than a pointless "1 / 1".
+    //
+    // In the icon half of the stream for the same reason the tab icons are: the
+    // page sheet is a *sprite*, drawn between the caller's two colour ranges, so
+    // anything in the chrome half would be painted over by the page it sits on.
+    if let Some(f) = font.filter(|_| layout.total_pages > 1) {
+        // `gui.recipebook.page` is `"%s / %s"` in `en_us.json`, and `currentPage`
+        // is zero-based on the wire but one-based on screen (`currentPage + 1`).
+        let text = format!("{} / {}", layout.page + 1, layout.total_pages);
+        let tw = f.width(&text, 1.0);
+        b.shadowed_label(
+            &text,
+            layout.panel.x + PAGE_TEXT_CENTRE_X - (tw * 0.5).floor(),
+            layout.panel.y + PAGE_TEXT_Y,
+            1.0,
+            PAGE_TEXT_COLOUR,
+        );
+    }
+
     if font.is_some() {
         let tx = layout.search_box.x + SEARCH_TEXT_INSET;
         let ty = layout.search_box.y + ((layout.search_box.h - SEARCH_GLYPH_H) * 0.5).floor();
