@@ -89,6 +89,19 @@ pub struct ContainerFrame<'a> {
     /// (`AnvilMenu.mayPickup`, `EnchantmentScreen.java:111`). `0` (the
     /// default) matches every existing caller.
     pub xp_level: i32,
+    /// Whether to draw the hovered slot's tooltip, and whether
+    /// `advancedItemTooltips` (F3+H) is on — `Some(advanced)`.
+    ///
+    /// `None` (the default) draws no tooltip at all, which is what keeps every
+    /// existing caller unchanged: the headless gates, `tests/container_screen.rs`
+    /// and every pixel gate build their frames without it, and a tooltip appearing
+    /// under a gate's cursor would change what those gates measure. See
+    /// [`with_tooltips`](Self::with_tooltips) and `super::tooltip`.
+    ///
+    /// A `bool` inside the `Option` rather than two fields because "draw one" and
+    /// "which flag" are always decided together: `advanced` alone could not
+    /// express "no tooltip", and the pair could disagree.
+    pub tooltips: Option<bool>,
 }
 
 impl<'a> ContainerFrame<'a> {
@@ -108,6 +121,7 @@ impl<'a> ContainerFrame<'a> {
             cost_data: &[],
             has_infinite_materials: false,
             xp_level: 0,
+            tooltips: None,
         }
     }
 
@@ -125,6 +139,7 @@ impl<'a> ContainerFrame<'a> {
             cost_data: &[],
             has_infinite_materials: false,
             xp_level: 0,
+            tooltips: None,
         }
     }
 
@@ -142,6 +157,18 @@ impl<'a> ContainerFrame<'a> {
     #[must_use]
     pub fn with_cursor(mut self, cursor: Option<[f32; 2]>) -> Self {
         self.cursor = cursor;
+        self
+    }
+
+    /// Draw the hovered slot's **tooltip**, with vanilla's `advancedItemTooltips`
+    /// (F3+H) either on or off — see [`Self::tooltips`].
+    ///
+    /// Needs [`with_cursor`](Self::with_cursor) as well: the hovered slot is
+    /// resolved from the cursor, so a frame with tooltips enabled and no cursor
+    /// draws none.
+    #[must_use]
+    pub fn with_tooltips(mut self, advanced: bool) -> Self {
+        self.tooltips = Some(advanced);
         self
     }
 

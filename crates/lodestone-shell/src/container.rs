@@ -37,6 +37,7 @@ mod input;
 mod layout;
 mod recipe_book;
 mod renderer;
+mod tooltip;
 
 pub use background::ContainerBackground;
 pub use frame::{

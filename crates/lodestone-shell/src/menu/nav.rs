@@ -1370,6 +1370,24 @@ impl MenuNav {
         self.options.render_distance
     }
 
+    /// [`crate::config::Options::advanced_item_tooltips`] — read by the container
+    /// tooltip builder, written only by [`Self::toggle_advanced_item_tooltips`].
+    #[must_use]
+    pub fn advanced_item_tooltips(&self) -> bool {
+        self.options.advanced_item_tooltips
+    }
+
+    /// F3+H. Persists eagerly, like every other option mutation here.
+    ///
+    /// On `MenuNav` rather than on `WindowApp` because this is the type that owns
+    /// `Options` and knows how to write `options.json`; the driver's F3 chord arm
+    /// is the caller. See the option's own doc for why it is persisted at all
+    /// when its two sibling chords are not.
+    pub fn toggle_advanced_item_tooltips(&mut self) {
+        self.options.advanced_item_tooltips = !self.options.advanced_item_tooltips;
+        self.persist_options();
+    }
+
     /// Vanilla's `options.invertMouseX` (issue #203) — see
     /// [`crate::config::Options::invert_mouse_x`]. Read per look-integration
     /// call and handed to `apply_look_inverted`.

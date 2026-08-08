@@ -732,6 +732,11 @@ impl WindowApp {
             let container_frame = ContainerFrame::new(container_menu, &container_title)
                 .with_inventory_label(&inventory_label)
                 .with_cursor(Some([self.cursor.0, self.cursor.1]))
+                // The hovered slot's tooltip. This is the *only* caller that
+                // enables it, which is deliberate — see `ContainerFrame::tooltips`
+                // — and the flag it passes is vanilla's persisted
+                // `advancedItemTooltips`, toggled by F3+H.
+                .with_tooltips(self.nav.advanced_item_tooltips())
                 .with_drag(self.menu_input.drag_paint())
                 // The wire `menu_type`, which is what `menu_type_title_anchor`
                 // keys on. Without this line the nine per-screen title anchors

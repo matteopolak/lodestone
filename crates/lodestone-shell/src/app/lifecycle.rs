@@ -43,6 +43,12 @@ impl ApplicationHandler for WindowApp {
         // Size the sky fog to our real render distance so terrain fades into the
         // sky where chunks actually stop, not at the render crate's 8-chunk default.
         render.set_fog(sky_fog(self.config.render_distance), self.config.render_distance);
+        // The F3 overlay's fixed adapter block (see `DebugStats::adapter`).
+        // Resolved **once**, here, because `Adapter::get_info` is the only place
+        // this is knowable and it never changes for the process — and because the
+        // field is otherwise an island: it was added with a draw and no producer,
+        // so the lines it exists to show reached zero pixels.
+        self.sim.stats.adapter = adapter_lines(&gpu);
         // Upload the stitched particle sheet the emitter already resolves its
         // flame/smoke/crit UVs against (issue #45). `load_particle_atlas` is
         // memoised, so this is the **same** `ParticleAtlas` object `Sim` built
@@ -785,6 +791,14 @@ impl ApplicationHandler for WindowApp {
                         self.debug_chord_used = true;
                         let was = self.debug_chunk_borders.load(Ordering::Relaxed);
                         self.debug_chunk_borders.store(!was, Ordering::Relaxed);
+                    }
+                    Some(KeyOutcome::ToggleAdvancedTooltips) => {
+                        // A persisted option, not a render flag — see the
+                        // outcome's own doc. `MenuNav` owns `Options` and writes
+                        // `options.json` eagerly on every mutation, so this
+                        // survives a crash the way every settings row does.
+                        self.debug_chord_used = true;
+                        self.nav.toggle_advanced_item_tooltips();
                     }
                     Some(KeyOutcome::Screenshot) => {
                         // Arm it; `redraw()` services it after the frame is

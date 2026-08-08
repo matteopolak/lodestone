@@ -281,6 +281,28 @@ fn scale_scroll(dy: f64, discrete: bool, sensitivity: f32) -> f64 {
     d * f64::from(sensitivity)
 }
 
+/// The F3 overlay's fixed adapter block — see
+/// [`crate::hud::DebugStats::adapter`] for why these three lines and not
+/// vanilla's JVM-shaped ones.
+///
+/// `max_bind_groups` is here because it has already caused a crash class in this
+/// repo: it reads `4` on a plain adapter and `8` on this Mac, which is why the
+/// model shader is pinned at four groups (`CLAUDE.md`'s rendering constraints).
+/// Having it on screen means the next person hitting it can read it rather than
+/// deduce it.
+fn adapter_lines(gpu: &GpuContext) -> Vec<String> {
+    let info = gpu.adapter().get_info();
+    let limits = gpu.device().limits();
+    vec![
+        format!("GPU {}", info.name),
+        format!("{:?} / {:?}", info.backend, info.device_type),
+        format!(
+            "BIND GROUPS {} TEX2D {}",
+            limits.max_bind_groups, limits.max_texture_dimension_2d
+        ),
+    ]
+}
+
 /// How long after the last Render Distance change the new value goes live —
 /// vanilla's literal `600L` in
 /// `OptionInstance.OptionInstanceSliderButton.applyValue`
