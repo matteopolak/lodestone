@@ -1296,6 +1296,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   driver's (`lodestone_shell::sim::Sim`). It now holds **one**, behind
   `lodestone_ecs::EcsHandle = Arc<parking_lot::RwLock<World>>`, and that one `World`
   carries **one** `GameTick` schedule driven by **one** 20 Hz accumulator.
+- [3-D biome cells and ore veins](./worldgen-biome-cells-and-veins.md) — Two
+  independent worldgen additions that share a page because both changed what a
+  generated column *contains* rather than how it is driven: the full 4×4×4 biome
+  grid (issue #512) and `OreVeinifier` (issue #496).
 - [Worldgen biome search](./worldgen-biome-search.md) — The climate → biome lookup
   layer: vanilla's `Climate.RTree` ported as a real search structure — and, since
   the owner's ruling on #492, as the *definition of the answer* — plus a
@@ -1321,6 +1325,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   a warm served column from **87 heap allocations to 64** and the vegetation stage's
   own share from **30 to 7**, while changing **not one byte** of generated world (45
   columns, 5 seeds, `cmp` clean, both dumps md5 `a9db7cf741214167db615fa8b9356fa8`).
+- [Worldgen decoration steps and feature types](./worldgen-decoration-steps.md) —
+  The `GenerationStep.Decoration` driver: which of vanilla's 11 decoration steps this
+  engine runs, which `configured_feature` types it can place, and which placement
+  modifiers it understands. Issue #513 took this from **1 step and 7 types** to **8
+  steps and 30 types**. Companion docs:
+  [`worldgen-vegetation.md`](./worldgen-vegetation.md) for the placement engine
+  itself, [`worldgen-parity.md`](./worldgen-parity.md) for what the JVM fixtures
+  measure.
 - [Worldgen density engine: the block field, and the interpolation order it depends on](./worldgen-density-engine.md) —
   How `crates/lodestone-worldgen-core`'s density stack turns vanilla's data-driven
   density-function graph into the per-block field that `fillFromNoise` writes, and the
