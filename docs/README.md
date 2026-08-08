@@ -481,6 +481,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   Issue #184 asks for the filled map item's own visual: the generated per-map pixel
   texture, player/marker icons, and the border frame, whether held, in an item frame,
   or shown as a GUI icon.
+- [Filled map rendering](./filled-map-rendering.md) — Drawing a
+  `minecraft:filled_map`'s actual picture — the vanilla `MapColor` palette, a
+  per-map 128×128 texture built from the colour bytes `SessionMaps` folds, and the
+  quads that show it in the hand and in an item frame (issue #184).
 - [First-person held item](./first-person-held-item.md) — The item in the local
   player's hand in first person — vanilla's `ItemInHandRenderer.submitArmWithItem`
   non-empty branch. It replaces the bare arm rather than joining it, and it is one
@@ -797,6 +801,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   is pure logic over the player's situation plus a randomised countdown, and it lives
   in `crates/lodestone-sound/src/music.rs` with a generated biome table beside it in
   `src/biome_music.rs`.
+- [Natural mob spawning](./natural-mob-spawning.md) — How the integrated server
+  populates a live world with mobs: the per-species `SpawnPlacements` table, the
+  per-column light the spawn rules test against, and the per-tick cycle that consults
+  the biome spawn lists and the mob caps. Issues #221 and #222 — before this,
+  `crates/lodestone-server/src/mob_spawn.rs` held a proven cap/despawn engine with
+  **no production caller at all**, so a world held exactly the mobs `seed_demo_mobs`
+  put in it, forever, and nothing anywhere implemented `lodestone_entity::spawn`'s
+  `SpawnRule`/`SpawnEnvironment` seam.
 - [The "Play offline" identity](./offline-identity.md) — The one persisted,
   user-editable name the client joins under when no Microsoft account is signed in,
   plus the stable UUID derived from it. It lives in
@@ -961,6 +973,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   from inside its own `Plugin::build`, and that recipe becomes matchable by the
   crafting-table screen and browsable in the recipe-book panel exactly like one of the
   1585 vanilla recipes.
+- [Pistons](./redstone-pistons.md) — `crates/lodestone-server/src/piston.rs` —
+  vanilla's `PistonBaseBlock` and `PistonStructureResolver`, ported as pure decisions
+  over a `Fn(BlockPos) -> String` world lookup, plus the wiring in `random_tick.rs`'s
+  neighbour-reaction pass that makes a powered piston actually move blocks. Issue
+  #316, **partially**: read "What is not here" before assuming a contraption works.
 - [Redstone: dust, torches, repeaters, comparators, observers](./redstone.md) — Five
   new modules in `crates/lodestone-server/src/`, all pure query/decision functions
   with no `ChunkColumn` in scope except through a `lookup: Fn(BlockPos) -> String`
@@ -1045,6 +1062,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   The three things that make a served session (singleplayer over `memory_pair`, or
   open-to-LAN over TCP) survive, keep time, and follow the player, instead of being a
   static, timeless island that a real client would eventually give up on:
+- [Server access control](./server-access-control.md) — Ops, whitelist, player bans
+  and IP bans — vanilla's four JSON files, read and written by
+  `crates/lodestone-server/src/access.rs` and enforced at login. Issue #336. Before
+  this, `grep -rniE 'whitelist|banned.player|ops\.json|permission.level'` over
+  `crates/` returned two hits, both *test comments* about vanilla's RCON console:
+  there was no operator model at all and a hosted world had no way to refuse anybody.
 - [Server-side advancements and statistics](./server-advancements.md) — The
   version-free server-authoritative model for advancement and statistic tracking in
   `crates/lodestone-server/src/advancements.rs` (issue #338): the advancement tree,
