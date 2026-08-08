@@ -73,6 +73,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Migrating to `bevy_ecs`](./bevy-migration.md) — A staged plan for moving
   Lodestone's world/entity/session state onto `bevy_ecs`, so that third-party
   extensions are native Rust plugins with the same power as built-in code.
+- [Biome mob-spawn settings: the `spawners` / `spawn_costs` parse](./biome-spawners.md) —
+  `crates/lodestone-worldgen/src/spawners.rs` parses the `spawners` and `spawn_costs`
+  fields every one of 26.2's 66 bundled biome documents carries. Until it existed,
+  **nothing in the workspace read either field** — the data shipped in
+  `crates/lodestone-server/assets/worldgen/biome/*.json` and was named by no line of
+  code. `OverworldGenerator::biome_spawners(biome)` exposes the per-biome answer.
 - [Real per-position biome tint (grass, foliage, water)](./biome-tint.md) — Grass,
   foliage, dry-foliage and water quads used to render one fixed **plains-default**
   colour everywhere — real per-biome variety existed in the world data (climate
@@ -728,6 +734,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   is the "not Minecraft" tell issue
   [#22](https://github.com/matteopolak/lodestone/issues/22) named: flat per-block
   light plus directional shade, with no darkening in corners and crevices.
+- [The `MOTION_BLOCKING` heightmap: generator half](./motion-blocking-heightmap.md) —
+  Every served chunk used to carry a well-framed, **zero-entry** heightmap NBT:
+  `crates/protocol/v770/src/server_protocol.rs:1465` writes
+  `Heightmaps::new().encode(&mut w)`, which is an empty `Vec<(u32, Heightmap)>`.
+  `lodestone-worldgen` now computes the real `MOTION_BLOCKING` map per column and
+  exposes it on `GeneratedColumn`, so the value exists; **nothing consumes it yet**,
+  because `ChunkColumn` and the encoder are in another cluster.
 - [The multi-protocol seam: constructing an adapter for the protocol it negotiated](./multi-protocol-seam.md) —
   The change that lets one `crates/protocol/vNNN` crate serve several protocol
   revisions instead of exactly one. Unit U2 of epic #343's dispatch plan

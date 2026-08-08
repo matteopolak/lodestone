@@ -225,7 +225,9 @@ use self::fill::AquiferTrees;
 
 pub use self::biome_cells::BiomeCells;
 pub use self::block_entities::{BeeOccupant, GeneratedBlockEntity};
-pub use self::output::GeneratedColumn;
+pub use self::output::{
+    GeneratedColumn, HEIGHTMAP_COLUMNS, MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::output::StageTimes;
 pub use self::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
@@ -466,6 +468,15 @@ pub struct OverworldGenerator {
     /// resolver method was needed. Only populated for biomes whose document
     /// carries a `temperature` field; a biome absent here does not freeze.
     biome_climates: HashMap<String, crate::feature::top_layer::BiomeClimate>,
+    /// Per-biome `MobSpawnSettings` — `spawners` and `spawn_costs` — read out of
+    /// the same `Resolver::biome_document` walk as `biome_climates`, so it costs
+    /// no extra JSON parse (issue #518, part 1). See
+    /// [`crate::spawners`] for why only the parse landed and what the other three
+    /// parts are blocked on, and [`Self::biome_spawners`] for the accessor.
+    ///
+    /// **No generation stage reads this.** It is data for a runtime spawner that
+    /// does not exist yet.
+    spawners_by_biome: HashMap<String, crate::spawners::BiomeSpawners>,
     /// Which biomes list `minecraft:freeze_top_layer` in their
     /// `TOP_LAYER_MODIFICATION` step. In vanilla 26.2 that is **every** biome
     /// (`BiomeDefaultFeatures.java:413`), so this is not really a filter — it is
@@ -651,6 +662,8 @@ impl OverworldGenerator {
         // `TOP_LAYER_MODIFICATION` composition costs no extra JSON parses.
         let mut biome_climates = HashMap::new();
         let mut freeze_biomes = HashSet::new();
+        // Issue #518 part 1 rides the same walk, for the same reason.
+        let mut spawners_by_biome = HashMap::new();
         for name in &biome_names {
             carvers_by_biome.insert(
                 name.clone(),
@@ -667,6 +680,10 @@ impl OverworldGenerator {
             }
             if crate::compose::biome_lists_freeze_top_layer(&document) {
                 freeze_biomes.insert(name.clone());
+            }
+            let spawners = crate::spawners::parse_biome_spawners(&document);
+            if !spawners.is_empty() {
+                spawners_by_biome.insert(name.clone(), spawners);
             }
         }
         let all_ores: Vec<PlacedOre> = ores_by_biome.values().flatten().cloned().collect();
@@ -728,11 +745,27 @@ impl OverworldGenerator {
             vegetation_by_biome,
             veg_tags,
             biome_climates,
+            spawners_by_biome,
             freeze_biomes,
             snow_support,
             climate_noise: crate::noise::ClimateNoise::new(),
             structures,
         }
+    }
+
+    /// Issue #518 part 1: one biome's parsed `MobSpawnSettings`, or `None` when
+    /// the biome declares no spawner entry and no spawn cost (which includes every
+    /// biome a fixture `Resolver` supplies, and any name this generator's biome
+    /// table cannot produce).
+    ///
+    /// Resolved once at construction, so this is a map lookup rather than a JSON
+    /// parse. **Nothing in the generation pipeline calls it** — see
+    /// [`crate::spawners`]'s module doc for what the remaining three parts of #518
+    /// are blocked on, and why a `SPAWN` stage built today would be measuring the
+    /// wrong world.
+    #[must_use]
+    pub fn biome_spawners(&self, biome: &str) -> Option<&crate::spawners::BiomeSpawners> {
+        self.spawners_by_biome.get(biome)
     }
 
     /// `MultiNoiseBiomeSource.getNoiseBiome(qx, qy, qz)` at an arbitrary quart
