@@ -161,6 +161,12 @@ mod inventory;
 /// barrier `4307b59` reinstated. `pub` because its gates measure in-flight
 /// concurrency through it from `tests/`, which `pub(crate)` cannot reach.
 pub mod join_scheduler;
+/// Whether a block edit changed the light a cell emits, and therefore whether
+/// its column has to be re-sent (`docs/server-block-light-updates.md`). Read that
+/// module's doc before touching light anywhere: it records what
+/// `compute_served_light` was measured to actually compute, and the one trap in
+/// `docs/server-chunk-light.md`'s brokered seam patch.
+pub mod light;
 /// Loot-table loading and rolling (issue #337): parses Mojang's datapack
 /// loot-table JSON from the bundled `assets/loot_table/` set and rolls it with
 /// the server's deterministic RNG for the empty loot context.

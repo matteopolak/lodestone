@@ -6153,3 +6153,60 @@ appeared — and all three are one cause.
   `oak_pressure_plate.json`). A test premise of "no result yet" while filling a grid one cell at a time is
   therefore false, and it failed in the safe-looking direction — an assertion that *no* packet was needed.
   The corpus answered a question the test's author had not asked.
+
+**12.138 Two "unbuilt features" reported as one bug each, and in both the failure was a missing
+*notification*, not a missing algorithm.** Owner report: *"liquids dont flow, torches dont emit light,
+etc."* Both turned out to be one link short of working, and in the light case eight of nine links were
+already green.
+
+- **Fluid spread: the classification side was complete and the spread side was absent.** `is_water`,
+  `is_air_or_fluid` and `random_tick::has_full_fluid` all correctly recognised water — including the
+  waterlogged case — and `tick::run_tick_loop`'s `fluid_ticks.drain_due` loop had an **empty body with a
+  comment saying nothing produced fluid ticks**. So a placed source was correctly identified as a fluid
+  and then sat there. `crates/lodestone-server/src/fluid.rs` is the port; `docs/fluid-spread.md` carries
+  the algorithm and the named gaps.
+- **The expected value that makes the port checkable comes from arithmetic, not from our output.**
+  `amount` starts at 8, each horizontal step costs `getDropOff`, `amount <= 0` is empty, and the block
+  stores `8 - amount`. So water's ramp is `level = 1..=7` and it stops at **7 cells**; overworld lava's
+  `dropOff = 2` gives levels `2, 4, 6` and stops at **3**. Both are predicted from the jar's own constants
+  before the code runs, and the two fluids run the same code — a `drop_off` that ignored its `FluidKind`
+  fails exactly one of the two gates. The lava gate is the water gate's control.
+- **A receding flow cannot be pushed back, so draining needs each cell's *own* tick.**
+  `WaterFluid.canBeReplacedWith` is `direction == DOWN && !other.is(WATER)`, so water never replaces water
+  horizontally. Rescheduling only the cells a tick *wrote* therefore left the ramp frozen at `level=3`
+  forever — visible as permanent flows. The fix is `Level.setBlock`'s flag-2 half: schedule every written
+  cell **and all six neighbours of each**, which is `updateNeighborsAt` → `LiquidBlock.neighborChanged` →
+  `scheduleTick`. Then the same symptom reappeared at `level=7` from a *second* cause: `run_scheduled_tick`
+  `return`ed early after writing air, skipping the notify loop it had just gained. **An early return after
+  a write is the bug shape here**; a `still_fluid` flag replaced both returns.
+- **The spread reads the cell below whatever it looks at, so a fluid on the floor of the world asks for
+  `min_y - 1` and `ChunkColumn::block_state` panics** — on the world tick thread. Every read now goes
+  through one `block_at` that answers air outside the build height, which is also `Level.getBlockState`'s
+  own first line, and `write_block` guards the same way. `FluidEnv` carries `min_y`/`height` for this and
+  `run_tick_loop` fills them from a real column *lazily*, because the constant `-64..320` is wrong for
+  every test double in the crate and #481 forbids a `world.column()` call at loop start.
+- **A source spreads sideways even when it has somewhere to fall, and that broke a test's premise rather
+  than the code.** `spread`'s fall-through is `if (fluidState.isSource() || !isWaterHole(...))`: once the
+  column below a source exists, the down branch is refused (water cannot replace water) and the source
+  makes a seven-wide sheet at its own level which then falls in seven places. A waterfall gate therefore
+  has to wall its shaft. Same class caught a second gate — water flows *around* an isolated one-block
+  wall, correctly, so a wall gate needs a wall wider than the seven-cell reach.
+- **Light: `compute_served_light` was measured, and both plausible diagnoses were wrong.** It is
+  `compute_column_light(column, &V770LightProps)`, which seeds **both** layers, and `V770LightProps::
+  emission` forwards to `lodestone_data::light_props::emission`, whose census carries `minecraft:torch`
+  at 14 under an existing gate. So it computes block light *and* the emission source is wired, and a torch
+  present at encode time really does light its column. The absent link was the **server-side
+  `LIGHT_UPDATE` encoder**: the client's decode arm, `LightPatch::from_light_masks`' three-state merge, and
+  the `ChunkLoaded` re-mesh signal all already existed. `docs/server-block-light-updates.md` has the table.
+- **The reachable fix was to re-use an encoder rather than add one.** An emission-changing edit re-sends
+  the column through `begin_chunk_batch`/`encode_chunk`/`end_chunk_batch`; `encode_chunk` recomputes light
+  over terrain that now contains the torch, so no new trait method and no brokered protocol change were
+  needed for the headline symptom. The gate is `emission(old) != emission(new)` — **a value comparison, not
+  a string one** (a wall torch and a torch both emit 14, and a break writes air, so `emission(new) > 0`
+  misses removal) — and it must stay narrow: widening it to `dampening` would turn every block placed into
+  a column resend.
+- **A trap `docs/server-chunk-light.md`'s brokered seam plan does not mention, and it fails in the
+  safe-looking direction.** If `ChunkColumn` gains a precomputed `light`, then `ChunkColumn::set_block`
+  **and** `ChunkStore::set_block` must invalidate it — both write blocks into a retained column without
+  touching anything derived from them. Stale light survives the edit, the wire looks correct, the client
+  re-meshes, and nothing changes on screen.
