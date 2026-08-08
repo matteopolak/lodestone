@@ -7448,3 +7448,102 @@ change, confirmed by location); `cargo check -p lodestone-shell --no-default-fea
 `cargo test -p lodestone-physics -p lodestone-ecs -p lodestone-controller -p lodestone-shell --no-fail-fast
 -- --test-threads=2`: physics 24 binaries / 265 passed, ecs 334 passed, controller 44 passed, shell **83
 binaries / 1,481 passed, 0 failed** — counted by a program reading the captured logs, not by a pipeline.
+
+**12.153 Three recorded blockers in one session, all approximately right and all wrong in the same
+direction: the record described an older version of the game.** #23's ledger said hanging signs needed
+"a different model set again (chains, a bar, its own text transform)". #62's brief said the wide/slim
+switch was "one `const`". `docs/inventory-player-preview.md` said the live pose needed "a caller with
+`Sim` state". Each was written by someone who had looked, each was true of *something*, and each cost a
+wrong estimate in a different direction — one too pessimistic, one too optimistic, one pointing at the
+wrong obstacle.
+
+**Hanging signs, too pessimistic by an order of magnitude.** In 26.2 `HangingSignRenderer` is
+`AbstractSignRenderer` plus a single `textTransformation` and declares **no model at all**; the board,
+bar and chains are real block models (`block/template_hanging_sign_rot_N`,
+`block/template_wall_hanging_sign`) the terrain mesher already draws. The "different model set" is
+**1.20's** shape, where `HangingSignRenderer` really did own a `HangingSignModel`. The whole port was
+four transform terms plus two text metrics — and it needed **no new render-source install**, because
+hanging signs arrive through the sign source that was already there. The staleness class §12 keeps
+warning about, but with a twist worth naming: this note was not stale *about our code*, it was stale
+*about Minecraft*. Nothing in our tree could have contradicted it. The only way to catch it was to open
+the 26.2 class and read that it has no model, which takes one command.
+
+Three of the six differing numbers read as mistakes and are not: `getTextLineHeight`/
+`getMaxTextLineWidth` live on the **block entity** (`HangingSignBlockEntity` overrides both to 9/60),
+the glyph **scale goes up** (0.9/64 against 0.6666667/64) while the line width goes **down**, and the
+hanging pre-offset has **no attachment branch** — `HangingSignRenderer` computes `state.attachmentType`
+for the crumbling overlay and then ignores it, so wall and ceiling hanging signs differ only in where
+the angle comes from. Generalising the plain sign's "wall means add the wall offset" is wrong, and
+`a_wall_hanging_sign_differs_from_a_ceiling_one_only_by_its_angle` holds it with the plain wall sign as
+its control. Live: the same string draws **60 px** wide on a hanging sign against **44 px** on a plain
+one, and 60/44 = 1.36 is 0.0140625/0.010416667 — a magnitude the gate never asserts and which falls out
+of it.
+
+**Skins, too optimistic in a way that hid a shipped bug.** "One `const` changes" was true of the
+*switch* and false of everything around it. `PlayerModelType` carries two names per variant —
+`SLIM("slim","slim")`, `WIDE("wide","default")` — and `metadata.model` holds the `legacyServicesId`, so
+**wide is spelled `default`**. Matching on `"wide"` matches nothing, and `byLegacyServicesName`'s
+`requireNonNullElse(…, WIDE)` then resolves every skin *including every slim one* to wide. The failure
+is invisible: the only symptom is Alex's arms being a pixel too thick. §12's "an authoritative source
+answering a neighbouring question" again, inside one enum.
+
+Then flipping that const for the first time exposed a **wrong number in the rig itself**.
+`player_model(slim)` narrowed both arms 4 → 3 texels but left the **right** arm's cube origin at `-3`
+where vanilla moves it to `-2` (`PlayerModel.java:43-71`; wide baseline `HumanoidModel.createMesh:101`).
+The **left** arm keeps origin `-1` in both, so "slim just narrows the arms" is true of the left and false
+of the right; the real invariant is that the right arm's inner edge stays at `origin + width == +1`. It
+had shipped because **nothing in the workspace had ever selected the slim rig** — the const that "was the
+one line to change" was also the thing keeping a defect unobservable. Making a code path reachable is
+itself a test.
+
+The payload's record definition is not in `client-src` at all: `MinecraftTexturesPayload` is
+**authlib's**, a jar rather than source. It came out of
+`.cache/mc/26.2/libraries/com/mojang/authlib/9.0.75/authlib-9.0.75.jar` by walking three classes'
+constant pools (the record's fields; `MinecraftProfileTexture$Type`'s `SKIN`/`CAPE`/`ELYTRA`, which are
+the literal JSON keys because GSON writes an enum key as its own name; and `url`/`metadata`), with
+26.2's own `SkinManager.registerTextures` pinning that the model lives on the skin entry's
+`metadata.model`. **A jar in `libraries/` is a usable outside source, and the constant pool is readable
+with thirty lines of Python** — worth knowing next time something is "not in the decompiled source".
+
+**The live pose, pointing at the wrong obstacle.** "A caller with `Sim` state can pass it" is true and
+useless: the obstacle is not access to `Sim`, it is that `Sim::body_pose` is **private** and its only
+public reader, `sim/camera.rs::third_person_body_state`, returns `None` in first person — the only camera
+mode the inventory screen is ever open in. So the walk cycle is one small `sim/` accessor away, and the
+attack swing was already reachable through the public `hand_swing_progress()`. Half of the feature landed
+immediately; the other half is a named patch in another cluster. **"Needs X" and "needs X to be public
+and not early-returning" are different reports**, and the second is the actionable one.
+
+That half then produced its own trap: **`attack_anim` is a phase, and `1.0` is a no-op.**
+`HumanoidModel.setupAttackAnimation` drives it through sines, so phase 1.0 is the rest pose again. The
+first version of the gate used 1.0, measured a delta of `1.7e-8`, and read as "the pose never arrives"
+when the pose was arriving perfectly. Phase 0.5 moves the arm; the endpoint identity is now asserted so
+the property is recorded rather than commented. This is the *magnitude* species (§12.43) with the
+subject and the assert both correct and the **input** at a degenerate value — a sixth flavour worth
+watching for whenever a parameter is a phase, an angle or a normalised time.
+
+**On the gates.** `EntityPipeline` has `cull_mode: None`, so a winding-determinant assertion cannot see
+a bad transform through it; the load-bearing invariant is a **cross-arm depth** one. Neutering
+`gui_entity`'s `z` flip to `Vec3::splat(size)` reddens the `gui_ortho` arm at 0.5037 against 0.4963 and
+leaves the real-`Camera` arm green — the two-arm structure doing exactly its job. The hanging-sign pixel
+gate had to be **differential against a sign-free frame** rather than absolute, because the
+first-person arm paints unconditionally at `y0:169` and a hanging sign's text band is `y 147-189`: an
+absolute "nothing else paints here" assertion would have been measuring the arm, §12's premise-false
+control failure. And a rect **derived from the same expression the draw uses** cannot be fooled but also
+cannot be bypassed — neutering the transform's three branches reddens the *disjointness premise* rather
+than the pixel comparison, which is correct behaviour and worth expecting rather than debugging.
+
+Every claim above was neutered and restored by `cp` with an md5 check. Two ledger corrections landed with
+the work: #23's list never named **`LECTERN`** or **`CONDUIT`** in either direction, a silent gap in a
+26-entry list it claimed to have derived exhaustively; and `TEXT_LINE_HEIGHT`'s doc said the value was
+"always `10` — the per-instance method never varies in the real jar", which `HangingSignBlockEntity`
+falsifies.
+
+`cargo check -p lodestone-shell -p lodestone-render -p lodestone-assets --all-targets` green;
+`cargo check -p lodestone-shell --no-default-features` green;
+`cargo test -p lodestone-shell -p lodestone-render -p lodestone-assets --no-fail-fast -- --test-threads=2`:
+**176 binaries, 2,679 passed, 0 failed**, counted by a program reading the captured log rather than by a
+pipeline. `cargo test -p lodestone-shell --test sign_text_pixels -- --ignored`: 4 GPU gates passed. One
+earlier run showed `singleplayer_persistence::a_session_saves_columns_in_proportion_to_mutation_not_residency`
+red; it passed in every later run with no change to that path, so it was another agent's mid-edit state,
+not a regression — §12's "re-run a timing-shaped failure alone before calling it a regression", and the
+same caution applies to a *state*-shaped one on a shared checkout.

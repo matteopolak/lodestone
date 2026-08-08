@@ -797,11 +797,16 @@ impl ContainerGeometry {
             player_avatar: matches!(menu.kind(), MenuKind::Player).then(|| {
                 let scale =
                     crate::config::calculate_gui_scale(gui_scale, width, height).max(1) as f32;
+                // `with_pose` carries the **live** animation state through
+                // (`ContainerFrame::avatar_pose`, `AnimInput::REST` for a caller
+                // with no `Sim`). Dropping it here is the whole difference between
+                // the pose reaching the draw and the field existing unread.
                 PlayerAvatar::new(
                     x,
                     y,
                     frame.cursor.map(|[cx, cy]| [cx / scale, cy / scale]),
                 )
+                .with_pose(frame.avatar_pose)
             }),
         }
     }

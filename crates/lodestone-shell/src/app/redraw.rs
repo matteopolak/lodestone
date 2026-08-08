@@ -896,6 +896,25 @@ impl WindowApp {
                 // a source installed but never set.
                 .with_menu_type(open_menu.as_ref().map(|open| &open.menu_type))
                 .with_recipe_book(self.recipe_book.as_ref())
+                // The inventory avatar's **live pose**. Vanilla poses the real
+                // render state, so a player who opens their inventory during the
+                // tail of a swing sees that swing. Without this line
+                // `gui_entity_anim`'s `base` argument — which exists for exactly
+                // this — is fed `AnimInput::REST` forever and the avatar is a
+                // mannequin.
+                //
+                // **`limb_swing`/`limb_swing_amount` are still `REST`**, and the
+                // reason is a crate boundary, not an oversight: the walk state
+                // lives on `Sim::body_pose`, a private field whose only public
+                // reader is `sim/camera.rs::third_person_body_state`, which
+                // returns `None` in first person — the only camera mode the
+                // inventory screen is ever open in. `hand_swing_progress` and
+                // `tick_count` are the two pose inputs `Sim` does publish.
+                .with_avatar_pose(lodestone_render::AnimInput {
+                    attack_anim: self.sim.hand_swing_progress(),
+                    age_ticks: self.sim.tick_count() as f32,
+                    ..lodestone_render::AnimInput::REST
+                })
                 // The anvil's XP cost and the enchanting table's three level
                 // costs (`docs/container-cost-screens.md`'s "What is not yet
                 // wired" gap). `&[]` on the player-inventory screen (no

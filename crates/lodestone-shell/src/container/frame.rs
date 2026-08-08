@@ -79,6 +79,13 @@ pub struct ContainerFrame<'a> {
     /// [`with_cost_context`](Self::with_cost_context) and
     /// `docs/container-cost-screens.md`.
     pub cost_data: &'a [(i32, i32)],
+    /// The live pose for the **inventory avatar** — see
+    /// [`super::PlayerAvatar::pose`]. `AnimInput::REST` (the default from
+    /// [`new`](Self::new)) draws a standing player, which is what keeps every
+    /// existing caller (headless builds, the pixel gates,
+    /// `tests/container_screen.rs`) unchanged. See
+    /// [`with_avatar_pose`](Self::with_avatar_pose).
+    pub avatar_pose: lodestone_render::AnimInput,
     /// `Player.hasInfiniteMaterials()` — `Abilities.instabuild`
     /// (`AnvilMenu.java:70-71`, `EnchantmentScreen.java:111`). Gates the
     /// anvil's "Too Expensive!" branch and the enchanting rows' afford
@@ -148,6 +155,7 @@ impl<'a> ContainerFrame<'a> {
             drag: None,
             menu_type: None,
             cost_data: &[],
+            avatar_pose: lodestone_render::AnimInput::REST,
             has_infinite_materials: false,
             xp_level: 0,
             tooltips: None,
@@ -168,6 +176,7 @@ impl<'a> ContainerFrame<'a> {
             drag: None,
             menu_type: None,
             cost_data: &[],
+            avatar_pose: lodestone_render::AnimInput::REST,
             has_infinite_materials: false,
             xp_level: 0,
             tooltips: None,
@@ -248,6 +257,21 @@ impl<'a> ContainerFrame<'a> {
         self.cost_data = data;
         self.has_infinite_materials = has_infinite_materials;
         self.xp_level = xp_level;
+        self
+    }
+
+    /// Attach the **live pose** for the inventory avatar, so a player who opens
+    /// their inventory mid-swing sees the tail of that swing rather than a
+    /// standing rig — vanilla poses the live render state
+    /// (`InventoryScreen.extractEntityInInventoryFollowsMouse` is handed the real
+    /// player entity). `AnimInput::REST` (the default) is what every caller
+    /// without a `Sim` keeps.
+    ///
+    /// The head angles are **not** taken from here: `gui_entity_anim` overwrites
+    /// them from the cursor, which is the whole point of it taking a base.
+    #[must_use]
+    pub fn with_avatar_pose(mut self, pose: lodestone_render::AnimInput) -> Self {
+        self.avatar_pose = pose;
         self
     }
 
