@@ -55,6 +55,13 @@ lodestone-model = { path = "../lodestone-model" }
 # protocol one: `ChunkWorld` (mobs.rs) reads it to classify real block states
 # into `PathType`/collision geometry instead of a solid/air guess (issue #204).
 lodestone-data = { path = "../lodestone-data" }
+# The light engine (`lighting::compute_column_light`) `natural_spawn` runs per
+# column, because every monster spawn rule in the game is a light test and this
+# crate computed no light at any position. Promoted from the dev-dependency it
+# was — step 1 of `docs/server-chunk-light.md`'s brokered patch — and it costs
+# nothing in graph terms: `lodestone-world`'s own dependencies are
+# `lodestone-core`, `thiserror` and `serde_json`, all already here.
+lodestone-world = { path = "../lodestone-world" }
 # The version-free crafting matcher and its datapack-JSON loader
 # (`recipe::RecipeBook`, `recipe_json`) — issue #529's server-authoritative
 # crafting. This crate must NOT grow a second matcher: the client's is already
@@ -130,7 +137,6 @@ tokio = { workspace = true, features = ["test-util"] }
 serde_json = { workspace = true }
 lodestone-client = { path = "../lodestone-client" }
 lodestone-model = { path = "../lodestone-model" }
-lodestone-world = { path = "../lodestone-world" }
 # `tests/chunk_nbt_vanilla_oracle.rs` opens a real 26.2 `.mca` directly, rather
 # than through this crate's own loader, so the oracle reads the file with
 # something other than the code under test.

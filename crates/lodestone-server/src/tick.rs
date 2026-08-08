@@ -60,6 +60,12 @@ use crate::sleep::{SleepEvent, SleepFeed, SleepState, SleepVote};
 use crate::weather::{WeatherFeed, WeatherState};
 use lodestone_model::BlockPos;
 
+/// The natural-spawn driver's RNG seed. A fixed literal, like every other seed
+/// in this module (`RANDOM_TICK_POSITION_SEED` and friends): the world seed is
+/// not threaded into this loop, and the spawn stream only has to be *reproducible*,
+/// not world-derived.
+const NATURAL_SPAWN_SEED: u64 = 0x5350_4157_4E45_5221;
+
 /// Vanilla's `mobGriefing` game rule, which gates whether a mob may change the
 /// world — here, whether a grazing sheep's eat actually removes the block
 /// (`ai/goal/EatBlockGoal.java:63,71`; `GameRules.RULE_MOBGRIEFING`, default
@@ -962,6 +968,28 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // #307.
     let mut random_ticks = RandomTickScheduler::new(RANDOM_TICK_POSITION_SEED, RANDOM_TICK_BEHAVIOR_SEED);
     let (tick_cx_range, tick_cz_range) = tick_area;
+    // Issues #221/#222: the natural-spawn driver. Long-lived rather than built
+    // per tick because it owns the per-column light cache — see
+    // `crate::natural_spawn`'s module doc for the per-cycle budget and the TTL
+    // that keep a 49-column area inside the 50 ms tick budget.
+    let mut natural_spawner = crate::natural_spawn::NaturalSpawner::new(
+        crate::worldgen_data::bundled_biome_spawners().clone(),
+        NATURAL_SPAWN_SEED,
+    );
+    // The chunks the spawn cycle and the census run over — the same fixed tick
+    // area everything else here uses, for the reason this module's own doc gives
+    // (there is still no loaded-chunk registry to derive a player-relative one
+    // from). Built once: it does not move.
+    let spawn_chunks: Vec<(i32, i32)> = tick_cz_range
+        .clone()
+        .flat_map(|cz| tick_cx_range.clone().map(move |cx| (cx, cz)))
+        .collect();
+    // Vanilla's `spawnableChunkCount` for the cap formula. `MAGIC_NUMBER` (289)
+    // worth of chunks yields caps equal to the per-chunk maxima, so a smaller
+    // tick area scales the caps down with it — which is the honest answer for an
+    // area this loop really does simulate.
+    let spawnable_chunks = i32::try_from(spawn_chunks.len()).unwrap_or(i32::MAX);
+    let mut despawn_rng = crate::mob_spawn::SpawnRng::new(NATURAL_SPAWN_SEED ^ 0x5DEE_C0DE);
     // Issue #326 / `docs/plans/world-state.md` B1: the world border, ticked
     // first each loop (per `ServerLevel.tick`'s order) and owned by this
     // thread with no lock, exactly like `weather`/`game_tick`. A **static
@@ -1017,6 +1045,34 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 sim.remove_monsters();
             }
         });
+        // Issues #221/#222: **the natural spawn cycle, and the despawn pass.**
+        // Both engines were complete and driverless — `MobSim::run_spawn_cycle`
+        // and `MobSim::despawn_pass` had no production caller at all, so a world
+        // held exactly the mobs `seed_demo_mobs` put in it, forever.
+        //
+        // Gated on the `spawn_mobs` game rule, which is what that rule's
+        // accessor was waiting for (`docs/world-state.md` said so explicitly).
+        // Peaceful is handled a few lines up by `remove_monsters`, so a monster
+        // spawned here is evicted next tick rather than never proposed —
+        // vanilla's own order, and it keeps the RNG stream independent of
+        // difficulty.
+        if world_state.spawn_mobs() {
+            let players: Vec<lodestone_model::Vec3> =
+                mobs.with(|sim| sim.players().iter().map(|p| p.position).collect());
+            if !players.is_empty() {
+                let world = mobs.with(|sim| sim.world());
+                natural_spawner.begin_cycle(world, game_tick, players.clone());
+                mobs.with(|sim| {
+                    let mut state = sim.census(spawnable_chunks);
+                    sim.run_spawn_cycle(&mut state, &mut natural_spawner, &spawn_chunks);
+                });
+            }
+            // Nearest-player despawn runs whether or not anything spawned: it is
+            // the other half of the same accounting, and vanilla runs it every
+            // tick from `Mob.checkDespawn`.
+            let nearest = mobs.with(|sim| sim.players().first().map(|p| p.position));
+            mobs.with(|sim| sim.despawn_pass(nearest, &mut despawn_rng));
+        }
         mob_out.publish(mobs.with(|sim| sim.snapshots()));
         // Issue #425: `MobSim::tick` already calls `MobSim::explode` the
         // tick a creeper's own fuse completes (`1feed17`/`614acb8`), but

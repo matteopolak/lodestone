@@ -158,6 +158,11 @@ pub mod join_scheduler;
 pub mod loot;
 mod mob_spawn;
 mod mobs;
+/// Natural mob spawning against a live world (issues #221/#222): the per-species
+/// `SpawnPlacements` table, a per-column light cache over the real light engine,
+/// and the `NaturalSpawner` that runs vanilla's cluster loop over real terrain
+/// and biome spawn lists. Driven by `tick::run_tick_loop`.
+pub mod natural_spawn;
 mod neighbor_update;
 mod players;
 mod plugin_channels;
@@ -276,6 +281,7 @@ pub use mob_spawn::{
     DespawnOutcome, MAGIC_NUMBER, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng,
     SpawnState, check_despawn, resolve_mob_shape,
 };
+pub use natural_spawn::NaturalSpawner;
 pub use mobs::{
     AttackOutcome, ChunkWorld, Detonation, LiveMobSource, MobHandle, MobSim, PlayerPerception,
     SimMob,
@@ -314,7 +320,8 @@ pub use tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 pub use weather::{WeatherEvent, WeatherFeed, WeatherState};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};
 pub use worldgen_data::{
-    bundled_worldgen_serves, overworld_chunk_source, overworld_generator, BUNDLED_WORLDGEN_SCOPE,
+    bundled_biome_spawners, bundled_worldgen_serves, overworld_chunk_source, overworld_generator,
+    BUNDLED_WORLDGEN_SCOPE,
 };
 
 // Re-exported so a caller (e.g. the shell's local world) can name the generator

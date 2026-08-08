@@ -396,12 +396,55 @@ impl ChunkWorld {
     /// `"minecraft:air"` for a missing column or an out-of-range Y — matching
     /// [`ChunkColumn::block_state`]'s own out-of-range behaviour.
     #[must_use]
-    fn block_state(&self, x: i32, y: i32, z: i32) -> &str {
+    pub(crate) fn block_state(&self, x: i32, y: i32, z: i32) -> &str {
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
         let (lx, lz) = (x.rem_euclid(16), z.rem_euclid(16));
         self.columns
             .get(&(cx, cz))
             .map_or(AIR, |col| col.block_state(lx, y, lz))
+    }
+
+    /// The column at chunk coordinates, or `None` when this snapshot does not
+    /// hold it. [`crate::natural_spawn`] needs the whole column, not one cell:
+    /// the light engine runs over a volume.
+    #[must_use]
+    pub(crate) fn column(&self, cx: i32, cz: i32) -> Option<&ChunkColumn> {
+        self.columns.get(&(cx, cz))
+    }
+
+    /// The biome name at world coordinates, or `None` for a missing column —
+    /// the key [`lodestone_worldgen::spawners`]' per-biome lists are indexed by.
+    #[must_use]
+    pub(crate) fn biome_at(&self, x: i32, y: i32, z: i32) -> Option<String> {
+        let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+        let (lx, lz) = (x.rem_euclid(16), z.rem_euclid(16));
+        self.columns
+            .get(&(cx, cz))
+            .map(|col| col.biome_state_at(lx, y, lz).to_string())
+    }
+
+    /// The world Y of the highest non-air block in the column at `(x, z)`, or
+    /// `None` for a missing column — vanilla's `WORLD_SURFACE` heightmap, which
+    /// `getRandomPosWithin` picks its Y band against.
+    #[must_use]
+    pub(crate) fn surface_y(&self, x: i32, z: i32) -> Option<i32> {
+        let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+        let (lx, lz) = (x.rem_euclid(16), z.rem_euclid(16));
+        let col = self.columns.get(&(cx, cz))?;
+        let top = col.min_y + col.height - 1;
+        Some(
+            (col.min_y..=top)
+                .rev()
+                .find(|&y| col.block_state(lx, y, lz) != AIR)
+                .unwrap_or(col.min_y),
+        )
+    }
+
+    /// This snapshot's vertical floor — [`PathWorld::min_y`] without needing the
+    /// trait in scope.
+    #[must_use]
+    pub(crate) fn floor_y(&self) -> i32 {
+        self.min_y
     }
 
     /// Resolves the global block-state id at world coordinates through
@@ -2793,20 +2836,20 @@ impl<'w> MobSim<'w> {
     /// global caps in `state`.
     ///
     /// For each chunk and each spawnable category still under its cap, the
-    /// [`SpawnCandidateSource`] is asked for a candidate; if it supplies one the
-    /// mob is spawned, tagged with its category, and counted so the cap is
-    /// honoured for the rest of the cycle. Nothing here decides *which* mob or
-    /// *where* — that is the source's version/terrain-dependent job.
+    /// [`SpawnCandidateSource`] is asked for the group it would spawn there; each
+    /// member becomes a real mob through [`spawn_species`](Self::spawn_species),
+    /// so it arrives with the species' own body, attributes and vanilla goal set
+    /// rather than a placeholder. Nothing here decides *which* mob or *where* —
+    /// that is the source's registry/terrain-dependent job.
     ///
-    /// Every naturally spawned mob gets a baseline goal set
-    /// ([`RandomStrollGoal`] + [`RandomLookAroundGoal`]) so it actually moves
-    /// and looks around instead of standing frozen at its spawn point — before
-    /// this, a mob produced by this cycle had an empty [`GoalSelector`] and
-    /// [`tick`](MobSim::tick) on it was a provable no-op. Combat goals are not
-    /// added here: they need a target (a player or another mob) this
-    /// version-free crate has no notion of naming yet, so a caller that does
-    /// (species-aware spawning) adds them via [`SimMob::add_goal`] on the
-    /// returned handle's id.
+    /// The **category is the spawn list's**, not
+    /// [`spawn_species`](Self::spawn_species)' hostile/friendly guess: vanilla's
+    /// category is a property of the `EntityType` registration, and the biome
+    /// list's key is exactly that. It is overridden after the spawn for the same
+    /// reason the cap is keyed by it.
+    ///
+    /// A group is truncated the moment its category reaches the cap, so the cap
+    /// can never be exceeded even though the source drew a whole cluster.
     ///
     /// Returns the number of mobs spawned.
     pub fn run_spawn_cycle(
@@ -2821,18 +2864,13 @@ impl<'w> MobSim<'w> {
                 if !state.can_spawn(category) {
                     continue;
                 }
-                if let Some(candidate) = source.candidate(category, cx, cz) {
-                    let speed = candidate.step_per_tick;
-                    let mob = self.spawn(
-                        candidate.pos,
-                        candidate.shape,
-                        candidate.step_per_tick,
-                        candidate.visited_budget,
-                    );
+                for candidate in source.cluster(category, cx, cz) {
+                    if !state.can_spawn(category) {
+                        break;
+                    }
+                    let mob = self.spawn_species(candidate.entity_type, candidate.pos);
                     mob.set_category(category)
-                        .set_persistent(category.is_persistent())
-                        .add_goal(0, Box::new(RandomStrollGoal::new(speed)))
-                        .add_goal(1, Box::new(RandomLookAroundGoal::new()));
+                        .set_persistent(category.is_persistent());
                     state.record(category);
                     spawned += 1;
                 }

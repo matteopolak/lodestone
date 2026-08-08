@@ -458,6 +458,35 @@ pub fn overworld_generator(seed: i64) -> OverworldGenerator {
     )
 }
 
+/// Every bundled biome's parsed `MobSpawnSettings`, biome name to settings —
+/// what [`crate::natural_spawn::NaturalSpawner`] consults to answer "what spawns
+/// in this biome".
+///
+/// Parsed straight from the embedded `biome/*.json` documents and cached, rather
+/// than read off an [`OverworldGenerator`]: the spawn lists are **seed-independent
+/// bundled data**, and the tick loop that needs them holds a
+/// [`ChunkSource`](crate::ChunkSource), not a generator. Building a whole
+/// generator to reach a constant table would cost the full ~54-document settings
+/// parse per world.
+#[must_use]
+pub fn bundled_biome_spawners()
+-> &'static std::collections::HashMap<String, lodestone_worldgen::spawners::BiomeSpawners> {
+    static TABLE: OnceLock<
+        std::collections::HashMap<String, lodestone_worldgen::spawners::BiomeSpawners>,
+    > = OnceLock::new();
+    TABLE.get_or_init(|| {
+        EMBEDDED_WORLDGEN
+            .iter()
+            .filter_map(|(id, _)| id.strip_prefix("biome/"))
+            .filter_map(|name| {
+                let document = EmbeddedResolver.biome_document(name);
+                let spawners = lodestone_worldgen::spawners::parse_biome_spawners(&document);
+                (!spawners.is_empty()).then(|| (format!("minecraft:{name}"), spawners))
+            })
+            .collect()
+    })
+}
+
 /// Builds the bundled overworld [`ChunkSource`](crate::ChunkSource) for `seed`.
 ///
 /// This is the terrain source the **integrated server** serves to a real client
