@@ -10,16 +10,55 @@ use crate::argument::ArgumentType;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(pub(crate) u32);
 
+/// A type-erased argument value, for an [`ArgumentType`] whose result is a
+/// structured Rust value rather than a primitive — an entity selector AST, a
+/// resolved item stack, a `Vec3`.
+///
+/// Blanket-implemented for every `Any + Send + Sync + Debug` type, so an
+/// argument type only has to say `ParsedValue::dynamic(my_value)`; there is
+/// nothing to implement by hand.
+///
+/// `Send + Sync` because a parsed command travels with an executor that is
+/// itself `Send + Sync` (see `lodestone_server::commands`), and `Debug`
+/// because [`ParsedValue`] is `Debug` and the whole point of this variant is
+/// that a failed extraction can say *what* was actually in the slot.
+pub trait AnyValue: std::any::Any + Send + Sync + std::fmt::Debug {
+    /// Upcast for downcasting. Needed because `dyn AnyValue` cannot be coerced
+    /// to `dyn Any` directly — a supertrait bound does not give the vtable a
+    /// `dyn Any` entry.
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+impl<T: std::any::Any + Send + Sync + std::fmt::Debug> AnyValue for T {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// The value produced by parsing one argument slot.
 ///
 /// `Custom` is what a registered [`ArgumentType`] outside the built-in set
-/// produces — kept as a plain `String` rather than `Box<dyn Any>` so the type
-/// stays `PartialEq`/`Debug` without forcing every custom type to also carry
-/// those bounds. A future consumer that needs a richer payload (issue #48's
-/// dispatcher, most likely, for something like a resolved player UUID) can
-/// widen this enum without touching the parser/reader logic — the two are
-/// deliberately decoupled.
-#[derive(Debug, Clone, PartialEq)]
+/// produces when its result really is just text — kept as a plain `String`
+/// rather than `Box<dyn Any>` so the common case stays cheap.
+///
+/// [`ParsedValue::Dyn`] is the richer payload this enum's earlier doc comment
+/// anticipated ("a future consumer that needs a richer payload — issue #48's
+/// dispatcher, most likely, for something like a resolved player UUID — can
+/// widen this enum without touching the parser/reader logic"). That consumer
+/// now exists: `lodestone_server::commands` keys typed `ArgKey<T>` handles off
+/// argument nodes and downcasts out of this variant, and `lodestone-command-mc`'s
+/// entity selectors and item inputs are the values that travel in it.
+///
+/// # `PartialEq` is hand-written, and `Dyn` compares by pointer
+///
+/// The impl below is what `derive` would have produced for the other seven
+/// variants. `Dyn` cannot be structurally compared — `dyn AnyValue` is not
+/// `PartialEq` and requiring it would exclude most useful payloads — so two
+/// `Dyn`s are equal only when they are the *same allocation*. That is enough
+/// for the one thing this crate uses equality for (a test asserting a parse
+/// produced the value it was handed) and deliberately not enough to be
+/// mistaken for a structural comparison.
+#[derive(Debug, Clone)]
 pub enum ParsedValue {
     Integer(i32),
     Long(i64),
@@ -28,6 +67,65 @@ pub enum ParsedValue {
     Bool(bool),
     String(String),
     Custom(String),
+    /// A structured value from a Minecraft-flavoured argument type. See
+    /// [`ParsedValue::dynamic`] to build one and
+    /// [`ParsedValue::downcast_ref`] to read it back.
+    Dyn(Arc<dyn AnyValue>),
+}
+
+impl ParsedValue {
+    /// Wrap a structured value as [`ParsedValue::Dyn`].
+    pub fn dynamic<T: AnyValue>(value: T) -> Self {
+        Self::Dyn(Arc::new(value))
+    }
+
+    /// Read a value of type `T` out of this slot, whatever variant carries it.
+    ///
+    /// Works uniformly across the primitive variants and [`ParsedValue::Dyn`]:
+    /// `downcast_ref::<i32>` succeeds on `Integer`, `downcast_ref::<String>` on
+    /// `String`/`Custom`, and `downcast_ref::<EntitySelector>` on a `Dyn`
+    /// carrying one. That uniformity is what lets a typed argument-key API
+    /// declare `Value = i32` for a Brigadier primitive and `Value =
+    /// EntitySelector` for a selector without two extraction paths.
+    pub fn downcast_ref<T: std::any::Any>(&self) -> Option<&T> {
+        fn cast<T: std::any::Any, U: std::any::Any>(value: &U) -> Option<&T> {
+            (value as &dyn std::any::Any).downcast_ref::<T>()
+        }
+        match self {
+            Self::Integer(v) => cast(v),
+            Self::Long(v) => cast(v),
+            Self::Float(v) => cast(v),
+            Self::Double(v) => cast(v),
+            Self::Bool(v) => cast(v),
+            Self::String(v) | Self::Custom(v) => cast(v),
+            // `&**v`, not `v.as_any()`. `Arc<dyn AnyValue>` is itself
+            // `Any + Send + Sync + Debug`, so the blanket impl above covers it
+            // too and plain method resolution finds `as_any` on the *`Arc`*
+            // before dereferencing — which downcasts to `Arc<dyn AnyValue>`
+            // and never to the payload. That compiles, and every downcast
+            // silently answers `None`. This is the whole bug the first run of
+            // `tests/dyn_values.rs` caught.
+            Self::Dyn(v) => {
+                let inner: &dyn AnyValue = &**v;
+                inner.as_any().downcast_ref::<T>()
+            }
+        }
+    }
+}
+
+impl PartialEq for ParsedValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Integer(a), Self::Integer(b)) => a == b,
+            (Self::Long(a), Self::Long(b)) => a == b,
+            (Self::Float(a), Self::Float(b)) => a == b,
+            (Self::Double(a), Self::Double(b)) => a == b,
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            (Self::String(a), Self::String(b)) | (Self::Custom(a), Self::Custom(b)) => a == b,
+            (Self::Dyn(a), Self::Dyn(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
 }
 
 pub(crate) enum NodeKind {

@@ -20,11 +20,14 @@
 //! permissions this crate's [`filter`] seam asks about (#122). The other two
 //! remain open and unchanged:
 //!
-//! - **#48** — the server-side Brigadier dispatcher. Still nothing: this crate
-//!   has no `CommandSource` and no execution semantics; `executable` is a bare
-//!   flag. `lodestone_ecs::commands` attaches its own executors *outside* the
-//!   tree (a `NodeId`-keyed side table), precisely so this crate stays free of
-//!   an execution model that #48 will want to define differently.
+//! - **#48** — the server-side Brigadier dispatcher. **This one now exists
+//!   too:** `lodestone_server::commands` defines the `CommandSource`, the
+//!   executor and *modifier* tables, and the fork-aware dispatch walk, all
+//!   still *outside* this crate's arena — `executable` remains a bare flag
+//!   here, and both dispatchers keep their callbacks in a `NodeId`-keyed side
+//!   table so two dispatchers over one tree library cannot disagree about
+//!   where a callback lives. The one thing that dispatcher needed *from* this
+//!   crate is [`ParsedValue::Dyn`], added for it.
 //! - **#46** — the client command UX. `CommandTree::suggest` exists for it, but
 //!   #46 shipped against `lodestone_model::command_tree` instead; see issue
 //!   #435 and `docs/plugin-commands.md` for why that duplication is the right
@@ -125,6 +128,6 @@ pub mod suggest;
 pub use argument::{ArgumentType, ArgumentTypeRegistry, BoolArgument, ChoicesArgument, DoubleArgument, FloatArgument, IntegerArgument, LongArgument, StringArgument, StringKind, SuggestionProvider};
 pub use error::{ParseError, ParseErrorKind};
 pub use filter::{AllowAll, DenyAll, PermissionFilter};
-pub use node::{CommandTree, Node, NodeId, ParsedValue};
+pub use node::{AnyValue, CommandTree, Node, NodeId, ParsedValue};
 pub use parse::ParsedCommand;
 pub use reader::StringReader;
