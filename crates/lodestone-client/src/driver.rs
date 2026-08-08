@@ -6,7 +6,7 @@ use std::time::Duration;
 use lodestone_game::chat_ack::{LastSeenTracker, MessageSignature};
 use lodestone_model::{
     AdapterError, ClientAction, ClientEvent, ConnectionState, Directive, LoginProfile,
-    PackedMessageSignature, ResourceKey, ServerAddress, VersionAdapter,
+    PackedMessageSignature, ResourceKey, ResourcePackResponseKind, ServerAddress, VersionAdapter,
 };
 use lodestone_net::{Connection, NetError, Transport};
 #[cfg(not(target_arch = "wasm32"))]
@@ -597,6 +597,33 @@ impl<T: Transport> Driver<T> {
             // us with `multiplayer.disconnect.flying`).
             ClientEvent::Ping { id } => {
                 auto_actions.push(ClientAction::PongResponse { id: *id });
+            }
+            // A pushed pack MUST be answered, and it must be answered from here
+            // rather than from the shell.
+            //
+            // In the **configuration** phase,
+            // `ServerConfigurationPacketListenerImpl.handleResourcePackResponse`
+            // only calls `finishCurrentTask` once the response's
+            // `Action.isTerminal()` — so an unanswered push means configuration
+            // never completes and the connection simply stalls. The shell's event
+            // loop does not start until after login, so it structurally cannot
+            // answer in time; a shell-side producer would be correct-looking and
+            // permanently too late.
+            //
+            // `FailedDownload` is the honest answer for a client that applies no
+            // packs, and it is deliberately not `Declined`. Two clauses decide
+            // that, both read off the vanilla listeners rather than guessed:
+            // `Action.isTerminal()` is `this != ACCEPTED && this != DOWNLOADED`,
+            // so `FAILED_DOWNLOAD` terminates the task; and the *play*-phase
+            // handler disconnects only on `DECLINED` when the pack is `required`.
+            // So this reply both completes configuration and keeps us connected,
+            // where `Declined` would get us kicked by any server that requires
+            // its pack.
+            ClientEvent::ResourcePackPushed { id, .. } => {
+                auto_actions.push(ClientAction::ResourcePackResponse {
+                    id: *id,
+                    response: ResourcePackResponseKind::FailedDownload,
+                });
             }
             ClientEvent::Login { .. } => {
                 // Entering the world arms the client-loaded signal; the first
