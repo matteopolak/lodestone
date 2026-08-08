@@ -104,6 +104,22 @@ Guessing the `ingest`/`session` fork wrong has cost work twice:
 belong to `session`. An arm in the wrong router compiles, unit-tests green, and
 never runs.
 
+**Two clarifications the #26 sweep forced, both of which look like exceptions and
+are not:**
+
+* **`DebugEntityValue` names an entity and is `session`.** A debug feed is keyed by
+  *subscription* and outlives the entity's ECS row, so folding it as a component
+  would resurrect rows the client has already dropped. It is session state *about*
+  an entity, not entity state. The convention is about what owns the lifetime, not
+  about which nouns appear in the packet.
+* **A registry-order table is `session`, even though `BiomeRegistryNames` is
+  `shell`.** `BiomeRegistryNames` predates the session-fold convention and is read
+  through a shell-owned cell; `EnchantmentRegistryNames` folds into
+  `SessionRegistryOrder` instead, because a `shell` route obliges an unconditional
+  arm in `net::forward` (or its `debug_assert!` fires) and a session component
+  reaches the same consumer without one. **Do not copy `BiomeRegistryNames` as the
+  pattern for the next registry table.**
+
 ## The trade, stated plainly
 
 Adding a `ClientEvent` variant now costs **one mandatory one-line arm** in `route`,
@@ -143,8 +159,17 @@ reviewable commit, not as a drive-by while landing something else.
 
 ## Islands: variants this table found reaching nothing
 
-**29 of 106** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
+**29 of 125** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
 consumer, which is a normal state for a from-scratch client.
+
+> **The numerator did not move when issue #26 added nineteen variants**, and that
+> is the useful reading of this line rather than a coincidence: the nineteen
+> clientbound packets that had no decode arm at all now decode *and* fold, all
+> nineteen into `session` components (`SessionStatistics`, `SessionDebugFeeds`,
+> `SessionServerInfo`, `SessionWaypoints`, `SessionRegistryOrder`). Nineteen new
+> islands would have read as "29 of 125" too if the numerator had been carried
+> forward instead of recomputed — which is exactly the failure the paragraph below
+> describes.
 
 > **On these two numbers, because both have been wrong in the record.** This line
 > read "38 of 98" until the world-state sweep below, and the numerator was right

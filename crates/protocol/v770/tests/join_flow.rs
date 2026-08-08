@@ -402,6 +402,11 @@ fn full_login_sequence_produces_expected_directives() {
                 has_precipitation: Vec::new(),
             },
             ClientEvent::BiomeRegistryNames { names: Vec::new() },
+            // Empty because this fixture sends no `registry_data` at all, which is
+            // the honest expectation: `entry_names` returns nothing and the
+            // consumer's contract is that empty means "fall back", not "this
+            // server has no enchantments".
+            ClientEvent::EnchantmentRegistryNames { names: Vec::new() },
             ClientEvent::Login {
                 entity_id: 1,
                 game_mode: GameMode::Survival,
@@ -486,17 +491,24 @@ fn configuration_disconnect_decodes_nbt_reason() {
 
 #[test]
 fn unknown_play_packet_is_ignored() {
-    // AWARD_STATS has no decode arm at all (falls through to the trailing
-    // catch-all). BUNDLE_DELIMITER used to be this test's fixture, but issue
-    // #299 gave it a real decode arm (`Directive::BundleDelimiter`), so it no
-    // longer decodes to an empty directive list — using it here now would
-    // assert the exact defect that issue fixed.
+    // An id **outside the protocol's play clientbound table entirely**, and that
+    // is the point. This fixture has now been rewritten twice for the same
+    // reason: it named `BUNDLE_DELIMITER` until #299 gave that a real decode arm,
+    // then `AWARD_STATS` until #26 gave that one — each time asserting the exact
+    // defect the next issue fixed, and each time only noticed because the test
+    // went red. Any *real* packet id is a fixture with an expiry date, so this
+    // uses one no version of this protocol can ever assign.
+    const NOT_A_PACKET: i32 = 0x7FFF;
+    assert!(
+        NOT_A_PACKET > play::clientbound::AWARD_STATS,
+        "the sentinel must sit above every assigned play clientbound id"
+    );
     assert!(
         adapter()
             .handle_packet(
                 &mut World::new(),
                 ConnectionState::Play,
-                play::clientbound::AWARD_STATS,
+                NOT_A_PACKET,
                 &[]
             )
             .unwrap()

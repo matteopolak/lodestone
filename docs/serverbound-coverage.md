@@ -1,0 +1,143 @@
+# Serverbound coverage: encoders versus producers
+
+## What it is
+
+The record of which serverbound packets this client can **encode** and which it
+actually **produces**, and why those are two different numbers. Issue #304 is the
+encoder half; this doc exists because the encoder half is the half that is easy to
+measure and the wrong one to trust.
+
+## How it works
+
+`cargo xtask connectedness` reports, for v770, `serverbound encoded N/69`. That
+counts arms in `crates/protocol/v770/src/adapter.rs`'s `encode_action` match. It
+**cannot see a producer**, so an encoder with nothing upstream of it counts as
+coverage — and that has shipped four times:
+
+| action | how it surfaced |
+|---|---|
+| `ClientAction::SetFlying` | four adapters encoded it, zero producers; the server kicked us with `multiplayer.disconnect.flying` |
+| `ClientAction::ChangeGameMode` | zero producers until a game-mode switcher was added |
+| `ClientAction::PlaceRecipe` | zero producers; the shell synthesises three container clicks instead |
+| `PlayerCommand::StartFallFlying` | four adapter encoders, zero producers, until riptide (#208) added the first |
+
+So the question to ask of a serverbound packet is never "does it encode" but
+**"what sends it"**.
+
+`crates/lodestone-ecs/tests/serverbound_producer_census.rs` snapshots the set with
+an encoder and no producer. It fails when someone lands the first producer for a
+listed entry, and the fix is to delete the line.
+
+## The measured numbers
+
+Measured with `cargo xtask connectedness`, not carried forward from any issue body:
+
+* **before #304**: `serverbound encoded 54/69`
+* **after #304**: `serverbound encoded 67/69`
+
+The two remaining are `CHAT_COMMAND_SIGNED` and `CHAT_SESSION_UPDATE`, which belong
+to the chat-signing issue and are deliberately out of scope here.
+
+**Note #304's title says twelve and its body lists thirteen.** Thirteen is right:
+`BLOCK_ENTITY_TAG_QUERY`, `CHANGE_DIFFICULTY`, `DEBUG_SUBSCRIPTION_REQUEST`,
+`ENTITY_TAG_QUERY`, `JIGSAW_GENERATE`, `LOCK_DIFFICULTY`, `SET_COMMAND_MINECART`,
+`SET_GAME_RULE`, `SET_JIGSAW_BLOCK`, `SET_STRUCTURE_BLOCK`, `SET_TEST_BLOCK`,
+`TEST_INSTANCE_BLOCK_ACTION`, `CUSTOM_CLICK_ACTION`.
+
+## The three wire shapes a transliterating encoder gets wrong
+
+Each is gated in `crates/protocol/v770/tests/operator_encoders.rs` with an
+assertion that fails under the plausible wrong encoding, not merely one that
+passes under the right one.
+
+| packet | trap | why the wrong version looks fine |
+|---|---|---|
+| `set_structure_block` | `offset`/`size` are six **signed bytes**, not two `Vec3i`s of VarInts, and the flags byte is **last**, after `seed` | a VarInt and a byte are the same length for any value in `0..=127`, so only a *negative* offset separates them |
+| `set_jigsaw_block` | `joint` is `getSerializedName()`, a **string** | every other enum field in the family is a VarInt ordinal; the server reads a wrong `joint` as a zero-length name and silently defaults to `ALIGNED` |
+| `custom_click_action` | **double-framed**: an outer VarInt *byte* length wrapping the optional-NBT body | the payload still "looks like" NBT either way; only the length prefix's presence differs |
+
+`Vec3i.STREAM_CODEC` is three plain `ByteBufCodecs.VAR_INT`s and is **not** zigzag.
+An earlier draft of the decode gate assumed it was, and the hand-built bytes caught
+it — the decoder was right and the test was wrong, which is the direction you want
+that disagreement to go.
+
+## What has an encoder and no producer
+
+Seventeen entries, each verified by hand. The full list with blockers lives in
+`KNOWN_UNPRODUCED` in the census gate; the grouping is:
+
+* **Creative/operator editor screens that do not exist** — structure block, jigsaw
+  block (plus its Generate button), test block, test instance block, command
+  minecart. Six entries. Nothing is missing but the screen.
+* **#32's settings menu** — `ChangeDifficulty`, `LockDifficulty`, `SetGameRules`.
+  Note the dependency if that work starts.
+* **Debug/shell input** — `QueryBlockEntityTag` and `QueryEntityTag` want vanilla's
+  F3+I copy-NBT keybind; `SubscribeDebug` wants a debug-overlay toggle.
+* **The dialog screen** — `CustomClickAction`. `show_dialog` now decodes into
+  `SessionServerInfo`, so the inbound half is done and the reply is waiting on a
+  renderer.
+* **`PlaceRecipe`** — brokered separately.
+* **The `PlayerCommand` family** — `StopSleeping`, `StartRidingJump`,
+  `StopRidingJump`, `OpenInventory`. All four are keypresses, so all four are shell
+  input. Found by grepping the family after `StartFallFlying` turned out to be the
+  fourth instance of the `SetFlying` shape; **the whole family was worth checking
+  precisely because one member of it had already been wrong**.
+
+### Two paired halves, which is the useful pattern
+
+`SubscribeDebug` and the four `debug_*` clientbound packets are one loop: the
+server sends **nothing** on a debug feed until a client subscribes, so the request
+without the response is silence and the response without the request is dead code.
+The same is true of `show_dialog` → `CustomClickAction`. When a serverbound packet
+looks unmotivated, check whether it is the request half of something clientbound.
+
+### The eighteen that are *not* verified
+
+A whole-enum sweep of `ClientAction` reported eighteen further variants with no
+producer found by name: `ContainerButtonClick`, `EditBook`, `EndClientTick`,
+`MoveVehicle`, `PaddleBoat`, `PingRequest`, `RecipeBookSeenRecipe`, `RenameItem`,
+`ResourcePackResponse`, `SeenAdvancements`, `SelectBundleItem`, `SelectTrade`,
+`SetBeaconEffects`, `SetContainerSlotState`, `SignUpdate`, `SpectatorAction`,
+`Stab`, `TeleportToEntity`.
+
+**That list is not trustworthy and is deliberately not in the gate.** At least one
+member is a false positive: `SignUpdate` *is* produced, through
+`submit.into_action()` in `lodestone-shell/src/app/menus.rs`
+(`menu/command_block.rs:541`), an indirection no name scanner can follow. Treat the
+eighteen as a list to *audit*, one at a time, by reading the call path rather than
+grepping for the variant name.
+
+Two of them are worth auditing first because they are **not** screen-blocked and
+both have a live failure mode:
+
+* **`EndClientTick`** — vanilla sends `client_tick_end` every tick. The only
+  construction found is in `lodestone-shell/tests/live_container_render.rs`, i.e. a
+  test. If production really never sends it, that is a protocol-conformance gap
+  rather than a missing feature.
+* **`ResourcePackResponse`** — no construction found anywhere. A server with a
+  `required` resource pack disconnects a client that never answers, which is
+  exactly the `SetFlying` failure mode: correct-looking encoder, no producer, remote
+  kick.
+
+## How to change it
+
+Adding an encoder is fine and useful ahead of its producer — **say which of the
+three buckets it is in**: has a producer, waiting on a named screen, or waiting on
+shell input. Add the entry to `KNOWN_UNPRODUCED` with that blocker. An entry with
+no stated blocker is the actual defect, because it is one nobody decided about.
+
+Do not wire a consumer for a feature that is client-authoritative in vanilla. An
+issue-body plan to "decode `USE_ITEM`" for riptide pointed the wrong way: riptide's
+launch is **client-predicted**, so the server is not the source of that motion and a
+serverbound decode would have been building the wrong half.
+
+## Configuration
+
+None. `cargo xtask connectedness` takes no arguments; the census gate runs under
+`cargo test -p lodestone-ecs`.
+
+## Dependencies
+
+`crates/protocol/v770/src/adapter.rs` for the encoders,
+`crates/lodestone-model/src/action.rs` for `ClientAction` and `PlayerCommand`, and
+`xtask/src/lib.rs`'s `connectedness_report` for the encoder count.
