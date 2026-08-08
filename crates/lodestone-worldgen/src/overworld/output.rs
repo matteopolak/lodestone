@@ -17,6 +17,7 @@ impl OverworldGenerator {
         &self,
         world: crate::dense_grid::DenseBlockGrid,
         biome_quarts: [(String, bool); 16],
+        biome_cells: super::BiomeCells,
     ) -> GeneratedColumn {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Intern);
         debug_assert_eq!(world.bounds().3, 16, "centre chunk width must be 16");
@@ -30,6 +31,7 @@ impl OverworldGenerator {
             palette,
             blocks,
             biome_quarts: biome_quarts.map(|(name, _)| name),
+            biome_cells,
         }
     }
 }
@@ -137,9 +139,18 @@ pub struct GeneratedColumn {
     palette: Vec<String>,
     blocks: Vec<u16>,
     /// Biome id per horizontal quart, row-major `qz * 4 + qx` (issue #405) —
-    /// see [`OverworldGenerator::biome_stage`]. Broadcast vertically: the
-    /// whole column shares these 16 values regardless of `y`.
+    /// see [`OverworldGenerator::biome_stage`]. **The surface answer**: this is
+    /// the biome a player standing on the column sees, and it is what surface
+    /// material, carve and decorate consume.
+    ///
+    /// It is *not* the biome of the column, and issue #512 is why: broadcasting
+    /// it vertically is what made `lush_caves`/`dripstone_caves`/`deep_dark`
+    /// unreachable. Read [`Self::biome_cells`] for anything that has a `y`.
     biome_quarts: [String; 16],
+    /// Issue #512: the full 4×4×4 biome grid — the authoritative per-cell answer,
+    /// and what a per-section biome container on the wire or in a region file
+    /// must be built from. See [`super::biome_cells`].
+    biome_cells: super::BiomeCells,
 }
 
 impl GeneratedColumn {
@@ -216,7 +227,26 @@ impl GeneratedColumn {
     /// indexes into `palette` (`palette[0] == "minecraft:air"`), `ly = y -
     /// min_y`, and `biome_quarts[qz * 4 + qx]` is this column's biome id for
     /// horizontal quart `(qx, qz)` (issue #405), constant across `y`.
+    ///    /// Issue #512's per-cell biome grid. **Read this, not [`Self::biome_quarts_ref`],
+    /// for anything that has a `y`** — a per-section biome container, a region-file
+    /// `biomes` palette, underground tint/fog, or a spawn rule.
     ///
+    /// Deliberately *not* folded into [`Self::into_raw`]: that tuple is destructured
+    /// by `lodestone_server::ChunkColumn::from_generated`, and widening it would be
+    /// a breaking change to a crate this one must not depend on. A consumer opts in.
+    #[must_use]
+    pub fn biome_cells(&self) -> &super::BiomeCells {
+        &self.biome_cells
+    }
+
+    /// The 16 surface quarts — see the field's own doc for when this is the wrong
+    /// question.
+    #[must_use]
+    pub fn biome_quarts_ref(&self) -> &[String; 16] {
+        &self.biome_quarts
+    }
+
+
     /// This is the zero-copy hand-off a downstream carrier (e.g. the integrated
     /// server's chunk column) uses to adopt the generated block field without
     /// re-interning every block. The index layout is stable and part of the

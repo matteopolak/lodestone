@@ -8,6 +8,7 @@
 use crate::biome::{BiomeTable, ClimateSampler};
 
 use super::OverworldGenerator;
+use super::biome_cells::BiomeCells;
 
 /// Real multi-noise biome assignment (issue #405), present on
 /// [`OverworldGenerator`] whenever its [`Resolver`] supplies a non-empty
@@ -25,57 +26,71 @@ pub(super) struct DynamicBiome {
 }
 
 impl OverworldGenerator {
-    /// Stage 2 (issue #405): one climate sample per horizontal quart
-    /// `(qx, qz)` in `0..4`, row-major `qz * 4 + qx` — 16 per chunk, matching
-    /// [`lodestone_world`](crate)'s own `ChunkSection::BIOME_EDGE` (4) so a
-    /// future encoder can write this straight into a real biome container.
-    /// Broadcast vertically: see `crate::biome`'s module doc for why one
-    /// sample per quart *column*, not a full 3-D grid, is this phase's
-    /// deliberate scope.
+    /// Stage 2 (issue #405, rebuilt by #512): the 16 **surface** quarts —
+    /// `(qx, qz)` in `0..4`, row-major `qz * 4 + qx`, matching `ChunkSection`'s own
+    /// `BIOME_EDGE` of 4 — each read at that quart's own already-generated surface
+    /// height.
     ///
-    /// Each quart samples at its own already-generated surface height
-    /// (`heights[]`, [`Self::heights_from_field`]'s output) rather than a
-    /// fixed Y — the module doc's "y = 0 trap" section is why a constant
-    /// height silently produces almost all cave/deep-ocean biomes instead of
-    /// the terrain biome a player standing there would actually see.
-    pub(super) fn biome_stage(&self, heights: &[i32; 256], base_x: i32, base_z: i32) -> [(String, bool); 16] {
-        // Entered unconditionally, unlike `ore_stage`/`vegetation_stage` below:
-        // this stage has no single early return, it degrades per-quart when
-        // `dynamic_biome` is `None`. So `stage_entered[biome]` is NOT the
-        // vacuity signal for this one — `biome_searches` is. A fixed-biome
-        // generator enters this stage 16 times and searches zero times.
-        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Biome);
+    /// **This no longer samples anything.** Issue #512 made
+    /// [`Self::biome_cells_stage`]'s 4×4×4 grid the primary product, and this reads
+    /// the layer each quart's surface falls in. That is exact, not an
+    /// approximation: the surface sample height is `(height >> 2) << 2`, already
+    /// quart-aligned, so it is by construction one of that grid's own layers. If
+    /// you change either sample convention, change both — a divergence would show
+    /// up as surface vegetation being chosen from a biome the served chunk does not
+    /// report.
+    ///
+    /// Why a *surface* array still exists alongside the grid: the module doc's
+    /// "y = 0 trap". Surface material, carve and decorate each ask a specific,
+    /// different question about Y, and having the grid does not license collapsing
+    /// them onto one answer — see [`super::biome_cells`].
+    pub(super) fn biome_stage(
+        &self,
+        cells: &BiomeCells,
+        heights: &[i32; 256],
+    ) -> [(String, bool); 16] {
         std::array::from_fn(|i| {
-            let Some(dynamic) = &self.dynamic_biome else {
-                return (
-                    self.fallback_biome.clone(),
-                    self.fallback_cold_enough_to_snow,
-                );
-            };
-            let qx = (i % 4) as i32;
-            let qz = (i / 4) as i32;
-            // Quart cell (qx, qz) covers local x/z in [qx*4, qx*4+4); sample
-            // at its own **corner** (`qx*4`), not its center — see
-            // `crate::biome`'s module doc and `docs/worldgen-biomes.md` for
-            // why this matched a real dark_forest/river boundary and the
-            // center convention did not.
-            let lx = qx * 4;
-            let lz = qz * 4;
-            // Y needs the same quart-rounding as X/Z (see the module doc).
+            let qx = i % 4;
+            let qz = i / 4;
+            let (lx, lz) = (qx as i32 * 4, qz as i32 * 4);
             let y = (heights[(lz * 16 + lx) as usize] >> 2) << 2;
-            let target = dynamic.climate.target(base_x + lx, y, base_z + lz);
-            // Unit 9: vanilla's own indexed search, not
-            // `crate::biome::nearest_biome`'s brute-force scan — and since the
-            // owner's ruling on #492 the tree is the *answer*, not merely a faster
-            // route to brute force's answer. The two differ only in which of
-            // several distance-tied rows they take; see `crate::biome::tree`'s
-            // module doc. **Not memoised**, deliberately:
-            // each quart samples at its own surface height, so all 16 targets in
-            // a chunk are distinct and there is nothing to reuse. The memo is for
-            // `biome_for_carver_source`, whose key really does repeat.
-            let name = dynamic.table.nearest(&target);
-            let cold = crate::biome::cold_enough_to_snow(&dynamic.temperatures, name);
+            let qy = ((y - self.min_y) >> 2).max(0) as usize;
+            let name = cells.at_quart(qx, qy, qz);
+            let cold = match &self.dynamic_biome {
+                Some(d) => crate::biome::cold_enough_to_snow(&d.temperatures, name),
+                None => self.fallback_cold_enough_to_snow,
+            };
             (name.to_string(), cold)
+        })
+    }
+
+    /// Stage 2b (issue #512): the **full** 4×4×4 biome grid for this column —
+    /// `16 × height/4` cells, one `MultiNoiseBiomeSource.getNoiseBiome` per
+    /// `QuartPos` cell, which is what `LevelChunkSection`'s biome container holds.
+    ///
+    /// [`Self::biome_stage`]'s 16-entry surface array is the *same data* read at
+    /// one Y per column — that function takes this grid as a parameter rather than
+    /// sampling again; see [`super::biome_cells`]'s module doc for why that is
+    /// exact and not an approximation.
+    ///
+    /// Falls back to a single-biome column when the resolver supplied no climate
+    /// table, matching [`Self::biome_stage`]'s own per-quart degradation.
+    pub(super) fn biome_cells_stage(&self, base_x: i32, base_z: i32) -> BiomeCells {
+        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Biome);
+        let Some(dynamic) = &self.dynamic_biome else {
+            return BiomeCells::uniform(&self.fallback_biome, self.min_y, self.height);
+        };
+        BiomeCells::from_fn(self.min_y, self.height, |qx, qy, qz| {
+            // Quart *corner*, not centre — the convention `biome_stage`'s own
+            // comment records as having matched a real dark_forest/river boundary
+            // where the centre convention did not. Applied to Y as well, which is
+            // why `min_y` has to be quart-aligned for this to be exact (it is:
+            // -64 >> 2 << 2 == -64).
+            let y = self.min_y + (qy as i32) * 4;
+            let target = dynamic
+                .climate
+                .target(base_x + qx as i32 * 4, y, base_z + qz as i32 * 4);
+            dynamic.table.nearest(&target).to_string()
         })
     }
 

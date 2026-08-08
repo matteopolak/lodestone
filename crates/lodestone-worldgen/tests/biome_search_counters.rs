@@ -27,7 +27,7 @@
 //! |---|---|---|
 //! | pre-ore chunks | `-2..=7` squared | 100 |
 //! | post-ore chunks | `-1..=6` squared | 64 |
-//! | `biome_stage` searches | 16 quarts × each pre-ore chunk | 1,600 |
+//! | biome-cell searches | 16 × 96 quart cells × each pre-ore chunk (#512) | 153,600 |
 //! | `biome_for_carver_source` **calls** | `289 × 100` (carve, 17×17 window) + `9 × 64` (ore, 3×3) | 29,476 |
 //! | distinct source chunks | pre-ore extent widened by `NEIGHBOURHOOD_RANGE = 8`: `-10..=15` squared | 676 |
 //!
@@ -35,8 +35,8 @@
 //! which the measurement can land on — which is what makes this a prediction and
 //! not a direction-of-change assertion (CLAUDE.md's *magnitude* species):
 //!
-//! * **un-memoised** (the pre-Unit-9 shape): `1,600 + 29,476 = 31,076` searches.
-//! * **memoised** (this unit): `1,600 + 676 = 2,276` searches — every repeated
+//! * **un-memoised** (the pre-Unit-9 shape): `153,600 + 29,476 = 183,076` searches.
+//! * **memoised** (this unit): `153,600 + 676 = 154,276` searches — every repeated
 //!   source chunk answered from [`lodestone_worldgen::biome`]'s memo.
 //!
 //! The 676 is exact rather than approximate because the memo is direct-mapped on
@@ -66,8 +66,16 @@ const PRE_ORE_WIDTH: u64 = SWEEP as u64 + 4;
 const POST_ORE_WIDTH: u64 = SWEEP as u64 + 2;
 const PRE_ORE_CHUNKS: u64 = PRE_ORE_WIDTH * PRE_ORE_WIDTH;
 const POST_ORE_CHUNKS: u64 = POST_ORE_WIDTH * POST_ORE_WIDTH;
-/// `crate::overworld`'s per-quart surface sample: 16 per pre-ore chunk.
-const BIOME_STAGE_SEARCHES: u64 = 16 * PRE_ORE_CHUNKS;
+/// Vertical quart layers in a standard overworld column (`height / 4`, 384 / 4).
+/// Issue #512: the biome stage samples a full 4×4×4 grid, not one layer, so this
+/// factor is what turned 16 searches per chunk into 1,536.
+const Y_QUARTS: u64 = 96;
+/// `crate::overworld`'s per-cell biome sample: `16 × Y_QUARTS` per pre-ore chunk.
+/// **Not memoised, and correctly so** — every cell in a column has a distinct
+/// climate target, so there is nothing to reuse. The memo is for
+/// `biome_for_carver_source`, whose key really does repeat; that is the claim the
+/// two hypotheses below still separate.
+const BIOME_STAGE_SEARCHES: u64 = 16 * Y_QUARTS * PRE_ORE_CHUNKS;
 
 /// The carve stage's source window width, **read from the carver** rather than
 /// written as 17 here. A gate that names its own geometry cannot notice the

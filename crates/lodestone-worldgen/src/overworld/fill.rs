@@ -56,7 +56,11 @@ impl OverworldGenerator {
         let aquifer = self.build_aquifer(cx, cz);
         let field = self.fill_stage(&aquifer, base_x, base_z);
         let heights = self.heights_from_field(&field);
-        let biome_quarts = self.biome_stage(&heights, base_x, base_z);
+        // Issue #512: the 4x4x4 grid is now the primary biome product and the
+        // 16-entry surface array is read out of it. Two separate sample passes
+        // would be two chances to diverge; see `biome_stage`.
+        let biome_cells = self.biome_cells_stage(base_x, base_z);
+        let biome_quarts = self.biome_stage(&biome_cells, &heights);
         let surface_diff = self.surface_stage(&field, &heights, &biome_quarts, base_x, base_z);
 
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
@@ -65,7 +69,7 @@ impl OverworldGenerator {
         // `Arc` because `PreOreResult` hands this world out to
         // `vegetation_stage`'s rim sources rather than only into a mutating
         // consumer — see that alias's own doc.
-        (Arc::new(world), heights, biome_quarts)
+        (Arc::new(world), heights, biome_quarts, Arc::new(biome_cells))
     }
 
     /// Builds a fresh, chunk-bound [`AquiferSystem`] from this generator's
