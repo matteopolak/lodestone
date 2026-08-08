@@ -164,6 +164,22 @@
 //! (`render_distance` 12) precisely because a gate at the default radius is under
 //! the old ceiling on *both* arms and can see nothing.
 //!
+//! # Two policies, because the ceiling is a question about whose memory it is
+//!
+//! The ceiling is **not** applied to singleplayer. `render_distance` 32 sizes the
+//! store at 4,539 columns, i.e. **867 MiB** at the 195.5 KiB per column measured
+//! above — large, but it is the memory of the person who moved the slider, and
+//! truncating the cache under a view they are already being streamed only buys
+//! them re-generation of the ground under their feet (see
+//! [`integrated_capacity_for_view_radius`] for why *innermost* rings are what a
+//! short capacity drops). A hosted server spends an operator's memory on behalf
+//! of players who did not choose the setting, so it keeps the cap.
+//!
+//! | path | constructor | policy |
+//! |---|---|---|
+//! | singleplayer (`open_in_memory*`) | `ChunkStore::for_integrated_view_radius` | uncapped, floored at [`DEFAULT_CAPACITY`] |
+//! | open-to-LAN (`IntegratedServer::bind`) | `ChunkStore::for_view_radius` | capped at [`MAX_CAPACITY`] |
+//!
 //! To reduce the cost rather than the count, the prior art is
 //! `lodestone-world`'s `PalettedContainer` over `PackedArray` plus
 //! `Arc<ChunkSection>` copy-on-write sections — that is unit **U8** of the
@@ -325,12 +341,17 @@ pub const CONCURRENT_SCAN_COLUMNS: usize = view_columns(CONCURRENT_TICK_RADIUS) 
 /// instead of extrapolated: a `HashMap` growing through several rehash thresholds
 /// with 192 KiB values in it could plausibly have been superlinear.
 ///
-/// An *un*capped derivation is what makes this a real choice rather than an
-/// oversight: `render_distance` 32 would size the store at 4,539 columns, i.e.
-/// **863 MiB** of resident chunk cache inside a client process that also holds
-/// meshes, textures and a GPU allocator, on a machine whose whole budget this
-/// repo's own operational notes put at 16 GB shared with everything else.
-/// Trading issue #505's CPU cliff for a memory cliff of that size is not a fix.
+/// An *un*capped derivation costs 4,539 columns at `render_distance` 32, i.e.
+/// **867 MiB** of resident chunk cache inside a process that also holds meshes,
+/// textures and a GPU allocator, on a machine whose whole budget this repo's own
+/// operational notes put at 16 GB shared with everything else.
+///
+/// **That is now the singleplayer policy** — see
+/// [`integrated_capacity_for_view_radius`], which is that same derivation with
+/// this ceiling removed, because there the memory belongs to the person who moved
+/// the slider. This constant governs the *hosted* path only
+/// (`IntegratedServer::bind`), where the setting is an operator's and the players
+/// paying for it did not choose it.
 ///
 /// # What degrades above it, precisely
 ///
@@ -357,8 +378,12 @@ pub const FULLY_RESIDENT_VIEW_RADIUS: i32 = 17;
 pub const MAX_CAPACITY: usize =
     view_columns(FULLY_RESIDENT_VIEW_RADIUS) + CONCURRENT_SCAN_COLUMNS;
 
-/// The capacity a store serving `view_radius` is built with — **issue #505's
-/// fix**, and the only thing [`crate::integrated`]'s constructors call.
+/// The capacity a **hosted** store serving `view_radius` is built with —
+/// issue #505's fix, and what `IntegratedServer::bind` (open-to-LAN) calls.
+///
+/// Singleplayer uses [`integrated_capacity_for_view_radius`] instead, which is
+/// this derivation without the ceiling; read that function for why the fork
+/// exists.
 ///
 /// `view_columns(view_radius) + CONCURRENT_SCAN_COLUMNS`, clamped to
 /// `DEFAULT_CAPACITY ..= MAX_CAPACITY`. Each of those three terms is load-bearing
@@ -388,6 +413,58 @@ pub const fn capacity_for_view_radius(view_radius: i32) -> usize {
     } else {
         want
     }
+}
+
+/// [`capacity_for_view_radius`] **without the [`MAX_CAPACITY`] ceiling** — the
+/// integrated (singleplayer) policy.
+///
+/// # Why the ceiling does not apply here
+///
+/// A hosted server's render distance is the *operator's* budget spent on behalf
+/// of players who did not choose it, so capping it is right. Singleplayer is the
+/// opposite: the person paying for the memory is the person who moved the slider,
+/// and the slider goes to 32. Refusing to hold the view they asked for buys them
+/// nothing — the columns are streamed and meshed either way; only the *cache*
+/// under them is truncated, so the cost of the cap is re-generation of ground
+/// they are currently looking at.
+///
+/// # The number, so the choice is informed
+///
+/// This store costs a measured **195.5 KiB per retained column** (the module
+/// docs' table, `/usr/bin/time -l` on the release lib-test binary). The streamed
+/// set is `(2 × (rd + 1) + 1)²`, and capacity is that plus
+/// [`CONCURRENT_SCAN_COLUMNS`]:
+///
+/// | `render_distance` | view columns | capacity | resident |
+/// |---|---|---|---|
+/// | 8 (our default) | 361 | 512 (floor) | 97.4 MiB, measured |
+/// | 12 (vanilla default) | 729 | 779 | 148 MiB |
+/// | 16 | 1,225 | 1,275 | 242.0 MiB, measured |
+/// | 24 | 2,601 | 2,651 | 506 MiB |
+/// | **32 (slider max)** | **4,489** | **4,539** | **867 MiB** |
+///
+/// Residency measured flat at 194.4–194.8 KiB per column across a 2.5× range, so
+/// the interpolated rows are safe to read; the last row is a 3.6× extrapolation
+/// of that rate and is the one to re-measure if it ever matters. 867 MiB inside a
+/// client process that also holds meshes, textures and a GPU allocator is large,
+/// on a machine this repo's operational notes budget at 16 GB — **large, and the
+/// user's call**, which is the whole difference from the hosted policy.
+///
+/// # Why the ceiling existed, so it is not reintroduced by accident
+///
+/// Removing a cap is safe; capping the *wrong* thing is not. `join_view_rings`
+/// streams outward, so the least-recently-used entry under a short capacity is
+/// the **innermost** ring — the player's own feet. At `render_distance` 10 the old
+/// 512-column literal dropped 17 columns and they were rings 0–2, the band
+/// `vitals_tick` probes every 50 ms and `run_tick_loop` random-ticks. A short
+/// capacity here does not degrade the horizon; it degrades the ground underfoot.
+#[must_use]
+pub const fn integrated_capacity_for_view_radius(view_radius: i32) -> usize {
+    // Same `saturating_add` reasoning as above, and it matters more here because
+    // nothing downstream clamps it: a wrap would produce a *tiny* capacity that
+    // looks like a thrashing cache rather than like arithmetic.
+    let want = view_columns(view_radius).saturating_add(CONCURRENT_SCAN_COLUMNS);
+    if want < DEFAULT_CAPACITY { DEFAULT_CAPACITY } else { want }
 }
 
 /// One retained column plus the stamp that orders eviction.
@@ -481,6 +558,17 @@ impl<S> ChunkStore<S> {
     /// files.
     pub(crate) fn for_view_radius(source: S, view_radius: i32) -> Self {
         Self::with_capacity(source, capacity_for_view_radius(view_radius))
+    }
+
+    /// [`for_view_radius`](Self::for_view_radius) for the **integrated** server:
+    /// the same derivation with no [`MAX_CAPACITY`] ceiling.
+    ///
+    /// The two constructors are the two halves of one decision, and which one a
+    /// call site picks is a question about *whose* memory is being spent — see
+    /// [`integrated_capacity_for_view_radius`] for the numbers. Singleplayer is
+    /// this one; open-to-LAN (`IntegratedServer::bind`) is the capped one.
+    pub(crate) fn for_integrated_view_radius(source: S, view_radius: i32) -> Self {
+        Self::with_capacity(source, integrated_capacity_for_view_radius(view_radius))
     }
 
     /// Wraps `source` with an explicit capacity. A capacity of 0 disables

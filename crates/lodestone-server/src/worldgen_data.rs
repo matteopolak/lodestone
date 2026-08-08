@@ -630,13 +630,24 @@ mod tests {
     /// (`FallenTreeFeature`), `tree: unsupported trunk/foliage/size/provider`
     /// (fancy/giant trunks — oak's `fancy_oak` branch and every
     /// jungle/dark-oak/acacia/mangrove/cherry tree, none of which parse a
-    /// `TreeConfig` this engine implements), plus a long tail of features
-    /// #406 never claimed (`kelp`/`seagrass`/coral/`bamboo`/`vines`/
-    /// `huge_*_mushroom`/cave-only `lush_caves` features). Measured by
-    /// running every reachable biome through
-    /// `lodestone_worldgen::compose::build_biome_vegetation` +
-    /// `vegetation::collect_unsupported` once, by hand, and transcribing the
-    /// result — see [`vegetation_placer_gaps_are_named_not_silent`] below.
+    /// `TreeConfig` this engine implements), plus a shrinking tail of features
+    /// #406 never claimed (coral, `bamboo`, `huge_*_mushroom`, `root_system`,
+    /// cave-only `lush_caves` features). Measured by running every reachable
+    /// biome through `lodestone_worldgen::compose::build_biome_vegetation` +
+    /// `vegetation::collect_unsupported` and transcribing the result — see
+    /// [`vegetation_placer_gaps_are_named_not_silent`] below, whose failure
+    /// output prints the measured list per biome, which is what to paste in
+    /// rather than editing a row by hand.
+    ///
+    /// **Issue #513 (`d102eb1d`) moved 16 rows, and one of them got *longer*.**
+    /// `kelp`, `seagrass`, `sea_pickle`, `vines`, `vegetation_patch` and
+    /// `random_boolean_selector` are all implemented now and dropped off. But
+    /// `minecraft:mushroom_fields` **gained** `huge_brown_mushroom` and
+    /// `huge_red_mushroom`: its gap used to read `random_boolean_selector`,
+    /// and resolving that selector is what finally exposed the two branches
+    /// underneath it. A row growing here is the gate working, not a
+    /// regression — the previous entry was hiding two features behind one
+    /// unparsed wrapper.
     ///
     /// **A floor, not a ceiling.** [`vegetation_gap_mismatches`] fails loudly
     /// in BOTH directions: a biome producing a reason NOT listed here (a new
@@ -649,22 +660,22 @@ mod tests {
     /// to force that kind of entry to be written down, not to auto-shrink.
     const KNOWN_VEGETATION_GAPS: &[(&str, &[&str])] = &[
         ("minecraft:badlands", &["multiface_growth"]),
-        ("minecraft:bamboo_jungle", &["bamboo", "multiface_growth", "tree: unsupported trunk/foliage/size/provider", "vines"]),
+        ("minecraft:bamboo_jungle", &["bamboo", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:beach", &["multiface_growth"]),
         ("minecraft:birch_forest", &["fallen_tree", "multiface_growth"]),
         ("minecraft:cherry_grove", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:cold_ocean", &["kelp", "multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:cold_ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         // dark_forest's `"tree: unsupported..."` entry REMAINS even after
         // issue #428's `DarkOakTrunkPlacer`/`DarkOakFoliagePlacer`: the
         // 66.7%-weight dark_oak branch of dark_forest_vegetation now parses
         // and places, but the 10%-weight `fancy_oak_leaf_litter` branch is
         // still a `FancyTrunkPlacer`/`FancyFoliagePlacer` tree — unmodelled.
         ("minecraft:dark_forest", &["fallen_tree", "huge_brown_mushroom", "huge_red_mushroom", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:deep_cold_ocean", &["kelp", "multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:deep_cold_ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:deep_dark", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:deep_frozen_ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:deep_lukewarm_ocean", &["kelp", "multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:deep_ocean", &["kelp", "multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:deep_lukewarm_ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:deep_ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:desert", &["multiface_growth"]),
         ("minecraft:dripstone_caves", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:eroded_badlands", &["multiface_growth"]),
@@ -676,22 +687,22 @@ mod tests {
         ("minecraft:grove", &["multiface_growth"]),
         ("minecraft:ice_spikes", &["fallen_tree", "multiface_growth"]),
         ("minecraft:jagged_peaks", &["multiface_growth"]),
-        ("minecraft:jungle", &["bamboo", "fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider", "vines"]),
-        ("minecraft:lukewarm_ocean", &["kelp", "multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:lush_caves", &["block_column: unsupported layer/direction/predicate", "multiface_growth", "random_boolean_selector", "root_system", "vegetation_patch", "vines"]),
-        ("minecraft:mangrove_swamp", &["multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:jungle", &["bamboo", "fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:lukewarm_ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:lush_caves", &["block_column: unsupported layer/direction/predicate", "multiface_growth", "root_system"]),
+        ("minecraft:mangrove_swamp", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:meadow", &["multiface_growth", "simple_block: unsupported to_place", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:mushroom_fields", &["multiface_growth", "random_boolean_selector"]),
-        ("minecraft:ocean", &["kelp", "multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:mushroom_fields", &["huge_brown_mushroom", "huge_red_mushroom", "multiface_growth"]),
+        ("minecraft:ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:old_growth_birch_forest", &["fallen_tree", "multiface_growth"]),
         ("minecraft:old_growth_pine_taiga", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:old_growth_spruce_taiga", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         // pale_garden's `"tree: unsupported..."` entry closed with the same
         // issue #428 change — pale_oak/pale_oak_creaking reuse the dark oak
         // trunk/foliage placers with their own providers.
-        ("minecraft:pale_garden", &["multiface_growth", "vegetation_patch"]),
+        ("minecraft:pale_garden", &["multiface_growth"]),
         ("minecraft:plains", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:river", &["multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:river", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         // savanna/savanna_plateau/windswept_savanna all resolve through
         // trees_savanna's RandomSelector (oak_checked default, acacia_checked
         // 80%, fallen_oak_tree 1.25%) — issue #428's `TrunkPlacerCfg::Forking`/
@@ -703,14 +714,14 @@ mod tests {
         ("minecraft:snowy_plains", &["fallen_tree", "multiface_growth"]),
         ("minecraft:snowy_slopes", &["multiface_growth"]),
         ("minecraft:snowy_taiga", &["fallen_tree", "multiface_growth"]),
-        ("minecraft:sparse_jungle", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider", "vines"]),
+        ("minecraft:sparse_jungle", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:stony_peaks", &["multiface_growth"]),
         ("minecraft:stony_shore", &["multiface_growth"]),
         ("minecraft:sulfur_caves", &["multiface_growth"]),
         ("minecraft:sunflower_plains", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:swamp", &["multiface_growth", "seagrass"]),
+        ("minecraft:swamp", &["multiface_growth"]),
         ("minecraft:taiga", &["fallen_tree", "multiface_growth"]),
-        ("minecraft:warm_ocean", &["coral_claw", "coral_mushroom", "coral_tree", "multiface_growth", "sea_pickle", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:warm_ocean", &["coral_claw", "coral_mushroom", "coral_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:windswept_forest", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:windswept_gravelly_hills", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:windswept_hills", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),

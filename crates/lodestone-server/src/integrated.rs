@@ -359,7 +359,13 @@ impl IntegratedServer {
         // constructor serves the whole `[-view_radius, view_radius]²` square at
         // join, and a capacity that does not cover it puts the columns the player
         // is looking at permanently in eviction range.
-        let source = Arc::new(ChunkStore::for_view_radius(source, view_radius));
+        //
+        // `for_integrated_view_radius`, i.e. **uncapped**: this is singleplayer,
+        // where the render distance is the player's own choice about their own
+        // memory. `IntegratedServer::bind` below keeps the hosted ceiling. See
+        // `chunk_store::integrated_capacity_for_view_radius` for the numbers and
+        // for why a short capacity drops the *innermost* rings.
+        let source = Arc::new(ChunkStore::for_integrated_view_radius(source, view_radius));
         // A fresh, empty registry for this one connection's lifetime. Nothing
         // ticks it here — only `open_in_memory_with_mobs` spawns the tick
         // loop (see that constructor's doc comment) — so a block entity
@@ -591,13 +597,16 @@ impl IntegratedServer {
         // generated **once** for the whole world instead of once here and once
         // more from a second, independent generator (issue #454).
         //
-        // Issue #505: the capacity is `chunk_store::capacity_for_view_radius`,
-        // not a literal. This is the constructor where the union matters most —
-        // `tick_area` here is *not* a subset of the streamed view (it is centred on
-        // world spawn and never moves), so the derivation adds
-        // `CONCURRENT_SCAN_COLUMNS` on top of the view rather than assuming the
-        // view covers it.
-        let source = Arc::new(ChunkStore::for_view_radius(source, view_radius));
+        // Issue #505: the capacity is derived from `view_radius`, not a literal.
+        // This is the constructor where the union matters most — `tick_area` here
+        // is *not* a subset of the streamed view (it is centred on world spawn and
+        // never moves), so the derivation adds `CONCURRENT_SCAN_COLUMNS` on top of
+        // the view rather than assuming the view covers it.
+        //
+        // `for_integrated_view_radius`, i.e. **uncapped**: this is the real
+        // singleplayer world, the one whose render-distance slider the player owns.
+        // See `chunk_store::integrated_capacity_for_view_radius`.
+        let source = Arc::new(ChunkStore::for_integrated_view_radius(source, view_radius));
 
         // Issue #454: **mob seeding is off the critical path.**
         //
@@ -1044,6 +1053,13 @@ impl IntegratedServer {
         // clamps each client's requested distance to it — so one derivation from
         // the cap covers every connection's worst case rather than the first
         // one's.
+        //
+        // `for_view_radius`, i.e. **capped at `MAX_CAPACITY`** — the one
+        // constructor that keeps the ceiling, and deliberately not the same policy
+        // as the two in-memory ones. This is a *host*: the memory is spent on
+        // behalf of every accepted connection, none of whom chose the setting.
+        // `chunk_store::integrated_capacity_for_view_radius` carries the argument
+        // and the price list for the other side of the fork.
         let source = Arc::new(ChunkStore::for_view_radius(source, view_radius));
         let shutdown = Arc::new(Notify::new());
         let signal = shutdown.clone();

@@ -57,7 +57,8 @@ use lodestone_server::{
     ChunkColumn, ChunkSource, IntegratedServer, STORE_CAPACITY_CEILING as MAX_CAPACITY,
     STORE_CAPACITY_FLOOR, STORE_CONCURRENT_SCAN_COLUMNS as CONCURRENT_SCAN_COLUMNS,
     STORE_FULLY_RESIDENT_VIEW_RADIUS as FULLY_RESIDENT_VIEW_RADIUS, ServerBound, ServerDirective,
-    ServerProtocol, store_capacity_for_view_radius as capacity_for_view_radius, view_columns,
+    ServerProtocol, integrated_store_capacity_for_view_radius as integrated_capacity_for_view_radius,
+    store_capacity_for_view_radius as capacity_for_view_radius, view_columns,
 };
 use uuid::Uuid;
 
@@ -301,7 +302,66 @@ async fn stream_view_then_reshrink_and_regrow(view_radius: i32) -> Observation {
 
     let (server, client_end) = IntegratedServer::open_in_memory(FakeProtocol, counting, view_radius);
     let mut client = Connection::new(client_end);
+    let (join_columns, regrow_columns) = drive_slider(&mut client, view_radius).await;
 
+    drop(client);
+    server.shutdown().await;
+
+    let (regenerated, worst_coord, worst) = regenerations(&per_chunk);
+    Observation {
+        join_columns,
+        regrow_columns,
+        regenerated,
+        worst: (worst_coord, worst),
+        total_generations: calls.load(Ordering::Relaxed),
+    }
+}
+
+/// [`stream_view_then_reshrink_and_regrow`] against the **open-to-LAN** server
+/// instead of the in-memory one, over a real loopback socket.
+///
+/// The two differ in exactly one thing that matters here: `IntegratedServer::bind`
+/// builds its store with `chunk_store::capacity_for_view_radius` (capped at
+/// [`MAX_CAPACITY`]) while `open_in_memory` uses the uncapped integrated policy.
+/// So this is how a *capped* store is measured through the real streaming path —
+/// see [`past_the_hosted_capacity_cap_the_view_cannot_stay_resident`].
+async fn stream_view_over_lan(view_radius: i32) -> Observation {
+    let counting = CountingSource::new();
+    let calls = Arc::clone(&counting.calls);
+    let per_chunk = Arc::clone(&counting.per_chunk);
+
+    let server = IntegratedServer::bind("127.0.0.1:0", FakeProtocol, counting, view_radius)
+        .await
+        .expect("bind loopback");
+    let addr = server.local_addr().expect("bound address");
+    let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let mut client = Connection::new(stream);
+    let (join_columns, regrow_columns) = drive_slider(&mut client, view_radius).await;
+
+    drop(client);
+    server.shutdown().await;
+
+    let (regenerated, worst_coord, worst) = regenerations(&per_chunk);
+    Observation {
+        join_columns,
+        regrow_columns,
+        regenerated,
+        worst: (worst_coord, worst),
+        total_generations: calls.load(Ordering::Relaxed),
+    }
+}
+
+/// Logs in, streams the join view, then drags the render-distance slider down to
+/// [`SHRUNK_RADIUS`] and back up to `view_radius`. Returns `(join columns, re-grow
+/// columns)`, both counted off the wire.
+///
+/// Generic over the transport so the in-memory and LAN rigs above are the same
+/// measurement of two different store policies rather than two rigs that might
+/// diverge.
+async fn drive_slider<T: Transport>(
+    client: &mut Connection<T>,
+    view_radius: i32,
+) -> (usize, usize) {
     // Handshake → Login → Configuration → Play, ack-driven exactly as the real
     // adapter drives it.
     client.write_packet(HANDSHAKE, &[2]).await.expect("handshake");
@@ -322,28 +382,18 @@ async fn stream_view_then_reshrink_and_regrow(view_radius: i32) -> Observation {
         .await
         .expect("finish configuration");
 
-    let join_columns = drain_one_batch(&mut client).await;
-    ack_batch(&mut client).await;
+    let join_columns = drain_one_batch(client).await;
+    ack_batch(client).await;
 
     // The slider goes down, then back up.
-    set_view_distance(&mut client, SHRUNK_RADIUS).await;
+    set_view_distance(client, SHRUNK_RADIUS).await;
     // A shrink adds nothing, so it emits no batch at all — there is nothing to
     // drain and nothing to ack. `set_view_radius`'s `build_batch` returns an empty
     // `Vec` when the difference is empty.
-    set_view_distance(&mut client, view_radius).await;
-    let regrow_columns = drain_one_batch(&mut client).await;
+    set_view_distance(client, view_radius).await;
+    let regrow_columns = drain_one_batch(client).await;
 
-    drop(client);
-    server.shutdown().await;
-
-    let (regenerated, worst_coord, worst) = regenerations(&per_chunk);
-    Observation {
-        join_columns,
-        regrow_columns,
-        regenerated,
-        worst: (worst_coord, worst),
-        total_generations: calls.load(Ordering::Relaxed),
-    }
+    (join_columns, regrow_columns)
 }
 
 /// The radius the slider is dragged down to before being dragged back up.
@@ -536,6 +586,14 @@ async fn regrowing_the_render_distance_regenerates_nothing_at_vanillas_default()
 /// `chunk_store`'s `with_capacity(source, 0)` controls, which reproduce the
 /// pre-store behaviour rather than describing it.
 ///
+/// **Over LAN, and that is the whole reason this arm still measures anything.**
+/// The ceiling is now the *hosted* policy only: singleplayer's
+/// `open_in_memory` uses `chunk_store::integrated_capacity_for_view_radius`,
+/// which has no ceiling, so driving this radius through the in-memory rig would
+/// report **0** regenerations — not because the cap works but because it no
+/// longer applies there. `IntegratedServer::bind` is the constructor that kept
+/// it, so the control follows the cap rather than the transport.
+///
 /// # Predicting the value
 ///
 /// At radius 20 the view is 1,681 columns against a 1,275-column ceiling, so the
@@ -548,8 +606,8 @@ async fn regrowing_the_render_distance_regenerates_nothing_at_vanillas_default()
 /// `FULLY_RESIDENT_VIEW_RADIUS` is how you shrink the degraded band, and the
 /// memory table on that constant is the price list.
 #[tokio::test]
-async fn past_the_capacity_cap_the_view_cannot_stay_resident() {
-    let observed = stream_view_then_reshrink_and_regrow(CONTROL_RADIUS).await;
+async fn past_the_hosted_capacity_cap_the_view_cannot_stay_resident() {
+    let observed = stream_view_over_lan(CONTROL_RADIUS).await;
 
     assert_eq!(
         observed.join_columns,
@@ -620,14 +678,23 @@ fn the_default_render_distance_is_under_the_old_ceiling_on_both_arms() {
 /// puts it in, computed from the policy's constants. The rows below the cap must
 /// regenerate nothing; the rows above it must regenerate at least the arithmetic
 /// shortfall.
+///
+/// The capacity per row is `integrated_capacity_for_view_radius`, because that is
+/// the policy `open_in_memory` — the rig's constructor — actually applies. It has
+/// no ceiling, so **every** row here now lands in the covers-the-view regime,
+/// including the one past `FULLY_RESIDENT_VIEW_RADIUS`; the shortfall branch
+/// survives for the hosted policy and is exercised by
+/// [`past_the_hosted_capacity_cap_the_view_cannot_stay_resident`] over LAN.
 #[tokio::test]
 async fn the_regeneration_curve_across_the_render_distance_slider() {
     // view_radius, i.e. render_distance + 1. Chosen to straddle both thresholds:
     // 9 is the shell default (under the old literal), 11 and 13 are past it
     // (10 and 12 on the slider — the cliff issue #505 reports), and 20 is past
-    // the new cap.
+    // the hosted cap (and, since the integrated policy dropped that ceiling, is
+    // the row proving the drop reaches the streamed view rather than only the
+    // arithmetic).
     for view_radius in [9, 11, 13, CONTROL_RADIUS] {
-        let capacity = capacity_for_view_radius(view_radius);
+        let capacity = integrated_capacity_for_view_radius(view_radius);
         let columns = view_columns(view_radius);
         let observed = stream_view_then_reshrink_and_regrow(view_radius).await;
 

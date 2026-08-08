@@ -107,17 +107,49 @@ storage.
 
 ## Configuration
 
-`capacity_for_view_radius(view_radius)` is the knob, and every constructor in
-`integrated.rs` goes through it via `ChunkStore::for_view_radius`. It is
+There are **two** capacity policies, and which one a constructor picks is a
+question about whose memory is being spent.
+
+| path | constructor | policy |
+|---|---|---|
+| singleplayer (`open_in_memory`, `open_in_memory_with_mobs`) | `ChunkStore::for_integrated_view_radius` | `integrated_capacity_for_view_radius` — **no ceiling** |
+| open-to-LAN (`IntegratedServer::bind`) | `ChunkStore::for_view_radius` | `capacity_for_view_radius` — capped at `MAX_CAPACITY` |
+
+Both are
 
 ```
-clamp( view_columns(view_radius) + CONCURRENT_SCAN_COLUMNS,
-       DEFAULT_CAPACITY ..= MAX_CAPACITY )
+view_columns(view_radius) + CONCURRENT_SCAN_COLUMNS      floored at DEFAULT_CAPACITY
 ```
 
-with `view_columns(r) = (2r + 1)²`, `CONCURRENT_SCAN_COLUMNS = 50`,
-`DEFAULT_CAPACITY = 512` and `MAX_CAPACITY = 1275`. Each term has its own doc
-comment carrying its own argument; the short version is below.
+with `view_columns(r) = (2r + 1)²`, `CONCURRENT_SCAN_COLUMNS = 50` and
+`DEFAULT_CAPACITY = 512`; the hosted one additionally clamps to
+`MAX_CAPACITY = 1275`. Each term has its own doc comment carrying its own
+argument; the short version is below.
+
+**Why singleplayer is uncapped.** The render distance is the player's own choice
+about their own machine, and capping the *cache* under a view they are already
+being streamed buys them nothing — the columns are generated and meshed either
+way. What a short capacity costs is re-generation of the ground they are standing
+on, because `join_view_rings` streams outward and the least-recently-used entry
+is therefore the **innermost** ring. (At `render_distance` 10 the old 512-column
+literal dropped 17 columns and they were rings 0–2, the band `vitals_tick` probes
+every 50 ms.) A hosted server is the opposite case: the memory is an operator's,
+spent on behalf of players who did not choose the setting, so `bind` keeps the
+ceiling.
+
+**The price of the uncapped path**, at the measured 195.5 KiB per retained column:
+
+| `render_distance` | view columns | capacity | resident |
+|---|---|---|---|
+| 8 (our default) | 361 | 512 (floor) | 97.4 MiB, measured |
+| 12 (vanilla default) | 729 | 779 | 148 MiB |
+| 16 | 1,225 | 1,275 | 242.0 MiB, measured |
+| 24 | 2,601 | 2,651 | 506 MiB |
+| **32 (slider max)** | **4,489** | **4,539** | **867 MiB** |
+
+Large but not fatal on a 16 GB machine, and it is the user's call. The last row is
+a 3.6× extrapolation of a rate measured flat across 2.5×; re-measure it before
+relying on it for anything.
 
 Measured cost, by `/usr/bin/time -l` on the release lib-test binary:
 
@@ -170,7 +202,8 @@ hold. The three terms of the replacement:
   *up*, so the default configuration is byte-for-byte the 512-column, 97.6 MiB
   store every measurement in this doc was taken against;
 - **the `MAX_CAPACITY` ceiling** stops the CPU cliff being traded for a memory
-  one. Uncapped, `render_distance` 32 sizes the store at 4,539 columns ≈ 863 MiB.
+  one — `render_distance` 32 sizes the store at 4,539 columns ≈ 867 MiB. It now
+  applies to the **hosted** path only; see the fork at the top of this section.
 
 The cap's own cost was measured rather than extrapolated, since a `HashMap`
 growing through several rehash thresholds with 192 KiB values could plausibly
@@ -240,10 +273,14 @@ reach the real streaming path:
   *measured* from the chunk packets `serve_connection` emits, not restated, so the
   gate is a join between the policy and production rather than
   `decode(encode(x)) == x`.
-- `past_the_capacity_cap_the_view_cannot_stay_resident` — the permanent negative
-  control, as a real configuration of the shipped policy (`view_radius = 20`,
-  past `FULLY_RESIDENT_VIEW_RADIUS`) rather than a temporary neuter. Asserts a
-  *computed* floor, `view_columns(20) − MAX_CAPACITY = 406`.
+- `past_the_hosted_capacity_cap_the_view_cannot_stay_resident` — the permanent
+  negative control, as a real configuration of the shipped policy
+  (`view_radius = 20`, past `FULLY_RESIDENT_VIEW_RADIUS`) rather than a temporary
+  neuter. Asserts a *computed* floor, `view_columns(20) − MAX_CAPACITY = 406`.
+  **Drives `IntegratedServer::bind` over a loopback socket, not
+  `open_in_memory`**, because `bind` is now the only constructor that still caps —
+  through the in-memory rig this arm would report 0 and look like a working cap
+  while measuring its absence.
 - `the_default_render_distance_is_under_the_old_ceiling_on_both_arms` — why the
   subject is not at our own default. 361 < 512, so a gate at `render_distance` 8
   would have passed before *and* after the fix: the **world** species of vacuity,
@@ -260,6 +297,10 @@ detached worktree at `c77146d9`, against the same arms after the fix:
 | 11 | 10 | 529 | 512 | **92** | 579 | 0 |
 | 13 | 12 | 729 | 512 | **451** | 779 | 0 |
 | 20 | 19 | 1681 | 512 | 1595 | 1275 | 1077 (the cap's own degradation) |
+
+The last row is the **hosted** policy; singleplayer at `view_radius = 20` now sizes
+at 1,731 and regenerates 0, which is what `the_regeneration_curve_across_the_render_distance_slider`
+asserts for that row.
 
 The unfixed figures move a few percent between runs and the arithmetic floors do
 not, because `generate_columns_offloaded` fans the re-grow out over the blocking

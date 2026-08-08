@@ -203,6 +203,56 @@ pub(crate) fn block_state_id(name: &str) -> Option<u32> {
     state_id_by_name().get(name).copied()
 }
 
+/// The **lowest** block-state id belonging to a bare block name — a stand-in for
+/// vanilla's `Block.defaultBlockState()` for callers that only need a
+/// per-*block* census row.
+///
+/// Built once (1,196 entries) beside [`state_id_by_name`] and cached the same
+/// way. Ids are allocated contiguously per block, so the lowest id of a block is
+/// one of its states; every census that keys on a state id but whose value is a
+/// property of the *block* — [`lodestone_data::hardness`] and
+/// [`lodestone_data::tool`], the two [`crate::block_breaking`] reads — gives the
+/// same answer for any of them. It is **not** a substitute for
+/// [`block_state_id`] where the properties matter (collision shapes, path
+/// types); those must resolve the exact state.
+#[must_use]
+fn default_state_id_by_block() -> &'static HashMap<&'static str, u32> {
+    static INDEX: OnceLock<HashMap<&'static str, u32>> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        let mut map: HashMap<&'static str, u32> =
+            HashMap::with_capacity(block_states::BLOCK_COUNT as usize);
+        for id in 0..block_states::STATE_COUNT {
+            if let Some(name) = block_states::block_name(id) {
+                map.entry(name).or_insert(id);
+            }
+        }
+        map
+    })
+}
+
+/// [`block_state_id`], falling back to the block's default state when the exact
+/// state string is not in the index.
+///
+/// The fallback exists because a *bare* name is only in [`state_id_by_name`] for
+/// a block with **no properties**: `"minecraft:stone"` resolves, and
+/// `"minecraft:sugar_cane"` does not, because every sugar cane state carries
+/// `age`. Anything that names a block without spelling out its properties — a
+/// feature's simple state provider, a test fixture, a `/setblock`-shaped string —
+/// therefore misses, and [`crate::block_breaking`] read that miss as "unknown
+/// block, do not validate", which is exactly the one-shot-block bug it was
+/// written to fix.
+///
+/// Only use this where the census being read is per-*block* rather than
+/// per-state; see [`default_state_id_by_block`].
+#[must_use]
+pub(crate) fn block_state_id_or_default(name: &str) -> Option<u32> {
+    if let Some(id) = block_state_id(name) {
+        return Some(id);
+    }
+    let base = name.split('[').next()?;
+    default_state_id_by_block().get(base).copied()
+}
+
 /// A [`PathWorld`] over the server's real per-block-state terrain.
 ///
 /// Backed by a sparse map of [`ChunkColumn`]s keyed by chunk coordinate. Missing

@@ -99,6 +99,7 @@
 //! [`Transport`]: lodestone_net::Transport
 
 mod advancements;
+mod block_breaking;
 mod block_entities;
 /// Rolling a broken block's loot table and popping the result as item entities
 /// (issue #337's missing consumer) — the join between [`loot`],
@@ -212,7 +213,7 @@ pub use chunk_store::{
     DEFAULT_CAPACITY as STORE_CAPACITY_FLOOR,
     FULLY_RESIDENT_VIEW_RADIUS as STORE_FULLY_RESIDENT_VIEW_RADIUS,
     MAX_CAPACITY as STORE_CAPACITY_CEILING, capacity_for_view_radius as store_capacity_for_view_radius,
-    view_columns,
+    integrated_capacity_for_view_radius as integrated_store_capacity_for_view_radius, view_columns,
 };
 pub use command::{
     CommandCaller, CommandDispatch, CommandResponse, CommandSink, UNKNOWN_COMMAND,

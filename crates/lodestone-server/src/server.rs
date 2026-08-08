@@ -73,6 +73,7 @@ use lodestone_data::block_items;
 use lodestone_net::{Connection, NetError, Transport};
 
 use crate::advancements::AdvancementManager;
+use crate::block_breaking::PendingBreak;
 use crate::block_entities::{BlockEntity, BlockEntityHandle, block_entity_for_item};
 use crate::border::BorderFeed;
 use crate::brewing::{Bottle, BottleKind, is_ingredient};
@@ -2223,18 +2224,29 @@ where
 }
 
 /// Applies one block-breaking phase, mirroring
-/// `ServerPlayerGameMode.handleBlockBreakAction`'s three destroy ordinals —
-/// simplified per this crate's documented scope (`docs/block-edit.md`): no
-/// hardness/timing validation (the client's own predictor already gates when
-/// it sends `StopDestroy` — see `lodestone-shell`'s `drive_mining`), and no
-/// interaction-range or spawn-protection checks (this crate does not track
-/// player position beyond the view-tracking column).
+/// `ServerPlayerGameMode.handleBlockBreakAction`'s three destroy ordinals.
+///
+/// Since issue #531 this **validates** the break rather than trusting it: see
+/// [`crate::block_breaking`] for the destroy-progress arithmetic, the tolerance
+/// it deliberately carries, and what is still not modelled (creative mode and
+/// spawn protection). Two behaviours follow from it, and they are opposite ends
+/// of the same missing computation:
+///
+/// * **`StartDestroy` can break the block by itself.** Vanilla's `"insta mine"`
+///   branch fires when destroy progress reaches `1.0` in the first tick, which is
+///   every zero-hardness block — and a client that knows the block is instant
+///   sends no `StopDestroy` at all. Breaking only on `StopDestroy` therefore made
+///   sugar cane, grass and flowers *unbreakable on this server*, which is the bug
+///   the owner reported.
+/// * **A `StopDestroy` that arrives too early is refused**, and the true block
+///   state is sent back so the client resyncs (vanilla's `destroyAndAck` failure
+///   path). Bedrock and obsidian are no longer instant.
 ///
 /// `pending_break` is this connection's tracked in-progress dig — the
-/// version-free analogue of vanilla's `destroyPos` field. It is what makes
-/// `StartDestroy` + `StopDestroy` break a block while `StartDestroy` +
-/// `AbortDestroy` does not, and what makes a `StopDestroy` for a position
-/// nobody started a no-op, mirroring vanilla's own
+/// version-free analogue of vanilla's `destroyPos` + `destroyProgressStart` pair.
+/// It is what makes `StartDestroy` + `StopDestroy` break a block while
+/// `StartDestroy` + `AbortDestroy` does not, and what makes a `StopDestroy` for a
+/// position nobody started a no-op, mirroring vanilla's own
 /// `pos.equals(this.destroyPos)` guard (`ServerPlayerGameMode.java:217`).
 ///
 /// **Also removes a broken position's [`BlockEntity`], if any, from the
@@ -2255,7 +2267,7 @@ async fn apply_block_action<T, P, S>(
     proto: &P,
     source: &S,
     state: &mut State,
-    pending_break: &mut Option<BlockPos>,
+    pending_break: &mut Option<PendingBreak>,
     block_entities: &BlockEntityHandle,
     open_container: &mut Option<OpenContainer>,
     container_sync: &mut ContainerSync,
@@ -2273,6 +2285,16 @@ async fn apply_block_action<T, P, S>(
     // than the whole inventory because that is all either use needs, and because
     // the caller holds `&mut PlayerInventory` for other reasons.
     held: Option<&ItemStack>,
+    // Issue #531. The breaker's tracked feet position for the interaction-range
+    // test, `None` until the client has sent a movement packet — see
+    // `block_breaking::within_interaction_range` for why `None` permits the break
+    // rather than refusing it.
+    player_feet: Option<Vec3>,
+    // Issue #531. The server tick this packet is being handled on, for the
+    // destroy-progress accounting. `None` on `wasm32`, which has no timer to
+    // count ticks with (see `serve_play`'s two definitions); the timing test is
+    // then skipped, while the hardness and range tests still apply.
+    game_tick: Option<u64>,
     action: BlockActionKind,
     pos: BlockPos,
 ) -> Result<(), ServerError>
@@ -2281,97 +2303,185 @@ where
     P: ServerProtocol,
     S: ChunkSource,
 {
+    // Vanilla's very first guard in `handleBlockBreakAction`, ahead of the
+    // per-ordinal fork: a break out of reach is dropped whatever phase it is.
+    if !crate::block_breaking::within_interaction_range(player_feet, pos) {
+        return Ok(());
+    }
     match action {
         BlockActionKind::StartDestroy => {
-            *pending_break = Some(pos);
+            let target = source.block_state(pos.x, pos.y, pos.z);
+            let per_tick = crate::block_breaking::progress_per_tick(&target, held);
+            // `None` is a state neither census knows — our gap, not a cheat, so
+            // it is priced as an ordinary progressive dig that the `None`-clock
+            // branch of `may_break_at` will accept on any `StopDestroy`.
+            if per_tick.is_some_and(|per| per >= 1.0) {
+                // Vanilla's `"insta mine"` exit: the block is gone now, and no
+                // `StopDestroy` is coming for it. This is the one-shot-block fix.
+                *pending_break = None;
+                destroy_block(
+                    conn,
+                    proto,
+                    source,
+                    state,
+                    block_entities,
+                    open_container,
+                    container_sync,
+                    mobs,
+                    drops_rng,
+                    held,
+                    pos,
+                )
+                .await?;
+            } else {
+                *pending_break = Some(PendingBreak {
+                    pos,
+                    progress_per_tick: per_tick.unwrap_or(f32::INFINITY),
+                    start_tick: game_tick,
+                });
+            }
         }
         BlockActionKind::AbortDestroy => {
-            if *pending_break == Some(pos) {
+            if pending_break.is_some_and(|dig| dig.pos == pos) {
                 *pending_break = None;
             }
         }
         BlockActionKind::StopDestroy => {
-            if *pending_break == Some(pos) {
-                *pending_break = None;
-                // Issue #337: read the block *before* it becomes air. This is
-                // the whole reason the drop has to happen here rather than in a
-                // later tick — once `set_block` has run, what was broken is
-                // unrecoverable, and vanilla's own `destroyBlock` likewise
-                // captures the state first (`Level.destroyBlock` reads
-                // `getBlockState(pos)`, calls `dropResources` with it, and only
-                // then `setBlock(pos, AIR)`).
-                let broken = source.block_state(pos.x, pos.y, pos.z);
-                source.set_block(pos.x, pos.y, pos.z, AIR);
-                debug_assert!(
-                    !broken.is_empty(),
-                    "`ChunkSource::block_state` returns a state name, never an empty string"
-                );
-                // Roll the broken block's loot table and pop each resulting
-                // stack as a real item entity. `MobSim` already ticks item
-                // lifecycle and fall dynamics every server tick
-                // (`crate::tick::run_tick_loop`) and already streams items to
-                // every connection (`MobSim::snapshots`), so this one call is
-                // what connects a 1,551-line loot module that had no production
-                // caller to the wire path mobs already proved reaches a client.
-                //
-                // **Not gated on `doTileDrops`.** Vanilla wraps `popResource` in
-                // `level.getGameRules().get(GameRules.BLOCK_DROPS)`, but this
-                // crate has no live game-rule registry to consult —
-                // `crate::game_rules` describes the rules for the wire and
-                // stores no values (`server.rs`'s own three "no `GameRules`
-                // registry" notes). A real registry is the prerequisite, not a
-                // guess here; see `docs/block-drops.md`.
-                //
-                // **Issue #539: the tool decides both whether anything drops at
-                // all and what.** `drops_are_allowed` is vanilla's
-                // `Player.hasCorrectToolForDrops`, consulted by `destroyBlock`
-                // *before* it calls `dropResources` — so a bare hand on stone
-                // breaks the block and drops nothing, and the roll's RNG draws
-                // never happen either (folding the check into the table would
-                // still consume them and shift the next break's stream). `held`
-                // then rides into the roll as `LootContextParams.TOOL`, which is
-                // what makes `match_tool`, `apply_bonus` and `table_bonus`
-                // evaluate against a real item instead of an absent one.
-                let popped = if crate::block_drops::drops_are_allowed(&broken, held) {
-                    crate::block_drops::drop_block_loot(
-                        crate::block_drops::bundled_tables(),
-                        &broken,
-                        pos,
-                        held,
-                        drops_rng,
-                    )
-                } else {
-                    Vec::new()
-                };
-                if !popped.is_empty() {
-                    mobs.with(|sim| {
-                        for drop in popped {
-                            // `ItemLifecycle::newly_dropped` already sets the
-                            // 10-tick delay `popResource`'s
-                            // `setDefaultPickUpDelay()` applies, so the breaker
-                            // cannot re-absorb the drop on the spawning tick.
-                            let count = u8::try_from(drop.stack.count).unwrap_or(u8::MAX);
-                            sim.spawn_item(
-                                drop.stack.item.clone(),
-                                drop.position,
-                                drop.velocity,
-                                ItemLifecycle::newly_dropped(count, DEFAULT_MAX_STACK_SIZE),
-                            );
-                        }
-                    });
-                }
-                block_entities.with(|reg| {
-                    reg.remove(pos);
-                });
-                if open_container.as_ref().is_some_and(|open| open.pos == pos) {
-                    *open_container = None;
-                    *container_sync = ContainerSync::default();
-                }
-                let directive = proto.encode_block_update(pos.x, pos.y, pos.z, AIR);
+            let Some(dig) = pending_break.filter(|dig| dig.pos == pos) else {
+                return Ok(());
+            };
+            *pending_break = None;
+            if !dig.may_break_at(game_tick) {
+                // Vanilla answers a refused break with the block's real state so
+                // the client's own prediction is rolled back (`destroyAndAck`'s
+                // else branch). Without this the client renders air over a block
+                // the server still has, which is worse than the cheat.
+                let actual = source.block_state(pos.x, pos.y, pos.z);
+                let directive = proto.encode_block_update(pos.x, pos.y, pos.z, &actual);
                 apply(conn, state, directive).await?;
+                return Ok(());
             }
+            destroy_block(
+                conn,
+                proto,
+                source,
+                state,
+                block_entities,
+                open_container,
+                container_sync,
+                mobs,
+                drops_rng,
+                held,
+                pos,
+            )
+            .await?;
         }
     }
+    Ok(())
+}
+
+/// Breaks the block at `pos`: rolls and pops its loot, clears any block entity
+/// and open container against it, and tells the client.
+///
+/// Vanilla's `ServerPlayerGameMode.destroyBlock` funnel. Extracted from
+/// [`apply_block_action`] by issue #531 because there are now **two** call sites
+/// — the instant break on `StartDestroy` and the validated `StopDestroy` — and
+/// vanilla likewise reaches `destroyBlock` from both.
+#[allow(clippy::too_many_arguments)]
+async fn destroy_block<T, P, S>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    state: &mut State,
+    block_entities: &BlockEntityHandle,
+    open_container: &mut Option<OpenContainer>,
+    container_sync: &mut ContainerSync,
+    mobs: &MobHandle,
+    drops_rng: &mut SpawnRng,
+    held: Option<&ItemStack>,
+    pos: BlockPos,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource,
+{
+    // Issue #337: read the block *before* it becomes air. This is
+    // the whole reason the drop has to happen here rather than in a
+    // later tick — once `set_block` has run, what was broken is
+    // unrecoverable, and vanilla's own `destroyBlock` likewise
+    // captures the state first (`Level.destroyBlock` reads
+    // `getBlockState(pos)`, calls `dropResources` with it, and only
+    // then `setBlock(pos, AIR)`).
+    let broken = source.block_state(pos.x, pos.y, pos.z);
+    source.set_block(pos.x, pos.y, pos.z, AIR);
+    debug_assert!(
+        !broken.is_empty(),
+        "`ChunkSource::block_state` returns a state name, never an empty string"
+    );
+    // Roll the broken block's loot table and pop each resulting
+    // stack as a real item entity. `MobSim` already ticks item
+    // lifecycle and fall dynamics every server tick
+    // (`crate::tick::run_tick_loop`) and already streams items to
+    // every connection (`MobSim::snapshots`), so this one call is
+    // what connects a 1,551-line loot module that had no production
+    // caller to the wire path mobs already proved reaches a client.
+    //
+    // **Not gated on `doTileDrops`.** Vanilla wraps `popResource` in
+    // `level.getGameRules().get(GameRules.BLOCK_DROPS)`, but this
+    // crate has no live game-rule registry to consult —
+    // `crate::game_rules` describes the rules for the wire and
+    // stores no values (`server.rs`'s own three "no `GameRules`
+    // registry" notes). A real registry is the prerequisite, not a
+    // guess here; see `docs/block-drops.md`.
+    //
+    // **Issue #539: the tool decides both whether anything drops at
+    // all and what.** `drops_are_allowed` is vanilla's
+    // `Player.hasCorrectToolForDrops`, consulted by `destroyBlock`
+    // *before* it calls `dropResources` — so a bare hand on stone
+    // breaks the block and drops nothing, and the roll's RNG draws
+    // never happen either (folding the check into the table would
+    // still consume them and shift the next break's stream). `held`
+    // then rides into the roll as `LootContextParams.TOOL`, which is
+    // what makes `match_tool`, `apply_bonus` and `table_bonus`
+    // evaluate against a real item instead of an absent one.
+    let popped = if crate::block_drops::drops_are_allowed(&broken, held) {
+        crate::block_drops::drop_block_loot(
+            crate::block_drops::bundled_tables(),
+            &broken,
+            pos,
+            held,
+            drops_rng,
+        )
+    } else {
+        Vec::new()
+    };
+    if !popped.is_empty() {
+        mobs.with(|sim| {
+            for drop in popped {
+                // `ItemLifecycle::newly_dropped` already sets the
+                // 10-tick delay `popResource`'s
+                // `setDefaultPickUpDelay()` applies, so the breaker
+                // cannot re-absorb the drop on the spawning tick.
+                let count = u8::try_from(drop.stack.count).unwrap_or(u8::MAX);
+                sim.spawn_item(
+                    drop.stack.item.clone(),
+                    drop.position,
+                    drop.velocity,
+                    ItemLifecycle::newly_dropped(count, DEFAULT_MAX_STACK_SIZE),
+                );
+            }
+        });
+    }
+    block_entities.with(|reg| {
+        reg.remove(pos);
+    });
+    if open_container.as_ref().is_some_and(|open| open.pos == pos) {
+        *open_container = None;
+        *container_sync = ContainerSync::default();
+    }
+    let directive = proto.encode_block_update(pos.x, pos.y, pos.z, AIR);
+    apply(conn, state, directive).await?;
     Ok(())
 }
 
@@ -3893,7 +4003,7 @@ async fn dispatch_play_packet<T, P, S>(
     state: &mut State,
     view: &mut ViewTracker,
     pending_keep_alive: &mut Option<i64>,
-    pending_break: &mut Option<BlockPos>,
+    pending_break: &mut Option<PendingBreak>,
     player_pos: &mut Option<(f64, f64, f64)>,
     // Issue #262. Mirrors `player_pos` exactly — updated here, read back by
     // the caller, republished to the `PlayerRegistry` so *other* connections
@@ -3969,6 +4079,13 @@ async fn dispatch_play_packet<T, P, S>(
     // The world spawn resolved at join, for the respawn teleport. See
     // `apply_client_command`'s own parameter comment.
     world_spawn: Vec3,
+    // Issue #531. The server tick this packet is handled on, for
+    // `apply_block_action`'s destroy-progress accounting. `Some(ticks_since(
+    // play_start))` on native; `None` on `wasm32`, whose `serve_play` has no
+    // `tokio::time` to count ticks with — a documented gap of the same shape as
+    // that loop's other timer-fed ones, and the only cost is that the break
+    // *timing* test is skipped there (hardness and range still apply).
+    game_tick: Option<u64>,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -4136,6 +4253,12 @@ where
                 mobs,
                 drops_rng,
                 inventory.selected_item(),
+                // Issue #531. The breaker's feet for the interaction-range test
+                // — the same `player_pos` ticket `apply_use_item_on` already
+                // reads for the bed reach check, and `None` for the same reason
+                // (no `PlayerMoved` packet has arrived yet).
+                player_pos.as_ref().map(|&(x, y, z)| Vec3::new(x, y, z)),
+                game_tick,
                 action,
                 pos,
             )
@@ -4472,7 +4595,7 @@ where
     E: EntitySource,
 {
     let mut pending_keep_alive: Option<i64> = None;
-    let mut pending_break: Option<BlockPos> = None;
+    let mut pending_break: Option<PendingBreak> = None;
     let mut player_pos: Option<(f64, f64, f64)> = None;
     // Issue #262, alongside `player_pos` — see `dispatch_play_packet`'s own
     // parameter comment.
@@ -4606,6 +4729,11 @@ where
                     player_entity_id,
                     &username,
                     world_spawn,
+                    // Issue #531. This loop already counts ticks off
+                    // `play_start` for the time-of-day broadcast; the break
+                    // validator reads the same clock, so a dig's start and stop
+                    // are priced on one monotonic counter.
+                    Some(u64::try_from(ticks_since(play_start)).unwrap_or(0)),
                     packet_id,
                     &payload,
                 )
@@ -5045,7 +5173,7 @@ where
     E: EntitySource,
 {
     let mut pending_keep_alive: Option<i64> = None;
-    let mut pending_break: Option<BlockPos> = None;
+    let mut pending_break: Option<PendingBreak> = None;
     let mut sprinting = false;
     // `player_pos`/`vitals` are tracked for parity with the native loop's
     // `dispatch_play_packet` calls (shared function, shared signature), but
@@ -5138,6 +5266,11 @@ where
             player_entity_id,
             &username,
             world_spawn,
+            // Issue #531. `None`: this target has no `tokio::time`, so there is
+            // no tick counter to price a dig's duration against — the same gap
+            // as `vitals` and `container_sync` above. Hardness and range still
+            // validate; only the timing test is skipped.
+            None,
             packet_id,
             &payload,
         )
