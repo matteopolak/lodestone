@@ -87,6 +87,9 @@ const CONTAINER_SET_SLOT_S2C: i32 = 57;
 /// `hasInfiniteMaterials()` check — so a test that gives itself an item has to be
 /// in creative for the write, exactly as a real client would be.
 const CHANGE_GAME_MODE_C2S: i32 = 58;
+/// A stand-in `set_game_rule` (issue #327): one VarInt entry count, then a
+/// key/value string pair each.
+const SET_GAME_RULE_C2S: i32 = 59;
 
 /// A [`ChunkSource`] that hands out an all-air column instantly — these
 /// tests are about packet scheduling, not terrain, so real worldgen would
@@ -219,6 +222,17 @@ impl ServerProtocol for FakeProtocol {
                     _ => Difficulty::Hard,
                 };
                 ServerBound::DifficultyChanged { difficulty }
+            }
+            State::Play if packet_id == SET_GAME_RULE_C2S => {
+                let mut r = Reader::new(payload);
+                let count = r.var_i32().expect("entry count");
+                let mut entries = Vec::new();
+                for _ in 0..count {
+                    let key = r.string(64).expect("rule key");
+                    let value = r.string(64).expect("rule value");
+                    entries.push((key, value));
+                }
+                ServerBound::GameRuleChanged { entries }
             }
             State::Play if packet_id == CHANGE_GAME_MODE_C2S => {
                 let mut r = Reader::new(payload);
@@ -417,8 +431,15 @@ impl ServerProtocol for FakeProtocol {
     /// arrived, with N entries" from "no reply", not round-trip the actual
     /// key/value strings).
     fn encode_game_rule_values(&self, entries: &[(String, String)]) -> ServerDirective {
+        // Issue #327: the entries themselves, not just the count. The count alone
+        // cannot tell a rule that was *validated and stored* from one echoed back
+        // verbatim, which is the whole distinction the gate below tests.
         let mut w = Writer::default();
         w.var_i32(entries.len() as i32);
+        for (key, value) in entries {
+            w.string(key);
+            w.string(value);
+        }
         ServerDirective::Send {
             packet_id: GAME_RULE_VALUES_S2C,
             payload: w.as_slice().to_vec(),
@@ -621,6 +642,18 @@ async fn send_creative_slot(client: &mut Connection<DuplexStream>, slot: i16, it
         .await
         .expect("send creative slot");
     send_game_mode(client, 0).await;
+}
+
+/// Sends the stand-in `set_game_rule` with one `(key, value)` entry.
+async fn send_game_rule(client: &mut Connection<DuplexStream>, key: &str, value: &str) {
+    let mut w = Writer::default();
+    w.var_i32(1);
+    w.string(key);
+    w.string(value);
+    client
+        .write_packet(SET_GAME_RULE_C2S, w.as_slice())
+        .await
+        .expect("send game rule");
 }
 
 /// Sends the stand-in `change_game_mode` (`0` survival, `1` creative).
@@ -837,25 +870,35 @@ async fn time_of_day_anchors_at_join_then_broadcasts_periodically() {
     client.read_packet().await.unwrap().unwrap(); // the one CHUNK
     client.read_packet().await.unwrap().unwrap(); // CHUNK_BATCH_FINISHED
 
-    // Now in `serve_play`: collect the periodic broadcasts. Each carries no
-    // anchor (an empty clock-update map on the real wire), and `game_time`
-    // must strictly increase — proof the 1-second `TIME_SYNC_INTERVAL` timer
-    // is actually firing repeatedly, not just once.
-    let mut last_game_time = -1i64;
-    for _ in 0..3 {
+    // Now in `serve_play`: collect the periodic broadcasts. **Issue #323**: each
+    // one reports the *world's* clock, and this server has no tick loop, so that
+    // clock is zero and stays zero. Three broadcasts arrive, proving the 1-second
+    // `TIME_SYNC_INTERVAL` timer fires repeatedly, and all three carry the same
+    // value.
+    //
+    // A *rising* value here was the bug. The old broadcast sent
+    // `ticks_since(play_start)` — wall-clock elapsed since this connection joined —
+    // with no anchor, and this test asserted exactly that, which is why every link
+    // in the chain read green while the number on the wire was not the world's
+    // time. So the assertion is inverted on purpose: if someone reintroduces an
+    // elapsed-time source, `game_time` climbs and this fails.
+    for broadcast in 0..3 {
         let (id, payload) = client.read_packet().await.unwrap().unwrap();
         assert_eq!(id, SET_TIME_S2C);
         let mut r = Reader::new(&payload);
-        let game_time = r.i64().unwrap();
-        assert!(
-            !r.bool().unwrap(),
-            "periodic sync must not carry a day/night anchor"
+        assert_eq!(
+            r.i64().unwrap(),
+            0,
+            "broadcast {broadcast}: no tick loop means no world ticks, so game_time \
+             stays 0 — a climbing value is elapsed-since-join, issue #323's bug"
         );
         assert!(
-            game_time > last_game_time,
-            "game_time must strictly increase: {last_game_time} -> {game_time}"
+            r.bool().unwrap(),
+            "the day/night anchor is now always sent: an empty clock map means \
+             'keep your own anchor', and a client keeps advancing that, so a frozen \
+             server clock would still show a moving sun"
         );
-        last_game_time = game_time;
+        assert_eq!(r.i64().unwrap(), 0, "and the anchor is the world's day_time");
     }
 
     drop(client);
@@ -1391,6 +1434,66 @@ async fn request_game_rule_values_replies_even_with_no_rules_set() {
     assert_eq!(id, GAME_RULE_VALUES_S2C);
     let mut r = Reader::new(&payload);
     assert_eq!(r.var_i32().expect("entry count"), 0, "no game rule was ever set");
+
+    drop(client);
+    let _ = server.await.unwrap();
+}
+
+/// **Issue #327 end to end**: `SET_GAME_RULE` writes into the world's typed store,
+/// and an unknown key is *rejected* rather than stored.
+///
+/// The camelCase name is the load-bearing half. 26.2 renamed every rule
+/// (`GameRules.java:24-92`), so `randomTickSpeed` is not a rule any more — and the
+/// old store kept every `(String, String)` verbatim, so it was accepted, echoed
+/// back to the client, and then never read by anything, because the reader asks for
+/// `random_tick_speed`. The player saw their rule confirmed and no behaviour
+/// change, with nothing reporting a problem.
+///
+/// Both directions are asserted from the same connection: the reply to the valid
+/// rule carries it, and the reply to the invalid one is empty.
+#[tokio::test(start_paused = true)]
+async fn a_set_game_rule_is_validated_and_a_renamed_key_is_refused() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
+            .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "RuleSetter", 1).await;
+
+    // The real 26.2 identifier: accepted, and confirmed back.
+    send_game_rule(&mut client, "random_tick_speed", "7").await;
+    let (id, payload) = client.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, GAME_RULE_VALUES_S2C);
+    let mut r = Reader::new(&payload);
+    assert_eq!(r.var_i32().expect("entry count"), 1);
+    assert_eq!(r.string(64).expect("key"), "random_tick_speed");
+    assert_eq!(r.string(64).expect("value"), "7");
+
+    // The pre-26.2 spelling: refused, so the confirmation is empty.
+    send_game_rule(&mut client, "randomTickSpeed", "9").await;
+    let (id, payload) = client.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, GAME_RULE_VALUES_S2C);
+    let mut r = Reader::new(&payload);
+    assert_eq!(
+        r.var_i32().expect("entry count"),
+        0,
+        "a renamed key is not a rule this server knows, and storing it would be \
+         confirmed-and-never-read"
+    );
+
+    // And the store still holds only the valid one.
+    send_client_command(&mut client, 2).await;
+    let (id, payload) = client.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, GAME_RULE_VALUES_S2C);
+    let mut r = Reader::new(&payload);
+    assert_eq!(r.var_i32().expect("entry count"), 1);
+    assert_eq!(r.string(64).expect("key"), "random_tick_speed");
+    assert_eq!(r.string(64).expect("value"), "7");
 
     drop(client);
     let _ = server.await.unwrap();

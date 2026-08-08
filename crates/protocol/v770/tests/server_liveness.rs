@@ -110,10 +110,25 @@ async fn real_client_survives_multiple_keep_alive_intervals() {
 /// companion to `serve_play.rs`'s
 /// `time_of_day_anchors_at_join_then_broadcasts_periodically`, and the live
 /// consumer `docs/time-of-day-lighting.md` describes on the client side.
+///
+/// **`open_in_memory_with_mobs`, not `open_in_memory`** — issue #323. The clock the
+/// broadcast carries is now the *world's*, advanced by `run_tick_loop`, and
+/// `open_in_memory` starts no tick loop at all. On the plain constructor this test
+/// used to pass against `ticks_since(play_start)`, wall-clock elapsed since join:
+/// a number that rose reliably and was not the world's time. So the constructor is
+/// load-bearing here, and picking the wrong one makes the gate measure a clock
+/// nothing ticks.
 #[tokio::test(start_paused = true)]
 async fn real_client_time_of_day_advances_from_periodic_broadcasts() {
     let source = cheap_source();
-    let (server, client_io) = IntegratedServer::open_in_memory(V770ServerProtocol, source, 0);
+    let (server, client_io) = IntegratedServer::open_in_memory_with_mobs(
+        V770ServerProtocol,
+        source,
+        (0..=0, 0..=0),
+        (0, 0),
+        0,
+        0,
+    );
     let (handle, _events) =
         ClientBuilder::new(address(), profile("Clockwatcher"), Box::new(adapter()))
             .connect_with(client_io);
