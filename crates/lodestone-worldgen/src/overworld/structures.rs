@@ -217,6 +217,14 @@ impl StartContext for StartSampler<'_> {
     fn dimension_height(&self) -> i32 {
         self.generator.height()
     }
+
+    /// `isReplaceableByStructures`: air or fluid. Read out of the same per-chunk
+    /// [`AquiferSystem`] the height probe uses, so a coded piece's foundation walk
+    /// costs no extra aquifer build.
+    fn is_replaceable_at(&self, x: i32, y: i32, z: i32) -> bool {
+        let aquifer = self.aquifer(x >> 4, z >> 4);
+        !matches!(aquifer.block_at(x, y, z), BlockKind::Stone)
+    }
 }
 
 impl OverworldGenerator {
