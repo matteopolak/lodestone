@@ -57,6 +57,16 @@ pub(crate) enum KeyOutcome {
     ToggleHitboxes,
     /// F3+G — vanilla's `key.debug.showChunkBorders`.
     ToggleChunkBorders,
+    /// F3+H — vanilla's `key.debug.advancedTooltips`.
+    ///
+    /// Unlike its two siblings above this does **not** toggle a render flag: it
+    /// flips a *persisted option*, `Options.advancedItemTooltips`
+    /// (`Options.java`), which is what `ItemStack.getTooltipLines` consults
+    /// through `TooltipFlag.Default.ADVANCED`. So the driver's arm writes it
+    /// through `MenuNav` (which owns `Options` and persists eagerly) rather than
+    /// into an `AtomicBool` — see
+    /// [`crate::config::Options::advanced_item_tooltips`].
+    ToggleAdvancedTooltips,
     /// `key.screenshot` (issue #16): capture the window's own frame to a PNG.
     ///
     /// **No payload**, and the two things it does not carry are deliberate,
@@ -290,6 +300,14 @@ pub(crate) fn resolve_key(
     } else if gate.debug_held && pressed && code == KeyCode::KeyG {
         // `key.debug.showChunkBorders`, vanilla keysym 71.
         Some(KeyOutcome::ToggleChunkBorders)
+    } else if gate.debug_held && pressed && code == KeyCode::KeyH {
+        // `key.debug.advancedTooltips`, vanilla keysym 72. **Not gated on
+        // `gate.gameplay`**, the same as its two siblings: F3 chords are debug
+        // instruments and vanilla's `KeyboardHandler.handleDebugKeys` runs
+        // regardless of the open screen — which matters more for this one than
+        // for the others, because the thing it changes is only *visible* with a
+        // container screen open.
+        Some(KeyOutcome::ToggleAdvancedTooltips)
     } else if binds.is(InputAction::Screenshot, code) && pressed {
         // Same tier as `DebugOverlay` immediately above, and for the same
         // reason: vanilla's `key.screenshot` is `Category.MISC` and takes no

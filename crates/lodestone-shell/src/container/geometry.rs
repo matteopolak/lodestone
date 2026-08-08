@@ -687,6 +687,23 @@ impl ContainerGeometry {
             }
         }
 
+        // The hovered slot's tooltip, **last of everything** — see
+        // `super::tooltip`'s module doc for why the tail of this stream is what
+        // puts it on top, and for the two things it deliberately cannot show
+        // (lore, enchantment names). `None` here is every existing caller.
+        if let Some(advanced) = frame.tooltips {
+            super::tooltip::emit_tooltip(
+                &mut b,
+                menu,
+                frame.cursor,
+                advanced,
+                gui_scale,
+                width,
+                height,
+                (w, h),
+            );
+        }
+
         Self {
             bg_slot_vertex_count: bg_slot_floats / BG_FLOATS_PER_VERTEX,
             dim_vertex_count: dim_floats / FLOATS_PER_VERTEX,

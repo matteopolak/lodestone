@@ -339,6 +339,28 @@ pub struct Options {
     /// Same migration as [`Self::sensitivity`]; consumers already existed at
     /// `sim/build.rs`'s world radius and `sim/camera.rs`'s fog.
     pub render_distance: u32,
+    /// Vanilla's `options.advancedItemTooltips` (`Options.java`), toggled by
+    /// **F3+H** and by nothing else.
+    ///
+    /// # Why this is an option and not a debug flag
+    ///
+    /// F3+H reads like a debug chord alongside F3+B and F3+G, and it is bound the
+    /// same way — but the two siblings flip transient render state while this one
+    /// flips a *persisted* option. `ItemStack.getTooltipLines` takes a
+    /// `TooltipFlag`, and `Minecraft` supplies
+    /// `options.advancedItemTooltips ? TooltipFlag.Default.ADVANCED :
+    /// TooltipFlag.Default.NORMAL`, so the chord is a *writer* of this field and
+    /// the tooltip builder is its only reader. Storing it in an `AtomicBool` on
+    /// `WindowApp` (which is what the hitbox and chunk-border chords do) would
+    /// lose it on every restart, which vanilla does not.
+    ///
+    /// Deliberately **no settings row**: vanilla has none either — there is no
+    /// `advancedItemTooltips` entry on any `OptionsSubScreen`, so adding a
+    /// `LiveOption` for it would be this client inventing a control. The chord is
+    /// the whole UI.
+    ///
+    /// Default `false`, matching vanilla's boot value.
+    pub advanced_item_tooltips: bool,
 }
 
 impl Default for Options {
@@ -367,6 +389,7 @@ impl Default for Options {
             chat_colors: true,
             sensitivity: DEFAULT_SENSITIVITY,
             render_distance: DEFAULT_RENDER_DISTANCE,
+            advanced_item_tooltips: false,
         }
     }
 }
@@ -501,6 +524,10 @@ impl Options {
             .and_then(|v| u32::try_from(v).ok())
             .filter(|v| (MIN_RENDER_DISTANCE..=MAX_RENDER_DISTANCE).contains(v))
             .unwrap_or(DEFAULT_RENDER_DISTANCE);
+        let advanced_item_tooltips = obj
+            .get("advanced_item_tooltips")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         Self {
             gui_scale,
             keybinds,
@@ -525,6 +552,7 @@ impl Options {
             chat_colors,
             sensitivity,
             render_distance,
+            advanced_item_tooltips,
         }
     }
 
@@ -631,6 +659,12 @@ impl Options {
         }
         if self.render_distance != default.render_distance {
             obj.insert("render_distance".into(), self.render_distance.into());
+        }
+        if self.advanced_item_tooltips != default.advanced_item_tooltips {
+            obj.insert(
+                "advanced_item_tooltips".into(),
+                self.advanced_item_tooltips.into(),
+            );
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
             .unwrap_or_else(|_| "{}".to_string());

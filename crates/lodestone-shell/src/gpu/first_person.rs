@@ -592,9 +592,49 @@ impl RenderState {
 
     /// The packed light byte the first-person hand is lit with, for both branches.
     ///
-    /// Exactly `renderItemInHand`'s `getPackedLightCoords(minecraft.player, …)`,
-    /// sampled at the **eye** rather than the feet: it is what the player is
-    /// looking through, and the two only differ standing in a doorway.
+    /// `renderItemInHand`'s `getPackedLightCoords(minecraft.player, partialTick)`.
+    ///
+    /// # The eye is not a deviation, and the byte is not one channel
+    ///
+    /// This doc used to read "sampled at the **eye** rather than the feet", framed
+    /// as a departure we chose. It is not — it is what vanilla does. Following the
+    /// call through:
+    ///
+    /// ```java
+    /// // EntityRenderer.java:48-50
+    /// BlockPos blockPos = BlockPos.containing(entity.getLightProbePosition(partialTickTime));
+    /// return LightCoordsUtil.pack(this.getBlockLightLevel(entity, blockPos),
+    ///                             this.getSkyLightLevel(entity, blockPos));
+    /// // Entity.java:2001-2003
+    /// public Vec3 getLightProbePosition(final float partialTickTime) {
+    ///    return this.getEyePosition(partialTickTime);
+    /// }
+    /// ```
+    ///
+    /// And the `u32::from(u8)` is a widen, not a truncation to a single channel:
+    /// [`EntityLightSource::sample`](super::sources::EntityLightSource) returns
+    /// vanilla's **packed** pair — sky in the high nibble, block in the low (see
+    /// [`lodestone_render::ENTITY_FULLBRIGHT`], which is `15 << 4`) — and
+    /// `entity.wgsl:180-181` unpacks both:
+    ///
+    /// ```wgsl
+    /// let sky = f32((light >> 4u) & 15u) / 15.0;
+    /// let block = f32(light & 15u) / 15.0;
+    /// ```
+    ///
+    /// So the hand is lit by exactly the same two-channel value every mob is, and
+    /// this is the same call `entity_passes.rs` makes for them. The clock term
+    /// rides the uniform rather than the byte — see `write_hand_camera`'s note on
+    /// issue #74, which was the last real defect here.
+    ///
+    /// The one measurable difference left from vanilla is that `camera.position`
+    /// has the view bob folded into it (`camera_rig::bobbed_camera`), so the probe
+    /// wanders by up to `0.05` blocks while walking where vanilla's
+    /// `getEyePosition` does not. That can flip the sampled block across a
+    /// boundary, and it is shared with every other `entity_light.sample` call in
+    /// this file's siblings rather than specific to the hand. Recorded, not fixed:
+    /// unbobbing it means passing a second camera down from
+    /// [`super::frame`], which is another agent's file.
     #[must_use]
     fn hand_light(&self, camera: &Camera) -> u32 {
         u32::from(self.entity_light.sample(camera.position))
