@@ -30,6 +30,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `login::finish_interactive` rather than hand-rolling a second copy — issue #73,
   see that section) and for the offline-selection convention it establishes that
   `login::try_cached_session` already happens to handle correctly.
+- [Advancements screen](./advancements-screen.md) — Vanilla's `AdvancementsScreen`
+  (issue #167), reached from the pause menu's Advancements button: five tabs, the real
+  26.2 advancement tree, connector lines, frames, icons, a tiled per-tab background,
+  panning, and a hover title. Built off the data pack rather than the wire —
+  **everything draws, nothing is obtained.**
 - [Ambient sound loops and client-predicted local sounds](./ambient-sounds.md) — Two
   related pieces of the audio layer, both in `crates/lodestone-sound`:
 - [Arm swing animation](./arm-swing-animation.md) — The arm swing you see when you
@@ -667,6 +672,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   with add/edit/delete, a per-server status ping showing MOTD, player count, latency
   and favicon, and an account list (issue #66) for the Microsoft accounts
   `lodestone-auth` knows about plus an always-present offline entry.
+- [Filled-map and advancement wire](./map-and-advancement-wire.md) — The four wire
+  gaps that kept filled maps (#184), the advancements screen (#167) and the statistics
+  screen (#188) from having any data at all: the v770 decode arms for `map_item_data`
+  (id 51) and `update_advancements` (id 130), and the two v770 `ServerProtocol`
+  overrides — `encode_update_advancements` and `encode_award_stats` — that had
+  never existed, so the server's own advancement and statistic tracking reached the
+  wire as `ServerDirective::None`.
 - [Screen focus, tab traversal, event dispatch — and `EditBox`](./menu-focus.md) —
   Two modules, the third child of the menu-framework epic (#392/#395):
 - [Menu layout containers](./menu-layout.md) —
@@ -1141,6 +1153,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   (issue #294); this issue is the server half: the version-free vocabulary struct, the
   `ServerProtocol` seam method, its `v770` encoder, and the feed a host publishes a
   push into. Part of the server-plumbing epic (#339).
+- [Server-side crafting](./server-side-crafting.md) — The server half of crafting
+  (issue #529): `crates/lodestone-server/src/crafting.rs` holds the crafting grid the
+  **server** owns plus the bundled 26.2 recipe corpus it resolves a result from, and
+  `apply_container_clicked` now derives the crafting result slot itself instead of
+  storing whatever the client claimed. The client-side matcher and menu layout are
+  `docs/crafting.md`.
 - [Server-list status (the Status phase)](./server-status.md) — How Lodestone's
   integrated server answers a client's **server-list ping** — the MOTD, player
   count, version, protocol number, and optional favicon a player sees in their
