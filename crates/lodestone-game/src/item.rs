@@ -679,6 +679,11 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             damage: stack.damage().and_then(|d| u32::try_from(d).ok()),
             enchantments: stack.enchantments().to_vec(),
             dyed_color: stack.dyed_color(),
+            // `minecraft:trim` (issue #17) is decoded off the wire into
+            // `lodestone_model::ItemComponents` but has no representation in this
+            // crate's own `ComponentMap`, so it does not survive the round trip —
+            // the same lossy-field class the doc above already lists.
+            trim: None,
             tool: stack.tool(),
             max_stack_size: stack
                 .components
@@ -1052,6 +1057,7 @@ mod tests {
                 damage: Some(37),
                 enchantments: vec![ItemEnchantment { id: 12, level: 4 }],
                 dyed_color: Some(0x00_11_22_33),
+                trim: None,
                 tool: ToolPatch::Set(tool),
                 max_stack_size: Some(1),
                 max_damage: Some(1561),

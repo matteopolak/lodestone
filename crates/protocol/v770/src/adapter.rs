@@ -15,7 +15,8 @@ use lodestone_model::command_tree::{
     RawCommandNode, StringKind,
 };
 use lodestone_model::{
-    AdapterError, AnimationAction, BlockAabb, BlockActionKind, BlockFace, BlockHardness, BlockPos,
+    AdapterError, AnimationAction, ArmorTrim, BlockAabb, BlockActionKind, BlockFace, BlockHardness,
+    BlockPos,
     BossAction,
     BossColor,
     BossOverlay, ChatAckInfo, ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent,
@@ -1306,6 +1307,127 @@ pub(crate) fn read_item_stack(reader: &mut Reader<'_>) -> Result<DecodedStack, A
     })
 }
 
+/// `minecraft:trim_material` registry paths in **vanilla bootstrap order**
+/// (`TrimMaterials.bootstrap`, `TrimMaterials.java:25-35`), which is the order a
+/// vanilla server's Configuration-phase registry sync assigns ids in.
+///
+/// # Why this table and not a synced registry
+///
+/// `Registries.TRIM_MATERIAL` is a **dynamic** registry: its ids come from the
+/// `registry_data` packets sent during Configuration, and this client keeps no
+/// dynamic-registry store, so a `Holder::REFERENCE` id has nothing to resolve
+/// against. Bootstrap order is what a vanilla server without a trim datapack
+/// sends, so this is exact for vanilla and **provisional** for a modded server —
+/// the same posture, and the same caveat, as `server_protocol.rs`'s `BIOME_NAMES`.
+/// An id outside the table decodes as the empty string rather than failing: the
+/// bytes are consumed either way, which is the property that keeps the rest of the
+/// packet readable.
+///
+/// Deliberately *not* read from `lodestone_assets::trim::TRIM_MATERIALS`, which
+/// happens to be in this same order today — `TRIM_PATTERNS` beside it is
+/// alphabetical, so "the asset table is in registry order" is a coincidence for
+/// one of the two and cannot be relied on for either.
+const TRIM_MATERIAL_IDS: &[&str] = &[
+    "quartz",
+    "iron",
+    "netherite",
+    "redstone",
+    "copper",
+    "gold",
+    "emerald",
+    "diamond",
+    "lapis",
+    "amethyst",
+    "resin",
+];
+
+/// `minecraft:trim_pattern` registry paths in vanilla bootstrap order
+/// (`TrimPatterns.bootstrap`, `TrimPatterns.java:31-48`). See
+/// [`TRIM_MATERIAL_IDS`] for the id-space caveat — and note this is **not** the
+/// alphabetical order `lodestone_assets::trim::TRIM_PATTERNS` uses.
+const TRIM_PATTERN_IDS: &[&str] = &[
+    "sentry",
+    "dune",
+    "coast",
+    "wild",
+    "ward",
+    "eye",
+    "vex",
+    "tide",
+    "snout",
+    "rib",
+    "spire",
+    "wayfinder",
+    "shaper",
+    "silence",
+    "raiser",
+    "host",
+    "flow",
+    "bolt",
+];
+
+/// Decodes `minecraft:trim`'s payload — `ArmorTrim.STREAM_CODEC`
+/// (`ArmorTrim.java:26-28`), a `Holder<TrimMaterial>` then a
+/// `Holder<TrimPattern>`.
+///
+/// Each holder is `ByteBufCodecs.holder(registry, DIRECT_STREAM_CODEC)`: a VarInt
+/// where `0` introduces an **inline** definition and any positive value references
+/// the registry at `value - 1`. Both forms are handled, because both must be — the
+/// inline form is what a datapack-defined trim arrives as, and consuming the wrong
+/// number of bytes for it would desync the rest of the packet exactly as the
+/// unmodeled-component cliff this arm exists to remove does.
+///
+/// The inline bodies, from the two `DIRECT_STREAM_CODEC`s:
+///
+/// * `TrimMaterial` (`TrimMaterial.java:22-24`) — a `MaterialAssetGroup` (an
+///   `AssetInfo` = one UTF-8 string, then a map of `ResourceKey -> AssetInfo`,
+///   i.e. a VarInt count of `(string, string)` pairs) then a description
+///   `Component` (network NBT).
+/// * `TrimPattern` (`TrimPattern.java:25-33`) — an `Identifier` (string), a
+///   description `Component`, then a `bool` `decal`.
+///
+/// **The inline material carries no registry name**, only its asset suffix, so
+/// that is what is reported: for every vanilla material the suffix *is* the
+/// registry path (`MaterialAssetGroup::create(base)`, `MaterialAssetGroup.java:36-46`),
+/// and it is also the half `lodestone_assets::trim::trim_sprite_id` actually needs.
+fn read_armor_trim(reader: &mut Reader<'_>) -> Result<ArmorTrim, AdapterError> {
+    let material = match reader.var_i32().map_err(dec_err)? {
+        0 => {
+            let base = reader.string(32767).map_err(dec_err)?;
+            let overrides = reader.var_i32().map_err(dec_err)?;
+            for _ in 0..overrides {
+                let _key = reader.string(32767).map_err(dec_err)?;
+                let _suffix = reader.string(32767).map_err(dec_err)?;
+            }
+            let _description = read_network_nbt(reader).map_err(dec_err)?;
+            base
+        }
+        holder => TRIM_MATERIAL_IDS
+            .get((holder - 1) as usize)
+            .copied()
+            .unwrap_or_default()
+            .to_owned(),
+    };
+    let pattern = match reader.var_i32().map_err(dec_err)? {
+        0 => {
+            let asset_id = reader.string(32767).map_err(dec_err)?;
+            let _description = read_network_nbt(reader).map_err(dec_err)?;
+            let _decal = reader.bool().map_err(dec_err)?;
+            // The asset id is a full identifier; the registry path is what the
+            // asset layer keys by.
+            asset_id
+                .rsplit_once(':')
+                .map_or(asset_id.clone(), |(_, path)| path.to_owned())
+        }
+        holder => TRIM_PATTERN_IDS
+            .get((holder - 1) as usize)
+            .copied()
+            .unwrap_or_default()
+            .to_owned(),
+    };
+    Ok(ArmorTrim { material, pattern })
+}
+
 /// Decodes an item stack's `DataComponentPatch` into the modeled component set,
 /// returning whether the patch was fully consumed.
 ///
@@ -1364,6 +1486,12 @@ fn read_component_patch(
             Some("minecraft:dyed_color") => {
                 components.dyed_color = Some(reader.i32().map_err(dec_err)? as u32);
             }
+            // Decoded rather than left unmodeled *because* the `other` arm below
+            // cannot skip: a trimmed armour stack used to truncate the whole
+            // remaining packet, not merely lose its trim. See [`read_armor_trim`].
+            Some("minecraft:trim") => {
+                components.trim = Some(read_armor_trim(reader)?);
+            }
             // Both of these are `ByteBufCodecs.VAR_INT` (`DataComponents.java:110-115`)
             // and both *override* the prototype value seeded above. They are
             // decoded rather than treated as unmodeled not because servers send
@@ -1387,6 +1515,18 @@ fn read_component_patch(
                 // it and everything after it in this packet are unreadable. Keep
                 // the modeled fields decoded so far, flag the stack, and stop —
                 // the packet is dropped past this point, not fatal.
+                //
+                // **Skipping is genuinely impossible here, re-verified against the
+                // jar rather than inherited from this comment.** 26.2 has two patch
+                // codecs: `DataComponentPatch.STREAM_CODEC` writes each payload raw
+                // and `DELIMITED_STREAM_CODEC` length-prefixes it
+                // (`DataComponentPatch.java:62-76`). Clientbound stacks use
+                // `ItemStack.OPTIONAL_STREAM_CODEC`, built on the **undelimited**
+                // one; the delimited variant is `OPTIONAL_UNTRUSTED_STREAM_CODEC`,
+                // i.e. serverbound only (`ItemStack.java:124-126`). So there is no
+                // length to skip and no self-describing framing to walk. The only
+                // way to stop a given component being a decode cliff is to model
+                // it, which is what the `minecraft:trim` arm above does.
                 //
                 // One special case: if the component we cannot decode is
                 // `minecraft:equippable` itself, the prototype slot seeded above

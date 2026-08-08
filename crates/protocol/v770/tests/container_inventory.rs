@@ -129,6 +129,58 @@ fn container_set_slot_decodes_a_dyed_leather_helmet() {
     }
 }
 
+/// `minecraft:trim` (issue #17). The point of this gate is **not** that the trim
+/// decodes — it is that a component after it still does.
+///
+/// Before the `minecraft:trim` arm existed, this component fell to
+/// `read_component_patch`'s `other =>` cliff, which cannot skip an unmodeled
+/// payload (clientbound stacks use `DataComponentPatch.STREAM_CODEC`, undelimited
+/// — see that arm's own comment). So a trimmed stack lost the trim *and* every
+/// component after it *and* the rest of the packet. The second component and the
+/// clean `ensure_empty` are what prove the cliff is gone.
+///
+/// The trim payload is two `Holder`s in reference form (`registryId + 1`):
+/// material `3` = index 2 = `netherite`, pattern `14` = index 13 = `silence`
+/// (`TrimMaterials`/`TrimPatterns` bootstrap order — see `adapter.rs`'s
+/// `TRIM_MATERIAL_IDS`).
+#[test]
+fn container_set_slot_decodes_a_trimmed_chestplate_without_losing_the_rest_of_the_patch() {
+    let mut payload = vec![0x01, 0x06, 0x00, 0x25];
+    payload.extend_from_slice(&[
+        0x01, // count = 1
+        0xD9, 0x07, // item id 985, VarInt
+        0x02, // added = 2
+        0x00, // removed = 0
+        0x38, // component type id 56 = minecraft:trim
+        0x03, // Holder<TrimMaterial>: reference, registry id 2 = netherite
+        0x0E, // Holder<TrimPattern>: reference, registry id 13 = silence
+        0x03, // component type id 3 = minecraft:damage
+        0x07, // damage = 7, VarInt
+    ]);
+    match handle(play::clientbound::CONTAINER_SET_SLOT, &payload).as_slice() {
+        [
+            Directive::Emit(ClientEvent::ContainerSlot { item, .. }),
+        ] => {
+            let item = item.as_ref().expect("a non-empty stack");
+            let trim = item.components.trim.as_ref().expect("the trim component");
+            assert_eq!(trim.material, "netherite");
+            assert_eq!(trim.pattern, "silence");
+            // The cliff: this is the component *after* the trim.
+            assert_eq!(
+                item.components.damage,
+                Some(7),
+                "a component after the trim must still decode — the whole point of \
+                 modeling trim rather than letting it stop the patch"
+            );
+            assert!(
+                !item.components.has_unmodeled,
+                "nothing in this patch is unmodeled, so the partial-stack flag must stay clear"
+            );
+        }
+        other => panic!("expected ContainerSlot, got {other:?}"),
+    }
+}
+
 #[test]
 fn container_set_content_decodes_items_and_carried() {
     // window 1, state 2, two items [stone, empty], carried empty.
