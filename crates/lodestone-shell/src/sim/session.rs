@@ -1175,6 +1175,46 @@ impl Sim {
         })
     }
 
+    /// The advancement tree and the local player's progress on it, as
+    /// `UPDATE_ADVANCEMENTS` last reported them (issue #167).
+    ///
+    /// Cloned for [`Self::game_rules`]' reason — handing out a reference means
+    /// handing out a live read guard. The clone is only taken while the
+    /// Advancements screen is open or a toast is being polled, not per frame of
+    /// ordinary play, and `crate::menu::advancements::AdvancementProgress`
+    /// immediately reduces it to a lean per-id snapshot.
+    ///
+    /// The store carries **no tree positions** — 26.2's advancement JSON has none
+    /// and the server computes them — so this is a source of *progress* keyed by
+    /// id and never a source of tree shape. See the screen's module doc.
+    #[must_use]
+    pub fn advancements(&self) -> lodestone_game::advancement::AdvancementStore {
+        self.read(|w| {
+            w.get::<lodestone_ecs::session::SessionAdvancements>(self.local)
+                .expect("the local player always carries SessionAdvancements")
+                .0
+                .clone()
+        })
+    }
+
+    /// Every filled map the server has sent contents for, as `MAP_ITEM_DATA`
+    /// last reported them (issue #184).
+    ///
+    /// Keyed on **map id**, not on an entity: several players and several item
+    /// frames can show the same map, which is why the fold is session-scoped.
+    /// Patch rectangles are already blitted into the full 128×128 grid by
+    /// `MapStore::apply`, so a caller reads `MapState::color_at` and never has to
+    /// think about sub-rectangles.
+    #[must_use]
+    pub fn maps(&self) -> lodestone_game::maps::MapStore {
+        self.read(|w| {
+            w.get::<lodestone_ecs::session::SessionMaps>(self.local)
+                .expect("the local player always carries SessionMaps")
+                .0
+                .clone()
+        })
+    }
+
     /// The player's spawn point, as `SET_DEFAULT_SPAWN_POSITION` last reported
     /// it (issue #436's `SessionSpawnPoint` island).
     ///

@@ -70,6 +70,7 @@ impl WindowApp {
             weather: None,
             creative: crate::container::CreativeState::default(),
             advancements_drag: None,
+            advancement_feed: super::advancements_screen::AdvancementsFeed::default(),
         }
     }
 
@@ -364,22 +365,17 @@ impl WindowApp {
         // ring can never be meshed, so asking for exactly `render_distance`
         // loses the last visible ring.
         //
-        // # Increasing is currently capped server-side, and the cap is not here
+        // # Raising it mid-session works, since #545
         //
-        // `dispatch_play_packet`'s `ClientInformationChanged` arm does
-        // `i32::from(view_distance).clamp(0, view_radius.max(0))`, where
-        // `view_radius` is *this connection's own* `serve_connection` argument —
-        // i.e. the `render_distance + 1` the shell asked for at join. So a
-        // **decrease** takes effect immediately and an **increase past the launch
-        // value** is silently clamped back.
-        //
-        // That cannot be fixed from this side: `serve_connection` takes one
-        // `view_radius` and uses it both to seed `ViewTracker::new` and as the
-        // clamp ceiling, so passing the slider's maximum to raise the ceiling
-        // would also make the *initial* stream 33 chunks. The fix is one line in
-        // `crates/lodestone-server/src/server.rs` — clamp against the server's
-        // configured maximum rather than the connection's current radius — and
-        // that file is not this cluster's.
+        // This used to be capped: `dispatch_play_packet`'s
+        // `ClientInformationChanged` arm clamped against *this connection's own*
+        // `serve_connection` radius — the `render_distance + 1` the shell asked
+        // for at join — so a decrease took effect and an increase past the launch
+        // value was silently clamped back. `0c09f576` separated the join view
+        // radius from the permitted maximum, so the clamp is now against the
+        // server's configured ceiling and the chunk store's capacity follows a
+        // live raise (grow-only, a session high-water mark). Both directions
+        // reach the stream now, and nothing on this side needs to compensate.
         let radius = wanted.saturating_add(1);
         if let Some(net) = self.sim.net() {
             net.send_action(lodestone_model::action::ClientAction::SetClientSettings(
@@ -392,6 +388,64 @@ impl WindowApp {
         // already finished. Nothing client-side gates chunk *retention* on the
         // radius — the camera's far plane and the fog do the work, and both read
         // `config` above.
+    }
+
+    /// Vanilla's `key.debug.spectate` (F3+N): drop into spectator, or come back
+    /// out of it (`KeyboardHandler.java:222-231`).
+    ///
+    /// **The first producer of `ClientAction::ChangeGameMode` anywhere outside
+    /// `crates/protocol/`** — the variant was encoded by two families and sent by
+    /// nothing, the outbound-island shape `ClientAction::SetFlying` was caught in,
+    /// and the reason the server's own `ServerBound::ChangeGameMode` arm (live
+    /// since `226ac517`) could never fire.
+    ///
+    /// **Coming back always lands in Creative, never in whatever you left.**
+    /// Vanilla reads `gameMode.getPreviousPlayerMode()` and falls back to
+    /// `GameType.CREATIVE` with `firstNonNull`; this client tracks no previous
+    /// mode, so it takes that fallback every time. The server is authoritative
+    /// either way — it answers with the mode it applied plus fresh abilities — so
+    /// the worst case is one extra chord, not a desync.
+    pub(super) fn toggle_spectator(&self) {
+        use lodestone_model::GameMode;
+        let Some(net) = self.sim.net() else { return };
+        let current = net
+            .shared_handle()
+            .get()
+            .cloned()
+            .and_then(|handle| handle.game_mode());
+        let wanted = if current == Some(GameMode::Spectator) {
+            GameMode::Creative
+        } else {
+            GameMode::Spectator
+        };
+        net.send_action(lodestone_model::action::ClientAction::ChangeGameMode { mode: wanted });
+    }
+
+    /// Vanilla's `key.debug.switchGameMode` (F3+F4), cycling instead of opening a
+    /// radial picker.
+    ///
+    /// `KeyboardHandler.java:235-241` shows a `GameModeSwitcherScreen` — a
+    /// four-slot hover picker with its own hotbar-style art. Cycling is the
+    /// honest subset: it reaches every mode with the same chord and needs no new
+    /// screen, and a player holding F3 and tapping F4 four times sees exactly the
+    /// same four modes the picker offers. Whoever wants the picker adds a
+    /// `Screen` variant; the action this sends does not change.
+    ///
+    /// **No permission gate.** Vanilla checks `canSwitchGameMode()` and
+    /// `GameModeCommand.PERMISSION_CHECK`; this client tracks no op level, and the
+    /// server rejects an unauthorised request as it rejects every other
+    /// optimistic action — see `targeted_command_block`'s doc for the same call.
+    pub(super) fn cycle_game_mode(&self) {
+        use lodestone_model::GameMode;
+        let Some(net) = self.sim.net() else { return };
+        let current = net
+            .shared_handle()
+            .get()
+            .cloned()
+            .and_then(|handle| handle.game_mode());
+        net.send_action(lodestone_model::action::ClientAction::ChangeGameMode {
+            mode: next_game_mode(current),
+        });
     }
 
     /// The [`lodestone_model::action::ClientSettings`] this client would send
@@ -688,5 +742,23 @@ impl WindowApp {
         }
         self.install_outline_source();
         self.install_debug_lines_source();
+    }
+}
+
+/// The next game mode in F3+F4's cycle: survival → creative → adventure →
+/// spectator → survival.
+///
+/// A free function so the cycle is testable without a window, a GPU or a live
+/// session — the same split [`crate::app::offhand_swap_action`] makes. An unknown
+/// current mode (no session, or a server that has not reported one) starts at
+/// creative, which is where a host reaching for this chord is going.
+pub(super) fn next_game_mode(current: Option<lodestone_model::GameMode>) -> lodestone_model::GameMode {
+    use lodestone_model::GameMode;
+    match current {
+        Some(GameMode::Survival) => GameMode::Creative,
+        Some(GameMode::Creative) => GameMode::Adventure,
+        Some(GameMode::Adventure) => GameMode::Spectator,
+        Some(GameMode::Spectator) => GameMode::Survival,
+        None => GameMode::Creative,
     }
 }

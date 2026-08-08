@@ -91,9 +91,21 @@ impl WindowApp {
                 self.target
                     .as_ref()
                     .map(RenderTarget::size)
-                    .and_then(|(w, h)| self.advancements_hover(w, h))
+                    .map(|(w, h)| self.advancements_hover(w, h))
             })
-            .flatten();
+            .flatten()
+            .unwrap_or_default();
+        // The live progress, read from `SessionAdvancements` and folded into the
+        // toast queue — the join that makes #167's frames, progress readouts and
+        // hidden-widget reveals real.
+        let advancement_progress = self.advancement_progress();
+        let toasted = self.advancement_toast(recipe_toast_now_ms());
+        let advancement_toast = toasted.map(|a| {
+            super::advancements_screen::advancement_toast_view(
+                a,
+                self.sim.translator().as_ref(),
+            )
+        });
         let advancements_title = advancements_open
             .then(|| {
                 let translate = self.sim.translator();
@@ -699,6 +711,9 @@ impl WindowApp {
         // `recipe_book_add` decode that does not exist yet — see the field's own
         // doc. Wired here anyway so it lights up the moment that lands.
         hud_frame.recipe_toast = recipe_toast_view(&self.recipe_toasts, recipe_toast_now_ms());
+        // The advancement-completion toast (issue #167), resolved above the
+        // field-borrow split like every other `Sim`-derived view.
+        hud_frame.advancement_toast = advancement_toast;
         // Always `Some`: `Sim::attack_strength_scale` is defined on both the
         // demo and live worlds (the ticker and the `attack_speed` attribute
         // default both exist before any server connection), unlike
@@ -930,7 +945,8 @@ impl WindowApp {
         if advancements_open
             && let Some(geo) = advancements_panel_geometry(
                 self.nav.advancements_mut(),
-                advancements_hover.as_ref().map(|(i, t)| (*i, t.as_str())),
+                &advancements_hover,
+                &advancement_progress,
                 &advancements_title,
                 container_renderer,
                 item_models,

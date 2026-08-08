@@ -568,6 +568,37 @@ pub struct RecipeToastView {
     pub visible_portion: f32,
 }
 
+/// `toast/advancement`, the completion toast's background sprite
+/// (`AdvancementToast.java:21`).
+pub const ADVANCEMENT_TOAST_SPRITE: &str = "toast/advancement";
+
+/// One advancement-completion toast (issue #167).
+///
+/// `AdvancementToast.extractRenderState` (`AdvancementToast.java:57-86`), the
+/// single-title-line branch: the type's own heading at `(30, 7)` in yellow — or
+/// `0xFFFF88FF` for a challenge — the advancement's title at `(30, 18)` in white,
+/// and its icon at `(8, 8)` unscaled, all over the same `160×32` background
+/// [`RecipeToastView`] uses.
+///
+/// **The multi-line branch is not modelled.** Vanilla alternates between the
+/// heading and the wrapped title every 1500 ms when the title does not fit 125 px;
+/// every one of 26.2's own 126 titles does fit, so the alternation is unreachable
+/// with the shipped data pack and a title longer than that degrades to its first
+/// line rather than growing a second animation clock.
+#[derive(Debug, Clone)]
+pub struct AdvancementToastView {
+    /// "Advancement Made!" / "Goal Reached!" / "Challenge Complete!", resolved.
+    pub heading: String,
+    /// The heading's colour — challenge advancements get their own.
+    pub heading_colour: [f32; 4],
+    /// The advancement's own title, resolved.
+    pub title: String,
+    /// Its icon, `None` for an id the atlas key parser rejects.
+    pub icon: Option<HotbarSlot>,
+    /// See [`RecipeToastView::visible_portion`].
+    pub visible_portion: f32,
+}
+
 /// Everything the HUD draws for one frame, bundled so the geometry builder and
 /// the GPU renderer take one argument that can grow without churning every call
 /// site. Borrows so building it per frame allocates nothing beyond the `chat`
@@ -786,6 +817,11 @@ pub struct HudFrame<'a> {
     /// toast appears the moment the decode lands, and no fake producer was
     /// added to make it light up early.
     pub recipe_toast: Option<RecipeToastView>,
+    /// The advancement-completion toast (issue #167), `Some` while one is inside
+    /// its 5000 ms window. Drawn in the same top-right slot as
+    /// [`Self::recipe_toast`] — vanilla's `ToastManager` stacks them, and this
+    /// client only ever has one queue live at a time.
+    pub advancement_toast: Option<AdvancementToastView>,
 }
 
 impl<'a> HudFrame<'a> {
@@ -823,6 +859,7 @@ impl<'a> HudFrame<'a> {
             spawn_debug: None,
             attack_cooldown: None,
             recipe_toast: None,
+            advancement_toast: None,
         }
     }
 }
@@ -1670,6 +1707,10 @@ impl HudGeometry {
         if let Some(toast) = &frame.recipe_toast {
             draw_recipe_toast(&mut b, toast);
         }
+        // The advancement-completion toast (issue #167), same slot and layer.
+        if let Some(toast) = &frame.advancement_toast {
+            draw_advancement_toast(&mut b, toast);
+        }
 
         Self {
             verts: b.verts,
@@ -1828,6 +1869,29 @@ fn draw_recipe_toast(b: &mut Builder, toast: &RecipeToastView) {
     );
     // `fakeItem(unlockedItem, 8, 8)` (`RecipeToast.java:64`), unscaled.
     b.item_icon(&toast.unlocked, tx + 8.0, ty + 8.0, ICON);
+}
+
+/// Draw one advancement-completion toast. Cited on [`AdvancementToastView`].
+fn draw_advancement_toast(b: &mut Builder, toast: &AdvancementToastView) {
+    let (tx, ty, tw, th) = recipe_toast_rect(b.w, toast.visible_portion);
+
+    let quads = b.gui_geometry(ADVANCEMENT_TOAST_SPRITE, tx, ty, tw, th);
+    if quads.is_empty() {
+        // Jar-less: vanilla's advancement toast art is a dark plate with a light
+        // border, so a dark fill keeps the yellow heading and white title legible.
+        b.rect_px(tx, ty, tw, th, [0.05, 0.05, 0.08, 0.94]);
+    } else {
+        for q in quads {
+            b.push_sprite_quad(q, [1.0, 1.0, 1.0, 1.0]);
+        }
+    }
+
+    b.text(&toast.heading, tx + 30.0, ty + 7.0, 1.0, toast.heading_colour);
+    b.text(&toast.title, tx + 30.0, ty + 18.0, 1.0, [1.0, 1.0, 1.0, 1.0]);
+    if let Some(icon) = &toast.icon {
+        // `fakeItem(iconItem, 8, 8)` (`AdvancementToast.java:84`), unscaled.
+        b.item_icon(icon, tx + 8.0, ty + 8.0, 16.0);
+    }
 }
 
 /// Draw the item icons into the nine hotbar cells. Mirrors the slot geometry of

@@ -662,6 +662,9 @@ struct WindowApp {
     /// mouse rather than of the screen — the same split
     /// [`menu_slider_drag`](Self::menu_slider_drag) already makes.
     advancements_drag: Option<(f32, f32)>,
+    /// The live advancement progress snapshot plus the completion-toast queue
+    /// (issue #167) — see [`AdvancementsFeed`](advancements_screen::AdvancementsFeed).
+    advancement_feed: advancements_screen::AdvancementsFeed,
 }
 
 #[cfg(test)]

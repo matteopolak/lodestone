@@ -1,33 +1,24 @@
 //! The Advancements screen (issue #167) — vanilla's `AdvancementsScreen`,
 //! reached from the pause menu's Advancements button.
 //!
-//! ## What is and is not built
+//! ## Where the progress comes from
 //!
-//! **Everything draws; nothing is obtained.** The tree structure, the five tabs,
-//! the tidy-tree layout, the connector lines, the frames, the icons, the tiled
-//! per-tab background, panning and the hover tooltip are all real and come from
-//! the real 26.2 data pack ([`super::advancement_data`], 126 advancements over 5
-//! roots). What no advancement has is *progress*, because nothing in this
-//! workspace decodes `UPDATE_ADVANCEMENTS`:
+//! The tree *shape* is static data ([`super::advancement_data`], the real 26.2
+//! data pack: 126 advancements over 5 roots), and the *progress* is live —
+//! `UPDATE_ADVANCEMENTS` decodes into `ClientEvent::AdvancementsUpdated`, folds
+//! into `lodestone_ecs::session::SessionAdvancements`, and reaches here as an
+//! [`AdvancementProgress`] snapshot built by [`AdvancementProgress::from_store`].
 //!
-//! - `crates/protocol/v770` has the packet id (`packet_ids.rs`) and no decode
-//!   arm, no `ClientEvent` variant, and nothing in `net.rs`'s `forward`.
-//! - The integrated server has a real `AdvancementManager` with per-player
-//!   progress and already *calls* the encode seam, but
-//!   `ServerProtocol::encode_update_advancements`'s trait default is
-//!   `ServerDirective::None` and `V770ServerProtocol` does not override it — so
-//!   even singleplayer against our own server sends nothing.
+//! **The two halves are joined by id, in one direction only.** The store carries
+//! no positions — 26.2's advancement JSON has no `x`/`y` and the server computes
+//! them with `TreeNodePosition` — so the layout is always ours, run over
+//! [`ADVANCEMENTS`], and the store is only ever *looked up* per id. Rebuilding
+//! the forest from the store's own `parent` links would give a second, unpositioned
+//! tree that disagrees with the one being drawn.
 //!
-//! So every widget draws its `*_frame_unobtained` sprite. That is the same trade
-//! the Statistics screen made (#188) and it is the **true** state, not a
-//! placeholder: a freshly created vanilla world's own Advancements screen looks
-//! exactly like this.
-//!
-//! The one thing this costs is that [`AdvancementsState`] carries no progress
-//! map. When the decode lands, the shape to add is
-//! `obtained: HashSet<&'static str>` plus a per-advancement completed-criteria
-//! count; [`advancement_frame_sprite`] and [`progress_text`] already take the
-//! `obtained` flag and the count, so the draw needs no restructuring.
+//! An empty store therefore draws exactly what it drew before the wire landed:
+//! every widget unobtained, no progress readouts. That is the true state of a
+//! fresh world, not a placeholder.
 //!
 //! ## Geometry
 //!
@@ -115,8 +106,135 @@ const ICON_DY: f32 = 5.0;
 /// and the hit region, kept.
 const HIT_SIZE: f32 = 26.0;
 
-/// `advancements/title_box`, the hover tooltip's background (`:25`).
+/// `advancements/title_box`, the description panel behind the hover tooltip
+/// (`AdvancementWidget.java:25`, blitted at `:233`/`:235`).
 const SPRITE_TITLE_BOX: &str = "advancements/title_box";
+/// `AdvancementWidgetType::boxSprite` — the hover tooltip's *title bar*, which
+/// splits into an obtained and an unobtained half at the progress fraction.
+const SPRITE_BOX_OBTAINED: &str = "advancements/box_obtained";
+/// See [`SPRITE_BOX_OBTAINED`].
+const SPRITE_BOX_UNOBTAINED: &str = "advancements/box_unobtained";
+
+/// One text line's height, vanilla's font line advance.
+const LINE_H: f32 = 9.0;
+/// `TITLE_MAX_WIDTH` (`AdvancementWidget.java:38`) — the wrap width for the
+/// title.
+const TITLE_MAX_WIDTH: f32 = 163.0;
+/// `TITLE_MIN_WIDTH` (`:39`).
+const TITLE_MIN_WIDTH: f32 = 80.0;
+/// `TITLE_PADDING_LEFT`/`RIGHT`/`TOP`/`BOTTOM` (`:33-37`).
+const TITLE_PAD_LEFT: f32 = 3.0;
+/// See [`TITLE_PAD_LEFT`].
+const TITLE_PAD_RIGHT: f32 = 5.0;
+/// See [`TITLE_PAD_LEFT`].
+const TITLE_PAD_TOP: f32 = 9.0;
+/// See [`TITLE_PAD_LEFT`].
+const TITLE_PAD_BOTTOM: f32 = 8.0;
+/// `TITLE_X` (`:35`) — where the title text starts inside a right-side box.
+const TITLE_TEXT_X: f32 = 32.0;
+/// `findOptimalLines`' candidate margins (`:40`), tried in order.
+const TEST_SPLIT_OFFSETS: [f32; 5] = [0.0, 10.0, -10.0, 25.0, -25.0];
+/// `-16711936` (`:274`/`:276`) — `0xFF00FF00`, the description's green.
+const DESCRIPTION_COLOUR: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+/// `-1`, white, for the title and the progress readout.
+const HOVER_TEXT_COLOUR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+/// Every advancement's progress, resolved by id against [`ADVANCEMENTS`].
+///
+/// Built per frame from `SessionAdvancements` while the screen is open — see the
+/// module doc for why the join goes this way round and never the other.
+#[derive(Debug, Clone, Default)]
+pub struct AdvancementProgress {
+    entries: std::collections::HashMap<&'static str, NodeProgress>,
+}
+
+/// One advancement's progress, in the units vanilla's readouts use.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct NodeProgress {
+    /// Completed requirement **groups** — `AdvancementProgress`'s own
+    /// `countCompletedRequirements`, which is an AND-of-ORs count and *not* the
+    /// number of obtained criteria.
+    pub done: u32,
+    /// How many groups the server declared. `0` until a node arrives.
+    pub total: u32,
+    /// `AdvancementProgress::isDone`.
+    pub obtained: bool,
+}
+
+impl NodeProgress {
+    /// `getPercent()`: completed groups over declared groups, `0.0` with none.
+    #[must_use]
+    pub fn percent(self) -> f32 {
+        if self.total == 0 {
+            return 0.0;
+        }
+        self.done as f32 / self.total as f32
+    }
+}
+
+impl AdvancementProgress {
+    /// Resolve every [`ADVANCEMENTS`] entry against the session store.
+    ///
+    /// The `total` comes from the **server's** `requirements` when the node
+    /// arrived and falls back to the data pack's own `requirement_count`, so a
+    /// tree the server has not sent still shows the right denominator.
+    #[must_use]
+    pub fn from_store(store: &lodestone_game::advancement::AdvancementStore) -> Self {
+        let mut entries = std::collections::HashMap::new();
+        for advancement in ADVANCEMENTS {
+            let Ok(id) = advancement.id.parse::<lodestone_model::Identifier>() else {
+                continue;
+            };
+            let Some(node) = store.get(&id) else { continue };
+            let progress = store.progress(&id);
+            let done = progress.map_or(0, |p| {
+                node.requirements
+                    .iter()
+                    .filter(|group| group.iter().any(|name| p.is_criterion_done(name)))
+                    .count() as u32
+            });
+            let total = if node.requirements.is_empty() {
+                advancement.requirement_count
+            } else {
+                node.requirements.len() as u32
+            };
+            entries.insert(
+                advancement.id,
+                NodeProgress {
+                    done,
+                    total,
+                    obtained: store.completion(&id).unwrap_or(false),
+                },
+            );
+        }
+        Self { entries }
+    }
+
+    /// One advancement's progress; all-zero for an id the server never sent.
+    #[must_use]
+    pub fn get(&self, id: &str) -> NodeProgress {
+        self.entries.get(id).copied().unwrap_or_default()
+    }
+
+    /// Whether an advancement is complete.
+    #[must_use]
+    pub fn obtained(&self, id: &str) -> bool {
+        self.get(id).obtained
+    }
+
+    /// How many advancements are complete — the toast queue's own seed check,
+    /// and a cheap "has the server told us anything" probe.
+    #[must_use]
+    pub fn obtained_count(&self) -> usize {
+        self.entries.values().filter(|p| p.obtained).count()
+    }
+
+    /// Whether the server has sent any node at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
 
 /// Vanilla's `-1` (white) for the foreground connector line and `-16777216`
 /// (black) for the wider shadow underneath it (`AdvancementWidget.java:132`).
@@ -125,15 +243,22 @@ const LINE_FG: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const LINE_BG: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 /// `extractTooltips`' `fill(0, 0, 234, 113, floor(fade * 255) << 24)`
-/// (`AdvancementTab.java:150`) at its `0.3` ceiling — the viewport dims while a
-/// widget is hovered. The fade *animation* is not modelled (it needs a per-frame
-/// tick this screen has no hook for); it snaps to the ceiling instead, which is
-/// what a player sees a fifth of a second later anyway.
-const HOVER_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.3];
+/// (`AdvancementTab.java:150`): the viewport dims while a widget is hovered.
+/// [`FADE_CEILING`] is the alpha it reaches; the ramp is
+/// [`AdvancementsState::tick_fade`].
+const HOVER_DIM_RGB: [f32; 3] = [0.0, 0.0, 0.0];
+/// `Mth.clamp(fade + 0.06F, 0.0F, 0.3F)` (`AdvancementTab.java:98`) — the rise
+/// per frame and its ceiling.
+const FADE_RISE: f32 = 0.06;
+/// See [`FADE_RISE`].
+const FADE_CEILING: f32 = 0.3;
+/// `Mth.clamp(fade - 0.12F, 0.0F, 1.0F)` (`:100`) — twice as fast out as in.
+const FADE_FALL: f32 = 0.12;
 
 /// Every advancements sprite id, for [`crate::container`]'s own GUI atlas — the
-/// twelve `ABOVE` tab variants, the six frames, and the title box.
-pub(crate) const ADVANCEMENT_SPRITES: [&str; 13] = [
+/// six `ABOVE` tab variants, the six frames, the description panel and the two
+/// title-bar boxes.
+pub(crate) const ADVANCEMENT_SPRITES: [&str; 15] = [
     "advancements/tab_above_left",
     "advancements/tab_above_middle",
     "advancements/tab_above_right",
@@ -147,6 +272,8 @@ pub(crate) const ADVANCEMENT_SPRITES: [&str; 13] = [
     "advancements/challenge_frame_unobtained",
     "advancements/challenge_frame_obtained",
     SPRITE_TITLE_BOX,
+    SPRITE_BOX_OBTAINED,
+    SPRITE_BOX_UNOBTAINED,
 ];
 
 /// `advancements/{task,goal,challenge}_frame_{obtained,unobtained}` for `frame`.
@@ -184,6 +311,11 @@ pub struct AdvancementsState {
     /// yet — [`Self::scroll_for`] centres it on first read, which is vanilla's
     /// `centered` latch.
     scroll: Vec<Option<(f32, f32)>>,
+    /// `AdvancementTab::fade`, in `0.0..=FADE_CEILING`. Shared across tabs
+    /// rather than per-tab: only one tab is ever hovered, and vanilla's own
+    /// per-tab copy is unobservable because switching tabs also clears the
+    /// hover.
+    fade: f32,
 }
 
 impl AdvancementsState {
@@ -228,6 +360,26 @@ impl AdvancementsState {
     /// the scroll lives on the `AdvancementTab` and not the screen.
     pub fn select_tab(&mut self, index: usize) {
         self.tab = index;
+    }
+
+    /// Advance the hover fade one frame, and return the alpha to dim with.
+    ///
+    /// `AdvancementTab.extractHovers` (`:97-104`). Deliberately per *frame* and
+    /// not per tick, matching vanilla — the ramp is framerate-dependent there
+    /// too, and at 60 fps it reaches the ceiling in five frames.
+    pub fn tick_fade(&mut self, hovering: bool) -> f32 {
+        self.fade = if hovering {
+            (self.fade + FADE_RISE).clamp(0.0, FADE_CEILING)
+        } else {
+            (self.fade - FADE_FALL).clamp(0.0, 1.0)
+        };
+        self.fade
+    }
+
+    /// The current fade alpha without advancing it.
+    #[must_use]
+    pub fn fade(&self) -> f32 {
+        self.fade
     }
 }
 
@@ -276,9 +428,15 @@ pub struct AdvancementsLayout {
 
 /// Builds [`AdvancementsLayout`] against an explicit `gui_scale` (`0` = auto) —
 /// the same triple the draw uses, one expression for both.
+///
+/// `progress` decides which hidden advancements are visible: vanilla's
+/// `extractRenderState` gate is `!isHidden() || progress.isDone()`
+/// (`AdvancementWidget.java:155`), so a hidden node appears the moment it is
+/// obtained and its connector appears with it.
 #[must_use]
 pub fn advancements_layout(
     state: &mut AdvancementsState,
+    progress: &AdvancementProgress,
     gui_scale: u32,
     width: u32,
     height: u32,
@@ -300,7 +458,7 @@ pub fn advancements_layout(
 
     let mut widgets = Vec::new();
     for (i, node) in tree.nodes.iter().enumerate() {
-        if node.advancement.hidden {
+        if !is_visible(node.advancement, progress) {
             continue;
         }
         let (nx, ny) = node_origin(node.x, node.y);
@@ -316,6 +474,11 @@ pub fn advancements_layout(
     }
 
     Some(AdvancementsLayout { window, inside, tabs, widgets, tree, scroll })
+}
+
+/// `!display.isHidden() || progress.isDone()`.
+fn is_visible(advancement: &Advancement, progress: &AdvancementProgress) -> bool {
+    !advancement.hidden || progress.obtained(advancement.id)
 }
 
 fn overlaps(a: Rect, b: Rect) -> bool {
@@ -370,7 +533,8 @@ pub fn advancements_hit_test(
     inside_rect(layout.window, px, py).then_some(AdvancementsHit::Window)
 }
 
-/// Everything the draw needs that this module cannot derive: resolved text.
+/// Everything the draw needs that this module cannot derive: resolved text and
+/// live progress.
 #[derive(Debug, Clone, Copy)]
 pub struct AdvancementsView<'a> {
     /// The selected tab's title, already through the language table.
@@ -380,6 +544,12 @@ pub struct AdvancementsView<'a> {
     pub hovered: Option<usize>,
     /// The hovered widget's title, resolved. Empty draws no box.
     pub hovered_title: &'a str,
+    /// The hovered widget's description, resolved. May be empty.
+    pub hovered_description: &'a str,
+    /// The local player's progress, from `SessionAdvancements`.
+    pub progress: &'a AdvancementProgress,
+    /// This frame's hover fade, from [`AdvancementsState::tick_fade`].
+    pub fade: f32,
 }
 
 /// The pieces of one frame's tree draw that are pure geometry over
@@ -395,13 +565,13 @@ struct DrawPlan {
     background: Option<&'static str>,
     /// Connector segments, `(rect, is_shadow)`, **shadows first**.
     lines: Vec<(Rect, bool)>,
-    /// Per visible widget: the frame rect, its icon stack, and the icon's
-    /// top-left.
-    frames: Vec<(Rect, ItemStack, (f32, f32))>,
+    /// Per visible widget: the frame rect, its sprite id, its icon stack, and
+    /// the icon's top-left.
+    frames: Vec<(Rect, &'static str, ItemStack, (f32, f32))>,
 }
 
 /// Assembles [`DrawPlan`] for `layout`.
-fn draw_plan(layout: &AdvancementsLayout) -> DrawPlan {
+fn draw_plan(layout: &AdvancementsLayout, progress: &AdvancementProgress) -> DrawPlan {
     let (sx, sy) = layout.scroll;
     let origin = (layout.inside.x, layout.inside.y);
 
@@ -426,7 +596,7 @@ fn draw_plan(layout: &AdvancementsLayout) -> DrawPlan {
     for shadow in [true, false] {
         for node in &layout.tree.nodes {
             let Some(parent) = node.parent else { continue };
-            if node.advancement.hidden {
+            if !is_visible(node.advancement, progress) {
                 continue;
             }
             let (px, py) = node_origin(layout.tree.nodes[parent].x, layout.tree.nodes[parent].y);
@@ -469,6 +639,10 @@ fn draw_plan(layout: &AdvancementsLayout) -> DrawPlan {
         };
         frames.push((
             Rect { x: rect.x + FRAME_DX, y: rect.y, w: FRAME_SIZE, h: FRAME_SIZE },
+            advancement_frame_sprite(
+                node.advancement.frame,
+                progress.obtained(node.advancement.id),
+            ),
             ItemStack::new(id, 1),
             (rect.x + ICON_DX, rect.y + ICON_DY),
         ));
@@ -505,17 +679,244 @@ fn clamp_to(r: &mut Rect, clip: Rect) -> bool {
     true
 }
 
-/// The hover tooltip's geometry: the title box and where its text goes.
+/// Word-wrap `text` to `max_px` against `measure`. Never returns an empty vector.
 ///
-/// `drawHover`'s title bar (`AdvancementWidget.java:190-270`): the box starts at
-/// the widget's own origin, is `TITLE_X = 32` wide of icon plus
-/// `TITLE_PADDING_RIGHT = 5`, and never narrower than `TITLE_MIN_WIDTH = 80`. Only
-/// the single-line case is modelled — the multi-line description panel needs the
-/// `findOptimalLines` splitter, which is a text-layout job of its own.
-fn hover_plan(layout: &AdvancementsLayout, hovered: usize, title_width: f32) -> Option<(Rect, (f32, f32))> {
+/// A plain greedy wrap, which is what vanilla's `StringSplitter::splitLines`
+/// reduces to for the unstyled, single-`Style` strings this screen hands it.
+fn wrap(measure: &dyn Fn(&str) -> f32, text: &str, max_px: f32) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let candidate = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{current} {word}")
+        };
+        if measure(&candidate) <= max_px || current.is_empty() {
+            current = candidate;
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current = word.to_string();
+        }
+    }
+    lines.push(current);
+    lines
+}
+
+/// `findOptimalLines` (`AdvancementWidget.java:96-115`): wrap at five candidate
+/// widths and keep the one whose longest line lands closest to `preferred`,
+/// returning early on anything within 10 px.
+///
+/// This is what stops a two-word second line — a greedy wrap at one width
+/// produces "…and then\nthis", and the offsets let it find a squarer block.
+fn find_optimal_lines(
+    measure: &dyn Fn(&str) -> f32,
+    text: &str,
+    preferred: f32,
+) -> Vec<String> {
+    let mut best: Option<(f32, Vec<String>)> = None;
+    for margin in TEST_SPLIT_OFFSETS {
+        let split = wrap(measure, text, preferred - margin);
+        let longest = split.iter().map(|l| measure(l)).fold(0.0f32, f32::max);
+        let distance = (longest - preferred).abs();
+        if distance <= 10.0 {
+            return split;
+        }
+        if best.as_ref().is_none_or(|(d, _)| distance < *d) {
+            best = Some((distance, split));
+        }
+    }
+    best.map(|(_, split)| split).unwrap_or_default()
+}
+
+/// The hover tooltip's wrapped text and its overall box width — vanilla's
+/// `AdvancementWidget` constructor (`:55-79`), which computes all of this once
+/// per widget. We compute it for the one hovered widget per frame instead, which
+/// is the same work spread differently and needs no per-widget cache.
+#[derive(Debug, Clone, Default)]
+struct HoverText {
+    title: Vec<String>,
+    description: Vec<String>,
+    /// `getProgressText()`, `None` for a single-group advancement.
+    progress: Option<String>,
+    /// The box width: `longestDescLine + TITLE_PADDING_LEFT + TITLE_PADDING_RIGHT`.
+    width: f32,
+}
+
+fn hover_text(
+    measure: &dyn Fn(&str) -> f32,
+    node: &NodeProgress,
+    title: &str,
+    description: &str,
+) -> HoverText {
+    let title_lines = wrap(measure, title, TITLE_MAX_WIDTH);
+    let title_width = title_lines
+        .iter()
+        .map(|l| measure(l))
+        .fold(0.0f32, f32::max)
+        .max(TITLE_MIN_WIDTH);
+    // `getMaxProgressWidth`: the width of the *widest possible* readout
+    // (`total/total`), plus 8 px of spacing — not the current one, so the box
+    // does not resize as criteria tick over.
+    let max_progress_width = if node.total <= 1 {
+        0.0
+    } else {
+        measure(&format!("{}/{}", node.total, node.total)) + 8.0
+    };
+    // `longestDescLine = 29 + titleWidth + maxProgressWidth`, then grown by any
+    // description line that overflows it.
+    let preferred = 29.0 + title_width + max_progress_width;
+    let description_lines = find_optimal_lines(measure, description, preferred);
+    let longest = description_lines
+        .iter()
+        .map(|l| measure(l))
+        .fold(preferred, f32::max);
+    HoverText {
+        title: title_lines,
+        description: description_lines,
+        progress: progress_text(node.done, node.total),
+        width: longest + TITLE_PAD_LEFT + TITLE_PAD_RIGHT,
+    }
+}
+
+/// One frame of hover-tooltip geometry, in absolute canvas pixels.
+struct HoverPlan {
+    /// The `advancements/title_box` panel behind the description, absent when
+    /// there is no description.
+    panel: Option<Rect>,
+    /// The title bar, as one or two `(rect, obtained)` pieces — the split is
+    /// vanilla's progress bar, and a partially-complete advancement really does
+    /// draw two different sprites butted together.
+    bars: Vec<(Rect, bool)>,
+    /// The icon frame, redrawn over the bar.
+    frame: (Rect, &'static str),
+    /// The icon's top-left.
+    icon_at: (f32, f32),
+    /// The title block's top-left.
+    title_at: (f32, f32),
+    /// The progress readout's top-left, already right-aligned.
+    progress_at: Option<(f32, f32)>,
+    /// The description block's top-left.
+    description_at: (f32, f32),
+}
+
+/// `extractHover` (`AdvancementWidget.java:185-280`), including its two
+/// flips: `leftSide` when the box would run off the screen's right edge, and
+/// `topSide` when the description would run past the viewport's bottom.
+fn hover_plan(
+    layout: &AdvancementsLayout,
+    hovered: usize,
+    text: &HoverText,
+    frame: AdvancementFrame,
+    node: &NodeProgress,
+    measure: &dyn Fn(&str) -> f32,
+    canvas_w: f32,
+) -> Option<HoverPlan> {
     let (_, rect) = layout.widgets.iter().find(|(i, _)| *i == hovered)?;
-    let w = (title_width + 32.0 + 5.0).max(80.0);
-    Some((Rect { x: rect.x, y: rect.y, w, h: FRAME_SIZE }, (rect.x + 32.0, rect.y + 9.0)))
+    let width = text.width;
+
+    let title_bar_h = LINE_H * text.title.len() as f32 + TITLE_PAD_TOP + TITLE_PAD_BOTTOM;
+    let title_top = rect.y + ((FRAME_SIZE - title_bar_h) / 2.0).floor();
+    let title_bar_bottom = title_top + title_bar_h;
+    let description_text_h = LINE_H * text.description.len() as f32;
+    // `6 + descriptionTextHeight` — the panel's own vertical padding.
+    let description_h = 6.0 + description_text_h;
+    let left_side = rect.x + width + FRAME_SIZE >= canvas_w;
+    let top_side = title_bar_bottom + description_h >= layout.inside.y + INSIDE_H;
+
+    // The four-way split at `:196-220`. `firstHalfWidth < 2` and `> width - 2`
+    // both collapse to a single full-width bar, so a barely-started or
+    // nearly-finished advancement does not draw a 1 px sliver.
+    let amount = node.percent();
+    let mut first_w = (amount * width).floor();
+    let (first_obtained, second_obtained, frame_obtained) = if amount >= 1.0 {
+        first_w = width / 2.0;
+        (true, true, true)
+    } else if first_w < 2.0 {
+        first_w = width / 2.0;
+        (false, false, false)
+    } else if first_w > width - 2.0 {
+        first_w = width / 2.0;
+        (true, true, false)
+    } else {
+        (true, false, false)
+    };
+
+    let title_left = if left_side {
+        rect.x - width + FRAME_SIZE + 6.0
+    } else {
+        rect.x
+    };
+    let panel_top = if top_side {
+        title_bar_bottom - (title_bar_h + description_h)
+    } else {
+        title_top
+    };
+
+    let mut bars = Vec::new();
+    if first_obtained == second_obtained {
+        bars.push((
+            Rect { x: title_left, y: title_top, w: width, h: title_bar_h },
+            first_obtained,
+        ));
+    } else {
+        bars.push((
+            Rect { x: title_left, y: title_top, w: first_w, h: title_bar_h },
+            first_obtained,
+        ));
+        bars.push((
+            Rect {
+                x: title_left + first_w,
+                y: title_top,
+                w: width - first_w,
+                h: title_bar_h,
+            },
+            second_obtained,
+        ));
+    }
+
+    let description_left = title_left + TITLE_PAD_RIGHT;
+    let title_at = if left_side {
+        (description_left, title_top + TITLE_PAD_TOP)
+    } else {
+        (rect.x + TITLE_TEXT_X, title_top + TITLE_PAD_TOP)
+    };
+    // Right-aligned, so the *current* readout's own width is what matters — not
+    // the widest-possible one the box was sized from.
+    let progress_at = text.progress.as_ref().map(|p| {
+        let pw = measure(p);
+        if left_side {
+            (rect.x - pw, title_top + TITLE_PAD_TOP)
+        } else {
+            (rect.x + width - pw - TITLE_PAD_RIGHT, title_top + TITLE_PAD_TOP)
+        }
+    });
+    let description_at = if top_side {
+        (description_left, title_top - description_text_h + 1.0)
+    } else {
+        (description_left, title_bar_bottom)
+    };
+
+    Some(HoverPlan {
+        panel: (!text.description.iter().all(String::is_empty)).then_some(Rect {
+            x: title_left,
+            y: panel_top,
+            w: width,
+            h: title_bar_h + description_h,
+        }),
+        bars,
+        frame: (
+            Rect { x: rect.x + FRAME_DX, y: rect.y, w: FRAME_SIZE, h: FRAME_SIZE },
+            advancement_frame_sprite(frame, frame_obtained),
+        ),
+        icon_at: (rect.x + ICON_DX, rect.y + ICON_DY),
+        title_at,
+        progress_at,
+        description_at,
+    })
 }
 
 /// Builds one frame of Advancements-screen geometry.
@@ -539,7 +940,27 @@ pub fn advancements_geometry(
     let assets = IconAssets { items, models };
     let (w, h) = crate::menu::render::logical_canvas(gui_scale, width, height);
     let mut b = Builder::new(w, h, font);
-    let plan = draw_plan(layout);
+    let plan = draw_plan(layout, view.progress);
+    // One measure closure for every text decision below, so the wrap, the box
+    // width and the right-alignment all agree. With no font attached every string
+    // measures zero, which collapses the box to its `TITLE_MIN_WIDTH` floor
+    // rather than to nothing.
+    let measure = |s: &str| font.map_or(0.0, |f| f.width(s, 1.0));
+    let hover = view.hovered.and_then(|i| {
+        let node = layout.tree.nodes.get(i)?;
+        let progress = view.progress.get(node.advancement.id);
+        let text = hover_text(&measure, &progress, view.hovered_title, view.hovered_description);
+        let plan = hover_plan(
+            layout,
+            i,
+            &text,
+            node.advancement.frame,
+            &progress,
+            &measure,
+            w,
+        )?;
+        Some((text, plan))
+    });
 
     // The same full-canvas dim every in-game screen draws, in its own leading
     // pass — `ContainerGeometry::dim_vertex_count`.
@@ -606,14 +1027,25 @@ pub fn advancements_geometry(
         tab_sprite(layout_tab(layout), true),
         layout.tabs[layout_tab(layout)],
     );
-    for (rect, _, _) in &plan.frames {
-        push_sprite(&mut b, background, frame_sprite_for(layout, *rect), *rect);
+    for (rect, sprite, _, _) in &plan.frames {
+        push_sprite(&mut b, background, sprite, *rect);
     }
-    if let Some(hovered) = view.hovered
-        && let Some((box_rect, _)) =
-            hover_plan(layout, hovered, font.map_or(0.0, |f| f.width(view.hovered_title, 1.0)))
-    {
-        push_sprite(&mut b, background, SPRITE_TITLE_BOX, box_rect);
+    // The hover tooltip's own sprites: description panel, then the title bar over
+    // it, then the icon frame redrawn on top — `extractHover`'s order, and the
+    // reason the frame is drawn twice per hovered widget.
+    if let Some((_, hover)) = &hover {
+        if let Some(panel) = hover.panel {
+            push_sprite(&mut b, background, SPRITE_TITLE_BOX, panel);
+        }
+        for (rect, obtained) in &hover.bars {
+            let sprite = if *obtained {
+                SPRITE_BOX_OBTAINED
+            } else {
+                SPRITE_BOX_UNOBTAINED
+            };
+            push_sprite(&mut b, background, sprite, *rect);
+        }
+        push_sprite(&mut b, background, hover.frame.1, hover.frame.0);
     }
     let bg_slot_floats = b.bg_verts.len();
 
@@ -631,14 +1063,15 @@ pub fn advancements_geometry(
         );
     }
     // The hover dim over the viewport, before the icons so a hovered
-    // advancement's own icon stays bright.
-    if view.hovered.is_some() {
+    // advancement's own icon stays bright. Ramped by `tick_fade`, so it also
+    // draws for the few frames *after* the pointer leaves a widget.
+    if view.fade > 0.0 {
         b.rect_px(
             layout.inside.x,
             layout.inside.y,
             layout.inside.w,
             layout.inside.h,
-            HOVER_DIM,
+            [HOVER_DIM_RGB[0], HOVER_DIM_RGB[1], HOVER_DIM_RGB[2], view.fade],
         );
     }
     if !view.title.is_empty() {
@@ -654,7 +1087,7 @@ pub fn advancements_geometry(
 
     // ---- the chrome/icon split ----
 
-    for (_, stack, at) in &plan.frames {
+    for (_, _, stack, at) in &plan.frames {
         b.draw_stack(&assets, stack, at.0, at.1);
     }
     let tab_roots = advancement_tabs();
@@ -670,12 +1103,42 @@ pub fn advancements_geometry(
             rect.y + TAB_ICON_DY,
         );
     }
-    if let Some(hovered) = view.hovered
-        && !view.hovered_title.is_empty()
-        && let Some((_, text_at)) =
-            hover_plan(layout, hovered, font.map_or(0.0, |f| f.width(view.hovered_title, 1.0)))
-    {
-        b.shadowed_label(view.hovered_title, text_at.0, text_at.1, 1.0, [1.0, 1.0, 1.0, 1.0]);
+    // The tooltip text, and the hovered widget's icon redrawn over its own frame.
+    if let Some((text, hover)) = &hover {
+        for (i, line) in text.title.iter().enumerate() {
+            b.label(
+                line,
+                hover.title_at.0,
+                hover.title_at.1 + LINE_H * i as f32,
+                1.0,
+                HOVER_TEXT_COLOUR,
+            );
+        }
+        if let (Some(readout), Some(at)) = (&text.progress, hover.progress_at) {
+            b.label(readout, at.0, at.1, 1.0, HOVER_TEXT_COLOUR);
+        }
+        for (i, line) in text.description.iter().enumerate() {
+            b.label(
+                line,
+                hover.description_at.0,
+                hover.description_at.1 + LINE_H * i as f32,
+                1.0,
+                DESCRIPTION_COLOUR,
+            );
+        }
+        let icon = layout
+            .tree
+            .nodes
+            .get(view.hovered.unwrap_or(0))
+            .and_then(|n| n.advancement.icon.parse::<lodestone_model::Identifier>().ok());
+        if let Some(id) = icon {
+            b.draw_stack(
+                &assets,
+                &ItemStack::new(id, 1),
+                hover.icon_at.0,
+                hover.icon_at.1,
+            );
+        }
     }
 
     // Nothing here draws a carried stack, so the slot stratum runs to the end of
@@ -722,19 +1185,6 @@ fn layout_tab(layout: &AdvancementsLayout) -> usize {
         .min(count.saturating_sub(1))
 }
 
-/// Which frame sprite `rect` belongs to, by looking it back up in the plan. A
-/// small indirection so the sprite id and the rect are produced in one place
-/// ([`draw_plan`]) and consumed in another without a second dispatch on frame
-/// type.
-fn frame_sprite_for(layout: &AdvancementsLayout, rect: Rect) -> &'static str {
-    for (i, r) in &layout.widgets {
-        if (r.x + FRAME_DX - rect.x).abs() < 0.001 && (r.y - rect.y).abs() < 0.001 {
-            return advancement_frame_sprite(layout.tree.nodes[*i].advancement.frame, false);
-        }
-    }
-    advancement_frame_sprite(AdvancementFrame::Task, false)
-}
-
 fn push_sprite(
     b: &mut Builder<'_>,
     background: Option<&ContainerBackground>,
@@ -768,6 +1218,101 @@ pub fn tab_sprite(index: usize, selected: bool) -> &'static str {
 /// `AdvancementTabType.ABOVE`'s `max` (`AdvancementTabType.java:21`).
 const TAB_MAX: usize = 8;
 
+/// `AdvancementToast.DISPLAY_TIME` (`AdvancementToast.java:22`), milliseconds.
+pub const TOAST_DISPLAY_MS: u64 = 5000;
+
+/// Newly-completed advancements, queued for the HUD toast.
+///
+/// ## The seed is the whole design
+///
+/// Vanilla's `ClientAdvancements` fires a toast from `onUpdateAdvancementProgress`,
+/// which the server only calls for a *change*. Our side sees a snapshot instead,
+/// and the join packet's `reset` batch carries every advancement already earned —
+/// so a naive "obtained now, not obtained last frame" test would fire sixty toasts
+/// at once on entering a long-played world. The first non-empty observation is
+/// therefore adopted silently, and only later transitions toast.
+#[derive(Debug, Clone, Default)]
+pub struct AdvancementToastQueue {
+    obtained: std::collections::HashSet<&'static str>,
+    pending: std::collections::VecDeque<&'static Advancement>,
+    /// Whether the join batch has been adopted. Stays `false` while the store is
+    /// empty, so a session that has not received `UPDATE_ADVANCEMENTS` yet does
+    /// not treat the *first* real advancement as a seed.
+    seeded: bool,
+    shown_at_ms: Option<u64>,
+}
+
+impl AdvancementToastQueue {
+    /// Fold this frame's progress snapshot.
+    pub fn observe(&mut self, progress: &AdvancementProgress) {
+        if progress.is_empty() {
+            return;
+        }
+        let now: std::collections::HashSet<&'static str> = ADVANCEMENTS
+            .iter()
+            .filter(|a| progress.obtained(a.id))
+            .map(|a| a.id)
+            .collect();
+        if !self.seeded {
+            self.seeded = true;
+            self.obtained = now;
+            return;
+        }
+        for advancement in ADVANCEMENTS {
+            if now.contains(&advancement.id) && !self.obtained.contains(&advancement.id) {
+                self.pending.push_back(advancement);
+            }
+        }
+        self.obtained = now;
+    }
+
+    /// The advancement whose toast should be on screen at `now_ms`, retiring one
+    /// that has had its [`TOAST_DISPLAY_MS`].
+    pub fn current(&mut self, now_ms: u64) -> Option<&'static Advancement> {
+        match self.shown_at_ms {
+            Some(started) if now_ms.saturating_sub(started) >= TOAST_DISPLAY_MS => {
+                self.pending.pop_front();
+                self.shown_at_ms = None;
+            }
+            Some(_) => {}
+            None => {}
+        }
+        let front = *self.pending.front()?;
+        if self.shown_at_ms.is_none() {
+            self.shown_at_ms = Some(now_ms);
+        }
+        Some(front)
+    }
+
+    /// How many toasts are waiting, the shown one included.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Whether nothing is queued.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+}
+
+/// The `advancements.toast.{task,goal,challenge}` heading for a frame type, and
+/// its colour: `-30465` (`0xFFFF88FF`) for a challenge, `-256` (yellow) otherwise
+/// (`AdvancementToast.java:63-65`).
+#[must_use]
+pub fn toast_heading(frame: AdvancementFrame) -> (&'static str, &'static str, [f32; 4]) {
+    const CHALLENGE: [f32; 4] = [1.0, 0x88 as f32 / 255.0, 1.0, 1.0];
+    const OTHER: [f32; 4] = [1.0, 1.0, 0.0, 1.0];
+    match frame {
+        AdvancementFrame::Task => ("advancements.toast.task", "Advancement Made!", OTHER),
+        AdvancementFrame::Goal => ("advancements.toast.goal", "Goal Reached!", OTHER),
+        AdvancementFrame::Challenge => {
+            ("advancements.toast.challenge", "Challenge Complete!", CHALLENGE)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,9 +1322,10 @@ mod tests {
         let tabs = advancement_tabs();
         assert_eq!(tabs.len(), 5);
         let mut state = AdvancementsState::default();
+        let progress = AdvancementProgress::default();
         for i in 0..tabs.len() {
             state.select_tab(i);
-            let layout = advancements_layout(&mut state, 2, 1280, 720)
+            let layout = advancements_layout(&mut state, &progress, 2, 1280, 720)
                 .unwrap_or_else(|| panic!("tab {i} has no layout"));
             assert!(!layout.tree.nodes.is_empty());
             assert_eq!(layout.tabs.len(), 5);
@@ -793,7 +1339,8 @@ mod tests {
     #[test]
     fn a_click_on_each_tab_resolves_to_that_tab() {
         let mut state = AdvancementsState::default();
-        let layout = advancements_layout(&mut state, 1, 1280, 720).expect("a layout");
+        let progress = AdvancementProgress::default();
+        let layout = advancements_layout(&mut state, &progress, 1, 1280, 720).expect("a layout");
         for (i, r) in layout.tabs.iter().enumerate() {
             let hit = advancements_hit_test(
                 &layout,
@@ -810,7 +1357,8 @@ mod tests {
     #[test]
     fn a_click_on_a_widget_resolves_to_that_advancement() {
         let mut state = AdvancementsState::default();
-        let layout = advancements_layout(&mut state, 1, 1280, 720).expect("a layout");
+        let progress = AdvancementProgress::default();
+        let layout = advancements_layout(&mut state, &progress, 1, 1280, 720).expect("a layout");
         let mut resolved = 0;
         for (i, r) in &layout.widgets {
             // Probe the centre of the part that is actually *inside* the
@@ -849,7 +1397,8 @@ mod tests {
     #[test]
     fn panning_is_clamped_to_the_tree() {
         let mut state = AdvancementsState::default();
-        let layout = advancements_layout(&mut state, 1, 1280, 720).expect("a layout");
+        let progress = AdvancementProgress::default();
+        let layout = advancements_layout(&mut state, &progress, 1, 1280, 720).expect("a layout");
         let tree = layout.tree.clone();
         let bounds = tree_bounds(&tree);
         let before = state.scroll_for(&tree);
@@ -886,8 +1435,9 @@ mod tests {
     #[test]
     fn the_tile_grid_covers_the_whole_viewport() {
         let mut state = AdvancementsState::default();
-        let layout = advancements_layout(&mut state, 1, 1280, 720).expect("a layout");
-        let plan = draw_plan(&layout);
+        let progress = AdvancementProgress::default();
+        let layout = advancements_layout(&mut state, &progress, 1, 1280, 720).expect("a layout");
+        let plan = draw_plan(&layout, &progress);
         assert!(plan.background.is_some(), "the root carries a background");
         // 17 columns x 10 rows, and the union must cover the viewport with the
         // seam off-screen at both ends.
@@ -901,10 +1451,11 @@ mod tests {
     #[test]
     fn every_connector_line_stays_inside_the_viewport() {
         let mut state = AdvancementsState::default();
+        let progress = AdvancementProgress::default();
         for i in 0..advancement_tabs().len() {
             state.select_tab(i);
-            let layout = advancements_layout(&mut state, 1, 1280, 720).expect("a layout");
-            let plan = draw_plan(&layout);
+            let layout = advancements_layout(&mut state, &progress, 1, 1280, 720).expect("a layout");
+            let plan = draw_plan(&layout, &progress);
             assert!(!plan.lines.is_empty(), "tab {i} has no connectors");
             for (r, _) in &plan.lines {
                 assert!(
@@ -922,5 +1473,155 @@ mod tests {
     fn progress_text_is_omitted_for_a_single_requirement() {
         assert_eq!(progress_text(0, 1), None);
         assert_eq!(progress_text(0, 9).as_deref(), Some("0/9"));
+    }
+
+    /// Build a store the way the wire does — one `AdvancementsUpdated` with the
+    /// nodes the server sent and their criterion times — so the join is exercised
+    /// through the same record `v770`'s decode produces.
+    fn store_with(
+        entries: &[(&str, &[&[&str]], &[&str])],
+    ) -> lodestone_game::advancement::AdvancementStore {
+        use lodestone_model::event::{AdvancementEntry, ClientEvent};
+        let mut added = Vec::new();
+        let mut progress = Vec::new();
+        for (id, requirements, done) in entries {
+            let parsed: lodestone_model::Identifier = id.parse().expect("a valid id");
+            added.push(AdvancementEntry {
+                id: parsed.clone(),
+                parent: None,
+                display: None,
+                requirements: requirements
+                    .iter()
+                    .map(|group| group.iter().map(|n| (*n).to_string()).collect())
+                    .collect(),
+                sends_telemetry_event: false,
+            });
+            let criteria = requirements
+                .iter()
+                .flat_map(|group| group.iter())
+                .map(|name| {
+                    (
+                        (*name).to_string(),
+                        done.contains(name).then_some(1_700_000_000_000_i64),
+                    )
+                })
+                .collect();
+            progress.push((parsed, criteria));
+        }
+        let mut store = lodestone_game::advancement::AdvancementStore::default();
+        store.apply(&ClientEvent::AdvancementsUpdated {
+            reset: true,
+            added,
+            removed: Vec::new(),
+            progress,
+            show_advancements: true,
+        });
+        store
+    }
+
+    /// The join itself: a completed advancement draws its `*_obtained` frame and
+    /// reports its group count, and an untouched one does neither.
+    #[test]
+    fn a_completed_advancement_draws_its_obtained_frame() {
+        let store = store_with(&[
+            ("minecraft:story/root", &[&["a"]], &["a"]),
+            ("minecraft:story/mine_stone", &[&["x"], &["y"]], &["x"]),
+        ]);
+        let progress = AdvancementProgress::from_store(&store);
+        assert!(progress.obtained("minecraft:story/root"));
+        assert!(!progress.obtained("minecraft:story/mine_stone"));
+        assert_eq!(progress.obtained_count(), 1);
+        let partial = progress.get("minecraft:story/mine_stone");
+        assert_eq!((partial.done, partial.total), (1, 2));
+        assert_eq!(progress_text(partial.done, partial.total).as_deref(), Some("1/2"));
+        // An id the server never sent reads as all-zero, not as obtained.
+        assert_eq!(progress.get("minecraft:story/smelt_iron"), NodeProgress::default());
+
+        let mut state = AdvancementsState::default();
+        state.select_tab(
+            advancement_tabs()
+                .iter()
+                .position(|t| t.id == "minecraft:story/root")
+                .expect("story is a tab"),
+        );
+        let layout = advancements_layout(&mut state, &progress, 1, 1280, 720).expect("a layout");
+        let plan = draw_plan(&layout, &progress);
+        let sprites: Vec<&str> = plan.frames.iter().map(|(_, s, _, _)| *s).collect();
+        assert!(
+            sprites.contains(&"advancements/task_frame_obtained"),
+            "the completed root drew no obtained frame: {sprites:?}"
+        );
+        assert!(
+            sprites.contains(&"advancements/task_frame_unobtained"),
+            "everything drew obtained: {sprites:?}"
+        );
+    }
+
+    /// A `display.hidden` advancement is invisible until obtained, then appears —
+    /// [`is_visible`] is the one gate both [`advancements_layout`] and
+    /// [`draw_plan`] consult, so a widget and its connector can never disagree.
+    #[test]
+    fn a_hidden_advancement_appears_once_obtained() {
+        const HIDDEN: &str = "minecraft:nether/all_effects";
+        let hidden = ADVANCEMENTS
+            .iter()
+            .find(|a| a.id == HIDDEN)
+            .expect("the data pack still carries it");
+        assert!(hidden.hidden, "the fixture stopped being a hidden advancement");
+        assert!(!is_visible(hidden, &AdvancementProgress::default()));
+        let progress = AdvancementProgress::from_store(&store_with(&[(HIDDEN, &[&["all"]], &["all"])]));
+        assert!(is_visible(hidden, &progress));
+        // An ordinary advancement is visible either way.
+        let plain = ADVANCEMENTS
+            .iter()
+            .find(|a| a.id == "minecraft:nether/root")
+            .expect("the nether root");
+        assert!(is_visible(plain, &AdvancementProgress::default()));
+    }
+
+    /// The join batch is adopted silently and only a later completion toasts —
+    /// the difference between one toast and sixty on entering an old world.
+    #[test]
+    fn the_toast_queue_seeds_silently_then_fires() {
+        let joined = AdvancementProgress::from_store(&store_with(&[(
+            "minecraft:story/root",
+            &[&["a"]],
+            &["a"],
+        )]));
+        let mut queue = AdvancementToastQueue::default();
+        queue.observe(&AdvancementProgress::default());
+        queue.observe(&joined);
+        assert!(queue.is_empty(), "the join batch toasted");
+
+        let later = AdvancementProgress::from_store(&store_with(&[
+            ("minecraft:story/root", &[&["a"]], &["a"]),
+            ("minecraft:story/mine_stone", &[&["x"]], &["x"]),
+        ]));
+        queue.observe(&later);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue.current(0).map(|a| a.id),
+            Some("minecraft:story/mine_stone")
+        );
+        // Still the same toast a moment later, gone once its window closes.
+        assert!(queue.current(TOAST_DISPLAY_MS - 1).is_some());
+        assert!(queue.current(TOAST_DISPLAY_MS).is_none());
+    }
+
+    /// The fade rises to vanilla's `0.3` ceiling and falls twice as fast.
+    #[test]
+    fn the_hover_fade_ramps_to_its_ceiling_and_back() {
+        let mut state = AdvancementsState::default();
+        assert_eq!(state.tick_fade(true), FADE_RISE);
+        for _ in 0..20 {
+            state.tick_fade(true);
+        }
+        assert_eq!(state.fade(), FADE_CEILING);
+        // `0.3 - 0.12 - 0.12 - 0.12` clamps at zero on the third frame out.
+        state.tick_fade(false);
+        state.tick_fade(false);
+        assert!(state.fade() > 0.0);
+        state.tick_fade(false);
+        assert_eq!(state.fade(), 0.0);
     }
 }

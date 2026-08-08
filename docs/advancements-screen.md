@@ -4,8 +4,9 @@
 
 Vanilla's `AdvancementsScreen` (issue #167), reached from the pause menu's
 Advancements button: five tabs, the real 26.2 advancement tree, connector lines,
-frames, icons, a tiled per-tab background, panning, and a hover title. Built off
-the data pack rather than the wire — **everything draws, nothing is obtained.**
+frames, icons, a tiled per-tab background, panning, and the full hover tooltip.
+The tree *shape* comes off the data pack; the *progress* comes off the wire, so
+completed advancements really do draw their obtained frames.
 
 ## How it works
 
@@ -66,31 +67,52 @@ together.
 `nav::routes_menu_input` does include it, so Escape reaches
 `UiState::on_escape` → `close_advancements`.
 
-### Why nothing is obtained
+### Where the progress comes from, and which direction the join runs
 
-Nothing in this workspace decodes `UPDATE_ADVANCEMENTS`:
+`UPDATE_ADVANCEMENTS` decodes into `ClientEvent::AdvancementsUpdated`, which
+`route` sends to **`session`** (`lodestone_ecs::session::apply_advancements` →
+`SessionAdvancements`). There is deliberately **no `net.rs` `forward` arm** — the
+event is `shell: false`, so adding one would put a second writer on state that
+already has one. `Sim::advancements()` clones the store and
+`AdvancementProgress::from_store` reduces it to a per-id snapshot.
 
-- `crates/protocol/v770` carries the packet **id** and nothing else — no decode
-  arm, no `ClientEvent` variant, nothing in `net.rs`'s `forward`.
-- The integrated server *does* have a real `AdvancementManager` with per-player
-  progress, and `server.rs` already calls the encode seam on join and on every
-  dirty tick. But `ServerProtocol::encode_update_advancements`'s trait default is
-  `ServerDirective::None` and `V770ServerProtocol` does not override it, so even
-  singleplayer against our own server sends nothing.
+**The store carries no positions, so the join is one-directional.** Ids are looked
+up *from* `ADVANCEMENTS` *into* the store, never the reverse: rebuilding the forest
+from the store's own `parent` links would produce a second, unpositioned tree that
+disagrees with the one being drawn. `AdvancementProgress::from_store` iterates
+`ADVANCEMENTS` for exactly that reason.
 
-So every widget draws `*_frame_unobtained`. This is the **true** state, not a
-placeholder — a freshly created vanilla world's own screen looks the same — and
-the same trade the Statistics screen made (#188).
+The snapshot is refreshed every frame while the screen is open and at 4 Hz
+otherwise (`PROGRESS_POLL`), because cloning a 126-entry store of owned criterion
+names sixty times a second buys nothing a player can see.
+
+An empty store draws what it drew before the wire landed: everything unobtained,
+no readouts. That is the true state of a fresh world.
+
+### What the progress reaches
+
+| surface | rule |
+|---|---|
+| frame sprite | `*_frame_obtained` when `AdvancementProgress::isDone` |
+| `x/y` readout | completed **requirement groups** over declared groups — an AND-of-ORs count, *not* obtained criteria |
+| hidden widgets | `!isHidden() \|\| isDone()`, via `is_visible`, consulted by both the layout and `draw_plan` so a widget and its connector agree |
+| hover title bar | split into an obtained and an unobtained half at the progress fraction |
+| completion toast | `AdvancementToastQueue` → `HudFrame::advancement_toast` |
+
+### The toast's seed is the whole design
+
+Vanilla fires `AdvancementToast` from `onUpdateAdvancementProgress`, which the
+server only calls on a change. We see a *snapshot*, and the join packet's `reset`
+batch carries everything already earned — so a naive "obtained now, not last
+frame" test fires sixty toasts at once on entering a long-played world.
+`AdvancementToastQueue::observe` adopts the first non-empty observation silently
+and only toasts later transitions.
 
 ## How to change it
 
-**When the decode lands**, the shape to add is a progress source on
-`AdvancementsState`: `obtained: HashSet<&'static str>` plus a completed-criteria
-count per id. `advancement_frame_sprite(frame, obtained)` and
-`progress_text(done, total)` already take those two arguments, and
-`Advancement::requirement_count` is already the denominator, so the draw needs no
-restructuring — only `draw_plan` passing the real flag instead of `false`, and the
-title box gaining its progress line.
+**A new progress-derived surface** goes through `AdvancementProgress`, not
+through a second read of `SessionAdvancements`: one snapshot per frame is what
+keeps the layout, the draw and the toast from disagreeing about the same id.
 
 **To regenerate the data table**, walk the data pack's advancement JSONs again
 (everything outside `recipes/` that has a `display` block). Verify every `icon`
@@ -118,10 +140,20 @@ frame while a wrong key draws the raw key.
 - **The per-tab scroll is centred lazily**, on first read — vanilla's `centered`
   latch. That is why even the *draw* path needs `&mut AdvancementsState`, and why
   `redraw` resolves the hover before it splits its field borrows.
-- **The hover fade is not animated.** Vanilla ramps the viewport dim to `0.3` over
-  a few ticks; this snaps to the ceiling, because the screen has no per-frame tick
-  hook. Only the single-line title box is drawn — the multi-line description panel
-  needs vanilla's `findOptimalLines` splitter, a text-layout job of its own.
+- **The fade is ticked from `advancements_hover`**, not from a screen tick hook —
+  that is the one per-frame call which already knows whether anything is hovered,
+  so ticking it anywhere else would walk the layout twice. Framerate-dependent, as
+  vanilla's own `+0.06`/`-0.12` per frame is.
+- **`box_obtained`/`box_unobtained`/`title_box` are nine-slice sprites and the
+  container atlas stretches them.** `ContainerBackground::sprite_quad` samples the
+  whole sprite; the HUD's `GuiAtlas` honours `.mcmeta` nine-slicing but the
+  container path does not. The tooltip's borders are therefore slightly stretched.
+  Fixing it means teaching the container atlas nine-slicing, which the tab sprites
+  would want too.
+- **The toast's multi-line branch is not modelled.** Vanilla alternates heading and
+  wrapped title every 1500 ms when the title exceeds 125 px; all 126 shipped titles
+  fit, so the alternation is unreachable with the vanilla data pack and a longer
+  title degrades to its first line.
 
 ## Configuration
 
