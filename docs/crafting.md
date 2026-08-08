@@ -7,6 +7,10 @@ matching rules (`recipe.rs`), a loader for Mojang's own datapack JSON
 (`recipe_json.rs`), and the crafting-table menu layout that `menus.rs` builds
 when the server opens a `minecraft:crafting` screen.
 
+> **Our own server does this now too** (issue #529) — see
+> [`server-side-crafting.md`](./server-side-crafting.md). Until that landing it
+> stored whatever result the client claimed.
+
 ## Who computes the result slot
 
 **The server does.** Vanilla's `CraftingMenu.slotsChanged` runs server-side,

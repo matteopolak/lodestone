@@ -86,7 +86,8 @@ use crate::chunk::{
 };
 use crate::fall::{FallSample, FallTracker};
 use crate::inventory::{
-    ContainerMenuSlot, PlayerInventory, container_menu_slot, window_zero_menu_slot,
+    ContainerMenuSlot, PLAYER_CRAFT_RESULT_MENU_SLOT, PlayerInventory, container_menu_slot,
+    window_zero_menu_slot,
 };
 use crate::mob_spawn::SpawnRng;
 use crate::mobs::{MobHandle, PlayerPerception};
@@ -4064,24 +4065,61 @@ fn apply_creative_mode_slot_set(inventory: &mut PlayerInventory, slot: i16, item
 /// `doClick` (rejecting an impossible client diff, catching a cheating
 /// client) is real future work, not done by this landing; see
 /// `crate::inventory`'s module doc comment.
-fn apply_container_clicked(
+///
+/// # The one slot that *is* server-authoritative (issue #529)
+///
+/// The passthrough above stops at the crafting **result**. Menu slot `0` of
+/// window `0` is derived by the server from the grid cells (menu `1..=4`, which
+/// land in [`PlayerInventory::crafting`]) and the client's claimed value for it is
+/// never stored — [`PlayerInventory::apply_menu_slot_change`] refuses it. After
+/// applying a click that touched the grid, the server pushes **its own** result
+/// with a `container_set_slot`, exactly as vanilla's `ResultContainer` broadcast
+/// does. So a diff claiming a diamond block out of an empty grid does not mint
+/// one: the claim is dropped and the client is corrected on the same packet.
+///
+/// This is narrower than a full server-side `doClick` and deliberately so — the
+/// remaining trust is "the client moved an item it already owned between slots it
+/// already owned", which mints nothing.
+/// Returns the corrective result-slot push the caller must send, if the click
+/// touched the crafting grid. A directive rather than a send so this stays a pure
+/// function of the click — the three unit tests below drive it with no connection.
+fn apply_container_clicked<P: ServerProtocol>(
+    proto: &P,
     inventory: &mut PlayerInventory,
     block_entities: &BlockEntityHandle,
     open_container: Option<&OpenContainer>,
     window_id: i32,
     changed_slots: Vec<(i32, Option<ItemStack>)>,
-) {
+) -> Option<ServerDirective> {
     if window_id == 0 {
+        let mut touched_grid = false;
         for (menu_slot, item) in changed_slots {
+            if menu_slot == PLAYER_CRAFT_RESULT_MENU_SLOT {
+                // The claim is not stored — the server derives this slot. Note
+                // there is no `consume_one` here and there must not be: the
+                // client's own diff already carries the shrunk grid cells (a take
+                // reports both the emptied result *and* every decremented cell),
+                // so consuming again would shrink the grid twice.
+                touched_grid = true;
+                continue;
+            }
+            touched_grid |= crate::inventory::player_craft_grid_cell(menu_slot).is_some();
             inventory.apply_menu_slot_change(menu_slot, item);
         }
-        return;
+        if !touched_grid {
+            return None;
+        }
+        let result = inventory.crafting().result().cloned();
+        return Some(proto.encode_container_slot(
+            0,
+            0,
+            PLAYER_CRAFT_RESULT_MENU_SLOT,
+            result.as_ref(),
+        ));
     }
-    let Some(open) = open_container else {
-        return;
-    };
+    let open = open_container?;
     if open.window_id != window_id {
-        return;
+        return None;
     }
     for (menu_slot, item) in changed_slots {
         match container_menu_slot(open.container_size, menu_slot) {
@@ -4098,6 +4136,7 @@ fn apply_container_clicked(
             None => {}
         }
     }
+    None
 }
 
 /// Resolves a `minecraft:attack` request (issue #12) against the live mob
@@ -4663,13 +4702,16 @@ where
             changed_slots,
             carried_item: _,
         } => {
-            apply_container_clicked(
+            if let Some(correction) = apply_container_clicked(
+                proto,
                 inventory,
                 block_entities,
                 open_container.as_ref(),
                 window_id,
                 changed_slots,
-            );
+            ) {
+                apply(conn, state, correction).await?;
+            }
         }
         ServerBound::ContainerClosed { window_id } => {
             if open_container.as_ref().is_some_and(|open| open.window_id == window_id) {
@@ -6177,6 +6219,7 @@ mod tests {
         let mut inventory = PlayerInventory::new();
         let block_entities = BlockEntityHandle::new();
         apply_container_clicked(
+            &ContainerTagProto,
             &mut inventory,
             &block_entities,
             None,
@@ -6184,6 +6227,84 @@ mod tests {
             vec![(9, Some(stack("minecraft:stone", 1)))],
         );
         assert_eq!(inventory.native(9), Some(&stack("minecraft:stone", 1)));
+    }
+
+    /// Issue #529's security property, on the one grid this landing covers: a
+    /// diff claiming a result the grid cannot produce mints nothing, and the
+    /// server answers the same click with a `container_set_slot` carrying **its
+    /// own** result for slot 0.
+    #[test]
+    fn a_claimed_crafting_result_is_never_stored_and_the_server_corrects_it() {
+        let mut inventory = PlayerInventory::new();
+        let block_entities = BlockEntityHandle::new();
+
+        // An empty grid, a claim of a diamond block. The claim is dropped and the
+        // correction says "slot 0 holds nothing" (count byte 0).
+        let correction = apply_container_clicked(
+            &ContainerTagProto,
+            &mut inventory,
+            &block_entities,
+            None,
+            0,
+            vec![(0, Some(stack("minecraft:diamond_block", 1)))],
+        );
+        assert_eq!(
+            correction,
+            Some(ServerDirective::Send {
+                packet_id: SLOT,
+                payload: vec![0, 0, 0, 0],
+            })
+        );
+        assert!(inventory.crafting().result().is_none());
+
+        // Four planks into the 2x2: the server derives a crafting table itself
+        // and pushes it, without the client having named a result at all.
+        let correction = apply_container_clicked(
+            &ContainerTagProto,
+            &mut inventory,
+            &block_entities,
+            None,
+            0,
+            (1..=4)
+                .map(|slot| (slot, Some(stack("minecraft:oak_planks", 1))))
+                .collect(),
+        );
+        assert_eq!(
+            correction,
+            Some(ServerDirective::Send {
+                packet_id: SLOT,
+                payload: vec![0, 0, 0, 1],
+            }),
+            "the derived crafting table is one item"
+        );
+        assert_eq!(
+            inventory.crafting().result().map(|r| r.item.to_string()),
+            Some("minecraft:crafting_table".to_string())
+        );
+
+        // Taking it: a real take reports the emptied result slot *and* the
+        // shrunk grid cells, and the server's re-derivation off the emptied grid
+        // is what the correction carries.
+        let mut take: Vec<(i32, Option<ItemStack>)> =
+            (1..=4).map(|slot| (slot, None)).collect();
+        take.push((0, None));
+        let correction = apply_container_clicked(
+            &ContainerTagProto,
+            &mut inventory,
+            &block_entities,
+            None,
+            0,
+            take,
+        );
+        assert_eq!(
+            correction,
+            Some(ServerDirective::Send {
+                packet_id: SLOT,
+                payload: vec![0, 0, 0, 0],
+            })
+        );
+        assert!(inventory.crafting().is_empty());
+        assert!(inventory.crafting().result().is_none());
     }
 
     /// A click against the connection's *open* non-zero window splits by
@@ -6202,6 +6323,7 @@ mod tests {
         let open = open(pos, 3);
 
         apply_container_clicked(
+            &ContainerTagProto,
             &mut inventory,
             &block_entities,
             Some(&open),
@@ -6234,6 +6356,7 @@ mod tests {
         let open = open(pos, 3); // window_id 7
 
         apply_container_clicked(
+            &ContainerTagProto,
             &mut inventory,
             &block_entities,
             Some(&open),

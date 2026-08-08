@@ -1,4 +1,4 @@
-# Filled map item rendering (issue #184) — blocked on decode
+# Filled map item rendering (issue #184) — the decode has landed
 
 ## What it is
 
@@ -6,7 +6,16 @@ Issue #184 asks for the filled map item's own visual: the generated
 per-map pixel texture, player/marker icons, and the border frame, whether
 held, in an item frame, or shown as a GUI icon.
 
-## The finding: the data does not reach the client at all
+> **Update: the blocker below is resolved.** `MAP_ITEM_DATA` (id 51) now decodes
+> into `ClientEvent::MapItemData` and folds into `SessionMaps` — see
+> [`map-and-advancement-wire.md`](./map-and-advancement-wire.md), including the
+> `MapPatch` field order and the fact that the colour half is a **sub-rectangle**,
+> not a 128×128 frame. What is still missing is the renderer half named below: the
+> map colour palette and the icon sprites. The survey that follows is kept because
+> its reasoning about *where* the renderer belongs is unaffected; only its premise
+> ("nothing decodes it") has changed.
+
+## The finding as it stood: the data did not reach the client at all
 
 **No renderer was built, because the wire data this issue depends on is not
 decoded anywhere in this codebase.** Checked directly rather than assumed,

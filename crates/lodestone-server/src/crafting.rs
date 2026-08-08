@@ -4,10 +4,15 @@
 //!
 //! The crafting grid the server owns, plus the corpus it resolves a result
 //! against. Before this module the server had **no crafting concept at all**:
-//! [`crate::inventory::PlayerInventory`] dropped menu slots `0..=4`, no menu
-//! opened for a crafting table, `PLACE_RECIPE` decoded into nothing, and
-//! `apply_container_clicked` applied whatever slot diff the client claimed — so a
-//! client could mint any item by sending a container diff naming it.
+//! [`crate::inventory::PlayerInventory`] dropped menu slots `0..=4` and
+//! `apply_container_clicked` applied whatever slot diff the client claimed,
+//! including the result slot — so a container diff could name any item as a
+//! crafting output and the server would store it.
+//!
+//! **What is still not here**: a crafting-*table* menu (nothing opens one, so the
+//! 3×3 [`CraftingState::table`] has no production caller yet) and
+//! `PLACE_RECIPE`. Both are steps 2 and 4 of issue #529's scope and are still
+//! open on it.
 //!
 //! ## How it works
 //!
@@ -16,8 +21,8 @@
 //! cell goes through [`CraftingState::set_input`], which immediately re-derives
 //! the result from [`recipe_book`] — the same `RecipeBook` matcher the *client*
 //! uses for its prediction, deliberately not a second one. So the result slot is
-//! never written by anything the client sent; a claimed result is only ever
-//! *compared* against ours, by [`CraftingState::claim_matches`].
+//! never written by anything the client sent — a claimed result is dropped and
+//! the server's own value pushed back in its place.
 //!
 //! The corpus is bundled and embedded (`assets/recipe/`, `assets/tags/item/`, via
 //! `build.rs`), following the `assets/loot_table/` precedent, because the client
@@ -36,7 +41,7 @@
 //! without its tag document.
 //!
 //! Grid *layout* (which menu slot is which cell) is [`crate::inventory`]'s
-//! business, not this module's — see `crafting_menu_slot`.
+//! business, not this module's — see `player_craft_grid_cell`.
 //!
 //! ## Dependencies
 //!
@@ -120,24 +125,6 @@ impl CraftingState {
         }
     }
 
-    /// Grid width in cells.
-    #[must_use]
-    pub fn width(&self) -> usize {
-        self.width
-    }
-
-    /// Number of input cells.
-    #[must_use]
-    pub fn input_count(&self) -> usize {
-        self.inputs.len()
-    }
-
-    /// One input cell.
-    #[must_use]
-    pub fn input(&self, index: usize) -> Option<&ItemStack> {
-        self.inputs.get(index).and_then(Option::as_ref)
-    }
-
     /// The result **the server derived**. Never written from the wire.
     #[must_use]
     pub fn result(&self) -> Option<&ItemStack> {
@@ -173,36 +160,6 @@ impl CraftingState {
             *cell = None;
         }
         self.result = None;
-    }
-
-    /// Consume one craft: decrement every occupied input by one and re-derive.
-    /// Mirrors vanilla's `ItemStack.shrink(1)` per grid slot in
-    /// `ResultSlot.onTake`.
-    pub fn consume_one(&mut self) {
-        for cell in &mut self.inputs {
-            if let Some(stack) = cell {
-                if stack.count <= 1 {
-                    *cell = None;
-                } else {
-                    stack.count -= 1;
-                }
-            }
-        }
-        self.recompute();
-    }
-
-    /// Whether a *claimed* result stack agrees with the one this grid actually
-    /// produces — the check that closes the mint-anything hole.
-    ///
-    /// Item **and** count, because a recipe's yield is part of the recipe: a
-    /// claim of 64 sticks from one plank has the right item.
-    #[must_use]
-    pub fn claim_matches(&self, claimed: Option<&ItemStack>) -> bool {
-        match (self.result.as_ref(), claimed) {
-            (None, None) => true,
-            (Some(ours), Some(theirs)) => ours.item == theirs.item && ours.count == theirs.count,
-            _ => false,
-        }
     }
 
     fn recompute(&mut self) {
@@ -289,34 +246,19 @@ mod tests {
         assert!(diagonal.result().is_none());
     }
 
-    /// The security property: a claim the grid does not produce is refused, and
-    /// consuming a craft shrinks the inputs and re-derives.
+    /// The result tracks the grid in both directions: emptying a cell must
+    /// *withdraw* a result that was there, not leave it standing. A stale result
+    /// is the same defect as a trusted one.
     #[test]
-    fn a_claimed_result_the_grid_cannot_produce_is_refused() {
+    fn clearing_a_cell_withdraws_the_result() {
         let mut grid = CraftingState::player();
-        assert!(
-            grid.claim_matches(None),
-            "an empty grid claiming nothing is fine"
-        );
-        assert!(
-            !grid.claim_matches(Some(&stack("minecraft:diamond_block", 1))),
-            "an empty grid cannot produce a diamond block"
-        );
-
         for i in 0..4 {
-            grid.set_input(i, Some(stack("minecraft:oak_planks", 2)));
+            grid.set_input(i, Some(stack("minecraft:oak_planks", 1)));
         }
-        assert!(grid.claim_matches(Some(&stack("minecraft:crafting_table", 1))));
-        assert!(
-            !grid.claim_matches(Some(&stack("minecraft:crafting_table", 64))),
-            "the count is part of the recipe"
-        );
-
-        grid.consume_one();
-        for i in 0..4 {
-            assert_eq!(grid.input(i).map(|s| s.count), Some(1));
-        }
-        grid.consume_one();
+        assert!(grid.result().is_some());
+        grid.set_input(3, None);
+        assert!(grid.result().is_none());
+        grid.clear();
         assert!(grid.is_empty());
         assert!(grid.result().is_none());
     }

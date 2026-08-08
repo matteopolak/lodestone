@@ -2829,7 +2829,7 @@ mod route_tests {
         // Asserting the two counts agree turns it into evidence a reader can see,
         // and catches a variant named twice.
         assert_eq!(
-            total, 104,
+            total, 106,
             "the `ClientEvent` variant count changed. That is fine and expected — \
              update `docs/event-routing.md` and this number together, which is the \
              whole point of this gate firing."

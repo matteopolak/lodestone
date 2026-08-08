@@ -18,6 +18,12 @@ to disk, and the server streams them with three packets:
 `ClientboundSelectAdvancementsTabPacket`. This module owns the model; the three
 `ServerProtocol` seams lower the payloads.
 
+Two of those three seams had **no v770 override** until recently, so everything
+this module computed reached the wire as `ServerDirective::None`. They now emit
+real frames — see
+[`map-and-advancement-wire.md`](./map-and-advancement-wire.md), which also records
+why the advancement `DisplayInfo` optional is written absent.
+
 ### The tree
 
 [`AdvancementManager::builtin`] ships a real vanilla tree — `story/root →
