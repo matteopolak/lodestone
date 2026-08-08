@@ -341,6 +341,35 @@ impl ApplicationHandler for WindowApp {
             // fourth time into the test that was supposed to police it, so
             // `Screen::CommandBlockEdit` could be missing from all four at once
             // and nothing failed (#474). See that function's doc.
+            // Advancements (#167) tracks the cursor for its hover *and* its
+            // viewport pan. Its own arm before the menu one below, which would
+            // otherwise try to hover a menu row on a screen that has none.
+            WindowEvent::CursorMoved { position, .. } if self.ui.is_advancements() => {
+                self.cursor = (position.x as f32, position.y as f32);
+                if let Some((w, h)) = self.target.as_ref().map(RenderTarget::size) {
+                    self.drag_advancements(w, h);
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } if self.ui.is_advancements() => {
+                if let (MouseButton::Left, Some((w, h))) =
+                    (button, self.target.as_ref().map(RenderTarget::size))
+                {
+                    match state {
+                        ElementState::Pressed => {
+                            self.handle_advancements_click(w, h);
+                        }
+                        ElementState::Released => self.advancements_drag = None,
+                    }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } if self.ui.is_advancements() => {
+                if let Some((w, h)) = self.target.as_ref().map(RenderTarget::size) {
+                    // Vanilla's `mouseScrolled` passes `scrollY` straight into
+                    // `AdvancementTab.scroll(0, scrollY * 16)`, so the notch count
+                    // goes through verbatim.
+                    self.scroll_advancements(wheel_notches(delta) as f32, w, h);
+                }
+            }
             WindowEvent::CursorMoved { position, .. }
                 if crate::menu::nav::routes_menu_input(&self.ui) =>
             {

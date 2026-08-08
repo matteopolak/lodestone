@@ -41,7 +41,7 @@ fn icon_record(stack: &lodestone_game::item::ItemStack) -> Option<HotbarSlot> {
 /// [`item_icon::COUNT_INK`]). Named rather than inline so the recipe-panel
 /// submission-order gate can find a count-digit vertex by the same constant the
 /// draw writes, instead of restating the literal.
-pub(super) const FALLBACK_COUNT_INK: [f32; 4] = [0.98, 0.98, 0.92, 1.0];
+pub(crate) const FALLBACK_COUNT_INK: [f32; 4] = [0.98, 0.98, 0.92, 1.0];
 
 fn item_label(path: &str) -> String {
     path.rsplit(['/', '_'])
@@ -69,27 +69,27 @@ fn item_color(path: &str) -> [f32; 4] {
 /// are the shared hotbar ones (see [`crate::hud::item_icon`]); the background
 /// stream samples [`ContainerBackground`]'s own atlas.
 #[derive(Debug)]
-pub(super) struct Builder<'a> {
+pub(crate) struct Builder<'a> {
     w: f32,
     h: f32,
-    pub(super) verts: Vec<f32>,
-    pub(super) item_verts: Vec<f32>,
+    pub(crate) verts: Vec<f32>,
+    pub(crate) item_verts: Vec<f32>,
     /// The enchantment-glint copies of `item_verts`; see [`IconSink::glint`].
-    pub(super) glint_verts: Vec<f32>,
-    pub(super) model_verts: Vec<ModelVertex>,
+    pub(crate) glint_verts: Vec<f32>,
+    pub(crate) model_verts: Vec<ModelVertex>,
     /// Special-renderer (block-entity) icons; see [`ContainerGeometry::special`].
-    pub(super) special: Vec<SpecialIconDraw>,
+    pub(crate) special: Vec<SpecialIconDraw>,
     /// Flat `[x, y, u, v, r, g, b, a]` per vertex, off
     /// [`ContainerBackground`]'s atlas.
-    pub(super) bg_verts: Vec<f32>,
+    pub(crate) bg_verts: Vec<f32>,
     /// The vanilla proportional font, for stack counts. `None` on a jar-less
     /// run, where [`item_icon::draw_item_icon`] falls back to the fixed-advance
     /// 5×7 debug font — the same degradation the HUD's own text uses.
-    pub(super) font: Option<&'a VanillaFont>,
+    pub(crate) font: Option<&'a VanillaFont>,
 }
 
 impl<'a> Builder<'a> {
-    pub(super) fn new(w: f32, h: f32, font: Option<&'a VanillaFont>) -> Self {
+    pub(crate) fn new(w: f32, h: f32, font: Option<&'a VanillaFont>) -> Self {
         Self {
             w,
             h,
@@ -103,18 +103,18 @@ impl<'a> Builder<'a> {
         }
     }
 
-    pub(super) fn rect_px(&mut self, x: f32, y: f32, w: f32, h: f32, c: [f32; 4]) {
+    pub(crate) fn rect_px(&mut self, x: f32, y: f32, w: f32, h: f32, c: [f32; 4]) {
         self.colour().rect(x, y, w, h, c);
     }
 
     /// A pixel-space rectangle with a vertical gradient from `top` (its own top
     /// edge) to `bottom` (its bottom edge) — see [`ColourStream::gradient_rect`].
-    pub(super) fn gradient_rect_px(&mut self, x: f32, y: f32, w: f32, h: f32, top: [f32; 4], bottom: [f32; 4]) {
+    pub(crate) fn gradient_rect_px(&mut self, x: f32, y: f32, w: f32, h: f32, top: [f32; 4], bottom: [f32; 4]) {
         self.colour().gradient_rect(x, y, w, h, top, bottom);
     }
 
     /// One [`GuiSpriteQuad`] onto the background stream, untinted.
-    pub(super) fn bg_sprite(&mut self, q: GuiSpriteQuad) {
+    pub(crate) fn bg_sprite(&mut self, q: GuiSpriteQuad) {
         let (w, h) = (self.w, self.h);
         item_icon::push_sprite_quad(&mut self.bg_verts, w, h, q, [1.0, 1.0, 1.0, 1.0]);
     }
@@ -133,7 +133,7 @@ impl<'a> Builder<'a> {
     /// way stack counts do — advances will be wrong, but the words are readable
     /// and the anchor is identical, so the geometry gate still measures the same
     /// thing.
-    pub(super) fn label(&mut self, s: &str, x: f32, y: f32, scale: f32, c: [f32; 4]) {
+    pub(crate) fn label(&mut self, s: &str, x: f32, y: f32, scale: f32, c: [f32; 4]) {
         match self.font {
             Some(f) => {
                 let mut cs = self.colour();
@@ -149,7 +149,7 @@ impl<'a> Builder<'a> {
     /// `true`, unlike [`label`](Self::label)'s explicit `false` for the two
     /// container labels. Degrades to the same fixed-advance debug font
     /// [`label`](Self::label) does on a jar-less run.
-    pub(super) fn shadowed_label(&mut self, s: &str, x: f32, y: f32, scale: f32, c: [f32; 4]) {
+    pub(crate) fn shadowed_label(&mut self, s: &str, x: f32, y: f32, scale: f32, c: [f32; 4]) {
         match self.font {
             Some(f) => {
                 let mut cs = self.colour();
@@ -210,14 +210,14 @@ impl<'a> Builder<'a> {
     /// swatch-and-letter fallback. Shared by the per-slot loop and the carried
     /// stack, so an atlas-less run shows the cursor's stack exactly as it
     /// shows an occupied well.
-    pub(super) fn draw_stack(&mut self, assets: &IconAssets<'_>, stack: &lodestone_game::item::ItemStack, x: f32, y: f32) {
+    pub(crate) fn draw_stack(&mut self, assets: &IconAssets<'_>, stack: &lodestone_game::item::ItemStack, x: f32, y: f32) {
         self.draw_stack_counted(assets, stack, x, y, item_icon::COUNT_INK);
     }
 
     /// As [`draw_stack`](Self::draw_stack), with an explicit stack-count ink. The
     /// drag preview uses [`item_icon::COUNT_INK_CLAMPED`] (vanilla's yellow) when
     /// the provisional count hit the destination cell's cap.
-    pub(super) fn draw_stack_counted(
+    pub(crate) fn draw_stack_counted(
         &mut self,
         assets: &IconAssets<'_>,
         stack: &lodestone_game::item::ItemStack,

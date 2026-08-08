@@ -9,6 +9,16 @@ use lodestone_render::GuiSpriteQuad;
 #[cfg(doc)]
 use super::GUI_SPRITES;
 
+/// The five per-tab advancement background ids, exactly as the datapack's
+/// `display.background` writes them.
+pub(crate) const ADVANCEMENT_TILE_IDS: [&str; 5] = [
+    "minecraft:gui/advancements/backgrounds/stone",
+    "minecraft:gui/advancements/backgrounds/nether",
+    "minecraft:gui/advancements/backgrounds/end",
+    "minecraft:gui/advancements/backgrounds/adventure",
+    "minecraft:gui/advancements/backgrounds/husbandry",
+];
+
 /// A GUI sprite id (`container/slot/helmet`) as the texture location it lives at
 /// (`minecraft:gui/sprites/container/slot/helmet`).
 ///
@@ -72,6 +82,15 @@ pub struct ContainerBackground {
     creative_search: ResourceLocation,
     /// See [`Self::creative_items`](Self::creative_quad).
     creative_inventory: ResourceLocation,
+    /// The Advancements screen's window art (issue #167) —
+    /// `textures/gui/advancements/window.png`, another loose sheet blitted at a
+    /// sub-rect (`252 x 140` of `256 x 256`).
+    advancements_window: ResourceLocation,
+    /// The five per-tab tiled backgrounds, keyed by their datapack id
+    /// (`minecraft:gui/advancements/backgrounds/stone`, ...). Each is a real
+    /// `16 x 16` texture — measured, not assumed from
+    /// `BACKGROUND_TILE_WIDTH`.
+    advancements_tiles: Vec<(&'static str, ResourceLocation)>,
 }
 
 /// Which vanilla `container/*.png` sheet a menu's background draws from, and
@@ -210,6 +229,21 @@ impl ContainerBackground {
         let creative_inventory =
             ResourceLocation::new("minecraft", "gui/container/creative_inventory/tab_inventory")
                 .expect("hardcoded location is always valid");
+        // The Advancements screen's window plus its five tiled backgrounds
+        // (issue #167). Same loose-`gui/**` family as everything above.
+        let advancements_window = ResourceLocation::new("minecraft", "gui/advancements/window")
+            .expect("hardcoded location is always valid");
+        let advancements_tiles: Vec<(&'static str, ResourceLocation)> = ADVANCEMENT_TILE_IDS
+            .iter()
+            .map(|id| {
+                let path = id.strip_prefix("minecraft:").unwrap_or(id);
+                (
+                    *id,
+                    ResourceLocation::new("minecraft", path)
+                        .expect("hardcoded location is always valid"),
+                )
+            })
+            .collect();
         let mut builder = AtlasBuilder::new();
         builder.load(manager, &generic)?;
         builder.load(manager, &crafting)?;
@@ -230,6 +264,10 @@ impl ContainerBackground {
         builder.load(manager, &creative_items)?;
         builder.load(manager, &creative_search)?;
         builder.load(manager, &creative_inventory)?;
+        builder.load(manager, &advancements_window)?;
+        for (_, loc) in &advancements_tiles {
+            builder.load(manager, loc)?;
+        }
         // The hover highlight and the empty-slot placeholders (issue #376) ride
         // in this same atlas rather than a second one. They are ordinary
         // textures with an ordinary `.png.mcmeta`, so `AtlasBuilder` needs no
@@ -270,7 +308,70 @@ impl ContainerBackground {
             creative_items,
             creative_search,
             creative_inventory,
+            advancements_window,
+            advancements_tiles,
         })
+    }
+
+    /// The Advancements screen's window blit (issue #167) —
+    /// `graphics.blit(..., WINDOW_LOCATION, leftPos, topPos, 0, 0, 252, 140, 256,
+    /// 256)` (`AdvancementsScreen.java:205`).
+    #[must_use]
+    pub(crate) fn advancements_window_quad(&self, x: f32, y: f32) -> Option<GuiSpriteQuad> {
+        use crate::menu::advancements::{WINDOW_H, WINDOW_W};
+        let sprite = self.atlas.sprite(&self.advancements_window)?;
+        let (aw, ah) = (self.atlas.width as f32, self.atlas.height as f32);
+        Some(GuiSpriteQuad {
+            dst: [x, y, WINDOW_W, WINDOW_H],
+            uv_min: [sprite.x as f32 / aw, sprite.y as f32 / ah],
+            uv_max: [
+                (sprite.x as f32 + WINDOW_W) / aw,
+                (sprite.y as f32 + WINDOW_H) / ah,
+            ],
+        })
+    }
+
+    /// One `16 x 16` tile of an advancement tab's background, by its datapack id.
+    ///
+    /// `full` is where the whole tile *would* go and `dst` is the part that
+    /// survived the viewport clamp; the UV window is narrowed by the same
+    /// fraction, which is what makes CPU clipping look like vanilla's scissor
+    /// (`crate::menu::advancements`' module doc explains why there is no scissor).
+    #[must_use]
+    pub(crate) fn advancements_tile_quad(
+        &self,
+        id: &str,
+        full: super::layout::Rect,
+        dst: super::layout::Rect,
+    ) -> Option<GuiSpriteQuad> {
+        let loc = &self.advancements_tiles.iter().find(|(k, _)| *k == id)?.1;
+        let sprite = self.atlas.sprite(loc)?;
+        let (aw, ah) = (self.atlas.width as f32, self.atlas.height as f32);
+        let u0 = (dst.x - full.x) / full.w;
+        let v0 = (dst.y - full.y) / full.h;
+        let u1 = (dst.x + dst.w - full.x) / full.w;
+        let v1 = (dst.y + dst.h - full.y) / full.h;
+        let (sx, sy) = (sprite.x as f32, sprite.y as f32);
+        Some(GuiSpriteQuad {
+            dst: [dst.x, dst.y, dst.w, dst.h],
+            uv_min: [(sx + u0 * full.w) / aw, (sy + v0 * full.h) / ah],
+            uv_max: [(sx + u1 * full.w) / aw, (sy + v1 * full.h) / ah],
+        })
+    }
+
+    /// [`sprite_quad`](Self::sprite_quad), reachable from outside this module —
+    /// the Advancements screen (issue #167) draws every one of its widgets through
+    /// it, and lives in `crate::menu` rather than here.
+    #[must_use]
+    pub(crate) fn sprite_quad_for(
+        &self,
+        id: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Option<GuiSpriteQuad> {
+        self.sprite_quad(id, x, y, w, h)
     }
 
     /// The creative screen's own background blit (issue #158) —
