@@ -55,6 +55,10 @@ use lodestone_server::{
     ServerDirective, ServerProtocol, WorldBorder, WorldgenScope,
 };
 use lodestone_server::{AdvancementUpdate, StatKey, StatType};
+use lodestone_server::crafting::{
+    RecipeBookEntry as ServerRecipeBookEntry, RecipeDisplay as ServerRecipeDisplay,
+    SlotDisplay as ServerSlotDisplay,
+};
 use lodestone_world::{
     ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmap, Heightmaps,
     LightProperties, compute_column_light,
@@ -798,6 +802,193 @@ fn stat_wire_ids(key: &StatKey) -> Option<(i32, i32)> {
         }
     };
     Some((type_id, value_id))
+}
+
+/// `minecraft:slot_display` registry ids, in `SlotDisplays.bootstrap`'s
+/// registration order — the dispatch key `SlotDisplay.STREAM_CODEC` writes before
+/// each variant's own body.
+///
+/// Registration order **is** the id assignment for a `registerSimple` registry, so
+/// this list is the record, not a guess. Only the five a crafting recipe reaches
+/// are named; the six unnamed ids (2 `with_any_potion`, 3
+/// `only_with_component`, 7 `dyed`, 8 `smithing_trim`, 9 `with_remainder`, 1
+/// `any_fuel`) belong to furnace/brewing/smithing displays.
+mod slot_display {
+    pub const EMPTY: i32 = 0;
+    pub const ITEM: i32 = 4;
+    pub const ITEM_STACK: i32 = 5;
+    pub const TAG: i32 = 6;
+    pub const COMPOSITE: i32 = 10;
+}
+
+/// `minecraft:recipe_display` registry ids, in `RecipeDisplays.bootstrap`'s order.
+mod recipe_display {
+    pub const CRAFTING_SHAPELESS: i32 = 0;
+    pub const CRAFTING_SHAPED: i32 = 1;
+}
+
+/// `minecraft:recipe_book_category` ids, in `RecipeBookCategories.java:7-19`'s
+/// registration order. Only the crafting book's four are reachable from the
+/// bundled corpus; the furnace/stonecutter/smithing entries are listed so the
+/// numbering is checkable against the source rather than trusted.
+const RECIPE_BOOK_CATEGORIES: &[&str] = &[
+    "crafting_building_blocks",
+    "crafting_redstone",
+    "crafting_equipment",
+    "crafting_misc",
+    "furnace_food",
+    "furnace_blocks",
+    "furnace_misc",
+    "blast_furnace_blocks",
+    "blast_furnace_misc",
+    "smoker_food",
+    "stonecutter",
+    "smithing",
+    "campfire",
+];
+
+/// Writes one `SlotDisplay.STREAM_CODEC` value: the registry dispatch id, then the
+/// variant body.
+///
+/// An `item`/`item_stack` naming an id the 26.2 item census does not know degrades
+/// to `empty` rather than writing a wrong id — the same choice
+/// [`write_optional_item_stack`] makes, and the only one that keeps the rest of the
+/// packet parseable.
+fn write_slot_display(w: &mut Writer, display: &ServerSlotDisplay) {
+    match display {
+        ServerSlotDisplay::Empty => w.var_i32(slot_display::EMPTY),
+        ServerSlotDisplay::Item(item) => match item_id(&item.to_string()) {
+            Some(id) => {
+                w.var_i32(slot_display::ITEM);
+                w.var_i32(id);
+            }
+            None => w.var_i32(slot_display::EMPTY),
+        },
+        ServerSlotDisplay::Stack { item, count } => match item_id(&item.to_string()) {
+            Some(id) => {
+                w.var_i32(slot_display::ITEM_STACK);
+                // `ItemStackTemplate.STREAM_CODEC` is item, **then** count, then
+                // the component patch — the opposite field order from
+                // `ItemStack.OPTIONAL_STREAM_CODEC`, which leads with the count.
+                // Transcribing one from the other is the mistake to avoid here.
+                w.var_i32(id);
+                w.var_i32(*count);
+                w.var_i32(0); // added components
+                w.var_i32(0); // removed components
+            }
+            None => w.var_i32(slot_display::EMPTY),
+        },
+        ServerSlotDisplay::Tag(tag) => {
+            w.var_i32(slot_display::TAG);
+            w.string(&tag.to_string());
+        }
+        ServerSlotDisplay::Composite(contents) => {
+            w.var_i32(slot_display::COMPOSITE);
+            w.var_i32(i32::try_from(contents.len()).unwrap_or(i32::MAX));
+            for entry in contents {
+                write_slot_display(w, entry);
+            }
+        }
+    }
+}
+
+/// Writes one `RecipeDisplay.STREAM_CODEC` value: dispatch id, the type's own
+/// fields, then `result` and `craftingStation` (in that order, for every type).
+fn write_recipe_display(w: &mut Writer, display: &ServerRecipeDisplay) {
+    let station = ServerSlotDisplay::Item(
+        "minecraft:crafting_table"
+            .parse()
+            .expect("static item id is valid"),
+    );
+    match display {
+        ServerRecipeDisplay::Shaped {
+            width,
+            height,
+            ingredients,
+            result,
+        } => {
+            w.var_i32(recipe_display::CRAFTING_SHAPED);
+            w.var_i32(*width);
+            w.var_i32(*height);
+            w.var_i32(i32::try_from(ingredients.len()).unwrap_or(i32::MAX));
+            for ingredient in ingredients {
+                write_slot_display(w, ingredient);
+            }
+            write_slot_display(w, result);
+            write_slot_display(w, &station);
+        }
+        ServerRecipeDisplay::Shapeless {
+            ingredients,
+            result,
+        } => {
+            w.var_i32(recipe_display::CRAFTING_SHAPELESS);
+            w.var_i32(i32::try_from(ingredients.len()).unwrap_or(i32::MAX));
+            for ingredient in ingredients {
+                write_slot_display(w, ingredient);
+            }
+            write_slot_display(w, result);
+            write_slot_display(w, &station);
+        }
+    }
+}
+
+/// Body of `ClientboundRecipeBookAddPacket` (issue #547): a list of
+/// `(RecipeDisplayEntry, flags)` pairs, then the `replace` bool.
+///
+/// `RecipeDisplayEntry` is `id`, `display`, `OptionalInt group`,
+/// `recipe_book_category` registry id, and `Optional<List<Ingredient>>` where an
+/// `Ingredient` is a `HolderSet<Item>`.
+///
+/// **The `HolderSet` encoding is the subtle part.** `ByteBufCodecs.holderSet`
+/// writes a VarInt that is `0` for "a tag follows" and `n + 1` for "a list of `n`
+/// direct entries follows". We always write the direct-list form (the ingredient
+/// items are already resolved server-side), so every count here is `len + 1` — an
+/// off-by-one that is *not* an off-by-one.
+///
+/// `flags` is `0`: neither `FLAG_NOTIFICATION` nor `FLAG_HIGHLIGHT`, because the
+/// join-time book is not a discovery toast.
+fn encode_recipe_book_add_body(entries: &[ServerRecipeBookEntry], replace: bool) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(i32::try_from(entries.len()).unwrap_or(i32::MAX));
+    for entry in entries {
+        w.var_i32(entry.id);
+        write_recipe_display(&mut w, &entry.display);
+        match entry.group {
+            Some(group) => {
+                w.bool(true);
+                w.var_i32(group);
+            }
+            None => w.bool(false),
+        }
+        let category = RECIPE_BOOK_CATEGORIES
+            .iter()
+            .position(|name| *name == entry.category)
+            .and_then(|i| i32::try_from(i).ok())
+            // `crafting_misc`, the tab vanilla's own JSON default lands in.
+            .unwrap_or(3);
+        w.var_i32(category);
+        if entry.crafting_requirements.is_empty() {
+            w.bool(false);
+        } else {
+            w.bool(true);
+            w.var_i32(i32::try_from(entry.crafting_requirements.len()).unwrap_or(i32::MAX));
+            for ingredient in &entry.crafting_requirements {
+                let ids: Vec<i32> = ingredient
+                    .iter()
+                    .filter_map(|item| item_id(&item.to_string()))
+                    .collect();
+                // See this function's doc: `n + 1`, because `0` means "a tag
+                // reference follows instead".
+                w.var_i32(i32::try_from(ids.len() + 1).unwrap_or(i32::MAX));
+                for id in ids {
+                    w.var_i32(id);
+                }
+            }
+        }
+        w.u8(0); // flags: not a notification, not highlighted
+    }
+    w.bool(replace);
+    w.into_vec()
 }
 
 /// Body of `ClientboundUpdateAdvancementsPacket` (see the trait method for the
@@ -4129,6 +4320,20 @@ impl ServerProtocol for V770ServerProtocol {
         ServerDirective::Send {
             packet_id: play::clientbound::UPDATE_ADVANCEMENTS,
             payload: encode_update_advancements_body(update),
+        }
+    }
+
+    /// See [`ServerProtocol::encode_recipe_book_add`]'s trait doc. This override
+    /// is what makes `PLACE_RECIPE` reachable at all (issue #547): the ids it
+    /// hands out are the only ids any client can echo back.
+    fn encode_recipe_book_add(
+        &self,
+        entries: &[ServerRecipeBookEntry],
+        replace: bool,
+    ) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::RECIPE_BOOK_ADD,
+            payload: encode_recipe_book_add_body(entries, replace),
         }
     }
 

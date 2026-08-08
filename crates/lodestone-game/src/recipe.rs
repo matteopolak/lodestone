@@ -513,6 +513,33 @@ impl ShapedRecipe {
         &self.result
     }
 
+    /// The pattern's own width — **not** the grid's. A `ShapedCraftingRecipeDisplay`
+    /// carries the pattern's real dimensions, so a 2×2 recipe must not be
+    /// advertised as a 3×3 with empty cells (a vanilla client would draw the ghost
+    /// overlay in the wrong slots of a player-inventory grid).
+    #[must_use]
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// The pattern's own height — see [`width`](Self::width).
+    #[must_use]
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// The row-major pattern cells, `None` meaning "must be empty".
+    #[must_use]
+    pub fn pattern(&self) -> &[Option<Ingredient>] {
+        &self.pattern
+    }
+
+    /// The recipe's `group`, if the JSON declared one.
+    #[must_use]
+    pub fn group(&self) -> Option<&str> {
+        self.group.as_deref()
+    }
+
     fn pattern_at(&self, x: usize, y: usize, mirrored: bool) -> Option<&Ingredient> {
         let col = if mirrored { self.width - 1 - x } else { x };
         self.pattern[y * self.width + col].as_ref()
@@ -618,6 +645,19 @@ impl ShapelessRecipe {
     #[must_use]
     pub fn result(&self) -> &ItemStack {
         &self.result
+    }
+
+    /// The ingredients in declaration order — what a
+    /// `ShapelessCraftingRecipeDisplay` carries, with no grid to lay them out in.
+    #[must_use]
+    pub fn ingredients(&self) -> &[Ingredient] {
+        &self.ingredients
+    }
+
+    /// The recipe's `group`, if the JSON declared one.
+    #[must_use]
+    pub fn group(&self) -> Option<&str> {
+        self.group.as_deref()
     }
 
     /// Ingredients in declaration order, one per grid cell in a

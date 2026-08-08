@@ -1636,6 +1636,29 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes the `ClientboundRecipeBookAddPacket` (26.2) — the packet that
+    /// **hands out `RecipeDisplayId`s** (issue #547).
+    ///
+    /// Without it `PLACE_RECIPE` is structurally unreachable rather than merely
+    /// unimplemented: the id a client echoes back is a position in *this* list, so
+    /// no client — ours or a real vanilla 26.2 one — can ever send a valid one
+    /// until something encodes it. `crate::crafting::recipe_at_index` and
+    /// [`crate::crafting::recipe_book_entries`] walk the same id-sorted corpus
+    /// order, so the index space cannot disagree.
+    ///
+    /// `replace` is vanilla's flag for "this is the whole book" (`true` at join)
+    /// versus "add these to what you have". The default emits nothing, so a
+    /// protocol without recipe-book support simply leaves the book empty — which
+    /// is what every family other than v770 does.
+    fn encode_recipe_book_add(
+        &self,
+        entries: &[crate::crafting::RecipeBookEntry],
+        replace: bool,
+    ) -> ServerDirective {
+        let _ = (entries, replace);
+        ServerDirective::None
+    }
+
     /// Encodes the `ClientboundSelectAdvancementsTabPacket` (26.2), sent in
     /// reply to the client's `select_advancements_tab` request (issue #338).
     /// `tab` is the advancement id to open, or `None` to close the screen —
