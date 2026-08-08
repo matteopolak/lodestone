@@ -78,16 +78,31 @@ fn main() {
 
     // Parallel wall-clock over the same patch (embarrassingly parallel: each
     // column builds a fresh sampler and reads only immutable generator state).
+    //
+    // **A fresh generator, deliberately.** This arm used to borrow the `gtor`
+    // the serial arm above had just walked, so the staged store answered most of
+    // its columns from memory and the "speedup" was largely a cache-hit rate.
+    // Measured while fixing it (`DESIGN.md` §12.132): the parallel arm ran a
+    // program roughly 83% answered from the store, and the 2.4–2.9× this metric
+    // reported was quoted as a real scaling figure in several places before
+    // anyone re-derived it. Each arm now generates the patch from cold, which is
+    // what makes the ratio a speedup rather than a warmth comparison.
+    //
+    // `crates/lodestone-server/tests/join_parallel_efficiency.rs` is the
+    // instrument to trust for this question — it sweeps the window and reads
+    // instructions retired, so it separates redundant recomputation from parked
+    // workers. This example stays a human-readable curve.
     let workers = std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(4);
     let batch = coords.len().div_ceil(workers);
+    let par_gtor = overworld_generator(seed);
     let par_start = Instant::now();
     let par_count: usize = std::thread::scope(|scope| {
         let handles: Vec<_> = coords
             .chunks(batch.max(1))
             .map(|slice| {
-                let gtor = &gtor;
+                let gtor = &par_gtor;
                 scope.spawn(move || {
                     slice
                         .iter()
@@ -166,12 +181,18 @@ fn main() {
     println!("--- thread-count sweep (same {n}-chunk patch each time) ---");
     for &count in &thread_counts {
         let batch = coords.len().div_ceil(count);
+        // Fresh generator per arm, for the reason given above the parallel
+        // section: sharing one across the sweep makes every arm after the first
+        // read a warm store, which flattens the curve and hides exactly the
+        // right-hand-side degradation this sweep exists to show. Build time is
+        // outside `t0`.
+        let sweep_gtor = overworld_generator(seed);
         let t0 = Instant::now();
         let sum: usize = std::thread::scope(|scope| {
             let handles: Vec<_> = coords
                 .chunks(batch.max(1))
                 .map(|slice| {
-                    let gtor = &gtor;
+                    let gtor = &sweep_gtor;
                     scope.spawn(move || {
                         slice
                             .iter()
