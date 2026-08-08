@@ -2504,6 +2504,7 @@ where
             | ServerBound::PlayerRotated { .. }
             | ServerBound::PlayerStatusOnly { .. }
             | ServerBound::BlockAction { .. }
+            | ServerBound::ItemDropped { .. }
             | ServerBound::UseItemOn { .. }
             | ServerBound::ChangeGameMode { .. }
             | ServerBound::DifficultyChanged { .. }
@@ -5042,26 +5043,154 @@ fn apply_recipe_placed<P: ServerProtocol>(
 ///
 /// A connection with no tracked position yet drops nothing rather than spawning at
 /// the origin, the same "no data yet, don't guess" gate [`apply_attack`] uses.
-fn spawn_dropped_stacks(mobs: &MobHandle, player_pos: Option<(f64, f64, f64)>, dropped: Vec<ItemStack>) {
+fn spawn_dropped_stacks(
+    mobs: &MobHandle,
+    player_pos: Option<(f64, f64, f64)>,
+    player_rot: Option<Rotation>,
+    rng: &mut SpawnRng,
+    dropped: Vec<ItemStack>,
+) {
     if dropped.is_empty() {
         return;
     }
     let Some((x, y, z)) = player_pos else { return };
-    // Vanilla throws from eye height with a forward impulse; this crate tracks no
-    // player facing at the container call sites, so the stack is released at the
-    // eye and left to `ItemMotion`'s own fall dynamics.
-    let position = Vec3::new(x, y + EYE_HEIGHT, z);
+    // Vanilla routes a container throw through the *same* `drop(stack, false,
+    // true)` the `Q` key uses (`AbstractContainerMenu.doClick`'s outside case →
+    // `Player.drop`), so it gets the same hand position and the same forward
+    // impulse. This used to release at the eye with **zero** velocity and a
+    // 10-tick pickup delay, with a comment saying facing was not tracked here — it
+    // is (`player_rot`), and the effect of the old shape was that a stack thrown
+    // out of an open window dropped straight onto the player's feet and was
+    // immediately picked back up, which reads as the throw not working.
+    let rotation = player_rot.unwrap_or(Rotation { yaw: 0.0, pitch: 0.0 });
+    let position = Vec3::new(x, y + EYE_HEIGHT - crate::block_drops::THROW_HAND_DROP, z);
     mobs.with(|sim| {
         for stack in dropped {
             let count = u8::try_from(stack.count).unwrap_or(u8::MAX);
+            // A fresh draw per stack, as vanilla does: `doClick`'s outside case
+            // can throw several stacks in one click and each gets its own spread.
+            let velocity =
+                crate::block_drops::thrown_item_velocity(rotation.yaw, rotation.pitch, rng);
             sim.spawn_item(
                 stack.item.clone(),
                 position,
-                Vec3::new(0.0, 0.0, 0.0),
-                ItemLifecycle::newly_dropped(count, DEFAULT_MAX_STACK_SIZE),
+                velocity,
+                ItemLifecycle {
+                    pickup_delay: crate::block_drops::THROWN_PICKUP_DELAY_TICKS,
+                    ..ItemLifecycle::newly_dropped(count, DEFAULT_MAX_STACK_SIZE)
+                },
             );
         }
     });
+}
+
+/// Throws the selected hotbar stack into the world — `Q` (`whole_stack: false`,
+/// one item) or `Ctrl+Q` (`whole_stack: true`, all of it).
+///
+/// Vanilla's `ServerPlayer.drop(boolean)` (`ServerPlayer.java:2081-2092`), which is
+/// three steps: `Inventory.removeFromSelected(all)` takes the items, the menu is
+/// told the selected slot's *new* contents, and `LivingEntity.drop` spawns the
+/// entity with [`crate::block_drops::thrown_item_velocity`].
+///
+/// # Why the slot update is not optional
+///
+/// There is no `ClientboundPlayerActionAckPacket` — the client predicts the drop
+/// itself and vanilla only ever confirms it through the menu's own slot sync
+/// (`containerMenu.setRemoteSlot`). So the returned directive *is* the reply, and
+/// without it the client's prediction is never reconciled: a rejected drop (a full
+/// hotbar slot read as empty, a stale selected index) leaves a ghost item on the
+/// client until something else resyncs the window. That is the same class of
+/// silent divergence `apply_container_clicked`'s corrective content packet exists
+/// to close, and it is why this returns `Some` even when nothing was dropped is
+/// **not** the case — a no-op drop returns `None`, because the client predicted no
+/// change either.
+///
+/// Returns the directive to send and the stacks to spawn; the caller owns both
+/// because it holds the `Connection` and the [`MobHandle`].
+fn apply_item_dropped<P: ServerProtocol>(
+    proto: &P,
+    inventory: &mut PlayerInventory,
+    open_container: Option<&mut OpenContainer>,
+    player_pos: Option<(f64, f64, f64)>,
+    player_rot: Option<Rotation>,
+    whole_stack: bool,
+    rng: &mut SpawnRng,
+    mobs: &MobHandle,
+) -> Option<ServerDirective> {
+    let native = usize::from(inventory.selected_hotbar_slot());
+    let held = inventory.native(native)?.clone();
+    if held.count <= 0 {
+        return None;
+    }
+    // `removeFromSelected(all)`: the whole count, or one item.
+    let taken = if whole_stack { held.count } else { 1 };
+    let mut thrown = held.clone();
+    thrown.count = taken;
+    let remaining = held.count - taken;
+    inventory.set_native(
+        native,
+        (remaining > 0).then(|| {
+            let mut rest = held.clone();
+            rest.count = remaining;
+            rest
+        }),
+    );
+
+    // Spawned before the reply is built so a panic here cannot leave the client
+    // told about an inventory change that produced no entity.
+    if let Some((x, y, z)) = player_pos {
+        let rotation = player_rot.unwrap_or(Rotation { yaw: 0.0, pitch: 0.0 });
+        let velocity =
+            crate::block_drops::thrown_item_velocity(rotation.yaw, rotation.pitch, rng);
+        let position = Vec3::new(
+            x,
+            y + EYE_HEIGHT - crate::block_drops::THROW_HAND_DROP,
+            z,
+        );
+        let count = u8::try_from(thrown.count).unwrap_or(u8::MAX);
+        mobs.with(|sim| {
+            sim.spawn_item(
+                thrown.item.clone(),
+                position,
+                velocity,
+                ItemLifecycle {
+                    // 40, not `newly_dropped`'s 10: a player walking forwards
+                    // would otherwise pick their own throw straight back up.
+                    pickup_delay: crate::block_drops::THROWN_PICKUP_DELAY_TICKS,
+                    ..ItemLifecycle::newly_dropped(count, DEFAULT_MAX_STACK_SIZE)
+                },
+            );
+        });
+    }
+
+    // The hotbar's menu slot in whichever window is open. The player screen and
+    // the crafting table both put native hotbar slot `n` at menu slot
+    // `hotbar_start + n`; asking the layout rather than hardcoding 36 is what
+    // keeps this right for a container whose payload half is a different size.
+    let (layout, window_id, state_id) = match open_container {
+        Some(tracked) => {
+            let layout = match tracked.shape {
+                MenuKind::CraftingTable => MenuLayout::crafting_table(),
+                _ => MenuLayout::container(tracked.container_size),
+            };
+            let window_id = tracked.window_id;
+            (layout, window_id, tracked.next_state_id())
+        }
+        None => (MenuLayout::player(), 0, 0),
+    };
+    // Asked of the layout rather than hardcoded as `36 + native`: a container
+    // window's own slots come *first*, so the hotbar's menu index depends on the
+    // container's size. The player screen is the only layout where it is 36.
+    let menu_slot = layout
+        .iter()
+        .find(|&(_, kind)| kind == SlotKind::Player(native))
+        .and_then(|(index, _)| i32::try_from(index).ok())?;
+    Some(proto.encode_container_slot(
+        window_id,
+        state_id,
+        menu_slot,
+        inventory.native(native),
+    ))
 }
 
 /// Resolves a `minecraft:attack` request (issue #12) against the live mob
@@ -5551,6 +5680,26 @@ where
             )
             .await?;
         }
+        // `Q` / `Ctrl+Q`. Vanilla refuses in spectator and nowhere else —
+        // creative included, where `handleCreativeModeItemDrop` is a no-op on the
+        // server and the stack really does leave the inventory.
+        ServerBound::ItemDropped { whole_stack } => {
+            if !matches!(*game_mode, GameMode::Spectator) {
+                let directive = apply_item_dropped(
+                    proto,
+                    inventory,
+                    open_container.as_mut(),
+                    *player_pos,
+                    *player_rot,
+                    whole_stack,
+                    drops_rng,
+                    mobs,
+                );
+                if let Some(directive) = directive {
+                    apply(conn, state, directive).await?;
+                }
+            }
+        }
         ServerBound::BlockAction {
             action,
             pos,
@@ -5672,7 +5821,7 @@ where
                 carried_item.as_ref(),
                 *game_mode == GameMode::Creative,
             );
-            spawn_dropped_stacks(mobs, *player_pos, dropped);
+            spawn_dropped_stacks(mobs, *player_pos, *player_rot, drops_rng, dropped);
             if let Some(correction) = correction {
                 apply(conn, state, correction).await?;
             }
@@ -5709,7 +5858,7 @@ where
                     spilled.push(leftover);
                 }
             }
-            spawn_dropped_stacks(mobs, *player_pos, spilled);
+            spawn_dropped_stacks(mobs, *player_pos, *player_rot, drops_rng, spilled);
             if open_container.as_ref().is_some_and(|open| open.window_id == window_id) {
                 *open_container = None;
                 *container_sync = ContainerSync::default();

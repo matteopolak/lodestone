@@ -382,13 +382,28 @@ pub enum ServerBound {
         /// Whether the client reports itself as grounded in this sample.
         on_ground: bool,
     },
+    /// The player threw an item out of their hand — `Q` / `Ctrl+Q`, vanilla's
+    /// `ServerboundPlayerActionPacket` ordinals `DROP_ITEM` (4) and
+    /// `DROP_ALL_ITEMS` (3).
+    ///
+    /// **These used to decode to [`Ignored`](Self::Ignored)**, and the note on
+    /// [`BlockAction`](Self::BlockAction) below said so — item handling was out of
+    /// this crate's scope when that note was written. It no longer is (this crate
+    /// owns [`PlayerInventory`](crate::PlayerInventory) and spawns item entities
+    /// for block drops), so the ordinals now lift to their own variant. Pressing
+    /// `Q` did nothing at all before, and no `_ =>` arm was to blame: the
+    /// information was thrown away one layer earlier, at the decode.
+    ItemDropped {
+        /// `true` for `DROP_ALL_ITEMS` (`Ctrl+Q`, the whole selected stack),
+        /// `false` for `DROP_ITEM` (one item) — vanilla's `all` argument to
+        /// `Inventory.removeFromSelected`.
+        whole_stack: bool,
+    },
     /// A block-breaking phase (`ServerboundPlayerActionPacket`'s
     /// `START_DESTROY_BLOCK`/`ABORT_DESTROY_BLOCK`/`STOP_DESTROY_BLOCK`
-    /// ordinals). The packet's other four ordinals (drop item, drop stack,
-    /// release use, swap-with-offhand, stab) share the same wire packet but
-    /// carry no terrain edit — item handling is out of this crate's scope
-    /// (see `docs/block-edit.md`) — and decode to [`Ignored`](Self::Ignored)
-    /// instead.
+    /// ordinals). The two drop ordinals share the same wire packet and lift to
+    /// [`ItemDropped`](Self::ItemDropped); release-use, swap-with-offhand and
+    /// stab still decode to [`Ignored`](Self::Ignored).
     BlockAction {
         /// Which phase of the break this is.
         action: BlockActionKind,
