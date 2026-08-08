@@ -1113,7 +1113,7 @@ impl FluidSectionView for SnapshotFluidView<'_> {
     /// for itself. Without this override the default composition triples the
     /// fill's coordinate work and a **fluid-free** section costs 2.9× what it
     /// did before the grid existed — measured, not predicted (`DESIGN.md`
-    /// §12.123). The out-of-neighbourhood answer is
+    /// §12.124). The out-of-neighbourhood answer is
     /// `FluidNeighborCell::default()`, which is exactly the `None`/`false`/
     /// `false` the three methods below return there.
     fn cell_at(&self, x: i32, y: i32, z: i32) -> FluidNeighborCell {

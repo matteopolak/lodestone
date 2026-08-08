@@ -90,7 +90,7 @@ const EFFECTS_MEMO: usize = 4;
 /// Measured on the fluid path: one `water_tint_at` cost **6,263 instructions, of
 /// which 97.8% was `biome_effects`** — 46% of `mesh_fluids`'s entire per-cell
 /// cost, and a term issue #542's own diagnosis did not name (`DESIGN.md`
-/// §12.123).
+/// §12.124).
 ///
 /// A blend box covers 25 columns and terrain has *one or two* biomes there, so
 /// the same handful of names is re-scanned dozens of times. This memo keys on
@@ -353,7 +353,7 @@ mod tests {
     }
 
     /// Control: the memo must actually *hit*, or it is dead weight and the
-    /// measured saving in `DESIGN.md` §12.123 could not have come from here.
+    /// measured saving in `DESIGN.md` §12.124 could not have come from here.
     ///
     /// Counts calls to the name closure and to a hand-rolled resolver standing
     /// in for the scan: a radius-2 blend over a single biome is 25 name lookups,
