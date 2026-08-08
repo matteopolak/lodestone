@@ -38,8 +38,14 @@
 //! * Otherwise the dig is recorded as a [`PendingBreak`], and `StopDestroy`
 //!   replays vanilla's `progress_per_tick * (ticks_spent + 1) >= 0.7` test
 //!   ([`STOP_DESTROY_PROGRESS`]) before breaking.
+//! * **A `StopDestroy` that falls short of `0.7` does not refuse the break — it
+//!   *defers* it.** [`PendingBreak::deferred`] is vanilla's `hasDelayedDestroy`:
+//!   the dig keeps accruing progress on the server's own clock after the packet,
+//!   and the block breaks the tick [`DELAYED_DESTROY_PROGRESS`] is reached. See
+//!   [`PendingBreak::deferred_break_ready`] and `crate::server`'s `vitals_tick`
+//!   arm, which is the tick hook that polls it.
 //! * An unbreakable block (`hardness == -1.0`, i.e. bedrock and barrier) yields
-//!   `0.0` progress per tick, so it never satisfies either test at any tick
+//!   `0.0` progress per tick, so it never satisfies any of the tests at any tick
 //!   count. That is the property, not a special case.
 //!
 //! # How to change it, and the gotchas
@@ -94,9 +100,16 @@ use crate::vitals::EYE_HEIGHT;
 /// It is `0.7` rather than `1.0` because the client is the authority on when it
 /// released the button and the server's tick accounting is one tick coarser than
 /// the client's; vanilla defers the remaining 30% to `hasDelayedDestroy`, which
-/// this crate does not model (a rejected `StopDestroy` simply resyncs the block
-/// instead — see `crate::server`'s `apply_block_action`).
+/// [`PendingBreak::deferred`] now models.
 pub const STOP_DESTROY_PROGRESS: f32 = 0.7;
+
+/// The progress a *deferred* dig must reach for the block to finally break —
+/// vanilla's `tick()` test `destroyProgress >= 1.0F` on `hasDelayedDestroy`.
+///
+/// This is the whole block, not [`STOP_DESTROY_PROGRESS`]: the `0.7` shortcut is
+/// a concession to the client having released the button, and a dig that did not
+/// earn it pays the full price on the server's own clock instead.
+pub const DELAYED_DESTROY_PROGRESS: f32 = 1.0;
 
 /// Multiplier applied to the server's destroy-progress estimate to absorb every
 /// speed input this crate does not track.
@@ -138,26 +151,87 @@ pub(crate) struct PendingBreak {
     /// `None` here means the timing test is skipped for this dig; the range and
     /// hardness tests still apply.
     pub(crate) start_tick: Option<u64>,
+    /// Vanilla's `hasDelayedDestroy`: the client has already sent its
+    /// `StopDestroy` and the dig fell short of [`STOP_DESTROY_PROGRESS`], so this
+    /// dig is no longer waiting on a packet — it is waiting on the *clock*, and
+    /// the server's own tick loop finishes it once
+    /// [`DELAYED_DESTROY_PROGRESS`] is reached.
+    ///
+    /// Why this exists rather than a refusal: for any block the client does not
+    /// treat as instant, `StopDestroy` **is** the ordinary end of a dig, and the
+    /// server's estimate is always a little behind the client's own progress. A
+    /// shortfall is the expected case on a slow block, not a cheat, so vanilla
+    /// keeps ticking (`ServerPlayerGameMode.tick`) rather than rolling the client
+    /// back. Refusing here made every non-instant block unbreakable: hold the
+    /// mouse on stone, release, nothing happens.
+    pub(crate) deferred: bool,
 }
 
 impl PendingBreak {
+    /// The dig's accrued progress as of `now`, as a fraction of the block —
+    /// vanilla's `getDestroyProgress * (ticksSpentDestroying + 1)`, with
+    /// [`UNTRACKED_SPEED_HEADROOM`] folded in.
+    ///
+    /// `None` when either side has no tick to compare (see
+    /// [`start_tick`](Self::start_tick)) — "no timing evidence", which each
+    /// caller resolves in its own safe direction rather than inventing a number.
+    fn progress_at(&self, now: Option<u64>) -> Option<f32> {
+        let (Some(start), Some(now)) = (self.start_tick, now) else {
+            return None;
+        };
+        let elapsed = (now.saturating_sub(start) + 1) as f32;
+        Some(self.progress_per_tick * UNTRACKED_SPEED_HEADROOM * elapsed)
+    }
+
+    /// This dig moved into vanilla's `hasDelayedDestroy` state — the same
+    /// `progress_per_tick` and the same start tick
+    /// (`delayedTickStart = destroyProgressStart`), so the deferred continuation
+    /// is priced on one unbroken clock instead of restarting from the
+    /// `StopDestroy`.
+    ///
+    /// `None` for a dig that could never finish: an unbreakable block, or one
+    /// with no clock to defer against (whose `StopDestroy` is accepted outright,
+    /// so this is unreachable there anyway). That `None` is what stops a bedrock
+    /// dig parking a doomed deferred break in the slot forever.
+    pub(crate) fn defer(self) -> Option<Self> {
+        if self.progress_per_tick <= 0.0 || self.start_tick.is_none() {
+            return None;
+        }
+        Some(Self {
+            deferred: true,
+            ..self
+        })
+    }
+
+    /// Whether a deferred dig has now earned its block — vanilla's
+    /// `tick()`/`incrementDestroyProgress` test against
+    /// [`DELAYED_DESTROY_PROGRESS`].
+    ///
+    /// `false` for a dig still waiting on its `StopDestroy`
+    /// ([`deferred`](Self::deferred) is `false`), so the server's tick hook can
+    /// call this unconditionally on whatever is in the slot.
+    pub(crate) fn deferred_break_ready(&self, now: Option<u64>) -> bool {
+        self.deferred
+            && self.progress_per_tick > 0.0
+            && self
+                .progress_at(now)
+                .is_some_and(|progress| progress >= DELAYED_DESTROY_PROGRESS)
+    }
+
     /// Whether a `StopDestroy` arriving on `now` may break this block —
     /// vanilla's `getDestroyProgress * (ticksSpentDestroying + 1) >= 0.7F`, with
     /// [`UNTRACKED_SPEED_HEADROOM`] folded in.
     ///
     /// Always `true` when either side has no tick to compare (see
     /// [`start_tick`](Self::start_tick)); always `false` for an unbreakable
-    /// block, whose `progress_per_tick` is `0.0`.
+    /// block, whose `progress_per_tick` is `0.0`. A `false` on a breakable block
+    /// is **not** a refusal — the caller defers the dig with [`Self::defer`].
     pub(crate) fn may_break_at(&self, now: Option<u64>) -> bool {
         if self.progress_per_tick <= 0.0 {
             return false;
         }
-        let (Some(start), Some(now)) = (self.start_tick, now) else {
-            return true;
-        };
-        let ticks_spent = now.saturating_sub(start);
-        let elapsed = (ticks_spent + 1) as f32;
-        self.progress_per_tick * UNTRACKED_SPEED_HEADROOM * elapsed >= STOP_DESTROY_PROGRESS
+        self.progress_at(now)
+            .is_none_or(|progress| progress >= STOP_DESTROY_PROGRESS)
     }
 }
 
@@ -250,10 +324,22 @@ mod tests {
             pos: BlockPos::new(0, 0, 0),
             progress_per_tick: per,
             start_tick: Some(0),
+            deferred: false,
         };
         assert!(!dig.may_break_at(Some(0)));
         assert!(!dig.may_break_at(Some(100_000)));
         assert!(!dig.may_break_at(None), "no clock must not mean no hardness");
+        // And the deferred continuation must not become a back door into it:
+        // bedrock is not deferrable at all, so no tick ever finishes it.
+        assert!(
+            dig.defer().is_none(),
+            "an unbreakable block must not arm a deferred break"
+        );
+        let doomed = PendingBreak {
+            deferred: true,
+            ..dig
+        };
+        assert!(!doomed.deferred_break_ready(Some(100_000)));
     }
 
     /// Issue #531's headline: obsidian must not break on a back-to-back
@@ -266,6 +352,7 @@ mod tests {
             pos: BlockPos::new(4, 64, 4),
             progress_per_tick: per,
             start_tick: Some(10),
+            deferred: false,
         };
         assert!(
             !dig.may_break_at(Some(10)),
@@ -281,6 +368,50 @@ mod tests {
              obsidian accepted after {needed} ticks"
         );
         assert!(dig.may_break_at(Some(10 + needed)));
+    }
+
+    /// The regression the deferred path exists for: the *ordinary* dig, where
+    /// `StartDestroy` and `StopDestroy` reach the server on the same tick (a
+    /// local integrated server reads both from one buffer). Refusing that made
+    /// every non-instant block unbreakable, which is worse than the cheat #531
+    /// was closing.
+    ///
+    /// Deepslate rather than stone because it is the block the `block_edit` gate
+    /// digs, and it is slower than stone — so if this passes, stone does.
+    #[test]
+    fn a_same_tick_stop_defers_and_then_breaks() {
+        let per =
+            progress_per_tick("minecraft:deepslate[axis=y]", None).expect("deepslate is in census");
+        let dig = PendingBreak {
+            pos: BlockPos::new(0, -50, 0),
+            progress_per_tick: per,
+            start_tick: Some(7),
+            deferred: false,
+        };
+        assert!(
+            !dig.may_break_at(Some(7)),
+            "a same-tick stop is still not an instant deepslate break"
+        );
+        let deferred = dig.defer().expect("deepslate is deferrable");
+        assert!(
+            !deferred.deferred_break_ready(Some(7)),
+            "deferring must not itself finish the dig"
+        );
+        // Predicted from the two constants, not read back off the code: the
+        // deferred dig owes the *whole* block, so it lands at
+        // ceil(1.0 / (per * headroom)) - 1 ticks after the start.
+        let needed = (DELAYED_DESTROY_PROGRESS / (per * UNTRACKED_SPEED_HEADROOM)).ceil() as u64 - 1;
+        assert!(
+            !deferred.deferred_break_ready(Some(7 + needed - 1)),
+            "the deferred break landed early: {needed} ticks was the prediction"
+        );
+        assert!(
+            deferred.deferred_break_ready(Some(7 + needed)),
+            "the deferred break never landed after {needed} ticks"
+        );
+        // A dig still waiting on its `StopDestroy` must never be finished by the
+        // tick hook, however long it has been held.
+        assert!(!dig.deferred_break_ready(Some(7 + needed * 100)));
     }
 
     #[test]

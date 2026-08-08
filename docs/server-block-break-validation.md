@@ -47,13 +47,46 @@ Then, in `apply_block_action`:
 |---|---|
 | out of range, any phase | dropped, before the per-ordinal fork (vanilla's first guard) |
 | `StartDestroy`, `progress_per_tick >= 1.0` | broken immediately — the one-shot fix |
-| `StartDestroy`, otherwise | recorded as a `PendingBreak { pos, progress_per_tick, start_tick }` |
+| `StartDestroy`, otherwise | recorded as a `PendingBreak { pos, progress_per_tick, start_tick, deferred: false }` |
 | `AbortDestroy` | clears `pending_break` if the position matches |
-| `StopDestroy` | breaks if `progress_per_tick × HEADROOM × (ticks_spent + 1) >= 0.7`, else **re-sends the block's real state** so the client rolls back its own prediction |
+| `StopDestroy`, progress `>= 0.7` | broken |
+| `StopDestroy`, progress `< 0.7` | **deferred, not refused** — `PendingBreak::defer` flips `deferred`, and the dig keeps accruing progress on the server's clock until it reaches `1.0` |
+| every 50 ms, `deferred` dig at `1.0` | broken by `serve_play`'s `vitals_tick` arm |
 
 An unbreakable block (`hardness == -1.0` — bedrock, barrier) prices at `0.0` progress
-per tick, so it satisfies neither test at any tick count. That is a property of the
-arithmetic, not a special case.
+per tick, so it satisfies none of the tests at any tick count, and `defer` returns
+`None` for it so it cannot park a doomed dig in the slot either. That is a property of
+the arithmetic, not a special case.
+
+### The deferred continuation, and why a refusal was wrong
+
+The first cut of this validation *refused* a short `StopDestroy` and re-sent the
+block's real state for the client to roll back on. **That broke ordinary block
+breaking outright** — hold the mouse on stone, release, nothing happens — and it is
+the worse of the two bugs, because a `StopDestroy` is the normal end of a dig for
+every block the client does not treat as instant, and on a local integrated server
+both packets are read off one buffer and land on **one server tick**, where no
+non-instant block can possibly have reached `0.7`.
+
+Vanilla does not refuse either. `ServerPlayerGameMode.handleBlockBreakAction`'s
+shortfall branch (`:229-234`) arms `hasDelayedDestroy` / `delayedDestroyPos` with
+`delayedTickStart = destroyProgressStart`, and `tick()` → `incrementDestroyProgress`
+keeps accruing progress until it reaches `1.0`, at which point the block is destroyed
+a tick or two late. It sends no rollback at all on this path. `PendingBreak::deferred`
+is that state, and `serve_play`'s `vitals_tick` arm — already a 50 ms timer, one
+server tick — is `tick()`. Like vanilla, that pass re-reads the block first and
+abandons the dig if something else already removed it, so a deferred break cannot
+roll a second set of drops into air.
+
+The deferred target is the whole block (`DELAYED_DESTROY_PROGRESS = 1.0`), not `0.7`:
+the `0.7` shortcut is a concession to the client having released the button, and a dig
+that did not earn it pays full price on the server's own clock instead.
+
+One deliberate divergence: this crate keeps **one** `pending_break` slot where vanilla
+keeps `isDestroyingBlock` and `hasDelayedDestroy` side by side (and prefers the
+delayed one in `tick()`). A fresh `StartDestroy` therefore replaces a deferred dig
+rather than coexisting with it. The client only ever has one dig in flight, so the
+second slot would only model a quirk.
 
 The actual breaking — loot roll, item-entity spawn, block-entity removal, the
 `block_update` packet — moved into `server.rs`'s `destroy_block`, vanilla's
@@ -101,15 +134,29 @@ sends no `StopDestroy` for stone will find it does not break. Nothing in
 `lodestone-server` tracks a game mode, so this is a named pre-existing gap rather
 than a half-fix.
 
+**The deferred continuation does not fix it, and cannot.** A deferred dig is armed
+by a `StopDestroy`; a creative client sends none, so nothing arms. And the wire is
+indistinguishable: a lone `StartDestroy` on stone is *also* what an ordinary survival
+player sends when they tap-and-move-on, so breaking on it unconditionally would
+reintroduce exactly the cheat this module exists to close. The real fix is game-mode
+state — honour the serverbound `CHANGE_GAME_MODE` this crate currently decodes into
+`ServerBound::Ignored` (`crates/protocol/v770/src/server_protocol.rs`), and stop
+hardcoding `game_type: 0` in `begin_play` / `JOIN_GAME_MODE` — then take vanilla's
+`instabuild` branch. Until then, note that **no client can legitimately be in
+creative against this server anyway**, because survival is all it ever advertises.
+
 **Interaction range is measured eye-to-block-*centre***, where vanilla's
 `isWithinBlockInteractionRange` measures to the closest point of the block's box.
 That is up to ~0.87 shorter, so `MAX_INTERACTION_DISTANCE` is rounded up to `6.0`
 rather than reproducing vanilla's `5.5`. The point is to reject a break from across
 the world; per-block AABB geometry is not worth the last half-block here.
 
-**Tests that break bare-handed must hold the dig.** A back-to-back
-`StartDestroy`/`StopDestroy` pair now lands on one server tick and is *refused* — see
-`BARE_HANDED_DIG` in `tests/serve_play.rs`. Use `tokio::time::sleep`, **not**
+**A test that wants the break to land *on the `StopDestroy`* must hold the dig.** A
+back-to-back pair lands on one server tick, which now takes the *deferred* path — the
+block still breaks, but a few ticks later, so a gate that drains the stream
+immediately after the pair sees nothing. See `BARE_HANDED_DIG` in
+`tests/serve_play.rs`, and `a_same_tick_stop_breaks_the_block_a_few_ticks_later`,
+which turns that lag into the thing under test. Use `tokio::time::sleep`, **not**
 `tokio::time::advance`: `advance` jumps the clock before yielding, so the server has
 not yet read the `StartDestroy` and stamps it with the already-advanced tick, putting
 both packets on one tick anyway. A paused-clock `sleep` lets the start packet drain
@@ -118,11 +165,12 @@ first. A diamond pickaxe on stone clears the threshold in a single tick, which i
 
 ## Configuration
 
-Three constants in `block_breaking.rs`, each documented on itself:
+Four constants in `block_breaking.rs`, each documented on itself:
 
 | constant | value | what it is |
 |---|---|---|
-| `STOP_DESTROY_PROGRESS` | `0.7` | vanilla's `destroyProgress >= 0.7F` acceptance threshold |
+| `STOP_DESTROY_PROGRESS` | `0.7` | vanilla's `destroyProgress >= 0.7F` acceptance threshold for a `StopDestroy` |
+| `DELAYED_DESTROY_PROGRESS` | `1.0` | vanilla's `tick()` threshold for a *deferred* dig — the whole block |
 | `UNTRACKED_SPEED_HEADROOM` | `8.0` | multiplier absorbing every speed input this crate does not track |
 | `MAX_INTERACTION_DISTANCE` | `6.0` | eye-to-block-centre reach limit |
 

@@ -2238,9 +2238,14 @@ where
 ///   sends no `StopDestroy` at all. Breaking only on `StopDestroy` therefore made
 ///   sugar cane, grass and flowers *unbreakable on this server*, which is the bug
 ///   the owner reported.
-/// * **A `StopDestroy` that arrives too early is refused**, and the true block
-///   state is sent back so the client resyncs (vanilla's `destroyAndAck` failure
-///   path). Bedrock and obsidian are no longer instant.
+/// * **A `StopDestroy` that arrives too early is *deferred*, not refused.** It
+///   arms vanilla's `hasDelayedDestroy` and the dig keeps accruing progress on
+///   the server's clock, breaking the block once it is fully earned — see
+///   [`crate::block_breaking::PendingBreak::defer`] and `serve_play`'s
+///   `vitals_tick` arm. Bedrock and obsidian are still not instant, because an
+///   unbreakable block is not deferrable and obsidian's deferred dig is minutes
+///   long; but hold-and-release on stone breaks stone, which an outright refusal
+///   made impossible.
 ///
 /// `pending_break` is this connection's tracked in-progress dig — the
 /// version-free analogue of vanilla's `destroyPos` + `destroyProgressStart` pair.
@@ -2338,6 +2343,14 @@ where
                     pos,
                     progress_per_tick: per_tick.unwrap_or(f32::INFINITY),
                     start_tick: game_tick,
+                    // Vanilla's `isDestroyingBlock`, not `hasDelayedDestroy`:
+                    // this dig is waiting on a `StopDestroy` packet. A fresh
+                    // `StartDestroy` replaces whatever was in the slot, including
+                    // a deferred dig on another position — vanilla keeps the two
+                    // states side by side and prefers the deferred one, a quirk
+                    // not worth a second slot here (the client only ever has one
+                    // dig in flight).
+                    deferred: false,
                 });
             }
         }
@@ -2352,13 +2365,21 @@ where
             };
             *pending_break = None;
             if !dig.may_break_at(game_tick) {
-                // Vanilla answers a refused break with the block's real state so
-                // the client's own prediction is rolled back (`destroyAndAck`'s
-                // else branch). Without this the client renders air over a block
-                // the server still has, which is worse than the cheat.
-                let actual = source.block_state(pos.x, pos.y, pos.z);
-                let directive = proto.encode_block_update(pos.x, pos.y, pos.z, &actual);
-                apply(conn, state, directive).await?;
+                // **Not a refusal.** Vanilla's shortfall branch arms
+                // `hasDelayedDestroy` and keeps accruing progress in
+                // `ServerPlayerGameMode.tick` until the block is fully earned
+                // (`ServerPlayerGameMode.java:229-234`); it sends no rollback
+                // here at all. Refusing instead — which is what this arm did
+                // between #531 and this fix — made every non-instant block
+                // unbreakable, because a `StopDestroy` arriving on the same tick
+                // as its `StartDestroy` (which is what a local integrated server
+                // sees) can never clear 0.7.
+                //
+                // A `None` means the dig can never finish (bedrock, or no clock),
+                // so the slot is simply left empty and nothing breaks. See
+                // `block_breaking::PendingBreak::defer` and `serve_play`'s
+                // `vitals_tick` arm, which is what finishes a deferred dig.
+                *pending_break = dig.defer();
                 return Ok(());
             }
             destroy_block(
@@ -4870,6 +4891,43 @@ where
             }
 
             _ = vitals_tick.tick() => {
+                // Vanilla's `ServerPlayerGameMode.tick` deferred-destroy pass,
+                // riding this timer because it is the one that already fires
+                // every 50ms — one server tick, exactly the cadence the
+                // continuation is counted in. This is what finishes an ordinary
+                // hold-and-release dig: `apply_block_action`'s `StopDestroy` arm
+                // defers a dig that fell short of 0.7 rather than refusing it,
+                // and nothing else in this loop would ever look at it again.
+                //
+                // `is_air` first, mirroring vanilla's own `blockState.isAir()`
+                // guard: something else (a random tick, another player) may have
+                // removed the block while the dig was deferred, and re-breaking
+                // air would roll a second set of drops.
+                if let Some(dig) = pending_break.filter(|dig| {
+                    dig.deferred_break_ready(
+                        Some(u64::try_from(ticks_since(play_start)).unwrap_or(0)),
+                    )
+                }) {
+                    pending_break = None;
+                    let current = source.get().block_state(dig.pos.x, dig.pos.y, dig.pos.z);
+                    if !crate::random_tick::is_air_variant(&current) {
+                        destroy_block(
+                            conn,
+                            proto,
+                            source.get(),
+                            &mut state,
+                            block_entities,
+                            &mut open_container,
+                            &mut container_sync,
+                            mobs,
+                            &mut drops_rng,
+                            inventory.selected_item(),
+                            dig.pos,
+                        )
+                        .await?;
+                    }
+                }
+
                 // No position yet (client has not sent a single move since
                 // join): nothing to test submersion against, so skip rather
                 // than guess a spawn position this version-free crate does

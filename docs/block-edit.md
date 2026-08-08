@@ -96,8 +96,11 @@ Since issue #531 it carries the dig's price and start tick, not just a position
   has accrued enough progress** — writes `minecraft:air` via `ChunkSource::set_block`,
   then sends one `encode_block_update` confirming it. A `StopDestroy` for a position
   nobody started (or one already aborted) is a no-op, same as vanilla; one that
-  arrives too early is answered with the block's *real* state so the client rolls its
-  prediction back.
+  arrives too early is **deferred rather than refused** — the dig keeps accruing
+  progress on the server's own clock and the block breaks a few ticks later, from
+  `serve_play`'s 50 ms `vitals_tick` arm. This matters because a same-tick
+  `Start`/`Stop` pair (what a local integrated server always sees) can never clear the
+  `0.7` threshold, so refusing it made every non-instant block unbreakable.
 
 The arithmetic behind "enough progress" is
 [`server-block-break-validation.md`](./server-block-break-validation.md).
