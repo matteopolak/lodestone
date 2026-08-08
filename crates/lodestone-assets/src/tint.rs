@@ -484,9 +484,22 @@ pub struct BiomeEffects {
 }
 
 /// Every 26.2 biome's [`BiomeEffects`], keyed by its path (no `minecraft:`
-/// namespace — see [`biome_effects`]). Sorted alphabetically, matching the 66
-/// files enumerated above; the sort order carries no meaning of its own since
-/// [`biome_effects`] looks up by name, not by index.
+/// namespace — see [`biome_effects`]).
+///
+/// **This table must stay in strictly ascending `str` order (bytewise, which is
+/// what `Ord for str` is), because [`FIRST_BYTE_INDEX`] assumes entries sharing a
+/// first byte are contiguous.** That was not a requirement before — the order used
+/// to be incidental, a by-product of the alphabetical `worldgen/biome/*.json`
+/// listing it was generated from, and the old doc said so explicitly. A biome
+/// inserted in the wrong place now silently resolves to `None` (so it renders the
+/// plains fallback) rather than failing to compile, which is why
+/// `biome_effects_table_is_strictly_ascending` in this module's tests enforces it.
+///
+/// Strictly speaking only *grouping* by first byte is needed, not a full sort; the
+/// full sort is asserted because it is the stronger, simpler property to state and
+/// to restore. Note `_` is `0x5F`, *below* every lowercase letter, so
+/// "alphabetical ignoring underscores" is **not** the required order — sort with
+/// `LC_ALL=C` if you regenerate this by hand.
 #[rustfmt::skip]
 const BIOME_EFFECTS: &[(&str, BiomeEffects)] = &[
     ("badlands", BiomeEffects { temperature: 2.0f32, downfall: 0.0f32, water_color: 0x3F76E4, grass_color: Some(0x90814D), foliage_color: Some(0x9E814D), dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
@@ -557,13 +570,73 @@ const BIOME_EFFECTS: &[(&str, BiomeEffects)] = &[
     ("wooded_badlands", BiomeEffects { temperature: 2.0f32, downfall: 0.0f32, water_color: 0x3F76E4, grass_color: Some(0x90814D), foliage_color: Some(0x9E814D), dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
 ];
 
+/// For each possible first byte, the half-open `BIOME_EFFECTS` range of entries
+/// beginning with it — the index [`biome_effects`] uses instead of scanning all
+/// 66.
+///
+/// Computed from the table at compile time by [`build_first_byte_index`], so it
+/// cannot drift out of step with it. Correct **only** because [`BIOME_EFFECTS`] is
+/// sorted, which makes entries sharing a first byte contiguous; see that table's
+/// doc for the invariant and the test enforcing it.
+///
+/// `u8` bounds are enough because the table has 66 entries. A first byte with no
+/// biome gets an empty range, which the scan below handles with no special case.
+const FIRST_BYTE_INDEX: [(u8, u8); 256] = build_first_byte_index();
+
+/// Buckets [`BIOME_EFFECTS`] by first byte at compile time. A `const fn` rather
+/// than a hand-written table precisely so adding a biome cannot leave a stale
+/// index behind — the failure mode would be one biome silently rendering the
+/// plains fallback, which no compile error and no screenshot would catch.
+const fn build_first_byte_index() -> [(u8, u8); 256] {
+    let mut index = [(0u8, 0u8); 256];
+    let mut i = 0usize;
+    while i < BIOME_EFFECTS.len() {
+        let byte = BIOME_EFFECTS[i].0.as_bytes()[0];
+        let start = i;
+        while i < BIOME_EFFECTS.len() && BIOME_EFFECTS[i].0.as_bytes()[0] == byte {
+            i += 1;
+        }
+        index[byte as usize] = (start as u8, i as u8);
+    }
+    index
+}
+
 /// Looks up a biome's [`BiomeEffects`] by name. Accepts either the bare path
 /// (`"swamp"`) or the namespaced id (`"minecraft:swamp"`) — a caller reading a
 /// wire biome name doesn't have to strip the namespace first.
+///
+/// # Why the shape of this function matters, and why it is not a binary search
+///
+/// This is not a cold path. `DESIGN.md` §12.124 measured one
+/// `NamedBiomeTint::water_color` call at **6,263 instructions, 97.8% of it inside
+/// this function**, because vanilla's biome blend is a radius-2 box — 25 samples
+/// per tinted quad — and `mesh_models`'s grass path asks up to four questions
+/// *per sample*. It was a plain `BIOME_EFFECTS.iter().find(…)`, ~33 compares on
+/// an average hit and all 66 on a miss.
+///
+/// **A `binary_search_by` over the sorted table was tried and measured *worse*,
+/// and the reason generalises: not all string compares cost the same.** `find`'s
+/// `*name == path` is `str::eq`, which compares **lengths first** and only reaches
+/// `memcmp` when they match — measured at **8.6 instructions per entry** on this
+/// table, because most entries differ from the probe in length. A `binary_search`
+/// comparator must return an `Ordering`, so every one of its ~7 probes is a real
+/// lexicographic `memcmp` call. Measured per call (§12.126): 58 → **309**
+/// instructions for the table's first entry, 618 → 352 for its last, and
+/// `mesh_fluids` **regressed 6,629 → 6,815 instructions per fluid cell**. Seven
+/// expensive compares beat thirty-three cheap ones only if you never price them.
+///
+/// So the win comes from doing *fewer of the cheap compares*: a compile-time
+/// [`FIRST_BYTE_INDEX`] narrows the scan to the entries sharing the probe's first
+/// byte — 3.79 compares on an average hit against 33.5, and a *miss* usually
+/// resolves in one or none. The miss path is worth naming separately because
+/// `NamedBiomeTint` deliberately does not memoise unresolvable names, so a section
+/// whose biome id is past `FALLBACK_BIOME_NAMES` paid a full 66-entry scan on
+/// every one of its 25 samples per cell.
 #[must_use]
 pub fn biome_effects(id: &str) -> Option<&'static BiomeEffects> {
     let path = id.strip_prefix("minecraft:").unwrap_or(id);
-    BIOME_EFFECTS
+    let (start, end) = FIRST_BYTE_INDEX[*path.as_bytes().first()? as usize];
+    BIOME_EFFECTS[start as usize..end as usize]
         .iter()
         .find(|(name, _)| *name == path)
         .map(|(_, effects)| effects)
@@ -611,3 +684,167 @@ pub fn blend_box<F: FnMut(i32, i32) -> Rgb>(x: i32, z: i32, radius: i32, mut sam
 /// Vanilla's default biome-blend radius (`Options.java:472`). See
 /// [`blend_box`]'s doc for why this is the only reachable value right now.
 pub const DEFAULT_BLEND_RADIUS: i32 = 2;
+
+/// Tests for invariants of *private* items — [`BIOME_EFFECTS`]'s sort order in
+/// particular, which the crate's public surface cannot see. Everything testable
+/// through the public API lives in `tests/tint.rs`.
+#[cfg(test)]
+mod tests {
+    /// The first index at which `names` is not strictly ascending under
+    /// `Ord for str`, or `None`. Separate from the test so the control below can
+    /// point it at data known to be out of order — an ascending-check that always
+    /// returns `None` would make the real test vacuous and read identically.
+    fn first_disorder(names: &[&str]) -> Option<usize> {
+        (1..names.len()).find(|&i| names[i - 1] >= names[i])
+    }
+
+    /// [`super::FIRST_BYTE_INDEX`] buckets [`super::BIOME_EFFECTS`] on the
+    /// assumption that entries sharing a first byte are contiguous, so a biome
+    /// inserted in the wrong place silently stops resolving. Nothing else enforces
+    /// the order: it is a `const` array of literals and the compiler has no
+    /// opinion about it.
+    #[test]
+    fn biome_effects_table_is_strictly_ascending() {
+        let names: Vec<&str> = super::BIOME_EFFECTS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            names.len(),
+            66,
+            "the 26.2 biome set is 66 entries (docs/worldgen-biomes.md's 66/66 gate); a \
+             different length means this test and the table disagree about the subject"
+        );
+        assert_eq!(
+            first_disorder(&names),
+            None,
+            "BIOME_EFFECTS is not strictly ascending: {:?} is followed by {:?}. \
+             FIRST_BYTE_INDEX buckets this table by first byte and assumes those runs are \
+             contiguous, so that entry now resolves to None and renders the plains fallback. \
+             Re-sort with `LC_ALL=C sort` — `_` is 0x5F, below every lowercase letter, so \
+             'alphabetical ignoring underscores' is the wrong order.",
+            first_disorder(&names).map(|i| names[i - 1]),
+            first_disorder(&names).map(|i| names[i]),
+        );
+    }
+
+    /// Control for the test above: the detector must actually fire. Both a swap
+    /// and a duplicate are checked, because `>=` catches the second only if the
+    /// comparison is not a bare `>`.
+    #[test]
+    fn the_ascending_check_finds_a_real_disorder() {
+        assert_eq!(
+            first_disorder(&["badlands", "beach", "bamboo_jungle"]),
+            Some(2),
+            "a swapped pair must be reported, or biome_effects_table_is_strictly_ascending \
+             is vacuous"
+        );
+        assert_eq!(
+            first_disorder(&["ocean", "ocean"]),
+            Some(1),
+            "a duplicate key must be reported too: binary_search_by picks an arbitrary one \
+             of two equal entries"
+        );
+        assert_eq!(first_disorder(&["a", "b", "c"]), None);
+        assert_eq!(first_disorder(&[]), None);
+    }
+
+    /// [`super::FIRST_BYTE_INDEX`] is built by a `const fn`, so the compiler
+    /// checks nothing about it beyond bounds. Three properties, each of which a
+    /// plausible off-by-one breaks differently: the ranges must be in bounds,
+    /// every entry in a range must actually start with that byte, and the ranges
+    /// must **cover all 66 entries** — the last is the one that catches a bucket
+    /// that ends early, which is otherwise invisible until one biome stops
+    /// resolving.
+    #[test]
+    fn the_first_byte_index_covers_every_entry_and_only_matching_ones() {
+        let mut covered = 0usize;
+        for (byte, &(start, end)) in super::FIRST_BYTE_INDEX.iter().enumerate() {
+            let (start, end) = (start as usize, end as usize);
+            assert!(
+                start <= end && end <= super::BIOME_EFFECTS.len(),
+                "byte {byte:#04X} indexes {start}..{end}, outside 0..{}",
+                super::BIOME_EFFECTS.len()
+            );
+            for (name, _) in &super::BIOME_EFFECTS[start..end] {
+                assert_eq!(
+                    name.as_bytes()[0] as usize,
+                    byte,
+                    "{name} is in byte {byte:#04X}'s bucket but does not start with it"
+                );
+            }
+            covered += end - start;
+        }
+        assert_eq!(
+            covered,
+            super::BIOME_EFFECTS.len(),
+            "the first-byte buckets cover {covered} of {} entries. The uncovered ones resolve \
+             to None and render the plains fallback",
+            super::BIOME_EFFECTS.len()
+        );
+    }
+
+    /// The reason the index is worth having at all, as a number rather than a
+    /// claim: it must narrow the scan by roughly an order of magnitude. Compares
+    /// are counted from the table itself, so this is arithmetic over outside data
+    /// and not a re-measurement of the code.
+    ///
+    /// `DESIGN.md` §12.126 records the instruction cost this predicts.
+    #[test]
+    fn the_first_byte_index_narrows_the_average_scan_by_about_nine_times() {
+        let n = super::BIOME_EFFECTS.len();
+        // Position within the whole table, 1-based: what `find` used to pay.
+        let flat: usize = (1..=n).sum();
+        // Position within the entry's own bucket, 1-based: what it pays now.
+        let bucketed: usize = super::FIRST_BYTE_INDEX
+            .iter()
+            .map(|&(start, end)| (1..=(end - start) as usize).sum::<usize>())
+            .sum();
+        let (flat, bucketed) = (flat as f64 / n as f64, bucketed as f64 / n as f64);
+        assert!(
+            (flat - 33.5).abs() < 0.01,
+            "a 66-entry linear scan averages 33.5 compares, computed {flat:.2}"
+        );
+        assert!(
+            bucketed < 4.5,
+            "the bucketed scan averages {bucketed:.2} compares, not the ~3.8 the first-byte \
+             distribution of the 66 biome names gives. Something has changed the bucketing, \
+             and DESIGN.md §12.126's per-call instruction figures no longer follow"
+        );
+        assert!(
+            flat / bucketed > 8.0,
+            "the index narrows the average scan only {:.1}x ({flat:.2} -> {bucketed:.2} \
+             compares). It was measured at 8.8x; below that the fixed cost of the index \
+             lookup starts to matter and the shape control in \
+             `client_chunk_cycles.rs` is the thing to re-read",
+            flat / bucketed
+        );
+    }
+
+    /// The property that actually matters, stated over the table itself rather
+    /// than over a hand-written name list: every entry must be *findable*, and a
+    /// name that sorts between two real entries must not be.
+    ///
+    /// `tests/tint.rs`'s `biome_effects_table_has_all_66_vanilla_biomes` checks
+    /// the same round trip against a list transcribed from the jar, which is the
+    /// stronger test of *contents*; this one is the stronger test of the *search*,
+    /// because it cannot pass by both sides sharing an omission.
+    #[test]
+    fn every_table_entry_is_findable_and_a_between_name_is_not() {
+        for (name, effects) in super::BIOME_EFFECTS {
+            assert_eq!(
+                super::biome_effects(name),
+                Some(effects),
+                "{name} is in the table but the search does not find it"
+            );
+            assert_eq!(
+                super::biome_effects(&format!("minecraft:{name}")),
+                Some(effects),
+                "{name} does not resolve through the namespaced form"
+            );
+        }
+        // Sorts strictly between "ocean" and "old_growth_birch_forest", so a
+        // linear scan and a binary search must agree it is absent.
+        assert!(super::biome_effects("oceanic").is_none());
+        assert!(super::biome_effects("").is_none());
+        assert!(super::biome_effects("zzz").is_none());
+        assert!(super::biome_effects("aaa").is_none());
+    }
+}

@@ -123,9 +123,12 @@
 use std::hint::black_box;
 
 use lodestone::mesher::{SectionKey, mesh_snapshot_fluids, mesh_snapshot_models, snapshot_section};
+use lodestone_assets::tint::{TintKind, biome_effects};
 use lodestone_client::ConnectionState;
 use lodestone_core::Nbt;
+use lodestone_model::BlockPos;
 use lodestone_render::BlockModels;
+use lodestone_render::biome_tint::{BLEND_RADIUS, NamedBiomeTint, resolve_blended_tint};
 use lodestone_world::{
     BiomePatch, BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk, World, WorldSink,
 };
@@ -506,21 +509,44 @@ fn assert_counters_are_real() {
         cold.cycles
     );
 
-    // The discriminator, with both hypotheses computed from the two measured
-    // ratios rather than restated. Correct reading: the same compiled loop takes
-    // the same number of steps in both arms, so instructions barely move while
-    // cycles blow out — separation equals roughly the cycle ratio itself
-    // (~13 on this machine). Swapped reading: the two ratios trade places, so
-    // separation becomes its own reciprocal (~0.08). A threshold of 4.0 sits two
-    // orders of magnitude from the wrong hypothesis and well below the right one.
+    // The discriminator. **This used to be `separation > 4.0` and that threshold
+    // was a defect**: it encoded one machine's observed DRAM latency ratio (~13)
+    // rather than the hypothesis it claims to separate, and it contradicted the
+    // premise check directly above it — any machine state with a cycle ratio
+    // between 2.0 and 4.0 passes the premise and fails the discriminator while
+    // being nowhere near the swapped reading. That is exactly what happened: under
+    // concurrent-agent memory pressure (`Swapouts` climbing 983,444 → 1,174,980
+    // within one session) the *hot* arm stalls too, the cycle ratio compresses to
+    // 2.8–3.9, and the whole harness became unrunnable for a reason unrelated to
+    // what it measures. `DESIGN.md` §12.128.
     //
-    // The instruction ratio is *not* asserted to be 1.00: page-fault and TLB
-    // handling in the kernel retires instructions that count toward this process,
-    // measured at 1.17x before the pre-fault touch above. That residual is small
-    // next to 13 and cannot flip this verdict, which is exactly why the
-    // assertion is on the separation and not on the tight band.
+    // The primary discriminator is now the **instruction** ratio, which is
+    // load-invariant. `chase` takes CHASE_ITERS steps through one compiled loop in
+    // both arms, so if the field being read is instructions retired the two arms
+    // must agree; the residual is page-fault and TLB handling in the kernel,
+    // measured at 1.17-1.28x. Under the swapped reading the two ratios trade
+    // places, so this field would show the *cycle* ratio — which the premise above
+    // has already required to exceed 2.0. So `insn_ratio < 1.5` rejects the
+    // swapped hypothesis outright, using no assumption about how slow DRAM is
+    // today. It is a strictly stronger test than the ratio of ratios.
     assert!(
-        separation > 4.0,
+        insn_ratio < 1.5,
+        "the 16 MiB arm retired {insn_ratio:.4}x the instructions of the 4 KiB arm over the \
+         same {CHASE_ITERS} steps of the same compiled loop. Correct hypothesis: ~1.0 (plus a \
+         page-fault residual measured at 1.17-1.28x). Swapped hypothesis: this field is really \
+         cycles, so it would read the cycle ratio, which the premise check above has just \
+         required to exceed 2.0. {insn_ratio:.4} lands on the swapped one — ri_instructions \
+         and ri_cycles are not the fields this harness thinks they are. hot {} / cold {}.",
+        hot.instructions,
+        cold.instructions
+    );
+    // The ratio of ratios is kept as a secondary check, now with a threshold
+    // derived from the premise floor rather than from a machine observation: with
+    // `cycle_ratio > 2.0` and `insn_ratio < 1.5` both established, the correct
+    // hypothesis puts separation above 1.33 and the swapped one below 0.5, so a
+    // threshold of 2.0 sits 4x above the wrong hypothesis's ceiling.
+    assert!(
+        separation > 2.0,
         "locality separation is {separation:.3}x (cycle ratio {cycle_ratio:.2} / instruction \
          ratio {insn_ratio:.4}). The correct hypothesis is ~{cycle_ratio:.1} — the same \
          compiled loop taking the same {CHASE_ITERS} steps retires the same instructions while \
@@ -1087,6 +1113,115 @@ fn client_chunk_path_cycle_attribution() {
         .map(|s| mesh_snapshot_models(s, models).quad_count())
         .sum();
 
+    // -- S3c: the biome-tint term, isolated from the mesh loop --------------
+    // `mesh_fluids`'s dominant remaining cost is `water_tint_at`, and
+    // `mesh_models`'s grass/foliage quads pay the same shape (`DESIGN.md`
+    // §12.124): one `resolve_blended_tint` is `(2*radius+1)²` = 25
+    // `Colormaps::resolve` samples, each asking a `BiomeTint` between one and
+    // four questions, each of which reaches `biome_effects` unless the per-call
+    // memo catches it.
+    //
+    // Measured here directly rather than inferred from the stage totals above,
+    // because the per-cell mesh figure cannot attribute a movement to the table
+    // lookup or to the blend kernel — and because the *shape* of the lookup is
+    // testable with no instructions-per-compare constant at all (see the probes).
+    let colormaps = models.colormaps().expect(
+        "the vanilla pack carries grass/foliage/dry_foliage colormaps, so the real tint path \
+         is reachable. Without them every tint call returns early and this stage measures \
+         nothing at all",
+    );
+
+    // Four probes into `BIOME_EFFECTS`, chosen by *position*. The table is sorted,
+    // so a name's position in it and its position within its own first-byte bucket
+    // are two different numbers, and which one the cost tracks is the whole
+    // question:
+    //
+    // | probe             | table index | index in its first-byte bucket |
+    // |-------------------|-------------|--------------------------------|
+    // | `badlands`        | 0 of 66     | 0 of 5   (`b`)                 |
+    // | `warm_ocean`      | 59 of 66    | 0 of 7   (`w`)                 |
+    // | `swamp`           | 55 of 66    | 13 of 14 (`s`, the worst)      |
+    // | `not_a_real_biome`| absent      | 0 of 1   (`n`)                 |
+    //
+    // `badlands` and `warm_ocean` are both *first in their bucket* and 59 entries
+    // apart, which makes their ratio a discriminator that needs no
+    // instructions-per-compare constant at all: a flat scan pays 1 compare for one
+    // and 60 for the other, a first-byte-bucketed scan pays 1 for both. A shape
+    // test, not a magnitude one.
+    const EFFECTS_PROBE_REPS: usize = 20_000;
+    let probe = |name: &'static str| {
+        measure_median(5, || {
+            for _ in 0..EFFECTS_PROBE_REPS {
+                black_box(biome_effects(black_box(name)));
+            }
+        })
+    };
+    let effects_bucket_head_early = probe("minecraft:badlands");
+    let effects_bucket_head_late = probe("minecraft:warm_ocean");
+    let effects_worst_bucket = probe("minecraft:swamp");
+    let effects_miss = probe("minecraft:not_a_real_biome");
+    let per_probe = |d: Delta| d.instructions as f64 / EFFECTS_PROBE_REPS as f64;
+    let effects_shape = per_probe(effects_bucket_head_late) / per_probe(effects_bucket_head_early);
+
+    // Two biomes either side of x = 0, so the radius-2 box at x = -1 straddles a
+    // real boundary and the memo is exercised the way terrain exercises it. A
+    // single-biome fixture would make all 25 samples return the same entry — the
+    // *world* species of vacuous test, the one that cannot be found by reading
+    // the assertion.
+    const TINT_REPS: usize = 20_000;
+    let boundary = |pos: BlockPos| {
+        if pos.x < 0 {
+            Some("minecraft:swamp")
+        } else {
+            Some("minecraft:plains")
+        }
+    };
+    // A biome name that is not in the 66-entry table at all. `NamedBiomeTint`
+    // deliberately does **not** memoise an unresolvable name (it would evict a
+    // name that is paying for itself), so this arm reaches `biome_effects` on
+    // every one of the 25 samples where the resolvable arms reach it once. It is
+    // the real cost of a section whose biome id is past `FALLBACK_BIOME_NAMES`,
+    // and the arm the memo structurally cannot help.
+    let unresolved = |_pos: BlockPos| Some("lodestone:not_a_vanilla_biome");
+    // `NamedBiomeTint::new` inside the loop, not outside: that is what
+    // `mesher.rs`'s `water_tint_at`/`biome_tint_at` do per call, so hoisting it
+    // here would measure a client that does not exist. `&dyn Fn` so one probe
+    // closure can serve two different biome fields.
+    let tint_probe = |name_at: &dyn Fn(BlockPos) -> Option<&'static str>,
+                      kind: TintKind,
+                      x: i32| {
+        measure_median(5, || {
+            for _ in 0..TINT_REPS {
+                let biome = NamedBiomeTint::new(name_at);
+                black_box(resolve_blended_tint(
+                    kind,
+                    colormaps,
+                    &biome,
+                    BLEND_RADIUS,
+                    black_box(x),
+                    black_box(64),
+                    black_box(0),
+                ));
+            }
+        })
+    };
+    let grass_boundary = tint_probe(&boundary, TintKind::Grass, -1);
+    let grass_uniform = tint_probe(&boundary, TintKind::Grass, -100);
+    let foliage_boundary = tint_probe(&boundary, TintKind::Foliage, -1);
+    let water_boundary = tint_probe(&boundary, TintKind::Water, -1);
+    let water_unresolved = tint_probe(&unresolved, TintKind::Water, -1);
+    // Derived from the radius the measurement passed, not restated as 25.
+    let samples_per_blend = f64::from((2 * BLEND_RADIUS + 1) * (2 * BLEND_RADIUS + 1));
+    // The world guard for the boundary probe, read through the same closure the
+    // measurement uses: a blend at x = -1 must differ from both pure sides, or
+    // the "boundary" is one biome and the probes above are the uniform case.
+    let biome_probe = NamedBiomeTint::new(boundary);
+    let pure_at = |x: i32| {
+        resolve_blended_tint(TintKind::Grass, colormaps, &biome_probe, BLEND_RADIUS, x, 64, 0)
+            .expect("grass is a blended kind")
+    };
+    let (straddle_lo, straddle_mid, straddle_hi) = (pure_at(-100), pure_at(-1), pure_at(100));
+
     // -- S4: draw submission, as a marginal cost per section ----------------
     // A difference, not an absolute: render the same frame with 0 sections
     // resident and then with every section of every fixture column, and divide
@@ -1179,6 +1314,66 @@ fn client_chunk_path_cycle_attribution() {
         "meshed quads (centre column) {meshed_quads}, {:.0} instructions per quad",
         s3_mesh.instructions as f64 / meshed_quads.max(1) as f64
     );
+    println!("\n--- S3c the biome-tint term, measured on its own ---");
+    println!(
+        "{:<30} {:>14} {:>14} {:>6} {:>14}",
+        "probe", "instructions", "cycles", "IPC", "per call"
+    );
+    let probe_row = |name: &str, d: Delta, reps: usize| {
+        println!(
+            "{name:<30} {:>14} {:>14} {:>6.2} {:>14.2}",
+            d.instructions,
+            d.cycles,
+            d.ipc(),
+            d.instructions as f64 / reps as f64
+        );
+    };
+    probe_row(
+        "effects badlands  (t0,  b0)",
+        effects_bucket_head_early,
+        EFFECTS_PROBE_REPS,
+    );
+    probe_row(
+        "effects warm_ocean(t59, b0)",
+        effects_bucket_head_late,
+        EFFECTS_PROBE_REPS,
+    );
+    probe_row(
+        "effects swamp     (t55, b13)",
+        effects_worst_bucket,
+        EFFECTS_PROBE_REPS,
+    );
+    probe_row("effects absent name", effects_miss, EFFECTS_PROBE_REPS);
+    println!(
+        "shape control  warm_ocean / badlands per-call cost = {effects_shape:.2}x. Both are \n\
+         FIRST in their first-byte bucket and 59 table entries apart, so a flat scan pays 1 \n\
+         compare for one and 60 for the other (many-fold) while a bucketed scan pays 1 for \n\
+         both (~1). No instructions-per-compare constant enters this ratio."
+    );
+    probe_row("blend Grass at a boundary", grass_boundary, TINT_REPS);
+    probe_row("blend Grass, one biome", grass_uniform, TINT_REPS);
+    probe_row("blend Foliage at a boundary", foliage_boundary, TINT_REPS);
+    probe_row("blend Water at a boundary", water_boundary, TINT_REPS);
+    probe_row("blend Water, unknown biome", water_unresolved, TINT_REPS);
+    println!(
+        "per blend SAMPLE (radius {BLEND_RADIUS}, {samples_per_blend:.0} samples per call): \
+         grass {:.1}, foliage {:.1}, water {:.1} instructions",
+        grass_boundary.instructions as f64 / TINT_REPS as f64 / samples_per_blend,
+        foliage_boundary.instructions as f64 / TINT_REPS as f64 / samples_per_blend,
+        water_boundary.instructions as f64 / TINT_REPS as f64 / samples_per_blend,
+    );
+    println!(
+        "boundary world guard: pure {straddle_lo:#08X} / blended {straddle_mid:#08X} / pure \
+         {straddle_hi:#08X}"
+    );
+    println!(
+        "the unknown-biome arm reaches biome_effects {samples_per_blend:.0}x per call where the \n\
+         others reach it once, because NamedBiomeTint does not memoise an unresolvable name. \n\
+         Its ratio to the resolved water arm ({:.2}x) is therefore also a control on the memo: \n\
+         if the memo were dead, the two would cost the same.",
+        water_unresolved.instructions as f64 / water_boundary.instructions as f64
+    );
+
     let chunk_path_total = whole.instructions + s3_snapshot.instructions + s3_mesh.instructions;
     println!("\nONE-OFF cost of one column reaching meshed geometry: {chunk_path_total} instructions");
     println!(
@@ -1276,6 +1471,56 @@ fn client_chunk_path_cycle_attribution() {
         "World::heap_bytes retired {} instructions over {resident_columns} columns — it cannot \
          have walked them, so the per-frame cost reported above is not the real one",
         heap_bytes_call.instructions
+    );
+    // The S3c world guard. A "boundary" that is really one biome makes every one
+    // of the 25 samples identical, so the boundary probes would silently be
+    // measuring the uniform case and a change to the blend kernel's *sharing*
+    // between adjacent columns could not be seen at all.
+    assert!(
+        straddle_mid != straddle_lo && straddle_mid != straddle_hi,
+        "the S3c tint fixture is not a real biome boundary: blended {straddle_mid:#08X} equals \
+         one of the pure sides ({straddle_lo:#08X} / {straddle_hi:#08X}), so all 25 samples \
+         resolved to the same biome and every tint probe above measured the uniform case"
+    );
+    // The `biome_effects` shape control. Both hypotheses come from the table's own
+    // layout rather than from a previous run: `badlands` and `warm_ocean` are both
+    // the FIRST entry in their first-byte bucket and 59 table entries apart, so a
+    // flat scan pays 1 compare against 60 (a ratio bounded below only by the fixed
+    // per-call term, measured many-fold) while a first-byte-bucketed scan pays 1
+    // against 1 (a ratio of ~1). 1.5x separates them with room to spare.
+    assert!(
+        effects_shape < 1.5,
+        "biome_effects costs {:.2} instructions per call for `warm_ocean` (table entry 59, \
+         first of its `w` bucket) against {:.2} for `badlands` (table entry 0, first of its \
+         `b` bucket) — a ratio of {effects_shape:.2}x. Both are one compare into their own \
+         bucket, so a bucketed scan must cost the same for both and this ratio must be ~1. A \
+         ratio this large is the signature of a scan whose cost is the entry's index in the \
+         WHOLE table: either FIRST_BYTE_INDEX is not being consulted, or BIOME_EFFECTS is no \
+         longer sorted so the buckets do not group (see \
+         `biome_effects_table_is_strictly_ascending` in lodestone-assets).",
+        per_probe(effects_bucket_head_late),
+        per_probe(effects_bucket_head_early),
+    );
+    // The memo control, riding on the arm added for the unknown-biome case. A
+    // resolvable name reaches `biome_effects` **once** per 25-sample blend; an
+    // unresolvable one reaches it 25 times, because `NamedBiomeTint` deliberately
+    // does not memoise a miss. If the memo were dead, both arms would scan 25
+    // times and cost the same.
+    assert!(
+        water_unresolved.instructions > water_boundary.instructions,
+        "a blend over an UNKNOWN biome ({} instructions for {TINT_REPS} calls) is not more \
+         expensive than one over a known biome ({}). The known arm should reach the 66-entry \
+         table once per call and the unknown arm {samples_per_blend:.0} times, so this means \
+         `NamedBiomeTint`'s effects memo is not being consulted at all",
+        water_unresolved.instructions,
+        water_boundary.instructions
+    );
+    assert!(
+        per_probe(effects_bucket_head_early) > 1.0 && grass_boundary.instructions > TINT_REPS as u64,
+        "S3c measured {:.2} instructions per biome_effects call and {} for {TINT_REPS} blend \
+         calls — below one instruction each, so the probes were folded away rather than run",
+        per_probe(effects_bucket_head_early),
+        grass_boundary.instructions
     );
     // The split control. Not a tautology: S1's arm pays `free` and no insert,
     // S2's arm pays an insert and no decode, and neither shares a measurement
