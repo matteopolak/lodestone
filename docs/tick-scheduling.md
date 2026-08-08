@@ -123,7 +123,7 @@ The real selection, cited directly from the decompiled 26.2 jar
   `getMaxLocalRawBrightness(pos.above()) >= 9` → four spread attempts, three
   `nextInt` draws each (offset `x/y/z`), regardless of hits.
 
-  `canStayAlive` (`:29-41`) is now the **real predicate** (issue #549), in this
+  `canStayAlive` (`:29-41`) is now the **real predicate** (issue #544), in this
   order: snow with `LAYERS == 1` → alive; a **full** fluid state above → dead;
   otherwise `getLightDampeningInto(...) < 15`, which for two full-cube states is
   the above block's own `getLightDampening()` —
@@ -405,7 +405,7 @@ changes"), here is exactly what does and does not:
   with a real `getMaxLocalRawBrightness(pos.above()) >= 9` check. The draw
   pattern (12 draws in the live branch) does not change, only which positions
   qualify. `canStayAlive` itself no longer needs anything — it reads
-  `lodestone_data::light_props::dampening` (#549).
+  `lodestone_data::light_props::dampening` (#544).
 - **If you add an occlusion-shape census**: close `getLightDampeningInto`'s
   merged-face `16` branch in `grass_can_stay_alive`. Do **not** substitute
   `collision_shapes` for it; they answer a different question.
