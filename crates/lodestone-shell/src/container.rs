@@ -31,6 +31,14 @@
 
 mod background;
 mod builder;
+/// Vanilla's creative-inventory tab contents (issue #158). **Data only, with no
+/// consumer yet** — the screen is the remainder of that issue, and this is
+/// committed ahead of it deliberately: the table is a hand-transcription of the
+/// decompiled `CreativeModeTabs.java` cross-checked against `lodestone-data`'s
+/// real item registry, so landing it separately means the screen work starts from
+/// a verified list rather than re-deriving 1725 ids and eleven expansion rules.
+/// A *named* pending consumer, not a silent island; see #158.
+mod creative_items;
 mod frame;
 mod geometry;
 mod input;
