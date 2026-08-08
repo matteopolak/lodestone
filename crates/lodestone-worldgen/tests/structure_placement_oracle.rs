@@ -138,6 +138,15 @@ impl Resolver for ServerAssets {
     fn biome_tag(&self, id: &str) -> Value {
         self.try_read("tags/worldgen/biome", id)
     }
+    /// The NBT templates sit beside `worldgen/`, under `assets/structure/`
+    /// (issue #514's S2). Without this every template-driven structure is demoted
+    /// to unsupported — which is exactly what the ledger test below caught when
+    /// this method was missing, so it is load-bearing for the *positive* half of
+    /// that test, not just for placement.
+    fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        std::fs::read(self.root.join("../structure").join(format!("{name}.nbt"))).ok()
+    }
 }
 
 fn generator() -> OverworldGenerator {

@@ -46,6 +46,17 @@ serde_json = { workspace = true }
 # rather than a `[workspace.dependencies]` alias, matching how `lodestone-server`
 # spells its dependency on this crate.
 lodestone-worldgen-core = { path = "../lodestone-worldgen-core" }
+# Issue #514's S2 (`src/structure/template.rs`): the NBT codec (`Nbt`, `Reader`,
+# `read_named_nbt`) the 1212 bundled `.nbt` structure templates are written in.
+# Reused rather than re-implemented — `lodestone-anvil` already reads chunk NBT
+# and `level.dat` through it, so a second decoder here would be a second thing to
+# be wrong about modified UTF-8 and list nesting. Version-free and already in
+# every build graph this crate is part of, wasm included.
+lodestone-core = { workspace = true }
+# Same unit: Mojang writes structure templates as gzip-wrapped NBT, so the
+# template reader needs an inflate. Pure-Rust backend (miniz_oxide), already a
+# workspace dependency (`lodestone-net`, `lodestone-anvil`).
+flate2 = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

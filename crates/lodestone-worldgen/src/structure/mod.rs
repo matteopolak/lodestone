@@ -52,10 +52,21 @@
 //! | `ocean_ruins` | ocean_ruin_cold, ocean_ruin_warm | 16 |
 //! | `buried_treasures` | buried_treasure | 2 |
 //! | `ocean_monuments` | monument | 2 |
+//! | `igloos` | igloo | — |
 //!
-//! Everything else waits on S2 (templates: ruined_portal), S4 (jigsaw: villages,
+//! Everything else waits on S2's remainder (ruined_portal — its own vertical
+//! placement, air pocket and blackstone/lava processors), S4 (jigsaw: villages,
 //! trail_ruins, trial_chambers, ancient_city, pillager_outpost) or S5 (coded
-//! pieces: mineshaft, stronghold, desert_pyramid, …).
+//! pieces: mineshaft, stronghold, desert_pyramid, monument, …).
+//!
+//! **S2 landed the template engine** ([`template`], [`processor`]): shipwreck,
+//! ocean ruin and igloo now build real piece lists out of the bundled `.nbt`
+//! templates and write blocks — see [`docs/worldgen-structure-templates.md`] for
+//! the whole path, including which vanilla behaviours are deliberately absent.
+//! `monument` still reports `pieces_complete: false`; its pieces are coded, not
+//! templated.
+//!
+//! [`docs/worldgen-structure-templates.md`]: ../../../../docs/worldgen-structure-templates.md
 //!
 //! # How to change it
 //!
@@ -97,14 +108,19 @@
 //! `crate::overworld` supplies the [`StartContext`].
 
 pub mod placement;
+pub mod processor;
+pub mod template;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource, WorldgenRandom};
 use serde_json::Value;
 
 use crate::density::Resolver;
 use placement::{Placement, PlacementKind};
+use processor::Processor;
+use template::{Mirror, PlaceSettings, Rotation, StructureTemplate};
 
 /// Vanilla's structure-set registration order, read from
 /// `.cache/mc/26.2/src/net/minecraft/data/worldgen/StructureSets.java`'s
@@ -184,6 +200,27 @@ impl BoundingBox {
         }
     }
 
+    /// `BoundingBox.fromCorners(a, b)` — the box spanning two corners in any
+    /// order.
+    #[must_use]
+    pub fn from_corners(a: [i32; 3], b: [i32; 3]) -> Self {
+        Self {
+            min: [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])],
+            max: [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])],
+        }
+    }
+
+    /// `intersects(other)` — overlap on all three axes.
+    #[must_use]
+    pub fn intersects(self, other: Self) -> bool {
+        self.max[0] >= other.min[0]
+            && self.min[0] <= other.max[0]
+            && self.max[2] >= other.min[2]
+            && self.min[2] <= other.max[2]
+            && self.max[1] >= other.min[1]
+            && self.min[1] <= other.max[1]
+    }
+
     /// `intersects(minX, minZ, maxX, maxZ)` — the horizontal-only test both
     /// `createReferences` and the beardifier's `isCloseToChunk` are built on.
     #[must_use]
@@ -261,6 +298,25 @@ pub trait StartContext {
     fn sea_level(&self) -> i32;
 }
 
+/// Everything a template-driven piece needs to write itself into a chunk: the
+/// decoded template, the world position of its origin, and its place settings.
+///
+/// Held behind an `Arc` on the piece because a start is cloned into every chunk
+/// that references it (`structure_refs`), and the template is the largest thing
+/// in the engine per-chunk graph.
+#[derive(Debug, Clone)]
+pub struct PiecePlacement {
+    /// The decoded template.
+    pub template: Arc<StructureTemplate>,
+    /// `templatePosition` — the world position template-relative `(0,0,0)` lands
+    /// at, **after** every height adjustment (see
+    /// [`StructureKind::generate_pieces`] for why that is resolved eagerly here
+    /// and lazily in vanilla).
+    pub position: [i32; 3],
+    /// Rotation, mirror, pivot and the processor chain.
+    pub settings: PlaceSettings,
+}
+
 /// One piece of a structure start — the unit vanilla persists under
 /// `structures.starts.<id>.Children`.
 #[derive(Debug, Clone)]
@@ -275,6 +331,65 @@ pub struct StructurePiece {
     pub gen_depth: i32,
     /// `Template`, for template-driven pieces (S2). `None` for coded pieces.
     pub template: Option<String>,
+    /// How to place it, for a template-driven piece. `None` for a coded piece,
+    /// which therefore reaches no blocks yet (`minecraft:btp` is the only one).
+    pub placement: Option<Arc<PiecePlacement>>,
+}
+
+/// The decoded templates one registry can place, keyed by template id
+/// (`minecraft:shipwreck/with_mast`).
+///
+/// Loaded **eagerly**, once per generator, for exactly the templates the
+/// supported [`StructureKind`]s can name (71 of the bundled 1212): a start
+/// predicate runs inside the chunk pipeline where there is no `&dyn Resolver` to
+/// reach and no obvious place to put a lock, and 71 gunzips at construction is
+/// cheaper than the machinery to avoid them.
+#[derive(Debug, Default)]
+pub struct TemplateStore {
+    templates: HashMap<String, Arc<StructureTemplate>>,
+}
+
+impl TemplateStore {
+    /// One decoded template, or `None` when it was not bundled or did not parse
+    /// (in which case its structure is on the ledger).
+    #[must_use]
+    pub fn get(&self, id: &str) -> Option<&Arc<StructureTemplate>> {
+        self.templates.get(id)
+    }
+
+    /// How many templates are loaded.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.templates.len()
+    }
+
+    /// True when nothing is loaded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.templates.is_empty()
+    }
+
+    /// Loads every id in `ids` that is not already present, returning the ids
+    /// that could not be loaded paired with why.
+    fn load(&mut self, resolver: &dyn Resolver, ids: &[&str]) -> Vec<(String, String)> {
+        let mut failures = Vec::new();
+        for id in ids {
+            if self.templates.contains_key(*id) {
+                continue;
+            }
+            let Some(bytes) = resolver.structure_template(id) else {
+                failures.push(((*id).to_string(), "template not bundled".to_string()));
+                continue;
+            };
+            match StructureTemplate::parse(&bytes) {
+                Ok(template) => {
+                    self.templates.insert((*id).to_string(), Arc::new(template));
+                }
+                Err(why) => failures.push(((*id).to_string(), why)),
+            }
+        }
+        failures
+    }
 }
 
 /// Whether a candidate structure's start could be decided at all.
@@ -337,6 +452,149 @@ impl StructureStart {
     }
 }
 
+/// `ShipwreckPieces.STRUCTURE_LOCATION_BEACHED`.
+const SHIPWRECK_BEACHED: &[&str] = &[
+    "minecraft:shipwreck/with_mast",
+    "minecraft:shipwreck/sideways_full",
+    "minecraft:shipwreck/sideways_fronthalf",
+    "minecraft:shipwreck/sideways_backhalf",
+    "minecraft:shipwreck/rightsideup_full",
+    "minecraft:shipwreck/rightsideup_fronthalf",
+    "minecraft:shipwreck/rightsideup_backhalf",
+    "minecraft:shipwreck/with_mast_degraded",
+    "minecraft:shipwreck/rightsideup_full_degraded",
+    "minecraft:shipwreck/rightsideup_fronthalf_degraded",
+    "minecraft:shipwreck/rightsideup_backhalf_degraded",
+];
+
+/// `ShipwreckPieces.STRUCTURE_LOCATION_OCEAN`.
+const SHIPWRECK_OCEAN: &[&str] = &[
+    "minecraft:shipwreck/with_mast",
+    "minecraft:shipwreck/upsidedown_full",
+    "minecraft:shipwreck/upsidedown_fronthalf",
+    "minecraft:shipwreck/upsidedown_backhalf",
+    "minecraft:shipwreck/sideways_full",
+    "minecraft:shipwreck/sideways_fronthalf",
+    "minecraft:shipwreck/sideways_backhalf",
+    "minecraft:shipwreck/rightsideup_full",
+    "minecraft:shipwreck/rightsideup_fronthalf",
+    "minecraft:shipwreck/rightsideup_backhalf",
+    "minecraft:shipwreck/with_mast_degraded",
+    "minecraft:shipwreck/upsidedown_full_degraded",
+    "minecraft:shipwreck/upsidedown_fronthalf_degraded",
+    "minecraft:shipwreck/upsidedown_backhalf_degraded",
+    "minecraft:shipwreck/sideways_full_degraded",
+    "minecraft:shipwreck/sideways_fronthalf_degraded",
+    "minecraft:shipwreck/sideways_backhalf_degraded",
+    "minecraft:shipwreck/rightsideup_full_degraded",
+    "minecraft:shipwreck/rightsideup_fronthalf_degraded",
+    "minecraft:shipwreck/rightsideup_backhalf_degraded",
+];
+
+/// `ShipwreckPieces.PIVOT`.
+const SHIPWRECK_PIVOT: [i32; 3] = [4, 0, 15];
+
+/// The four `OceanRuinPieces` template families, `[small, big]` each. The **index
+/// into `bricks`/`cracked`/`mossy` is shared** for a cold ruin (one `nextInt`
+/// picks the same slot in all three), so these must stay index-aligned.
+const OCEAN_RUIN_WARM: [&[&str]; 2] = [
+    &[
+        "minecraft:underwater_ruin/warm_1",
+        "minecraft:underwater_ruin/warm_2",
+        "minecraft:underwater_ruin/warm_3",
+        "minecraft:underwater_ruin/warm_4",
+        "minecraft:underwater_ruin/warm_5",
+        "minecraft:underwater_ruin/warm_6",
+        "minecraft:underwater_ruin/warm_7",
+        "minecraft:underwater_ruin/warm_8",
+    ],
+    &[
+        "minecraft:underwater_ruin/big_warm_4",
+        "minecraft:underwater_ruin/big_warm_5",
+        "minecraft:underwater_ruin/big_warm_6",
+        "minecraft:underwater_ruin/big_warm_7",
+    ],
+];
+
+const OCEAN_RUIN_BRICK: [&[&str]; 2] = [
+    &[
+        "minecraft:underwater_ruin/brick_1",
+        "minecraft:underwater_ruin/brick_2",
+        "minecraft:underwater_ruin/brick_3",
+        "minecraft:underwater_ruin/brick_4",
+        "minecraft:underwater_ruin/brick_5",
+        "minecraft:underwater_ruin/brick_6",
+        "minecraft:underwater_ruin/brick_7",
+        "minecraft:underwater_ruin/brick_8",
+    ],
+    &[
+        "minecraft:underwater_ruin/big_brick_1",
+        "minecraft:underwater_ruin/big_brick_2",
+        "minecraft:underwater_ruin/big_brick_3",
+        "minecraft:underwater_ruin/big_brick_8",
+    ],
+];
+
+const OCEAN_RUIN_CRACKED: [&[&str]; 2] = [
+    &[
+        "minecraft:underwater_ruin/cracked_1",
+        "minecraft:underwater_ruin/cracked_2",
+        "minecraft:underwater_ruin/cracked_3",
+        "minecraft:underwater_ruin/cracked_4",
+        "minecraft:underwater_ruin/cracked_5",
+        "minecraft:underwater_ruin/cracked_6",
+        "minecraft:underwater_ruin/cracked_7",
+        "minecraft:underwater_ruin/cracked_8",
+    ],
+    &[
+        "minecraft:underwater_ruin/big_cracked_1",
+        "minecraft:underwater_ruin/big_cracked_2",
+        "minecraft:underwater_ruin/big_cracked_3",
+        "minecraft:underwater_ruin/big_cracked_8",
+    ],
+];
+
+const OCEAN_RUIN_MOSSY: [&[&str]; 2] = [
+    &[
+        "minecraft:underwater_ruin/mossy_1",
+        "minecraft:underwater_ruin/mossy_2",
+        "minecraft:underwater_ruin/mossy_3",
+        "minecraft:underwater_ruin/mossy_4",
+        "minecraft:underwater_ruin/mossy_5",
+        "minecraft:underwater_ruin/mossy_6",
+        "minecraft:underwater_ruin/mossy_7",
+        "minecraft:underwater_ruin/mossy_8",
+    ],
+    &[
+        "minecraft:underwater_ruin/big_mossy_1",
+        "minecraft:underwater_ruin/big_mossy_2",
+        "minecraft:underwater_ruin/big_mossy_3",
+        "minecraft:underwater_ruin/big_mossy_8",
+    ],
+];
+
+/// `IglooPieces`' three templates, with their `PIVOTS` and `OFFSETS`.
+const IGLOO_PARTS: [(&str, [i32; 3], [i32; 3]); 3] = [
+    ("minecraft:igloo/top", [3, 5, 5], [0, 0, 0]),
+    ("minecraft:igloo/middle", [1, 3, 1], [2, -3, 4]),
+    ("minecraft:igloo/bottom", [3, 6, 7], [0, -3, -2]),
+];
+
+/// The Y every template-driven piece is *first* positioned at, before its own
+/// height adjustment — vanilla's `IglooPieces.GENERATION_HEIGHT`, and the same
+/// literal 90 in `ShipwreckStructure`, `OceanRuinStructure` and
+/// `BuriedTreasureStructure`.
+const GENERATION_HEIGHT: i32 = 90;
+
+/// `OceanRuinStructure.Type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OceanRuinTemperature {
+    /// `warm` — sandstone ruins.
+    Warm,
+    /// `cold` — the three-layer brick/cracked/mossy stack.
+    Cold,
+}
+
 /// A structure's own generation behaviour.
 ///
 /// Only the variants whose piece generators have landed carry configuration;
@@ -353,7 +611,17 @@ pub enum StructureKind {
     },
     /// `minecraft:ocean_ruin`. `onTopOfChunkCenter` on `OCEAN_FLOOR_WG`,
     /// unconditionally valid once the biome passes.
-    OceanRuin,
+    OceanRuin {
+        /// `biome_temp`.
+        temperature: OceanRuinTemperature,
+        /// `large_probability`.
+        large_probability: f32,
+        /// `cluster_probability`.
+        cluster_probability: f32,
+    },
+    /// `minecraft:igloo` — one template piece, plus a ladder shaft and basement
+    /// half the time.
+    Igloo,
     /// `minecraft:buried_treasure` — one coded single-block piece at
     /// `(chunkBlockX(9), 90, chunkBlockZ(9))`.
     BuriedTreasure,
@@ -370,21 +638,21 @@ pub enum StructureKind {
     Unsupported(String),
 }
 
-/// What a start predicate produced, before the caller applies the biome filter.
-struct GenerationStub {
-    /// The position the biome check is made at.
-    position: [i32; 3],
-    /// The pieces, or `None` when the generator does not exist.
-    pieces: Option<Vec<StructurePiece>>,
-}
-
 impl StructureKind {
     fn parse(value: &Value, resolver: &dyn Resolver) -> Self {
         match value["type"].as_str().unwrap_or_default() {
             "minecraft:shipwreck" => Self::Shipwreck {
                 beached: value["is_beached"].as_bool().unwrap_or(false),
             },
-            "minecraft:ocean_ruin" => Self::OceanRuin,
+            "minecraft:ocean_ruin" => Self::OceanRuin {
+                temperature: match value["biome_temp"].as_str() {
+                    Some("cold") => OceanRuinTemperature::Cold,
+                    _ => OceanRuinTemperature::Warm,
+                },
+                large_probability: value["large_probability"].as_f64().unwrap_or(0.0) as f32,
+                cluster_probability: value["cluster_probability"].as_f64().unwrap_or(0.0) as f32,
+            },
+            "minecraft:igloo" => Self::Igloo,
             "minecraft:buried_treasure" => Self::BuriedTreasure,
             "minecraft:ocean_monument" => Self::OceanMonument {
                 surrounding: resolve_biome_set(
@@ -398,19 +666,43 @@ impl StructureKind {
         }
     }
 
-    /// `Structure.findGenerationPoint` — the generation point plus, for the
-    /// structures whose generators exist, the piece list.
+    /// Every template this kind can name, for eager loading into a
+    /// [`TemplateStore`]. Empty for a kind that places no template.
+    fn template_ids(&self) -> Vec<&'static str> {
+        match self {
+            Self::Shipwreck { beached } => {
+                if *beached {
+                    SHIPWRECK_BEACHED.to_vec()
+                } else {
+                    SHIPWRECK_OCEAN.to_vec()
+                }
+            }
+            Self::OceanRuin { temperature, .. } => {
+                let families: &[[&[&str]; 2]] = match temperature {
+                    OceanRuinTemperature::Warm => &[OCEAN_RUIN_WARM],
+                    OceanRuinTemperature::Cold => {
+                        &[OCEAN_RUIN_BRICK, OCEAN_RUIN_CRACKED, OCEAN_RUIN_MOSSY]
+                    }
+                };
+                families
+                    .iter()
+                    .flat_map(|family| family.iter().flat_map(|list| list.iter().copied()))
+                    .collect()
+            }
+            Self::Igloo => IGLOO_PARTS.iter().map(|(id, _, _)| *id).collect(),
+            Self::BuriedTreasure | Self::OceanMonument { .. } | Self::Unsupported(_) => Vec::new(),
+        }
+    }
+
+    /// `Structure.findGenerationPoint`'s *position* — the point the biome filter
+    /// is applied at. Draws no RNG for any kind here (all of them are
+    /// `onTopOfChunkCenter`-shaped), which is what lets the piece list be built
+    /// afterwards, in [`Self::generate_pieces`], exactly as vanilla's lazy
+    /// `GenerationStub` does.
     ///
-    /// Returns `None` where vanilla returns `Optional.empty()` (no start at all,
-    /// before any biome check). **Draws no RNG for the currently implemented
-    /// kinds**, matching vanilla: all four are `onTopOfChunkCenter`-shaped, whose
-    /// piece generation is the lazy `Either.left` arm.
-    fn find_generation_point(
-        &self,
-        cx: i32,
-        cz: i32,
-        ctx: &dyn StartContext,
-    ) -> Option<GenerationStub> {
+    /// Returns `None` where vanilla returns `Optional.empty()` — no start at all,
+    /// before any biome check.
+    fn find_generation_point(&self, cx: i32, cz: i32, ctx: &dyn StartContext) -> Option<[i32; 3]> {
         // `ChunkPos.getMiddleBlockX/Z` — `getBlockX(8)`.
         let middle_x = cx * 16 + 8;
         let middle_z = cz * 16 + 8;
@@ -422,41 +714,16 @@ impl StructureKind {
                     HeightmapKind::OceanFloorWg
                 };
                 let y = ctx.first_occupied_height(middle_x, middle_z, heightmap);
-                Some(GenerationStub {
-                    position: [middle_x, y, middle_z],
-                    pieces: None,
-                })
+                Some([middle_x, y, middle_z])
             }
-            Self::OceanRuin => {
-                let y =
-                    ctx.first_occupied_height(middle_x, middle_z, HeightmapKind::OceanFloorWg);
-                Some(GenerationStub {
-                    position: [middle_x, y, middle_z],
-                    pieces: None,
-                })
+            Self::OceanRuin { .. } | Self::BuriedTreasure => {
+                let y = ctx.first_occupied_height(middle_x, middle_z, HeightmapKind::OceanFloorWg);
+                Some([middle_x, y, middle_z])
             }
-            Self::BuriedTreasure => {
+            Self::Igloo => {
                 let y =
-                    ctx.first_occupied_height(middle_x, middle_z, HeightmapKind::OceanFloorWg);
-                // The piece's own position is `getBlockX(9)`, not the chunk
-                // middle the biome check uses, and its Y is the literal 90 from
-                // `BuriedTreasureStructure.generatePieces`. Vanilla's persisted
-                // box is the *post-placement* one (`postProcess` reassigns
-                // `boundingBox` after walking down to bedrock-ish stone), so a
-                // freshly generated start and a reloaded one legitimately differ
-                // in Y — see `docs/structures.md`.
-                let px = cx * 16 + 9;
-                let pz = cz * 16 + 9;
-                Some(GenerationStub {
-                    position: [middle_x, y, middle_z],
-                    pieces: Some(vec![StructurePiece {
-                        id: "minecraft:btp".to_string(),
-                        bounding_box: BoundingBox::of_block(px, 90, pz),
-                        orientation: None,
-                        gen_depth: 0,
-                        template: None,
-                    }]),
-                })
+                    ctx.first_occupied_height(middle_x, middle_z, HeightmapKind::WorldSurfaceWg);
+                Some([middle_x, y, middle_z])
             }
             Self::OceanMonument { surrounding } => {
                 let ox = cx * 16 + 9;
@@ -464,12 +731,8 @@ impl StructureKind {
                 if !biomes_within_all_in(ctx, ox, ctx.sea_level(), oz, 29, surrounding) {
                     return None;
                 }
-                let y =
-                    ctx.first_occupied_height(middle_x, middle_z, HeightmapKind::OceanFloorWg);
-                Some(GenerationStub {
-                    position: [middle_x, y, middle_z],
-                    pieces: None,
-                })
+                let y = ctx.first_occupied_height(middle_x, middle_z, HeightmapKind::OceanFloorWg);
+                Some([middle_x, y, middle_z])
             }
             Self::Unsupported(_) => {
                 // No generator, so no honest generation point — and therefore no
@@ -482,12 +745,94 @@ impl StructureKind {
                 // grid nominates. Where the real generation point sits in a
                 // different biome than sea level does, this start is a false
                 // positive — named, not hidden.
-                let _ = middle_x;
-                Some(GenerationStub {
-                    position: [middle_x, ctx.sea_level(), middle_z],
-                    pieces: None,
-                })
+                Some([middle_x, ctx.sea_level(), middle_z])
             }
+        }
+    }
+
+    /// `Structure.GenerationStub`'s piece generator — run **after** the biome
+    /// filter, exactly as vanilla runs `getPiecesBuilder()` only for a start whose
+    /// biome check passed. `None` means "this engine has no generator", which is
+    /// what [`StructureStart::pieces_complete`] reports as `false`.
+    ///
+    /// # Height adjustment happens here, not at placement time
+    ///
+    /// Vanilla positions every template piece at Y=90 and fixes it up inside
+    /// `postProcess`, mutating the *shared* `StructureStart` the first time any
+    /// chunk places it. That is unavailable to us: our chunks are generated
+    /// independently and memoised, so a piece whose Y depended on which chunk got
+    /// there first would shear a shipwreck along a chunk border. We instead
+    /// resolve it once, here, against the same `_WG` noise columns vanilla's own
+    /// too-big-to-fit branch uses (`Structure.getLowestY` /
+    /// `getMeanFirstOccupiedHeight`). Two consequences, both deliberate:
+    ///
+    /// * the heights come from a fresh noise column rather than from the placed
+    ///   chunk's stored `_WG` heightmap, so a surface rule that raises a column
+    ///   (snow on a beach) is not seen — sub-block, and the only alternative is a
+    ///   stage cycle;
+    /// * the beached shipwreck's `random.nextInt(3)` sink comes out of the
+    ///   structure's own per-chunk stream instead of the decoration stream. That
+    ///   stream is per-structure-per-chunk and nothing else reads it after this
+    ///   call, so no other structure's draws move.
+    fn generate_pieces(
+        &self,
+        cx: i32,
+        cz: i32,
+        seed: i64,
+        ctx: &dyn StartContext,
+        templates: &TemplateStore,
+    ) -> Option<Vec<StructurePiece>> {
+        match self {
+            Self::Shipwreck { beached } => {
+                let mut random = WorldgenRandom::new(LegacyRandomSource::new(0));
+                random.set_large_feature_seed(seed, cx, cz);
+                Some(shipwreck_pieces(*beached, cx, cz, ctx, templates, &mut random))
+            }
+            Self::OceanRuin {
+                temperature,
+                large_probability,
+                cluster_probability,
+            } => {
+                let mut random = WorldgenRandom::new(LegacyRandomSource::new(0));
+                random.set_large_feature_seed(seed, cx, cz);
+                Some(ocean_ruin_pieces(
+                    *temperature,
+                    *large_probability,
+                    *cluster_probability,
+                    cx,
+                    cz,
+                    ctx,
+                    templates,
+                    &mut random,
+                ))
+            }
+            Self::Igloo => {
+                let mut random = WorldgenRandom::new(LegacyRandomSource::new(0));
+                random.set_large_feature_seed(seed, cx, cz);
+                Some(igloo_pieces(cx, cz, ctx, templates, &mut random))
+            }
+            Self::BuriedTreasure => {
+                // The piece's own position is `getBlockX(9)`, not the chunk
+                // middle the biome check uses, and its Y is the literal 90 from
+                // `BuriedTreasureStructure.generatePieces`. Vanilla's persisted
+                // box is the *post-placement* one (`postProcess` reassigns
+                // `boundingBox` after walking down to bedrock-ish stone), so a
+                // freshly generated start and a reloaded one legitimately differ
+                // in Y — see `docs/structures.md`.
+                let px = cx * 16 + 9;
+                let pz = cz * 16 + 9;
+                Some(vec![StructurePiece {
+                    id: "minecraft:btp".to_string(),
+                    bounding_box: BoundingBox::of_block(px, GENERATION_HEIGHT, pz),
+                    orientation: None,
+                    gen_depth: 0,
+                    template: None,
+                    placement: None,
+                }])
+            }
+            // `OceanMonumentPieces` is ~1,400 lines of coded pieces, not
+            // templates, so it is S5's and not S2's.
+            Self::OceanMonument { .. } | Self::Unsupported(_) => None,
         }
     }
 
@@ -495,21 +840,382 @@ impl StructureKind {
     /// `Unknown` for the kinds whose generators have not landed.
     fn validity(&self, pieces: &Option<Vec<StructurePiece>>) -> Validity {
         match self {
-            Self::Unsupported(_) => Validity::Unknown,
-            // The three template-driven kinds always add at least one piece, so
-            // biome-valid implies start-valid — but their piece *lists* need S2's
-            // template engine, so they report `Unknown` too until it lands.
-            Self::Shipwreck { .. } | Self::OceanRuin | Self::OceanMonument { .. } => {
-                match pieces {
-                    Some(p) if !p.is_empty() => Validity::Valid,
-                    _ => Validity::Unknown,
-                }
-            }
+            Self::Unsupported(_) | Self::OceanMonument { .. } => Validity::Unknown,
+            // Every template-driven kind adds at least one piece, so biome-valid
+            // implies start-valid — but an empty list means a template failed to
+            // load, which is `Unknown` (named on the ledger), not `Invalid`.
+            Self::Shipwreck { .. } | Self::OceanRuin { .. } | Self::Igloo => match pieces {
+                Some(p) if !p.is_empty() => Validity::Valid,
+                _ => Validity::Unknown,
+            },
             Self::BuriedTreasure => match pieces {
                 Some(p) if !p.is_empty() => Validity::Valid,
                 _ => Validity::Invalid,
             },
         }
+    }
+}
+
+/// `level.getHeight(heightmap, x, z)` — the first **free** Y, one above the
+/// topmost matching block.
+///
+/// [`StartContext::first_occupied_height`] is vanilla's `getFirstOccupiedHeight`
+/// (`getBaseHeight - 1`), so the two differ by exactly one. Every piece generator
+/// below transcribes `postProcess` code that calls `getHeight`, so mixing the two
+/// up would sink every template one block into the ground.
+fn free_height(ctx: &dyn StartContext, x: i32, z: i32, heightmap: HeightmapKind) -> i32 {
+    ctx.first_occupied_height(x, z, heightmap) + 1
+}
+
+/// `Util.getRandom(array, random)`.
+fn pick<'a, R: RandomSource>(list: &[&'a str], random: &mut R) -> &'a str {
+    let index = random.next_int_bounded(i32::try_from(list.len()).unwrap_or(1));
+    list[usize::try_from(index).unwrap_or(0).min(list.len() - 1)]
+}
+
+/// `Mth.nextInt(random, min, max)` — inclusive both ends.
+fn next_int_between<R: RandomSource>(random: &mut R, min: i32, max: i32) -> i32 {
+    random.next_int_bounded(max - min + 1) + min
+}
+
+/// `ShipwreckStructure.generatePieces` + `ShipwreckPiece.postProcess`'s height
+/// adjustment.
+fn shipwreck_pieces<R: RandomSource>(
+    beached: bool,
+    cx: i32,
+    cz: i32,
+    ctx: &dyn StartContext,
+    templates: &TemplateStore,
+    random: &mut R,
+) -> Vec<StructurePiece> {
+    let rotation = Rotation::random(random);
+    let list = if beached { SHIPWRECK_BEACHED } else { SHIPWRECK_OCEAN };
+    let name = pick(list, random);
+    let Some(template) = templates.get(name) else {
+        return Vec::new();
+    };
+    let settings = PlaceSettings {
+        rotation,
+        mirror: Mirror::None,
+        pivot: SHIPWRECK_PIVOT,
+        processors: vec![Processor::structure_and_air()],
+        waterlogging: true,
+    };
+    let size = template.size();
+    let heightmap = if beached {
+        HeightmapKind::WorldSurfaceWg
+    } else {
+        HeightmapKind::OceanFloorWg
+    };
+    // Vanilla scans the **unrotated** footprint from `templatePosition`, which is
+    // the chunk's min corner — not the rotated bounding box. Transcribed as-is.
+    let (base_x, base_z) = (cx * 16, cz * 16);
+    let mut sum = 0i32;
+    let mut lowest = i32::MAX;
+    let area = size[0] * size[2];
+    for x in base_x..(base_x + size[0].max(1)) {
+        for z in base_z..(base_z + size[2].max(1)) {
+            let h = free_height(ctx, x, z, heightmap);
+            sum += h;
+            lowest = lowest.min(h);
+        }
+    }
+    let y = if area == 0 {
+        free_height(ctx, base_x, base_z, heightmap)
+    } else if beached {
+        // `calculateBeachedPosition`.
+        lowest - size[1] / 2 - random.next_int_bounded(3)
+    } else {
+        sum / area
+    };
+    let position = [base_x, y, base_z];
+    vec![template_piece("minecraft:shipwreck", name, template, position, settings)]
+}
+
+/// `OceanRuinStructure.generatePieces` → `OceanRuinPieces.addPieces`.
+#[allow(clippy::too_many_arguments)]
+fn ocean_ruin_pieces<R: RandomSource>(
+    temperature: OceanRuinTemperature,
+    large_probability: f32,
+    cluster_probability: f32,
+    cx: i32,
+    cz: i32,
+    ctx: &dyn StartContext,
+    templates: &TemplateStore,
+    random: &mut R,
+) -> Vec<StructurePiece> {
+    let origin = [cx * 16, GENERATION_HEIGHT, cz * 16];
+    let rotation = Rotation::random(random);
+    let mut pieces = Vec::new();
+    let is_large = random.next_float() <= large_probability;
+    let base_integrity = if is_large { 0.9 } else { 0.8 };
+    ocean_ruin_add_piece(
+        temperature,
+        origin,
+        rotation,
+        is_large,
+        base_integrity,
+        ctx,
+        templates,
+        random,
+        &mut pieces,
+    );
+    if is_large && random.next_float() <= cluster_probability {
+        // `addClusterRuins`.
+        let parent_corner = {
+            let c = template::transform([15, 0, 15], Mirror::None, rotation, [0, 0, 0]);
+            [c[0] + origin[0], origin[1], c[2] + origin[2]]
+        };
+        let parent_box = BoundingBox::from_corners(origin, parent_corner);
+        let bottom_left = [
+            origin[0].min(parent_corner[0]),
+            origin[1],
+            origin[2].min(parent_corner[2]),
+        ];
+        let mut candidates = cluster_positions(bottom_left, random);
+        let count = next_int_between(random, 4, 8);
+        for _ in 0..count {
+            if candidates.is_empty() {
+                continue;
+            }
+            let index = random.next_int_bounded(i32::try_from(candidates.len()).unwrap_or(1));
+            let pos = candidates.remove(usize::try_from(index).unwrap_or(0));
+            let next_rotation = Rotation::random(random);
+            let corner = {
+                let c = template::transform([5, 0, 6], Mirror::None, next_rotation, [0, 0, 0]);
+                [c[0] + pos[0], pos[1], c[2] + pos[2]]
+            };
+            if BoundingBox::from_corners(pos, corner).intersects(parent_box) {
+                continue;
+            }
+            ocean_ruin_add_piece(
+                temperature,
+                pos,
+                next_rotation,
+                false,
+                0.8,
+                ctx,
+                templates,
+                random,
+                &mut pieces,
+            );
+        }
+    }
+    pieces
+}
+
+/// `OceanRuinPieces.allPositions` — eight offsets, sixteen draws, in this order.
+fn cluster_positions<R: RandomSource>(origin: [i32; 3], random: &mut R) -> Vec<[i32; 3]> {
+    // `(x base, x range, z base, z range)` per candidate, in vanilla's order. Java
+    // evaluates the x argument before the z argument, so each row is two draws in
+    // that order and the row order is the draw order.
+    const CANDIDATES: [(i32, (i32, i32), i32, (i32, i32)); 8] = [
+        (-16, (1, 8), 16, (1, 7)),
+        (-16, (1, 8), 0, (1, 7)),
+        (-16, (1, 8), -16, (4, 8)),
+        (0, (1, 7), 16, (1, 7)),
+        (0, (1, 7), -16, (4, 6)),
+        (16, (1, 7), 16, (3, 8)),
+        (16, (1, 7), 0, (1, 7)),
+        (16, (1, 7), -16, (4, 8)),
+    ];
+    CANDIDATES
+        .iter()
+        .map(|&(x_base, (x_min, x_max), z_base, (z_min, z_max))| {
+            let dx = x_base + next_int_between(random, x_min, x_max);
+            let dz = z_base + next_int_between(random, z_min, z_max);
+            [origin[0] + dx, origin[1], origin[2] + dz]
+        })
+        .collect()
+}
+
+/// `OceanRuinPieces.addPiece` — one warm piece, or the cold three-layer stack
+/// (which shares one template index across brick/cracked/mossy).
+#[allow(clippy::too_many_arguments)]
+fn ocean_ruin_add_piece<R: RandomSource>(
+    temperature: OceanRuinTemperature,
+    position: [i32; 3],
+    rotation: Rotation,
+    is_large: bool,
+    base_integrity: f32,
+    ctx: &dyn StartContext,
+    templates: &TemplateStore,
+    random: &mut R,
+    out: &mut Vec<StructurePiece>,
+) {
+    let slot = usize::from(is_large);
+    match temperature {
+        OceanRuinTemperature::Warm => {
+            let name = pick(OCEAN_RUIN_WARM[slot], random);
+            ocean_ruin_push(name, position, rotation, base_integrity, ctx, templates, out);
+        }
+        OceanRuinTemperature::Cold => {
+            let bricks = OCEAN_RUIN_BRICK[slot];
+            let index = usize::try_from(random.next_int_bounded(i32::try_from(bricks.len()).unwrap_or(1)))
+                .unwrap_or(0);
+            for (family, integrity) in [
+                (OCEAN_RUIN_BRICK[slot], base_integrity),
+                (OCEAN_RUIN_CRACKED[slot], 0.7),
+                (OCEAN_RUIN_MOSSY[slot], 0.5),
+            ] {
+                let Some(name) = family.get(index) else { continue };
+                ocean_ruin_push(name, position, rotation, integrity, ctx, templates, out);
+            }
+        }
+    }
+}
+
+fn ocean_ruin_push(
+    name: &str,
+    position: [i32; 3],
+    rotation: Rotation,
+    integrity: f32,
+    ctx: &dyn StartContext,
+    templates: &TemplateStore,
+    out: &mut Vec<StructurePiece>,
+) {
+    let Some(template) = templates.get(name) else {
+        return;
+    };
+    let settings = PlaceSettings {
+        rotation,
+        mirror: Mirror::None,
+        pivot: [0, 0, 0],
+        // `BlockRotProcessor` first, then `STRUCTURE_AND_AIR`: a rotted-away
+        // block is dropped before the ignore list ever sees it. The third
+        // processor vanilla adds (the capped suspicious-sand rule) is on the
+        // ledger, not here.
+        processors: vec![
+            Processor::BlockRot { integrity },
+            Processor::structure_and_air(),
+        ],
+        waterlogging: true,
+    };
+    let position = ocean_ruin_position(template, position, &settings, ctx);
+    out.push(template_piece("minecraft:orp", name, template, position, settings));
+}
+
+/// `OceanRuinPiece.postProcess`'s two-step height fix: sit on the ocean floor,
+/// then sink to the floor's own minimum when the footprint is mostly overhanging.
+fn ocean_ruin_position(
+    template: &StructureTemplate,
+    position: [i32; 3],
+    settings: &PlaceSettings,
+    ctx: &dyn StartContext,
+) -> [i32; 3] {
+    let floor = free_height(ctx, position[0], position[2], HeightmapKind::OceanFloorWg);
+    let size = template.size();
+    let corner = template::transform([size[0] - 1, 0, size[2] - 1], Mirror::None, settings.rotation, [0, 0, 0]);
+    let corner = [corner[0] + position[0], floor, corner[2] + position[2]];
+    let (x0, x1) = (position[0].min(corner[0]), position[0].max(corner[0]));
+    let (z0, z1) = (position[2].min(corner[2]), position[2].max(corner[2]));
+    // `getHeight`: for each column, walk down from `floor - 1` while the block is
+    // air, water or ice. Against a `_WG` column that is exactly
+    // `min(floor - 1, first_occupied(OCEAN_FLOOR_WG))` — there is no ice in a
+    // pre-surface column, and everything above the ocean floor is water or air.
+    let top = floor - 1;
+    let mut min_floor = 512;
+    let mut overhanging = 0;
+    for x in x0..=x1 {
+        for z in z0..=z1 {
+            let column = ctx
+                .first_occupied_height(x, z, HeightmapKind::OceanFloorWg)
+                .min(top);
+            min_floor = min_floor.min(column);
+            if column < top - 2 {
+                overhanging += 1;
+            }
+        }
+    }
+    let width = (position[0] - corner[0]).abs();
+    let y = if top - min_floor > 2 && overhanging > width - 2 {
+        min_floor + 1
+    } else {
+        floor
+    };
+    [position[0], y, position[2]]
+}
+
+/// `IglooStructure.generatePieces` → `IglooPieces.addPieces`, with
+/// `IglooPiece.postProcess`'s entrance-column height fix folded in.
+fn igloo_pieces<R: RandomSource>(
+    cx: i32,
+    cz: i32,
+    ctx: &dyn StartContext,
+    templates: &TemplateStore,
+    random: &mut R,
+) -> Vec<StructurePiece> {
+    let start = [cx * 16, GENERATION_HEIGHT, cz * 16];
+    let rotation = Rotation::random(random);
+    let mut out = Vec::new();
+    let push = |part: usize, depth: i32, out: &mut Vec<StructurePiece>| {
+        let (name, pivot, offset) = IGLOO_PARTS[part];
+        let Some(template) = templates.get(name) else {
+            return;
+        };
+        let settings = PlaceSettings {
+            rotation,
+            mirror: Mirror::None,
+            pivot,
+            processors: vec![Processor::structure_block()],
+            // `LiquidSettings.IGNORE_WATERLOGGING`.
+            waterlogging: false,
+        };
+        let position = [
+            start[0] + offset[0],
+            start[1] + offset[1] - depth,
+            start[2] + offset[2],
+        ];
+        // The entrance column: the same world column for all three parts, by
+        // construction (each part's offset cancels against its own probe).
+        let entrance = template::transform([3 - offset[0], 0, -offset[2]], Mirror::None, rotation, pivot);
+        let surface = free_height(
+            ctx,
+            position[0] + entrance[0],
+            position[2] + entrance[2],
+            HeightmapKind::WorldSurfaceWg,
+        );
+        let position = [
+            position[0],
+            position[1] + surface - GENERATION_HEIGHT - 1,
+            position[2],
+        ];
+        out.push(template_piece("minecraft:iglu", name, template, position, settings));
+    };
+    if random.next_double() < 0.5 {
+        let depth = random.next_int_bounded(8) + 4;
+        push(2, depth * 3, &mut out);
+        for i in 0..(depth - 1) {
+            push(1, i * 3, &mut out);
+        }
+    }
+    push(0, 0, &mut out);
+    out
+}
+
+/// Builds the piece record for a template placed at `position`.
+///
+/// `orientation` is `Some(2)` because `TemplateStructurePiece`'s constructor calls
+/// `setOrientation(Direction.NORTH)` and `Direction.NORTH.get2DDataValue()` is 2 —
+/// the piece's *rotation* lives in its place settings, not in `O`.
+fn template_piece(
+    id: &str,
+    name: &str,
+    template: &Arc<StructureTemplate>,
+    position: [i32; 3],
+    settings: PlaceSettings,
+) -> StructurePiece {
+    StructurePiece {
+        id: id.to_string(),
+        bounding_box: template.bounding_box(position, &settings),
+        orientation: Some(2),
+        gen_depth: 0,
+        template: Some(name.to_string()),
+        placement: Some(Arc::new(PiecePlacement {
+            template: Arc::clone(template),
+            position,
+            settings,
+        })),
     }
 }
 
@@ -573,6 +1279,7 @@ pub struct StructureRegistry {
     sets: Vec<StructureSetDef>,
     set_index: HashMap<String, usize>,
     structures: HashMap<String, StructureDef>,
+    templates: TemplateStore,
     unsupported: BTreeMap<String, String>,
 }
 
@@ -587,6 +1294,7 @@ impl StructureRegistry {
         let ids = resolver.structure_set_ids();
         let mut sets: Vec<StructureSetDef> = Vec::with_capacity(ids.len());
         let mut structures: HashMap<String, StructureDef> = HashMap::new();
+        let mut templates = TemplateStore::default();
         let mut unsupported: BTreeMap<String, String> = BTreeMap::new();
 
         for set_id in ids {
@@ -623,8 +1331,21 @@ impl StructureRegistry {
                         .insert(structure_id.clone(), "structure document missing".into());
                     continue;
                 }
-                let kind = StructureKind::parse(&doc, resolver);
-                if let StructureKind::Unsupported(type_id) = &kind {
+                let mut kind = StructureKind::parse(&doc, resolver);
+                // A template-driven kind whose templates are not all loadable
+                // cannot place anything, so it is demoted rather than left to
+                // produce empty piece lists at generation time.
+                let failures = templates.load(resolver, &kind.template_ids());
+                if !failures.is_empty() {
+                    let (name, why) = &failures[0];
+                    unsupported.insert(
+                        structure_id.clone(),
+                        format!("template '{name}' unusable ({why}), {} in total", failures.len()),
+                    );
+                    kind = StructureKind::Unsupported(
+                        doc["type"].as_str().unwrap_or("unknown").to_string(),
+                    );
+                } else if let StructureKind::Unsupported(type_id) = &kind {
                     unsupported.insert(
                         structure_id.clone(),
                         format!("no piece generator for type '{type_id}'"),
@@ -662,13 +1383,46 @@ impl StructureRegistry {
             .map(|(i, s)| (s.id.clone(), i))
             .collect();
 
+        // Gaps in the template engine itself, rather than in a structure's
+        // generator: recorded once, keyed so they cannot be mistaken for a
+        // structure id (the placement oracle asserts implemented structures are
+        // *absent* from this map).
+        if !templates.is_empty() {
+            unsupported.insert(
+                "processor:minecraft:capped".into(),
+                "ocean ruins' 5 suspicious sand/gravel blocks: needs the archaeology \
+                 loot pass plus a shuffled-index walk over the whole processed list"
+                    .into(),
+            );
+            unsupported.insert(
+                "template:data_markers".into(),
+                "structure_block DATA markers are dropped, so template loot chests \
+                 (shipwreck supply/treasure/map, ocean ruin chest) are not placed: \
+                 needs block entities and loot tables in worldgen"
+                    .into(),
+            );
+            unsupported.insert(
+                "template:mirrored_shape".into(),
+                "a stair/rail `shape` property is not remapped under a mirror; every \
+                 structure placed today uses Mirror.NONE, where it is invariant"
+                    .into(),
+            );
+        }
+
         Self {
             seed,
             sets,
             set_index,
             structures,
+            templates,
             unsupported,
         }
+    }
+
+    /// The decoded templates this registry loaded.
+    #[must_use]
+    pub fn templates(&self) -> &TemplateStore {
+        &self.templates
     }
 
     /// True when this registry places nothing at all (no structure-set data).
@@ -808,23 +1562,25 @@ impl StructureRegistry {
         ctx: &dyn StartContext,
     ) -> Option<StructureStart> {
         let def = self.structures.get(structure_id)?;
-        let stub = def.kind.find_generation_point(cx, cz, ctx)?;
+        let position = def.kind.find_generation_point(cx, cz, ctx)?;
         // `Structure.isValidBiome`: the biome at the *stub position*, quart-wise,
         // including Y. Using y = 0 (or the surface) instead is the "y = 0 trap"
         // `crate::biome` already documents for carvers.
-        let biome = ctx.biome_at_quart(
-            stub.position[0] >> 2,
-            stub.position[1] >> 2,
-            stub.position[2] >> 2,
-        );
+        let biome = ctx.biome_at_quart(position[0] >> 2, position[1] >> 2, position[2] >> 2);
         if !def.biomes.contains(&biome) {
             return None;
         }
-        match def.kind.validity(&stub.pieces) {
+        // Only now — vanilla's `GenerationStub` runs its piece consumer inside
+        // `getPiecesBuilder()`, after `findValidGenerationPoint`'s biome filter, so
+        // a biome-rejected candidate must consume no RNG and sample no columns.
+        let generated = def
+            .kind
+            .generate_pieces(cx, cz, self.seed, ctx, &self.templates);
+        match def.kind.validity(&generated) {
             Validity::Invalid => None,
             validity => {
                 let complete = validity == Validity::Valid;
-                let pieces = stub.pieces.unwrap_or_default();
+                let pieces = generated.unwrap_or_default();
                 let bounding_box = pieces
                     .iter()
                     .map(|p| p.bounding_box)
@@ -835,8 +1591,8 @@ impl StructureRegistry {
                         // `pieces_complete`) and never inflated into a
                         // beardifier box, because S3 filters on
                         // `pieces_complete` too.
-                        min: [cx * 16, stub.position[1], cz * 16],
-                        max: [cx * 16 + 15, stub.position[1], cz * 16 + 15],
+                        min: [cx * 16, position[1], cz * 16],
+                        max: [cx * 16 + 15, position[1], cz * 16 + 15],
                     });
                 Some(StructureStart {
                     structure: def.id.clone(),

@@ -65,6 +65,9 @@ impl OverworldGenerator {
 
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
         let world = self.carve_stage(cx, cz, &aquifer, &heights, &biome_quarts, base_x, base_z, world);
+        // Issue #514's S2. A no-op (and free) for a generator with no structure
+        // data, which is every fixture resolver in this workspace.
+        let world = self.structure_place_stage(cx, cz, world);
 
         // `Arc` because `PreOreResult` hands this world out to
         // `vegetation_stage`'s rim sources rather than only into a mutating
