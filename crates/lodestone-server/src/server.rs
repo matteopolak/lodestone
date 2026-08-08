@@ -5092,17 +5092,25 @@ fn spawn_dropped_stacks(
 /// told the selected slot's *new* contents, and `LivingEntity.drop` spawns the
 /// entity with [`crate::block_drops::thrown_item_velocity`].
 ///
-/// # Why the slot update is not optional
+/// # The slot update is a deliberate divergence from vanilla, not a port of it
 ///
-/// There is no `ClientboundPlayerActionAckPacket` — the client predicts the drop
-/// itself and vanilla only ever confirms it through the menu's own slot sync
-/// (`containerMenu.setRemoteSlot`). So the returned directive *is* the reply, and
-/// without it the client's prediction is never reconciled: a rejected drop (a full
-/// hotbar slot read as empty, a stale selected index) leaves a ghost item on the
-/// client until something else resyncs the window. That is the same class of
-/// silent divergence `apply_container_clicked`'s corrective content packet exists
-/// to close, and it is why this returns `Some` even when nothing was dropped is
-/// **not** the case — a no-op drop returns `None`, because the client predicted no
+/// **Vanilla sends nothing here.** There is no drop ack, and
+/// `ServerPlayer.drop`'s `containerMenu.setRemoteSlot(slotIndex, …)` is *not* a
+/// send — it updates the server's record of what the client is believed to hold,
+/// which **suppresses** the corrective broadcast that would otherwise follow. That
+/// works because the client predicts the drop itself (`lodestone-client`'s
+/// `drop_selected` does, and its doc records that an unpredicted drop leaves the
+/// count permanently wrong — the item really is gone server-side).
+///
+/// This crate has no `setRemoteSlot` model, so "send nothing" is not available in
+/// the same sense: if the server *rejects* the drop where the client predicted one
+/// — a stale selected index, a slot the server reads as empty — nothing ever
+/// reconciles it and the client shows a ghost item until the window is reopened.
+/// One `container_set_slot` carrying the authoritative content closes that, and it
+/// is inert in the common case because it equals what the client predicted.
+///
+/// If a `setRemoteSlot` equivalent ever lands, this is the send to remove.
+/// A no-op drop returns `None` and sends nothing, because the client predicted no
 /// change either.
 ///
 /// Returns the directive to send and the stacks to spawn; the caller owns both
