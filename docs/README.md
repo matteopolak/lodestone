@@ -1631,8 +1631,8 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   structure engine whose blocks are Java statements rather than an `.nbt` template —
   `crates/lodestone-worldgen/src/structure/coded.rs`, issue #514's phase S5. It ports
   `StructurePiece`'s block-writing helpers and `ScatteredFeaturePiece`'s two
-  ground-height rules, and on top of them the piece generators for **`swamp_hut`** and
-  **`desert_pyramid`**.
+  ground-height rules, and on top of them the piece generators for **`swamp_hut`**,
+  **`desert_pyramid`** and **`jungle_pyramid`**.
 - [The bundled 26.2 structure corpus (worldgen phase S-data)](./worldgen-structure-corpus.md) —
   The complete vanilla 26.2 structure dataset, extracted verbatim from the server jar
   into `crates/lodestone-server/assets/`, plus the drift gate that keeps it
