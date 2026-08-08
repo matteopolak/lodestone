@@ -387,7 +387,11 @@ impl IntegratedServer {
             // thus the client's read side) is dropped on the way out.
             tokio::select! {
                 _ = signal.notified() => {}
-                _ = serve_connection_shared(&mut conn, &protocol, &source, &entities, view_radius, &block_entities, &mobs) => {}
+                // Issue #545: `MAX_CLIENT_VIEW_RADIUS` as the live-change ceiling
+                // — see the `open_in_memory_with_mobs_using` call site below for
+                // the policy, and `crate::server::ViewTracker::max_radius` for
+                // why the join radius could not serve as both.
+                _ = serve_connection_shared(&mut conn, &protocol, &source, &entities, view_radius, crate::server::MAX_CLIENT_VIEW_RADIUS, &block_entities, &mobs) => {}
             }
         });
 
@@ -710,6 +714,14 @@ impl IntegratedServer {
                     &conn_source,
                     &conn_entities,
                     view_radius,
+                    // Issue #545: singleplayer's live-change ceiling is the
+                    // slider's own maximum, not the radius this connection
+                    // joined with — raising render distance mid-session used to
+                    // be silently clamped back. Uncapped for the same reason
+                    // `for_integrated_view_radius` above is: it is the memory of
+                    // the person who moved the slider. See
+                    // `crate::server::MAX_CLIENT_VIEW_RADIUS`.
+                    crate::server::MAX_CLIENT_VIEW_RADIUS,
                     &conn_block_entities,
                     &conn_mobs,
                     &conn_block_ticks,
@@ -1283,8 +1295,16 @@ impl IntegratedServer {
                             // disconnected vote `run_tick_loop` (the loop this
                             // world's tick task runs) forwards. See
                             // `crate::sleep`'s module doc.
+                            // Issue #545: open-to-LAN keeps the configured
+                            // `view_radius` as its live-change ceiling, which is
+                            // vanilla's `serverViewDistance`
+                            // (`ChunkMap.java:826`) and the same policy that
+                            // keeps `MAX_CAPACITY` on this path — a host spends
+                            // memory and bandwidth on behalf of players who did
+                            // not choose the setting.
                             let _ = serve_connection_with_mob_events_shared(
                                 &mut conn, &*protocol, &source, &entities, view_radius,
+                                view_radius,
                                 &block_entities, &mobs,
                                 &conn_block_ticks, &conn_explosions,
                                 &SleepVote::new(), &SleepFeed::default(),

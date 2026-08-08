@@ -139,6 +139,64 @@ at join; matching vanilla's exact circular shape was not otherwise
 load-bearing for "the world keeps up as the player walks", and would have
 made the initial-view and steady-state code paths disagree.
 
+#### A live render-distance change, and the two radii (#545)
+
+`ServerBound::ClientInformationChanged` carries the client's requested render
+distance; `ViewTracker::set_view_radius` resizes the window around the *existing*
+centre (never moving it) and produces forgets for what left plus one batch for
+what entered.
+
+**`ViewTracker` holds two radii, and they answer two different questions.**
+
+| field | question | set from |
+|---|---|---|
+| `radius` | where does this connection *start*, and where is it *now*? | `serve_connection`'s `view_radius` |
+| `max_radius` | how far may it *go*? | `serve_connection_inner`'s `max_view_radius` |
+
+They used to be one value, and that was the bug the owner reported as *"render
+distance doesn't seem to apply to the server until I relog"*. The clamp lived at
+the call site and read `clamp(0, view_radius.max(0))` — `view_radius` being *this
+connection's own join argument*. So **lowering** took effect immediately and
+**raising past the launch value was silently clamped back**. Vanilla clamps
+against `serverViewDistance`, a server setting
+(`ChunkMap.java:826` — `Mth.clamp(player.requestedViewDistance(), 2, this.serverViewDistance)`),
+never against the player's current view. The clamp now lives inside
+`set_view_radius` against `max_radius`.
+
+The other half of the same report was client-side (#506: the shell never sent the
+packet at all) and is fixed separately in `Session::set_render_distance`. Either
+half alone leaves the slider looking broken.
+
+**Who supplies `max_view_radius` is a per-path memory-policy decision** — the
+same fork `ChunkStore::for_view_radius` vs `for_integrated_view_radius` already
+encodes (see [`chunk-store.md`](./chunk-store.md)'s "two policies" section):
+
+| path | ceiling | why |
+|---|---|---|
+| singleplayer (`open_in_memory*`) | `MAX_CLIENT_VIEW_RADIUS` (33) | the memory of the person who moved the slider |
+| open-to-LAN (`IntegratedServer::bind`) | its configured `view_radius` | a host spends memory and bandwidth for players who did not choose the setting |
+| every other `serve_connection*` wrapper | `view_radius` | exactly the pre-#545 behaviour; no wrapper serves a path with its own policy |
+
+`MAX_CLIENT_VIEW_RADIUS = 33` is derived, not chosen: the shell's slider tops out
+at `config::MAX_RENDER_DISTANCE = 32` and `set_render_distance` sends
+`render_distance + 1` (the outermost streamed ring can never be meshed). It is a
+*sanity* bound, not a policy one — the wire field is an `i8`, so without it a
+malformed `127` would try to stream 65,025 columns.
+
+**Gotcha: the store's capacity does not follow a live raise.** `ChunkStore`'s
+capacity is fixed at construction from the *join* radius, and it is a plain
+`usize` behind an `Arc`, so nothing can grow it mid-session. Raising render
+distance well past the join value therefore over-subscribes the cache and costs
+re-generation — of the *innermost* rings, since `join_view_rings` streams outward
+and the LRU victim is the least recently touched (see
+`chunk_store::integrated_capacity_for_view_radius`). That is the same tradeoff
+already accepted for a short capacity, and it degrades the ground underfoot
+rather than the horizon. Making capacity follow the radius is a wider change than
+separating these two roles — it needs the capacity behind the cache mutex or an
+`AtomicUsize`, *and* a way for `dispatch_play_packet` to reach a `ChunkStore`
+through the generic `ChunkSource` it actually holds — and is deliberately not
+attempted here.
+
 `FORGET_LEVEL_CHUNK`'s wire layout (a single packed `i64`, `x` in the low
 32 bits and `z` in the high 32, mirroring vanilla's `ChunkPos.pack`) is
 hand-encoded to match `V770Adapter::handle_play`'s existing
@@ -198,10 +256,17 @@ No env vars or flags. The knobs are compile-time constants in
 | `KEEP_ALIVE_INTERVAL` | 15,000 ms | `ServerCommonPacketListenerImpl.java:35-36` |
 | `TIME_SYNC_INTERVAL` | 1,000 ms | stands in for vanilla's every-20-ticks-at-20-TPS (`MinecraftServer.java:1095-1099`) |
 | `MILLIS_PER_TICK` | 50 | vanilla's normal 20 TPS |
+| `MAX_CLIENT_VIEW_RADIUS` | 33 | `config::MAX_RENDER_DISTANCE` (32) + the mesher's buffer ring — the largest live raise singleplayer permits (#545) |
 
 `view_radius` (already an existing `serve_connection`/`IntegratedServer`
 parameter) sizes both the initial view and every subsequent `ViewTracker`
 recenter — it was not made independently configurable for the two.
+
+`max_view_radius` (`serve_connection_inner`, and the two `pub(crate)` `*_shared`
+entry points) is the **ceiling** for a live change, which is a different question
+— see "A live render-distance change" above. It is not exposed on the seven public
+`serve_connection*` wrappers: each passes `view_radius`, so their behaviour is
+unchanged, and only a caller with its own capacity policy needs the second value.
 
 ## Dependencies
 
