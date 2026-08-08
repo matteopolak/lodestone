@@ -1204,6 +1204,24 @@ impl ParticleEngine {
                 // constant explicitly (`15728880`), independently of
                 // `SimpleAnimatedParticle`. `HugeExplosionParticle.
                 // getLightCoords` overrides to the identical constant too.
+                //
+                // **This list is exhaustive for what this crate models, and it
+                // is short by design.** Exactly five vanilla classes return the
+                // bare constant (`grep -rl 'return 15728880'`): those three plus
+                // `GustParticle` and `TrailParticle`, neither of which has a
+                // `Behaviour` yet. Everything else that *looks* self-lit in game
+                // still samples the world and then boosts the block half —
+                // `LightCoordsUtil.withBlock(super…, 15)` (lava, shriek, sculk
+                // charge, vibration, glowing drips and souls) or
+                // `addSmoothBlockEmission(super…, t)` (`FlameParticle`,
+                // `GlowParticle`, `PortalParticle`). Neither boost is modelled
+                // here, so `Flame` comes out sampled — dimmer than vanilla in
+                // the dark, never brighter. Adding a new behaviour: read
+                // `getLightCoords` in the jar rather than guessing from how the
+                // particle looks, and add an arm here only for a bare
+                // `15728880`. `FireflyParticle` is the trap — it overrides
+                // `getLightCoords` to return a *fade fraction* scaled by 255,
+                // which is not a packed light value at all.
                 Behaviour::SimpleAnimated { .. } | Behaviour::SweepAttack | Behaviour::HugeExplosion => {
                     FULL_BRIGHT
                 }

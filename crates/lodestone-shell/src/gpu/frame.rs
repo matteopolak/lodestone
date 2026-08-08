@@ -17,8 +17,15 @@
 //!   drawn after it passes the depth test against the sea floor and paints
 //!   over the surface however deep it is — which is why mobs, armour, wool,
 //!   flame, block entities and sign text all sit above the water draw, and
-//!   why alpha-blended debris, weather, the outline, debug lines and nametags
-//!   all sit below it.
+//!   why weather, the outline, debug lines and nametags all sit below it.
+//! * **Particles straddle that line, exactly as vanilla's do.** Vanilla submits
+//!   one particle group twice — into the `solid` phase and into `afterTerrain`
+//!   — and each draw keeps only the `SingleQuadParticle.Layer`s whose
+//!   `translucent()` matches, so `Layer::Opaque` particles land *before*
+//!   translucent terrain and `Layer::Translucent` ones after. Both halves were
+//!   below the water draw here, which is why breaking a block underwater threw
+//!   debris that drew on top of the surface. The opaque half now draws with the
+//!   water, from a depth-writing pipeline; see `crate::particles`.
 //!
 //! The first-person hand then gets its **own** pass with the depth buffer
 //! cleared (vanilla's `GameRenderer.renderLevel` does the same before
@@ -710,6 +717,29 @@ impl RenderState {
                     }
                 }
 
+                // Opaque-layer particles — block-break debris above all — here,
+                // **before translucent water**, for the same reason the mobs and
+                // block entities above are. Break a block underwater and the
+                // debris used to be painted over the surface however deep it was.
+                //
+                // This is vanilla's split, not a blanket move: `Layer::Opaque`
+                // goes in the `solid` phase and `Layer::Translucent` in
+                // `afterTerrain`, on either side of the translucent terrain draw
+                // (`SubmitNodeCollection.submitQuadParticleGroup` submits the
+                // group into both, and `QuadParticleFeatureRenderer.prepareGroup`
+                // keeps only the layers whose `translucent()` matches). The
+                // translucent half stays below, where every particle used to be.
+                //
+                // Unlike the mobs, this half is still alpha-blended — what makes
+                // the water read correctly is its **depth write**, which the
+                // opaque pipeline has and the translucent one does not: water
+                // tests depth and does not write it, so it can only blend over a
+                // submerged particle that is already in the depth buffer, and can
+                // only be rejected in front of one that is nearer. See
+                // `ParticleRenderer::new`.
+                self.particles
+                    .draw_opaque(&mut pass, &self.particle_atlas_bind_group);
+
                 // Translucent water, drawn after all opaque model terrain so the
                 // sea floor already written to depth shows through the surface
                 // (depth test on, depth write off, alpha blend — the fluid
@@ -734,10 +764,12 @@ impl RenderState {
                 }
             }
 
-            // Debris last among the world geometry: it is alpha-blended with
-            // depth write off, so it must read a depth buffer that already holds
-            // every opaque surface, or fragments behind a wall would show
-            // through. The outline is drawn after it, as vanilla does.
+            // The *translucent* half of the debris last among the world geometry
+            // (the opaque half is above, before the water): it is alpha-blended
+            // with depth write off, so it must read a depth buffer that already
+            // holds every opaque surface, or fragments behind a wall would show
+            // through. Vanilla's `afterTerrain` phase, i.e. after translucent
+            // terrain. The outline is drawn after it, as vanilla does.
             self.particles
                 .draw(&mut pass, &self.particle_atlas_bind_group);
             stats.particles_drawn = self.particles.count();
