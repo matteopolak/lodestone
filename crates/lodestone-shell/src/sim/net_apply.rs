@@ -127,6 +127,12 @@ impl Sim {
                     // some other block type (a note block's pitch, a piston's
                     // direction) and is dropped by `apply_block_event`.
                     self.chest_lids.apply_block_event(pos, b0, b1);
+                    // Bells share the same `b0 == 1` (issue #23) — see
+                    // `BellShakes::apply_block_event`. Both trackers are offered
+                    // the event because the packet cannot tell them apart; the
+                    // per-type gather is what reads only its own positions back
+                    // out, so a rung bell never opens a chest lid and vice versa.
+                    self.bell_shakes.apply_block_event(pos, b0, b1);
                 }
                 NetUpdate::ItemPickup(event) => {
                     // Issue #365. Accumulated, not acted on here: the drain at the

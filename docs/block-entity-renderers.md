@@ -10,15 +10,10 @@ came back to fix the summary at the top, exactly the staleness class `CLAUDE.md`
 common defect in this repo's own written record. Read the per-type sections below, not this
 paragraph's memory of them.
 
-**Bell's own wiring has a real, named gap, unlike the other three: it is not installed from the
-live per-frame path.** `RenderState::set_bell_source`/`prepare_block_entities`'s bell half exist and
-are proven by a real GPU pixel gate (see [Bell](#bell)), but no `sim.rs`/`app.rs` call site feeds
-them a world-driven source the way chest/skull/sign have — that installer sits outside this
-session's file ownership (both files are off-limits: two other agents were mid-flight in them). So
-today a bell in a live game still shows only its block model's attachment frame, with nothing hanging
-in it, exactly as before this session. The render pass reaching pixels in a hermetic test is proven;
-a real client drawing one is not, and the doc says so at the one place ([Bell](#bell)) rather than
-letting the top-line summary overclaim it.
+**Bell is now fully wired, including its `BLOCK_EVENT` trigger, and the paragraph that used to sit
+here saying otherwise was itself stale** — the live install landed before this note was next read,
+and the shake trigger landed with `BellShakes` (see [Bell](#bell)). Both halves of the gap this
+paragraph named are closed.
 
 ## The real vanilla scope, from the registration list — not the issue's guess-list
 
@@ -629,16 +624,28 @@ evidence standard. `bell_block_entity_pixels.rs`'s GPU gate reuses the same `tic
 the angle actually reaches the rendered mesh (see below), which the render-crate unit test cannot see
 on its own.
 
-**What is not wired: the trigger.** Vanilla starts a shake from `BellBlockEntity.triggerEvent`
-(`BLOCK_EVENT` with `b0 == 1`, the swing direction packed into `b1`) — a **different** `b0` meaning
-than chest's own `b0 == 1` (chest lid open/close vs. bell shake direction), so a router keyed only on
-`b0` would need the block type too, not just the byte. Nothing in this workspace decodes that trigger
-into a bell-specific tick clock yet (the `ChestLids`-shaped map this module's own "How to change it"
-section already anticipated: "a bell's swing... wants its own map alongside `ChestLids`, not a field
-on it"). `crate::block_entities::bell_spawn` always resolves `BellSpawn::shake` to `None`, so a live
-bell draws — correctly, at rest — but never shakes. That is a real, named gap, not a design choice;
-closing it needs a `BellShakes`-shaped tick map plus a `BLOCK_EVENT` arm that distinguishes bell from
-chest by block type, both outside this session's scope.
+**The trigger is wired.** `crate::block_entities::BellShakes` is the `ChestLids`-shaped map this
+module's own "How to change it" section anticipated: a `HashMap<[i32; 3], Shake>` fed by
+`NetUpdate::BlockEvent` in `sim/net_apply.rs`, advanced once per client tick in `sim/step.rs`, and
+read back by `bell_spawns` through `Sim::bell_source`. `BellShakes::shake` interpolates the tick
+counter against the partial tick for the same reason `ChestLids::openness` does — the angle is a
+`sin` of it, so a stepped counter reads as a stutter at 60 fps — which is also why `bell_source`
+captures the partial tick and **must be re-installed every frame**, unlike skull/sign.
+
+Three details worth keeping, each of which is a way to get it subtly wrong:
+
+- **`b0 == 1` means a different thing for a bell than for a chest** (shake vs. lid), and the packet
+  cannot tell them apart. Both trackers are offered every event and the **per-type gather** is what
+  reads only its own positions back out, so a rung bell never opens a chest lid. Routing on `b0`
+  alone, or picking one tracker at the arm, is what would break.
+- **`b1` is `Direction.from3DDataValue`, not a count** — `0` down, `1` up, `2` north, `3` south, `4`
+  west, `5` east. That order is the jar's, not alphabetical and not `BellShakeDirection`'s own
+  declaration order; getting it wrong swings the bell along the wrong axis, which still looks like a
+  working animation. `shake_direction_from_3d` drops UP/DOWN, which `BellModel.setupAnim` has no
+  rotation for.
+- **A shake runs exactly 50 ticks** (`BellBlockEntity.DURATION`) and the entry is then dropped, the
+  same garbage collection `ChestLids` does and safe for the same reason: an absent entry and a bell
+  at rest are both `None`.
 
 ### Status: fully wired, including the live install
 

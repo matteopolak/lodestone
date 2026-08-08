@@ -493,6 +493,11 @@ impl Sim {
             // instead would open a chest in a third of a second at 60 fps and
             // make the animation speed a function of the frame rate.
             self.chest_lids.tick();
+            // Bell shakes, on the same fixed 20 Hz and for the same reason: the
+            // shake angle is a `sin` of vanilla's raw tick counter over a 50-tick
+            // window, so advancing it per frame would make the swing's speed a
+            // function of the frame rate.
+            self.bell_shakes.tick();
             // The HUD status effects and the title/action-bar overlays used to be
             // aged by three hand-written `tick(1)` calls right here. They are now
             // `lodestone_ecs::session::tick_hud_overlays` in `TickSet::Animate`,

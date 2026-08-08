@@ -194,18 +194,24 @@ impl Sim {
         Some(move |eye: glam::Vec3| crate::block_entities::sign_spawns(&handle, eye))
     }
 
-    /// The bell sibling of [`Self::skull_source`] — see
-    /// `crate::block_entities::bell_spawns`. Same per-frame install shape as
-    /// chest/skull/sign; see `docs/block-entity-renderers.md`'s Bell section
-    /// for why the render pass and the CPU-side gather were already landed
-    /// and only this call site (plus `app.rs`'s install) was missing.
+    /// The bell sibling of [`Self::block_entity_source`] — see
+    /// `crate::block_entities::bell_spawns`.
+    ///
+    /// Like the chest source and **unlike** skull/sign, this captures the shake
+    /// tracker *and* the partial tick, because a bell animates. The same warning
+    /// applies: this must be re-installed every frame, or every shake freezes at
+    /// the fraction of a tick the closure was built on.
     #[must_use]
     pub fn bell_source(
         &self,
     ) -> Option<impl Fn(glam::Vec3) -> Vec<lodestone_render::BellSpawn> + Send + Sync + 'static>
     {
         let handle = self.net.as_ref()?.shared_handle();
-        Some(move |eye: glam::Vec3| crate::block_entities::bell_spawns(&handle, eye))
+        let shakes = self.bell_shakes.clone();
+        let partial_tick = self.clock().interp_alpha;
+        Some(move |eye: glam::Vec3| {
+            crate::block_entities::bell_spawns(&handle, &shakes, eye, partial_tick)
+        })
     }
 
     /// How many chest lids are currently animating or open — for the debug
@@ -214,6 +220,14 @@ impl Sim {
     #[must_use]
     pub fn chest_lid_count(&self) -> usize {
         self.chest_lids.len()
+    }
+
+    /// How many bells are currently shaking — the bell sibling of
+    /// [`Self::chest_lid_count`], and for the same reason: it distinguishes "the
+    /// block event never arrived" from "the bell is drawn at rest".
+    #[must_use]
+    pub fn bell_shake_count(&self) -> usize {
+        self.bell_shakes.len()
     }
 
     /// The interpolated entities to draw this frame, resolved by the renderer
