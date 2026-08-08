@@ -4266,3 +4266,99 @@ production `ServerProtocol::encode_chunk` and decoded through `lodestone_registr
   unthrottled 30, and the control was run: neutering `refreshes_world_stats` to `true` produced *"frames
   1..31 recomputed the world stats 30 times; the correct hypothesis is 1 and the unthrottled hypothesis is
   30"*.
+
+**12.121 Delete and scrolling both landed, and the most valuable thing the session produced was not either
+of them: it was that `options.rs`'s own written explanation of why the settings list could not scroll
+properly had been false since #445, and was still being read as the reason a live defect existed.**
+
+Issues [#540](https://github.com/matteopolak/lodestone/issues/540) and
+[#541](https://github.com/matteopolak/lodestone/issues/541) plus a player report on the settings screen.
+The previous agent filed all three rather than finishing them; the code is now in
+`crates/lodestone-shell/src/{saves.rs, menu/confirm.rs, menu/world_select.rs, menu/options.rs,
+menu/render/*}`.
+
+- **The staleness, first, because it is the reusable part.** `options.rs`'s module doc departure 3 read
+  *"the scroll snaps to whole entries and the visible window is fixed at `LIST_WINDOW_PX` … this menu
+  pipeline has no scissor, so a row that overran the band would paint over the footer"*, and
+  `docs/settings-screen.md` said the same thing at greater length, ending *"this is the departure most worth
+  revisiting: a scissor in the menu pipeline would delete it."* **Both halves had already been deleted by
+  #445**, which converted the screen to a continuous pixel offset and gave the pipeline
+  `Quads::with_clip`. The prose survived, was handed to this agent as the diagnosis, and named a cause that
+  no longer existed while standing in front of two causes that did. `CLAUDE.md`'s staleness class in its
+  most expensive form: not a claim that looks out of date, but a *correct-when-written* explanation for a
+  behaviour that has since been fixed.
+- **What was actually wrong, measured.** (a) `with_clip` reached the three screens whose rows are list
+  **entries** (`MenuRow::entry`/`account`/`world`) and not the settings tree, whose rows are *slotted
+  widgets* — so a settings row scrolled past the band painted over the footer's Done button. (b)
+  `SettingsNav::scroll_to_cursor` runs on a keypress, which has no canvas, so it clamps against
+  `MIN_SCALED_HEIGHT`: the Video page's `maxScrollAmount` there is **330**, and at 854×480 it is **90**.
+  The rows were placed from the raw 330 while the scrollbar, which goes through `ListSpec::model`, was
+  placed from the clamped 90 — two readers, two numbers, the list drawn 240 px past its own end with its
+  top rows behind the header, and the next wheel notch snapping it back. That is exactly the reported
+  *"text overlaps, is in the wrong place, and when I scroll it doesn't reach the end"*, from one root cause
+  in two halves.
+- **The owner's other two complaints were the same defect, not a second one.** *"I don't see options in the
+  same places as 26.2 vanilla"* and *"I don't see the render distance option"* were audited page by page
+  against the jar's `addOptions`, and **every page's composition and within-page order matches exactly**,
+  root grid included; Render Distance is on Video's Quality & Performance section, paired with Biome Blend,
+  live since #443. Three traps were checked rather than assumed, and each would have produced a wrong page
+  from a summary of the call site: `AccessibilityOptionsScreen` calls
+  `addSmall(AbstractWidget, OptionInstance, AbstractWidget)` — a **three-argument overload whose middle
+  argument is `findOption` metadata, not a third widget** (`OptionsList.java:52`), so reading the call site
+  literally ships a duplicated Narrator row; `SoundSource` has **eleven** values with `UI` last;
+  Video's `qualityOptions` has **seventeen** entries, so the tail is eight pairs plus a lone
+  `weatherRadius`. "Read the record definition, not a summary of the call site" earned its place again.
+- **`max_visible_world_rows` and `LIST_WINDOW_PX` are the same defect wearing two names**, which is what
+  the orchestrator suspected and it is confirmed: both derive a *row count* from the shortest canvas
+  because the code that needs the number runs without one. The world list's version capped the list at 10
+  rows; the settings version sized a window. Both are now handled the same way — the conservative
+  canvas-free value is still what the keyboard uses, and the offset is **re-clamped where the canvas is
+  first known** (`world_list_scroll_for`, `options::drawn_scroll`), which is vanilla's own
+  `refreshScrollAmount`. The residue is one-directional and stated at both sites: arrowing down can reach
+  the end of a list slightly earlier than it strictly had to at a tall canvas, never later.
+- **Delete's cost was the confirmation, exactly as the previous agent predicted, and the safety property is
+  a rect relation rather than a timer.** `ConfirmScreen`'s block is centred in the canvas while
+  `SelectWorldScreen` pins Delete into a footer band, so the affirmative button sits **177 px** above the
+  button the player just pressed; a second click hits nothing. The gate resolves both rects through the
+  same slot machinery the draw and the hit-test read, because a restated constant could be right while the
+  drawn rect was not — and it asserts that its own overlap detector detects an overlap. The second half is
+  focus: vanilla's `ConfirmScreen.init` sets **no** initial focus, unlike `SelectWorldScreen.java:147`, so
+  Enter immediately after opening presses nothing. Faithful *and* the safe direction.
+- **Making a corrupt world deletable required changing this screen's selection model, and it exposed a real
+  bug in the process.** `LevelSummary.canDelete()` is unconditionally `true` in vanilla and the corrupt
+  world is the one you most need to remove — but Delete acts on the *selection*, and this screen refused to
+  select an inactive row, so that world was unreachable from the UI. Selection and activation are two facts
+  now (a click selects any row; `active` still gates focus and Play). That removed an **implicit**
+  protection: `play_selected` had no `can_play()` check because a corrupt world could never be the
+  selection, and vanilla has had that check in `joinWorld` all along
+  (`WorldSelectionList.java:610`). `a_corrupt_worlds_row_is_selectable_and_deletable_but_never_playable`
+  went red on the first run with `left: Play("zulu")`. **The lesson is about guards that are safe by
+  unreachability**: widening what can reach a code path deletes protections nobody wrote down, and the only
+  reason this one was caught is that the invariant ("must stay non-playable") had been stated in the brief
+  and turned into an assertion rather than a belief.
+- **Twelve controls were neutered and observed to fail; one was dead and had to be re-pointed.** The dead
+  one is instructive: neutering `play_selected`'s `can_play()` guard did **not** fail the
+  integration-level `a_corrupt_world_can_be_deleted_and_never_played`, because that test clicks Play
+  through `click_row`, which consults the button's `active` flag first — the *first* of two guards makes
+  the second unreachable, so a test that goes through the button cannot see the second one at all. Only
+  the unit test that calls `play_selected` directly fires. **A control for a second-line guard has to
+  bypass the first line**, or it measures the first guard twice.
+- **Two pixel controls needed the "what else already paints here?" question and both would have been
+  premise-false without it.** The obvious rect for "a row was cut at the band's bottom" is everything below
+  the band — which is where all six footer buttons paint. The rect that works is the **8 px gutter between
+  the band's bottom and the footer grid's own top**, with both edges derived (the band from the
+  `ListSpec::model` the clip is built from, the footer from `world_select_slot(Play)` /
+  `options::footer_rects`) and the title screen measured in the same rect as a second premise. Likewise the
+  natural arm for "a row scrolled out of view draws nothing" is degenerate: a fully-scrolled-out row's rect
+  is **off-canvas**, so emptiness there is free. The measurement that discriminates is the *selection
+  outline's colour* at the band's first row position before and after scrolling ten rows, plus an
+  assertion that the position still has ink — so "nothing drew" cannot pass for "the right row drew".
+- **A predicted magnitude was wrong in the first draft and the measurement corrected it**, which is the
+  whole point of predicting rather than asserting a sign: `max_scroll` for 25 rows of 36 in a 371 px band
+  was predicted as `900 - 371 = 529` and measured 533, because `AbstractSelectionList.contentHeight()`
+  adds vanilla's own `+ 4` (`:197-205`) — the 2 px above the first entry and below the last. Both
+  hypotheses are now in the gate.
+- **The clip that #445 added carried its own instruction and it was honoured.** `draw.rs`'s world-row arm
+  said *"if scrolling lands, the clip has to land with it — a pixel-granular offset without one paints over
+  the footer buttons"*. That comment is why this landing needed no rediscovery, and it is the best argument
+  in this file for writing down the consequence of a limitation at the site of the limitation.

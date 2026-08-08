@@ -12,6 +12,7 @@
 use super::*;
 use super::account_screen::{ACCOUNTS_DETAIL_Y, ACCOUNTS_DIM, ACCOUNTS_HEAD_ICON, ACCOUNTS_ROW_W, ACCOUNTS_SELECTION_FILL, ACCOUNTS_SPACING, ACCOUNTS_TEXT_GAP};
 use super::frame::notice_lines;
+use super::world_list::WORLD_LIST_ROW_W;
 use super::measure::{advance, clip};
 use super::renderer::FLOATS_PER_VERTEX;
 use super::world_list::{WORLD_LIST_DIM, WORLD_LIST_SELECTION_FILL};
@@ -297,18 +298,53 @@ pub fn build(
         // text lines, not a button. Tested before `slot` for the same reason — it
         // carries none.
         //
-        // **No `with_clip` here, and that is a consequence of the missing scroll
-        // model rather than an oversight.** The server and account lists clip
-        // because a row can straddle the band's edge at an intermediate scroll
-        // offset; this list does not scroll, so `world_list_row_visible` rejects
-        // every row that is not wholly inside the band and there is nothing left
-        // to cut. If scrolling lands, the clip has to land with it — a
-        // pixel-granular offset without one paints over the footer buttons.
+        // **Clipped to the band since #541, and the clip is required rather than
+        // tidy.** This comment used to say the opposite, and said why: with no
+        // scroll model `world_list_row_visible` rejected every row that was not
+        // *wholly* inside the band, so there was nothing left to cut — and it
+        // ended "if scrolling lands, the clip has to land with it — a
+        // pixel-granular offset without one paints over the footer buttons."
+        // Scrolling landed; this is that clip. At any offset that is not a
+        // multiple of 36 a row straddles the band's bottom edge, which is the
+        // normal case and not an edge one.
+        //
+        // The rect is the band the spec derived, not a restated one, so the clip
+        // and the row placement cannot disagree.
         if row.world.is_some() {
-            draw_world_entry(&mut b, &frame.rows, i, width, height);
+            match active_list.as_ref() {
+                Some((list, _)) => {
+                    let (bx, bw) = (world_list_row_left(width), WORLD_LIST_ROW_W);
+                    let (by, bh) = (list.top(), list.height());
+                    b.with_clip(bx, by, bw, bh, |b| {
+                        draw_world_entry(b, &frame.rows, i, width, height);
+                    });
+                }
+                None => draw_world_entry(&mut b, &frame.rows, i, width, height),
+            }
             continue;
         }
-        if row.slot.is_some() {
+        if let Some(slot) = row.slot {
+            // **A slotted row that is a list entry is clipped to the band too.**
+            // The three list screens above are clipped because their rows are
+            // `MenuRow::entry`/`account`/`world`; every settings-tree list draws
+            // its rows as *slotted widgets* instead, so they fell through to the
+            // unclipped path below and a row scrolled past the band's bottom
+            // painted over the footer. That is the overlap a player reported on the
+            // settings screen — see `Origin::is_scrolling_list_row`, which is the
+            // predicate that decides, and which deliberately excludes the footer,
+            // the title and `OptionsScreen`'s own grid (clipping *those* to the
+            // band would erase them).
+            //
+            // The band is the same `ListSpec::model` the scrollbar is drawn from,
+            // so the clip and the rows cannot disagree; horizontal extent is the
+            // full canvas for `list_labels`' reason — a two-column settings row
+            // straddles the centre and cropping to `row_w` would cut the value
+            // column.
+            let clip = slot
+                .origin
+                .is_scrolling_list_row()
+                .then(|| active_list.as_ref().map(|(list, _)| (list.top(), list.height())))
+                .flatten();
             // A vanilla-positioned row can be a **text field** rather than a
             // button: `Screen::WorldSelect`'s search box is placed by the header
             // layout's arithmetic like every other widget on that screen, and
@@ -318,19 +354,31 @@ pub fn build(
             // `draw_edit_box`).
             if let Some(edit) = row.edit.as_ref() {
                 if let Some((x, y, w, h)) = row_rect(&frame.rows, i, width, height) {
-                    draw_edit_box(&mut b, edit, x, y, w, h);
+                    match clip {
+                        Some((top, band_h)) => b.with_clip(0.0, top, width, band_h, |b| {
+                            draw_edit_box(b, edit, x, y, w, h);
+                        }),
+                        None => draw_edit_box(&mut b, edit, x, y, w, h),
+                    }
                 }
                 continue;
             }
-            draw_widget(
-                &mut b,
-                &frame.rows,
-                i,
-                width,
-                height,
-                i == frame.selected,
-                frame.hovered == Some(i),
-            );
+            let selected = i == frame.selected;
+            let hovered = frame.hovered == Some(i);
+            match clip {
+                Some((top, band_h)) => b.with_clip(0.0, top, width, band_h, |b| {
+                    draw_widget(b, &frame.rows, i, width, height, selected, hovered);
+                }),
+                None => draw_widget(
+                    &mut b,
+                    &frame.rows,
+                    i,
+                    width,
+                    height,
+                    selected,
+                    hovered,
+                ),
+            }
             continue;
         }
         let Some((x, y, w, h)) = row_rect(&frame.rows, i, width, height) else {
@@ -990,7 +1038,11 @@ fn draw_world_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32, h
     // reason: this is the draw's own statement of what is on screen, and the two
     // must agree by both reading the same predicate rather than by one trusting
     // the other's `None`.
-    if !world_list_row_visible(view.index, height) {
+    // The re-clamped offset — `world_list_scroll_for`, the same function
+    // `row_rect` reads, so the draw and the hit-test cannot disagree about where a
+    // row is.
+    let scroll = world_list_scroll_for(rows, height);
+    if !world_list_row_visible(view.index, height, scroll) {
         return;
     }
     let Some((x, y, w, h)) = row_rect(rows, i, width, height) else {
@@ -1002,7 +1054,7 @@ fn draw_world_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32, h
         b.rect(x + 1.0, y + 1.0, w - 2.0, h - 2.0, WORLD_LIST_SELECTION_FILL);
     }
 
-    let (cx, cy, ..) = world_list_row_content_rect(view.index, width);
+    let (cx, cy, ..) = world_list_row_content_rect(view.index, width, scroll);
     let text_x = cx + WORLD_LIST_TEXT_DX;
     let room = world_list_text_width();
     // Name, folder + last played, game mode + version — in `MenuRow`'s own

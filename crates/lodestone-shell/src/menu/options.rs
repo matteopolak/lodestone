@@ -74,14 +74,31 @@
 //!    text. This is the one place where the absence of a component is the honest
 //!    render; it is not "disabled art", which
 //!    [`super::widget`] correctly forbids for this widget family.
-//! 3. **The scroll snaps to whole entries and the visible window is fixed at
-//!    [`LIST_WINDOW_PX`].** `AbstractSelectionList` scrolls continuously and
-//!    scissors the band; this menu pipeline has no scissor, so a row that
-//!    overran the band would paint over the footer. The window is therefore
-//!    derived from the *shortest* content band any `gui_scale` can produce
-//!    (`config::MIN_SCALED_HEIGHT`), which makes it correct at every canvas and
-//!    conservative at large ones. `super::accounts`' `VISIBLE_ROWS` is the
-//!    existing precedent for the same trade.
+//! 3. **The keyboard's scroll-into-view runs against the shortest canvas.** This
+//!    departure used to read "the scroll snaps to whole entries and the visible
+//!    window is fixed at [`LIST_WINDOW_PX`] … this menu pipeline has no scissor,
+//!    so a row that overran the band would paint over the footer", and **both
+//!    halves went stale without looking it**. Issue #445 converted this screen to
+//!    a continuous pixel offset and gave the pipeline a real CPU scissor
+//!    ([`super::render`]'s `Quads::with_clip`), so neither the snapping nor the
+//!    fixed window survived — but the prose did, and it was still being cited as
+//!    the reason a limitation existed. That is `CLAUDE.md`'s staleness class in
+//!    its most expensive form: a *correct-when-written* explanation for a
+//!    behaviour that had already been fixed, standing in front of a behaviour
+//!    that had **not**.
+//!
+//!    What is really left is narrower and still real: a keypress has no canvas,
+//!    so [`SettingsNav::scroll_to_cursor`] clamps against
+//!    `config::MIN_SCALED_HEIGHT` and can therefore ask for an offset a *taller*
+//!    canvas has no room for. [`drawn_scroll`] re-clamps where the canvas is
+//!    first known — vanilla's own `refreshScrollAmount` — so the rows, the
+//!    scrollbar and the clip are three readers of one expression. Read its doc:
+//!    it carries the player report that found this, and the two numbers (330 at
+//!    the shortest canvas, 90 at 854×480) that made it visible.
+//!
+//!    The clip itself is [`super::render::Origin::is_scrolling_list_row`], and it
+//!    had to be added: `with_clip` reached the three screens whose rows are list
+//!    *entries* and not the settings tree, whose rows are slotted widgets.
 //! 4. **Up/Down move the cursor over *every* control, including inactive
 //!    ones** — where `AbstractWidget.nextFocusPath` skips them
 //!    (`AbstractWidget.java:152-158`), as [`super::nav`]'s `step_enabled` does
@@ -2189,6 +2206,7 @@ pub fn list_cell_origin(
     scroll: f32,
     column: u8,
     width: f32,
+    height: f32,
 ) -> (f32, f32) {
     let entries = page.entries();
     // Pixel scrolling (#445): the entry's **absolute** offset in the list, minus
@@ -2200,8 +2218,43 @@ pub fn list_cell_origin(
         + LIST_TOP_INSET
         + entry_offset(entries, entry)
         + ENTRY_CONTENT_INSET
-        - scroll.floor();
+        - drawn_scroll(page, scroll, height).floor();
     (row_left(width, column), y)
+}
+
+/// `scroll` re-clamped to what a `height`-tall canvas can justify — vanilla's
+/// `refreshScrollAmount`, which `updateSizeAndPosition` runs after every resize
+/// (`AbstractSelectionList.java:185-195`).
+///
+/// ## Why this exists, and what it fixed
+///
+/// [`SettingsNav`] has two writers of its offset and only one of them knows the
+/// canvas. The wheel does (`app/lifecycle.rs` resolves a logical canvas for every
+/// mouse event) and clamps exactly, through [`SettingsNav::model`]. The
+/// **keyboard** does not: a keypress has no canvas, so [`SettingsNav::scroll_to_cursor`]
+/// runs against [`crate::config::MIN_SCALED_HEIGHT`] — where the band is
+/// `240 - 33 - 33` = 174 and `maxScrollAmount` for the Video page's 500 px of
+/// content is **330**. At an 854×480 canvas the band is 414 and the real maximum
+/// is **90**. So arrowing to the bottom of the Video page set an offset up to
+/// 240 px past that canvas's own end, and the rows were drawn from the raw value
+/// while the scrollbar — which goes through `model` — was drawn from the clamped
+/// one. Two readers, two different numbers.
+///
+/// That is the defect a player reported (2026-08-07) as *"some text overlaps, is
+/// in the wrong place, and when I scroll it doesn't reach the end"*: the list
+/// jumped past its end, the top rows went up behind the header, and the next
+/// wheel notch snapped it back. The **Video page is where it bites hardest**
+/// because it carries the most controls of any page.
+///
+/// The clamp is here, in the one place that first learns the canvas, and it goes
+/// through the same [`list_spec`] the scrollbar and the wheel use — so the rows,
+/// the bar and the clip are three readers of one expression rather than three
+/// expressions that agree today.
+#[must_use]
+pub fn drawn_scroll(page: SettingsPage, scroll: f32, height: f32) -> f32 {
+    list_spec(page, scroll)
+        .model(height)
+        .map_or(scroll, |list| list.scroll())
 }
 
 /// The top-left of a header entry's `StringWidget`:
@@ -2213,8 +2266,9 @@ pub fn list_header_origin(
     entry: usize,
     scroll: f32,
     width: f32,
+    height: f32,
 ) -> (f32, f32) {
-    let (x, y) = list_cell_origin(page, entry, scroll, 0, width);
+    let (x, y) = list_cell_origin(page, entry, scroll, 0, width, height);
     (x, y + header_padding_top(entry))
 }
 
@@ -2349,9 +2403,9 @@ pub fn placement_anchor(placement: Placement, width: f32, height: f32) -> (f32, 
             entry,
             scroll,
             column,
-        } => list_cell_origin(page, usize::from(entry), scroll, column, width),
+        } => list_cell_origin(page, usize::from(entry), scroll, column, width, height),
         Placement::ListHeader { page, entry, scroll } => {
-            list_header_origin(page, usize::from(entry), scroll, width)
+            list_header_origin(page, usize::from(entry), scroll, width, height)
         }
     }
 }
@@ -3931,30 +3985,186 @@ mod tests {
         // `+160`. The first entry's widget is at
         // `headerHeight(33) + getFirstEntryY()'s 2 + getContentY()'s 2 = 37`.
         let page = SettingsPage::Mouse;
-        assert_eq!(list_cell_origin(page, 0, 0.0, 0, 480.0), (85.0, 37.0));
-        assert_eq!(list_cell_origin(page, 0, 0.0, 1, 480.0), (245.0, 37.0));
+        assert_eq!(list_cell_origin(page, 0, 0.0, 0, 480.0, 480.0), (85.0, 37.0));
+        assert_eq!(list_cell_origin(page, 0, 0.0, 1, 480.0, 480.0), (245.0, 37.0));
         // Entry 2 is two 25 px entries down.
-        assert_eq!(list_cell_origin(page, 2, 0.0, 0, 480.0), (85.0, 87.0));
+        assert_eq!(list_cell_origin(page, 2, 0.0, 0, 480.0, 480.0), (85.0, 87.0));
+        // The **scrolled** assertions need a canvas the offset is legal at, since
+        // `list_cell_origin` now re-clamps through `drawn_scroll` (see its doc, and
+        // the player report it fixed). This page fits a 480-tall canvas whole, so
+        // *no* offset is legal there — asking for one and getting 0 is the clamp
+        // working, not the arithmetic failing. A short canvas is the honest
+        // fixture, and the premise is asserted rather than assumed.
+        const SHORT: f32 = 100.0;
+        let room = list_spec(page, 0.0)
+            .model(SHORT)
+            .expect("premise: this page scrolls at a 100 px canvas")
+            .max_scroll();
+        assert!(
+            room >= 50.0,
+            "premise: a 50 px offset must be legal at a {SHORT} px canvas, but the \
+             maximum there is {room} — the assertions below would measure the clamp \
+             instead of the offset"
+        );
         // Scrolled by entry 2's own absolute offset (two 25 px entries = 50 px),
-        // entry 2 lands exactly where entry 0 was. The third argument is now
+        // entry 2 lands exactly where entry 0 was. The third argument is
         // **pixels** (issue #445), not the index of the top entry — `2` used to
         // mean "entry 2 at the top" and `50.0` means the same thing here, which is
         // the conversion in one line.
         assert_eq!(entry_offset(page.entries(), 2), 50.0);
-        assert_eq!(list_cell_origin(page, 2, 50.0, 0, 480.0), (85.0, 37.0));
+        assert_eq!(list_cell_origin(page, 2, 50.0, 0, 480.0, SHORT), (85.0, 37.0));
         // And a *fractional* scroll no row-index offset could express: 10 px down
         // from the top puts entry 0 ten pixels higher, not a whole row higher.
-        assert_eq!(list_cell_origin(page, 0, 10.0, 0, 480.0), (85.0, 27.0));
+        assert_eq!(list_cell_origin(page, 0, 10.0, 0, 480.0, SHORT), (85.0, 27.0));
         // Java integer division on an odd width: `481 / 2 == 240`, not 240.5.
         assert_eq!(row_left(481.0, 0), 85.0);
         assert_eq!(row_left(480.0, 0), 85.0);
         // A header's `StringWidget` is at `getContentY() + paddingTop`, and the
         // 18 px padding is what separates a mid-list header from its neighbour.
         let video = SettingsPage::Video;
-        assert_eq!(list_header_origin(video, 0, 0.0, 480.0), (85.0, 37.0));
-        let (_, quality_y) = list_header_origin(video, 6, 0.0, 480.0);
-        let (_, cell_y) = list_cell_origin(video, 6, 0.0, 0, 480.0);
+        assert_eq!(list_header_origin(video, 0, 0.0, 480.0, 480.0), (85.0, 37.0));
+        let (_, quality_y) = list_header_origin(video, 6, 0.0, 480.0, 480.0);
+        let (_, cell_y) = list_cell_origin(video, 6, 0.0, 0, 480.0, 480.0);
         assert_eq!(quality_y - cell_y, 18.0, "the second header's paddingTop");
+    }
+
+    /// **Scrolling reaches the end of the longest page, at every canvas** — the
+    /// player report *"when I scroll it doesn't reach the end"* (2026-08-07), as a
+    /// predicted value rather than "more rows than before".
+    ///
+    /// Driven through the **keyboard**, because that is the writer that had no
+    /// canvas and therefore produced the defect: `scroll_to_cursor` runs against
+    /// `MIN_SCALED_HEIGHT`, and before `drawn_scroll` existed the rows were then
+    /// placed from that raw offset at whatever canvas the window happened to be.
+    ///
+    /// The page is **Video** specifically and the control count is a
+    /// **precondition**: the `world` species of vacuous test lives in the input
+    /// data, and a page whose entries fit the band cannot show a tail being
+    /// unreachable. The count comes from the page's own control list, so adding a
+    /// 32nd control cannot silently make the tail unreachable again — and the
+    /// canvas is swept, because a fixture at one canvas cannot show that another
+    /// wastes space.
+    #[test]
+    fn arrowing_to_the_end_of_the_video_page_reaches_its_last_control_at_every_canvas() {
+        let page = SettingsPage::Video;
+        let entries = page.entries();
+        let all = all_controls(page, false);
+        assert!(
+            all.len() >= 31,
+            "premise: the Video page is the longest in the tree ({} controls) — a \
+             shorter one cannot exercise an unreachable tail",
+            all.len()
+        );
+        assert_eq!(
+            all.len(),
+            PAGES
+                .iter()
+                .map(|p| all_controls(*p, false).len())
+                .max()
+                .unwrap(),
+            "premise: and it really is the longest, so this is the page where a \
+             conservative window bites hardest"
+        );
+        // The last control that is a *list cell* — the footer's Done is the last
+        // entry of `all_controls` and is not in the band at all.
+        let last = (0..all.len())
+            .rev()
+            .find_map(|i| entry_of_control(page, i).map(|e| (i, e)))
+            .expect("premise: the page has list cells");
+        let (last_cursor, last_entry) = last;
+        assert_eq!(
+            last_entry,
+            entries.len() - 1,
+            "premise: the last list control is in the page's last entry"
+        );
+
+        for height in [
+            crate::config::MIN_SCALED_HEIGHT as f32,
+            318.0,
+            480.0,
+            720.0,
+        ] {
+            let mut nav = SettingsNav::new();
+            nav.open_at(false, page);
+            assert_eq!(nav.scroll(), 0.0, "a page opens at the top");
+            // Arrow down to the last list control, exactly as a player would.
+            for _ in 0..last_cursor {
+                nav.step(true);
+            }
+            assert_eq!(nav.cursor(), last_cursor, "the cursor reached the last row");
+
+            let band_top = page.header_height();
+            let band_bottom = height - FOOTER_HEIGHT;
+            let (_, y) = list_cell_origin(page, last_entry, nav.scroll(), 0, 854.0, height);
+            let bottom = y + WIDGET_H;
+            assert!(
+                y >= band_top && bottom <= band_bottom,
+                "at a {height} px canvas the last Video control is drawn at \
+                 {y}..{bottom}, outside the band {band_top}..{band_bottom} — this is \
+                 the 'scrolling does not reach the end' defect"
+            );
+
+            // And when the page *does* overflow, the last row really is at the end
+            // of the band rather than merely somewhere legal: within one entry's
+            // height of the band's bottom. Predicted, not a direction.
+            let max = list_spec(page, 0.0)
+                .model(height)
+                .map_or(0.0, |l| l.max_scroll());
+            if max > 0.0 {
+                assert!(
+                    bottom >= band_bottom - DEFAULT_ITEM_HEIGHT,
+                    "at a {height} px canvas the page overflows by {max} px but its \
+                     last control stops at {bottom}, more than one {DEFAULT_ITEM_HEIGHT} \
+                     px entry short of the band's bottom {band_bottom}"
+                );
+            } else {
+                // The control for the branch above: at a canvas tall enough to
+                // show the whole page there is nothing to reach, and the last row
+                // must *not* be at the bottom — otherwise the assertion above
+                // would be satisfied by a page that is always scrolled to its end.
+                assert!(
+                    bottom < band_bottom - DEFAULT_ITEM_HEIGHT,
+                    "at a {height} px canvas the whole page fits, so its last \
+                     control must sit well above the band's bottom"
+                );
+            }
+        }
+    }
+
+    /// The clamp itself, both hypotheses computed from outside constants.
+    ///
+    /// At the shortest canvas the Video page's band is `240 - 33 - 33` = 174 and
+    /// `contentHeight` is `500 + 4`, so `maxScrollAmount` is **330**. At 854×480
+    /// the band is 414 and the maximum is **90**. `scroll_to_cursor` legitimately
+    /// produces the former; drawing it at the latter canvas is the defect.
+    #[test]
+    fn the_settings_scroll_is_clamped_to_the_canvas_it_is_drawn_at() {
+        let page = SettingsPage::Video;
+        let content: f32 = (0..page.entries().len())
+            .map(|i| entry_height(page.entries(), i))
+            .sum();
+        assert_eq!(content, 500.0, "premise: the Video page's own content height");
+        let short = crate::config::MIN_SCALED_HEIGHT as f32;
+        assert_eq!(
+            list_spec(page, 0.0).model(short).unwrap().max_scroll(),
+            content + 4.0 - (short - 2.0 * FOOTER_HEIGHT),
+            "330 at the shortest canvas"
+        );
+        assert_eq!(
+            list_spec(page, 0.0).model(480.0).unwrap().max_scroll(),
+            content + 4.0 - (480.0 - 2.0 * FOOTER_HEIGHT),
+            "90 at 854x480"
+        );
+        // The keyboard's own offset, clamped for the canvas it is drawn at.
+        assert_eq!(drawn_scroll(page, 330.0, 480.0), 90.0);
+        assert_eq!(drawn_scroll(page, 330.0, short), 330.0, "legal at its own canvas");
+        assert_ne!(
+            drawn_scroll(page, 330.0, 480.0),
+            330.0,
+            "the unclamped hypothesis would draw the list 240 px past its own end"
+        );
+        // A page that fits has no legal offset at all.
+        assert_eq!(drawn_scroll(SettingsPage::Controls, 200.0, 480.0), 0.0);
     }
 
     #[test]
@@ -3975,7 +4185,14 @@ mod tests {
                 // never overruns the footer) in the new units.
                 let first_px = entry_offset(entries, first);
                 for entry in visible_entries(entries, first) {
-                    let (_, y) = list_cell_origin(page, entry, first_px, 0, 480.0);
+                    // The canvas is `height`, not a fixed 480: this test's whole
+                    // subject is the shortest canvas, and `list_cell_origin` now
+                    // re-clamps the offset against the canvas it is *drawn* at
+                    // (`drawn_scroll`). Passing 480 here would clamp every offset
+                    // to what a 480-tall canvas allows and then assert the result
+                    // against a 240-tall canvas's footer — which is how this
+                    // assertion first went red, correctly.
+                    let (_, y) = list_cell_origin(page, entry, first_px, 0, 480.0, height);
                     let bottom = match entries[entry] {
                         Entry::Header(_) => y + header_padding_top(entry) + HEADER_LINE_HEIGHT,
                         _ => y + WIDGET_H,
@@ -3992,7 +4209,8 @@ mod tests {
         let entries = SettingsPage::Chat.entries();
         let window = visible_entries(entries, 0);
         assert!(window.len() >= 6, "at least six 25 px rows fit 172 px");
-        let overrun = list_cell_origin(SettingsPage::Chat, window.end, 0.0, 0, 480.0).1 + WIDGET_H;
+        let overrun =
+            list_cell_origin(SettingsPage::Chat, window.end, 0.0, 0, 480.0, height).1 + WIDGET_H;
         assert!(
             overrun > footer_top,
             "the first entry the window rejects must be the one that would not fit \

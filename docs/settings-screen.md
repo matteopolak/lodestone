@@ -578,16 +578,57 @@ each value — plus the two executed rival formulas above. If a JVM becomes
 available, running `OptionInstance`'s own method over these accessors is the
 stronger check and should replace the hand arithmetic.
 
-**3. The scroll snaps to whole entries, and the visible window is a fixed pixel
-budget.** `AbstractSelectionList` scrolls continuously and scissors the band;
-this menu pipeline has no scissor, so a row that overran the band would paint over
-the footer. `LIST_WINDOW_PX` is therefore derived from the **shortest** content
-band any `gui_scale` can produce (`config::MIN_SCALED_HEIGHT`, vanilla's
-`Window.java:453`), which makes it correct at every canvas and *conservative* at
-large ones — seven 25 px rows where vanilla would show eleven or twelve.
-`menu/accounts.rs`'s `VISIBLE_ROWS` is the existing precedent for the same trade.
-This is the departure most worth revisiting: a scissor in the menu pipeline, or a
-`&mut MenuNav` in `frame_for`, would delete it.
+**3. The keyboard's scroll-into-view runs against the shortest canvas.**
+
+This departure used to say something else, and it is worth keeping what it said
+because the staleness is the lesson: *"the scroll snaps to whole entries, and the
+visible window is a fixed pixel budget … this menu pipeline has no scissor, so a
+row that overran the band would paint over the footer … This is the departure most
+worth revisiting: a scissor in the menu pipeline would delete it."*
+
+**Both halves of that were already false.** Issue #445 converted this screen to a
+continuous pixel offset *and* gave the pipeline a real CPU scissor
+(`render::draw`'s `Quads::with_clip`) — but the prose survived, and it was still
+being read as the reason a limitation existed. It cost a player two real defects,
+reported 2026-08-07 as *"some text overlaps, is in the wrong place, and when I
+scroll it doesn't reach the end"*:
+
+- `with_clip` reached the three screens whose rows are list **entries**
+  (`MenuRow::entry`/`account`/`world`) and **not** the settings tree, whose rows
+  are slotted widgets — so a settings row scrolled past the band still painted
+  over the footer's Done button. `Origin::is_scrolling_list_row` is the predicate
+  that fixes it, and it deliberately excludes the footer, the title and
+  `OptionsScreen`'s own grid: clipping *those* to the band would erase them.
+- `SettingsNav::scroll_to_cursor` runs without a canvas (a keypress has none), so
+  it clamps against `config::MIN_SCALED_HEIGHT`, where the Video page's
+  `maxScrollAmount` is **330**. At 854×480 the real maximum is **90**. The rows
+  were placed from the raw 330 while the scrollbar — which goes through
+  `ListSpec::model` — was placed from the clamped 90: two readers, two numbers,
+  and the list drawn 240 px past its own end with its top rows behind the header.
+
+What is left of the departure is only the first bullet's cause: the keyboard
+cannot know the canvas. `options::drawn_scroll` re-clamps where the canvas is
+first known — vanilla's own `refreshScrollAmount`, which `updateSizeAndPosition`
+calls after every resize — so the rows, the bar and the clip are three readers of
+one expression. The residue is that arrowing to the bottom of a long page can
+reach the end slightly earlier than it strictly had to at a tall canvas. Never the
+other way round: the cursor's row is always inside the band, and
+`arrowing_to_the_end_of_the_video_page_reaches_its_last_control_at_every_canvas`
+is the gate, swept over four canvases with the control count asserted as a
+precondition off the page's own control list.
+
+**The parity half of the same report — *"I don't see options in the same places as
+26.2 vanilla"* and *"I don't see the render distance option"* — was audited and
+found to be the same defect, not a composition one.** Every page's entry order
+was re-read against the jar's `addOptions` and matches exactly, root grid
+included; Render Distance is on Video's Quality & Performance section paired with
+Biome Blend, and live since #443. Three traps were checked rather than assumed:
+
+| trap | what a summary of the call site would have produced |
+|---|---|
+| `AccessibilityOptionsScreen` calls `addSmall(widget, OptionInstance, widget)` | a **duplicated Narrator row** — that middle argument is `findOption` metadata, not a third widget (`OptionsList.java:52`) |
+| `SoundSource` has **eleven** values, `UI` last | a Sound page one row short |
+| Video's `qualityOptions` has **seventeen** entries | eight pairs and no `weatherRadius` |
 
 **4. Up/Down move the cursor over *every* control, including inactive ones.**
 `AbstractWidget.nextFocusPath` returns `null` when `!isActive()`
