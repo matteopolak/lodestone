@@ -44,6 +44,8 @@
 
 use lodestone_model::ItemStack;
 
+use crate::crafting::CraftingState;
+
 /// Native size of the player's own inventory: hotbar (`0..=8`) + main storage
 /// (`9..=35`) + armour (`36..=39`) + off-hand (`40`). See the module doc
 /// comment for the vanilla citation; mirrors `lodestone-game`'s
@@ -65,6 +67,11 @@ pub const HOTBAR_SIZE: u8 = 9;
 pub struct PlayerInventory {
     slots: Vec<Option<ItemStack>>,
     selected_hotbar_slot: u8,
+    /// The inventory screen's own 2×2 crafting grid (issue #529). Vanilla keeps
+    /// this in `InventoryMenu`'s scratch `CraftSlots` rather than in `Inventory`,
+    /// but the menu is a per-connection thing here and this struct is the
+    /// per-connection thing that already reaches every caller that needs it.
+    crafting: CraftingState,
 }
 
 impl Default for PlayerInventory {
@@ -72,6 +79,7 @@ impl Default for PlayerInventory {
         Self {
             slots: vec![None; PLAYER_NATIVE_SIZE],
             selected_hotbar_slot: 0,
+            crafting: CraftingState::player(),
         }
     }
 }
@@ -145,12 +153,26 @@ impl PlayerInventory {
     /// | `36..=44` (hotbar) | `0..=8` |
     /// | `45` (off-hand) | `40` |
     ///
-    /// Menu slots `0..=4` (the 2×2 crafting result/grid) have no native
-    /// index at all — see the module doc comment's scope note — so those
-    /// entries are dropped rather than misapplied. Returns whether the slot
-    /// was recognised, so a caller can log a dropped entry rather than
-    /// silently discarding it.
+    /// Menu slots `1..=4` are the 2×2 crafting grid, which has no *native*
+    /// index — it is scratch space in vanilla's `InventoryMenu`, not part of
+    /// `Inventory` — so those land in [`crafting`](Self::crafting) instead, and
+    /// re-derive the result as they go.
+    ///
+    /// **Menu slot `0`, the crafting result, is never written from here and
+    /// returns `false`** (issue #529). It is derived by the server from the grid,
+    /// and accepting a client's value for it is exactly the hole that let a
+    /// container diff mint any item. The caller's job on slot `0` is to push
+    /// back the server's own value, not to store the claim.
+    ///
+    /// Returns whether the slot was recognised, so a caller can log a dropped
+    /// entry rather than silently discarding it.
     pub fn apply_menu_slot_change(&mut self, menu_slot: i32, item: Option<ItemStack>) -> bool {
+        if menu_slot == PLAYER_CRAFT_RESULT_MENU_SLOT {
+            return false;
+        }
+        if let Some(cell) = player_craft_grid_cell(menu_slot) {
+            return self.crafting.set_input(cell, item);
+        }
         match player_menu_native_index(menu_slot) {
             Some(native) => {
                 self.set_native(native, item);
@@ -158,6 +180,19 @@ impl PlayerInventory {
             }
             None => false,
         }
+    }
+
+    /// This inventory screen's 2×2 crafting grid and the result the *server*
+    /// derived for it.
+    #[must_use]
+    pub fn crafting(&self) -> &CraftingState {
+        &self.crafting
+    }
+
+    /// Mutable access to the 2×2 grid — for the recipe-book fill and for
+    /// consuming a craft.
+    pub fn crafting_mut(&mut self) -> &mut CraftingState {
+        &mut self.crafting
     }
 
     /// Adds `stack` to this inventory, mirroring vanilla's
@@ -306,6 +341,23 @@ const ITEMS_SIZE: usize = 36;
 /// The menu-index → native-index mapping for the player's own inventory
 /// screen (window `0`) — see [`PlayerInventory::apply_menu_slot_change`]'s
 /// doc comment for the table this implements.
+/// Menu slot of the player inventory screen's crafting **result**
+/// (`InventoryMenu`'s `RESULT_SLOT = 0`). Server-derived; never client-writable.
+pub const PLAYER_CRAFT_RESULT_MENU_SLOT: i32 = 0;
+
+/// The 2×2 grid cell a player-inventory menu slot addresses, if any.
+///
+/// `InventoryMenu` lays the grid out as menu slots `1..=4` in row-major order
+/// immediately after the result (`InventoryMenu.java`'s `CraftingContainer(2, 2)`
+/// loop), so cell index is `menu_slot - 1`.
+#[must_use]
+pub fn player_craft_grid_cell(menu_slot: i32) -> Option<usize> {
+    match menu_slot {
+        1..=4 => usize::try_from(menu_slot - 1).ok(),
+        _ => None,
+    }
+}
+
 fn player_menu_native_index(menu_slot: i32) -> Option<usize> {
     match menu_slot {
         5 => Some(39), // head
@@ -449,27 +501,36 @@ mod tests {
         }
     }
 
-    /// The crafting grid/result (menu `0..=4`) has no native slot — a
-    /// `CONTAINER_CLICK` reporting a change there must be dropped, not
-    /// misapplied to some other native index. The control:
-    /// [`menu_slot_change_maps_every_documented_entry`] proves recognised
-    /// slots really do get written, so this asserting `false` here is a
-    /// meaningful negative, not a vacuous one.
+    /// Menu slots `1..=4` reach the crafting grid, never a native slot, and menu
+    /// slot `0` (the result) is refused outright — a client's claimed result is
+    /// the mint-anything hole (issue #529), so the only value that slot ever
+    /// holds is the one the server derived.
     #[test]
-    fn crafting_grid_and_result_menu_slots_are_dropped() {
-        for menu_slot in 0..=4 {
-            let mut inv = PlayerInventory::new();
-            let before = inv.clone_slots_for_test();
+    fn crafting_grid_menu_slots_reach_the_grid_and_the_result_is_refused() {
+        let mut inv = PlayerInventory::new();
+        let before = inv.clone_slots_for_test();
+        assert!(
+            !inv.apply_menu_slot_change(0, Some(stack("minecraft:diamond_block", 1))),
+            "the result slot is not client-writable"
+        );
+        assert!(inv.crafting().result().is_none());
+
+        for menu_slot in 1..=4 {
             assert!(
-                !inv.apply_menu_slot_change(menu_slot, Some(stack("minecraft:stone", 1))),
-                "menu slot {menu_slot} should not be recognised"
-            );
-            assert_eq!(
-                inv.clone_slots_for_test(),
-                before,
-                "dropped entry must not mutate any native slot"
+                inv.apply_menu_slot_change(menu_slot, Some(stack("minecraft:oak_planks", 1))),
+                "menu slot {menu_slot} is a grid cell"
             );
         }
+        assert_eq!(
+            inv.clone_slots_for_test(),
+            before,
+            "grid cells must not mutate any native slot"
+        );
+        // And the server derived the result itself, from the grid it now holds.
+        assert_eq!(
+            inv.crafting().result().map(|r| r.item.to_string()),
+            Some("minecraft:crafting_table".to_string())
+        );
     }
 
     /// A change writing `None` clears a native slot that previously held an

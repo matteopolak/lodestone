@@ -143,7 +143,7 @@ reviewable commit, not as a drive-by while landing something else.
 
 ## Islands: variants this table found reaching nothing
 
-**29 of 104** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
+**29 of 106** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
 consumer, which is a normal state for a from-scratch client.
 
 > **On these two numbers, because both have been wrong in the record.** This line
@@ -175,6 +175,8 @@ found nine more. All twelve are fixed:
 | `SpawnPositionChanged` | none — new `lodestone_game::levelstate::SpawnPoint` | `session` → `SessionSpawnPoint`, folded by `apply_spawn_point` | same |
 | `GameRulesChanged` | none — new `lodestone_game::levelstate::GameRuleValues` | `session` → `SessionGameRules`, folded by `apply_game_rules` | same |
 | `RecipeBookSettingsChanged` | **the packet had no decode at all** — a new variant, not an un-stranded one | `session` → `SessionRecipeBookSettings`, folded by `apply_recipe_book_settings` | same |
+| `MapItemData` | **no decode at all** — id 51 registered, nothing else (issue #184) | `session` → `SessionMaps`, folded by `apply_maps`. Keyed on **map id**, not on an entity: one map can be held by several players and hung in several frames at once | the map/advancement wire landing |
+| `AdvancementsUpdated` | **no decode at all** — id 130 registered, nothing else (issue #167) | `session` → `SessionAdvancements`, folded by `apply_advancements` | same |
 
 ### One step earlier in the pipeline: id registered, never decoded
 

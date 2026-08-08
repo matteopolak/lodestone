@@ -9,6 +9,14 @@ live). Only the **General** tab (vanilla's 77 fixed stats — time, distance,
 damage, counters) is a real scrollable list; **Items** and **Mobs** are
 present-and-inactive.
 
+> **Update: the server can now answer.** `V770ServerProtocol::encode_award_stats`
+> had no override, so the server built a real stats snapshot on
+> `ClientCommand(REQUEST_STATS)` and handed it to a seam that dropped it. It now
+> emits a real `award_stats` frame — see
+> [`map-and-advancement-wire.md`](./map-and-advancement-wire.md) for the per-stat-
+> type registry dispatch. The client-side decode of that packet is still not
+> written, so this screen's numbers are still its own.
+
 ## How it works
 
 - `menu/stats.rs` — the whole model: `StatFormat` (vanilla's four
