@@ -8,12 +8,12 @@
 //! position.
 //!
 //! Point evaluation matches vanilla's `SinglePointContext` *value-wise*: no
-//! marker wrapper ever changes *what* is computed, only how many times. One of
-//! the five marker kinds (`cache_2d`) does real caching here — see
-//! `## Caching` below; the raw, uninstantiated `DensityFunctions.Marker.compute`
-//! (`DensityFunctions.java:793-797`) is fully transparent for all five, and
-//! that remains true here for the other four (`interpolated`, `flat_cache`,
-//! `cache_once`, `cache_all_in_cell`) and, deliberately, for `blend_density`.
+//! marker wrapper ever changes *what* is computed, only how many times. **All
+//! five marker kinds are now transparent here**, which is byte-for-byte what the
+//! raw, uninstantiated `DensityFunctions.Marker.compute`
+//! (`DensityFunctions.java:793-797`) does — `return this.wrapped.compute(context);`
+//! and nothing else. `cache_2d` was the one exception until §12.132 measured its
+//! hit rate at **0.12%**; see `## Caching`.
 //!
 //! ## Caching
 //!
@@ -27,25 +27,38 @@
 //! cache here" has to be answered per node kind, not assumed uniformly:
 //!
 //! * **`cache_2d`** (`NoiseChunk.Cache2D`, `NoiseChunk.java:531-569`) marks a
-//!   subtree whose value is a pure function of `(x, z)` — vanilla's own
-//!   `Cache2D.compute` keys on exactly `(blockX, blockZ)` and ignores `y`
-//!   outright. [`Density::Cache2D`] gets a real [`Cache2DSlot`] here: a
-//!   single-slot last-`(x,z)`-value cache, exact for *any* caller (see
-//!   [`Cache2DSlot`]'s own doc for why a single slot, not vanilla's
-//!   whole-chunk prefilled array, is the bit-exact-for-any-caller choice).
-//!   Measured win: `preliminarySurfaceLevel`'s own `cache2d(offset)` /
-//!   `cache2d(factor)` wrapping (`NoiseRouterData.java:489-490`) sits directly
-//!   above `find_top_surface`'s per-`y` scan loop, so one corner's scan (up to
-//!   ~56 candidate `y` values, `NoiseSettings.OVERWORLD_NOISE_SETTINGS`'s
-//!   `[-64, 320]` range in 8-block steps) now evaluates that `(x, z)`-only
-//!   subtree once instead of once per candidate `y`. A criterion
-//!   `--baseline`/`--baseline` paired comparison (`docs/benchmark-harness.md`)
-//!   measured **−4.4% (95% CI −6.0%..−2.7%, p < 0.05)** on `column()`'s
-//!   median from this alone — real, but modest, because
-//!   `preliminary_surface_level` is a minority of total column cost even
-//!   within the surface stage (§ `docs/worldgen-surface-perf.md`'s corner-cell
-//!   hoist already eliminated the *outer*, 256×-per-chunk redundancy; this
-//!   catches the *inner*, per-`y`-step redundancy that hoist could not touch).
+//!   subtree whose value is a pure function of `(x, z)`, and it is now
+//!   **transparent** — the `Mutex`-backed single-slot last-`(x, z)` memo it
+//!   carried from `d68e0a5` until §12.132 is gone. It is worth keeping *why*,
+//!   because both the original decision and its reversal were measurements and
+//!   the second one caught the first going stale:
+//!
+//!   The memo was added for `preliminarySurfaceLevel`'s own `cache2d(offset)` /
+//!   `cache2d(factor)` wrapping (`NoiseRouterData.java:489-490`), which sits
+//!   directly above `find_top_surface`'s per-`y` scan, and a criterion paired
+//!   comparison measured **−4.4% (95% CI −6.0%..−2.7%, p < 0.05)** on `column()`'s
+//!   median. That was true when written. §12.132 counted the outcome of every
+//!   lookup over a 289-column burst and measured **24,843 hits against
+//!   19,899,205 misses — a 0.12% hit rate**, 86 hits per column. So the scan the
+//!   memo was for no longer re-enters it: U4 (§12.102) made `find_top_surface` a
+//!   *leaf* whose result the `Scratch` slot layer memoises one level up, and that
+//!   layer eliminated the repeat visits this one was catching.
+//!
+//!   Which makes the `flat_cache` paragraph below exactly right about `cache_2d`
+//!   too: *"a last-value cache that (almost) never has a matching prior `(x, z)`
+//!   pays a `Mutex` lock on every visit for (almost) no hits."* The asymmetry
+//!   that paragraph claims — that `cache_2d` "sits directly over a scan that
+//!   revisits one `(x, z)` dozens of times in a row" — is what stopped being
+//!   true, and nothing about the code changed to announce it.
+//!
+//!   Under `Arc`-shared graph evaluation the cost was not just a lock: the
+//!   compiled `final_density` carried **708** of these slots, reached ~68,900
+//!   times per column, so 20 workers fought over 708 cache lines and IPC fell
+//!   from **5.46 to 1.32**. Deleting the memo is value-invariant on real data by
+//!   two independent arguments — vanilla's unwrapped `Marker.compute` does not
+//!   memoise at all, and every `cache_2d` in 26.2's shipped data wraps an
+//!   xz-only subtree — and the 45-column/5-seed dump is byte-identical across the
+//!   change.
 //! * **`flat_cache`** (`NoiseChunk.FlatCache`, `NoiseChunk.java:673-716`)
 //!   marks the *same kind* of `(x, z)`-only boundary as `cache_2d` — vanilla's
 //!   `overworld/continents.json` / `overworld/erosion.json` /
@@ -103,10 +116,6 @@
 //! (The cell interpolation `interpolated` drives inside a real `NoiseChunk` is
 //! a separate, later stage — [`NoiseChunkSampler`], not this module.)
 
-use std::cell::Cell;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use serde_json::Value;
 
 use crate::math::{clamp, clamped_map};
@@ -117,203 +126,6 @@ mod chunk;
 mod spline;
 pub use chunk::NoiseChunkSampler;
 pub use spline::{Spline, SplinePoint};
-
-/// The three outcomes of a [`Cache2DSlot`] lookup, process-wide.
-///
-/// # Why this is always on, and not behind `gen-counters`
-///
-/// A `try_lock` outcome is a **timing-dependent** observable: it depends on how
-/// many threads are inside the slot at that instant. `crate::counters` inflates a
-/// generation burst ~3× (see its module doc), which changes the very quantity
-/// being measured — a `gen-counters` build would report the contention of a
-/// different system. So this instrument has to survive into a clean release
-/// build, which means it must be cheap enough to be invisible.
-///
-/// # How it is cheap
-///
-/// The hot path is a **thread-local** `Cell<u64>` triple with no atomic and no
-/// shared cache line, flushed into the globals every [`FLUSH_EVERY`] lookups.
-/// That matters: the slots are reached on the order of 10^4–10^5 times per chunk,
-/// so three `Relaxed` `fetch_add`s per lookup would be tens of millions of writes
-/// to three shared lines per burst — an instrument that manufactures the
-/// contention it exists to measure. The cost is ~4 instructions per lookup, and
-/// the bound is checked against measured instructions/column in
-/// `DESIGN.md` §12.131.
-///
-/// # Reading it
-///
-/// [`reset_cache_2d_stats`] then [`cache_2d_stats`], exactly as
-/// `crate::counters`. Both are process-global, so the reset/read pair must
-/// bracket work that no other test is running concurrently. The residue in each
-/// thread's unflushed buffer is at most `FLUSH_EVERY - 1` per live thread, which
-/// is why nothing here is exact and why nothing asserts an exact total; the
-/// **ratio** is the observable. `contended` under a single-threaded sweep is the
-/// one exact value: a `try_lock` cannot fail with no other thread, so it is
-/// exactly 0, and that is this instrument's calibration.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Cache2DStats {
-    /// Lookups whose slot already held this exact `(x, z)`.
-    pub hits: u64,
-    /// Lookups that took the lock and found a different `(x, z)` (or none) — a
-    /// real cache miss, the same one a serial run pays.
-    pub misses: u64,
-    /// Lookups whose `try_lock` failed because another thread held the slot.
-    /// Recomputed rather than waited, so this is **redundant work**, and it is
-    /// exactly 0 in any single-threaded run.
-    pub contended: u64,
-}
-
-/// Thread-local lookups between flushes into [`CACHE_2D`]. A power of two so the
-/// flush test is a mask, and large enough that the flush is ~0.1% of the bumps.
-const FLUSH_EVERY: u64 = 1024;
-
-static CACHE_2D_HITS: AtomicU64 = AtomicU64::new(0);
-static CACHE_2D_MISSES: AtomicU64 = AtomicU64::new(0);
-static CACHE_2D_CONTENDED: AtomicU64 = AtomicU64::new(0);
-
-thread_local! {
-    static LOCAL_HITS: Cell<u64> = const { Cell::new(0) };
-    static LOCAL_MISSES: Cell<u64> = const { Cell::new(0) };
-    static LOCAL_CONTENDED: Cell<u64> = const { Cell::new(0) };
-    static LOCAL_PENDING: Cell<u64> = const { Cell::new(0) };
-}
-
-/// Bumps one thread-local bucket and flushes the triple every [`FLUSH_EVERY`]
-/// lookups. `#[inline]` because it is called from the innermost spline leaf.
-#[inline]
-fn bump_cache_2d(bucket: &'static std::thread::LocalKey<Cell<u64>>) {
-    bucket.with(|b| b.set(b.get() + 1));
-    let pending = LOCAL_PENDING.with(|p| {
-        let n = p.get() + 1;
-        p.set(n);
-        n
-    });
-    if pending & (FLUSH_EVERY - 1) == 0 {
-        flush_cache_2d();
-    }
-}
-
-/// Moves this thread's buffered counts into the globals.
-fn flush_cache_2d() {
-    for (local, global) in [
-        (&LOCAL_HITS, &CACHE_2D_HITS),
-        (&LOCAL_MISSES, &CACHE_2D_MISSES),
-        (&LOCAL_CONTENDED, &CACHE_2D_CONTENDED),
-    ] {
-        let n = local.with(Cell::take);
-        if n != 0 {
-            global.fetch_add(n, Ordering::Relaxed);
-        }
-    }
-}
-
-/// Zeroes the global [`Cache2DStats`]. Does **not** clear other threads'
-/// unflushed buffers — see [`Cache2DStats`] on why the residue is bounded and
-/// why only ratios are read from this.
-pub fn reset_cache_2d_stats() {
-    CACHE_2D_HITS.store(0, Ordering::Relaxed);
-    CACHE_2D_MISSES.store(0, Ordering::Relaxed);
-    CACHE_2D_CONTENDED.store(0, Ordering::Relaxed);
-}
-
-/// Flushes the calling thread's buffer and reads the global [`Cache2DStats`].
-///
-/// Call this after the measured work has been **joined**: a worker thread that is
-/// still alive holds up to `FLUSH_EVERY - 1` unreported lookups, and a worker
-/// that has exited holds none only because it flushed on its last multiple, not
-/// because exiting flushes.
-#[must_use]
-pub fn cache_2d_stats() -> Cache2DStats {
-    flush_cache_2d();
-    Cache2DStats {
-        hits: CACHE_2D_HITS.load(Ordering::Relaxed),
-        misses: CACHE_2D_MISSES.load(Ordering::Relaxed),
-        contended: CACHE_2D_CONTENDED.load(Ordering::Relaxed),
-    }
-}
-
-/// A single-slot last-value `(x, z) -> f64` cache backing [`Density::Cache2D`]
-/// — see the `## Caching` section on [`Density`] for which vanilla node kinds
-/// this is (and, per a measured regression, is *not*) worth applying to.
-///
-/// `Mutex`, not `Cell`: [`Density`] must stay `Sync` — real `ChunkSource`
-/// implementations (`lodestone-server`) share one generator, and therefore one
-/// `Density` tree, across threads behind `&self`. A poisoned lock (only
-/// possible if a panic previously unwound out of `inner.compute` while this
-/// slot's lock was held) is recovered from rather than propagated: a cache is
-/// not a correctness-critical invariant, so losing a poisoned slot's stale
-/// entry and carrying on is preferable to panicking the whole evaluation.
-///
-/// `Clone` deliberately does **not** clone the cached entry — a cloned tree
-/// (e.g. `OverworldGenerator::shape_stage`'s per-chunk
-/// `self.final_density.clone()`) starts cold, exactly as a fresh `Builder`
-/// output would. Cloning lock state across a `Mutex` isn't meaningful anyway.
-/// Opaque: the only public operations are [`Default`], [`Clone`] and
-/// [`Debug`] (all needed since [`Density`] itself derives them); the field
-/// and [`Self::get_or_compute`] stay private to this module, so no external
-/// caller can observe or depend on the cache's contents or keying.
-#[derive(Debug, Default)]
-pub struct Cache2DSlot(Mutex<Option<(i32, i32, f64)>>);
-
-impl Clone for Cache2DSlot {
-    fn clone(&self) -> Self {
-        Self::default()
-    }
-}
-
-impl Cache2DSlot {
-    /// Returns the cached value for `(x, z)` if the slot's last entry was for
-    /// this exact position, else computes it via `f`, stores it, and returns
-    /// it. `y` is not part of the key: the node kind this backs (`cache_2d`)
-    /// is, by construction, asked to cache a subtree whose value cannot
-    /// depend on `y` (see `## Caching` on [`Density`]).
-    /// Uses `try_lock`, not `lock`, and treats contention as a cache miss.
-    ///
-    /// This is value-invariant, and the reason is the whole justification for
-    /// sharing a compiled graph across threads: the memo's key is an exact
-    /// `(x, z)` and the wrapped subtree is a pure function of it, so a hit and a
-    /// recomputation return the same bits. Nothing observable distinguishes them.
-    ///
-    /// Why it matters: U4 made a `Program` `Arc`-shared, and the compiled
-    /// `final_density` carries **708** `Cache2D` nodes inside its point-evaluated
-    /// leaves (`Program::cache_2d_under_leaves`). Before that, `build_aquifer`
-    /// deep-cloned the trees per chunk, so each chunk had its own cold,
-    /// uncontended slots; sharing turns those into 708 slots contended by every
-    /// generating thread, hit on the order of 10^4-10^5 times per chunk from the
-    /// spline leaves. A blocking `lock` there converts a cache that exists to
-    /// save time into a serialisation point. `try_lock` means no thread ever
-    /// waits: under contention it simply does the work it would have done on a
-    /// miss anyway.
-    ///
-    /// A poisoned lock (only possible if a panic unwound out of `inner.compute`
-    /// while this slot was held) is recovered from rather than propagated, for
-    /// the same reason — a cache is not a correctness-critical invariant.
-    fn get_or_compute(&self, x: i32, z: i32, f: impl FnOnce() -> f64) -> f64 {
-        let Ok(mut slot) = self
-            .0
-            .try_lock()
-            .or_else(|e| match e {
-                std::sync::TryLockError::Poisoned(p) => Ok(p.into_inner()),
-                std::sync::TryLockError::WouldBlock => Err(()),
-            })
-        else {
-            // Another thread holds the slot. Recompute rather than wait.
-            bump_cache_2d(&LOCAL_CONTENDED);
-            return f();
-        };
-        if let Some((cached_x, cached_z, value)) = *slot
-            && cached_x == x
-            && cached_z == z
-        {
-            bump_cache_2d(&LOCAL_HITS);
-            return value;
-        }
-        bump_cache_2d(&LOCAL_MISSES);
-        let value = f();
-        *slot = Some((x, z, value));
-        value
-    }
-}
 
 /// Noise parameters loaded from a `worldgen/noise/*.json` file.
 #[derive(Debug, Clone)]
@@ -584,15 +396,16 @@ pub enum Density {
         /// Cache slot for the block-field sampler.
         slot: usize,
     },
-    /// `cache_2d` — for point evaluation, caches the wrapped fn's value by
-    /// exact `(x, z)` (module `## Caching`). For the block field this stays
-    /// transparent, matching [`chunk::NoiseChunkSampler`]'s existing,
-    /// JVM-cross-checked handling.
+    /// `cache_2d` — **transparent in both evaluators** since §12.132 retired its
+    /// 0.12%-hit-rate memo (module `## Caching` carries the measurement and the
+    /// two independent value-invariance arguments). Kept as its own variant
+    /// rather than folded into [`Marker`](Self::Marker) so
+    /// [`kind_index`](Self::kind_index) — and therefore `engine::graph`'s
+    /// `OpKind` discriminants — do not shift, and so
+    /// `Program::cache_2d_under_leaves` still has something to count.
     Cache2D {
         /// Wrapped function.
         inner: Box<Density>,
-        /// Last-`(x, z)`-value cache for point evaluation.
-        cache: Cache2DSlot,
     },
     /// A transparent marker (`cache_once`, `cache_all_in_cell`,
     /// `blend_density`): mathematically identical to its wrapped function in
@@ -816,10 +629,8 @@ impl Density {
             Density::Clamp { input, min, max } => clamp(input.compute(ctx), *min, *max),
             Density::Interpolated { inner, .. }
             | Density::Marker(inner)
-            | Density::FlatCache { inner, .. } => inner.compute(ctx),
-            Density::Cache2D { inner, cache } => {
-                cache.get_or_compute(ctx.x, ctx.z, || inner.compute(ctx))
-            }
+            | Density::FlatCache { inner, .. }
+            | Density::Cache2D { inner } => inner.compute(ctx),
             Density::Noise {
                 noise,
                 xz_scale,
@@ -1037,7 +848,6 @@ impl<'a> Builder<'a> {
             },
             "cache_2d" => Density::Cache2D {
                 inner: self.child(node, "argument"),
-                cache: Cache2DSlot::default(),
             },
             "cache_once" | "cache_all_in_cell" | "blend_density" => {
                 Density::Marker(self.child(node, "argument"))
@@ -1200,10 +1010,7 @@ mod kind_index_tests {
             ),
             (Density::FlatCache { inner: b(), slot: 0 }, "flat_cache"),
             (
-                Density::Cache2D {
-                    inner: b(),
-                    cache: super::Cache2DSlot::default(),
-                },
+                Density::Cache2D { inner: b() },
                 "cache_2d",
             ),
             (Density::Marker(b()), "marker"),

@@ -378,13 +378,9 @@ fn yaw_sector(yaw_degrees: f32) -> i32 {
 /// How many columns the join burst keeps in flight once primed, derived from the
 /// machine rather than from the view.
 ///
-/// `2 × available_parallelism`, floored at 2:
+/// `available_parallelism`, floored at 2 — **one in-flight column per hardware
+/// thread**.
 ///
-/// * **the factor of 2** is the encode overlap. The caller awaits one column,
-///   then writes it to the socket; with a window of exactly `parallelism` the
-///   pool would be idle for the whole of that write. Doubling keeps a full set of
-///   workers resident while the emitted column is being encoded, which is the
-///   entire reason a window beats a barrier.
 /// * **the floor of 2** is what makes a window a window. At 1 this degenerates to
 ///   the fully serial shape, and the ring-overlap detector in
 ///   `join_scheduler_gates.rs` would be vacuous on a machine reporting
@@ -394,16 +390,51 @@ fn yaw_sector(yaw_degrees: f32) -> i32 {
 ///   machine ran 289 concurrent generator calls. This one grows with cores, so
 ///   the pathological case is unreachable by construction at any view radius.
 ///
+/// # It was `2 × available_parallelism` until §12.132, and the factor of 2 cost
+/// a third of the burst's throughput
+///
+/// The doubling was for encode overlap — the caller awaits one column, then writes
+/// it to the socket, and a window of exactly `parallelism` leaves the pool idle for
+/// that write. Reasonable, unmeasured, and **wrong by 1.5×**. A window sweep over
+/// the real 289-column burst on the 10-core reference machine, instructions retired
+/// held flat to 1.4% across every arm so the comparison is of scheduling and not of
+/// work:
+///
+/// | window | wall | speedup over serial | cycles/column vs serial | IPC |
+/// |---|---|---|---|---|
+/// | 4 | 4.78 s | 2.00× | 1.01× | 5.27 |
+/// | 6 | 4.19 s | 2.28× | 1.05× | 5.09 |
+/// | **8** | **3.67 s** | **2.60×** | 1.26× | 4.25 |
+/// | 10 (`P`) | 4.28 s | 2.23× | 1.96× | 2.73 |
+/// | 12 | 4.87 s | 1.96× | 2.54× | 2.11 |
+/// | 20 (`2P`, the old value) | 6.43 s | **1.49×** | **4.39×** | **1.23** |
+///
+/// So the curve is a U with its floor at 8–10 and a **steep** right-hand side, and
+/// `2 × P` sat well past it. The mechanism is **not a lock**, and the shape of the
+/// curve is what says so: a lock contended by 20 workers is contended by 4, so cycle
+/// inflation would be a constant tax rather than the threshold it measures —
+/// 1.01–1.15× at a window of 4 over five runs, against 2.6–4.4× at 20, growing
+/// super-linearly in between. It is **cache capacity**: each in-flight column carries
+/// a multi-megabyte working set, and past roughly the core count they stop fitting
+/// together. `join_parallel_efficiency.rs`'s
+/// `a_small_window_shows_no_lock_on_the_shared_generator` is that assertion.
+///
+/// That is why the coefficient is now 1 rather than a fitted 0.8: it is a
+/// *machine-derived proxy* for a cache bound this code cannot query, it lands
+/// inside the measured floor, and the encode overlap the 2 was buying is worth far
+/// less than the capacity it spent. `join_parallel_efficiency.rs`'s
+/// `the_production_window_sits_at_the_measured_optimum` is the gate that fails if a
+/// different machine's floor moves; re-run the sweep rather than adjusting this by
+/// feel.
+///
 /// # The store interaction, stated rather than left to be discovered
 ///
-/// Each in-flight `column()` call pins its own 5×5 pre-ore neighbourhood (25
-/// entries) in the staged store, and `STORE_RETENTION` is 512. At `2 × P` in
-/// flight the pinned set therefore passes 512 somewhere above 10 cores, and
-/// reclamation cannot fire for the duration of the burst. That is **safe** —
-/// nothing evicted means nothing recomputed, which is what licenses reading the
-/// stage counters as one-per-chunk — and it is not a change: the per-ring loop
-/// held a whole ring in flight, up to 72 columns at `view_radius = 9`, so it
-/// exceeded the same bound by more.
+/// Each in-flight `column()` call pins its own pre-ore neighbourhood in the staged
+/// store — `COLUMN_CLOSURE_RADIUS + REFS_RADIUS = 10`, so 21×21 = 441 entries per
+/// column since #514 (§12.130), against a retention ceiling of 2,048 derived from
+/// the 289-column burst's own 37×37 closure. At `P` in flight nothing is evicted
+/// for the duration of the burst, which is what licenses reading the stage counters
+/// as one-per-chunk; halving the window can only make that more true.
 #[must_use]
 pub fn generation_window() -> usize {
     generation_window_for(
@@ -417,7 +448,7 @@ pub fn generation_window() -> usize {
 /// depending on the host's core count.
 #[must_use]
 pub fn generation_window_for(parallelism: usize) -> usize {
-    (2 * parallelism.max(1)).max(2)
+    parallelism.max(2)
 }
 
 /// A primed sliding window over a fixed coordinate order.
@@ -968,8 +999,10 @@ mod tests {
     fn the_window_is_derived_from_cores_and_never_below_two() {
         assert_eq!(generation_window_for(0), 2, "a bogus 0 must still window");
         assert_eq!(generation_window_for(1), 2);
-        assert_eq!(generation_window_for(8), 16);
-        assert_eq!(generation_window_for(64), 128);
+        // One in-flight column per hardware thread since §12.132 — `2 × P` measured
+        // 1.49× against window 8's 2.60× on the 289-column burst.
+        assert_eq!(generation_window_for(8), 8);
+        assert_eq!(generation_window_for(64), 64);
         assert!(
             generation_window() >= 2,
             "the host-derived window must window on any machine"

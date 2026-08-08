@@ -30,7 +30,9 @@ Only three node kinds behave differently between the two layers:
   interpolation in the field.
 - `flat_cache` — transparent at a point; XZ snapped to the quart grid and
   `y` forced to `0` in the field.
-- `cache_2d` — a real last-`(x, z)` memo at a point; transparent in the field.
+- `cache_2d` — **transparent in both**, since §12.132. It was a real last-`(x, z)`
+  memo at a point until that section measured its hit rate at 0.12%; see
+  *`cache_2d` was a memo and is not any more* below.
 
 `cache_once`, `cache_all_in_cell` and `blend_density` are value-transparent in
 both. `spline`, `old_blended_noise` and `find_top_surface` are **leaves** to the
@@ -185,10 +187,9 @@ the measurement window and the clone targets are fixed-size **arrays**, not
 container overhead, which is exactly the kind of allowance that later gets
 widened instead of removed.
 
-One consequence worth knowing before sharing a graph more widely: see the
-`cache_2d` note under *How to change it*. `Cache2DSlot` now uses `try_lock` and
-treats contention as a miss, which is value-invariant because the memo is keyed on
-an exact `(x, z)` over a pure subtree.
+One consequence worth knowing before sharing a graph more widely: see
+*`cache_2d` was a memo and is not any more* below. The slot is gone entirely, so
+there is nothing left in a shared `Program` for two threads to contend on.
 
 ### What it cost and what it bought, measured
 
@@ -305,9 +306,9 @@ per-wrapper fixture rather than only an end-to-end gate:
    to thread through the descent.
 3. **`flat_cache`'s quart snap and forced `y = 0`.** Keyed on `(qx, 0, qz)`; the
    inner is evaluated with `interpolate = false`.
-4. **`cache_2d` / `cache_once` scoping.** `cache_2d` caches in the point
-   interpreter and is transparent in the field; `cache_once` and
-   `cache_all_in_cell` are transparent in *both* of our evaluators, and the
+4. **`cache_2d` / `cache_once` scoping.** All of `cache_2d`, `cache_once` and
+   `cache_all_in_cell` are transparent in *both* of our evaluators (`cache_2d`
+   since §12.132 — it used to memoise at a point), and the
    `cache_all_in_cell` above `final_density` is not in the data at all (above) —
    its effect is already baked into the choice of `Mth.lerp3`.
 5. **`cache_all_in_cell` selecting the interpolation order.** Value-transparent,
@@ -385,14 +386,43 @@ accumulation chain is not.
 - **Do not flatten beneath `spline` / `old_blended_noise` / `find_top_surface`.**
   They are leaves to the field evaluator by vanilla's own semantics, so they hold
   an untouched `Density` subtree and are evaluated with `Density::compute`.
-- **`Arc`-sharing one graph across threads shares its leaves' `cache_2d` slots.**
-  The compiled `final_density` has **708** `Cache2D` nodes nested inside its
-  point-evaluated leaves (`Program::cache_2d_under_leaves`), each carrying a
-  `Mutex`-backed last-value slot. Sharing is value-invariant — the memo is keyed on
-  an exact `(x, z)` and the function is pure — but it converts 708 per-chunk cold,
-  uncontended caches into shared contended ones. Anything that starts sharing a
-  graph across threads should measure that, and the cheap fix if it bites is a
-  `try_lock`-and-recompute, which stays value-invariant for the same reason.
+- **`Program::cache_2d_under_leaves` now measures duplication, not contention.**
+  It reads **708** on the real overworld router, against the handful of `cache_2d`
+  nodes 26.2's data actually declares — because compilation expands a DAG into a
+  tree, so every parent that references `overworld/offset` gets its own copy of it.
+  A node-sharing (CSE) pass over the `Op` table is the open work that number is the
+  size of, and it would be a *serial* win, not a parallelism one.
+
+  There is nothing to contend on any more. See the next entry.
+- **`cache_2d` was a memo and is not any more, and the reversal is the interesting
+  part.** It carried a `Mutex<Option<(i32, i32, f64)>>` single-slot last-value cache
+  in the point interpreter from `d68e0a5` until §12.132. Both the decision and its
+  reversal were measurements, and the second caught the first going stale:
+
+  | when | evidence |
+  |---|---|
+  | added | criterion paired comparison, **−4.4%** on `column()`'s median (95% CI −6.0%..−2.7%) — it sat above `find_top_surface`'s per-`y` scan |
+  | §12.132 | every lookup's outcome counted over a 289-column burst: **24,843 hits against 19,899,205 misses**, a **0.12%** hit rate, 86 hits per column |
+
+  U4 is what changed underneath it: `find_top_surface` became a *leaf*, and the
+  `Scratch` slot layer memoises its result one level up, so the repeat visits this
+  cache existed to catch stop reaching it. Removing it was worth **3.5% of serial
+  instructions retired** — the memo had become net-negative even single-threaded.
+
+  Two independent arguments make the removal value-invariant, which is why the
+  45-column/5-seed dump came out byte-identical (md5 `c0ef05ac…`, 8,902,157 bytes):
+  vanilla's own unwrapped `DensityFunctions.Marker.compute` is
+  `return this.wrapped.compute(context);` with no memo at all, and every `cache_2d`
+  in 26.2's shipped data wraps an xz-only subtree (`shift_a`, `blend_offset`,
+  `blend_alpha`, a spline over `continents`), so a `y`-keyed difference cannot arise.
+  `engine_semantics.rs`'s `cache_2d_is_transparent_in_both_evaluators` is the gate,
+  and it keeps the deliberately `y`-dependent fixture — a real `cache_2d` can never
+  show a memo, so only an invalid one can detect it.
+
+  **It was not the parallelism defect**, which is worth recording because it looked
+  exactly like one: §12.102 flagged the 708 shared slots as a contention hazard, and
+  removing them changed the 289-column burst's cycle ratio from 4.19× to 4.35× —
+  i.e. not at all. The window was the defect (§12.132).
 - `new_bounded`'s contract is unchecked in release: every query must fall inside
   the declared inclusive bounds or it silently aliases another cell. `erosion`
   and `depth` deliberately stay on the unbounded `new` because
