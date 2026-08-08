@@ -127,7 +127,7 @@ struct Band {
     /// Store entries held when the walk finished.
     store_len: usize,
     /// Entries the store dropped over the walk. Expected zero at this scale
-    /// (six columns' closure is far under the 512-entry ceiling); a non-zero
+    /// (six columns' closure is far under the 2,048-entry ceiling); a non-zero
     /// value invalidates the timings, because an eviction makes a later column
     /// recompute a stage rather than reuse it.
     evictions: usize,
@@ -284,14 +284,20 @@ fn distance_curve() {
     }
 }
 
-/// Columns walked by [`age_curve`]. Chosen against [`STORE_RETENTION`] (512),
-/// not as a round number: one column's pre-ore closure is 5×5, so a straight
-/// walk of `n` columns reaches roughly `5 * (n + 4)` distinct chunks at the
-/// pre-ore stage. 400 columns therefore drives the store to about 2,020 entries
-/// *wanted* against a 512-entry ceiling — nearly 4× over — which is the only
-/// region where the retention path can be observed doing anything at all. A walk
-/// that stayed under the ceiling would exercise the ceiling exactly zero times
-/// and report a flat line, and that flat line would mean nothing.
+/// Columns walked by [`age_curve`]. Chosen against [`STORE_RETENTION`] (2,048),
+/// not as a round number, and **the arithmetic here was re-derived after
+/// `DESIGN.md` §12.130** — the old version reasoned from the pre-ore stage's 5×5
+/// closure against a 512-entry ceiling (about 2,020 entries wanted, "nearly 4×
+/// over"). Both numbers moved: the widest stage is **structure starts**, whose
+/// per-column closure is 21×21 (`REFS_RADIUS` = 8), and retention is now 2,048.
+///
+/// So a straight walk of `n` columns reaches roughly `21 * (n + 20)` distinct
+/// chunks, and 400 columns wants about **8,820** against 2,048 — still ~4.3× over,
+/// so this walk does exercise the retention path. Note that is now true for a
+/// *different reason* than the comment used to give, and it is close: the old
+/// stated figure of 2,020 would sit **under** today's ceiling and exercise it
+/// exactly zero times, reporting a flat line that would mean nothing. Re-check
+/// this derivation whenever either `REFS_RADIUS` or `STORE_RETENTION` moves.
 const AGE_WALK_COLUMNS: usize = 400;
 
 /// Interval at which [`age_curve`] reports. 20 columns is 320 blocks — about the
@@ -325,7 +331,8 @@ const AGE_REPORT_EVERY: usize = 20;
 fn age_curve() {
     println!(
         "\n=== AGE: one generator, {AGE_WALK_COLUMNS}-column straight walk from the origin ===\n\
-         (store ceiling STORE_RETENTION=512; a straight walk of n columns wants ~5*(n+4) entries)"
+         (store ceiling STORE_RETENTION=2048; a straight walk of n columns wants ~21*(n+20) entries \
+         at the structure-starts stage)"
     );
     let generator = overworld_generator(SEED);
     let mut window = Vec::with_capacity(AGE_REPORT_EVERY);
@@ -481,4 +488,6 @@ fn view_walk_curve() {
 /// *past* the ceiling, so being stale in the low direction weakens the check
 /// rather than breaking it — but re-read `overworld/mod.rs`'s `STORE_RETENTION`
 /// before trusting it.
-const STORE_RETENTION_UNDER_TEST: usize = 512;
+/// **It went stale exactly as predicted.** It read 512 until `REFS_RADIUS`-derived
+/// retention landed (`DESIGN.md` §12.130); the real ceiling is now 2,048.
+const STORE_RETENTION_UNDER_TEST: usize = 2048;

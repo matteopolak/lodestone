@@ -70,6 +70,18 @@ const SWEEP: i32 = 12;
 const PRE_ORE_CLOSURE: usize = 16 * 16;
 /// Distinct chunks the sweep reaches at the post-ore stage: `-1..=12` squared.
 const POST_ORE_CLOSURE: usize = 14 * 14;
+/// Distinct chunks the sweep reaches at the **structure-starts** stage, and
+/// therefore the store's real entry count: `-10..=21` squared.
+///
+/// This is the widest stage, not the pre-ore one, because `pre_ore_stage` reads
+/// `structure_refs_stage`, which walks
+/// [`REFS_RADIUS`](lodestone_worldgen::overworld::structures::REFS_RADIUS) = 8 —
+/// so a single column closes over 21×21 = 441 chunks rather than 25. Asserting
+/// `PRE_ORE_CLOSURE` here was wrong from the moment structure placement landed
+/// (#514): the store legitimately holds the *structure* closure, and reading the
+/// entry count against the narrower stage made a correct store look like it had
+/// aliased a key.
+const STRUCTURE_CLOSURE: usize = 32 * 32;
 
 struct SweepResult {
     counters: Snapshot,
@@ -128,9 +140,11 @@ fn each_neighbour_stage_is_computed_exactly_once_over_a_12x12_sweep() {
     // means no chunk was ever entered under a second key — the anti-aliasing half
     // of the criterion, from a different source than the counters.
     assert_eq!(
-        s.store_len, PRE_ORE_CLOSURE,
-        "the store should hold exactly the sweep's 16x16 pre-ore closure ({PRE_ORE_CLOSURE}); \
-         more means a key aliased or a closure radius is wrong, fewer means something evicted"
+        s.store_len, STRUCTURE_CLOSURE,
+        "the store should hold exactly the sweep's 32x32 structure-starts closure \
+         ({STRUCTURE_CLOSURE}) — the widest stage, since pre-ore reads structure refs over \
+         REFS_RADIUS = 8; more means a key aliased or a closure radius is wrong, fewer means \
+         something evicted"
     );
     assert_eq!(
         s.evictions, 0,
