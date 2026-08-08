@@ -578,6 +578,9 @@ impl WindowApp {
         hud_frame.show_debug = self.show_debug;
         hud_frame.crosshair = crosshair;
         hud_frame.chat = &chat_lines;
+        // Persisted wrap results (issue #527 (a)): without this the whole
+        // visible log is re-wrapped, quadratically, every frame.
+        hud_frame.chat_wrap = Some(&self.chat_wrap);
         hud_frame.chat_input = chat_open.then(|| self.chat_input.as_str());
         // Vanilla blinks the text cursor on a 300 ms half-period:
         // `TextCursorUtils.CURSOR_BLINK_INTERVAL_MS == 300` and

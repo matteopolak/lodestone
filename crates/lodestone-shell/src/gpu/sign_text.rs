@@ -82,6 +82,11 @@ pub(super) struct SignTextRenderer {
     /// `None` off a jar-less run — same fail-open contract as
     /// [`super::nametag::NameTagRenderer::font`].
     font: Option<RasterFont>,
+    /// Ink-run layouts, persisted across frames (issue #527 (b)) — sign text
+    /// changes only on a block-entity update, so the texel walk must not run
+    /// per frame either. Shares [`super::nametag::InkLayoutCache`] for the same
+    /// reason this file already shares `layout_ink_runs`.
+    ink: super::nametag::InkLayoutCache,
 }
 
 impl SignTextRenderer {
@@ -191,6 +196,7 @@ impl SignTextRenderer {
             uniform,
             vertices,
             font: super::nametag::load_font(),
+            ink: super::nametag::InkLayoutCache::default(),
         }
     }
 
@@ -211,8 +217,24 @@ impl SignTextRenderer {
 
         let mut vertices = Vec::new();
         for spawn in signs {
-            push_side_quads(raster, &spawn.front, spawn.pos, spawn.orientation, true, &mut vertices);
-            push_side_quads(raster, &spawn.back, spawn.pos, spawn.orientation, false, &mut vertices);
+            push_side_quads(
+                raster,
+                &self.ink,
+                &spawn.front,
+                spawn.pos,
+                spawn.orientation,
+                true,
+                &mut vertices,
+            );
+            push_side_quads(
+                raster,
+                &self.ink,
+                &spawn.back,
+                spawn.pos,
+                spawn.orientation,
+                false,
+                &mut vertices,
+            );
         }
         let len = vertices.len().min(MAX_SIGN_TEXT_VERTICES);
         if len > 0 {
@@ -241,6 +263,7 @@ impl SignTextRenderer {
 /// not a behaviour change.
 fn push_side_quads(
     raster: &RasterFont,
+    ink: &super::nametag::InkLayoutCache,
     side: &SignSide,
     pos: [i32; 3],
     orientation: SignOrientation,
@@ -260,12 +283,13 @@ fn push_side_quads(
         if line.is_empty() {
             continue;
         }
-        let (rects, total_width) = super::nametag::layout_ink_runs(raster, line);
+        let layout = ink.layout(raster, line);
+        let (rects, total_width) = (&layout.0, layout.1);
         // Each line is centred independently, matching `x1 =
         // -font.width(line) / 2` — not all four lines sharing one width.
         let x1 = -total_width / 2.0;
         let y_off = i as f32 * TEXT_LINE_HEIGHT - sign_midpoint;
-        for rect in &rects {
+        for rect in rects {
             let lx = rect.x + x1;
             let ly = rect.y + y_off;
             // Fed **unflipped** into the placement matrix: its own `-Y`
@@ -311,10 +335,27 @@ mod tests {
         let Some(raster) = super::super::nametag::load_font() else {
             return;
         };
+        let ink = super::super::nametag::InkLayoutCache::default();
         let mut out = Vec::new();
         let spawn = SignSpawn::at([0, 0, 0]);
-        push_side_quads(&raster, &spawn.front, spawn.pos, spawn.orientation, true, &mut out);
-        push_side_quads(&raster, &spawn.back, spawn.pos, spawn.orientation, false, &mut out);
+        push_side_quads(
+            &raster,
+            &ink,
+            &spawn.front,
+            spawn.pos,
+            spawn.orientation,
+            true,
+            &mut out,
+        );
+        push_side_quads(
+            &raster,
+            &ink,
+            &spawn.back,
+            spawn.pos,
+            spawn.orientation,
+            false,
+            &mut out,
+        );
         assert!(out.is_empty());
     }
 
@@ -326,13 +367,30 @@ mod tests {
         let Some(raster) = super::super::nametag::load_font() else {
             return;
         };
+        let ink = super::super::nametag::InkLayoutCache::default();
         let spawn = sign_with_front_text("LODESTONE");
         let mut front = Vec::new();
-        push_side_quads(&raster, &spawn.front, spawn.pos, spawn.orientation, true, &mut front);
+        push_side_quads(
+            &raster,
+            &ink,
+            &spawn.front,
+            spawn.pos,
+            spawn.orientation,
+            true,
+            &mut front,
+        );
         assert!(!front.is_empty(), "front text must contribute vertices");
 
         let mut back = Vec::new();
-        push_side_quads(&raster, &spawn.back, spawn.pos, spawn.orientation, false, &mut back);
+        push_side_quads(
+            &raster,
+            &ink,
+            &spawn.back,
+            spawn.pos,
+            spawn.orientation,
+            false,
+            &mut back,
+        );
         assert!(back.is_empty(), "an untouched back side must contribute nothing");
     }
 }
