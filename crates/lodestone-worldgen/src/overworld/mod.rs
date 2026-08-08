@@ -356,7 +356,7 @@ const STRUCTURE_CLOSURE_RADIUS: i32 = COLUMN_CLOSURE_RADIUS + structures::REFS_R
 ///
 /// **This was 512 and 512 was the pre-#514 derivation** — the same sentence with
 /// the pre-ore radius 2 in place of the structure radius 10, giving 441 and 256.
-/// It is on the record in `DESIGN.md` §12.118 as a *measured* regression rather
+/// It is on the record in `DESIGN.md` §12.130 as a *measured* regression rather
 /// than a theoretical one: at 512 the 12×12 sweep recomputed `pre_ore` 740 times
 /// instead of 256, because the sweep's real working set was 1,024 entries and the
 /// oldest unpinned ones were the neighbours it was about to read back.

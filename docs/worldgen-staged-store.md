@@ -81,13 +81,22 @@ on a non-reentrant semaphore. So:
 
 - **Exact keys only.** `ChunkPos` is the literal `(cx, cz)`. Nothing rounds, clamps or merges a key.
 - **In-flight neighbourhoods are pinned.** `column()`/`column_timed()` open a `ViewScope` over
-  `COLUMN_CLOSURE_RADIUS` (= 2, derived from the drivers), and pinned entries are *structurally
-  ineligible* for reclamation. Eviction therefore cannot cause a recompute inside a request — not a
-  probability argument.
-- **The ceiling is derived.** `STORE_RETENTION = 512` comes from the D4 burst itself: 289 columns are
-  a 17×17 view whose pre-ore closure is 21×21 = **441** chunks, so retention must exceed 441 or the
-  very burst this exists for could evict its own working set. Memory is unchanged from the two
-  512-entry caches it replaced.
+  `STRUCTURE_CLOSURE_RADIUS` (= `COLUMN_CLOSURE_RADIUS + structures::REFS_RADIUS` = **10**), and pinned
+  entries are *structurally ineligible* for reclamation. Eviction therefore cannot cause a recompute
+  inside a request — not a probability argument.
+- **The ceiling is derived.** `STORE_RETENTION = 2048` comes from the D4 burst itself: 289 columns are
+  a 17×17 view whose full closure is 37×37 = **1,369** chunks, so retention must exceed 1,369 or the
+  very burst this exists for could evict its own working set.
+- **Both of those numbers were 2 and 512 until issue #514, and leaving them was a measured 4× C_ss
+  regression** (DESIGN.md §12.130). `pre_ore` reads `structure_refs`, whose `REFS_RADIUS` = 8 walk makes
+  one column's closure 21×21 = 441 entries rather than 25 — so the pin covered 25 of 441 and the 12×12
+  sweep's 1,024-entry working set evicted the neighbours it was about to read back: `pre_ore_computed`
+  **740 against a predicted 256**, steady-state allocations **87,882 against 118**, C_ss **79.9 ms
+  against 21.0 ms**. Nothing about the eviction policy was wrong. The pin was narrower than the closure.
+- **Entry count is not proportional to memory, which is why 2,048 is affordable.** Only entries whose
+  `pre_ore`/`post_ore` slots were actually computed hold a dense grid (~192 KiB); the extra entries this
+  ceiling admits are structure-starts-only and hold a `Vec` of starts. Per column of travel a session
+  adds ~21 structure-only entries against ~5 terrain-bearing ones.
 - **"Nothing was evicted" is checkable.** `store_evictions()` is observable, so the gates assert zero
   rather than assuming it. That is what licenses reading the stage counters as one-per-chunk.
 
@@ -127,7 +136,7 @@ argument rather than a style choice:
 Two costs are deliberately bounded rather than eliminated. The check is gated on `fresh_inserts > 0`,
 so a steady-state view re-opening an already-resident neighbourhood does not even perform the atomic
 load — the same "misses only" rule `entry()` follows. And `reclaim()` is `O(live · log live)` per
-insert while over the ceiling; at retention 512 that is a few thousand map probes against a ~50 ms
+insert while over the ceiling; at retention 2,048 that is a few thousand map probes against a ~20 ms
 column. Measured: the whole 100-step hermetic walk (1,989 column visits, 2,029 evictions) costs
 **0.03 s in release**, ~15 µs of store-and-reclaim work per column, or **0.03%** of a real column.
 That figure is negligible *because* the ceiling holds, so the two properties are coupled.
@@ -193,8 +202,12 @@ byte-identical `Vec<String>` (DESIGN.md §12.100's trap).
 - **Add it *above* the stages it consumes, and never make a stage depend on itself.**
   `OnceLock::get_or_init` deadlocks on same-slot reentry. The current layering is
   `post_ore → pre_ore → nothing`; keep the graph pointing one way.
-- **If a driver's neighbourhood widens, widen `COLUMN_CLOSURE_RADIUS` with it**, or the pin stops
-  covering the request that needs it, and re-derive `STORE_RETENTION` from the new closure.
+- **If a driver's neighbourhood widens, widen `STRUCTURE_CLOSURE_RADIUS` with it**, or the pin stops
+  covering the request that needs it, and re-derive `STORE_RETENTION` from the new closure. **This is
+  the rule issue #514 broke**, and it broke it by adding a stage *above* `pre_ore` rather than by
+  touching a driver — so "did any neighbourhood widen?" has to be asked of new stages too, not only of
+  the decoration drivers. `benches/generation.rs`'s sweep now asserts `store_evictions() == 0` and
+  `structure_starts_computed == closure(10)`, which is what would catch the next one.
 - **Do not add a shared scratch pool.** Any buffer reuse belongs in a `thread_local` free-list; a pool
   behind a lock re-creates exactly the contention this module deleted. The store currently owns **no**
   scratch at all — `ViewScope` re-derives its pinned set from `centre`/`radius` on drop rather than
@@ -287,8 +300,9 @@ vegetation seam gates, and `parallel_generation_is_deterministic_and_matches_ser
 | knob | where | note |
 |---|---|---|
 | `SHARD_COUNT` | `store.rs`, compile-time | 64; power of two so `shard_of` masks instead of dividing |
-| `STORE_RETENTION` | `overworld/mod.rs` | 512, derived from the 289-column burst's 441-chunk closure |
+| `STORE_RETENTION` | `overworld/mod.rs` | 2,048, derived from the 289-column burst's 1,369-chunk closure |
 | `COLUMN_CLOSURE_RADIUS` | `overworld/mod.rs` | 2, derived from the drivers (3×3 post-ore of 3×3 pre-ore) |
+| `STRUCTURE_CLOSURE_RADIUS` | `overworld/mod.rs` | 10 = `COLUMN_CLOSURE_RADIUS + REFS_RADIUS`; **this is the pin radius** |
 | `gen-counters` | `lodestone-worldgen` feature, default **off** | required for the counter arm of the gate |
 
 ## Dependencies

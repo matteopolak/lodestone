@@ -1745,7 +1745,7 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
          count below is inflated by recomputation and the median is measuring the \
          eviction rather than the pipeline. The sweep's working set is \
          {} entries (its {}-radius structure closure) and `STORE_RETENTION` must exceed \
-         it — see DESIGN.md §12.118, where this read 740 pre-ore computations against a \
+         it — see DESIGN.md §12.130, where this read 740 pre-ore computations against a \
          prediction of 256.",
         generator.store_evictions(),
         (SIDE + 2 * SWEEP_STRUCTURE_RADIUS) * (SIDE + 2 * SWEEP_STRUCTURE_RADIUS),
@@ -1786,7 +1786,7 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
                  stage was recomputed — check `store_evictions()` below first: the \
                  retention ceiling being smaller than the sweep's real working set is \
                  what produced 740 pre-ore computations against this same 256 \
-                 (DESIGN.md §12.118). A LOWER number means a stage stopped running.",
+                 (DESIGN.md §12.130). A LOWER number means a stage stopped running.",
                 stage, s.stage_entered[stage as usize]
             );
         }

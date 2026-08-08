@@ -708,7 +708,7 @@ mod tests {
     /// (`REFS_RADIUS` = 8) upstream of `pre_ore`, so the real pin is `2 + 8`. A
     /// model at radius 2 is not a cheaper version of production's shape — it is a
     /// 59-entry-per-column shape where production is 1,243, and every number below
-    /// is derived from it (DESIGN.md §12.118).
+    /// is derived from it (DESIGN.md §12.130).
     const WALK_CLOSURE_RADIUS: i32 = 10;
 
     /// View radius the walk gate slides: 8 gives a 17×17 = 289-column view, the
