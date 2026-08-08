@@ -140,11 +140,11 @@ picks the palette.
 
 | key | why |
 |---|---|
-| `processor:minecraft:capped` | ocean ruins' 5 suspicious sand/gravel blocks: needs the archaeology loot pass and a shuffled-index walk over the whole processed list |
+| `block_entity:append_loot` | a `capped` archaeology rule *does* place its `suspicious_sand`/`suspicious_gravel` block now (ocean ruins, trail ruins), but the loot table its `append_loot` modifier attaches needs block entities in worldgen: brushing one yields nothing. Replaced `processor:minecraft:capped`, which is closed |
 | `template:data_markers` | `structure_block` `DATA` markers are dropped, so template loot chests (shipwreck supply/treasure/map, ocean ruin chest) are not placed: needs block entities and loot tables in worldgen |
-| `template:mirrored_shape` | a stair/rail `shape` is not remapped under a mirror (inert today: every placed structure uses `Mirror.NONE`) |
+| `template:mirrored_shape` | a **rail** `shape` is not remapped under a mirror. A stair's is, as of S5: a coded piece with a SOUTH or WEST orientation carries a real `LEFT_RIGHT` mirror, so this stopped being inert — see `docs/worldgen-structure-coded.md` |
 | `minecraft:ruined_portal` | still `Unsupported`: its own vertical placement, air pocket, and blackstone/lava/`block_age` processors are a unit of their own |
-| `minecraft:monument` | pieces are **coded**, not templated (~1,400 lines of `OceanMonumentPieces`) — S5, not S2 |
+| `minecraft:monument` | pieces are **coded**, not templated (~2,000 lines of `OceanMonumentPieces`). Placement and the 29-block biome survey are complete; only the pieces are missing, and this row did not exist until S5 went looking for it |
 
 Entities in templates are parsed and not placed, for the same reason as loot
 chests. Igloo's "cap the shaft with snow when there is no ladder below" fix-up is
@@ -337,11 +337,13 @@ reference.
 
 ### What S4 does not do, all on the ledger
 
+**No jigsaw *structure* is refused any more.** The three that were — `trail_ruins` on `capped`,
+`trial_chambers` on `pool_aliases`, `bastion_remnant` on `high_rampart`'s `axis_aligned_linear_pos` —
+closed in S5's Part A, and `tests/structure_jigsaw.rs` now asserts all three are **supported** so a
+regression cannot look like missing data. What is left are engine gaps rather than structures:
+
 | ledger key | gap |
 |---|---|
-| `minecraft:trail_ruins` | its processor lists use `capped` |
-| `minecraft:trial_chambers` | `pool_aliases` (a `random_group` binding redirects a pool per instance) |
-| `minecraft:bastion_remnant` | `high_rampart`'s `axis_aligned_linear_pos` position predicate |
 | `pool:feature_pool_element` | participates in the joint graph and the free-space accumulator (so the village around it is vanilla's) but places no blocks |
 | `nbt:jigsaw_pool_element` | a persisted jigsaw child carries `Template`, not vanilla's `pool_element` compound |
 | `jigsaw:step_order` | see above |
