@@ -747,6 +747,25 @@ impl OverworldGenerator {
         self.store.evicted()
     }
 
+    /// Issue #515: whether `(cx, cz)` is a slime chunk for **this generator's**
+    /// seed — `WorldgenRandom.seedSlimeChunk` plus its `nextInt(10) == 0`.
+    ///
+    /// A method on the generator rather than a bare function so a caller never has
+    /// to know the world seed to ask; the derivation itself is
+    /// [`crate::rng::is_slime_chunk`], beside the three other `WorldgenRandom` seed
+    /// derivations, and is unit-tested element-wise against an independently
+    /// transcribed lattice.
+    ///
+    /// **This has no gameplay consumer yet, and that is the honest state.** Slime
+    /// spawning is blocked on there being a natural spawn cycle at all (#222) and a
+    /// per-species spawn rule table (#221); nothing here can make slimes appear. It
+    /// is a proven predicate waiting for whichever of those lands first, or for the
+    /// F3 chunk-borders overlay (#197) to read it.
+    #[must_use]
+    pub fn is_slime_chunk(&self, cx: i32, cz: i32) -> bool {
+        crate::rng::is_slime_chunk(cx, cz, self.seed)
+    }
+
     /// Generates the block field for chunk `(cx, cz)`.
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> GeneratedColumn {
