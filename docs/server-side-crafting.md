@@ -29,17 +29,62 @@ already uses. `crafting::recipe_book()` parses them once into a
 
 **The authority.** Menu slot `0` of window `0` is the crafting result.
 `PlayerInventory::apply_menu_slot_change` **refuses** it — it returns `false` and
-stores nothing — while menu slots `1..=4` route into the grid. After any click
-that touched the grid or named slot `0`, `apply_container_clicked` returns a
-`container_set_slot` carrying the result *the server derived*, which
-`dispatch_play_packet` sends on the same packet. So a diff claiming a diamond
-block out of an empty grid mints nothing and the client is corrected immediately,
-exactly as vanilla's `ResultContainer` broadcast does.
+stores nothing — while menu slots `1..=4` route into the grid. `do_click` is then
+re-run server-side from `(slot, button, click_type)` and the result slot is
+re-derived from the grid, never copied out of the click. So a diff claiming a
+diamond block out of an empty grid mints nothing.
 
-There is deliberately **no `consume_one`** on a take. A real take's diff already
-carries the shrunk grid cells alongside the emptied result, so consuming again
-would shrink the grid twice; the server applies the cells the client reports and
-re-derives from those.
+## Taking the result: write-protected is not un-clickable
+
+The rule "the result slot is never written by anything the client sent" is right, and
+reading it as "the client cannot interact with slot 0" is what produced a shipped
+bug — three symptoms, one cause. Vanilla's `ResultSlot.mayPlace` is `false` and its
+`onTake` is what decrements the grid: **a click on slot 0 is how you craft.**
+
+Two properties make that work, and both are now in
+`crates/lodestone-server/src/container_click.rs`:
+
+* **`slotsChanged` runs inside the click.** `CraftingMenu.slotChangedCraftingGrid`
+  re-derives slot 0 and pushes a `container_set_slot` on *any* grid change, so the
+  result slot is live for the duration of one `doClick`. `do_click_with` takes the
+  menu's corpus (`crafting::derive_result` bound to the open grid's dimensions) and
+  re-derives after every grid mutation; plain `do_click` keeps the recipe-free
+  behaviour for callers with no corpus.
+* **`QUICK_MOVE` repeats.** `AbstractContainerMenu.doClick` loops `quickMoveStack`
+  *while the clicked slot still holds the same item*. For every slot but a result that
+  runs once; for a result it is the whole of "shift-click crafts until the grid runs
+  out", because the loop only terminates once the refill stops. It ends on an empty
+  grid or a full inventory (nothing moves → `quickMoveStack` returns EMPTY).
+
+### The resync was the actual defect
+
+`apply_container_clicked` answers a click with a corrective `container_set_content`
+when the client's prediction disagrees with what the server derived. That comparison
+used to walk **only the slots the client claimed** — and a client claims nothing for
+a change it cannot predict, which is precisely the server-derived result slot. So
+every crafting click "agreed", nothing was sent, and:
+
+| symptom | mechanism |
+|---|---|
+| the output draws dimmed and looks unclickable | the client's result slot stayed empty, so the container screen drew its own *ghost preview* (`ContainerFrame::with_recipe_book`) and a click on an empty local slot predicted nothing |
+| shift-clicking the output needs a close+reopen | the craft really happened server-side; the only packet that ever carried it was the next full `container_set_content`, i.e. the next open |
+| items appear at unrelated moments | once client and server disagree about a *native* slot (an invisible craft landed in one), the next click whose `moveItemStackTo` picks a different destination finally disagrees and forces the resync |
+
+The comparison is now "the pre-click state, overwritten by what the client claimed,
+must equal the whole derived menu" — vanilla's `remoteSlots` diff in
+`broadcastChanges`, which is unconditional and per-slot. An honest prediction still
+costs no traffic; the control for that is the second half of
+`a_derived_result_is_pushed_to_the_client_and_an_honest_claim_still_costs_nothing`.
+
+**A take does consume the grid**, and an earlier note here said the opposite ("no
+`consume_one`, the client's diff already carries the shrunk cells"). That was true
+only while the client's diff was trusted. It is not, so `ResultSlot.onTake` is ours to
+perform.
+
+One datum worth keeping because it reads as a bug in play: **a single plank in the 2×2
+is a real recipe** (`oak_button.json`), and two side by side are
+`oak_pressure_plate.json`. Filling a grid one click at a time therefore changes the
+result on *every* click, and each one is a packet.
 
 ## The crafting-table menu is a *positionless virtual* menu (step 2)
 

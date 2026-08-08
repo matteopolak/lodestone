@@ -164,6 +164,15 @@ result slot's server authority:
   it, so a server disagreeing just means the real `slot_item` draw takes over
   next frame — the same "server truth always wins" contract every other slot
   already has.
+
+  **A permanently dimmed result means the server never sent slot 0**, and that
+  is worth knowing as a diagnostic rather than a cosmetic detail: the ghost is
+  *supposed* to be replaced within one round trip. Our own server failed to send
+  it for a while (its click-agreement check compared only the slots the client
+  claimed, and the client cannot claim a server-derived result) — see
+  [`server-side-crafting.md`](./server-side-crafting.md)'s "the resync was the
+  actual defect". The ghost made that failure look like a *rendering* choice
+  instead of a missing packet, which is the one cost of drawing it at all.
 - **A debug-overlay counter.** `HudFrame::recipe_stats` appends a
   `recipes=N tags=M` line to the F3 overlay when the book has loaded, as the
   cheap "did this actually reach the running client" signal — the same role

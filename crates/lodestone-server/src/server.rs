@@ -85,7 +85,7 @@ use crate::chunk::{
     is_air_or_fluid, is_water,
 };
 use crate::fall::{FallSample, FallTracker};
-use crate::container_click::{Click, MenuKind, MenuLayout, SlotKind, do_click};
+use crate::container_click::{Click, MenuKind, MenuLayout, SlotKind, do_click_with};
 use crate::crafting::CraftingState;
 use crate::inventory::{PlayerInventory, window_zero_menu_slot};
 use crate::mob_spawn::SpawnRng;
@@ -4609,8 +4609,29 @@ fn apply_container_clicked<P: ServerProtocol>(
     };
 
     let mut slots = read_menu(&layout, inventory, grid_owner.as_ref(), &own);
+    // What the client believed before this click — the baseline the agreement check
+    // below rebuilds its prediction on top of. Vanilla keeps this as the menu's
+    // `remoteSlots`; here the last thing we sent *was* this state, because every
+    // disagreement is answered with a full content packet.
+    let before = slots.clone();
     let mut state = inventory.click_state().clone();
-    let dropped = do_click(&layout, &mut slots, &mut state, click, creative);
+    // The open grid's dimensions, so `do_click_with` can re-derive the result slot
+    // mid-click (`slotsChanged`) — which is what makes a shift-click on the result
+    // craft repeatedly instead of once.
+    let (grid_width, grid_height) = grid_owner
+        .as_ref()
+        .map_or((0, 0), |grid| (grid.width(), grid.height()));
+    let recipe = |cells: &[Option<ItemStack>]| {
+        crate::crafting::derive_result(grid_width, grid_height, cells)
+    };
+    let dropped = do_click_with(
+        &layout,
+        &mut slots,
+        &mut state,
+        click,
+        creative,
+        Some(&recipe),
+    );
     *inventory.click_state_mut() = state;
 
     // Write back. Grid cells go last and through `set_input`, so the result slot
@@ -4667,21 +4688,40 @@ fn apply_container_clicked<P: ServerProtocol>(
     };
     let derived = read_menu(&layout, inventory, grid_owner.as_ref(), &own);
 
-    // Did the client predict this correctly? Only the slots it claimed plus the
-    // cursor are compared: it does not claim slots it believes unchanged.
+    // Did the client end up believing what the server derived? The client's belief is
+    // **the pre-click state overwritten by the slots it claimed** — it does not claim
+    // slots it thinks are unchanged — plus its claimed cursor.
+    //
+    // # Comparing only the claimed slots was vacuous, and that was the bug
+    //
+    // This used to walk `claimed_slots` alone, so a client that claimed *nothing*
+    // agreed by construction. That is exactly what a client does for every change it
+    // cannot predict — above all the **crafting result**, which is server-derived — so
+    // the result slot was never sent, the screen drew its own dimmed ghost forever,
+    // and a shift-clicked craft only showed up on the next full content packet (i.e.
+    // after closing and reopening the table). Vanilla has no such hole: `doClick` is
+    // followed unconditionally by `broadcastChanges`, which diffs **every** slot
+    // against `remoteSlots`, and `slotChangedCraftingGrid` additionally pushes slot 0
+    // on any grid change (`CraftingMenu.java:69-71`).
+    //
+    // An honest prediction still costs no traffic — the control for that is
+    // `a_claimed_item_is_never_stored_and_the_client_is_corrected`'s second half.
     let cursor = inventory.click_state().carried.clone();
     let mut agrees = cursor.as_ref() == claimed_cursor;
     if agrees {
+        let mut believed = before;
         for (menu_slot, claimed) in claimed_slots {
-            let index = usize::try_from(*menu_slot).ok().filter(|i| *i < derived.len());
-            match index {
-                Some(index) if derived[index] == *claimed => {}
-                _ => {
+            match usize::try_from(*menu_slot).ok().filter(|i| *i < believed.len()) {
+                Some(index) => believed[index] = claimed.clone(),
+                // A claim naming a slot this menu does not have is itself a
+                // disagreement: it cannot be reconciled, so correct the client.
+                None => {
                     agrees = false;
                     break;
                 }
             }
         }
+        agrees = agrees && believed == derived;
     }
     if agrees {
         return (None, dropped);
@@ -7310,6 +7350,220 @@ mod tests {
         assert!(
             inventory.crafting().is_empty(),
             "the player screen's 2x2 must be untouched — they are separate grids"
+        );
+    }
+
+    /// **The reported bug**: the result the server derives has to *reach the client*,
+    /// and taking it has to work on the same click — no reopen.
+    ///
+    /// The claims below are the real client's: `lodestone-game`'s `ClientMenu::predict`
+    /// diffs its own menu before/after, and its result slot is server-owned, so a grid
+    /// click claims the cell and the cursor and **never the result**. Under the old
+    /// agreement check — which walked only the claimed slots — that made every
+    /// crafting click "agree", so slot 0 was never sent: the screen drew its own dimmed
+    /// ghost, clicking it looked dead, and a craft only appeared after close+reopen.
+    ///
+    /// The control is the second half: a client that *does* claim the right result and
+    /// cursor gets no packet, so this is a comparison over the whole menu rather than
+    /// an unconditional resend.
+    #[test]
+    fn a_derived_result_is_pushed_to_the_client_and_an_honest_claim_still_costs_nothing() {
+        let mut inventory = PlayerInventory::new();
+        let block_entities = BlockEntityHandle::new();
+        inventory.click_state_mut().carried = Some(stack("minecraft:oak_planks", 4));
+
+        // Four right-clicks, one plank per cell. **Every one of them changes the derived
+        // result** — measured against vanilla's own datapack, one plank alone is
+        // `oak_button.json`, two side by side are `oak_pressure_plate.json`, three match
+        // nothing, four are `crafting_table.json` — and the client predicts none of
+        // them, so each has to be answered.
+        for (menu_slot, left_on_cursor) in [(1, Some(3u32)), (2, Some(2)), (3, Some(1)), (4, None)] {
+            let (correction, _) = apply_container_clicked(
+                &ContainerTagProto,
+                &mut inventory,
+                &block_entities,
+                None,
+                0,
+                Click { slot: menu_slot, button: 1, click_type: 0 },
+                &[(menu_slot, Some(stack("minecraft:oak_planks", 1)))],
+                left_on_cursor
+                    .map(|count| stack("minecraft:oak_planks", count))
+                    .as_ref(),
+                false,
+            );
+            assert!(
+                matches!(&correction, Some(ServerDirective::Send { packet_id, .. }) if *packet_id == CONTENT),
+                "menu slot {menu_slot} moved the result slot the client cannot derive, got {correction:?}"
+            );
+        }
+        assert_eq!(
+            inventory.crafting().result(),
+            Some(&stack("minecraft:crafting_table", 1))
+        );
+
+        // Now take it. The client's prediction is empty on both counts (its own result
+        // slot is still empty), so this is the click that read as dead.
+        let (correction, dropped) = apply_container_clicked(
+            &ContainerTagProto,
+            &mut inventory,
+            &block_entities,
+            None,
+            0,
+            Click { slot: 0, button: 0, click_type: 0 },
+            &[],
+            None,
+            false,
+        );
+        assert!(dropped.is_empty());
+        assert_eq!(
+            inventory.click_state().carried,
+            Some(stack("minecraft:crafting_table", 1)),
+            "exactly one table, on the cursor"
+        );
+        assert!(
+            inventory.crafting().is_empty(),
+            "and one of every input was consumed"
+        );
+        // `ContainerTagProto` puts the carried count in the last payload byte: the
+        // client is told about the cursor on this same packet, which is what "without a
+        // reopen" means.
+        match &correction {
+            Some(ServerDirective::Send { packet_id, payload }) => {
+                assert_eq!(*packet_id, CONTENT);
+                assert_eq!(payload[0], 0, "window 0");
+                assert_eq!(payload[2], 46, "all 46 InventoryMenu slots");
+                assert_eq!(payload[3], 1, "carrying one crafting table");
+            }
+            other => panic!("taking a result must resync the client, got {other:?}"),
+        }
+
+        // The control: with the take already applied, a client claiming precisely what
+        // the server derived (nothing left in the grid, one table on the cursor) is
+        // answered with silence.
+        let (correction, _) = apply_container_clicked(
+            &ContainerTagProto,
+            &mut inventory,
+            &block_entities,
+            None,
+            0,
+            Click { slot: 0, button: 0, click_type: 0 },
+            &[],
+            Some(&stack("minecraft:crafting_table", 1)),
+            false,
+        );
+        assert_eq!(
+            correction, None,
+            "an empty result slot and a matching cursor is agreement, not a resend"
+        );
+    }
+
+    /// Shift-clicking a result crafts **repeatedly** until the grid runs out —
+    /// vanilla's `doClick` `QUICK_MOVE` `while` loop over a result slot that
+    /// `slotsChanged` refills between rounds.
+    ///
+    /// Expected value from outside this code: `chest.json` is eight `#minecraft:planks`
+    /// around an empty centre, and `ResultSlot.onTake` removes **one** per occupied
+    /// cell per craft, so eight planks per cell is exactly eight chests — not one (the
+    /// old single-shot behaviour) and not sixty-four.
+    #[test]
+    fn shift_clicking_the_result_crafts_until_the_grid_runs_out() {
+        let mut inventory = PlayerInventory::new();
+        inventory.open_table_crafting();
+        let block_entities = BlockEntityHandle::new();
+        let mut open = OpenContainer {
+            window_id: 3,
+            pos: BlockPos::new(0, 64, 0),
+            shape: MenuKind::CraftingTable,
+            container_size: 10,
+            state_id: 0,
+        };
+        for cell in [0, 1, 2, 3, 5, 6, 7, 8] {
+            inventory
+                .table_crafting_mut()
+                .expect("open")
+                .set_input(cell, Some(stack("minecraft:oak_planks", 8)));
+        }
+        assert_eq!(
+            inventory.table_crafting().and_then(|g| g.result()),
+            Some(&stack("minecraft:chest", 1)),
+            "premise: the grid produces one chest per craft"
+        );
+
+        let (correction, dropped) = apply_container_clicked(
+            &ContainerTagProto,
+            &mut inventory,
+            &block_entities,
+            Some(&mut open),
+            3,
+            Click { slot: 0, button: 0, click_type: 1 },
+            &[],
+            None,
+            false,
+        );
+        assert!(dropped.is_empty(), "36 empty slots have room for 8 chests");
+        let chests: u32 = (0..crate::inventory::PLAYER_NATIVE_SIZE)
+            .filter_map(|native| inventory.native(native))
+            .filter(|s| s.item.to_string() == "minecraft:chest")
+            .map(|s| s.count)
+            .sum();
+        assert_eq!(chests, 8, "eight planks per cell is eight crafts");
+        assert!(
+            inventory.table_crafting().is_some_and(CraftingState::is_empty),
+            "and the grid is empty, not merely one item lighter"
+        );
+        assert!(
+            correction.is_some(),
+            "the client cannot predict any of that and must be resynced"
+        );
+    }
+
+    /// **Control**, and the third reported symptom: shift-clicking an *input* out of
+    /// the grid moves that item to the inventory and withdraws the result. It must
+    /// never craft — `quickMoveStack`'s grid-cell branch has no `onTake` on the result
+    /// container, and `ResultSlot.onTake` is reachable only through slot 0.
+    #[test]
+    fn shift_clicking_a_grid_input_moves_it_out_without_crafting() {
+        let mut inventory = PlayerInventory::new();
+        let block_entities = BlockEntityHandle::new();
+        for cell in 0..4 {
+            inventory
+                .crafting_mut()
+                .set_input(cell, Some(stack("minecraft:oak_planks", 1)));
+        }
+        assert!(
+            inventory.crafting().result().is_some(),
+            "premise: a result is standing when the input is shift-clicked"
+        );
+
+        let (_, dropped) = apply_container_clicked(
+            &ContainerTagProto,
+            &mut inventory,
+            &block_entities,
+            None,
+            0,
+            Click { slot: 1, button: 0, click_type: 1 },
+            &[],
+            None,
+            false,
+        );
+
+        assert!(dropped.is_empty());
+        assert!(inventory.click_state().carried.is_none(), "nothing on the cursor");
+        assert!(
+            (0..crate::inventory::PLAYER_NATIVE_SIZE)
+                .filter_map(|native| inventory.native(native))
+                .all(|s| s.item.to_string() == "minecraft:oak_planks"),
+            "no crafting table anywhere: taking an input is not a craft"
+        );
+        let planks: u32 = (0..crate::inventory::PLAYER_NATIVE_SIZE)
+            .filter_map(|native| inventory.native(native))
+            .map(|s| s.count)
+            .sum();
+        assert_eq!(planks, 1, "exactly the one plank that left the grid");
+        assert_eq!(inventory.crafting().input(0), None, "the cell it came from");
+        assert!(
+            inventory.crafting().result().is_none(),
+            "and the result is withdrawn, not crafted"
         );
     }
 

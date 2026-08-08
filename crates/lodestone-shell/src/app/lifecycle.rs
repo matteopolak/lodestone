@@ -487,13 +487,17 @@ impl ApplicationHandler for WindowApp {
                         self.active_container_menu(),
                         self.target.as_ref().map(RenderTarget::size),
                     ) {
-                        let hit = hit_test_with_scale(
+                        let hit = crate::container::hit_test_with_book(
                             &menu,
                             self.nav.gui_scale(),
                             w,
                             h,
                             self.cursor.0,
                             self.cursor.1,
+                            // An open recipe book **moves the panel** (`redraw` passes
+                            // the same flag to `ContainerFrame::with_book_open`), so an
+                            // unshifted hit-test paints slots the pointer is not over.
+                            self.recipe_panel.open,
                         );
                         // `&menu` supplies the cursor stack and the slot rules
                         // vanilla's `shouldAddSlotToQuickCraft` gate needs — see
@@ -548,13 +552,22 @@ impl ApplicationHandler for WindowApp {
                         && menu_button == MenuButton::Left
                         && self.handle_recipe_panel_click(&menu, w, h);
                     if !consumed_by_recipe_panel {
-                        let hit = hit_test_with_scale(
+                        // **`hit_test_with_book`, not `hit_test_with_scale`.** This is
+                        // the one click path that was still testing against an
+                        // unshifted panel while `redraw` drew a shifted one
+                        // (`ContainerFrame::with_book_open`) — the exact hazard that
+                        // module's doc warns about, and with the book open it lands
+                        // every click a panel-offset to the left of what is on screen.
+                        // The swap/drop/pick-item paths in `container_input.rs` already
+                        // passed the flag; only the mouse did not.
+                        let hit = crate::container::hit_test_with_book(
                             &menu,
                             self.nav.gui_scale(),
                             w,
                             h,
                             self.cursor.0,
                             self.cursor.1,
+                            self.recipe_panel.open,
                         );
                         let ctx = MenuContext {
                             cursor_loaded: menu.carried().is_some(),

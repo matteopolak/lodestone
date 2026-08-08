@@ -504,6 +504,15 @@ craft") — it is the same boundary, not a new one. Left as-is; noted here so
 a future refill mechanism doesn't quietly reintroduce the gap without
 someone remembering `THROW` needs the loop too.
 
+> **That refill mechanism now exists — on the server side only.**
+> `lodestone-server`'s `container_click::do_click_with` takes the menu's recipe
+> corpus and re-derives the result slot mid-click, so its `QUICK_MOVE` loop really
+> does craft repeatedly (see
+> [`server-side-crafting.md`](./server-side-crafting.md)). Everything above still
+> holds for `lodestone-game`: this crate's `Menu` has no corpus at click time, its
+> predicted loop still exits after one craft, and the server's extra crafts arrive
+> as an ordinary correction. `do_throw`'s missing loop stays inert *here*.
+
 ### Not a gap: `PICKUP_ALL`'s reverse-scan direction
 
 `doClick`'s `PICKUP_ALL` branch supports `buttonNum != 0` (scan backwards from
