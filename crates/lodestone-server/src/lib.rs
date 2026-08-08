@@ -116,6 +116,7 @@ mod fall;
 mod furnace;
 mod gravity_tick;
 mod growth_tick;
+mod hand_use;
 mod hopper;
 mod integrated;
 mod inventory;

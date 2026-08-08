@@ -3127,6 +3127,78 @@ where
         return Ok(());
     }
 
+    // Issue #532: `useWithoutItem`. **Ahead of the placement branch**, exactly like
+    // vanilla, whose `Player.useItemOn` tries `state.useItemOn`/`useWithoutItem`
+    // before `BlockItem.place` — otherwise right-clicking a door while holding a
+    // block would build instead of opening it. See `crate::hand_use` for the five
+    // families and the rules each comes from.
+    //
+    // Returns early like the bed arm: a click that operated a block is not also a
+    // placement.
+    {
+        let clicked = source.block_state(pos.x, pos.y, pos.z);
+        if crate::hand_use::is_hand_usable(&clicked) {
+            // The door's partner half, read here because `hand_use` has no world
+            // access. `None` for every other family, and for a door whose partner
+            // is missing (a half-broken door, which vanilla also tolerates).
+            let other_half = crate::redstone_openable::other_door_half_pos(pos, &clicked)
+                .map(|p| (p, source.block_state(p.x, p.y, p.z)));
+            if let Some(used) = crate::hand_use::hand_use(pos, &clicked, other_half, player_yaw) {
+                let mut fanout: Vec<BlockPos> = Vec::new();
+                for (p, new_state) in &used.changes {
+                    source.set_block(p.x, p.y, p.z, new_state);
+                    fanout.push(*p);
+                }
+                // The same neighbour fan-out a placement owes its neighbours
+                // (issue #465). This is what makes a lever actually power the
+                // wire beside it rather than merely look flipped: without it the
+                // redstone model is correct and unreachable from a player's hand,
+                // which is precisely the state #314/#315/#319 were left in.
+                let mut changed: Vec<(BlockPos, String)> = Vec::new();
+                for p in &fanout {
+                    let (mut more, scheduled) = propagate_placement(source, *p);
+                    block_ticks.request_scheduled_ticks(scheduled);
+                    changed.append(&mut more);
+                }
+                // A pressed button releases itself. Scheduled through the same
+                // relative-delay feed a placement's delayed families use, so
+                // `run_tick_loop` rebases it onto its own counter.
+                if let Some(delay) = used.release_after {
+                    // Built through a throwaway queue rather than a struct literal
+                    // because `ScheduledTick`'s `sub_tick_order` is private — the
+                    // same idiom `propagate_placement` uses to produce its own
+                    // relative-delay batch, and for the same reason.
+                    let mut pending: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+                    pending.schedule(
+                        (pos.x, pos.y, pos.z),
+                        crate::hand_use::TICK_BUTTON.to_string(),
+                        delay,
+                        crate::scheduled_tick::TickPriority::Normal,
+                    );
+                    block_ticks.request_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
+                }
+                // Every cell the click rewrote, then every cell the fan-out did.
+                let mut notify: Vec<BlockPos> = fanout;
+                for (p, _) in &changed {
+                    if !notify.contains(p) {
+                        notify.push(*p);
+                    }
+                }
+                for p in notify {
+                    let current = source.block_state(p.x, p.y, p.z);
+                    apply(conn, state, proto.encode_block_update(p.x, p.y, p.z, &current)).await?;
+                }
+                return Ok(());
+            }
+            // `hand_use` said no (an iron door, or an already-pressed button).
+            // Vanilla returns PASS/CONSUME, and in neither case does it fall
+            // through to placement against the clicked cell — an iron door is not
+            // replaceable, so the placement branch would do nothing anyway, but
+            // returning here says why.
+            return Ok(());
+        }
+    }
+
     let neighbour = relative(pos, face);
     let clicked = source.block_state(pos.x, pos.y, pos.z);
     let target = if is_air_or_fluid(&clicked) { pos } else { neighbour };
