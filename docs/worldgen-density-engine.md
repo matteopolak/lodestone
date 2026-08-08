@@ -372,7 +372,7 @@ accumulation chain is not.
   change what *later* queries return, not merely the cost. `range_choice`,
   `interval_select` and `interpolated`'s two regimes branch as well, so the set of
   nodes one evaluation touches is position-dependent.
-- **Adding a `Density` variant is three edits and only two are compile errors.**
+- **Adding a `Density` variant is four edits and only three are compile errors.**
   `graph.rs`'s `compile_node` and `field.rs`'s `eval` are both exhaustive matches
   and will fail to build. But `OpKind`'s discriminant must *also* equal the new
   variant's `Density::kind_index()`, and only
@@ -380,18 +380,60 @@ accumulation chain is not.
   Get it wrong and the node still evaluates — as the wrong operator, with the
   per-kind counter filed under the wrong name. Append to both tables; never insert
   in the middle, because a recorded counter table from an earlier run is indexed by
-  these numbers. `graph.rs`'s `walk_interpolating` is a **fourth** place, and it is
+  these numbers. `graph.rs`'s `walk_interpolating` is a **fifth** place, and it is
   not exhaustive-checked in a useful way: an operator missing a case there silently
-  stops contributing its subtree to `interpolating_slots`.
-- **Do not flatten beneath `spline` / `old_blended_noise` / `find_top_surface`.**
-  They are leaves to the field evaluator by vanilla's own semantics, so they hold
-  an untouched `Density` subtree and are evaluated with `Density::compute`.
-- **`Program::cache_2d_under_leaves` now measures duplication, not contention.**
-  It reads **708** on the real overworld router, against the handful of `cache_2d`
-  nodes 26.2's data actually declares — because compilation expands a DAG into a
-  tree, so every parent that references `overworld/offset` gets its own copy of it.
-  A node-sharing (CSE) pass over the `Op` table is the open work that number is the
-  size of, and it would be a *serial* win, not a parallelism one.
+  stops contributing its subtree to `interpolating_slots`. The third compile error is
+  `Density::write_signature` — see the node-sharing entry below for what to write in
+  it, which is the part a compile error cannot tell you.
+
+  `end_islands` is the worked example: `Density::EndIslands(Arc<EndIslandNoise>)`
+  appended at index 31, `OpKind::EndIslands = 31` in `graph.rs` *and* an arm in
+  `field.rs`, a `compute` arm passing **only** `(x, z)`, a signature arm, and a case
+  added to `op_kind_discriminants_match_density_kind_index` — a case left out of that
+  list is a case the gate does not cover. `Builder` holds a `OnceCell` for it because
+  construction burns 17,292 discarded `nextInt`s plus a 256-step shuffle and the type
+  appears twice in 26.2's data (`noise_settings/end.json`'s `erosion`, and
+  `end/sloped_cheese.json`); vanilla substitutes one object into both.
+- **Do not flatten beneath `spline` / `old_blended_noise` / `find_top_surface` /
+  `end_islands`.** They are leaves to the field evaluator by vanilla's own
+  semantics, so they hold an untouched `Density` subtree and are evaluated with
+  `Density::compute`.
+- **Compilation is a node-sharing pass, and a new node kind has to be classified.**
+  `Program::compile` hash-conses the `Op` table (`graph.rs`'s `Interner`), so an
+  identical subtree is compiled once however many times `Builder`'s reference
+  expansion duplicated it. Two rules for anyone adding a kind:
+  1. **Add a `Density::write_signature` arm.** The match is exhaustive so this is a
+     compile error, but *what* you write matters: floats go in as `to_bits()`, never
+     as compared values (`0.0 == -0.0` is true and they are different values under
+     `1.0 / x`; `NaN != NaN` would stop a node matching itself), and lengths precede
+     their contents.
+  2. **Decide whether the kind is a pure function of position.** Everything in
+     26.2's data is — `Graph` holds no mutable state and every evaluator entry takes
+     `&self` — so today's exclusion list is empty. A kind that advanced an RNG at
+     *evaluation* time could not be collapsed, and the arm should then push a
+     per-instance unique word instead of a structural one.
+
+  The `slot` of `interpolated`/`flat_cache` is deliberately **excluded** from the
+  signature: it is an index into `Scratch`'s memo, not part of the function, so two
+  copies collapse onto the first one's slot and the second parent then reads the
+  memo instead of re-evaluating. Freed slots are simply unused; `Builder::slot_count`
+  still sizes the scratch.
+- **`Program::cache_2d_under_leaves` measures duplication, and 708 → 236 is only
+  part of the story.** It read **708** on the real overworld `final_density` before
+  the sharing pass and reads **236** after — exactly 708/3, because the leaf *table*
+  held three copies of each `cache_2d`-bearing subtree. The 236 that remain are
+  duplication *inside* one leaf, which an `Op`-level pass structurally cannot reach:
+  a leaf is an untouched `Density` subtree interned whole or not at all.
+  `preliminary_surface_level` is the extreme — **one** op, **one** leaf, **416**
+  `cache_2d` nodes inside it — and `depth` carries another 106.
+
+  **And node sharing is not evaluation sharing.** The field evaluator is a recursive
+  descent with no per-node memo, so a node with two parents is still evaluated
+  twice. Measured: sharing removed 51% of `final_density`'s nodes and **0.26%** of
+  instructions retired per column. The redundancy is real (4.87× per column, §12.134)
+  and removing it needs per-position memoisation, which §12.132 closed for `cache_2d`
+  on hit-rate grounds — grounds this pass changes, since the reason that memo could
+  never hit was the duplication it now removes.
 
   There is nothing to contend on any more. See the next entry.
 - **`cache_2d` was a memo and is not any more, and the reversal is the interesting
