@@ -411,6 +411,77 @@ a within-arm spread of 0.14%/0.25%. Point-interpreter node visits per column
 byte-identical across the change (8,902,157 bytes, md5
 `c0ef05ac09ba3f90175a14b0f9a69d50`, one-flipped-byte control fires).
 
+## The field evaluator's leaf memo — one slot, not a table
+
+`Scratch::leaf_get`/`leaf_put` is a 64-entry, direct-mapped, **one-slot-per-node**
+last-`(x, y, z)` memo, and it is the memo above's opposite in every respect except
+purpose. Both were sized by `tests/density_redundancy_probe.rs`; the numbers, per
+interior column of the 12×12 sweep, seed 42:
+
+| evaluator | subject | one slot | `(node, x, z)` map |
+|---|---|---|---|
+| point interpreter | `flat_cache` / `cache_2d` subtrees | 2.1% | **78.2%** |
+| field evaluator | `old_blended_noise` (977 of 1,954 visits) | **100%** | — |
+
+**The shape follows from the caller, not from the node.** In the point interpreter
+the visits alternate over a cell's four `(x, z)` corners, so a slot is evicted
+before it is read and a table is the only thing that works. In the field evaluator
+the duplication is *adjacency*: after the node-sharing pass one `Op` has two
+parents, and `range_choice` evaluates its input and then a branch that opens with
+the same subtree, so the node is reached twice inside one corner evaluation. One
+slot catches all of it. Deciding either case from the other's measurement builds
+the wrong structure — see DESIGN.md §12.143.
+
+Two constraints on any change:
+
+- **The kind list is a correctness boundary.** Only the four point-evaluated leaves
+  (`spline`, `old_blended_noise`, `find_top_surface`, `end_islands`) and `noise` may
+  be memoised here, because a hit skips a subtree and in *this* evaluator a skipped
+  subtree can contain a `slot_put`/`cell_put` a later query depends on. Those five
+  are the only kinds with no field children at all. They also ignore the
+  `interpolate` flag, which is why it is absent from the key — for any other kind it
+  would have to be in it, since a node is transparent in one regime and
+  interpolating in the other.
+- **`reconfigure` must keep clearing it unconditionally.** A `NodeId` is unique only
+  within one `Graph`, and a pooled scratch crosses graphs whenever two share a
+  config (the three vein programs do). The failure mode is not a stale value from
+  the previous chunk but a value from a *different function*.
+
+Worth **−0.17%** of `I_ss` (430.87 M → 430.08 M, ten alternated rounds, all ten
+negative), at 2,933 hits per column — exactly the probe's prediction. Byte-identical,
+same dump and control as above. The prediction was −6% to −8% and missed by 40×
+because it back-derived the noise kernel's unit cost from the previous unit's
+aggregate; `engine::leaf_memo_stats()` exists so the next one does not have to.
+
+## Where a column's cost actually is
+
+Because this doc has been the destination of five perf units in a row, the
+attribution belongs in it. `stage_share_of_a_steady_state_column` (same test file)
+reports the ten stages' medians over the 100 interior columns, with the store warmed
+by `column()` first:
+
+| stage | share | | stage | share |
+|---|---|---|---|---|
+| aquifer | 3.0% | | **ore** | **38.7%** |
+| **shape** | **22.5%** | | vegetation | 13.0% |
+| biome | 4.3% | | top_layer | 7.8% |
+| surface | 4.7% | | carve | 1.5% |
+| materialize | 4.2% | | intern | 0.2% |
+
+`aquifer + shape` are the only buckets containing any `Field::eval`, so this engine
+is at most **25.6%** of a column — an upper bound, since `shape` is also the
+four-way `BlockKind` fill and the heightmap scan. §12.140's −11.22% was worth ~2.9%
+of a column. **Zeroing every density evaluation leaves ~14 ms against a 5–10 ms
+target**, so the next win is not here.
+
+The warm-up is load-bearing: on a cold store the same probe reports `vegetation`
+51.6% and `aquifer + shape` 14.7%, because `vegetation_stage` reads its 3×3's
+post-ore worlds and therefore computes those neighbours' whole pipelines inside its
+own timing bucket. And the shares are unweighted on purpose — weighting by
+§12.130's `pre_ore_computed / columns` = 1.78 overshoots `C_ss` by 1.4× while the
+unweighted sum lands within 2% of it, because those counts are sweep averages
+dominated by the leading edge.
+
 ## How to change it
 
 - **Do not "fix" `lerp3` to the incremental chain.** Read

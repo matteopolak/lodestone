@@ -6544,3 +6544,123 @@ The rule this pays for: **when a ledger row names a blocker, name the *stage* th
 just the function signature that would return it.** `ruined_portal` genuinely does only need
 `block_kind_at`, because its obsidian/lava test is over the four-way pre-surface kinds the aquifer already
 computes — two rows one line apart, the same-looking blocker, and only one of them true.
+
+**12.143 The shared scratch this unit was briefed to build is worth exactly zero, and the probe that
+says so had to be extended to be able to say it — the old one folded the sampler out of its key. What is
+left in the field evaluator is *adjacency* rather than recurrence, worth −0.17%, and the number the unit
+actually needed is that `aquifer + shape` is ~26% of a column while `ore` is ~39%. Density evaluation is
+no longer where a column's instructions are.**
+
+Measured at `753c3805`, release, `lto = "thin"`, embedded server data, seed 42, the 12×12 sweep whose 100
+interior columns define `C_ss`/`I_ss`. Both arms are `git worktree --detach 753c3805` with their **own**
+`CARGO_TARGET_DIR`, the after arm being that worktree with only this unit's files copied in; the two bench
+binaries were built once and run **alternately**, ten rounds, in one shell invocation.
+
+- **The brief's premise was false and one probe run refuted it.** §12.140 closed by naming a
+  cross-*sampler* item: `old_blended_noise` 1,954 field visits per column at 50% duplicated `(x, y, z)`,
+  `flat_cache` 6,248 at 46.9%, attributed to `Scratch` being per-sampler while a column builds several
+  over one `Arc<Graph>` — so "the shape stage and the aquifer's own `final_density` sampler recompute each
+  other's corners", fixable in `aquifer/mod.rs` and `overworld/mod.rs`. Keying the probe's seen-sets on the
+  **sampler** as well as the node measures the split directly. Per interior column:
+
+  | kind | visits | dup `(x,y,z)` | same sampler | **cross-sampler** |
+  |---|---|---|---|---|
+  | `flat_cache` | 6,248 | 2,931 | 2,931 | **0** |
+  | `blended` | 1,954 | 977 | 977 | **0** |
+  | `noise` | 14,169 | 1,957 | 1,957 | **0** |
+  | *every other kind* | — | — | — | **0** |
+
+  Zero, on every kind, with 3.4 distinct samplers per column. **The reason the old probe could not say
+  this is that it folded the graph's address into the node key**, which merges every sampler over one graph
+  into one subject — so it reported duplication a per-sampler memo could never have collected as if it
+  were collectable, and the natural reading of its output was a fix in the wrong crate. This is
+  §12.140's own lesson ("a single number cannot distinguish a cache that is the wrong size from one that is
+  the wrong shape") landing on the instrument that taught it: **ask what a hypothetical memo's *scope* is,
+  not only its key, and put the scope in the key.**
+- **What the duplication actually is, and it is the opposite shape from §12.140's.** Adding a one-slot
+  last-`(x, y, z)` hypothesis shows the duplicate pairs are **adjacent in the walk**: `blended` 977
+  duplicates and 977 one-slot hits, `noise` 1,957 and 1,957 — 100% in both, and the same for `add`, `mul`,
+  `marker`, `flat_cache` and `quarter_negative`. Cause: after §12.134's hash-consing one `Op` node has two
+  parents, and `range_choice` evaluates its input and then a branch that opens with the same subtree, so
+  the node is reached twice inside one corner evaluation. **§12.140 measured one slot at 2.1% against a
+  map's 78.2% in the point interpreter and this measures one slot at 100% in the field evaluator, on the
+  same graph.** Neither is a property of the memo: a one-slot form is right when the duplication is
+  *adjacency* and useless when it is *recurrence*, and only measuring both shapes in one run tells you
+  which you have. Deciding this from §12.140's conclusion would have built a 4,096-entry table to collect
+  what 64 slots collect.
+- **The mechanism, and why the kind list is a correctness boundary rather than tuning.**
+  `Scratch::leaf_get`/`leaf_put`: 64 entries, direct-mapped on the `NodeId` with a full key compare, 1,536
+  bytes per scratch. Restricted to the four point-evaluated leaves and `Noise` because **a memo hit skips
+  a subtree**, and in *this* evaluator a skipped subtree can contain a `slot_put`/`cell_put` a later query
+  depends on — the same reason `engine/mod.rs` requires the walk to stay a recursive descent, and the
+  reason `xz_memo`'s "a hit skips the whole subtree, safe because the point interpreter has no side
+  effects" does not transfer. Those five kinds have **no field children at all**: a leaf hands its whole
+  subtree to the point interpreter, which touches no `Scratch`, and `Noise` reads only its own noise and
+  params. They also ignore the `interpolate` flag, which is why the flag is correctly absent from the key —
+  for any other kind it would have to be *in* it, because a node is transparent in one regime and
+  interpolating in the other.
+- **The clearing is the reuse hazard in its worst form.** `reconfigure` empties the table
+  unconditionally, before its early return. A `NodeId` is unique only within one `Graph`, and a pooled
+  scratch is handed to a sampler over a *different* graph whenever the two share a config — `final_density`
+  / `erosion` / `depth` do not (bounds differ) but the three vein programs do. Without the clear the
+  failure is not a stale value from the previous chunk but **a value from a different function**, at a
+  plausible magnitude. `leaf_memo_needs_the_whole_key_and_clears_on_reconfigure` gates it, including the
+  same-row case (ids 3 and 67 share a row, so a table comparing only the row would return another
+  function's value) and a control that fails if `leaf_put` stored nothing.
+- **The numbers, and the prediction was wrong by 40× in the direction that matters.** Ten rounds,
+  interleaved:
+
+  | quantity | before | after | delta |
+  |---|---|---|---|
+  | `I_ss` mean of ten rounds | 430,872,160 | **430,076,968** | **−0.185%** |
+  | `I_ss` min of ten rounds | 430,548,490 | 429,816,040 | −0.170% |
+  | within-arm `I_ss` spread | 0.27% | 0.16% | — |
+  | leaf-memo hits/column | — | **2,933** at 18.11% | — |
+  | `blended` point computes/column | 1,954 | **977** | −50.0% |
+  | `C_ss` min of ten rounds | 17,984.5 µs | 17,585.3 µs | −2.22% |
+
+  Ten of ten rounds negative, so −0.17% is real; `C_ss` is not a claim. The memo hits **exactly** the
+  probe's predicted 977 + 1,957 = 2,934, which is the cross-check that the mechanism is doing what was
+  designed rather than something else of the same size. **The prediction was −6% to −8% and the
+  measurement was −0.17%**: it costed `BlendedNoise::compute` at 24–40 `ImprovedNoise::noise_scaled` calls
+  (correct — the octave loops are 8 + 16 with `is_min`/`is_max` short-circuits) times a per-call
+  instruction cost *back-derived from §12.140's own aggregate delta*, and that back-derivation is where the
+  40× went. The real figure is **240 instructions per hit**. Deriving a kernel's unit cost by dividing a
+  previous unit's total by a previous unit's event count attributes every co-occurring saving to the one
+  kernel you happen to be thinking about; §12.140's 54.4 M was 32,591 noise evaluations **and** 116,011
+  avoided tree-walk visits, and splitting it two ways is a choice, not a measurement. **A unit cost needs
+  its own measurement, and the cheapest one is a hit counter on the thing you are about to build** — which
+  is what `leaf_memo_stats` now is, added only after the first arm disagreed with its own prediction.
+- **Byte identity, with its control.** 45-column/5-seed U15 dump byte-identical across the change:
+  8,902,157 bytes, md5 `c0ef05ac09ba3f90175a14b0f9a69d50` on both arms — the value §12.130, §12.132,
+  §12.134 and §12.140 recorded, reproduced rather than quoted — harness md5
+  `99691badc02cca288a9071f0491d2fa7` equal on both arms, and a one-flipped-byte control makes `cmp` fire
+  (exit 1, `char 4000001`, md5 `b2bf654b…`). `engine_semantics.rs`'s deliberately `y`-dependent `cache_2d`
+  fixture still passes, unchanged.
+- **The number this unit existed to find, and it is not in the density engine.** `column_timed`'s ten
+  stages, median of the same 100 interior columns:
+
+  | stage | median | share | | stage | median | share |
+  |---|---|---|---|---|---|---|
+  | aquifer | 544 µs | 3.0% | | carve | 262 µs | 1.5% |
+  | **shape** | **4,027 µs** | **22.5%** | | **ore** | **6,918 µs** | **38.7%** |
+  | biome | 769 µs | 4.3% | | vegetation | 2,330 µs | 13.0% |
+  | surface | 845 µs | 4.7% | | top_layer | 1,399 µs | 7.8% |
+  | materialize | 742 µs | 4.2% | | intern | 32 µs | 0.2% |
+
+  So `aquifer + shape` — the only two buckets containing any `Field::eval` — is **25.6%**, and it is an
+  *upper* bound because `shape` is also the four-way `BlockKind` fill and the heightmap scan. **The whole
+  of §12.140's −11.22% was therefore worth ~2.9% of a column**, and no further work inside the density
+  evaluators can reach the 5–10 ms target from 18.7 ms: zeroing every density evaluation leaves ~14 ms.
+  `ore` is the largest single stage and nothing has ever measured it.
+- **Two ways to get that attribution wrong, and both were run.** (1) On a **cold store** the same probe
+  reports `vegetation` **51.6%** and `aquifer + shape` 14.7% — because `column_timed`'s `vegetation` bucket
+  times `vegetation_stage`, which reads the post-ore world of its 3×3 and therefore *computes* those
+  neighbours' entire pre-ore and ore pipelines inside that one row. Most of the 51.6% was other chunks'
+  `shape`, and the bound it produced was too *low*. **A stage-attribution bucket that can contain another
+  chunk's whole pipeline is not an attribution**; sweeping with `column()` first is the fix, and it moved
+  `vegetation` 51.6% → 13.0%. (2) Weighting each pre-ore stage by §12.130's `pre_ore_computed / columns`
+  = 1.78 and `ore` by 1.36 looks obligatory and overshoots `C_ss` by 1.4×, while the **unweighted** sum
+  lands within 2% of it (17,868 µs against 17,975 µs) — those counts are sweep averages dominated by the
+  leading edge filling its 5×5 closure, and the median interior column is not the average. **The control
+  is that the parts sum to the whole**, and it is the only thing that distinguished the two.
