@@ -1699,6 +1699,13 @@ struct HudAnim {
     /// Per-hotbar-slot pop amount, vanilla's `5.0 → 0.0` scale, `0.0` =
     /// settled/idle (see `hud/anim::HotbarPop`).
     hotbar_pop: [f32; 9],
+    /// Level-up flash strength: `1.0` at the moment of the gain, decaying to
+    /// `0.0` (see `hud/anim::XpFlash`, issue #30).
+    ///
+    /// **Read `XpFlash`'s doc before treating this as a parity value** — 26.2
+    /// has no XP-bar flash, and this is the effect the issue asked for rather
+    /// than a port of one.
+    xp_flash: f32,
 }
 
 impl HudAnim {
@@ -1707,6 +1714,7 @@ impl HudAnim {
         display_health: i32::MIN, // unused while `heart_blink` is false and jitter is skipped
         tick: 0,
         hotbar_pop: [0.0; 9],
+        xp_flash: 0.0,
     };
 }
 
@@ -1775,11 +1783,18 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
         if p > 0.0 {
             // Crop by shrinking both the destination width and the sampled UV
             // span, so the bar reveals its pattern instead of squashing it.
+            //
+            // The level-up flash (issue #30) rides the *fill*'s vertex tint. The
+            // sprite is already near-white, so the visible part of the effect is
+            // the level number below; brightening the fill too is what stops the
+            // number looking like it flashed on its own. `white` unchanged at
+            // `xp_flash == 0.0`, so an idle frame is byte-identical to before.
+            let fill = anim::flash_toward_white(white, anim.xp_flash);
             for mut q in b.gui_geometry("hud/experience_bar_progress", hx, by, bar_w, bar_h) {
                 let span = q.uv_max[0] - q.uv_min[0];
                 q.dst[2] *= p;
                 q.uv_max[0] = q.uv_min[0] + span * p;
-                b.push_sprite_quad(q, white);
+                b.push_sprite_quad(q, fill);
             }
         }
         // The level number (vanilla green), centred above the bar.
@@ -1821,8 +1836,11 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
             let ty = by - 6.0;
             let black = [0.0, 0.0, 0.0, 1.0];
             // `0x80FF20` (`ARGB.color(255, 0x80, 0xFF, 0x20)`), the literal
-            // vanilla constant `-8323296` reinterpreted as unsigned ARGB.
-            let green = [128.0 / 255.0, 1.0, 32.0 / 255.0, 1.0];
+            // vanilla constant `-8323296` reinterpreted as unsigned ARGB —
+            // brightened toward white for the level-up flash's duration (issue
+            // #30). The mix is in this raw-byte space on purpose; see
+            // `anim::flash_toward_white`.
+            let green = anim::flash_toward_white([128.0 / 255.0, 1.0, 32.0 / 255.0, 1.0], anim.xp_flash);
             b.text_plain(&s, tx + 1.0, ty, 1.0, black);
             b.text_plain(&s, tx - 1.0, ty, 1.0, black);
             b.text_plain(&s, tx, ty + 1.0, 1.0, black);
@@ -2587,6 +2605,8 @@ pub struct HudRenderer {
     heart_anim: anim::HeartAnim,
     /// Cross-frame per-slot hotbar pop timers (`hud/anim::HotbarPop`).
     hotbar_pop: anim::HotbarPop,
+    /// Cross-frame level-up flash state (`hud/anim::XpFlash`, issue #30).
+    xp_flash: anim::XpFlash,
     /// Colour-stream buffer for the **recipe-book panel** pass
     /// ([`HudRenderer::render_recipe_book_panel`]), created lazily on the first
     /// frame the panel is open.
@@ -2703,6 +2723,7 @@ impl HudRenderer {
             anim_start: Instant::now(),
             heart_anim: anim::HeartAnim::new(),
             hotbar_pop: anim::HotbarPop::new(),
+            xp_flash: anim::XpFlash::new(),
             recipe_panel_buffer: None,
             recipe_panel_capacity_floats: 0,
             recipe_panel_sprite_buffer: None,
@@ -2930,11 +2951,13 @@ impl HudRenderer {
         let hotbar_pop = self
             .hotbar_pop
             .tick(tick, frame.hotbar_items.unwrap_or(&[]));
+        let xp_flash = self.xp_flash.tick(tick, frame.xp.map(|(level, _)| level));
         let anim = HudAnim {
             heart_blink,
             display_health,
             tick,
             hotbar_pop,
+            xp_flash,
         };
         let geo = HudGeometry::build_inner(
             frame,
