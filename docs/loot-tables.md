@@ -111,23 +111,61 @@ A feature this module does not recognise is **parsed but marked unsupported**
 ([`LootTable::unsupported_features`]) rather than aborting the load — the same
 tolerance `recipe_json` shows — and contributes nothing to a roll: an
 unsupported condition fails, an unsupported function/entry/provider is a no-op.
-The six tables bundled under `assets/loot_table/` are curated to have **zero**
-unsupported features, so `LootTableSet::load_bundled` rolls exactly the vanilla
-loot those JSON files define.
+Every table bundled under `assets/loot_table/` has **zero** unsupported features,
+so `LootTableSet::load_bundled` rolls exactly the vanilla loot those JSON files
+define.
+
+### The bundle is the clean subset of the whole corpus (issue #538)
+
+`assets/loot_table/` used to be six hand-picked tables, so almost every block in
+the game dropped nothing. It is now **1,230 of Mojang's 1,355** 26.2 loot tables —
+every one whose features this roller fully evaluates — copied verbatim, **823 KB**
+(`843,212` bytes) across 1,035 block tables plus chests, entities, archaeology,
+shearing, brushing, dispensers, harvest, pots, spawners and gameplay. For scale,
+`crates/lodestone-server/assets/` already carried 13.5 MB of worldgen and
+structure data.
+
+The subset is not a curation preference: `load_bundled` debug-asserts zero
+unsupported features per table, so "clean" *is* the bundling precondition. The
+125 excluded tables are exactly the ones using a feature the roller does not
+model — mostly `copy_components` (71), `enchant_randomly` (52), `set_potion` (48),
+`enchant_with_levels` (34), `set_damage` (28), plus one `minecraft:tag` entry and
+one `minecraft:dynamic`. Teaching the roller one of those moves tables into the
+subset; **regenerate and re-commit rather than adding files by hand**, and update
+`loot.rs`'s own `bundled_tables_are_all_fully_supported_and_roll` count.
+
+Regenerate with `just regen-loot-corpus`. Its gate
+(`tests/loot_corpus.rs::the_bundle_is_exactly_the_clean_subset_of_the_vanilla_corpus`)
+compares three directions, and the middle one is what a bundle-only drift check
+structurally cannot do:
+
+1. every bundled table is byte-identical to Mojang's copy;
+2. every **clean cache** table is bundled — so a table that newly becomes clean
+   fails until it is added;
+3. nothing is bundled that is not in the clean subset — so an invented table, or
+   one whose features regressed, fails too.
+
+**That gate had never run before #538.** `corpus_root()` joined `../../..` to
+`CARGO_MANIFEST_DIR`, which is the repo's *parent*, so both existing tests aborted
+on their own `root.is_dir()` precondition. Being `#[ignore]`d, no health check
+here could see it, and `just regen-loot-corpus` now exists so there is a named way
+to run it.
 
 ## How to change it
 
 - **Add a condition/function/number-provider**: add the variant to the enum,
   its parse arm in the matching `from_value`, its empty-context semantics in
   `test`/`apply`/`int`/`float`, and a test.
-- **Bundle another table**: drop the verbatim JSON under
-  `assets/loot_table/` (ids are `minecraft:` + path-minus-extension); `build.rs`
-  re-embeds it. Keep the "zero unsupported" invariant — `load_bundled` asserts it
-  in debug builds.
+- **Bundle more tables**: teach the roller the feature they use, then
+  **`just regen-loot-corpus`**. Do not add files under `assets/loot_table/` by
+  hand — it is generated, and the drift gate compares it against the cache. Update
+  `bundled_tables_are_all_fully_supported_and_roll`'s exact count in the same
+  commit.
 - **Run the corpus gate** (`#[ignore]`d, needs `.cache/mc/26.2/client-src`):
   `cargo test -p lodestone-server --test loot_corpus -- --ignored --nocapture`.
   It proves every bundled table is byte-identical to Mojang's data (modulo the
-  trailing newline) and that all 1355 vanilla tables parse without a hard error.
+  trailing newline), that all 1355 vanilla tables parse without a hard error, and
+  that the bundle is exactly the clean subset in both directions.
 
 ### Gotchas
 
@@ -156,10 +194,17 @@ loot those JSON files define.
 
 ## Configuration
 
-Nothing to configure: the bundled tables live in `assets/loot_table/` and are
-embedded by `crates/lodestone-server/build.rs` into `$OUT_DIR/embedded_loot.rs`
-(the same mechanism `assets/worldgen/` uses). `cargo::rerun-if-changed` on
+Nothing to configure: the bundled tables live in `assets/loot_table/` (1,230
+files, 823 KB) and are embedded by `crates/lodestone-server/build.rs` into
+`$OUT_DIR/embedded_loot.rs` as 1,230 `include_str!`s (the same mechanism
+`assets/worldgen/` uses for 7 MB). `cargo::rerun-if-changed` on
 `assets/loot_table` rebuilds on a data change.
+
+`block_drops::bundled_tables()` parses the whole set once per process behind a
+`OnceLock`. Measured in release, `load_bundled` **plus** a roll of every one of the
+1,230 tables completes inside a test reporting `0.01s`, so nothing here needs a
+lazier scheme. `LootTableSet::get` is still a linear scan — 1,230 key comparisons
+once per block break, which is not worth an index.
 
 ## Dependencies
 

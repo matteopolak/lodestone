@@ -130,6 +130,21 @@ regen-worldgen-structures:
     python3 scripts/extract-worldgen-structures.py
     cargo test -p lodestone-server --test worldgen_structure_corpus {{jflag}} --target-dir {{tdir}} -- --nocapture
 
+# Re-extract crates/lodestone-server/assets/loot_table/ VERBATIM from the
+# decompiled client's datapack data: every one of Mojang's 1355 26.2 loot tables
+# whose features src/loot.rs fully evaluates (1230 of them, 823 KB). Needs no JVM
+# and no container -- loot tables are datapack data, so copying them is strictly
+# more authoritative than asking a program to describe them. It DOES need
+# .cache/mc/26.2/client-src. Deletes and rewrites the tree, so a table that
+# stopped being clean is removed rather than left to trip load_bundled's
+# zero-unsupported assertion. Test: crates/lodestone-server/tests/loot_corpus.rs
+# :: the_bundle_is_exactly_the_clean_subset_of_the_vanilla_corpus (#[ignore]d),
+# which is also the drift gate -- it compares the bundle against the CACHE, not
+# against itself, so a table falling in or out of scope fails loudly.
+regen-loot-corpus:
+    LODESTONE_REGEN=1 cargo test -p lodestone-server --test loot_corpus {{jflag}} --target-dir {{tdir}} the_bundle_is_exactly -- --ignored --nocapture
+    cargo test -p lodestone-server --test loot_corpus {{jflag}} --target-dir {{tdir}} -- --ignored --nocapture
+
 # Regenerate crates/lodestone-data's freeze_top_layer support table
 # (src/generated/snow_support.rs) from the committed JVM dump. Test:
 # crates/lodestone-data/tests/snow_support.rs :: committed_table_matches_dump

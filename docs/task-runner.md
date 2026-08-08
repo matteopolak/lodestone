@@ -106,6 +106,13 @@ asserting.
 | `regen-docs-index` | `cargo xtask docs-index` directly (no test needed — `cargo test -p xtask` has its own `docs_index_matches_committed`, not `#[ignore]`d, which is why plain `cargo test -p xtask` catches drift with no `LODESTONE_REGEN` flag at all) | n/a |
 | `regen-collision` | `crates/lodestone-data/tests/collision_shapes.rs::committed_table_matches_dump` | yes |
 | `regen-hardness` | `crates/lodestone-data/tests/hardness.rs::committed_table_matches_dump` | yes |
+| `regen-loot-corpus` | `crates/lodestone-server/tests/loot_corpus.rs::the_bundle_is_exactly_the_clean_subset_of_the_vanilla_corpus`, then the whole `loot_corpus` binary | yes |
+
+`regen-loot-corpus` is the one whose "authoritative source" is not a dump but
+Mojang's own datapack JSON in `.cache/mc/26.2/client-src`, copied verbatim — the
+same shape `regen-worldgen-structures` uses. Its drift gate compares the bundle
+against the **cache**, not against itself, which is the property that lets it see
+a table falling into or out of the roller's supported subset.
 
 The collision-shape and hardness tests are `#[ignore]`d because they need an
 external artifact (a physics-oracle dump / a JVM dump) that is not always

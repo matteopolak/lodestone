@@ -2029,10 +2029,34 @@ mod tests {
         assert!((2..=4).contains(&out[0].count), "count was {}", out[0].count);
     }
 
+    /// Since #538 the bundle is the **whole clean subset** of Mojang's 26.2
+    /// corpus, not a hand-picked handful. Two invariants, and the count is
+    /// deliberately exact rather than a floor.
+    ///
+    /// `1230` is not a preference: it is the number of tables in
+    /// `.cache/mc/26.2/client-src/data/minecraft/loot_table/` (1,355) whose
+    /// features this roller fully evaluates, measured by
+    /// `tests/loot_corpus.rs`'s own scan. A change to the roller that makes more
+    /// or fewer tables clean must move this number *and* regenerate the bundle
+    /// (`just regen-loot-corpus`), which is what stops the two drifting apart
+    /// silently — the corpus gate asserts the same number from the cache side.
+    ///
+    /// **"Rolls something" is not asserted**, and that is a correction rather
+    /// than a relaxation: plenty of real tables legitimately roll nothing at a
+    /// given seed (an `empty` entry winning, a `random_chance` failing, a
+    /// `killed_by_player` pool with no killer). The old six-table version could
+    /// assert non-emptiness only because all six happened to be unconditional.
+    /// What is still asserted is that every table rolls **without panicking** and
+    /// produces only well-formed stacks.
     #[test]
     fn bundled_tables_are_all_fully_supported_and_roll() {
         let set = LootTableSet::load_bundled();
-        assert_eq!(set.len(), 6, "six curated tables are bundled");
+        assert_eq!(
+            set.len(),
+            1230,
+            "the bundle is the clean subset of the 1,355-table vanilla corpus; \
+             if this moved, regenerate with `just regen-loot-corpus` and say why"
+        );
         for table in set.iter() {
             assert!(
                 table.unsupported_features().is_empty(),
@@ -2041,11 +2065,37 @@ mod tests {
                 table.unsupported_features(),
             );
         }
-        // Every bundled table rolls deterministically.
+        // Every bundled table rolls without panicking, and every stack it
+        // produces names a parseable item.
+        let mut produced = 0usize;
         for table in set.iter() {
             let mut rng = SpawnRng::new(42);
-            let out = set.roll(&table.id, &LootContext::default(), &mut rng);
-            assert!(!out.is_empty(), "{} rolled nothing", table.id);
+            for stack in set.roll(&table.id, &LootContext::default(), &mut rng) {
+                assert!(
+                    !stack.item.to_string().is_empty(),
+                    "{} produced a nameless stack",
+                    table.id
+                );
+                produced += 1;
+            }
+        }
+        assert!(
+            produced > 1000,
+            "one seed across 1,230 tables must produce a lot of stacks; {produced} \
+             suggests the roller is short-circuiting"
+        );
+        // The five tables #538 replaced still behave exactly as they did, which
+        // is the regression guard for the bulk import.
+        for (id, expected) in [
+            ("minecraft:blocks/dirt", "minecraft:dirt"),
+            ("minecraft:blocks/stone", "minecraft:cobblestone"),
+            ("minecraft:blocks/coal_ore", "minecraft:coal"),
+            ("minecraft:blocks/iron_ore", "minecraft:raw_iron"),
+        ] {
+            let key: ResourceKey = id.parse().unwrap();
+            let mut rng = SpawnRng::new(42);
+            let out = set.roll(&key, &LootContext::default(), &mut rng);
+            assert_eq!(describe(&out), vec![format!("{expected}x1")], "{id}");
         }
     }
 

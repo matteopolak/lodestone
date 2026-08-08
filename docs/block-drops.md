@@ -102,12 +102,15 @@ as the exact inverse of the existing menu→native table rather than by restatin
 
 ## How to change it, and the gotchas
 
-* **Bundling another block's table** is a JSON file under `assets/loot_table/blocks/`; `build.rs` re-embeds
-  it and `block_loot_table_id` finds it with no code change. Keep the "zero unsupported features" invariant —
-  `LootTableSet::load_bundled` debug-asserts it.
-* **Only five block tables are bundled** (`stone`, `dirt`, `gravel`, `coal_ore`, `iron_ore`). Every other
-  block in the game drops nothing. That is honest rather than guessed: a block with no table returns an empty
-  `Vec`, exactly as one whose table rolled nothing does.
+* **Do not add a table by hand.** `assets/loot_table/` is now generated: `just regen-loot-corpus` copies every
+  clean table out of `.cache/mc/26.2/client-src`, and its drift gate compares the tree against the *cache*.
+  Adding one file by hand fails that gate. To bring more tables in, teach `loot.rs` the feature they use and
+  regenerate — see `docs/loot-tables.md`.
+* **1,230 of vanilla's 1,355 tables are bundled** (#538), including 1,035 block tables. The 125 excluded ones
+  use a feature the roller does not model, and a block among them still drops nothing — honest rather than
+  guessed, since a block with no table returns an empty `Vec` exactly as one whose table rolled nothing does.
+  Blocks vanilla itself gives no table (`bedrock`, `barrier`, the fluids, `end_portal`) take the same path
+  correctly.
 * **`doTileDrops` is not honoured.** Vanilla wraps `popResource` in
   `level.getGameRules().get(GameRules.BLOCK_DROPS)`. This crate has no live game-rule registry to consult —
   `game_rules.rs` describes rules for the wire and stores no values. A real registry is the prerequisite.
@@ -243,7 +246,9 @@ instantiation).
 
 * `block_drops::BLOCK_DROPS_BEHAVIOR_SEED` — the per-connection roll/placement seed. Separate from
   `COMPOSTER_BEHAVIOR_SEED` so a composter click cannot shift which drop a later break rolls.
-* `assets/loot_table/` — the bundled corpus (28 KB, 6 files), embedded by `build.rs`.
+* `assets/loot_table/` — the bundled corpus (823 KB, 1,230 files), embedded by `build.rs` and parsed once per
+  process behind a `OnceLock`. Measured in release: `load_bundled` plus a roll of all 1,230 tables completes
+  inside a test that reports `0.01s`, so the first block break of a session carries no visible hitch.
 
 ## Dependencies
 
