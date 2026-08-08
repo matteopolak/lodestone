@@ -1,30 +1,38 @@
-# World select, with creation disabled
+# World select, and the singleplayer save list
 
 ## What it is
 
 `Screen::WorldSelect` — vanilla's `SelectWorldScreen`, reached from the title
 screen's **Singleplayer** button. A title, a search field, a world list, and six
 footer buttons: Play Selected World, Create New World, Edit, Delete, Re-Create,
-Back. **Four of the six are present and disabled, Create New World among them**,
-and the list holds **exactly one** world.
+Back. The list holds **one row per world in `saves/`**, and **three of the six
+buttons are present and disabled**: Edit and Re-Create have no screen to open, and
+Delete has no confirmation step.
 
 This is issue #397, the fifth child of the menu-framework epic #392, and the first
 consumer of #394's `HeaderAndFooterLayout` — which landed as a knowing exception to
 this repo's island rule precisely so this screen could be the thing that wires it
 to pixels.
 
-**Issue #287 then gave it a world and made Play Selected World live**, so this is
-now the screen a real session starts from. The launch chain itself is documented in
-[`singleplayer.md`](./singleplayer.md); what follows is the screen.
+**Issue #287 then gave it a world and made Play Selected World live**, and issue
+#468's second reading turned its one hardcoded row into a real save list, so this
+is now the screen a real session starts from and the screen that creates one. The
+launch chain is documented in [`singleplayer.md`](./singleplayer.md) and the
+directory layout in [`world-save-load.md`](./world-save-load.md); what follows is
+the screen.
 
-Two files:
+Three files:
 
+- `crates/lodestone-shell/src/saves.rs` — this client's `LevelStorageSource`:
+  enumeration, `WorldSummary` (vanilla's `LevelSummary`), name sanitising and
+  creation. **Read its module doc before changing anything here**; it is the spec.
 - `crates/lodestone-shell/src/menu/world_select.rs` — the screen's *input* half:
   which widgets exist, which are active, where focus is, what a key or a click
   means.
 - `crates/lodestone-shell/src/menu/render.rs` — the geometry (`world_select_slot`,
   `world_select_search_slot`, `world_list_row_rect`) and the draw
-  (`frame_for`'s `Screen::WorldSelect` arm), beside the other two vanilla screens'.
+  (`frame_for`'s `Screen::WorldSelect` arm, plus `draw_world_entry`), beside the
+  other two vanilla screens'.
 
 ## How it works
 
@@ -106,83 +114,143 @@ position is therefore the real one rather than an approximation of it.
 
 `active = false` is the whole mechanism (see [`menu-widgets.md`](./menu-widgets.md)).
 Vanilla disables Play, Edit, Delete and Re-Create together whenever nothing is
-selected (`updateButtonStatus(null)`, `SelectWorldScreen.java:159-166`), which is
-where three of our four disabled buttons come from — but **not Play**: since #287
-there is always a selection, so Play is active and Edit/Delete/Re-Create are off for
-their own reasons (below).
+selected (`updateButtonStatus(null)`, `SelectWorldScreen.java:159-166`), and this
+screen now really does reach that state — an empty `saves/`, or a search matching
+nothing — so all four go grey together exactly as vanilla's do. With a playable
+selection, Play comes back and the other three stay off for their own reasons: no
+`EditWorldScreen` (210 lines), no re-create flow, and no confirmation step for a
+Delete that cannot be undone.
 
-**The one deviation is Create New World**, which vanilla leaves active: its press is
-`CreateWorldScreen.openFresh` (`:87`), and `CreateWorldScreen` (828 lines) plus
-`WorldCreationUiState` (326) are issue **#190**. `EditWorldScreen` (210) is the
-same story for Edit, and Re-Create routes through `CreateWorldScreen` too. None of
-them is ported, and naming them here is the whole of the stub.
+**Create New World was the one deviation** — vanilla leaves it active and #397 left
+it greyed, pending `CreateWorldScreen` (828 lines) plus `WorldCreationUiState`
+(326). Issue **#190** built it and this button has been live since.
 
-Rendering Create greyed rather than omitting it is the point of the issue: a
-missing row changes the footer grid's shape, so the screen would read as a
-*different* screen rather than as vanilla with a feature unavailable.
+Rendering a still-unavailable button greyed rather than omitting it is the point of
+the issue: a missing row changes the footer grid's shape, so the screen would read
+as a *different* screen rather than as vanilla with a feature unavailable.
 
-`WorldSelectNav::update_button_status` is vanilla's method collapsed to a constant,
-because the selection is one. Vanilla's non-null branch reads `primaryActionActive()`,
-`canEdit()`, `canRecreate()`, `canDelete()` (`LevelSummary.java:189-211`, overridden
-by `SymlinkLevelSummary`/`CorruptedLevelSummary` at `:273-347`) plus a
-`requiresFileFixing()` tooltip. Only the first is ported, and as a constant `true`:
-`BUNDLED_WORLD` is always the selection and is always playable, while the other three
-ask about a *file* — there is none, and Edit/Delete/Re-Create have no screen to open
-anyway. The rest stays unported rather than modelled-and-unused, because an enum
-whose variants nothing constructs is the island `CLAUDE.md` names as this repo's
-dominant defect. Those line numbers are the lookup for whoever adds world storage.
+`WorldSelectNav::update_button_status` **used to be vanilla's method collapsed to a
+constant**, because the selection was one. Since the save list it asks a real
+summary. Vanilla's non-null branch reads `primaryActionActive()`, `canEdit()`,
+`canRecreate()`, `canDelete()` (`LevelSummary.java:189-211`, overridden by
+`SymlinkLevelSummary`/`CorruptedLevelSummary` at `:273-347`) plus a
+`requiresFileFixing()` tooltip; all four are now ported onto
+`saves::WorldSummary` and `&&`-ed with `WorldSelectButton::enabled()`, which is the
+*client-level ceiling*:
+
+| button | ceiling | per-selection |
+|---|---|---|
+| Play Selected World | live | `can_play()` — `false` for a world whose `level.dat` will not decode |
+| Create New World | live | always |
+| Edit | **never** | no `EditWorldScreen` (210 lines) is ported |
+| Delete | **never** | no confirmation step exists — see `saves.rs` on why a cheap one was rejected |
+| Re-Create | **never** | routes through `CreateWorldScreen` |
+| Back | live | always |
+
+So a greyed Play now means "nothing selected" — an empty `saves/`, or a search that
+matches nothing — which is a state vanilla's `updateButtonStatus(null)` exists for
+and this screen previously could not reach. The tooltip stays unported (below).
+
+The three `WorldSummary` predicates that answer "not disabled" in vanilla —
+`locked`, `requiresManualConversion`, `isCompatible` — are deliberately **not**
+modelled: this client writes no `session.lock` and has no `DataFixer`, so each
+would be a constant claiming a check happened. `readable` is the one real failure
+mode, and it maps to `CorruptedLevelSummary`.
 
 No tooltip either. `WidgetTooltipHolder` is what makes "disabled with an
 explanation" honest and #393 deferred it to "whatever knows how long the cursor has
 rested"; #395's input layer sees clicks and keys, not hover dwell time, so it is
 still deferred. See [`menu-focus.md`](./menu-focus.md)'s deliberate-gaps list.
 
-### The one row, and why vanilla has nothing to copy
+### The list: N rows, `WorldListEntry`'s geometry
 
-There is still no singleplayer world *storage* in this client — no
-`LevelStorageSource`, no save directory, no save format. What #287 added is the
-**server**: `lodestone_server::IntegratedServer` runs in-process over an in-memory
-duplex, so a world can be played without ever being written. The one row is
-`BUNDLED_WORLD` — a fixed seed for the bundled overworld generator, regenerated
-identically on every launch and never persisted. This module still ships **no
-`LevelSummary` equivalent**; a fabricated *save* would read as a working one, and the
-row's label says "generated, not saved" instead.
+The rows come from `saves::list_worlds_in`, one `MenuRow` each, in
+`saves::WorldSummary::cmp_for_list` order — `LevelSummary.compareTo` verbatim, i.e.
+last played **descending**, ties broken by folder name ascending. Each carries
+`WorldListEntry`'s three text lines (`WorldSelectionList.java:555-570`):
 
-One row rather than a list because one is the honest count: with no storage there is
-nothing to enumerate and a second row would have to be invented.
+| line | y inside the content box | content | colour |
+|---|---|---|---|
+| 1 | `+1` | the display name (`LevelName`, or the folder when it is empty) | white |
+| 2 | `+9+3` | `folder (YYYY-MM-DD HH:MM UTC)` | `-8355712` grey |
+| 3 | `+9+9+3` | `Survival, Cheats, Version: 26.2` | `-8355712` grey |
 
-**Vanilla has no empty-list rendering for this screen**, which contradicts the
-obvious guess. It is worth keeping even now that the list is not empty, because it is
-why the one row looks the way it does.
-`WorldSelectionList.handleNewLevels` (`WorldSelectionList.java:167-183`) switches on
-the list type, and for `SINGLEPLAYER` an empty result calls
-`CreateWorldScreen.openFresh` — it *leaves the screen*. `NoWorldsEntry`
-(`:379-397`) exists but only the Realms `UPLOAD_WORLD` branch reaches it, and
-`LoadingHeader` (`:354-377`) is only up while a `CompletableFuture` is pending.
-Neither is a state a vanilla player sees on `SelectWorldScreen` with no worlds.
+all inset by `getTextX() = getContentX() + 32 + 3`. **The 32 px icon column is
+reserved and drawn empty**: vanilla blits `FaviconTexture.forWorld` from the
+`icon.png` the client writes on quit, and this client writes none, so there is
+nothing to blit — and the column still has to exist, because all three lines' x is
+measured from its far edge. Drawing a placeholder square would be inventing a
+texture vanilla has no equivalent of.
 
-So the choice here is deliberate rather than transcribed: the screen draws
-**`NoWorldsEntry`'s geometry** — one entry, a `StringWidget` centred in row 0's
-content box — carrying `BUNDLED_WORLD.label`. `WorldListEntry`'s own geometry (a
-32×32 icon plus three text lines off a `LevelSummary`, `:494-502`) is the one we
-*cannot* draw, because there is no `LevelSummary` to fill it from.
+The date format is a **deliberate deviation**: vanilla uses
+`Util.localizedDateFormatter(FormatStyle.SHORT)`, i.e. the user's locale and the
+system time zone, and this shell has neither a locale table nor a tz database.
+Guessing a locale format would be wrong in a way nobody could test; an ISO
+timestamp labelled `UTC` says what it is. `saves::format_epoch_millis_utc` is
+`civil_from_days`, gated against values produced by Python's own `datetime`.
 
-The centring is exact rather than approximate, and the derivation is short enough to
-keep: `contentXMiddle` is `rowLeft + 2 + 133` and `rowLeft` is `floor(w/2) - 135`,
-so the halves cancel and the centre is the screen's own. The text's top is
-`contentYMiddle - 4`, where the `4` is Java's `9 / 2` and not 4.5.
+Two more deviations, both worth knowing before "fixing" them:
 
-The label's **length** is a constraint: `NoWorldsEntry`'s `StringWidget` has no
-`maxWidth`, so nothing clips it and a longer string would overhang the 266 px row —
-44 characters at the jar-less fixed advance.
-`the_world_list_row_label_fits_the_row_it_is_centred_in` pins that.
+**The empty list does not leave the screen.** `WorldSelectionList.handleNewLevels`
+(`WorldSelectionList.java:167-183`) switches on the list type, and for
+`SINGLEPLAYER` an empty result calls `CreateWorldScreen.openFresh` — real vanilla
+*replaces* the world list with the creation screen when you have no worlds.
+`NoWorldsEntry` (`:379-397`) exists but only the Realms `UPLOAD_WORLD` branch
+reaches it. This shell draws `NoWorldsEntry` anyway, with
+`world_select::NO_WORLDS_LABEL`, for two reasons: opening a different screen from a
+screen's *first frame* makes the world list unreachable on a fresh install, and
+Escape from that creation screen would return the player to a screen they never
+saw.
 
-`AbstractSelectionList`'s scrolling and per-entry hit-testing are still **not**
-ported. With exactly one world, that world is always the selection
-(`WorldSelectNav::selected`), so nothing needs clicking to select — which is the one
-deliberate deviation from vanilla in this screen's *behaviour*, and it is what makes
-Play Selected World active. #396 is the issue that needs a real list, for the server
-screen.
+`NoWorldsEntry`'s centring is exact rather than approximate, and the derivation is
+short enough to keep: `contentXMiddle` is `rowLeft + 2 + 133` and `rowLeft` is
+`floor(w/2) - 135`, so the halves cancel and the centre is the screen's own. The
+text's top is `contentYMiddle - 4`, where the `4` is Java's `9 / 2` and not 4.5.
+Its **length** is a constraint: the `StringWidget` has no `maxWidth`, so nothing
+clips it and a longer string would overhang the 266 px row — 44 characters at the
+jar-less fixed advance. `the_world_list_row_label_fits_the_row_it_is_centred_in`
+pins that. A world *row*'s three lines are clipped, matching
+`StringWidget.setMaxWidth` (`:418`), and
+`a_long_world_name_is_clipped_to_its_row_rather_than_overhanging_it` is the gate.
+
+**The list does not scroll.** `AbstractSelectionList`'s scroll model is not ported
+here — #396 ported it for the *server* list, and this screen has no equivalent yet.
+So `world_list_row_visible` rejects any row that would fall outside the content
+band, and `row_rect` then reports **no rect at all** for it: not drawn, and not
+clickable, which is the same gate `server_row_visible` applies and for the same
+reason (`row_rect` is also `app.rs`'s hit-test). `world_list_max_rows()` caps the
+list at what the reference canvas can show — 10 — so a player with more worlds than
+that cannot reach the rest, and at a canvas shorter than 480 the last few of those
+ten are not drawn either. Both are the same missing feature, and both are stated
+here rather than discovered.
+
+One behavioural deviation follows from it: **row 0 is selected on open**, where
+vanilla starts with `updateButtonStatus(null)` and waits for a click. With no
+keyboard selection model, requiring a click would leave a keyboard-only player
+unable to play at all; row 0 is the most recently played world, which is both the
+likely intent and the state this screen already had when it had one row. Focus
+landing on a row also selects it, which is `AbstractSelectionList.nextFocusPath`'s
+own `setSelected`.
+
+### The row ids are not the row order
+
+The frame's `rows` run **search field, then the six footer buttons, then the world
+rows** (`world_select::SEARCH_FIELD`, `FIRST_BUTTON_ROW`, `FIRST_WORLD_ROW`) — even
+though the worlds draw *above* the buttons and Tab visits them *before* the buttons.
+Three different orderings, deliberately:
+
+- the **ids** are indices into `frame.rows` and into `FocusSet`, so they must be
+  stable; putting the worlds between the search field and the buttons would renumber
+  all six buttons whenever the world count changed, and `app.rs`'s hit-test would be
+  reading last frame's numbering. That is #391's shape at list scale: every click one
+  control off.
+- the **tab order** is registration order, which `WorldSelectNav::rebuild` sets to
+  header → contents → footer, exactly as `layout.visitWidgets`
+  (`SelectWorldScreen.java:76`) walks it.
+- the **screen order** is geometry, which `row_rect` answers.
+
+`tab_visits_the_list_between_the_search_field_and_the_footer` is the gate that fails
+if the first two are ever collapsed into one.
 
 ### Hover is not focus — the first screen where that matters
 
@@ -225,8 +293,13 @@ one. `MenuNav::click` translating a click into `hover` + `Enter` has caused two 
 bugs on cursorless screens — #391's GUI-scale row toggling view bobbing, and
 clicking a `ServerEdit` field submitting the form — and this screen has no row
 cursor at all: a click on the field focuses it, a click on Back presses it, and a
-click on one of the five disabled buttons does **nothing, including not moving
-focus** (which is what would let the next Enter press it).
+click on one of the disabled buttons does **nothing, including not moving
+focus** (which is what would let the next Enter press it). A click on a **world
+row** is its own case again: it *selects* and does not launch, because
+`WorldListEntry.mouseClicked` (`:571-583`) only joins on a double-click or on a
+click inside the 32×32 icon — and because launching on a single click would make Play
+Selected World unreachable, since you could never point at a world without opening
+it.
 
 ## What consumes it
 
@@ -276,16 +349,37 @@ reachable again the moment this list has a world.
 
 ## How it is proved
 
-- `world_select.rs`'s own tests: the five-disabled/one-enabled split with Create
-  asserted present; the row-index ↔ focus-id mapping in both directions; every
-  widget reachable through the `FocusChildren` seam with a control for an unknown
-  id; the exact Tab sequence **with a control that enables Create and watches the
-  walk reach it**, so "two stops" is not satisfied by a traversal that can only find
-  two things; typing plus Up/Down leaving the field (which is also the premise
-  assertion that the seeded bounds put Back below the box and overlapping it in x);
-  Escape and Enter-from-Back; a click that focuses without pressing; a click on each
-  disabled button doing nothing with the enabled-button control executed; and hover
-  never moving focus.
+- `world_select.rs`'s own tests, over a **stated** fixture — three worlds, one of
+  which is deliberately corrupt, asserted as a precondition, because the `world`
+  species of vacuous test lives in the input data and is unreadable from the test
+  source. They cover: the three id bands not overlapping in either direction; every
+  widget reachable through the `FocusChildren` seam with a control for an unknown id;
+  the exact Tab sequence, and its own control — the *same* walk with an empty list
+  must visit only the footer, so the list rows appearing has to be caused by there
+  being rows; typing plus Up/Down leaving the field; Escape and Enter-from-Back; a
+  click that selects a row without launching, with the control that Play then opens
+  *that* row rather than always row 0; a corrupt world's row listed, inactive and
+  never a tab stop; the filter matching name **and** folder, keeping the selected
+  *world* rather than its row index across a filter change, and greying Play when it
+  matches nothing; and hover never moving focus or selection.
+- `saves.rs`'s own tests: enumeration over a root that really contains a tie on
+  last-played, an empty `LevelName`, an undecodable `level.dat`, a directory with no
+  `level.dat` and a stray *file*; the `FileUtil` name rules including the ` (N)`
+  counter and a 400-character non-ASCII name that byte-slicing would panic on; and
+  `creating_a_world_writes_the_typed_name_and_a_fresh_directory`, which asserts the
+  second Create makes a **different** directory — the defect the save list exists to
+  fix, asserted directly rather than inferred.
+- `nav.rs`'s `creating_two_worlds_lists_both_and_play_opens_the_selected_one` is the
+  owner's report as an assertion, driven through the real screen flow (title → list →
+  create → list → Play), so it fails if any hop is unwired rather than only if
+  `saves.rs` is wrong.
+- `render.rs`'s `every_world_in_the_list_draws_inside_its_own_row_band` measures
+  **each** row's own content rect. The single-row gate it replaces could not tell
+  "the list drew" from "row 0 drew", which is exactly the failure a hardcoded row
+  has. It asserts by *location* that ink starts past the 32 px icon column, that the
+  selection outline is present on row 0 and absent on row 1, and — as controls — that
+  the band after the last world is empty and that every band it measures is empty on
+  the title screen.
 - `render.rs`: `the_world_select_rects_are_vanillas_own` holds the hand-derived table
   above as the *expectation* while the values come out of the arranged tree — two
   independent derivations of the same arithmetic, which is the only shape of gate

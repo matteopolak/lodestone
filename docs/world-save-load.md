@@ -162,15 +162,31 @@ Three things had to change, and only the first is the one the issue named.
 world lives. `Origin::Integrated` carries an `Option<PathBuf>`; `Some` selects
 `open_persistent_with_mobs`.
 
-**One implicit world, not a save list.** `saves::default_world_dir()` is
-`<data dir>/saves/world`, and every singleplayer session opens it. This is a
-product decision, argued in that module's own doc: a save list is what vanilla
-does and what the `CreateWorld` screen implies, but `world_select` renders one
-hardcoded row with disabled Edit/Delete buttons and pixel gates pinning that
-row, so a real list is a feature rather than a wiring fix. The honest cost is
-that **"Create New World" cannot create a second world** — it reopens the
-existing one, and the typed seed only takes effect on the very first launch.
-Nothing deletes a world.
+**One implicit world, not a save list — and that is no longer what ships.**
+#468 chose reading (1): `saves::default_world_dir()` is `<data dir>/saves/world`
+and every singleplayer session opened it, because a real list needed UI work the
+persistence fix was not blocked on. Its honest cost was stated at the time and
+was exactly what the owner then reported: **"Create New World" could not create a
+second world** — it reopened the existing one, because `resolve_world_seed`
+(rightly) lets a stored seed win over a requested one, so the typed seed only
+took effect on the very first launch.
+
+Reading (2) — a real save list — has since landed. `crate::saves` is now this
+client's `LevelStorageSource`: it enumerates `saves/*/level.dat` into
+`WorldSummary` (vanilla's `LevelSummary`), sanitises a typed name into a folder
+name with `FileUtil`'s own rules, and creates a **new directory** per world. The
+menu passes that directory to `begin_singleplayer` as a
+`menu::nav::SingleplayerLaunch`, so `default_world_dir()` is no longer how a world
+is opened — it survives only as the name a pre-save-list Lodestone world was
+written under, which enumeration finds like any other. See
+[`world-select.md`](./world-select.md) for the screen and `saves.rs`'s module doc
+for the rules.
+
+Creating a fresh directory is the *right* fix rather than a convenient one:
+forcing a requested seed onto an existing world is the alternative, and it
+destroys the continuity of the world the player was building — the discontinuity
+`resolve_world_seed`'s own doc describes. **Nothing deletes a world**, still, and
+`saves.rs` explains why the four-line filesystem half was not written either.
 
 `min_y`/`height` are read off the source via `OverworldChunkSource::min_y`/
 `height` rather than written as `(-64, 384)` at the call site, because this
@@ -230,7 +246,19 @@ seed gate with the observed profile equal to the *requested* seed's terrain
 
 Named rather than left to be discovered:
 
-- **There is one world, not a list.** See "One implicit world" above.
+- **Deleting a world is not possible from the game.** The save list landed
+  without it: the filesystem half is four lines, and the part that is not four
+  lines is a confirmation a player cannot fire by accident. Arming the existing
+  Delete button and confirming with a second press of the same button is
+  deletable-by-double-click; a real `ConfirmScreen` needs a new `Screen` variant
+  threaded through `menu.rs`, `menu/nav.rs` and `menu/render/dispatch.rs` with its
+  own pixel gates. So Delete stays present-and-inactive, and `delete_world_in`
+  deliberately does not exist — a tested helper with no caller is the island
+  `CLAUDE.md` names. Filed as a follow-up to #468.
+- **The world list does not scroll**, so it is capped at
+  `render::world_list_max_rows()` (10 at the reference canvas) and a player with
+  more worlds than that cannot reach the rest. See
+  [`world-select.md`](./world-select.md).
 - **`level.dat` is written and read, but only the server consumes it.**
   `LevelDatHandle` (`region_source.rs`) creates the file at world open, stamps
   `Time` and `LastPlayed` on every save and at shutdown, and reads the age back
@@ -336,9 +364,13 @@ Named rather than left to be discovered:
 ## Configuration
 
 - `world_dir` — passed to `IntegratedServer::open_persistent_with_mobs`. For a
-  real session it is `lodestone::saves::default_world_dir()`, i.e.
-  `<data dir>/saves/world`, so the `LODESTONE_DATA_DIR` environment variable
-  relocates saves along with `options.json` and `servers.json`.
+  real session it is a directory the world-select screen chose under
+  `lodestone::saves`' root, i.e. `<data dir>/saves/<world>`, so the
+  `LODESTONE_DATA_DIR` environment variable relocates saves along with
+  `options.json` and `servers.json`. **A test must never reach that root**;
+  `crates/lodestone-shell/tests/no_test_touches_the_real_saves_dir.rs` is the
+  source scan that enforces it, for the reason `CLAUDE.md` §12.44 gives — a test
+  that writes into the owner's own saves folder has no symptom the suite can see.
 - `autosave` — a `Duration`, same call. The shell passes
   `net::AUTOSAVE_INTERVAL`, 30 s. Far shorter than vanilla's 6000 ticks because
   a save writes only the dirty set, off-thread: a player standing still writes
