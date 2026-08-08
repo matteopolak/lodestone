@@ -309,3 +309,93 @@ fn trailing_bytes_after_an_advancement_packet_are_refused() {
     payload.push(0xFF); // one byte too many
     expect_err(play::clientbound::UPDATE_ADVANCEMENTS, &payload);
 }
+
+/// The two encoders that had no v770 override at all, so every advancement and
+/// statistic the server tracked reached the wire as `ServerDirective::None`.
+mod server_encoders {
+    use lodestone_server::{
+        Advancement, AdvancementProgressUpdate, AdvancementUpdate, ServerDirective, ServerProtocol,
+        StatKey, StatType,
+    };
+    use lodestone_v770::V770ServerProtocol;
+    use lodestone_v770::packet_ids::play;
+
+    use super::var_i32;
+
+    /// `update_advancements` produces a real frame with the exact body vanilla's
+    /// own reader expects, byte for byte.
+    #[test]
+    fn update_advancements_encodes_a_real_frame() {
+        let update = AdvancementUpdate {
+            reset: true,
+            added: vec![
+                Advancement::new("minecraft:story/root", vec![vec!["got_it".to_string()]], false),
+            ],
+            removed: vec!["minecraft:story/gone".to_string()],
+            progress: vec![AdvancementProgressUpdate {
+                id: "minecraft:story/root".to_string(),
+                criteria: vec![("got_it".to_string(), Some(1_700_000_000_123))],
+            }],
+            show_advancements: true,
+        };
+
+        let mut expected = vec![1u8]; // reset
+        expected.extend_from_slice(&var_i32(1)); // one added
+        expected.extend_from_slice(&var_i32(20));
+        expected.extend_from_slice(b"minecraft:story/root");
+        expected.push(0u8); // no parent
+        expected.push(0u8); // no display
+        expected.extend_from_slice(&var_i32(1)); // one requirement group
+        expected.extend_from_slice(&var_i32(1)); // one criterion in it
+        expected.extend_from_slice(&var_i32(6));
+        expected.extend_from_slice(b"got_it");
+        expected.push(0u8); // sendsTelemetryEvent
+        expected.extend_from_slice(&var_i32(1)); // one removed
+        expected.extend_from_slice(&var_i32(20));
+        expected.extend_from_slice(b"minecraft:story/gone");
+        expected.extend_from_slice(&var_i32(1)); // one progress entry
+        expected.extend_from_slice(&var_i32(20));
+        expected.extend_from_slice(b"minecraft:story/root");
+        expected.extend_from_slice(&var_i32(1)); // one criterion
+        expected.extend_from_slice(&var_i32(6));
+        expected.extend_from_slice(b"got_it");
+        expected.push(1u8); // obtained
+        expected.extend_from_slice(&1_700_000_000_123i64.to_be_bytes());
+        expected.push(1u8); // showAdvancements
+
+        assert_eq!(
+            V770ServerProtocol.encode_update_advancements(&update),
+            ServerDirective::Send {
+                packet_id: play::clientbound::UPDATE_ADVANCEMENTS,
+                payload: expected,
+            }
+        );
+    }
+
+    /// `award_stats` resolves each key in the registry its stat type dispatches
+    /// on — `mined` in the *block* registry, `killed` in `entity_type` — and
+    /// skips a key that resolves in neither rather than inventing an id.
+    #[test]
+    fn award_stats_encodes_registry_ids_per_stat_type() {
+        let stats = vec![
+            (StatKey::new(StatType::Mined, "minecraft:stone"), 12),
+            (StatKey::new(StatType::Custom, "play_time"), 4200),
+            (StatKey::new(StatType::Killed, "minecraft:not_a_mob"), 3),
+        ];
+        let ServerDirective::Send { packet_id, payload } =
+            V770ServerProtocol.encode_award_stats(&stats)
+        else {
+            panic!("award_stats must send");
+        };
+        assert_eq!(packet_id, play::clientbound::AWARD_STATS);
+
+        let mut expected = var_i32(2); // the unresolvable entity key is skipped
+        expected.extend_from_slice(&var_i32(0)); // stat_type mined
+        expected.extend_from_slice(&var_i32(1)); // block registry id of stone
+        expected.extend_from_slice(&var_i32(12));
+        expected.extend_from_slice(&var_i32(8)); // stat_type custom
+        expected.extend_from_slice(&var_i32(1)); // custom_stat play_time
+        expected.extend_from_slice(&var_i32(4200));
+        assert_eq!(payload, expected);
+    }
+}

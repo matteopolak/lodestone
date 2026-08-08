@@ -54,6 +54,7 @@ use lodestone_server::{
     MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, MetadataField, PlayerListing, ResourcePackPush, ServerBound,
     ServerDirective, ServerProtocol, WorldBorder, WorldgenScope,
 };
+use lodestone_server::{AdvancementUpdate, StatKey, StatType};
 use lodestone_world::{
     ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmap, Heightmaps,
     LightProperties, compute_column_light,
@@ -656,6 +657,219 @@ fn send<T: Encode>(packet_id: i32, packet: &T) -> ServerDirective {
         packet_id,
         payload: encode_body(packet),
     }
+}
+
+/// `minecraft:custom_stat` registry paths by numeric id, from
+/// `.cache/mc/26.2/generated/reports/registries.json`. A built-in registry, so
+/// these ids are the jar's and not synced.
+///
+/// Note the 26.2 names: `play_time`, not the older `play_one_minute`.
+const CUSTOM_STAT_IDS: &[&str] = &[
+    "leave_game",
+    "play_time",
+    "total_world_time",
+    "time_since_death",
+    "time_since_rest",
+    "sneak_time",
+    "walk_one_cm",
+    "crouch_one_cm",
+    "sprint_one_cm",
+    "walk_on_water_one_cm",
+    "fall_one_cm",
+    "climb_one_cm",
+    "fly_one_cm",
+    "walk_under_water_one_cm",
+    "minecart_one_cm",
+    "boat_one_cm",
+    "pig_one_cm",
+    "happy_ghast_one_cm",
+    "horse_one_cm",
+    "aviate_one_cm",
+    "swim_one_cm",
+    "strider_one_cm",
+    "nautilus_one_cm",
+    "jump",
+    "drop",
+    "damage_dealt",
+    "damage_dealt_absorbed",
+    "damage_dealt_resisted",
+    "damage_taken",
+    "damage_blocked_by_shield",
+    "damage_absorbed",
+    "damage_resisted",
+    "deaths",
+    "mob_kills",
+    "animals_bred",
+    "player_kills",
+    "fish_caught",
+    "talked_to_villager",
+    "traded_with_villager",
+    "eat_cake_slice",
+    "fill_cauldron",
+    "use_cauldron",
+    "clean_armor",
+    "clean_banner",
+    "clean_shulker_box",
+    "interact_with_brewingstand",
+    "interact_with_beacon",
+    "inspect_dropper",
+    "inspect_hopper",
+    "inspect_dispenser",
+    "play_noteblock",
+    "tune_noteblock",
+    "pot_flower",
+    "trigger_trapped_chest",
+    "open_enderchest",
+    "enchant_item",
+    "play_record",
+    "interact_with_furnace",
+    "interact_with_crafting_table",
+    "open_chest",
+    "sleep_in_bed",
+    "open_shulker_box",
+    "open_barrel",
+    "interact_with_blast_furnace",
+    "interact_with_smoker",
+    "interact_with_lectern",
+    "interact_with_campfire",
+    "interact_with_cartography_table",
+    "interact_with_loom",
+    "interact_with_stonecutter",
+    "bell_ring",
+    "raid_trigger",
+    "raid_win",
+    "interact_with_anvil",
+    "interact_with_grindstone",
+    "target_hit",
+    "interact_with_smithing_table",
+];
+
+/// The `minecraft:block` **registry** id (registration order) for a block name.
+///
+/// A linear scan over [`lodestone_data::block_states::block_type_name`] rather
+/// than a reverse map: statistics are a request/response batch of at most a few
+/// hundred entries, sent when a player opens one screen, so a table would cost
+/// more to keep than the scan does to run. Note this is the registry id space,
+/// **not** the block-state id space a chunk palette uses.
+fn block_registry_id_by_name(name: &str) -> Option<i32> {
+    (0..lodestone_data::block_states::BLOCK_COUNT).find_map(|id| {
+        (lodestone_data::block_states::block_type_name(id)? == name)
+            .then(|| i32::try_from(id).ok())
+            .flatten()
+    })
+}
+
+/// Resolves a [`StatKey`] to the pair of VarInts `Stat.STREAM_CODEC` writes: the
+/// `minecraft:stat_type` registry id, then the value's id in whichever registry
+/// that type dispatches on.
+///
+/// The four value registries come straight from `Stats.java`: `mined` is
+/// `BLOCK`, the five item counters are `ITEM`, the two kill counters are
+/// `ENTITY_TYPE`, and `custom` is `CUSTOM_STAT`. Getting that mapping wrong is
+/// invisible — every id resolves to *something* in the wrong registry, and the
+/// client draws a plausible line about the wrong block.
+fn stat_wire_ids(key: &StatKey) -> Option<(i32, i32)> {
+    let type_id = match key.kind {
+        StatType::Mined => 0,
+        StatType::Crafted => 1,
+        StatType::Used => 2,
+        StatType::Broken => 3,
+        StatType::PickedUp => 4,
+        StatType::Dropped => 5,
+        StatType::Killed => 6,
+        StatType::KilledBy => 7,
+        StatType::Custom => 8,
+    };
+    let value = key.value.as_str();
+    let value_id = match key.kind {
+        StatType::Mined => block_registry_id_by_name(value)?,
+        StatType::Crafted
+        | StatType::Used
+        | StatType::Broken
+        | StatType::PickedUp
+        | StatType::Dropped => item_id(value)?,
+        StatType::Killed | StatType::KilledBy => entity_type_id(value)?,
+        StatType::Custom => {
+            // Custom stats are conventionally written bare (`play_time`) but the
+            // registry key is namespaced, so accept either spelling.
+            let path = value.strip_prefix("minecraft:").unwrap_or(value);
+            let index = CUSTOM_STAT_IDS.iter().position(|name| *name == path)?;
+            i32::try_from(index).ok()?
+        }
+    };
+    Some((type_id, value_id))
+}
+
+/// Body of `ClientboundUpdateAdvancementsPacket` (see the trait method for the
+/// field-by-field wire notes).
+fn encode_update_advancements_body(update: &AdvancementUpdate) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.bool(update.reset);
+    w.var_i32(i32::try_from(update.added.len()).unwrap_or(i32::MAX));
+    for advancement in &update.added {
+        w.string(&advancement.id);
+        match &advancement.parent {
+            Some(parent) => {
+                w.bool(true);
+                w.string(parent);
+            }
+            None => w.bool(false),
+        }
+        // No display: `lodestone_server::advancements::Advancement` deliberately
+        // carries no presentation (it has no component model), and vanilla's own
+        // reader treats the optional as absent-and-hidden rather than erroring.
+        // A client with its own advancement table (ours does) keys on the id and
+        // draws its own icon; the progress below is the part that was missing.
+        w.bool(false);
+        w.var_i32(i32::try_from(advancement.requirements.len()).unwrap_or(i32::MAX));
+        for group in &advancement.requirements {
+            w.var_i32(i32::try_from(group.len()).unwrap_or(i32::MAX));
+            for criterion in group {
+                w.string(criterion);
+            }
+        }
+        w.bool(advancement.sends_telemetry_event);
+    }
+    w.var_i32(i32::try_from(update.removed.len()).unwrap_or(i32::MAX));
+    for id in &update.removed {
+        w.string(id);
+    }
+    w.var_i32(i32::try_from(update.progress.len()).unwrap_or(i32::MAX));
+    for entry in &update.progress {
+        w.string(&entry.id);
+        w.var_i32(i32::try_from(entry.criteria.len()).unwrap_or(i32::MAX));
+        for (name, obtained) in &entry.criteria {
+            w.string(name);
+            // `CriterionProgress` is a nullable `Instant`: presence bool then
+            // epoch millis as a big-endian long.
+            match obtained {
+                Some(millis) => {
+                    w.bool(true);
+                    w.i64(*millis);
+                }
+                None => w.bool(false),
+            }
+        }
+    }
+    w.bool(update.show_advancements);
+    w.into_vec()
+}
+
+/// Body of `ClientboundAwardStatsPacket`: a VarInt-counted map of
+/// `(stat type id, value id) -> count`.
+fn encode_award_stats_body(stats: &[(StatKey, i32)]) -> Vec<u8> {
+    let resolved: Vec<((i32, i32), i32)> = stats
+        .iter()
+        .filter_map(|(key, count)| stat_wire_ids(key).map(|ids| (ids, *count)))
+        .collect();
+    let mut w = Writer::default();
+    w.var_i32(i32::try_from(resolved.len()).unwrap_or(i32::MAX));
+    for ((type_id, value_id), count) in resolved {
+        w.var_i32(type_id);
+        w.var_i32(value_id);
+        w.var_i32(count);
+    }
+    w.into_vec()
 }
 
 /// Decodes a packet body, asserting the payload was consumed to the last
@@ -3877,6 +4091,49 @@ impl ServerProtocol for V770ServerProtocol {
             play::clientbound::SET_BORDER_WARNING_DISTANCE,
             &SetBorderWarningDistance { warning_blocks },
         )
+    }
+
+    /// See [`ServerProtocol::encode_update_advancements`]'s trait doc comment.
+    ///
+    /// Before this override the trait default returned `ServerDirective::None`,
+    /// so the whole advancement path — a real `AdvancementManager` with per-player
+    /// progress, an every-tick `flush_dirty`, and a join-time `initial_update` —
+    /// reached the wire as **nothing**, even in singleplayer against our own
+    /// server. That is the island shape, with every intermediate piece green.
+    ///
+    /// Wire shape (`ClientboundUpdateAdvancementsPacket`'s own reader): a bool
+    /// `reset`, a VarInt-counted list of `AdvancementHolder` (id, optional parent,
+    /// optional `DisplayInfo`, the AND-of-ORs requirement groups, and the
+    /// `sendsTelemetryEvent` bit), a VarInt-counted list of removed ids, a
+    /// VarInt-counted map of id → per-criterion nullable `Instant`, and a bool
+    /// `showAdvancements`.
+    ///
+    /// The display optional is always written absent — see
+    /// [`encode_update_advancements_body`] for why, and note that a *vanilla*
+    /// client hides a display-less advancement, so this override is complete for
+    /// our own client and partial for vanilla's. Growing it needs a component
+    /// model in `lodestone-server`, which is that crate's own scoped omission.
+    fn encode_update_advancements(&self, update: &AdvancementUpdate) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::UPDATE_ADVANCEMENTS,
+            payload: encode_update_advancements_body(update),
+        }
+    }
+
+    /// See [`ServerProtocol::encode_award_stats`]'s trait doc comment. Same
+    /// missing-override story as
+    /// [`encode_update_advancements`](Self::encode_update_advancements): the
+    /// server already answered `ClientCommand(REQUEST_STATS)` by building a real
+    /// snapshot and handing it to a seam that dropped it.
+    ///
+    /// A key whose value does not resolve in its stat type's registry is
+    /// **skipped**, not encoded with a made-up id — the count is taken after
+    /// resolution so the map length always matches the entries that follow.
+    fn encode_award_stats(&self, stats: &[(StatKey, i32)]) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::AWARD_STATS,
+            payload: encode_award_stats_body(stats),
+        }
     }
 
     /// This host serves the embedded 26.2 worldgen bundle (issue #407): the
