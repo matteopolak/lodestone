@@ -211,6 +211,27 @@ fn invalid_username_reason() -> Text {
 #[cfg(not(target_arch = "wasm32"))]
 const TIME_SYNC_INTERVAL: Duration = Duration::from_millis(1_000);
 
+/// The largest view radius a client may raise itself to mid-session on a path
+/// whose memory it owns — the ceiling `IntegratedServer::open_in_memory*` hands
+/// [`ViewTracker::max_radius`] (issue #545).
+///
+/// **Derived, not chosen.** The shell's render-distance slider tops out at
+/// `config::MAX_RENDER_DISTANCE = 32` chunks and
+/// `Session::set_render_distance` sends `render_distance + 1` (the outermost
+/// streamed ring can never be meshed, so asking for exactly `render_distance`
+/// loses the last visible ring) — so `33` is the largest value a real client on
+/// this project can ask for, and vanilla's own `ClientInformation.viewDistance`
+/// is documented as `2..=32` on [`ServerBound::ClientInformationChanged`].
+///
+/// This is a *sanity* bound rather than a memory policy: the wire field is an
+/// `i8`, so without it a malformed packet asking for `127` would try to stream
+/// 65,025 columns. Singleplayer is deliberately **not** capped by
+/// `chunk_store::MAX_CAPACITY` — see that constant and
+/// `chunk_store::integrated_capacity_for_view_radius` for whose memory is being
+/// spent, and this module's own note on what the store's capacity does *not*
+/// follow.
+pub const MAX_CLIENT_VIEW_RADIUS: i32 = 33;
+
 /// Milliseconds per tick at vanilla's normal 20 TPS, used to convert
 /// wall-clock elapsed time into the tick-based `game_time`
 /// [`ServerProtocol::encode_set_time`] carries, in the absence of a real
@@ -519,16 +540,39 @@ impl<'a, S: ChunkSource + 'static> SourceRef<'a, S> {
 struct ViewTracker {
     center: (i32, i32),
     loaded: HashSet<(i32, i32)>,
-    /// The connection's *current* effective view radius — starts at the
-    /// server's configured cap (`serve_connection`'s own `view_radius`
-    /// parameter) and can shrink or grow within that cap via
+    /// The connection's *current* effective view radius — starts at the radius
+    /// the connection joined with (`serve_connection`'s own `view_radius`
+    /// parameter) and can shrink or grow within
+    /// [`max_radius`](Self::max_radius) via
     /// [`set_view_radius`](Self::set_view_radius) (issue #270's
     /// `ServerBound::ClientInformationChanged`). Stored on `self` rather than
     /// re-passed at every [`recenter`](Self::recenter) call so a client's
     /// requested distance actually sticks across subsequent moves, instead
-    /// of being silently overwritten by the original cap on the next
+    /// of being silently overwritten by the original radius on the next
     /// `PlayerMoved`.
     radius: i32,
+    /// The largest radius this connection is **permitted** to reach, and the
+    /// ceiling [`set_view_radius`](Self::set_view_radius) clamps a client
+    /// request to — vanilla's `ChunkMap.java:826`,
+    /// `Mth.clamp(player.requestedViewDistance(), 2, this.serverViewDistance)`.
+    ///
+    /// **Issue #545: this is a second field precisely because it is a second
+    /// question.** `radius` above is where the connection *starts*; this is how
+    /// far it may *go*. They were one value, so the ceiling for a live change was
+    /// the radius the client happened to join with — lowering render distance
+    /// mid-session worked and raising it silently did nothing, which is exactly
+    /// the owner's report. Vanilla clamps against `serverViewDistance`, a server
+    /// setting, never against the player's current view.
+    ///
+    /// Who supplies it is a per-path memory-policy decision, the same fork
+    /// `ChunkStore::for_view_radius` vs `for_integrated_view_radius` already
+    /// encodes: singleplayer (`open_in_memory*`) passes
+    /// [`MAX_CLIENT_VIEW_RADIUS`] because it is the slider-mover's own memory,
+    /// while open-to-LAN (`IntegratedServer::bind`) passes its configured
+    /// `view_radius` because it spends an operator's memory on behalf of players
+    /// who did not choose the setting. Every other caller passes `view_radius`,
+    /// which is exactly the old behaviour.
+    max_radius: i32,
 }
 
 /// The directives produced by one [`ViewTracker`] update, split by whether
@@ -553,7 +597,13 @@ impl ViewTracker {
     /// view (`center`, `[-view_radius, view_radius]²` around it), so the
     /// first [`recenter`](Self::recenter) diffs against what the client
     /// actually has rather than an empty set.
-    fn new(center: (i32, i32), view_radius: i32) -> Self {
+    /// `max_view_radius` is the ceiling for a *later*
+    /// [`set_view_radius`](Self::set_view_radius) — see
+    /// [`max_radius`](Self::max_radius). It is raised to `view_radius` if a
+    /// caller passes something smaller, because the join square has already been
+    /// sent and a ceiling under it would make the connection's very first live
+    /// settings packet shrink a view nobody asked to shrink.
+    fn new(center: (i32, i32), view_radius: i32, max_view_radius: i32) -> Self {
         let mut loaded = HashSet::new();
         for dz in -view_radius..=view_radius {
             for dx in -view_radius..=view_radius {
@@ -564,6 +614,7 @@ impl ViewTracker {
             center,
             loaded,
             radius: view_radius,
+            max_radius: max_view_radius.max(view_radius),
         }
     }
 
@@ -675,6 +726,16 @@ impl ViewTracker {
         P: ServerProtocol,
         S: ChunkSource + 'static,
     {
+        // Issue #545: the clamp lives here, against
+        // [`max_radius`](Self::max_radius), and **not** at the call site against
+        // the connection's current radius — which is the bug. The floor is `0`,
+        // not vanilla client UI's slider minimum of `2` (`Options::renderDistance`):
+        // the server side has no evidence pinning that specific floor, and a floor
+        // above the ceiling would be actively wrong on a connection served with a
+        // smaller radius than that (several tests in this crate use
+        // `view_radius: 0`). `.max(0)` on the upper bound only guards `clamp`'s own
+        // `min <= max` invariant against a negative `max_radius`.
+        let radius = radius.clamp(0, self.max_radius.max(0));
         if radius == self.radius {
             return ViewUpdate::default();
         }
@@ -1037,6 +1098,12 @@ pub(crate) async fn serve_connection_shared<T, P, S, E>(
     source: &Arc<S>,
     entities: &E,
     view_radius: i32,
+    // Issue #545. Forwarded rather than defaulted to `view_radius`, because this
+    // is one of the two entry points a caller with its own memory policy uses —
+    // `IntegratedServer::open_in_memory*` passes [`MAX_CLIENT_VIEW_RADIUS`] here
+    // so the slider can actually be raised mid-session. See
+    // `ViewTracker::max_radius`.
+    max_view_radius: i32,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
 ) -> Result<ServeSummary, ServerError>
@@ -1052,6 +1119,7 @@ where
         SourceRef::Shared(source),
         entities,
         view_radius,
+        max_view_radius,
         block_entities,
         mobs,
         &BlockTickFeed::default(),
@@ -1084,6 +1152,12 @@ pub(crate) async fn serve_connection_with_mob_events_shared<T, P, S, E>(
     source: &Arc<S>,
     entities: &E,
     view_radius: i32,
+    // Issue #545, and this is the entry point where the fork actually *matters*:
+    // both `IntegratedServer::open_in_memory_with_mobs*` (uncapped — passes
+    // [`MAX_CLIENT_VIEW_RADIUS`]) and `IntegratedServer::bind` (open-to-LAN —
+    // passes its configured `view_radius`) come through here, so the ceiling
+    // cannot be derived locally. See `ViewTracker::max_radius`.
+    max_view_radius: i32,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
     block_ticks: &BlockTickFeed,
@@ -1108,6 +1182,7 @@ where
         SourceRef::Shared(source),
         entities,
         view_radius,
+        max_view_radius,
         block_entities,
         mobs,
         block_ticks,
@@ -1169,6 +1244,9 @@ where
         SourceRef::Shared(source),
         entities,
         view_radius,
+        // Issue #545: the join radius is also the ceiling here — this wrapper
+        // serves no path with its own capacity policy. See `ViewTracker::max_radius`.
+        view_radius,
         block_entities,
         mobs,
         block_ticks,
@@ -1221,6 +1299,9 @@ where
         proto,
         SourceRef::Borrowed(source),
         entities,
+        view_radius,
+        // Issue #545: the join radius is also the ceiling here — this wrapper
+        // serves no path with its own capacity policy. See `ViewTracker::max_radius`.
         view_radius,
         block_entities,
         mobs,
@@ -1289,6 +1370,9 @@ where
         SourceRef::Borrowed(source),
         entities,
         view_radius,
+        // Issue #545: the join radius is also the ceiling here — this wrapper
+        // serves no path with its own capacity policy. See `ViewTracker::max_radius`.
+        view_radius,
         block_entities,
         mobs,
         block_ticks,
@@ -1351,6 +1435,9 @@ where
         SourceRef::Borrowed(source),
         entities,
         view_radius,
+        // Issue #545: the join radius is also the ceiling here — this wrapper
+        // serves no path with its own capacity policy. See `ViewTracker::max_radius`.
+        view_radius,
         block_entities,
         mobs,
         block_ticks,
@@ -1410,6 +1497,9 @@ where
         proto,
         SourceRef::Borrowed(source),
         entities,
+        view_radius,
+        // Issue #545: the join radius is also the ceiling here — this wrapper
+        // serves no path with its own capacity policy. See `ViewTracker::max_radius`.
         view_radius,
         block_entities,
         mobs,
@@ -1471,6 +1561,9 @@ where
         SourceRef::Borrowed(source),
         entities,
         view_radius,
+        // Issue #545: the join radius is also the ceiling here — this wrapper
+        // serves no path with its own capacity policy. See `ViewTracker::max_radius`.
+        view_radius,
         block_entities,
         mobs,
         block_ticks,
@@ -1505,6 +1598,12 @@ async fn serve_connection_inner<T, P, S, E>(
     source: SourceRef<'_, S>,
     entities: &E,
     view_radius: i32,
+    // Issue #545. The largest radius this connection may later raise itself to,
+    // which is a different question from the `view_radius` it joins with — see
+    // `ViewTracker::max_radius` for the per-path policy and why one value could
+    // not do both jobs. Every wrapper above except the two `*_shared` ones
+    // passes `view_radius` here, which is exactly the pre-#545 behaviour.
+    max_view_radius: i32,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
     block_ticks: &BlockTickFeed,
@@ -1853,7 +1952,10 @@ where
                 // the X/Z offsets move, this follows automatically.
                 let spawn_cx = (spawn.pos.x / 16.0).floor() as i32;
                 let spawn_cz = (spawn.pos.z / 16.0).floor() as i32;
-                let view = ViewTracker::new((spawn_cx, spawn_cz), view_radius);
+                // Issue #545: two radii, two roles — the square that was just
+                // streamed, and the ceiling a later `ClientInformationChanged`
+                // may raise this connection to. See `ViewTracker::max_radius`.
+                let view = ViewTracker::new((spawn_cx, spawn_cz), view_radius, max_view_radius);
                 // Issues #48/#464. Built here, at the Play handoff, because
                 // this is the first point where both halves of a caller's
                 // identity are known and settled: `login_uuid` is the uuid
@@ -4383,20 +4485,18 @@ where
             .await?;
         }
         ServerBound::ClientInformationChanged { view_distance } => {
-            // Clamp against the server's own configured cap (`view_radius`,
-            // this connection's original `serve_connection` argument) —
-            // vanilla's own server likewise never streams more than its
-            // configured `view-distance` setting regardless of what a
-            // client asks for. The floor is `0`, not vanilla client UI's
-            // slider minimum of `2` (`Options::renderDistance`): the server
-            // side has no evidence pinning that specific floor, and a floor
-            // above the server's own cap would be actively wrong on a
-            // connection configured with a smaller `view_radius` than that
-            // (several tests in this crate use `view_radius: 0`). `.max(0)`
-            // on the upper bound only guards `clamp`'s own `min <= max`
-            // invariant against a caller passing a negative `view_radius`.
-            let requested = i32::from(view_distance).clamp(0, view_radius.max(0));
-            let update = view.set_view_radius(proto, source, requested).await;
+            // **Issue #545: no clamp here.** This arm used to do
+            // `clamp(0, view_radius.max(0))` against `view_radius` — *this
+            // connection's own `serve_connection` argument*, i.e. the radius it
+            // joined with. That made lowering render distance mid-session work
+            // and raising it silently do nothing, which is the owner's report.
+            // Vanilla clamps against `serverViewDistance`, a server setting
+            // (`ChunkMap.java:826`), never against the player's current view.
+            //
+            // The ceiling now lives on the `ViewTracker` as its own field and
+            // `set_view_radius` applies it — see `ViewTracker::max_radius` for
+            // the per-path policy and why the two roles had to be separated.
+            let update = view.set_view_radius(proto, source, i32::from(view_distance)).await;
             send_view_update(conn, state, update, awaiting_chunk_batch_ack, pending_chunk_batches).await?;
         }
         ServerBound::ChunkBatchAcknowledged { .. } => {
