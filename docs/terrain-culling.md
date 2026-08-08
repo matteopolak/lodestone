@@ -188,6 +188,33 @@ warning, `block == u32::MAX` so it sorts last) rather than becoming a hole in th
 * `crate::mesher::SectionKey::coord()` — the `SectionKey` → section-grid conversion, via `div_euclid`
   because `min_y` is negative in the overworld.
 
+## Measured, on the `client_chunk_cycles` fixture (25 real generated columns, 193 sections with
+opaque geometry, camera at (8, 96, 8))
+
+`cargo test -p lodestone-shell --release --test client_chunk_cycles -- --ignored --nocapture`, at
+`5cd65646`. Section counts are exact; the instruction column is there for magnitude only — the
+submission term reproduces to ~3.1% across processes, so **gate on the counts**.
+
+| arm | sections drawn | note |
+|---|---|---|
+| no cull (`smartCull` off) | 193 | 310 draw calls, 2 buffer-bind pairs |
+| distance ∩ frustum | **12** | frustum 181, distance **0** |
+| + occlusion graph | 12 | **0 more** — and that zero is the interesting number, see below |
+| looking down (pitch 75), graph off | 191 | the frustum keeps the subsurface at this heading |
+| looking down, graph on | **59** | **132 culled by the graph — 69%** |
+
+**The camera angle decides whether this cull can be measured at all, and the vacuous reading is the
+plausible-looking one.** At the harness's shared camera (pitch 15, just below the horizon) the frustum
+has *already* removed the entire subsurface, so the occlusion graph reports **0** — true, and completely
+uninformative about whether the graph works. Only a heading where the frustum keeps the underground can
+tell a working walk from a walk that silently degraded, which is why the harness has a separate steeply
+pitched arm and why `occlusion_active` is a counter rather than an inference. A gate that had asserted
+"occlusion culls something" at the shared camera would have failed on correct code; one that asserted
+nothing would have passed on a completely dead graph.
+
+The distance cull's **0** is likewise not a defect: all 25 fixture columns sit inside render distance 8's
+circle, and the predicate only starts removing columns past ~rd 9.
+
 ## See also
 
 * [`docs/plans/render-performance.md`](./plans/render-performance.md) — the sequenced plan (U1–U5) and

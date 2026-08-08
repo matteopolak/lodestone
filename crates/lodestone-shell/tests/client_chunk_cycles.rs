@@ -672,6 +672,13 @@ struct SubmitCost {
     /// [`occluded_by_graph`](Self::occluded_by_graph) exactly — the same walk, the
     /// same camera, one arm drawing them and one not.
     shadow_would_cull: usize,
+    /// The same fixture with the camera pitched steeply **down**:
+    /// `(drawn with occlusion off, drawn with it on, culled by the graph)`.
+    ///
+    /// The arm that can see U3 at all. At the shared camera's pitch the frustum has
+    /// already removed the subsurface, so the graph's own contribution there is a
+    /// true and completely uninformative zero.
+    looking_down: (usize, usize, usize),
 }
 
 /// Renders one frame with no terrain, then the same frame with every section of
@@ -978,6 +985,71 @@ fn measure_draw_submission(
          walk never ran over the camera's coord."
     );
 
+    // Arm 6: the arm that can actually *see* the occlusion graph, and the reason
+    // arms 3–5 are not enough.
+    //
+    // At the shared camera above (pitch 15, looking just below the horizon) the
+    // frustum has already removed the whole subsurface, so the graph has nothing
+    // left to remove and reports **0** — a true reading, and a completely vacuous
+    // one for U3. That is this repo's *world* species: the fixture cannot exercise
+    // the code under test. So this arm points the same camera steeply **down**,
+    // which is the one heading where the frustum keeps the underground and only
+    // connectivity can remove it. No instruction measurement — a section count is
+    // exact where the submission term reproduces to only ~3.1%.
+    let down = Camera {
+        pitch: 75.0,
+        ..camera
+    };
+    let mut down_frame = |state: &RenderState| {
+        let frame = target.acquire().expect("headless acquire");
+        state.render(device, queue, frame.view(), &down, None, &[])
+    };
+    state.set_terrain_occlusion(lodestone::gpu::TerrainOcclusion::Off);
+    let down_off = {
+        let mut last = None;
+        for _ in 0..3 {
+            last = Some(down_frame(&state));
+        }
+        last.expect("three frames")
+    };
+    state.set_terrain_occlusion(lodestone::gpu::TerrainOcclusion::On);
+    let down_on = {
+        let mut last = None;
+        for _ in 0..3 {
+            last = Some(down_frame(&state));
+        }
+        last.expect("three frames")
+    };
+    assert!(
+        down_on.sections_drawn < down_off.sections_drawn,
+        "looking straight down over real terrain, the occlusion graph removed nothing: {} \
+         sections drawn either way. The frustum keeps the subsurface at this pitch, so a graph \
+         that culls nothing here is a graph that is not working — check `occlusion_active` ({}) \
+         and `occlusion_graph_sections` ({}) before believing the walk.",
+        down_on.sections_drawn,
+        down_on.occlusion_active,
+        down_on.occlusion_graph_sections
+    );
+    assert!(
+        down_on.sections_drawn > 0,
+        "the occlusion walk removed every section while looking down"
+    );
+    // And the invariant closes in this arm too, which is what says the removed
+    // sections were *counted* as occlusion rather than quietly dropped.
+    assert_eq!(
+        down_on.sections_drawn
+            + down_on.sections_culled_distance
+            + down_on.sections_culled_frustum
+            + down_on.sections_culled_occlusion,
+        stats.sections_drawn,
+        "the looking-down arm's cull split does not close against the resident set"
+    );
+    let looking_down = (
+        down_off.sections_drawn,
+        down_on.sections_drawn,
+        down_on.sections_culled_occlusion,
+    );
+
     SubmitCost {
         fixed,
         loaded,
@@ -997,6 +1069,7 @@ fn measure_draw_submission(
         occluded_by_graph: ostats.sections_culled_occlusion,
         occlusion_graph_sections: ostats.occlusion_graph_sections,
         shadow_would_cull: shadow_stats.sections_occlusion_shadow,
+        looking_down,
     }
 }
 
@@ -1607,6 +1680,11 @@ fn client_chunk_path_cycle_attribution() {
     println!(
         "  graph holds {} sections; shadow mode predicted {} culls",
         s4.occlusion_graph_sections, s4.shadow_would_cull
+    );
+    let (down_off, down_on, down_occ) = s4.looking_down;
+    println!(
+        "same set, camera pitched down  {down_off:>13} sections with the graph off / {down_on} \
+         with it on ({down_occ} culled by the graph)"
     );
     // The extrapolation to the one recorded live figure. 931 sections / 441k
     // quads at default render distance is `45a93e4`'s commit message — the only
