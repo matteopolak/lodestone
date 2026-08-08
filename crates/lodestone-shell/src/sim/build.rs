@@ -428,6 +428,7 @@ impl Sim {
             sprint_window_ticks: lodestone_controller::SPRINT_TRIGGER_WINDOW_TICKS,
             first_chunk_at: None,
             chest_lids: crate::block_entities::ChestLids::new(),
+            bell_shakes: crate::block_entities::BellShakes::new(),
             pickups: lodestone_game::mining::PickupFeed::new(),
         };
         sim.refresh_mesh_policy();

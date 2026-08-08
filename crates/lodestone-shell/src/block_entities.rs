@@ -108,8 +108,8 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 use lodestone_render::{
-    BellSpawn, ChestHalf, ChestMaterial, ChestSpawn, SignOrientation, SignSpawn, SkullOrientation,
-    SkullSpawn, SkullType, horizontal_facing_yaw,
+    BellShakeDirection, BellSpawn, ChestHalf, ChestMaterial, ChestSpawn, SignOrientation, SignSpawn,
+    SkullOrientation, SkullSpawn, SkullType, horizontal_facing_yaw,
 };
 use lodestone_world::{ChunkPos, SignText, World};
 
@@ -223,6 +223,128 @@ impl ChestLids {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.lids.is_empty()
+    }
+}
+
+/// `BellBlockEntity.DURATION` — a shake runs 50 ticks and then stops
+/// (`BellBlockEntity.tick`: `if (entity.ticks >= 50) { shaking = false; ticks = 0; }`).
+const BELL_SHAKE_DURATION: f32 = 50.0;
+
+/// One bell's shake — `BellBlockEntity`'s `clickDirection` plus its `ticks`
+/// counter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Shake {
+    direction: BellShakeDirection,
+    /// `BellBlockEntity.ticks`, counted up from `0`.
+    ticks: f32,
+    /// The value at the start of the current tick, for the partial-tick lerp.
+    previous: f32,
+}
+
+/// Per-position bell shake state, driven by `BLOCK_EVENT` and advanced once per
+/// client tick — the bell sibling of [`ChestLids`].
+///
+/// Keyed by absolute block position, and entries are dropped once their 50-tick
+/// shake finishes: a bell at rest is indistinguishable from an absent entry (both
+/// give [`shake`](Self::shake) `None`), the same property that makes `ChestLids`'
+/// own garbage collection safe.
+#[derive(Debug, Default, Clone)]
+pub struct BellShakes {
+    shakes: HashMap<[i32; 3], Shake>,
+}
+
+impl BellShakes {
+    /// An empty set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Applies one `BLOCK_EVENT` to the bell at `pos`, returning whether it was a
+    /// bell event.
+    ///
+    /// `BellBlockEntity.triggerEvent` (`:43-53`): only `b0 == 1` is a bell ring,
+    /// and `b1` is `Direction.from3DDataValue(...)` — the *face the bell was hit
+    /// on*, not a viewer count. A ring always restarts the animation from tick 0
+    /// even mid-shake, which is why this overwrites rather than merging.
+    ///
+    /// **`b0 == 1` is also a chest lid event**, and that collision is real: the
+    /// two are told apart by the block at `pos`, not by the packet, which is why
+    /// both trackers accept the same event and the *gather* decides which of them
+    /// a given position reads from. A note block's `b0` is its instrument and a
+    /// piston's is its direction, so neither reaches either tracker.
+    pub fn apply_block_event(&mut self, pos: [i32; 3], b0: u8, b1: u8) -> bool {
+        if b0 != 1 {
+            return false;
+        }
+        let Some(direction) = shake_direction_from_3d(b1) else {
+            // `Direction.from3DDataValue` gives UP/DOWN for `0`/`1`, which
+            // `BellModel.setupAnim` has no rotation for — vanilla stores it and
+            // then multiplies by nothing. Dropping it here is the same picture and
+            // keeps the map free of entries that can never move.
+            return false;
+        };
+        self.shakes.insert(
+            pos,
+            Shake {
+                direction,
+                ticks: 0.0,
+                previous: 0.0,
+            },
+        );
+        true
+    }
+
+    /// Advances every shake one client tick, dropping the finished ones.
+    pub fn tick(&mut self) {
+        self.shakes.retain(|_, shake| {
+            shake.previous = shake.ticks;
+            shake.ticks += 1.0;
+            shake.ticks < BELL_SHAKE_DURATION
+        });
+    }
+
+    /// The shake at `pos` for this partial tick, or `None` for a bell at rest.
+    ///
+    /// The tick counter is interpolated because that is what
+    /// `BellRenderer.extractRenderState` passes into `setupAnim` — `ticks +
+    /// partialTick`, not the whole number. Interpolating matters here for the same
+    /// reason it does for a chest lid: `bell_shake_angle` is a `sin` of it, so a
+    /// stepped counter reads as a stutter at 60 fps.
+    #[must_use]
+    pub fn shake(&self, pos: [i32; 3], partial_tick: f32) -> Option<(BellShakeDirection, f32)> {
+        let shake = self.shakes.get(&pos)?;
+        let t = partial_tick.clamp(0.0, 1.0);
+        Some((shake.direction, shake.previous + (shake.ticks - shake.previous) * t))
+    }
+
+    /// Number of bells currently shaking (for stats and tests).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.shakes.len()
+    }
+
+    /// Whether nothing is being tracked.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.shakes.is_empty()
+    }
+}
+
+/// `Direction.from3DDataValue(b1)`, narrowed to the four horizontal directions
+/// [`BellShakeDirection`] models: `0` down, `1` up, `2` north, `3` south, `4`
+/// west, `5` east.
+///
+/// **The order is the jar's, not alphabetical and not `BellShakeDirection`'s own
+/// declaration order** — getting it wrong swings the bell along the wrong axis,
+/// which still looks like a working animation.
+fn shake_direction_from_3d(b1: u8) -> Option<BellShakeDirection> {
+    match b1 {
+        2 => Some(BellShakeDirection::North),
+        3 => Some(BellShakeDirection::South),
+        4 => Some(BellShakeDirection::West),
+        5 => Some(BellShakeDirection::East),
+        _ => None,
     }
 }
 
@@ -537,19 +659,22 @@ fn bell_is_present(state_id: u32) -> bool {
 /// the block **state** is the truth about whether this is a bell at all, so a
 /// stale or orphan record whose state is not a bell draws nothing.
 ///
-/// `shake` is always `None` — see [`BellSpawn::shake`]'s doc for exactly why
-/// (the `BLOCK_EVENT` trigger is not wired from this gather) — so a bell
-/// always draws at rest rather than not drawing at all, which is still a real
-/// improvement over the hole `docs/block-entity-renderers.md` describes for a
-/// block entity with no ported renderer.
+/// `shake` comes from [`BellShakes`], the `BLOCK_EVENT`-driven tracker — `None`
+/// for a bell at rest, which is every bell until one is rung.
 #[must_use]
-pub fn bell_spawn(block: [i32; 3], state_id: u32, light: u8) -> Option<BellSpawn> {
+pub fn bell_spawn(
+    block: [i32; 3],
+    state_id: u32,
+    light: u8,
+    shakes: &BellShakes,
+    partial_tick: f32,
+) -> Option<BellSpawn> {
     if !bell_is_present(state_id) {
         return None;
     }
     Some(BellSpawn {
         pos: block,
-        shake: None,
+        shake: shakes.shake(block, partial_tick),
         light,
     })
 }
@@ -559,7 +684,12 @@ pub fn bell_spawn(block: [i32; 3], state_id: u32, light: u8) -> Option<BellSpawn
 /// [`skull_spawns`] does, for the same reason: that gather is already generic
 /// over block-entity type.
 #[must_use]
-pub fn bell_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<BellSpawn> {
+pub fn bell_spawns(
+    handle: &SharedHandle,
+    shakes: &BellShakes,
+    eye: Vec3,
+    partial_tick: f32,
+) -> Vec<BellSpawn> {
     let Some(client) = handle.get() else {
         return Vec::new();
     };
@@ -588,7 +718,7 @@ pub fn bell_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<BellSpawn> {
     for (block, state_id) in candidates {
         let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
             .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
-        if let Some(spawn) = bell_spawn(block, state_id, light) {
+        if let Some(spawn) = bell_spawn(block, state_id, light, shakes, partial_tick) {
             out.push(spawn);
         }
     }
@@ -1087,10 +1217,69 @@ mod bell_tests {
             .find(|id| lodestone_data::block_states::block_name(*id) == Some("minecraft:bell"))
             .expect("bell must be in the 26.2 state table");
         assert!(bell_is_present(id));
-        let spawn =
-            bell_spawn([1, 2, 3], id, lodestone_render::ENTITY_FULLBRIGHT).expect("must resolve");
+        let shakes = BellShakes::new();
+        let spawn = bell_spawn([1, 2, 3], id, lodestone_render::ENTITY_FULLBRIGHT, &shakes, 0.0)
+            .expect("must resolve");
         assert_eq!(spawn.pos, [1, 2, 3]);
-        assert_eq!(spawn.shake, None, "no gather here drives the shake yet");
+        assert_eq!(spawn.shake, None, "an unrung bell is at rest");
+    }
+
+    /// The `BLOCK_EVENT` -> shake chain, end to end on the CPU side: a ring makes
+    /// the gather report a shake, the tick counter advances, and the entry is gone
+    /// once vanilla's 50-tick window closes.
+    #[test]
+    fn a_block_event_rings_the_bell_for_fifty_ticks_and_then_stops() {
+        let id = (0..lodestone_data::block_states::STATE_COUNT)
+            .find(|id| lodestone_data::block_states::block_name(*id) == Some("minecraft:bell"))
+            .expect("bell must be in the 26.2 state table");
+        let pos = [4, 5, 6];
+        let mut shakes = BellShakes::new();
+        assert!(shakes.apply_block_event(pos, 1, 2), "b0 == 1 with a north face rings");
+        let spawn = bell_spawn(pos, id, lodestone_render::ENTITY_FULLBRIGHT, &shakes, 0.0)
+            .expect("must resolve");
+        assert_eq!(spawn.shake, Some((BellShakeDirection::North, 0.0)));
+
+        // Ten ticks in, the counter is ten and the angle is non-zero — the whole
+        // point of the chain, since `bell_shake_angle(_, 0.0)` is also zero and a
+        // frozen counter would be indistinguishable from a bell at rest.
+        for _ in 0..10 {
+            shakes.tick();
+        }
+        // At partial tick 0 the value is the *start* of the current tick, which
+        // after ten ticks is 9 — the same convention `ChestLids::openness` uses,
+        // and the reason both trackers keep a `previous`.
+        let (direction, ticks) = shakes.shake(pos, 0.0).expect("still shaking");
+        assert_eq!(direction, BellShakeDirection::North);
+        assert!((ticks - 9.0).abs() < 0.001, "ticks did not advance: {ticks}");
+        let (_, end) = shakes.shake(pos, 1.0).expect("still shaking");
+        assert!((end - 10.0).abs() < 0.001, "the partial tick does not interpolate: {end}");
+        let (x_rot, z_rot) = lodestone_render::bell_shake_angle(Some(direction), ticks);
+        assert!(x_rot.abs() > 0.0001, "a shaking bell must be rotated: {x_rot}");
+        assert_eq!(z_rot, 0.0, "a north hit swings on x only");
+
+        // And it ends: `BellBlockEntity.tick` clears at 50.
+        for _ in 0..45 {
+            shakes.tick();
+        }
+        assert!(shakes.is_empty(), "the shake outlived its 50-tick window");
+        assert_eq!(shakes.shake(pos, 0.0), None);
+    }
+
+    /// The four horizontal faces map to vanilla's own `from3DDataValue` order, and
+    /// the two vertical ones are dropped rather than stored as a direction the
+    /// model has no rotation for.
+    #[test]
+    fn the_shake_direction_is_vanillas_own_3d_data_order() {
+        assert_eq!(shake_direction_from_3d(2), Some(BellShakeDirection::North));
+        assert_eq!(shake_direction_from_3d(3), Some(BellShakeDirection::South));
+        assert_eq!(shake_direction_from_3d(4), Some(BellShakeDirection::West));
+        assert_eq!(shake_direction_from_3d(5), Some(BellShakeDirection::East));
+        assert_eq!(shake_direction_from_3d(0), None, "DOWN has no swing");
+        assert_eq!(shake_direction_from_3d(1), None, "UP has no swing");
+        // And a non-ring event never starts one, whatever its parameter says.
+        let mut shakes = BellShakes::new();
+        assert!(!shakes.apply_block_event([0, 0, 0], 0, 2));
+        assert!(shakes.is_empty());
     }
 
     /// A non-bell block entity with a `facing` property (a furnace, a chest)
@@ -1107,7 +1296,13 @@ mod bell_tests {
             };
             assert!(!bell_is_present(id), "{name} matched as a bell");
             assert_eq!(
-                bell_spawn([0, 0, 0], id, lodestone_render::ENTITY_FULLBRIGHT),
+                bell_spawn(
+                    [0, 0, 0],
+                    id,
+                    lodestone_render::ENTITY_FULLBRIGHT,
+                    &BellShakes::new(),
+                    0.0,
+                ),
                 None,
                 "{name} unexpectedly resolved a bell spawn"
             );
@@ -1117,7 +1312,7 @@ mod bell_tests {
     #[test]
     fn bell_spawns_before_login_is_empty_rather_than_a_panic() {
         let handle: SharedHandle = std::sync::Arc::new(std::sync::OnceLock::new());
-        assert!(bell_spawns(&handle, Vec3::ZERO).is_empty());
+        assert!(bell_spawns(&handle, &BellShakes::new(), Vec3::ZERO, 0.0).is_empty());
     }
 }
 

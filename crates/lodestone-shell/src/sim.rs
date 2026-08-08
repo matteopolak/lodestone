@@ -646,6 +646,12 @@ pub struct Sim {
     /// only "somebody is looking in this chest", and the *angle* is a client-side
     /// accumulator — see `crate::block_entities::ChestLids`.
     chest_lids: crate::block_entities::ChestLids,
+    /// Per-position bell shake state (issue #23). Fed by `NetUpdate::BlockEvent`
+    /// in [`Self::poll_net`] and advanced once per tick, exactly like
+    /// [`chest_lids`](Self::chest_lids) — the same `b0 == 1` event drives both,
+    /// and the *gather* is what decides which tracker a given position reads
+    /// from (see `block_entities::BellShakes::apply_block_event`).
+    bell_shakes: crate::block_entities::BellShakes,
 
     /// This frame's item pickups (`take_item_entity`), awaiting the fly-to-collector
     /// animation — issue #365.
