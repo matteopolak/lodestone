@@ -887,6 +887,14 @@ impl ApplicationHandler for WindowApp {
                         let was = self.debug_chunk_borders.load(Ordering::Relaxed);
                         self.debug_chunk_borders.store(!was, Ordering::Relaxed);
                     }
+                    Some(KeyOutcome::ToggleSpectator) => {
+                        self.debug_chord_used = true;
+                        self.toggle_spectator();
+                    }
+                    Some(KeyOutcome::CycleGameMode) => {
+                        self.debug_chord_used = true;
+                        self.cycle_game_mode();
+                    }
                     Some(KeyOutcome::RecipeSearch) => {
                         // `RecipePanelState::search` had **no writer at all** —
                         // the field was read by `RecipeBook::browse` and (since
