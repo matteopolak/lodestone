@@ -362,10 +362,31 @@ impl AquiferSystem {
     /// The pre-surface block at world coordinates — vanilla `doFill`'s decision:
     /// `computeSubstance(context, final_density(x,y,z))`, mapped to a
     /// [`BlockKind`] (`None` → the default block, stone).
+    ///
+    /// **No beard.** This is the spelling every caller outside the fill loop
+    /// wants, and it is vanilla's too: `NoiseBasedChunkGenerator` passes
+    /// `BeardifierMarker.INSTANCE` (a constant `0.0`) at both of its non-fill call
+    /// sites (`NoiseBasedChunkGenerator.java:145,230` — `getBaseColumn` and
+    /// `getBaseHeight`), which is exactly why a structure's *own* height probe
+    /// does not see the terrain its own beard is about to create.
     #[must_use]
     pub fn block_at(&self, x: i32, y: i32, z: i32) -> BlockKind {
+        self.block_at_beard(x, y, z, 0.0)
+    }
+
+    /// [`block_at`](Self::block_at) with a beardifier term added to the density —
+    /// vanilla's `add(finalDensity, beardifier)` (`NoiseChunk.java:157`).
+    ///
+    /// The `+ beard` is the whole of issue #514's S3 at this layer, and the
+    /// **operand order is the specification**: `Ap2(ADD)` evaluates
+    /// `argument1.compute(ctx) + argument2.compute(ctx)`, so the interpolated
+    /// density comes first. See
+    /// [`crate::structure::beardifier`] for why the term is added here rather
+    /// than inside the density graph.
+    #[must_use]
+    pub fn block_at_beard(&self, x: i32, y: i32, z: i32, beard: f64) -> BlockKind {
         crate::counters::bump_block_at();
-        let density = self.final_density.final_density(x, y, z);
+        let density = self.final_density.final_density(x, y, z) + beard;
         match self.compute_substance(x, y, z, density) {
             None => BlockKind::Stone,
             Some(fluid) => fluid.to_block(),

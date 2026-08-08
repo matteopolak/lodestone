@@ -92,12 +92,15 @@ impl StructureRefs {
         out
     }
 
-    /// The starts S3's beardifier will evaluate: adaptation-bearing, piece-complete,
-    /// and in reach. **Empty today for every chunk**, because no
-    /// adaptation-bearing structure has a piece generator yet (all of them are
-    /// jigsaw, plus stronghold; the three S2 kinds are all `terrain_adaptation:
-    /// none`) — which is precisely why S3 has no structure-positive gate available
-    /// at its own landing.
+    /// The starts the beardifier evaluates: adaptation-bearing, piece-complete,
+    /// and in reach.
+    ///
+    /// **Which structures reach this** is the honest measure of how much of S3 is
+    /// observable in a generated world: only the seven adaptation-bearing kinds
+    /// with a landed piece generator do. See `docs/worldgen-beardifier.md` for the
+    /// current list — while every adaptation-bearing kind is still jigsaw (S4) or
+    /// coded (S5), this iterator is empty for every chunk and the fill stage takes
+    /// its no-beard branch, which is exactly what the negative control asserts.
     #[must_use]
     pub fn adaptation_bearing(&self) -> impl Iterator<Item = &Arc<StructureStart>> {
         self.entries
@@ -388,6 +391,80 @@ impl OverworldGenerator {
             }
         }
         world
+    }
+
+    /// Stage 0c (issue #514's S3): this chunk's beard term.
+    ///
+    /// Cheap in the case that matters. A generator with no structure data returns
+    /// [`Beardifier::empty`] without touching the store; a generator *with*
+    /// structure data reads its already-memoised
+    /// [`StructureRefs`] and, for the overwhelming majority of chunks, finds no
+    /// adaptation-bearing start and returns empty too. Only a chunk genuinely
+    /// within reach of one builds a rigid list, and only then does
+    /// [`fill_stage`](OverworldGenerator::fill_stage) take its per-block branch.
+    ///
+    /// Not memoised in the store, deliberately: it is a pure function of
+    /// `structure_refs` (which *is* memoised) and it is consumed exactly once per
+    /// chunk, by the fill. A slot for it would be a third stage carrying no work.
+    pub(super) fn beardifier_for(&self, cx: i32, cz: i32) -> crate::structure::beardifier::Beardifier {
+        use crate::structure::beardifier::Beardifier;
+        if self.structures.is_none() {
+            return Beardifier::empty();
+        }
+        let refs = self.structure_refs_stage(cx, cz);
+        Beardifier::for_chunk(cx, cz, refs.adaptation_bearing().map(std::convert::AsRef::as_ref))
+    }
+
+    /// This chunk's pre-surface shape field (`fillFromNoise`'s output, stage 1)
+    /// with an **explicit** beard term — the seam a gate or a JVM comparison
+    /// drives the beardifier through.
+    ///
+    /// Public because S3's evidence needs it and there is no other way in. The
+    /// production path derives its beard from [`Self::beardifier_for`], which can
+    /// only ever produce the beard the *real* starts imply; every
+    /// adaptation-bearing structure in 26.2 is jigsaw (S4) or coded (S5), so until
+    /// one of those lands, a real generated chunk cannot exercise a non-empty
+    /// beard at all. Passing one in is what lets the terrain change be measured
+    /// now rather than asserted later, and it is also the comparison point for a
+    /// `Beardifier`-bearing JVM dump.
+    ///
+    /// Returns `16 × height × 16` [`BlockKind`](crate::aquifer::BlockKind)s;
+    /// index it with [`Self::shape_index`] rather than restating the layout.
+    /// Calling it does **not** touch the store's `pre_ore` slot: it builds a fresh
+    /// aquifer, so it is not a way to poison the memoised pipeline with a
+    /// synthetic beard.
+    #[must_use]
+    pub fn shape_field_with_beard(
+        &self,
+        cx: i32,
+        cz: i32,
+        beard: &crate::structure::beardifier::Beardifier,
+    ) -> Vec<crate::aquifer::BlockKind> {
+        let aquifer = self.build_aquifer(cx, cz);
+        self.fill_stage(&aquifer, cx * 16, cz * 16, beard)
+    }
+
+    /// Where chunk-local `(lx, ly, lz)` lands in
+    /// [`Self::shape_field_with_beard`]'s return.
+    ///
+    /// Forwards to the *same* private `idx` the fill writes through, rather than
+    /// restating `((ly * 16 + lz) * 16 + lx)`: a caller that restated it would
+    /// read a transposed field and report a plausible-looking wrong answer, and
+    /// the two spellings could then drift apart independently.
+    #[must_use]
+    pub fn shape_index(&self, lx: i32, ly: i32, lz: i32) -> usize {
+        Self::idx(lx, ly, lz, self.height())
+    }
+
+    /// The beard term this generator's real starts imply for `(cx, cz)` — the
+    /// exact value the production fill uses.
+    ///
+    /// Public so a gate can assert *which* branch the fill took, rather than
+    /// inferring it from the output. See [`Self::shape_field_with_beard`].
+    #[must_use]
+    pub fn beardifier(&self, cx: i32, cz: i32) -> crate::structure::beardifier::Beardifier {
+        let _view = self.store.open_view((cx, cz), REFS_RADIUS);
+        self.beardifier_for(cx, cz)
     }
 
     /// The registry's unsupported ledger, or an empty map for a generator with no
