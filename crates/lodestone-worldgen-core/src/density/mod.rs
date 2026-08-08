@@ -307,6 +307,50 @@ pub trait Resolver {
     fn block_tag(&self, _id: &str) -> Value {
         Value::Null
     }
+
+    /// Every `worldgen/structure_set/*.json` id this resolver can serve, e.g.
+    /// `["minecraft:villages", "minecraft:shipwrecks", …]` (issue #514's S1).
+    ///
+    /// This is the *entry point* to the whole structure engine: vanilla's
+    /// `ChunkGeneratorStructureState.createForNormal` iterates the structure-set
+    /// registry, so a resolver that returns nothing here places no structures at
+    /// all — the same "no data supplied" convention as
+    /// [`biome_parameters`](Self::biome_parameters), and the reason
+    /// `lodestone_worldgen::structure` is inert for every fixture resolver in
+    /// this workspace without any of them changing.
+    ///
+    /// **Order is not significant and callers must not depend on it.**
+    /// `lodestone_worldgen::structure::StructureRegistry` re-orders whatever it
+    /// gets into vanilla's own bootstrap order (`StructureSets.bootstrap`), which
+    /// is the order `createStructures` walks.
+    fn structure_set_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// `worldgen/structure_set/<name>.json` — `{placement: {...}, structures: [...]}`.
+    /// Default: `Value::Null` ("no such set").
+    fn structure_set(&self, _id: &str) -> Value {
+        Value::Null
+    }
+
+    /// `worldgen/structure/<name>.json` — the structure's `type`, `biomes`
+    /// holder-set, `step`, `terrain_adaptation` and type-specific config.
+    /// Default: `Value::Null`.
+    fn structure(&self, _id: &str) -> Value {
+        Value::Null
+    }
+
+    /// `tags/worldgen/biome/<name>.json`, the raw tag document
+    /// (`{"values": [...]}`, with `"#minecraft:..."` entries needing their own
+    /// recursive lookup, exactly like [`block_tag`](Self::block_tag)).
+    ///
+    /// Needed because **every** bundled structure spells its `biomes` field as a
+    /// single tag reference (`"#minecraft:has_structure/shipwreck"`) rather than
+    /// an inline list, so without this the biome predicate of every structure is
+    /// empty and no start is ever valid. Default: `Value::Null` (empty tag).
+    fn biome_tag(&self, _id: &str) -> Value {
+        Value::Null
+    }
 }
 
 /// Evaluation context: a single block position (`SinglePointContext`).
