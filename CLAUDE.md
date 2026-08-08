@@ -426,19 +426,39 @@ see `crates/lodestone-data/tests/{collision_shapes,hardness}.rs` for the generat
 It is **per-crate** — `crates/lodestone-{data,render,physics,canonical}/oracle-java/` — so a root-relative
 path in a brief or a doc resolves to nothing. Find the one belonging to your crate.
 
-**There is no Java runtime installed on this machine.** `java -version` reports *"Unable to locate a Java
-Runtime"*. So **every instruction to "verify against a JVM oracle" is currently unexecutable**, including
-the ones in this file, and an agent handed one will either burn time discovering that or silently
-substitute a weaker check. Two consequences, and the second is the one that matters:
+**There is no Java runtime on the *host*, and that does not block a JVM oracle — the oracles run in a
+container.** `java -version` reports *"Unable to locate a Java Runtime"*, and the first version of this
+section wrongly concluded from that that *"every instruction to verify against a JVM oracle is currently
+unexecutable"*. That was wrong, it was propagated into four agent briefs, and at least one of them
+correctly refused it. **Read [`docs/oracle-runtimes.md`](./docs/oracle-runtimes.md) before repeating the
+claim:** every oracle path runs its real vanilla server or JVM oracle under **Apple `container`**, not
+Docker — *"Docker is gone from every one of these paths — there is no `LODESTONE_ORACLE_RUNTIME` switch and
+no fallback"*. So the JVM comes from the image and the host needs no `java`. `scripts/worldgen-oracle/run.sh`
+(temurin-25) and `scripts/live-oracles/*.sh` are the entry points; `container list` tells you what is up.
 
-- The **committed dumps are still the outside source** — they were generated when a JVM was available, and
-  a generate-or-assert gate asserting against a committed dump is as good as it ever was. What is
-  unavailable is producing a *new* fixture for a case nobody has dumped yet.
-- **For a new parity question, say so and pick a different outside source** rather than treating "no oracle
-  available" as licence to compare our output against our own. The alternatives that keep the
+**There is also a vanilla-authored oracle world already on disk**, which several units need no new fixture
+to start against: `.cache/mc/survival/world`, seed **-195764831**, ~89 region files — 14,499 overworld
+chunks carrying full `structures.starts`/`References` NBT (mineshaft 29, ocean_ruin 14, trial_chambers 8,
+ruined_portal 7, shipwreck 7, and one each of monument/village/trail_ruins/buried_treasure) plus **2,444
+Nether chunks** (wastes 487, crimson 327, soul_sand 255, basalt 172, and **warped_forest 0** — a
+world-species limit to assert, not to discover later). `chunk_nbt_vanilla_oracle.rs` is the precedent for
+reading it. The End has no block oracle anywhere, so End work gates on record definitions plus arithmetic
+until someone generates one.
+
+**26.2 no longer stores the world seed in `level.dat`** — it is in
+`world/data/minecraft/world_gen_settings.dat`. Reading `level.dat` and finding no seed is not evidence the
+world lacks one.
+
+Two consequences of all this, and the second is the one that matters:
+
+- The **committed dumps and the on-disk oracle world are outside sources you can use right now**, with no
+  container start at all. A generate-or-assert gate against a committed dump is as good as it ever was.
+- **Verify the runtime before promising it, and name your outside source either way.** `container list`
+  costs nothing; asserting availability from memory has now been wrong in both directions in one day. When
+  a container genuinely is not available, that is **never** licence to compare our output against our own —
+  that is the closed loop the whole evidence section exists to forbid. The alternatives that keep the
   expected-value-from-outside rule intact: the decompiled 26.2 source read as a *record definition* and
-  hand-expanded; captured bytes from a live vanilla server (`scripts/live-oracles/*.sh`, which need Docker
-  running — also verify that before promising it); or a **cross-arm invariant** whose expectation comes from
+  hand-expanded; the on-disk vanilla world above; or a **cross-arm invariant** whose expectation comes from
   geometry or arithmetic rather than from either implementation. Measured while wiring server light
   (§12.117): a seam survey comparing isolated against exact 3×3 computation is a legitimate outside
   expectation, because the two arms are independent constructions of the same physical rule.
