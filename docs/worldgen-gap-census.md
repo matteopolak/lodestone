@@ -95,7 +95,7 @@ Vanilla source of truth: `level/biome/{Climate,MultiNoiseBiomeSource}.java`,
 | Multi-noise climate sampling (7 channels) | **reached** | `crates/lodestone-worldgen/src/biome/mod.rs`, driven from `overworld/biome.rs:41` `biome_stage` |
 | `Climate.RTree` search | **reached** | `biome/tree.rs` (717 lines, literal port); landed `7ff942dd` / `71dd8b22`. Issue **#491 is stale-open** |
 | per-source-chunk biome memo | **reached** | `biome/memo.rs` |
-| **3-D biome sampling (4×4×4 quart cells)** | **absent** | `biome_stage` returns `[(String, bool); 16]` — 16 quart *columns*, one sample each at that quart's own surface height, **broadcast vertically**. `GeneratedColumn::biome_quarts: [String; 16]` (`overworld/output.rs:142`) and the encoder resolves 16 ids once and reuses them for every section (`server_protocol.rs:1393-1401`). Vanilla stores 16 × (height/4) cells. Consequence: **no cave biome can ever appear** — lush caves, dripstone caves and deep dark are unreachable at any depth |
+| **3-D biome sampling (4×4×4 quart cells)** | **reached** (#512, generator `0ccb2e5d` + consumer `a617454d`) | `biome_cells_stage` builds a `BiomeCells` of 16 × (height/4) cells and `biome_stage`'s 16-entry surface array is now *read out of* it rather than sampled separately. `ChunkColumn` carries the grid, the v770 encoder resolves the column's small biome palette once and indexes per cell, and `chunk_nbt` reads and writes every section's own container. Measured over 576 generated columns: 503 carry a biome the surface array does not, across `lush_caves`, `dripstone_caves` and `sulfur_caves`. The prior verdict was **absent**, with the consequence that no cave biome could appear at any depth |
 | biome-specific surface rules | **reached** | `Cond::Biome` at `surface/mod.rs:1016`, driven per column |
 | `TheEndBiomeSource` / `FixedBiomeSource` / `CheckerboardColumnBiomeSource` | **absent** | see §1 |
 | biome wire ids | **partial, known-divergent** | `server_protocol.rs:233-256` uses a *sorted* 55-entry local id space, not vanilla's registration order, because `worldgen/biome` is not in the configuration-phase registry sync (**#275**). Documented in place, not a hidden gap |
@@ -348,20 +348,28 @@ Vanilla: worldgen places block entities (structure chest loot, dungeon/mineshaft
 trail-ruins decorated pots, bee nests with bees) and they travel in the chunk-data packet's
 `block_entities` array.
 
-**Verdict: absent.**
+**Verdict: reached for bee nests** (#520, generator `60c9a5f9` + consumer `a617454d`);
+still absent for every other producer, because no other feature makes one.
 
-- No slot in the path: neither `GeneratedColumn` (`overworld/output.rs:134`) nor
-  `ChunkColumn` (`lodestone-server/src/chunk.rs:94`) has a block-entity field, and
-  `ChunkColumn::from_generated` (`chunk.rs:130`) moves only
-  `(min_y, height, palette, blocks, biome_quarts)`.
-- The wire array is a literal zero: `server_protocol.rs:1494`
-  `w.var_i32(0); // block entities: none generated yet`.
-- **The one shipped defect on this axis** is honest and in-source:
+- The slot exists end to end now: `GeneratedColumn::block_entities()` →
+  `ChunkColumn::block_entities()` (via `chunk_nbt::generated_block_entity`, which
+  turns the generator's typed enum into a `BlockEntity::Opaque` holding the vanilla
+  save-form compound) → the chunk packet's block-entity array.
+- The wire array is no longer a literal zero. As a side effect a **chest read off
+  disk** now reaches the client too: `region_source::load` copies the chunk's
+  entities onto the column, where before they went only into the tick loop's
+  registry and the packet still claimed the chunk had none.
+- Structure-borne block entities (chest loot, spawners, decorated pots) remain
+  absent for the reason §7 gives — no piece generator, so no structure blocks at
+  all, let alone their block entities.
+- **The one shipped defect on this axis, now fixed**, was honest and in-source:
   `place_beehive_decorator` (`feature/vegetation/place.rs:375`) writes
   `minecraft:bee_nest[facing=south,honey_level=0]` (`:425`) and then at `:428`:
   *"Bee-entity storage (2-3 bees) is not modelled"* — `let _bee_count = 2 +
   random.next_int_bounded(2);`. The draw is consumed (so the RNG stream stays aligned, which
-  is correct) and discarded, so **every generated bee nest reaches the client empty**.
+  is correct) and discarded, so **every generated bee nest reaches the client empty**. The
+  fix was not adding a draw but starting to *use* one — plus a genuinely new
+  `nextInt(599)` per bee, which vanilla makes and this engine had been short of.
 - `docs/block-entities.md` is a different thing: four server-side tick *simulations*
   (composter, furnace, hopper, brewing) plus Anvil NBT round-trip. None is fed by the
   generator. Related but distinct: **#477** (loading a real vanilla world drops 1608 of
@@ -379,7 +387,7 @@ Vanilla source of truth: `level/levelgen/WorldgenRandom.java`, `RandomState.java
 | `setDecorationSeed` | **reached** | `rng/mod.rs:124` |
 | `setFeatureSeed` | **reached** | `rng/mod.rs:136` — per-feature stream isolation, which is why adding a feature cannot desync its neighbours |
 | `setLargeFeatureSeed` | **reached** | `rng/mod.rs:144` — carvers |
-| `setLargeFeatureWithSalt` | **absent** | 0 hits; needed by structure-set placement (§7) |
+| `setLargeFeatureWithSalt` | **reached** (#514 S1) | `set_large_feature_with_salt`, consumed by structure-set placement (§7) |
 | `seedSlimeChunk` | **absent** | 0 hits (§8) |
 | `RandomState`'s algorithm switch on `legacy_random_source` | **absent** | `density/mod.rs:708` hardcodes the Xoroshiro branch; **#486** |
 | `NormalNoise.createLegacyNetherBiome` (raw-seed, non-positional) | **absent** | `PerlinNoise::new_legacy` is private and blended-noise-only; no `NormalNoise` legacy-init path (recorded in #485/#486) |
@@ -394,21 +402,25 @@ Ranking is about what a player would notice standing in the world, not about cos
 | rank | gap | why it ranks here | verdict |
 |---|---|---|---|
 | 1 | **No Nether, no End** | two of three dimensions do not exist; the whole late game is unreachable | absent (§1) |
-| 2 | **No structures** | villages, mineshafts, strongholds, monuments, temples, trial chambers — the entire exploration layer, and the corpus is already on disk | absent engine / orphaned data (§7) |
+| 2 | **No structure *blocks*** | placement is done and wired (#514 S1: starts and references reach the region file), but no piece generator exists (S2), so the exploration layer is still invisible in the world | partial — placement reached, pieces absent (§7) |
 | 3 | **8 of 11 decoration steps, 48 of 55 feature types** | no lakes, springs, geodes, dripstone, icebergs, disks, dungeons, fossils, glow lichen, sculk, coral. The world reads as terrain + ore + grass/trees + snow | absent (§6) |
 | 4 | **No mob spawning** | a world with six demo mobs and no others, ever; no cap, no despawn, no night hostiles | absent + orphaned (§9) |
 | 5 | **All-`Missing` light on the served chunk** | the integrated-server path ships no light while a working engine sits one crate away | orphaned — **parity defect** (§11) |
-| 6 | **No 3-D biomes** | lush caves / dripstone caves / deep dark can never appear; underground biome tint, fog and future spawn inputs are the surface biome's | absent (§2) |
+| 6 | ~~**No 3-D biomes**~~ | **fixed** (#512): the generator samples a real 4x4x4 grid and the encoder, region writer and region reader all carry it per section | reached (§2) |
 | 7 | **Ore veins never generate** | large copper and iron veins are simply missing from a world we otherwise call Overworld-parity | absent — **parity defect** (§5) |
 | 8 | **Empty heightmap NBT** | not directly visible, but it is a wrong value in a field we populate, and a JVM-proven `MOTION_BLOCKING` exists and is unreachable | partial — **parity defect** (§10) |
 | 9 | **Slime chunks** | one predicate; blocks slime spawning, and a well-known player-facing mechanic | absent (§8) |
 | 10 | **World presets / amplified / large_biomes / superflat / single-biome / debug** | player-selectable world types, all data-complete and unreachable | absent wiring (§1) |
-| 11 | **Empty bee nests** | small, visible, and a value we already ship wrong | absent (§12) |
+| 11 | ~~**Empty bee nests**~~ | **fixed** (#520): the decorator's discarded bee draw is used, and the chunk packet's block-entity array is no longer a hardcoded zero | reached (§12) |
 | 12 | **`nether_cave` carver, `scattered_ore`** | latent until the Nether exists | absent (§4, §5) |
 
 **The parity-defect set — worse than absences, because they look done:** ore veins (§5),
-heightmaps (§10), light (§11), empty bee nests (§12). Each is a field or a world we already
-populate, populated wrongly, inside a subsystem whose gates are green.
+heightmaps (§10), light (§11), ~~empty bee nests (§12)~~, and one this census missed —
+~~the chunk NBT's permanently empty `structures{starts,References}` compound~~ (both now
+fixed, kept listed because the *shape* is the lesson). Each is a field or a world we already
+populate, populated wrongly, inside a subsystem whose gates are green. The `structures` stub
+is the sharpest instance: a well-formed field that always says nothing, so no reader ever
+errors and the absence is invisible until you go looking for a village.
 
 ---
 

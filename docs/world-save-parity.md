@@ -195,10 +195,18 @@ crate. The full measurements are in `DESIGN.md` §12.126.
   `default_lava` with no properties, while `crates/lodestone-worldgen/src/carver/mod.rs` already uses
   the canonical form. So one column can hold **two palette entries for one block state** — measured at
   4 sections in the direction A fixture.
-- **Direction B — 3-D biome data is flattened, and structure references are destroyed.** 696 biome
-  cells across 100 sections, every one `minecraft:lush_caves` → the surface biome above it, because
-  `ChunkColumn::biome_quarts` is `[String; 16]`: one biome per horizontal quart, constant across `y`.
-  And 57 `structures.References`/`starts` entries dropped, because `chunk_nbt` writes an empty stub.
+- **Direction B — 3-D biome data was flattened, and structure references destroyed. ~~Both~~ fixed
+  (#512, #514 S1); re-measure.** The finding as measured: 696 biome cells across 100 sections, every
+  one `minecraft:lush_caves` → the surface biome above it, because `ChunkColumn` held only
+  `biome_quarts: [String; 16]` — one biome per horizontal quart, constant across `y`; and 57
+  `structures.References`/`starts` entries dropped, because `chunk_nbt` wrote an empty stub.
+
+  `ChunkColumn` now carries the full per-section biome grid, `column_from_nbt` restores every
+  section's container (not just section 0's bottom layer, which was the *load* half of the erasure)
+  and `column_to_nbt_with` writes them back per section; the `structures` compound is filled from
+  `OverworldGenerator::{structure_starts, structure_references}`. **These numbers are therefore the
+  pre-fix measurement, not the current state** — the container run needed to re-measure has not been
+  done, so do not quote them as live.
 
 Everything else in direction B is **green, and that is a real result**: zero block-state differences
 across 64 real vanilla chunks, zero block entities added or removed out of 145 across 8 kinds (7 of them
