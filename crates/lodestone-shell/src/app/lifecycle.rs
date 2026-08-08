@@ -645,6 +645,7 @@ impl ApplicationHandler for WindowApp {
                     // key dispatch cannot disagree about what is on screen.
                     container_open: self.active_container_menu().is_some(),
                     gameplay: self.ui.accepts_gameplay_input(),
+                    debug_held: self.debug_held,
                 };
                 let code = match event.physical_key {
                     PhysicalKey::Code(code) => Some(code),
@@ -722,6 +723,32 @@ impl ApplicationHandler for WindowApp {
                         // vanilla, 26.2 makes this a real `KeyMapping`, so it
                         // belongs in the table — see `keybinds`' module docs.
                         self.show_debug = !self.show_debug;
+                    }
+                    Some(KeyOutcome::DebugModifier(down)) => {
+                        // Issue #197. Vanilla's
+                        // `keyDebugModifier.setDown(!didDebugAction)`
+                        // (`KeyboardHandler.java:554-555`): the overlay toggles
+                        // on the **release**, and only if no chord consumed the
+                        // hold. Without that, F3+B would both open the overlay
+                        // and toggle hitboxes on one keystroke.
+                        self.debug_held = down;
+                        if down {
+                            self.debug_chord_used = false;
+                        } else if !self.debug_chord_used {
+                            self.show_debug = !self.show_debug;
+                        }
+                    }
+                    Some(KeyOutcome::ToggleHitboxes) => {
+                        use std::sync::atomic::Ordering;
+                        self.debug_chord_used = true;
+                        let was = self.debug_hitboxes.load(Ordering::Relaxed);
+                        self.debug_hitboxes.store(!was, Ordering::Relaxed);
+                    }
+                    Some(KeyOutcome::ToggleChunkBorders) => {
+                        use std::sync::atomic::Ordering;
+                        self.debug_chord_used = true;
+                        let was = self.debug_chunk_borders.load(Ordering::Relaxed);
+                        self.debug_chunk_borders.store(!was, Ordering::Relaxed);
                     }
                     Some(KeyOutcome::Screenshot) => {
                         // Arm it; `redraw()` services it after the frame is

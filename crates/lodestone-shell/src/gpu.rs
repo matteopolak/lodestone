@@ -51,7 +51,9 @@ mod pixel_gates;
 #[cfg(test)]
 mod tests;
 
-pub use debug_lines::{DebugLineVertex, debug_line_vertices};
+pub use debug_lines::{
+    DebugLineVertex, chunk_border_vertices, debug_line_vertices, entity_hitbox_vertices,
+};
 pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
 pub use sources::{

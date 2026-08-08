@@ -55,6 +55,23 @@ pub(crate) fn hud_line_h() -> f32 {
     (font::GLYPH_H as f32 + 2.0) * HUD_TEXT_SCALE
 }
 
+/// The plate behind each F3 overlay line — vanilla's
+/// `fill(left - 1, top - 1, left + width + 1, top + height - 1, -1873784752)`,
+/// i.e. `0x90505050` (`DebugScreenOverlay.extractLines`). The shell had no plate
+/// at all before issue #197, which is why the overlay was unreadable over bright
+/// terrain.
+pub(crate) const DEBUG_LINE_BG: [f32; 4] = [
+    0x50 as f32 / 255.0,
+    0x50 as f32 / 255.0,
+    0x50 as f32 / 255.0,
+    0x90 as f32 / 255.0,
+];
+
+/// The F3 overlay's ink — vanilla's `-2039584`, i.e. `0xFFE0E0E0`, drawn
+/// **without** a shadow (`extractLines` passes `shadow = false`).
+pub(crate) const DEBUG_LINE_INK: [f32; 4] =
+    [0xE0 as f32 / 255.0, 0xE0 as f32 / 255.0, 0xE0 as f32 / 255.0, 1.0];
+
 /// The Tab player-list overlay's panel geometry.
 ///
 /// **Exists so the draw and its gate share one expression rather than two that
@@ -215,6 +232,19 @@ pub struct DebugStats {
     /// #411). `ServerDifficulty` reached a real, tested ECS fold in `44485e4`
     /// but nothing in the shell read it; this is that last hop.
     pub difficulty: Option<(lodestone_model::Difficulty, bool)>,
+    /// Sky and block light at the player's feet, as the client's own world
+    /// reports them — `None` before login or for an unloaded section, which is
+    /// the honest "no data" state and is drawn as such.
+    ///
+    /// Issue #197 asked for the "light-level pie chart"; **26.2 does not have
+    /// one.** `DebugScreenEntries` registers a `minecraft:light` *text* entry
+    /// (`DebugEntryLight`) that prints `Client Light: <raw> (<sky> sky, <block>
+    /// block)`, and the pie was removed. So this reproduces the entry that
+    /// actually exists rather than a chart that no longer does — see
+    /// `docs/debug-overlay.md`.
+    ///
+    /// `(sky, block)`, each `0..=15`.
+    pub light: Option<(u8, u8)>,
 }
 
 /// All-caps display name for a [`lodestone_model::Difficulty`], matching the
@@ -245,9 +275,29 @@ impl DebugStats {
         }
     }
 
-    /// The overlay's text lines.
+    /// The overlay's text lines, in one flat list.
+    ///
+    /// Kept as the concatenation of [`Self::left_lines`] and
+    /// [`Self::right_lines`] so nothing that wanted "every line" has to know
+    /// about the column split, and so the two-column draw cannot silently drop
+    /// a line: adding one to either column changes this too.
     #[must_use]
     pub fn lines(&self) -> Vec<String> {
+        let mut all = self.left_lines();
+        all.extend(self.right_lines());
+        all
+    }
+
+    /// The **left** column: the player and the world around them.
+    ///
+    /// Vanilla's own split is mechanical in 26.2 (`DebugScreenOverlay`
+    /// balances `regularLines` at `mid = (n + 1) / 2` and keeps named groups
+    /// contiguous), but issue #197 asks for the *semantic* split the layout
+    /// reads as — player/world on the left, engine internals on the right — so
+    /// the assignment is by hand here. That is deliberate: a mechanical halve
+    /// would reshuffle both columns every time a line is added or removed.
+    #[must_use]
+    pub fn left_lines(&self) -> Vec<String> {
         vec![
             "LODESTONE".to_string(),
             format!(
@@ -266,12 +316,38 @@ impl DebugStats {
                 self.yaw,
                 self.pitch
             ),
-            format!("FPS {:.0} ({:.2} MS)", self.fps, self.frame_ms),
-            format!("F/T {:.2}", self.frames_per_tick),
             match self.target {
                 Some([x, y, z]) => format!("TARGET {x} {y} {z}"),
                 None => "TARGET -".to_string(),
             },
+            // `DebugEntryLight`'s line, with vanilla's own raw/sky/block shape.
+            // `getRawBrightness` is the max of the two, which is what the
+            // renderer actually samples.
+            match self.light {
+                Some((sky, block)) => {
+                    format!("LIGHT {} ({sky} SKY, {block} BLOCK)", sky.max(block))
+                }
+                None => "LIGHT -".to_string(),
+            },
+            match self.difficulty {
+                Some((d, locked)) => format!(
+                    "DIFFICULTY {}{}",
+                    difficulty_name(d),
+                    if locked { " (LOCKED)" } else { "" }
+                ),
+                None => "DIFFICULTY -".to_string(),
+            },
+            self.status.to_uppercase(),
+        ]
+    }
+
+    /// The **right** column: frame timing and render-engine internals — the
+    /// half vanilla fills from `getSystemInformation`'s descendants.
+    #[must_use]
+    pub fn right_lines(&self) -> Vec<String> {
+        vec![
+            format!("FPS {:.0} ({:.2} MS)", self.fps, self.frame_ms),
+            format!("F/T {:.2}", self.frames_per_tick),
             format!(
                 "CHUNKS {} SECTIONS {} QUADS {}",
                 self.chunk_count, self.section_count, self.quads
@@ -290,15 +366,6 @@ impl DebugStats {
                 self.world_bytes / 1024,
                 self.rss_bytes / (1024 * 1024)
             ),
-            match self.difficulty {
-                Some((d, locked)) => format!(
-                    "DIFFICULTY {}{}",
-                    difficulty_name(d),
-                    if locked { " (LOCKED)" } else { "" }
-                ),
-                None => "DIFFICULTY -".to_string(),
-            },
-            self.status.to_uppercase(),
         ]
     }
 
@@ -910,23 +977,65 @@ impl HudGeometry {
         let glyph_h = font::GLYPH_H as f32;
         let line_h = hud_line_h();
 
-        // Debug text, top-left.
+        // The F3 overlay, in vanilla's **two columns** (issue #197): player and
+        // world on the left, engine internals on the right, each line sitting on
+        // its own translucent fill.
+        //
+        // The right column is right-aligned at `w - margin - text_width(line)`,
+        // which is vanilla's `guiWidth() - 2 - font.width(line)`
+        // (`DebugScreenOverlay.extractLines`), so a long line grows leftwards
+        // instead of off the screen. The width has to come from `b.text_width`,
+        // the same measure the draw itself uses — a restated constant would
+        // misalign the moment the vanilla font is or is not loaded.
         if frame.show_debug {
-            let mut debug_lines = frame.stats.lines();
+            let mut left = frame.stats.left_lines();
+            let mut right = frame.stats.right_lines();
+            // The three conditional diagnostics are engine-side, so they join
+            // the right column.
             if let Some((recipes, tags)) = frame.recipe_stats {
-                debug_lines.push(format!("recipes={recipes} tags={tags}"));
+                right.push(format!("recipes={recipes} tags={tags}"));
             }
             if let Some((dist, warn_at, strength)) = frame.border_debug {
-                debug_lines.push(format!(
+                right.push(format!(
                     "border dist={dist:.1} warn_at={warn_at:.1} warning={strength:.2}"
                 ));
             }
             if let Some(spawn) = frame.spawn_debug {
-                debug_lines.push(format!("spawn {} {} {}", spawn.x, spawn.y, spawn.z));
+                left.push(format!("spawn {} {} {}", spawn.x, spawn.y, spawn.z));
             }
-            for (i, line) in debug_lines.iter().enumerate() {
-                let y = margin + i as f32 * line_h;
-                b.text(line, margin, y, scale, [0.96, 0.98, 1.0, 1.0]);
+            // Vanilla fills a plate behind every non-empty line *before* drawing
+            // any text (`extractLines` does two passes for exactly this reason),
+            // so a later line's plate cannot cover an earlier line's glyphs.
+            for (column, lines) in [(false, &left), (true, &right)] {
+                for (i, line) in lines.iter().enumerate() {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let tw = b.text_width(line, scale);
+                    let x = if column { w - margin - tw } else { margin };
+                    let y = margin + i as f32 * line_h;
+                    b.rect_px(
+                        x - 1.0,
+                        y - 1.0,
+                        tw + 2.0,
+                        glyph_h * scale + 2.0,
+                        DEBUG_LINE_BG,
+                    );
+                }
+            }
+            for (column, lines) in [(false, &left), (true, &right)] {
+                for (i, line) in lines.iter().enumerate() {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let x = if column {
+                        w - margin - b.text_width(line, scale)
+                    } else {
+                        margin
+                    };
+                    let y = margin + i as f32 * line_h;
+                    b.text(line, x, y, scale, DEBUG_LINE_INK);
+                }
             }
         }
 

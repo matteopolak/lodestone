@@ -869,7 +869,10 @@ fn default_playing_expectations() -> Vec<(KeyCode, KeyOutcome)> {
         (KeyCode::Slash, KeyOutcome::OpenChat { command: true }),
         (KeyCode::Tab, KeyOutcome::PlayerList(true)),
         (KeyCode::F5, KeyOutcome::TogglePerspective),
-        (KeyCode::F3, KeyOutcome::ToggleDebugOverlay),
+        // Issue #197: F3 is now the debug *modifier*, reporting both edges; the
+        // overlay toggle happens on the release when no chord fired (see
+        // `resolve_key`, and vanilla `KeyboardHandler.java:554-555`).
+        (KeyCode::F3, KeyOutcome::DebugModifier(true)),
         (KeyCode::Escape, KeyOutcome::Pause),
         (KeyCode::Digit1, KeyOutcome::SelectSlot(0)),
         (KeyCode::Digit2, KeyOutcome::SelectSlot(1)),
@@ -1430,6 +1433,7 @@ fn a_menu_screen_outranks_the_chat_prompt_and_everything_below_it() {
         chat_open: true,
         container_open: true,
         gameplay: true,
+        debug_held: true,
     };
     assert_eq!(resolve(both, KeyCode::KeyW, true), Some(KeyOutcome::Menu));
     assert_eq!(resolve(both, KeyCode::Escape, true), Some(KeyOutcome::Menu));
@@ -1460,7 +1464,7 @@ fn gameplay_bindings_are_inert_when_no_screen_accepts_gameplay_input() {
             // So is the debug overlay — it is an instrument, and gating it
             // on `Playing` would make it unavailable exactly when a stuck
             // connection is the thing being debugged.
-            KeyCode::F3 => assert_eq!(got, Some(KeyOutcome::ToggleDebugOverlay)),
+            KeyCode::F3 => assert_eq!(got, Some(KeyOutcome::DebugModifier(true))),
             _ => assert_eq!(got, None, "{code:?} fired outside gameplay"),
         }
     }
@@ -1485,7 +1489,6 @@ fn held_bindings_report_both_edges_and_one_shot_bindings_only_the_press() {
         KeyCode::Slash,
         KeyCode::KeyF,
         KeyCode::F5,
-        KeyCode::F3,
         KeyCode::Escape,
         KeyCode::Digit1,
     ] {
@@ -1495,6 +1498,43 @@ fn held_bindings_report_both_edges_and_one_shot_bindings_only_the_press() {
             "{one_shot:?} must not fire on release"
         );
     }
+    // F3 is deliberately *not* in that list any more (issue #197): it is the
+    // debug modifier, so it reports both edges, and the driver toggles the
+    // overlay on the release when no chord fired.
+    assert_eq!(
+        resolve(playing(), KeyCode::F3, false),
+        Some(KeyOutcome::DebugModifier(false))
+    );
+}
+
+/// F3+B and F3+G resolve to their sub-modes only while the modifier is held, and
+/// a plain B or G is untouched — issue #197.
+///
+/// The negative half is the point: `B` and `G` are unbound in the default table,
+/// so if the chord arms ignored `debug_held` they would fire on every press and
+/// the assertion below would catch it.
+#[test]
+fn the_debug_chords_need_the_modifier_held() {
+    let held = KeyGate {
+        gameplay: true,
+        debug_held: true,
+        ..KeyGate::default()
+    };
+    assert_eq!(
+        resolve(held, KeyCode::KeyB, true),
+        Some(KeyOutcome::ToggleHitboxes)
+    );
+    assert_eq!(
+        resolve(held, KeyCode::KeyG, true),
+        Some(KeyOutcome::ToggleChunkBorders)
+    );
+    // Release is not a chord — a chord that fired on both edges would toggle
+    // twice per keystroke and appear to do nothing.
+    assert_eq!(resolve(held, KeyCode::KeyB, false), None);
+
+    // Without the modifier, neither key means anything.
+    assert_eq!(resolve(playing(), KeyCode::KeyB, true), None);
+    assert_eq!(resolve(playing(), KeyCode::KeyG, true), None);
 }
 
 #[test]
