@@ -4176,3 +4176,93 @@ owner's "Create New World just joins me to the existing world".**
   and its magnitude is asserted against the wrong hypothesis (`11`, the count that forgets the 60 px footer
   band) so the gate cannot pass on a sign. A player with more than ten worlds cannot reach the rest: filed,
   named, and reachable by grep.
+
+**12.120 The client chunk path measured in instructions retired: meshing is 96.3% of it and *fluid*
+meshing alone is 58.8%, while the two per-frame F3 terms the briefing ranked second-largest are together
+0.6M against draw submission's 17.7M. Two of the instrument's own controls were premise-false and both
+fired — one asserted a microarchitectural belief that is simply untrue of the kernel it measured, and the
+other produced a negative cost that a `saturating_sub` silently reported as zero.**
+
+Instrument: `crates/lodestone-shell/tests/client_chunk_cycles.rs`, `proc_pid_rusage` /
+`RUSAGE_INFO_V4`. Fixture: 25 real columns from `lodestone_server::overworld_chunk_source`, encoded by the
+production `ServerProtocol::encode_chunk` and decoded through `lodestone_registry::adapter_for_protocol`
+(no version crate imported, so the shell's version seam is intact). Doc:
+[`docs/client-chunk-cycles.md`](./docs/client-chunk-cycles.md).
+
+- **The per-column ledger, one column, 8 sections with geometry, 3,203 quads, 112,245,079 instructions
+  total:** decode 4,124,674 (3.7%), `World::load` 6,519 (0.006%), `snapshot_section` 52,952 (0.05%),
+  `mesh_models` 42,083,973 (37.5%), `mesh_fluids` 65,982,635 (58.8%). Split control: decode-into-a-discarding-sink
+  plus insert-over-pre-cloned-chunks summed to 4,131,193 against a production `handle_packet`-into-a-real-`World`
+  whole of 4,125,519 — **ratio 1.0005**, and not a tautology, because the two arms share no measurement (one
+  pays `free` and no insert, the other an insert and no decode).
+
+- **"The mesher is not the bottleneck" and "meshing is 96% of the cycles" are both true, and conflating them
+  is the trap.** `docs/mesh-fill-rate.md`'s 0-of-26,168,839-frames-with-a-full-queue is a statement about the
+  mesher not being the *rate limiter* for filling the view; it says nothing about where the work is. Meshing
+  runs on worker threads, so it never stalls a frame — and it is still where 96.3% of the per-column
+  instructions go. **A throughput measurement and a cost measurement answer different questions about the
+  same subsystem, and a "not the bottleneck" verdict from one does not license skipping the other.**
+
+- **The fluid share decomposes into geometry, not the empty scan, and that was worth checking because the
+  cheap fix would have been the wrong one.** `mesh_fluids` (`lodestone-render/src/models.rs:1158`) scans all
+  4096 cells and `continue`s at `:1166`, so the obvious hypothesis was a wasted full scan removable by a
+  palette-level "contains no fluid" precheck. Splitting the column's sections by fluid content refuted it:
+  the 3 fluid-free sections cost **489,335** each (119 per scanned cell) and the 5 fluid-bearing ones
+  **12,899,732** each — **13,711 instructions per fluid cell**. The precheck would have bought the 119/cell
+  arm and left 98% of the term standing. The real target is that `mesh_fluids` makes on the order of thirty
+  **virtual** calls through `&dyn FluidSectionView` per fluid cell, each redoing three `split16`s, three
+  range checks, a snapshot-slot index and a `PalettedContainer::get` bit-unpack, re-querying the same
+  neighbours repeatedly within a cell and again from adjacent cells. **The fixture is water-bearing (4,704 of
+  30,484 non-air cells), so 58.8% is terrain-dependent and 13,711-per-fluid-cell is the figure to quote.**
+
+- **The briefing's per-frame ranking inverts under measurement, and the render plan's ordering was already
+  right.** Draw submission measured **19,024 instructions per section drawn**, i.e. **17,711,344 per frame**
+  at `45a93e4`'s recorded 931 sections — against `World::heap_bytes` at 494,570 and the per-frame
+  `Vec<ChunkPos>` at 116,242. Submission is **36×** the `heap_bytes` term the briefing called the
+  second-largest client cost. Culling (the plan's U1/U2) is the priority; the F3 fields are a tidy-up.
+
+- **But instructions understate `heap_bytes`, and the profile was right to worry.** 494,570 instructions at
+  IPC 4.47 is ~31 µs, while a `samply` capture attributed 1,223 samples — ~1.2 s over ~94 s, roughly **7×**
+  more time than that count implies. Both are correct: the harness measures a 25-column world that fits in
+  cache and extrapolates linearly, while `heap_bytes` pointer-chases the entire resident world (tens of MB at
+  361 columns) so its real IPC there is far below 4.47. **This is the documented limit of the instrument, met
+  in practice on the first real question: instructions are blind to locality, and a large instruction count
+  with a low IPC is the memory-bound signal.** Read `ri_cycles` beside `ri_instructions`, always.
+
+- **Control 1, premise-false, fired on correct code.** To catch `ri_instructions` and `ri_cycles` being read
+  swapped — which no scaling test can see, because cycles scale 4× too — the first version asserted
+  `IPC > 1.0` on the reference kernel, reasoning that "a wide out-of-order core retires more than one integer
+  op per cycle". It measured **IPC 0.643** (18,196,013 instructions / 28,285,041 cycles) and failed. The
+  kernel is a *serially dependent* SplitMix64 chain: two 64-bit multiplies per iteration, each feeding the
+  next, latency-bound at ~14 cycles for ~9.1 instructions. **Low IPC was the correct reading.** The error
+  direction is the dangerous one — a `< 1.0` assertion would have "passed" on a genuinely swapped read. The
+  replacement's expectation is arithmetic instead of microarchitectural: the same `#[inline(never)]` loop
+  taking the same 1,500,000 steps over a 4 KiB table and a 16 MiB table must retire the same instructions
+  while its cycles blow out (measured 12.79×). **An instrument's validity control must not rest on a belief
+  about the hardware; derive it from a property of the program.**
+
+- **Control 2: the assertion that hid its own failure.** S4 first took one frame per arm after 4 warm-up
+  frames and reported the 189-section frame at **4,288,471** instructions against the no-terrain frame's
+  **7,958,869** — a *negative* marginal cost, which a `saturating_sub` turned into a clean-looking `0
+  instructions per section`, and the extrapolation table dutifully printed `0 instructions per second`. Lazy
+  Metal pipeline compilation had not settled by frame 4, so the "fixed" arm absorbed one-off work. Fixed with
+  40 warm-up frames, a median over 5 windows of 10 frames each, and an assertion that the difference is
+  **positive**. **A saturating or clamping operation on a measured difference converts an impossible result
+  into a plausible one; on a quantity that cannot legitimately be negative, assert rather than clamp.**
+
+- **`sections_drawn` is not the upload count, and the gap is a real cost, not an error.** 195 sections
+  uploaded, 189 in `sections_drawn`, 304 `draw_calls`. `sections_drawn` is incremented only by the opaque
+  loop (`frame.rs:480`) and a water-only section carries `mesh: None` there while still issuing a water draw
+  at `frame.rs:720`. The initial `>= uploaded` assertion was wrong; the 115 extra draw calls are exactly the
+  second encoder set the render plan's U4 targets.
+
+- **The fix landed is a throttle, not a `show_debug` gate, and the reason is a second consumer.**
+  `sim/step.rs`'s three O(resident-world) fields (`heap_bytes`, the `loaded_chunks()` `Vec`, and a
+  `task_info` syscall) now recompute one frame in 30 (~0.5 s at 60 fps). Gating on overlay visibility would
+  have silently zeroed `DebugStats::one_line`, which `app/redraw.rs:930` and `app/runners.rs:113` print in
+  headless and logged runs — the same "flat zero that looks like evidence" the RSS field already shipped
+  once. The unconditional per-frame `self.status.clone()` became a compare-then-`clone_from`. The gate
+  asserts a **count** (exactly 1 refresh per 30-frame window) against both hypotheses, correct 1 and
+  unthrottled 30, and the control was run: neutering `refreshes_world_stats` to `true` produced *"frames
+  1..31 recomputed the world stats 30 times; the correct hypothesis is 1 and the unthrottled hypothesis is
+  30"*.
