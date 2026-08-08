@@ -245,9 +245,9 @@ pub struct ArmourLayer {
     /// `EquipmentLayerRenderer.getColorForLayer` returns `-1` (white, i.e. no
     /// tint) for a non-dyeable layer and `dyeColor != 0 ? dyeColor :
     /// colorWhenUndyed` for a dyeable one. A stack's own
-    /// `minecraft:dyed_color` overrides this; nothing in this engine decodes
-    /// that component through to the renderer yet, so today this *is* the
-    /// colour every leather piece draws with.
+    /// `minecraft:dyed_color` overrides this, and that component *is* decoded
+    /// through to the renderer, so this is the fallback for an undyed piece
+    /// rather than the only colour leather can draw with.
     pub dye: Option<[u8; 3]>,
 }
 
