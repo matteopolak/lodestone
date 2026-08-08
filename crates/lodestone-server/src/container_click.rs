@@ -47,6 +47,16 @@
 //!   [`take_result`]. Before the server derived clicks, `apply_container_clicked`
 //!   deliberately did *not* consume, because the client's diff already carried the
 //!   shrunk cells — that comment is now wrong and the consume is required.
+//! * **Take-only is not un-clickable, and the difference was a shipped bug.**
+//!   `ResultSlot.mayPlace` is `false` and `ResultSlot.onTake` is what decrements the
+//!   grid: a click *on* the result is how you craft. [`do_click`] always modelled the
+//!   take; what was missing is that the result slot is **live inside one click**.
+//!   Vanilla's `QUICK_MOVE` arm loops `quickMoveStack` *while the clicked slot still
+//!   holds the same item* (`AbstractContainerMenu.java:423-427`), and that loop only
+//!   terminates because `slotsChanged` refills slot `0` between iterations — which is
+//!   how shift-clicking a result crafts until the grid empties. So a caller that owns
+//!   a recipe corpus passes it to [`do_click_with`]; [`do_click`] itself keeps the
+//!   recipe-free behaviour (one craft per click) for callers that have none.
 //! * **`may_place` on an armour slot is a real restriction**, checked against
 //!   `lodestone_data::item_prototypes`' `equip_slot` (vanilla's `ArmorSlot.mayPlace`).
 //!   Allowing anything there lets a boot go on your head, which reads as a
@@ -356,23 +366,57 @@ impl ClickState {
     }
 }
 
-/// Runs one click against `slots` (menu-ordered) and `state`.
+/// A menu's recipe corpus: grid cells (row-major, by [`SlotKind::Grid`] cell index)
+/// to the result they produce.
+///
+/// `lodestone-server`'s is `crate::crafting::derive_result` bound to the open grid's
+/// dimensions. This module deliberately holds no corpus of its own — it is the click
+/// state machine, and a second matcher here could disagree with
+/// [`crate::crafting::CraftingState`]'s.
+pub type ResultRecipe<'a> = &'a dyn Fn(&[Option<ItemStack>]) -> Option<ItemStack>;
+
+/// Upper bound on [`quick_move`]'s repeat rounds — vanilla's `while` loop has none,
+/// relying on the grid draining. A malformed [`ResultRecipe`] that refilled the
+/// result without consuming anything would spin forever, and a server that hangs on
+/// one click is worse than one that crafts 64 times.
+const QUICK_MOVE_ROUNDS: usize = 512;
+
+/// Runs one click against `slots` (menu-ordered) and `state`, with **no recipe
+/// corpus**: the result slot is taken and the grid consumed exactly once, and the
+/// result slot itself is left as the caller wrote it.
 ///
 /// Returns the stacks that left the menu into the world (a `Throw`, or a click
 /// outside the window with a full cursor) — vanilla's `player.drop(...)` calls,
 /// which this module has no world to make.
 ///
 /// `creative` is `player.hasInfiniteMaterials()`, which gates `Clone`.
-///
-/// `on_result_taken` is called when the result slot is taken, so the caller can
-/// consume the grid (`ResultSlot.onTake`); the grid cells are in `slots` too, so
-/// the callback only needs to know that it happened.
 pub fn do_click(
     layout: &MenuLayout,
     slots: &mut [Option<ItemStack>],
     state: &mut ClickState,
     click: Click,
     creative: bool,
+) -> Vec<ItemStack> {
+    do_click_with(layout, slots, state, click, creative, None)
+}
+
+/// [`do_click`], with the menu's own recipe corpus so the result slot is **live for
+/// the duration of the click** — vanilla's `slotsChanged` →
+/// `CraftingMenu.slotChangedCraftingGrid` hook.
+///
+/// Two behaviours need it, and neither is reachable without it:
+///
+/// * a shift-click on the result crafts **repeatedly** until the grid empties or the
+///   inventory fills, because vanilla's `QUICK_MOVE` loop tests the *refilled* slot;
+/// * the `slots` this returns carry the result the grid now produces, so a caller
+///   comparing against the client's prediction sees the same value the client will.
+pub fn do_click_with(
+    layout: &MenuLayout,
+    slots: &mut [Option<ItemStack>],
+    state: &mut ClickState,
+    click: Click,
+    creative: bool,
+    recipe: Option<ResultRecipe<'_>>,
 ) -> Vec<ItemStack> {
     let mut dropped = Vec::new();
     let index = usize::try_from(click.slot).ok();
@@ -407,7 +451,7 @@ pub fn do_click(
                     }
                 }
             } else if state.drag.status == 2 {
-                finish_drag(layout, slots, state);
+                finish_drag(layout, slots, state, recipe);
                 state.drag = Drag::default();
             } else {
                 state.drag = Drag::default();
@@ -433,16 +477,16 @@ pub fn do_click(
                 }
             } else if let Some(index) = index.filter(|i| *i < layout.len()) {
                 if click.click_type == 1 {
-                    quick_move(layout, slots, index, &mut dropped);
+                    quick_move(layout, slots, index, &mut dropped, recipe);
                 } else {
-                    pickup(layout, slots, state, index, primary, &mut dropped);
+                    pickup(layout, slots, state, index, primary, &mut dropped, recipe);
                 }
             }
         }
         // SWAP — a hotbar number key (`0..9`) or the off-hand key (`40`).
         2 if (0..9).contains(&click.button) || click.button == 40 => {
             if let Some(index) = index.filter(|i| *i < layout.len()) {
-                swap(layout, slots, index, click.button, &mut dropped);
+                swap(layout, slots, index, click.button, &mut dropped, recipe);
             }
         }
         // CLONE — creative middle-click.
@@ -459,7 +503,8 @@ pub fn do_click(
         4 if state.carried.is_none() => {
             if let Some(index) = index.filter(|i| *i < layout.len()) {
                 let whole = click.button == 1;
-                if let Some(taken) = take_from(layout, slots, index, if whole { u32::MAX } else { 1 })
+                if let Some(taken) =
+                    take_from(layout, slots, index, if whole { u32::MAX } else { 1 }, recipe)
                 {
                     dropped.push(taken);
                 }
@@ -468,13 +513,66 @@ pub fn do_click(
         // PICKUP_ALL — double-click gather into the cursor.
         6 => {
             if let Some(index) = index.filter(|i| *i < layout.len()) {
-                pickup_all(layout, slots, state, index, click.button == 0);
+                pickup_all(layout, slots, state, index, click.button == 0, recipe);
             }
         }
         _ => {}
     }
 
+    // `slotsChanged`: every arm above can have written a grid cell (a place, a drag,
+    // a swap, a quick-move *into* the grid), and vanilla re-derives the result on any
+    // of them — not only on a take. Doing it once here rather than in each arm is why
+    // no arm has to remember to.
+    resync_result(layout, slots, recipe);
+
     dropped
+}
+
+/// The menu index of the result slot, if this layout has one.
+fn result_index(layout: &MenuLayout) -> Option<usize> {
+    layout
+        .slots
+        .iter()
+        .position(|kind| *kind == SlotKind::Result)
+}
+
+/// The grid cells in `slots`, in [`SlotKind::Grid`] cell order — the argument a
+/// [`ResultRecipe`] takes.
+fn grid_cells(layout: &MenuLayout, slots: &[Option<ItemStack>]) -> Vec<Option<ItemStack>> {
+    let mut cells: Vec<Option<ItemStack>> = Vec::new();
+    for (index, kind) in layout.iter() {
+        if let SlotKind::Grid(cell) = kind {
+            if cells.len() <= cell {
+                cells.resize(cell + 1, None);
+            }
+            cells[cell] = slots.get(index).cloned().flatten();
+        }
+    }
+    cells
+}
+
+/// Re-derives the result slot from the grid — `CraftingMenu.slotChangedCraftingGrid`.
+///
+/// A `None` recipe leaves the result slot **exactly as it is**, which is the
+/// recipe-free [`do_click`] contract: a caller with no corpus has already written
+/// whatever it believes the result to be, and clearing it here would silently
+/// contradict that.
+fn resync_result(
+    layout: &MenuLayout,
+    slots: &mut [Option<ItemStack>],
+    recipe: Option<ResultRecipe<'_>>,
+) {
+    let Some(recipe) = recipe else { return };
+    let Some(index) = result_index(layout) else {
+        return;
+    };
+    let cells = grid_cells(layout, slots);
+    if cells.is_empty() {
+        return;
+    }
+    if let Some(slot) = slots.get_mut(index) {
+        *slot = recipe(&cells);
+    }
 }
 
 /// `AbstractContainerMenu.canItemQuickReplace(slot, stack, true)`.
@@ -497,7 +595,12 @@ fn quick_craft_place_count(slot_count: usize, kind: i32, item: &ItemStack) -> u3
 
 /// The `quickcraftStatus == 2` branch: distribute the cursor over the collected
 /// slots, then keep whatever is left on the cursor.
-fn finish_drag(layout: &MenuLayout, slots: &mut [Option<ItemStack>], state: &mut ClickState) {
+fn finish_drag(
+    layout: &MenuLayout,
+    slots: &mut [Option<ItemStack>],
+    state: &mut ClickState,
+    recipe: Option<ResultRecipe<'_>>,
+) {
     if state.drag.slots.is_empty() {
         return;
     }
@@ -510,7 +613,7 @@ fn finish_drag(layout: &MenuLayout, slots: &mut [Option<ItemStack>], state: &mut
         let primary = state.drag.kind == 0;
         let mut dropped = Vec::new();
         state.drag = Drag::default();
-        pickup(layout, slots, state, index, primary, &mut dropped);
+        pickup(layout, slots, state, index, primary, &mut dropped, recipe);
         return;
     }
 
@@ -550,6 +653,7 @@ fn pickup(
     index: usize,
     primary: bool,
     dropped: &mut Vec<ItemStack>,
+    recipe: Option<ResultRecipe<'_>>,
 ) {
     let clicked = slots[index].clone();
     let carried = state.carried.clone();
@@ -567,7 +671,7 @@ fn pickup(
             } else {
                 clicked.count.div_ceil(2)
             };
-            if let Some(taken) = take_from(layout, slots, index, amount) {
+            if let Some(taken) = take_from(layout, slots, index, amount, recipe) {
                 state.carried = Some(taken);
             }
         }
@@ -588,7 +692,9 @@ fn pickup(
                 // this is how a crafting result stacks onto a partial cursor.
                 let room = max_stack_size(&carried).saturating_sub(carried.count);
                 if room > 0 {
-                    if let Some(taken) = take_from(layout, slots, index, clicked.count.min(room)) {
+                    if let Some(taken) =
+                        take_from(layout, slots, index, clicked.count.min(room), recipe)
+                    {
                         let mut grown = carried;
                         grown.count += taken.count;
                         state.carried = Some(grown);
@@ -646,6 +752,7 @@ fn take_from(
     slots: &mut [Option<ItemStack>],
     index: usize,
     amount: u32,
+    recipe: Option<ResultRecipe<'_>>,
 ) -> Option<ItemStack> {
     let existing = slots[index].clone()?;
     let taken = amount.min(existing.count);
@@ -658,17 +765,26 @@ fn take_from(
         remaining.count -= taken;
     }
     if layout.kind_of(index) == Some(SlotKind::Result) {
-        take_result(layout, slots);
+        take_result(layout, slots, recipe);
     }
     let mut out = existing;
     out.count = taken;
     Some(out)
 }
 
-/// `ResultSlot.onTake` — one craft consumes one of every non-empty grid cell.
-fn take_result(layout: &MenuLayout, slots: &mut [Option<ItemStack>]) {
+/// `ResultSlot.onTake` — one craft consumes one of every non-empty grid cell, then
+/// the result slot is re-derived from what is left (`slotsChanged`).
+///
+/// The re-derivation is *here* rather than only at the end of the click because
+/// [`quick_move`]'s repeat loop reads it: the refilled result is what tells it to
+/// craft again.
+fn take_result(
+    layout: &MenuLayout,
+    slots: &mut [Option<ItemStack>],
+    recipe: Option<ResultRecipe<'_>>,
+) {
     for (index, kind) in layout.slots.iter().copied().enumerate() {
-        if kind != SlotKind::Grid(0) && !matches!(kind, SlotKind::Grid(_)) {
+        if !matches!(kind, SlotKind::Grid(_)) {
             continue;
         }
         let Some(cell) = slots[index].as_mut() else { continue };
@@ -678,43 +794,81 @@ fn take_result(layout: &MenuLayout, slots: &mut [Option<ItemStack>]) {
             cell.count -= 1;
         }
     }
+    resync_result(layout, slots, recipe);
 }
 
-/// `QUICK_MOVE`: `quickMoveStack` in a loop until nothing more moves.
+/// `QUICK_MOVE`: `quickMoveStack`, then vanilla's own **repeat loop**.
+///
+/// `AbstractContainerMenu.doClick`'s `QUICK_MOVE` arm is
+///
+/// ```java
+/// ItemStack clicked = this.quickMoveStack(player, slotIndex);
+/// while (!clicked.isEmpty() && ItemStack.isSameItem(this.getSlot(slotIndex).getItem(), clicked)) {
+///    clicked = this.quickMoveStack(player, slotIndex);
+/// }
+/// ```
+///
+/// For every slot but a crafting result that loop runs once — the slot is empty or
+/// unchanged the second time round. For the **result** slot it is the whole of
+/// "shift-click crafts until the grid runs out": each round consumes one of every
+/// grid cell, `slotsChanged` refills the result with the same item, and the condition
+/// holds again. It ends when the grid can no longer produce that item (nothing to
+/// refill with) or the inventory has no room (nothing moves, so `quickMoveStack`
+/// returns EMPTY).
+///
+/// Without a [`ResultRecipe`] the result slot never refills and this is one craft,
+/// which is [`do_click`]'s documented recipe-free behaviour.
 fn quick_move(
     layout: &MenuLayout,
     slots: &mut [Option<ItemStack>],
     index: usize,
     dropped: &mut Vec<ItemStack>,
+    recipe: Option<ResultRecipe<'_>>,
 ) {
-    let Some(source) = slots[index].clone() else {
-        return;
-    };
     let is_result = layout.kind_of(index) == Some(SlotKind::Result);
-    let mut stack = source.clone();
-    let targets = layout.quick_move_targets(index, &source);
-    for (start, end, backwards) in targets {
-        move_stack_to(layout, slots, &mut stack, start, end, backwards, index);
-        if stack.count == 0 {
-            break;
+    for _ in 0..QUICK_MOVE_ROUNDS {
+        let Some(source) = slots[index].clone() else {
+            return;
+        };
+        let mut stack = source.clone();
+        let targets = layout.quick_move_targets(index, &source);
+        for (start, end, backwards) in targets {
+            move_stack_to(layout, slots, &mut stack, start, end, backwards, index);
+            if stack.count == 0 {
+                break;
+            }
         }
-    }
-    if stack.count == source.count {
-        // Nothing moved — vanilla returns EMPTY and leaves the slot alone.
-        return;
-    }
-    if stack.count == 0 {
-        slots[index] = None;
-    } else if let Some(existing) = slots[index].as_mut() {
-        existing.count = stack.count;
-    }
-    if is_result {
-        take_result(layout, slots);
-        // Vanilla drops whatever would not fit rather than leaving it in the
-        // result slot (`if (slotIndex == 0) player.drop(stack, false)`).
+        if stack.count == source.count {
+            // Nothing moved — vanilla returns EMPTY and leaves the slot alone.
+            return;
+        }
+        if stack.count == 0 {
+            slots[index] = None;
+        } else if let Some(existing) = slots[index].as_mut() {
+            existing.count = stack.count;
+        }
+        if !is_result {
+            return;
+        }
+        take_result(layout, slots, recipe);
+        // Vanilla drops whatever would not fit rather than leaving it in the result
+        // slot (`if (slotIndex == 0) player.drop(stack, false)`). It does **not**
+        // clear the slot: `onTake` has already refilled it with the next result, and
+        // the dropped stack is the old object. With no recipe there is nothing to
+        // refill with, so the leftover would linger as a phantom result and is
+        // cleared instead.
         if stack.count > 0 {
             dropped.push(stack);
-            slots[index] = None;
+            if recipe.is_none() {
+                slots[index] = None;
+            }
+            return;
+        }
+        // Vanilla's `while`: the grid refilled the result with the same item, so
+        // craft again.
+        match slots[index].as_ref() {
+            Some(next) if same(next, &source) => {}
+            _ => return,
         }
     }
 }
@@ -785,6 +939,7 @@ fn swap(
     index: usize,
     button: i8,
     dropped: &mut Vec<ItemStack>,
+    recipe: Option<ResultRecipe<'_>>,
 ) {
     let native = if button == 40 {
         OFFHAND_NATIVE
@@ -815,7 +970,7 @@ fn swap(
             if layout.kind_of(index) == Some(SlotKind::Result) {
                 // A result can be swapped *out* but the take must consume the grid.
                 slots[index] = None;
-                take_result(layout, slots);
+                take_result(layout, slots, recipe);
             } else {
                 slots[index] = None;
             }
@@ -870,6 +1025,7 @@ fn pickup_all(
     state: &mut ClickState,
     index: usize,
     forwards: bool,
+    recipe: Option<ResultRecipe<'_>>,
 ) {
     let Some(mut carried) = state.carried.clone() else {
         return;
@@ -902,7 +1058,7 @@ fn pickup_all(
                 continue;
             }
             let room = cap - carried.count;
-            if let Some(taken) = take_from(layout, slots, target, existing.count.min(room)) {
+            if let Some(taken) = take_from(layout, slots, target, existing.count.min(room), recipe) {
                 carried.count += taken.count;
             }
         }

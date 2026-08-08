@@ -45,7 +45,7 @@ use crate::chat::ChatInput;
 use crate::config::{Config, Mode};
 use crate::container::{
     ContainerFrame, ContainerRenderer, MenuButton, MenuContext, MenuHit, MenuInput,
-    MenuKey as ContainerMenuKey, hit_test_with_scale,
+    MenuKey as ContainerMenuKey,
 };
 use crate::effects::EffectsRenderer;
 use crate::gpu::RenderState;

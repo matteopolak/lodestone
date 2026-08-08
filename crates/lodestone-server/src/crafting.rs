@@ -433,6 +433,39 @@ pub fn place_recipe(
     placed_any
 }
 
+/// The result a `width × height` grid of `cells` produces, from [`recipe_book`].
+///
+/// The free function behind [`CraftingState::recompute`], extracted so the click
+/// machine can re-derive the result **inside** one `doClick`
+/// ([`crate::container_click::do_click_with`]) rather than only after it. That is
+/// vanilla's `slotsChanged` → `slotChangedCraftingGrid` hook, and it is what makes
+/// a shift-click on the result craft *repeatedly*: vanilla's `QUICK_MOVE` arm loops
+/// `quickMoveStack` while the result slot still holds the same item, which only
+/// terminates because the slot is refilled between iterations.
+///
+/// `cells` is row-major and must be `width * height` long; a shorter one is padded
+/// with empties rather than rejected, because the caller is a slot vector and a
+/// length mismatch there is a layout bug that should not silently mint a result.
+#[must_use]
+pub fn derive_result(width: usize, height: usize, cells: &[Option<ItemStack>]) -> Option<ItemStack> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let items = (0..width * height)
+        .map(|i| cells.get(i).and_then(|slot| slot.as_ref()).map(|stack| stack.item.clone()))
+        .collect();
+    let grid = CraftingGrid::new(width, height, items);
+    if grid.is_empty() {
+        return None;
+    }
+    recipe_book().match_grid(&grid).map(|result| {
+        // `lodestone_game::item::ItemStack` and `lodestone_model::ItemStack` are two
+        // distinct types (a signed working count vs. an unsigned stored one); the
+        // recipe corpus speaks the former and every slot in this crate the latter.
+        ItemStack::new(result.item().clone(), result.count().max(0).unsigned_abs())
+    })
+}
+
 /// The server's own crafting grid and the result *it* computed.
 ///
 /// One per open crafting menu. The player inventory screen's 2×2 and a crafting
@@ -531,23 +564,7 @@ impl CraftingState {
     }
 
     fn recompute(&mut self) {
-        let cells = self
-            .inputs
-            .iter()
-            .map(|slot| slot.as_ref().map(|stack| stack.item.clone()))
-            .collect();
-        let grid = CraftingGrid::new(self.width, self.height, cells);
-        self.result = if grid.is_empty() {
-            None
-        } else {
-            recipe_book().match_grid(&grid).map(|result| {
-                // `lodestone_game::item::ItemStack` and `lodestone_model::ItemStack`
-                // are two distinct types (a signed working count vs. an unsigned
-                // stored one); the recipe corpus speaks the former and every slot
-                // in this crate the latter.
-                ItemStack::new(result.item().clone(), result.count().max(0).unsigned_abs())
-            })
-        };
+        self.result = derive_result(self.width, self.height, &self.inputs);
     }
 }
 
