@@ -462,6 +462,7 @@ mod tests {
             gen_depth: 0,
             template: None,
             placement: None,
+            extra_placements: Vec::new(),
             beard: None,
         }
     }

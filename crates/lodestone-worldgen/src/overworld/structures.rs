@@ -206,6 +206,17 @@ impl StartContext for StartSampler<'_> {
     fn sea_level(&self) -> i32 {
         self.generator.sea_level()
     }
+
+    /// The real dimension bounds, so a jigsaw structure's `above_bottom` /
+    /// `below_top` start height and its `dimension_padding` resolve against this
+    /// world rather than against the trait's overworld default.
+    fn min_y(&self) -> i32 {
+        self.generator.min_y()
+    }
+
+    fn dimension_height(&self) -> i32 {
+        self.generator.height()
+    }
 }
 
 impl OverworldGenerator {
@@ -388,6 +399,13 @@ impl OverworldGenerator {
                 placement
                     .template
                     .place(placement.position, &placement.settings, &mut world);
+                // A `list_pool_element` writes several templates at one position,
+                // in document order — `ListPoolElement.place`'s own loop.
+                for extra in &piece.extra_placements {
+                    extra
+                        .template
+                        .place(extra.position, &extra.settings, &mut world);
+                }
             }
         }
         world

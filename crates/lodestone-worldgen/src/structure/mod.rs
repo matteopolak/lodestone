@@ -108,7 +108,9 @@
 //! `crate::overworld` supplies the [`StartContext`].
 
 pub mod beardifier;
+pub mod jigsaw;
 pub mod placement;
+pub mod pool;
 pub mod processor;
 pub mod template;
 
@@ -119,9 +121,23 @@ use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource, WorldgenRan
 use serde_json::Value;
 
 use crate::density::Resolver;
+use jigsaw::{JigsawConfig, JigsawStub};
 use placement::{Placement, PlacementKind};
+use pool::PoolStore;
 use processor::Processor;
 use template::{Mirror, PlaceSettings, Rotation, StructureTemplate};
+
+/// The concrete random every structure's per-chunk stream is —
+/// `WorldgenRandom` over a legacy LCG, seeded by
+/// `setLargeFeatureSeed(seed, cx, cz)`.
+type StructureRandom = WorldgenRandom<LegacyRandomSource>;
+
+/// `Structure.GenerationContext`'s random for one `(structure, chunk)`.
+fn structure_random(seed: i64, cx: i32, cz: i32) -> StructureRandom {
+    let mut random = WorldgenRandom::new(LegacyRandomSource::new(0));
+    random.set_large_feature_seed(seed, cx, cz);
+    random
+}
 
 /// Vanilla's structure-set registration order, read from
 /// `.cache/mc/26.2/src/net/minecraft/data/worldgen/StructureSets.java`'s
@@ -304,6 +320,16 @@ pub trait StartContext {
     fn biome_at_quart(&self, qx: i32, qy: i32, qz: i32) -> String;
     /// The dimension's sea level.
     fn sea_level(&self) -> i32;
+    /// `LevelHeightAccessor.getMinY()`. Defaulted to the overworld's so that no
+    /// existing implementor had to change; only a `VerticalAnchor` other than
+    /// `absolute` and a jigsaw's dimension padding read it.
+    fn min_y(&self) -> i32 {
+        -64
+    }
+    /// `LevelHeightAccessor.getHeight()`, i.e. `getMaxY() = min_y + height - 1`.
+    fn dimension_height(&self) -> i32 {
+        384
+    }
 }
 
 /// Everything a template-driven piece needs to write itself into a chunk: the
@@ -342,6 +368,14 @@ pub struct StructurePiece {
     /// How to place it, for a template-driven piece. `None` for a coded piece,
     /// which therefore reaches no blocks yet (`minecraft:btp` is the only one).
     pub placement: Option<Arc<PiecePlacement>>,
+    /// The *second and later* templates of a `list_pool_element`, which places
+    /// several templates at one position (`pillager_outpost/towers`).
+    ///
+    /// A separate field rather than a `Vec` in [`Self::placement`]'s place because
+    /// one `StructurePiece` really is one piece here — it carries one bounding
+    /// box, one junction list and one beard — and splitting it into siblings would
+    /// hand the beardifier a duplicate rigid box per sub-template.
+    pub extra_placements: Vec<Arc<PiecePlacement>>,
     /// The `PoolElementStructurePiece`-only facts the beardifier reads, or `None`
     /// for a coded piece — which is vanilla's own `else` branch
     /// (`Beardifier.java:75`: rigid box, `groundLevelDelta` 0, no junctions), not
@@ -646,9 +680,39 @@ pub enum StructureKind {
         /// The resolved `required_ocean_monument_surrounding` biome set.
         surrounding: HashSet<String>,
     },
+    /// `minecraft:jigsaw` — the five villages and `pillager_outpost` (issue
+    /// #514's S4). See [`jigsaw`] for the assembly and for what a
+    /// [`JigsawConfig`] refuses to model.
+    Jigsaw(Box<JigsawConfig>),
     /// A structure `type` whose generator has not landed. Carries the type id so
     /// the ledger can name it.
     Unsupported(String),
+}
+
+/// `Structure.GenerationStub` — the generation point, plus whatever a kind needs
+/// to carry across the biome filter.
+///
+/// Almost every kind needs nothing: its `findGenerationPoint` draws no RNG, so
+/// `generate_pieces` can seed a fresh stream and be exactly vanilla. **Jigsaw is
+/// the exception**: its centre rotation and centre element are drawn *before* the
+/// biome check and the whole BFS continues from the same stream after it, so the
+/// half-consumed random has to travel through.
+#[allow(missing_debug_implementations)]
+enum Stub {
+    /// A position and nothing else.
+    Plain([i32; 3]),
+    /// A jigsaw centre piece and its live RNG stream.
+    Jigsaw(Box<JigsawStub<StructureRandom>>),
+}
+
+impl Stub {
+    /// The point `Structure.isValidBiome` samples.
+    fn position(&self) -> [i32; 3] {
+        match self {
+            Self::Plain(position) => *position,
+            Self::Jigsaw(stub) => stub.position,
+        }
+    }
 }
 
 impl StructureKind {
@@ -674,6 +738,13 @@ impl StructureKind {
                         "#minecraft:required_ocean_monument_surrounding".to_string(),
                     ),
                 ),
+            },
+            "minecraft:jigsaw" => match JigsawConfig::parse(value) {
+                Ok(config) => Self::Jigsaw(Box::new(config)),
+                // The reason travels to the ledger through the type id, which is
+                // what `StructureRegistry::new` records — a jigsaw structure whose
+                // config we refuse must say *why*, not just "jigsaw".
+                Err(why) => Self::Unsupported(format!("minecraft:jigsaw — {why}")),
             },
             other => Self::Unsupported(other.to_string()),
         }
@@ -703,7 +774,13 @@ impl StructureKind {
                     .collect()
             }
             Self::Igloo => IGLOO_PARTS.iter().map(|(id, _, _)| *id).collect(),
-            Self::BuriedTreasure | Self::OceanMonument { .. } | Self::Unsupported(_) => Vec::new(),
+            // A jigsaw structure's templates are named by its *pools*, and there
+            // are hundreds of them — `PoolStore::load` pulls each one in as it
+            // parses the element that names it, so there is no static list here.
+            Self::Jigsaw(_)
+            | Self::BuriedTreasure
+            | Self::OceanMonument { .. }
+            | Self::Unsupported(_) => Vec::new(),
         }
     }
 
@@ -715,6 +792,33 @@ impl StructureKind {
     ///
     /// Returns `None` where vanilla returns `Optional.empty()` — no start at all,
     /// before any biome check.
+    fn find_stub(
+        &self,
+        cx: i32,
+        cz: i32,
+        seed: i64,
+        ctx: &dyn StartContext,
+        pools: &PoolStore,
+    ) -> Option<Stub> {
+        if let Self::Jigsaw(config) = self {
+            // The one kind whose generation point costs RNG. See [`Stub`].
+            return jigsaw::begin(
+                config,
+                pools,
+                cx,
+                cz,
+                ctx.min_y(),
+                ctx.dimension_height(),
+                ctx,
+                structure_random(seed, cx, cz),
+            )
+            .map(|stub| Stub::Jigsaw(Box::new(stub)));
+        }
+        self.find_generation_point(cx, cz, ctx).map(Stub::Plain)
+    }
+
+    /// The draw-free half of `findGenerationPoint`, for every kind except
+    /// [`Self::Jigsaw`].
     fn find_generation_point(&self, cx: i32, cz: i32, ctx: &dyn StartContext) -> Option<[i32; 3]> {
         // `ChunkPos.getMiddleBlockX/Z` — `getBlockX(8)`.
         let middle_x = cx * 16 + 8;
@@ -747,6 +851,8 @@ impl StructureKind {
                 let y = ctx.first_occupied_height(middle_x, middle_z, HeightmapKind::OceanFloorWg);
                 Some([middle_x, y, middle_z])
             }
+            // Handled by `find_stub` before this function is reached.
+            Self::Jigsaw(_) => None,
             Self::Unsupported(_) => {
                 // No generator, so no honest generation point — and therefore no
                 // honest biome-check Y either. Sea level is used deliberately
@@ -789,16 +895,25 @@ impl StructureKind {
     ///   call, so no other structure's draws move.
     fn generate_pieces(
         &self,
+        stub: Stub,
         cx: i32,
         cz: i32,
         seed: i64,
         ctx: &dyn StartContext,
         templates: &TemplateStore,
+        pools: &PoolStore,
     ) -> Option<Vec<StructurePiece>> {
+        if let Self::Jigsaw(config) = self {
+            // Taken **by value**: `finish` consumes the half-used random, and a
+            // copy of it would restart the stream and build a different village.
+            let Stub::Jigsaw(stub) = stub else {
+                return None;
+            };
+            return Some(jigsaw::finish(*stub, config, pools, ctx));
+        }
         match self {
             Self::Shipwreck { beached } => {
-                let mut random = WorldgenRandom::new(LegacyRandomSource::new(0));
-                random.set_large_feature_seed(seed, cx, cz);
+                let mut random = structure_random(seed, cx, cz);
                 Some(shipwreck_pieces(*beached, cx, cz, ctx, templates, &mut random))
             }
             Self::OceanRuin {
@@ -806,8 +921,7 @@ impl StructureKind {
                 large_probability,
                 cluster_probability,
             } => {
-                let mut random = WorldgenRandom::new(LegacyRandomSource::new(0));
-                random.set_large_feature_seed(seed, cx, cz);
+                let mut random = structure_random(seed, cx, cz);
                 Some(ocean_ruin_pieces(
                     *temperature,
                     *large_probability,
@@ -820,8 +934,7 @@ impl StructureKind {
                 ))
             }
             Self::Igloo => {
-                let mut random = WorldgenRandom::new(LegacyRandomSource::new(0));
-                random.set_large_feature_seed(seed, cx, cz);
+                let mut random = structure_random(seed, cx, cz);
                 Some(igloo_pieces(cx, cz, ctx, templates, &mut random))
             }
             Self::BuriedTreasure => {
@@ -841,12 +954,15 @@ impl StructureKind {
                     gen_depth: 0,
                     template: None,
                     placement: None,
+                    extra_placements: Vec::new(),
                     beard: None,
                 }])
             }
             // `OceanMonumentPieces` is ~1,400 lines of coded pieces, not
             // templates, so it is S5's and not S2's.
             Self::OceanMonument { .. } | Self::Unsupported(_) => None,
+            // Handled above, before the match, because it consumes `stub`.
+            Self::Jigsaw(_) => None,
         }
     }
 
@@ -859,6 +975,15 @@ impl StructureKind {
             // implies start-valid — but an empty list means a template failed to
             // load, which is `Unknown` (named on the ledger), not `Invalid`.
             Self::Shipwreck { .. } | Self::OceanRuin { .. } | Self::Igloo => match pieces {
+                Some(p) if !p.is_empty() => Validity::Valid,
+                _ => Validity::Unknown,
+            },
+            // A jigsaw start always has at least its centre piece — `addPieces`
+            // returns `Optional.empty()` rather than an empty builder when the
+            // centre cannot be placed, and that path is `find_stub` returning
+            // `None`, before the biome check. So an empty list here means a pool
+            // failed to load, which is ledgered rather than treated as invalid.
+            Self::Jigsaw(_) => match pieces {
                 Some(p) if !p.is_empty() => Validity::Valid,
                 _ => Validity::Unknown,
             },
@@ -877,7 +1002,7 @@ impl StructureKind {
 /// (`getBaseHeight - 1`), so the two differ by exactly one. Every piece generator
 /// below transcribes `postProcess` code that calls `getHeight`, so mixing the two
 /// up would sink every template one block into the ground.
-fn free_height(ctx: &dyn StartContext, x: i32, z: i32, heightmap: HeightmapKind) -> i32 {
+pub(crate) fn free_height(ctx: &dyn StartContext, x: i32, z: i32, heightmap: HeightmapKind) -> i32 {
     ctx.first_occupied_height(x, z, heightmap) + 1
 }
 
@@ -1100,7 +1225,10 @@ fn ocean_ruin_push(
         // processor vanilla adds (the capped suspicious-sand rule) is on the
         // ledger, not here.
         processors: vec![
-            Processor::BlockRot { integrity },
+            Processor::BlockRot {
+                rottable: None,
+                integrity,
+            },
             Processor::structure_and_air(),
         ],
         waterlogging: true,
@@ -1230,6 +1358,8 @@ fn template_piece(
             position,
             settings,
         })),
+        // Only a `list_pool_element` (S4) needs more than one.
+        extra_placements: Vec::new(),
         // Not a jigsaw piece. Every kind `template_piece` serves is
         // `terrain_adaptation: none`, so this is doubly inert today — but it is
         // the field S4's pool pieces fill, and leaving it out of the constructor
@@ -1299,6 +1429,7 @@ pub struct StructureRegistry {
     set_index: HashMap<String, usize>,
     structures: HashMap<String, StructureDef>,
     templates: TemplateStore,
+    pools: PoolStore,
     unsupported: BTreeMap<String, String>,
 }
 
@@ -1314,6 +1445,7 @@ impl StructureRegistry {
         let mut sets: Vec<StructureSetDef> = Vec::with_capacity(ids.len());
         let mut structures: HashMap<String, StructureDef> = HashMap::new();
         let mut templates = TemplateStore::default();
+        let mut pools = PoolStore::default();
         let mut unsupported: BTreeMap<String, String> = BTreeMap::new();
 
         for set_id in ids {
@@ -1351,6 +1483,18 @@ impl StructureRegistry {
                     continue;
                 }
                 let mut kind = StructureKind::parse(&doc, resolver);
+                // A jigsaw structure's whole pool graph is pulled in here, once,
+                // for the same reason the template store is eager: a start
+                // predicate runs inside the chunk pipeline with no `&dyn Resolver`
+                // in reach. A pool (or one of its templates, or one of its
+                // processors) that will not load demotes the structure — the ledger
+                // says which one and why, instead of a village of nothing.
+                if let StructureKind::Jigsaw(config) = &kind {
+                    if let Err(why) = pools.load(resolver, &mut templates, &config.start_pool) {
+                        unsupported.insert(structure_id.clone(), why);
+                        kind = StructureKind::Unsupported("minecraft:jigsaw".to_string());
+                    }
+                }
                 // A template-driven kind whose templates are not all loadable
                 // cannot place anything, so it is demoted rather than left to
                 // produce empty piece lists at generation time.
@@ -1365,10 +1509,18 @@ impl StructureRegistry {
                         doc["type"].as_str().unwrap_or("unknown").to_string(),
                     );
                 } else if let StructureKind::Unsupported(type_id) = &kind {
-                    unsupported.insert(
-                        structure_id.clone(),
-                        format!("no piece generator for type '{type_id}'"),
-                    );
+                    // `or_insert`, not `insert`: a demotion above this point
+                    // already recorded *which* pool, template or processor was the
+                    // blocker, and overwriting that with the generic "no piece
+                    // generator for type 'minecraft:jigsaw'" is how a precise
+                    // ledger entry becomes a useless one.
+                    let reason = match type_id.split_once(" — ") {
+                        Some((type_id, why)) => {
+                            format!("no generator for type '{type_id}': {why}")
+                        }
+                        None => format!("no piece generator for type '{type_id}'"),
+                    };
+                    unsupported.entry(structure_id.clone()).or_insert(reason);
                 }
                 let biomes = resolve_biome_set(resolver, &doc["biomes"]);
                 structures.insert(
@@ -1427,6 +1579,52 @@ impl StructureRegistry {
                     .into(),
             );
         }
+        // S4's own gaps, recorded once. Keyed so they cannot be mistaken for a
+        // structure id, exactly as the S2 rows above are.
+        if !pools.is_empty() {
+            unsupported.insert(
+                "pool:feature_pool_element".into(),
+                "a `feature_pool_element` participates in the joint graph and the \
+                 free-space accumulator (so the village around it is vanilla's) but \
+                 places no blocks: its `placed_feature` needs the feature driver to \
+                 accept a structure-supplied origin"
+                    .into(),
+            );
+            unsupported.insert(
+                "nbt:jigsaw_pool_element".into(),
+                "a persisted jigsaw child carries `Template` instead of vanilla's \
+                 `pool_element` compound, so a save this engine writes would reload \
+                 as an invalid start in a real client"
+                    .into(),
+            );
+            for dangling in pools.dangling_templates() {
+                unsupported.insert(
+                    format!("dangling:{dangling}"),
+                    "referenced by a loaded template pool but not resolvable, and not \
+                     shipped by vanilla either: replaced with an empty template, which \
+                     is what `StructureTemplateManager.getOrCreate` does — the element \
+                     stays in its pool and places nothing"
+                        .into(),
+                );
+            }
+            unsupported.insert(
+                "jigsaw:step_order".into(),
+                "every structure this engine places is written at the end of `pre_ore`, \
+                 which is vanilla's `surface_structures` slot: an `underground_structures` \
+                 structure is therefore placed slightly late and an \
+                 `underground_decoration` one (ancient_city) early enough that ores can \
+                 overwrite it"
+                    .into(),
+            );
+            unsupported.insert(
+                "jigsaw:gravity_reads_a_pre_beard_column".into(),
+                "a `terrain_matching` element's GravityProcessor reads a fresh `_WG` \
+                 noise column resolved at start time, not the decorating chunk's \
+                 post-beard heightmap: chunk-independent by construction, which is \
+                 what stops a street shearing at a chunk border"
+                    .into(),
+            );
+        }
 
         Self {
             seed,
@@ -1434,8 +1632,15 @@ impl StructureRegistry {
             set_index,
             structures,
             templates,
+            pools,
             unsupported,
         }
+    }
+
+    /// The loaded jigsaw template pools.
+    #[must_use]
+    pub fn pools(&self) -> &PoolStore {
+        &self.pools
     }
 
     /// The decoded templates this registry loaded.
@@ -1581,7 +1786,8 @@ impl StructureRegistry {
         ctx: &dyn StartContext,
     ) -> Option<StructureStart> {
         let def = self.structures.get(structure_id)?;
-        let position = def.kind.find_generation_point(cx, cz, ctx)?;
+        let stub = def.kind.find_stub(cx, cz, self.seed, ctx, &self.pools)?;
+        let position = stub.position();
         // `Structure.isValidBiome`: the biome at the *stub position*, quart-wise,
         // including Y. Using y = 0 (or the surface) instead is the "y = 0 trap"
         // `crate::biome` already documents for carvers.
@@ -1592,9 +1798,15 @@ impl StructureRegistry {
         // Only now — vanilla's `GenerationStub` runs its piece consumer inside
         // `getPiecesBuilder()`, after `findValidGenerationPoint`'s biome filter, so
         // a biome-rejected candidate must consume no RNG and sample no columns.
-        let generated = def
-            .kind
-            .generate_pieces(cx, cz, self.seed, ctx, &self.templates);
+        let generated = def.kind.generate_pieces(
+            stub,
+            cx,
+            cz,
+            self.seed,
+            ctx,
+            &self.templates,
+            &self.pools,
+        );
         match def.kind.validity(&generated) {
             Validity::Invalid => None,
             validity => {

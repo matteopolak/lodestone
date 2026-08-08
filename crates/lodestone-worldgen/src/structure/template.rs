@@ -53,6 +53,13 @@
 //!   the `structure_block` data markers that create them need block entities plus
 //!   loot tables, which no worldgen stage has yet; the markers themselves are
 //!   dropped by the same `BlockIgnoreProcessor` vanilla drops them with.
+//! * **A block's `nbt` compound is retained** ([`TemplateBlock::nbt`]), which S2
+//!   deliberately dropped. It is not decoration: a jigsaw block's *entire*
+//!   configuration — `name`, `target`, `pool`, `final_state`, `joint`,
+//!   `placement_priority`, `selection_priority` — lives nowhere else, so S4's
+//!   assembly reads it through [`StructureTemplate::filter_blocks`]. Only a few
+//!   blocks per template carry one, so it is an `Option<Arc<..>>` rather than a
+//!   parallel dense array.
 //!
 //! # Dependencies
 //!
@@ -62,13 +69,45 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Read as _;
+use std::sync::Arc;
 
 use lodestone_core::{Nbt, Reader};
 use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource, get_seed};
 
 use super::BoundingBox;
-use super::processor::Processor;
+use super::processor::{ProcessCtx, Processor, ProcessedBlock};
 use crate::dense_grid::DenseBlockGrid;
+
+/// One template block's `nbt` compound, as the flat field list the NBT reader
+/// produces.
+///
+/// Kept unparsed because the two consumers want different keys — jigsaw
+/// assembly reads seven of them, a data marker reads `metadata` — and because a
+/// typed struct per consumer would have to be widened every time a new one
+/// appears.
+pub type BlockNbt = Vec<(String, Nbt)>;
+
+/// One string field of a [`BlockNbt`].
+#[must_use]
+pub fn nbt_string<'a>(nbt: &'a BlockNbt, key: &str) -> Option<&'a str> {
+    nbt.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
+        Nbt::String(s) => Some(s.as_str()),
+        _ => None,
+    })
+}
+
+/// One integer field of a [`BlockNbt`], accepting any of NBT's integral widths
+/// (vanilla writes `placement_priority`/`selection_priority` as `Int`, but
+/// `getIntOr` reads a `Byte` too).
+#[must_use]
+pub fn nbt_int(nbt: &BlockNbt, key: &str) -> Option<i32> {
+    nbt.iter().find(|(k, _)| k == key).and_then(|(_, v)| match *v {
+        Nbt::Int(i) => Some(i),
+        Nbt::Short(s) => Some(i32::from(s)),
+        Nbt::Byte(b) => Some(i32::from(b)),
+        _ => None,
+    })
+}
 
 /// One of vanilla's four `Rotation`s, in `Rotation.values()` order — the order
 /// `Rotation.getRandom` indexes with a single `nextInt(4)`.
@@ -214,8 +253,23 @@ impl BlockState {
             let rotated = (value + 4 * turns) % 16;
             out.properties.insert("rotation".into(), rotated.to_string());
         }
+        if let Some(orientation) = out.properties.get("orientation") {
+            if let Some(rotated) = rotate_orientation(orientation, turns) {
+                out.properties.insert("orientation".into(), rotated);
+            }
+        }
         rotate_directional_flags(&mut out, turns);
         out
+    }
+
+    /// `JigsawBlock.getFrontFacing` / `getTopFacing` — the two halves of the
+    /// `orientation` property (`FrontAndTop`, serialised `"<front>_<top>"`).
+    ///
+    /// Returns `None` for a state with no `orientation`, which is every block
+    /// except a jigsaw.
+    #[must_use]
+    pub fn front_and_top(&self) -> Option<(&str, &str)> {
+        self.properties.get("orientation")?.split_once('_')
     }
 
     /// `BlockState.mirror(mirror)` for the same property set.
@@ -265,6 +319,50 @@ fn rotate_direction(dir: &str, turns: u32) -> Option<&'static str> {
     const CW: [&str; 4] = ["north", "east", "south", "west"];
     let index = CW.iter().position(|d| *d == dir)?;
     Some(CW[(index + turns as usize) % 4])
+}
+
+/// `OctahedralGroup.rotate(FrontAndTop)` for a Y-axis rotation:
+/// `fromFrontAndTop(rotate(front), rotate(top))`.
+///
+/// A vertical component is invariant (`Rotation.rotate(Direction)` returns a
+/// Y-axis direction unchanged), which is what makes this a per-component rewrite
+/// rather than a 12-entry table. **Load-bearing for jigsaw assembly**: the front
+/// facing of a rotated jigsaw block is the direction the connection points in,
+/// and getting it wrong makes every `canAttach` fail — a village that silently
+/// consists of its town centre alone.
+fn rotate_orientation(orientation: &str, turns: u32) -> Option<String> {
+    let (front, top) = orientation.split_once('_')?;
+    let front = rotate_direction(front, turns).unwrap_or(front);
+    let top = rotate_direction(top, turns).unwrap_or(top);
+    Some(format!("{front}_{top}"))
+}
+
+/// `Direction.getOpposite`.
+#[must_use]
+pub fn opposite_direction(dir: &str) -> &str {
+    match dir {
+        "north" => "south",
+        "south" => "north",
+        "east" => "west",
+        "west" => "east",
+        "up" => "down",
+        "down" => "up",
+        other => other,
+    }
+}
+
+/// `Direction.getStepX/Y/Z` — the unit offset of a named direction.
+#[must_use]
+pub fn direction_step(dir: &str) -> [i32; 3] {
+    match dir {
+        "north" => [0, 0, -1],
+        "south" => [0, 0, 1],
+        "west" => [-1, 0, 0],
+        "east" => [1, 0, 0],
+        "up" => [0, 1, 0],
+        "down" => [0, -1, 0],
+        _ => [0, 0, 0],
+    }
 }
 
 /// The four directional booleans of a fence/pane/vine, permuted by `turns`.
@@ -331,12 +429,34 @@ impl Default for PlaceSettings {
     }
 }
 
-/// One block of a template: its position relative to the template origin and its
-/// index into whichever palette was selected.
-#[derive(Debug, Clone, Copy)]
-struct TemplateBlock {
+/// One block of a template: its position relative to the template origin, its
+/// index into whichever palette was selected, and its `nbt` compound if it has
+/// one.
+#[derive(Debug, Clone)]
+pub struct TemplateBlock {
     pos: [i32; 3],
     state: u16,
+    /// The block's own `nbt` compound — a jigsaw block's whole configuration, a
+    /// data marker's `metadata`, a chest's `LootTable`. `None` for the
+    /// overwhelming majority of blocks, and behind an `Arc` so cloning a block
+    /// info is a refcount bump.
+    pub nbt: Option<Arc<BlockNbt>>,
+}
+
+/// One block of a template, resolved: absolute world position, rotated state and
+/// retained NBT — vanilla's `StructureTemplate.StructureBlockInfo` after
+/// `filterBlocks(position, settings, block, absolute = true)`.
+#[derive(Debug, Clone)]
+pub struct TemplateBlockInfo {
+    /// The world position, i.e. `calculateRelativePosition(...).offset(position)`.
+    pub pos: [i32; 3],
+    /// The **rotated** state (`blockInfo.state.rotate(rotation)`).
+    pub state: BlockState,
+    /// The template-local, unrotated position — what a `GravityProcessor` reads
+    /// its `delta` from.
+    pub local: [i32; 3],
+    /// The block's `nbt`.
+    pub nbt: Option<Arc<BlockNbt>>,
 }
 
 /// A parsed `.nbt` structure template.
@@ -398,7 +518,14 @@ impl StructureTemplate {
                     Some(Nbt::Int(i)) => u16::try_from(*i).unwrap_or(0),
                     _ => 0,
                 };
-                blocks.push(TemplateBlock { pos, state });
+                // Retained, unlike S2 and unlike vanilla's own placement loop:
+                // this is the only place a jigsaw block's pool/target/joint
+                // configuration exists. See the module doc.
+                let nbt = match field(entry, "nbt") {
+                    Some(Nbt::Compound(fields)) => Some(Arc::new(fields.clone())),
+                    _ => None,
+                };
+                blocks.push(TemplateBlock { pos, state, nbt });
             }
         }
         if blocks.is_empty() {
@@ -410,6 +537,28 @@ impl StructureTemplate {
             palettes,
             blocks,
         })
+    }
+
+    /// The template `StructureTemplateManager.getOrCreate` invents when a
+    /// referenced `.nbt` does not exist: **zero size, no palette, no blocks.**
+    ///
+    /// This is not a defensive stub; it is vanilla's own behaviour for a dangling
+    /// reference, and vanilla's own data has one —
+    /// `AncientCityStructurePools.java:113` names
+    /// `ancient_city/walls/intact_horizontal_wall_stairs_5`, of which only `_1`
+    /// through `_4` ship. `getOrCreate` logs, caches an empty template, and the
+    /// element stays in its pool with a degenerate box and no jigsaw blocks, so it
+    /// is offered by the pool's shuffle (consuming the draws) and never attaches.
+    /// Refusing the pool instead would delete the whole structure.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            size: [0, 0, 0],
+            // One empty palette rather than none, so `place`/`filter_blocks` need
+            // no extra guard: the block list is empty, so neither iterates.
+            palettes: vec![Vec::new()],
+            blocks: Vec::new(),
+        }
     }
 
     /// `getSize()`.
@@ -452,50 +601,123 @@ impl StructureTemplate {
         random.next_int_bounded(count).max(0) as usize
     }
 
+    /// `filterBlocks(position, new StructurePlaceSettings().setRotation(r), block,
+    /// absolute = true)` — every block of this template whose *id* is `name`, at
+    /// its world position with its state already rotated.
+    ///
+    /// The reader jigsaw assembly is built on: it needs the jigsaw blocks of an
+    /// element at an arbitrary position and rotation, which is a different
+    /// traversal from placing the whole template. Note the palette is chosen from
+    /// `position`, exactly as vanilla's `getJigsaws` does — so the same element
+    /// scanned at its real position and at `BlockPos.ZERO` can legitimately see
+    /// two different palettes, and `JigsawPlacement` scans it both ways.
+    #[must_use]
+    pub fn filter_blocks(
+        &self,
+        name: &str,
+        position: [i32; 3],
+        rotation: Rotation,
+    ) -> Vec<TemplateBlockInfo> {
+        let palette = &self.palettes[self.palette_for(position).min(self.palettes.len() - 1)];
+        let mut out = Vec::new();
+        for block in &self.blocks {
+            let Some(state) = palette.get(block.state as usize) else {
+                continue;
+            };
+            if state.name != name {
+                continue;
+            }
+            let rel = transform(block.pos, Mirror::None, rotation, [0, 0, 0]);
+            out.push(TemplateBlockInfo {
+                pos: [
+                    rel[0] + position[0],
+                    rel[1] + position[1],
+                    rel[2] + position[2],
+                ],
+                state: state.rotate(rotation),
+                local: block.pos,
+                nbt: block.nbt.clone(),
+            });
+        }
+        out
+    }
+
     /// Places this template at `position` into `grid`, clipped to the grid's own
     /// box (a write outside it is a no-op, which is how per-chunk clipping
     /// happens — see the module doc).
+    ///
+    /// # Two passes, because a processor can read the world
+    ///
+    /// `processBlockInfos` runs the **whole** chain over the **whole** block list
+    /// before `placeInWorld` writes a single block, so a `RuleProcessor`'s
+    /// `location_predicate` (village streets test for water under a `dirt_path`, to
+    /// build a bridge) sees the pre-structure world — never an earlier block of
+    /// the same template. S2's single pass had no processor that read the world, so
+    /// the distinction did not exist; with rule location predicates it is the
+    /// difference between a plank bridge and a random one.
     ///
     /// Returns the number of blocks actually written inside the grid.
     pub fn place(&self, position: [i32; 3], settings: &PlaceSettings, grid: &mut DenseBlockGrid) -> usize {
         let palette = &self.palettes[self.palette_for(position).min(self.palettes.len() - 1)];
         let (min_x, min_y, min_z, size_x, size_y, size_z) = grid.bounds();
-        let mut written = 0;
+        let inside = |p: [i32; 3]| {
+            p[0] >= min_x
+                && p[0] < min_x + size_x
+                && p[1] >= min_y
+                && p[1] < min_y + size_y
+                && p[2] >= min_z
+                && p[2] < min_z + size_z
+        };
+        let mut processed: Vec<ProcessedBlock> = Vec::new();
         for block in &self.blocks {
             let rel = transform(block.pos, settings.mirror, settings.rotation, settings.pivot);
             let world = [rel[0] + position[0], rel[1] + position[1], rel[2] + position[2]];
             // The grid clips writes, but a processor chain is not free — skip the
-            // whole block when it cannot land here anyway.
-            if world[0] < min_x
-                || world[0] >= min_x + size_x
-                || world[1] < min_y
-                || world[1] >= min_y + size_y
-                || world[2] < min_z
-                || world[2] >= min_z + size_z
-            {
+            // whole block when it cannot land here anyway. This is vanilla's own
+            // `processOnlyInCurrentChunk` skip, which it also takes whenever no
+            // processor `evaluatesEntirePieceState()` (only `capped` does, and
+            // `capped` is on the ledger).
+            if !inside(world) {
                 continue;
             }
             let Some(state) = palette.get(block.state as usize) else {
                 continue;
             };
             // Processors see the *unrotated* state at the absolute position —
-            // `StructureTemplate.processBlockInfos` runs before the
-            // `mirror().rotate()` in the placement loop. A processor returning
-            // `None` drops the block, which is how air and rot work.
-            let mut processed = Some(state.clone());
+            // `processBlockInfos` runs before the `mirror().rotate()` in the
+            // placement loop. A processor returning `None` drops the block, which
+            // is how air, rot and jigsaw replacement work.
+            let mut current = Some(ProcessedBlock {
+                pos: world,
+                state: state.clone(),
+            });
             for processor in &settings.processors {
-                let Some(current) = processed.take() else { break };
-                processed = processor.process(world, current);
+                let Some(block_now) = current.take() else { break };
+                let ctx = ProcessCtx {
+                    local: block.pos,
+                    nbt: block.nbt.as_deref(),
+                    world: grid,
+                };
+                current = processor.process(&ctx, block_now);
             }
-            let Some(processed) = processed else { continue };
-            let mut final_state = processed.mirror(settings.mirror).rotate(settings.rotation);
+            if let Some(block_now) = current {
+                processed.push(block_now);
+            }
+        }
+        let mut written = 0;
+        for block in processed {
+            // A `GravityProcessor` moves a block, so re-test the clip.
+            if !inside(block.pos) {
+                continue;
+            }
+            let mut final_state = block.state.mirror(settings.mirror).rotate(settings.rotation);
             if settings.waterlogging
                 && final_state.is_waterloggable_and_dry()
-                && grid.get(world[0], world[1], world[2]).starts_with("minecraft:water")
+                && grid.get(block.pos[0], block.pos[1], block.pos[2]).starts_with("minecraft:water")
             {
                 final_state.properties.insert("waterlogged".into(), "true".into());
             }
-            grid.set(world[0], world[1], world[2], &final_state.canonical());
+            grid.set(block.pos[0], block.pos[1], block.pos[2], &final_state.canonical());
             written += 1;
         }
         written
