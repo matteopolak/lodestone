@@ -52,7 +52,7 @@
 //! chunks it was **0 cells on seven of them and at most 121 of 212,992 (0.057%)**,
 //! always in the never-brighter direction, and located at the surface where a
 //! hillside's sky gradient runs across a column border. See
-//! `server_protocol::compute_served_light`'s doc comment and `DESIGN.md` §12.114
+//! `server_protocol::compute_served_light`'s doc comment and `DESIGN.md` §12.117
 //! for the brokered `lodestone-server` patch that takes it to zero.
 #![allow(clippy::needless_range_loop)]
 
@@ -663,7 +663,7 @@ fn seam_residual_is_bounded_and_never_brighter_than_the_exact_compute() {
         "cross-chunk seam residual {differ}/{compared} ({:.4}%) exceeds the pinned ceiling \
          {:.2}%. Bounding box {bbox:?}, worst cell {worst:?}. Either the generator grew terrain \
          whose light genuinely spans a chunk border (land the brokered lodestone-server patch in \
-         DESIGN.md §12.114, which takes this to 0) or the isolated compute regressed.",
+         DESIGN.md §12.117, which takes this to 0) or the isolated compute regressed.",
         fraction * 100.0,
         SEAM_RESIDUAL_CEILING * 100.0
     );
