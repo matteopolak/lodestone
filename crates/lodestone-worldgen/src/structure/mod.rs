@@ -1646,29 +1646,76 @@ pub struct StructureRegistry {
 }
 
 impl StructureRegistry {
-    /// Builds the registry for `seed` from `resolver`'s structure documents.
+    /// Builds the registry for `seed` from `resolver`'s structure documents, with
+    /// **no dimension filter** — every structure set the resolver serves is kept.
     ///
     /// An empty [`Resolver::structure_set_ids`] yields an empty registry that
     /// places nothing, which is what every fixture resolver in this workspace
     /// gets and why none of them had to change.
+    ///
+    /// See [`Self::new_for_biomes`] for the filtered form and for why the
+    /// Overworld deliberately stays on this one.
     #[must_use]
     pub fn new(seed: i64, resolver: &dyn Resolver) -> Self {
+        Self::new_for_biomes(seed, resolver, None)
+    }
+
+    /// [`Self::new`] plus vanilla's `hasBiomesForStructureSet` filter: a set is
+    /// kept only when at least one of its structures' resolved `biomes` closures
+    /// intersects `possible_biomes`, the dimension's own
+    /// `BiomeSource.possibleBiomes()`.
+    ///
+    /// # Why this exists, and why it is not merely an optimisation
+    ///
+    /// `ChunkGeneratorStructureState.createForNormal` filters the *whole
+    /// structure-set registry* through `hasBiomesForStructureSet` before
+    /// `createStructures` ever walks it
+    /// (`ChunkGeneratorStructureState.java:52-67`), and `possibleStructureSets()`
+    /// is what that walk iterates. So a Nether generator handed the full 20-set
+    /// bundle is not "vanilla plus some wasted predicates": it is a generator
+    /// whose `structure_starts` can report an Overworld set's id, and whose
+    /// [`Self::unsupported`] ledger names blockers for structures that dimension
+    /// could never have placed. Both of those are answers to a question nobody
+    /// asked, which is how a ledger row becomes noise.
+    ///
+    /// **It cannot change which chunk gets which structure, in either
+    /// direction**, and that is worth stating because it looks like it could.
+    /// [`Self::starts_at`] re-seeds its weighted walk per set
+    /// (`set_large_feature_seed(seed, cx, cz)`), so dropping a set shifts no other
+    /// set's stream; and a dropped set's own structures would have been rejected
+    /// by [`Self::try_start`]'s biome filter anyway. What it does change is cost —
+    /// a filtered Nether registry loads `bastion`'s pools and nothing else,
+    /// instead of every village, `ancient_city` and `trial_chambers` pool graph.
+    ///
+    /// **`None` means "no filter", and that is what the Overworld passes.** Its
+    /// `possibleBiomes()` is the whole 7,594-row parameter table's biome set, so
+    /// filtering there would drop exactly the Nether and End sets and change
+    /// nothing else — but it would also change [`Self::unsupported`]'s keys for a
+    /// generator whose gates pin them, for no behavioural gain. The asymmetry is
+    /// deliberate and is the reason this is a second constructor rather than a
+    /// changed signature.
+    #[must_use]
+    pub fn new_for_biomes(
+        seed: i64,
+        resolver: &dyn Resolver,
+        possible_biomes: Option<&HashSet<String>>,
+    ) -> Self {
         let ids = resolver.structure_set_ids();
         let mut sets: Vec<StructureSetDef> = Vec::with_capacity(ids.len());
         let mut structures: HashMap<String, StructureDef> = HashMap::new();
         let mut templates = TemplateStore::default();
         let mut pools = PoolStore::default();
         let mut unsupported: BTreeMap<String, String> = BTreeMap::new();
+        // One resolved `biomes` closure per structure id, shared between the
+        // filter probe below and the parse loop that follows it. Without this the
+        // filtered path resolves every candidate's biome-tag closure twice.
+        let mut biome_sets: HashMap<String, HashSet<String>> = HashMap::new();
 
         for set_id in ids {
             let document = resolver.structure_set(&set_id);
             if document.is_null() {
                 unsupported.insert(set_id.clone(), "structure set document missing".into());
                 continue;
-            }
-            let placement = Placement::parse(&document["placement"]);
-            if let PlacementKind::Unsupported(kind) = &placement.kind {
-                unsupported.insert(set_id.clone(), format!("placement type '{kind}'"));
             }
             let entries: Vec<(String, i32)> = document["structures"]
                 .as_array()
@@ -1683,6 +1730,35 @@ impl StructureRegistry {
                         .collect()
                 })
                 .unwrap_or_default();
+
+            // `hasBiomesForStructureSet`, before `Placement::parse` and before any
+            // pool or template is touched — a set this dimension cannot place must
+            // cost nothing and must leave no ledger row, exactly as vanilla drops
+            // it from `possibleStructureSets` before `generatePositions` runs.
+            if let Some(possible) = possible_biomes {
+                let mut reachable = false;
+                for (structure_id, _) in &entries {
+                    let doc = resolver.structure(structure_id);
+                    if doc.is_null() {
+                        continue;
+                    }
+                    let biomes = biome_sets
+                        .entry(structure_id.clone())
+                        .or_insert_with(|| resolve_biome_set(resolver, &doc["biomes"]));
+                    if biomes.iter().any(|b| possible.contains(b)) {
+                        reachable = true;
+                        break;
+                    }
+                }
+                if !reachable {
+                    continue;
+                }
+            }
+
+            let placement = Placement::parse(&document["placement"]);
+            if let PlacementKind::Unsupported(kind) = &placement.kind {
+                unsupported.insert(set_id.clone(), format!("placement type '{kind}'"));
+            }
 
             for (structure_id, _) in &entries {
                 if structures.contains_key(structure_id) {
@@ -1754,7 +1830,9 @@ impl StructureRegistry {
                     };
                     unsupported.entry(structure_id.clone()).or_insert(reason);
                 }
-                let biomes = resolve_biome_set(resolver, &doc["biomes"]);
+                let biomes = biome_sets
+                    .remove(structure_id)
+                    .unwrap_or_else(|| resolve_biome_set(resolver, &doc["biomes"]));
                 structures.insert(
                     structure_id.clone(),
                     StructureDef {
@@ -1913,18 +1991,28 @@ impl StructureRegistry {
         }
         // Reachability, not mechanism — and the one class of row that looks like no
         // row is needed, because every *other* instrument says these are fine.
+        //
+        // **The composition half of this row is closed.** `NetherGenerator` now runs
+        // starts / refs / beardifier / place, so `bastion_remnant` writes real blocks
+        // into a real Nether column. What is left is one dimension-shaped gap and
+        // three per-structure ones, and the row is kept (rather than deleted) because
+        // the per-structure rows cannot say the dimension-level thing: a reader asking
+        // "can I walk into a bastion" needs to know that no chunk source serves this
+        // dimension yet.
         if !structures.is_empty() {
             unsupported.insert(
                 "dimension:nether_structures".into(),
-                "**`bastion_remnant`, `fortress`, `nether_fossil` and \
-                 `ruined_portal_nether` reach zero blocks in a served world regardless \
-                 of their piece generators**: their biome tags are Nether-only \
-                 (`bastion_remnant` is crimson_forest / nether_wastes / \
-                 soul_sand_valley / warped_forest) and `NetherGenerator` has **no \
-                 structure stage at all** — no starts, no refs, no place, no beardifier. \
-                 `bastion_remnant` therefore assembles correctly, is absent from every \
-                 other row here, and is invisible in the Overworld because its biome \
-                 filter can never pass. The fix is in `nether/mod.rs`, not here"
+                "`NetherGenerator` composes a structure stage now, so \
+                 `bastion_remnant` assembles **and places blocks** in a generated \
+                 Nether column. Two gaps remain. (1) `fortress`, `nether_fossil` and \
+                 `ruined_portal_nether` have no piece generator — each has its own row \
+                 here — so at their placement cells the Nether gets an advisory start \
+                 with `pieces_complete: false` and zero blocks, which is also what \
+                 stops the weighted `nether_complexes` walk from handing every \
+                 fortress cell to a bastion. (2) Nothing *serves* the dimension: \
+                 `lodestone-server`'s `EmbeddedResolver` hardcodes the Overworld \
+                 documents and `OverworldChunkSource` is the only chunk source, so a \
+                 portal trip still does not land in this terrain (issue #330)"
                     .into(),
             );
         }

@@ -306,22 +306,28 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
     ] {
         assert!(ledger.contains_key(key), "{key} is not on the ledger");
     }
-    // `bastion_remnant` is **supported** (its pools load, it assembles) and reaches
-    // zero blocks in a served world, because it is Nether-only and `NetherGenerator`
-    // has no structure stage. Both halves are asserted: the structure absent from
-    // the per-structure rows, *and* the reachability row present naming it. A gate
-    // that only checked the first would report a healthy bastion, which is what
-    // every other instrument here already does.
+    // `bastion_remnant` is **supported** (its pools load, it assembles) and, since
+    // `NetherGenerator` gained a structure stage, it also *places blocks* — 15,405
+    // bastion-only blocks at chunk (8, 7) against 0 in the structure-free control,
+    // measured by `tests/nether_structures.rs`, which is where that half is gated.
+    // What survives here is the dimension row, and what it must now say is the
+    // *remaining* gap: nothing serves the Nether, so the terrain and its bastion are
+    // still unreachable from the game. A row that still claimed "no structure stage"
+    // would be the stale-record failure this file's own history is full of.
     assert!(
         !ledger.contains_key("minecraft:bastion_remnant"),
-        "bastion_remnant assembles; its problem is reachability, not support"
+        "bastion_remnant assembles and places; it is not a support gap"
     );
     let nether_row = ledger
         .get("dimension:nether_structures")
-        .expect("the Nether reachability gap must be named");
+        .expect("the remaining Nether reachability gap must be named");
     assert!(
-        nether_row.contains("bastion_remnant") && nether_row.contains("NetherGenerator"),
-        "the row must name the structure and where the fix goes: {nether_row}"
+        nether_row.contains("places blocks"),
+        "the row must record that the composition gap closed: {nether_row}"
+    );
+    assert!(
+        nether_row.contains("ChunkSource") || nether_row.contains("chunk source"),
+        "the row must name what is still missing — a chunk source: {nether_row}"
     );
     // The two rows S6 corrected. `template:data_markers` claimed shipwreck / igloo /
     // ocean-ruin loot chests were not placed at all; `lodestone_server`'s
