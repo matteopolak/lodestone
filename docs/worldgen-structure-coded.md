@@ -5,7 +5,7 @@
 The half of the structure engine whose blocks are Java statements rather than an `.nbt` template —
 `crates/lodestone-worldgen/src/structure/coded.rs`, issue #514's phase S5. It ports
 `StructurePiece`'s block-writing helpers and `ScatteredFeaturePiece`'s two ground-height rules, and on
-top of them the piece generators for **`swamp_hut`** and **`desert_pyramid`**.
+top of them the piece generators for **`swamp_hut`**, **`desert_pyramid`** and **`jungle_pyramid`**.
 
 ## How it works
 
@@ -83,6 +83,10 @@ generator sits three layers below the start predicate that holds the seed; a fix
 those two picks are position-dependent but seed-independent. Ledgered as `coded:pyramid_roof_seed` —
 threading the seed down is the faithful fix and is a one-line change to `desert_pyramid_pieces`' signature.
 
+The four trap-room chests are placed as **blocks** now, at the alcove floors, overwriting the `air` the
+alcove loop wrote there. Their loot tables and vanilla's `nextLong()` roll seeds ride on
+`StructurePiece::loot`; see `jungle_pyramid` below for why that list exists and what still has to read it.
+
 `afterPlace` itself needed no deviation: its candidate set is the whole piece's, its shuffle is a
 positional fork at the piece box centre, and only the *writes* are clipped by `chunkBB`. Two details are
 the specification and both are silent when wrong:
@@ -91,6 +95,44 @@ the specification and both are silent when wrong:
 |---|---|---|
 | the candidate set's order | `SortedArraySet(Vec3i::compareTo)` — **y, then z, then x** | insertion order, which the shuffle then permutes differently |
 | how many are suspicious | `nextInt(5, 8)` = `5 + nextInt(3)`, i.e. **5..=7** | `nextIntBetweenInclusive(5, 8)`, i.e. 5..=8 |
+
+### `jungle_pyramid`, and the one number that is the whole specification
+
+368 Java statements, two tripwire/dispenser traps, a sticky-piston puzzle and two chests. The only new
+machinery it needed was `generateBox`'s `BlockSelector` overload — `Builder::generate_box_selected` —
+plus `generate_air_box`, `create_chest` and `create_dispenser`.
+
+**`MossStoneSelector` draws one `nextFloat()` per position in the box, before the write**, so a box of
+`n` positions consumes `n` draws whether or not each write lands in the decorating chunk. Summed over
+the 43 selector call sites with the loops expanded that is **1,522** draws, and with the orientation
+`nextInt(4)` and four `nextLong()`s (two `next(32)` each) the piece's total stream advance is **1,531**.
+That number is the gate: a temple whose selector is only consulted for served positions, or which
+re-seeds between its two halves, is still temple-shaped.
+
+Its `random` is vanilla's *decoration* stream — per chunk, so chunk-order dependent, the same ambiguity
+`desert_pyramid` has. Every draw comes out of the structure's own per-chunk stream here instead, in
+vanilla's order and count, which makes the temple a pure function of `(seed, chunk)`. Ledgered as
+`coded:decoration_random`.
+
+Two smaller facts, both invisible when wrong:
+
+| fact | why it matters |
+|---|---|
+| `createChest` calls `level.setBlock` **directly**, `createDispenser` goes through `placeBlock` | the dispenser's `facing` is mirrored/rotated with the piece and the chest's is not |
+| vanilla's chest `facing` comes from `reorient`, which reads the four horizontal neighbours' render-solidity *as written so far* | there is no block-state read on `StartContext` and no solidity table in this crate, so a coded chest keeps `facing=north`. Ledgered as `coded:chest_reorient` — cosmetic, and the only coded-piece property knowingly not vanilla's |
+
+### Where a coded piece's loot goes
+
+`StructurePiece::loot` is a `Vec<CodedLoot>` of `(pos, table, seed)`. It is a side list rather than a
+field on `CodedBlock` because a pyramid is ~7k blocks and four of them are chests.
+
+**Nothing reads it yet, and that is the one open gap here.** `lodestone_server::structure_loot` resolves
+a *template* piece's loot by re-reading the raw `.nbt` bytes for `structure_block` DATA markers; a coded
+piece has no template, so that pass structurally cannot see these. Ledgered as `coded:chests`. Note this
+is a **narrower** claim than the row it replaced, which said worldgen had no block entities and no loot
+tables — both of those exist (`overworld::block_entities`, and the server's roller plus
+`structure_loot`), and the marker path for shipwreck / igloo / ocean ruin has been rolling real loot
+since #337.
 
 ## How to change it
 
@@ -121,25 +163,43 @@ control:
 |---|---|
 | pyramid | the world holds **exactly** the count of signature blocks the piece's own last-write-wins map carries (403 at the gated chunk), and the control holds **0** |
 | hut | > 80 hut-only blocks, control **0** |
+| jungle temple | the same exactly-equal-to-predicted count over a signature set with no other source in a jungle (`chiseled_stone_bricks`, `cobblestone_stairs`, `lever`, `repeater`, `sticky_piston`, `dispenser`, `tripwire`/`_hook`, `chest`), control **0**. `mossy_cobblestone` is deliberately excluded — the temple's commonest block, but not uniquely its |
+| coded containers | each piece's `loot` list carries vanilla's table ids in vanilla's order, four **distinct** roll seeds (two equal seeds would mean a re-seed), and a chest/dispenser block surviving in the piece's *final* state at that position |
 | reproducibility | two independently constructed generators produce byte-identical block lists |
-| ledger | `swamp_hut` and `desert_pyramid` are **absent** from the ledger; `jungle_pyramid`, `mineshaft`, `stronghold`, `monument`, `ruined_portal` are present; all four `coded:` deviation rows are present |
+| ledger | `swamp_hut`, `desert_pyramid` and `jungle_pyramid` are **absent** from the ledger; `mineshaft`, `stronghold`, `monument`, `ruined_portal` are present; every `coded:` deviation row is present; `template:data_markers` is **gone** and `template:block_entity_nbt` carries its measured 132 |
 
 Neither structure appears in the oracle world's generated area, so the chunks come from the placement
 engine (itself gated against that oracle by S1), walked outward in rings until the biome filter lets one
 through: **234** candidate cells for the pyramid and **211** for the hut, which is why the chunks are
-recorded as constants — a bounded search reports "not implemented" for a working generator.
+recorded as constants — a bounded search reports "not implemented" for a working generator. The jungle
+temple's is grid ring **5**, far nearer than either, so a search bound tuned to the pyramid would have
+found it and one tuned to ring 4 would not: the bound is a per-structure measurement, not a constant.
+`find_the_nearest_start_chunks` is the `#[ignore]`d search that produced all three, and it walks
+**placement cells** rather than chunks (one candidate per `spacing²`) using
+`Placement::potential_structure_chunk` — production's own function, because a test helper that
+re-derives the grid maths turns a failing gate into a hanging one.
 
 Unit arms in `coded.rs` cover the four orientation coordinate mappings, `makeBoundingBox`'s axis swap,
 `generateBox`'s edge/fill split (a 3-cube is 26 edge blocks and one interior), `Facing::random`'s single
-draw in `Direction.Plane.HORIZONTAL` order, and the 2D data values (SOUTH is 0, not NORTH).
+draw in `Direction.Plane.HORIZONTAL` order, and the 2D data values (SOUTH is 0, not NORTH). The jungle
+temple adds the stream-position arm above plus the cobble/mossy split as a **two-hypothesis** magnitude
+test: `nextFloat() < 0.4F` selects cobblestone, so the inverted reading predicts 0.6, and both values are
+computed from outside constants and the measurement is required to land on one. One continuous stream of
+1,522 draws, never 1,522 fresh randoms — sequentially seeded LCGs are correlated in their first draw.
 
 ## What is still coded and not here
 
-`jungle_pyramid` (368 lines, and the only one needing `generateBox`'s RNG `BlockSelector` overload),
-`mineshaft` (1,386), `stronghold` (1,766), `monument` (1,988), `ruined_portal` (its own vertical
-placement plus `spreadNetherrack`'s 29×29 cross-chunk apron), `nether_fossil`, `fortress`, `end_city`,
-`mansion`. Each is named on `StructureRegistry::unsupported`. The infrastructure in this file is what
-they were all blocked on; what remains for `jungle_pyramid` is transcription plus one helper.
+`mineshaft` (1,386) and `stronghold` (1,766), which both need **eager piece generation** — the same
+architectural shape, so they pair; `monument` (1,988), pieces only; `ruined_portal` (its own vertical
+placement plus `spreadNetherrack`'s 29×29 cross-chunk apron); `nether_fossil`, `fortress`, `end_city`,
+`mansion`. Each is named on `StructureRegistry::unsupported`.
+
+**`buried_treasure` is on that list too, and it did not look like it.** It produces a start and a real
+bounding box and places **zero blocks**: `BuriedTreasurePieces.postProcess` walks a cursor down until the
+block *below* it is sandstone/stone/andesite/granite/diorite, then writes up to five neighbours and one
+chest. Every one of those decisions is a `getBlockState`, and `StartContext` offers only
+`is_replaceable_at` (air-or-fluid). The blocker is one method — a `BlockKind`-at-position read — and it
+is the same one `ruined_portal` needs. Ledgered as `coded:buried_treasure_chest`.
 
 ## Dependencies
 

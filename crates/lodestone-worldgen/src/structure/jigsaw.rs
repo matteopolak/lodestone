@@ -1212,6 +1212,7 @@ impl Placer<'_> {
                 placement: first.map(|(_, placement)| placement),
                 extra_placements: extra.into_iter().map(|(_, placement)| placement).collect(),
                 blocks: None,
+                loot: Vec::new(),
                 beard,
             });
         }
@@ -1585,6 +1586,7 @@ mod tests {
             placement: None,
             extra_placements: Vec::new(),
             blocks: None,
+            loot: Vec::new(),
             beard: None,
         };
         let pieces = vec![

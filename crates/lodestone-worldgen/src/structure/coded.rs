@@ -130,6 +130,7 @@ pub struct Builder {
     rotation: Rotation,
     height_position: Option<i32>,
     blocks: Vec<CodedBlock>,
+    loot: Vec<super::CodedLoot>,
 }
 
 impl Builder {
@@ -166,6 +167,7 @@ impl Builder {
             rotation,
             height_position: None,
             blocks: Vec::new(),
+            loot: Vec::new(),
         }
     }
 
@@ -330,6 +332,125 @@ impl Builder {
         }
     }
 
+    /// `generateAirBox(level, chunkBB, x0, y0, z0, x1, y1, z1)`.
+    ///
+    /// Not `generate_box` with air for both arguments: it is a distinct vanilla
+    /// method and spelling it out keeps the transcription line-for-line, which is
+    /// the property that makes a 300-statement piece reviewable at all.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_air_box(&mut self, x0: i32, y0: i32, z0: i32, x1: i32, y1: i32, z1: i32) {
+        let air = BlockState::of("minecraft:air");
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                for z in z0..=z1 {
+                    self.place(&air, x, y, z);
+                }
+            }
+        }
+    }
+
+    /// `generateBox(..., skipAir = false, random, selector)` — the
+    /// [`StructurePiece.BlockSelector`] overload.
+    ///
+    /// **The draw count is the specification.** `selector.next` is called for
+    /// *every* position in the box, before `placeBlock`, so a box of `n` positions
+    /// consumes exactly `n` selector draws whether or not each write lands inside
+    /// the decorating chunk. Skipping a position — for instance to "optimise" a box
+    /// that is entirely outside the served chunk — desynchronises the stream for
+    /// everything after it.
+    ///
+    /// `is_edge` is vanilla's inline
+    /// `y == y0 || y == y1 || x == x0 || x == x1 || z == z0 || z == z1`, which is
+    /// the *negation* of [`Self::generate_box`]'s `interior` test — not
+    /// `isInterior`, the unrelated heightmap probe on the same class.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_box_selected<R: RandomSource>(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        z0: i32,
+        x1: i32,
+        y1: i32,
+        z1: i32,
+        random: &mut R,
+        selector: &mut dyn FnMut(&mut R, i32, i32, i32, bool) -> BlockState,
+    ) {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                for z in z0..=z1 {
+                    let is_edge = y == y0 || y == y1 || x == x0 || x == x1 || z == z0 || z == z1;
+                    let state = selector(random, x, y, z, is_edge);
+                    self.place(&state, x, y, z);
+                }
+            }
+        }
+    }
+
+    /// `createChest(level, chunkBB, random, x, y, z, lootTable)`.
+    ///
+    /// Three faithfulness notes, each of which would be invisible if it were wrong:
+    ///
+    /// * **`createChest` calls `level.setBlock` directly, not `placeBlock`**, so the
+    ///   piece's mirror/rotation is *not* applied to the chest — unlike
+    ///   [`Self::create_dispenser`], which does go through `placeBlock`. The state
+    ///   is pushed raw.
+    /// * `random.nextLong()` is drawn **whenever the chest lands inside the
+    ///   decorating chunk**, and vanilla's `placedMainChest` flag makes that happen
+    ///   exactly once per piece across all the chunk passes. One draw here, in
+    ///   source order, is the same total.
+    /// * vanilla's facing comes from `StructurePiece.reorient`, which reads the
+    ///   render-solidity of the four horizontal neighbours *of the world as written
+    ///   so far*. There is no block-state read on [`StartContext`] and no solidity
+    ///   table in this crate, so the default `facing=north` is kept and the
+    ///   deviation is on the ledger as `coded:chest_reorient`.
+    pub fn create_chest<R: RandomSource>(
+        &mut self,
+        random: &mut R,
+        x: i32,
+        y: i32,
+        z: i32,
+        table: &str,
+    ) {
+        let pos = self.world_pos(x, y, z);
+        self.blocks.push(CodedBlock {
+            pos,
+            state: "minecraft:chest[facing=north,type=single,waterlogged=false]".to_string(),
+        });
+        let seed = random.next_long();
+        self.loot.push(super::CodedLoot {
+            pos,
+            table: table.to_string(),
+            seed,
+        });
+    }
+
+    /// `createDispenser(level, chunkBB, random, x, y, z, facing, lootTable)`.
+    ///
+    /// Unlike [`Self::create_chest`] this one *does* route through `placeBlock`, so
+    /// the dispenser's `facing` is mirrored and rotated with the piece.
+    pub fn create_dispenser<R: RandomSource>(
+        &mut self,
+        random: &mut R,
+        x: i32,
+        y: i32,
+        z: i32,
+        facing: &str,
+        table: &str,
+    ) {
+        self.place(
+            &BlockState::parse(&format!("minecraft:dispenser[facing={facing},triggered=false]")),
+            x,
+            y,
+            z,
+        );
+        let seed = random.next_long();
+        self.loot.push(super::CodedLoot {
+            pos: self.world_pos(x, y, z),
+            table: table.to_string(),
+            seed,
+        });
+    }
+
     /// `fillColumnDown(level, state, x, startY, z, chunkBB)` — write downward from
     /// `startY` while the column is replaceable.
     ///
@@ -382,6 +503,7 @@ impl Builder {
             placement: None,
             extra_placements: Vec::new(),
             blocks: Some(Arc::new(self.blocks)),
+            loot: self.loot,
             // `Beardifier.java:75`'s `else` branch: a non-pool piece is a rigid box
             // with `groundLevelDelta` 0 and no junctions. Inert for both structures
             // here, whose `terrain_adaptation` is `none`.
@@ -693,10 +815,14 @@ pub fn desert_pyramid_pieces<R: RandomSource>(
         b.place(&chiseled, ox, -10, oz);
         b.place(&cut, ox, -11, oz);
     }
-    // `createChest` ×4 at `(10 ± 2, -11, 10 ± 2)`: the chest block itself needs a
-    // block entity and the desert-pyramid loot table, so it is ledgered rather than
-    // placed as an empty chest. The alcove air above is placed, so the trap room is
-    // shaped correctly and simply holds nothing.
+    // `for (Direction direction : Direction.Plane.HORIZONTAL) { … createChest(10 +
+    // stepX*2, -11, 10 + stepZ*2, DESERT_PYRAMID) }` — the four alcove floors, each
+    // overwriting the `air` the loop above wrote there. **The iteration order is the
+    // specification**, because each chest consumes one `nextLong()`: NORTH, EAST,
+    // SOUTH, WEST, i.e. steps (0,-1), (1,0), (0,1), (-1,0).
+    for (dx, dz) in [(0, -2), (2, 0), (0, 2), (-2, 0)] {
+        b.create_chest(random, 10 + dx, -11, 10 + dz, DESERT_PYRAMID_LOOT);
+    }
 
     // `addCellar`.
     let (rx, ry, rz) = (16, -4, 13);
@@ -909,6 +1035,298 @@ fn after_place_suspicious_sand(
     piece.blocks = Some(Arc::new(blocks));
 }
 
+/// `JungleTemplePiece.WIDTH`. Public for the same reason
+/// [`PYRAMID_WIDTH`] is: `SinglePieceStructure.findGenerationPoint` samples this
+/// footprint's four corners *before* any piece exists.
+pub const JUNGLE_WIDTH: i32 = 12;
+/// `JungleTemplePiece.DEPTH`.
+pub const JUNGLE_DEPTH: i32 = 15;
+
+/// `JungleTempleStructure` → `JungleTemplePiece` — the whole temple, its two
+/// tripwire/dispenser traps and its piston puzzle.
+///
+/// # The one deviation, and why the draw *count* still matches
+///
+/// `postProcess`'s `random` is the **decorating chunk's** feature stream, not the
+/// start's, and every one of this piece's draws comes from it: **1,522**
+/// `MossStoneSelector.nextFloat()` calls (the summed volume of the 43 selector
+/// `generateBox` call sites, loops expanded) plus four `nextLong()`s for the two
+/// chests and two dispensers. Vanilla is therefore chunk-order dependent here in exactly
+/// the way §12.139 records for `desert_pyramid` — a temple spanning two chunks gets
+/// its cobble/mossy pattern from whichever chunk's stream reached each block, and
+/// the four `placed*` booleans mean the container draws happen in whichever pass
+/// first had the container inside `chunkBB`.
+///
+/// Resolved the same way `swamp_hut`'s sink and the beached shipwreck's
+/// `nextInt(3)` were: the draws come out of the **structure's own per-chunk
+/// stream**, continuing after the orientation draw, in source order. That stream is
+/// per-structure-per-chunk and nothing reads it after this call, so no other
+/// structure's draws move, and the whole temple becomes a pure function of
+/// `(seed, chunk)`. Ledgered as `coded:decoration_random`.
+///
+/// The *number* and *order* of draws is vanilla's, which is the half that a wrong
+/// implementation gets wrong silently: a box whose selector is only consulted for
+/// positions inside the served chunk still produces a plausible temple.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn jungle_pyramid_pieces<R: RandomSource>(
+    cx: i32,
+    cz: i32,
+    ctx: &dyn StartContext,
+    random: &mut R,
+) -> Vec<StructurePiece> {
+    // `getRandomHorizontalDirection(random)` in the piece constructor, from
+    // `context.random()` — the one draw vanilla also takes from this stream.
+    let orientation = Facing::random(random);
+    let w = JUNGLE_WIDTH;
+    let d = JUNGLE_DEPTH;
+    let mut b = Builder::new(cx * 16, 64, cz * 16, orientation, w, 10, d);
+    if !b.average_ground_height(ctx, 0) {
+        return Vec::new();
+    }
+
+    let cobble = s("minecraft:cobblestone");
+    let mossy = s("minecraft:mossy_cobblestone");
+    let air = s("minecraft:air");
+    // `MossStoneSelector.next`: one `nextFloat()` per position, ignoring the
+    // coordinates and the edge flag entirely.
+    let mut moss = |r: &mut R, _x: i32, _y: i32, _z: i32, _edge: bool| {
+        if r.next_float() < 0.4 {
+            cobble.clone()
+        } else {
+            mossy.clone()
+        }
+    };
+    // One name per `generateBox(level, chunkBB, …, false, random, STONE_SELECTOR)`,
+    // so the transcription below stays line-for-line with the Java.
+    macro_rules! moss_box {
+        ($x0:expr, $y0:expr, $z0:expr, $x1:expr, $y1:expr, $z1:expr) => {
+            b.generate_box_selected($x0, $y0, $z0, $x1, $y1, $z1, random, &mut moss)
+        };
+    }
+
+    moss_box!(0, -4, 0, w - 1, 0, d - 1);
+    moss_box!(2, 1, 2, 9, 2, 2);
+    moss_box!(2, 1, 12, 9, 2, 12);
+    moss_box!(2, 1, 3, 2, 2, 11);
+    moss_box!(9, 1, 3, 9, 2, 11);
+    moss_box!(1, 3, 1, 10, 6, 1);
+    moss_box!(1, 3, 13, 10, 6, 13);
+    moss_box!(1, 3, 2, 1, 6, 12);
+    moss_box!(10, 3, 2, 10, 6, 12);
+    moss_box!(2, 3, 2, 9, 3, 12);
+    moss_box!(2, 6, 2, 9, 6, 12);
+    moss_box!(3, 7, 3, 8, 7, 11);
+    moss_box!(4, 8, 4, 7, 8, 10);
+    b.generate_air_box(3, 1, 3, 8, 2, 11);
+    b.generate_air_box(4, 3, 6, 7, 3, 9);
+    b.generate_air_box(2, 4, 2, 9, 5, 12);
+    b.generate_air_box(4, 6, 5, 7, 6, 9);
+    b.generate_air_box(5, 7, 6, 6, 7, 8);
+    b.generate_air_box(5, 1, 2, 6, 2, 2);
+    b.generate_air_box(5, 2, 12, 6, 2, 12);
+    b.generate_air_box(5, 5, 1, 6, 5, 1);
+    b.generate_air_box(5, 5, 13, 6, 5, 13);
+    b.place(&air, 1, 5, 5);
+    b.place(&air, 10, 5, 5);
+    b.place(&air, 1, 5, 9);
+    b.place(&air, 10, 5, 9);
+
+    let mut z = 0;
+    while z <= 14 {
+        moss_box!(2, 4, z, 2, 5, z);
+        moss_box!(4, 4, z, 4, 5, z);
+        moss_box!(7, 4, z, 7, 5, z);
+        moss_box!(9, 4, z, 9, 5, z);
+        z += 14;
+    }
+    moss_box!(5, 6, 0, 6, 6, 0);
+
+    let mut x = 0;
+    while x <= 11 {
+        let mut z = 2;
+        while z <= 12 {
+            moss_box!(x, 4, z, x, 5, z);
+            z += 2;
+        }
+        moss_box!(x, 6, 5, x, 6, 5);
+        moss_box!(x, 6, 9, x, 6, 9);
+        x += 11;
+    }
+
+    moss_box!(2, 7, 2, 2, 9, 2);
+    moss_box!(9, 7, 2, 9, 9, 2);
+    moss_box!(2, 7, 12, 2, 9, 12);
+    moss_box!(9, 7, 12, 9, 9, 12);
+    moss_box!(4, 9, 4, 4, 9, 4);
+    moss_box!(7, 9, 4, 7, 9, 4);
+    moss_box!(4, 9, 10, 4, 9, 10);
+    moss_box!(7, 9, 10, 7, 9, 10);
+    moss_box!(5, 9, 7, 6, 9, 7);
+
+    let stairs = |facing: &str| {
+        s(&format!(
+            "minecraft:cobblestone_stairs[facing={facing},half=bottom,shape=straight,\
+             waterlogged=false]"
+        ))
+    };
+    let east_stairs = stairs("east");
+    let west_stairs = stairs("west");
+    let south_stairs = stairs("south");
+    let north_stairs = stairs("north");
+    b.place(&north_stairs, 5, 9, 6);
+    b.place(&north_stairs, 6, 9, 6);
+    b.place(&south_stairs, 5, 9, 8);
+    b.place(&south_stairs, 6, 9, 8);
+    b.place(&north_stairs, 4, 0, 0);
+    b.place(&north_stairs, 5, 0, 0);
+    b.place(&north_stairs, 6, 0, 0);
+    b.place(&north_stairs, 7, 0, 0);
+    b.place(&north_stairs, 4, 1, 8);
+    b.place(&north_stairs, 4, 2, 9);
+    b.place(&north_stairs, 4, 3, 10);
+    b.place(&north_stairs, 7, 1, 8);
+    b.place(&north_stairs, 7, 2, 9);
+    b.place(&north_stairs, 7, 3, 10);
+    moss_box!(4, 1, 9, 4, 1, 9);
+    moss_box!(7, 1, 9, 7, 1, 9);
+    moss_box!(4, 1, 10, 7, 2, 10);
+    moss_box!(5, 4, 5, 6, 4, 5);
+    b.place(&east_stairs, 4, 4, 5);
+    b.place(&west_stairs, 7, 4, 5);
+
+    for i in 0..4 {
+        b.place(&south_stairs, 5, -i, 6 + i);
+        b.place(&south_stairs, 6, -i, 6 + i);
+        b.generate_air_box(5, -i, 7 + i, 6, -i, 9 + i);
+    }
+
+    b.generate_air_box(1, -3, 12, 10, -1, 13);
+    b.generate_air_box(1, -3, 1, 3, -1, 13);
+    b.generate_air_box(1, -3, 1, 9, -1, 5);
+
+    let mut z = 1;
+    while z <= 13 {
+        moss_box!(1, -3, z, 1, -2, z);
+        z += 2;
+    }
+    let mut z = 2;
+    while z <= 12 {
+        moss_box!(1, -1, z, 3, -1, z);
+        z += 2;
+    }
+    moss_box!(2, -2, 1, 5, -2, 1);
+    moss_box!(7, -2, 1, 9, -2, 1);
+    moss_box!(6, -3, 1, 6, -3, 1);
+    moss_box!(6, -1, 1, 6, -1, 1);
+
+    // `attached=true` is set explicitly on every hook and wire; `powered` and
+    // `disarmed` keep their defaults.
+    let hook = |facing: &str| {
+        s(&format!(
+            "minecraft:tripwire_hook[attached=true,facing={facing},powered=false]"
+        ))
+    };
+    let tripwire_ew = s(
+        "minecraft:tripwire[attached=true,disarmed=false,east=true,north=false,powered=false,\
+         south=false,west=true]",
+    );
+    let tripwire_ns = s(
+        "minecraft:tripwire[attached=true,disarmed=false,east=false,north=true,powered=false,\
+         south=true,west=false]",
+    );
+    b.place(&hook("east"), 1, -3, 8);
+    b.place(&hook("west"), 4, -3, 8);
+    b.place(&tripwire_ew, 2, -3, 8);
+    b.place(&tripwire_ew, 3, -3, 8);
+
+    let wire = |east: &str, north: &str, south: &str, west: &str| {
+        s(&format!(
+            "minecraft:redstone_wire[east={east},north={north},power=0,south={south},west={west}]"
+        ))
+    };
+    let wire_ns = wire("none", "side", "side", "none");
+    b.place(&wire_ns, 5, -3, 7);
+    b.place(&wire_ns, 5, -3, 6);
+    b.place(&wire_ns, 5, -3, 5);
+    b.place(&wire_ns, 5, -3, 4);
+    b.place(&wire_ns, 5, -3, 3);
+    b.place(&wire_ns, 5, -3, 2);
+    b.place(&wire("none", "side", "none", "side"), 5, -3, 1);
+    b.place(&wire("side", "none", "none", "side"), 4, -3, 1);
+    b.place(&mossy.clone(), 3, -3, 1);
+    b.create_dispenser(random, 3, -2, 1, "north", JUNGLE_TEMPLE_DISPENSER_LOOT);
+    b.place(
+        &s("minecraft:vine[east=false,north=false,south=true,up=false,west=false]"),
+        3,
+        -2,
+        2,
+    );
+    b.place(&hook("north"), 7, -3, 1);
+    b.place(&hook("south"), 7, -3, 5);
+    b.place(&tripwire_ns, 7, -3, 2);
+    b.place(&tripwire_ns, 7, -3, 3);
+    b.place(&tripwire_ns, 7, -3, 4);
+    b.place(&wire("side", "none", "none", "side"), 8, -3, 6);
+    b.place(&wire("none", "none", "side", "side"), 9, -3, 6);
+    b.place(&wire("none", "side", "up", "none"), 9, -3, 5);
+    b.place(&mossy.clone(), 9, -3, 4);
+    b.place(&wire_ns, 9, -2, 4);
+    b.create_dispenser(random, 9, -2, 3, "west", JUNGLE_TEMPLE_DISPENSER_LOOT);
+    let vine_east = s("minecraft:vine[east=true,north=false,south=false,up=false,west=false]");
+    b.place(&vine_east, 8, -1, 3);
+    b.place(&vine_east, 8, -2, 3);
+    b.create_chest(random, 8, -3, 3, JUNGLE_TEMPLE_LOOT);
+    for (x, y, z) in [
+        (9, -3, 2),
+        (8, -3, 1),
+        (4, -3, 5),
+        (5, -2, 5),
+        (5, -1, 5),
+        (6, -3, 5),
+        (7, -2, 5),
+        (7, -1, 5),
+        (8, -3, 5),
+    ] {
+        b.place(&mossy.clone(), x, y, z);
+    }
+    moss_box!(9, -1, 1, 9, -1, 5);
+    b.generate_air_box(8, -3, 8, 10, -1, 10);
+    let chiseled = s("minecraft:chiseled_stone_bricks");
+    b.place(&chiseled, 8, -2, 11);
+    b.place(&chiseled, 9, -2, 11);
+    b.place(&chiseled, 10, -2, 11);
+    let lever = s("minecraft:lever[face=wall,facing=north,powered=false]");
+    b.place(&lever, 8, -2, 12);
+    b.place(&lever, 9, -2, 12);
+    b.place(&lever, 10, -2, 12);
+    moss_box!(8, -3, 8, 8, -3, 10);
+    moss_box!(10, -3, 8, 10, -3, 10);
+    b.place(&mossy.clone(), 10, -2, 9);
+    b.place(&wire_ns, 8, -2, 9);
+    b.place(&wire_ns, 8, -2, 10);
+    b.place(&wire("side", "side", "side", "side"), 10, -1, 9);
+    b.place(&s("minecraft:sticky_piston[extended=false,facing=up]"), 9, -2, 8);
+    b.place(&s("minecraft:sticky_piston[extended=false,facing=west]"), 10, -2, 8);
+    b.place(&s("minecraft:sticky_piston[extended=false,facing=west]"), 10, -1, 8);
+    b.place(
+        &s("minecraft:repeater[delay=1,facing=north,locked=false,powered=false]"),
+        10,
+        -2,
+        10,
+    );
+    b.create_chest(random, 9, -3, 10, JUNGLE_TEMPLE_LOOT);
+
+    vec![b.finish("minecraft:tejp")]
+}
+
+/// `BuiltInLootTables.JUNGLE_TEMPLE`.
+const JUNGLE_TEMPLE_LOOT: &str = "minecraft:chests/jungle_temple";
+/// `BuiltInLootTables.JUNGLE_TEMPLE_DISPENSER`.
+const JUNGLE_TEMPLE_DISPENSER_LOOT: &str = "minecraft:chests/jungle_temple_dispenser";
+/// `BuiltInLootTables.DESERT_PYRAMID`.
+const DESERT_PYRAMID_LOOT: &str = "minecraft:chests/desert_pyramid";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1093,6 +1511,92 @@ mod tests {
                  (5..=7 from the walk plus at most one distinct roof block)"
             );
         }
+    }
+
+    /// The jungle temple consumes **exactly 1,531** primitive draws, and its
+    /// cobble/mossy split lands on 0.4 rather than on 0.6.
+    ///
+    /// # Both numbers come from outside this module
+    ///
+    /// The draw count was derived by a script over
+    /// `.cache/mc/26.2/.../JungleTemplePiece.java` — 43 `generateBox(…, false,
+    /// random, STONE_SELECTOR)` call sites, loops expanded, summed volume **1,522**
+    /// — plus one `nextInt(4)` for the orientation and four `nextLong()`s for the
+    /// two chests and two dispensers. `WorldgenRandom::count()` counts `next(bits)`
+    /// calls, and a legacy `nextLong()` is two of them, so `1 + 1522 + 8 = 1531`.
+    ///
+    /// **This is the assertion that a plausible temple cannot satisfy by accident.**
+    /// Skipping the selector for a position outside the served chunk, shuffling a
+    /// raw pool instead of its weight-expanded copy, or re-seeding between the two
+    /// halves all build something temple-shaped; only a stream-position assertion
+    /// sees them (§12.135).
+    ///
+    /// The ratio is the *magnitude* discipline: `nextFloat() < 0.4F` selects
+    /// **cobblestone**, so the inverted reading yields 0.6, and both hypotheses are
+    /// computed here rather than the sign of the difference being asserted. One
+    /// continuous stream of 1,522 draws, not 1,522 fresh randoms — sequentially
+    /// seeded LCGs are correlated in their first draw and biased two earlier rate
+    /// measurements by several sigma (§12.139).
+    #[test]
+    fn the_jungle_temple_draw_count_and_moss_ratio_are_vanillas() {
+        use lodestone_worldgen_core::rng::{LegacyRandomSource, WorldgenRandom};
+        let ctx = Flat(74);
+        let mut random = WorldgenRandom::new(LegacyRandomSource::new(-195_764_831));
+        let pieces = jungle_pyramid_pieces(0, 0, &ctx, &mut random);
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(
+            random.count(),
+            1_531,
+            "the temple's stream position is the specification"
+        );
+
+        let blocks = pieces[0].blocks.as_ref().expect("blocks");
+        // Every *write*, not the final state per position: the draws happened once
+        // per write and last-write-wins would hide most of them.
+        let cobble = blocks.iter().filter(|b| b.state == "minecraft:cobblestone").count();
+        let mossy = blocks
+            .iter()
+            .filter(|b| b.state == "minecraft:mossy_cobblestone")
+            .count();
+        // 12 `placeBlock(MOSSY_COBBLESTONE, …)` statements are unconditional and are
+        // *not* selector draws, so the predicted fraction is 0.4·n/(n+12).
+        assert_eq!(cobble + mossy, 1_522 + 12, "cobble {cobble} + mossy {mossy}");
+        let fraction = cobble as f64 / (cobble + mossy) as f64;
+        let correct = 0.4 * 1_522.0 / 1_534.0;
+        let inverted = 0.6 * 1_522.0 / 1_534.0;
+        assert!(
+            (fraction - correct).abs() < 0.04,
+            "cobble fraction {fraction:.4}; correct hypothesis {correct:.4}, \
+             inverted-comparison hypothesis {inverted:.4}"
+        );
+        assert!(
+            (fraction - inverted).abs() > 0.1,
+            "the measurement must exclude the inverted hypothesis, not merely admit \
+             the correct one: {fraction:.4} vs {inverted:.4}"
+        );
+
+        // The two traps and the two chests, with vanilla's own table ids.
+        let tables: Vec<&str> = pieces[0].loot.iter().map(|l| l.table.as_str()).collect();
+        assert_eq!(
+            tables,
+            vec![
+                JUNGLE_TEMPLE_DISPENSER_LOOT,
+                JUNGLE_TEMPLE_DISPENSER_LOOT,
+                JUNGLE_TEMPLE_LOOT,
+                JUNGLE_TEMPLE_LOOT,
+            ]
+        );
+        // 12 x 10 x 15 for a Z-axis orientation, and it never fails to place.
+        let bb = pieces[0].bounding_box;
+        let extents = [
+            bb.max[0] - bb.min[0] + 1,
+            bb.max[1] - bb.min[1] + 1,
+            bb.max[2] - bb.min[2] + 1,
+        ];
+        assert!(
+            extents == [12, 10, 15] || extents == [15, 10, 12],
+            "box extents {extents:?}"
+        );
     }
 
     /// A pyramid is a pure function of `(chunk, terrain)` — the property the
