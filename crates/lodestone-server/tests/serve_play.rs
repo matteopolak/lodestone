@@ -39,7 +39,8 @@ use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStac
 use lodestone_net::{Connection, NetError, memory_pair};
 use lodestone_server::{
     BlockEntityHandle, BlockTickFeed, ChunkColumn, ChunkSource, ChunkWorld, ExplosionFeed,
-    MobHandle, MobSim, NoEntities, ServerBound, ServerDirective, ServerError, ServerProtocol,
+    MetadataField, MobHandle, MobSim, NoEntities, ServerBound, ServerDirective, ServerError,
+    ServerProtocol,
     WeatherEvent, WeatherFeed, serve_connection, serve_connection_with_mob_events,
 };
 use std::str::FromStr;
@@ -2353,6 +2354,22 @@ async fn breaking_stone_drops_exactly_one_cobblestone_item_entity() {
         "minecraft:item",
         "a dropped item is entity type `minecraft:item`; the item's own key here \
          means `entity_type_id` misses and the client draws `minecraft:acacia_boat`"
+    );
+    // Issue #537: and the *stack* travels as metadata, which is what decides
+    // whether the drop draws at all. `entity_type` alone gets a correctly
+    // positioned, correctly typed, completely **invisible** item entity onto
+    // the client — vanilla's `ItemEntityRenderer.submit` returns early on
+    // `state.item.isEmpty()` and this project's client does the same. Asserted
+    // as the exact field list, not `!is_empty()`: a `MetadataField::Item`
+    // carrying the wrong key (`minecraft:stone`, had the silk-touch branch
+    // won) or the wrong count would satisfy a non-emptiness check.
+    assert_eq!(
+        snapshots[0].metadata,
+        vec![MetadataField::Item {
+            item: "minecraft:cobblestone".parse().expect("valid key"),
+            count: 1,
+        }],
+        "a dropped item's whole visible identity is ItemEntity.DATA_ITEM"
     );
 
     drop(client);

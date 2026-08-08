@@ -2985,24 +2985,34 @@ impl<'w> MobSim<'w> {
                 rotation: Rotation::new(0.0, 0.0),
                 head_yaw: 0.0,
                 velocity: state.motion.velocity,
-                // **The one remaining gap that keeps a drop invisible, and it
-                // is a version-crate change rather than one here.** A client
-                // draws nothing for an item entity whose stack it has not been
-                // told (vanilla's `ItemEntityRenderer.submit` returns early on
-                // `state.item.isEmpty()`, and this project's own client does the
-                // same — `EntityInterpolator::set_item_stack`'s doc comment).
-                // The stack travels as `ItemEntity.DATA_ITEM`, so carrying it
-                // needs a new `MetadataField` variant *and* an arm in
-                // `crates/protocol/v770/src/server_protocol.rs`'s
-                // `encode_set_entity_data`, which `match *field`es a `Copy` enum
-                // with no wildcard arm — adding a `ResourceKey`-carrying variant
-                // therefore cannot be done from inside this crate alone.
+                // **The field that makes a drop draw at all** (issue #537). A
+                // client draws nothing for an item entity whose stack it has
+                // not been told: vanilla's `ItemEntityRenderer.submit` returns
+                // early on `state.item.isEmpty()`, and this project's own
+                // client does the same (`EntityInterpolator::set_item_stack`).
+                // So until this was filled a block drop spawned, streamed as a
+                // real item entity, fell, merged and could be picked up — the
+                // pickup being *visible*, since the inventory slot updates —
+                // while drawing zero pixels. Every link in the chain was green.
                 //
-                // Until that lands, a block drop spawns, streams as a real item
-                // entity, falls, merges and can be picked up (which *is* visible
-                // — the inventory slot updates), but its 3-D model does not draw.
-                // See `docs/block-drops.md` for the exact patch.
-                metadata: Vec::new(),
+                // This is the **only** place in the tree that constructs a
+                // `MetadataField::Item`, and that is load-bearing rather than
+                // incidental: `ItemEntity.DATA_ITEM`'s wire index (8) is shared
+                // with nineteen other fields on other classes, so the encoder
+                // in `crates/protocol/v770/src/server_protocol.rs` relies on
+                // every `Item` field belonging to a `minecraft:item` entity by
+                // construction. This loop iterates `item_state`, so it does.
+                // Never push one from the mob or projectile loops above.
+                //
+                // The count is the *entity's* stack size and lives on the
+                // lifecycle, not on `ItemState` — the same
+                // `map_or(1, |l| l.count)` read `merge_neighbouring_items` uses
+                // above, with the same default for the (unreachable in
+                // practice) case of state without a lifecycle.
+                metadata: vec![MetadataField::Item {
+                    item: state.item.clone(),
+                    count: self.items.get(id).map_or(1, |lifecycle| lifecycle.count),
+                }],
             });
         }
         out

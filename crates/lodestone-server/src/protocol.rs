@@ -132,7 +132,17 @@ pub struct ResourcePackPush {
 /// `crates/protocol/v770/src/packets/metadata.rs`'s decode-side constants
 /// already are), matching every other version-free `Server*`/`Client*`
 /// vocabulary type in this crate.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// # Why this enum is deliberately **not** `Copy`
+///
+/// It derived `Copy` until issue #537, which is the first field whose value is
+/// an owned one ([`Item`](Self::Item) carries a [`ResourceKey`]). A version-free
+/// vocabulary enum that derives `Copy` silently forbids every future field that
+/// carries an owned value, and the cost surfaces only at the first feature that
+/// needs one — here, the whole of "a dropped item draws at all". Keep it
+/// non-`Copy`: the only cost is that an implementor's `match` is by reference
+/// (`match field`, not `match *field`), and that is one character per
+/// implementor. See DESIGN.md §12.116.
+#[derive(Debug, Clone, PartialEq)]
 pub enum MetadataField {
     /// `Creeper.DATA_SWELL_DIR` — which way `swell` is currently moving
     /// (`-1`, `0`, or `1`). See [`crate::mobs::SimMob::snapshot`]'s own doc
@@ -141,6 +151,28 @@ pub enum MetadataField {
     CreeperSwellDir(i32),
     /// `Creeper.DATA_IS_IGNITED` — set once by `ignite()`, never cleared.
     CreeperIgnited(bool),
+    /// `ItemEntity.DATA_ITEM` — the stack a dropped item entity is showing,
+    /// and the *whole* of its visible identity.
+    ///
+    /// A client draws nothing for an item entity whose stack it has not been
+    /// told: vanilla's `ItemEntityRenderer.submit` returns early on
+    /// `state.item.isEmpty()`, and this project's own client does the same (see
+    /// `EntityInterpolator::set_item_stack`). So an item entity streamed
+    /// without this field spawns, falls, merges and can be picked up — every
+    /// one of which is observable — while drawing zero pixels. That is why it
+    /// is one field and not an optimisation.
+    ///
+    /// `count` is the *entity's* stack size (vanilla's
+    /// `ItemLifecycle::count`), not the number of entities.
+    Item {
+        /// The item's registry key, e.g. `minecraft:diamond`. **Not** an
+        /// entity type — see [`crate::mobs::MobSim::snapshots`] for the
+        /// `minecraft:acacia_boat` bug that confusing the two produced.
+        item: ResourceKey,
+        /// Stack size. `0` is the empty stack, which a client renders as
+        /// nothing — the same as sending no field at all.
+        count: u8,
+    },
 }
 
 /// Which worldgen data bundle a [`ServerProtocol`]'s hosting needs (issue
