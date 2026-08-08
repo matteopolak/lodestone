@@ -1664,6 +1664,13 @@ impl IntegratedServer {
         &mut self,
         config: crate::rcon::RconConfig,
     ) -> std::io::Result<std::net::SocketAddr> {
+        // The listener gets **this** server's shared world state, whatever the
+        // caller put in the config. A private `WorldStateHandle` here is the bug
+        // issues #327 and #328 were both reported for, and over RCON it is
+        // invisible: `/gamerule keep_inventory true` would report success and
+        // change nothing anyone reads. Substituting rather than asserting means a
+        // host cannot get it wrong.
+        let config = crate::rcon::RconConfig { world: self.world_state.clone(), ..config };
         let (task, addr) = crate::rcon::spawn_listener(self.shutdown.clone(), config)?;
         self.rcon_task = Some(task);
         Ok(addr)
@@ -2078,11 +2085,11 @@ mod tests {
             source,
             LanConfig {
                 view_radius: 0,
-                rcon: Some(crate::rcon::RconConfig {
-                    addr: (std::net::Ipv4Addr::LOCALHOST, 0).into(),
-                    password: "hunter2".to_string(),
-                    commands: crate::command::CommandDispatch::none(),
-                }),
+                rcon: Some(crate::rcon::RconConfig::new(
+                    (std::net::Ipv4Addr::LOCALHOST, 0).into(),
+                    "hunter2",
+                    crate::command::CommandDispatch::none(),
+                )),
                 // Off, so this gate measures the RCON wiring alone and binds no
                 // UDP port a parallel test could contend for.
                 query: false,

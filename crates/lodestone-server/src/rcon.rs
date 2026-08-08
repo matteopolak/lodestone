@@ -43,16 +43,28 @@
 //! * **Auth/response behaviour:** the per-connection state machine is
 //!   [`handle_connection`]; the packet-type constants at the top of the module
 //!   are keyed to vanilla's `RconClient`.
-//! * **What a command does:** commands execute through the same
+//! * **What a command does:** the **built-in tree** in [`crate::commands`] is
+//!   consulted first, with the console identity (see [`rcon_caller`]) at
+//!   permission level 4; only a root it does not own falls through to the host
 //!   [`CommandDispatch`](crate::CommandDispatch) seam `crate::server`'s
-//!   `ChatCommand` arm uses, with the console identity (see [`rcon_caller`]).
-//!   The built-in command tree in `crate::commands` is deliberately *not*
-//!   consulted here, because it is not yet wired into that production arm
-//!   either — when it is, this is the place to call it first.
+//!   `ChatCommand` arm uses. That ordering is the same one the chat arm applies,
+//!   deliberately: one entry point, so a command cannot behave differently
+//!   depending on which transport typed it. Before this, RCON called the host
+//!   sink *only* and bypassed the built-ins entirely — so `/gamerule` over RCON
+//!   was answered by whatever the host did with unknown input.
+//!
+//!   **What RCON cannot do here is apply a per-connection effect.** It has no
+//!   `ServerProtocol` and no transport of its own, so an [`Effect`](crate::Effect)
+//!   aimed at a player is queued on the shared [`crate::PlayerRegistry`] and
+//!   applied by that player's own loop; an effect aimed at nobody (the console has
+//!   no body) has no target and is dropped. `/gamemode creative` with no argument
+//!   therefore fails for RCON exactly as it does in vanilla
+//!   (`getPlayerOrException`), rather than silently doing nothing.
 //!
 //! # Configuration
 //!
-//! [`RconConfig`] holds the bind address, the password, and the command
+//! [`RconConfig`] holds the bind address, the password, the built-in command
+//! tree, the world's rule store and player registry, and the host command
 //! dispatch; [`IntegratedServer::start_rcon`](crate::IntegratedServer::start_rcon)
 //! is the production wiring — it binds synchronously (so a port conflict fails
 //! fast, before any task spawns) and runs the accept loop as a task racing the
@@ -74,6 +86,7 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::command::{CommandCaller, CommandDispatch, CommandResponse};
+use crate::commands::{CommandSource, CommandWorld, ServerCommands};
 use crate::spawn::{Task, spawn};
 
 /// Vanilla's default RCON port (`DedicatedServerProperties.rconPort`, the
@@ -115,6 +128,19 @@ pub struct RconConfig {
     /// same [`CommandDispatch`] `crate::server`'s `ChatCommand` arm consults,
     /// so RCON and an in-game player run through one dispatcher.
     pub commands: CommandDispatch,
+    /// The server's own built-in commands, consulted before `commands`.
+    pub builtins: ServerCommands,
+    /// The world's shared state, for the rules `/gamerule` reads and writes.
+    ///
+    /// The *shared* handle, not a fresh one: a per-listener store is the bug
+    /// issues #327 and #328 were both reported for, and it would be invisible
+    /// here — `/gamerule keep_inventory true` over RCON would report success and
+    /// change nothing anyone reads.
+    pub world: crate::world_state::WorldStateHandle,
+    /// The connected-player registry, for selector resolution and for the
+    /// directed effect queue. `None` for a server with no registry, where RCON
+    /// can still read and set game rules but has nobody to target.
+    pub players: Option<crate::PlayerRegistry>,
 }
 
 impl RconConfig {
@@ -128,7 +154,47 @@ impl RconConfig {
             addr: SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, DEFAULT_RCON_PORT)),
             password: password.into(),
             commands,
+            builtins: ServerCommands::new(),
+            world: crate::world_state::WorldStateHandle::default(),
+            players: None,
         }
+    }
+
+    /// A config at an explicit address, with the built-in tree and an empty
+    /// world/registry.
+    ///
+    /// Prefer this to a struct literal: the built-in tree, rule store and player
+    /// registry are all defaulted here, so adding a fourth thing the listener
+    /// needs does not break every caller. Chain
+    /// [`with_world`](Self::with_world) to point it at a real world —
+    /// [`IntegratedServer::start_rcon`](crate::IntegratedServer::start_rcon)
+    /// substitutes its own shared `WorldStateHandle` regardless, so a host
+    /// cannot accidentally give RCON a private copy of the game rules.
+    #[must_use]
+    pub fn new(addr: SocketAddr, password: impl Into<String>, commands: CommandDispatch) -> Self {
+        Self {
+            addr,
+            password: password.into(),
+            commands,
+            builtins: ServerCommands::new(),
+            world: crate::world_state::WorldStateHandle::default(),
+            players: None,
+        }
+    }
+
+    /// The same config pointed at a *shared* world and player registry — what
+    /// [`IntegratedServer::start_rcon`](crate::IntegratedServer::start_rcon)
+    /// builds, and the only shape in which `/gamerule` and `/give` over RCON
+    /// affect the running world.
+    #[must_use]
+    pub fn with_world(
+        mut self,
+        world: crate::world_state::WorldStateHandle,
+        players: Option<crate::PlayerRegistry>,
+    ) -> Self {
+        self.world = world;
+        self.players = players;
+        self
     }
 }
 
@@ -209,7 +275,7 @@ async fn handle_connection(stream: TcpStream, config: &RconConfig) -> std::io::R
                 // Vanilla's `Commands.trimOptionalPrefix`: RCON clients send
                 // `/op Steve` and `op Steve` alike, and both must run.
                 let command = strip_optional_slash(&frame.payload);
-                let response = config.commands.run(&rcon_caller(), command);
+                let response = run_command(config, command);
                 write_response(&mut stream, frame.id, &join_response(&response)).await?;
             }
             other => {
@@ -340,6 +406,43 @@ fn strip_optional_slash(command: &str) -> &str {
 /// so a multi-line response reads the way it would to the player who typed it.
 fn join_response(response: &CommandResponse) -> String {
     response.lines().join("\n")
+}
+
+/// The console's permission level.
+///
+/// Vanilla's `RconConsoleSource` builds its `CommandSourceStack` with
+/// `Commands.LEVEL_OWNERS` (4) — the console is a full owner. This is the one
+/// caller in this crate that is not a player, and it is deliberately the highest
+/// level rather than a bypass: the built-in tree's permission filter runs for RCON
+/// exactly as it does for a player, so a future level-restricted command is
+/// gated by one mechanism and not two.
+const RCON_PERMISSION_LEVEL: u8 = 4;
+
+/// Runs one RCON command: built-ins first, host sink for a root they do not own.
+///
+/// Cross-player effects are queued on the shared registry; an effect aimed at the
+/// console itself cannot exist, because [`CommandSource::console`] has no entity
+/// and therefore no uuid for a command to address.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_command(config: &RconConfig, command: &str) -> CommandResponse {
+    let candidates = config.players.as_ref().map(crate::PlayerRegistry::candidates).unwrap_or_default();
+    let world = CommandWorld { rules: &config.world, players: &candidates };
+    let source = CommandSource::console(
+        RCON_NAME,
+        crate::commands::overworld_dimension(),
+        RCON_PERMISSION_LEVEL,
+    );
+    match config.builtins.run(&world, &source, command) {
+        Some(outcome) => {
+            if let Some(players) = config.players.as_ref() {
+                for directed in outcome.effects {
+                    players.push_effect(directed.target, directed.effect);
+                }
+            }
+            outcome.response
+        }
+        None => config.commands.run(&rcon_caller(), command),
+    }
 }
 
 /// The identity commands executed over RCON present to the host sink.

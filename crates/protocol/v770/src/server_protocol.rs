@@ -3804,6 +3804,37 @@ impl ServerProtocol for V770ServerProtocol {
         }]
     }
 
+    /// The `UPDATE_GAME_MODE`-only form of `player_info_update`, for `/gamemode`.
+    ///
+    /// One action bit (ordinal 2) and therefore one field per entry: the uuid then
+    /// the game type as a VarInt. **No `GameProfile`**, because `ADD_PLAYER` is not
+    /// in the mask — the entry already exists and this only updates it.
+    ///
+    /// The `EnumSet` mask and the per-entry body must agree exactly, which is why
+    /// the mask is written as the shifted ordinal here too rather than as `4`: a
+    /// mask claiming an action whose field is not written reinterprets the next
+    /// entry's uuid as this one's payload, and the client reports it as trailing
+    /// bytes rather than as a missing field.
+    fn encode_player_info_game_mode(
+        &self,
+        entries: &[(Uuid, lodestone_model::GameMode)],
+    ) -> Vec<ServerDirective> {
+        if entries.is_empty() {
+            return Vec::new();
+        }
+        let mut w = Writer::default();
+        w.u8(1 << 2);
+        w.var_i32(i32::try_from(entries.len()).unwrap_or(i32::MAX));
+        for (uuid, mode) in entries {
+            w.uuid(*uuid);
+            w.var_i32(crate::adapter::game_mode_to_ordinal(*mode));
+        }
+        vec![ServerDirective::Send {
+            packet_id: play::clientbound::PLAYER_INFO_UPDATE,
+            payload: w.into_vec(),
+        }]
+    }
+
     /// Issue #438. `ClientboundPlayerInfoRemovePacket` is a plain
     /// VarInt-prefixed list of profile uuids — see
     /// `crate::packets::player_info::PlayerInfoRemove`'s decoder, this

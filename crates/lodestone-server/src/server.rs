@@ -2329,9 +2329,24 @@ where
                 // because a nil uuid resolves to no player and therefore no
                 // permissions — failing closed, not open.
                 let player_uuid = login_uuid.unwrap_or_default();
+                // The permission level, resolved **once** and from this
+                // connection's own authenticated uuid — never from anything in a
+                // command's text, which is the same property `CommandCaller`
+                // exists for. On `wasm32` there is no `AccessHandle` in this
+                // signature at all (the whole ops/whitelist/ban feature is
+                // native-only), and the browser build is the single-player
+                // owner's own world, so level 4 is the honest answer there rather
+                // than 0 — which would lock the owner out of `/gamemode` in their
+                // own game.
+                #[cfg(not(target_arch = "wasm32"))]
+                let permission_level = access.command_permission_level(player_uuid);
+                #[cfg(target_arch = "wasm32")]
+                let permission_level = 4;
                 let commands = CommandSession {
+                    builtins: crate::commands::ServerCommands::new(),
                     dispatch: commands.clone(),
                     caller: CommandCaller::new(player_uuid, username.clone()),
+                    permission_level,
                 };
                 // Issue #338. The server-authoritative advancement/statistics
                 // store for this connection, created at the Play handoff and
@@ -3304,38 +3319,85 @@ fn game_mode_directives<P: ServerProtocol>(proto: &P, mode: GameMode) -> [Server
     ]
 }
 
-/// Parses a `/gamemode …` command body.
+/// Applies one command [`Effect`](crate::Effect) to **this** connection.
 ///
-/// `None` means "not a `/gamemode` command, hand it to the host's sink";
-/// `Some(None)` means it was one but the argument was missing or unknown, so
-/// the caller answers with usage rather than silently doing nothing.
+/// The counterpart to `PlayerRegistry::push_effect`: an effect aimed at the
+/// caller's own connection never goes through the registry at all, because
+/// everything it needs — `game_mode`, `inventory`, `proto`, `conn` — is right
+/// here and nothing else can reach it. The two paths are the reason
+/// [`crate::Effect`] exists; see its module doc.
 ///
-/// The body arrives **without** the leading slash (vanilla's
-/// `ServerboundChatCommandPacket` strips it), and vanilla accepts both the
-/// full name and the `s`/`c`/`a`/`sp` abbreviations
-/// (`GameType.byName`'s aliases).
-fn parse_gamemode_command(command: &str) -> Option<Option<GameMode>> {
-    let mut parts = command.trim().split_whitespace();
-    if parts.next()? != "gamemode" {
-        return None;
+/// The `SetGameMode` arm also republishes to the registry, so another
+/// connection's `@a[gamemode=creative]` reads the truth. Forgetting that
+/// republish is silent: this connection behaves correctly and every *other*
+/// connection's selector is wrong.
+#[allow(clippy::too_many_arguments)]
+async fn apply_own_effect<T, P>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    game_mode: &mut GameMode,
+    inventory: &mut PlayerInventory,
+    players: Option<&PlayerRegistry>,
+    player_uuid: uuid::Uuid,
+    effect: crate::commands::Effect,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+{
+    match effect {
+        crate::commands::Effect::SetGameMode(mode) => {
+            *game_mode = mode;
+            if let Some(registry) = players {
+                registry.set_game_mode(player_uuid, mode);
+            }
+            for directive in game_mode_directives(proto, mode) {
+                apply(conn, state, directive).await?;
+            }
+            // The tab-list entry's own game mode (`UPDATE_GAME_MODE`, action
+            // ordinal 2). Without it the player's mode changes and every client's
+            // tab list keeps reporting the mode they joined in — including their
+            // own, which is what makes a spectator still show as survival there.
+            for directive in proto.encode_player_info_game_mode(&[(player_uuid, mode)]) {
+                apply(conn, state, directive).await?;
+            }
+        }
+        crate::commands::Effect::GiveItems(stacks) => {
+            for stack in stacks {
+                let (written, leftover) = inventory.add(stack);
+                for native in written {
+                    // Window `0`, `state_id` `0` — matching every other
+                    // server-initiated slot write in this file.
+                    if let Some(menu_slot) = window_zero_menu_slot(native) {
+                        apply(
+                            conn,
+                            state,
+                            proto.encode_container_slot(0, 0, menu_slot, inventory.native(native)),
+                        )
+                        .await?;
+                    }
+                }
+                if leftover.is_some() {
+                    // Vanilla drops the remainder as an item entity
+                    // (`GiveCommand`'s `player.drop(...)`). This crate has no
+                    // command-spawned drop path, so the surplus is reported rather
+                    // than silently discarded — the player is told, which is
+                    // strictly better than an item vanishing.
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_system_chat("Your inventory was full — some items were not given"),
+                    )
+                    .await?;
+                }
+            }
+        }
+        crate::commands::Effect::Message(line) => {
+            apply(conn, state, proto.encode_system_chat(&line)).await?;
+        }
     }
-    Some(parts.next().and_then(|arg| match arg {
-        "survival" | "s" | "0" => Some(GameMode::Survival),
-        "creative" | "c" | "1" => Some(GameMode::Creative),
-        "adventure" | "a" | "2" => Some(GameMode::Adventure),
-        "spectator" | "sp" | "3" => Some(GameMode::Spectator),
-        _ => None,
-    }))
-}
-
-/// The vanilla translation-key stem for a mode, for the chat confirmation.
-fn gamemode_name(mode: GameMode) -> &'static str {
-    match mode {
-        GameMode::Survival => "Survival Mode",
-        GameMode::Creative => "Creative Mode",
-        GameMode::Adventure => "Adventure Mode",
-        GameMode::Spectator => "Spectator Mode",
-    }
+    Ok(())
 }
 
 /// `SlabBlock.canBeReplaced` (`SlabBlock.java:84-97`) for the clicked block:
@@ -5165,6 +5227,17 @@ async fn dispatch_play_packet<T, P, S>(
     // registry and this connection's username) because the caller already
     // owns both, and this function already takes 25.
     outgoing_chat: &mut Vec<String>,
+    // The shared player registry, for the `ChatCommand` arm alone: a command's
+    // entity selectors resolve against the roster, and a command's effects aimed
+    // at *another* player are queued on it.
+    //
+    // A concrete `Option<&PlayerRegistry>` rather than the generic
+    // `EntitySource` the caller holds, so this function gains no type parameter —
+    // and an `Option` rather than a required handle because singleplayer builds
+    // no registry at all (`open_in_memory`). The `ChatCommand` arm synthesises the
+    // caller's own candidate in that case, which is what keeps `@s` working
+    // there.
+    players: Option<&PlayerRegistry>,
     // Issue #465. Threaded through only to reach `apply_use_item_on`, which
     // needs to ask the world tick loop for a neighbour-update fan-out that
     // outlives this packet — see that function's own parameter comment.
@@ -5601,15 +5674,33 @@ where
         // Issues #48/#464: the wire path for commands, and the *whole* of it
         // on this side of the seam.
         //
-        // This arm deliberately does no parsing, no permission check and no
-        // name lookup. It cannot: the Brigadier tree, the registry and the
-        // `Permissions` resource all live in `lodestone-ecs`, which this crate
-        // does not depend on (see `crate::command`'s module doc for why, and
-        // for the two alternatives that were rejected). What it does is the
-        // one thing only it can do — attach the connection's **authenticated**
-        // identity, taken from the login this connection actually performed
-        // rather than from anything in the command text — and hand both to the
-        // host.
+        // # The built-in tree is consulted first, and that is the fix
+        //
+        // This arm used to do no parsing at all beyond a hand-rolled
+        // `parse_gamemode_command` string split, and then fall through to the
+        // host sink. Since every real constructor passes
+        // `CommandDispatch::none()` (issue #535), **that meant `/gamerule` typed
+        // by a player did nothing** — the built-in `ServerCommands` tree existed,
+        // was tested, and had zero references outside its own module. Its own doc
+        // comment claimed this arm consulted it; that claim was stale. This is
+        // the call that makes it true, and `rcon.rs` is the other one.
+        //
+        // # Why the effects come back rather than being applied by the executor
+        //
+        // `game_mode` and `inventory` are *this function's* parameters, reached
+        // through `&mut`. An executor is a shared `Arc` closure inside a
+        // process-wide tree and cannot touch either, nor can it reach `proto` or
+        // `conn`. So `run` returns typed `Effect`s: the ones aimed at this
+        // connection are applied here, inline, exactly as the hand-rolled
+        // `/gamemode` arm already did; the rest are queued on the shared
+        // `PlayerRegistry` for their own connection's loop to drain.
+        //
+        // # Permission level
+        //
+        // `commands.permission_level` was resolved once at the Play handoff from
+        // this connection's authenticated uuid. It gates the *tree* — a level-2
+        // command is invisible to tab completion and answers `NoPermission` on
+        // execution — rather than being checked per command here.
         //
         // With no sink installed, `CommandDispatch::run` refuses. That
         // direction is load-bearing and is not an implementation detail: an
@@ -5617,37 +5708,67 @@ where
         // property `dispatch_refuses_rather_than_ungates_when_permissions_are_missing`
         // holds one layer in.
         ServerBound::ChatCommand { command } => {
-            // `/gamemode` is answered here rather than by the sink, because
-            // the mode is *this loop's* state — no host dispatcher can reach
-            // `game_mode` — and because every real constructor passes
-            // `CommandDispatch::none()` (issue #535), so routing it to the sink
-            // would make creative mode unreachable in the shipping product.
-            if let Some(requested) = parse_gamemode_command(&command) {
-                match requested {
-                    Some(mode) => {
-                        *game_mode = mode;
-                        for directive in game_mode_directives(proto, mode) {
-                            apply(conn, state, directive).await?;
+            // The roster the command's selectors resolve against.
+            //
+            // With no registry — singleplayer, where `open_in_memory` builds no
+            // `PlayerRegistry` at all — the caller is synthesised as the sole
+            // candidate. That is not a courtesy: without it `@s` resolves to
+            // nothing and `/gamemode creative` fails in single-player, which is
+            // the single most common use of the command.
+            let mut candidates = players.map(PlayerRegistry::candidates).unwrap_or_default();
+            let position = player_pos
+                .map_or(world_spawn, |(x, y, z)| Vec3::new(x, y, z));
+            if !candidates.iter().any(|c| c.uuid == player_uuid) {
+                candidates.push(crate::commands::PlayerCandidate {
+                    uuid: player_uuid,
+                    entity_id: player_entity_id,
+                    username: username.to_owned(),
+                    position,
+                    game_mode: *game_mode,
+                });
+            }
+            let source = crate::commands::CommandSource::player(
+                player_uuid,
+                player_entity_id,
+                username,
+                position,
+                player_rot.unwrap_or(Rotation { yaw: 0.0, pitch: 0.0 }),
+                crate::commands::overworld_dimension(),
+                commands.permission_level,
+            );
+            let command_world =
+                crate::commands::CommandWorld { rules: world, players: &candidates };
+            match commands.builtins.run(&command_world, &source, &command) {
+                Some(outcome) => {
+                    for directed in outcome.effects {
+                        if directed.target == player_uuid {
+                            apply_own_effect(
+                                conn,
+                                proto,
+                                state,
+                                game_mode,
+                                inventory,
+                                players,
+                                player_uuid,
+                                directed.effect,
+                            )
+                            .await?;
+                        } else if let Some(registry) = players {
+                            registry.push_effect(directed.target, directed.effect);
                         }
-                        let line = format!("Set own game mode to {}", gamemode_name(mode));
-                        apply(conn, state, proto.encode_system_chat(&line)).await?;
                     }
-                    None => {
-                        apply(
-                            conn,
-                            state,
-                            proto.encode_system_chat(
-                                "Usage: /gamemode <survival|creative|adventure|spectator>",
-                            ),
-                        )
-                        .await?;
+                    for line in outcome.response.lines() {
+                        apply(conn, state, proto.encode_system_chat(line)).await?;
                     }
                 }
-                return Ok(());
-            }
-            let response = commands.dispatch.run(&commands.caller, &command);
-            for line in response.lines() {
-                apply(conn, state, proto.encode_system_chat(line)).await?;
+                // No built-in root matched: the host's problem, exactly as
+                // before.
+                None => {
+                    let response = commands.dispatch.run(&commands.caller, &command);
+                    for line in response.lines() {
+                        apply(conn, state, proto.encode_system_chat(line)).await?;
+                    }
+                }
             }
         }
         // The F4 switcher. A *request*, not an instruction: the two directives
@@ -6030,6 +6151,7 @@ where
                     &mut advancements,
                     player_uuid,
                     &mut outgoing_chat,
+                    entities.players(),
                     block_ticks,
                     &mut composter_rng,
                     &mut drops_rng,
@@ -6449,6 +6571,28 @@ where
                         apply(conn, &mut state, proto.encode_system_chat(&line.rendered()))
                             .await?;
                     }
+                    // Command effects another player's command aimed at *this*
+                    // connection — `/gamemode creative Steve` typed by someone
+                    // else, or `/give @a diamond`.
+                    //
+                    // A **drain**, not a cursor, and that is the difference from
+                    // chat two lines up: the queue is per-uuid and this is its
+                    // only reader, so taking it is what makes the delivery
+                    // directed. A cursor over a shared log would hand Steve's
+                    // game-mode change to everyone.
+                    for effect in registry.take_effects(player_uuid) {
+                        apply_own_effect(
+                            conn,
+                            proto,
+                            &mut state,
+                            &mut game_mode,
+                            &mut inventory,
+                            Some(registry),
+                            player_uuid,
+                            effect,
+                        )
+                        .await?;
+                    }
                 }
                 // Issue #335: same shape as chat above — a broadcast is
                 // host-published (a future #77 plugin, a command, a config
@@ -6695,6 +6839,7 @@ where
             &mut advancements,
             player_uuid,
             &mut outgoing_chat,
+            entities.players(),
             block_ticks,
             &mut composter_rng,
             &mut drops_rng,
@@ -8255,29 +8400,19 @@ mod tests {
         assert_eq!(horizontal_look_direction(-450.0), Direction::East);
     }
 
-    /// `/gamemode` is the reachable switch today (nothing produces the F4
-    /// packet client-side yet), so its parsing is worth pinning — including the
-    /// two answers that are *not* a mode: not-my-command, and my-command-but-bad.
-    #[test]
-    fn gamemode_command_parses_names_aliases_and_ids() {
-        assert_eq!(
-            parse_gamemode_command("gamemode creative"),
-            Some(Some(GameMode::Creative))
-        );
-        assert_eq!(parse_gamemode_command("gamemode c"), Some(Some(GameMode::Creative)));
-        assert_eq!(parse_gamemode_command("gamemode 1"), Some(Some(GameMode::Creative)));
-        assert_eq!(
-            parse_gamemode_command("  gamemode   spectator  "),
-            Some(Some(GameMode::Spectator))
-        );
-        // A `/gamemode` with no or an unknown argument: mine, but unusable, so
-        // the caller answers with usage instead of falling through to the sink.
-        assert_eq!(parse_gamemode_command("gamemode"), Some(None));
-        assert_eq!(parse_gamemode_command("gamemode wizard"), Some(None));
-        // Not mine: the host's sink must still see it.
-        assert_eq!(parse_gamemode_command("gamerule doDaylightCycle false"), None);
-        assert_eq!(parse_gamemode_command(""), None);
-    }
+    // `gamemode_command_parses_names_aliases_and_ids` was here, testing
+    // `parse_gamemode_command` — a hand-rolled string split that has been
+    // deleted. `/gamemode` is now a real Brigadier command in
+    // `crate::commands::gamemode`, gated against the captured vanilla tree
+    // (`crates/protocol/v770/tests/builtin_command_parity.rs`) and driven
+    // end-to-end by `tests/builtin_commands.rs`.
+    //
+    // Worth recording rather than silently dropping: the deleted test asserted
+    // that `gamemode c` and `gamemode 1` parse as creative. **26.2 accepts
+    // neither.** `GameType.byName` is an exact match against the four
+    // `getSerializedName` values, so the old parser — and the test that pinned
+    // it — were *more* permissive than vanilla. No test could have caught that,
+    // because the failure only ever made a command work that should have failed.
 
     /// The three redstone families keep the full property set the signal model
     /// reads, and everything else falls through to `crate::block_placement`

@@ -126,7 +126,13 @@ mod command;
 /// The built-in server command tree (`/gamerule`, …) — issue #48. **Was an
 /// orphan file, never declared and therefore never compiled**; see
 /// `docs/game-rules.md`.
-mod commands;
+///
+/// Public as of the command-dispatcher unit: the wire-parity gates live in
+/// `crates/protocol/v770/tests/` (they need a real `V770Adapter` to decode the
+/// captured vanilla tree, which this crate cannot reach), so `ServerCommands` and
+/// its projection have to be nameable from outside. It was `mod commands;` while
+/// it was an island, which is part of how the island survived.
+pub mod commands;
 mod composter;
 /// Server-side `doClick` (the container-click state machine): derives the result
 /// of a click from the slot/button/click-type the wire carries, rather than
@@ -311,6 +317,9 @@ pub use neighbor_update::{Direction, NeighborPropagator, Notification, UPDATE_OR
 pub use players::{
     PLAYER_ENTITY_ID_BASE, ChatLine, PlayerAwareSource, PlayerListStreamer, PlayerRegistry,
     PlayerTicket, PlayerView,
+};
+pub use commands::{
+    CommandOutcome, CommandSource, DirectedEffect, Effect, PlayerCandidate, ServerCommands,
 };
 pub use plugin_channels::{
     ClientChannels, PluginChannelHandler, PluginChannelRegistry, REGISTER_CHANNEL,
