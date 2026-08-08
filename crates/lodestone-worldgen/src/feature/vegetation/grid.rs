@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use crate::dense_grid::DenseBlockGrid;
-use crate::feature::region_view::{Overlay, WriteLog, source_slot};
+use crate::feature::region_view::{
+    Overlay, WIDE_RADIUS, WIDE_SLOTS, WriteLog, wide_slot_of_offset, wide_source_slot,
+};
 use crate::interner::{StateId, StateInterner};
 
 use self::census::bump as census_bump;
@@ -84,11 +86,28 @@ pub struct VegGrid {
     /// sparse map with no source grids at all — working unchanged against the
     /// identical read path.
     blocks: Overlay,
-    /// The nine post-ore source chunks a read falls through to, indexed by
-    /// [`crate::feature::region_view::source_slot`] over this grid's **local**
-    /// coordinates. Empty for every fixture/unit-test constructor (a miss then
-    /// answers air, exactly as an unseeded cell always did); populated by
-    /// [`Self::with_sources`] in production.
+    /// The **25** source chunks of `centre ± `[`WIDE_RADIUS`] a read falls through
+    /// to, indexed by [`wide_source_slot`] over this grid's **local** coordinates.
+    /// Empty for every fixture/unit-test constructor (a miss then answers air,
+    /// exactly as an unseeded cell always did); populated by [`Self::with_sources`]
+    /// in production.
+    ///
+    /// **It is 25 and not 9 because of a measured seam defect, not for margin.**
+    /// The 3×3 driver decorates nine sources and every one of them can write into
+    /// the centre, so each source's placements must be a function of that source
+    /// alone — the chunks either side of a seam recompute the same tree, and if
+    /// their two computations disagree the served world keeps one half. A source at
+    /// offset `(-1, 0)` reads up to [`crate::feature::VEG_PADDING`] blocks past its
+    /// own west edge, i.e. into chunk offset `-2`. With a nine-slot table those
+    /// columns answered **air**, and *where that boundary fell depended on which
+    /// column was the centre*, so the source's own pass diverged between the two
+    /// drives. See [`WIDE_RADIUS`] for the measurement (94 truncated seam rows over
+    /// the 66 bundled biomes, 50 of them removed by this) and
+    /// `tests/vegetation_seam_consistency.rs` for the live gate.
+    ///
+    /// The inner 3×3 carries **post-ore** terrain; the 16 rim chunks carry
+    /// **pre-ore** terrain — see [`Self::with_sources`] for why that is exact for
+    /// heightmaps and what it approximates.
     ///
     /// Read-only, and that is a rule rather than an accident: these are `Arc`
     /// snapshots shared with every other in-flight column that has the same
@@ -96,12 +115,16 @@ pub struct VegGrid {
     /// to have exactly one writer — its own serve task. Writes therefore go to
     /// `blocks` and the caller folds them into the one grid it owns.
     ///
-    /// Note the footprint is **wider** than the sources cover: `local_lo` /
-    /// `local_hi` span `REGION_MIN - VEG_PADDING .. REGION_MAX + VEG_PADDING`, so
-    /// the padding ring has no source and reads air there — which is precisely
-    /// what the unseeded ring did before, so tree canopy spilling into the pad is
-    /// still writable and still readable back.
-    sources: [Option<Arc<DenseBlockGrid>>; 9],
+    /// Note the source table is now **wider** than the footprint, which is the
+    /// reverse of how this read before the 5×5 landed. `local_lo`/`local_hi` span
+    /// `REGION_MIN - VEG_PADDING .. REGION_MAX + VEG_PADDING` = `[-24, 40)`, and the
+    /// 5×5 covers `[-32, 48)` — so the padding ring **does** have a source now and
+    /// answers real terrain rather than air. That is the whole point: the ring is
+    /// exactly what a source at the edge of the decorated 3×3 reads into, and
+    /// answering air there is what made its pass depend on the centre. Canopy
+    /// spilling into the pad is still writable and still readable back, unchanged;
+    /// only what an *unwritten* pad cell reads has changed.
+    sources: [Option<Arc<DenseBlockGrid>>; WIDE_SLOTS],
     /// Resolves this grid's [`StateId`]s. Shared with the generator's dense
     /// grids, which is what lets `stitch_veg_region` move ids across without a
     /// string round-trip — ids from a different interner are meaningless here
@@ -202,19 +225,38 @@ impl VegGrid {
         }
     }
 
-    /// [`VegGrid::with_footprint_interned`] over the 3×3 neighbourhood's **own**
-    /// post-ore grids instead of a seeded copy of them — the production form
-    /// since Unit 7 of `docs/plans/worldgen-rewrite.md`.
+    /// [`VegGrid::with_footprint_interned`] over the read neighbourhood's **own**
+    /// grids instead of a seeded copy of them — the production form since Unit 7
+    /// of `docs/plans/worldgen-rewrite.md`.
     ///
-    /// `source_at(dx, dz)` is called once per chunk offset in `[-1, 1]²` and
-    /// returns that chunk's post-ore world (absolute-coordinate addressed), or
-    /// `None` to make that chunk read as air — which is exactly what the
-    /// `LODESTONE_VEG_SINGLE_SOURCE_DEBUG` path wants for the eight neighbours.
+    /// `source_at(dx, dz)` is called once per chunk offset in
+    /// `[-`[`WIDE_RADIUS`]`, `[`WIDE_RADIUS`]`]²` — **25 offsets, not 9** — and
+    /// returns that chunk's terrain (absolute-coordinate addressed), or `None` to
+    /// make that chunk read as air, which is exactly what the
+    /// `LODESTONE_VEG_SINGLE_SOURCE_DEBUG` path wants for everything but the centre.
     ///
-    /// The slots are filled through [`crate::feature::region_view::source_slot`],
-    /// the same function every read routes with, so the fill convention and the
-    /// lookup convention cannot drift apart. Getting that wrong is the recorded
-    /// `VegGrid` failure mode — see this type's own doc comment.
+    /// # Why 25, and what the rim is allowed to be
+    ///
+    /// See the [`Self::sources`] field doc for the defect. The consequence for a
+    /// caller is a split:
+    ///
+    /// * the **inner 3×3** are the chunks the driver decorates, and they must carry
+    ///   that chunk's **post-ore** world — decoration reads and writes against it,
+    ///   and it is what vanilla's FEATURES stage sees;
+    /// * the **16 rim chunks** are read-only context. `crate::overworld` supplies
+    ///   **pre-ore** terrain there, because a column's pre-ore closure is already
+    ///   the 5×5 (`overworld::COLUMN_CLOSURE_RADIUS`) and every one of those 25
+    ///   results is already memoised for every served column — so the rim costs
+    ///   *no* extra pipeline work, where post-ore terrain would widen the closure
+    ///   to 7×7. That is **exact for both heightmaps**: ore placement *replaces*
+    ///   blocks rather than adding or removing them, so the topmost non-air `y` is
+    ///   identical either way. It approximates only a state *identity* check landing
+    ///   on a cell an ore blob replaced, ≥16 blocks from the chunk being served.
+    ///
+    /// The slots are filled through [`wide_source_slot`], the same function every
+    /// read routes with, so the fill convention and the lookup convention cannot
+    /// drift apart. Getting that wrong is the recorded `VegGrid` failure mode — see
+    /// this type's own doc comment.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn with_sources(
@@ -230,21 +272,22 @@ impl VegGrid {
         let mut grid = Self::with_footprint_interned(
             interner, min_y, height, origin_x, origin_z, local_lo, local_hi,
         );
-        for dx in -1..=1i32 {
-            for dz in -1..=1i32 {
-                let slot = source_slot(dx * 16, dz * 16)
-                    .expect("a 3x3 offset's own origin column is inside the region");
+        for dx in -WIDE_RADIUS..=WIDE_RADIUS {
+            for dz in -WIDE_RADIUS..=WIDE_RADIUS {
+                let slot = wide_source_slot(dx * 16, dz * 16)
+                    .expect("a 5x5 offset's own origin column is inside the read region");
+                debug_assert_eq!(slot, wide_slot_of_offset(dx, dz));
                 grid.sources[slot] = source_at(dx, dz);
             }
         }
         grid
     }
 
-    /// The state one of the nine source chunks holds at **local** `(lx, y, lz)`,
-    /// or [`StateId::AIR`] when no source owns that column (the padding ring, a
-    /// fixture with no sources, or a `None` slot).
+    /// The state one of the 25 source chunks holds at **local** `(lx, y, lz)`,
+    /// or [`StateId::AIR`] when no source owns that column (outside
+    /// `centre ± `[`WIDE_RADIUS`], a fixture with no sources, or a `None` slot).
     fn source_id(&self, lx: i32, y: i32, lz: i32) -> StateId {
-        match source_slot(lx, lz).and_then(|slot| self.sources[slot].as_deref()) {
+        match wide_source_slot(lx, lz).and_then(|slot| self.sources[slot].as_deref()) {
             Some(grid) => grid.get_id(self.origin_x + lx, y, self.origin_z + lz),
             None => StateId::AIR,
         }

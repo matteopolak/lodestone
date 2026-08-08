@@ -73,6 +73,17 @@ the constraint it had to satisfy is still per-thread-never-shared, unchanged.
 
 ## How to change it, and the gotchas
 
+**The nine sources are decorated over a 3×3, but vegetation *reads* over a 5×5, and
+that difference is load-bearing.** Every one of the nine can write into the centre, so
+each source's pass has to be a function of that source alone or the chunks either side
+of a seam compute different versions of the same tree and the served world keeps one
+half. `VegGrid::sources` therefore has 25 slots (`region_view::wide_source_slot`), the
+16 rim chunks carrying pre-ore terrain at no extra pipeline cost. The remaining
+violation — the nine passes sharing one write overlay — is open and cannot be closed
+without a JVM-parity trade. Read
+[`worldgen-seam-consistency.md`](./worldgen-seam-consistency.md) before touching either
+driver's neighbourhood or its overlay.
+
 **Fold-back order decides the served palette.** A `DenseBlockGrid` appends to its
 local palette in first-write order and that palette goes on the wire, so *the
 order writes are replayed in is world-visible*. The two stages differ and are not

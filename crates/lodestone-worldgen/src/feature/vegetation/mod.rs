@@ -277,13 +277,23 @@ pub fn apply_vegetal_decoration_step<R: RandomSource>(
 /// the ore driver's and `crate::carver::apply_carvers`'s own fixed,
 /// documented iteration order — not a claim this matches real-world chunk
 /// *load* order, which vanilla itself does not guarantee at boundaries),
-/// against one shared `grid`. `grid` must already be seeded with every one
-/// of the 9 sources' own post-ore terrain (its footprint should span
-/// [`crate::feature::REGION_MIN`]/[`crate::feature::REGION_MAX`], built via
-/// [`VegGrid::with_footprint`] with `origin_x`/`origin_z` fixed at
-/// `(center_x * 16, center_z * 16)`) — this function does no stitching of
-/// its own, mirroring [`crate::feature::apply_ore_step_3x3_per_source`]'s
-/// own "caller stitches, driver only places" split.
+/// against one shared `grid`. `grid` must already be able to *read* every one of
+/// the 9 sources' own post-ore terrain **and the 16-chunk rim around them** — in
+/// production via [`VegGrid::with_sources`] over
+/// [`crate::feature::region_view::WIDE_RADIUS`] = 2, in a fixture via
+/// [`VegGrid::with_footprint`] plus `seed`, with `origin_x`/`origin_z` fixed at
+/// `(center_x * 16, center_z * 16)` either way. This function does no stitching of
+/// its own, mirroring [`crate::feature::apply_ore_step_3x3_per_source`]'s own
+/// "caller stitches, driver only places" split.
+///
+/// **The rim is not margin.** Each of these nine can write into the centre, so each
+/// one's pass has to be a function of that source alone or the two chunks either
+/// side of a seam produce different versions of the same tree and the served world
+/// keeps one half. A source at offset `(±1, ±1)` reads
+/// [`crate::feature::VEG_PADDING`] blocks past its own edge; if those columns answer
+/// air, *where* they start answering air moves with the centre. Measured: 94
+/// truncated seam rows over the 66 bundled biomes, 50 removed by the rim. See
+/// `docs/worldgen-seam-consistency.md`.
 ///
 /// Each source's own pass mutates `grid` **in place**, so a later source in
 /// the fixed iteration order sees an earlier source's writes — this is a
@@ -291,6 +301,18 @@ pub fn apply_vegetal_decoration_step<R: RandomSource>(
 /// mutates one shared, live `WorldGenLevel` across all 9 sources in the same
 /// order, not 9 independent snapshots merged afterward. See that oracle's
 /// own doc comment on `runStep` for the vanilla behaviour this reproduces.
+///
+/// **That shared mutation is also the remaining, unclosed violation of the
+/// invariant above, and it cannot be fixed here without a parity trade.** Which
+/// other sources have already written — and in what order — is decided by the
+/// centre, so a source's reads still differ between the two drives that recompute
+/// it. Giving each source its own overlay takes the truncation count to **0** and
+/// simultaneously pushes JVM FULL3X3 identity mismatches from 1 to 7 at
+/// `vegetation_savanna_neg30_15_jvm.txt`, past `tests/vegetation_parity.rs`'s own
+/// measured bound of 3 — vanilla genuinely is order-dependent here, because it runs
+/// each chunk's FEATURES stage exactly once and persists the spill. Do not "fix"
+/// this by isolating the overlay without re-baselining that gate and reading
+/// `docs/worldgen-seam-consistency.md` first.
 ///
 /// `features_for_source(source_x, source_z)` is called once per source
 /// (their own chunk coordinates, not centre-relative) and must return that

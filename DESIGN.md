@@ -3937,3 +3937,105 @@ Landed as `3f26be21` (the props census) + `9ae07b8e` (the wiring and its gate).
   `lodestone-v770` target since v770 depends on it. Building the `lodestone-data` census first — a crate with a
   disjoint dependency cone — kept the run productive and landed a reviewable commit in the gap. **Dependency
   order is a scheduling tool when the tree is shared.**
+
+**12.118 The owner's "trees are cut off at chunk borders" was real, and the leading hypothesis handed to this
+unit was wrong in the direction that matters: the per-source pass *is* centre-dependent, but the divergence
+that reaches a served chunk comes from two other channels, and only one of them can be fixed without
+regressing JVM parity. The complete fix is measured, reaches exactly zero, and is blocked — because vanilla's
+own model is order-dependent and a recompute-per-centre architecture is only correct if it is not.**
+
+- **The architecture's unstated invariant, written down for the first time.** The 3×3 driver serves chunk `C`
+  by re-running all nine of `C ± 1`'s own decoration passes and keeping what lands in `C`, so a tree straddling
+  the `A`|`B` seam is computed **twice** and each drive supplies the half in its own chunk. That is correct only
+  if **source `S`'s pass is a function of `(seed, S)` and undecorated terrain, never of which column is the
+  centre.** Vanilla does not need the invariant: it runs each chunk's FEATURES stage exactly once and persists
+  the spill. We recompute, so we do. Nothing in the engine, its docs or its gates had ever stated it.
+
+- **The brief's leading hypothesis was confirmed as a fact and refuted as a cause, and separating the two took
+  one measurement.** A source's pass really does differ by centre — `RegionView`/`VegGrid` answer air outside
+  the centre's 3×3, and where that boundary falls moves with the centre. But bucketing the differing cells
+  **by chunk** and asking whether each chunk lay inside *both* centres' regions gave **IN-BOTH-REGIONS = 0 at
+  every one of six centre offsets, on all four JVM fixtures**: every difference sat in a chunk the other centre
+  cannot serve, so production discards it. Had the probe stopped at "the counts differ" it would have reported
+  a confirmed root cause that discards no served block. **A difference between two computations is only a
+  defect where their outputs are both used; bucket by the consumer before believing it.**
+
+- **The fixture that found it had to be the production biome set, and the obvious one is vacuous in a way no
+  reading of the test could reveal.** The probe above ran on `plains` and `savanna` — the only two biomes in
+  `lodestone-worldgen`'s own fixture tree — and both measure **zero** truncated seam rows at *every* arm,
+  fixed or broken. Re-pointed at the 66 bundled biomes (read straight off
+  `crates/lodestone-server/assets/worldgen`, tracked repo state, no crate dependency) the same harness found
+  **94** truncated rows in five biomes. §12.43's *world* species, in its purest form: exemplary test source,
+  green either way, and the flaw is entirely in which biome's feature list the fixture happens to carry.
+
+- **Two independent channels, decomposed by turning each off separately — and each alone leaves a majority of
+  the defect standing.** Truncated seam rows over the 66 biomes, flat 5×5 world, seed 42:
+
+  | arm | rows |
+  |---|---|
+  | as shipped | **94** |
+  | reads widened to a 5×5 neighbourhood | 44 |
+  | per-source write isolation | 75 |
+  | both | **0** |
+
+  Neither is a majority fix and the two are not additive — they interact, and after the read fix landed the
+  isolation arm re-measured **0** rather than 75. A decomposition that had tested only one would have
+  concluded the other did not matter.
+
+- **The channel that could be fixed: a read region belonging to the centre rather than to the source.** A
+  source at offset `(-1, 0)` reads up to `VEG_PADDING` = 8 blocks past its own west edge, i.e. chunk offset
+  `-2`, which had no slot in the nine-entry table and answered `AIR`. **The mechanism by which that reaches a
+  tree 20 blocks away is the RNG stream, not the wrong cell**: every attempt of a feature draws from one
+  shared per-feature stream, so one attempt whose outcome flips shifts every later attempt in that source. The
+  fix is a 5×5 **read** neighbourhood (`region_view::WIDE_RADIUS`, `VegGrid::sources` at 25 slots);
+  decoration still runs for the inner 3×3 and only the centre is folded back.
+
+- **It is free, and the reason is that the closure it needs already existed.** The 16 rim chunks carry
+  **pre-ore** terrain, and a column's pre-ore closure was *already* exactly this 5×5
+  (`COLUMN_CLOSURE_RADIUS = 2`, which `store::open_view` already pins), so every one of the 25 is already
+  memoised for every served column. Measured, one cold column, `--features gen-counters`, before → after:
+  `pre_ore_computed` **25 → 25**, `post_ore_computed` **9 → 9**, `pre_ore_hits` **66 → 82**; at 8×8,
+  `pre_ore_hits` **1340 → 2364** = exactly +16 per column with both `*_computed` unchanged. **Zero additional
+  stage computation.** Pre-ore rather than post-ore is also *exact for both heightmaps* — ore placement
+  **replaces** blocks rather than adding or removing them, so the topmost non-air `y` is identical either way —
+  where post-ore terrain on the rim would have widened the closure to 7×7, 49 pre-ore chunks per column.
+  **The cheap option was the more accurate one, and only asking what the reads actually consume showed it.**
+
+- **The channel that cannot be fixed here, and the parity measurement that stopped it.** The nine passes share
+  one write overlay and reads consult it first — deliberately, since vanilla's heightmaps update as decoration
+  places blocks — so `S`'s pass sees whichever sources ran before it, and both that set and its order are the
+  centre's. Isolating each source's overlay reaches **0** truncated rows. It also regresses FULL3X3 identity
+  mismatches against the real JVM dumps from **1 → 7** at `vegetation_savanna_neg30_15_jvm.txt` where
+  `vegetation_parity.rs`'s own measured bound is 3 (and 0 → 3, 0 → 1 at two others). Vanilla genuinely does
+  mutate one shared level across the passes. **Exact vanilla behaviour is order-dependent and a
+  recompute-per-centre architecture is only correct if it is order-independent; those are not simultaneously
+  satisfiable, and no amount of care inside this file makes them so.** The options — isolate and re-baseline,
+  persist decoration per chunk in the store the way vanilla does, or accept 44 rows — are the owner's call, and
+  they are written down in `docs/worldgen-seam-consistency.md` rather than settled by widening a bound.
+
+- **The control is the whole reason the 94 is worth anything, and it is one argument rather than a second
+  implementation.** `narrow_read_neighbourhood_is_what_truncates` hands `None` for the 16 rim chunks in the
+  same binary, same fixture, same seed, reproducing the nine-slot table exactly; it measures 94 against the
+  fixed arm's 44 and additionally requires both biomes the fix claims to have fixed to be **non-zero** under
+  it. The prediction was made before the fix compiled and the fixed arm landed on **44 exactly**, with the
+  per-biome split unchanged from the diagnostic arm — a predicted value, not a direction (§12.43's *magnitude*
+  species avoided by construction).
+
+- **No JVM oracle was reachable, and the cross-seam route is stronger here anyway.** `java -version` reports
+  no runtime, so the whole `oracle-java` path is unavailable (§12.117 recorded the same). The expectation
+  instead comes from **the neighbour chunk's own independent construction of the same physical tree**: if two
+  drives both say a canopy occupies both sides of a border and the stitched served field carries only one, one
+  of them is wrong regardless of what vanilla does. That is an expected value originating outside either arm,
+  and unlike a percentage it is reported **by location** — side of the seam plus a `(y, z)` bounding box.
+
+- **The one gate that should have caught this is a closed loop, and its name says so.**
+  `parallel_generation_is_deterministic_and_matches_serial` compares our output against our own serial output,
+  so an inconsistency present in both arms is invisible. `decoration_seam_spill.rs` asserts a canopy *reaches*
+  across the seam — which it does, 20 crossings, still green — and structurally cannot see that the two sides
+  describe **different** trees. **"Both halves are present" and "both halves are the same tree" are different
+  claims, and the first one passing is what kept anyone from asking the second.**
+
+- **Ore has the identical structural defect and is untouched.** `RegionView` still routes through the
+  nine-slot table and `apply_ore_step_3x3_per_source` still shares one overlay across nine sources, so a blob
+  straddling a seam is inconsistent the same way. Unmeasured, underground, and not the reported symptom — but
+  recorded here so it is not later assumed fixed by association.
