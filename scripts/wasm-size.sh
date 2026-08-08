@@ -24,8 +24,13 @@
 #   window. So brotli is measured on the rustc output (pre-wasm-opt), which is the
 #   smaller of the two. The gzip ceiling holds with or without wasm-opt.
 #
-# BASELINE (measured, W4 report, opt-level="z" + lto=fat + strip):
-#   raw 4.12 MiB   gzip 1.24 MiB   brotli 0.89 MiB  (brotli = real wire cost)
+# BASELINE (measured, opt-level="z" + lto=fat + strip):
+#   raw 2.69 MiB   gzip 0.84 MiB   brotli 0.60 MiB  (brotli = real wire cost)
+#   Re-measured 2026-08-08 (882220 B gzip, 55% of the ceiling). The previous W4
+#   figures recorded here -- raw 4.12 / gzip 1.24 / brotli 0.89 MiB -- were stale by
+#   about a third: they predate dropping the WebGL2 fallback, whose glow backend the
+#   attribution below still counts. Quoting the old number would make a ~30%
+#   regression look like the baseline, which is the direction that hides a problem.
 #   The dominant cost is the wgpu graphics stack (wgpu-core/-hal + naga shader
 #   compiler + glow, ~1.19 MiB attributed); our own code is ~120 KiB and
 #   lodestone-assets contributes ~18 KiB (no full-corpus bloat — DCE handles it).
