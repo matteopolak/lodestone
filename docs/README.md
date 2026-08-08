@@ -223,6 +223,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   section, instead of every agent running heavy `cargo` builds on the one shared dev
   laptop — with ten agents on ten cores, local verification was slower than the work
   it was checking.
+- [Client chunk-path cycle accounting](./client-chunk-cycles.md) — An
+  instruction-denominated attribution of the **client** chunk path — from a
+  `level_chunk_with_light` packet arriving to its pixels being submitted — measured
+  over real generated terrain with macOS's task-level hardware counters. It answers
+  "where do the CPU cycles actually go?" with a number per stage and a named counter
+  behind each one, and it carries the controls that prove the counter is a counter.
+  The harness is `crates/lodestone-shell/tests/client_chunk_cycles.rs`; this doc is
+  how to read it, what it found, and how to extend it without reintroducing a defect
+  it already caught.
 - [v770 clientbound `play` packet coverage, and the 32-packet remainder](./clientbound-packet-coverage.md) —
   The measured decode/consumer coverage of protocol 776's `play` clientbound packets
   in `crates/protocol/v770`, and a sourced triage of every packet that is still
