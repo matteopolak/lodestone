@@ -24,6 +24,11 @@ use super::server_list::{SERVER_ENTRY_BAD, SERVER_ENTRY_DIM, SERVER_ENTRY_ICON, 
 /// centre, so one flat quad is the whole of it. Decoded straight out of the 26.2
 /// `client.jar`. `pub(super)` so the draw's gate can assert the box by colour.
 pub(super) const TOOLTIP_BG: [f32; 4] = [16.0 / 255.0, 0.0, 16.0 / 255.0, 240.0 / 255.0];
+/// Inset of a resource-pack row's thumbnail and text from its own edges (issue
+/// #415). Two pixels, so a 36 px row's icon comes out at the [`ICON`] 32 the
+/// account and server lists already draw their mosaics at — the same box-filtered
+/// drawable, so there is one size and not three.
+const PACK_ROW_PAD: f32 = 2.0;
 /// `tooltip/frame.png`'s top bar and the light end of its side gradient —
 /// (80, 0, 255, 80).
 const TOOLTIP_FRAME_TOP: [f32; 4] = [80.0 / 255.0, 0.0, 1.0, 80.0 / 255.0];
@@ -1260,6 +1265,40 @@ fn draw_widget(
         // `spriteOffset` is zero at every call site, so this is a plain centre.
         let (ix, iy) = widget.icon_rect(ICON_SPRITE);
         b.sprite(icon, ix, iy, ICON_SPRITE, ICON_SPRITE, ICON_TINT);
+        return;
+    }
+
+    // A **resource-pack row** (issue #415): its `pack.png` thumbnail at the left
+    // edge, the pack name on the first line and its `pack.mcmeta` description
+    // under it, both left-aligned past the icon — vanilla's
+    // `TransferableSelectionList.Entry.render` shape.
+    //
+    // Gated on `MenuRow::favicon`, which **no other slotted row anywhere sets**
+    // (checked: the only producer is `dispatch.rs`'s server-list arm, whose rows
+    // carry a `ServerEntryView` and are drawn by `draw_server_entry` before this
+    // function is ever reached). So this branch is additive: it cannot change a
+    // pixel on any pre-existing screen. `detail` rides along inside the same
+    // `if` for that reason — several slotted rows do set `detail`, and drawing it
+    // unconditionally here would move them.
+    if let Some(icon) = row.favicon.as_ref() {
+        let side = (h - PACK_ROW_PAD * 2.0).min(ICON);
+        b.mosaic(icon, x + PACK_ROW_PAD, y + PACK_ROW_PAD, side);
+        let colour = widget.message_colour();
+        let (_, right) = widget.content_span();
+        let tx = (x + PACK_ROW_PAD + side + PACK_ROW_PAD).floor();
+        let room = (right - tx).max(0.0);
+        let title = clip_measured(b, &widget.message, room);
+        b.text(title, tx, (y + PACK_ROW_PAD + 2.0).floor(), 1.0, colour);
+        if !row.detail.is_empty() {
+            let detail = clip_measured(b, &row.detail, room);
+            b.text(
+                detail,
+                tx,
+                (y + PACK_ROW_PAD + 2.0 + LINE_H + 2.0).floor(),
+                1.0,
+                FG_DIM,
+            );
+        }
         return;
     }
 

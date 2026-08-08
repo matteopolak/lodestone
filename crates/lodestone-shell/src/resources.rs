@@ -116,7 +116,11 @@ impl BlockResources {
         let bytes = std::fs::read(&jar).map_err(|e| format!("read {}: {e}", jar.display()))?;
         let zip =
             ZipSource::from_bytes(bytes).map_err(|e| format!("open {}: {e}", jar.display()))?;
-        let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
+        // The user's selected packs sit on top of the built-in jar (issue #415),
+        // so a pack that ships `assets/minecraft/textures/block/**` changes the
+        // world's appearance from this session on. This is the block atlas' own
+        // stack, not a shared one — see `selected_pack_sources`' doc.
+        let manager = build_pack_stack(Box::new(zip));
         let registry =
             blocks_json_registry(&report).map_err(|e| format!("load {}: {e}", report.display()))?;
         let atlas = BlockAtlas::build(&manager, &registry)
@@ -147,12 +151,25 @@ impl BlockResources {
     }
 }
 
-/// Opens `<root>/client.jar` as a [`ResourceManager`], warning and returning
-/// `None` on either failure — the fail-open jar discovery every loader in this
-/// module shares below [`BlockResources::try_vanilla`], whose own errors must
-/// propagate as a fallback-banner reason instead of a log line, so it opens
-/// the jar itself rather than going through this helper.
-fn open_client_jar(root: &Path) -> Option<ResourceManager> {
+/// Opens `<root>/client.jar` **plus every selected user resource pack** as a
+/// [`ResourceManager`], warning and returning `None` on a jar failure — the
+/// fail-open pack discovery every loader in this module shares below
+/// [`BlockResources::try_vanilla`], whose own errors must propagate as a
+/// fallback-banner reason instead of a log line, so it builds its stack through
+/// [`selected_pack_sources`] itself rather than going through this helper.
+///
+/// **This is the one function that makes the Resource Packs screen do
+/// anything.** Every `load_*` in this module goes through it, so a pack that
+/// overrides GUI sprites, item art, the sky, the container panels or the block
+/// textures is picked up by whichever loader owns that art the next time it
+/// runs. See [`selected_pack_sources`] for what "the next time it runs" means
+/// per loader.
+///
+/// `pub` so `tests/resource_pack_stack.rs` can drive the **production** stack
+/// rather than reassembling one that happens to look the same — the difference
+/// between proving the wire and proving a copy of it.
+#[must_use]
+pub fn open_pack_stack(root: &Path) -> Option<ResourceManager> {
     let jar = root.join("client.jar");
     let bytes = match std::fs::read(&jar) {
         Ok(b) => b,
@@ -168,7 +185,260 @@ fn open_client_jar(root: &Path) -> Option<ResourceManager> {
             return None;
         }
     };
-    Some(ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]))
+    Some(build_pack_stack(Box::new(zip)))
+}
+
+/// Lays the currently selected user packs on top of the built-in pack.
+///
+/// `builtin` is the bottom of the stack — vanilla's own `Pack.Position.BOTTOM`
+/// fixed-position built-in pack (`Pack.java:145-157`), which is why the
+/// Resource Packs screen can never move or remove it.
+fn build_pack_stack(builtin: Box<dyn ResourceSource>) -> ResourceManager {
+    let mut sources: Vec<Box<dyn ResourceSource>> = vec![builtin];
+    // `ResourceManager::new` is lowest-priority-first and `selected_pack_sources`
+    // returns the UI's own highest-first order, so the extend is `.rev()`. See
+    // `ResourceManager::from_priority_order`'s doc for both attestations.
+    sources.extend(selected_pack_sources().into_iter().rev());
+    ResourceManager::new(sources)
+}
+
+// -- the pack repository (issue #415) ----------------------------------------
+
+/// The user's `resourcepacks/` folder — vanilla's `FolderRepositorySource`
+/// root, alongside `saves/`, `servers.json` and `options.json` in the same
+/// platform data directory (and honouring the same `LODESTONE_DATA_DIR`
+/// override).
+#[must_use]
+pub fn resource_packs_dir() -> PathBuf {
+    crate::menu::servers::data_dir().join("resourcepacks")
+}
+
+/// Whether a discovered pack is a directory tree or a zip archive. Both are the
+/// same on-disk format to [`ResourceSource`], so this only exists to decide
+/// which constructor to call and what to show the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackKind {
+    /// A directory tree containing `pack.mcmeta`.
+    Directory,
+    /// A `.zip` archive.
+    Zip,
+}
+
+/// One resource pack found in [`resource_packs_dir`], with everything the
+/// Resource Packs screen draws.
+#[derive(Debug, Clone)]
+pub struct DiscoveredPack {
+    /// Vanilla's own pack id: `"file/<filename>"`
+    /// (`FolderRepositorySource.createDiscoveredFilePackInfo`). This is what is
+    /// persisted in `resource_packs.json`, so renaming the file on disk
+    /// deselects the pack — exactly as it does in vanilla.
+    pub id: String,
+    /// The display title: the bare filename, as
+    /// `Component.literal(nameFromPath(content))`.
+    pub title: String,
+    /// The `pack.mcmeta` description, flattened to plain text.
+    pub description: String,
+    /// The pack's declared `pack_format`. Recorded but **not** validated — see
+    /// this module's note on `docs/resource-packs.md`.
+    pub pack_format: u32,
+    /// The decoded `pack.png`, when the pack ships one.
+    pub icon: Option<lodestone_assets::Image>,
+    /// Where it lives, for reopening it as a source.
+    pub path: PathBuf,
+    /// Directory or zip.
+    pub kind: PackKind,
+}
+
+/// Scans [`resource_packs_dir`] for packs, accepting **both** directories and
+/// `.zip` files, sorted by id so the Available column is stable across runs.
+///
+/// Fail-open at every level: an unreadable folder yields an empty list, and an
+/// entry that will not open (a corrupt zip, a directory with no `pack.mcmeta`)
+/// is skipped with a warning rather than failing the scan. That mirrors
+/// `FolderRepositorySource.loadPacks`, which logs and continues.
+#[must_use]
+pub fn scan_resource_packs() -> Vec<DiscoveredPack> {
+    scan_resource_packs_in(&resource_packs_dir())
+}
+
+/// As [`scan_resource_packs`], from an explicit directory — the form tests use,
+/// so no test ever reads the developer's own pack folder.
+#[must_use]
+pub fn scan_resource_packs_in(dir: &Path) -> Vec<DiscoveredPack> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // Skip the dotfiles a Finder/Explorer visit leaves behind.
+        if name.starts_with('.') {
+            continue;
+        }
+        let kind = if path.is_dir() {
+            PackKind::Directory
+        } else if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+        {
+            PackKind::Zip
+        } else {
+            continue;
+        };
+        let Some(source) = open_pack_source(&path, kind) else {
+            continue;
+        };
+        // A directory with no `pack.mcmeta` is not a pack — it is a stray
+        // folder. A zip without one is a stray archive. Vanilla's own
+        // `Pack.readMetaAndCreate` returns null in both cases and the entry is
+        // dropped, which is what the `?` here reproduces.
+        let Some(meta_bytes) = source.read("pack.mcmeta") else {
+            tracing::debug!(target: "assets", "{}: no pack.mcmeta, not a resource pack", path.display());
+            continue;
+        };
+        let meta = match lodestone_assets::PackMeta::parse(&meta_bytes) {
+            Ok(meta) => meta,
+            Err(e) => {
+                tracing::warn!(target: "assets", "{}: malformed pack.mcmeta: {e}", path.display());
+                continue;
+            }
+        };
+        let icon = source
+            .read("pack.png")
+            .and_then(|png| match lodestone_assets::Image::decode_png(&png) {
+                Ok(img) => Some(img),
+                Err(e) => {
+                    tracing::warn!(target: "assets", "{}: decode pack.png: {e}", path.display());
+                    None
+                }
+            });
+        out.push(DiscoveredPack {
+            id: format!("file/{name}"),
+            title: name.to_string(),
+            description: meta.description.plain_text(),
+            pack_format: meta.pack_format,
+            icon,
+            path,
+            kind,
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// Opens one discovered pack as a [`ResourceSource`], warning on failure.
+fn open_pack_source(path: &Path, kind: PackKind) -> Option<Box<dyn ResourceSource>> {
+    match kind {
+        PackKind::Directory => match lodestone_assets::DirectorySource::new(path) {
+            Ok(s) => Some(Box::new(s) as Box<dyn ResourceSource>),
+            Err(e) => {
+                tracing::warn!(target: "assets", "open pack dir {}: {e}", path.display());
+                None
+            }
+        },
+        PackKind::Zip => match ZipSource::open(path) {
+            Ok(s) => Some(Box::new(s) as Box<dyn ResourceSource>),
+            Err(e) => {
+                tracing::warn!(target: "assets", "open pack zip {}: {e}", path.display());
+                None
+            }
+        },
+    }
+}
+
+/// The process-wide selected-pack order, **highest priority first** (the
+/// Resource Packs screen's own top-to-bottom Selected column).
+///
+/// A `RwLock` rather than a `OnceLock` because the whole point of the screen is
+/// that this changes mid-run; `None` means "not read from disk yet", which
+/// [`selected_packs`] resolves on first use.
+static SELECTED_PACKS: std::sync::RwLock<Option<Vec<String>>> = std::sync::RwLock::new(None);
+
+/// Replaces the selected-pack order, highest priority first. Anything built
+/// after this call sees the new stack; see [`selected_pack_sources`] for which
+/// loaders that actually reaches.
+pub fn set_selected_packs(ids: Vec<String>) {
+    if let Ok(mut guard) = SELECTED_PACKS.write() {
+        *guard = Some(ids);
+    }
+}
+
+/// The current selected-pack order, highest priority first, seeding itself from
+/// [`crate::config::SelectedPacks`] on first use.
+///
+/// **Lazy rather than an explicit `init` call from `app::lifecycle`** because the
+/// ordering would be a trap: `Sim` is built (and with it the block atlas, via
+/// [`BlockResources::load`]) before `lifecycle` has a GPU, so an init placed
+/// anywhere obvious would land *after* the first consumer and the selection
+/// would silently miss the launch it was made on.
+#[must_use]
+pub fn selected_packs() -> Vec<String> {
+    if let Ok(guard) = SELECTED_PACKS.read() {
+        if let Some(ids) = guard.as_ref() {
+            return ids.clone();
+        }
+    }
+    let ids = load_persisted_selection();
+    tracing::info!(target: "assets", packs = ids.len(), "loaded the selected resource pack order");
+    set_selected_packs(ids.clone());
+    ids
+}
+
+/// The persisted order. A `#[cfg(test)]` **fork**, not an early return on
+/// `cfg!(test)`, so no unit test can read the developer's real
+/// `resource_packs.json` and the interception is a property of the build rather
+/// than a silent skip (`CLAUDE.md` §12.44). A test drives
+/// [`set_selected_packs`] directly.
+#[cfg(not(test))]
+fn load_persisted_selection() -> Vec<String> {
+    crate::config::SelectedPacks::load().into_ids()
+}
+
+#[cfg(test)]
+fn load_persisted_selection() -> Vec<String> {
+    Vec::new()
+}
+
+/// Opens every currently selected pack, **highest priority first**, dropping
+/// any whose file has since disappeared.
+///
+/// # What a change here does and does not reach
+///
+/// Nothing in this module holds a live `ResourceManager`; each `load_*` opens
+/// its own and is called from one place. So changing the selection takes effect
+/// at each consumer's own next build:
+///
+/// - the **block atlas and per-state models** rebuild per session
+///   (`sim/build.rs`'s `BlockResources::load`), i.e. on the next world join —
+///   which is the visible acceptance condition for issue #415;
+/// - the **GUI/menu atlases, item atlas, sky, container panels, weather, glint
+///   and entity sheets** rebuild when their owner is next constructed
+///   (`app/lifecycle.rs`, `menu/render/renderer.rs`, `gpu/entities.rs`);
+/// - the **particle atlas** is the one exception: [`load_particle_atlas`] caches
+///   in a `OnceLock` on purpose (two consumers must share one object), so it
+///   keeps whatever stack was live at its first call for the rest of the
+///   process.
+#[must_use]
+fn selected_pack_sources() -> Vec<Box<dyn ResourceSource>> {
+    let selected = selected_packs();
+    if selected.is_empty() {
+        return Vec::new();
+    }
+    let discovered = scan_resource_packs();
+    let mut out = Vec::new();
+    for id in selected {
+        let Some(pack) = discovered.iter().find(|p| p.id == id) else {
+            tracing::warn!(target: "assets", "selected pack {id} is no longer in the packs folder");
+            continue;
+        };
+        if let Some(source) = open_pack_source(&pack.path, pack.kind) {
+            out.push(source);
+        }
+    }
+    out
 }
 
 /// Load real per-mob entity textures from `client.jar`, keyed by the render
@@ -190,7 +460,7 @@ pub fn load_entity_textures() -> std::collections::HashMap<&'static str, lodesto
     let Some(root) = asset_root() else {
         return out;
     };
-    let Some(manager) = open_client_jar(&root) else {
+    let Some(manager) = open_pack_stack(&root) else {
         return out;
     };
 
@@ -251,7 +521,7 @@ pub fn load_block_entity_textures()
     let Some(root) = asset_root() else {
         return out;
     };
-    let Some(manager) = open_client_jar(&root) else {
+    let Some(manager) = open_pack_stack(&root) else {
         return out;
     };
 
@@ -316,7 +586,7 @@ pub const RECIPE_BOOK_PANEL_SPRITE: &str = "recipe_book/panel";
 #[must_use]
 pub fn load_gui_atlas() -> Option<Arc<GuiAtlas>> {
     let root = asset_root()?;
-    let manager = open_client_jar(&root)?;
+    let manager = open_pack_stack(&root)?;
     match GuiAtlas::build_with_extras(&manager, RECIPE_BOOK_TEXTURES) {
         Ok(atlas) => {
             tracing::info!(
@@ -353,7 +623,7 @@ pub fn load_sky(
     color_format: wgpu::TextureFormat,
 ) -> Option<SkyRenderer> {
     let root = asset_root()?;
-    let manager = open_client_jar(&root)?;
+    let manager = open_pack_stack(&root)?;
     match SkyRenderer::new(device, queue, color_format, &manager) {
         Ok(sky) => {
             tracing::info!(target: "assets", "loaded vanilla sky (sun/moon/stars/clouds)");
@@ -378,7 +648,7 @@ pub fn load_screen_effects(
     color_format: wgpu::TextureFormat,
 ) -> Option<ScreenEffectRenderer> {
     let root = asset_root()?;
-    let manager = open_client_jar(&root)?;
+    let manager = open_pack_stack(&root)?;
     match ScreenEffectRenderer::new(device, queue, color_format, &manager) {
         Ok(fx) => {
             tracing::info!(target: "assets", "loaded underwater/fire screen overlays");
@@ -407,7 +677,7 @@ pub fn load_screen_effects(
 #[must_use]
 pub fn load_weather_textures() -> Option<lodestone_render::WeatherTextures> {
     let root = asset_root()?;
-    let manager = open_client_jar(&root)?;
+    let manager = open_pack_stack(&root)?;
     match lodestone_render::load_weather_textures(&manager) {
         Ok(textures) => {
             tracing::info!(
@@ -443,7 +713,7 @@ pub fn load_weather_textures() -> Option<lodestone_render::WeatherTextures> {
 #[must_use]
 pub fn load_glint_texture() -> Option<lodestone_assets::Image> {
     let root = asset_root()?;
-    let manager = open_client_jar(&root)?;
+    let manager = open_pack_stack(&root)?;
     let path = "assets/minecraft/textures/misc/enchanted_glint_item.png";
     let png = manager.read(path)?;
     match lodestone_assets::Image::decode_png(&png) {
@@ -535,7 +805,7 @@ const _: () = assert!(
 #[must_use]
 pub fn load_menu_gui_atlas() -> Option<Arc<GuiAtlas>> {
     let root = asset_root()?;
-    let manager = open_client_jar(&root)?;
+    let manager = open_pack_stack(&root)?;
     match GuiAtlas::build_with_extras(&manager, MENU_TEXTURES) {
         Ok(atlas) => {
             tracing::info!(
@@ -575,7 +845,7 @@ pub fn load_menu_gui_atlas() -> Option<Arc<GuiAtlas>> {
 #[must_use]
 pub fn load_panorama() -> Option<Arc<crate::menu::panorama::PanoramaFaces>> {
     let root = asset_root()?;
-    let manager = open_client_jar(&root)?;
+    let manager = open_pack_stack(&root)?;
     // Absent or unreadable is not fatal: `panorama::load` falls back to the jar
     // per face and reports how many faces it actually got from the store.
     let objects = match crate::asset_objects::AssetObjectStore::open(&root) {
@@ -631,7 +901,7 @@ pub fn load_panorama() -> Option<Arc<crate::menu::panorama::PanoramaFaces>> {
 #[must_use]
 pub fn load_container_background() -> Option<Arc<crate::container::ContainerBackground>> {
     let root = asset_root()?;
-    let manager = open_client_jar(&root)?;
+    let manager = open_pack_stack(&root)?;
     match crate::container::ContainerBackground::build(&manager) {
         Ok(background) => {
             tracing::info!(target: "assets", "loaded vanilla container background art");
@@ -687,7 +957,7 @@ pub fn load_particle_atlas() -> Option<Arc<ParticleAtlas>> {
 
 fn build_particle_atlas() -> Option<Arc<ParticleAtlas>> {
     let root = asset_root()?;
-    let manager = open_client_jar(&root)?;
+    let manager = open_pack_stack(&root)?;
     let (atlas, report) = match ParticleAtlas::build_reported(&manager) {
         Ok(pair) => pair,
         Err(e) => {
@@ -716,7 +986,7 @@ fn build_particle_atlas() -> Option<Arc<ParticleAtlas>> {
 #[must_use]
 pub fn load_item_atlas() -> Option<Arc<ItemAtlas>> {
     let root = asset_root()?;
-    let manager = open_client_jar(&root)?;
+    let manager = open_pack_stack(&root)?;
     let (atlas, report) = match ItemAtlas::build_reported(&manager) {
         Ok(pair) => pair,
         Err(e) => {
@@ -761,7 +1031,7 @@ pub fn load_recipe_book() -> Option<lodestone_game::recipe::RecipeBook> {
     use lodestone_game::recipe_json::CorpusBuilder;
 
     let root = asset_root()?;
-    let manager = open_client_jar(&root)?;
+    let manager = open_pack_stack(&root)?;
 
     let mut builder = CorpusBuilder::new();
     for path in manager.list("data/") {

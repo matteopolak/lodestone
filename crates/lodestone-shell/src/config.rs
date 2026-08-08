@@ -774,6 +774,111 @@ pub fn hidden_players_path() -> PathBuf {
     crate::menu::servers::data_dir().join("hidden_players.json")
 }
 
+/// The Resource Packs screen's (issue #415) ordered selection, **highest
+/// priority first** — the same order the screen's Selected column shows
+/// top-to-bottom, and the order
+/// [`lodestone_assets::ResourceManager::from_priority_order`] documents.
+///
+/// A separate file for the same reason [`HiddenPlayers`] is one: [`Options`] is
+/// deliberately `Copy` and a `Vec<String>` field would take that away from every
+/// call site that copies it by value. Vanilla keeps this in `options.txt` as
+/// `resourcePacks:[...]`; this client keeps it beside `options.json` instead,
+/// which is the same trade `servers.json` and the profile list already made.
+///
+/// The **built-in pack is not in this list.** It is pinned to the bottom of the
+/// stack by construction in `resources.rs`, exactly as vanilla's own
+/// fixed-position `Pack.Position.BOTTOM` built-in pack is
+/// (`Pack.java:145-157`), so there is no state here that could ever deselect it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SelectedPacks {
+    ids: Vec<String>,
+}
+
+impl SelectedPacks {
+    /// Loads from the real on-disk location ([`selected_packs_path`]). Missing
+    /// or corrupt is empty, never an error — same rule as [`Options::load`].
+    #[must_use]
+    pub fn load() -> Self {
+        Self::load_from(&selected_packs_path())
+    }
+
+    /// As [`Self::load`], from an explicit path (for tests).
+    #[must_use]
+    pub fn load_from(path: &Path) -> Self {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Self::default();
+        };
+        let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&text)
+        else {
+            return Self::default();
+        };
+        let mut ids = Vec::new();
+        for value in items {
+            if let Some(id) = value.as_str() {
+                let id = id.to_string();
+                // A duplicate would load the same pack twice at two priorities.
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        Self { ids }
+    }
+
+    /// Wraps an already-ordered id list, highest priority first.
+    #[must_use]
+    pub fn from_ids(ids: Vec<String>) -> Self {
+        Self { ids }
+    }
+
+    /// The ids, highest priority first.
+    #[must_use]
+    pub fn ids(&self) -> &[String] {
+        &self.ids
+    }
+
+    /// Consumes into the id list, highest priority first.
+    #[must_use]
+    pub fn into_ids(self) -> Vec<String> {
+        self.ids
+    }
+
+    /// Writes to the real on-disk location.
+    ///
+    /// # Errors
+    /// Returns the underlying I/O error if the directory cannot be created or
+    /// the file cannot be written.
+    pub fn save(&self) -> std::io::Result<()> {
+        self.save_to(&selected_packs_path())
+    }
+
+    /// As [`Self::save`], to an explicit path (for tests).
+    ///
+    /// # Errors
+    /// Returns the underlying I/O error if the directory cannot be created or
+    /// the file cannot be written.
+    pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let items: Vec<serde_json::Value> = self
+            .ids
+            .iter()
+            .map(|id| serde_json::Value::String(id.clone()))
+            .collect();
+        let text = serde_json::to_string_pretty(&serde_json::Value::Array(items))
+            .unwrap_or_else(|_| "[]".to_string());
+        std::fs::write(path, text)
+    }
+}
+
+/// Full path to the persisted resource-pack selection — same directory
+/// discovery as [`options_path`]/`servers_path`.
+#[must_use]
+pub fn selected_packs_path() -> PathBuf {
+    crate::menu::servers::data_dir().join("resource_packs.json")
+}
+
 /// How the binary should run this session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {

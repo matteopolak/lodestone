@@ -213,17 +213,22 @@ impl Origin {
     /// them. That asymmetry is why this is a predicate on the placement rather than
     /// "clip every slotted row on a screen that has a list".
     ///
-    /// [`Origin::Packs`] and [`Origin::Telemetry`] are absent because neither
-    /// screen returns a spec from `MenuNav::active_list` — they do not scroll at
-    /// all, so there is no band to clip to. Adding one is the point at which its
-    /// row variant joins this list.
+    /// [`Origin::Telemetry`] is absent because that screen returns no spec from
+    /// `MenuNav::active_list` — it does not scroll at all, so there is no band
+    /// to clip to. Adding one is the point at which its row variant joins this
+    /// list, which is exactly what happened to [`Origin::Packs`] when issue
+    /// #415's real two-column screen replaced its non-scrolling stub: both its
+    /// row variants are here, because a `MoveButton` rides on its row and must
+    /// be clipped with it or it outlives the row it belongs to.
     #[must_use]
     pub fn is_scrolling_list_row(self) -> bool {
         use super::options::Placement;
+        use super::packs::PacksPlacement;
         match self {
             Origin::Settings(Placement::ListCell { .. } | Placement::ListHeader { .. }) => true,
             Origin::KeyBinds(_) => true,
             Origin::Language(super::language::LanguagePlacement::Row { .. }) => true,
+            Origin::Packs(PacksPlacement::Row { .. } | PacksPlacement::MoveButton { .. }) => true,
             Origin::Social(_) => true,
             _ => false,
         }
