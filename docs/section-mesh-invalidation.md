@@ -96,7 +96,7 @@ which is why a column at the bottom of the world is not held back forever.
 
 | | ours | vanilla 26.2 |
 |---|---|---|
-| invalidate on arrival | `Sim::on_column_arrived` → `TerrainMesh::mark_neighbours_dirty` → `dirty_columns` → `heal_dirty_columns` (budget `DIRTY_COLUMN_BUDGET = 4` columns/frame) | `ClientPacketListener.enableChunkLight` → `ClientLevel.setSectionRangeDirty(x-1, minSectionY, z-1, x+1, maxSectionY, z+1)` — the same 3×3 column footprint over the whole vertical range |
+| invalidate on arrival | `Sim::on_column_arrived` → `TerrainMesh::mark_neighbours_dirty` → `dirty_columns` → `heal_dirty_columns` (budget `DIRTY_COLUMN_BUDGET` columns/frame — 64 today; read the constant, several places in this doc's history quoted the old 4) | `ClientPacketListener.enableChunkLight` → `ClientLevel.setSectionRangeDirty(x-1, minSectionY, z-1, x+1, maxSectionY, z+1)` — the same 3×3 column footprint over the whole vertical range |
 | defer the **first** build | `SnapshotOutcome::Deferred` + `TerrainMesh::route`'s `uploaded_sections` check | `LevelExtractor.extract`: compile when `section.sectionMesh.get() != CompiledSectionMesh.UNCOMPILED \|\| sectionUpdateTracker.hasAllNeighbors(level, node)`; `SectionUpdateTracker.hasAllNeighbors` checks the four orthogonal **and** four diagonal neighbour columns |
 
 `TerrainMesh::route` is where the second row lands:
@@ -186,6 +186,63 @@ throughput cannot influence the outcome and what remains under test is purely
 scheduling — which makes 25 of 30 a scheduling defect and not starvation. The
 integrated server's tick lag is a real, separate throughput problem; it is the
 *trigger* that made this reachable in ordinary play, not the cause.
+
+### The order the budget is spent in — near the player, then in front of them
+
+`DIRTY_COLUMN_BUDGET` is finite, so `dirty_columns` is not just a set: whatever
+does not fit waits a frame, and the queue therefore *chooses* which part of the
+world appears first. It was a `BTreeSet<(i32, i32)>` drained with `pop_first()`,
+which is **lexicographic** — smallest `cx`, then smallest `cz`. That is a corner
+of the world, not a place the player is, so a backlog was worked from `−x/−z`
+outward no matter where the camera pointed.
+
+That mattered the moment the server started streaming **view-first**
+(`crates/lodestone-server/src/join_scheduler.rs`, and
+[join scheduler](./join-scheduler.md)): the server's ordering reached no pixels,
+because the client re-sorted it into corner order on arrival. Reported from play
+as chunks appearing behind you while you stare at a hole.
+
+`DirtyColumns` (in `mesher.rs`) keys the drain on the **same shape** as the
+server's `view_order_key`:
+
+```text
+(Chebyshev distance from the player's column, in-frustum penalty, cx, cz)
+```
+
+* **Distance is primary, and that is the anti-starvation property.** A column at
+  distance `d` *behind* the player still precedes every column at distance
+  `d + 1`, in view or not. Pure frustum-first lets a slow spin starve what is
+  behind you, and then you turn round into a hole.
+* **The penalty is `0` inside a 120° horizontal cone, `1` outside**, so it only
+  reorders *within* one distance band. 60° half-angle, generous against vanilla's
+  ~106° horizontal at 16:9, and the player's own column plus its eight neighbours
+  always count as in view.
+* Re-keying happens in `heal_dirty_columns`, once per frame, from the local
+  player's live `PhysicsState` (`position`, `yaw` — the values mouse-look writes
+  each frame). `DirtyColumns::reprioritise` is a **no-op unless the player's
+  column or one of 16 quantised yaw sectors changed**, so a typical frame costs a
+  comparison, and a rebuild is ≤ 4,225 integer keys at the largest view.
+
+The constants are a deliberate second copy of the server's, not an import: the
+shell must not depend on `lodestone-server` (the version seam — see
+`just check-seam`), and singleplayer is the only build where both crates exist.
+What is shared is the semantics, stated in both places.
+
+**Structure, and the property that had to survive the change.** A `BTreeSet`
+gave "a column dirtied twice is meshed once" for free. The replacement is a
+`BinaryHeap` of keys plus a `HashSet` of membership, where the *set* is the truth:
+`insert` only pushes a key when the set did not already hold the coordinate, and
+`pop_next` skips any popped key whose coordinate is no longer live. `remove` (a
+column left the view) drops from the set and leaves the heap entry as a
+**tombstone**, compacted when the heap exceeds twice the live count — a heap has
+no cheap arbitrary erase and this is a queue, so paying for one on every unload
+would be the wrong trade. A sorted `Vec` was the alternative and loses on insert
+cost: every chunk arrival dirties up to eight columns.
+
+While keying this, the pre-existing backlog warning turned out to be
+**unreachable**: it sat inside the `let … else` arm of the pop, which only runs
+when the queue is *empty*, and then tested `!is_empty()`. It is now after the
+loop, where "budget depleted with work still queued" is actually true.
 
 ### Why deferring the frontier costs nothing
 
@@ -282,6 +339,20 @@ Hermetic (`cargo test -p lodestone-shell --lib mesher`):
 - `control_a_seamless_fixture_shows_no_convergence` — the same three
   measurements with a *present but empty* neighbour: 256 → 256. The world species
   made to fire.
+- `the_mesh_drain_prefers_near_and_in_front_but_never_starves_what_is_behind` —
+  the drain order, as two claims rather than a fixed sequence: distance is
+  monotone over a whole 11×11 window (so `(0, −3)` behind the player precedes
+  `(0, 4)` in front of them — the assertion a pure frustum-first drain fails), and
+  within ring 5 the in-frustum columns form the **prefix** (so the facing bonus is
+  not inert, which is what stops the first claim being satisfied by an ordering
+  that ignores rotation entirely). Also that a column dirtied *after* the keying
+  joins at its priority rather than at the end.
+- `a_column_dirtied_twice_is_meshed_once_and_an_unloaded_one_not_at_all` — the two
+  properties the `BTreeSet` gave for free: dedup, and a removed column's tombstone
+  not resurfacing as a phantom pop.
+- `rekeying_only_fires_when_the_column_or_the_yaw_sector_moves` — the cheap-path
+  gate: identical pose and a 10°-of-22.5° nudge do not rebuild; a quarter turn and
+  a chunk-boundary crossing do.
 
 Jar-backed, `#[ignore]`d
 (`cargo test -p lodestone-shell --test water_seam_convergence -- --ignored --nocapture`):

@@ -26,18 +26,20 @@
 //! atlas would let greedy back in — noted in the report.)
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, BinaryHeap, HashSet};
 use std::sync::{
     Arc, Mutex, OnceLock,
     mpsc::{self, Receiver},
 };
 use std::thread::{self, JoinHandle};
 
+use bevy_ecs::query::With;
 use bevy_ecs::resource::Resource;
 use bevy_ecs::schedule::IntoScheduleConfigs;
-use bevy_ecs::system::{Res, ResMut};
+use bevy_ecs::system::{Query, Res, ResMut};
 use lodestone_ecs::app::{App, Plugin};
-use lodestone_ecs::{ChunkWorld, ChunkWorldWrite, FrameSet, Update};
+use lodestone_ecs::{ChunkWorld, ChunkWorldWrite, FrameSet, LocalPlayer, PhysicsState, Update};
 use lodestone_render::{
     BlockClassifier, BlockModels, ChunkSectionView, FluidCell, FluidKind, FluidMeshes,
     FluidNeighborCell, FluidSectionView, FluidSprites, Mesh, ModelMesh, ModelSectionView,
@@ -1581,9 +1583,264 @@ impl Drop for MeshScheduler {
 /// Was 4 before crossbeam MPMC + full-core workers — the old mutex-contended
 /// pool couldn't keep up with more. Now each column's sections fan out across
 /// all cores via lock-free MPMC, so draining the full backlog every frame is
-/// both safe and correct: duplicate dirty signals are coalesced by the
-/// BTreeSet, and the worker pool absorbs the burst.
+/// both safe and correct: duplicate dirty signals are coalesced by
+/// [`DirtyColumns`], and the worker pool absorbs the burst.
+///
+/// The budget being finite is exactly why [`DirtyColumns`]' *order* matters:
+/// whatever does not fit waits a frame, so the queue decides which part of the
+/// world appears first.
 pub const DIRTY_COLUMN_BUDGET: usize = 64;
+
+/// Half-angle, in degrees, of the horizontal cone [`DirtyColumns`] treats as
+/// "the player is looking at this column".
+///
+/// The same 60° (120° total) the server's join scheduler picks
+/// (`lodestone_server::join_scheduler::FRUSTUM_HALF_ANGLE_DEGREES`), and for the
+/// same reason: vanilla's default 70° *vertical* FOV is about 106° horizontal at
+/// 16:9, so this is the real view plus a margin — a column about to rotate into
+/// view should already have been meshed. **Deliberately a second copy of that
+/// constant rather than an import**: the shell must not depend on
+/// `lodestone-server` (the version seam, and singleplayer is the only build where
+/// both exist), so what is shared is the semantics, stated here and in
+/// `docs/section-mesh-invalidation.md`.
+const MESH_FRUSTUM_HALF_ANGLE_DEGREES: f32 = 60.0;
+
+/// How finely a yaw is quantised before it counts as "the player turned" — 16
+/// sectors of 22.5°, again mirroring the server's `YAW_SECTORS`.
+///
+/// A *re-sort trigger*, not part of the ordering: the frustum test uses the raw
+/// yaw. Quantising is what keeps re-prioritisation off the per-frame path — a
+/// player panning smoothly re-keys the queue ~16 times per revolution instead of
+/// on every frame.
+const MESH_YAW_SECTORS: f32 = 16.0;
+
+/// Chebyshev (chess-king) ring index of `coord` around `centre`.
+#[must_use]
+fn column_ring_distance(centre: (i32, i32), coord: (i32, i32)) -> i32 {
+    (coord.0 - centre.0).abs().max((coord.1 - centre.1).abs())
+}
+
+/// Whether `coord` lies in the horizontal cone a player at column `centre`
+/// facing `yaw_degrees` can see. Vanilla's yaw convention — 0 looks towards
+/// `+Z`, 90 towards `−X`, the same one [`lodestone_physics::PlayerState::yaw`]
+/// and `camera_rig`'s `Camera::forward` use.
+///
+/// The player's own column and its eight neighbours are always in view: the
+/// direction to them is degenerate or dominated by where in the column the
+/// player is standing, and they are the ground under their feet either way.
+#[must_use]
+fn column_in_frustum(centre: (i32, i32), yaw_degrees: f32, coord: (i32, i32)) -> bool {
+    if column_ring_distance(centre, coord) <= 1 {
+        return true;
+    }
+    if !yaw_degrees.is_finite() {
+        return true;
+    }
+    let yaw = yaw_degrees.to_radians();
+    let (fx, fz) = (-yaw.sin(), yaw.cos());
+    let (dx, dz) = ((coord.0 - centre.0) as f32, (coord.1 - centre.1) as f32);
+    let len = (dx * dx + dz * dz).sqrt();
+    if len == 0.0 {
+        return true;
+    }
+    ((fx * dx + fz * dz) / len) >= MESH_FRUSTUM_HALF_ANGLE_DEGREES.to_radians().cos()
+}
+
+/// The mesh queue's ordering: **distance first, facing cone second**.
+///
+/// A sort key rather than a comparator, so the order is a total, deterministic
+/// function of integers — `(ring, penalty, cx, cz)`, the shape of the server's
+/// `join_scheduler::view_order_key` (a *set* ordering: there is no prior walk to
+/// inherit as a tie-break, so the coordinate is one).
+///
+/// * `ring` — Chebyshev distance from the player's column. **Primary, and that
+///   is the anti-starvation property**: a column at distance `d` behind the
+///   player (`(d, 1, …)`) still precedes every column at distance `d + 1`,
+///   in view or not (`(d + 1, 0, …)`). Pure frustum-first would let a slow spin
+///   starve what is behind the player, who then turns round into a hole.
+/// * `penalty` — `0` inside the facing cone, `1` outside. The whole of "mesh
+///   where the player is looking": it reorders *within* one ring and can never
+///   promote a far column over a near one.
+/// * `(cx, cz)` — a deterministic tie-break. With `facing: None` this key is
+///   `(ring, 0, cx, cz)`, i.e. ring-by-ring and lexicographic inside a ring.
+#[must_use]
+fn mesh_order_key(
+    centre: (i32, i32),
+    facing: Option<f32>,
+    coord: (i32, i32),
+) -> (i32, u8, i32, i32) {
+    let penalty = match facing {
+        Some(yaw) if column_in_frustum(centre, yaw, coord) => 0,
+        Some(_) => 1,
+        None => 0,
+    };
+    (
+        column_ring_distance(centre, coord),
+        penalty,
+        coord.0,
+        coord.1,
+    )
+}
+
+/// The quantised yaw sector a rotation falls in — see [`MESH_YAW_SECTORS`].
+#[must_use]
+fn mesh_yaw_sector(yaw_degrees: f32) -> i32 {
+    if !yaw_degrees.is_finite() {
+        return 0;
+    }
+    let wrapped = yaw_degrees.rem_euclid(360.0);
+    (wrapped / (360.0 / MESH_YAW_SECTORS)).floor() as i32
+}
+
+/// The set of columns whose boundary geometry is stale, ordered so the
+/// [`DIRTY_COLUMN_BUDGET`] is spent **near the player and in front of them
+/// first**.
+///
+/// # Why this is not a `BTreeSet` any more
+///
+/// It was one, drained with `pop_first()` — i.e. lexicographically, smallest
+/// `cx` then smallest `cz`. That is a corner of the world, not a place the
+/// player is: a backlog (which `heal_dirty_columns` logs, and which forms on
+/// every join) was therefore worked from `−x/−z` outward regardless of where the
+/// camera pointed, so the server streaming its columns view-first
+/// (`lodestone_server::join_scheduler`) reached no pixels in that order. The
+/// visible symptom is chunks appearing behind you while you stare at a hole.
+///
+/// # Structure, and why this one
+///
+/// A `BinaryHeap` of [`mesh_order_key`] keys plus a `HashSet` of membership:
+///
+/// * the set is the **truth**, and it is what keeps "a column enqueued twice is
+///   meshed once" — the property the `BTreeSet` gave for free. `insert` only
+///   pushes a key when the set did not already hold the coordinate, and
+///   [`pop_next`](Self::pop_next) is the only thing that takes one out;
+/// * [`remove`](Self::remove) (a column that left the view) drops from the set
+///   and leaves the heap entry as a **tombstone**, skipped on pop and compacted
+///   when the heap grows past twice the live count. A heap has no cheap
+///   arbitrary erase and this is a queue, so paying for one on every unload
+///   would be the wrong trade;
+/// * re-keying is a **rebuild**, not a per-frame sort, and it only happens when
+///   the player's column or quantised yaw sector actually changed
+///   ([`reprioritise`](Self::reprioritise)). At a 32-chunk view that is ≤ 4,225
+///   integer keys, microseconds, ~16 times per revolution.
+///
+/// A plain sorted `Vec` was the alternative and loses: dirty columns arrive
+/// continuously (every chunk arrival dirties up to eight), and an insert into a
+/// sorted `Vec` is `O(n)` where the heap's is `O(log n)`.
+#[derive(Debug, Default)]
+pub struct DirtyColumns {
+    /// The live set — membership, dedup, and [`len`](Self::len).
+    queued: HashSet<(i32, i32)>,
+    /// Best-first over [`mesh_order_key`]. May hold tombstones for coordinates
+    /// no longer in `queued`; see the type doc.
+    heap: BinaryHeap<Reverse<(i32, u8, i32, i32)>>,
+    /// The player's column, as the keys in `heap` were computed against.
+    centre: (i32, i32),
+    /// The player's yaw in degrees, or `None` for "no rotation known" — a
+    /// distinct state from any particular yaw, under which the ordering is
+    /// distance-only and the facing cone is inert.
+    facing: Option<f32>,
+    /// The quantised sector `facing` was last re-keyed at — see
+    /// [`MESH_YAW_SECTORS`].
+    sector: Option<i32>,
+}
+
+impl DirtyColumns {
+    /// Queue `coord` for a boundary re-mesh. Idempotent: a coordinate already
+    /// queued is not queued twice, and will be meshed once.
+    pub fn insert(&mut self, coord: (i32, i32)) -> bool {
+        if !self.queued.insert(coord) {
+            return false;
+        }
+        self.heap
+            .push(Reverse(mesh_order_key(self.centre, self.facing, coord)));
+        true
+    }
+
+    /// Drop `coord` from the queue — the column left the view, so the budget
+    /// spent on it would go to a `mesh_column` that early-returns.
+    pub fn remove(&mut self, coord: (i32, i32)) -> bool {
+        if !self.queued.remove(&coord) {
+            return false;
+        }
+        // Bound the tombstones: an unload sweep names a whole strip, and without
+        // this the heap would keep every one of them for the session.
+        if self.heap.len() > 2 * self.queued.len().max(32) {
+            self.rebuild();
+        }
+        true
+    }
+
+    /// The highest-priority column, or `None` when the queue is empty.
+    ///
+    /// Skips tombstones left by [`remove`](Self::remove) — a popped key whose
+    /// coordinate is no longer in the live set is not a column, it is a hole.
+    pub fn pop_next(&mut self) -> Option<(i32, i32)> {
+        while let Some(Reverse((_, _, cx, cz))) = self.heap.pop() {
+            if self.queued.remove(&(cx, cz)) {
+                return Some((cx, cz));
+            }
+        }
+        None
+    }
+
+    /// Re-key the queue for a player who has moved to column `centre` or turned
+    /// to `facing` (degrees of yaw), returning whether anything was re-ordered.
+    ///
+    /// **A no-op — and specifically not a rebuild — when neither the centre
+    /// column nor the quantised yaw sector changed**, which is the common case on
+    /// the frame this is called from. That gate is the whole of "re-prioritisation
+    /// must be cheap".
+    pub fn reprioritise(&mut self, centre: (i32, i32), facing: Option<f32>) -> bool {
+        let sector = facing.map(mesh_yaw_sector);
+        if self.centre == centre && self.sector == sector {
+            // Keep the *old* yaw: it is what the current keys were computed
+            // from, and storing a sub-sector nudge would make them disagree with
+            // the ordering they are supposed to describe.
+            return false;
+        }
+        self.centre = centre;
+        self.facing = facing;
+        self.sector = sector;
+        self.rebuild();
+        true
+    }
+
+    /// How many columns are queued.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.queued.len()
+    }
+
+    /// Whether anything is queued.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.queued.is_empty()
+    }
+
+    /// Whether `coord` is queued.
+    #[must_use]
+    pub fn contains(&self, coord: (i32, i32)) -> bool {
+        self.queued.contains(&coord)
+    }
+
+    /// Forget everything queued (session teardown).
+    pub fn clear(&mut self) {
+        self.queued.clear();
+        self.heap.clear();
+    }
+
+    /// Re-derive every heap key from the live set — the only way the heap
+    /// changes shape, and it drops tombstones on the way through.
+    fn rebuild(&mut self) {
+        let (centre, facing) = (self.centre, self.facing);
+        self.heap = self
+            .queued
+            .iter()
+            .map(|&coord| Reverse(mesh_order_key(centre, facing, coord)))
+            .collect();
+    }
+}
 
 /// The two facts terrain meshing needs that the [`ChunkWorld`] store cannot
 /// answer, because they are properties of the *session* rather than of the
@@ -1639,7 +1896,11 @@ pub struct TerrainMesh {
     /// across the seam: **water grows a falling "wall" at each chunk border** and
     /// cross-chunk AO stays wrong. Re-meshing the eight eagerly on every arrival
     /// would be 9× the work, so they coalesce here and drain on a budget.
-    pub dirty_columns: BTreeSet<(i32, i32)>,
+    ///
+    /// Ordered **near the player and in front of them first**, not
+    /// lexicographically — see [`DirtyColumns`] for what that fixed and why the
+    /// container is no longer a `BTreeSet`.
+    pub dirty_columns: DirtyColumns,
     /// Columns that must be meshed **even if a horizontal neighbour is missing**,
     /// because a neighbour is missing for a reason that will never resolve: it
     /// left the tracking view.
@@ -1742,7 +2003,7 @@ impl TerrainMesh {
         Self {
             column_source: scheduler.column_source(),
             scheduler,
-            dirty_columns: BTreeSet::new(),
+            dirty_columns: DirtyColumns::default(),
             forced_columns: BTreeSet::new(),
             departed: HashSet::new(),
             pending_removals: Vec::new(),
@@ -1980,7 +2241,7 @@ impl TerrainMesh {
     pub fn forget_column(&mut self, cx: i32, cz: i32) {
         // A queued heal for a column that has left is budget spent on a
         // `mesh_column` that will early-return anyway.
-        self.dirty_columns.remove(&(cx, cz));
+        self.dirty_columns.remove((cx, cz));
         self.forced_columns.remove(&(cx, cz));
         let gone: Vec<SectionKey> = self
             .uploaded_sections
@@ -2158,8 +2419,38 @@ impl TerrainMesh {
 /// backlog the ordinary queue happens to hold. That backlog reached 45 columns in
 /// a twelve-step walk, i.e. eleven frames of latency, which is exactly the window
 /// in which the old code lost them for good.
+///
+/// # Where the budget is spent
+///
+/// The queue is re-keyed here, once per frame, from the local player's own pose
+/// (`lodestone_physics::PlayerState`'s `position` and `yaw` — the same values
+/// mouse-look writes each frame, so this is the *live* facing and not last
+/// tick's). [`DirtyColumns::reprioritise`] is a no-op unless the player's column
+/// or yaw sector actually moved, so this costs a comparison on a typical frame.
+///
+/// This is the client half of the server's view-first streaming
+/// (`lodestone_server::join_scheduler`): with the queue keyed lexicographically
+/// the server's careful ordering reached no pixels, because a backlog was worked
+/// from the `−x/−z` corner of the world whatever the camera was pointing at.
 #[tracing::instrument(skip_all, fields(dirty = terrain.dirty_columns.len(), forced = terrain.forced_columns.len()))]
-pub fn heal_dirty_columns(store: Res<ChunkWorld>, mut terrain: ResMut<TerrainMesh>) {
+pub fn heal_dirty_columns(
+    store: Res<ChunkWorld>,
+    mut terrain: ResMut<TerrainMesh>,
+    view: Query<&PhysicsState, With<LocalPlayer>>,
+) {
+    // `iter().next()` rather than `single()`: a harness with no local player is a
+    // legitimate configuration (`TerrainPlugin` inserts no player entity), and it
+    // means exactly "no view known" — under which the ordering falls back to the
+    // stored centre and no facing.
+    if let Some(state) = view.iter().next() {
+        let centre = (
+            (state.0.position.x.floor() as i32).div_euclid(16),
+            (state.0.position.z.floor() as i32).div_euclid(16),
+        );
+        terrain
+            .dirty_columns
+            .reprioritise(centre, Some(state.0.yaw));
+    }
     for _ in 0..DIRTY_COLUMN_BUDGET {
         let Some((cx, cz)) = terrain.forced_columns.pop_first() else {
             break;
@@ -2167,24 +2458,30 @@ pub fn heal_dirty_columns(store: Res<ChunkWorld>, mut terrain: ResMut<TerrainMes
         terrain.mesh_column_forced(&store, cx, cz);
     }
     for _ in 0..DIRTY_COLUMN_BUDGET {
-        let Some((cx, cz)) = terrain.dirty_columns.pop_first() else {
-            // PERF: log when backlog exists but budget is depleted for this frame
-            if !terrain.dirty_columns.is_empty() {
-                static BACKLOG_FRAME_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let n = BACKLOG_FRAME_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // Throttle: log every ~2 seconds at 120fps
-                if n % 240 == 0 {
-                    tracing::warn!(
-                        "mesh column backlog: {} dirty columns waiting (heal budget is {} forced + {} dirty), {} backlogged frames",
-                        terrain.dirty_columns.len(),
-                        DIRTY_COLUMN_BUDGET, DIRTY_COLUMN_BUDGET,
-                        n,
-                    );
-                }
-            }
-            return;
+        let Some((cx, cz)) = terrain.dirty_columns.pop_next() else {
+            break;
         };
         terrain.mesh_column(&store, cx, cz);
+    }
+    // The budget was depleted with work still queued, i.e. this frame's terrain is
+    // a *choice* of which columns to mesh — which is what the ordering above is
+    // for. Checked after the loop, not inside its `else`: in the `else` the queue
+    // is empty by construction, so the old placement could never fire.
+    if !terrain.dirty_columns.is_empty() {
+        static BACKLOG_FRAME_COUNT: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let n = BACKLOG_FRAME_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Throttle: roughly every two seconds at 120 fps.
+        if n % 240 == 0 {
+            tracing::warn!(
+                "mesh column backlog: {} dirty columns waiting (heal budget is {} forced + {} \
+                 dirty), {} backlogged frames",
+                terrain.dirty_columns.len(),
+                DIRTY_COLUMN_BUDGET,
+                DIRTY_COLUMN_BUDGET,
+                n,
+            );
+        }
     }
 }
 
@@ -3581,7 +3878,7 @@ mod tests {
             // Drain the heal queue completely rather than at
             // `DIRTY_COLUMN_BUDGET`: the subject is eviction, and leaving a
             // backlog would let a *starved* run masquerade as a bounded one.
-            while let Some((cx, cz)) = terrain.dirty_columns.pop_first() {
+            while let Some((cx, cz)) = terrain.dirty_columns.pop_next() {
                 terrain.mesh_column(&store, cx, cz);
             }
             for key in terrain.drain_removals() {
@@ -3812,7 +4109,7 @@ mod tests {
                     terrain.mesh_column_forced(&store, cx, cz);
                 }
                 for _ in 0..DIRTY_COLUMN_BUDGET {
-                    let Some((cx, cz)) = terrain.dirty_columns.pop_first() else {
+                    let Some((cx, cz)) = terrain.dirty_columns.pop_next() else {
                         break;
                     };
                     terrain.mesh_column(&store, cx, cz);
@@ -3847,7 +4144,7 @@ mod tests {
                 terrain.mesh_column_forced(&store, cx, cz);
             }
             for _ in 0..DIRTY_COLUMN_BUDGET {
-                let Some((cx, cz)) = terrain.dirty_columns.pop_first() else {
+                let Some((cx, cz)) = terrain.dirty_columns.pop_next() else {
                     break;
                 };
                 terrain.mesh_column(&store, cx, cz);
@@ -3930,5 +4227,181 @@ mod tests {
             resident.len(),
             expected.len()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The mesh drain's order
+    // -----------------------------------------------------------------------
+
+    /// Every column of a Chebyshev-radius-`r` window about the origin, generated
+    /// in the **lexicographic** order the old `BTreeSet` drain used — so the
+    /// insertion order below is exactly the order this queue has to *not* keep.
+    fn window_columns(r: i32) -> Vec<(i32, i32)> {
+        let mut out = Vec::new();
+        for cx in -r..=r {
+            for cz in -r..=r {
+                out.push((cx, cz));
+            }
+        }
+        out
+    }
+
+    /// **Where the heal budget goes.** Near-and-in-front first, and — the
+    /// property that matters more — a near column *behind* the player still beats
+    /// a far one in front of them, so no amount of looking one way starves the
+    /// other.
+    #[test]
+    fn the_mesh_drain_prefers_near_and_in_front_but_never_starves_what_is_behind() {
+        let radius = 5;
+        let mut dirty = DirtyColumns::default();
+        for coord in window_columns(radius) {
+            dirty.insert(coord);
+        }
+        // Yaw 0 is due +Z in vanilla's convention, so this player is looking at
+        // the columns with positive `cz`.
+        assert!(dirty.reprioritise((0, 0), Some(0.0)));
+
+        let mut order = Vec::new();
+        while let Some(coord) = dirty.pop_next() {
+            order.push(coord);
+        }
+        assert_eq!(
+            order.len(),
+            ((2 * radius + 1) * (2 * radius + 1)) as usize,
+            "every queued column must come back out exactly once"
+        );
+
+        // 1. Distance is the primary key, stated as the property: the ring bands
+        //    are contiguous, so nothing at distance `d + 1` can precede anything
+        //    at distance `d`. Its concrete form — and the one a pure
+        //    frustum-first drain fails — is the pair below.
+        let mut previous = 0;
+        for &coord in &order {
+            let distance = column_ring_distance((0, 0), coord);
+            assert!(
+                distance >= previous,
+                "{coord:?} at distance {distance} follows distance {previous}: the facing \
+                 bonus must never promote a far column over a near one, or a player who \
+                 turns round finds a hole that was deprioritised for as long as they looked \
+                 away"
+            );
+            previous = distance;
+        }
+        let behind = order
+            .iter()
+            .position(|&c| c == (0, -3))
+            .expect("the column three behind the player is in the window");
+        let ahead = order
+            .iter()
+            .position(|&c| c == (0, 4))
+            .expect("the column four in front of the player is in the window");
+        assert!(
+            behind < ahead,
+            "a near column behind the player must be meshed before a far one in front \
+             (behind at {behind}, ahead at {ahead})"
+        );
+
+        // 2. …and within one ring the facing cone really does win, or the feature
+        //    is inert and assertion 1 would be satisfied by an ordering that
+        //    ignores the player's rotation entirely. The whole in-frustum half of
+        //    the ring precedes the whole out-of-frustum half.
+        let ring: Vec<(i32, i32)> = order
+            .iter()
+            .copied()
+            .filter(|&c| column_ring_distance((0, 0), c) == radius)
+            .collect();
+        let split = ring
+            .iter()
+            .position(|&c| !column_in_frustum((0, 0), 0.0, c))
+            .expect("a 120° cone cannot contain a whole ring");
+        assert!(
+            ring[..split]
+                .iter()
+                .all(|&c| column_in_frustum((0, 0), 0.0, c)),
+            "the in-frustum columns of a ring must form its prefix; ring 5 drained as {ring:?}"
+        );
+        assert_eq!(
+            order.first(),
+            Some(&(0, 0)),
+            "the player's own column is meshed first; the old lexicographic drain started \
+             at {:?} instead",
+            (-radius, -radius)
+        );
+
+        // A column dirtied *after* the queue was keyed is keyed too, rather than
+        // appended: this is what makes the ordering hold during streaming, when
+        // arrivals and drains interleave every frame.
+        dirty.insert((0, -5));
+        dirty.insert((0, 2));
+        assert_eq!(
+            dirty.pop_next(),
+            Some((0, 2)),
+            "a fresh dirty signal joins the order at its priority, not at the end"
+        );
+    }
+
+    /// Dedup and unload, the two properties the `BTreeSet` gave for free and a
+    /// heap does not: a column dirtied twice is meshed once, and one that left the
+    /// view is not meshed at all — its tombstone must not resurface as a phantom
+    /// pop.
+    #[test]
+    fn a_column_dirtied_twice_is_meshed_once_and_an_unloaded_one_not_at_all() {
+        let mut dirty = DirtyColumns::default();
+        assert!(dirty.insert((2, 3)));
+        assert!(!dirty.insert((2, 3)), "a repeat dirty signal must coalesce");
+        assert_eq!(dirty.len(), 1);
+
+        assert!(dirty.insert((4, 0)));
+        assert!(dirty.remove((4, 0)), "the column left the view");
+        assert!(!dirty.remove((4, 0)), "and it is gone only once");
+        assert_eq!(dirty.len(), 1);
+        assert!(dirty.contains((2, 3)));
+
+        assert_eq!(dirty.pop_next(), Some((2, 3)));
+        assert_eq!(
+            dirty.pop_next(),
+            None,
+            "the removed column must not come back out of the heap"
+        );
+        assert!(dirty.is_empty());
+    }
+
+    /// Re-keying runs on every frame, so the common case must not rebuild: it
+    /// fires when the player crosses a chunk boundary or turns into a new yaw
+    /// sector, and does nothing otherwise.
+    #[test]
+    fn rekeying_only_fires_when_the_column_or_the_yaw_sector_moves() {
+        let mut dirty = DirtyColumns::default();
+        for coord in window_columns(3) {
+            dirty.insert(coord);
+        }
+        assert!(
+            dirty.reprioritise((0, 0), Some(0.0)),
+            "the first known rotation is a change: the default is no facing at all"
+        );
+        assert!(
+            !dirty.reprioritise((0, 0), Some(0.0)),
+            "an identical column and yaw must not rebuild"
+        );
+        assert!(
+            !dirty.reprioritise((0, 0), Some(10.0)),
+            "a sub-sector nudge (10° of 22.5°) must not rebuild"
+        );
+        assert!(
+            dirty.reprioritise((0, 0), Some(90.0)),
+            "a quarter turn is a new sector"
+        );
+        assert!(
+            dirty.reprioritise((1, 0), Some(90.0)),
+            "crossing a chunk boundary re-centres the whole ordering"
+        );
+
+        // And the new centre is what the order is keyed on afterwards.
+        let mut previous = 0;
+        while let Some(coord) = dirty.pop_next() {
+            let distance = column_ring_distance((1, 0), coord);
+            assert!(distance >= previous, "{coord:?} is out of order about (1, 0)");
+            previous = distance;
+        }
     }
 }
