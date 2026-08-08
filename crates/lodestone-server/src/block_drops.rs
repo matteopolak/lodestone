@@ -79,12 +79,15 @@
 //!   [`drop_block_loot`] returns an empty `Vec` for both "no such table" and "a
 //!   table that rolled nothing", because vanilla does not distinguish them at
 //!   this seam either.
-//! * **Tool-sensitive drops** (silk touch, fortune, correct-tool) need
-//!   [`crate::LootContext`] to carry the tool, not a change here. Under the
-//!   empty context every bundled table's `match_tool` branch fails and the
-//!   `alternatives` fall through to the un-enchanted branch — which is *exactly*
-//!   right for a bare hand, and exactly wrong for a silk-touch pickaxe. See
-//!   this module's tests for the predicted-value table.
+//! * **Tool-sensitive drops** are two separate mechanisms and conflating them is
+//!   the trap (issue #539). `Silk Touch`/`Fortune`/`match_tool` are *loot*
+//!   features, evaluated inside [`crate::loot`] against
+//!   [`crate::LootContext::tool`], which [`drop_block_loot`] fills from its
+//!   `held` argument. The **correct-tool** requirement is *not* a loot condition
+//!   at all: it is [`drops_are_allowed`], vanilla's
+//!   `Player.hasCorrectToolForDrops`, which the caller must consult *before*
+//!   rolling — see that function's doc for why folding it into the roll is wrong
+//!   twice.
 //! * **The pickup volume** is vanilla's player AABB inflated by `(1.0, 0.5,
 //!   1.0)` intersected against the item's own AABB, not a radius. Both boxes
 //!   matter: see [`is_within_pickup_range`].
@@ -97,7 +100,7 @@
 
 use lodestone_model::{BlockPos, ItemStack, ResourceKey, Vec3};
 
-use crate::loot::{LootContext, LootTableSet};
+use crate::loot::{LootContext, LootTableSet, LootTool};
 use crate::mob_spawn::SpawnRng;
 
 /// Half the height of `EntityTypes.ITEM`, which is `.sized(0.25F, 0.25F)`
@@ -257,9 +260,43 @@ fn next_in_range(rng: &mut SpawnRng, min: f64, max: f64) -> f64 {
     rng.next_f64() * (max - min) + min
 }
 
+/// `Player.hasCorrectToolForDrops` (`world/entity/player/Player.java:617-619`):
+/// `!state.requiresCorrectToolForDrops() || selectedItem.isCorrectToolForDrops(state)`.
+///
+/// **This is not a loot condition** and deliberately does not live inside
+/// [`drop_block_loot`]. Vanilla consults it in `ServerPlayerGameMode.destroyBlock`
+/// (`:295`) and, when it is false, simply never calls `playerDestroy` →
+/// `dropResources` at all — the block still breaks, and nothing drops. Folding it
+/// into the table roll would look equivalent and be wrong twice: the roll's RNG
+/// draws would still happen (shifting the stream for the next break), and a table
+/// with no `match_tool` branch would still be consulted.
+///
+/// The whole computation already existed in [`lodestone_data::tool::mining`],
+/// whose `correct_tool` field is *this* flag rather than the block's own
+/// `requiresCorrectToolForDrops` — the two are routinely confused, and
+/// `lodestone-shell`'s `sim.rs` carries the same warning for the mining-speed
+/// divider. `held` is the main-hand stack; `None` is a bare hand.
+///
+/// Returns `true` for a block state this version's census does not know, which is
+/// the same direction the pre-#539 behaviour took (everything dropped) and keeps
+/// an unknown state from silently swallowing its drops.
+#[must_use]
+pub fn drops_are_allowed(block_state: &str, held: Option<&ItemStack>) -> bool {
+    let Some(state_id) = crate::mobs::block_state_id(block_state) else {
+        return true;
+    };
+    lodestone_data::tool::mining(held, state_id).is_none_or(|mining| mining.correct_tool)
+}
+
 /// Rolls `block_state`'s loot table and returns one [`PoppedItem`] per
 /// resulting stack — vanilla's `Block.dropResources` → `getDrops` →
-/// `popResource` chain, for the empty loot context.
+/// `popResource` chain.
+///
+/// `held` is the breaking player's main-hand stack, becoming the loot context's
+/// `LootContextParams.TOOL`; `None` is a bare hand and reproduces the empty
+/// context exactly. **Callers must gate on [`drops_are_allowed`] first** — this
+/// function models `getDrops`, not `destroyBlock`, so it will happily roll a
+/// stone table for a bare hand.
 ///
 /// Empty for a block with no bundled table and for a table that rolled nothing.
 /// Zero-count stacks are dropped, matching the `!itemStack.isEmpty()` guard in
@@ -274,6 +311,7 @@ pub fn drop_block_loot(
     tables: &LootTableSet,
     block_state: &str,
     pos: BlockPos,
+    held: Option<&ItemStack>,
     rng: &mut SpawnRng,
 ) -> Vec<PoppedItem> {
     let Some(table_id) = block_loot_table_id(block_state) else {
@@ -282,7 +320,10 @@ pub fn drop_block_loot(
     let Some(table) = tables.get(&table_id) else {
         return Vec::new();
     };
-    let context = LootContext::default();
+    let context = LootContext {
+        luck: 0.0,
+        tool: held.map(LootTool::from_held_item),
+    };
     table
         .roll(&context, rng)
         .into_iter()
@@ -399,7 +440,7 @@ mod tests {
         ] {
             for seed in 0..64u64 {
                 let mut rng = SpawnRng::new(seed);
-                let drops = drop_block_loot(&tables, block, pos, &mut rng);
+                let drops = drop_block_loot(&tables, block, pos, None, &mut rng);
                 assert_eq!(
                     drops.len(),
                     1,
@@ -439,7 +480,7 @@ mod tests {
         let mut gravel = 0usize;
         for seed in 0..samples {
             let mut rng = SpawnRng::new(seed);
-            let drops = drop_block_loot(&tables, "minecraft:gravel", pos, &mut rng);
+            let drops = drop_block_loot(&tables, "minecraft:gravel", pos, None, &mut rng);
             assert_eq!(drops.len(), 1, "gravel always drops exactly one stack");
             match drops[0].stack.item.to_string().as_str() {
                 "minecraft:flint" => flint += 1,
@@ -467,9 +508,348 @@ mod tests {
             &tables,
             "minecraft:deepslate_emerald_ore",
             BlockPos::new(0, 0, 0),
+            None,
             &mut SpawnRng::new(1),
         );
         assert!(drops.is_empty());
+    }
+
+    /// A tool for these tests. Enchantments are attached by **key**, which is
+    /// what [`LootTool`] carries — see its doc comment for why an id would not
+    /// work here.
+    fn tool(item: &str) -> ItemStack {
+        ItemStack::new(item.parse().expect("valid item key"), 1)
+    }
+
+    /// `drop_block_loot` with an explicit [`LootTool`] rather than a bare
+    /// `ItemStack`, so a test can name an enchantment level. Mirrors the
+    /// production call exactly apart from the context construction.
+    fn drop_with_tool(
+        tables: &LootTableSet,
+        block: &str,
+        pos: BlockPos,
+        tool: LootTool,
+        rng: &mut SpawnRng,
+    ) -> Vec<PoppedItem> {
+        let table_id = block_loot_table_id(block).expect("test block name parses");
+        let table = tables.get(&table_id).expect("test block has a bundled table");
+        let context = LootContext {
+            luck: 0.0,
+            tool: Some(tool),
+        };
+        table
+            .roll(&context, rng)
+            .into_iter()
+            .filter(|stack| stack.count > 0)
+            .map(|stack| {
+                let (position, velocity) = pop_resource_placement(pos, rng);
+                PoppedItem {
+                    stack,
+                    position,
+                    velocity,
+                }
+            })
+            .collect()
+    }
+
+    fn silk_touch() -> LootTool {
+        LootTool::new("minecraft:diamond_pickaxe".parse().unwrap())
+            .with_enchantment("minecraft:silk_touch".parse().unwrap(), 1)
+    }
+
+    fn fortune(level: u32) -> LootTool {
+        LootTool::new("minecraft:diamond_pickaxe".parse().unwrap())
+            .with_enchantment("minecraft:fortune".parse().unwrap(), level)
+    }
+
+    /// **Silk Touch flips every silk-gated table to the block itself, exactly,
+    /// on every seed.**
+    ///
+    /// Each bundled block table except `dirt` is an `alternatives` whose *first*
+    /// child is gated on a `match_tool` predicate requiring `minecraft:silk_touch`
+    /// at `levels: {min: 1}`. With that tool the first child expands, so
+    /// `alternatives` short-circuits and the second child is never reached — which
+    /// makes the prediction degenerate and therefore exact: the item is the block,
+    /// count 1, and `cobblestone`/`flint`/`coal`/`raw_iron` must **never** appear.
+    ///
+    /// The "never" half is the assertion that a plausible-but-wrong `match_tool`
+    /// fails: a predicate that only checked "is anything in hand" would pass here
+    /// too, so the *negative* row below (a plain pickaxe with no enchantment) is
+    /// what separates them.
+    #[test]
+    fn silk_touch_drops_the_block_itself_and_never_the_processed_item() {
+        let tables = LootTableSet::load_bundled();
+        let pos = BlockPos::new(-8, 40, 12);
+        for (block, silked, unsilked) in [
+            ("minecraft:stone", "minecraft:stone", "minecraft:cobblestone"),
+            ("minecraft:gravel", "minecraft:gravel", "minecraft:flint"),
+            ("minecraft:coal_ore", "minecraft:coal_ore", "minecraft:coal"),
+            ("minecraft:iron_ore", "minecraft:iron_ore", "minecraft:raw_iron"),
+        ] {
+            for seed in 0..256u64 {
+                let mut rng = SpawnRng::new(seed);
+                let drops = drop_with_tool(&tables, block, pos, silk_touch(), &mut rng);
+                assert_eq!(drops.len(), 1, "{block} seed {seed}: {drops:?}");
+                assert_eq!(
+                    drops[0].stack.item.to_string(),
+                    silked,
+                    "{block} with silk touch at seed {seed} must never be {unsilked}"
+                );
+                assert_eq!(drops[0].stack.count, 1, "{block} seed {seed}");
+            }
+        }
+    }
+
+    /// **The negative row for the test above**, and the one that distinguishes a
+    /// real `ItemPredicate` from "is anything in hand".
+    ///
+    /// A plain, unenchanted diamond pickaxe is a *present* tool, so
+    /// `MatchTool.test`'s first clause (`tool != null`) passes — and the
+    /// enchantment predicate must then fail, dropping the roll through to the
+    /// second alternative. If `match_tool` were modelled as tool-presence alone,
+    /// every row here would produce the block itself and the previous test would
+    /// still pass.
+    #[test]
+    fn an_unenchanted_tool_is_present_but_does_not_satisfy_the_silk_touch_predicate() {
+        let tables = LootTableSet::load_bundled();
+        let pos = BlockPos::new(1, 2, 3);
+        let pick = tool("minecraft:diamond_pickaxe");
+        for (block, expected) in [
+            ("minecraft:stone", "minecraft:cobblestone"),
+            ("minecraft:coal_ore", "minecraft:coal"),
+            ("minecraft:iron_ore", "minecraft:raw_iron"),
+        ] {
+            for seed in 0..64u64 {
+                let mut rng = SpawnRng::new(seed);
+                let drops = drop_block_loot(&tables, block, pos, Some(&pick), &mut rng);
+                assert_eq!(drops.len(), 1);
+                assert_eq!(
+                    drops[0].stack.item.to_string(),
+                    expected,
+                    "{block} with a plain pickaxe at seed {seed}: an unenchanted \
+                     tool must not satisfy a silk-touch enchantment predicate"
+                );
+            }
+        }
+    }
+
+    /// **Fortune 3 on gravel drops flint on every single seed.**
+    ///
+    /// `gravel.json`'s `table_bonus` carries `chances: [0.1, 0.14285715, 0.25,
+    /// 1.0]` on `minecraft:fortune`, and `BonusLevelTableCondition.test` reads
+    /// `values[min(level, len - 1)]` — so at level 3 the chance is exactly `1.0`
+    /// and `nextFloat() < 1.0` is true for every draw `nextFloat` can produce
+    /// (its range is `[0, 1)`). That makes this the strongest single assertion
+    /// available on this table: a degenerate but *exact* prediction, over every
+    /// seed, with no bracket.
+    ///
+    /// The three lower levels are asserted as shares, because they are genuinely
+    /// random — and each share is predicted from the table's own number, not from
+    /// this crate's behaviour. Fortune 4 (above the list's length) must clamp to
+    /// `values[3]` and so also be certain: that row is what a `values[level]`
+    /// transliteration panics on.
+    #[test]
+    fn fortunes_table_bonus_reads_the_predicted_chance_for_its_level() {
+        let tables = LootTableSet::load_bundled();
+        let pos = BlockPos::new(0, 70, 0);
+        // Levels 3 and 4 are certain, so assert them per-seed with no tolerance.
+        for level in [3u32, 4] {
+            for seed in 0..512u64 {
+                let mut rng = SpawnRng::new(seed);
+                let drops = drop_with_tool(&tables, "minecraft:gravel", pos, fortune(level), &mut rng);
+                assert_eq!(drops.len(), 1);
+                assert_eq!(
+                    drops[0].stack.item.to_string(),
+                    "minecraft:flint",
+                    "fortune {level} makes gravel's chances[min(level, 3)] = 1.0, \
+                     so flint is certain (seed {seed})"
+                );
+            }
+        }
+        // Levels 0-2 are chances[0..3] = 0.1 / 0.14285715 / 0.25. σ for the
+        // widest of these over 8,192 samples is under 0.005, so ±0.03 is six σ.
+        const SAMPLES: u64 = 8192;
+        for (level, expected) in [(0u32, 0.1f64), (1, 0.142_857_15), (2, 0.25)] {
+            let mut flint = 0usize;
+            for seed in 0..SAMPLES {
+                let mut rng = SpawnRng::new(seed);
+                let drops = drop_with_tool(&tables, "minecraft:gravel", pos, fortune(level), &mut rng);
+                assert_eq!(drops.len(), 1);
+                match drops[0].stack.item.to_string().as_str() {
+                    "minecraft:flint" => flint += 1,
+                    "minecraft:gravel" => {}
+                    other => panic!("gravel dropped {other} at fortune {level}"),
+                }
+            }
+            let share = flint as f64 / SAMPLES as f64;
+            assert!(
+                (expected - 0.03..expected + 0.03).contains(&share),
+                "fortune {level} flint share {share} is not near the table's own \
+                 chances[{level}] = {expected} ({flint} of {SAMPLES})"
+            );
+        }
+    }
+
+    /// **`ore_drops`, predicted from the record body rather than a restatement of
+    /// it.**
+    ///
+    /// `ApplyBonusCount.OreDrops.calculateNewCount`
+    /// (`…/functions/ApplyBonusCount.java`) is:
+    ///
+    /// ```text
+    /// if (level > 0) {
+    ///    int bonus = random.nextInt(level + 2) - 1;
+    ///    if (bonus < 0) bonus = 0;
+    ///    return count * (bonus + 1);
+    /// } else {
+    ///    return count;
+    /// }
+    /// ```
+    ///
+    /// so with `count = 1` the multiplier is `max(nextInt(level + 2), 1)` and the
+    /// **support** is exactly `1..=level+1` with `P(1) = 2/(level+2)` and
+    /// `P(k) = 1/(level+2)` for every other `k`. Both halves are asserted:
+    ///
+    /// * a count above `level + 1` is impossible — this is the assertion a
+    ///   "Fortune N means N+1 drops" implementation fails immediately;
+    /// * every value in `1..=level+1` must actually occur, which is what a
+    ///   `max(1, …)` applied to the wrong variable fails;
+    /// * `P(1)` is **twice** every other outcome, which is the `- 1` then
+    ///   `max(0)` clamp and nothing else. A formula without the clamp would make
+    ///   all `level + 2` outcomes equally likely, so this ratio is the only thing
+    ///   that separates the two — and both hypotheses are computed below rather
+    ///   than one being asserted.
+    #[test]
+    fn ore_drops_produces_the_records_exact_support_and_doubled_first_outcome() {
+        let tables = LootTableSet::load_bundled();
+        let pos = BlockPos::new(3, 12, -40);
+        const SAMPLES: u64 = 16_384;
+        for level in 1u32..=3 {
+            let max_count = level + 1;
+            let mut histogram = vec![0usize; (max_count + 2) as usize];
+            for seed in 0..SAMPLES {
+                let mut rng = SpawnRng::new(seed);
+                let drops = drop_with_tool(&tables, "minecraft:coal_ore", pos, fortune(level), &mut rng);
+                assert_eq!(drops.len(), 1, "one pool, one roll");
+                assert_eq!(drops[0].stack.item.to_string(), "minecraft:coal");
+                let count = drops[0].stack.count;
+                assert!(
+                    (1..=max_count).contains(&count),
+                    "fortune {level} produced coal x{count}; `count * (max(nextInt({}), 1))` \
+                     cannot exceed {max_count}",
+                    level + 2
+                );
+                histogram[count as usize] += 1;
+            }
+            for k in 1..=max_count {
+                assert!(
+                    histogram[k as usize] > 0,
+                    "fortune {level}: count {k} is in the record's support and never occurred"
+                );
+            }
+            // The two competing hypotheses, both computed from outside constants:
+            //   clamped (correct): P(1) = 2/(level+2)
+            //   unclamped (wrong): P(1) = 1/(level+2)
+            let clamped = 2.0 / f64::from(level + 2);
+            let unclamped = 1.0 / f64::from(level + 2);
+            let observed = histogram[1] as f64 / SAMPLES as f64;
+            assert!(
+                (observed - clamped).abs() < (observed - unclamped).abs(),
+                "fortune {level}: P(count == 1) measured {observed:.4}; the clamped \
+                 record predicts {clamped:.4} and an unclamped nextInt would predict \
+                 {unclamped:.4}, and the measurement must land on the former"
+            );
+            assert!(
+                (clamped - 0.03..clamped + 0.03).contains(&observed),
+                "fortune {level}: P(count == 1) measured {observed:.4}, predicted {clamped:.4}"
+            );
+        }
+    }
+
+    /// **`ore_drops` draws nothing at level 0, and that is a draw-*count* claim a
+    /// distribution test structurally cannot make.**
+    ///
+    /// The record's guard is `if (level > 0)`, not `if (count > 1)`, so an
+    /// unenchanted tool skips the formula entirely. The commonly-quoted
+    /// restatement `count * max(1, nextInt(fortune + 2))` is arithmetically
+    /// identical at level 0 (`max(1, nextInt(2))` is 1 or 1) and **draws once**
+    /// — producing the same coal x1 and a different RNG stream for every later
+    /// draw in the roll.
+    ///
+    /// The observable is `popResource`'s placement, which happens *after* the
+    /// roll from the same stream: if `apply_bonus` consumed a draw, the drop
+    /// would land somewhere else. So a bare hand and an unenchanted tool must
+    /// produce **byte-identical positions**, and a fortune-1 tool (which does
+    /// draw) must not.
+    #[test]
+    fn an_unenchanted_tool_costs_ore_drops_no_rng_draw_but_fortune_does() {
+        let tables = LootTableSet::load_bundled();
+        let pos = BlockPos::new(0, 64, 0);
+        let plain = tool("minecraft:diamond_pickaxe");
+
+        let mut a = SpawnRng::new(0x0DE_D00D);
+        let bare = drop_block_loot(&tables, "minecraft:coal_ore", pos, None, &mut a);
+        let mut b = SpawnRng::new(0x0DE_D00D);
+        let unenchanted = drop_block_loot(&tables, "minecraft:coal_ore", pos, Some(&plain), &mut b);
+        assert_eq!(
+            bare[0].position, unenchanted[0].position,
+            "`ore_drops` guards on `level > 0`, so an unenchanted tool must leave \
+             the stream exactly where a bare hand does — a `max(1, nextInt(2))` \
+             port would shift the placement draws by one"
+        );
+        assert_eq!(bare[0].velocity, unenchanted[0].velocity);
+
+        let mut c = SpawnRng::new(0x0DE_D00D);
+        let enchanted = drop_with_tool(&tables, "minecraft:coal_ore", pos, fortune(1), &mut c);
+        assert_ne!(
+            bare[0].position, enchanted[0].position,
+            "fortune 1 *does* draw, so the placement must move — if it did not, \
+             `apply_bonus` never ran"
+        );
+    }
+
+    /// **`Player.hasCorrectToolForDrops`: a bare hand on stone drops nothing.**
+    ///
+    /// This is an *absence*, so the control is the row that must fail with the
+    /// gate removed — see this test's own `wooden_pickaxe` row and
+    /// `docs/block-drops.md`'s control table. Every expectation comes from
+    /// `lodestone_data::tool`'s generated census (itself dumped from the real
+    /// jar), not from this module.
+    ///
+    /// The two directions both matter and are asymmetric:
+    ///
+    /// * `minecraft:stone` **requires** a correct tool, so a bare hand and a
+    ///   shovel are both refused while any pickaxe is allowed;
+    /// * `minecraft:dirt` requires none, so a bare hand is allowed — and a gate
+    ///   written as "you need a tool" rather than
+    ///   "`!requires || tool_is_correct`" refuses it. That row is the one that
+    ///   makes this more than a restatement of `requires_correct_tool`.
+    #[test]
+    fn the_correct_tool_gate_is_vanillas_and_not_a_requires_correct_tool_restatement() {
+        let wooden = tool("minecraft:wooden_pickaxe");
+        let shovel = tool("minecraft:diamond_shovel");
+
+        assert!(
+            !drops_are_allowed("minecraft:stone", None),
+            "stone requires a correct tool, so a bare hand drops nothing — \
+             vanilla `destroyBlock` never calls `dropResources`"
+        );
+        assert!(
+            !drops_are_allowed("minecraft:stone", Some(&shovel)),
+            "a shovel is not `mineable/pickaxe`, so it is the wrong tool for stone"
+        );
+        assert!(
+            drops_are_allowed("minecraft:stone", Some(&wooden)),
+            "the weakest pickaxe is still `correct_for_drops` on stone"
+        );
+        assert!(
+            drops_are_allowed("minecraft:dirt", None),
+            "dirt does not require a correct tool, so a bare hand drops it — \
+             a gate reading `tool.is_some()` refuses this"
+        );
+        assert!(drops_are_allowed("minecraft:dirt", Some(&shovel)));
+        // An unknown state must not silently swallow its drops.
+        assert!(drops_are_allowed("minecraft:not_a_real_block", None));
     }
 
     /// `popResource`'s geometry, predicted from the vanilla constants rather

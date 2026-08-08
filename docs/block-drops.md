@@ -111,10 +111,10 @@ as the exact inverse of the existing menu→native table rather than by restatin
 * **`doTileDrops` is not honoured.** Vanilla wraps `popResource` in
   `level.getGameRules().get(GameRules.BLOCK_DROPS)`. This crate has no live game-rule registry to consult —
   `game_rules.rs` describes rules for the wire and stores no values. A real registry is the prerequisite.
-* **Tool-sensitive drops need `LootContext`, not a change here.** Under the empty context every bundled
-  table's silk-touch `match_tool` branch fails and `alternatives` falls through to the un-enchanted child —
-  correct for a bare hand, wrong for a silk-touch pickaxe. Fortune is likewise level 0, so `apply_bonus`
-  (`ore_drops`) and `table_bonus` are at their base values.
+* **The tool is two separate mechanisms, and conflating them is the trap** (#539). Silk Touch, Fortune and
+  `match_tool` are *loot* features and live in `loot.rs` against `LootContext::tool`, which
+  `drop_block_loot` fills from its `held` argument. The **correct-tool** requirement is not a loot condition
+  at all — see the section below.
 * **The RNG stream is not vanilla's.** Draw *count* and *order* are; the stream is SplitMix64 vs vanilla's
   Xoroshiro, and vanilla additionally splits position draws (level RNG) from velocity draws (entity RNG).
   Byte-exact JVM parity is separate, larger work — `loot.rs`'s module doc records the same divergence.
@@ -122,6 +122,29 @@ as the exact inverse of the existing menu→native table rather than by restatin
   shrink. `MobSim::set_item_count` does this as a remove-and-respawn at the same id (preserving `age`, so a
   full player brushing past cannot reset the despawn clock), because `ItemEntityRegistry` in
   `lodestone-entity` exposes no count setter.
+
+## The correct-tool gate is not a loot condition (#539)
+
+`block_drops::drops_are_allowed` is vanilla's `Player.hasCorrectToolForDrops`
+(`Player.java:617-619`): `!state.requiresCorrectToolForDrops() || selectedItem.isCorrectToolForDrops(state)`.
+`ServerPlayerGameMode.destroyBlock` (`:295`) consults it and, when it is false, **never calls `playerDestroy`
+→ `dropResources` at all**. So a bare hand on stone breaks the block and yields nothing; before #539 it
+dropped a cobblestone.
+
+It must stay outside the roll, and folding it in would be wrong twice:
+
+1. the roll's RNG draws would still happen, shifting the stream for the *next* break on that connection;
+2. a table with no `match_tool` branch at all would still be consulted.
+
+The computation itself was already in the tree — `lodestone_data::tool::mining(held, state_id).correct_tool`
+is *this* flag, already folded with the block's own `requiresCorrectToolForDrops`, and the two are routinely
+confused (`lodestone-shell`'s `sim.rs` carries the same warning for the mining-speed divider). The only new
+plumbing is `mobs::block_state_id`, the name→state-id bridge every id-keyed census needs from a world that
+stores canonical strings.
+
+**A stone-only fixture cannot test this**, which is why `serve_play.rs` grew a `StoneWithDirtSource`: every
+block in the stone fixture *requires* a correct tool, so a gate mis-implemented as "you need a tool" passes
+every stone assertion. Dirt requires none, and the same bare hand must still drop it.
 
 ## How the drop becomes *visible* — `ItemEntity.DATA_ITEM` (#537)
 
@@ -176,6 +199,10 @@ world. Every control below was run and observed failing:
 | a freshly popped drop is not collectable | ignore `can_be_picked_up` | `left: 0, right: 1` |
 | a drop 10 blocks away is not collected | make `is_within_pickup_range` return `true` | `left: 0, right: 1` |
 | the drop's snapshot carries `Item { cobblestone, 1 }` | revert `metadata` to `Vec::new()` | `left: [], right: [Item { … "cobblestone" …, count: 1 }]` |
+| bare-handed stone drops nothing, bare-handed dirt still drops | make `drops_are_allowed` return `true` | `a bare hand on stone is hasCorrectToolForDrops == false … left: 1, right: 0` |
+| an unenchanted tool does not satisfy the silk-touch predicate | make `match_tool` tool-presence-only | `left: "minecraft:stone", right: "minecraft:cobblestone"` (plus five other assertions) |
+| `ore_drops` draws nothing at level 0 | use the issue body's `count * max(1, nextInt(level + 2))` | `left: Vec3 { x: 0.3820…}, right: Vec3 { x: 0.4504… }` — **and nothing else failed**, which is the point |
+| `ore_drops`' support is `1..=level+1` | drop the `- 1` / `max(0)` clamp | `fortune 1 produced coal x3; count * (max(nextInt(3), 1)) cannot exceed 2` |
 
 `crates/protocol/v770/tests/server_item_entity_metadata.rs` gates the wire half against the **captured
 vanilla packet**, so the expected value predates the encoder: our metadata list must be byte-identical to
@@ -193,6 +220,24 @@ Predicted-and-observed drops under the empty context: `stone`→`cobblestone`×1
 `coal_ore`→`coal`×1, `iron_ore`→`raw_iron`×1 (each across 64 seeds), `gravel`→`flint` or `gravel` with the
 flint share bracketed to `0.07..0.13` over 4,096 samples, which excludes both `table_bonus` never passing and
 always passing.
+
+With a tool (#539), each value derived from the jar's own record and not from the roller:
+
+| block × tool | predicted | how it is asserted |
+|---|---|---|
+| Silk Touch on `stone` / `gravel` / `coal_ore` / `iron_ore` | the block itself × 1 | exact, every seed of 256; the processed item must **never** appear |
+| plain pickaxe on `stone` | `cobblestone` × 1 | exact, 64 seeds — the row that separates a real `ItemPredicate` from tool-presence |
+| bare hand on `stone` | **nothing** | absence, with the dirt row and the pickaxe row as its controls |
+| Fortune 3 (and 4) on `gravel` | `flint`, **every** seed | `chances[min(level, 3)] = 1.0`, so certain — degenerate but exact, and level 4 also pins the clamp |
+| Fortune 0/1/2 on `gravel` | flint share `0.1` / `0.142857` / `0.25` | ±0.03 over 8,192 samples (≈6σ), each number the table's own |
+| Fortune 1/2/3 on `coal_ore` | support exactly `1..=level+1`, `P(1) = 2/(level+2)` | ceiling and full support asserted exactly; `P(1)` required to land nearer the clamped hypothesis than the unclamped one, both computed from outside constants |
+| unenchanted tool on `coal_ore` | `coal` × 1 **and byte-identical placement to a bare hand** | the draw-count assertion; `ore_drops` guards on `level > 0` |
+| Fortune 1 on `coal_ore` | placement **differs** from a bare hand | the other half — if it did not, `apply_bonus` never ran |
+
+`loot.rs`'s own tests cover the two formulas no bundled table uses yet, from synthetic JSON whose expected
+values come from the record: `uniform_bonus_count` (support exactly `1..=1 + M·L`, and one draw at level 0)
+and `binomial_with_bonus_count` (mean `1 + (L + extra)·p`, at `extra = 3, p = 0.5714286` — the corpus's only
+instantiation).
 
 ## Configuration
 

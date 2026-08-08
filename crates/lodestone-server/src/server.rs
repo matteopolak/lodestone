@@ -2215,6 +2215,13 @@ async fn apply_block_action<T, P, S>(
     // the one `MobSim` every connection's streaming pass reads.
     mobs: &MobHandle,
     drops_rng: &mut SpawnRng,
+    // Issue #539. The breaker's main-hand stack, `None` for a bare hand — this
+    // connection's `PlayerInventory::selected_item`. It is `LootContextParams.TOOL`
+    // for the roll *and* the subject of `Player.hasCorrectToolForDrops`, which is
+    // consulted before the roll happens at all. Passed as a borrowed stack rather
+    // than the whole inventory because that is all either use needs, and because
+    // the caller holds `&mut PlayerInventory` for other reasons.
+    held: Option<&ItemStack>,
     action: BlockActionKind,
     pos: BlockPos,
 ) -> Result<(), ServerError>
@@ -2263,12 +2270,28 @@ where
                 // stores no values (`server.rs`'s own three "no `GameRules`
                 // registry" notes). A real registry is the prerequisite, not a
                 // guess here; see `docs/block-drops.md`.
-                let popped = crate::block_drops::drop_block_loot(
-                    crate::block_drops::bundled_tables(),
-                    &broken,
-                    pos,
-                    drops_rng,
-                );
+                //
+                // **Issue #539: the tool decides both whether anything drops at
+                // all and what.** `drops_are_allowed` is vanilla's
+                // `Player.hasCorrectToolForDrops`, consulted by `destroyBlock`
+                // *before* it calls `dropResources` — so a bare hand on stone
+                // breaks the block and drops nothing, and the roll's RNG draws
+                // never happen either (folding the check into the table would
+                // still consume them and shift the next break's stream). `held`
+                // then rides into the roll as `LootContextParams.TOOL`, which is
+                // what makes `match_tool`, `apply_bonus` and `table_bonus`
+                // evaluate against a real item instead of an absent one.
+                let popped = if crate::block_drops::drops_are_allowed(&broken, held) {
+                    crate::block_drops::drop_block_loot(
+                        crate::block_drops::bundled_tables(),
+                        &broken,
+                        pos,
+                        held,
+                        drops_rng,
+                    )
+                } else {
+                    Vec::new()
+                };
                 if !popped.is_empty() {
                     mobs.with(|sim| {
                         for drop in popped {
@@ -3816,6 +3839,7 @@ where
                 container_sync,
                 mobs,
                 drops_rng,
+                inventory.selected_item(),
                 action,
                 pos,
             )

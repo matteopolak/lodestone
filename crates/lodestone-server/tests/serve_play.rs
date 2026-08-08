@@ -2282,6 +2282,38 @@ impl ChunkSource for StoneSource {
 /// inside `StoneSource`'s 0..16 stone band.
 const BREAK_POS: BlockPos = BlockPos::new(4, 9, 4);
 
+/// Puts a plain diamond pickaxe in the selected hand, breaks `pos`, and then
+/// **empties the hand again**.
+///
+/// The pickaxe is required since issue #539: stone `requiresCorrectToolForDrops`,
+/// so `Player.hasCorrectToolForDrops` is false bare-handed and vanilla never
+/// rolls the table at all (asserted by
+/// `bare_handed_stone_drops_nothing_while_bare_handed_dirt_still_drops`). It is
+/// deliberately *unenchanted*, so the silk-touch `match_tool` branch of stone's
+/// `alternatives` still fails and the expected drop is `cobblestone` exactly as
+/// before.
+///
+/// Emptying the hand afterwards is not tidiness: `Inventory.add` searches
+/// selected → off-hand → `0..36` and `getFreeSlot` scans `items` in order, so a
+/// pickaxe left in native slot 0 would send the collected cobblestone to native
+/// slot 1 (menu slot 10) and change *which slot the pickup announces*. Clearing
+/// it keeps the pickup gates asserting menu slot 36, the property they exist to
+/// pin.
+async fn break_with_a_pickaxe(client: &mut Connection<DuplexStream>, ordinal: u8, pos: BlockPos) {
+    send_creative_slot(
+        client,
+        36,
+        Some(&ItemStack::new(
+            "minecraft:diamond_pickaxe".parse().expect("valid key"),
+            1,
+        )),
+    )
+    .await;
+    send_block_action(client, 0, pos).await;
+    send_block_action(client, ordinal, pos).await;
+    send_creative_slot(client, 36, None).await;
+}
+
 /// **Issue #337's acceptance gate, first half: a broken block drops.**
 ///
 /// Before this, `apply_block_action`'s `StopDestroy` arm set the block to air and
@@ -2332,9 +2364,7 @@ async fn breaking_stone_drops_exactly_one_cobblestone_item_entity() {
         0,
         "precondition: nothing has dropped anything yet"
     );
-
-    send_block_action(&mut client, 0, BREAK_POS).await;
-    send_block_action(&mut client, 2, BREAK_POS).await;
+    break_with_a_pickaxe(&mut client, 2, BREAK_POS).await;
     let _ = drain_available(&mut client).await;
 
     let snapshots = mobs.with(|sim| sim.snapshots());
@@ -2376,6 +2406,139 @@ async fn breaking_stone_drops_exactly_one_cobblestone_item_entity() {
     let _ = server.await.expect("server task panicked");
 }
 
+/// Stone everywhere except one column of dirt at [`DIRT_POS`], for issue #539's
+/// correct-tool gate.
+///
+/// The *world*-species guard for that gate: `Player.hasCorrectToolForDrops` is
+/// `!state.requiresCorrectToolForDrops() || tool.isCorrectToolForDrops(state)`,
+/// and a fixture of **only stone** exercises exactly one side of that `||`.
+/// Every block in [`StoneSource`] requires a correct tool, so a gate
+/// mis-implemented as "you need a tool" would pass every stone assertion and
+/// fail only here.
+struct StoneWithDirtSource;
+
+/// The dirt column in [`StoneWithDirtSource`]: same chunk and height band as
+/// [`BREAK_POS`], different x.
+const DIRT_POS: BlockPos = BlockPos::new(6, 9, 4);
+
+impl ChunkSource for StoneWithDirtSource {
+    fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+        let mut col = ChunkColumn::new(0, 16);
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 0..16 {
+                    col.set_block(x, y, z, "minecraft:stone");
+                }
+            }
+        }
+        col.set_block(DIRT_POS.x, DIRT_POS.y, DIRT_POS.z, "minecraft:dirt");
+        col
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+        // As `StoneSource`: no storage, and the drop is rolled from the state
+        // read before `set_block`.
+    }
+}
+
+/// **Issue #539's correct-tool gate, through the real `serve_connection` path:
+/// stone broken bare-handed drops nothing, and dirt still does.**
+///
+/// Vanilla's `ServerPlayerGameMode.destroyBlock` (`:295`) consults
+/// `Player.hasCorrectToolForDrops` and, when it is false, never calls
+/// `playerDestroy` → `dropResources` at all. Stone
+/// `requiresCorrectToolForDrops`, so a bare hand breaks it and yields nothing —
+/// before #539 it dropped a cobblestone, the most visible wrong behaviour in the
+/// whole block-drop chain.
+///
+/// The stone half is an **absence**, so it is only worth what the evidence that
+/// the detector fires is worth. Three things supply that here rather than a
+/// description of it:
+///
+/// 1. the *same* packets with a pickaxe in slot 36 do produce a drop — that is
+///    `breaking_stone_drops_exactly_one_cobblestone_item_entity` above, which had
+///    to have the pickaxe added to keep passing;
+/// 2. **dirt, bare-handed, in the same session, still drops dirt.** A gate that
+///    swallowed the whole `StopDestroy` arm, or that read "you need a tool",
+///    would report "no drop" for stone too and fail here;
+/// 3. the two assertions run against one connection in one order, so neither can
+///    be explained by the session never having reached the break path.
+#[tokio::test(start_paused = true)]
+async fn bare_handed_stone_drops_nothing_while_bare_handed_dirt_still_drops() {
+    let (client_end, server_end) = memory_pair();
+    let mobs = MobHandle::default();
+    let mobs_for_server = mobs.clone();
+    let source = StoneWithDirtSource;
+    assert_eq!(
+        source.block_state(BREAK_POS.x, BREAK_POS.y, BREAK_POS.z),
+        "minecraft:stone",
+        "precondition: BREAK_POS is stone, which requires a correct tool"
+    );
+    assert_eq!(
+        source.block_state(DIRT_POS.x, DIRT_POS.y, DIRT_POS.z),
+        "minecraft:dirt",
+        "precondition: DIRT_POS is dirt, which requires none — without this row \
+         the fixture cannot exercise the other side of vanilla's `||`"
+    );
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &StoneWithDirtSource,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+            &mobs_for_server,
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "BareHands", 1).await;
+
+    // No creative-slot write at all: the selected slot is empty, which is the
+    // bare hand.
+    send_block_action(&mut client, 0, BREAK_POS).await;
+    send_block_action(&mut client, 2, BREAK_POS).await;
+    let _ = drain_available(&mut client).await;
+    assert_eq!(
+        mobs.with(|sim| sim.item_count()),
+        0,
+        "a bare hand on stone is `hasCorrectToolForDrops == false`, so vanilla \
+         never rolls the table; before #539 this dropped a cobblestone"
+    );
+
+    send_block_action(&mut client, 0, DIRT_POS).await;
+    send_block_action(&mut client, 2, DIRT_POS).await;
+    let _ = drain_available(&mut client).await;
+    let snapshots = mobs.with(|sim| sim.snapshots());
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "dirt does not require a correct tool, so the same bare hand drops it: \
+         {snapshots:?}"
+    );
+    assert_eq!(
+        snapshots[0].metadata,
+        vec![MetadataField::Item {
+            item: "minecraft:dirt".parse().expect("valid key"),
+            count: 1,
+        }],
+    );
+
+    drop(client);
+    let _ = server.await.expect("server task panicked");
+}
+
 /// **The control for the gate above, and it must fail the same assertion.**
 ///
 /// Same world, same block, same packets — except the second phase is
@@ -2408,8 +2571,9 @@ async fn an_aborted_dig_drops_nothing() {
 
     let mut client = Connection::new(client_end);
     drive_login_and_join(&mut client, "Aborter", 1).await;
-    send_block_action(&mut client, 0, BREAK_POS).await;
-    send_block_action(&mut client, 1, BREAK_POS).await;
+    // A *correct* tool, so the only difference from the positive gate is the
+    // second ordinal — the correct-tool gate cannot be what makes this pass.
+    break_with_a_pickaxe(&mut client, 1, BREAK_POS).await;
     let _ = drain_available(&mut client).await;
 
     assert_eq!(
@@ -2464,8 +2628,7 @@ async fn a_dropped_item_is_collected_into_the_hotbar_and_announced() {
 
     let mut client = Connection::new(client_end);
     drive_login_and_join(&mut client, "Collector", 1).await;
-    send_block_action(&mut client, 0, BREAK_POS).await;
-    send_block_action(&mut client, 2, BREAK_POS).await;
+    break_with_a_pickaxe(&mut client, 2, BREAK_POS).await;
     let _ = drain_available(&mut client).await;
     assert_eq!(mobs.with(|sim| sim.item_count()), 1, "precondition: a drop exists");
 
@@ -2538,8 +2701,7 @@ async fn a_freshly_popped_drop_is_not_collectable_before_its_delay_elapses() {
 
     let mut client = Connection::new(client_end);
     drive_login_and_join(&mut client, "Impatient", 1).await;
-    send_block_action(&mut client, 0, BREAK_POS).await;
-    send_block_action(&mut client, 2, BREAK_POS).await;
+    break_with_a_pickaxe(&mut client, 2, BREAK_POS).await;
     let _ = drain_available(&mut client).await;
     assert_eq!(mobs.with(|sim| sim.item_count()), 1);
 
@@ -2601,8 +2763,7 @@ async fn a_drop_outside_the_pickup_volume_is_not_collected() {
 
     let mut client = Connection::new(client_end);
     drive_login_and_join(&mut client, "Distant", 1).await;
-    send_block_action(&mut client, 0, BREAK_POS).await;
-    send_block_action(&mut client, 2, BREAK_POS).await;
+    break_with_a_pickaxe(&mut client, 2, BREAK_POS).await;
     let _ = drain_available(&mut client).await;
     mobs.with(|sim| sim.tick_for(12));
 

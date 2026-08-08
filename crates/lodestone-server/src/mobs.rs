@@ -184,6 +184,25 @@ fn state_id_by_name() -> &'static HashMap<String, u32> {
     })
 }
 
+/// The global block-state id for a canonical state string, or `None` for a name
+/// this version's census does not carry.
+///
+/// The one public door onto [`state_id_by_name`]'s cached index, added for
+/// [`crate::block_drops`]'s correct-tool gate (issue #539): every per-block-state
+/// census in `lodestone-data` — hardness, tool rules, collision — is keyed by
+/// **id**, while `ChunkColumn` stores states as canonical **strings**, so
+/// anything that reads one of those censuses for a block the world names has to
+/// cross this bridge. Kept here rather than duplicated because building the
+/// 32,366-entry map twice per process would be the only alternative.
+///
+/// Accepts a bare name (`"minecraft:stone"`) or one with properties
+/// (`"minecraft:oak_log[axis=y]"`), since that is exactly what
+/// [`ChunkColumn::block_state`] returns.
+#[must_use]
+pub(crate) fn block_state_id(name: &str) -> Option<u32> {
+    state_id_by_name().get(name).copied()
+}
+
 /// A [`PathWorld`] over the server's real per-block-state terrain.
 ///
 /// Backed by a sparse map of [`ChunkColumn`]s keyed by chunk coordinate. Missing
