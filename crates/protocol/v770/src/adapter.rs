@@ -1497,6 +1497,14 @@ fn read_component_patch(
             Some("minecraft:trim") => {
                 components.trim = Some(read_armor_trim(reader)?);
             }
+            // `MapId.STREAM_CODEC` is `ByteBufCodecs.VAR_INT.map(MapId::new, …)`
+            // (`MapId.java:19`), registered `networkSynchronized` at
+            // `DataComponents.java:229`. Decoded for the same reason as the trim
+            // above — a filled map in any inventory was truncating the packet from
+            // here on, not merely losing which map it showed.
+            Some("minecraft:map_id") => {
+                components.map_id = Some(reader.var_i32().map_err(dec_err)?);
+            }
             // Both of these are `ByteBufCodecs.VAR_INT` (`DataComponents.java:110-115`)
             // and both *override* the prototype value seeded above. They are
             // decoded rather than treated as unmodeled not because servers send

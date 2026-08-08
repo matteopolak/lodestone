@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use lodestone_model::{Identifier, ItemEnchantment, Text, ToolPatch};
+use lodestone_model::{ArmorTrim, Identifier, ItemEnchantment, Text, ToolPatch};
 
 /// The default maximum stack size when an item carries no
 /// `minecraft:max_stack_size` component. Matches vanilla's `Item.Properties`
@@ -42,6 +42,12 @@ pub const CUSTOM_NAME_COMPONENT: &str = "minecraft:custom_name";
 /// Well-known component identifier for the tool behaviour patch
 /// (`minecraft:tool`).
 pub const TOOL_COMPONENT: &str = "minecraft:tool";
+
+/// Well-known component identifier for `minecraft:trim`.
+pub const TRIM_COMPONENT: &str = "minecraft:trim";
+
+/// Well-known component identifier for `minecraft:map_id`.
+pub const MAP_ID_COMPONENT: &str = "minecraft:map_id";
 /// Well-known component identifier for enchantments.
 pub const ENCHANTMENTS_COMPONENT: &str = "minecraft:enchantments";
 /// Well-known component identifier for the worn-slot component
@@ -113,6 +119,13 @@ pub enum ComponentValue {
     /// vanilla tool, so this variant only appears when the patch is *not*
     /// `Inherited` — see [`ItemStack`]'s `From` impl.
     Tool(ToolPatch),
+    /// The stack's `minecraft:trim` — a smithing-table armour trim's material
+    /// and pattern, carried verbatim from [`lodestone_model::ArmorTrim`].
+    ///
+    /// A variant of its own rather than a `Str` pair because a trim is two
+    /// registry entries that must stay together: half a trim is not a trim, and
+    /// the renderer keys its decal atlas on the pair.
+    Trim(ArmorTrim),
     /// Enchantments applied to the stack (`minecraft:enchantments`), carried
     /// verbatim and in wire order from [`lodestone_model::ItemEnchantment`].
     Enchantments(Vec<ItemEnchantment>),
@@ -471,6 +484,34 @@ impl ItemStack {
         self.write_component(TOOL_COMPONENT, value);
     }
 
+    /// The stack's `minecraft:trim`, or `None` for untrimmed armour and every
+    /// non-armour item.
+    #[must_use]
+    pub fn trim(&self) -> Option<ArmorTrim> {
+        match self.components.get_str(TRIM_COMPONENT) {
+            Some(ComponentValue::Trim(trim)) => Some(trim.clone()),
+            _ => None,
+        }
+    }
+
+    /// Sets or clears `minecraft:trim`.
+    pub fn set_trim(&mut self, trim: Option<ArmorTrim>) {
+        self.write_component(TRIM_COMPONENT, trim.map(ComponentValue::Trim));
+    }
+
+    /// Which saved map a `filled_map` stack shows, or `None` for anything else.
+    #[must_use]
+    pub fn map_id(&self) -> Option<i32> {
+        self.components
+            .get_int(MAP_ID_COMPONENT)
+            .and_then(|v| i32::try_from(v).ok())
+    }
+
+    /// Sets or clears `minecraft:map_id`.
+    pub fn set_map_id(&mut self, id: Option<i32>) {
+        self.write_component(MAP_ID_COMPONENT, id.map(|v| ComponentValue::Int(i64::from(v))));
+    }
+
     /// The stack's `minecraft:custom_model_data` selector, if any (issue #147).
     #[must_use]
     pub fn custom_model_data(&self) -> Option<i32> {
@@ -604,6 +645,24 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             components.insert(key, ComponentValue::Int(i64::from(rgb)));
         }
 
+        // Same crate-boundary loss as the dye above, and with the same symptom
+        // seen from the other side: remote players, mobs and armour stands drew
+        // their trims off the *model* stack while the local player — whose stack
+        // arrives here — did not.
+        if let Some(trim) = stack.components.trim.clone()
+            && let Ok(key) = TRIM_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::Trim(trim));
+        }
+
+        // Without this the renderer cannot tell which saved map a `filled_map`
+        // shows, and falls back to the lowest-numbered known map.
+        if let Some(id) = stack.components.map_id
+            && let Ok(key) = MAP_ID_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::Int(i64::from(id)));
+        }
+
         // The three *effective* fields — prototype folded with patch by the
         // version adapter. Unlike the patch-only fields above, these are
         // present for ordinary stacks, and without them armour cannot be
@@ -679,11 +738,8 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             damage: stack.damage().and_then(|d| u32::try_from(d).ok()),
             enchantments: stack.enchantments().to_vec(),
             dyed_color: stack.dyed_color(),
-            // `minecraft:trim` (issue #17) is decoded off the wire into
-            // `lodestone_model::ItemComponents` but has no representation in this
-            // crate's own `ComponentMap`, so it does not survive the round trip —
-            // the same lossy-field class the doc above already lists.
-            trim: None,
+            trim: stack.trim(),
+            map_id: stack.map_id(),
             tool: stack.tool(),
             max_stack_size: stack
                 .components
@@ -1057,7 +1113,11 @@ mod tests {
                 damage: Some(37),
                 enchantments: vec![ItemEnchantment { id: 12, level: 4 }],
                 dyed_color: Some(0x00_11_22_33),
-                trim: None,
+                trim: Some(ArmorTrim {
+                    material: "netherite".to_string(),
+                    pattern: "silence".to_string(),
+                }),
+                map_id: Some(1701),
                 tool: ToolPatch::Set(tool),
                 max_stack_size: Some(1),
                 max_damage: Some(1561),

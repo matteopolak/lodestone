@@ -88,6 +88,14 @@ pub struct ItemComponents {
     /// [`has_unmodeled`](Self::has_unmodeled)): a trimmed stack used to truncate
     /// decoding of the rest of the packet, not just lose its trim.
     pub trim: Option<ArmorTrim>,
+    /// `minecraft:map_id`: which saved map a `filled_map` stack shows.
+    ///
+    /// `None` for every other item. Decoded for the same reason as
+    /// [`trim`](Self::trim) rather than for the picture's sake: the clientbound
+    /// component patch cannot skip an unknown component, so a filled map sitting
+    /// in any inventory used to truncate decoding of the rest of the packet.
+    /// Without it the renderer can only draw the lowest-numbered known map.
+    pub map_id: Option<i32>,
     /// What this stack's component *patch* said about `minecraft:tool`.
     ///
     /// Almost always [`ToolPatch::Inherited`] — see that type's docs; a plain
