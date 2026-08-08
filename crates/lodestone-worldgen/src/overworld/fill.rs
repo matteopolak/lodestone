@@ -286,6 +286,13 @@ impl OverworldGenerator {
         // this deletes 98,304 block-state *string* hashes per chunk and changes
         // nothing else — the palette is still appended in this loop's order,
         // which is the property the comment above is about.
+        // Issue #496: `OreVeinifier`. Bound to this chunk once, outside the loop,
+        // because `vein_toggle`/`vein_ridged` are `minecraft:interpolated` and the
+        // sampler's cell caches are per-chunk — see `super::veins`.
+        let veins = self
+            .veins
+            .as_ref()
+            .map(|v| v.for_chunk(self.slot_count, base_x, base_z, self.min_y, self.height));
         for lz in 0..16i32 {
             for lx in 0..16i32 {
                 for ly in 0..self.height {
@@ -296,7 +303,38 @@ impl OverworldGenerator {
                         BlockKind::Lava => self.default_lava_pre.state,
                         BlockKind::Air => crate::interner::StateId::AIR,
                     };
-                    let state = surface_diff.get(&(lx, y, lz)).copied().unwrap_or(base);
+                    // Veins replace the *default block* only: vanilla's
+                    // `MaterialRuleList` reaches `OreVeinifier` after the aquifer
+                    // and only where it returned that block, never over air or a
+                    // fluid.
+                    let vein_state = if base == self.default_block_pre.state {
+                        veins
+                            .as_ref()
+                            .and_then(|v| v.state_at(base_x + lx, y, base_z + lz))
+                    } else {
+                        None
+                    };
+                    // **A vein wins over the surface diff, and that is not an
+                    // ordering shortcut.** Vanilla runs `buildSurface` *after* the
+                    // fill that placed the vein, but `SurfaceSystem.buildSurface`
+                    // opens with `if (old == this.defaultBlock)`
+                    // (`SurfaceSystem.java:151`) — a cell holding copper ore or
+                    // granite is not the default block, so every surface rule skips
+                    // it. Applying the diff unconditionally here was measured to
+                    // erase **every** vein cell: the overworld surface rules write
+                    // `deepslate` over the whole column below y ≈ 0, so a vein at
+                    // y = -40 came back out as deepslate and the served chunk was
+                    // byte-identical with veins on and off. That is what made this
+                    // an island for one debugging session.
+                    //
+                    // Known second-order gap: `surface_diff` is computed from the
+                    // pre-vein `field`, so vanilla's `stone_depth_above/below`
+                    // counters see vein blocks and ours do not. Narrow (it can only
+                    // matter where a vein reaches the surface band) and not measured.
+                    let state = match vein_state {
+                        Some(v) => v,
+                        None => surface_diff.get(&(lx, y, lz)).copied().unwrap_or(base),
+                    };
                     world.set_id(base_x + lx, y, base_z + lz, state);
                 }
             }
