@@ -4452,7 +4452,7 @@ mod block_edit_tests {
     /// for block drops. Meanwhile the *client* half was complete (a keybind, four
     /// adapters encoding ordinals 3 and 4), so `Q` did nothing whatsoever and this
     /// test required that it keep doing nothing. The premise had to be re-checked
-    /// rather than the assertion trusted; see `DESIGN.md` §12.149.
+    /// rather than the assertion trusted; see `DESIGN.md` §12.150.
     ///
     /// `5..=7` are still genuinely unmodelled, and keeping them in the loop is
     /// what stops the two drop arms from having been written as a `3..=7`
