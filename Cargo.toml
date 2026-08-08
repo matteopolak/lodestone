@@ -47,6 +47,11 @@ repository = "https://github.com/matthew/lodestone"
 [workspace.dependencies]
 lodestone-core   = { path = "crates/lodestone-core" }
 lodestone-command = { path = "crates/lodestone-command" }
+# The Minecraft-flavoured half of the Brigadier port — `McArg` plus the game
+# mode / entity-selector / coordinate / item argument types. Separate from
+# `lodestone-command` because that crate is deliberately dependency-free and an
+# argument type that knows what an item is cannot live there.
+lodestone-command-mc = { path = "crates/lodestone-command-mc" }
 lodestone-macros = { path = "crates/lodestone-macros" }
 lodestone-model  = { path = "crates/lodestone-model" }
 lodestone-world  = { path = "crates/lodestone-world" }
