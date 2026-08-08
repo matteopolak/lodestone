@@ -45,6 +45,9 @@ use serde_json::Value;
 use crate::protocol::WorldgenScope;
 
 include!(concat!(env!("OUT_DIR"), "/embedded_worldgen.rs"));
+// `EMBEDDED_STRUCTURE_TEMPLATES` — the `.nbt` bytes, sorted by key. See
+// `EmbeddedResolver::structure_template`.
+include!(concat!(env!("OUT_DIR"), "/embedded_structures.rs"));
 
 /// The fallback biome [`OverworldGenerator`] would use if [`EmbeddedResolver`]
 /// supplied no biome-parameter table — it does (see [`EmbeddedResolver::biome_parameters`]),
@@ -249,6 +252,28 @@ impl Resolver for EmbeddedResolver {
         self.try_json(&format!("structure/{name}"))
     }
 
+    /// The raw `structure/<name>.nbt` bytes for one template (the S2 unit).
+    ///
+    /// **The second entry point to the structure engine**, and it fails the same
+    /// quiet way [`structure_set_ids`](Self::structure_set_ids) does: the trait
+    /// default is `None`, and a resolver taking it makes the worldgen side
+    /// **demote** every template-driven structure to `Unsupported` and record it
+    /// in the ledger — the start is placed, the blocks are not. Shipwrecks, ocean
+    /// ruins and igloos reached zero blocks in the served world for exactly that
+    /// reason.
+    ///
+    /// Served from a `binary_search_by` over the generated table, which `build.rs`
+    /// sorts by key for this reason (an unsorted table would silently miss rather
+    /// than fail). Owned `Vec` because the trait is version-free and cannot name
+    /// this crate's `&'static` table.
+    fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        EMBEDDED_STRUCTURE_TEMPLATES
+            .binary_search_by(|(key, _)| (*key).cmp(name))
+            .ok()
+            .map(|i| EMBEDDED_STRUCTURE_TEMPLATES[i].1.to_vec())
+    }
+
     /// `tags/worldgen/biome/<name>.json`. Load-bearing rather than a nicety:
     /// every bundled structure spells its `biomes` field as a single tag
     /// reference (`"#minecraft:has_structure/shipwreck"`), so without this every
@@ -432,6 +457,41 @@ pub fn overworld_chunk_source(seed: i64) -> crate::chunk::OverworldChunkSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The island this resolver's `structure_template` closes: with the trait
+    /// default, every template-driven structure lands on the ledger with a
+    /// `template '…' unusable` reason and places no blocks at all.
+    ///
+    /// Asserts on the *ledger*, which is the mechanism's own report rather than
+    /// this test's opinion — and the second half is what makes it non-vacuous: a
+    /// ledger that is entirely empty would also satisfy the first assertion, and
+    /// is not the truth (several structure types still have no piece generator).
+    #[test]
+    fn no_structure_is_demoted_for_unloadable_templates() {
+        let registry =
+            lodestone_worldgen::structure::StructureRegistry::new(1234, &EmbeddedResolver);
+        let template_failures: Vec<_> = registry
+            .unsupported()
+            .iter()
+            .filter(|(_, why)| why.starts_with("template "))
+            .collect();
+        assert!(
+            template_failures.is_empty(),
+            "structures demoted for unloadable templates: {template_failures:?}"
+        );
+        assert!(
+            !registry.unsupported().is_empty(),
+            "an entirely empty ledger means the registry parsed nothing, not that \
+             every structure is supported"
+        );
+
+        // A template really resolves, by name and to plausible NBT (gzip magic).
+        let bytes = EmbeddedResolver
+            .structure_template("minecraft:shipwreck/with_mast")
+            .expect("shipwreck/with_mast is bundled");
+        assert_eq!(&bytes[..2], &[0x1f, 0x8b], "structure templates are gzipped NBT");
+        assert!(EmbeddedResolver.structure_template("minecraft:not/a/template").is_none());
+    }
 
     /// Coordinate sweep used to *choose* the `freeze_top_layer` fixtures rather
     /// than guess them (issue #404's U2). `#[ignore]`d: it is a several-minute
