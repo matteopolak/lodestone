@@ -221,8 +221,9 @@ clickable, which is the same gate `server_row_visible` applies and for the same
 reason (`row_rect` is also `app.rs`'s hit-test). `world_list_max_rows()` caps the
 list at what the reference canvas can show — 10 — so a player with more worlds than
 that cannot reach the rest, and at a canvas shorter than 480 the last few of those
-ten are not drawn either. Both are the same missing feature, and both are stated
-here rather than discovered.
+ten are not drawn either. Both are the same missing feature, filed as
+[#541](https://github.com/matteopolak/lodestone/issues/541), and both are stated here
+rather than discovered.
 
 One behavioural deviation follows from it: **row 0 is selected on open**, where
 vanilla starts with `updateButtonStatus(null)` and waits for a click. With no

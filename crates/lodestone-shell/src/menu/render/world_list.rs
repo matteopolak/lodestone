@@ -355,7 +355,9 @@ pub fn world_list_row_visible(index: usize, height: f32) -> bool {
 /// [`world_list_row_visible`] and are neither drawn nor clickable, and a player
 /// with more worlds than this cannot reach the rest at all. Both are the same
 /// missing feature — `AbstractSelectionList`'s scroll model, which #396 ported
-/// for the *server* list and which this screen still lacks.
+/// for the *server* list and which this screen still lacks. Filed as
+/// [#541](https://github.com/matteopolak/lodestone/issues/541), whose body names the
+/// machinery to reuse and the clip that becomes mandatory with it.
 #[must_use]
 pub fn world_list_max_rows() -> usize {
     world_list_visible_rows(WORLD_SELECT_REF_CANVAS.1)
