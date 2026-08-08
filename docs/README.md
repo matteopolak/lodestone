@@ -1024,14 +1024,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `handles_event` router, and no producer of any of the serverbound riding actions
   either.
 - [Riptide and the elytra firework boost](./riptide-and-firework-boost.md) — Two
-  item-driven velocity impulses in `lodestone-physics`: the riptide-trident launch
-  (#208) and the elytra firework-rocket glide boost (#206). Both are landed as
-  **physics-only, partial** — the arithmetic is implemented and tested against the
-  decompiled source; the *trigger* (item use, held-duration, weather, rocket entity
-  lifetime) is not, because none of it is physics state this crate models. See "What
-  is not modelled" in each section — this is not an oversight, it is the scope
-  boundary `lodestone-physics` draws everywhere else in this codebase (equipment,
-  entity spawning and item state all live outside it).
+  item-driven velocity impulses: the riptide-trident launch (#208) and the elytra
+  firework-rocket glide boost (#206). The **arithmetic** lives in `lodestone-physics`
+  and the **triggers** — item use, held duration, the wet gate, the enchantment
+  level, the glide flag, the rocket's duration — live in the shell and
+  `lodestone-ecs`, because none of them is physics state.
 - [The screen overlays: underwater, fire, pumpkin, freeze, spyglass, confusion, portal](./screen-overlays.md) —
   Seven full-screen (or near-full-screen) post-hand-pass effects, issues #108, #112,
   #185, #139, #154, #144 and #149: a blue-ish tint plus a scrolling
