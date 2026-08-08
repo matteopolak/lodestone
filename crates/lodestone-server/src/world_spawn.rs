@@ -61,6 +61,31 @@ pub(crate) struct RespawnPoint {
     pub pos: BlockPos,
 }
 
+/// Vanilla's `ChunkGenerator.getSpawnHeight`
+/// (`.cache/mc/26.2/src/net/minecraft/world/level/chunk/ChunkGenerator.java:432`):
+///
+/// ```java
+/// public int getSpawnHeight(final LevelHeightAccessor heightAccessor) {
+///    return 64;
+/// }
+/// ```
+///
+/// A literal `64`, and `NoiseBasedChunkGenerator` does **not** override it — only
+/// `FlatLevelSource` does — so this is the value in force for the overworld this
+/// crate serves. `setInitialSpawn` (`MinecraftServer.java:494-498`) reads it,
+/// keeps it because `64 >= level.getMinY()`, and pre-seeds the world spawn at
+/// `offset(8, 64, 8)`; the `WORLD_SURFACE` heightmap branch beside it is dead
+/// code for any noise generator.
+///
+/// # Why a literal is the right answer and a surface query is not
+///
+/// It is two blocks above the generator's sea level of 62, so a fully-ocean
+/// search box lands the player in open water — visible, breathable at the
+/// surface, and no fall damage from a two-block drop. The surface-derived value
+/// this replaced was strictly worse in the case that actually fires: see
+/// [`find_initial_spawn`]'s own comment.
+const GENERATOR_SPAWN_HEIGHT: i32 = 64;
+
 /// The height a player stands at for a `getLevelRespawnPos`-valid column
 /// position `(lx, lz)` in `[0..16)`, or `None` when the column is invalid
 /// there.
@@ -80,26 +105,145 @@ pub(crate) struct RespawnPoint {
 ///    position.
 /// 4. A column with no solid block at all (air/void world) is `None`.
 ///
-/// The "solid" test is [`is_air_or_fluid`]'s negation — the same block-name
-/// solidity this crate uses for placement — rather than vanilla's full-top-
-/// face collision shape, because this crate serves no generator output with
-/// partial-block surfaces at spawn (the `worldgen_data` scope note: no
-/// vegetation at surface).
+/// The two tests are vanilla's own, and **not** [`is_air_or_fluid`]'s negation,
+/// which is what this function used until the measurement in DESIGN.md §12.125:
+///
+/// | vanilla expression | here |
+/// |---|---|
+/// | `!blockState.getFluidState().isEmpty()` (`:169`) | [`spawn_has_fluid_state`] |
+/// | `Block.isFaceFull(state.getCollisionShape(…), UP)` (`:171`) | [`spawn_face_full_up`] |
+///
+/// The old form's justification was a *stale* `worldgen_data` scope note ("no
+/// vegetation at surface"). The generator now places `short_grass`,
+/// `dandelion`, `poppy` and snow layers, and `is_air_or_fluid` says all four are
+/// ground — so the spawn Y came out **one block above** the block a player can
+/// actually stand on, which is the "I spawn in the air" report. Measured
+/// `face_full_up`: `short_grass`/`dandelion`/`poppy`/`snow` are all `false`,
+/// `grass_block`/`stone`/`oak_log`/`oak_leaves` are all `true` — so the jar's own
+/// predicate scans past the vegetation and stops on the ground, and a treetop
+/// spawn (leaves are genuinely face-full) stays faithful rather than being
+/// "fixed" into a divergence.
+///
+/// The vanilla pre-check at `:156-159` — the `WORLD_SURFACE` / `MOTION_BLOCKING`
+/// / `OCEAN_FLOOR` heightmap comparison — is deliberately not reproduced: it is
+/// an early-out over three persisted heightmaps a [`ChunkColumn`] does not
+/// carry, and the loop below reaches the same verdict for the case it exists to
+/// catch (a water column aborts on the fluid test before any ground is found).
 fn get_level_respawn_pos(column: &ChunkColumn, lx: i32, lz: i32) -> Option<i32> {
     let top_y = column.min_y + column.height - 1;
     for y in (column.min_y..=top_y).rev() {
         let state = column.block_state(lx, y, lz);
-        let base = state.split('[').next().unwrap_or(state);
-        if matches!(base, "minecraft:water" | "minecraft:lava") {
+        if spawn_has_fluid_state(state) {
             // Fluid between sky and ground — an ocean column. Fail-closed,
             // exactly like vanilla's `null`: the caller keeps searching.
             return None;
         }
-        if !is_air_or_fluid(state) {
+        if spawn_face_full_up(state) {
             return Some(y + 1);
         }
     }
     None
+}
+
+/// The two lookup tables joining a block-state *string* to a census state id:
+/// exact canonical state first, base-name default second.
+///
+/// [`lodestone_data::snow_support`]'s bitsets are keyed by block-state id and
+/// this crate only ever holds a string, so the two have to be joined. **Both**
+/// halves are load-bearing and each covers a case the other gets wrong:
+///
+/// * The **exact** map is what makes `oak_leaves[waterlogged=true]` answer
+///   `has_fluid_state = true`. A base-name-only join reports its *default*
+///   state's `false`, and
+///   `spawn_state_resolution_agrees_with_the_census_for_every_surface_state`
+///   caught exactly that — it is not a hypothetical, it is why this map exists.
+/// * The **base-name** map is what makes bare `minecraft:water` resolve at all:
+///   `lodestone-worldgen` emits fluids without their `level` property
+///   (`docs/worldgen-parity.md`'s "Known representation gap", the same reason
+///   [`crate::worldgen_data`]'s `freeze_facts` keys its document by default
+///   state), so a generated column's water is a string no exact map contains.
+///
+/// Built once per process from two static tables.
+fn spawn_state_tables() -> &'static (
+    std::collections::HashMap<String, u32>,
+    std::collections::HashMap<&'static str, u32>,
+) {
+    use std::sync::OnceLock;
+    #[allow(clippy::type_complexity)]
+    static TABLES: OnceLock<(
+        std::collections::HashMap<String, u32>,
+        std::collections::HashMap<&'static str, u32>,
+    )> = OnceLock::new();
+    TABLES.get_or_init(|| {
+        use lodestone_data::{block_states, snow_support};
+        let mut exact = std::collections::HashMap::new();
+        let mut defaults = std::collections::HashMap::new();
+        for id in 0..snow_support::STATE_COUNT {
+            let Some(name) = block_states::block_name(id) else {
+                continue;
+            };
+            exact.insert(spawn_canonical_state(id), id);
+            if snow_support::is_default_state(id) == Some(true) {
+                defaults.insert(name, id);
+            }
+        }
+        (exact, defaults)
+    })
+}
+
+/// `name[k=v,…]` with properties in `block_states::properties`' own sorted
+/// order — the spelling `lodestone_worldgen::feature::canon_state` produces and
+/// therefore the spelling a generated [`ChunkColumn`] holds.
+///
+/// A near-duplicate of [`crate::worldgen_data`]'s private `canonical_state`, kept
+/// separate rather than made shared: that one is a build input for the freeze
+/// document and this one is a runtime lookup key, and coupling them would make a
+/// change to either reach the other for no reason.
+fn spawn_canonical_state(id: u32) -> String {
+    use lodestone_data::block_states;
+    let name = block_states::block_name(id).unwrap_or("minecraft:air");
+    let props = block_states::properties(id).unwrap_or(&[]);
+    if props.is_empty() {
+        return name.to_owned();
+    }
+    let body: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    format!("{name}[{}]", body.join(","))
+}
+
+/// The census state id for a block-state string: the exact state where the
+/// census has it, otherwise the block's default state.
+fn spawn_state_id(state: &str) -> Option<u32> {
+    let (exact, defaults) = spawn_state_tables();
+    if let Some(&id) = exact.get(state) {
+        return Some(id);
+    }
+    let base = state.split('[').next().unwrap_or(state);
+    defaults.get(base).copied()
+}
+
+/// Vanilla `!blockState.getFluidState().isEmpty()`
+/// ([`lodestone_data::snow_support::has_fluid_state`]) for a block-state string.
+///
+/// An unknown block name answers `false`: a name the census has never heard of
+/// cannot be a fluid, and answering `true` would abort the spawn search for the
+/// whole column.
+fn spawn_has_fluid_state(state: &str) -> bool {
+    spawn_state_id(state)
+        .and_then(lodestone_data::snow_support::has_fluid_state)
+        .unwrap_or(false)
+}
+
+/// Vanilla `Block.isFaceFull(state.getCollisionShape(…), UP)`
+/// ([`lodestone_data::snow_support::face_full_up`]) for a block-state string.
+///
+/// An unknown block name answers `false` — fail-closed, so a name the census
+/// does not carry can never become the block a player is stood on top of. That
+/// is the safe direction: the search moves on instead of placing the player on
+/// something it cannot prove is solid.
+fn spawn_face_full_up(state: &str) -> bool {
+    spawn_state_id(state)
+        .and_then(lodestone_data::snow_support::face_full_up)
+        .unwrap_or(false)
 }
 
 /// Scans one already-generated column's 256 block positions in vanilla's order
@@ -168,10 +312,10 @@ fn spiral_chunk_offsets() -> Vec<(i32, i32)> {
 /// land instead of spawning the player under water).
 ///
 /// Returns the first valid spawn position in spiral order, or — when every
-/// chunk in the box is invalid (a full-ocean box) — the origin column's
-/// surface at local `(8, 8)`, vanilla's own fallback (`setInitialSpawn`
-/// pre-seeds `levelData.setSpawn` with `offset(8, height, 8)` before the
-/// loop and the loop only overrides it with a *valid* find).
+/// chunk in the box is invalid (a full-ocean box) — `(8, `[`GENERATOR_SPAWN_HEIGHT`]`, 8)`,
+/// which is vanilla's own pre-seed (`setInitialSpawn` calls `levelData.setSpawn`
+/// with `offset(8, height, 8)` before the loop and the loop only overrides it
+/// with a *valid* find).
 ///
 /// # Column generations, because this is on the join critical path
 ///
@@ -190,11 +334,16 @@ fn spiral_chunk_offsets() -> Vec<(i32, i32)> {
 /// those columns from cache when the ring loop reaches them.
 pub(crate) fn find_initial_spawn<S: ChunkSource>(source: &S) -> WorldSpawn {
     let origin = source.column(0, 0);
-    // `min_y + 1` when the origin is invalid (ocean/void) is the pre-#329
-    // `spawn_surface_y` fallback, kept so a pathological world spawns at the
-    // same `(8, min_y + 1, 8)` it did before the search existed — a silent
-    // Y regression is worse than a fixed X/Z.
-    let fallback_y = get_level_respawn_pos(&origin, 8, 8).unwrap_or(origin.min_y + 1);
+    // Vanilla's own pre-seed, and **not** what this line used to say. See
+    // [`GENERATOR_SPAWN_HEIGHT`]: the previous form was
+    // `get_level_respawn_pos(&origin, 8, 8).unwrap_or(origin.min_y + 1)`, and the
+    // `min_y + 1` arm put the player at `y = -63` — *inside the bedrock floor*,
+    // under an ocean, in the dark. Measured on two of four probe seeds
+    // (`1234` and `-195764831`), where the whole ±5 box is ocean and the fallback
+    // is the arm that fires. `64` is `ChunkGenerator.getSpawnHeight`, two blocks
+    // above the generator's sea level of 62, so the same pathological world now
+    // drops the player into open water instead of burying them.
+    let fallback_y = GENERATOR_SPAWN_HEIGHT;
 
     for (xo, zo) in spiral_chunk_offsets() {
         // `(0, 0)` is always the spiral's first offset, and `origin` is already
@@ -402,6 +551,144 @@ mod tests {
         assert_eq!(get_level_respawn_pos(&void, 0, 0), None, "no solid block at all");
     }
 
+    /// **The spawn-in-the-air defect, as a magnitude gate.** A plains column with
+    /// vegetation on it must spawn the player *on the ground block*, not on the
+    /// flower standing on it.
+    ///
+    /// Both hypotheses are computed from outside constants rather than one being
+    /// asserted: `is_air_or_fluid`'s negation (the predicate this function used
+    /// until DESIGN.md §12.125) calls `short_grass` ground and yields `surface +
+    /// 2`; the jar's `Block.isFaceFull(…, UP)` scans past it and yields `surface +
+    /// 1`. A sign-only check ("the spawn is above the surface") passes under
+    /// both, which is exactly why the bug survived.
+    #[test]
+    fn vegetation_on_the_surface_is_not_what_the_player_stands_on() {
+        const SURFACE_Y: i32 = 70;
+        for plant in [
+            "minecraft:short_grass",
+            "minecraft:dandelion",
+            "minecraft:poppy",
+            "minecraft:snow[layers=1]",
+        ] {
+            let mut column = land_column(SURFACE_Y);
+            // The generator's own shape: a solid surface block with one
+            // non-collidable decoration standing on it.
+            column.set_block(0, SURFACE_Y, 0, "minecraft:grass_block[snowy=false]");
+            column.set_block(0, SURFACE_Y + 1, 0, plant);
+
+            let correct = SURFACE_Y + 1;
+            let suspected_wrong = SURFACE_Y + 2;
+            assert_ne!(correct, suspected_wrong, "the two hypotheses must differ");
+
+            let measured = get_level_respawn_pos(&column, 0, 0);
+            assert_eq!(
+                measured,
+                Some(correct),
+                "{plant} has no collision, so vanilla stands the player on the \
+                 grass_block at {SURFACE_Y} (feet {correct}); {suspected_wrong} is the \
+                 `is_air_or_fluid` answer that put the player one block in the air"
+            );
+        }
+    }
+
+    /// **Control for the gate above**: the predicate is not simply "skip
+    /// everything above the stone", which would also produce `SURFACE_Y + 1`.
+    /// A block that *is* face-full — leaves, which vanilla genuinely lets a
+    /// player spawn on top of — must still raise the spawn.
+    ///
+    /// Without this, `vegetation_on_the_surface_is_not_what_the_player_stands_on`
+    /// would pass against an implementation that ignored the block census
+    /// entirely and always answered `stone_top + 1`.
+    #[test]
+    fn a_face_full_block_above_the_surface_does_raise_the_spawn() {
+        const SURFACE_Y: i32 = 70;
+        let mut column = land_column(SURFACE_Y);
+        column.set_block(0, SURFACE_Y + 1, 0, "minecraft:oak_leaves[distance=3]");
+        assert_eq!(
+            get_level_respawn_pos(&column, 0, 0),
+            Some(SURFACE_Y + 2),
+            "oak_leaves measures face_full_up = true, so the player stands on the leaf"
+        );
+    }
+
+    /// **The join gate.** [`spawn_state_id`] must give the census's own answer for
+    /// **every** state of every block a generated surface can carry — not just the
+    /// default state, and not just the states this module happens to name in a
+    /// fixture.
+    ///
+    /// This test found a real defect on its first run: the join was base-name-only
+    /// and `minecraft:oak_leaves[…,waterlogged=true]` (state id 253) resolved to
+    /// its `waterlogged=false` default, reporting `has_fluid_state = false` for a
+    /// block that vanilla says holds water. A waterlogged canopy would then have
+    /// been treated as standable ground instead of aborting the column.
+    #[test]
+    fn spawn_state_resolution_agrees_with_the_census_for_every_surface_state() {
+        use lodestone_data::{block_states, snow_support};
+        // Every block the overworld generator can leave at or above a surface.
+        const SURFACE_BLOCKS: &[&str] = &[
+            "minecraft:water",
+            "minecraft:lava",
+            "minecraft:grass_block",
+            "minecraft:short_grass",
+            "minecraft:dandelion",
+            "minecraft:poppy",
+            "minecraft:snow",
+            "minecraft:oak_leaves",
+            "minecraft:birch_leaves",
+            "minecraft:oak_log",
+            "minecraft:stone",
+            "minecraft:sand",
+            "minecraft:gravel",
+        ];
+        let mut states_checked = 0usize;
+        let mut multi_state_blocks = 0usize;
+        for &name in SURFACE_BLOCKS {
+            let mut states = 0usize;
+            for id in 0..snow_support::STATE_COUNT {
+                if block_states::block_name(id) != Some(name) {
+                    continue;
+                }
+                states += 1;
+                states_checked += 1;
+                let canonical = spawn_canonical_state(id);
+                assert_eq!(
+                    spawn_state_id(&canonical),
+                    Some(id),
+                    "{canonical} must resolve to its own state id, not another state's"
+                );
+                assert_eq!(
+                    spawn_face_full_up(&canonical),
+                    snow_support::face_full_up(id) == Some(true),
+                    "face_full_up disagrees with the census for {canonical}"
+                );
+                assert_eq!(
+                    spawn_has_fluid_state(&canonical),
+                    snow_support::has_fluid_state(id) == Some(true),
+                    "has_fluid_state disagrees with the census for {canonical}"
+                );
+            }
+            assert!(states > 0, "{name} must exist in the 26.2 census");
+            if states > 1 {
+                multi_state_blocks += 1;
+            }
+            // The generator's fluid spelling: bare, no `level`. It must still
+            // resolve, via the base-name half.
+            assert!(
+                spawn_state_id(name).is_some(),
+                "the bare base name {name} must resolve through the default-state map"
+            );
+        }
+        // Preconditions. The first would be a vacuous pass with an empty list; the
+        // second is what makes the *exact* half of the join actually exercised —
+        // a corpus of single-state blocks could not tell the two maps apart.
+        assert_eq!(states_checked > 0, true);
+        assert!(
+            multi_state_blocks >= 5,
+            "only {multi_state_blocks} of the surface blocks have more than one state; \
+             the exact-state half of the join would be barely covered"
+        );
+    }
+
     /// A valid origin chunk is accepted by the spiral's *first* candidate, and the
     /// position inside it is vanilla's scan order — local `(0, 0)`, **not** the
     /// centre.
@@ -522,17 +809,144 @@ mod tests {
         assert_eq!(spawn.pos.y, 16.0, "one above the land surface");
     }
 
+    /// Every chunk in the spiral invalid: the search must return vanilla's own
+    /// pre-seed, `(8, 64, 8)`.
+    ///
+    /// **This is the bedrock-burial gate.** The Y assertion is the whole point
+    /// and it was missing — this test asserted X and Z only, so the arm that
+    /// returned `min_y + 1` was completely uncovered and shipped. Two of four
+    /// probe seeds against the real generator take this arm.
+    ///
+    /// Both hypotheses computed from outside constants: `min_y + 1` is `-63` for
+    /// a `(-64, 384)` world (inside the bedrock floor), and
+    /// `ChunkGenerator.getSpawnHeight` is `64`.
     #[test]
-    fn fully_ocean_box_falls_back_to_the_origin_surface() {
-        // Every chunk in the spiral invalid: the search must return vanilla's
-        // own fallback, the origin column's surface at local (8, 8) — not a
-        // panic, and not an underwater spawn below the waterline.
+    fn a_fully_invalid_box_falls_back_above_sea_level_not_into_the_bedrock_floor() {
+        const MIN_Y: i32 = -64;
+        const HEIGHT: i32 = 384;
+        let mut ocean = ChunkColumn::new(MIN_Y, HEIGHT);
+        for x in 0..16 {
+            for z in 0..16 {
+                // A real ocean column: bedrock floor, stone, then water to sea
+                // level. The bedrock is what the old fallback landed inside.
+                ocean.set_block(x, MIN_Y, z, "minecraft:bedrock");
+                for y in (MIN_Y + 1)..=(MIN_Y + 3) {
+                    ocean.set_block(x, y, z, "minecraft:deepslate");
+                }
+                for y in (MIN_Y + 4)..=62 {
+                    ocean.set_block(x, y, z, "minecraft:water");
+                }
+            }
+        }
         let mut columns = std::collections::HashMap::new();
-        columns.insert((0, 0), ocean_column());
-        let spawn = find_initial_spawn(&MapSource { columns });
+        columns.insert((0, 0), ocean);
+        let source = MapSource { columns };
+        let spawn = find_initial_spawn(&source);
+
+        let suspected_wrong = f64::from(MIN_Y + 1);
+        let correct = f64::from(GENERATOR_SPAWN_HEIGHT);
+        assert_ne!(correct, suspected_wrong, "the two hypotheses must differ");
 
         assert_eq!(spawn.pos.x, 8.0);
         assert_eq!(spawn.pos.z, 8.0);
+        assert_eq!(
+            spawn.pos.y, correct,
+            "vanilla's `getSpawnHeight` is 64; {suspected_wrong} is `min_y + 1`, which is \
+             inside the bedrock floor"
+        );
+
+        // The user-visible property, read out of the **same** fixture the search
+        // ran against rather than a fresh empty one — and with its own premise
+        // check, because "not inside a solid block" is trivially true of any
+        // coordinate in an all-air source.
+        //
+        // Premise: the wrong answer really is inside something solid. If this
+        // assertion stops holding the fixture no longer reproduces the defect and
+        // the one below proves nothing.
+        assert!(
+            spawn_face_full_up(&source.block_state(8, MIN_Y + 1, 8)),
+            "premise: `min_y + 1` must sit inside a collidable block for this gate to \
+             mean anything (it is deepslate in the fixture)"
+        );
+        assert!(
+            !spawn_face_full_up(&source.block_state(8, spawn.pos.y as i32, 8)),
+            "the fallback must not place the player inside a collidable block"
+        );
+    }
+
+    /// **The world-species gate.** Every hermetic fixture above is a column this
+    /// module's own test code wrote, so none of them can exercise the thing that
+    /// actually broke: what the *production generator* leaves at the surface.
+    /// Both defects DESIGN.md §12.125 records were invisible to the whole
+    /// fixture suite and visible on the first real seed.
+    ///
+    /// The expected value originates outside this module in both halves: the
+    /// standability predicate is `lodestone-data`'s jar-dumped
+    /// `snow_support::face_full_up`, and the fallback height is the literal read
+    /// off `ChunkGenerator.getSpawnHeight`. Nothing here compares the search
+    /// against another copy of itself.
+    ///
+    /// `#[ignore]`d: it composes real columns (measured ~1.5 s per seed in
+    /// release, and an all-ocean box walks all 121).
+    ///
+    /// ```text
+    /// cargo test --release -p lodestone-server --lib real_generator_spawn -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "composes real generator columns; several seconds per seed"]
+    fn real_generator_spawn_is_always_standable_or_the_documented_fallback() {
+        // Four seeds chosen because they cover both arms: 0 and 42 find a valid
+        // chunk in the box, 1234 and -195764831 have a fully-ocean ±5 box and take
+        // the fallback. A single-seed version of this gate would be the *world*
+        // species all over again.
+        let mut took_fallback = 0usize;
+        let mut found_in_box = 0usize;
+        for seed in [0_i64, 42, 1234, -195764831] {
+            let source = crate::worldgen_data::overworld_chunk_source(seed);
+            let spawn = find_initial_spawn(&source);
+            let (sx, sy, sz) = (spawn.pos.x as i32, spawn.pos.y as i32, spawn.pos.z as i32);
+
+            let feet = source.block_state(sx, sy, sz);
+            let head = source.block_state(sx, sy + 1, sz);
+            let support = source.block_state(sx, sy - 1, sz);
+            println!(
+                "seed {seed}: spawn=({sx}, {sy}, {sz}) support={support} feet={feet} head={head}"
+            );
+
+            // Holds on **both** arms, and it is the property the owner's report was
+            // about: the player is never inside terrain.
+            assert!(
+                !spawn_face_full_up(&feet),
+                "seed {seed}: spawn feet at ({sx}, {sy}, {sz}) are inside {feet}"
+            );
+            assert!(
+                !spawn_face_full_up(&head),
+                "seed {seed}: spawn head at ({sx}, {}, {sz}) is inside {head}",
+                sy + 1
+            );
+
+            if spawn_face_full_up(&support) {
+                // The search-found arm: the block under the player's feet is
+                // something vanilla's own `isFaceFull` accepts as standable.
+                found_in_box += 1;
+            } else {
+                // The fallback arm. It is only reached when the whole box is
+                // invalid, and then the height is not a search result at all — it
+                // is `getSpawnHeight`.
+                assert_eq!(
+                    (sx, sy, sz),
+                    (8, GENERATOR_SPAWN_HEIGHT, 8),
+                    "seed {seed}: a spawn with nothing standable beneath it must be \
+                     exactly the documented `(8, getSpawnHeight, 8)` fallback, not a \
+                     search result hanging in the air"
+                );
+                took_fallback += 1;
+            }
+        }
+        // Preconditions, not decoration: a run that exercised only one arm would
+        // pass while leaving the other completely untested.
+        assert!(found_in_box > 0, "no seed exercised the search-found arm");
+        assert!(took_fallback > 0, "no seed exercised the fallback arm");
     }
 
     #[test]

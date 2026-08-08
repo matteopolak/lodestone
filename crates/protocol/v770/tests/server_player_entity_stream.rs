@@ -432,17 +432,27 @@ async fn two_connections_see_each_other_as_player_entities() {
     //
     // For [`AirSource`] that search finds no solid block in any of its 121 spiral
     // candidates, so it returns its documented full-invalid-box fallback of
-    // `(8, min_y + 1, 8)`. `AirSource`'s column is `ChunkColumn::new(-64, 384)`, so
-    // `min_y + 1` is `-63` — derived from the fixture plus `find_initial_spawn`'s
-    // contract, not read off the failure.
+    // `(8, getSpawnHeight, 8)`.
     //
-    // X and Z stay `8.0`, which is what keeps this assertion able to do its job:
-    // all three components remain non-zero, so an uninitialised `Vec3::default()`
-    // still fails on every axis.
-    const AIR_SOURCE_MIN_Y: f64 = -64.0;
+    // **This expected `min_y + 1` (`-63`) and had to change a second time.** That
+    // was `find_initial_spawn`'s fallback until it was measured against the real
+    // generator: on two of four probe seeds the whole ±5 box is ocean, the fallback
+    // fires, and `-63` is *inside the bedrock floor* — the player is buried in the
+    // dark, which reads as a server hang. `world_spawn::GENERATOR_SPAWN_HEIGHT` is
+    // now vanilla's own `ChunkGenerator.getSpawnHeight`
+    // (`.cache/mc/26.2/src/net/minecraft/world/level/chunk/ChunkGenerator.java:432`,
+    // a literal `64` that `NoiseBasedChunkGenerator` does not override), which is
+    // what `MinecraftServer.setInitialSpawn` pre-seeds the world spawn with. See
+    // DESIGN.md §12.125.
+    //
+    // Derived from the jar plus `find_initial_spawn`'s contract, not read off the
+    // failure. X and Z stay `8.0`, which is what keeps this assertion able to do
+    // its job: all three components remain non-zero, so an uninitialised
+    // `Vec3::default()` still fails on every axis.
+    const GENERATOR_SPAWN_HEIGHT: f64 = 64.0;
     assert_eq!(
         (a_entity.x, a_entity.y, a_entity.z),
-        (8.0, AIR_SOURCE_MIN_Y + 1.0, 8.0),
+        (8.0, GENERATOR_SPAWN_HEIGHT, 8.0),
         "A's entity must stand at the join spawn position `begin_play_at` teleported A to — \
          `find_initial_spawn`'s fallback for a source with no solid block anywhere"
     );
