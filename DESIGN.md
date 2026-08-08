@@ -4773,3 +4773,164 @@ before the run rather than read off it.
   only a *leaf* can enable it. `web/Cargo.toml` already does, target-scoped — which is why the
   `trunk build` row passes while the standalone crate row fails. **That row has therefore been red for
   its whole life and has never been able to catch a regression.**
+
+**12.126 The world-save roundtrip against real vanilla 26.2 landed red in both directions, and the four
+things that nearly made it green were all harness properties rather than assertions.** The owner asked
+for a test that saves a fresh world, gives it to vanilla, has vanilla save it, and reads it back
+identical. Byte identity is **not achievable and is not the goal** — `level.dat` carries a wall clock,
+vanilla recompresses region payloads at its own zlib level, sector placement follows write order, and
+NBT compound field order is not part of the value. So the gate asserts *semantic* identity after
+canonical decode, against an explicitly justified allowlist:
+`crates/lodestone-anvil/tests/vanilla_save_parity.rs`, `scripts/live-oracles/save-parity.sh`,
+`crates/lodestone-anvil/src/nbt_diff.rs`, `docs/world-save-parity.md`. Health at the landing sha:
+`cargo check --workspace --all-targets`, `--all-features --exclude lodestone-allocbench`,
+`-p lodestone-shell --no-default-features`, and `cargo test --workspace --no-fail-fast` — **6977 passed,
+0 failed, 0 non-compiling targets across 579 binaries**.
+
+**Four vacuity traps, each measured, each of which alone would have produced a green run proving
+nothing.** This is the part worth keeping; the defects below are cheaper to rediscover than these are.
+
+- **A vanilla server with no players loads almost nothing.** Handed a real 26.2 world, the server
+  reported `Loading 0 persistent chunks... / Preparing spawn area: 100% / Time elapsed: 16 ms` and
+  touched not one region chunk. A gate that then diffed the directory would have been comparing its own
+  bytes to themselves. `forceload add` is the fix — and its arguments are **block** coordinates, so
+  `forceload add 0 0 31 31` marks four chunks, not thirty-two; getting that wrong shrinks the compared
+  set silently.
+- **A loaded-but-unmodified chunk is not rewritten either.** What actually forces the rewrite is that we
+  write `isLightOn = 0`: vanilla relights on load and `ChunkAccess.setLightCorrect(true)` calls
+  `markUnsaved()`. That is an *inference* about vanilla's internals, so it is not trusted — each
+  direction carries an `assert_vanilla_rewrote` control requiring the region bytes to have changed
+  **and** a field only vanilla writes (`Heightmaps`) to be present in every chunk read back. Two
+  signals, because either alone has a false pass: recompression alone changes bytes, and opaque
+  carry-across leaves the field absent.
+- **`container logs` is empty for `eclipse-temurin:25-jdk`, and the first version of the harness timed
+  out against a perfectly healthy server because of it.** Measured: a server that booted, printed 27
+  lines to its own `logs/latest.log` and reported `Done (0.165s)!` produced *nothing* on
+  `container logs`/`container logs -f`. log4j2's console appender is not line-flushed when stdout is not
+  a tty. The readiness poll now reads `<serverRoot>/logs/latest.log` from the bind mount — and deletes
+  `logs/` before boot, because log4j rolls an existing `latest.log` into a dated `.gz` *at boot*, so a
+  stale file is a `Done (` that has already happened.
+- **A command vanilla rejects is not a failed RCON call.** `gamerule randomTickSpeed 0` was silently
+  refused for eleven runs: 26.2 renamed the rule to `random_tick_speed`
+  (`net/minecraft/world/level/gamerules/GameRules.java:74`, and there is a `GameRuleRegistryFix`
+  datafixer for the old spelling). The server answered
+  `Incorrect argument for commandgamerule randomTickSpeed 0<--[HERE]` — a perfectly valid RCON
+  *response*. `rcon-op.py` printed it and exited 0, the script carried on, and random ticks grew kelp
+  through every subsequent run while the transcript read as correct. This is CLAUDE.md's "treat an audit
+  that prints nothing as a failure to run" in a different costume: **it printed the failure and nothing
+  read it.** Everything now goes through `rcon_checked`, which fails on Brigadier's own error markers.
+
+**Two more that are about the fixture rather than the harness, and both bit.**
+
+- **A fragment of a world is not a world: vanilla decorates newly generated chunks into their existing
+  neighbours.** `applyBiomeDecoration` places features across a 3×3 chunk region, so an ore vein rooted
+  in a new chunk writes cells into ours. Handing vanilla an 8×8 island produced **99 block-state cell
+  changes with nothing to do with our save format**: 25 `stone → coal_ore`, 8 `granite → andesite`, 4
+  `granite → diorite`, a `deepslate → deepslate_diamond_ore`, and a scatter of
+  `birch_leaves[distance=N]` recalculations from neighbours appearing. The fix is a **one-chunk margin**
+  — write and force-load a 10×10, compare the interior 8×8 — because the differences are *real* and
+  allowlisting `block_states` would gut the gate. Removing the cause beats tolerating the effect.
+  (`crates/lodestone-server/tests/decoration_seam_spill.rs` tracks the same mechanism from the other
+  side.)
+- **Freeze the clock, do not allowlist the simulation.** With the tick loop running, ten seconds of
+  settle produced 60-odd cells and 11 rescheduled ticks of pure noise: kelp and cave vines grew, gravel
+  fell (a matched `water[level=0]`→`gravel` / `gravel`→`water[level=0]` pair), and two block-entity tick
+  counters moved (`server_data.state_updating_resumes_at` on 34 trial spawners, `bees[n].ticks_in_hive`
+  on a beehive). All correct vanilla behaviour, none of it about the save format. `tick freeze` before
+  loading removes every one, and it is safe for a specific reason:
+  `runGameElements = !isFrozen || frozenTicksToRun > 0` gates block, random and entity ticks but **not**
+  the chunk source, so loading, promotion to FULL and the relight still run. Had that not held, the
+  `vanilla_rewrote` control would have failed rather than the gate passing vacuously — which is what
+  that control is for. **Four allowlist entries were avoided by fixing the harness instead.**
+
+**The allowlist ended at seven entries, and the shape that makes it auditable is worth copying.** Every
+entry is either a field we deliberately do not write which vanilla recomputes from data it does have
+(`Heightmaps`, `PostProcessing`, `BlockLight`, `SkyLight`), or a clock whose purpose is to advance
+(`LastUpdate`, `InhabitedTime`, `isLightOn`). Nothing touches `block_states`, `biomes`, `Status`,
+`xPos`/`yPos`/`zPos`, `DataVersion`, `block_entities`, `block_ticks`, `fluid_ticks` or `structures`, and
+a non-`#[ignore]`d control asserts no shipped pattern *can* reach one of those paths. Three properties
+carry the weight:
+
+- **`Added` and `Removed` must be distinguished.** "Vanilla added a field we omit" and "vanilla dropped
+  a field we wrote" are the same NBT path, and one is designed behaviour while the other is data loss.
+  A differ reporting both as "differs" cannot express the allowlist at all.
+- **The one permission broad enough to be dangerous has a *checked* premise.** The light entries permit
+  any change whatsoever, sound only while we author no light bytes — so direction B asserts our writer
+  emitted zero `BlockLight`/`SkyLight` arrays *before* the handoff. The premise is a test, not a
+  sentence in a comment.
+- **`PostProcessing` was allowlisted only after measuring it.** Vanilla writes 24 sub-lists per chunk
+  where we write nothing, which looks like data. An independent stdlib Python NBT parser over all **841
+  chunks vanilla saved** found every one carrying 24 sub-lists and a total of **0** positions. Reading
+  it with `lodestone-anvil` would have been a closed loop.
+
+**A control can be exemplary to read and test a path shape the subject cannot produce.** The shipped
+allowlist patterns read `sections[*].SkyLight`, while `compare_sections` keys sections by `Y` and emits
+`sections[Y=-4].SkyLight`. The matcher's control asserted `path_matches("sections[*].SkyLight",
+"sections[7].SkyLight")` — a hand-written path — and passed throughout. The allowlist therefore matched
+**nothing**, and a live run reported 39 `SkyLight` and 2 `BlockLight` additions as failures. This is
+§12.43's *world* species applied to a control: the flaw is the input data, so no amount of reading the
+control finds it. The generalisable rule now enforced by
+`the_allowlist_matcher_is_tested_against_paths_the_gate_really_emits`: **derive the paths a pattern is
+tested against from the comparison itself, not from the pattern's author**, and require every shipped
+pattern to match at least one difference the real comparison emitted.
+
+**Two of my own tools were wrong in the flattering direction, and both were caught by their controls
+rather than by review.** `nbt_diff`'s module doc claimed float leaves compared bit-exactly; the code used
+`Nbt`'s `PartialEq`, which is IEEE — so `0.0 == -0.0` is **true** (a flipped sign bit would go
+unreported) and `NaN == NaN` is **false** (a byte-identical file would report as differing from itself).
+Now compared on `to_bits()`, with the naive comparison kept as the control that shows the difference is
+real. And the fixture helper for the reordered-palette control filled every cell with `palette[0]`
+rather than a nameable background index, so it compared a mostly-air section against a mostly-*stone*
+one and reported 4,095 differences; the same *world* species, in a four-line helper.
+
+**What the gate found. Direction A: the generator emits two spellings of one fluid state, and vanilla's
+own data file is the outside source that proves it.** All 153 unallowlisted differences across 9 chunks
+are `minecraft:water` → `minecraft:water[level=0]` (128 sampled) or `minecraft:lava` →
+`minecraft:lava[level=0]` (8), in 17 sections. `crates/lodestone-server/assets/worldgen/noise_settings/
+overworld.json` carries `"default_fluid": {"Name": "minecraft:water", "Properties": {"level": "0"}}` —
+Mojang's own file — and `crates/lodestone-worldgen/src/overworld/mod.rs` reads only `["Name"]`, dropping
+the properties, while hardcoding `default_lava = "minecraft:lava"` with none at all.
+`crates/lodestone-worldgen/src/carver/mod.rs:32-33` already uses the canonical `[level=0]` forms. So the
+shape stage and the carver disagree, and **4 sections in the direction A fixture carry two palette
+entries for one block state** — a size regression as well as a parity one, since a palette crossing 16
+entries costs a bit of index width for the whole section. Benign on disk (`BlockState.CODEC` defaults
+the property) and *not* benign in memory: `chunk_nbt`'s own doc warns that a non-canonical state string
+is `!=` the identical state and every downstream `match` misses. The same file lists `nether.json` and
+`caves.json`/`floating_islands.json` carrying the same `Properties`, so the fix is one helper, not one
+constant.
+
+**Direction B: 3-D biome data is flattened and structure references are destroyed — and everything else
+is green, which is itself the result.** 696 biome cells across 100 sections, every one
+`minecraft:lush_caves` → the surface biome above it (`ocean` 458, `birch_forest` 139, `beach` 85,
+`river` 8, `dark_forest` 6), because `ChunkColumn::biome_quarts` is `[String; 16]` — one biome per
+horizontal quart, constant across `y` (issue #405's stated shape). Loading a real vanilla world and
+re-saving it therefore erases every cave biome. Separately, 56 `structures.References` and 1
+`structures.starts` entries dropped, because `chunk_nbt` writes `{References: {}, starts: {}}` as a
+stub. Against that: **zero** block-state differences across 64 real vanilla chunks, **zero** block
+entities added or removed out of 145 across 8 kinds — 7 of them unmodelled and surviving only via
+#477's `BlockEntity::Opaque` passthrough — and `Heightmaps` matching byte-for-byte, which is
+independent confirmation of the block preservation since vanilla recomputed them from our re-written
+blocks. #477's passthrough is now evidenced end-to-end through a real JVM rather than through our own
+re-read.
+
+**Three claims in the brief that set this work up were stale or wrong, all in the confident direction.**
+#477 is **closed** — the `BlockEntity::Opaque` passthrough landed in `1927f2e2` — so "saving a real
+vanilla world empties its chests" is no longer true, and direction B now proves it. #516's heightmap gap
+is a *wire* defect and its own issue body says the Anvil omission is deliberate and correct, so the
+predicted "heightmaps appearing" is an allowlist entry with a citation rather than a failure. And #520
+means the generator emits no block entities *at all*, so direction A structurally cannot test the
+block-entity half — which is why that half is direction B's, on a fixture a real server authored.
+`crates/lodestone-server/tests/world_persistence_round_trip.rs` was correctly described: our writer
+through our reader, a closed loop, and it can see none of the above.
+
+**A fixture chosen by a rule beat one chosen by hand, and the hard precondition is what proved it.**
+Direction B first compared the fixed chunk block `0..=7` of `.cache/mc/survival`'s `r.0.0.mca` and the
+precondition fired at **6** block entities — a run that would otherwise have reported green
+block-entity preservation off six containers. The selection is now `densest_chunk_block`: the 10×10
+block whose compared 8×8 *interior* holds the most block entities, maximising over the interior rather
+than the whole written block so the margin's contents cannot win a selection the gate then ignores. It
+picks offset `(8, 7)` with 145 block entities across `chest`, `vault`, `trial_spawner`, `hopper`,
+`barrel`, `decorated_pot`, `dispenser` and `beehive` — a trial chamber. Also asserted as a hard
+precondition: a section palette of **more than 16 entries**, because every palette of 16 or fewer
+divides 64 evenly and reads correctly under either packing rule, so nothing below that threshold
+exercises the non-spanning rule the whole format hinges on.

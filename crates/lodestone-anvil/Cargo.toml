@@ -34,3 +34,18 @@ xxhash-rust = { version = "0.8", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+# **A dev-dependency cycle, deliberately.** `lodestone-server` depends on this
+# crate normally; this direction exists only for `tests/vanilla_save_parity.rs`,
+# whose whole subject is the *chunk schema* (`lodestone_server::chunk_nbt`) and
+# the *generator* (`overworld_chunk_source`) travelling through this crate's
+# container and back out of a real Mojang server. Cargo permits `A --dev--> B
+# --> A`; the precedent here is `lodestone-worldgen` and `lodestone-sound`,
+# which dev-depend on `lodestone-server` for the same reason.
+#
+# The alternative was to hand-author chunk NBT inside the test, which would have
+# made the gate assert against the test's own idea of the schema rather than
+# against the writer production uses — CLAUDE.md's *world* species of vacuous
+# test, where the flaw is which implementation the test resolves to. The cost is
+# real (this crate is otherwise near-leaf, and its dev targets now pull tokio
+# and bevy_ecs through the server graph); the correctness is worth it.
+lodestone-server = { path = "../lodestone-server" }

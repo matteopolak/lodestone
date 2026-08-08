@@ -34,6 +34,10 @@
 //!   per subsystem landed afterward.
 //! - [`compression`]: the compression-scheme byte shared by both formats
 //!   (gzip/zlib/none/lz4 for region chunks; always gzip for `level.dat`).
+//! - [`nbt_diff`]: canonical, path-reporting structural comparison of two NBT
+//!   trees — the primitive the world-save parity gate reports through, and
+//!   deliberately schema-free like [`region`] itself. See
+//!   [`docs/world-save-parity.md`](https://github.com/matteopolak/lodestone/blob/main/docs/world-save-parity.md).
 //! - [`lz4_block`]: the third-party `net.jpountz.lz4` block-stream framing
 //!   the `lz4` region scheme uses — its own module because the framing has
 //!   nothing to do with Minecraft's own format and is reverse-engineered
@@ -93,6 +97,7 @@
 pub mod compression;
 mod lz4_block;
 pub mod level_dat;
+pub mod nbt_diff;
 pub mod region;
 pub mod world_gen_settings;
 
