@@ -306,12 +306,39 @@ fn check(held: &[Held], want: &Held) {
 pub fn hold_read<R>(handle: &EcsHandle, f: impl FnOnce(&World) -> R) -> R {
     let _ledger = Ledger::enter(handle, false);
     let world = handle.read();
-    let started = Instant::now();
+    let started = hold_clock();
     let out = f(&world);
-    if let Some(meter) = world.get_resource::<LockHolds>() {
+    if let Some(started) = started
+        && let Some(meter) = world.get_resource::<LockHolds>()
+    {
         meter.record(started.elapsed());
     }
     out
+}
+
+/// A monotonic reading, or `None` where the target has no clock.
+///
+/// `std::time::Instant::now()` compiles for `wasm32-unknown-unknown` and then
+/// **panics** at runtime ("time not implemented on this platform"), and
+/// [`hold_read`]/[`hold_write`] sit directly on the client driver's ingest path
+/// (`lodestone_client::state::SharedState::apply`). So in a browser this aborted
+/// the session on the first ingested event — measured against a live 26.2 server
+/// through the WebSocket relay, immediately after `Login`. It was invisible
+/// before because the only browser client that had ever reached `Play` used a
+/// stand-in adapter emitting events that route to the echo branch, never here.
+///
+/// Where there is no clock the hold is simply **unmeasured** — the same state a
+/// `World` with no [`LockHolds`] is already documented to be in. Native builds
+/// take `Some` and are unchanged.
+fn hold_clock() -> Option<Instant> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Some(Instant::now())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
 }
 
 /// [`hold_read`]'s **write** twin.
@@ -323,11 +350,13 @@ pub fn hold_read<R>(handle: &EcsHandle, f: impl FnOnce(&World) -> R) -> R {
 pub fn hold_write<R>(handle: &EcsHandle, f: impl FnOnce(&mut World) -> R) -> R {
     let _ledger = Ledger::enter(handle, true);
     let mut world = handle.write();
-    let started = Instant::now();
+    let started = hold_clock();
     let out = f(&mut world);
     // `f` could in principle have removed the resource; `get_resource` tolerates
     // that rather than turning a diagnostic into a crash.
-    if let Some(meter) = world.get_resource::<LockHolds>() {
+    if let Some(started) = started
+        && let Some(meter) = world.get_resource::<LockHolds>()
+    {
         meter.record(started.elapsed());
     }
     out

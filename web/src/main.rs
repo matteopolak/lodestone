@@ -550,12 +550,12 @@ thread_local! {
 ///
 /// `assets` re-uploads the atlas and its UV table (a live world's block set is
 /// whatever the *server* sends, so the atlas is not fixed at startup like the
-/// fixture path's). `view` reseats the camera from a world-space AABB; pass it
-/// only once per session, or the camera snaps back on every chunk batch.
+/// fixture path's). `view` reseats the camera to `(eye, target)`; pass it only
+/// once per session, or the camera snaps back on every chunk batch.
 fn install_scene(
     meshes: &[terrain::SectionMesh],
     assets: Option<&terrain::TerrainAssets>,
-    view: Option<([f32; 3], [f32; 3])>,
+    view: Option<(Vec3, Vec3)>,
 ) -> Result<(usize, usize), String> {
     // `wgpu::Device`/`Queue` are `Arc`-backed and `Clone`, so cloning them out
     // releases the `RENDER_STATE` borrow before the uploads — which matters,
@@ -597,16 +597,8 @@ fn install_scene(
             state.atlas = atlas;
             state.uv = uv;
         }
-        if let Some((min, max)) = view {
-            let centre = Vec3::new(
-                (min[0] + max[0]) * 0.5,
-                (min[1] + max[1]) * 0.5,
-                (min[2] + max[2]) * 0.5,
-            );
-            let extent = Vec3::new(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
-            let radius = (extent.length() * 0.9).max(24.0);
-            let eye = centre + Vec3::new(radius * 0.7, radius * 0.6, radius * 0.7);
-            state.fly = FlyCamera::looking_at(eye, centre);
+        if let Some((eye, target)) = view {
+            state.fly = FlyCamera::looking_at(eye, target);
         }
         Ok((sections, quads))
     })
@@ -745,7 +737,31 @@ async fn run_multiplayer(target: multiplayer::JoinTarget, pack_bytes: Rc<Vec<u8>
             live.section_count,
             &assets.classifier,
         );
-        let view = if seated { None } else { Some((min, max)) };
+
+        // Seat the camera once, near the *player*, not at the centre of the whole
+        // streamed region: a 9×9-column AABB is ~400 blocks tall, so an AABB-derived
+        // orbit puts the eye far outside the world and frames its dark underside.
+        // A short third-person offset is what makes the first frame look like a
+        // game rather than a distant cube.
+        let view = if seated {
+            None
+        } else {
+            match handle.position() {
+                Some(pos) => {
+                    let target = Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
+                    Some((target + Vec3::new(14.0, 12.0, 14.0), target))
+                }
+                None => {
+                    // No position yet: fall back to the meshed region's centre.
+                    let centre = Vec3::new(
+                        (min[0] + max[0]) * 0.5,
+                        (min[1] + max[1]) * 0.5,
+                        (min[2] + max[2]) * 0.5,
+                    );
+                    Some((centre + Vec3::new(40.0, 40.0, 40.0), centre))
+                }
+            }
+        };
         match install_scene(&meshes, Some(assets), view) {
             Ok((sections, quads)) => {
                 seated = true;
