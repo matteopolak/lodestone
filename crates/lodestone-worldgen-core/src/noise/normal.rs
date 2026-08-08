@@ -25,19 +25,37 @@ impl NormalNoise {
         let first = PerlinNoise::create(random, first_octave, amplitudes);
         let second = PerlinNoise::create(random, first_octave, amplitudes);
 
-        let mut min_octave = i32::MAX;
-        let mut max_octave = i32::MIN;
-        for (i, amp) in amplitudes.iter().enumerate() {
-            if *amp != 0.0 {
-                min_octave = min_octave.min(i as i32);
-                max_octave = max_octave.max(i as i32);
-            }
-        }
-        let value_factor = 0.166_666_666_666_666_66 / expected_deviation(max_octave - min_octave);
         Self {
             first,
             second,
-            value_factor,
+            value_factor: value_factor(amplitudes),
+        }
+    }
+
+    /// `NormalNoise.createLegacyNetherBiome` — the `useNewInitialization = false`
+    /// arm (`NormalNoise.java:26-28`, `:41-47`).
+    ///
+    /// The **only** two noises in the game that take it are
+    /// `minecraft:nether/temperature` and `minecraft:nether/vegetation`, and
+    /// `RandomState`'s `NoiseWiringHelper.visitNoise` special-cases them by *id*
+    /// — not by the dimension's `legacy_random_source` flag — seeding them from
+    /// `new LegacyRandomSource(worldSeed + 0)` and `(worldSeed + 1)`
+    /// respectively, on the **raw world seed** rather than a positional fork.
+    /// Since the Nether router zeroes every other climate channel, these two
+    /// noises *are* the Nether's biome map, so this path is not an edge case.
+    pub fn create_legacy_nether_biome<R: RandomSource>(
+        random: &mut R,
+        first_octave: i32,
+        amplitudes: &[f64],
+    ) -> Self {
+        let first =
+            PerlinNoise::create_legacy_for_legacy_nether_biome(random, first_octave, amplitudes);
+        let second =
+            PerlinNoise::create_legacy_for_legacy_nether_biome(random, first_octave, amplitudes);
+        Self {
+            first,
+            second,
+            value_factor: value_factor(amplitudes),
         }
     }
 
@@ -53,4 +71,20 @@ impl NormalNoise {
 
 fn expected_deviation(octave_span: i32) -> f64 {
     0.1 * (1.0 + 1.0 / f64::from(octave_span + 1))
+}
+
+/// `0.16666666666666666 / expectedDeviation(maxOctave - minOctave)`, over the
+/// indices of the non-zero amplitudes. Shared by both constructor arms — the
+/// `useNewInitialization` flag changes how the two Perlin stacks are *seeded*,
+/// never this scale factor.
+fn value_factor(amplitudes: &[f64]) -> f64 {
+    let mut min_octave = i32::MAX;
+    let mut max_octave = i32::MIN;
+    for (i, amp) in amplitudes.iter().enumerate() {
+        if *amp != 0.0 {
+            min_octave = min_octave.min(i as i32);
+            max_octave = max_octave.max(i as i32);
+        }
+    }
+    0.166_666_666_666_666_66 / expected_deviation(max_octave - min_octave)
 }

@@ -51,6 +51,29 @@ impl PerlinNoise {
         Self::new_legacy(random, first_octave, amplitudes)
     }
 
+    /// `createLegacyForLegacyNetherBiome` — the `useNewInitialization = false`
+    /// path over an explicit `(first_octave, amplitudes)` pair.
+    ///
+    /// Same constructor arm as [`Self::create_legacy_for_blended_noise`]; the
+    /// difference is only that the octave set arrives as amplitudes rather than
+    /// as a range (`PerlinNoise.java:34-37`). Reached from
+    /// [`crate::noise::NormalNoise::create_legacy_nether_biome`], which is the
+    /// only caller vanilla has.
+    ///
+    /// **The draw count is not the octave count.** For the two Nether noises
+    /// (`first_octave -7`, amplitudes `[1.0, 1.0]`) `zeroOctaveIndex` is 7 while
+    /// there are only 2 octaves, so vanilla builds an `ImprovedNoise` for the
+    /// zero octave and **throws it away**, then `skipOctave`s (262 discarded
+    /// `nextInt`s) five times before building the two it keeps. Getting that
+    /// wrong yields a plausible Nether that is not vanilla's.
+    pub fn create_legacy_for_legacy_nether_biome<R: RandomSource>(
+        random: &mut R,
+        first_octave: i32,
+        amplitudes: &[f64],
+    ) -> Self {
+        Self::new_legacy(random, first_octave, amplitudes.to_vec())
+    }
+
     /// `getOctaveNoise(i)` = `noiseLevels[len - 1 - i]`.
     #[must_use]
     pub fn get_octave_noise(&self, i: usize) -> Option<&ImprovedNoise> {

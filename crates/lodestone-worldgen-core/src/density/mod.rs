@@ -120,7 +120,7 @@ use serde_json::Value;
 
 use crate::math::{clamp, clamped_map};
 use crate::noise::{BlendedNoise, NormalNoise};
-use crate::rng::{PositionalRandomFactory, RandomSource, XoroshiroRandomSource};
+use crate::rng::{PositionalRandomFactory, RandomSource};
 
 mod chunk;
 mod spline;
@@ -717,20 +717,54 @@ fn shift_compute(noise: &NormalNoise, x: f64, y: f64, z: f64) -> f64 {
 }
 
 /// Builds a density-function tree from JSON, seeding all noises from `seed`
-/// exactly as vanilla's `RandomState` does for the overworld (xoroshiro).
+/// exactly as vanilla's `RandomState` does.
+///
+/// The RNG family is **data**, not a constant: `legacy_random_source` in the
+/// dimension's `noise_settings` picks it, and the Nether and the End both set
+/// it. [`Builder::new`] keeps the xoroshiro default the Overworld uses;
+/// [`Builder::with_algorithm`] is the dimension-aware entry point. See
+/// [`crate::rng::Algorithm`].
 #[allow(missing_debug_implementations)]
 pub struct Builder<'a> {
-    master: crate::rng::XoroshiroPositionalFactory,
+    master: crate::rng::AnyPositionalFactory,
+    /// The raw world seed. Kept because two of `RandomState`'s wirings are
+    /// defined on it directly rather than on a positional fork: the two Nether
+    /// biome noises (`seed + 0` / `seed + 1`) and `BlendedNoise` under legacy
+    /// init (`seed + 0`).
+    seed: i64,
+    algorithm: crate::rng::Algorithm,
     resolver: &'a dyn Resolver,
     slots: std::cell::Cell<usize>,
 }
 
+/// `Noises.TEMPERATURE_NETHER` — one of the two ids `RandomState` special-cases.
+const TEMPERATURE_NETHER: &str = "minecraft:nether/temperature";
+/// `Noises.VEGETATION_NETHER`.
+const VEGETATION_NETHER: &str = "minecraft:nether/vegetation";
+
 impl<'a> Builder<'a> {
-    /// Creates a builder for `seed` using `resolver` for references.
+    /// Creates a builder for `seed` using `resolver` for references, with the
+    /// xoroshiro family — i.e. every dimension whose settings leave
+    /// `legacy_random_source` false, which is the Overworld and its variants.
     pub fn new(seed: i64, resolver: &'a dyn Resolver) -> Self {
-        let master = XoroshiroRandomSource::new(seed).fork_positional();
+        Self::with_algorithm(seed, crate::rng::Algorithm::Xoroshiro, resolver)
+    }
+
+    /// Creates a builder for `seed` on an explicit RNG family — the
+    /// `settings.getRandomSource().newInstance(seed).forkPositional()` of
+    /// `RandomState.java:36`.
+    ///
+    /// Use [`crate::rng::Algorithm::from_settings`] to read the flag rather than
+    /// deciding per dimension at the call site.
+    pub fn with_algorithm(
+        seed: i64,
+        algorithm: crate::rng::Algorithm,
+        resolver: &'a dyn Resolver,
+    ) -> Self {
         Self {
-            master,
+            master: algorithm.root_positional(seed),
+            seed,
+            algorithm,
             resolver,
             slots: std::cell::Cell::new(0),
         }
@@ -752,6 +786,24 @@ impl<'a> Builder<'a> {
 
     fn instantiate_noise(&self, id: &str) -> NormalNoise {
         let params = self.resolver.noise(id);
+        // `RandomState.NoiseWiringHelper.visitNoise` (`RandomState.java:53-65`)
+        // branches on the noise *id*, before `getOrCreateNoise` is ever reached,
+        // and does so regardless of `legacy_random_source` — so this fork is not
+        // conditional on `self.algorithm`. `newLegacyInstance(n)` is
+        // `new LegacyRandomSource(seed + n)` on the raw world seed (`:50-52`).
+        let offset = match id {
+            TEMPERATURE_NETHER => Some(0),
+            VEGETATION_NETHER => Some(1),
+            _ => None,
+        };
+        if let Some(offset) = offset {
+            let mut src = crate::rng::LegacyRandomSource::new(self.seed.wrapping_add(offset));
+            return NormalNoise::create_legacy_nether_biome(
+                &mut src,
+                params.first_octave,
+                &params.amplitudes,
+            );
+        }
         let mut src = self.master.from_hash_of(id);
         NormalNoise::create(&mut src, params.first_octave, &params.amplitudes)
     }
@@ -770,12 +822,27 @@ impl<'a> Builder<'a> {
     /// per-column `at(x, 0, z)` draw and for `getOrCreateRandomFactory(name)`
     /// (`master.fromHashOf(name).forkPositional()`) used by `vertical_gradient`.
     #[must_use]
-    pub fn positional_factory(&self) -> crate::rng::XoroshiroPositionalFactory {
+    pub fn positional_factory(&self) -> crate::rng::AnyPositionalFactory {
         self.master
     }
 
+    /// The RNG family this builder was created with — the `useLegacyInit` of
+    /// `RandomState.java:41`. Exposed so a dimension pipeline can assert it read
+    /// its own settings rather than inheriting the Overworld default.
+    #[must_use]
+    pub fn algorithm(&self) -> crate::rng::Algorithm {
+        self.algorithm
+    }
+
     fn instantiate_blended(&self, node: &Value) -> BlendedNoise {
-        let mut src = self.master.from_hash_of("minecraft:terrain");
+        // `RandomState.java:70-73`: `useLegacyInit ? newLegacyInstance(0L)
+        // : random.fromHashOf("terrain")`. Both `old_blended_noise` dimensions
+        // (Nether, End) take the first arm, on the raw world seed.
+        let mut src = if self.algorithm.is_legacy() {
+            crate::rng::AnyRandomSource::Legacy(crate::rng::LegacyRandomSource::new(self.seed))
+        } else {
+            self.master.from_hash_of("minecraft:terrain")
+        };
         BlendedNoise::new(
             &mut src,
             f(node, "xz_scale"),

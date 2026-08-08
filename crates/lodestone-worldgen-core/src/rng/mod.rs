@@ -9,11 +9,19 @@
 //! Both expose the same [`RandomSource`] surface and a [`PositionalRandomFactory`]
 //! (via `fork_positional`) that derives independent, position-keyed generators —
 //! the mechanism worldgen uses to seed per-noise and per-feature randomness.
+//!
+//! Which family a *dimension* uses is data, not a constant: see [`Algorithm`]
+//! (`WorldgenRandom.Algorithm`) and the [`AnyRandomSource`] /
+//! [`AnyPositionalFactory`] pair it produces. The Overworld is xoroshiro; the
+//! Nether and the End set `legacy_random_source: true` and are therefore LCG
+//! from the noise stack down.
 
+mod any;
 mod gaussian;
 mod legacy;
 mod xoroshiro;
 
+pub use any::{Algorithm, AnyPositionalFactory, AnyRandomSource};
 pub use legacy::{LegacyPositionalFactory, LegacyRandomSource};
 pub use xoroshiro::{XoroshiroPositionalFactory, XoroshiroRandomSource};
 

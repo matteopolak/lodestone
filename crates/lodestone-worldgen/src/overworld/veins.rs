@@ -48,7 +48,7 @@ use crate::density::NoiseChunkSampler;
 use crate::engine::{Bounds, Program};
 use crate::interner::StateId;
 use crate::math::clamped_map;
-use crate::rng::{PositionalRandomFactory, RandomSource, XoroshiroPositionalFactory};
+use crate::rng::{PositionalRandomFactory, RandomSource, AnyPositionalFactory};
 
 /// `OreVeinifier`'s own constants, named as vanilla names them.
 const VEININESS_THRESHOLD: f64 = 0.4;
@@ -80,7 +80,7 @@ pub(super) struct VeinPrograms {
     toggle: Program,
     ridged: Program,
     gap: Program,
-    positional: XoroshiroPositionalFactory,
+    positional: AnyPositionalFactory,
     copper: VeinType,
     iron: VeinType,
 }

@@ -70,7 +70,7 @@ use crate::density::{Builder, Context as DfContext, Density};
 use crate::interner::{StateId, StateInterner};
 use crate::math::{floor, lerp2, map, random_between_inclusive, round};
 use crate::noise::NormalNoise;
-use crate::rng::{PositionalRandomFactory, RandomSource, XoroshiroPositionalFactory};
+use crate::rng::{PositionalRandomFactory, RandomSource, AnyPositionalFactory};
 
 /// The vanilla `Integer.MIN_VALUE` sentinel meaning "no water above".
 const NO_WATER: i32 = i32::MIN;
@@ -208,7 +208,7 @@ enum Cond {
     Temperature,
     Hole,
     VerticalGradient {
-        factory: XoroshiroPositionalFactory,
+        factory: AnyPositionalFactory,
         true_at_and_below: i32,
         false_at_and_above: i32,
     },
@@ -434,7 +434,7 @@ pub struct SurfaceSystem {
     interner: Arc<StateInterner>,
     surface_noise: NormalNoise,
     surface_secondary_noise: NormalNoise,
-    master: XoroshiroPositionalFactory,
+    master: AnyPositionalFactory,
     prelim: Density,
     rule: Rule,
 }
