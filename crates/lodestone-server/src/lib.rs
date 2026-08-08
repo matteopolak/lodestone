@@ -112,6 +112,10 @@ mod block_entities;
 /// [`MobSim::spawn_item`] and `server`'s block-break arm.
 pub mod block_drops;
 mod block_placement;
+/// Bone meal's instant-growth right-click — the rule layer for one item, on top
+/// of the growth families [`growth_tick`] already models. Public because the
+/// producer is a right-click handler outside the tick loop.
+pub mod bone_meal;
 mod border;
 mod brewing;
 mod chunk;
@@ -147,6 +151,14 @@ pub mod ecs;
 /// because `ServerProtocol`'s three new encoders name [`effects::WorldEffect`].
 pub mod effects;
 mod fall;
+/// Fire spread and burnout on the block-tick queue (`docs/fire-spread.md`).
+/// Public for the same reason [`fluid`] is: any code that writes a fire block
+/// owes [`fire::ticks_after_edit`] for that position, or the fire is inert.
+pub mod fire;
+/// Explosion block destruction — the ray-sampled blast on real blast resistance
+/// (`docs/explosion-blocks.md`). Public because the detonation producer lives
+/// outside the tick loop.
+pub mod explosion_blocks;
 /// Water and lava spread on the scheduled-tick queue (`docs/fluid-spread.md`).
 /// Public because the tick loop is not the only intended caller: any code that
 /// edits a block owes [`fluid::ticks_after_edit`] for that position.

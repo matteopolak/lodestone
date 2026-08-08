@@ -164,6 +164,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   every one of the 32,366 block states, plus the type's volume and pitch. It is the
   data half of every surface sound a block makes, and its absence is the whole reason
   block breaking was silent (see [sound playback](./sound-playback.md)).
+- [Bone meal](./bone-meal.md) — The instant-growth right-click: a port of 26.2's
+  `BoneMealItem::useOn` and the per-block `isValidBonemealTarget` /
+  `isBonemealSuccess` / `performBonemeal` triples it dispatches to, in
+  `crates/lodestone-server/src/bone_meal.rs`. Bone meal on wheat, carrots, potatoes or
+  beetroots jumps the crop several growth stages; on a sapling it advances the stage
+  45% of the time and is consumed either way.
 - [Break particles](./break-particles.md) — A terrain particle is a small
   camera-facing billboard textured from a random **quarter** of its block's
   `#particle` sprite, tinted by a per-state colour, and shaded by the light at its
@@ -479,6 +485,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   client's event routers claim each `ClientEvent` variant. It exists so that adding a
   variant and forgetting to wire it is a **compile error** (`E0004`) rather than a
   silent nothing.
+- [Explosion block destruction](./explosion-blocks.md) — The half of an explosion
+  that removes blocks: a port of 26.2's `ServerExplosion::calculateExplodedPositions`
+  into `crates/lodestone-server/src/explosion_blocks.rs`, on real per-block blast
+  resistance dumped from the jar, so a creeper leaves a crater instead of only hurting
+  whoever was standing in it.
+- [Explosion performance](./explosion-performance.md) — A measured profile of what
+  an explosion costs on the integrated server, and a plan for making it cheap without
+  changing a single output. Vanilla's own explosions visibly stall a Java tick when
+  several fire at once; the goal here is identical physics at a different cost, so a
+  TNT cannon does not freeze the game.
 - [Fall damage and death](./fall-damage-and-death.md) — The server-side half of the
   damage→death→respawn loop: `FallTracker` (`crates/lodestone-server/src/fall.rs`)
   accumulates fall distance from the positions a client reports and turns a landing
@@ -494,6 +510,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `minecraft:filled_map`'s actual picture — the vanilla `MapColor` palette, a
   per-map 128×128 texture built from the colour bytes `SessionMaps` folds, and the
   quads that show it in the hand and in an item frame (issue #184).
+- [Fire spread and burnout](./fire-spread.md) — Fire behaving like fire on the
+  integrated server: a port of 26.2's `FireBlock` into
+  `crates/lodestone-server/src/fire.rs`, driven by the block scheduled-tick queue, so
+  a fire ages toward burnout, eats the blocks around it, spreads onto flammable
+  neighbours at vanilla's own odds, is put out by rain, and burns forever over
+  netherrack. Lava's own random tick is what lights the first one.
 - [First-person held item](./first-person-held-item.md) — The item in the local
   player's hand in first person — vanilla's `ItemInHandRenderer.submitArmWithItem`
   non-empty branch. It replaces the bare arm rather than joining it, and it is one
