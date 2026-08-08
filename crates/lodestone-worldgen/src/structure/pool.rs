@@ -339,6 +339,22 @@ pub struct PoolStore {
     dangling: BTreeSet<String>,
 }
 
+/// The alias names and targets of one jigsaw structure, as
+/// [`PoolStore::load`] needs them.
+///
+/// Two sets rather than one map because the walk asks two different questions:
+/// *"is this missing pool an alias, and therefore fine?"* (`names`) and *"what else
+/// must be loaded even though nothing references it?"* (`targets`). One map keyed
+/// by alias could answer neither cleanly, since a `random_group` binding has many
+/// possible targets per alias.
+#[derive(Debug, Default, Clone)]
+pub struct AliasedPools {
+    /// Every id that appears as an `alias`.
+    pub names: BTreeSet<String>,
+    /// Every id any binding can resolve **to**.
+    pub targets: BTreeSet<String>,
+}
+
 impl PoolStore {
     /// One loaded pool, or `None` when it was not bundled.
     #[must_use]
@@ -378,8 +394,12 @@ impl PoolStore {
         resolver: &dyn Resolver,
         templates: &mut TemplateStore,
         start: &str,
+        aliases: &AliasedPools,
     ) -> Result<(), String> {
         let mut queue = vec![start.to_string()];
+        // Every alias *target* is a root of its own: only one is chosen per
+        // structure instance, at start time, so all of them have to be loaded now.
+        queue.extend(aliases.targets.iter().cloned());
         let mut seen: BTreeSet<String> = BTreeSet::new();
         while let Some(id) = queue.pop() {
             if !seen.insert(id.clone()) || self.pools.contains_key(&id) {
@@ -387,6 +407,14 @@ impl PoolStore {
             }
             let document = resolver.template_pool(&id);
             if document.is_null() {
+                // An **alias** is not expected to be a pool at all
+                // (`trial_chambers/spawner/contents/melee` ships no document), so a
+                // missing document for a declared alias is data being correct, not
+                // data being absent. Every other missing pool still refuses the
+                // structure.
+                if aliases.names.contains(&id) {
+                    continue;
+                }
                 return Err(format!("template pool '{id}' not bundled"));
             }
             let fallback = document["fallback"]
@@ -580,26 +608,45 @@ impl PoolStore {
             "minecraft:rule" => {
                 let mut rules = Vec::new();
                 for rule in value["rules"].as_array().cloned().unwrap_or_default() {
-                    // A rule with a real `position_predicate` is refused rather
-                    // than defaulted: `PosAlwaysTrueTest` draws nothing and
-                    // `AxisAlignedLinearPosTest` draws one float, so pretending
-                    // would shift every later rule's roll.
-                    match rule["position_predicate"]["predicate_type"].as_str() {
-                        None | Some("minecraft:always_true") => {}
-                        Some(other) => return Err(format!("position_predicate '{other}'")),
-                    }
-                    if rule.get("block_entity_modifier").is_some_and(|m| {
-                        m["type"].as_str().is_some_and(|t| t != "minecraft:passthrough")
-                    }) {
-                        return Err("rule block_entity_modifier".to_string());
+                    // `append_loot` chooses the *state* and additionally writes a
+                    // loot table into the block entity. The state half is honoured;
+                    // the loot half is ledgered under `block_entity:append_loot`,
+                    // because a worldgen chunk here has no block entities at all.
+                    // Any other modifier type is still refused — its effect is not
+                    // confined to something we can name.
+                    match rule["block_entity_modifier"]["type"].as_str() {
+                        None | Some("minecraft:passthrough") | Some("minecraft:clear")
+                        | Some("minecraft:append_loot") => {}
+                        Some(other) => {
+                            return Err(format!("rule block_entity_modifier '{other}'"));
+                        }
                     }
                     rules.push(ProcessorRule {
                         input: self.rule_test(resolver, &rule["input_predicate"])?,
                         location: self.rule_test(resolver, &rule["location_predicate"])?,
+                        position: parse_pos_test(&rule["position_predicate"])?,
                         output: parse_state(&rule["output_state"]),
                     });
                 }
                 Ok(Processor::Rule(rules))
+            }
+            "minecraft:capped" => {
+                let delegate = self.parse_processor(resolver, &value["delegate"])?;
+                // `IntProviders.POSITIVE_CODEC` accepts a bare int (`ConstantInt`,
+                // no draw) or a tagged provider (which *does* draw, before the
+                // shuffle). Every bundled `capped` uses the bare form; anything
+                // else is refused rather than approximated, because a draw here
+                // moves the entire shuffled index walk.
+                let limit = match &value["limit"] {
+                    Value::Number(n) => n.as_i64().unwrap_or(0) as i32,
+                    other => {
+                        return Err(format!("capped `limit` provider {other}"));
+                    }
+                };
+                Ok(Processor::Capped {
+                    delegate: Box::new(delegate),
+                    limit,
+                })
             }
             other => Err(format!("processor_type '{other}'")),
         }
@@ -689,6 +736,42 @@ fn collect_blocks(
             }
         }
         _ => {}
+    }
+}
+
+/// A `PosRuleTest` document, or why it cannot be modelled.
+///
+/// `min_dist`/`max_dist` default to `0`, which vanilla's own constructor rejects
+/// (`minDist >= maxDist` throws) — so a document that omits both is malformed
+/// data, and refusing it here keeps that a loud ledger row rather than a
+/// divide-by-zero producing `NaN` and a chance of `min_chance` everywhere.
+fn parse_pos_test(value: &Value) -> Result<super::processor::PosTest, String> {
+    use super::processor::{Axis, PosTest};
+    match value["predicate_type"].as_str() {
+        None | Some("minecraft:always_true") => Ok(PosTest::AlwaysTrue),
+        Some("minecraft:axis_aligned_linear_pos") => {
+            let min_dist = value["min_dist"].as_i64().unwrap_or(0) as i32;
+            let max_dist = value["max_dist"].as_i64().unwrap_or(0) as i32;
+            if min_dist >= max_dist {
+                return Err(format!(
+                    "axis_aligned_linear_pos range [{min_dist},{max_dist}]"
+                ));
+            }
+            let axis = match value["axis"].as_str() {
+                None | Some("y") => Axis::Y,
+                Some("x") => Axis::X,
+                Some("z") => Axis::Z,
+                Some(other) => return Err(format!("position_predicate axis '{other}'")),
+            };
+            Ok(PosTest::AxisAlignedLinear {
+                min_chance: value["min_chance"].as_f64().unwrap_or(0.0) as f32,
+                max_chance: value["max_chance"].as_f64().unwrap_or(0.0) as f32,
+                min_dist,
+                max_dist,
+                axis,
+            })
+        }
+        Some(other) => Err(format!("position_predicate '{other}'")),
     }
 }
 

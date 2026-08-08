@@ -400,6 +400,24 @@ pub fn transform(pos: [i32; 3], mirror: Mirror, rotation: Rotation, pivot: [i32;
     }
 }
 
+/// `placeInWorld`'s three non-`StructurePlaceSettings` arguments.
+///
+/// Grouped because they arrive from three different places and every one of them
+/// is easy to get wrong on its own: `position` is the piece's, `reference` is the
+/// whole *start*'s (see [`super::jigsaw::reference_position`]), and `seed` is the
+/// **world** seed rather than any derived stream — [`Processor::Capped`] forks it
+/// positionally, so a per-chunk or per-structure seed here would give one piece a
+/// different set of suspicious blocks in each chunk it spans.
+#[derive(Debug, Clone, Copy)]
+pub struct PlaceOrigin {
+    /// `templatePosition` — where template-local `(0,0,0)` lands.
+    pub position: [i32; 3],
+    /// `referencePos`.
+    pub reference: [i32; 3],
+    /// `level.getSeed()`.
+    pub seed: i64,
+}
+
 /// How one piece places its template: vanilla's `StructurePlaceSettings` plus the
 /// template position, held together because a piece needs all of it and nothing
 /// else.
@@ -657,7 +675,13 @@ impl StructureTemplate {
     /// difference between a plank bridge and a random one.
     ///
     /// Returns the number of blocks actually written inside the grid.
-    pub fn place(&self, position: [i32; 3], settings: &PlaceSettings, grid: &mut DenseBlockGrid) -> usize {
+    pub fn place(
+        &self,
+        origin: PlaceOrigin,
+        settings: &PlaceSettings,
+        grid: &mut DenseBlockGrid,
+    ) -> usize {
+        let position = origin.position;
         let palette = &self.palettes[self.palette_for(position).min(self.palettes.len() - 1)];
         let (min_x, min_y, min_z, size_x, size_y, size_z) = grid.bounds();
         let inside = |p: [i32; 3]| {
@@ -668,16 +692,28 @@ impl StructureTemplate {
                 && p[2] >= min_z
                 && p[2] < min_z + size_z
         };
+        // `processOnlyInCurrentChunk`: false as soon as **any** processor
+        // `evaluatesEntirePieceState()`. Only `capped` does, and for it the whole
+        // piece must be processed even though only this chunk's share is written:
+        // its shuffled walk indexes the processed list, so a list clipped to the
+        // chunk would give the piece a different number of suspicious blocks on
+        // each side of a border.
+        let whole_piece = settings
+            .processors
+            .iter()
+            .any(Processor::evaluates_entire_piece_state);
         let mut processed: Vec<ProcessedBlock> = Vec::new();
+        // The `originalBlockInfoList` half — template-local position and `nbt` per
+        // *surviving* block, kept index-parallel with `processed` because that is
+        // exactly the invariant `CappedProcessor` checks before doing anything.
+        let mut originals: Vec<([i32; 3], Option<Arc<BlockNbt>>)> = Vec::new();
         for block in &self.blocks {
             let rel = transform(block.pos, settings.mirror, settings.rotation, settings.pivot);
             let world = [rel[0] + position[0], rel[1] + position[1], rel[2] + position[2]];
             // The grid clips writes, but a processor chain is not free — skip the
-            // whole block when it cannot land here anyway. This is vanilla's own
-            // `processOnlyInCurrentChunk` skip, which it also takes whenever no
-            // processor `evaluatesEntirePieceState()` (only `capped` does, and
-            // `capped` is on the ledger).
-            if !inside(world) {
+            // whole block when it cannot land here anyway, unless a whole-piece
+            // processor forbids it.
+            if !whole_piece && !inside(world) {
                 continue;
             }
             let Some(state) = palette.get(block.state as usize) else {
@@ -695,6 +731,7 @@ impl StructureTemplate {
                 let Some(block_now) = current.take() else { break };
                 let ctx = ProcessCtx {
                     local: block.pos,
+                    reference: origin.reference,
                     nbt: block.nbt.as_deref(),
                     world: grid,
                 };
@@ -702,7 +739,21 @@ impl StructureTemplate {
             }
             if let Some(block_now) = current {
                 processed.push(block_now);
+                originals.push((block.pos, block.nbt.clone()));
             }
+        }
+        // `for (StructureProcessor processor : settings.getProcessors())
+        //      processedBlockInfoList = processor.finalizeProcessing(...)` — every
+        // processor in chain order, and every one but `capped` is the identity.
+        for processor in &settings.processors {
+            processor.finalize(
+                position,
+                origin.reference,
+                origin.seed,
+                &originals,
+                &mut processed,
+                grid,
+            );
         }
         let mut written = 0;
         for block in processed {

@@ -351,6 +351,25 @@ pub struct PiecePlacement {
     pub settings: PlaceSettings,
 }
 
+/// One block a **coded** piece generator emits, resolved at start time.
+///
+/// The seam that makes a coded `postProcess` work in a per-chunk memoised
+/// pipeline. Vanilla's coded generators write into the world as they walk, reading
+/// heights and existing blocks at arbitrary positions and freely crossing chunk
+/// borders from whichever chunk got there first; we cannot, so a coded piece
+/// resolves its whole block list once, against [`StartContext`], and
+/// `structure_place_stage` clips it. The cost is the list's memory (a desert
+/// pyramid is ~7k entries) and the gain is that two chunks placing two halves of
+/// one pyramid cannot disagree.
+#[derive(Debug, Clone)]
+pub struct CodedBlock {
+    /// Absolute world position.
+    pub pos: [i32; 3],
+    /// The canonical block state string, ready for
+    /// [`DenseBlockGrid::set`](crate::dense_grid::DenseBlockGrid::set).
+    pub state: String,
+}
+
 /// One piece of a structure start — the unit vanilla persists under
 /// `structures.starts.<id>.Children`.
 #[derive(Debug, Clone)]
@@ -376,6 +395,12 @@ pub struct StructurePiece {
     /// box, one junction list and one beard — and splitting it into siblings would
     /// hand the beardifier a duplicate rigid box per sub-template.
     pub extra_placements: Vec<Arc<PiecePlacement>>,
+    /// A **coded** piece's pre-resolved block list, or `None` for a template piece.
+    ///
+    /// `Option<Arc<…>>` rather than a bare `Vec` for the same reason
+    /// [`Self::placement`] is: a start is cloned into every chunk that references
+    /// it, and a pyramid's 7k blocks must be a refcount bump rather than a copy.
+    pub blocks: Option<Arc<Vec<CodedBlock>>>,
     /// The `PoolElementStructurePiece`-only facts the beardifier reads, or `None`
     /// for a coded piece — which is vanilla's own `else` branch
     /// (`Beardifier.java:75`: rigid box, `groundLevelDelta` 0, no junctions), not
@@ -809,6 +834,7 @@ impl StructureKind {
                 cz,
                 ctx.min_y(),
                 ctx.dimension_height(),
+                seed,
                 ctx,
                 structure_random(seed, cx, cz),
             )
@@ -955,6 +981,10 @@ impl StructureKind {
                     template: None,
                     placement: None,
                     extra_placements: Vec::new(),
+                    // `BuriedTreasurePiece.postProcess` walks down to stone and
+                    // places one chest, which needs a block entity and a loot
+                    // table — ledgered, not emitted.
+                    blocks: None,
                     beard: None,
                 }])
             }
@@ -1186,7 +1216,16 @@ fn ocean_ruin_add_piece<R: RandomSource>(
     match temperature {
         OceanRuinTemperature::Warm => {
             let name = pick(OCEAN_RUIN_WARM[slot], random);
-            ocean_ruin_push(name, position, rotation, base_integrity, ctx, templates, out);
+            ocean_ruin_push(
+                name,
+                temperature,
+                position,
+                rotation,
+                base_integrity,
+                ctx,
+                templates,
+                out,
+            );
         }
         OceanRuinTemperature::Cold => {
             let bricks = OCEAN_RUIN_BRICK[slot];
@@ -1198,14 +1237,51 @@ fn ocean_ruin_add_piece<R: RandomSource>(
                 (OCEAN_RUIN_MOSSY[slot], 0.5),
             ] {
                 let Some(name) = family.get(index) else { continue };
-                ocean_ruin_push(name, position, rotation, integrity, ctx, templates, out);
+                ocean_ruin_push(
+                    name,
+                    temperature,
+                    position,
+                    rotation,
+                    integrity,
+                    ctx,
+                    templates,
+                    out,
+                );
             }
         }
     }
 }
 
+/// `OceanRuinPieces.archyRuleProcessor(candidate, replacement, lootTable)` — the
+/// coded `CappedProcessor` that turns exactly five of a ruin's sand or gravel
+/// blocks into suspicious ones.
+///
+/// A *coded* processor, not one of the 40 `processor_list` documents, which is why
+/// it is spelled out here rather than resolved from data. `ConstantInt.of(5)`
+/// draws nothing; the five positions come from the shuffled index walk over the
+/// piece's already-rotted block list.
+fn ocean_ruin_archaeology(temperature: OceanRuinTemperature) -> Processor {
+    let (candidate, replacement) = match temperature {
+        OceanRuinTemperature::Warm => ("minecraft:sand", "minecraft:suspicious_sand[dusted=0]"),
+        OceanRuinTemperature::Cold => ("minecraft:gravel", "minecraft:suspicious_gravel[dusted=0]"),
+    };
+    Processor::Capped {
+        delegate: Box::new(Processor::Rule(vec![processor::ProcessorRule {
+            input: processor::RuleTest::BlockMatch(candidate.to_string()),
+            location: processor::RuleTest::AlwaysTrue,
+            position: processor::PosTest::AlwaysTrue,
+            // `replacementBlock.defaultBlockState()` — `BrushableBlock`'s `dusted`
+            // defaults to 0, and the property has to be spelled out because the
+            // state field's canonical form carries every property.
+            output: template::BlockState::parse(replacement),
+        }])),
+        limit: 5,
+    }
+}
+
 fn ocean_ruin_push(
     name: &str,
+    temperature: OceanRuinTemperature,
     position: [i32; 3],
     rotation: Rotation,
     integrity: f32,
@@ -1220,16 +1296,19 @@ fn ocean_ruin_push(
         rotation,
         mirror: Mirror::None,
         pivot: [0, 0, 0],
-        // `BlockRotProcessor` first, then `STRUCTURE_AND_AIR`: a rotted-away
-        // block is dropped before the ignore list ever sees it. The third
-        // processor vanilla adds (the capped suspicious-sand rule) is on the
-        // ledger, not here.
+        // `BlockRotProcessor` first, then `STRUCTURE_AND_AIR`, then the capped
+        // archaeology rule: a rotted-away block is dropped before the ignore
+        // list ever sees it, and the capped walk runs over what survives both.
+        // Its order matters twice over — being last is what makes its index walk
+        // range over the *rotted* list, so a ruin with integrity 0.5 has half as
+        // many candidate positions as one with 1.0.
         processors: vec![
             Processor::BlockRot {
                 rottable: None,
                 integrity,
             },
             Processor::structure_and_air(),
+            ocean_ruin_archaeology(temperature),
         ],
         waterlogging: true,
     };
@@ -1360,6 +1439,7 @@ fn template_piece(
         })),
         // Only a `list_pool_element` (S4) needs more than one.
         extra_placements: Vec::new(),
+        blocks: None,
         // Not a jigsaw piece. Every kind `template_piece` serves is
         // `terrain_adaptation: none`, so this is doubly inert today — but it is
         // the field S4's pool pieces fill, and leaving it out of the constructor
@@ -1490,7 +1570,13 @@ impl StructureRegistry {
                 // processors) that will not load demotes the structure — the ledger
                 // says which one and why, instead of a village of nothing.
                 if let StructureKind::Jigsaw(config) = &kind {
-                    if let Err(why) = pools.load(resolver, &mut templates, &config.start_pool) {
+                    let aliases = pool::AliasedPools {
+                        names: config.alias_names(),
+                        targets: config.alias_targets(),
+                    };
+                    if let Err(why) =
+                        pools.load(resolver, &mut templates, &config.start_pool, &aliases)
+                    {
                         unsupported.insert(structure_id.clone(), why);
                         kind = StructureKind::Unsupported("minecraft:jigsaw".to_string());
                     }
@@ -1507,6 +1593,20 @@ impl StructureRegistry {
                     );
                     kind = StructureKind::Unsupported(
                         doc["type"].as_str().unwrap_or("unknown").to_string(),
+                    );
+                } else if matches!(kind, StructureKind::OceanMonument { .. }) {
+                    // `OceanMonument` is the one kind with a *real* start
+                    // predicate (the 29-block biome survey) and no piece
+                    // generator, so it falls through both branches around this one
+                    // and had no ledger row at all until this was added — the
+                    // island shape the ledger exists to prevent, hiding inside the
+                    // ledger's own construction.
+                    unsupported.insert(
+                        structure_id.clone(),
+                        "placement and start predicate are complete; \
+                         `OceanMonumentPieces` is ~2,000 lines of coded pieces and \
+                         has not landed, so the start carries no children"
+                            .into(),
                     );
                 } else if let StructureKind::Unsupported(type_id) = &kind {
                     // `or_insert`, not `insert`: a demotion above this point
@@ -1560,9 +1660,11 @@ impl StructureRegistry {
         // *absent* from this map).
         if !templates.is_empty() {
             unsupported.insert(
-                "processor:minecraft:capped".into(),
-                "ocean ruins' 5 suspicious sand/gravel blocks: needs the archaeology \
-                 loot pass plus a shuffled-index walk over the whole processed list"
+                "block_entity:append_loot".into(),
+                "a `capped` archaeology rule places its `suspicious_sand`/\
+                 `suspicious_gravel` block (ocean ruins, trail ruins), but the loot \
+                 table its `append_loot` modifier attaches needs block entities in \
+                 worldgen: brushing one yields nothing"
                     .into(),
             );
             unsupported.insert(
@@ -1635,6 +1737,17 @@ impl StructureRegistry {
             pools,
             unsupported,
         }
+    }
+
+    /// The world seed this registry was built for.
+    ///
+    /// Read by the placement stage, not by anything here: `CappedProcessor` forks
+    /// the **world** seed positionally, so the value has to reach
+    /// [`template::PlaceOrigin`] from somewhere and this is the only object on that
+    /// path that already holds it.
+    #[must_use]
+    pub fn seed(&self) -> i64 {
+        self.seed
     }
 
     /// The loaded jigsaw template pools.
