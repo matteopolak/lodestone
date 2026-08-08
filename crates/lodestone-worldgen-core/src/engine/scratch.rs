@@ -234,6 +234,35 @@ enum SlotStore {
     },
 }
 
+/// Entries in the leaf memo — see [`Scratch::leaf_get`].
+///
+/// 64 rather than "one per node" because a `Scratch` is sized from
+/// `Builder::slot_count` and has never known the graph's op count. The table is
+/// direct-mapped on the node id with a **full key compare**, so the size is a
+/// hit-rate choice only: a collision costs a miss, never a wrong value. 64 × 24 B
+/// = 1,536 B per scratch against `xz_memo`'s 98 KB per thread, and one `fill` per
+/// sampler to clear.
+const LEAF_MEMO_LEN: usize = 64;
+
+#[derive(Clone, Copy)]
+struct LeafMemo {
+    /// `u32::MAX` for empty. Node ids are dense from 0, so the sentinel is
+    /// unreachable rather than merely unlikely.
+    id: u32,
+    x: i32,
+    y: i32,
+    z: i32,
+    value: f64,
+}
+
+const LEAF_MEMO_EMPTY: LeafMemo = LeafMemo {
+    id: u32::MAX,
+    x: 0,
+    y: 0,
+    z: 0,
+    value: 0.0,
+};
+
 /// One `interpolated` slot's per-cell corner octets.
 enum CellStore {
     Hashed(HashMap<(i32, i32, i32), [f64; 8], FxBuild>),
@@ -255,6 +284,21 @@ pub struct Scratch {
     /// a compatible reuse (clear flags, keep allocations) from an incompatible
     /// one (rebuild).
     config: Option<(usize, i32, i32, Option<Bounds>)>,
+    /// A per-thread monotonic id, re-issued on every [`Self::acquire`], so
+    /// `super::redundancy_probe` can tell "this node was already evaluated at
+    /// this position **by another sampler**" from "…by this one".
+    ///
+    /// It must not be the scratch's *address*: the pool recycles a scratch, so
+    /// two samplers alive at different moments in one column can share an
+    /// address and would be merged into one scope — which biases the
+    /// cross-sampler measurement toward zero, the direction that says "there is
+    /// nothing here". One `Cell` increment per sampler construction (tens per
+    /// column against ~10^9 instructions) is why this is not behind a feature.
+    probe_scope: u64,
+    /// A one-slot-per-node last-`(x, y, z)` memo for the field evaluator's
+    /// **side-effect-free** node kinds — the four point-evaluated leaves and
+    /// `Noise`. See [`Self::leaf_get`] for why those and no others.
+    leaf_memo: [LeafMemo; LEAF_MEMO_LEN],
 }
 
 impl Default for Scratch {
@@ -265,6 +309,8 @@ impl Default for Scratch {
             dense: None,
             cell_shape: None,
             config: None,
+            probe_scope: 0,
+            leaf_memo: [LEAF_MEMO_EMPTY; LEAF_MEMO_LEN],
         }
     }
 }
@@ -285,7 +331,18 @@ impl Scratch {
     ) -> Self {
         let mut s = POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
         s.reconfigure(slot_count, cell_width, cell_height, bounds);
+        s.probe_scope = NEXT_SCOPE.with(|c| {
+            let n = c.get() + 1;
+            c.set(n);
+            n
+        });
         s
+    }
+
+    /// This sampler's measurement-only scope id. See the field's own doc.
+    #[inline]
+    pub(crate) fn probe_scope(&self) -> u64 {
+        self.probe_scope
     }
 
     /// Returns this scratch to the thread's free list for the next chunk.
@@ -313,6 +370,14 @@ impl Scratch {
         bounds: Option<Bounds>,
     ) {
         let want = (slot_count, cell_width, cell_height, bounds);
+        // Unconditionally, before the early return. A node **id** is only unique
+        // within one `Graph`, and a pooled scratch is handed to a sampler over a
+        // *different* graph whenever the two happen to share a config — which
+        // `final_density`, `erosion` and `depth` do not (bounds differ) but the
+        // three vein programs do. Missing this is the module doc's reuse hazard in
+        // its worst form: not a stale value from the previous chunk but a value
+        // from a different function, at a plausible magnitude.
+        self.leaf_memo = [LEAF_MEMO_EMPTY; LEAF_MEMO_LEN];
         if self.config == Some(want) {
             for s in &mut self.slots {
                 match s {
@@ -394,6 +459,59 @@ impl Scratch {
         }
     }
 
+    /// Reads the one-slot last-`(x, y, z)` memo for a side-effect-free node.
+    ///
+    /// # Why one slot, and why only these kinds
+    ///
+    /// Measured (`tests/density_redundancy_probe.rs`, 100 interior columns of the
+    /// 12×12 sweep, seed 42): the field evaluator visits `old_blended_noise`
+    /// **1,954** times per column of which **977** are at an `(x, y, z)` that node
+    /// was asked about *immediately before* — 977 duplicated visits and 977 one-slot
+    /// hits, i.e. **the one-slot form catches 100% of them**, and the same holds for
+    /// `noise` (1,957 of 14,169). That is the opposite of §12.140's finding in the
+    /// point interpreter, where the one-slot form hit 2.1% against a map's 78.2%,
+    /// and the difference is entirely the *caller*: there the visits alternate over
+    /// a cell's four `(x, z)` corners, here a DAG node with two parents is reached
+    /// twice inside one subtree walk (`range_choice` evaluates its input, then a
+    /// branch that opens with the same subtree). **A one-slot memo is right when the
+    /// duplication is adjacency and wrong when it is recurrence; only measuring both
+    /// tells you which you have.**
+    ///
+    /// The kind restriction is a correctness boundary, not a tuning choice. A memo
+    /// hit *skips a subtree*, and in this evaluator a skipped subtree can contain a
+    /// `slot_put`/`cell_put` that a later query depends on — which is why
+    /// `engine/mod.rs`'s "the walk must stay a recursive descent" rule exists. The
+    /// four point-evaluated leaves and `Noise` are the only kinds with **no field
+    /// children at all**: a leaf hands its whole subtree to the point interpreter,
+    /// which touches no `Scratch`, and `Noise` reads only its own noise and params.
+    /// They also ignore `interpolate`, so the flag is correctly absent from the key —
+    /// for any other kind it would have to be part of it.
+    #[inline]
+    pub(crate) fn leaf_get(&self, id: u32, x: i32, y: i32, z: i32) -> Option<f64> {
+        let e = self.leaf_memo[(id as usize) & (LEAF_MEMO_LEN - 1)];
+        if e.id == id && e.x == x && e.y == y && e.z == z {
+            #[cfg(feature = "gen-counters")]
+            LEAF_MEMO_HITS.with(|c| c.set(c.get() + 1));
+            Some(e.value)
+        } else {
+            #[cfg(feature = "gen-counters")]
+            LEAF_MEMO_MISSES.with(|c| c.set(c.get() + 1));
+            None
+        }
+    }
+
+    /// Stores `(node, x, y, z) -> value`, evicting whatever shared the slot.
+    #[inline]
+    pub(crate) fn leaf_put(&mut self, id: u32, x: i32, y: i32, z: i32, value: f64) {
+        self.leaf_memo[(id as usize) & (LEAF_MEMO_LEN - 1)] = LeafMemo {
+            id,
+            x,
+            y,
+            z,
+            value,
+        };
+    }
+
     /// Reads a cached corner (or `flat_cache`) value for one slot.
     #[inline]
     pub(crate) fn slot_get(&self, slot: usize, key: (i32, i32, i32)) -> Option<f64> {
@@ -443,6 +561,41 @@ const POOL_CAP: usize = 8;
 thread_local! {
     static POOL: std::cell::RefCell<Vec<Scratch>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// Hands out [`Scratch::probe_scope`] ids. Per-thread and never reset, so an
+    /// id identifies one sampler for the whole process life.
+    static NEXT_SCOPE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static LEAF_MEMO_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static LEAF_MEMO_MISSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// `(hits, misses)` for the leaf memo on this thread since [`reset_leaf_memo_stats`].
+/// Always `(0, 0)` without `gen-counters`.
+///
+/// This exists because the *predicted* hit rate and the measured one disagreed by
+/// a factor of 40 on the first attempt — a direct-mapped table's real hit rate is a
+/// property of what else writes to it, which no probe over node visits can see.
+#[must_use]
+pub fn leaf_memo_stats() -> (u64, u64) {
+    #[cfg(feature = "gen-counters")]
+    {
+        (
+            LEAF_MEMO_HITS.with(std::cell::Cell::get),
+            LEAF_MEMO_MISSES.with(std::cell::Cell::get),
+        )
+    }
+    #[cfg(not(feature = "gen-counters"))]
+    {
+        (0, 0)
+    }
+}
+
+/// Zeroes this thread's leaf-memo hit/miss counters.
+pub fn reset_leaf_memo_stats() {
+    #[cfg(feature = "gen-counters")]
+    {
+        LEAF_MEMO_HITS.with(|c| c.set(0));
+        LEAF_MEMO_MISSES.with(|c| c.set(0));
+    }
 }
 
 #[cfg(test)]
@@ -518,6 +671,41 @@ mod tests {
         assert_eq!(s.slot_get(0, (-9_000, 4_000, 12_345)), Some(1.0));
         s.reconfigure(1, 4, 8, None);
         assert_eq!(s.slot_get(0, (-9_000, 4_000, 12_345)), None);
+    }
+
+    /// The leaf memo must compare its **whole** key, and must be cleared by
+    /// `reconfigure` — the second is the load-bearing one, because a node id is
+    /// unique only within one `Graph` and a pooled scratch crosses graphs.
+    ///
+    /// The "different node" case is not a nicety: with a 64-entry direct-mapped
+    /// table, ids `3` and `67` share a row, so a table that compared only the row
+    /// would return a *different function's* value at a plausible magnitude.
+    #[test]
+    fn leaf_memo_needs_the_whole_key_and_clears_on_reconfigure() {
+        let mut s = Scratch::default();
+        s.reconfigure(1, 4, 8, Some(B));
+        s.leaf_put(3, 4, -8, 12, 1.25);
+        assert_eq!(s.leaf_get(3, 4, -8, 12), Some(1.25));
+        assert_eq!(s.leaf_get(3, 4, -8, 13), None, "a different y must miss");
+        assert_eq!(s.leaf_get(3, 5, -8, 12), None, "a different x must miss");
+        assert_eq!(s.leaf_get(3, 4, -7, 12), None, "a different z must miss");
+        assert_eq!(
+            s.leaf_get(3 + LEAF_MEMO_LEN as u32, 4, -8, 12),
+            None,
+            "a different node sharing the row must miss"
+        );
+
+        // The reuse hazard, at the same configuration (the allocation-reuse path).
+        s.reconfigure(1, 4, 8, Some(B));
+        assert_eq!(
+            s.leaf_get(3, 4, -8, 12),
+            None,
+            "a reused scratch served the previous graph's leaf value"
+        );
+        // Control: the assertions above are also satisfied by `leaf_put` storing
+        // nothing at all, which is the vacuous reading.
+        s.leaf_put(3, 4, -8, 12, 9.5);
+        assert_eq!(s.leaf_get(3, 4, -8, 12), Some(9.5));
     }
 
     /// Acquiring after releasing must hand back a *clean* scratch. This is the

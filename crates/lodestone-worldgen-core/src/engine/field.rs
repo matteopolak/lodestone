@@ -79,6 +79,7 @@ impl<'a> Field<'a> {
             x,
             y,
             z,
+            self.scratch.probe_scope(),
         );
         match op.kind {
             OpKind::Const => self.graph.param(op.a),
@@ -174,11 +175,20 @@ impl<'a> Field<'a> {
             // per-kind `density_evals` counter keeps reporting it.
             OpKind::Cache2D | OpKind::Marker => self.eval(op.a, x, y, z, interpolate),
 
+            // Memoised on the last `(x, y, z)` — see `Scratch::leaf_get`. Safe
+            // here and at the leaf arm below, and at no other arm, because these
+            // are the only kinds with no field children: nothing under them can
+            // write a cache slot a later query depends on.
             OpKind::Noise => {
+                if let Some(v) = self.scratch.leaf_get(id, x, y, z) {
+                    return v;
+                }
                 let n = self.graph.noise(op.a);
                 let xz = self.graph.param(op.b);
                 let ys = self.graph.param(op.b + 1);
-                n.get_value(f64::from(x) * xz, f64::from(y) * ys, f64::from(z) * xz)
+                let v = n.get_value(f64::from(x) * xz, f64::from(y) * ys, f64::from(z) * xz);
+                self.scratch.leaf_put(id, x, y, z, v);
+                v
             }
             OpKind::ShiftedNoise => {
                 let (c0, c1, c2) = (
@@ -244,8 +254,19 @@ impl<'a> Field<'a> {
             // interpolation). That is a real vanilla semantic — see
             // `super::graph`'s module doc — and it is why these hold an
             // untouched `Density` subtree rather than compiled nodes.
+            //
+            // Memoised on the last `(x, y, z)`: `old_blended_noise` is reached
+            // twice per corner evaluation (one DAG node, two parents) and one
+            // `BlendedNoise::sample` is up to 40 `ImprovedNoise::noise_scaled`
+            // calls, the most expensive kernel in the engine. `Scratch::leaf_get`
+            // carries the measurement and the safety argument.
             OpKind::Spline | OpKind::Blended | OpKind::FindTopSurface | OpKind::EndIslands => {
-                self.graph.leaf(op.a).compute(Context::new(x, y, z))
+                if let Some(v) = self.scratch.leaf_get(id, x, y, z) {
+                    return v;
+                }
+                let v = self.graph.leaf(op.a).compute(Context::new(x, y, z));
+                self.scratch.leaf_put(id, x, y, z, v);
+                v
             }
         }
     }
