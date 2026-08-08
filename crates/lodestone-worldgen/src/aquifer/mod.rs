@@ -41,7 +41,7 @@ use crate::density::{Builder, Context as DfContext, Density, NoiseChunkSampler};
 use crate::engine::{Bounds, Program};
 use crate::math::{clamp, clamped_map, floor, map};
 use crate::rng::{PositionalRandomFactory, RandomSource};
-pub use crate::rng::XoroshiroPositionalFactory;
+pub use crate::rng::AnyPositionalFactory;
 
 const CELL_WIDTH: i32 = 4;
 const CELL_HEIGHT: i32 = 8;
@@ -180,7 +180,7 @@ pub struct AquiferSystem {
     lava: Arc<Density>,
     prelim: Arc<Density>,
 
-    positional: XoroshiroPositionalFactory,
+    positional: AnyPositionalFactory,
     sea_level: i32,
 
     min_grid_x: i32,
@@ -268,7 +268,7 @@ impl AquiferSystem {
         spread: Arc<Density>,
         lava: Arc<Density>,
         prelim: Arc<Density>,
-        positional: XoroshiroPositionalFactory,
+        positional: AnyPositionalFactory,
         sea_level: i32,
         min_y: i32,
         height: i32,

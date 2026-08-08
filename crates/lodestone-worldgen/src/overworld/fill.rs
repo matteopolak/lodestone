@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::aquifer::{AquiferSystem, BlockKind, XoroshiroPositionalFactory};
+use crate::aquifer::{AquiferSystem, BlockKind, AnyPositionalFactory};
 use crate::carver::{CarveGrid, CarverConfig, NoObserver};
 use crate::density::Density;
 use crate::engine::Program;
@@ -41,7 +41,7 @@ pub(super) struct AquiferTrees {
     pub(super) spread: Arc<Density>,
     pub(super) lava: Arc<Density>,
     pub(super) prelim: Arc<Density>,
-    pub(super) positional: XoroshiroPositionalFactory,
+    pub(super) positional: AnyPositionalFactory,
 }
 
 impl OverworldGenerator {
