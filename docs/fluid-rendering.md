@@ -35,6 +35,59 @@ We split it in two:
   `crates/lodestone-shell/src/mesher.rs`, reading real state ids out of the
   3×3×3 section snapshot.
 
+### The neighbourhood is resolved once, into a padded grid (issue #542)
+
+`mesh_fluids` used to call back through `FluidSectionView` for **every** probe —
+around fifty per fluid cell, each redoing three `split16`s, three range checks, a
+snapshot-slot index and a `PalettedContainer::get` bit-unpack, re-resolving the
+same neighbour many times within one cell and again from every adjacent cell. That
+measured **13,709 instructions per fluid cell**, 58.8% of the whole client chunk
+path ([client chunk cycles](./client-chunk-cycles.md), `DESIGN.md` §12.120).
+
+It now resolves the neighbourhood **once**, into
+`lodestone_render::fluid_grid::FluidGrid` — an 18³ array of 16-bit packed cells
+(fluid kind, amount, `falling`, occludes, overlay), 11,664 bytes, L1-resident. The
+grid spans `-1..=16` on each axis, which is exactly the mesher's reach. Three
+things about it are load-bearing:
+
+- **`FluidSectionView::cell_at` is the fill primitive**, answering all three of
+  `fluid_at`/`occludes_at`/`overlay_at` in one call. Its default composes the three,
+  so every existing implementor keeps working; `SnapshotFluidView` **overrides** it
+  to share the single `get_block`. That override is not optional — without it a
+  *fluid-free* section costs 2.9× what it did before the grid existed, measured.
+- **`partial_occluder_y_range_at` is deliberately not in the grid** — two `f32`s do
+  not pack, and it is consulted at most four times per *surface* cell. It stays a
+  live call.
+- **`mesh_fluids` is generic over the view, not `&dyn`.** Fifty calls per cell
+  through a trait object inline nowhere. The `?Sized` bound keeps
+  `mesh_fluids(&dyn FluidSectionView)` compiling.
+
+Per-cell cost after that plus the biome-tint memo below: **6,629 instructions**,
+2.07× lower, and the output is byte-identical — see
+`crates/lodestone-render/tests/fluid_mesh_identity_gate.rs`.
+
+### The largest single term was the biome table, not the neighbourhood
+
+Issue #542's diagnosis named the fifty virtual calls. Measured, **46% of the
+per-cell cost was `water_tint_at`**: vanilla's radius-2 biome blend is 25 samples
+per cell, each resolving a biome *name* and then calling
+`lodestone_assets::tint::biome_effects`, which is a **linear scan of 66
+`(&str, BiomeEffects)` entries with a string compare per entry**. One
+`water_tint_at` cost 6,263 instructions, of which **97.8% was that scan**.
+
+`NamedBiomeTint` (`crates/lodestone-render/src/biome_tint.rs`) now carries a
+four-entry memo keyed on the `&'static str`'s data pointer and length — four
+because a radius-2 box can straddle a four-way biome junction and a one-entry memo
+thrashes there. A pointer miss on an equal string is slow, never wrong.
+
+**The root fix is still open and belongs in `lodestone-assets`:** `BIOME_EFFECTS`
+is already alphabetically sorted, so `biome_effects` could be a `binary_search_by`
+— six compares instead of ~33 — which would fix every caller rather than this one.
+Beyond that, the 25 samples of adjacent cells overlap in 20 of 25 columns, so a
+separable sliding-window sum over `blend_box` would be bit-exact (vanilla's
+per-channel floor division happens once, at the end) and roughly 5× again. Neither
+is done.
+
 ### Which face is emitted (read this before changing anything)
 
 Straight from `FluidRenderer.tesselate`, and note how few of these are the same
@@ -201,6 +254,22 @@ jar's** `grass_block`, not on a hand-written view.
 - **Gotcha: there are two meshers.** `--headless` renders through `mesh_simple`,
   which has no fluid path at all. Anything about water must be verified through
   `mesh_fluids` / `mesh_snapshot_fluids`, which is what live terrain uses.
+- **Gotcha: a probe outside `-1..=16` now silently reads air in release.** Every
+  neighbourhood read goes through `FluidGrid::get`, which `debug_assert`s the range.
+  If you add a probe that reaches two cells out, a debug build panics and a release
+  build renders the wrong thing — so **run the new logic once in debug** before
+  trusting a release measurement of it.
+- **Gotcha: touching `mesh_fluids`'s output means regenerating a committed golden,
+  and that is a decision, not a chore.** `fluid_mesh_identity_gate.rs` holds
+  FNV-1a digests of 13 scenes' meshes, produced by the *pre-#542* implementation.
+  Fluid rendering carries deliberate deviations from vanilla, so the gate cannot
+  tell "more correct" from "different": if your change is meant to be cost-only and
+  the gate fires, the change is wrong. Only regenerate
+  (`LODESTONE_REGEN=1`) for a reviewed, intended output change, and say in the
+  commit which scenes moved and why.
+- **Gotcha: a new `FluidSectionView` implementor gets `cell_at` for free and it
+  will be slow.** The default composes three probes. If your view resolves a block
+  state to answer them, override `cell_at` — that is where the grid's cost lives.
 
 ## Known gaps
 
@@ -323,8 +392,10 @@ documented boundary of this feature rather than an open TODO.
     `min_y <= 0 && max_y >= max(corner_a, corner_b)` on top of the existing
     `occludes_at` boolean.
 
-  **Not yet live** — same shape as the overlay gap above until this lands:
-  `SnapshotFluidView` in `crates/lodestone-shell/src/mesher.rs` needs
+  **This IS live.** `SnapshotFluidView` in
+  `crates/lodestone-shell/src/mesher.rs` implements it, and this doc said "not yet
+  live" long after it landed — verified 2026-08-07 while working #542. The body is
+  exactly the patch this section used to propose:
   ```rust
   fn partial_occluder_y_range_at(&self, x: i32, y: i32, z: i32) -> Option<(f32, f32)> {
       let (dx, lx) = split16(x);
@@ -340,7 +411,9 @@ documented boundary of this feature rather than an open TODO.
   ```
   `mesher.rs` already depends on `lodestone_data` (it calls
   `lodestone_data::shade_brightness::occludes_ambient_light` a few dozen lines
-  above `SnapshotFluidView`), so this needs no new dependency, only the method.
+  above `SnapshotFluidView`), so it needed no new dependency, only the method.
+  `path_bank` in `fluid_mesh_identity_gate.rs` is the scene that exercises it, and
+  the gate asserts a non-zero partial-occluder census so it cannot go vacuous.
 
   **Still open — the general multi-box case.** A shape with holes or a partial
   footprint (stairs, fences, walls, panes) needs the real voxel-grid
@@ -374,11 +447,9 @@ skipping.
   `HalfTransparentBlock`/`LeavesBlock` name-list classification), `mesh_fluids`,
   `ModelPipeline::for_fluid`, `FluidSectionView::partial_occluder_y_range_at`.
 - `lodestone-shell` — `SnapshotFluidView` / `mesh_snapshot_fluids`, the live
-  neighbourhood. Implements `FluidSectionView::overlay_at` (landed `385b4fee`).
-  **Does not yet implement `partial_occluder_y_range_at`**; see "Known gaps"
-  for the exact patch, and note it needs no new dependency —
-  `crates/lodestone-shell/src/mesher.rs` already depends on `lodestone-data`
-  for `shade_brightness::occludes_ambient_light`.
+  neighbourhood. Implements `FluidSectionView::overlay_at` (landed `385b4fee`),
+  `partial_occluder_y_range_at`, and — since #542 — `cell_at`, the `FluidGrid`
+  fill primitive that shares one `get_block` across all three probes.
 - `lodestone-data` — `outline_shapes::outline_boxes`, the real per-state
   jar-dumped **outline** geometry the partial-occluders fix needs. **Not**
   `collision_shapes` — see "Known gaps" for why the two disagree for about
@@ -386,7 +457,31 @@ skipping.
 
 ## Tests
 
+Output identity, and the thing to run after **any** change to `mesh_fluids`
+(`#[ignore]`d — needs `client.jar`):
+
+- `crates/lodestone-render/tests/fluid_mesh_identity_gate.rs` — 13 scenes of real
+  vanilla state ids (fully submerged, water-only surface, submerged air pocket,
+  every `level` value, grass/glass/`dirt_path` banks, lava beside water,
+  waterlogged, dry, single-cell puddles at both section corners), each meshed and
+  digested against a golden produced by the **pre-#542** implementation. Carries two
+  executed controls: an off-by-one-padding view (every out-of-section probe reads
+  air) that must change 12 of the 13 scenes, and an FNV-1a single-bit-flip check.
+  It also meshes every scene through *both* `cell_at` shapes — the default
+  three-probe composition and the shared-state override production installs — and
+  requires them to agree.
+
 Hermetic (`cargo test -p lodestone-render --lib`):
+
+- `fluid_grid::tests::the_shell_fill_is_bounded_by_the_fluid_bounding_box` — counts
+  probes: exactly `4096 + 19` for a one-cell puddle, against a whole-shell fill's
+  `4096 + 1736`. A count, not an inequality.
+- `fluid_grid::tests::packing_round_trips_every_reachable_fluid_cell` — every
+  `(kind, amount 1..=8, falling, occludes, overlay)` survives the 16-bit pack. The
+  one way the grid could silently move a surface is by losing a bit of `amount`.
+- `biome_tint::tests::the_effects_memo_reaches_the_table_once_per_blend_box` and
+  `..._is_transparent_under_eviction` — the memo hits (25 samples leave exactly one
+  entry) and stays correct when eight biomes cycle through its four slots.
 
 - `models::tests::a_walled_pool_emits_only_its_level_top_surface` — 0 side faces
   and a level 8×8 surface (now 128 quads: every top quad is double-sided, see

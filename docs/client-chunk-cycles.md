@@ -115,6 +115,39 @@ The same neighbour cells are re-queried many times per cell and again by adjacen
 so it is water-bearing. An inland column with no lake would put the fluid share near zero. The
 *per-fluid-cell* number is the terrain-independent one; the 58.8% share is not.
 
+### The fluid decomposition after issue #542
+
+Same harness, same fixture, same 4,704 fluid cells, three separable commits. Each row is the
+**wet** arm (the 5 fluid-bearing sections), so the figure is per *fluid* cell:
+
+| arm | instructions/cell | cycles/cell | IPC | dry section |
+|---|---|---|---|---|
+| before (`4e0ffdf2`) | 13,709 | 1,793 | 7.64 | 490,885 |
+| + `mesh_fluids` generic over the view | 12,406 | 1,622 | 7.65 | 356,874 |
+| + padded `FluidGrid` and `cell_at` | 8,709 | 1,166 | 7.46 | 404,542 |
+| + `NamedBiomeTint` effects memo | **6,629** | **857** | 7.74 | 404,471 |
+
+`mesh_fluids` for the whole column: **65,965,170 → 32,413,136**; the column's one-off total
+**112,215,407 → 78,653,989**. Three notes, each of which was measured rather than assumed:
+
+- **The win is in instructions, not in locality.** This was expected to be a cache-locality
+  change and therefore to show up more in cycles than in instructions. It did not: IPC starts
+  at **7.64** — near this core's retire width — so the loop was never memory-bound, and
+  instructions and cycles fell by 2.07× and 2.09× respectively. The instrument's blind spot
+  (see below) was not in play, and checking cost nothing.
+- **The largest single term was not the one issue #542 named.** Its diagnosis was the ~50
+  virtual calls per cell. Measured, **6,263 of the 13,709 (46%) were one `water_tint_at`**, of
+  which **97.8% was `lodestone_assets::tint::biome_effects`** — a linear scan of 66
+  `(&str, BiomeEffects)` entries with a string compare per entry, run 25 times per cell because
+  vanilla's biome blend is a radius-2 box. Monomorphisation plus the grid together bought 5,000
+  instructions/cell; a four-entry memo on the *name* lookup bought 2,080 more.
+- **A precomputed grid can make the fluid-free case worse, and did.** The dry arm is the
+  4,096-cell scan. With `FluidGrid` filling through the trait's *default* `cell_at` (three
+  independent probes) it went **356,874 → 1,021,034** per section, a 2.9× regression on
+  exactly the terrain most sections are. Overriding `cell_at` in `SnapshotFluidView` to share
+  one `get_block` brought it to 404,542 — below the pre-#542 490,885. **Measure the arm your
+  optimisation does not target.**
+
 ## Where instructions understate, and this is not hypothetical
 
 `heap_bytes` measured 494,570 instructions per frame at 361 columns, at IPC 4.47 — about 31 µs.
