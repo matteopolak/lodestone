@@ -839,11 +839,22 @@ impl WindowApp {
         // predicate is vanilla's own `DownloadingTerrainScreen` rule (the chunk
         // column under the player is loaded), so the text clears the moment the
         // ground the player is standing on arrives.
+        //
+        // The bar and the count line only appear when there is a real
+        // denominator to divide by (the session declared a view radius); with
+        // none, this stays the bare phase label it always was, because a
+        // progress bar wired to nothing is worse than no bar.
         if self.ui.is_playing()
             && self.sim.terrain_loading()
             && let Some(menu) = self.menu.as_mut()
         {
-            let loading_frame = crate::menu::render::loading_frame("Loading terrain...");
+            let label = crate::menu::loading::ConnectPhase::LoadingTerrain.label();
+            let loading_frame = match self.sim.terrain_progress() {
+                Some(progress) => {
+                    crate::menu::render::loading_frame_with_progress(label, progress)
+                }
+                None => crate::menu::render::loading_frame(label),
+            };
             menu.render_overlay(device, queue, frame.view(), &loading_frame, w, h);
         }
 

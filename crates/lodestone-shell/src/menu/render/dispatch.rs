@@ -507,7 +507,7 @@ pub fn frame_for<'a>(
                 },
             })
         }
-        // The loading screen (issue #449): "Connecting..." over a flat dark
+        // The loading screen (issue #449): the connect phase name over a flat dark
         // backdrop while the handshake/configuration phase runs. Safe to take
         // the whole frame here — no chunk packets arrive until after login, so
         // nothing meshes or uploads behind the loading screen and the world
@@ -517,7 +517,13 @@ pub fn frame_for<'a>(
         // that concern belongs to the *post-login* terrain stream, which stays
         // on the world path as an overlay in `app::redraw` (see its loading
         // block) rather than piling behind a full screen.
-        Screen::Connecting => Some(loading_frame("Connecting...")),
+        // The label is the phase's own real vanilla string rather than a fixed
+        // literal (issue #449's item (a)): "Connecting to the server..." while
+        // the socket is dialled and the integrated server opened, then "Joining
+        // world..." once the handle exists. No bar on this screen — there is
+        // nothing real to count before login, and a synthesised bar is the one
+        // thing the issue rules out.
+        Screen::Connecting => Some(loading_frame(ui.connect_phase().label())),
         // The error screen is drawn by this renderer too, even though it is not
         // an `is_menu()` screen: a session that dies mid-game used to leave a
         // frozen world on screen with no explanation. See `error_frame` for the

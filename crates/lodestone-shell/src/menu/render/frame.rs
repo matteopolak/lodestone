@@ -476,7 +476,41 @@ pub struct MenuFrame<'a> {
     /// with no scrollbar wants anyway — so this degrades to [`Self::labels`]
     /// rather than to nothing.
     pub list_labels: Vec<MenuLabel>,
+    /// The loading screen's progress bar, `None` on every other screen (issue
+    /// #449) — see [`MenuProgress`] and [`loading_frame_with_progress`].
+    pub progress: Option<MenuProgress>,
 }
+
+/// Vanilla's `LevelLoadingScreen` progress bar, as a frame primitive.
+///
+/// Geometry is transcribed from `LevelLoadingScreen.java`: `PROGRESS_BAR_WIDTH =
+/// 200`, two pixels tall, black background, filled to `round(progress * 200)` in
+/// green, horizontally centred. `dy` is measured from the screen centre so the
+/// bar sits under the phase label the same way vanilla's sits under its text.
+///
+/// **The fraction is not clamped here.** It arrives already bounded by
+/// [`crate::menu::loading::TerrainProgress::fraction`], which is where the
+/// "never claim completion" rule lives; a second clamp here would put that rule
+/// in two places and let one of them drift.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MenuProgress {
+    /// Fill fraction, `0.0..=1.0`.
+    pub fraction: f32,
+    /// The bar's top edge, in logical pixels from the screen centre.
+    pub dy: f32,
+}
+
+/// `LevelLoadingScreen.PROGRESS_BAR_WIDTH`.
+pub const PROGRESS_BAR_W: f32 = 200.0;
+
+/// The bar's height. `LevelLoadingScreen` fills `textTop + 12` to `textTop + 14`.
+pub const PROGRESS_BAR_H: f32 = 2.0;
+
+/// The unfilled track — `LevelLoadingScreen`'s `0xFF000000`.
+pub const PROGRESS_BAR_BG: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+/// The filled portion — `LevelLoadingScreen`'s `0xFF00FF00`.
+pub const PROGRESS_BAR_FG: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
 
 /// Decoded favicon mosaics, keyed by the status cache's address key.
 ///

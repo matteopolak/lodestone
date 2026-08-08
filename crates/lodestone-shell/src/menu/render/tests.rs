@@ -5200,3 +5200,66 @@ fn solid_png(side: u32, rgba: [u8; 4]) -> Vec<u8> {
     }
     out
 }
+
+/// The loading screen's progress bar (issue #449) reaches geometry, at vanilla's
+/// `LevelLoadingScreen` rect, and its **green fill tracks the real fraction**.
+///
+/// The fill width is the assertion, not the bar's presence: a bar that drew at a
+/// fixed width would pass a presence check while telling the player nothing. The
+/// expected width is derived from `PROGRESS_BAR_W` and the fraction the frame was
+/// built from, the same two terms the draw multiplies.
+#[test]
+fn the_loading_bar_fill_tracks_the_real_column_count() {
+    use crate::menu::loading::TerrainProgress;
+
+    let quarter = TerrainProgress { loaded: 100, expected: 400 };
+    let f = loading_frame_with_progress("Loading terrain...", quarter);
+    let v = geometry(&f, V_W, V_H);
+
+    let track = colour_bounds(&v, V_W, V_H, PROGRESS_BAR_BG)
+        .expect("the black track must reach the colour stream");
+    let fill = colour_bounds(&v, V_W, V_H, PROGRESS_BAR_FG)
+        .expect("the green fill must reach the colour stream");
+
+    // The track is vanilla's 200x2, horizontally centred.
+    assert!(
+        (track.2 - PROGRESS_BAR_W).abs() < 0.5,
+        "track width {} should be {PROGRESS_BAR_W}",
+        track.2
+    );
+    assert!(
+        (track.3 - PROGRESS_BAR_H).abs() < 0.5,
+        "track height {} should be {PROGRESS_BAR_H}",
+        track.3
+    );
+    assert!(
+        (track.0 + track.2 * 0.5 - V_W * 0.5).abs() < 1.0,
+        "track should be centred, got x0={} w={}",
+        track.0,
+        track.2
+    );
+
+    // A quarter-loaded view fills a quarter of the bar, from the same left edge.
+    let want = (quarter.fraction() * PROGRESS_BAR_W).round();
+    assert!(
+        (fill.2 - want).abs() < 0.5,
+        "fill width {} should be {want} for {}/{}",
+        fill.2,
+        quarter.loaded,
+        quarter.expected
+    );
+    assert!((fill.0 - track.0).abs() < 0.5, "fill must start at the track's left edge");
+
+    // The negative control that matters here: an empty view must draw the track
+    // and *no* fill at all, so a full-width fill cannot masquerade as progress.
+    let empty = TerrainProgress { loaded: 0, expected: 400 };
+    let v0 = geometry(&loading_frame_with_progress("Loading terrain...", empty), V_W, V_H);
+    assert!(
+        colour_bounds(&v0, V_W, V_H, PROGRESS_BAR_BG).is_some(),
+        "the track still draws at zero"
+    );
+    assert!(
+        colour_bounds(&v0, V_W, V_H, PROGRESS_BAR_FG).is_none(),
+        "a zero-column view must draw no green fill"
+    );
+}

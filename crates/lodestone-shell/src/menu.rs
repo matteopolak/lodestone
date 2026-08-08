@@ -48,6 +48,7 @@ pub mod focus;
 pub mod key_binds;
 pub mod language;
 pub mod layout;
+pub mod loading;
 pub mod nav;
 pub mod options;
 pub mod packs;
@@ -360,6 +361,10 @@ pub struct UiState {
     /// [`Self::die`]. Mirrors how [`Self::error`] carries `Screen::Error`'s
     /// reason.
     death_message: Option<String>,
+    /// Which step of establishing a session [`Screen::Connecting`] is naming —
+    /// issue #449. Only read on that screen; reset by [`Self::begin`] so a
+    /// second session never inherits the previous one's last phase.
+    connect_phase: loading::ConnectPhase,
 }
 
 impl Default for UiState {
@@ -371,6 +376,7 @@ impl Default for UiState {
             quit_requested: false,
             settings_return: Screen::MainMenu,
             death_message: None,
+            connect_phase: loading::ConnectPhase::default(),
         }
     }
 }
@@ -536,6 +542,23 @@ impl UiState {
         self.kind = Some(kind);
         self.error = None;
         self.screen = Screen::Connecting;
+        // A fresh session starts at the first phase, never at whatever the
+        // previous one got stuck on (issue #449).
+        self.connect_phase = loading::ConnectPhase::Connecting;
+    }
+
+    /// Record which connect step the session task has reached, so
+    /// [`Screen::Connecting`] can name it (issue #449). Driven from real
+    /// `NetUpdate::ConnectPhase` boundaries — see [`loading::ConnectPhase`] for
+    /// why there are only three and not vanilla's full six.
+    pub fn set_connect_phase(&mut self, phase: loading::ConnectPhase) {
+        self.connect_phase = phase;
+    }
+
+    /// The step [`Screen::Connecting`] is naming.
+    #[must_use]
+    pub fn connect_phase(&self) -> loading::ConnectPhase {
+        self.connect_phase
     }
 
     /// Enter the local dev world directly (the shell's `worldgen` stand-in).

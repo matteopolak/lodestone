@@ -412,10 +412,15 @@ pub fn command_block_frame(
 }
 
 /// Builds the loading screen's frame (issue #449): a flat dark backdrop with
-/// one centred line of text — "Connecting..." while the handshake /
-/// configuration phase runs, "Loading terrain..." while the player's own chunk
-/// streams in after login. The issue asks for exactly this: a dark background
-/// with the text, no vanilla `LevelLoadingScreen` chrome.
+/// one centred line of text — the current `ConnectPhase`'s own vanilla string
+/// (`connect.connecting`/`connect.joining`) while the handshake and
+/// configuration phase runs, `multiplayer.downloadingTerrain` while the
+/// player's own chunk streams in after login.
+///
+/// This is the bar-less variant: a dark background with the text and no vanilla
+/// `LevelLoadingScreen` chrome. See [`loading_frame_with_progress`] for the one
+/// that also draws a bar, and `crate::menu::loading` for why the connect phases
+/// deliberately have no progress to show.
 ///
 /// Same shape as [`error_frame`]: a `vanilla` frame whose only geometry is the
 /// backdrop and one [`MenuLabel`]. Unlike every other `vanilla` frame it
@@ -434,7 +439,7 @@ pub fn command_block_frame(
 ///   `overlay` gives the translucent dim that keeps the streaming chunks
 ///   visible behind the text instead of a hard opaque panel.
 #[must_use]
-pub fn loading_frame(text: &'static str) -> MenuFrame<'static> {
+pub fn loading_frame(text: &str) -> MenuFrame<'static> {
     MenuFrame {
         vanilla: true,
         overlay: true,
@@ -447,6 +452,69 @@ pub fn loading_frame(text: &'static str) -> MenuFrame<'static> {
             colour: LABEL,
             scale: 1.0,
         }],
+        ..Default::default()
+    }
+}
+
+/// The phase label pushed up to make room for the bar. Vanilla's own text sits
+/// 12 px above its bar (`LevelLoadingScreen`: bar at `textTop + 12`), and the
+/// label's own line height is 9, so -14 puts the same gap under the text.
+const LOADING_LABEL_DY: f32 = -14.0;
+
+/// The count line, one line under the bar.
+const LOADING_DETAIL_DY: f32 = 8.0;
+
+/// The `en_us` grey vanilla uses for the secondary line under a progress bar
+/// (`0xFFA0A0A0`) — dimmer than the phase name so the phase reads first.
+const LOADING_DETAIL: [f32; 4] = [160.0 / 255.0, 160.0 / 255.0, 160.0 / 255.0, 1.0];
+
+/// As [`loading_frame`], but with vanilla's `LevelLoadingScreen` progress bar
+/// and a raw count line under it (issue #449).
+///
+/// This is the terrain-streaming half of the loading screen, and the *only*
+/// screen in this file that draws a number. The number has to be real: it is
+/// the client's own loaded-column count over the view square the server is
+/// going to send (see [`crate::menu::loading::TerrainProgress`]), and the bar
+/// cannot reach the end, because the screen is dismissed by a real predicate
+/// (`Sim::terrain_loading`) and not by the bar filling. A bar that could read
+/// as complete while the screen was still up would turn an honest freeze into a
+/// false reassurance, which is the one failure mode the issue singles out.
+///
+/// `detail` is drawn dimmer than the phase name so a glance reads the phase
+/// first and the count second — the count is for diagnosing a stall ("stuck at
+/// 37/441"), not for watching.
+#[must_use]
+pub fn loading_frame_with_progress(
+    text: &str,
+    progress: crate::menu::loading::TerrainProgress,
+) -> MenuFrame<'static> {
+    MenuFrame {
+        vanilla: true,
+        overlay: true,
+        labels: vec![
+            MenuLabel {
+                text: text.to_string(),
+                origin: Origin::Centre,
+                dx: 0.0,
+                dy: LOADING_LABEL_DY,
+                align: Align::Centre,
+                colour: LABEL,
+                scale: 1.0,
+            },
+            MenuLabel {
+                text: progress.detail(),
+                origin: Origin::Centre,
+                dx: 0.0,
+                dy: LOADING_DETAIL_DY,
+                align: Align::Centre,
+                colour: LOADING_DETAIL,
+                scale: 1.0,
+            },
+        ],
+        progress: Some(super::MenuProgress {
+            fraction: progress.fraction(),
+            dy: 0.0,
+        }),
         ..Default::default()
     }
 }

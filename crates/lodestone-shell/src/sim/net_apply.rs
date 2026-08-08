@@ -70,6 +70,14 @@ impl Sim {
                 NetUpdate::Connecting => {
                     self.status = "connecting…".into();
                     self.set_phase(SessionPhase::Connecting);
+                    self.set_connect_phase(crate::menu::loading::ConnectPhase::Connecting);
+                }
+                NetUpdate::ConnectPhase(phase) => {
+                    // Issue #449: purely the loading screen's label. Kept out of
+                    // `SessionPhase` on purpose — that enum drives the menu
+                    // state machine, and adding display-only steps to it would
+                    // make every `match` on it care about them.
+                    self.set_connect_phase(phase);
                 }
                 NetUpdate::LoggedIn { entity_id } => {
                     // The id is *not* recorded here. `ClientEvent::Login` folds it
@@ -80,6 +88,11 @@ impl Sim {
                     // that is a human-readable string, not state.
                     self.status = format!("connected (entity {entity_id})");
                     self.set_phase(SessionPhase::Connected);
+                    // Issue #449: login done, so the screen is now naming the
+                    // terrain stream rather than the connect handshake. On a
+                    // brand-new singleplayer world this is also when generation
+                    // happens — columns are generated lazily as they stream.
+                    self.set_connect_phase(crate::menu::loading::ConnectPhase::LoadingTerrain);
                 }
                 NetUpdate::Chunk { x, z } => {
                     // §12.24 dirty-region signal: no block data travels on the
