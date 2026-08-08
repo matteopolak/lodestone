@@ -24,10 +24,8 @@ covers why `StartDestroy` can now break a block by itself.
 consumption from inventory (placement resolves the held item but never *spends* it —
 see "Placement resolves the held item" below), drops, block-entity data beyond the six
 ticking blocks, redstone/neighbour updates, and
-any placement rule beyond "the state implied by clicking a face" (stairs, slabs, doors,
-fences all need a cursor-derived orientation this does not compute). Spawn protection
-and creative mode are still skipped — the latter because nothing in this crate tracks
-a game mode.
+and vanilla's full `canBeReplaced` set (only air, fluids and a matching half-slab are
+replaceable here). Spawn protection is still skipped.
 
 ## How it works
 
@@ -147,23 +145,12 @@ for when testing containers — chest, furnace — are exactly the ones that wor
 **Block state is now partly in scope, and the bare-name path itself changed.** Two
 separate fixes, and it is worth keeping them apart:
 
-* `placed_block_state` (`server.rs`) computes a real `getStateForPlacement` for the
-  families whose inputs this path already has: `facing` from the placer's yaw for
-  repeater / comparator / observer (issue #475), and `axis` from the **clicked face**
-  for every pillar block — logs, stripped wood, basalt, quartz and purpur pillars, bone
-  blocks, froglights, hay (`RotatedPillarBlock.java:44`). "Is it a pillar" is read off
-  `lodestone_data::block_states` — a block whose default state carries a three-valued
-  `axis` — rather than a name list that would miss the next one added.
-* Everything else still writes the **bare name**, but a bare name no longer means "the
-  lowest id with that name". `resolve_state_id` resolves it to the block's real
-  **default state** (issue #546 — see below), so a bare `minecraft:oak_stairs` at least
-  arrives as vanilla's default stair rather than an arbitrary one.
-
-Still out of scope: `half` for stairs and slabs, and `facing` for the horizontal
-families whose convention varies per block (a stair takes `getHorizontalDirection()`, a
-chest and a furnace take its `.getOpposite()`, an anvil its `.getClockWise()`). Those
-need the **cursor position** within the clicked face, which `ServerBound::UseItemOn`
-does not currently decode, plus a per-block table — a separate and larger piece of work.
+* `crate::block_placement` carries a real `getStateForPlacement` per family — see
+  [`block-placement-conventions.md`](./block-placement-conventions.md).
+* A block with no convention writes the **bare name**, and a bare name no longer means
+  "the lowest id with that name". `resolve_state_id` resolves it to the block's real
+  **default state** (issue #546 — see below), so a bare `minecraft:stone_bricks` arrives
+  as vanilla's default rather than an arbitrary one.
 
 ### `is_air_or_fluid` doubles as "replaceable"
 
@@ -173,6 +160,10 @@ reused as the placement-replaceability test. Vanilla's real `canBeReplaced` cove
 of that vegetation yet (`worldgen_data.rs`'s own "no caves/ores/trees" scope note), so
 air-or-fluid is the whole replaceable set that can actually appear in served terrain
 today.
+
+The one exception is `server.rs`'s `slab_doubles`, which is `SlabBlock.canBeReplaced`
+(`SlabBlock.java:84-97`). Without it a slab clicked onto a matching half-slab lands in
+the cell *above* instead of doubling, because the clicked cell is not air.
 
 ## A discovered, pre-existing wire-fidelity gap — now fixed (issue #363)
 
