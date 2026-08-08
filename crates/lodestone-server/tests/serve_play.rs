@@ -2366,10 +2366,13 @@ async fn the_shared_arm_streams_the_view_outward_too() {
 /// | hypothesis | count |
 /// |---|---|
 /// | the join burst blocks the play loop (the defect) | **361** — the reply cannot precede the last chunk, because the loop that produces it has not started |
-/// | the burst is deferred past `JOIN_PRESTREAM_RADIUS` (the fix) | **~9** — the nine pre-streamed columns, plus however many the `select!` happened to emit first |
+/// | the burst is deferred past `JOIN_PRESTREAM_RADIUS` (the fix) | **12–24**, measured over three runs — the nine pre-streamed columns plus however many of the deferred stream `select!` emitted before it happened to poll the socket read first |
 ///
 /// The bound is 40 — comfortably above the second and nowhere near the first, so
-/// it cannot be satisfied by a scheduler that merely reordered the burst. And the
+/// it cannot be satisfied by a scheduler that merely reordered the burst. It is a
+/// *range* rather than a single number because `select!` picks between a ready
+/// column and a ready packet at random, which is exactly the property that stops
+/// either starving the other; the floor of 9 is the deterministic part. And the
 /// view still has to arrive **whole and in order** afterwards, which the tail of
 /// this test asserts with the same [`check_proximity_stream`] the two ordering
 /// gates use: a "fix" that dropped the rest of the view would otherwise pass.
@@ -2451,8 +2454,7 @@ async fn a_play_packet_is_serviced_before_the_last_join_chunk() {
         at < 40,
         "the play packet was answered only after {at} of {expected_chunks} join chunks. \
          Under the defect this is exactly {expected_chunks} (the play loop cannot run until the \
-         burst finishes); with the burst deferred it is ~{}",
-        9
+         burst finishes); with the burst deferred it measured 12-24"
     );
 
     // …and the deferred remainder still arrives, whole and in order.
