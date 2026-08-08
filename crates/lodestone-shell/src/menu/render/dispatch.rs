@@ -567,6 +567,14 @@ pub fn frame_for<'a>(
         // scrollbar the draw paints and the offset the wheel arm clamps are two
         // readers of one declaration rather than two declarations that agree today.
         f.list = nav.active_list(ui);
+        // Stamped for the same reason: hover is a *canvas* fact, so any screen with a
+        // hover affordance would otherwise have to remember to plumb the pointer into
+        // its own frame arm. The multiplayer list did that by hand and the Resource
+        // Packs screen would have had to repeat it for its icon overlay. Idempotent
+        // where an arm already set it (the server list sets this exact expression),
+        // and inert everywhere else: the only readers are the two draws that first
+        // check for a row kind carrying a hover overlay.
+        f.cursor = nav.menu_cursor();
         f
     })
 }

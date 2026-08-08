@@ -46,10 +46,10 @@ lodestone-assets   ResourceManager::from_priority_order — the one reversal
 - **`menu/nav.rs`** — `key_packs`, `apply_packs` (which calls `packs::commit`
   before `leave_packs`), the hover/click guards, and the `active_list` /
   `scroll_active_list` arms.
-- **`menu/render/draw.rs`** — `draw_widget` grew one additive branch, gated on
-  `MenuRow::favicon`, that draws the thumbnail plus a title/description pair.
-  No other slotted row anywhere sets `favicon`, so the branch cannot move a pixel
-  on a pre-existing screen.
+- **`menu/render/draw.rs`** — `draw_pack_entry`, this screen's own row draw, plus
+  `draw_arrow` for the two reorder buttons. A pack row is routed there by
+  `MenuRow::pack`, tested inside the `slot` arm (the rect *is* the slot, unlike the
+  three other list screens, whose `getRowLeft()` needs its own `row_rect` arm).
 
 ## The trap: the UI list and the manager stack are reversed
 
@@ -90,30 +90,60 @@ than a hand-written `.rev()`.
   atlases and friends when their owner is next constructed. `load_particle_atlas`
   is the one exception — it caches in a `OnceLock` on purpose (two consumers must
   share one object), so it keeps whatever stack was live at its first call.
+- **A pack row is a list entry, not a button.** `draw_pack_entry` transcribes
+  `TransferableSelectionList.PackEntry.extractContent` (`:136-219`): the 32×32
+  `pack.png` mosaic at the content box's top-left, the name at `+34, +1`, up to two
+  description lines at `+34, +12` in vanilla's `-8355712` grey, all clipped/wrapped
+  to `MAX_DESCRIPTION_WIDTH_PIXELS` (157), and the selection's 1 px outline over a
+  black interior. It draws **no** `widget/button*` nine-slice — that is what the
+  wrong version did, and the row gate in `menu/render/tests.rs` asserts the absence
+  of `ROW_BG`/`ROW_SEL` for exactly that reason.
+  - It *was* a button for one release, because the draw dispatched on
+    `MenuRow::favicon` and a pack with no `pack.png` (including the built-in row,
+    the only row an empty folder shows) never matched. Worth remembering how it
+    survived: every test on this screen asserts on the **frame data**, which
+    carried the icon and the description correctly the whole time. Nothing tested
+    the draw, so a dispatch fault sat behind a green suite.
+  - The hover overlay is vanilla's (`transferable_list/select`, `unselect`, over an
+    `0xA0909090` dim) but it is an **indicator, not a hit zone**: in this client the
+    whole row transfers the pack. The `_highlighted` variant still tracks the cursor
+    being over the icon, as `mouseOverIcon` does.
 - **The per-row move buttons are this client's shape, not vanilla's.** Vanilla
-  draws hover-revealed 32 px sprite zones over the pack icon
-  (`TransferableSelectionList.Entry.render`). Two right-anchored square buttons
-  per row is `menu/key_binds.rs`'s existing row shape, which this pipeline
-  already draws and hit-tests. The bitmap font is upper-case 5×7 with no arrow
-  glyphs, hence `U`/`D` rather than `▲`/`▼`.
+  draws hover-revealed 32 px sprite zones over the pack icon's two right quadrants
+  (`TransferableSelectionList.PackEntry.extractContent`, `:187-209`). Two
+  right-anchored square buttons per row is `menu/key_binds.rs`'s existing row
+  shape, which this pipeline already draws and hit-tests. What they carry *is*
+  vanilla-shaped: a triangle (`MenuRow::arrow` → `draw_arrow`, four stacked 1 px
+  rows of 1/3/5/7) rather than the `U`/`D` letters they shipped with — the fallback
+  bitmap font is upper-case 5×7 and has no arrow glyph, so the arrow is geometry.
 
 ## What is deliberately not built
 
-- **Pack-format validation.** Vanilla checks `pack_format` against the host's and
-  warns/confirms on an incompatible pack. `PackMeta::accepts` already exists and
-  `DiscoveredPack::pack_format` already carries the number — it is simply not
-  consulted. **This client is more permissive than vanilla here:** an old pack
-  loads and its stale paths silently resolve to nothing.
+- **Pack-format validation**, and with it the incompatible row's red content box
+  and `pack.incompatible` name swap (`TransferableSelectionList.java:137-144`).
+  `PackMeta::accepts` already exists and `DiscoveredPack::pack_format` already
+  carries the number, but **nothing in this client declares a host `pack_format`**
+  to compare against, and the scan drops `pack.mcmeta`'s `supported_formats` range
+  — so a guessed host number would paint a warning over packs that are in fact
+  fine. Painting nothing is the honest reduction; a wrong warning is not. **This
+  client is more permissive than vanilla here:** an old pack loads and its stale
+  paths silently resolve to nothing.
 - **A search box** and the **drag-and-drop-file hint** (`pack.dropInfo`). The
   hint would advertise a file-drop handler that does not exist, so the header
   stays the generic 33 px `OptionsSubScreen` band rather than vanilla's taller
   one.
 - **A scrollbar per column.** Both columns share one vertical band, so
-  `packs::list_spec` declares it once — enough for the rows to be clipped to it
-  (`Origin::is_scrolling_list_row`) and for the wheel to reach the focused
-  column — but the thumb reflects whichever column the cursor is in, not both. At
-  `MIN_SCALED_HEIGHT` that band shows four rows; beyond that the cursor
-  auto-scrolls and the wheel works, which is what keeps every row reachable.
+  `packs::list_spec` declares it once — enough for a bar to be drawn, for the rows
+  to be clipped to the band (`Origin::is_scrolling_list_row`) and for the wheel to
+  reach the focused column — but the thumb reflects whichever column the cursor is
+  in, not both. At `MIN_SCALED_HEIGHT` that band shows four rows; beyond that the
+  cursor auto-scrolls and the wheel works.
+  - The **last row is reachable**, measured rather than assumed:
+    `wheeling_to_the_clamp_brings_the_last_row_fully_inside_the_band` drives the
+    wheel to `max_scroll` at three canvases and compares `packs::row_y` — the
+    expression the *draw* uses — against the band. It was asked because of a
+    separate "settings scrolling doesn't reach the end" report; whatever that is, it
+    is not this band arithmetic.
 - **Filesystem watching**, and **live reload** on Done.
 
 ## Configuration
@@ -159,6 +189,23 @@ would produce:
   the real atlas. Measured: **rgb(143,143,143) with no packs, rgb(255,0,255) with
   the folder pack selected.** The no-pack read is the control — without it, a
   vanilla stone that happened to be magenta would pass.
+
+The **draw** is gated separately, hermetically, in `menu/render/tests.rs` — and it
+is the gate this screen was missing:
+
+- `a_resource_pack_row_draws_its_icon_and_description_not_a_centred_button_label`
+  measures a flat-coloured `pack.png` filling the 32×32 icon column, the
+  description's grey on its own line past that column, and **zero**
+  `ROW_BG`/`ROW_SEL`/`ROW_OFF` in the row — the button fill the wrong draw painted.
+  It checks the built-in row too, which has no icon at all: the case the
+  `favicon`-gated version missed.
+- `a_move_button_draws_a_triangle_pointing_its_own_way` asks *where* the arrow's ink
+  is, not whether there is any: an up arrow's top half must carry less than its
+  bottom half and a down arrow the reverse, so a letter or a pair drawn the same way
+  round fails.
+- `every_sprite_id_the_vanilla_screens_name_exists_in_the_real_pack` (`#[ignore]`d)
+  now also asserts the four `transferable_list/*` ids and the loose
+  `misc/unknown_pack` resolve in the real jar — a typo there draws nothing, silently.
 
 ## Dependencies
 

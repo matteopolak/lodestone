@@ -771,18 +771,31 @@ pub const UNKNOWN_SERVER_TEXTURE: (&str, &str) = (
     "assets/minecraft/textures/misc/unknown_server.png",
 );
 
+/// The Resource Packs screen's fallback pack icon —
+/// `PackSelectionScreen.DEFAULT_ICON` (`PackSelectionScreen.java:67`), blitted at
+/// 32×32 for any pack that ships no readable `pack.png`, which includes the
+/// built-in row.
+///
+/// Loose for [`UNKNOWN_SERVER_TEXTURE`]'s reason and in the same directory: it
+/// lives at `textures/misc/`, outside `gui/sprites/**`.
+pub const UNKNOWN_PACK_TEXTURE: (&str, &str) = (
+    "misc/unknown_pack",
+    "assets/minecraft/textures/misc/unknown_pack.png",
+);
+
 /// Every loose texture the **menu** atlas carries: [`TITLE_TEXTURES`] plus
-/// [`UNKNOWN_SERVER_TEXTURE`].
+/// [`UNKNOWN_SERVER_TEXTURE`] and [`UNKNOWN_PACK_TEXTURE`].
 ///
 /// A superset rather than an addition to [`TITLE_TEXTURES`], because that
-/// constant means "what `LogoRenderer` blits by path" and the server list's
-/// fallback icon is not that. The `assert!` below is a compile-time guard: this
-/// list spells the title pair out by index, so a third title texture would
-/// otherwise be dropped from the menu atlas silently.
+/// constant means "what `LogoRenderer` blits by path" and the two list fallback
+/// icons are not that. The `assert!` below is a compile-time guard: this list
+/// spells the title pair out by index, so a third title texture would otherwise
+/// be dropped from the menu atlas silently.
 pub const MENU_TEXTURES: &[(&str, &str)] = &[
     TITLE_TEXTURES[0],
     TITLE_TEXTURES[1],
     UNKNOWN_SERVER_TEXTURE,
+    UNKNOWN_PACK_TEXTURE,
 ];
 
 const _: () = assert!(
