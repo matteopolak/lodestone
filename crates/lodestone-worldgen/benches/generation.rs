@@ -184,6 +184,200 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static GLOBAL_ALLOC: CountingAllocator = CountingAllocator;
 
+// ---------------------------------------------------------------------------
+// Instructions retired — the standing before/after comparator
+// ---------------------------------------------------------------------------
+//
+// **Why this exists beside the wall clock rather than instead of it.**
+// `DESIGN.md` §12.112 states this bench's own reproducibility: wall clock here
+// moves **10.8%** run to run on a machine with two or three other agents
+// compiling, and §12.98 records a 20% swing on an identical binary. That is wider
+// than most of the wins a later optimisation unit will claim, so a wall-clock
+// acceptance criterion on this file is unusable — it was the reason 21 units of
+// `docs/plans/worldgen-rewrite.md` landed against allocation counters and the
+// headline figure went unmeasured for the whole drive.
+//
+// `proc_pid_rusage(getpid(), RUSAGE_INFO_V4, …)`'s `ri_instructions` reproduces to
+// **0.1–0.6%** under the same load: thermal state, DVFS and P-vs-E-core placement
+// change how *fast* instructions retire, never *which* instructions a
+// deterministic program executes. `docs/plans/worldgen-cycle-accounting.md` is the
+// characterisation; `crates/lodestone-shell/tests/client_chunk_cycles.rs` is the
+// first customer and the pattern this follows, including reaching
+// `ri_instructions` **by name** out of a field-by-field transcription rather than
+// at a hand-computed offset.
+//
+// **Instructions are blind to locality, so both are kept.** §12 records a case
+// measuring 490k instructions against ~7× more time; a cache or locality story
+// needs the pair, and reporting the ratio (instructions per µs) is how a change
+// that moved only locality announces itself.
+
+/// `RUSAGE_INFO_V4` from `<sys/resource.h>`.
+const RUSAGE_INFO_V4: i32 = 4;
+
+/// `struct rusage_info_v4` from macOS `<sys/resource.h>`, transcribed
+/// **field-by-field in declaration order** so `ri_instructions` is reached by name.
+/// Same transcription as `client_chunk_cycles.rs`; [`RUSAGE_INFO_V4_SIZE`] is the
+/// check that a dropped or mis-typed line fails loudly instead of silently
+/// shifting which field is read.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+#[allow(non_snake_case, dead_code)]
+struct RusageInfoV4 {
+    ri_uuid: [u8; 16],
+    ri_user_time: u64,
+    ri_system_time: u64,
+    ri_pkg_idle_wkups: u64,
+    ri_interrupt_wkups: u64,
+    ri_pageins: u64,
+    ri_wired_size: u64,
+    ri_resident_size: u64,
+    ri_phys_footprint: u64,
+    ri_proc_start_abstime: u64,
+    ri_proc_exit_abstime: u64,
+    ri_child_user_time: u64,
+    ri_child_system_time: u64,
+    ri_child_pkg_idle_wkups: u64,
+    ri_child_interrupt_wkups: u64,
+    ri_child_pageins: u64,
+    ri_child_elapsed_abstime: u64,
+    ri_diskio_bytesread: u64,
+    ri_diskio_byteswritten: u64,
+    ri_cpu_time_qos_default: u64,
+    ri_cpu_time_qos_maintenance: u64,
+    ri_cpu_time_qos_background: u64,
+    ri_cpu_time_qos_utility: u64,
+    ri_cpu_time_qos_legacy: u64,
+    ri_cpu_time_qos_user_initiated: u64,
+    ri_cpu_time_qos_user_interactive: u64,
+    ri_billed_system_time: u64,
+    ri_serviced_system_time: u64,
+    ri_logical_writes: u64,
+    ri_lifetime_max_phys_footprint: u64,
+    ri_instructions: u64,
+    ri_cycles: u64,
+    ri_billed_energy: u64,
+    ri_serviced_energy: u64,
+    ri_interval_max_phys_footprint: u64,
+    ri_runnable_time: u64,
+    ri_flags: u64,
+}
+
+/// The size the transcription above must have if every field is present and
+/// correctly typed: a 16-byte UUID followed by 36 `u64`s. Derived from the field
+/// list, not measured.
+const RUSAGE_INFO_V4_SIZE: usize = 16 + 36 * 8;
+
+unsafe extern "C" {
+    /// `libproc`'s task-level resource accounting, in `libSystem` — no link flag
+    /// and no privileges needed for the calling process.
+    fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut core::ffi::c_void) -> i32;
+}
+
+/// Instructions retired by this **process** so far.
+///
+/// Process-wide, not per-thread: everything measured through it below is
+/// single-threaded and criterion's own sampling is not running concurrently with
+/// it, which is the same constraint `client_chunk_cycles.rs` documents.
+fn instructions_retired() -> u64 {
+    let mut info = RusageInfoV4::default();
+    let rc = unsafe {
+        proc_pid_rusage(
+            i32::try_from(std::process::id()).expect("pid fits in i32"),
+            RUSAGE_INFO_V4,
+            (&raw mut info).cast::<core::ffi::c_void>(),
+        )
+    };
+    assert_eq!(
+        rc, 0,
+        "proc_pid_rusage(RUSAGE_INFO_V4) failed with {rc}; the standing before/after \
+         comparator has nothing to report without it"
+    );
+    info.ri_instructions
+}
+
+/// A fixed-iteration SplitMix64 chain: the instrument's own scaling control.
+/// `#[inline(never)]` so the optimiser cannot fold two calls with different
+/// `iters` into one codegen, which would break the ratio the control asserts.
+#[inline(never)]
+fn reference_kernel(iters: u64) -> u64 {
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    for _ in 0..iters {
+        x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = x;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        x = x.wrapping_add(z ^ (z >> 31));
+    }
+    x
+}
+
+/// Fails unless `ri_instructions` is being read at all and is really an
+/// instruction count.
+///
+/// Two checks, both with expected values from outside the field being read:
+///
+/// * **Struct size** — `16 + 36 × 8`, from the field list. Catches a dropped,
+///   added or mis-typed line, which would shift the read to a neighbouring field
+///   whose value would still look like a plausible large number.
+/// * **4× scaling** — four times the loop bound must retire ~four times the
+///   instructions. The expected value is a ratio of two constants chosen in this
+///   file, so it is arithmetic, not an observation. A footprint, flags or
+///   wakeup-count field reads ≈1.00 here; a zero (Rosetta, or a kernel that does
+///   not populate the field) fails the non-zero check inside it.
+///
+/// The locality control that separates `ri_instructions` from `ri_cycles` — the
+/// third arm — lives in `client_chunk_cycles.rs`, which is the same struct read
+/// the same way. It is not duplicated here.
+fn assert_instruction_counter_is_real() {
+    assert_eq!(
+        std::mem::size_of::<RusageInfoV4>(),
+        RUSAGE_INFO_V4_SIZE,
+        "the rusage_info_v4 transcription is {} bytes, not the {RUSAGE_INFO_V4_SIZE} its \
+         own field list implies; `ri_instructions` is therefore not the field being read",
+        std::mem::size_of::<RusageInfoV4>()
+    );
+
+    // **Large, because the instrument's own cost sits inside both arms.** Each
+    // `measure` call brackets the kernel with two `proc_pid_rusage` reads, and a
+    // read costs ~80,000 instructions (it walks the task's threads) — far more than
+    // the ~600 ns wall figure suggests. That fixed term inflates the smaller arm
+    // proportionally more, so the ratio is `(4nk + C) / (nk + C)`, not 4. At
+    // `BASE = 200_000` it measured **3.663** and failed this control on a correct
+    // reading; at 5,000,000 the term is 0.4% of the smaller arm and the ratio lands
+    // at 3.98. The band below is set to that residual, not widened to hide it.
+    const BASE: u64 = 5_000_000;
+    // `black_box` on the **argument** as well as the result, and it is load-bearing.
+    // `reference_kernel` reads no memory, so LLVM infers `readnone` and is free to
+    // common-subexpression two calls it can prove share an argument — `#[inline(never)]`
+    // stops inlining, not CSE. Observed: the warm-up call and the first measured
+    // call, both at `BASE`, collapsed into one and this control read
+    // **1304.7×** instead of 4.00. It fired on a broken control rather than on
+    // broken code, which is the direction a control is supposed to fail in.
+    let measure = |iters: u64| -> u64 {
+        let before = instructions_retired();
+        black_box(reference_kernel(black_box(iters)));
+        instructions_retired().saturating_sub(before)
+    };
+    // Warm: the first call pays for lazily-resolved symbols on the syscall path.
+    // A different bound from either measured arm, so nothing can be folded into it.
+    black_box(measure(BASE / 2 + 1));
+    let one = measure(BASE);
+    let four = measure(4 * BASE);
+    assert!(
+        one > 0 && four > 0,
+        "the instruction counter did not move over {BASE} kernel iterations \
+         ({one} then {four}); it reads zero on Rosetta and on kernels that do not \
+         populate the field, and a zero delta would satisfy every ratio below"
+    );
+    let ratio = four as f64 / one as f64;
+    assert!(
+        (3.90..=4.10).contains(&ratio),
+        "4x the loop bound retired {ratio:.3}x the instructions ({one} -> {four}); the \
+         expected 4.00 is the ratio of two constants in this file, so a value near 1.00 \
+         means a non-instruction field is being read"
+    );
+}
+
 /// Runs `f` with allocation counting on for this thread, returning its value and
 /// the count.
 fn measure_allocs<T>(f: impl FnOnce() -> T) -> (T, u64) {
@@ -926,6 +1120,35 @@ const BLOCKS_PER_CHUNK_LAYER: u64 = 16 * 16;
 /// claim.
 const COLD_PRE_ORE_CHUNKS: u64 = 25;
 
+/// Chebyshev radius of the pre-ore closure above, in chunks: 5×5 is radius 2.
+const COLD_PRE_ORE_RADIUS: i32 = 2;
+
+/// Chebyshev radius of the **structure-start** closure, in chunks.
+///
+/// `pre_ore` reads `structure_refs`, which walks `structure_starts` over
+/// [`lodestone_worldgen::overworld::structures::REFS_RADIUS`]. Composed with the
+/// pre-ore closure that is `2 + 8 = 10` — the widest closure in the pipeline, and
+/// the one `overworld::STORE_RETENTION` has to be sized against.
+const SWEEP_STRUCTURE_RADIUS: i32 =
+    COLD_PRE_ORE_RADIUS + lodestone_worldgen::overworld::structures::REFS_RADIUS;
+
+/// Chunks whose **structure starts** one cold `column()` must compute.
+///
+/// This is issue #514's new closure and it is much wider than the terrain one.
+/// `pre_ore_stage` reads `structure_refs_stage` for its own chunk (S1's ordering
+/// edge), and `structure_refs_stage` walks `structure_starts_stage` over
+/// `overworld::structures::REFS_RADIUS` = 8 chunks in every direction —
+/// vanilla's own `createReferences` range. Composing that with the 5×5 pre-ore
+/// closure gives a Chebyshev radius of `2 + 8 = 10`, i.e. **21×21 = 441**
+/// chunks.
+///
+/// Derived from `REFS_RADIUS` rather than written down, so a change to vanilla's
+/// range moves the prediction instead of breaking it.
+const COLD_STRUCTURE_START_CHUNKS: u64 = {
+    let side = 1 + 2 * SWEEP_STRUCTURE_RADIUS;
+    (side * side) as u64
+};
+
 /// Ore RNG walks one cold `column()` must run: the 3×3 post-ore closure. D4's
 /// "9 ore RNG walks".
 const COLD_POST_ORE_CHUNKS: u64 = 9;
@@ -1049,15 +1272,83 @@ fn bench_counter_calibration(_c: &mut Criterion) {
          neighbourhood); got {}",
         s.stage_entered[Stage::Shape as usize]
     );
+    // `block_at` has **two** consumers as of issue #514, and this assertion is an
+    // exhaustive decomposition rather than a literal.
+    //
+    // 1. `fill_stage` — one call per cell, `256 × height` per chunk fill, over the
+    //    5×5 pre-ore closure. This is the term the rewrite plan's D1 states as
+    //    98,304 and it is still exact.
+    // 2. `StartSampler::first_occupied_height` — structure placement asking for a
+    //    heightmap on terrain that does not exist yet, so it scans a column
+    //    top-down through the aquifer. Data-dependent: how many probes, and how
+    //    deep each one goes, is a property of which structure sets try to place
+    //    near (0, 0) and where the surface is. Counted, not predicted.
+    //
+    // Writing this as `fill + probes` keeps consumer 1 pinned. The alternative —
+    // raising the literal to the observed 99,752/fill — would have made the gate
+    // green while destroying the only thing it measures: a *third* consumer, or a
+    // per-fill regression to two calls per cell, would then be indistinguishable
+    // from a structure-placement data change.
+    //
+    // **This is self-controlling.** If `bump_structure_height_probe` were dead
+    // (compiled out, or never reached), `structure_probe_block_at` would read 0
+    // and the identity would fail by exactly the amount the probes cost — which
+    // is how this assertion was first diagnosed. No hand-bumped control is needed
+    // for a term whose absence makes the equation false.
+    let fill_block_at = per_fill * COLD_PRE_ORE_CHUNKS;
     assert_eq!(
         s.block_at,
-        per_fill * COLD_PRE_ORE_CHUNKS,
-        "`block_at` should be {per_fill} per fill × {COLD_PRE_ORE_CHUNKS} fills = {}; got {}. \
-         `block_at / stage_entered[shape]` = {} is the per-chunk figure the rewrite plan \
-         states as 98,304.",
-        per_fill * COLD_PRE_ORE_CHUNKS,
-        s.block_at,
-        s.block_at / s.stage_entered[Stage::Shape as usize].max(1)
+        fill_block_at + s.structure_probe_block_at,
+        "`block_at` must decompose exactly into its two consumers: \
+         {per_fill} per fill × {COLD_PRE_ORE_CHUNKS} fills = {fill_block_at}, plus \
+         {} calls from {} structure height probes = {}; got {}. A surplus means a THIRD \
+         consumer of `AquiferSystem::block_at` appeared (grep for `.block_at(` — there \
+         should be exactly two call sites, `overworld/fill.rs` and \
+         `overworld/structures.rs`) or the fill loop stopped being one call per cell. \
+         A deficit means the probe counter is over-reporting.",
+        s.structure_probe_block_at,
+        s.structure_height_probes,
+        fill_block_at + s.structure_probe_block_at,
+        s.block_at
+    );
+    // The probe term is not predicted, but it *is* bounded: every probe issues at
+    // least one query and at most one per Y level. A ratio outside that range
+    // means the counter and the loop have drifted apart, which would let the
+    // identity above absorb an arbitrary amount of new work.
+    assert!(
+        s.structure_height_probes > 0,
+        "no structure height probe ran on a cold column against embedded data, so the \
+         `block_at` decomposition above degenerates to the pre-#514 form and would not \
+         notice the probes coming back. Structure sets failed to resolve."
+    );
+    assert!(
+        s.structure_probe_block_at >= s.structure_height_probes
+            && s.structure_probe_block_at <= s.structure_height_probes * height,
+        "each of the {} structure height probes must issue between 1 and {height} \
+         `block_at` calls; {} total is a mean of {:.1}, outside [1, {height}]",
+        s.structure_height_probes,
+        s.structure_probe_block_at,
+        s.structure_probe_block_at as f64 / s.structure_height_probes as f64
+    );
+    // Same bound one level up: a probe reuses its chunk's aquifer from
+    // `StartSampler`'s own map, so builds can only ever be *fewer* than probes.
+    assert!(
+        s.structure_aquifers_built >= 1
+            && s.structure_aquifers_built <= s.structure_height_probes,
+        "structure probes built {} aquifers for {} probes — must be in \
+         [1, probes], since `StartSampler` memoises one per chunk",
+        s.structure_aquifers_built,
+        s.structure_height_probes
+    );
+    // The closure size for stage 0a, which is *why* the surplus exists at all.
+    // Arithmetic from `REFS_RADIUS`, not an observation.
+    assert_eq!(
+        s.structure_starts_computed, COLD_STRUCTURE_START_CHUNKS,
+        "a cold column must compute structure starts for exactly \
+         {COLD_STRUCTURE_START_CHUNKS} chunks (the 17×17 `createReferences` walk of the \
+         5×5 pre-ore closure); got {}. This is the widest closure in the pipeline — \
+         nearly 18× the terrain one — so a change here moves C_cold a lot.",
+        s.structure_starts_computed
     );
 
     // --- 2. The D4 dependency closure -----------------------------------
@@ -1072,8 +1363,11 @@ fn bench_counter_calibration(_c: &mut Criterion) {
         "D4 predicts {COLD_POST_ORE_CHUNKS} ore RNG walks on a cold column; got {}",
         s.post_ore_computed
     );
+    // `Stage::Aquifer` is the one stage with the same two-consumer problem as
+    // `block_at`: `StartSampler` builds a real aquifer per probed chunk, and those
+    // chunks are not in the pre-ore closure. Decomposed, for the same reason.
     for (stage, expected) in [
-        (Stage::Aquifer, COLD_PRE_ORE_CHUNKS),
+        (Stage::Aquifer, COLD_PRE_ORE_CHUNKS + s.structure_aquifers_built),
         (Stage::Surface, COLD_PRE_ORE_CHUNKS),
         (Stage::Materialize, COLD_PRE_ORE_CHUNKS),
         (Stage::Carve, COLD_PRE_ORE_CHUNKS),
@@ -1229,16 +1523,29 @@ fn bench_counter_calibration(_c: &mut Criterion) {
     println!(
         "  DERIVED: block_at/fill = {} (plan states 98,304); pre_ore closure = {} (plan: 25); \
          ore walks = {} (plan: 9)",
-        s.block_at / s.stage_entered[Stage::Shape as usize].max(1),
+        (s.block_at - s.structure_probe_block_at) / s.stage_entered[Stage::Shape as usize].max(1),
         s.pre_ore_computed,
         s.post_ore_computed
     );
+    println!(
+        "  DERIVED: structure starts closure = {} (21x21 = {COLD_STRUCTURE_START_CHUNKS}); \
+         height probes = {} over {} block_at calls ({:.1} deep each, {:.1}% of all block_at)",
+        s.structure_starts_computed,
+        s.structure_height_probes,
+        s.structure_probe_block_at,
+        s.structure_probe_block_at as f64 / s.structure_height_probes.max(1) as f64,
+        100.0 * s.structure_probe_block_at as f64 / s.block_at.max(1) as f64,
+    );
 
+    // The **fill-only** figure, i.e. with the structure-probe term removed. Before
+    // this subtraction the recorded metric drifted from 98,304 to 99,752 and the
+    // JSONL history read as a 1.5% per-fill regression that had not happened.
     support::record(support::Record {
         bench: "generation",
         metric: "calibration_block_at_per_chunk_fill",
         scene: "seed=42 chunk=(0,0) resolver=embedded cold=true",
-        value: (s.block_at / s.stage_entered[Stage::Shape as usize].max(1)) as f64,
+        value: ((s.block_at - s.structure_probe_block_at)
+            / s.stage_entered[Stage::Shape as usize].max(1)) as f64,
         unit: "calls",
     });
 }
@@ -1265,6 +1572,10 @@ fn print_counters(s: &Snapshot, chunks: u64) {
     row("biome_rows_compared", s.biome_rows_compared);
     row("stitch_cells_copied", s.stitch_cells);
     row("string_allocs", s.string_allocs);
+    row("structure_starts_computed", s.structure_starts_computed);
+    row("structure_height_probes", s.structure_height_probes);
+    row("structure_probe_block_at", s.structure_probe_block_at);
+    row("structure_aquifers_built", s.structure_aquifers_built);
     row("rng_draws (all stages)", s.rng_draws_total());
     println!("  rng draws by stage:");
     for (i, name) in lodestone_worldgen::counters::STAGE_NAMES.iter().enumerate() {
@@ -1365,26 +1676,44 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
     let coords: Vec<(i32, i32)> =
         (0..SIDE).flat_map(|cz| (0..SIDE).map(move |cx| (cx, cz))).collect();
 
+    // Instructions are read per column **inside the sweep**, so `I_ss` below is the
+    // median of the same 100 interior columns C_ss is the median of — the same
+    // scene, the same definition, two instruments. Measuring it on a *repeat* of
+    // one already-swept column instead would have been much easier and wrong: a
+    // repeat re-runs only vegetation/top_layer/intern (the store answers the rest),
+    // which measured 3.6 ms against C_ss's 21.4 ms. A comparator blind to 83% of
+    // the cost is worse than no comparator, because it looks like one.
+    //
+    // The two reads cost ~1.2 µs against a ~20 ms column, i.e. 0.006%.
+    assert_instruction_counter_is_real();
     counters::reset();
-    let mut per_chunk_us: Vec<(i32, i32, f64)> = Vec::with_capacity(coords.len());
+    let mut per_chunk: Vec<(i32, i32, f64, u64)> = Vec::with_capacity(coords.len());
     let sweep_start = Instant::now();
     let mut non_air_total = 0usize;
     for &(cx, cz) in &coords {
+        let insns_before = instructions_retired();
         let t = Instant::now();
         let col = generator.column(cx, cz);
         let us = t.elapsed().as_secs_f64() * 1e6;
+        let insns = instructions_retired().saturating_sub(insns_before);
         non_air_total += col.non_air_count();
-        per_chunk_us.push((cx, cz, us));
+        per_chunk.push((cx, cz, us, insns));
     }
     let sweep_s = sweep_start.elapsed().as_secs_f64();
     let s = counters::snapshot();
     assert!(non_air_total > 0, "the whole sweep generated only air — nothing was measured");
 
     // Interior = the sweep minus a one-chunk border.
-    let mut interior: Vec<f64> = per_chunk_us
+    let is_interior = |cx: i32, cz: i32| cx > 0 && cz > 0 && cx < SIDE - 1 && cz < SIDE - 1;
+    let mut interior: Vec<f64> = per_chunk
         .iter()
-        .filter(|&&(cx, cz, _)| cx > 0 && cz > 0 && cx < SIDE - 1 && cz < SIDE - 1)
-        .map(|&(_, _, us)| us)
+        .filter(|&&(cx, cz, _, _)| is_interior(cx, cz))
+        .map(|&(_, _, us, _)| us)
+        .collect();
+    let mut interior_insns: Vec<u64> = per_chunk
+        .iter()
+        .filter(|&&(cx, cz, _, _)| is_interior(cx, cz))
+        .map(|&(_, _, _, insns)| insns)
         .collect();
     assert_eq!(
         interior.len(),
@@ -1394,15 +1723,53 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
         interior.len()
     );
     interior.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    interior_insns.sort_unstable();
     let c_ss_us = (interior[49] + interior[50]) / 2.0;
     let p95 = interior[94];
+    let i_ss = (interior_insns[49] + interior_insns[50]) / 2;
+    let i_ss_p95 = interior_insns[94];
+
+    // ---- The eviction control, which every counter below depends on ----
+    //
+    // This runs with the counters feature **off** as well, deliberately: it is the
+    // one check that separates "each stage ran once" from "each stage ran once,
+    // plus however many times the retention ceiling made us redo it", and it needs
+    // no counters to do it. The detector itself is proven live in
+    // `overworld::store`'s own `a_view_walked_across_the_world_...` gate, which
+    // asserts `evicted() > 0` over a 240-step walk — so a zero here is a
+    // measurement, not a dead instrument.
+    assert_eq!(
+        generator.store_evictions(),
+        0,
+        "the {SIDE}×{SIDE} sweep evicted {} store entries, so every stage-computation \
+         count below is inflated by recomputation and the median is measuring the \
+         eviction rather than the pipeline. The sweep's working set is \
+         {} entries (its {}-radius structure closure) and `STORE_RETENTION` must exceed \
+         it — see DESIGN.md §12.118, where this read 740 pre-ore computations against a \
+         prediction of 256.",
+        generator.store_evictions(),
+        (SIDE + 2 * SWEEP_STRUCTURE_RADIUS) * (SIDE + 2 * SWEEP_STRUCTURE_RADIUS),
+        SWEEP_STRUCTURE_RADIUS
+    );
 
     // ---- Counter assertions on the sweep ------------------------------
     if counters::enabled() {
+        // Printed *before* the assertions, deliberately: an assertion failure here
+        // used to abort with a single stage's number and no attribution, which is
+        // the least useful moment to lose the table.
+        println!("\n  -- counters over the {}-chunk sweep (pre-assertion) --", coords.len());
+        print_counters(&s, u64::try_from(coords.len()).unwrap());
         let sweep = u64::try_from(coords.len()).unwrap();
         let closure = |extra: i32| -> u64 { u64::try_from((SIDE + 2 * extra) * (SIDE + 2 * extra)).unwrap() };
         for (stage, expected, radius) in [
-            (Stage::Aquifer, closure(2), "5×5 pre-ore closure"),
+            // See the calibration bench: structure height probes build aquifers
+            // for chunks outside the pre-ore closure, so this one stage carries a
+            // second term. Counted, not predicted — the probe set is data.
+            (
+                Stage::Aquifer,
+                closure(2) + s.structure_aquifers_built,
+                "5×5 pre-ore closure + structure probes",
+            ),
             (Stage::Shape, closure(2), "5×5 pre-ore closure"),
             (Stage::Surface, closure(2), "5×5 pre-ore closure"),
             (Stage::Materialize, closure(2), "5×5 pre-ore closure"),
@@ -1416,9 +1783,10 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
                 s.stage_entered[stage as usize], expected,
                 "exactly-once violated for stage {:?}: expected {expected} runs over a \
                  {SIDE}×{SIDE} sweep ({radius}), got {}. A HIGHER number means a chunk's \
-                 stage was recomputed — most likely FIFO eviction from the 512-entry memo \
-                 caches, which is exactly the failure U6's staged store removes \
-                 structurally. A LOWER number means a stage stopped running.",
+                 stage was recomputed — check `store_evictions()` below first: the \
+                 retention ceiling being smaller than the sweep's real working set is \
+                 what produced 740 pre-ore computations against this same 256 \
+                 (DESIGN.md §12.118). A LOWER number means a stage stopped running.",
                 stage, s.stage_entered[stage as usize]
             );
         }
@@ -1431,6 +1799,19 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
             s.post_ore_computed,
             closure(1),
             "post-ore computations over the sweep should equal the 3×3 closure exactly"
+        );
+        // Structure starts are the **widest** closure in the pipeline, and the
+        // reason `STORE_RETENTION` is what it is. Predicted from `REFS_RADIUS`.
+        assert_eq!(
+            s.structure_starts_computed,
+            closure(SWEEP_STRUCTURE_RADIUS),
+            "structure-start computations over the sweep should equal the \
+             {SWEEP_STRUCTURE_RADIUS}-radius closure ({}×{}) exactly; got {}. This counter \
+             read 7,569 against this same prediction of 1,024 at `ac5391d1` — a 7.4× \
+             recompute caused entirely by the store's retention ceiling.",
+            SIDE + 2 * SWEEP_STRUCTURE_RADIUS,
+            SIDE + 2 * SWEEP_STRUCTURE_RADIUS,
+            s.structure_starts_computed
         );
         assert_all_ten_stages_ran(&s, sweep, "C_ss sweep (embedded data)");
         assert_all_ten_stages_ran(&cold_snapshot, 1, "C_cold (embedded data)");
@@ -1453,6 +1834,44 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
         measure_allocs_by_stage(|| generator.column(5, 5));
     black_box(warm_col.non_air_count());
 
+    // ---- Repeatability probe: why I_ss is the comparator ---------------
+    //
+    // The instrument's justification, measured here rather than quoted. Both
+    // numbers come from the **same repetitions of identical work** — that is the
+    // only shape in which a spread means reproducibility rather than scene
+    // variation, which is why this cannot be read off the interior-100
+    // distribution above.
+    //
+    // The repeated work is `column(5, 5)` on the already-swept generator: not the
+    // C_ss path (the store answers pre_ore/post_ore, so only
+    // vegetation/top_layer/intern re-run), and it does not need to be. It only has
+    // to be *the same work each time*.
+    //
+    // Deliberately outside `measure_allocs`: the counting allocator adds
+    // instructions of its own at every allocation in the window.
+    const PROBE_REPS: usize = 7;
+    let mut probe: Vec<(u64, f64)> = Vec::with_capacity(PROBE_REPS);
+    for _ in 0..PROBE_REPS {
+        let t = Instant::now();
+        let before = instructions_retired();
+        let col = generator.column(5, 5);
+        let insns = instructions_retired().saturating_sub(before);
+        let us = t.elapsed().as_secs_f64() * 1e6;
+        black_box(col.non_air_count());
+        probe.push((insns, us));
+    }
+    let spread = |lo: f64, hi: f64, mid: f64| 100.0 * (hi - lo) / mid.max(1.0);
+    let mut probe_insns: Vec<u64> = probe.iter().map(|&(i, _)| i).collect();
+    let mut probe_us: Vec<f64> = probe.iter().map(|&(_, u)| u).collect();
+    probe_insns.sort_unstable();
+    probe_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let insn_spread = spread(
+        probe_insns[0] as f64,
+        probe_insns[PROBE_REPS - 1] as f64,
+        probe_insns[PROBE_REPS / 2] as f64,
+    );
+    let us_spread = spread(probe_us[0], probe_us[PROBE_REPS - 1], probe_us[PROBE_REPS / 2]);
+
     // ---- Report ------------------------------------------------------
     println!("\n=== worldgen C_ss / C_cold — release baseline, EMBEDDED server data ===");
     println!("  scene: seed={SEED}, {SIDE}x{SIDE} sweep ({} chunks), single thread", coords.len());
@@ -1461,6 +1880,18 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
     println!("  C_cold (first column, fresh)    : {c_cold_us:>12.1} us   target <= 8000 us");
     println!("  whole {SIDE}x{SIDE} sweep            : {sweep_s:>12.3} s");
     println!("  steady-state heap allocs/column : {steady_allocs:>12}   target 0 from hot path + O(1) output");
+    println!(
+        "  I_ss   (median insns of same 100): {i_ss:>12}   <-- THE before/after comparator"
+    );
+    println!("  I_ss   p95 interior             : {i_ss_p95:>12}");
+    println!(
+        "  I_ss   insn/us                  : {:>12.1}   (moves with I_ss flat => a locality story, not a work story)",
+        i_ss as f64 / c_ss_us.max(1.0)
+    );
+    println!(
+        "  repeatability, {PROBE_REPS} reps of one : insns {insn_spread:>6.2}%   wall {us_spread:>6.2}%   \
+         <-- why the comparator is the left one"
+    );
     if counters::enabled() {
         // Attribution for whatever the total still is. Unit 3 took it from
         // 905,459 to 20,684 by interning; the split says which stage owns the
@@ -1481,8 +1912,6 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
         }
     }
     if counters::enabled() {
-        println!("\n  -- counters over the {}-chunk sweep --", coords.len());
-        print_counters(&s, u64::try_from(coords.len()).unwrap());
         println!("\n  -- counters for the single COLD column (C_cold) --");
         print_counters(&cold_snapshot, 1);
     }
@@ -1497,6 +1926,9 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
         ("c_cold_first_column_us", c_cold_us, "us"),
         ("c_ss_sweep_total_s", sweep_s, "s"),
         ("steady_state_heap_allocs_per_column", steady_allocs as f64, "allocs"),
+        // The comparator. Recorded last so a `bench-compare` reader sees it beside
+        // the wall-clock figures it is meant to replace as the acceptance criterion.
+        ("i_ss_median_instructions_per_column", i_ss as f64, "instructions"),
     ] {
         support::record(support::Record {
             bench: "generation",

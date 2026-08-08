@@ -306,15 +306,68 @@ struct ChunkStages {
 /// Narrowing it would break vegetation's seam consistency as well as the pin.
 const COLUMN_CLOSURE_RADIUS: i32 = 2;
 
+/// Chebyshev chunk radius one [`OverworldGenerator::column`] call closes over
+/// **including the structure stages** — the radius the store pin actually uses.
+///
+/// # Why this is not [`COLUMN_CLOSURE_RADIUS`], and what it cost to find out
+///
+/// Issue #514's S1 added one upstream edge: [`OverworldGenerator::pre_ore_stage`]
+/// reads `structure_refs_stage` for its own chunk, and that stage walks
+/// `structure_starts_stage` over [`structures::REFS_RADIUS`] = 8 chunks in every
+/// direction (vanilla's `createReferences` range). Compose that with the 5×5
+/// pre-ore closure and **one `column()` call touches 21×21 = 441 store entries,
+/// not 25**.
+///
+/// The pin radius was left at 2, so 416 of those 441 entries were unpinned while
+/// the request that needed them was still running, and [`STORE_RETENTION`] was
+/// still sized for the 25-per-column world. Measured over the 12×12 C_ss sweep at
+/// `ac5391d1`, against the exactly-once predictions in `benches/generation.rs`:
+///
+/// | counter | predicted | measured | factor |
+/// |---|---|---|---|
+/// | `pre_ore_computed` | 256 | **740** | 2.9× |
+/// | `post_ore_computed` | 196 | **416** | 2.1× |
+/// | `structure_starts_computed` | 1,024 | **7,569** | 7.4× |
+///
+/// Every one of those recomputations is a full terrain stage re-run, and the
+/// counters that were supposed to report it were unreadable because a *different*
+/// assertion in the same bench had gone red first (see that file's `block_at`
+/// decomposition). Nothing was wrong with the eviction policy: the pin was
+/// narrower than the closure, which is exactly the failure the pin exists to make
+/// impossible.
+///
+/// **Widen this with any driver that widens.** The rule from
+/// [`COLUMN_CLOSURE_RADIUS`] applies twice over here: this is `2 + 8` because two
+/// separate constants say so, and if either moves this must be re-derived rather
+/// than adjusted.
+const STRUCTURE_CLOSURE_RADIUS: i32 = COLUMN_CLOSURE_RADIUS + structures::REFS_RADIUS;
+
 /// Soft ceiling on entries retained by [`OverworldGenerator::store`].
 ///
 /// **Derived from the scenario this unit exists to fix, not picked as a round
 /// number.** `4307b59` — the revert that put `lodestone-server`'s per-ring
 /// barrier back — names a **289-column join burst**. 289 columns are a 17×17
-/// view, and a 17×17 view's pre-ore closure is 21×21 = **441** chunks. Retention
-/// therefore has to exceed 441, or the very burst this store is built for could
-/// evict its own live working set; 512 is the next power of two above it, and
-/// also comfortably covers the 12×12 parity sweep's 16×16 = 256-chunk closure.
+/// view, and a 17×17 view's closure is `17 + 2 ×`
+/// [`STRUCTURE_CLOSURE_RADIUS`]` = 37` on a side, i.e. 37×37 = **1,369** chunks.
+/// Retention therefore has to exceed 1,369, or the very burst this store is built
+/// for could evict its own live working set; 2,048 is the next power of two above
+/// it, and also comfortably covers the 12×12 parity sweep's 32×32 = 1,024-chunk
+/// closure.
+///
+/// **This was 512 and 512 was the pre-#514 derivation** — the same sentence with
+/// the pre-ore radius 2 in place of the structure radius 10, giving 441 and 256.
+/// It is on the record in `DESIGN.md` §12.118 as a *measured* regression rather
+/// than a theoretical one: at 512 the 12×12 sweep recomputed `pre_ore` 740 times
+/// instead of 256, because the sweep's real working set was 1,024 entries and the
+/// oldest unpinned ones were the neighbours it was about to read back.
+///
+/// **Entry count is not proportional to memory here, which is why raising it is
+/// affordable.** Only entries whose `pre_ore`/`post_ore` slots were actually
+/// computed hold a dense grid (~192 KiB each); the extra entries this ceiling
+/// admits are structure-starts-only, which hold a `Vec` of starts and nothing
+/// else. Per column of travel a session adds ~21 structure-only entries against
+/// ~5 terrain-bearing ones, so the resident terrain set at 2,048 entries is on the
+/// order of the 512-entry ceiling's — see `docs/worldgen-store-distance-leak.md`.
 ///
 /// Two things keep this from being the capacity-FIFO guess it replaced. First,
 /// in-flight neighbourhoods are **pinned** ([`store::StagedStore::open_view`]),
@@ -330,7 +383,7 @@ const COLUMN_CLOSURE_RADIUS: i32 = 2;
 /// for a whole world's lifetime — a session gradually exploring a large area
 /// would otherwise grow this without bound, a real if slow leak on a machine
 /// CLAUDE.md already flags memory as the binding limit on.
-const STORE_RETENTION: usize = 512;
+const STORE_RETENTION: usize = 2048;
 
 /// A composed, reusable overworld generator. Build once per seed; call
 /// [`column`](Self::column) per chunk.
@@ -868,12 +921,16 @@ impl OverworldGenerator {
     /// Generates the block field for chunk `(cx, cz)`.
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> GeneratedColumn {
-        // Pins this request's whole 5×5 pre-ore closure in the store for the
-        // duration of the call, so nothing it computes can be evicted before it
-        // is read back — the property that makes eviction view-scoped instead of
-        // a capacity guess. Dropped at the end of the call; see
-        // [`COLUMN_CLOSURE_RADIUS`] for where the 5×5 comes from.
-        let _view = self.store.open_view((cx, cz), COLUMN_CLOSURE_RADIUS);
+        // Pins this request's whole closure in the store for the duration of the
+        // call, so nothing it computes can be evicted before it is read back —
+        // the property that makes eviction view-scoped instead of a capacity
+        // guess. Dropped at the end of the call.
+        //
+        // [`STRUCTURE_CLOSURE_RADIUS`], not [`COLUMN_CLOSURE_RADIUS`]: since
+        // issue #514 the closure is 21×21, and pinning the inner 5×5 of it left
+        // the request's own structure-start entries evictable *by the request
+        // itself*. See that constant for the measured cost.
+        let _view = self.store.open_view((cx, cz), STRUCTURE_CLOSURE_RADIUS);
         let cached = self.pre_ore_stage(cx, cz);
         // Issue #427: routed through `post_ore_world` (which wraps
         // `ore_stage` in `Self::post_ore_cache`) rather than calling
@@ -1021,7 +1078,7 @@ impl OverworldGenerator {
         // neighbourhood through `ore_stage`/`vegetation_stage`, so it needs the
         // same protection or a bench near the retention ceiling could measure an
         // eviction rather than the pipeline.
-        let _view = self.store.open_view((cx, cz), COLUMN_CLOSURE_RADIUS);
+        let _view = self.store.open_view((cx, cz), STRUCTURE_CLOSURE_RADIUS);
         let base_x = cx * 16;
         let base_z = cz * 16;
 
