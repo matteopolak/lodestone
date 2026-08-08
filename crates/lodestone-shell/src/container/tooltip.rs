@@ -39,16 +39,16 @@
 //!
 //! ## Dependencies
 //!
-//! [`lodestone_game::item::styled_hover_name`] for the title line, and
-//! [`super::layout::hit_test_with_scale`] for the hovered slot — the *same*
-//! function the click path uses, so a tooltip can never appear for a slot a click
-//! would resolve elsewhere.
+//! [`lodestone_game::item::styled_hover_name`] for the title line. The hovered
+//! slot is **not** resolved here — `build_inner` resolves it once (through
+//! `super::layout::hit_test_with_book`, the same function the click path uses) and
+//! passes it in, so a tooltip can never appear for a slot the highlight, or a
+//! click, would resolve elsewhere.
 
 use lodestone_game::item::ItemStack;
 use lodestone_game::menu::Menu;
 
 use super::builder::Builder;
-use super::layout::{MenuHit, hit_test_with_book};
 
 /// `TooltipRenderUtil.MOUSE_OFFSET` (`TooltipRenderUtil.java:12`) — the tooltip's
 /// text origin sits `(+12, -12)` from the cursor
@@ -157,9 +157,13 @@ pub(super) fn tooltip_lines(stack: &ItemStack, advanced: bool) -> Vec<TooltipLin
 ///
 /// * **cursor** — `ContainerFrame::cursor` is `None` unless a caller opted in via
 ///   `with_cursor`, exactly as the carried-stack draw requires.
-/// * **over a slot** — through [`hit_test_with_scale`], the same call the click
-///   path makes. The alternative (re-deriving the slot rects here) is how a
-///   tooltip comes to describe a different slot than a click would act on.
+/// * **over a slot** — `hovered`, resolved **once** by `build_inner` and shared
+///   with the highlight sprites. This function used to run its own
+///   `hit_test_with_book`; sharing the caller's answer is what makes "the tooltip
+///   describes the slot the highlight is on, which is the slot a click would act
+///   on" true by construction. It also means the overlay suppression
+///   (`ContainerFrame::hover_blocked`) reaches the tooltip for free rather than
+///   needing a second gate here.
 /// * **slot holds a stack** — vanilla's
 ///   `if (hoveredSlot != null && hoveredSlot.hasItem())`
 ///   (`AbstractContainerScreen.java:202`).
@@ -169,31 +173,24 @@ pub(super) fn tooltip_lines(stack: &ItemStack, advanced: bool) -> Vec<TooltipLin
 /// * **font** — with no `VanillaFont` there is nothing to measure the box against,
 ///   and a box sized off the 5×7 debug font would be visibly wrong. A jar-less run
 ///   draws no tooltip rather than a mis-sized one.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_tooltip(
     b: &mut Builder<'_>,
     menu: &Menu,
+    hovered: Option<usize>,
     cursor: Option<[f32; 2]>,
     advanced: bool,
     gui_scale: u32,
     width: u32,
     height: u32,
     canvas: (f32, f32),
-    book_open: bool,
 ) {
     let Some([cx, cy]) = cursor else { return };
     if menu.carried().is_some() {
         return;
     }
     let Some(font) = b.font else { return };
-    // **Book-aware**, because an open recipe book shifts the panel
-    // (`layout::recipe_book_panel_shift`) and an unshifted hit-test would name the
-    // slot one panel-offset to the left — a tooltip describing the wrong item is
-    // worse than none.
-    let MenuHit::Slot(index) =
-        hit_test_with_book(menu, gui_scale, width, height, cx, cy, book_open)
-    else {
-        return;
-    };
+    let Some(index) = hovered else { return };
     let Some(stack) = menu.slot_item(index) else {
         return;
     };

@@ -3287,3 +3287,328 @@ fn recipe_book_sprites_resolve_against_the_real_client_jar() {
         );
     }
 }
+
+// ---------------------------------------------------------------------
+// The recipe book vs the hovered slot: two distinct faults, both reported
+// as one symptom ("hovering the open recipe book highlights an inventory
+// slot").
+//
+// 1. `build_inner` resolved `hovered` through `hit_test_with_scale`, which
+//    is `hit_test_with_book(.., false)`, while the *draw* shifted the whole
+//    panel right by `recipe_book_panel_shift`. So the highlight was
+//    resolved against slot rects one shift left of where they were drawn.
+//    The click path and the tooltip were already book-aware; only the
+//    highlight was not.
+// 2. Nothing told the frame the pointer was over an overlay, so even a
+//    book-aware hover still resolves to whatever slot sits geometrically
+//    *beneath* the book — which is what happens at narrow canvases, where
+//    `recipe_book_panel_shift` is deliberately zero and the two overlap.
+//
+// These assert on `bg_verts` — what the GPU is handed — for the reason
+// `CLAUDE.md` records twice today: a suite that only ever asserts on frame
+// *data* stays green while the draw is wrong.
+// ---------------------------------------------------------------------
+
+/// As [`geo_with_background`], with the recipe book's own two flags.
+fn geo_with_background_book(
+    menu: &Menu,
+    cursor: Option<[f32; 2]>,
+    book_open: bool,
+    hover_blocked: bool,
+) -> ContainerGeometry {
+    let bg = synthetic_background();
+    let frame = ContainerFrame::new(Some(menu), "Title")
+        .with_cursor(cursor)
+        .with_book_open(book_open)
+        .with_hover_blocked(hover_blocked);
+    ContainerGeometry::build_inner(
+        &frame,
+        VIEW.0,
+        VIEW.1,
+        crate::config::AUTO_GUI_SCALE,
+        &IconAssets {
+            items: None,
+            models: None,
+        },
+        None,
+        Some(&bg),
+    )
+}
+
+/// How far right the panel moves at `VIEW` with the book open — derived from
+/// the same expression `build_inner` and `hit_test_with_book` both add, never
+/// restated as a number.
+fn book_shift(menu: &Menu) -> f32 {
+    let layout = slot_layout(menu);
+    let (canvas_w, _) = crate::menu::render::logical_canvas(
+        crate::config::AUTO_GUI_SCALE,
+        VIEW.0,
+        VIEW.1,
+    );
+    super::layout::recipe_book_panel_shift(canvas_w, layout.width, true)
+}
+
+/// The physical-pixel cursor over slot `menu_index` **as drawn** with the book
+/// open — [`slot_point`] plus the panel shift, scaled the same way.
+fn slot_point_book_open(menu: &Menu, menu_index: usize) -> [f32; 2] {
+    let (cx, cy) = slot_point(menu, menu_index);
+    let scale =
+        crate::config::calculate_gui_scale(crate::config::AUTO_GUI_SCALE, VIEW.0, VIEW.1)
+            .max(1) as f32;
+    [cx + book_shift(menu) * scale, cy]
+}
+
+/// The two highlight quads for slot `menu_index` at its **drawn** origin —
+/// `blitSprite(SLOT_HIGHLIGHT_{BACK,FRONT}, slot.x - 4, slot.y - 4, 24, 24)`,
+/// where `slot.x` already carries the book shift.
+fn highlight_hits(geo: &ContainerGeometry, want: [f32; 4]) -> usize {
+    bg_rects(geo, crate::config::AUTO_GUI_SCALE)
+        .iter()
+        .filter(|r| r.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.01))
+        .count()
+}
+
+/// Fault 1, positively: with the book open, hovering the slot **where it is
+/// drawn** highlights *that* slot.
+///
+/// The magnitude is what makes this a real assertion rather than a shape
+/// check: at `VIEW` the shift is 77 logical pixels, which is more than four
+/// whole 18px cells, so the pre-fix code resolved this cursor to a slot four
+/// columns away and blitted the highlight there. The shift is asserted
+/// non-zero first — at a canvas below `RECIPE_BOOK_MIN_WIDTH` it is
+/// deliberately zero and this whole test would be vacuous, measuring the
+/// book-closed path twice.
+#[test]
+fn with_the_book_open_the_highlight_follows_the_shifted_panel() {
+    let menu = Menu::player();
+    let shift = book_shift(&menu);
+    assert!(
+        shift > CELL,
+        "at {VIEW:?} the panel must actually move, or this test measures the \
+         book-closed path twice; shift was {shift}"
+    );
+
+    let geo = geo_with_background_book(&menu, Some(slot_point_book_open(&menu, 9)), true, false);
+    let (sx, sy) = slot_origin(&menu, 9);
+    let drawn = [sx + shift - 4.0, sy - 4.0, 24.0, 24.0];
+    assert_eq!(
+        highlight_hits(&geo, drawn),
+        2,
+        "expected the back and front highlight at the *drawn* slot {drawn:?}; \
+         background quads were {:?}",
+        bg_rects(&geo, crate::config::AUTO_GUI_SCALE)
+    );
+
+    // The wrong hypothesis, computed rather than described: the unshifted
+    // origin is where a `hit_test_with_scale` hover would have put it if the
+    // cursor had been over the unshifted rect. Nothing may be blitted there.
+    let unshifted = [sx - 4.0, sy - 4.0, 24.0, 24.0];
+    assert_ne!(drawn, unshifted);
+    assert_eq!(
+        highlight_hits(&geo, unshifted),
+        0,
+        "a highlight at the unshifted origin means the draw and the hover \
+         disagree about where the panel is"
+    );
+}
+
+/// Fault 1, as the reported symptom: with the book open, a cursor sitting over
+/// the **recipe book's own page** — which overlaps the *unshifted* panel — must
+/// highlight nothing.
+///
+/// This is the exact point the pre-fix code lit up. The two `assert!`s below
+/// are the control that the point really is in the overlap: inside the book's
+/// drawn rect, and inside a slot rect of the unshifted layout. Without them the
+/// test could pass by picking a point that was over nothing at all.
+#[test]
+fn hovering_the_open_recipe_book_highlights_no_slot() {
+    let menu = Menu::player();
+    let (canvas_w, _) = crate::menu::render::logical_canvas(
+        crate::config::AUTO_GUI_SCALE,
+        VIEW.0,
+        VIEW.1,
+    );
+    let book = recipe_book_panel_layout_with_scale(
+        &menu,
+        crate::config::AUTO_GUI_SCALE,
+        VIEW.0,
+        VIEW.1,
+        4,
+        false,
+        false,
+        true,
+    )
+    .panel;
+    // Slot 9's unshifted cell, which is what the pre-fix hover measured
+    // against. Its right edge is 8 + 16 = 24 local, well inside the book's
+    // page at this canvas.
+    let (ux, uy) = slot_origin(&menu, 9);
+    let point = [ux + 8.0, uy + 8.0];
+    assert!(
+        point[0] >= book.x
+            && point[0] < book.x + book.w
+            && point[1] >= book.y
+            && point[1] < book.y + book.h,
+        "the probe {point:?} must lie inside the book's drawn page {book:?}, \
+         or this test is not reproducing the symptom"
+    );
+    assert!(
+        canvas_w >= super::layout::RECIPE_BOOK_MIN_WIDTH,
+        "at a narrow canvas the panel does not shift and the probe would be \
+         over a real slot; canvas was {canvas_w}"
+    );
+
+    let scale =
+        crate::config::calculate_gui_scale(crate::config::AUTO_GUI_SCALE, VIEW.0, VIEW.1)
+            .max(1) as f32;
+    let geo = geo_with_background_book(
+        &menu,
+        Some([point[0] * scale, point[1] * scale]),
+        true,
+        false,
+    );
+    let closed = geo_with_background_book(&menu, None, true, false);
+    assert_eq!(
+        bg_rects(&geo, crate::config::AUTO_GUI_SCALE).len(),
+        bg_rects(&closed, crate::config::AUTO_GUI_SCALE).len(),
+        "a cursor over the recipe book's page added background quads, i.e. it \
+         highlighted a slot underneath the book"
+    );
+}
+
+/// Fault 2, and the pair that is the whole fix: `hover_blocked` suppresses the
+/// hovered slot **and the carried stack keeps tracking the pointer**.
+///
+/// The second half is why this is not simply "withhold the cursor". A carried
+/// stack drawn through `Builder::draw_stack` lands in the item/model streams,
+/// and it must be byte-identical between the blocked and unblocked frames —
+/// the pointer still positions it over the book, exactly as vanilla drags a
+/// held item across the page.
+#[test]
+fn hover_blocked_suppresses_the_highlight_and_keeps_the_carried_stack() {
+    let mut menu = Menu::player();
+    menu.set_carried(Some(ItemStack::new(
+        lodestone_model::Identifier::new("minecraft", "stick").unwrap(),
+        7,
+    )));
+    let cursor = Some(slot_point_book_open(&menu, 9));
+
+    let open = geo_with_background_book(&menu, cursor, true, false);
+    let blocked = geo_with_background_book(&menu, cursor, true, true);
+    let (sx, sy) = slot_origin(&menu, 9);
+    let drawn = [sx + book_shift(&menu) - 4.0, sy - 4.0, 24.0, 24.0];
+
+    // The suppression, and its own control: the unblocked frame really does
+    // highlight here, so a `hover_blocked` that did nothing would fail.
+    assert_eq!(
+        highlight_hits(&open, drawn),
+        2,
+        "control: the unblocked frame must highlight, or the suppression below \
+         is measuring nothing"
+    );
+    assert_eq!(
+        highlight_hits(&blocked, drawn),
+        0,
+        "hover_blocked must suppress the hovered slot's highlight"
+    );
+    assert_eq!(
+        bg_rects(&blocked, crate::config::AUTO_GUI_SCALE).len() + 2,
+        bg_rects(&open, crate::config::AUTO_GUI_SCALE).len(),
+        "exactly the two highlight quads, and nothing else, may differ"
+    );
+
+    // ...and the carried stack is untouched. With no `ItemAtlas` attached the
+    // stack degrades to `Builder::draw_stack`'s hash-derived swatch on the
+    // **colour** stream (the same jar-less fallback every other icon here
+    // takes), so that is the stream to measure. The `>` against a cursor-less
+    // frame is the control: without it, two frames that both drew *no* carried
+    // stack would satisfy the equality vacuously.
+    let no_cursor = geo_with_background_book(&menu, None, true, false);
+    assert!(
+        open.verts.len() > no_cursor.verts.len(),
+        "the carried stack must actually draw ({} colour floats against a \
+         cursor-less frame's {}), or the equality below is vacuous",
+        open.verts.len(),
+        no_cursor.verts.len()
+    );
+    assert_eq!(
+        blocked.verts, open.verts,
+        "hover_blocked must not disturb the carried stack — it keeps following \
+         the pointer over the book, which is why the suppression is its own \
+         flag and not a withheld cursor"
+    );
+    assert_eq!(blocked.item_verts, open.item_verts);
+    assert_eq!(blocked.model_verts, open.model_verts);
+}
+
+/// The tooltip rides the same single `hovered` resolution as the highlight, so
+/// it inherits both halves of the fix. Asserted on the emitted **colour**
+/// stream (the tooltip's box and text), not on a flag.
+///
+/// Skips without the real jar font: `emit_tooltip` requires a `VanillaFont` to
+/// measure the box against and draws nothing without one, so a jar-less run has
+/// no tooltip to suppress. That is a precondition skip and it is why the
+/// `Some(font)` arm below asserts a *non-zero* delta first.
+#[test]
+fn hover_blocked_suppresses_the_tooltip_too() {
+    let Some(font) = VanillaFont::shared() else {
+        return; // jar-less: nothing measures, nothing draws
+    };
+    let mut menu = Menu::player();
+    menu.set_slot_item(
+        9,
+        Some(ItemStack::new(
+            lodestone_model::Identifier::new("minecraft", "diamond_sword").unwrap(),
+            1,
+        )),
+    );
+    let bg = synthetic_background();
+    let build = |hover_blocked: bool| {
+        let frame = ContainerFrame::new(Some(&menu), "Title")
+            .with_cursor(Some(slot_point_book_open(&menu, 9)))
+            .with_tooltips(false)
+            .with_book_open(true)
+            .with_hover_blocked(hover_blocked);
+        ContainerGeometry::build_inner(
+            &frame,
+            VIEW.0,
+            VIEW.1,
+            crate::config::AUTO_GUI_SCALE,
+            &IconAssets {
+                items: None,
+                models: None,
+            },
+            Some(&font),
+            Some(&bg),
+        )
+    };
+    let shown = build(false);
+    let suppressed = build(true);
+    assert!(
+        shown.verts.len() > suppressed.verts.len(),
+        "control: the unblocked frame must emit a tooltip at all — it drew \
+         {} colour floats against the blocked frame's {}",
+        shown.verts.len(),
+        suppressed.verts.len()
+    );
+    // And the blocked frame is exactly the no-tooltip frame, not merely a
+    // shorter one: nothing else in the colour stream may move.
+    let no_tooltip = {
+        let frame = ContainerFrame::new(Some(&menu), "Title")
+            .with_cursor(Some(slot_point_book_open(&menu, 9)))
+            .with_book_open(true);
+        ContainerGeometry::build_inner(
+            &frame,
+            VIEW.0,
+            VIEW.1,
+            crate::config::AUTO_GUI_SCALE,
+            &IconAssets {
+                items: None,
+                models: None,
+            },
+            Some(&font),
+            Some(&bg),
+        )
+    };
+    assert_eq!(suppressed.verts.len(), no_tooltip.verts.len());
+}

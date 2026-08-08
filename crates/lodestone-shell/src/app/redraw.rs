@@ -844,6 +844,24 @@ impl WindowApp {
             // (`Inventory.java:55`), so there is no server component to resolve.
             let inventory_label =
                 crate::container::player_inventory_label(self.sim.translator().as_ref());
+            // Does the recipe-book panel own the pointer this frame? The *click*
+            // path has consulted this predicate before the container's own hit
+            // test since the panel landed (`handle_recipe_panel_click`); the draw
+            // had no equivalent, so the hovered-slot highlight and the tooltip
+            // resolved to whatever slot sat under the book. Same predicate, same
+            // shared layout — see `recipe_panel_pointer_hit`.
+            let hover_blocked = container_menu.is_some_and(|menu| {
+                recipe_panel_pointer_hit(
+                    self.recipe_book.as_ref(),
+                    &self.recipe_panel,
+                    menu,
+                    self.nav.gui_scale(),
+                    self.cursor,
+                    w,
+                    h,
+                )
+                .is_some()
+            });
             // The carried stack follows the pointer, so the frame needs the cursor
             // in physical pixels — the same space `hit_test` and the menu layout
             // use (see the `cursor` field). Without this the stack is built but
@@ -865,6 +883,11 @@ impl WindowApp {
                 // `updateScreenPosition`). `container_input`'s hit-test passes the
                 // same flag through `hit_test_with_book` — the two must agree.
                 .with_book_open(self.recipe_panel.open)
+                // …and the panel **consumes the pointer** over itself, so no slot
+                // highlights or tooltips under it. Deliberately not expressed by
+                // withholding the cursor: the carried stack must keep following
+                // the pointer across the book. See `ContainerFrame::hover_blocked`.
+                .with_hover_blocked(hover_blocked)
                 .with_drag(self.menu_input.drag_paint())
                 // The wire `menu_type`, which is what `menu_type_title_anchor`
                 // keys on. Without this line the nine per-screen title anchors
