@@ -81,6 +81,19 @@ lodestone-testsupport = { workspace = true }
 # direct call is structured so that path replaces the call site, not the
 # generator (plan §8).
 lodestone-server = { path = "../lodestone-server" }
+# `level.dat`, for the singleplayer save list (`src/saves.rs`): enumerating
+# `saves/*/level.dat` into vanilla `LevelSummary`s, and writing one for a world
+# the player just named. **Not reached through `lodestone-server`** — that crate
+# target-gates its own `lodestone-anvil` edge off wasm and does not re-export the
+# codec, so a path through it would be both invisible and fragile.
+#
+# Deliberately a plain dependency rather than the `cfg(not(target_arch =
+# "wasm32"))` edge `lodestone-server` uses: this crate depends on
+# `lodestone-render` with `features = ["window"]`, so it is not a wasm target in
+# the first place, and a target section here would only make `saves.rs` need a
+# `cfg` fork with no second implementation behind it. Version-free either way, so
+# `cargo check -p lodestone-shell --no-default-features` is unaffected.
+lodestone-anvil = { path = "../lodestone-anvil" }
 # The status ping behind the multiplayer server list (MOTD, player counts,
 # favicon), plus the SRV resolution vanilla performs when no port is pinned.
 # Before this edge existed, `lodestone_net::ping` / `resolve` had **no consumer

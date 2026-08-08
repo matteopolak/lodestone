@@ -56,14 +56,19 @@ impl WindowApp {
                 // takes the *same* path a join does, so there is only ever one
                 // world and it always came off the wire.
                 //
-                // `None` when `Screen::WorldSelect`'s Play Selected World produced
-                // the action (no seed of its own, so this resolves to
-                // `BUNDLED_WORLD.seed` via `resolve_launch_seed`); `Some(config)`
-                // when `Screen::CreateWorld`'s Create button did (issue #190,
-                // `menu/nav.rs`'s `apply_create_world`). `begin_singleplayer`,
-                // `resolve_launch_seed` and `launch_singleplayer` handle both
+                // Issue #468's reading (2): the payload is a
+                // `menu::nav::SingleplayerLaunch`, naming a **world directory**
+                // that already exists. `Open` is `Screen::WorldSelect`'s Play
+                // Selected World (the world's stored seed wins, so none travels);
+                // `Created` is `Screen::CreateWorld`'s Create button, whose
+                // directory the menu made and whose typed seed
+                // `resolve_launch_seed` resolves. `begin_singleplayer` handles both
                 // uniformly (see this file's `resolved_seeds_from_different_world_
                 // creation_configs_generate_different_terrain`).
+                //
+                // This used to be an `Option<WorldCreationConfig>` where `None`
+                // meant "the one implicit world" — which is why Create New World
+                // could not create a second one. See `crate::saves`' module doc.
                 self.begin_singleplayer(config);
             }
             MenuAction::Connect(entry) => {

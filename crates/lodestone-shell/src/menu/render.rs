@@ -102,7 +102,7 @@ pub use draw::{MenuGeometry, build, geometry};
 pub use favicon::{FaviconMosaic, default_head_icon, favicon_mosaic, head_mosaic};
 pub use frame::{
     AccountEntryView, Align, FaviconCache, MenuFrame, MenuLabel, MenuNotice, MenuRow,
-    ServerEntryView, notice_rect, owns_frame,
+    ServerEntryView, WorldEntryView, notice_rect, owns_frame,
 };
 pub use measure::{EDIT_BOX_H, field_rect, field_row_rects, logical_canvas, row_rect, text_px};
 pub use origin::{Origin, Slot};
@@ -117,8 +117,10 @@ pub use server_list::{
 };
 pub use title_pause::{death_slot, pause_grid_size, pause_slot, title_slot};
 pub use world_list::{
-    world_list_row_content_rect, world_list_row_label, world_list_row_left, world_list_row_rect,
-    world_list_row_top, world_select_search_slot, world_select_slot, world_select_title_label,
+    WORLD_LIST_LINE_DY, WORLD_LIST_TEXT_DX, world_list_max_rows, world_list_row_content_rect,
+    world_list_row_label, world_list_row_left, world_list_row_rect, world_list_row_top,
+    world_list_row_visible, world_list_text_width, world_list_visible_rows,
+    world_select_search_slot, world_select_slot, world_select_title_label,
 };
 
 /// Bitmap-font cell metrics, matching [`crate::hud`]'s font (`glyph_rows`

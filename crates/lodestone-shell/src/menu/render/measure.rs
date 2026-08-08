@@ -104,6 +104,19 @@ pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(
         }
         return Some(accounts_row_rect(view.index, width, view.scroll));
     }
+    // A world-list row (the save list) is placed the same way and for the same
+    // reason again — `getRowLeft()` is `floor(width / 2) - floor(270 / 2)`, two
+    // integer divisions rather than `anchor + dx`. The visibility gate is
+    // load-bearing here rather than tidy: this screen's list does **not** scroll
+    // (`world_select`'s module docs), so a row past the content band's last slot
+    // must report no rect at all — otherwise it would draw over the footer
+    // buttons *and* steal their clicks.
+    if let Some(view) = row.world.as_ref() {
+        if !world_list_row_visible(view.index, height) {
+            return None;
+        }
+        return Some(world_list_row_rect(view.index, width));
+    }
     if let Some(slot) = row.slot {
         return Some(slot.resolve(width, height));
     }

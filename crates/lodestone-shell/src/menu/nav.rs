@@ -72,26 +72,62 @@ pub enum MenuKey {
 }
 
 /// The one thing the app must do as a result of a keypress.
+/// Which world [`MenuAction::Singleplayer`] is about, and how it got there.
+///
+/// Both arms carry a **directory that already exists on disk**, which is the
+/// property that makes this seam narrow: the menu owns "where is `saves/`" and
+/// "make a folder called that" (it is the only layer that knows the root — see
+/// [`crate::saves`]'s note on why tests get a temp one), and `app.rs` owns "start
+/// a server against this directory". Neither has to know the other's rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SingleplayerLaunch {
+    /// **Play Selected World**: open this existing world directory.
+    ///
+    /// No seed travels with it, and that is not an omission:
+    /// `lodestone_server::region_source::resolve_world_seed` reads the world's
+    /// **stored** seed and a requested one is a *creation* parameter it ignores.
+    /// Passing one here would be a value that looks connected and is discarded —
+    /// worse than none, because a reader would believe it.
+    Open(std::path::PathBuf),
+    /// **Create New World**: `world_dir` was just created by the menu (so the
+    /// player's typed name is already in its `level.dat`), and `config` carries
+    /// the typed **seed** for `app`'s `resolve_launch_seed`.
+    ///
+    /// The seed does travel here, and here it is honoured, because the directory
+    /// is new and therefore has no `world_gen_settings.dat` yet — which is the
+    /// whole reason creating a fresh directory is the right fix for #468's wart
+    /// rather than forcing a seed onto an existing world.
+    Created {
+        /// The directory the menu created.
+        world_dir: std::path::PathBuf,
+        /// What the player typed on the creation screen.
+        config: crate::menu::create_world::WorldCreationConfig,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuAction {
     /// Nothing to do; the menu handled it internally.
     None,
-    /// Enter the singleplayer world: start the integrated server in-process and
-    /// connect to it (issue #287).
+    /// Enter a singleplayer world: start the integrated server in-process
+    /// against that world's directory and connect to it (issues #287, #468).
     ///
-    /// Two producers: [`Screen::WorldSelect`]'s **Play Selected World** button
-    /// (`None` — the bundled world's own seed) and, since issue #190,
-    /// [`Screen::CreateWorld`]'s **Create** button (`Some(config)` — the
-    /// collected [`crate::menu::create_world::WorldCreationConfig`], whose
-    /// `seed` field `app.rs`'s `resolve_launch_seed` resolves ahead of the
-    /// bundled world's). `app.rs`'s arm calls `begin_singleplayer`, which
-    /// takes the same `Option` this variant carries.
+    /// Two producers, and the payload says which: [`Screen::WorldSelect`]'s
+    /// **Play Selected World** ([`SingleplayerLaunch::Open`]) and
+    /// [`Screen::CreateWorld`]'s **Create** ([`SingleplayerLaunch::Created`]).
+    /// `app.rs`'s arm calls `begin_singleplayer`, which takes exactly what this
+    /// variant carries.
+    ///
+    /// It used to carry `Option<WorldCreationConfig>` — `None` meaning "the one
+    /// implicit world at `saves/world`". That was issue #468's reading (1) and it
+    /// is why Create New World could not create a second world; see
+    /// [`crate::saves`]'s module doc.
     ///
     /// Between #397 and #287 this variant had **no producer at all** and was
     /// kept as the seam the integrated server would land on. It is worth naming
     /// because "the variant exists and is matched" was true throughout and is
     /// exactly what an island looks like from the inside.
-    Singleplayer(Option<crate::menu::create_world::WorldCreationConfig>),
+    Singleplayer(SingleplayerLaunch),
     /// Connect to this server (the app opens the session and shows Connecting).
     Connect(ServerEntry),
     /// Shut the game down cleanly.
@@ -999,6 +1035,17 @@ pub struct MenuNav {
     /// [`EditForm`]'s reason: it owns real [`EditBox`] state (a caret, a
     /// selection, a scroll offset) that cannot be rebuilt per frame.
     world_select: crate::menu::world_select::WorldSelectNav,
+    /// The root every singleplayer world folder lives under — [`crate::saves`]'s
+    /// `saves_dir()` in production, a temp directory in every test.
+    ///
+    /// **Held here rather than read from [`crate::saves::saves_dir`] at the call
+    /// site**, and that is the mechanism that keeps the suite off the developer's
+    /// real saves folder: it is derived from [`Self::path`]'s own directory
+    /// exactly as `options_path`/`profiles_path`/`hidden_players_path` are, so a
+    /// test that points `MenuNav` at a temp `servers.json` gets a temp `saves/`
+    /// for free and cannot forget to. See `crate::saves`'s module doc on why a
+    /// `cfg!(test)` early return would have been the wrong shape.
+    saves_root: std::path::PathBuf,
     /// Which [`SERVER_LIST_BUTTONS`] entry the cursor is over, if any (#396).
     ///
     /// Separate from [`Self::server`] because the two are different cursors that
@@ -1150,6 +1197,14 @@ impl MenuNav {
             .parent()
             .map(|d| d.join("hidden_players.json"))
             .unwrap_or_else(|| std::path::PathBuf::from("hidden_players.json"));
+        // Same derivation, and load-bearing for a different reason: this one is a
+        // *directory tree* the game writes worlds into, so a test that inherited
+        // the real one would be creating and listing worlds in the developer's own
+        // saves folder. See [`Self::saves_root`].
+        let saves_root = path
+            .parent()
+            .map(|d| d.join(crate::saves::SAVES_DIR))
+            .unwrap_or_else(|| std::path::PathBuf::from(crate::saves::SAVES_DIR));
         Self {
             main: 0,
             server: 0,
@@ -1163,7 +1218,14 @@ impl MenuNav {
             options_path,
             options_save_error: None,
             accounts: crate::menu::accounts::AccountsNav::with_path(profiles_path),
+            // Empty on construction, deliberately: `MenuNav::new()` runs at
+            // startup and in hundreds of tests, and enumerating the filesystem
+            // from a constructor is the OS-side-effect-in-a-test shape §12.44
+            // records. The list is read when the screen is *opened* — see
+            // `open_world_list`, which is also what makes a just-created world
+            // appear.
             world_select: crate::menu::world_select::WorldSelectNav::new(),
+            saves_root,
             list_button: None,
             server_scroll: 0.0,
             menu_cursor: None,
@@ -1182,6 +1244,31 @@ impl MenuNav {
     #[must_use]
     pub fn list(&self) -> &ServerList {
         &self.list
+    }
+
+    /// Where singleplayer worlds live for *this* `MenuNav`. See
+    /// [`Self::saves_root`].
+    #[must_use]
+    pub fn saves_root(&self) -> &std::path::Path {
+        &self.saves_root
+    }
+
+    /// Open [`Screen::WorldSelect`], re-reading `saves/` first.
+    ///
+    /// **The re-read is the point**, and it is vanilla's own behaviour rather than
+    /// a cache invalidation bolted on: `TitleScreen` constructs a brand-new
+    /// `SelectWorldScreen` on every press, whose `WorldSelectionList` calls
+    /// `loadLevels()` in its constructor. Without it, a world created a moment ago
+    /// would be absent from the list the player is returned to — which is exactly
+    /// the "Create New World did nothing" report all over again, one layer up.
+    ///
+    /// Every entry point to the screen goes through here for that reason: the
+    /// title-screen button, and the return from `CreateWorld`'s Cancel.
+    pub fn open_world_list(&mut self, ui: &mut UiState) {
+        self.world_select = crate::menu::world_select::WorldSelectNav::with_worlds(
+            crate::saves::list_worlds_in(&self.saves_root),
+        );
+        ui.open_world_select();
     }
 
     /// The persisted `gui_scale` option ([`crate::config::AUTO_GUI_SCALE`] or
@@ -2309,7 +2396,9 @@ impl MenuNav {
                     // Vanilla's `TitleScreen` opens `SelectWorldScreen` here; it
                     // does not start a world (issue #397).
                     MainButton::Singleplayer => {
-                        ui.open_world_select();
+                        // `open_world_list`, not `ui.open_world_select()`: the save
+                        // list has to be re-read here. See that method.
+                        self.open_world_list(ui);
                         MenuAction::None
                     }
                     MainButton::Multiplayer => {
@@ -2656,7 +2745,22 @@ impl MenuNav {
             // list until then, because a launch that fails (no version family
             // compiled in) has to be able to show its error over a screen the
             // player recognises rather than over a blank one.
-            WorldSelectOutcome::Play => MenuAction::Singleplayer(None),
+            //
+            // The folder name is resolved against **this** `MenuNav`'s saves root
+            // through [`crate::saves::world_dir_in`], which is also the containment
+            // check: a `dir_name` that is not one plain path component answers
+            // `None` and the press does nothing rather than opening the saves root
+            // itself as a world.
+            WorldSelectOutcome::Play(dir_name) => {
+                match crate::saves::world_dir_in(&self.saves_root, &dir_name) {
+                    Some(dir) => MenuAction::Singleplayer(SingleplayerLaunch::Open(dir)),
+                    None => {
+                        self.world_select
+                            .set_error(format!("{dir_name:?} is not a world folder"));
+                        MenuAction::None
+                    }
+                }
+            }
             // Issue #190.
             WorldSelectOutcome::CreateWorld => {
                 self.create_world = crate::menu::create_world::CreateWorldNav::new();
@@ -2692,11 +2796,50 @@ impl MenuNav {
         use crate::menu::create_world::CreateWorldOutcome;
         match outcome {
             CreateWorldOutcome::Handled => MenuAction::None,
+            // Back to the world list, **re-read**: the player may have cancelled
+            // after a create that failed, and the list they return to must be
+            // what is on disk rather than what was there when they left.
             CreateWorldOutcome::Cancel => {
                 ui.close_create_world();
+                self.open_world_list(ui);
                 MenuAction::None
             }
-            CreateWorldOutcome::Create(config) => MenuAction::Singleplayer(Some(config)),
+            // **This is where a world is actually created** (issue #468's reading
+            // 2), and it is here rather than in `app.rs` because this is the layer
+            // that knows the saves root — the same reason `ServerList::save_to` is
+            // called from this file.
+            //
+            // `game_type` is the one `WorldCreationConfig` field that reaches disk:
+            // it lands in `level.dat`'s `GameType`, so the list row says Creative
+            // for a creative world. Hardcore maps to survival's `0` because
+            // `LevelDat::for_new_world` writes `hardcore: 0` and this layer has no
+            // business hand-editing that compound — so a Hardcore world is created
+            // as Survival, which is the same gap `create_world.rs`'s own
+            // "decorative" list already records for difficulty, structures, bonus
+            // chest and cheats.
+            CreateWorldOutcome::Create(config) => {
+                let game_type = match config.game_mode {
+                    crate::menu::create_world::WorldGameMode::Creative => 1,
+                    crate::menu::create_world::WorldGameMode::Survival
+                    | crate::menu::create_world::WorldGameMode::Hardcore => 0,
+                };
+                match crate::saves::create_world_in(&self.saves_root, &config.name, game_type) {
+                    Ok(world_dir) => {
+                        MenuAction::Singleplayer(SingleplayerLaunch::Created { world_dir, config })
+                    }
+                    // Reported over a screen the player recognises, never routed
+                    // around: a failed `create_dir` means the data directory is
+                    // unwritable, and silently opening *some other* world would be
+                    // the worst possible answer.
+                    Err(e) => {
+                        ui.close_create_world();
+                        self.open_world_list(ui);
+                        self.world_select
+                            .set_error(format!("Could not create the world: {e}"));
+                        MenuAction::None
+                    }
+                }
+            }
         }
     }
 
@@ -5472,15 +5615,134 @@ mod tests {
         type_str(&mut nav, &mut ui, "777");
 
         let action = nav.click(&mut ui, CREATE_ROW);
-        let MenuAction::Singleplayer(Some(config)) = action else {
-            panic!("expected MenuAction::Singleplayer(Some(config)), got {action:?}");
+        let MenuAction::Singleplayer(SingleplayerLaunch::Created { world_dir, config }) = action
+        else {
+            panic!("expected MenuAction::Singleplayer(Created {{ .. }}), got {action:?}");
         };
         assert_eq!(config.seed, "777", "the typed seed must reach the action's payload");
+        // Issue #468's reading (2): pressing Create really **creates**. Before
+        // this, the action carried a config and no directory, and
+        // `begin_singleplayer` opened `saves/world` — so a second Create reopened
+        // the first world and the typed seed was silently discarded by
+        // `resolve_world_seed`. The directory and its `level.dat` are the proof
+        // that stopped being possible.
+        assert!(world_dir.is_dir(), "Create must have made a directory: {world_dir:?}");
+        assert!(
+            world_dir.starts_with(nav.saves_root()),
+            "and it must be under this nav's own saves root, not the real one: {world_dir:?}"
+        );
+        assert!(
+            world_dir.join("level.dat").is_file(),
+            "a world folder with no level.dat is not one vanilla will open"
+        );
+        // And **not** the seed's own file: `resolve_world_seed` creates that on
+        // first open, which is what makes the typed seed win for a new world.
+        assert!(
+            !world_dir
+                .join("data")
+                .join("minecraft")
+                .join("world_gen_settings.dat")
+                .exists(),
+            "the menu must not pre-write the seed file"
+        );
         assert_eq!(
             ui.screen(),
             Screen::CreateWorld,
             "the nav layer must not leave the screen; begin_singleplayer does that"
         );
+    }
+
+    /// **The owner's report, end to end at the nav layer: Create New World twice
+    /// makes two worlds, both are listed, and either can be opened.**
+    ///
+    /// This is the acceptance condition for issue #468's reading (2) and the
+    /// regression gate for the wart reading (1) shipped with — *"Using Create New
+    /// World just joins me to the existing world"*. Every step is the real screen
+    /// flow (title → list → create → list), so it fails if any hop is unwired
+    /// rather than only if `saves.rs` is wrong.
+    #[test]
+    fn creating_two_worlds_lists_both_and_play_opens_the_selected_one() {
+        use crate::menu::create_world::{CREATE_ROW, NAME_LABEL};
+        use crate::menu::world_select::{FIRST_WORLD_ROW, WorldSelectButton as B};
+
+        let (mut nav, _) = self::nav("two-worlds");
+        let mut ui = UiState::new();
+
+        // Two creations, each with its own typed name, through the real buttons.
+        let mut created: Vec<std::path::PathBuf> = Vec::new();
+        for name in ["First", "Second"] {
+            nav.key(&mut ui, MenuKey::Enter);
+            assert_eq!(ui.screen(), Screen::WorldSelect, "premise: the list is open");
+            assert_eq!(nav.click(&mut ui, B::Create.row()), MenuAction::None);
+            assert_eq!(ui.screen(), Screen::CreateWorld);
+            // Clear the `New World` default and type a real name.
+            nav.click(&mut ui, crate::menu::create_world::NAME_FIELD);
+            for _ in 0..NAME_LABEL.len() + crate::menu::create_world::DEFAULT_NAME.len() {
+                nav.key(&mut ui, MenuKey::Backspace);
+            }
+            type_str(&mut nav, &mut ui, name);
+            let action = nav.click(&mut ui, CREATE_ROW);
+            let MenuAction::Singleplayer(SingleplayerLaunch::Created { world_dir, .. }) = action
+            else {
+                panic!("expected Created, got {action:?}");
+            };
+            created.push(world_dir);
+            // The app would take over here; simulate coming back to the title the
+            // way quitting to it does.
+            ui = UiState::new();
+        }
+        assert_eq!(created.len(), 2);
+        assert_ne!(
+            created[0], created[1],
+            "the second Create must make a **different** directory — this is the \
+             whole defect: with one implicit world it reopened the first"
+        );
+        assert_eq!(
+            created[0].file_name().and_then(|n| n.to_str()),
+            Some("First")
+        );
+        assert_eq!(
+            created[1].file_name().and_then(|n| n.to_str()),
+            Some("Second")
+        );
+
+        // Both are on the list, re-read from disk by opening the screen.
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(ui.screen(), Screen::WorldSelect);
+        let listed: Vec<String> = nav
+            .world_select()
+            .worlds()
+            .iter()
+            .map(|w| w.display_name.clone())
+            .collect();
+        assert_eq!(
+            listed.len(),
+            2,
+            "both worlds must be listed after Create; got {listed:?}"
+        );
+        assert!(listed.contains(&"First".to_string()), "{listed:?}");
+        assert!(listed.contains(&"Second".to_string()), "{listed:?}");
+
+        // And **either** can be opened: click each row and check Play resolves to
+        // that row's own directory.
+        for row in 0..2 {
+            assert_eq!(nav.click(&mut ui, FIRST_WORLD_ROW + row), MenuAction::None);
+            let expected = nav
+                .world_select()
+                .world_at(row)
+                .expect("row exists")
+                .dir_name
+                .clone();
+            let action = nav.click(&mut ui, B::Play.row());
+            let MenuAction::Singleplayer(SingleplayerLaunch::Open(dir)) = action else {
+                panic!("expected Open, got {action:?}");
+            };
+            assert_eq!(
+                dir.file_name().and_then(|n| n.to_str()),
+                Some(expected.as_str()),
+                "Play must open the row that is selected, not a fixed world"
+            );
+        }
     }
 
     /// **An untouched Seed field reaches the app as an empty string, not a
@@ -5508,8 +5770,8 @@ mod tests {
         // No click into the Seed field, no typing — Create is pressed with
         // the field exactly as `CreateWorldNav::new` left it.
         let action = nav.click(&mut ui, CREATE_ROW);
-        let MenuAction::Singleplayer(Some(config)) = action else {
-            panic!("expected MenuAction::Singleplayer(Some(config)), got {action:?}");
+        let MenuAction::Singleplayer(SingleplayerLaunch::Created { config, .. }) = action else {
+            panic!("expected MenuAction::Singleplayer(Created {{ .. }}), got {action:?}");
         };
         assert_eq!(
             config.seed, "",
@@ -5531,18 +5793,47 @@ mod tests {
     /// The screen must **not** change here: `begin_singleplayer` is what moves to
     /// `Screen::Connecting`, and a launch that cannot proceed needs to fail onto
     /// a screen the player recognises.
+    /// Plant a world under `nav`'s own saves root, through the same codec
+    /// production reads — the fixture has to be a file
+    /// `crate::saves::list_worlds_in` can actually parse.
+    fn plant_world(nav: &MenuNav, dir_name: &str) {
+        let dir = nav.saves_root().join(dir_name);
+        std::fs::create_dir_all(&dir).expect("create world dir");
+        let level = lodestone_anvil::level_dat::LevelDat::for_new_world(
+            dir_name,
+            &lodestone_anvil::level_dat::Spawn::default(),
+            0,
+        );
+        lodestone_anvil::level_dat::write_to_file(
+            &level,
+            &lodestone_anvil::level_dat::path_in(&dir),
+        )
+        .expect("write level.dat");
+    }
+
     #[test]
     fn play_selected_world_asks_the_app_to_start_singleplayer() {
         use crate::menu::world_select::WorldSelectButton as B;
         let (mut nav, _) = self::nav("world-select-play");
+        // A world has to exist for Play to be live at all — with an empty
+        // `saves/` it is greyed, which is `updateButtonStatus(null)` and is
+        // covered by `world_select.rs`'s own gates.
+        plant_world(&nav, "planted");
         let mut ui = UiState::new();
         nav.key(&mut ui, MenuKey::Enter);
         assert_eq!(ui.screen(), Screen::WorldSelect, "premise: the list is open");
+        assert_eq!(
+            nav.world_select().shown_len(),
+            1,
+            "premise: opening the screen enumerated the planted world"
+        );
 
         assert_eq!(
             nav.click(&mut ui, B::Play.row()),
-            MenuAction::Singleplayer(None),
-            "Play Selected World must ask the app to launch"
+            MenuAction::Singleplayer(SingleplayerLaunch::Open(
+                nav.saves_root().join("planted")
+            )),
+            "Play Selected World must ask the app to launch that world's directory"
         );
         assert_eq!(
             ui.screen(),
@@ -5550,15 +5841,28 @@ mod tests {
             "the nav layer must not leave the list; `begin_singleplayer` does that"
         );
 
-        // The keyboard path is the same action, not a second implementation:
-        // Tab off the search field lands on Play (registration order), and Enter
-        // presses it.
+        // The keyboard path is the same action, not a second implementation.
+        // **Two Tabs now, not one**: registration order is header → contents →
+        // footer, so the planted world's row comes between the search field and
+        // Play — which is exactly what `FIRST_WORLD_ROW`'s doc says the *ids* do
+        // not tell you.
         let (mut nav, _) = self::nav("world-select-play-keys");
+        plant_world(&nav, "planted");
         let mut ui = UiState::new();
         nav.key(&mut ui, MenuKey::Enter);
         nav.key(&mut ui, MenuKey::Tab);
+        assert_eq!(
+            nav.world_select().focused_row(),
+            Some(crate::menu::world_select::FIRST_WORLD_ROW)
+        );
+        nav.key(&mut ui, MenuKey::Tab);
         assert_eq!(nav.world_select().focused_row(), Some(B::Play.row()));
-        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::Singleplayer(None));
+        assert_eq!(
+            nav.key(&mut ui, MenuKey::Enter),
+            MenuAction::Singleplayer(SingleplayerLaunch::Open(
+                nav.saves_root().join("planted")
+            ))
+        );
     }
 
     /// Typing on the world list goes into the search box, and Escape leaves.

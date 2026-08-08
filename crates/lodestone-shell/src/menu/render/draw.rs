@@ -14,6 +14,7 @@ use super::account_screen::{ACCOUNTS_DETAIL_Y, ACCOUNTS_DIM, ACCOUNTS_HEAD_ICON,
 use super::frame::notice_lines;
 use super::measure::{advance, clip};
 use super::renderer::FLOATS_PER_VERTEX;
+use super::world_list::{WORLD_LIST_DIM, WORLD_LIST_SELECTION_FILL};
 use super::server_list::{SERVER_ENTRY_BAD, SERVER_ENTRY_DIM, SERVER_ENTRY_ICON, SERVER_ENTRY_INCOMPATIBLE, SERVER_ENTRY_MOTD_INSET, SERVER_ENTRY_MOTD_LINES, SERVER_ENTRY_MOTD_Y, SERVER_ENTRY_SPACING, SERVER_ENTRY_TEXT_GAP, SERVER_ICON_DARKEN, SERVER_JOIN_SPRITES, SERVER_LIST_ROW_W, SERVER_LIST_SELECTION_FILL, SERVER_MOVE_DOWN_SPRITES, SERVER_MOVE_UP_SPRITES, SERVER_UNKNOWN_ICON};
 
 /// The multiplayer list's "who's online" tooltip fill — `tooltip/background.png`'s
@@ -289,6 +290,22 @@ pub fn build(
                 }
                 None => draw_account_entry(&mut b, &frame.rows, i, width, height),
             }
+            continue;
+        }
+        // A world-list row (the save list, #468's reading 2) is the third of the
+        // same kind: a 36 px selection-list entry with an icon column and three
+        // text lines, not a button. Tested before `slot` for the same reason — it
+        // carries none.
+        //
+        // **No `with_clip` here, and that is a consequence of the missing scroll
+        // model rather than an oversight.** The server and account lists clip
+        // because a row can straddle the band's edge at an intermediate scroll
+        // offset; this list does not scroll, so `world_list_row_visible` rejects
+        // every row that is not wholly inside the band and there is nothing left
+        // to cut. If scrolling lands, the clip has to land with it — a
+        // pixel-granular offset without one paints over the footer buttons.
+        if row.world.is_some() {
+            draw_world_entry(&mut b, &frame.rows, i, width, height);
             continue;
         }
         if row.slot.is_some() {
@@ -941,6 +958,75 @@ fn draw_account_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32,
     let detail_room = (cx + cw - ACCOUNTS_SPACING - text_x).max(0.0);
     let detail = clip_measured(b, &row.detail, detail_room);
     b.text(detail, text_x, cy + ACCOUNTS_DETAIL_Y, 1.0, ACCOUNTS_DIM);
+}
+
+/// Draws one world-list row — `WorldSelectionList.WorldListEntry.extractContent`
+/// (`WorldSelectionList.java:555-570`).
+///
+/// The selection outline, then three text lines at
+/// [`WORLD_LIST_LINE_DY`]'s offsets, all measured from the row's **content** rect
+/// (the 36 px entry inset by `CONTENT_PADDING`) and inset again by
+/// [`WORLD_LIST_TEXT_DX`] for the icon column.
+///
+/// **The icon column is reserved and left empty**, and that is deliberate rather
+/// than unfinished: vanilla blits a 32×32 `FaviconTexture.forWorld` there, backed
+/// by the `icon.png` the client writes on quit. This client writes none (see
+/// `crate::saves::WorldSummary`'s doc on the fields it deliberately does not
+/// port), so there is nothing to blit — and the column still has to exist,
+/// because all three text lines' x is measured from its far edge. Drawing a
+/// placeholder square would be inventing a texture vanilla does not have for a
+/// world with no icon.
+///
+/// Every string is clipped to [`world_list_text_width`] with the same
+/// [`clip_measured`] the account row uses, which is `StringWidget.setMaxWidth`
+/// (`:418`, `:436`, `:441`) — vanilla additionally attaches a tooltip when it
+/// clips, still unported for #393's reason (nothing tracks hover dwell time).
+fn draw_world_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32, height: f32) {
+    let Some(row) = rows.get(i) else { return };
+    let Some(view) = row.world.as_ref() else {
+        return;
+    };
+    // The gate is asked here as well as inside `row_rect` for `draw_server_entry`'s
+    // reason: this is the draw's own statement of what is on screen, and the two
+    // must agree by both reading the same predicate rather than by one trusting
+    // the other's `None`.
+    if !world_list_row_visible(view.index, height) {
+        return;
+    }
+    let Some((x, y, w, h)) = row_rect(rows, i, width, height) else {
+        return;
+    };
+
+    if view.selected {
+        b.rect(x, y, w, h, LABEL);
+        b.rect(x + 1.0, y + 1.0, w - 2.0, h - 2.0, WORLD_LIST_SELECTION_FILL);
+    }
+
+    let (cx, cy, ..) = world_list_row_content_rect(view.index, width);
+    let text_x = cx + WORLD_LIST_TEXT_DX;
+    let room = world_list_text_width();
+    // Name, folder + last played, game mode + version — in `MenuRow`'s own
+    // `label`/`detail`/`trailing`, read off the row rather than duplicated into
+    // `WorldEntryView`. Only the first is white; see `WORLD_LIST_DIM`.
+    for (line, (text, colour)) in [
+        (row.label.as_str(), LABEL),
+        (row.detail.as_str(), WORLD_LIST_DIM),
+        (row.trailing.as_str(), WORLD_LIST_DIM),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if text.is_empty() {
+            continue;
+        }
+        b.text(
+            clip_measured(b, text, room),
+            text_x,
+            cy + WORLD_LIST_LINE_DY[line],
+            1.0,
+            colour,
+        );
+    }
 }
 
 /// Draws one vanilla widget: its `widget/button*` nine-slice background, then

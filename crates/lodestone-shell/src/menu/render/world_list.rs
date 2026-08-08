@@ -313,6 +313,54 @@ pub fn world_list_row_top(index: usize) -> f32 {
     world_select_block().content_top + WORLD_LIST_FIRST_ENTRY_Y + index as f32 * WORLD_LIST_ITEM_H
 }
 
+/// How many whole world-list rows fit between the content band's top and the
+/// footer band on a `height`-tall canvas.
+///
+/// `floor((bandBottom - firstEntryY) / itemHeight)`, where the band's bottom is
+/// `height - footerHeight` — the footer is pinned to the bottom edge
+/// (`HeaderAndFooterLayout`), so this is the same expression
+/// [`WorldSelectBlock::footer_slot`]'s negative `dy` encodes.
+///
+/// Derived rather than a constant because the answer really does depend on the
+/// window: 10 rows at the 854×480 reference canvas, 3 at the 320×240 floor
+/// `calculate_gui_scale` can produce.
+#[must_use]
+pub fn world_list_visible_rows(height: f32) -> usize {
+    let top = world_list_row_top(0);
+    let bottom = height - WORLD_SELECT_FOOTER_H;
+    (((bottom - top) / WORLD_LIST_ITEM_H).floor().max(0.0)) as usize
+}
+
+/// Whether world-list row `index` is inside the content band at this canvas.
+///
+/// The same gate `server_row_visible` applies to the multiplayer list and for the
+/// same two reasons: a row that would overflow into the footer must not draw
+/// **and** must not hit-test, because `row_rect` is read by `app.rs`'s click
+/// routing as well as by the draw. Without it a click below the last visible row
+/// would land on a row that is nowhere near the cursor.
+#[must_use]
+pub fn world_list_row_visible(index: usize, height: f32) -> bool {
+    index < world_list_visible_rows(height)
+}
+
+/// The most world rows this screen will ever *list*, as opposed to draw.
+///
+/// [`super::world_select::WorldSelectNav`] has to decide how many rows exist
+/// before any canvas is known — the widgets outlive a frame, and focus
+/// registration happens at construction — so it caps at the count for the
+/// **reference** canvas rather than for the real one.
+///
+/// The consequence is stated rather than hidden: on a canvas shorter than
+/// [`WORLD_SELECT_REF_CANVAS`]'s 480 the last few of those rows fail
+/// [`world_list_row_visible`] and are neither drawn nor clickable, and a player
+/// with more worlds than this cannot reach the rest at all. Both are the same
+/// missing feature — `AbstractSelectionList`'s scroll model, which #396 ported
+/// for the *server* list and which this screen still lacks.
+#[must_use]
+pub fn world_list_max_rows() -> usize {
+    world_list_visible_rows(WORLD_SELECT_REF_CANVAS.1)
+}
+
 /// The left edge of every world-list row: `getRowLeft()`, which is
 /// `getX() + this.width / 2 - getRowWidth() / 2` with `getX() == 0`
 /// (`AbstractSelectionList.java:372-374`). The `floor` is Java's integer
@@ -349,14 +397,59 @@ pub fn world_list_row_content_rect(index: usize, width: f32) -> (f32, f32, f32, 
     )
 }
 
-/// The one entry the list has, drawn with vanilla's `NoWorldsEntry` geometry —
-/// `text` is [`super::world_select::WorldSelectNav::world_row_label`], i.e. the
-/// bundled world (issue #287).
+/// `Component.literal(levelIdAndDate).withColor(-8355712)`
+/// (`WorldSelectionList.java:433`) and the same colour merged onto the info line
+/// (`:439`) — `0xFF808080`, i.e. mid grey.
 ///
-/// `NoWorldsEntry`'s geometry rather than `WorldListEntry`'s is deliberate and
-/// unchanged by #287: `WorldListEntry` draws a 32×32 icon plus three text lines
-/// off a `LevelSummary` (`WorldSelectionList.java:494-502`), and there is no
-/// world storage here to supply one. See `world_select`'s module docs.
+/// The **name** line takes no colour at all in vanilla, so it draws in
+/// [`LABEL`]'s white. That asymmetry is the whole visual hierarchy of the row and
+/// is why this is a separate constant rather than one grey for all three lines.
+pub(super) const WORLD_LIST_DIM: [f32; 4] =
+    [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
+
+/// `AbstractSelectionList.extractItem`'s selection pass
+/// (`AbstractSelectionList.java:354-370`): a 1 px outline with the interior
+/// filled **black**, drawn under the row's content.
+pub(super) const WORLD_LIST_SELECTION_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+/// Where a `WorldListEntry`'s three text lines start, relative to the row's
+/// content box: `getTextX() = getContentX() + 32 + 3`
+/// (`WorldSelectionList.java:568-570`).
+///
+/// The 32 is `WorldListEntry.ICON_SIZE` (`:400`) — the icon column. **This client
+/// draws nothing in it** (no `icon.png` is ever written, see
+/// `crate::saves::WorldSummary`), and the column is reserved anyway, because
+/// removing it would move all three text lines and stop this being vanilla's
+/// layout.
+pub const WORLD_LIST_TEXT_DX: f32 = 32.0 + 3.0;
+
+/// The three text lines' y offsets inside a row's content box —
+/// `WorldListEntry.extractContent` (`WorldSelectionList.java:557-563`):
+/// `contentY + 1`, `contentY + 9 + 3`, `contentY + 9 + 9 + 3`.
+///
+/// Left unreduced for the reason `WORLD_SELECT_HEADER_H` is: the `9`s are
+/// `StringWidget`'s own height and the `3`s are the gaps, and a reader has to be
+/// able to check them against the Java rather than against `12` and `21`.
+pub const WORLD_LIST_LINE_DY: [f32; 3] = [1.0, 9.0 + 3.0, 9.0 + 9.0 + 3.0];
+
+/// The width one of those three lines is clipped to — `WorldListEntry`'s own
+/// `maxTextWidth` (`:417`), which is `getRowWidth() - getTextX() - 2` less the
+/// content inset.
+#[must_use]
+pub fn world_list_text_width() -> f32 {
+    (WORLD_LIST_ROW_W - 2.0 * LIST_CONTENT_PADDING - WORLD_LIST_TEXT_DX - 2.0).max(0.0)
+}
+
+/// The **empty-list** row, drawn with vanilla's `NoWorldsEntry` geometry —
+/// `text` is [`super::world_select::WorldSelectNav::empty_label`].
+///
+/// `NoWorldsEntry`'s geometry is now used for *only* that case: a populated list
+/// draws `WorldListEntry`'s icon column plus three text lines
+/// (`WorldSelectionList.java:490-502`) through
+/// [`super::draw::draw_world_entry`], because there finally is a `LevelSummary`
+/// (`crate::saves::WorldSummary`) to supply them. See `world_select`'s module
+/// docs for why this shell shows an empty list at all where vanilla leaves the
+/// screen for `CreateWorldScreen`.
 ///
 /// `NoWorldsEntry.extractContent` centres a `StringWidget` in the entry's
 /// content box — `setPosition(getContentXMiddle() - width / 2, getContentYMiddle()
