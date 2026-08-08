@@ -1229,12 +1229,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   files on disk and writes back everything the world mutated, through
   `lodestone-anvil`'s container codec. Issue
   [#437](https://github.com/matteopolak/lodestone/issues/437).
-- [World select, with creation disabled](./world-select.md) — `Screen::WorldSelect`
-  — vanilla's `SelectWorldScreen`, reached from the title screen's **Singleplayer**
-  button. A title, a search field, a world list, and six footer buttons: Play Selected
-  World, Create New World, Edit, Delete, Re-Create, Back. **Four of the six are
-  present and disabled, Create New World among them**, and the list holds **exactly
-  one** world.
+- [World select, and the singleplayer save list](./world-select.md) —
+  `Screen::WorldSelect` — vanilla's `SelectWorldScreen`, reached from the title
+  screen's **Singleplayer** button. A title, a search field, a world list, and six
+  footer buttons: Play Selected World, Create New World, Edit, Delete, Re-Create,
+  Back. The list holds **one row per world in `saves/`**, and **three of the six
+  buttons are present and disabled**: Edit and Re-Create have no screen to open, and
+  Delete has no confirmation step.
 - [One bevy `World` — §4.1(c)](./world-unification.md) — Until this change the
   process held **three** `bevy_ecs::World`s: the net thread's
   (`lodestone_client::state::SharedState`, authoritative over the network read-model),

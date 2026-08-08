@@ -57,32 +57,49 @@ no layout class); this is the same call at a coarser grain.
 - **Wired since — the collected config's effect on the launched seed.** This
   section used to say "nothing downstream reads any field of it yet" and
   pointed at a queued patch; that patch has landed (`72cb451`, `d65d593`).
-  `nav.rs`'s `apply_create_world` now turns `CreateWorldOutcome::Create` into
-  `MenuAction::Singleplayer(Some(config))`, and `app.rs`'s
+  `nav.rs`'s `apply_create_world` **creates the world directory** (issue #468's
+  reading 2 — it is the layer that knows where `saves/` is) and turns
+  `CreateWorldOutcome::Create` into
+  `MenuAction::Singleplayer(SingleplayerLaunch::Created { world_dir, config })`,
+  and `app.rs`'s
   `begin_singleplayer`/`resolve_launch_seed`/`parse_seed` resolve
   `config.seed` (vanilla's own `WorldOptions.parseSeed`/`randomSeed` rule —
   trim, a valid `i64` literal verbatim, free text hashed with Java's
   `String.hashCode`, empty means fresh random) into the `i64`
   `lodestone_server::worldgen_data::overworld_chunk_source(seed)` wants,
-  replacing `world_select::BUNDLED_WORLD`'s hardcoded seed. Proved end to end,
+  replacing `world_select::BUNDLED_WORLD`'s hardcoded seed. The typed seed is
+  honoured because the directory is **new** and therefore has no
+  `world_gen_settings.dat` yet — which is precisely why creating a fresh directory
+  is the right fix for #468's wart rather than forcing a seed onto an existing
+  world. Proved end to end,
   not just at the `i64` level: `app.rs`'s
   `resolved_seeds_from_different_world_creation_configs_generate_different_terrain`
   resolves two typed seeds through the *production* path and asserts
   different real terrain at the same coordinate in the same column, plus
   byte-identical reproduction of the same seed.
-- **Decorative — game mode, difficulty, structures, bonus chest and
-  allow-cheats.** Collected and cycled/toggled for real, but nothing
-  downstream reads any of them — see "What is still queued" below.
-- **Decorative — the world name and the "will be saved in" folder.** There
-  is still no `LevelStorageSource`, so a name is collected and shown but
-  nothing is ever written to a folder of that name.
+- **Wired since — the world name.** This section used to say "decorative: there
+  is still no `LevelStorageSource`, so a name is collected and shown but nothing
+  is ever written to a folder of that name". There is one now
+  (`crate::saves`, issue #468's reading 2): the typed name is sanitised into a
+  folder name by `FileUtil.sanitizeName`'s own rules, de-duplicated with a
+  ` (N)` counter, and written into the new world's `level.dat` as `LevelName` —
+  so the world-select list shows what the player typed even when the folder had
+  to be sanitised into something else. `saves.rs` is the spec.
+- **Wired since — the game mode, partly.** It reaches `level.dat`'s `GameType`,
+  so a world created as Creative is *listed* as Creative. **Hardcore is written
+  as Survival**, because `LevelDat::for_new_world` writes `hardcore: 0` and this
+  layer has no business hand-editing that compound; that is the same gap as the
+  four fields below, one field narrower.
+- **Decorative — difficulty, structures, bonus chest and allow-cheats.**
+  Collected and cycled/toggled for real, but nothing downstream reads any of
+  them — see "What is still queued" below.
 
 ## What is still queued
 
-The seed is the one field that reaches the wire (see above). Game mode,
-difficulty, structures, bonus chest and allow-cheats need deeper
-session-setup wiring (an ECS/server-side initial state, not just a menu-side
-constant) than the seed's one-parameter threading, and are left as
+The seed and the name reach disk, and the game mode partly does (see above).
+Difficulty, structures, bonus chest, allow-cheats and the hardcore flag need
+deeper session-setup wiring (an ECS/server-side initial state, not just a
+menu-side constant) than the seed's one-parameter threading, and are left as
 documented follow-up.
 
 ## How to change it

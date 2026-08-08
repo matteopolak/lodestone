@@ -4039,3 +4039,140 @@ own model is order-dependent and a recompute-per-centre architecture is only cor
   nine-slot table and `apply_ore_step_3x3_per_source` still shares one overlay across nine sources, so a blob
   straddling a seam is inconsistent the same way. Unmeasured, underground, and not the reported symptom — but
   recorded here so it is not later assumed fixed by association.
+
+**12.119 The save list's cost was almost entirely in the four things around it, not in the enumeration: the
+`Option` in `MenuAction::Singleplayer` was where "one implicit world" was actually encoded, a fresh `FocusSet`
+plus a widget that still believed it was focused silently disagreed about focus, `create_world(` matched five
+unrelated `menu::create_world` helpers and turned a source-scan gate into noise, and the pixel gate this
+replaced could not tell "the list drew" from "row 0 drew". Reading (2) of #468 — the save list — closes the
+owner's "Create New World just joins me to the existing world".**
+
+- **The product decision was written down and the wart was written down, and both were right — which is why the
+  fix took an hour rather than a day.** `saves.rs`'s module doc named reading (1), named reading (2), and named
+  the exact consequence (*"Create New World cannot create a second one, because the stored seed of an existing
+  world always wins"*) plus the reason the alternative was worse. Nothing had to be diagnosed. **A documented
+  wart is a cheaper starting point than a green test suite**, and this is the strongest instance of that in the
+  repo so far: the report, the cause and the intended fix were all already on one page.
+
+- **`Option<WorldCreationConfig>` was where reading (1) lived, and no amount of work in `saves.rs` could have
+  fixed it.** `None` meant "the one implicit world" — a *sentinel*, not an absent value — so
+  `begin_singleplayer` had nowhere to put a directory and hardcoded `default_world_dir()`. The replacement is
+  `SingleplayerLaunch::{Open(PathBuf), Created { world_dir, config }}`, and the property that makes the seam
+  narrow is that **both arms carry a directory that already exists**: the menu owns "where is `saves/`" and
+  "make a folder", `app` owns "start a server against this path". The variant name and arity are unchanged, so
+  `app/menus.rs`'s pass-through arm compiled untouched — **a payload-type change can be invisible to a
+  forwarding call site, which is exactly when its comment goes stale silently.** That comment was the one
+  edit needed outside the cluster.
+
+- **`Open` deliberately carries no seed, and that absence is load-bearing.** `resolve_world_seed` reads the
+  world's stored seed and ignores a requested one; a seed field on that arm would be a value that looks
+  connected and is discarded, which §12 already records as worse than none because a reader believes it. The
+  seed travels only on `Created`, where the directory is new and therefore has no `world_gen_settings.dat` —
+  which is *why* creating a fresh directory is the right fix rather than forcing a seed onto an existing world.
+
+- **`level.dat`'s `LevelName` comes from the directory name, so writing the file in the shell is not
+  redundant.** `region_source::LevelDatHandle::open_or_create` derives the name from `world_dir.file_name()`.
+  A world the player calls `My World!` gets a sanitised folder, so leaving `level.dat` to the server would
+  list it under the sanitised name forever. The typed name and the folder name are two different strings and
+  the creating layer is the only one that knows both. Caught by writing the gate for
+  `creating_a_world_writes_the_typed_name_and_a_fresh_directory` before the code, not by review.
+
+- **A fresh `FocusSet` beside a widget that still carries `focused = true` disagree, and `set_initial_focus` is
+  the wrong tool for restoring focus — it declines.** Rebuilding the screen on every keystroke (the search
+  box's responder) means rebuilding the focus registry, and the restore path used
+  `set_initial_focus`, whose gate is `takes_focus() == is_active() && !is_focused()`. The widget the new set
+  had forgotten was still flagged focused, so the offer was refused, nothing was set, and `focused_row()`
+  answered `None` while the search box drew a caret. **Ten tests failed on one line, all of them saying
+  "focus is `None`" and none of them saying why.** The fix is `set_focused` plus clearing the stale flag
+  first, because `set_focused`'s own `self.focused == next` early return would otherwise short-circuit on a
+  set whose `focused` is `None`. **Two objects holding the same fact need one owner; when a rebuild replaces
+  one of them, the other's copy is stale by construction.**
+
+- **A source-scan gate's needle decides whether it is a gate or noise: `create_world(` matched
+  `open_create_world()`, `close_create_world()`, `key_create_world(` and `apply_create_world(`.** The whole
+  point of `tests/no_test_touches_the_real_saves_dir.rs` is §12.44's shape — a test that writes into the
+  owner's real `saves/` has **no symptom the suite can see** — and the first draft reported seven entirely
+  correct files. Qualifying every needle with `saves::` fixed it. **A gate that cries wolf gets its allowlist
+  grown until it means nothing**, so a false positive is not a harmless direction to err in. The two
+  remaining hits were prose in doc comments and were *reworded* rather than allowlisted, for the same reason.
+  Its own control asserts the needles match a real call and do **not** match the `_in` twins.
+
+- **The structural defence is better than the scan and is what actually enforces it.** `MenuNav` derives its
+  saves root from the directory it takes `servers.json` from, exactly as it already derives `options.json` and
+  `profiles.json`, so a test that points it at a temp path gets a temp `saves/` **and cannot forget to**. Every
+  operation also has an explicit-root `_in` twin, which is `CLAUDE.md`'s "fork on `#[cfg(test)]` rather than
+  early-returning on `cfg!(test)`" generalised: a separate function is assertable, a `cfg!(test)` early return
+  is a silent skip.
+
+- **The pixel gate it replaced could not tell "the list drew" from "row 0 drew", which is the exact failure a
+  hardcoded row has.** `the_world_list_draws_its_one_row_inside_row_zeros_content_rect` measured one band, and
+  its control was that row 1's band was *empty* — a control that a real list must now *fail*. The replacement
+  measures every row's own content rect and asserts by **location** that ink starts past the reserved 32 px
+  icon column, which a coverage fraction structurally cannot see. **Re-deriving a gate for N is not the same
+  as loosening it for N; the single-case version's control was an assertion the feature had to break.**
+
+- **A premise-false control, found by running it: the selection outline is not inside the content rect.** The
+  first draft asserted that row 0 — the selection — has ink at its band's left edge, because
+  `AbstractSelectionList.extractItem` draws a 1 px outline there. It failed with ink at 329 for a band starting
+  at 294. The outline is at the *row* rect's edge, `CONTENT_PADDING` outside the band, and its interior fill is
+  black, so the leftmost thing inside any content rect is always `getTextX()`. Asking "what else already paints
+  here" gave the answer directly: nothing, because the fill removed it. The outline now gets its own
+  colour-sampled assertion at the row rect, with row 1 as the control — a strictly better gate that
+  discriminates selected from unselected, which the band measurement never could.
+
+- **`FileUtil.findAvailableName`'s first attempt has no counter, and the copy-counter regex accepts an empty
+  count that its own `parseInt` then throws on.** `count` starts at 0 unless the name already ends `" (N)"`,
+  so `New World` → `New World`, then `New World (1)`. And `(<name>.*) \((<count>\d*)\)` matches `A ()`, whose
+  `Integer.parseInt("")` throws out of `findAvailableName` — caught by
+  `WorldCreationUiState.findResultFolder`, which answers `"World"`. Ported as "an unparseable count means no
+  counter", reaching the same place without a panic. The 255-char clamp is by **characters**, not bytes:
+  vanilla's `substring` counts UTF-16 units and byte-slicing a Rust `String` would panic mid-codepoint on a
+  world called `Мир`. Gated with 400 Cyrillic characters.
+
+- **Two vanilla behaviours were deliberately not copied, and both are the kind of thing a faithful port gets
+  wrong by being faithful.** `WorldSelectionList.handleNewLevels` calls `CreateWorldScreen.openFresh` for an
+  *empty* singleplayer list — real vanilla leaves the screen — which would make the world list unreachable on a
+  fresh install and make Escape return the player to a screen they never saw. And vanilla waits for a click
+  before selecting anything, which with no `AbstractSelectionList` keyboard model would strand a keyboard-only
+  player. Both deviations are argued at the site. **The owner's framing asserted vanilla shows an empty list
+  with a working Create button; the decompile says otherwise, and the right answer was still the owner's.**
+
+- **Delete was deferred *and its filesystem half deleted*, which is the opposite of the usual mistake.** A
+  tested `delete_world_in` with no caller is the island `CLAUDE.md` names, and it had 20 lines of gates
+  proving guards that nothing exercised. The part that is not four lines is a confirmation a player cannot
+  fire by accident: arming the existing Delete button and confirming with a second press of it is
+  deletable-by-double-click, and a real `ConfirmScreen` needs a new `Screen` variant across `menu.rs`,
+  `menu/nav.rs` and `menu/render/dispatch.rs` — three choke points, with three other agents live. **For an
+  irreversible operation, "the confirmation is a follow-up" is not a smaller version of the feature; it is a
+  different feature, and shipping the destructive half without it is worse than shipping neither.** The
+  containment check (`world_dir_in`) stayed, because it is already load-bearing for *opening*: a `dir_name` of
+  `..` would resolve to the saves root, which `IntegratedServer` would then fill with region files.
+
+- **The row ids, the tab order and the screen order are three different orderings and collapsing any two is a
+  bug.** World rows get ids *after* the six footer buttons even though they draw above them and Tab visits
+  them first: the ids index `frame.rows` and `FocusSet`, so inserting worlds in the middle would renumber all
+  six buttons whenever the world count changed and `app.rs`'s hit-test would read last frame's numbering —
+  #391's shape at list scale. Registration order is what Tab follows, and that *is* vanilla's header →
+  contents → footer. `tab_visits_the_list_between_the_search_field_and_the_footer` is the gate that fails if
+  the two are ever unified.
+
+- **The fixture is stated in the test source and asserted as a precondition, because the `world` species is
+  unreadable from the source.** `saves.rs`'s root really contains a tie on `LastPlayed`, an empty `LevelName`,
+  an undecodable `level.dat`, a directory with no `level.dat` and a stray *file*; `world_select.rs`'s three
+  worlds include one deliberately corrupt. A one-valid-world fixture cannot exercise sorting, the tie-break,
+  the name fallback or `can_play == false`, and no amount of reading the assertions would show it.
+
+- **The date format is a deviation with a testability argument, not a shortcut.** Vanilla uses
+  `Util.localizedDateFormatter(FormatStyle.SHORT)` — the user's locale and the system time zone — and this
+  shell has neither a locale table nor a tz database. Guessing a locale format would be wrong in a way nobody
+  could test. ISO `YYYY-MM-DD HH:MM UTC`, from `civil_from_days`, gated against values produced by Python's
+  own `datetime` including two adjacent leap-day boundaries — an expected value from outside the code under
+  test, which `decode(encode(x)) == x` on our own arithmetic would not have been.
+
+- **The list does not scroll, and the honest consequence is written into a function name rather than a
+  comment.** `world_list_row_visible` rejects any row outside the content band and `row_rect` then reports no
+  rect at all — not drawn, not clickable, the same gate `server_row_visible` applies because `row_rect` is
+  also the hit-test. `world_list_max_rows()` caps the list at 10, derived from the band rather than chosen,
+  and its magnitude is asserted against the wrong hypothesis (`11`, the count that forgets the 60 px footer
+  band) so the gate cannot pass on a sign. A player with more than ten worlds cannot reach the rest: filed,
+  named, and reachable by grep.

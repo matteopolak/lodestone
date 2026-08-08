@@ -105,19 +105,28 @@ and never withholds one it wants.
 
 ## How to change it
 
-- **The world's identity lives in `menu/world_select.rs`'s `BUNDLED_WORLD`** —
-  label and seed together, because those are the same fact. `app.rs` reads the seed
-  from there. If a real world list ever lands, `WorldSelectOutcome::Play` becomes
-  `Play(WorldEntry)` and both ends change at once, by construction.
-- **The seed is fixed deliberately.** A random seed per launch would make "the
-  world" a different world every time it is opened, which is *worse* than not
-  persisting it — a player would read the changing surroundings as a bug. A fixed
-  seed plus a deterministic generator is the closest thing to persistence there is
-  without a save format, and the row label says the world is generated.
-- **The row label has a 44-character ceiling.** Vanilla's `NoWorldsEntry` gives its
-  `StringWidget` no `maxWidth`, so nothing clips it and a longer string overhangs
-  the 266 px row. `the_world_list_row_label_fits_the_row_it_is_centred_in`
-  measures it.
+- **The world's identity is a directory now, not a constant.** This used to say
+  "the world's identity lives in `menu/world_select.rs`'s `BUNDLED_WORLD` — label
+  and seed together", and predicted that "if a real world list ever lands,
+  `WorldSelectOutcome::Play` becomes `Play(WorldEntry)`". It landed (issue #468's
+  reading 2, see [`world-select.md`](./world-select.md)): `Play` carries the
+  selected world's **folder name**, `menu/nav.rs` resolves it against
+  `crate::saves`' root, and `MenuAction::Singleplayer` carries a
+  `SingleplayerLaunch` naming a directory that already exists.
+- **`BUNDLED_WORLD.seed` survives in one narrow case, and is still fixed
+  deliberately.** `resolve_launch_seed(None)` returns it, and `resolve_world_seed`
+  then discards it for any world that has a stored seed — which is every world
+  created through the menu. It matters only for a directory whose
+  `world_gen_settings.dat` is missing, and there a *random* seed would generate
+  the unvisited chunks against a different seed from the visited ones: the
+  discontinuity `resolve_world_seed`'s own doc calls worse than either failure
+  alone.
+- **The empty-list notice has a 44-character ceiling.** Vanilla's `NoWorldsEntry`
+  gives its `StringWidget` no `maxWidth`, so nothing clips it and a longer string
+  overhangs the 266 px row. `the_world_list_row_label_fits_the_row_it_is_centred_in`
+  measures it — and measures `BUNDLED_WORLD.label` too, which nothing draws any
+  more, because that measurement is the only place the reason for its length
+  survives.
 - **Adding a `ServerProtocol` method?** Add its forward to the `Box<P>` impl in
   `lodestone-server`'s `protocol.rs`. Thirteen of the eighteen methods have
   defaults, so a missing forward is **not a compile error** — the box silently
@@ -169,7 +178,9 @@ why `singleplayer_seam.rs` exists beside it.
 | `--render-distance <n>` | the server's `view_radius`, hence the initial view's size and the load time |
 | `--protocol <n>` | which family the registry is asked for, on both sides |
 | `lodestone-shell`'s `live` feature (default **on**) | compiles `v770` into the registry; without it `server_protocol_for_protocol` returns `None` and Singleplayer reports `NoVersionFamily` |
-| `BUNDLED_WORLD.seed` | the world |
+| the world-select selection | which `saves/<world>` directory is opened |
+| `CreateWorld`'s Seed field | the seed a **newly created** world generates with; ignored for an existing one, whose stored seed wins |
+| `BUNDLED_WORLD.seed` | the fallback seed for a world directory with no `world_gen_settings.dat` |
 
 ## Dependencies
 
