@@ -72,6 +72,17 @@ pub struct PlayerInventory {
     /// but the menu is a per-connection thing here and this struct is the
     /// per-connection thing that already reaches every caller that needs it.
     crafting: CraftingState,
+    /// The cursor stack and in-progress drag the server's own `doClick` needs
+    /// ([`crate::container_click`]). Same argument as `crafting` above: it is
+    /// per-connection menu state, and this struct is the per-connection value
+    /// every container call site already holds, so it costs no new parameter on
+    /// `dispatch_play_packet` (which is at 28).
+    click_state: crate::container_click::ClickState,
+    /// The 3×3 grid of the crafting **table** this connection currently has open,
+    /// if any (issue #529 step 2). `None` when no table menu is open, which is
+    /// what makes "is this window a crafting table" answerable without a second
+    /// registry: the grid exists exactly while the menu does.
+    table_crafting: Option<CraftingState>,
 }
 
 impl Default for PlayerInventory {
@@ -80,6 +91,8 @@ impl Default for PlayerInventory {
             slots: vec![None; PLAYER_NATIVE_SIZE],
             selected_hotbar_slot: 0,
             crafting: CraftingState::player(),
+            click_state: crate::container_click::ClickState::default(),
+            table_crafting: None,
         }
     }
 }
@@ -195,6 +208,45 @@ impl PlayerInventory {
         &mut self.crafting
     }
 
+    /// This connection's cursor and in-progress drag.
+    #[must_use]
+    pub fn click_state(&self) -> &crate::container_click::ClickState {
+        &self.click_state
+    }
+
+    /// Mutable access to the cursor and drag — for
+    /// [`crate::container_click::do_click`] and for a menu close, which returns
+    /// the cursor to the world.
+    pub fn click_state_mut(&mut self) -> &mut crate::container_click::ClickState {
+        &mut self.click_state
+    }
+
+    /// The open crafting **table**'s 3×3 grid, if a table menu is open.
+    #[must_use]
+    pub fn table_crafting(&self) -> Option<&CraftingState> {
+        self.table_crafting.as_ref()
+    }
+
+    /// Mutable access to the open table's grid.
+    pub fn table_crafting_mut(&mut self) -> Option<&mut CraftingState> {
+        self.table_crafting.as_mut()
+    }
+
+    /// Opens a fresh 3×3 table grid — called when a crafting-table menu opens.
+    pub fn open_table_crafting(&mut self) {
+        self.table_crafting = Some(CraftingState::table());
+    }
+
+    /// Closes the table grid and returns whatever was in it, so the caller can
+    /// give it back to the player (vanilla's `CraftingMenu.removed` →
+    /// `clearContainer`). A grid silently discarded on close deletes items.
+    pub fn take_table_crafting(&mut self) -> Vec<ItemStack> {
+        self.table_crafting
+            .take()
+            .map(|grid| grid.inputs().iter().flatten().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Adds `stack` to this inventory, mirroring vanilla's
     /// `Inventory.add(-1, stack)` → `addResource` loop
     /// (`Inventory.java`'s `add`/`addResource`/`getSlotWithRemainingSpace`/
@@ -270,6 +322,31 @@ impl PlayerInventory {
                 written.push(slot);
             }
         }
+    }
+
+    /// Removes **one** item matching `predicate` from `items` (`0..36`) and returns
+    /// it as a single-count stack — the take side of a recipe-book fill
+    /// (`Inventory.findSlotMatchingItem` + a one-item split).
+    ///
+    /// Scans hotbar then main storage in native order, which is vanilla's own
+    /// `items` order. Armour and the off-hand are excluded, exactly as
+    /// [`add`](Self::add)'s `getFreeSlot` half is: a recipe never consumes the
+    /// boots you are wearing.
+    pub fn take_matching(&mut self, predicate: impl Fn(&ItemStack) -> bool) -> Option<ItemStack> {
+        let index = (0..ITEMS_SIZE).find(|&index| {
+            self.slots[index]
+                .as_ref()
+                .is_some_and(|stack| stack.count > 0 && predicate(stack))
+        })?;
+        let stack = self.slots[index].as_mut()?;
+        let mut one = stack.clone();
+        one.count = 1;
+        if stack.count <= 1 {
+            self.slots[index] = None;
+        } else {
+            stack.count -= 1;
+        }
+        Some(one)
     }
 
     /// `Inventory.getSlotWithRemainingSpace` — see [`add`](Self::add)'s doc
@@ -371,47 +448,11 @@ fn player_menu_native_index(menu_slot: i32) -> Option<usize> {
     }
 }
 
-/// Where a `container_click`'s menu-slot index lands for a **non-player**
-/// window (a furnace/hopper screen, `window_id != 0`) — either inside the
-/// block entity's own container slots, or inside the player's standard
-/// inventory rows every such menu appends after them.
-///
-/// Every vanilla non-player container menu builds its player-facing section
-/// with `AbstractContainerMenu::addStandardInventorySlots` (e.g.
-/// `AbstractFurnaceMenu.java:66`'s `addStandardInventorySlots(inventory, 8,
-/// 84)`, `HopperMenu.java:27`'s `addStandardInventorySlots(inventory, 8,
-/// 51)`): 27 main-storage slots (native `9..=35`) immediately followed by 9
-/// hotbar slots (native `0..=8`) — **never** armour or off-hand, which only
-/// `InventoryMenu` (window `0`) exposes. This is the same 36-slot tail
-/// [`crate::block_entities::BlockEntity::container_slots`]'s callers append
-/// when building a `container_set_content` payload, so the two sides agree
-/// on where the boundary falls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContainerMenuSlot {
-    /// An index into the block entity's own slots (`0..container_size`).
-    Own(usize),
-    /// A native [`PlayerInventory`] index (main storage `9..=35` or hotbar
-    /// `0..=8` — never armour/off-hand, per this enum's own doc comment).
-    Player(usize),
-}
-
-/// Resolves one `container_click` menu-slot index against a `container_size`-
-/// slot non-player menu — see [`ContainerMenuSlot`]'s doc comment for the
-/// layout this implements. `None` for an index past the end of the standard
-/// 36-slot player tail (a malformed or future-layout packet).
-#[must_use]
-pub fn container_menu_slot(container_size: usize, menu_slot: i32) -> Option<ContainerMenuSlot> {
-    let menu_slot = usize::try_from(menu_slot).ok()?;
-    if menu_slot < container_size {
-        return Some(ContainerMenuSlot::Own(menu_slot));
-    }
-    match menu_slot - container_size {
-        main @ 0..=26 => Some(ContainerMenuSlot::Player(main + 9)),
-        hotbar @ 27..=35 => Some(ContainerMenuSlot::Player(hotbar - 27)),
-        _ => None,
-    }
-}
-
+/// The non-player menu layout that used to live here (`ContainerMenuSlot` /
+/// `container_menu_slot`) is now [`crate::container_click::MenuLayout::container`],
+/// which has to describe the same 27-main + 9-hotbar tail *and* answer
+/// `may_place`/`max_stack_size` for it. Two copies of that boundary is how the two
+/// sides of a click drift apart, so there is one.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,35 +593,6 @@ mod tests {
         fn clone_slots_for_test(&self) -> Vec<Option<ItemStack>> {
             self.slots.clone()
         }
-    }
-
-    /// Pins [`container_menu_slot`]'s boundary for a 3-slot furnace menu
-    /// (`AbstractFurnaceMenu.SLOT_COUNT = 3`): the container's own slots
-    /// (`0..3`), then main storage (`3..30` menu -> native `9..35`), then
-    /// hotbar (`30..39` menu -> native `0..8`) — the exact table
-    /// `AbstractFurnaceMenu.java:63-66` builds.
-    #[test]
-    fn container_menu_slot_maps_a_furnace_sized_menu() {
-        assert_eq!(container_menu_slot(3, 0), Some(ContainerMenuSlot::Own(0)));
-        assert_eq!(container_menu_slot(3, 2), Some(ContainerMenuSlot::Own(2)));
-        assert_eq!(container_menu_slot(3, 3), Some(ContainerMenuSlot::Player(9)));
-        assert_eq!(container_menu_slot(3, 29), Some(ContainerMenuSlot::Player(35)));
-        assert_eq!(container_menu_slot(3, 30), Some(ContainerMenuSlot::Player(0)));
-        assert_eq!(container_menu_slot(3, 38), Some(ContainerMenuSlot::Player(8)));
-        assert_eq!(container_menu_slot(3, 39), None);
-    }
-
-    /// Same shape, a 5-slot hopper menu (`HopperMenu.CONTAINER_SIZE = 5`) —
-    /// the control that the boundary genuinely moves with `container_size`
-    /// rather than being hardcoded to the furnace's `3`.
-    #[test]
-    fn container_menu_slot_maps_a_hopper_sized_menu() {
-        assert_eq!(container_menu_slot(5, 4), Some(ContainerMenuSlot::Own(4)));
-        assert_eq!(container_menu_slot(5, 5), Some(ContainerMenuSlot::Player(9)));
-        assert_eq!(container_menu_slot(5, 31), Some(ContainerMenuSlot::Player(35)));
-        assert_eq!(container_menu_slot(5, 32), Some(ContainerMenuSlot::Player(0)));
-        assert_eq!(container_menu_slot(5, 40), Some(ContainerMenuSlot::Player(8)));
-        assert_eq!(container_menu_slot(5, 41), None);
     }
 
     /// [`window_zero_menu_slot`] must be the exact inverse of

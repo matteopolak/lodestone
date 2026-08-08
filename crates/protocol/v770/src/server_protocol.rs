@@ -955,19 +955,19 @@ fn read_hashed_stack(r: &mut Reader) -> Option<Option<ItemStack>> {
 /// [`read_hashed_stack`] value), then the carried cursor stack, also a
 /// [`read_hashed_stack`].
 ///
-/// The clicked slot/button/click-type fields are decoded (so the reader
-/// advances correctly) but not carried into [`ServerBound`] — see that
-/// variant's own doc comment for why `changed_slots` alone is what this
-/// crate's consumer needs: the client has already run the full `doClick`
-/// locally and this packet's changed-slots map **is** its predicted result,
-/// not raw button input to re-interpret.
+/// The clicked slot/button/click-type fields **are** carried into
+/// [`ServerBound`]: `lodestone-server`'s `container_click::do_click` re-derives
+/// the whole menu state from them, the way vanilla's own `doClick` does.
+/// `changed_slots`/`carried_item` come along as the client's *prediction*, which
+/// the consumer compares against and never stores — see that variant's own doc
+/// comment.
 fn decode_container_click(payload: &[u8]) -> Option<ServerBound> {
     let mut r = Reader::new(payload);
     let window_id = r.var_i32().ok()?;
     let state_id = r.var_i32().ok()?;
-    let _slot = r.i16().ok()?;
-    let _button = r.i8().ok()?;
-    let _click_type = r.var_i32().ok()?;
+    let slot = i32::from(r.i16().ok()?);
+    let button = r.i8().ok()?;
+    let click_type = r.var_i32().ok()?;
     let count = r.var_i32().ok()?;
     let count = usize::try_from(count).ok()?;
     // No `Vec::with_capacity(count)`: `count` is attacker-controlled and
@@ -985,6 +985,9 @@ fn decode_container_click(payload: &[u8]) -> Option<ServerBound> {
     Some(ServerBound::ContainerClicked {
         window_id,
         state_id,
+        slot,
+        button,
+        click_type,
         changed_slots,
         carried_item,
     })
@@ -2695,9 +2698,18 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
+            // Issue #529 step 4. `recipe` is a `RecipeDisplayId.index` — an opaque
+            // position in the book the *server* handed out, not a recipe name; see
+            // `ServerBound::RecipePlaced`'s own doc comment.
             State::Play if packet_id == play::serverbound::PLACE_RECIPE => {
-                let _ = decode_full::<PlaceRecipe>(payload);
-                ServerBound::Ignored
+                match decode_full::<PlaceRecipe>(payload) {
+                    Some(p) => ServerBound::RecipePlaced {
+                        window_id: p.container_id,
+                        recipe_index: p.recipe,
+                        use_max_items: p.use_max_items,
+                    },
+                    None => ServerBound::Ignored,
+                }
             }
             State::Play if packet_id == play::serverbound::RECIPE_BOOK_CHANGE_SETTINGS => {
                 let _ = decode_full::<RecipeBookChangeSettings>(payload);
@@ -5065,6 +5077,9 @@ mod inventory_decode_tests {
             ServerBound::ContainerClicked {
                 window_id: 0,
                 state_id: 7,
+                slot: 36,
+                button: 0,
+                click_type: 0,
                 changed_slots: vec![(36, Some(stack("minecraft:diamond_pickaxe", 1)))],
                 carried_item: None,
             }
@@ -5103,6 +5118,12 @@ mod inventory_decode_tests {
             ServerBound::ContainerClicked {
                 window_id: 0,
                 state_id: 12,
+                slot: 9,
+                // `ContainerClickType::Swap` is ordinal 2 — the whole point of
+                // carrying these three now, so they are asserted rather than
+                // wildcarded.
+                button: 0,
+                click_type: 2,
                 changed_slots: vec![
                     (9, Some(stack("minecraft:cobblestone", 32))),
                     (40, None),

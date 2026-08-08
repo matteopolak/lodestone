@@ -82,6 +82,11 @@ const GAME_EVENT_S2C: i32 = 55;
 /// plus x/y/z) and the server-initiated window-slot write a pickup produces.
 const BLOCK_ACTION_C2S: i32 = 56;
 const CONTAINER_SET_SLOT_S2C: i32 = 57;
+/// A stand-in `change_game_mode` (one byte ordinal). Needed because
+/// `SET_CREATIVE_MODE_SLOT` is gated on creative mode server-side — vanilla's own
+/// `hasInfiniteMaterials()` check — so a test that gives itself an item has to be
+/// in creative for the write, exactly as a real client would be.
+const CHANGE_GAME_MODE_C2S: i32 = 58;
 
 /// A [`ChunkSource`] that hands out an all-air column instantly — these
 /// tests are about packet scheduling, not terrain, so real worldgen would
@@ -214,6 +219,16 @@ impl ServerProtocol for FakeProtocol {
                     _ => Difficulty::Hard,
                 };
                 ServerBound::DifficultyChanged { difficulty }
+            }
+            State::Play if packet_id == CHANGE_GAME_MODE_C2S => {
+                let mut r = Reader::new(payload);
+                let mode = match r.u8().expect("game mode ordinal") {
+                    1 => lodestone_model::GameMode::Creative,
+                    2 => lodestone_model::GameMode::Adventure,
+                    3 => lodestone_model::GameMode::Spectator,
+                    _ => lodestone_model::GameMode::Survival,
+                };
+                ServerBound::ChangeGameMode { mode }
             }
             // Issue #266/#270: minimal stand-in wire formats for the four
             // newly-connected packets — same "test scheduling, not wire
@@ -588,6 +603,12 @@ fn container_slot_writes(packets: &[(i32, Vec<u8>)]) -> Vec<(i32, String, i32)> 
 /// Sends a `SET_CREATIVE_MODE_SLOT`-equivalent write. `item` mirrors the real
 /// packet's `None` = clear-the-slot case.
 async fn send_creative_slot(client: &mut Connection<DuplexStream>, slot: i16, item: Option<&ItemStack>) {
+    // `SET_CREATIVE_MODE_SLOT` is creative-only server-side (vanilla's
+    // `hasInfiniteMaterials()`), so the write is bracketed by a switch into
+    // creative and straight back out. Back out matters: creative also changes
+    // block breaking and damage immunity, and every caller of this helper is
+    // testing survival behaviour.
+    send_game_mode(client, 1).await;
     let mut w = Writer::default();
     w.i16(slot);
     w.bool(item.is_some());
@@ -599,6 +620,17 @@ async fn send_creative_slot(client: &mut Connection<DuplexStream>, slot: i16, it
         .write_packet(SET_CREATIVE_MODE_SLOT_C2S, w.as_slice())
         .await
         .expect("send creative slot");
+    send_game_mode(client, 0).await;
+}
+
+/// Sends the stand-in `change_game_mode` (`0` survival, `1` creative).
+async fn send_game_mode(client: &mut Connection<DuplexStream>, ordinal: u8) {
+    let mut w = Writer::default();
+    w.u8(ordinal);
+    client
+        .write_packet(CHANGE_GAME_MODE_C2S, w.as_slice())
+        .await
+        .expect("send game mode");
 }
 
 /// Sends a `CLIENT_COMMAND`-equivalent request (`0` = respawn, `2` = request

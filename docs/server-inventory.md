@@ -80,27 +80,44 @@ made for the anvil/enchanting-table costs.
 
 `crates/lodestone-server/src/server.rs`. `apply_carried_item_changed` writes
 straight into `PlayerInventory::set_selected_hotbar_slot` — no confirmation
-packet, matching vanilla's `handleSetCarriedItem`. `apply_container_clicked`
-applies `changed_slots` directly into the model, for `window_id == 0` only;
-any other window is decoded but dropped (no open-container model exists
-yet).
+packet, matching vanilla's `handleSetCarriedItem`. `apply_container_clicked` **derives** the
+click's result rather than applying the claim — see below.
 
-**Scope, stated plainly: this does not re-run vanilla's `doClick` state
-machine server-side.** `CONTAINER_CLICK`'s `changed_slots` is the client's
-own post-click prediction — `lodestone-game`'s `click.rs` (issue #27,
-`docs/container-clicks.md`) already computed the full result before encoding
-the packet — and this landing applies that diff verbatim rather than
-re-deriving the seven click modes / the quick-craft drag machine
-server-side. This is deliberate, and it is consistent with today's actual
-desync risk rather than a shortcut around it: the client already predicts
-locally with **no server confirmation needed to look correct**
-(`docs/container-clicks.md`), so nothing before this landing validated any
-of it server-side at all. Applying the client's own diff verbatim cannot
-introduce a *new* desync relative to that baseline — the server model
-becomes a mirror of what the client already believes, by construction —
-where a from-scratch, subtly-wrong reimplementation of `doClick` would. A
-server-authoritative `doClick` (rejecting an impossible client diff, the
-actual point of running it server-side at all) is real future work.
+## The click is derived, not trusted (was a scope cut, now closed)
+
+~~"this does not re-run vanilla's `doClick` state machine server-side"~~ — it
+does, in `crates/lodestone-server/src/container_click.rs`. The struck-through
+paragraph that used to be here argued that applying the client's own
+`changed_slots` prediction verbatim could not introduce a *new* desync, which
+was true and beside the point: **it let any client mint any item in any slot by
+naming it in a diff.** Issue #529 closed the crafting *result* alone; this closes
+the general case.
+
+What the consumer now does with each `CONTAINER_CLICK`:
+
+1. builds the [`MenuLayout`] for the tracked window — the player screen, a
+   block-entity container, or a crafting table,
+2. reads the menu's slots out of their real backing stores,
+3. runs `container_click::do_click` (the port of
+   `AbstractContainerMenu.doClick`) over them, from `(slot, button, click_type)`
+   alone,
+4. writes the result back, with grid cells routed through
+   `CraftingState::set_input` so the result slot is re-derived,
+5. compares the client's `changed_slots`/`carried_item` prediction against what
+   it derived, and sends a full corrective `container_set_content` **only** on a
+   disagreement.
+
+So the packet's item payloads are never stored, and an honest client pays no
+extra traffic. Step 5's comparison is what makes the correction a comparison
+rather than an unconditional resend — the property
+`a_claimed_item_is_never_stored_and_the_client_is_corrected` asserts in both
+directions.
+
+The cursor and the in-progress drag live on `PlayerInventory`
+(`click_state()`), for the same reason the crafting grid does: they are
+per-connection menu state and `PlayerInventory` is the per-connection value every
+container call site already holds, so neither costs a new parameter on
+`dispatch_play_packet` (which is at 28).
 
 ## How to change it
 
@@ -119,13 +136,13 @@ actual point of running it server-side at all) is real future work.
   container kind means giving it a [`BlockEntity`](crate::block_entities::BlockEntity)
   variant with a real `menu_name`/`container_slots`/`data_properties`, not
   touching this file.
-- **Server-authoritative `doClick`** — would replace `apply_container_clicked`
-  applying the client's diff with actually running `click.rs`'s verb table
-  (or a server-side port of it) against `PlayerInventory`, and diffing its
-  own result against the client's claimed `changed_slots` to detect
-  disagreement. Not done here; see the scope note above for why applying the
-  diff directly was the right first landing rather than a half-correct
-  reimplementation.
+- **A new click behaviour** — `container_click.rs`'s `do_click`. What is
+  deliberately *not* modelled there, and would be noticed only by a player:
+  `tryItemClickBehaviourOverride` (bundles), `canDropItems`, and a menu-specific
+  stack cap smaller than the item's own (no menu this crate opens has one). What
+  *is* modelled and easy to get wrong: the per-item stack cap and the armour-slot
+  `mayPlace`, both from `lodestone_data::item_prototypes`' jar dump — a constant
+  64 there would let the server itself derive a 64-stack of swords.
 - **`SET_CREATIVE_MODE_SLOT`** — the next packet in #266's list this model
   unblocks; needs `read_optional_item_stack`'s decode counterpart (see
   `crate::adapter::write_optional_item_stack`'s doc comment for the existing
