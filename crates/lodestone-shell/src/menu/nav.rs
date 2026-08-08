@@ -1110,6 +1110,13 @@ pub struct MenuNav {
     /// (issue #190). Held here for the same reason [`Self::form`] is: it owns
     /// real [`EditBox`] state that cannot be rebuilt per frame.
     create_world: crate::menu::create_world::CreateWorldNav,
+    /// The live confirmation screen's own widgets, focus and request (issue
+    /// #540). Held here for [`Self::create_world`]'s reason — the widgets carry
+    /// focus state that cannot be rebuilt per frame — and **replaced** rather
+    /// than mutated every time a confirmation is opened, so a stale focus or a
+    /// stale target can never survive into the next one. A confirmation that
+    /// remembered the last answer is the failure mode this rules out.
+    confirm: crate::menu::confirm::ConfirmNav,
     /// A double-click on a server row joins it — vanilla's
     /// `ServerSelectionList.java:513-514`, `if (doubleClick) join()`,
     /// unconditional on where in the row the click landed. The primitive is
@@ -1233,6 +1240,10 @@ impl MenuNav {
             social: crate::menu::social::SocialNav::with_path(hidden_players_path),
             stats: crate::menu::stats::StatsNav::default(),
             create_world: crate::menu::create_world::CreateWorldNav::new(),
+            // A placeholder: nothing reads it until `Screen::Confirm` is
+            // reached, and `apply_world_select`'s Delete arm builds the real one
+            // in the same statement that opens the screen.
+            confirm: crate::menu::confirm::ConfirmNav::default(),
             double_click: super::focus::DoubleClickTracker::new(),
             click_clock: std::time::Instant::now(),
             command_block: None,
@@ -1558,6 +1569,15 @@ impl MenuNav {
                     None
                 }
             }
+            // The singleplayer save list (issue #541). Its length is the
+            // **post-filter** row count, so typing in the search box shortens the
+            // bar instead of leaving a thumb sized for the whole of `saves/` —
+            // `WorldSelectNav::shown_len` is the one expression that decides, and
+            // the row draw reads the same one.
+            super::Screen::WorldSelect => {
+                let ws = self.world_select();
+                Some(super::render::world_list_spec(ws.shown_len(), ws.scroll()))
+            }
             // Issue #445's first adoption. Its offset is pixels, which is the
             // prerequisite this arm exists to assert — see `ListSpec`'s doc.
             super::Screen::Statistics => Some(super::stats::list_spec(
@@ -1650,6 +1670,14 @@ impl MenuNav {
                 let before = accounts.scroll();
                 accounts.scroll_by(notches, canvas_height);
                 accounts.scroll() != before
+            }
+            // The save list (issue #541). Same screen as `active_list`'s arm — the
+            // two sets must agree, or the wheel scrolls a screen with no bar or a
+            // bar sits beside a screen the wheel does not reach.
+            super::Screen::WorldSelect => {
+                let before = self.world_select.scroll();
+                self.world_select.scroll_by(notches, canvas_height);
+                self.world_select.scroll() != before
             }
             super::Screen::Statistics => {
                 let before = self.stats.scroll();
@@ -1898,6 +1926,13 @@ impl MenuNav {
         &self.world_select
     }
 
+    /// The live confirmation screen (issue #540) — what it asks and what it will
+    /// do if answered affirmatively.
+    #[must_use]
+    pub fn confirm(&self) -> &crate::menu::confirm::ConfirmNav {
+        &self.confirm
+    }
+
     /// Moves the highlight to row `row` of the current screen, as a mouse hover
     /// would. Out-of-range rows are ignored rather than clamped: the caller
     /// hit-tests against the rendered rects, so "no row here" must not silently
@@ -1928,6 +1963,11 @@ impl MenuNav {
             // across the footer would pull the keyboard out of the search field.
             // See `world_select::WorldSelectNav::hovered`.
             Screen::WorldSelect => self.world_select.hover(row),
+            // The confirmation screen (issue #540) — hover is not focus here for
+            // a sharper reason than on the world list: a hover that moved focus
+            // onto the affirmative button would arm the *next* Enter to delete.
+            // See `confirm::ConfirmNav::hover`.
+            Screen::Confirm => self.confirm.hover(row),
             // `hover_row` is `ContainerEventHandler.setFocused(child)` for the
             // two text fields — real focus, not a highlight index, because the
             // row indices and `EditForm`'s focus ids are the same numbers (see
@@ -2060,6 +2100,14 @@ impl MenuNav {
         if ui.screen() == Screen::WorldSelect {
             let outcome = self.world_select.click_row(row);
             return self.apply_world_select(ui, outcome);
+        }
+        // The confirmation screen (issue #540). Its own arm for the same reason,
+        // and here the "hover then Enter" translation would be actively
+        // destructive rather than merely wrong: the row a hover had highlighted
+        // would be the row Enter pressed.
+        if ui.screen() == Screen::Confirm {
+            let outcome = self.confirm.click_row(row);
+            return self.apply_confirm(ui, outcome);
         }
         // World Creation (issue #190) — #391's shape again: a click focuses a
         // field or presses a button, never "hover then Enter".
@@ -2304,6 +2352,10 @@ impl MenuNav {
             // World Creation (issue #190) — same reasoning as
             // `Screen::WorldSelect`'s own arm above.
             Screen::CreateWorld => self.key_create_world(ui, key),
+            // The confirmation screen (issue #540). Escape here is the *negative
+            // answer* rather than a bare unwind, which is why it needs an arm of
+            // its own and cannot fall through to `UiState::on_escape`.
+            Screen::Confirm => self.key_confirm(ui, key),
             Screen::Settings => self.key_settings(ui, key),
             Screen::Accounts => self.key_accounts(ui, key),
             // Unlike the other arms above, the pause menu is not an
@@ -2765,6 +2817,84 @@ impl MenuNav {
             WorldSelectOutcome::CreateWorld => {
                 self.create_world = crate::menu::create_world::CreateWorldNav::new();
                 ui.open_create_world();
+                MenuAction::None
+            }
+            // Issue #540. **Nothing is deleted here.** This arm only opens the
+            // confirmation, carrying the folder the player had selected — the
+            // removal happens in [`Self::apply_confirm`]'s `Yes` arm and nowhere
+            // else, which is the property that makes the Delete button safe to
+            // press. The whole `ConfirmNav` is rebuilt rather than reused, so a
+            // previous confirmation's focus and target cannot leak in.
+            WorldSelectOutcome::DeleteWorld {
+                dir_name,
+                display_name,
+            } => {
+                self.confirm =
+                    crate::menu::confirm::ConfirmNav::delete_world(&dir_name, &display_name);
+                ui.open_confirm();
+                MenuAction::None
+            }
+        }
+    }
+
+    /// The confirmation screen (issue #540). Every key goes through
+    /// [`crate::menu::confirm::ConfirmNav::handle_key`], which is vanilla's
+    /// `ConfirmScreen.keyPressed` order — including its Escape branch, which is
+    /// `callback.accept(false)` rather than `onClose`.
+    fn key_confirm(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        let outcome = self.confirm.handle_key(key);
+        self.apply_confirm(ui, outcome)
+    }
+
+    /// What an answer to the confirmation means.
+    ///
+    /// **This is the only place in the shell that deletes a world**, and it is
+    /// here for `apply_create_world`'s reason: this layer knows the saves root, so
+    /// the containment check and the removal happen where the root is rather than
+    /// somewhere a folder name has been carried to.
+    ///
+    /// Both answers `close_confirm` **and re-read the list** —
+    /// `WorldSelectionList.deleteWorld`'s callback calls `returnToScreen()`
+    /// outside its own `if (result)` (`WorldSelectionList.java:624-631`) — so the
+    /// screen the player lands on always reflects the disk rather than what was
+    /// enumerated before the confirmation opened. That matters even for a cancel:
+    /// another process may have removed the world in the meantime.
+    ///
+    /// The `match` on [`crate::menu::confirm::ConfirmRequest`] is exhaustive so a
+    /// second kind of confirmation cannot be opened and then silently do nothing
+    /// when the player says yes — the island shape, in the one place where the
+    /// island would be a *missing destructive action* rather than an unused one.
+    fn apply_confirm(
+        &mut self,
+        ui: &mut UiState,
+        outcome: crate::menu::confirm::ConfirmOutcome,
+    ) -> MenuAction {
+        use crate::menu::confirm::{ConfirmOutcome, ConfirmRequest};
+        match outcome {
+            ConfirmOutcome::Handled => MenuAction::None,
+            ConfirmOutcome::No => {
+                ui.close_confirm();
+                self.open_world_list(ui);
+                MenuAction::None
+            }
+            ConfirmOutcome::Yes => {
+                // Cloned out of the request before anything moves the screen: the
+                // list rebuild below replaces `world_select`, and reading the
+                // target after that would be reading it from a screen that has
+                // already forgotten which row was selected.
+                let ConfirmRequest::DeleteWorld { dir_name, .. } = self.confirm.request().clone();
+                let result = crate::saves::delete_world_in(&self.saves_root, &dir_name);
+                ui.close_confirm();
+                self.open_world_list(ui);
+                // Reported over a screen the player recognises rather than
+                // swallowed — vanilla logs it and raises `SystemToast
+                // .onWorldDeleteFailure` (`WorldSelectionList.java:646-648`), and
+                // this shell has no toast layer, so the world list's own error
+                // line is where it goes (the same place a failed create goes).
+                if let Err(e) = result {
+                    self.world_select
+                        .set_error(format!("Could not delete the world: {e}"));
+                }
                 MenuAction::None
             }
         }
@@ -5660,6 +5790,239 @@ mod tests {
     /// World just joins me to the existing world"*. Every step is the real screen
     /// flow (title → list → create → list), so it fails if any hop is unwired
     /// rather than only if `saves.rs` is wrong.
+    /// **The whole delete flow, driven through the real screens** (issue #540):
+    /// title -> world list -> Delete -> the confirmation -> its affirmative
+    /// control -> the world is gone and the others are not.
+    ///
+    /// This is the anti-island gate for the feature. Every hop is a production
+    /// call (`nav.key`/`nav.click` on a `UiState`), so it fails if any of them is
+    /// unwired rather than only if `saves::delete_world_in` is wrong — which its
+    /// own tests already cover from the inside.
+    ///
+    /// The fixture is three worlds plus a **non-world directory** and a stray
+    /// **file**, asserted as a precondition, because "it deleted the right one" is
+    /// not a question a one-world root can ask and "it left everything else alone"
+    /// is not one a root with only worlds in it can ask.
+    #[test]
+    fn deleting_a_world_removes_that_world_and_nothing_else() {
+        use crate::menu::confirm::{NO_ROW, YES_ROW};
+        use crate::menu::world_select::{FIRST_WORLD_ROW, WorldSelectButton as B};
+
+        let (mut nav, _) = self::nav("delete-flow");
+        let root = nav.saves_root().to_path_buf();
+        for name in ["alpha", "bravo", "charlie"] {
+            plant_world(&nav, name);
+        }
+        std::fs::create_dir_all(root.join("notaworld")).expect("create the non-world dir");
+        std::fs::write(root.join(".DS_Store"), b"\x00").expect("write the stray file");
+
+        let mut ui = UiState::new();
+        // Reached the way a player reaches it.
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(ui.screen(), Screen::WorldSelect);
+        assert_eq!(
+            nav.world_select().shown_len(),
+            3,
+            "premise: three worlds, so 'the right one' is a real question"
+        );
+        assert!(
+            root.join("notaworld").is_dir() && root.join(".DS_Store").is_file(),
+            "premise: the root also holds a non-world directory and a stray file"
+        );
+
+        // Select `bravo` (row 1 under `cmp_for_list`: `plant_world` writes them
+        // with the same `LastPlayed`, so the tie-break is folder name ascending).
+        nav.click(&mut ui, FIRST_WORLD_ROW + 1);
+        assert_eq!(
+            nav.world_select().selected().map(|w| w.dir_name.clone()),
+            Some("bravo".to_string())
+        );
+
+        // Delete **opens the confirmation and deletes nothing.**
+        assert_eq!(nav.click(&mut ui, B::Delete.row()), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::Confirm);
+        assert!(
+            root.join("bravo").is_dir(),
+            "pressing Delete must not remove anything by itself"
+        );
+        assert!(
+            nav.confirm().message().contains("bravo"),
+            "the confirmation must name the world it will remove: {:?}",
+            nav.confirm().message()
+        );
+        assert_eq!(
+            nav.confirm().focused_row(),
+            None,
+            "nothing is focused, so Enter here presses nothing"
+        );
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+        assert!(root.join("bravo").is_dir(), "Enter with no focus deleted a world");
+
+        // Only the affirmative control deletes.
+        assert_eq!(nav.click(&mut ui, YES_ROW), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::WorldSelect, "and it returns to the list");
+        assert!(!root.join("bravo").exists(), "bravo must be gone");
+        for kept in ["alpha", "charlie"] {
+            assert!(root.join(kept).is_dir(), "{kept} must survive");
+        }
+        assert!(root.join("notaworld").is_dir(), "the non-world folder survives");
+        assert!(root.join(".DS_Store").is_file(), "the stray file survives");
+        assert!(root.is_dir(), "and the saves root itself survives");
+        // The list was **re-read**, so the screen reflects the disk.
+        let dirs: Vec<String> = nav
+            .world_select()
+            .worlds()
+            .iter()
+            .map(|w| w.dir_name.clone())
+            .collect();
+        assert_eq!(dirs, vec!["alpha".to_string(), "charlie".to_string()]);
+        assert_eq!(nav.world_select().error(), None, "and no failure was reported");
+
+        // -- controls: the three ways of saying no ---------------------------
+        // Each one is run, and each must leave the world intact — an assertion of
+        // absence, so each needs the affirmative arm above as its own control,
+        // which it has.
+        for (what, cancel) in [
+            ("cancel button", 0usize),
+            ("escape", 1),
+            ("a click on nothing, then escape", 2),
+        ] {
+            let (mut nav, _) = self::nav(&format!("delete-flow-no-{cancel}"));
+            let root = nav.saves_root().to_path_buf();
+            plant_world(&nav, "alpha");
+            plant_world(&nav, "keepme");
+            let mut ui = UiState::new();
+            nav.key(&mut ui, MenuKey::Enter);
+            nav.click(&mut ui, FIRST_WORLD_ROW + 1);
+            assert_eq!(
+                nav.world_select().selected().map(|w| w.dir_name.clone()),
+                Some("keepme".to_string()),
+                "{what}: premise — `keepme` is the selection"
+            );
+            nav.click(&mut ui, B::Delete.row());
+            assert_eq!(ui.screen(), Screen::Confirm, "{what}: premise — it opened");
+            match cancel {
+                0 => {
+                    nav.click(&mut ui, NO_ROW);
+                }
+                1 => {
+                    nav.key(&mut ui, MenuKey::Escape);
+                }
+                _ => {
+                    // A click on a row this screen does not have — "clicking
+                    // elsewhere" — then Escape.
+                    nav.click(&mut ui, 99);
+                    assert_eq!(ui.screen(), Screen::Confirm, "{what}: still up");
+                    nav.key(&mut ui, MenuKey::Escape);
+                }
+            }
+            assert_eq!(ui.screen(), Screen::WorldSelect, "{what}: back to the list");
+            assert!(
+                root.join("keepme").is_dir(),
+                "{what} must leave the world intact"
+            );
+            assert!(root.join("alpha").is_dir(), "{what}: and the other one");
+        }
+    }
+
+    /// A **corrupt** world can be removed, which is the one #540 says you most
+    /// need — and it stays non-playable throughout.
+    ///
+    /// The fixture is the point: a directory with a `level.dat` that is not gzip
+    /// at all, asserted undecodable as a precondition, because a *readable* world
+    /// cannot exercise any of this.
+    #[test]
+    fn a_corrupt_world_can_be_deleted_and_never_played() {
+        use crate::menu::confirm::YES_ROW;
+        use crate::menu::world_select::{FIRST_WORLD_ROW, WorldSelectButton as B};
+
+        let (mut nav, _) = self::nav("delete-corrupt-flow");
+        let root = nav.saves_root().to_path_buf();
+        plant_world(&nav, "aaa-readable");
+        let broken = root.join("zzz-broken");
+        std::fs::create_dir_all(&broken).expect("create the corrupt world dir");
+        std::fs::write(
+            lodestone_anvil::level_dat::path_in(&broken),
+            b"this is not gzip",
+        )
+        .expect("write the corrupt level.dat");
+        assert!(
+            lodestone_anvil::level_dat::read_from_file(&lodestone_anvil::level_dat::path_in(
+                &broken
+            ))
+            .is_err(),
+            "premise: the level.dat must genuinely fail to decode"
+        );
+
+        let mut ui = UiState::new();
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(nav.world_select().shown_len(), 2, "both are listed");
+        // Row 1 is the corrupt one — same `LastPlayed`, so folder name ascending.
+        nav.click(&mut ui, FIRST_WORLD_ROW + 1);
+        let selected = nav.world_select().selected().expect("a selection");
+        assert_eq!(selected.dir_name, "zzz-broken");
+        assert!(!selected.readable, "premise: the corrupt world is selected");
+        assert!(
+            !nav.world_select().is_active(B::Play.row()),
+            "Play must stay greyed for a corrupt world"
+        );
+        assert!(nav.world_select().is_active(B::Delete.row()), "Delete must not");
+        // Play does nothing even if something reaches it — the second guard.
+        assert_eq!(nav.click(&mut ui, B::Play.row()), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::WorldSelect, "no launch");
+
+        nav.click(&mut ui, B::Delete.row());
+        assert_eq!(ui.screen(), Screen::Confirm);
+        nav.click(&mut ui, YES_ROW);
+        assert!(!broken.exists(), "a corrupt world must be removable");
+        assert!(root.join("aaa-readable").is_dir(), "the readable one survives");
+        assert_eq!(nav.world_select().error(), None);
+    }
+
+    /// A delete that the filesystem refuses is **reported over the world list**,
+    /// not swallowed — vanilla raises `SystemToast.onWorldDeleteFailure` and this
+    /// shell has no toast layer, so the list's own error line is where it goes.
+    ///
+    /// Driven by removing the directory behind the confirmation's back, which is
+    /// the real race (another process, or Finder) rather than a fault injected
+    /// into our own code.
+    #[test]
+    fn a_delete_the_filesystem_refuses_is_reported_on_the_world_list() {
+        use crate::menu::confirm::YES_ROW;
+        use crate::menu::world_select::WorldSelectButton as B;
+
+        let (mut nav, _) = self::nav("delete-refused");
+        let root = nav.saves_root().to_path_buf();
+        plant_world(&nav, "vanishing");
+        let mut ui = UiState::new();
+        nav.key(&mut ui, MenuKey::Enter);
+        nav.click(&mut ui, B::Delete.row());
+        assert_eq!(ui.screen(), Screen::Confirm, "premise: it opened");
+        // Gone behind our back.
+        std::fs::remove_dir_all(root.join("vanishing")).expect("remove it first");
+        nav.click(&mut ui, YES_ROW);
+        assert_eq!(ui.screen(), Screen::WorldSelect);
+        let err = nav
+            .world_select()
+            .error()
+            .expect("a refused delete must say so");
+        assert!(
+            err.starts_with("Could not delete the world:"),
+            "unexpected message: {err:?}"
+        );
+
+        // -- control ---------------------------------------------------------
+        // A delete that succeeds sets **no** error, so the assertion above is
+        // about the failure and not about a screen that always shows one.
+        let (mut nav, _) = self::nav("delete-refused-control");
+        plant_world(&nav, "present");
+        let mut ui = UiState::new();
+        nav.key(&mut ui, MenuKey::Enter);
+        nav.click(&mut ui, B::Delete.row());
+        nav.click(&mut ui, YES_ROW);
+        assert_eq!(nav.world_select().error(), None);
+    }
+
     #[test]
     fn creating_two_worlds_lists_both_and_play_opens_the_selected_one() {
         use crate::menu::create_world::{CREATE_ROW, NAME_LABEL};
@@ -7282,6 +7645,26 @@ mod tests {
                 ui.enter_dev_world();
                 ui.pause();
                 ui.open_statistics_from_pause();
+            }),
+            // Issue #540's confirmation. Needs the `nav` half too: the frame is
+            // built from `MenuNav::confirm`, so this drives the world list's own
+            // Delete button rather than calling `ui.open_confirm()` — which also
+            // makes it an anti-island premise (if Delete no longer opens the
+            // screen, the setup fails rather than the assertion).
+            ("Confirm", |ui, nav| {
+                plant_world(nav, "alpha");
+                nav.open_world_list(ui);
+                assert_eq!(
+                    nav.world_select().shown_len(),
+                    1,
+                    "premise: the world list enumerated the planted world"
+                );
+                nav.click(ui, crate::menu::world_select::WorldSelectButton::Delete.row());
+                assert_eq!(
+                    ui.screen(),
+                    Screen::Confirm,
+                    "premise: the world list's Delete button opens the confirmation"
+                );
             }),
             // The one that was broken in #474. Needs the `nav` half too — the
             // frame is built from `MenuNav::command_block`, so a `UiState` on

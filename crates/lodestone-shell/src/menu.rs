@@ -6,6 +6,7 @@
 //! | module | what it owns |
 //! |---|---|
 //! | [`command_block`] | the command block edit screen (issue #47) |
+//! | [`confirm`] | vanilla's `ConfirmScreen`, the gate an irreversible action passes through (issue #540) |
 //! | [`nav`] | selection, the add/edit form, what a keypress means |
 //! | [`options`] | the whole settings tree, unsupported controls disabled |
 //! | [`render`] | layout + a self-contained GPU pipeline |
@@ -40,6 +41,7 @@
 
 pub mod accounts;
 pub mod command_block;
+pub mod confirm;
 pub mod create_world;
 pub mod edit_box;
 pub mod focus;
@@ -80,18 +82,19 @@ pub enum Screen {
     /// The add/edit form for one server entry. Reached from
     /// [`Screen::ServerList`]; Escape returns there **without** saving.
     ServerEdit,
-    /// The singleplayer world list (issue #397): vanilla's `SelectWorldScreen`,
-    /// with **world creation present and disabled**. Reached from
-    /// [`Screen::MainMenu`] via [`nav::MainButton::Singleplayer`] — which is
-    /// vanilla's own wiring, where the title screen's Singleplayer button opens
-    /// this screen rather than launching anything; Escape (or the screen's own
-    /// Back button) returns there.
+    /// The singleplayer world list (issue #397): vanilla's `SelectWorldScreen`.
+    /// Reached from [`Screen::MainMenu`] via [`nav::MainButton::Singleplayer`] —
+    /// which is vanilla's own wiring, where the title screen's Singleplayer button
+    /// opens this screen rather than launching anything; Escape (or the screen's
+    /// own Back button) returns there.
     ///
-    /// The list holds **exactly one** world (#287's
-    /// [`world_select::BUNDLED_WORLD`]): a fixed seed the integrated server
-    /// regenerates on every launch, never written to disk. There is still no
-    /// world storage in this client and no world creation (#190), so one is the
-    /// honest count — a second row would have to be invented. Its **Play
+    /// **This doc used to say the list holds "exactly one" world** — #287's
+    /// [`world_select::BUNDLED_WORLD`], a fixed seed regenerated every launch and
+    /// never written to disk — and that world creation was present and disabled.
+    /// Both were true when written and neither has been since #190 and #468: the
+    /// list is one row per directory in `saves/`, Create New World creates one, it
+    /// **scrolls** (#541) and Delete removes one through [`Screen::Confirm`]
+    /// (#540). Its **Play
     /// Selected World** button is live and starts a real session; see
     /// [`world_select`] for the row's geometry and the launch chain.
     WorldSelect,
@@ -270,6 +273,29 @@ pub enum Screen {
     /// allow-cheats remain decorative (no session-setup wiring consumes them
     /// yet). See [`create_world`]'s module docs for the current split.
     CreateWorld,
+    /// Vanilla's `ConfirmScreen` (issue #540): a question, a warning naming what
+    /// is at risk, and two buttons. Reached from [`Screen::WorldSelect`]'s
+    /// **Delete** button; Escape, its own Cancel button and its affirmative
+    /// button all return to [`Screen::WorldSelect`].
+    ///
+    /// **The whole reason it is a screen and not a mode on the world list** is in
+    /// [`confirm`]'s module doc: arming the Delete button and treating a second
+    /// press as confirmation is deletable-by-double-click, and for an
+    /// irreversible operation that is worse than no Delete at all. Being a
+    /// separate screen is what puts the affirmative control somewhere the
+    /// player's second click cannot land.
+    ///
+    /// **One entry point, so one return screen.** Like
+    /// [`Self::open_social_from_pause`] this needs no return-fork:
+    /// [`UiState::close_confirm`] always goes back to the world list, because
+    /// that is the only screen that opens it. A second caller (an
+    /// `EditWorldScreen` reset, a re-create that overwrites) is a
+    /// [`confirm::ConfirmRequest`] variant plus a return fork, in that order.
+    ///
+    /// The *content* — which question, which world — lives in
+    /// [`nav::MenuNav::confirm`], the same split every other widget-bearing
+    /// screen here makes.
+    Confirm,
 }
 
 impl Screen {
@@ -295,7 +321,7 @@ impl Screen {
     /// residue is real; it is stated rather than papered over. If a third
     /// consumer ever needs this, a derive is the fix, not another hand-written
     /// list.
-    pub const ALL: [Screen; 18] = [
+    pub const ALL: [Screen; 19] = [
         Screen::MainMenu,
         Screen::ServerList,
         Screen::ServerEdit,
@@ -314,6 +340,7 @@ impl Screen {
         Screen::Social,
         Screen::Statistics,
         Screen::CreateWorld,
+        Screen::Confirm,
     ];
 }
 
@@ -462,6 +489,10 @@ impl UiState {
                 | Screen::WorldSelect
                 | Screen::Settings
                 | Screen::Accounts
+                // Issue #540. A confirmation opened from the world list is a
+                // pre-session menu screen exactly as the list it sits over is:
+                // no world is loaded, and the menu renderer owns the frame.
+                | Screen::Confirm
         )
     }
 
@@ -756,6 +787,33 @@ impl UiState {
         }
     }
 
+    /// Open the confirmation screen (issue #540) from the world list's
+    /// **Delete** button. Only from [`Screen::WorldSelect`] — same guard as every
+    /// other `open_*`, and load-bearing here rather than merely tidy: a stray
+    /// call must never put a *delete confirmation* over a screen the player is
+    /// not on.
+    ///
+    /// The question and the target live in [`nav::MenuNav::confirm`]; this only
+    /// moves the screen. See [`Screen::Confirm`].
+    pub fn open_confirm(&mut self) {
+        if self.screen == Screen::WorldSelect {
+            self.screen = Screen::Confirm;
+        }
+    }
+
+    /// Back to the world list from the confirmation — whichever answer was given.
+    ///
+    /// "Either way" for [`close_chat`](Self::close_chat)'s reason: which button
+    /// was pressed decides *whether a world was deleted*, not which screen comes
+    /// next. Vanilla is the same shape — `WorldSelectionList.deleteWorld`'s
+    /// callback calls `this.list.returnToScreen()` outside its `if (result)`
+    /// (`WorldSelectionList.java:624-631`).
+    pub fn close_confirm(&mut self) {
+        if self.screen == Screen::Confirm {
+            self.screen = Screen::WorldSelect;
+        }
+    }
+
     /// Back to the world list from World Creation — Escape or Cancel, and
     /// (today) Create too, since nothing yet launches a world from the
     /// collected config (see [`create_world`]'s module docs).
@@ -896,6 +954,15 @@ impl UiState {
             Screen::Statistics => self.close_statistics(),
             // Same reasoning again — back to the world list.
             Screen::CreateWorld => self.close_create_world(),
+            // In practice `MenuNav::key_confirm` intercepts Escape before this is
+            // reached, and it must: on the confirmation screen Escape is the
+            // *negative answer* (`ConfirmScreen.java:97-104` runs
+            // `callback.accept(false)` rather than `onClose`, which is why
+            // `shouldCloseOnEsc()` is `false` there), so the callback has to run.
+            // This arm keeps the match exhaustive and unwinds one level, which for
+            // a *cancel* is the same observable thing — no world is deleted either
+            // way, because deletion only happens on the affirmative answer.
+            Screen::Confirm => self.close_confirm(),
         }
     }
 

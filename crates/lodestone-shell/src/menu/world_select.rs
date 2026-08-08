@@ -17,19 +17,18 @@
 //!
 //! ## What is disabled, and why
 //!
-//! Three of the six footer buttons are inactive (four, before issue #190
-//! enabled Create), and **`active = false` is the whole mechanism** — see
-//! [`super::widget`]. Vanilla disables them itself, for our exact reason:
+//! **Two** of the six footer buttons are inactive — three before issue #540 gave
+//! Delete its confirmation screen, four before #190 enabled Create — and
+//! **`active = false` is the whole mechanism**, see [`super::widget`]. Vanilla
+//! disables them itself, for our exact reason:
 //! `SelectWorldScreen.updateButtonStatus(null)` (`SelectWorldScreen.java:159-166`)
-//! turns Edit, Delete and Re-Create off whenever nothing is selected, and
-//! nothing can be selected here (below); Play and Create are both active for
-//! the same reason vanilla's own are (a launchable selection, and a screen
-//! genuinely worth opening — see [`super::create_world`]'s module docs for
-//! what that screen does and does not do yet). Rendering the still-disabled
-//! three greyed rather than omitting them is the point of #397: a missing row
-//! would change the footer grid's shape and read as a *different screen*,
-//! where a greyed one reads exactly like vanilla with the feature
-//! unavailable.
+//! turns Edit, Delete and Re-Create off whenever nothing is selected, which is a
+//! state this screen really reaches (an empty `saves/`, or a filter matching
+//! nothing). What is left is the *client-level* ceiling: `Edit` and `Re-Create`
+//! have no screen to open at all. Rendering them greyed rather than omitting them
+//! is the point of #397: a missing row would change the footer grid's shape and
+//! read as a *different screen*, where a greyed one reads exactly like vanilla
+//! with the feature unavailable.
 //!
 //! What vanilla does with a **tooltip** on such a button
 //! (`TitleScreen.java:196`, `OptionsScreen.java:88-92`) is still deferred, for
@@ -82,15 +81,17 @@
 //!   [`crate::saves::WorldSummary::cmp_for_list`] sorts last-played descending —
 //!   is both the likely intent and the state this screen already had when it
 //!   had one row.
-//! - **The list does not scroll.** `AbstractSelectionList`'s scroll model is not
-//!   ported here (`#396` did port it for the *server* list; this screen has no
-//!   equivalent yet). A row that would fall outside the content band therefore
-//!   reports **no rect at all** from `render::row_rect`, so it is neither drawn
-//!   nor clickable rather than being drawn over the footer — the same gate
-//!   `server_row_visible` applies. [`max_visible_world_rows`] is how many that
-//!   is, and a player with more worlds than that cannot currently reach the
-//!   rest: a real limitation, filed as
-//!   [#541](https://github.com/matteopolak/lodestone/issues/541) rather than hidden.
+//! - **The list scrolls, and focus scrolls with it** (issue #541). This bullet
+//!   used to say the list did not, and that a player with more worlds than
+//!   `max_visible_world_rows()` could not reach the rest. The cap is gone: every
+//!   world gets a widget, [`Self::scroll`](WorldSelectNav) is a pixel offset
+//!   driven by `MenuNav::active_list`/`scroll_active_list`, and
+//!   [`WorldSelectNav::scroll_to_focus`] brings the focused row into the band —
+//!   which is what makes removing the cap safe, because a focusable row with no
+//!   rect is a trap. `render::world_list_row_visible` is a partial-overlap band
+//!   test now, and `draw_world_entry` runs inside `Quads::with_clip`. See
+//!   `docs/world-select.md` for the one residue (a keypress has no canvas, so
+//!   scroll-into-view is conservative and the offset is re-clamped at draw time).
 //!
 //! ## What consumes it
 //!
@@ -209,18 +210,6 @@ pub const FIRST_BUTTON_ROW: usize = 1;
 ///   were ever collapsed into one.
 pub const FIRST_WORLD_ROW: usize = FIRST_BUTTON_ROW + WORLD_SELECT_BUTTONS.len();
 
-/// How many world rows this screen will list.
-///
-/// Derived rather than chosen — [`super::render::world_list_max_rows`] computes it
-/// from the same content band the draw uses, at the reference canvas. Read that
-/// function's doc for the two limitations the choice of *reference* canvas
-/// carries; both are the same missing feature (this list does not scroll), and a
-/// constant nobody can find is how that stops being written down.
-#[must_use]
-pub fn max_visible_world_rows() -> usize {
-    super::render::world_list_max_rows()
-}
-
 /// The screen's six footer buttons, in vanilla's own `RowHelper` order —
 /// `SelectWorldScreen.createFooterButtons` (`SelectWorldScreen.java:81-107`).
 ///
@@ -233,10 +222,12 @@ pub enum WorldSelectButton {
     /// `LevelSummary.PLAY_WORLD` = `selectWorld.select` (`LevelSummary.java:18`).
     /// Two columns wide. **Enabled** (issue #287): vanilla's
     /// `updateButtonStatus` turns this on for a selection whose
-    /// `primaryActionActive()` holds (`:163`), and [`BUNDLED_WORLD`] is always
-    /// the selection because it is the only world. Pressing it starts the
-    /// integrated server — see [`WorldSelectOutcome::Play`] and the module docs'
-    /// "what consumes it".
+    /// `primaryActionActive()` holds (`:163`) — which since #468 is a real
+    /// [`crate::saves::WorldSummary`] rather than the one hardcoded
+    /// [`BUNDLED_WORLD`] this doc used to name. Pressing it starts the integrated
+    /// server — see [`WorldSelectOutcome::Play`] and the module docs' "what
+    /// consumes it". [`WorldSelectNav::play_selected`] re-checks `can_play()`,
+    /// which is not redundant: see its doc, and issue #540.
     Play,
     /// `selectWorld.create`. Two columns wide. **Enabled** (issue #190): its
     /// press opens [`super::Screen::CreateWorld`] — see
@@ -247,10 +238,12 @@ pub enum WorldSelectButton {
     /// `selectWorld.edit`, 71 px. Disabled: vanilla's `summary.canEdit()`
     /// (`:170`), and there is no selection — nor an `EditWorldScreen` to open.
     Edit,
-    /// `selectWorld.delete`, 71 px. Disabled: `summary.canDelete()` (`:172`).
-    /// Note vanilla's own `LevelSummary.canDelete()` is unconditionally `true`
-    /// (`LevelSummary.java:209-211`), so this button is disabled purely by the
-    /// no-selection branch — there is nothing to delete.
+    /// `selectWorld.delete`, 71 px. **Live** since issue #540:
+    /// `summary.canDelete()` (`:172`), and vanilla's own
+    /// `LevelSummary.canDelete()` is unconditionally `true`
+    /// (`LevelSummary.java:209-211`) — so this is off only in the no-selection
+    /// branch, where there is nothing to delete. Its press opens
+    /// [`super::Screen::Confirm`]; it does not delete anything itself.
     Delete,
     /// `selectWorld.recreate`, 71 px. Disabled: `summary.canRecreate()`
     /// (`:171`), and re-creation routes through `CreateWorldScreen` too.
@@ -296,12 +289,17 @@ impl WorldSelectButton {
     /// [`crate::saves::WorldSummary::can_play`] exactly as vanilla's
     /// `updateButtonStatus` computes it from `LevelSummary`. What is left here is
     /// the *ceiling*: `Edit` and `Re-Create` return `false` unconditionally
-    /// because there is no `EditWorldScreen` and no re-create flow to open, and
-    /// `Delete` returns `false` because deleting a world needs a confirmation
-    /// step this screen does not have yet — see [`crate::saves`]'s module doc for
-    /// why a cheap two-press confirm was rejected rather than shipped, and
-    /// [#540](https://github.com/matteopolak/lodestone/issues/540) for the real
-    /// one.
+    /// because there is no `EditWorldScreen` and no re-create flow to open.
+    ///
+    /// **`Delete` used to be in that list and is not any more** (issue #540). The
+    /// reason it was there is worth keeping, because it is the reason the fix
+    /// looks the way it does: deleting a world is irreversible, and a cheap
+    /// confirmation — arming this button and treating a second press as the
+    /// answer — is deletable-by-double-click. What changed is that
+    /// [`super::confirm`] exists, so the affirmative control is a different
+    /// control on a different screen whose rect does not overlap this one's. A
+    /// press of this button now returns
+    /// [`WorldSelectOutcome::DeleteWorld`], which *asks*.
     ///
     /// **Read this for "could it ever be active", never for "is it active".**
     /// [`WorldSelectNav::is_active`] is the live fact, and consulting the enum
@@ -311,10 +309,11 @@ impl WorldSelectButton {
         match self {
             WorldSelectButton::Create | WorldSelectButton::Back => true,
             // Selection-dependent; `update_button_status` narrows it.
-            WorldSelectButton::Play => true,
-            WorldSelectButton::Edit
-            | WorldSelectButton::Delete
-            | WorldSelectButton::ReCreate => false,
+            //
+            // `Delete` joined this arm in issue #540, when the confirmation
+            // screen it was waiting for landed — see this method's own doc.
+            WorldSelectButton::Play | WorldSelectButton::Delete => true,
+            WorldSelectButton::Edit | WorldSelectButton::ReCreate => false,
         }
     }
 
@@ -429,6 +428,22 @@ pub enum WorldSelectOutcome {
     Play(String),
     /// Create New World (issue #190): open [`super::Screen::CreateWorld`].
     CreateWorld,
+    /// Delete (issue #540): open the **confirmation** for this world.
+    ///
+    /// Deliberately not `Delete(String)`-and-do-it: this variant is a request to
+    /// *ask*, and nothing anywhere in this module can remove a directory. The
+    /// folder name is what [`crate::saves::delete_world_in`] resolves (through
+    /// [`crate::saves::world_dir_in`], the containment check); the display name
+    /// rides along because vanilla's `selectWorld.deleteWarning` interpolates
+    /// `LevelSummary.getLevelName()` rather than the folder
+    /// (`WorldSelectionList.java:633`), and quoting the wrong one of the two is
+    /// exactly how a player confirms the deletion of a different world.
+    DeleteWorld {
+        /// The folder under the saves root.
+        dir_name: String,
+        /// The name to quote in the warning.
+        display_name: String,
+    },
 }
 
 /// The world-select screen's live state: its widgets, its focus, and which row
@@ -473,6 +488,15 @@ pub struct WorldSelectNav {
     /// `updateButtonStatus(null)` state, which this screen really can be in now
     /// (an empty list, or a filter that matches nothing) rather than never.
     selected: Option<usize>,
+    /// How far the list is scrolled, **in logical pixels** (issue #541).
+    ///
+    /// Pixels rather than a row index for #445's reason: one wheel notch is
+    /// `scrollRate = defaultEntryHeight / 2` = 18 px, and a row-quantised offset
+    /// cannot represent that at all. Owned here rather than on
+    /// [`super::nav::MenuNav`] — unlike the multiplayer list's — because focus
+    /// lives here, and **scroll-into-view has to happen wherever focus moves**:
+    /// that is the whole fix for "Tab can focus a row that is not drawn".
+    scroll: f32,
     /// A message to show above the footer — a create failure, mainly.
     ///
     /// Set by `MenuNav` rather than by this screen, for the same reason
@@ -519,6 +543,7 @@ impl WorldSelectNav {
             worlds: Vec::new(),
             shown: Vec::new(),
             selected: None,
+            scroll: 0.0,
             error: None,
         };
         nav.rebuild();
@@ -572,19 +597,27 @@ impl WorldSelectNav {
                     || world.dir_name.to_lowercase().contains(&filter)
             })
             .map(|(i, _)| i)
-            .take(max_visible_world_rows())
             .collect();
 
-        // One seeded widget per visible row. The rects come from
-        // `render::world_list_row_rect`, the same expression the draw and
-        // `app.rs`'s hit-test read, so arrow navigation is geometric against the
-        // real geometry rather than against a restatement of it.
+        // One seeded widget per row — **every** row, not the first
+        // `max_visible_world_rows()` of them (issue #541). The cap was what made a
+        // world past the tenth unreachable, and removing it is only safe because
+        // focus now scrolls itself into view ([`Self::scroll_to_focus`]): a
+        // focusable row with no rect is a trap, and the fix is to give it a rect
+        // rather than to refuse it focus.
+        //
+        // The rects come from `render::world_list_row_rect`, the same expression
+        // the draw and `app.rs`'s hit-test read, so arrow navigation is geometric
+        // against the real geometry rather than against a restatement of it —
+        // seeded at **scroll 0** deliberately: the offset shifts every row by the
+        // same amount, so it cannot change which row is above which or whether two
+        // overlap in x, and those are the only facts geometric navigation reads.
         // Built into a local first: the closure reads `self` (for `world_at`)
         // while the destination is a field of `self`, which cannot be one
         // expression.
         let rows: Vec<Widget> = (0..self.shown.len())
             .map(|row| {
-                let (x, y, w, h) = super::render::world_list_row_rect(row, SEED_CANVAS.0);
+                let (x, y, w, h) = super::render::world_list_row_rect(row, SEED_CANVAS.0, 0.0);
                 let world = self.world_at(row);
                 let mut widget = Widget::new(
                     x,
@@ -625,6 +658,9 @@ impl WorldSelectNav {
             focus.add_renderable_widget(b.row());
         }
         self.focus = focus;
+        // `updateFilter` shortened or lengthened the list; the offset survives it
+        // (vanilla's `clearEntries` does not reset one) but must be re-clamped.
+        self.clamp_scroll();
         match focused.filter(|id| self.widgets.get(*id).is_some()) {
             // A *rebuild* (the player typed into the search box): put the focus
             // back where it was, or on the search box if the widget it was on went
@@ -867,7 +903,16 @@ impl WorldSelectNav {
         }
     }
 
-    /// If focus is on a world row, make that row the selection.
+    /// If focus is on a world row, make that row the selection — and scroll it
+    /// into view.
+    ///
+    /// The scroll is not optional and not cosmetic: it is what stops focus landing
+    /// on a row that is not drawn (issue #541). Vanilla joins the two the same way
+    /// — `setSelected` calls `scrollToEntry` whenever the last input was the
+    /// keyboard (`AbstractSelectionList.java:53-62`) — and it is called
+    /// unconditionally here rather than only when focus moved *onto* the list,
+    /// because [`Self::scroll_to_focus`] is a no-op for a focus that is not on a
+    /// row.
     fn sync_selection_to_focus(&mut self) {
         if let Some(row) = self.focus.focused()
             && let Some(index) = self.world_row(row)
@@ -875,6 +920,7 @@ impl WorldSelectNav {
             self.selected = Some(index);
             self.update_button_status();
         }
+        self.scroll_to_focus();
     }
 
     /// A left-click that landed on row `row`.
@@ -908,12 +954,29 @@ impl WorldSelectNav {
         // this pure module has none of), and it is what turns a second click into
         // Play. See `MenuNav::apply_world_select`.
         if let Some(index) = self.world_row(row) {
-            if !self.is_active(row) {
-                // A corrupt world's row: still hoverable, not selectable.
-                return WorldSelectOutcome::Handled;
-            }
+            // **Selection and activation are two facts, and conflating them made
+            // a corrupt world impossible to remove** (issue #540). This branch
+            // used to return early for an inactive row, so clicking the one world
+            // whose `level.dat` will not decode left the selection where it was —
+            // and Delete acts on the *selection*, so vanilla's
+            // "`canDelete()` is unconditionally `true`, including for a corrupt
+            // world" could not be reached from the UI at all.
+            //
+            // Vanilla has no such coupling: `AbstractSelectionList.setSelected`
+            // runs for any entry, and `primaryActionActive()` gates only
+            // `joinWorld`. So a click selects any row, and the row's own `active`
+            // flag — which stays `can_play()` — still decides two separate
+            // things: whether it can take **focus** (so a corrupt row is never a
+            // tab stop, as before) and whether Play lights up (it does not).
             self.selected = Some(index);
-            self.focus.set_focused(&mut self.widgets, Some(row));
+            if self.is_active(row) {
+                self.focus.set_focused(&mut self.widgets, Some(row));
+                // `setSelected`'s `topClipped || bottomClipped` branch
+                // (`AbstractSelectionList.java:55-61`): a click can land on a row
+                // that is only half inside the band, and that row then has to come
+                // fully in — it is the focused one.
+                self.scroll_to_focus();
+            }
             self.update_button_status();
             return WorldSelectOutcome::Handled;
         }
@@ -949,12 +1012,16 @@ impl WorldSelectNav {
             WorldSelectButton::Play => self.play_selected(),
             // Issue #190: opens `Screen::CreateWorld`.
             WorldSelectButton::Create => WorldSelectOutcome::CreateWorld,
-            // Edit and Re-Create have no screen to open; Delete has no
-            // confirmation step (see [`WorldSelectButton::enabled`]). All three
-            // are inactive, so neither press path reaches them — spelled out
-            // anyway so enabling one without giving it an action is a compile
-            // error rather than a silently dead button.
-            WorldSelectButton::Edit | WorldSelectButton::Delete | WorldSelectButton::ReCreate => {
+            // Vanilla's `list.getSelectedOpt().ifPresent(WorldListEntry::deleteWorld)`
+            // (`SelectWorldScreen.java:94-95`), whose `deleteWorld` opens a
+            // `ConfirmScreen` and deletes nothing (`WorldSelectionList.java:619-637`).
+            // Issue #540.
+            WorldSelectButton::Delete => self.delete_selected(),
+            // Edit and Re-Create have no screen to open, so both are inactive and
+            // neither press path reaches them — spelled out anyway so enabling one
+            // without giving it an action is a compile error rather than a
+            // silently dead button.
+            WorldSelectButton::Edit | WorldSelectButton::ReCreate => {
                 WorldSelectOutcome::Handled
             }
         }
@@ -968,9 +1035,36 @@ impl WorldSelectNav {
     /// ([`Self::update_button_status`]) — so this is the second of two guards,
     /// and the first one being right is what makes it unreachable rather than
     /// what makes it safe.
+    ///
+    /// **The `can_play` half of the guard is not decoration** (issue #540). It was
+    /// implicit until then — a corrupt world could not be *selected*, so this
+    /// could never see one — and making the corrupt row selectable so it could be
+    /// deleted removed that implicit protection. The gate is vanilla's own:
+    /// `WorldListEntry.joinWorld` opens with `if (this.summary.primaryActionActive())`
+    /// (`WorldSelectionList.java:610`), i.e. the check lives in the *action* and
+    /// not only in the button's `active` flag.
+    /// `a_corrupt_worlds_row_is_selectable_and_deletable_but_never_playable` is
+    /// what caught the gap, and it is the gate on it.
     pub fn play_selected(&mut self) -> WorldSelectOutcome {
         match self.selected() {
-            Some(world) => WorldSelectOutcome::Play(world.dir_name.clone()),
+            Some(world) if world.can_play() => WorldSelectOutcome::Play(world.dir_name.clone()),
+            _ => WorldSelectOutcome::Handled,
+        }
+    }
+
+    /// `WorldListEntry.deleteWorld()`: **ask** about the selection, or do nothing
+    /// when there is none.
+    ///
+    /// The name is `delete_selected` and it deletes nothing, which is deliberate —
+    /// it is what vanilla's method of that name does too. The only thing in this
+    /// crate that removes a directory is [`crate::saves::delete_world_in`], and
+    /// the only caller of *that* is `MenuNav::apply_confirm`'s affirmative arm.
+    pub fn delete_selected(&mut self) -> WorldSelectOutcome {
+        match self.selected() {
+            Some(world) => WorldSelectOutcome::DeleteWorld {
+                dir_name: world.dir_name.clone(),
+                display_name: world.display_name.clone(),
+            },
             None => WorldSelectOutcome::Handled,
         }
     }
@@ -989,6 +1083,91 @@ impl WorldSelectNav {
     #[must_use]
     pub fn selected_row(&self) -> Option<usize> {
         self.selected
+    }
+
+    /// How far the list is scrolled, in logical pixels (issue #541).
+    ///
+    /// The value the frame stamps onto every row and the scrollbar's thumb is
+    /// placed from. It may sit past a *tall* canvas's own `maxScrollAmount` —
+    /// see [`super::render::world_list_scroll_for`], which is the one place that
+    /// re-clamps it, and why the clamp cannot live here.
+    #[must_use]
+    pub fn scroll(&self) -> f32 {
+        self.scroll
+    }
+
+    /// One mouse-wheel notch at a `canvas_height`-tall canvas —
+    /// `AbstractScrollArea::mouseScrolled`,
+    /// `setScrollAmount(scrollAmount() - scrollY * scrollRate())`
+    /// (`AbstractScrollArea.java:34`).
+    ///
+    /// **Delegates to [`super::widget::ScrollList`] rather than reimplementing the
+    /// arithmetic**, which is what makes one notch 18 px rather than a whole 36 px
+    /// entry: that type owns `scrollRate = defaultEntryHeight / 2` and
+    /// `setScrollAmount`'s clamp, both already gated against the jar. `notches` is
+    /// winit's `scrollY` verbatim, so positive scrolls **up**; the negation lives
+    /// in `mouse_scrolled` so there is exactly one place the sign can be wrong.
+    pub fn scroll_by(&mut self, notches: f32, canvas_height: f32) {
+        let Some(mut list) =
+            super::render::world_scroll_model(self.shown.len(), canvas_height)
+        else {
+            return;
+        };
+        list.set_scroll(self.scroll);
+        list.mouse_scrolled(notches);
+        self.scroll = list.scroll();
+    }
+
+    /// Bring the **focused** row into the band —
+    /// `AbstractSelectionList.scrollToEntry` (`:251-261`), reached in vanilla
+    /// through `setSelected`'s keyboard branch (`:53-62`).
+    ///
+    /// This is the fix for the one thing #541 called genuinely wrong rather than
+    /// merely limited: Tab could focus a row that was not drawn. With the row cap
+    /// gone every world has a widget, so instead of refusing focus the list
+    /// *follows* it, and `world_list_row_visible` then reports the focused row as
+    /// on screen at every step.
+    ///
+    /// Runs against [`super::render::world_list_window_rows`]' conservative
+    /// shortest band, because a keypress has no canvas — the same trade
+    /// `scroll_server_to_show` makes. The residue is stated rather than hidden: at
+    /// a **taller** canvas this can ask for more scroll than that canvas's own
+    /// maximum, so `world_list_scroll_for` re-clamps at draw time and the visible
+    /// effect is that arrowing down reaches the bottom of the list slightly
+    /// earlier than it strictly had to. Never the other way round — a focused row
+    /// is always inside the band.
+    fn scroll_to_focus(&mut self) {
+        let Some(row) = self.focus.focused().and_then(|id| self.world_row(id)) else {
+            return;
+        };
+        let row_h = super::render::WORLD_LIST_ITEM_H;
+        let window_px = super::render::world_list_window_rows() as f32 * row_h;
+        let row_top = row as f32 * row_h;
+        // Both deltas measured against the *current* offset and applied in order,
+        // exactly as `scrollToEntry` does, so this is the minimum move that brings
+        // the row fully into the band rather than a whole-window jump.
+        if row_top < self.scroll {
+            self.scroll = row_top;
+        } else if row_top + row_h > self.scroll + window_px {
+            self.scroll = row_top + row_h - window_px;
+        }
+        self.clamp_scroll();
+    }
+
+    /// Keep [`Self::scroll`] inside the range the **conservative** window can
+    /// justify — vanilla's `refreshScrollAmount`, which `updateSizeAndPosition`
+    /// runs after every resize (`AbstractSelectionList.java:191-195`) and which
+    /// `updateFilter` needs for the same reason: `clearEntries` does **not** reset
+    /// the offset (`:84-87`), so a filter that shortens the list would otherwise
+    /// leave it scrolled past the new end.
+    ///
+    /// Conservative, so it cannot be the only clamp — see
+    /// [`super::render::world_list_scroll_for`] for the canvas-aware one.
+    fn clamp_scroll(&mut self) {
+        let row_h = super::render::WORLD_LIST_ITEM_H;
+        let window_px = super::render::world_list_window_rows() as f32 * row_h;
+        let max = (self.shown.len() as f32 * row_h - window_px).max(0.0);
+        self.scroll = self.scroll.clamp(0.0, max);
     }
 
     /// What the empty-list row says, or `None` when the list is not empty.
@@ -1061,14 +1240,20 @@ mod tests {
         nav
     }
 
-    /// Every button is present; three of them can never be active in this client.
+    /// Every button is present; **two** of them can never be active in this
+    /// client.
     ///
-    /// The count is asserted both ways round on purpose: "three that can never
-    /// be active" is what makes the screen honest about what this client cannot
-    /// do (Edit and Re-Create have no screen, Delete has no confirmation step),
-    /// and Play/Create/Back being reachable is #287/#190/#468.
+    /// The count is asserted both ways round on purpose: "two that can never be
+    /// active" is what makes the screen honest about what this client cannot do
+    /// (Edit and Re-Create have no screen to open), and Play/Create/Delete/Back
+    /// being reachable is #287/#190/#468/#540.
+    ///
+    /// It was **three** until issue #540, and the one that moved is the whole of
+    /// that issue: Delete's ceiling was `false` because deleting a world needs a
+    /// confirmation the player cannot fire by accident, and
+    /// [`super::confirm`] is now that confirmation.
     #[test]
-    fn three_of_the_six_footer_buttons_can_never_be_active() {
+    fn two_of_the_six_footer_buttons_can_never_be_active() {
         assert_eq!(WORLD_SELECT_BUTTONS.len(), 6, "vanilla has six footer buttons");
         let enabled: Vec<_> = WORLD_SELECT_BUTTONS
             .iter()
@@ -1080,18 +1265,59 @@ mod tests {
             vec![
                 WorldSelectButton::Play,
                 WorldSelectButton::Create,
+                WorldSelectButton::Delete,
                 WorldSelectButton::Back
             ],
-            "Play opens the selection (#468); Create opens the new screen (#190); Back leaves"
+            "Play opens the selection (#468); Create opens the new screen (#190); \
+             Delete opens the confirmation (#540); Back leaves"
         );
         assert_eq!(WorldSelectButton::Create.label(), "Create New World");
-        for b in [
-            WorldSelectButton::Edit,
-            WorldSelectButton::Delete,
-            WorldSelectButton::ReCreate,
-        ] {
+        for b in [WorldSelectButton::Edit, WorldSelectButton::ReCreate] {
             assert!(!b.enabled(), "{b:?} must still be present and inactive");
         }
+    }
+
+    /// Pressing Delete **asks**; it does not delete.
+    ///
+    /// The strongest thing this module can assert about safety, because it is the
+    /// whole of what this module is allowed to do: the outcome is a request naming
+    /// the world, and there is no variant that removes anything. The second half
+    /// is the one that would have caught the wrong world being named — the request
+    /// carries the *folder* for the delete and the *display name* for the warning,
+    /// which are two different strings on purpose.
+    #[test]
+    fn pressing_delete_asks_about_the_selected_world_rather_than_deleting_it() {
+        let mut nav = populated();
+        assert!(nav.is_active(WorldSelectButton::Delete.row()), "live for a selection");
+        assert_eq!(
+            nav.click_row(WorldSelectButton::Delete.row()),
+            WorldSelectOutcome::DeleteWorld {
+                dir_name: "alpha".to_string(),
+                display_name: "Alpha World".to_string(),
+            }
+        );
+        // It follows the selection, not row 0 — the failure this rules out is a
+        // confirmation naming one world and removing another.
+        nav.click_row(FIRST_WORLD_ROW + 1);
+        assert_eq!(
+            nav.click_row(WorldSelectButton::Delete.row()),
+            WorldSelectOutcome::DeleteWorld {
+                dir_name: "bravo".to_string(),
+                display_name: "Bravo World".to_string(),
+            }
+        );
+
+        // -- control ---------------------------------------------------------
+        // With nothing selected the button is inactive and the press does
+        // nothing, so the assertions above are about the selection rather than
+        // about Delete always answering.
+        let mut empty = WorldSelectNav::new();
+        assert!(!empty.is_active(WorldSelectButton::Delete.row()));
+        assert_eq!(
+            empty.click_row(WorldSelectButton::Delete.row()),
+            WorldSelectOutcome::Handled
+        );
+        assert_eq!(empty.delete_selected(), WorldSelectOutcome::Handled);
     }
 
     /// The empty list — a fresh install, which is the state the owner hits first.
@@ -1190,22 +1416,45 @@ mod tests {
     /// A corrupt world is listed, is not selectable and cannot be played —
     /// vanilla's `CorruptedLevelSummary` reaching this screen's own predicates.
     #[test]
-    fn a_corrupt_worlds_row_is_listed_but_not_playable() {
+    fn a_corrupt_worlds_row_is_selectable_and_deletable_but_never_playable() {
         let mut nav = populated();
         let row = FIRST_WORLD_ROW + 2;
         assert!(nav.world_row(row).is_some(), "it is on the list");
         assert!(!nav.is_active(row), "and its row is inactive");
         assert_eq!(nav.click_row(row), WorldSelectOutcome::Handled);
+        // **This used to assert the selection did not move**, and that was the
+        // bug issue #540 surfaced: Delete acts on the selection, so a corrupt
+        // world that could not be selected could not be removed — the one world
+        // vanilla most insists you can remove (`canDelete()` is unconditionally
+        // `true`). Selection and activation are two facts now; see `click_row`.
+        assert_eq!(nav.selected_row(), Some(2), "a click selects any row");
         assert_eq!(
-            nav.selected_row(),
-            Some(0),
-            "clicking a corrupt row must not move the selection onto it"
+            nav.focused_row(),
+            Some(SEARCH_FIELD),
+            "but an inactive row still does not take focus, so it is never a tab \
+             stop and the next Enter cannot press it"
         );
-        // The control: the *same* click on a readable row does move it, so the
-        // assertion above is about `readable` and not about `click_row` ignoring
-        // every list row.
+        // Not playable, and Play is greyed for it — the invariant that must
+        // survive the change above.
+        assert!(!nav.is_active(WorldSelectButton::Play.row()));
+        assert_eq!(nav.play_selected(), WorldSelectOutcome::Handled);
+        // But deletable, which is the point.
+        assert!(nav.is_active(WorldSelectButton::Delete.row()));
+        assert_eq!(
+            nav.click_row(WorldSelectButton::Delete.row()),
+            WorldSelectOutcome::DeleteWorld {
+                dir_name: "zulu".to_string(),
+                display_name: "Corrupt".to_string(),
+            }
+        );
+
+        // The control: the *same* click on a readable row selects **and** focuses,
+        // so the focus assertion above is about `readable` and not about
+        // `click_row` never focusing a list row.
         assert_eq!(nav.click_row(FIRST_WORLD_ROW + 1), WorldSelectOutcome::Handled);
         assert_eq!(nav.selected_row(), Some(1));
+        assert_eq!(nav.focused_row(), Some(FIRST_WORLD_ROW + 1));
+        assert!(nav.is_active(WorldSelectButton::Play.row()), "and Play comes back");
     }
 
     /// The row indices the mouse reports are the ids focus dispatches on, and the
@@ -1309,7 +1558,10 @@ mod tests {
                 Some(FIRST_WORLD_ROW + 1),
                 Some(WorldSelectButton::Play.row()),
                 Some(WorldSelectButton::Create.row()),
-                Some(WorldSelectButton::Back.row()),
+                // Delete joined the walk in issue #540, between Create and Back,
+                // because the footer's registration order is vanilla's own
+                // `RowHelper` order and Delete is the fourth cell of it.
+                Some(WorldSelectButton::Delete.row()),
             ],
             "tab order is registration order: header, then the list, then the footer"
         );
@@ -1321,6 +1573,10 @@ mod tests {
             !seen.contains(&Some(WorldSelectButton::Edit.row())),
             "Edit is inactive and must never be a tab stop"
         );
+        // One more Tab reaches Back, which is what makes the six above a prefix of
+        // the walk rather than the whole of it.
+        nav.handle_key(MenuKey::Tab);
+        assert_eq!(nav.focused_row(), Some(WorldSelectButton::Back.row()));
 
         // Focus landing on a list row **is** a selection change —
         // `AbstractSelectionList.nextFocusPath` calls `setSelected`.
@@ -1487,6 +1743,12 @@ mod tests {
         nav.handle_key(MenuKey::Tab);
         assert_eq!(nav.focused_row(), Some(WorldSelectButton::Create.row()));
         nav.handle_key(MenuKey::Tab);
+        assert_eq!(
+            nav.focused_row(),
+            Some(WorldSelectButton::Delete.row()),
+            "Delete is live since #540, so it is a tab stop before Back"
+        );
+        nav.handle_key(MenuKey::Tab);
         assert_eq!(nav.focused_row(), Some(WorldSelectButton::Back.row()));
         assert_eq!(nav.handle_key(MenuKey::Enter), WorldSelectOutcome::Close);
     }
@@ -1620,38 +1882,132 @@ mod tests {
         assert_eq!(nav.search().widget.height, 20.0);
     }
 
-    /// The list is capped at what the reference canvas can show, and the cap is
-    /// **derived** rather than chosen — see
-    /// [`super::render::world_list_max_rows`].
+    /// **The list scrolls** (issue #541), and the fixture is large enough to
+    /// prove it.
     ///
-    /// The magnitude matters, not just the sign: 10 rows is
-    /// `floor((480 - 60 - 51) / 36)`, and the two hypotheses this distinguishes
-    /// are "the cap is the visible count" (10) and "the cap forgot the footer
-    /// band" (`floor((480 - 51) / 36) == 11`, which would draw a row over the
-    /// buttons).
+    /// The `world` species of vacuous test lives in the input data, and this is
+    /// exactly where it would bite: a fixture that *fits* cannot exercise
+    /// scrolling at all, and would pass against a list that still capped itself.
+    /// So the row count is asserted as a **precondition** against
+    /// [`super::render::world_list_visible_rows`] at the reference canvas — the
+    /// same expression the draw's band uses — rather than against a literal.
+    ///
+    /// This replaces `the_list_is_capped_at_the_rows_the_band_can_actually_show`,
+    /// whose subject was the cap. Its magnitude reasoning is kept where it still
+    /// applies: 10 rows at 854x480 is `floor((480 - 60 - 51) / 36)`, and the
+    /// wrong hypothesis — forgetting the footer band — is
+    /// `floor((480 - 51) / 36) == 11`.
     #[test]
-    fn the_list_is_capped_at_the_rows_the_band_can_actually_show() {
-        assert_eq!(max_visible_world_rows(), 10);
-        assert_ne!(
-            max_visible_world_rows(),
-            11,
-            "11 is the count that ignores the 60 px footer band"
-        );
+    fn every_world_gets_a_row_and_the_list_scrolls_to_the_ones_past_the_band() {
+        const CANVAS_H: f32 = 480.0;
+        let fits = super::super::render::world_list_visible_rows(CANVAS_H);
+        assert_eq!(fits, 10, "floor((480 - 60 - 51) / 36)");
+        assert_ne!(fits, 11, "11 is the count that ignores the 60 px footer band");
+
         let many: Vec<WorldSummary> = (0..25)
             .map(|i| world(&format!("w{i:02}"), &format!("World {i}"), 1_000 - i))
             .collect();
-        let nav = WorldSelectNav::with_worlds(many);
-        assert_eq!(nav.worlds().len(), 25, "all 25 were enumerated");
+        let mut nav = WorldSelectNav::with_worlds(many);
+        // The precondition, both halves: everything was enumerated, and there is
+        // genuinely more than fits — without the second, nothing below scrolls.
+        assert_eq!(nav.worlds().len(), 25, "premise: all 25 enumerated");
         assert_eq!(
             nav.shown_len(),
-            max_visible_world_rows(),
-            "and only the ones that fit are rows"
+            25,
+            "premise: every world is a row now — the `.take(max_visible_world_rows())` \
+             cap is what made worlds past the tenth unreachable"
         );
-        // Every row that exists has a widget, which is what stops focus landing
-        // on a row with no rect.
+        assert!(
+            nav.shown_len() > fits,
+            "premise: {} rows must not fit in a band that shows {fits}, or this test \
+             cannot exercise scrolling",
+            nav.shown_len()
+        );
+
+        // Every row has a widget, so focus can never land on a row with no rect.
         for row in 0..nav.shown_len() {
-            assert!(nav.widgets.get(FIRST_WORLD_ROW + row).is_some());
+            assert!(
+                nav.widgets.get(FIRST_WORLD_ROW + row).is_some(),
+                "row {row} has no widget"
+            );
         }
         assert!(nav.widgets.get(FIRST_WORLD_ROW + nav.shown_len()).is_none());
+
+        // At rest the last row is **out of the band**, which is the state #541
+        // described, and the first is in it.
+        assert_eq!(nav.scroll(), 0.0, "the list opens at the top");
+        let visible = |nav: &WorldSelectNav, row: usize| {
+            super::super::render::world_list_row_visible(row, CANVAS_H, nav.scroll())
+        };
+        assert!(visible(&nav, 0));
+        assert!(
+            !visible(&nav, 24),
+            "premise: the last row starts off-band, or 'scrolling reached it' is \
+             satisfied by it having been there all along"
+        );
+
+        // The wheel reaches it. `max_scroll` is the **predicted** value, not "more
+        // than zero", and both hypotheses are computed from outside constants:
+        // 25 rows of 36 is 900, `contentHeight()` adds vanilla's own `+ 4` — the
+        // 2 px above the first entry and below the last
+        // (`AbstractSelectionList.java:197-205`) — and the band is
+        // `480 - 60 - 49` = 371. So the answer is `904 - 371` = **533**, and the
+        // wrong hypothesis (forgetting `contentHeight`'s `+ 4`) is 529. The first
+        // draft of this assertion predicted 529 and the measurement said 533.
+        let model = super::super::render::world_scroll_model(25, CANVAS_H)
+            .expect("25 rows in a 371 px band scroll");
+        assert_eq!(model.max_scroll(), 904.0 - 371.0);
+        assert_ne!(model.max_scroll(), 900.0 - 371.0, "529 forgets contentHeight's +4");
+        // One notch is 18 px — `scrollRate = defaultEntryHeight / 2`, **not** a
+        // whole 36 px row (#445's record of getting this wrong with a `usize`).
+        nav.scroll_by(-1.0, CANVAS_H);
+        assert_eq!(nav.scroll(), 18.0, "one notch is 18 px, not 36");
+        // Enough notches to reach the clamp, then the last row is on screen and
+        // the first is not.
+        for _ in 0..60 {
+            nav.scroll_by(-1.0, CANVAS_H);
+        }
+        assert_eq!(nav.scroll(), model.max_scroll(), "the wheel clamps at the end");
+        assert!(visible(&nav, 24), "the last world must be reachable");
+        assert!(
+            !visible(&nav, 0),
+            "and the first must now be scrolled out, or the band did not move"
+        );
+
+        // -- the out-of-view control, in both directions ---------------------
+        // A row scrolled out of view must not be a tab stop. It cannot be, because
+        // focus scrolls itself into view: walk Tab from the top and require the
+        // focused row to be visible at every step.
+        let mut nav = WorldSelectNav::with_worlds(
+            (0..25)
+                .map(|i| world(&format!("w{i:02}"), &format!("World {i}"), 1_000 - i))
+                .collect(),
+        );
+        assert_eq!(nav.focused_row(), Some(SEARCH_FIELD));
+        let mut seen_rows = 0usize;
+        for _ in 0..30 {
+            nav.handle_key(MenuKey::Tab);
+            if let Some(row) = nav.focused_row().and_then(|id| nav.world_row(id)) {
+                seen_rows += 1;
+                assert!(
+                    super::super::render::world_list_row_visible(row, CANVAS_H, nav.scroll()),
+                    "Tab focused world row {row} while it was scrolled out of the \
+                     band (scroll {}) — a focusable row with no rect is a trap",
+                    nav.scroll()
+                );
+            }
+        }
+        assert_eq!(
+            seen_rows, 25,
+            "premise: the walk really visited every world row, or the assertion \
+             inside it measured almost nothing"
+        );
+        // And the walk moved the list, which is what makes the assertion above
+        // about scrolling rather than about a band that happened to hold
+        // everything.
+        assert!(
+            nav.scroll() > 0.0,
+            "tabbing through 25 rows never scrolled the list"
+        );
     }
 }

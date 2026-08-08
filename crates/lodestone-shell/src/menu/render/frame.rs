@@ -178,6 +178,15 @@ pub struct WorldEntryView {
     /// the row the mouse is over. All three are visible at once and mean different
     /// things — the same split `world_select`'s own module doc argues for.
     pub selected: bool,
+    /// The list's scroll offset, **in logical pixels** (issue #541).
+    ///
+    /// Denormalized onto every entry for exactly [`ServerEntryView::scroll`]'s
+    /// reason: [`world_list_row_rect`] is also `app`'s hit-test, so it must resolve
+    /// a row's position and visibility from the row alone rather than needing a
+    /// second plumbing path from `WorldSelectNav` to the draw. It is also the
+    /// number the scrollbar thumb is placed from, so the bar and the rows cannot
+    /// read different offsets.
+    pub scroll: f32,
 }
 
 /// One account-list row's state (issues #66/#402).
@@ -569,6 +578,10 @@ pub fn owns_frame(screen: super::Screen) -> bool {
             | Screen::Social
             | Screen::Statistics
             | Screen::CreateWorld
+            // Issue #540. A full-frame screen with two buttons and nothing behind
+            // it worth rendering — the world list it was opened from is a menu
+            // screen too, so the Clear pass costs nothing here.
+            | Screen::Confirm
     )
 }
 

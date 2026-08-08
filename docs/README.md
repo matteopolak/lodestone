@@ -269,6 +269,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   not hosting one — the server-side dispatcher is issue #48, and a plugin's own
   command registration is issue #118; both are explicitly out of scope here and
   designed to share an argument-type library with this work rather than duplicate it.
+- [Confirmation screen](./confirm-screen.md) — `Screen::Confirm` — vanilla's
+  `ConfirmScreen`: a question, a warning naming the thing at risk, and two buttons. It
+  is the gate an **irreversible** action passes through, and the only thing that opens
+  it today is the world list's Delete button (issue
+  [#540](https://github.com/matteopolak/lodestone/issues/540)).
 - [Container clicks](./container-clicks.md) — The client-side predictor for what a
   mouse click on an open container screen does — vanilla
   `AbstractContainerMenu.doClick`, reimplemented version-free. It runs locally the
@@ -1242,9 +1247,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `Screen::WorldSelect` — vanilla's `SelectWorldScreen`, reached from the title
   screen's **Singleplayer** button. A title, a search field, a world list, and six
   footer buttons: Play Selected World, Create New World, Edit, Delete, Re-Create,
-  Back. The list holds **one row per world in `saves/`**, and **three of the six
-  buttons are present and disabled**: Edit and Re-Create have no screen to open, and
-  Delete has no confirmation step.
+  Back. The list holds **one row per world in `saves/`**, it **scrolls**, and **two of
+  the six buttons are present and disabled**: Edit and Re-Create have no screen to
+  open. Delete is live since issue #540 and opens a real [confirmation
+  screen](./confirm-screen.md); the list scrolls since #541.
 - [One bevy `World` — §4.1(c)](./world-unification.md) — Until this change the
   process held **three** `bevy_ecs::World`s: the net thread's
   (`lodestone_client::state::SharedState`, authoritative over the network read-model),

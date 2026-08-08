@@ -260,6 +260,13 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
                 ui.open_world_select();
                 ui.open_create_world();
             }
+            // Issue #540. Reached the way a player reaches it — through the world
+            // list — because `open_confirm` guards on that screen for the reason
+            // its own doc gives.
+            Screen::Confirm => {
+                ui.open_world_select();
+                ui.open_confirm();
+            }
         }
         assert_eq!(ui.screen(), screen, "failed to reach {screen:?}");
         reached += 1;
@@ -3873,14 +3880,14 @@ fn the_world_select_rects_are_vanillas_own() {
     );
     assert_eq!(title.align, Align::Centre);
 
-    assert_eq!(world_list_row_rect(0, V_W), (292.0, 51.0, 270.0, 36.0));
+    assert_eq!(world_list_row_rect(0, V_W, 0.0), (292.0, 51.0, 270.0, 36.0));
     assert_eq!(
-        world_list_row_rect(1, V_W),
+        world_list_row_rect(1, V_W, 0.0),
         (292.0, 87.0, 270.0, 36.0),
         "rows stack by itemHeight with no gap"
     );
     assert_eq!(
-        world_list_row_content_rect(0, V_W),
+        world_list_row_content_rect(0, V_W, 0.0),
         (294.0, 53.0, 266.0, 32.0),
         "CONTENT_PADDING insets the entry by 2, and 36 - 4 is the icon's 32"
     );
@@ -4038,10 +4045,10 @@ fn the_world_select_frame_with_worlds_lists_them_all() {
             "{button:?}'s row moved when the list gained rows"
         );
     }
-    // Play is live now, and Edit/Delete/Re-Create still are not.
+    // Play and Delete are live now (#468, #540), and Edit/Re-Create still are not.
     assert!(f.rows[WorldSelectButton::Play.row()].enabled);
+    assert!(f.rows[WorldSelectButton::Delete.row()].enabled);
     assert!(!f.rows[WorldSelectButton::Edit.row()].enabled);
-    assert!(!f.rows[WorldSelectButton::Delete.row()].enabled);
     assert!(!f.rows[WorldSelectButton::ReCreate.row()].enabled);
 
     // No `NoWorldsEntry` notice — the list is not empty.
@@ -4080,7 +4087,7 @@ fn the_world_select_frame_with_worlds_lists_them_all() {
         // hit-test reads.
         assert_eq!(
             row_rect(&f.rows, FIRST_WORLD_ROW + row, V_W, V_H),
-            Some(world_list_row_rect(row, V_W)),
+            Some(world_list_row_rect(row, V_W, 0.0)),
             "world row {row} is not at its list rect"
         );
     }
@@ -4099,9 +4106,9 @@ fn the_world_select_frame_with_worlds_lists_them_all() {
     );
     // And the visibility gate really does reject: at a canvas too short for row
     // 1, row 1 has no rect while row 0 still does.
-    let short = world_list_row_top(1) + 40.0;
+    let short = world_list_row_top(1, 0.0) + 40.0;
     assert!(
-        world_list_row_visible(0, V_H) && !world_list_row_visible(1, short),
+        world_list_row_visible(0, V_H, 0.0) && !world_list_row_visible(1, short, 0.0),
         "the visibility gate does not discriminate: rows visible at {V_H} = {}, \
          at {short} = {}",
         world_list_visible_rows(V_H),
@@ -4260,7 +4267,7 @@ fn the_empty_world_list_draws_its_notice_inside_row_zeros_content_rect() {
     let frame = world_select_frame(&nav, &ui);
     let colour = geometry(&frame, V_W, V_H);
 
-    let band = world_list_row_content_rect(0, V_W);
+    let band = world_list_row_content_rect(0, V_W, 0.0);
     let inside = band_coverage(&colour, V_W, V_H, band);
     assert!(
         inside.count > 0,
@@ -4282,7 +4289,7 @@ fn the_empty_world_list_draws_its_notice_inside_row_zeros_content_rect() {
     );
 
     // -- control 1: the row below it is empty ----------------------------
-    let empty_band = world_list_row_content_rect(1, V_W);
+    let empty_band = world_list_row_content_rect(1, V_W, 0.0);
     assert_eq!(
         band_coverage(&colour, V_W, V_H, empty_band).count,
         0,
@@ -4341,7 +4348,7 @@ fn every_world_in_the_list_draws_inside_its_own_row_band() {
     let colour = geometry(&frame, V_W, V_H);
 
     for row in 0..names.len() {
-        let band = world_list_row_content_rect(row, V_W);
+        let band = world_list_row_content_rect(row, V_W, 0.0);
         let inside = band_coverage(&colour, V_W, V_H, band);
         assert!(
             inside.count > 0,
@@ -4379,7 +4386,7 @@ fn every_world_in_the_list_draws_inside_its_own_row_band() {
     // from an unselected one. Its own control is the second assertion: row 1 is not
     // selected and must not have it.
     let selected_edge = |row: usize| {
-        let (rx, ry, _, rh) = world_list_row_rect(row, V_W);
+        let (rx, ry, _, rh) = world_list_row_rect(row, V_W, 0.0);
         coverage_of(&colour, V_W, V_H, (rx, ry + 2.0, 1.0, rh - 4.0), [1.0, 1.0, 1.0, 1.0])
     };
     assert!(
@@ -4395,7 +4402,7 @@ fn every_world_in_the_list_draws_inside_its_own_row_band() {
     );
 
     // -- control 1: the band after the last world is empty ---------------
-    let after = world_list_row_content_rect(names.len(), V_W);
+    let after = world_list_row_content_rect(names.len(), V_W, 0.0);
     let empty = band_coverage(&colour, V_W, V_H, after);
     assert_eq!(
         empty.count, 0,
@@ -4415,7 +4422,7 @@ fn every_world_in_the_list_draws_inside_its_own_row_band() {
     let title = frame_for(&title_ui, &title_nav, &statuses, &mut fav).expect("title frame");
     let title_colour = geometry(&title, V_W, V_H);
     for row in 0..names.len() {
-        let band = world_list_row_content_rect(row, V_W);
+        let band = world_list_row_content_rect(row, V_W, 0.0);
         let painted = band_coverage(&title_colour, V_W, V_H, band);
         assert_eq!(
             painted.count, 0,
@@ -4439,7 +4446,7 @@ fn every_world_in_the_list_draws_inside_its_own_row_band() {
 /// measurement is the only place that fact survives.
 #[test]
 fn the_world_list_row_label_fits_the_row_it_is_centred_in() {
-    let (.., content_w, _) = world_list_row_content_rect(0, V_W);
+    let (.., content_w, _) = world_list_row_content_rect(0, V_W, 0.0);
     for label in [
         crate::menu::world_select::NO_WORLDS_LABEL,
         crate::menu::world_select::BUNDLED_WORLD.label,
@@ -4466,7 +4473,7 @@ fn a_long_world_name_is_clipped_to_its_row_rather_than_overhanging_it() {
     let frame = world_select_frame(&nav, &ui);
     let colour = geometry(&frame, V_W, V_H);
 
-    let (rx, ry, rw, rh) = world_list_row_rect(0, V_W);
+    let (rx, ry, rw, rh) = world_list_row_rect(0, V_W, 0.0);
     // The band immediately to the right of the row must be untouched.
     let right_of = (rx + rw, ry, 80.0, rh);
     let spill = band_coverage(&colour, V_W, V_H, right_of);
@@ -4481,12 +4488,289 @@ fn a_long_world_name_is_clipped_to_its_row_rather_than_overhanging_it() {
     // or the assertion is vacuous. The row itself is inked, and the clip width is
     // less than the row width — so there is real text being cut.
     assert!(
-        band_coverage(&colour, V_W, V_H, world_list_row_content_rect(0, V_W)).count > 0,
+        band_coverage(&colour, V_W, V_H, world_list_row_content_rect(0, V_W, 0.0)).count > 0,
         "the row drew nothing at all, so the no-spill assertion measures nothing"
     );
     assert!(
         text_px(&long, 1.0) > crate::menu::render::world_list_text_width(),
         "the name is not actually long enough to be clipped, so nothing was cut"
+    );
+}
+
+/// **The settings overlap gate** (the player report of 2026-08-07): a settings
+/// list row is **cut** at the band's bottom rather than painted into the gap above
+/// the footer.
+///
+/// This is the pixel half of the defect `Origin::is_scrolling_list_row` fixed.
+/// Every settings-tree list draws its rows as *slotted widgets*, so they went down
+/// `draw`'s unclipped path while the three `MenuRow::entry`/`account`/`world`
+/// screens were clipped — and a row that overran the band painted straight over
+/// the footer's Done button.
+///
+/// **What else already paints here** was asked first, and it is why the rect is
+/// the gap *between* the band's bottom and the footer's own top rather than
+/// "everything below the band": the footer paints in the latter. Both edges are
+/// derived — the band from the `ListSpec::model` the clip is built from, the footer
+/// from `options::footer_rects` — and the control is the same frame with its
+/// `ListSpec` removed, which takes the unclipped branch and must fail the same
+/// assertion.
+#[test]
+fn a_settings_row_is_cut_at_the_bands_bottom_rather_than_painted_over_the_footer() {
+    use crate::menu::options::{self, SettingsPage};
+
+    const H: f32 = 480.0;
+    let page = SettingsPage::Video;
+    let mut nav = test_nav("settings-clip-pixels");
+    let mut ui = UiState::new();
+    ui.open_settings();
+    // Reached the way a player reaches it: the root page's own Video nav button,
+    // found in the row list `app.rs` hit-tests rather than by index. That makes
+    // this an anti-island premise too — if the button no longer opens the page,
+    // the setup fails instead of the assertion.
+    let video_row = nav
+        .settings()
+        .visible()
+        .iter()
+        .position(|c| {
+            matches!(c.cell, options::Cell::Nav { page: Some(p), .. } if p == page)
+        })
+        .expect("premise: the root page carries a Video nav button");
+    nav.click(&mut ui, video_row);
+    assert_eq!(nav.settings().page(), page, "premise: the Video page is up");
+
+    let statuses = StatusCache::with_probe(unavailable_probe());
+    let mut fav = FaviconCache::new();
+    let frame = frame_for(&ui, &nav, &statuses, &mut fav).expect("settings owns its frame");
+    let spec = frame
+        .list
+        .as_ref()
+        .expect("premise: the settings page declares a ListSpec");
+    let model = spec.model(H).expect("premise: the Video page scrolls at 480");
+    let band_bottom = model.top() + model.height();
+    let footer_top = options::footer_rects(V_W, H, 1)
+        .first()
+        .expect("the footer has a Done button")
+        .1;
+    assert!(
+        footer_top > band_bottom,
+        "premise: there must be a gap between the band's bottom ({band_bottom}) and \
+         the footer's top ({footer_top})"
+    );
+    let row_x = options::row_left(V_W, 0);
+    let gutter = (row_x, band_bottom, options::BIG_BUTTON_WIDTH, footer_top - band_bottom);
+
+    // Premise: some entry really does straddle the band's bottom edge at this
+    // offset, or there is nothing for a clip to cut.
+    let entries = page.entries();
+    let straddler = (0..entries.len()).find(|e| {
+        let (_, y) = options::list_cell_origin(page, *e, 0.0, 0, V_W, H);
+        y < band_bottom && y + options::WIDGET_H > band_bottom
+    });
+    assert!(
+        straddler.is_some(),
+        "premise: no Video entry straddles the band's bottom at scroll 0, so this \
+         gate cannot see a clip"
+    );
+
+    let clipped = band_coverage(&geometry(&frame, V_W, H), V_W, H, gutter);
+    assert_eq!(
+        clipped.count, 0,
+        "a settings row painted into the gutter between the list band and the \
+         footer: {:?}",
+        clipped.bounds
+    );
+
+    // -- control, executed ---------------------------------------------------
+    let mut unclipped = frame.clone();
+    unclipped.list = None;
+    let spilled = band_coverage(&geometry(&unclipped, V_W, H), V_W, H, gutter);
+    assert!(
+        spilled.count > 0,
+        "the unclipped frame painted nothing in the gutter either, so the clip is \
+         not what the assertion above measured"
+    );
+
+    // And the footer's own row is **not** clipped away — the predicate excludes it
+    // deliberately, and erasing it would be the opposite defect.
+    let done_rect = (footer_top - 1.0, options::DONE_WIDTH);
+    let done = band_coverage(
+        &geometry(&frame, V_W, H),
+        V_W,
+        H,
+        ((V_W - done_rect.1) * 0.5, done_rect.0, done_rect.1, options::WIDGET_H + 2.0),
+    );
+    assert!(
+        done.count > 0,
+        "the footer's Done button was clipped away with the list rows — a footer \
+         button is not a list row"
+    );
+}
+
+/// **The scroll gate** (issue #541), in three parts, each with its control:
+///
+/// 1. a row straddling the band's bottom edge is **cut** rather than painted into
+///    the gap above the footer — the control is the *same frame with no
+///    `ListSpec`*, which takes `draw`'s unclipped branch and must fail the same
+///    assertion;
+/// 2. the row that was at the top of the band before scrolling is **not drawn
+///    there** afterwards, measured by the selection outline's own colour — the
+///    control is the pre-scroll arm, where it is;
+/// 3. and the band is not simply blank afterwards: the row that *is* there draws.
+///
+/// **What else already paints here** was asked before believing (1): the row
+/// column overlaps the search box above the band and all six footer buttons below
+/// it, so an "is anything painted outside the band" rect would have measured the
+/// footer. The rect used is the 8 px gutter **between** the band's bottom and the
+/// footer grid's own top, and both edges are derived — the band from the
+/// `ListSpec::model` the clip itself is built from, the footer from
+/// `world_select_slot(Play)`. The title screen is measured in the same rect as a
+/// second premise check.
+///
+/// Part (2) is colour-discriminated for the same reason
+/// `every_world_in_the_list_draws_inside_its_own_row_band` had to be: the
+/// selection outline is the one thing that separates "row 0 is here" from "some
+/// row is here", and the leftmost *ink* inside a content rect is always
+/// `getTextX()` whichever row it belongs to.
+#[test]
+fn a_scrolled_world_list_is_cut_at_the_band_and_stops_drawing_the_rows_above_it() {
+    let owned: Vec<String> = (0..25).map(|i| format!("world{i:02}")).collect();
+    let names: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let (mut nav, ui) = world_select_nav_with_worlds("ws-scroll-pixels", &names);
+
+    // The band, from the same expression the clip is built from.
+    let frame = world_select_frame(&nav, &ui);
+    let spec = frame
+        .list
+        .as_ref()
+        .expect("premise: the world list declares a ListSpec, or there is no clip and no scrollbar");
+    let model = spec
+        .model(V_H)
+        .expect("premise: 25 rows in this band scroll");
+    let band_top = model.top();
+    let band_bottom = band_top + model.height();
+    let footer_top = world_select_slot(crate::menu::world_select::WorldSelectButton::Play)
+        .resolve(V_W, V_H)
+        .1;
+    assert!(
+        footer_top > band_bottom,
+        "premise: there must be a gap between the band's bottom ({band_bottom}) and \
+         the footer's top ({footer_top}), or the only rect a cut row could paint in \
+         is one the footer paints in too"
+    );
+    let (row_x, _, row_w, row_h) = world_list_row_rect(0, V_W, 0.0);
+    let gutter = (row_x, band_bottom, row_w, footer_top - band_bottom);
+
+    // Premise: the title screen paints nothing in the gutter, so "empty" there is
+    // a fact about this screen.
+    let title_nav = test_nav("ws-scroll-pixels-title");
+    let title_ui = UiState::new();
+    let statuses = StatusCache::with_probe(unavailable_probe());
+    let mut fav = FaviconCache::new();
+    let title = frame_for(&title_ui, &title_nav, &statuses, &mut fav).expect("title frame");
+    let painted = band_coverage(&geometry(&title, V_W, V_H), V_W, V_H, gutter);
+    assert_eq!(
+        painted.count, 0,
+        "the title screen already paints in the gutter {gutter:?}, so this gate's \
+         emptiness assertion measures nothing: {:?}",
+        painted.bounds
+    );
+
+    // Scroll to a position where a row really does straddle the band's edge.
+    let notches = 20.0;
+    nav.scroll_active_list(&ui, -notches, V_H);
+    let scroll = nav.world_select().scroll();
+    assert_eq!(
+        scroll,
+        notches * model.scroll_rate(),
+        "premise: the wheel moved by whole notches of `scrollRate`"
+    );
+    let straddler = (0..names.len())
+        .find(|r| {
+            let top = world_list_row_top(*r, scroll);
+            top < band_bottom && top + row_h > band_bottom
+        })
+        .expect("premise: some row straddles the band's bottom edge at this offset");
+    assert!(
+        world_list_row_visible(straddler, V_H, scroll),
+        "premise: the straddling row {straddler} is still a drawn row"
+    );
+
+    let frame = world_select_frame(&nav, &ui);
+    let clipped = band_coverage(&geometry(&frame, V_W, V_H), V_W, V_H, gutter);
+    assert_eq!(
+        clipped.count, 0,
+        "world row {straddler} straddles the band's bottom edge at scroll {scroll} \
+         and painted into the gutter above the footer: {:?}",
+        clipped.bounds
+    );
+
+    // -- control for (1), executed -------------------------------------------
+    // The *same* frame with no `ListSpec` takes `draw`'s unclipped branch. It must
+    // fail the assertion above, or the clip is not what made it pass.
+    let mut unclipped = world_select_frame(&nav, &ui);
+    unclipped.list = None;
+    let spilled = band_coverage(&geometry(&unclipped, V_W, V_H), V_W, V_H, gutter);
+    assert!(
+        spilled.count > 0,
+        "the unclipped frame painted nothing in the gutter either, so the clip is \
+         not what the assertion above measured — the straddling row may not be \
+         drawing at all"
+    );
+
+    // -- (2) and (3): the row above the band is no longer drawn there ---------
+    // The band's first row position, and the selection outline's own colour there.
+    let outline_at_top = |nav: &MenuNav, ui: &UiState| {
+        let f = world_select_frame(nav, ui);
+        let colour = geometry(&f, V_W, V_H);
+        let (rx, ry, _, rh) = world_list_row_rect(0, V_W, nav.world_select().scroll());
+        (
+            coverage_of(&colour, V_W, V_H, (rx, ry + 2.0, 1.0, rh - 4.0), [1.0, 1.0, 1.0, 1.0]),
+            band_coverage(&colour, V_W, V_H, world_list_row_content_rect(0, V_W, 0.0)),
+        )
+    };
+    // Control: before scrolling, row 0 is the selection and it is at the top of
+    // the band, so the outline is there.
+    let (mut fresh_nav, fresh_ui) = world_select_nav_with_worlds("ws-scroll-pixels-top", &names);
+    assert_eq!(fresh_nav.world_select().scroll(), 0.0);
+    assert_eq!(fresh_nav.world_select().selected_row(), Some(0));
+    let (outline_before, ink_before) = outline_at_top(&fresh_nav, &fresh_ui);
+    assert!(
+        outline_before > 0.5,
+        "premise: with the list at the top, row 0's selection outline is at the \
+         band's first row position: coverage {outline_before}"
+    );
+    assert!(ink_before.count > 0, "premise: and the row draws text there");
+
+    // Scroll by exactly ten rows, so row 10 lands where row 0 was.
+    let ten_rows = 10.0 * crate::menu::render::WORLD_LIST_ITEM_H;
+    let notches = ten_rows / model.scroll_rate();
+    fresh_nav.scroll_active_list(&fresh_ui, -notches, V_H);
+    assert_eq!(
+        fresh_nav.world_select().scroll(),
+        ten_rows,
+        "premise: the list moved by exactly ten rows"
+    );
+    assert!(
+        !world_list_row_visible(0, V_H, ten_rows),
+        "premise: row 0 is now out of view"
+    );
+    let f = world_select_frame(&fresh_nav, &fresh_ui);
+    let colour = geometry(&f, V_W, V_H);
+    let first_slot = world_list_row_content_rect(0, V_W, 0.0);
+    let (rx, ry, _, rh) = world_list_row_rect(0, V_W, 0.0);
+    let outline_after =
+        coverage_of(&colour, V_W, V_H, (rx, ry + 2.0, 1.0, rh - 4.0), [1.0, 1.0, 1.0, 1.0]);
+    assert!(
+        outline_after < 0.1,
+        "row 0 is scrolled out of view but its selection outline is still drawn at \
+         the band's first row position: coverage {outline_after}"
+    );
+    // (3) And the band is not blank: the row that *is* there draws.
+    let ink_after = band_coverage(&colour, V_W, V_H, first_slot);
+    assert!(
+        ink_after.count > 0,
+        "the band's first row position is empty after scrolling, so the outline \
+         assertion above is satisfied by nothing drawing at all"
     );
 }
 

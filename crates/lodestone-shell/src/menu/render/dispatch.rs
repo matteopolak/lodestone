@@ -379,6 +379,9 @@ pub fn frame_for<'a>(
             // come off `WorldSummary` here rather than in the draw, so the draw
             // decides nothing except where (the same division `ServerEntryView`
             // documents).
+            // Read once and stamped onto every entry (#541) — see
+            // `WorldEntryView::scroll`.
+            let scroll = ws.scroll();
             for row in 0..ws.shown_len() {
                 let world = ws
                     .world_at(row)
@@ -393,6 +396,7 @@ pub fn frame_for<'a>(
                     world: Some(crate::menu::render::WorldEntryView {
                         index: row,
                         selected: ws.selected_row() == Some(row),
+                        scroll,
                     }),
                     ..Default::default()
                 });
@@ -519,6 +523,12 @@ pub fn frame_for<'a>(
         // for why this is one flat hand-placed list rather than vanilla's
         // three tabs.
         Screen::CreateWorld => Some(super::create_world::frame(nav.create_world())),
+        // Vanilla's `ConfirmScreen` (issue #540) — the gate the world list's
+        // Delete button passes through. See `super::confirm`'s module doc for why
+        // it is a screen at all rather than a two-press mode on the list, and
+        // `confirm::frame` for the one thing this arm must not do: default
+        // `selected` to `0`, which would light the affirmative button up.
+        Screen::Confirm => Some(super::confirm::frame(nav.confirm())),
         _ => None,
     };
     // Stamped on every screen (not read back out of `nav` per-screen above) so

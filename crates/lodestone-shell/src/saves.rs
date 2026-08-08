@@ -85,26 +85,25 @@
 //! - **Names**: [`sanitise_name`] is `FileUtil.sanitizeName` and
 //!   [`available_dir_name`] is `FileUtil.findAvailableName`, including its
 //!   `" (N)"` counter. See each for the two places this deliberately differs.
-//! - **Deletion is deliberately absent**, and this is the one sentence to read
-//!   before adding it. `saves.rs` used to say "nothing here deletes a world" and
-//!   that was load-bearing: the reason issue #468 shipped one implicit world is
-//!   that overwriting a directory silently destroys what the player built. A
-//!   `delete_world_in` is four lines; the part that is not four lines is a
-//!   *confirmation the player cannot fire by accident*, and there is no safe
-//!   cheap version of it. Arming the existing Delete button and confirming with
-//!   a second press of the same button is deletable-by-double-click, and a real
-//!   `ConfirmScreen` needs a new [`crate::menu::Screen`] variant threaded
-//!   through `menu.rs`, `menu/nav.rs` and `menu/render/dispatch.rs` with its own
-//!   pixel gates. So Delete stays present-and-inactive on the world-select
-//!   screen exactly as it was, and the filesystem half is **not** written here
-//!   either — a tested `delete_world_in` with no caller is the island
-//!   `CLAUDE.md` names, and it costs nothing to write when its screen exists.
-//!   Tracked as [#540](https://github.com/matteopolak/lodestone/issues/540), whose
-//!   body carries the `ConfirmScreen` shape and the acceptance conditions.
-//! - [`world_dir_in`]'s containment check is what a future `delete_world_in`
-//!   must go through, and it is already load-bearing without it: a
+//! - **Deletion is [`delete_world_in`], and it exists because its screen does**
+//!   (issue [#540](https://github.com/matteopolak/lodestone/issues/540)). This
+//!   section used to say deletion was deliberately absent, and the reasoning it
+//!   gave was right and is worth keeping: the destructive part of Delete is not
+//!   the four-line `remove_dir_all`, it is a *confirmation the player cannot fire
+//!   by accident*, and **arming the existing Delete button and confirming with a
+//!   second press of the same button is deletable-by-double-click** — which for
+//!   an irreversible operation is worse than no Delete at all. What changed is
+//!   that [`crate::menu::confirm`] and [`crate::menu::Screen::Confirm`] now
+//!   exist, so the affirmative control is a *different control on a different
+//!   screen* whose rect does not overlap the Delete button's; a second click
+//!   where the player just clicked lands on nothing.
+//!   `the_confirmation_cannot_be_fired_by_a_second_click_where_delete_was` is the
+//!   gate on that, and it derives both rects from the layouts the draw uses.
+//! - [`world_dir_in`]'s containment check is what [`delete_world_in`] goes
+//!   through, and it was already load-bearing before there was a delete: a
 //!   [`WorldSummary::dir_name`] of `..` reaching [`crate::app`] would otherwise
-//!   open the saves *root* as a world.
+//!   open the saves *root* as a world — and reaching `remove_dir_all` it would
+//!   **empty** it. See [`delete_world_in`] for all three of its refusals.
 //!
 //! # Configuration
 //!
@@ -742,6 +741,108 @@ pub fn create_world_in(root: &Path, name: &str, game_type: i32) -> Result<PathBu
     Ok(dir)
 }
 
+/// Why a world could not be deleted.
+///
+/// Four variants rather than one `io::Error`, and the split is the whole safety
+/// argument: three of them are **refusals** this module makes before touching the
+/// filesystem at all, and each names a different way a `dir_name` travelling
+/// through the UI as a `String` could have pointed somewhere that is not a world.
+/// Collapsing them into `Io` would make "we refused" and "the filesystem
+/// refused" the same observation, and only one of those is a bug.
+#[derive(Debug)]
+pub enum DeleteError {
+    /// `dir_name` is not a single plain path component, so [`world_dir_in`]
+    /// declined to resolve it. `..` is the case that matters: it would otherwise
+    /// name the saves **root**.
+    NotAWorldName(String),
+    /// The directory resolved, and holds no `level.dat`. This is what stops the
+    /// saves root itself and somebody's unrelated folder from being removed —
+    /// see [`delete_world_in`].
+    NotAWorld(PathBuf),
+    /// The entry is a **symlink**, so removing it would either delete the link
+    /// (leaving the target) or, if anything followed it, delete a directory
+    /// outside `saves/`. Refused rather than resolved.
+    Symlink(PathBuf),
+    /// The filesystem refused the removal itself.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for DeleteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeleteError::NotAWorldName(name) => {
+                write!(f, "{name:?} is not a world folder name")
+            }
+            DeleteError::NotAWorld(dir) => {
+                write!(f, "{} holds no level.dat", dir.display())
+            }
+            DeleteError::Symlink(dir) => {
+                write!(f, "{} is a symbolic link", dir.display())
+            }
+            DeleteError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for DeleteError {}
+
+/// Remove the world named `dir_name` from under `root` —
+/// `LevelStorageSource.LevelStorageAccess.deleteLevel`, and the destructive half
+/// of issue [#540](https://github.com/matteopolak/lodestone/issues/540).
+///
+/// **There is deliberately no no-argument twin.** Every other operation here has
+/// one because production calls it with the real root; this one is only ever
+/// reached from [`crate::menu::nav::MenuNav`], which holds its own root, so a
+/// `delete_world()` would exist solely as a way for a test to delete the
+/// developer's worlds. See the module doc's note on
+/// `no_test_touches_the_real_saves_dir`.
+///
+/// # The three refusals, in order, and why each one is here
+///
+/// 1. [`world_dir_in`] — the containment check. A [`WorldSummary::dir_name`] is a
+///    `String` by the time it has been through the UI, and a value of `..`
+///    resolves to the saves **root**; `/etc` resolves to `/etc`. Neither is
+///    representable as one `Component::Normal`, so both are refused before any
+///    path is built.
+/// 2. **Not a symlink.** `std::fs::remove_dir_all` does not follow one, so this is
+///    belt-and-braces — but the belt is what makes the guarantee *assertable*: a
+///    symlink in `saves/` pointing at the player's home directory must produce a
+///    named refusal, not an `io::Error` whose kind depends on the platform.
+///    Checked with `symlink_metadata`, which does not follow.
+/// 3. **A `level.dat` must be present.** This is the guard that makes the target
+///    a *world* rather than a directory: the saves root has no `level.dat`, and
+///    neither does the `notaworld` folder every fixture here carries. It is
+///    deliberately an *existence* check and not a decode: vanilla's
+///    `canDelete()` is unconditionally `true`, a corrupt world is the one you
+///    most need to remove, and requiring a decode would make exactly that world
+///    permanent.
+///
+/// # Errors
+///
+/// [`DeleteError`], one variant per refusal above plus [`DeleteError::Io`] for a
+/// removal the filesystem declined. Returns the directory that was removed, so a
+/// caller (and a gate) can say *which* one without re-deriving it.
+pub fn delete_world_in(root: &Path, dir_name: &str) -> Result<PathBuf, DeleteError> {
+    let Some(dir) = world_dir_in(root, dir_name) else {
+        return Err(DeleteError::NotAWorldName(dir_name.to_string()));
+    };
+    // `symlink_metadata` rather than `metadata`: the latter follows the link and
+    // would report the *target's* kind, which is the one answer that must not
+    // decide this.
+    let meta = std::fs::symlink_metadata(&dir).map_err(DeleteError::Io)?;
+    if meta.is_symlink() {
+        return Err(DeleteError::Symlink(dir));
+    }
+    if !meta.is_dir() {
+        return Err(DeleteError::NotAWorld(dir));
+    }
+    if !lodestone_anvil::level_dat::path_in(&dir).is_file() {
+        return Err(DeleteError::NotAWorld(dir));
+    }
+    std::fs::remove_dir_all(&dir).map_err(DeleteError::Io)?;
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1105,6 +1206,172 @@ mod tests {
         for bad in ["..", ".", "", "a/b", "/abs", "a/", "./a"] {
             assert_eq!(world_dir_in(root, bad), None, "{bad:?} must be refused");
         }
+    }
+
+    /// Every entry of [`populated_root`], sorted — the whole-directory
+    /// observation the delete gates below measure *before and after*.
+    ///
+    /// A helper rather than an inline `read_dir` because "nothing outside the
+    /// target was touched" is a statement about the **set**, and the only way to
+    /// make it one is to compare sets rather than to spot-check names.
+    fn entries_of(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(root)
+            .expect("root exists")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Delete removes **the selected world's own directory**, and nothing else in
+    /// the saves root.
+    ///
+    /// The fixture is the reason this is not vacuous: a root with one world
+    /// cannot distinguish "removed the right one" from "removed the only one",
+    /// and a root with no non-world entries cannot show that the stray file and
+    /// the `level.dat`-less folder survive. [`populated_root`]'s seven entries are
+    /// asserted as the precondition.
+    #[test]
+    fn delete_removes_exactly_the_selected_world_and_nothing_else() {
+        let root = populated_root("delete-one");
+        let before = entries_of(&root);
+        assert_eq!(before.len(), 7, "premise: seven entries to choose from");
+        assert!(
+            list_worlds_in(&root).len() >= 2,
+            "premise: more than one world, or 'the right one' is not a question"
+        );
+
+        let removed = delete_world_in(&root, "bravo").expect("bravo is a world");
+        assert_eq!(removed, root.join("bravo"));
+        assert!(!removed.exists(), "the directory itself must be gone");
+
+        let after = entries_of(&root);
+        let expected: Vec<String> = before.iter().filter(|n| *n != "bravo").cloned().collect();
+        assert_eq!(
+            after, expected,
+            "delete must remove exactly one entry: the world's own directory"
+        );
+        assert!(root.is_dir(), "the saves root itself must survive");
+        // And the *list* changed by exactly that world.
+        let dirs: Vec<String> = list_worlds_in(&root)
+            .into_iter()
+            .map(|w| w.dir_name)
+            .collect();
+        assert_eq!(dirs, vec!["alpha", "charlie", "delta", "broken"]);
+    }
+
+    /// A **corrupt** world is deletable — vanilla's `canDelete()` is
+    /// unconditionally `true`, and the world whose `level.dat` will not decode is
+    /// the one you most need to be able to remove.
+    ///
+    /// This is why [`delete_world_in`]'s third guard is an *existence* check on
+    /// `level.dat` rather than a decode: a decode would make exactly this world
+    /// permanent.
+    #[test]
+    fn a_corrupt_world_is_still_deletable() {
+        let root = populated_root("delete-corrupt");
+        let broken = list_worlds_in(&root)
+            .into_iter()
+            .find(|w| w.dir_name == "broken")
+            .expect("premise: the fixture lists the corrupt world");
+        assert!(!broken.readable, "premise: it really is undecodable");
+        assert!(broken.can_delete());
+        assert!(!broken.can_play(), "and it must stay non-playable");
+        delete_world_in(&root, "broken").expect("a corrupt world must be removable");
+        assert!(!root.join("broken").exists());
+    }
+
+    /// **Each of the three refusals is shown to fire, with a legitimate call as
+    /// the executed control.**
+    ///
+    /// Every arm additionally asserts that the root's entry *set* is unchanged —
+    /// an error return that had already deleted something would otherwise look
+    /// identical to a refusal.
+    #[test]
+    fn every_delete_guard_fires_and_a_legitimate_name_is_the_control() {
+        let root = populated_root("delete-guards");
+        let before = entries_of(&root);
+
+        // (1) The containment check. `..` is the one that matters: it resolves to
+        // the saves root, which `remove_dir_all` would happily empty.
+        for bad in ["..", ".", "", "a/b", "/etc", "alpha/..", "./alpha"] {
+            let err = delete_world_in(&root, bad)
+                .err()
+                .unwrap_or_else(|| panic!("{bad:?} was accepted"));
+            assert!(
+                matches!(err, DeleteError::NotAWorldName(_)),
+                "{bad:?} must be refused by name, got {err:?}"
+            );
+            assert_eq!(entries_of(&root), before, "{bad:?} changed the root");
+        }
+        // Stated separately, because it is the consequence that matters rather
+        // than the return value: the root is still a directory with its contents.
+        assert!(root.is_dir());
+
+        // (2) A directory with no `level.dat` is not a world.
+        let err = delete_world_in(&root, "notaworld").expect_err("not a world");
+        assert!(
+            matches!(err, DeleteError::NotAWorld(_)),
+            "got {err:?}"
+        );
+        assert!(root.join("notaworld").is_dir(), "and it survives");
+        // The same refusal for a plain file, which is the `.DS_Store` case.
+        let err = delete_world_in(&root, ".DS_Store").expect_err("not a directory");
+        assert!(matches!(err, DeleteError::NotAWorld(_)), "got {err:?}");
+        assert!(root.join(".DS_Store").is_file());
+        // A name that resolves to nothing at all is the filesystem's answer, not
+        // ours — `symlink_metadata` is the first thing that can fail.
+        let err = delete_world_in(&root, "no-such-world").expect_err("absent");
+        assert!(matches!(err, DeleteError::Io(_)), "got {err:?}");
+        assert_eq!(entries_of(&root), before);
+
+        // (3) A symlink is refused, and its **target** survives untouched. This
+        // is the assertion that says a delete cannot reach outside `saves/`.
+        #[cfg(unix)]
+        {
+            let outside = std::env::temp_dir().join(format!(
+                "lodestone-saves-{}-delete-guards-outside",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&outside);
+            std::fs::create_dir_all(&outside).expect("create the outside dir");
+            // Given a `level.dat`, so the *only* thing standing between the
+            // delete and the target is the symlink guard.
+            plant_world(&outside, "victim", "Victim", 1, 0);
+            std::os::unix::fs::symlink(outside.join("victim"), root.join("linked"))
+                .expect("create the symlink");
+            assert!(
+                lodestone_anvil::level_dat::path_in(&root.join("linked")).is_file(),
+                "premise: the link resolves to a real world, so only the symlink \
+                 guard can refuse it"
+            );
+            let err = delete_world_in(&root, "linked").expect_err("a symlink");
+            assert!(matches!(err, DeleteError::Symlink(_)), "got {err:?}");
+            assert!(
+                outside.join("victim").is_dir(),
+                "the symlink's target must be untouched"
+            );
+            assert!(
+                root.join("linked").exists(),
+                "and the link itself is left alone rather than half-removed"
+            );
+            let _ = std::fs::remove_dir_all(&outside);
+            std::fs::remove_file(root.join("linked")).expect("tidy the link");
+        }
+
+        // -- control ---------------------------------------------------------
+        // The refusals above are only about *these* names if a legitimate one
+        // succeeds against the same root through the same function.
+        let removed = delete_world_in(&root, "alpha").expect("alpha is a world");
+        assert_eq!(removed, root.join("alpha"));
+        assert!(!removed.exists());
+        assert_ne!(
+            entries_of(&root),
+            before,
+            "the control must actually change the root, or every assertion above \
+             passes for a `delete_world_in` that never deletes anything"
+        );
     }
 
     /// The date arithmetic, against values produced by Python's `datetime` —
