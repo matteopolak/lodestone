@@ -7292,3 +7292,68 @@ Two smaller things, both paid for:
   the entity spawned, the inventory decremented, every counter agrees, and the symptom is still "throwing
   does not work". A drop's velocity has the same trap in a second form — the block-pop formula has no notion
   of facing at all, so reusing it drops the stack at the player's feet.
+
+**12.151 The inventory avatar: a brief's own correction of a brief was itself half wrong, and the hazard
+the record predicted turned out to be invisible to the mechanism it named.** Reported: *"can we render the
+player in the inventory and have their eyes follow the mouse, etc.? right now theres just a black box where
+the player should be"*. The black box was the recess in vanilla's own `inventory.png` with nothing rendered
+into it.
+
+**The brief carried a correction to an earlier brief's look angles, and the correction was the wrong half
+right.** It said: *"Both track by the identical `xAngle * 20`; the difference is a constant 180°, not 'the
+head tracks further than the body'"*. The field values are exactly that — `bodyRot = 180 + a`, `yRot = a`
+(`InventoryScreen.java:125-126`) — so the claim survives inspection of the line it cites. But
+`LivingEntityRenderer.java:246` defines `state.yRot = wrapDegrees(headRot - state.bodyRot)`: **`yRot` is the
+head yaw *relative to the body* and `bodyRot` is absolute, so the two fields are not the same kind of
+number.** Absolutely the body sits at `180 + a` and the head at `180 + 2a`, and the original "the head
+tracks further" reading was right after all — for a reason neither brief gave. Coding the correction
+literally draws a player permanently looking 180° over their own shoulder. §12.144's shape again: a true
+citation answering a neighbouring question, one file away from the definition that settles it.
+
+**The winding hazard the brief led with is real and its stated symptom is not.** `CLAUDE.md`'s rule —
+`sign(det(gui_ortho * pose))` must equal `sign(det(Camera::view_projection()))` — holds, and the naive
+`Mat4::from_scale(Vec3::splat(size))` in place of vanilla's `scale(s, s, -s)` does reverse it. But
+`EntityPipeline` is built with **`cull_mode: None`** (`entity_pipeline.rs:1033`), so a reversed winding
+culls nothing: the visible symptom is not an inside-out silhouette, it is the **depth order** — the back of
+the skull wins `LessEqual` over the face. A gate asserting only the determinant sign would be measuring a
+quantity this pipeline is insensitive to and calling it a proof about pixels. What actually pins it is a
+**cross-arm depth invariant** whose expectation is in neither arm: a viewer in front of a player sees the
+front of the head nearer than the back, whichever projection they look through. Arm A is a real `Camera` 4
+blocks south of a yaw-`0` entity; arm B is the inventory pose at a centred cursor. Which mesh `z` is the
+*front* is derived rather than assumed — `entity_model_matrix` at yaw `0` maps mesh `−Z` to world `+Z`, and
+Minecraft's yaw `0` faces `+Z`. Both controls fire: the naive uniform scale flips the determinant **and**
+puts the back of the head in front, and arm A carries its own premise-false check.
+
+**`Rz(π)` is not decoration and the cancellation is the proof the composition is right.** `Rz(π)` composed
+over `entity_model_matrix`'s `scale(-1, -1, 1)` is exactly the identity, which looks like redundancy to
+optimise away. It is *why* vanilla rotates by π: `LivingEntityRenderer` flips the rig so a `+Y`-up world can
+draw a `Y`-**down** mesh, and GUI space is already `y`-down. Once cancelled, the baked mesh's own frame maps
+straight onto GUI `y`-down — head up, feet down — and the derived pixel spans (head at `topPos + 11.9`, feet
+at `topPos + 71.8`, inside a recess of `topPos + 8 .. 78`) came out right on the first run, which is the
+cheapest available evidence that a ten-factor matrix chain was composed in the right order.
+
+**26.2 does not scissor this, and the brief's transcription said it did.** *"The `x0, y0, x1, y1` passed to
+`graphics.entity` is the **scissor** rect"* — in 26.2 they are the **destination rect of a
+render-to-texture blit**. `PictureInPictureRenderer.prepare` allocates an offscreen
+`(x1-x0) * guiScale × (y1-y0) * guiScale` colour+depth pair, renders into it under its own ortho, and blits
+with premultiplied alpha. Two consequences, and only the second cost anything: every term of its model-view
+is proportional to `guiScale`, so the whole thing **collapses to one matrix in logical GUI pixels** with
+`s = size` — the space this workspace already works in — and the offscreen target then buys exactly one
+thing, clipping, for which `set_scissor_rect` is the cheap equivalent on an opaque pass. So the divergence
+is deliberate and the matrices are still vanilla's; but a unit that had believed the transcription would
+have looked for a scissor in the record and not found one.
+
+**Confirmed hazards, cheaply avoided:** the shared-uniform trap (`queue.write_buffer` orders against the
+**submit**, not the encoder) is structural here rather than a discipline, because `PlayerPreview` owns its
+buffer outright and has nothing to share; and the 4-bind-group floor never came near, because the entity
+shader spends two and the avatar is a second bind *group over the existing layout*, the same move
+`EntityRenderer::hand_cam_bind_group` already documents.
+
+**One more island shape, and it is invisible to every emptiness check.** The avatar is a *placement*, not a
+vertex stream, so `render_geometry_scaled`'s early return — five `is_empty()` calls over the five streams —
+would have discarded a frame whose only content was the avatar. `geo.player_avatar.is_none()` had to join
+that guard. Both neuter controls were run and observed: forcing `player_avatar` to `None` reddens all four
+wiring gates, and feeding the raw physical cursor through instead of dividing by `calculate_gui_scale`
+reddens exactly the one that computes both hypotheses. `cargo test -p lodestone-shell -p lodestone-render
+--no-fail-fast -- --test-threads=2`: **143 binaries, 2,236 passed, 0 failed**, counted by a program reading
+the captured log rather than by a pipeline.

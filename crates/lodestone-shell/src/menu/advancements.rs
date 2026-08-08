@@ -1165,6 +1165,9 @@ pub fn advancements_geometry(
         special: b.special,
         bg_verts: b.bg_verts,
         widget_rect: Some(layout.window),
+        // No inventory avatar — `AdvancementsScreen` is not `InventoryScreen`.
+        // See `ContainerGeometry::player_avatar`.
+        player_avatar: None,
     }
 }
 

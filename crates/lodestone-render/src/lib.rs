@@ -62,6 +62,7 @@ pub mod fog;
 pub mod frame;
 pub mod glint;
 pub mod gui_atlas;
+pub mod gui_entity;
 pub mod item_render;
 pub mod light;
 pub mod map_item;
@@ -165,6 +166,10 @@ pub use entity_pipeline::{
 pub use frame::SystemClock;
 pub use frame::{FrameOutcome, FramePacer, FrameTiming, Renderer, TimeSource};
 pub use gui_atlas::{GuiAtlas, GuiAtlasError, GuiSpriteQuad};
+pub use gui_entity::{
+    GuiEntityLook, INVENTORY_OFFSET_Y, INVENTORY_RECT_OFFSET, INVENTORY_RECT_SIZE, INVENTORY_SIZE,
+    gui_entity_anim, gui_entity_look, gui_entity_pose, gui_entity_view,
+};
 pub use item_render::{
     CROSSBOW_CHARGE_TICKS, GUI_DEPTH_HALF_RANGE, ItemStateContext, SCALE_LIMIT, TRANSLATION_LIMIT,
     UNITS_PER_BLOCK, display_matrix, gui_item_pose, gui_ortho,

@@ -14,6 +14,7 @@ use crate::hud::item_icon::{self, IconAssets, IconRenderer};
 use super::background::ContainerBackground;
 use super::frame::ContainerFrame;
 use super::geometry::ContainerGeometry;
+use super::player_preview::PlayerPreview;
 use super::{BG_FLOATS_PER_VERTEX, CONTAINER_BG_WGSL, CONTAINER_WGSL, FLOATS_PER_VERTEX};
 
 /// GPU renderer for the container overlay.
@@ -35,6 +36,15 @@ pub struct ContainerRenderer {
     /// alone keep the pre-texture flat-fill behaviour — the jar-less path and
     /// the negative control the pixel gate leans on.
     background: Option<ContainerBackgroundGpu>,
+    /// The **inventory avatar** — the player standing in the panel's recess with
+    /// their head tracking the cursor. Starts detached, so every existing caller
+    /// and every headless gate keeps the empty recess it has always drawn.
+    ///
+    /// Detached is also the honest state on a jar-less run: without the skin sheet
+    /// there is nothing to draw and no synthetic fallback, exactly as
+    /// [`background`](Self::background) and `gpu/entities.rs`'s armour sheets
+    /// behave. See [`super::player_preview`].
+    player_preview: Option<PlayerPreview>,
 }
 
 /// The GPU half of [`ContainerBackground`]: its own tiny textured pipeline,
@@ -123,7 +133,36 @@ impl ContainerRenderer {
             icons: IconRenderer::new(),
             font: VanillaFont::shared(),
             background: None,
+            player_preview: None,
         }
+    }
+
+    /// Attach the **inventory avatar** — the player rig drawn into the panel's
+    /// recess with their head tracking the cursor.
+    ///
+    /// Independent of every other `attach_*` here, and a no-op returning `false`
+    /// on a jar-less run (no skin sheet, so the recess stays the empty hole in
+    /// `inventory.png` that it was before this existed). Requires a depth view at
+    /// draw time for the same reason the 3-D block-item pass does: the rig is
+    /// depth-tested against itself.
+    pub fn attach_player_preview(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+    ) -> bool {
+        self.player_preview = PlayerPreview::new(device, queue, color_format);
+        self.player_preview.is_some()
+    }
+
+    /// Whether the inventory avatar is bound — the "is this attached" gate for the
+    /// avatar, in the same shape as
+    /// [`background_attached`](Self::background_attached) and for the same reason:
+    /// without it a missing jar silently degrades to an empty recess and a
+    /// coverage-only assertion still passes.
+    #[must_use]
+    pub fn player_preview_attached(&self) -> bool {
+        self.player_preview.is_some()
     }
 
     /// Attach vanilla's real `container/*.png` panel art (issue #51), so the
@@ -499,6 +538,10 @@ impl ContainerRenderer {
             && geo.model_verts.is_empty()
             && geo.bg_verts.is_empty()
             && geo.special.is_empty()
+            // …and so does the inventory avatar, for the same reason: it is a
+            // placement rather than a vertex stream, so it is invisible to every
+            // emptiness check above.
+            && geo.player_avatar.is_none()
         {
             return;
         }
@@ -620,6 +663,30 @@ impl ContainerRenderer {
             pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, self.buffer.slice(..));
             pass.draw(dim_count..chrome_count, 0..1);
+        }
+
+        // The inventory avatar, immediately after the panel art it stands in and
+        // before the slot icons — which is where vanilla calls it, from
+        // `InventoryScreen.extractBackground`, right after its own `INVENTORY_LOCATION`
+        // blit. Ordering against the slots is free (the recess holds no slot), but
+        // ordering against the *panel* is not: drawn first it would be painted over.
+        //
+        // Its pass clears depth and the model pass below clears it again, so
+        // neither inherits the other's — see `PlayerPreview::draw`.
+        if let (Some(preview), Some(avatar), Some(depth_view)) =
+            (self.player_preview.as_ref(), geo.player_avatar, depth)
+        {
+            preview.draw(
+                device,
+                queue,
+                &mut encoder,
+                view,
+                depth_view,
+                &avatar,
+                gui_scale,
+                width,
+                height,
+            );
         }
 
         self.icons.draw_models_range(

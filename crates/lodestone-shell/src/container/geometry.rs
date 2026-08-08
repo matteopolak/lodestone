@@ -6,7 +6,7 @@
 
 use lodestone_assets::ItemAtlas;
 use lodestone_game::item::ItemStack;
-use lodestone_game::menu::{Menu, SpecialLayout};
+use lodestone_game::menu::{Menu, MenuKind, SpecialLayout};
 use lodestone_render::{BlockModels, ModelVertex};
 
 use crate::hud::VanillaFont;
@@ -16,6 +16,7 @@ use super::background::ContainerBackground;
 use super::builder::Builder;
 use super::frame::{ContainerFrame, LabelLayout, label_layout, menu_type_title_anchor};
 use super::layout::{MenuHit, Rect, SlotLayout, hit_test_with_book, panel_origin_with_scale, slot_layout};
+use super::player_preview::PlayerAvatar;
 use super::{
     BG_FLOATS_PER_VERTEX, BLAST_FURNACE_BURN_PROGRESS, BLAST_FURNACE_LIT_PROGRESS,
     BREWING_BREW_PROGRESS, BREWING_BUBBLES, BREWING_FUEL_LENGTH, CELL, FLOATS_PER_VERTEX,
@@ -118,6 +119,21 @@ pub struct ContainerGeometry {
     /// framebuffer readback) must scale it up first, the same way [`hit_test`]
     /// scales a physical cursor position down before comparing the other way.
     pub widget_rect: Option<Rect>,
+    /// The **inventory avatar**: where the player rig is drawn and where it is
+    /// looking, or `None` on every screen that is not the player's own inventory.
+    ///
+    /// `Some` exactly when [`MenuKind::Player`] — vanilla calls
+    /// `extractEntityInInventoryFollowsMouse` only from
+    /// `InventoryScreen.extractBackground`, so a chest or a furnace has no avatar
+    /// and drawing one there would be a divergence, not a bonus.
+    ///
+    /// This is a *placement*, not a vertex stream: the rig is 3-D and goes through
+    /// `EntityPipeline` in its own pass, exactly as the special block-entity icons
+    /// do. It carries the rect and the cursor in the **logical** canvas, like
+    /// [`widget_rect`](Self::widget_rect), and it is derived from the same shifted
+    /// panel origin every slot is — so an open recipe book moves the avatar with
+    /// the panel for free.
+    pub player_avatar: Option<PlayerAvatar>,
 }
 
 impl ContainerGeometry {
@@ -199,6 +215,7 @@ impl ContainerGeometry {
                 slot_model_vertex_count: 0,
                 slot_special_count: 0,
                 widget_rect: None,
+                player_avatar: None,
             };
         };
         let layout = slot_layout(menu);
@@ -769,6 +786,22 @@ impl ContainerGeometry {
                 y,
                 w: layout.width,
                 h: layout.height,
+            }),
+            // The inventory avatar (`InventoryScreen.extractBackground`'s second
+            // call). Measured from `x`/`y` — the **shifted** panel origin above —
+            // for the reason that shift is applied there and nowhere else, and
+            // with the cursor divided down by the same integer scale
+            // `hit_test_with_book` divides by, so the head aims at where the
+            // pointer visually is rather than at a physical-pixel coordinate
+            // several times too far out.
+            player_avatar: matches!(menu.kind(), MenuKind::Player).then(|| {
+                let scale =
+                    crate::config::calculate_gui_scale(gui_scale, width, height).max(1) as f32;
+                PlayerAvatar::new(
+                    x,
+                    y,
+                    frame.cursor.map(|[cx, cy]| [cx / scale, cy / scale]),
+                )
             }),
         }
     }

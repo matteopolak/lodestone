@@ -561,6 +561,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Sprint food gate, toggle sneak/sprint, and mouse feel](./input-options.md) —
   Three small, related fixes to `lodestone-controller`'s input model and the settings
   screen's mouse/controls pages:
+- [The inventory player avatar](./inventory-player-preview.md) — The player standing
+  in the inventory panel with their head and eyes tracking the mouse — vanilla's
+  `InventoryScreen.extractEntityInInventoryFollowsMouse`. Before this, the recess at
+  `(leftPos + 26, topPos + 8)` was the *hole in vanilla's own `inventory.png`* with
+  nothing rendered into it, so the screen showed a black box where the player belongs.
+  It is the first thing in this workspace to draw a full 3-D entity rig inside a 2-D
+  GUI panel, and the first to use a GPU scissor.
 - [Item → block census](./item-block-census.md) — The authoritative 26.2 answer to
   "if a player right-clicks holding this item, which block gets placed?" —
   `lodestone_data::block_items`, generated from a headless dump of the real server's

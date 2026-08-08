@@ -598,10 +598,12 @@ impl EntityRenderer {
 /// texture is kept alive by the returned view (and, in turn, the bind group),
 /// so it is not returned separately.
 ///
-/// `pub(super)` so the block-entity pass (`gpu/block_entities.rs`) can share it:
-/// the `Rgba8UnormSrgb` choice below is the load-bearing part and a second copy
-/// would be free to get it wrong, at +48% brightness on every chest pixel.
-pub(super) fn entity_texture_from_image(
+/// `pub(crate)` so the block-entity pass (`gpu/block_entities.rs`) **and** the
+/// container screen's inventory avatar (`container/player_preview.rs`) can share
+/// it: the `Rgba8UnormSrgb` choice below is the load-bearing part and a second
+/// copy would be free to get it wrong, at +48% brightness on every chest pixel.
+/// It was `pub(super)` while both callers lived under `gpu/`.
+pub(crate) fn entity_texture_from_image(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     img: &lodestone_assets::Image,
