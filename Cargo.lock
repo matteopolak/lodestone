@@ -3015,6 +3015,7 @@ dependencies = [
  "lodestone-sound",
  "lodestone-testsupport",
  "lodestone-world",
+ "lodestone-worldgen-core",
  "memory-stats",
  "png",
  "pollster",
@@ -3203,6 +3204,8 @@ name = "lodestone-worldgen"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "flate2",
+ "lodestone-core",
  "lodestone-server",
  "lodestone-worldgen-core",
  "memory-stats",
