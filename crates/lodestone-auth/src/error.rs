@@ -150,6 +150,20 @@ pub enum AuthError {
         env: &'static str,
     },
 
+    /// A texture URL was refused by
+    /// [`crate::texture::is_allowed_texture_domain`] — authlib's
+    /// `TextureUrlChecker`. Typed rather than folded into
+    /// [`AuthError::Service`] because it is the **security-relevant** outcome:
+    /// the URL arrived over the network, and no request was made. A caller that
+    /// wants to log-and-continue needs to tell this apart from "the host was
+    /// allowed but the fetch failed".
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("refusing to fetch a texture from a host outside vanilla's allow list: {url}")]
+    TextureDomainNotAllowed {
+        /// The refused URL, verbatim, for the log line.
+        url: String,
+    },
+
     /// Reading or writing the on-disk token cache failed.
     #[cfg(not(target_arch = "wasm32"))]
     #[error("token cache io error: {0}")]

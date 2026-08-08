@@ -124,6 +124,62 @@ pub struct MsToken {
     pub refresh_token: String,
 }
 
+/// Which of the two player rigs a skin is authored for.
+///
+/// The services profile spells these `CLASSIC`/`SLIM`, which is a **different
+/// vocabulary** from the `default`/`slim` that appears in a `textures` profile
+/// property (authlib's `PlayerModelType.legacyServicesId` — see
+/// `lodestone_assets::PlayerModelType` and `docs/player-skins.md`). Both reach
+/// the same two rigs, and [`Self::legacy_services_id`] is the one bridge between
+/// them, so a renderer never grows a second parse that could disagree with the
+/// network path's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkinVariant {
+    /// The 4-texel-armed rig — Steve. `default` in the legacy vocabulary.
+    Classic,
+    /// The 3-texel-armed rig — Alex.
+    Slim,
+}
+
+impl SkinVariant {
+    /// This variant spelled the way a `textures` property spells it, so a caller
+    /// can hand it to the same `by_legacy_services_name` parse the property path
+    /// uses instead of matching on this enum itself.
+    #[must_use]
+    pub fn legacy_services_id(self) -> &'static str {
+        match self {
+            // Not `"wide"`. See `lodestone_assets::PlayerModelType`: the wire
+            // spelling of the wide rig is `default`, and getting it wrong
+            // resolves *every* skin wide, slim ones included.
+            Self::Classic => "default",
+            Self::Slim => "slim",
+        }
+    }
+
+    /// Parses the services profile's `variant` field. Anything unrecognised is
+    /// [`Self::Classic`], matching authlib's own
+    /// `requireNonNullElse(…, WIDE)` fallback.
+    fn from_services_variant(raw: &str) -> Self {
+        if raw.eq_ignore_ascii_case("slim") {
+            Self::Slim
+        } else {
+            Self::Classic
+        }
+    }
+}
+
+/// The active skin declared on a services profile: where to fetch it and which
+/// rig it is drawn on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileSkin {
+    /// The texture URL. **Not yet screened** — pass it through
+    /// [`crate::texture::fetch_texture`], which applies authlib's
+    /// `TextureUrlChecker` host restriction, rather than fetching it directly.
+    pub url: String,
+    /// The rig the sheet is authored for.
+    pub variant: SkinVariant,
+}
+
 /// A player's public identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Profile {
@@ -131,6 +187,14 @@ pub struct Profile {
     pub name: String,
     /// The player's account UUID.
     pub id: Uuid,
+    /// The account's active skin, if it has one.
+    ///
+    /// `None` covers three cases deliberately not distinguished here: the
+    /// profile declares no skin at all, every declared skin is `INACTIVE`, or
+    /// the response's `skins` array was missing or malformed. All three mean
+    /// "draw the default rig", and none of them is a sign-in failure — see
+    /// [`fetch_profile`].
+    pub skin: Option<ProfileSkin>,
 }
 
 /// An authenticated Minecraft session: a services access token plus the profile
@@ -639,6 +703,49 @@ async fn login_with_xbox(client: &reqwest::Client, xsts: &XstsToken) -> Result<S
 struct ProfileResponse {
     id: String,
     name: String,
+    /// The account's skins. **Every field here is optional on purpose**, and the
+    /// vector defaults to empty: this shape is the services API's own and is not
+    /// pinned by anything in the jar (authlib never calls `/minecraft/profile` —
+    /// the launcher does), so it is the one part of this response we cannot
+    /// verify against an outside record. Making it required would turn a shape
+    /// change at Mojang's end into a *sign-in failure* over a cosmetic field.
+    /// `serde` skips unknown fields by default, so extra ones cost nothing.
+    #[serde(default)]
+    skins: Vec<SkinResponse>,
+}
+
+#[derive(Deserialize)]
+struct SkinResponse {
+    url: Option<String>,
+    /// `ACTIVE` or `INACTIVE`. An account keeps its previously-worn skins in this
+    /// array, so picking the first entry would sometimes draw the wrong one.
+    state: Option<String>,
+    /// `CLASSIC` or `SLIM` — see [`SkinVariant`], and note this is *not* the
+    /// `default`/`slim` spelling a `textures` property uses.
+    variant: Option<String>,
+}
+
+/// The `skins` entry to draw: the `ACTIVE` one, or — when nothing says which is
+/// active — the first with a URL.
+///
+/// Split out so the selection rule is testable without a network call; that is
+/// the whole of what a hermetic test can check here, since the response itself
+/// needs a real account.
+fn active_skin(skins: Vec<SkinResponse>) -> Option<ProfileSkin> {
+    let mut fallback = None;
+    for skin in skins {
+        let Some(url) = skin.url else { continue };
+        let variant = SkinVariant::from_services_variant(skin.variant.as_deref().unwrap_or(""));
+        let active = skin
+            .state
+            .as_deref()
+            .is_some_and(|s| s.eq_ignore_ascii_case("ACTIVE"));
+        if active {
+            return Some(ProfileSkin { url, variant });
+        }
+        fallback = fallback.or(Some(ProfileSkin { url, variant }));
+    }
+    fallback
 }
 
 /// Fetches the Minecraft profile for a services access token.
@@ -656,9 +763,18 @@ async fn fetch_profile(client: &reqwest::Client, mc_access_token: &str) -> Resul
         step: "profile",
         message: format!("invalid profile uuid {:?}: {e}", resp.id),
     })?;
+    let skin = active_skin(resp.skins);
+    tracing::debug!(
+        target: "auth",
+        step = "profile",
+        skin = skin.is_some(),
+        variant = skin.as_ref().map(|s| s.variant.legacy_services_id()),
+        "resolved the profile"
+    );
     Ok(Profile {
         name: resp.name,
         id,
+        skin,
     })
 }
 
@@ -733,6 +849,74 @@ mod tests {
         let id = Uuid::parse_str(&resp.id).unwrap();
         assert_eq!(resp.name, "Notch");
         assert_eq!(id.simple().to_string(), "069a79f444e94726a5befca90e38aaf5");
+    }
+
+    /// A realistic full response: two skins, only one `ACTIVE`, plus a cape and
+    /// the `capes` array the shape also carries. The **active** one must win, and
+    /// it is deliberately the *second* entry so "take the first" fails.
+    #[test]
+    fn the_active_skin_wins_over_a_previously_worn_one() {
+        let json = r#"{
+          "id":"069a79f444e94726a5befca90e38aaf5",
+          "name":"Notch",
+          "skins":[
+            {"id":"1","state":"INACTIVE","url":"https://textures.minecraft.net/texture/old","textureKey":"k","variant":"CLASSIC"},
+            {"id":"2","state":"ACTIVE","url":"https://textures.minecraft.net/texture/new","textureKey":"k","variant":"SLIM"}
+          ],
+          "capes":[],
+          "profileActions":{}
+        }"#;
+        let resp: ProfileResponse = serde_json::from_str(json).unwrap();
+        let skin = active_skin(resp.skins).expect("an active skin must resolve");
+        assert_eq!(skin.url, "https://textures.minecraft.net/texture/new");
+        assert_eq!(skin.variant, SkinVariant::Slim);
+        // The bridge to the rig, not a second parse: the wide spelling on the
+        // wire is `default`, so this pair is what a swapped mapping cannot pass.
+        assert_eq!(skin.variant.legacy_services_id(), "slim");
+        assert_eq!(SkinVariant::Classic.legacy_services_id(), "default");
+    }
+
+    /// The three shapes that must degrade to "no skin" rather than to a failed
+    /// sign-in, since this array is the one part of the response with no outside
+    /// record definition behind it.
+    #[test]
+    fn a_missing_or_malformed_skins_array_is_no_skin_not_an_error() {
+        // absent entirely — the pre-existing test above is exactly this case
+        let resp: ProfileResponse =
+            serde_json::from_str(r#"{"id":"069a79f444e94726a5befca90e38aaf5","name":"Notch"}"#)
+                .unwrap();
+        assert!(active_skin(resp.skins).is_none());
+
+        // present but empty
+        let resp: ProfileResponse = serde_json::from_str(
+            r#"{"id":"069a79f444e94726a5befca90e38aaf5","name":"Notch","skins":[]}"#,
+        )
+        .unwrap();
+        assert!(active_skin(resp.skins).is_none());
+
+        // an entry with no `url` at all is skipped rather than panicking
+        let resp: ProfileResponse = serde_json::from_str(
+            r#"{"id":"069a79f444e94726a5befca90e38aaf5","name":"Notch",
+                "skins":[{"state":"ACTIVE","variant":"SLIM"}]}"#,
+        )
+        .unwrap();
+        assert!(active_skin(resp.skins).is_none());
+    }
+
+    /// No `state` field anywhere: fall back to the first entry with a URL rather
+    /// than reporting no skin. An unrecognised `variant` is `CLASSIC`, matching
+    /// authlib's own `requireNonNullElse(…, WIDE)`.
+    #[test]
+    fn with_no_state_field_the_first_url_wins_and_an_unknown_variant_is_classic() {
+        let resp: ProfileResponse = serde_json::from_str(
+            r#"{"id":"069a79f444e94726a5befca90e38aaf5","name":"Notch",
+                "skins":[{"url":"https://textures.minecraft.net/texture/a","variant":"WHAT"},
+                         {"url":"https://textures.minecraft.net/texture/b"}]}"#,
+        )
+        .unwrap();
+        let skin = active_skin(resp.skins).unwrap();
+        assert_eq!(skin.url, "https://textures.minecraft.net/texture/a");
+        assert_eq!(skin.variant, SkinVariant::Classic);
     }
 
     #[test]

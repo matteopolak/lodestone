@@ -7636,3 +7636,40 @@ vanilla 26.2, silently wrong against any datapack that reorders, because the id 
 distinction on the properties carrier is the load-bearing part of the first: `None` means the update had no
 `ADD_PLAYER` and must keep the existing skin, and collapsing the two would clear every remote skin on the
 next latency ping.
+
+**12.156 A security check transcribed from a constant pool would have been wrong, and the parser you reach
+for to be safe normalises away the exact question.** Issue #62's own-skin fetch needed authlib's
+`TextureUrlChecker`, which is not in `client-src` at all. The constant pool of
+`com/mojang/authlib/yggdrasil/TextureUrlChecker.class` (in the jar 26.2 resolves) gives
+`Set.of("http","https")`, `Set.of("textures.minecraft.net")`, `IDN.toUnicode`, `String.toLowerCase`,
+`String.equals` **and** `Set.contains` — enough to look complete and not enough to be right, because it does
+not say what `equals` compares. The bytecode does: `aload 5; aload 4; String.equals` is
+`lowerCaseDomain.equals(decodedDomain)`, comparing the lowered host against the *unlowered* one and returning
+`false` when they differ. Vanilla **refuses** a mixed-case host rather than folding it, and
+`java.net.URI.getScheme()` is case-preserving so `HTTPS` is refused too. Neither clause would have been
+invented, and the plausible guess — "a suffix of `minecraft.net`" — is both laxer *and* wrong, since
+`ALLOWED_DOMAINS` is exact-match membership on the whole host.
+
+The second half is the trap. The safe instinct is "do not hand-roll a URL parser, use the `url` crate", and
+the `url` crate **lower-cases the scheme and the host while parsing** — which is precisely the question being
+asked case-sensitively. A check written against `Url::host_str()` accepts all four upper-case spellings and
+looks rigorous doing it. The shape that works keeps both: `Url` remains the authority on structure (it is
+what gets `userinfo` right, so `https://textures.minecraft.net@evil.example.invalid/x` resolves to
+`evil.example.invalid`), and a raw-string layer on top can only ever *add* a rejection, so a mistake in the
+hand-parse cannot widen what is accepted. **When a normalising parser is the safe choice for structure, ask
+what it normalised away before trusting it for policy.**
+
+The gate needs no neuter: `an_unlowered_host_or_scheme_is_refused_not_folded` asserts, in the same run, that
+`Url`'s parsed host *does* equal the allowed domain and its parsed scheme *is* allowed — the wrong hypothesis
+computed rather than described — and then that our check refuses anyway. Without those two premise
+assertions the rejection is equally consistent with the URL being malformed for an unrelated reason. Every
+stand-in host in the fixture set is RFC 2606 `.invalid`, so a regression that made one *fetchable* still
+cannot reach a real server.
+
+One more, smaller, from the same unit and the same species as §12.153's `default`-not-`wide`: a type carrying
+two names per variant needs the **inverse** of its parse published, not just the parse. `PlayerModelType`
+had `by_legacy_services_name` and `serialized_name`, and the fetch has to *write* the rig into
+`<data_dir>/skin.model` for the startup path to read. `serialized_name()` gives `"wide"`, which
+`by_legacy_services_name` does not recognise — and because its fallback *is* wide, a Steve round-trips
+correctly and only an Alex is wrong. `legacy_services_id()` exists so the producer cannot pick the wrong one
+of the two names.

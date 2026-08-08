@@ -64,6 +64,10 @@ pub mod migrate;
 pub mod paths;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod store;
+/// Fetching a skin/cape texture under authlib's own `TextureUrlChecker` host
+/// restriction (issue #62). Native-only, as [`flow`] is and for the same reason.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod texture;
 /// The process-default rustls crypto provider (issue #446). Native-only, for the
 /// same reason as the modules above: reqwest's rustls stack is itself
 /// `cfg(not(wasm32))`, so a browser build has no provider to select.
@@ -76,9 +80,9 @@ pub use tls::install_crypto_provider;
 pub use error::XstsErrorKind;
 #[cfg(not(target_arch = "wasm32"))]
 pub use flow::{
-    DeviceCodePrompt, MOJANG_CLIENT_ID, MsToken, PendingLogin, Profile, Session,
-    authenticate_with_device_code, join_server, poll_token, refresh_token, request_device_code,
-    session_from_ms_token,
+    DeviceCodePrompt, MOJANG_CLIENT_ID, MsToken, PendingLogin, Profile, ProfileSkin, Session,
+    SkinVariant, authenticate_with_device_code, join_server, poll_token, refresh_token,
+    request_device_code, session_from_ms_token,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use login::{CachedSessionOutcome, finish_interactive, resolve_client_id, try_cached_session};
@@ -86,3 +90,8 @@ pub use login::{CachedSessionOutcome, finish_interactive, resolve_client_id, try
 pub use metadata::{AccountProfile, AccountsMetadata};
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::{AccountSecrets, KeychainStore, MemoryStore, SecretStore, StorageMode};
+#[cfg(not(target_arch = "wasm32"))]
+pub use texture::{
+    ALLOWED_TEXTURE_DOMAIN, ALLOWED_TEXTURE_SCHEMES, MAX_TEXTURE_BYTES, fetch_texture,
+    is_allowed_texture_domain,
+};

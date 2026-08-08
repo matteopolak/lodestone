@@ -140,6 +140,24 @@ impl PlayerModelType {
         matches!(self, PlayerModelType::Slim)
     }
 
+    /// The `legacyServicesId` — the spelling that appears in a `textures`
+    /// property, and the exact inverse of
+    /// [`by_legacy_services_name`](Self::by_legacy_services_name).
+    ///
+    /// Exists so a *producer* of that spelling (the skin cache issue #62's fetch
+    /// writes, `<data_dir>/skin.model`) cannot pick the wrong one of the two
+    /// names this type carries. Reaching for
+    /// [`serialized_name`](Self::serialized_name) there writes `"wide"`, which
+    /// `by_legacy_services_name` does not recognise — and because its fallback
+    /// *is* wide, a Steve round-trips correctly and only an Alex is wrong.
+    #[must_use]
+    pub const fn legacy_services_id(self) -> &'static str {
+        match self {
+            PlayerModelType::Wide => Self::WIDE_LEGACY_SERVICES_ID,
+            PlayerModelType::Slim => Self::SLIM_LEGACY_SERVICES_ID,
+        }
+    }
+
     /// The `id` (`StringRepresentable` serialized name) — `"wide"`/`"slim"`.
     /// This is the datapack/component spelling, **not** the one that appears in
     /// a `textures` property.

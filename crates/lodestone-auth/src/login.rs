@@ -136,7 +136,13 @@ pub async fn finish_interactive(
     metadata.upsert(AccountProfile {
         profile_id: session.profile.id,
         username: session.profile.name.clone(),
-        skin_url: None,
+        // Issue #62: this field existed with nothing ever writing it. The profile
+        // response's `skins` array is now kept (`flow::fetch_profile`), so the
+        // pointer is recorded here — verbatim, unscreened. The host allow list
+        // (`crate::texture`) is applied at *fetch* time, not at persist time, so
+        // a URL that later becomes disallowed cannot be laundered by already
+        // being in `profiles.json`.
+        skin_url: session.profile.skin.as_ref().map(|s| s.url.clone()),
         last_used: crate::migrate::unix_now(),
     });
     metadata.selected = Some(session.profile.id);
