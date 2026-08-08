@@ -31,7 +31,12 @@ use crate::particles::ParticleRenderer;
 
 mod block_entities;
 mod debug_lines;
-mod entities;
+// `pub(crate)` for one item only: `entity_texture_from_image`, which the
+// container screen's inventory avatar shares rather than copying — see that
+// function's own doc for why a second copy of the `Rgba8UnormSrgb` choice is a
+// +48%-brightness bug waiting to happen. Everything else in here stays
+// `pub(super)`, i.e. `pub(in crate::gpu)`.
+pub(crate) mod entities;
 mod entity_passes;
 mod first_person;
 mod frame;

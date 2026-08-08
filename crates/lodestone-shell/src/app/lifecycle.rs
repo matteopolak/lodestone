@@ -151,6 +151,18 @@ impl ApplicationHandler for WindowApp {
         if let Some(background) = crate::resources::load_container_background() {
             container.attach_background(gpu.device(), gpu.queue(), format, background);
         }
+        // The inventory avatar — the player standing in the panel's recess with
+        // their head following the cursor (player report: "right now theres just a
+        // black box where the player should be"). This call is the whole
+        // difference between the capability existing and reaching zero pixels:
+        // `ContainerRenderer` starts with it detached and draws nothing.
+        // `false` on a jar-less run, where the recess stays empty.
+        if !container.attach_player_preview(gpu.device(), gpu.queue(), format) {
+            tracing::info!(
+                target: "assets",
+                "no player skin sheet: the inventory avatar will not draw"
+            );
+        }
 
         // Upload whatever has already meshed; the rest streams in per frame.
         for meshed in self.sim.drain_meshes() {

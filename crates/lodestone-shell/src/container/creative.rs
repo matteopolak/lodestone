@@ -831,6 +831,11 @@ pub fn creative_geometry(
         special: b.special,
         bg_verts: b.bg_verts,
         widget_rect: Some(layout.panel),
+        // No avatar: vanilla's creative screen is `CreativeModeInventoryScreen`,
+        // which never calls `extractEntityInInventoryFollowsMouse` — its survival
+        // tab shows the player's *slots*, not the player. See
+        // `ContainerGeometry::player_avatar`.
+        player_avatar: None,
     }
 }
 

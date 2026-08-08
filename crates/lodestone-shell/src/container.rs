@@ -45,6 +45,10 @@ mod frame;
 mod geometry;
 mod input;
 mod layout;
+/// The inventory avatar (the player standing in the panel, head tracking the
+/// cursor) — see `docs/inventory-player-preview.md`. The pose arithmetic lives in
+/// `lodestone_render::gui_entity`; this is the GPU half.
+mod player_preview;
 mod recipe_book;
 mod renderer;
 mod tooltip;
@@ -68,6 +72,7 @@ pub use layout::{
     hit_test_with_book, hit_test_with_scale, panel_origin, panel_origin_with_scale,
     recipe_book_panel_shift, recipe_book_width_too_narrow, slot_layout,
 };
+pub use player_preview::PlayerAvatar;
 pub use recipe_book::{
     RECIPE_BUTTON_SIZE, RECIPE_FILTER_BUTTON, RECIPE_GRID_COLS, RECIPE_GRID_ORIGIN,
     RECIPE_GRID_ROWS, RECIPE_GRID_STEP, RECIPE_ITEMS_PER_PAGE, RECIPE_MAGNIFIER, RECIPE_PAGE_BACK,

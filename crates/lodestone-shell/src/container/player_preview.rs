@@ -1,0 +1,653 @@
+//! [`PlayerPreview`] — the GPU half of the inventory avatar: the player rig
+//! drawn into the inventory panel's recess, head tracking the cursor
+//! (vanilla's `InventoryScreen.extractEntityInInventoryFollowsMouse`).
+//!
+//! ## What it is
+//!
+//! Before this existed, the recess at `(leftPos + 26, topPos + 8)` was the
+//! *hole in vanilla's own `inventory.png`* with nothing rendered into it — a
+//! black box where the player belongs. The player report was exactly that.
+//!
+//! All the pose arithmetic lives in
+//! [`lodestone_render::gui_entity`](lodestone_render::gui_entity), which is where
+//! the record definition is transcribed and gated. This module is only the GPU
+//! side: one [`EntityPipeline`], the baked player rig, the skin sheet, a camera
+//! uniform and one scissored pass.
+//!
+//! ## Three decisions worth knowing before changing this
+//!
+//! **1. Its own [`EntityPipeline`], not the world renderer's.** `ContainerRenderer`
+//! is constructed independently of `gpu::RenderState` and receives only a depth
+//! view and a `BlockModels` borrow, so reaching the world's `EntityRenderer` would
+//! mean threading it through `app.rs`'s whole redraw path. The cost is one
+//! pipeline object, one mesh upload and one 64×64 texture — the same trade
+//! `ContainerRenderer::attach_items` already documents for the item atlas ("costs
+//! a second upload of the (small) item atlas"). It is **not** a fifth bind group:
+//! the entity shader still spends exactly two, camera and texture.
+//!
+//! **2. Its own camera buffer, unconditionally.** `queue.write_buffer` is ordered
+//! against the **submit**, not against the encoder, so two passes sharing one
+//! uniform buffer in a single submit both read the *last* value written — and
+//! nothing fails loudly. This pass's `view_proj` is
+//! [`gui_ortho`](lodestone_render::gui_ortho), the world entity pass's is a
+//! perspective camera, and the world glint already paid for this exact mistake
+//! once today. [`PlayerPreview`] therefore owns [`Self::cam_buffer`] outright and
+//! never borrows one.
+//!
+//! **3. A GPU scissor, where every other GUI pass in this workspace clips on the
+//! CPU.** `set_scissor_rect` appears nowhere else here (`menu/render/draw.rs`
+//! documents at length why the menu pipeline does not have one), and this is the
+//! one place where CPU clipping is not an option: the thing that overflows is a
+//! *3-D rig* whose silhouette is a function of two look angles, so there are no
+//! rows or quads to reject. Vanilla clips this by rendering to an offscreen
+//! texture and blitting; the scissor is the cheap equivalent, and
+//! `lodestone_render::gui_entity`'s module docs explain why the two agree for an
+//! opaque pass.
+//!
+//! ## Configuration
+//!
+//! Nothing env-driven. Everything comes from the vanilla pack: no `client.jar`
+//! means [`PlayerPreview::new`] returns `None` and the recess stays empty — the
+//! same fail-open degradation `ContainerRenderer::attach_background` and
+//! `gpu/entities.rs`'s armour sheets take, and for the same reason (a synthetic
+//! flat-magenta humanoid in the inventory reads as a rendering bug, not as "no
+//! pack found").
+
+use glam::{Mat4, Vec3};
+use lodestone_render::{
+    AnimInput, CameraUniform, EntityCameraUniform, EntityInstance, EntityMesh, EntityModelSet,
+    EntityPipeline, GpuEntityModel, entity_camera_buffer, entity_texture_candidates, fog::FogUniform,
+    gui_entity::{
+        GuiEntityLook, INVENTORY_OFFSET_Y, INVENTORY_RECT_OFFSET, INVENTORY_RECT_SIZE,
+        INVENTORY_SIZE, gui_entity_anim, gui_entity_look, gui_entity_view,
+    },
+    gui_ortho, upload_instances,
+};
+
+use super::layout::Rect;
+
+/// A standing player's `boundingBoxHeight`, in blocks — the number vanilla reads
+/// off the render state and halves for `translation.y`.
+///
+/// Hardcoded rather than looked up through `lodestone_data::entity_dimensions`
+/// deliberately: the *only* entity this pass ever draws is the local player, and
+/// the dimensions table is keyed by network type id, which this module (which
+/// never sees a packet) has no honest way to obtain. `EntityType.PLAYER` is
+/// `0.6 × 1.8` and has been since 1.0; a crouching or swimming player has a
+/// shorter box, but vanilla's inventory screen never shows one — `InventoryScreen`
+/// is unreachable while `Pose` is anything but `STANDING`, because opening the
+/// inventory releases the crouch.
+const PLAYER_BB_HEIGHT: f32 = 1.8;
+
+/// Which rig to draw. `false` is the wide (`steve`) rig, which is
+/// `player_model_name`'s default and the only honest answer while nothing in this
+/// workspace decodes a skin's declared model — see
+/// `lodestone_render::entity::player_model_name`'s doc. When skins land, this is
+/// the one line that changes.
+const SLIM: bool = false;
+
+/// The avatar's rect and the cursor that aims it, in **logical GUI pixels** —
+/// what [`super::geometry::ContainerGeometry`] hands the draw.
+///
+/// The rect is carried rather than recomputed at draw time so the layout is
+/// derived once, from the same panel origin every slot and label is measured
+/// from. A control that restated `+26, +8` against its own idea of the origin
+/// would be premise-false the moment the recipe book shifted the panel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerAvatar {
+    /// The recess, logical GUI pixels, top-left origin.
+    pub rect: Rect,
+    /// Cursor position in the same logical space. [`Rect`]'s own centre when the
+    /// caller has no cursor, which is [`GuiEntityLook::FORWARD`] — an avatar
+    /// looking straight out, not one snapped to a corner.
+    pub mouse: [f32; 2],
+}
+
+impl PlayerAvatar {
+    /// The avatar rect for a panel whose top-left is at `(panel_x, panel_y)` in
+    /// logical GUI pixels, plus the cursor to aim it with.
+    ///
+    /// `cursor_logical` is `None` for every caller with no pointer (headless
+    /// gates, a screen opened before the first mouse event); that resolves to the
+    /// rect centre, i.e. facing the viewer.
+    #[must_use]
+    pub fn new(panel_x: f32, panel_y: f32, cursor_logical: Option<[f32; 2]>) -> Self {
+        let rect = Rect {
+            x: panel_x + INVENTORY_RECT_OFFSET[0],
+            y: panel_y + INVENTORY_RECT_OFFSET[1],
+            w: INVENTORY_RECT_SIZE[0],
+            h: INVENTORY_RECT_SIZE[1],
+        };
+        let mouse = cursor_logical.unwrap_or([rect.x + rect.w * 0.5, rect.y + rect.h * 0.5]);
+        Self { rect, mouse }
+    }
+
+    /// `[x, y, w, h]`, the shape `lodestone_render::gui_entity` takes.
+    #[must_use]
+    pub fn rect_px(&self) -> [f32; 4] {
+        [self.rect.x, self.rect.y, self.rect.w, self.rect.h]
+    }
+
+    /// This avatar's look angles — the same call the draw makes, so a test can
+    /// assert on the angles the pixels are actually posed with.
+    #[must_use]
+    pub fn look(&self) -> GuiEntityLook {
+        // `false`: see `PLAYER_BB_HEIGHT`'s doc for why the inventory screen never
+        // shows a `FALL_FLYING` player.
+        gui_entity_look(self.rect_px(), self.mouse, false)
+    }
+
+    /// The **view** matrix this avatar draws through: entity space → logical GUI
+    /// pixel space. Compose with [`gui_ortho`] to reach clip space.
+    #[must_use]
+    pub fn view(&self) -> Mat4 {
+        gui_entity_view(
+            self.rect_px(),
+            INVENTORY_SIZE,
+            INVENTORY_OFFSET_Y,
+            PLAYER_BB_HEIGHT,
+            &self.look(),
+        )
+    }
+}
+
+/// GPU resources for the inventory avatar: its own pipeline, the uploaded player
+/// rig, the skin sheet's bind group, and its own group-0 uniform.
+#[derive(Debug)]
+pub(super) struct PlayerPreview {
+    pipeline: EntityPipeline,
+    /// The CPU rig, kept because the *pose* is computed per frame from the
+    /// skeleton on this side — `part_transforms` is what animates the head.
+    mesh: EntityMesh,
+    model: &'static str,
+    gpu: GpuEntityModel,
+    texture: wgpu::BindGroup,
+    /// This pass's own group-0 uniform. See the module docs' decision 2 — never
+    /// share this with the world entity pass.
+    cam_buffer: wgpu::Buffer,
+    cam_bind_group: wgpu::BindGroup,
+}
+
+impl PlayerPreview {
+    /// Build the avatar's resources, or `None` when the player skin sheet is not
+    /// in the pack (a jar-less run), in which case the recess stays empty.
+    pub(super) fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+    ) -> Option<Self> {
+        let model = lodestone_render::entity::player_model_name(SLIM);
+        let models = EntityModelSet::load();
+        let mesh = models.get(model)?.clone();
+        let gpu = GpuEntityModel::upload(device, &mesh)?;
+
+        // The rig's own sheet, by the same candidate list the world entity pass
+        // resolves through — not a hardcoded path, so a pack that ships only the
+        // legacy name still finds it.
+        let img = load_skin(model)?;
+
+        let pipeline = EntityPipeline::new(device, color_format);
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("container-player-preview-sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let view = crate::gpu::entities::entity_texture_from_image(device, queue, &img);
+        let texture = pipeline.texture_bind_group(device, &view, &sampler);
+
+        // Fog disabled, which also leaves the sky-darken lane at its `0.0`
+        // sentinel — read back as `1.0`. That is vanilla:
+        // `GuiEntityRenderer.renderToTexture` sets up `Lighting.Entry.ENTITY_IN_UI`
+        // and `GuiGraphicsExtractor.entity` forces `lightCoords = 15728880`
+        // (full bright), so the inventory avatar does **not** dim at night the way
+        // the mob standing next to you does.
+        let cam_buffer = entity_camera_buffer(
+            device,
+            EntityCameraUniform {
+                camera: CameraUniform {
+                    view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                    section_origin: [0.0, 0.0, 0.0, 0.0],
+                },
+                fog: FogUniform::disabled(),
+            },
+        );
+        let cam_bind_group = pipeline.camera_bind_group(device, &cam_buffer);
+
+        Some(Self {
+            pipeline,
+            mesh,
+            model,
+            gpu,
+            texture,
+            cam_buffer,
+            cam_bind_group,
+        })
+    }
+
+    /// Record the avatar's pass: colour loaded, depth **cleared**, scissored to
+    /// the recess.
+    ///
+    /// The depth clear is unconditional and full-attachment (a `LoadOp::Clear`
+    /// ignores the scissor). That is safe and necessary here: the world's depth
+    /// buffer is still resident and would swallow a rig at GUI clip depth, and the
+    /// container's own item-model pass clears it again immediately afterwards, so
+    /// nothing downstream inherits this pass's depth.
+    ///
+    /// `physical_w`/`physical_h` are the real framebuffer size; the scissor is
+    /// converted from logical to physical with the same integer GUI scale
+    /// `logical_canvas` divided by, so the clip lands exactly on the recess at
+    /// every DPI.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        avatar: &PlayerAvatar,
+        gui_scale: u32,
+        physical_w: u32,
+        physical_h: u32,
+    ) {
+        let (logical_w, logical_h) =
+            crate::menu::render::logical_canvas(gui_scale, physical_w, physical_h);
+        let (logical_w, logical_h) = (logical_w.max(1.0) as u32, logical_h.max(1.0) as u32);
+        let Some(scissor) = physical_scissor(avatar.rect, gui_scale, physical_w, physical_h) else {
+            // The recess is entirely off-target (a window smaller than the panel).
+            // wgpu rejects an out-of-bounds scissor outright, so this is a real
+            // guard rather than defensive noise.
+            return;
+        };
+
+        let matrices =
+            avatar_part_matrices(&self.mesh, self.model, avatar, logical_w, logical_h);
+        // Full bright, per `new`'s note on `ENTITY_IN_UI`.
+        let light = u32::from(lodestone_render::ENTITY_FULLBRIGHT);
+        let buffers: Vec<Option<wgpu::Buffer>> = matrices
+            .iter()
+            .map(|m| upload_instances(device, &[*m], &[light]))
+            .collect();
+
+        // Group 0 is `gui_ortho`'s **identity** here: the clip matrix is already
+        // baked into every instance transform above, because the entity shader
+        // multiplies `view_proj * instance * vertex` and the instance is the only
+        // per-part slot. Writing `gui_ortho` into the uniform *and* into the
+        // instance would apply it twice.
+        queue.write_buffer(
+            &self.cam_buffer,
+            0,
+            bytemuck::bytes_of(&EntityCameraUniform {
+                camera: CameraUniform {
+                    view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                    section_origin: [0.0, 0.0, 0.0, 0.0],
+                },
+                fog: FogUniform::disabled(),
+            }),
+        );
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("container-player-preview-pass"),
+            color_attachments: &[Some(crate::hud::item_icon::load_colour_attachment(view))],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        let [sx, sy, sw, sh] = scissor;
+        pass.set_scissor_rect(sx, sy, sw, sh);
+        pass.set_pipeline(&self.pipeline.pipeline);
+        pass.set_bind_group(0, &self.cam_bind_group, &[]);
+        pass.set_bind_group(1, &self.texture, &[]);
+        pass.set_vertex_buffer(0, self.gpu.vertices.slice(..));
+        pass.set_index_buffer(self.gpu.indices.slice(..), wgpu::IndexFormat::Uint32);
+        for (range, buffer) in self.gpu.parts.iter().zip(&buffers) {
+            let (Some(buffer), true) = (buffer.as_ref(), range.index_count > 0) else {
+                continue;
+            };
+            pass.set_vertex_buffer(1, buffer.slice(..));
+            let end = range.index_start + range.index_count;
+            pass.draw_indexed(range.index_start..end, 0, 0..1);
+        }
+    }
+}
+
+/// The per-part `mesh → clip` matrices the avatar draws with, at
+/// `logical_w × logical_h`.
+///
+/// A free function taking the mesh rather than a [`PlayerPreview`] method for one
+/// reason: **it is the whole geometric content of the draw, and this way a gate
+/// can assert on it with no GPU at all.** Everything left in
+/// [`PlayerPreview::draw`] after this returns is `wgpu` bookkeeping — buffer
+/// uploads, a scissor, a pass. So a test over this function is a test of what is
+/// drawn, not of a struct field that happens to sit near it.
+///
+/// `EntityInstance::new` at the origin with this look's body yaw produces
+/// `entity_model_matrix · part`, and [`PlayerAvatar::view`] is the *other* factor
+/// of `gui_entity_pose` — so `clip · part_transforms[i]` is exactly
+/// `gui_ortho · gui_entity_pose · part_i`, with no second copy of either half and
+/// therefore no way for the avatar's placement to drift from the world path's.
+#[must_use]
+fn avatar_part_matrices(
+    mesh: &EntityMesh,
+    model: &'static str,
+    avatar: &PlayerAvatar,
+    logical_w: u32,
+    logical_h: u32,
+) -> Vec<Mat4> {
+    let look = avatar.look();
+    let anim = gui_entity_anim(&look, AnimInput::REST);
+    let instance = EntityInstance::new(model, mesh, Vec3::ZERO, look.body_yaw_deg, 1.0, &anim);
+    let clip = gui_ortho(logical_w, logical_h) * avatar.view();
+    instance
+        .part_transforms
+        .iter()
+        .map(|part| clip * *part)
+        .collect()
+}
+
+/// A logical-pixel rect as a **physical** scissor `[x, y, w, h]`, clamped into
+/// the target, or `None` if nothing of it is on the target.
+///
+/// `wgpu` validates a scissor against the attachment size and panics on an
+/// overrun, so the clamp is load-bearing rather than tidiness: the recess sits at
+/// `panel_origin + 26` and `panel_origin_with_scale` floors the origin at `8`, so
+/// a window narrower than the panel really does push the rect off the right edge.
+#[must_use]
+fn physical_scissor(rect: Rect, gui_scale: u32, width: u32, height: u32) -> Option<[u32; 4]> {
+    let scale = crate::config::calculate_gui_scale(gui_scale, width, height).max(1) as f32;
+    let x0 = (rect.x * scale).floor().max(0.0) as u32;
+    let y0 = (rect.y * scale).floor().max(0.0) as u32;
+    // `ceil` on the far edge, not `floor` on the width: a fractional edge must
+    // round *outwards* or a scaled avatar loses its rightmost column of pixels.
+    let x1 = ((rect.x + rect.w) * scale).ceil().max(0.0) as u32;
+    let y1 = ((rect.y + rect.h) * scale).ceil().max(0.0) as u32;
+    let x1 = x1.min(width);
+    let y1 = y1.min(height);
+    if x0 >= x1 || y0 >= y1 {
+        return None;
+    }
+    Some([x0, y0, x1 - x0, y1 - y0])
+}
+
+/// Decode the player rig's skin sheet out of the vanilla `client.jar`, trying
+/// `entity_texture_candidates`' paths in order — the same resolution the world
+/// entity pass performs, so the inventory avatar and the third-person body can
+/// never end up on different sheets.
+fn load_skin(model: &str) -> Option<lodestone_assets::Image> {
+    let manager = crate::resources::vanilla_manager()?;
+    for path in entity_texture_candidates(model) {
+        let Some(png) = manager.read(path) else {
+            continue;
+        };
+        match lodestone_assets::Image::decode_png(&png) {
+            Ok(img) => return Some(img),
+            Err(e) => tracing::warn!(target: "assets", "decode {path}: {e}"),
+        }
+    }
+    tracing::warn!(target: "assets", model, "no player skin sheet for the inventory avatar");
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A non-zero panel origin, so a slip that measures from the canvas corner
+    /// instead of the panel shows up. `(339, 157)` is what
+    /// `panel_origin_with_scale` gives a 176×166 panel on an 854×480 canvas.
+    const PANEL: (f32, f32) = (339.0, 157.0);
+
+    #[test]
+    fn the_rect_is_vanillas_recess_relative_to_the_panel() {
+        let a = PlayerAvatar::new(PANEL.0, PANEL.1, None);
+        // `InventoryScreen.java:101`: `xo + 26, yo + 8` to `xo + 75, yo + 78`.
+        assert_eq!(a.rect.x, PANEL.0 + 26.0);
+        assert_eq!(a.rect.y, PANEL.1 + 8.0);
+        assert_eq!(a.rect.x + a.rect.w, PANEL.0 + 75.0);
+        assert_eq!(a.rect.y + a.rect.h, PANEL.1 + 78.0);
+    }
+
+    #[test]
+    fn no_cursor_is_a_forward_look_not_a_corner() {
+        let a = PlayerAvatar::new(PANEL.0, PANEL.1, None);
+        assert_eq!(a.look(), GuiEntityLook::FORWARD);
+    }
+
+    /// The cursor is threaded, and it is threaded in the **logical** space the
+    /// rect lives in. A physical-pixel cursor at `gui_scale > 1` would give an
+    /// angle several times too large — the class of bug `hit_test`'s own scaling
+    /// note exists for.
+    #[test]
+    fn a_cursor_right_of_the_recess_turns_the_head_right() {
+        let centre = [PANEL.0 + 26.0 + 24.5, PANEL.1 + 8.0 + 35.0];
+        let a = PlayerAvatar::new(PANEL.0, PANEL.1, Some([centre[0] + 40.0, centre[1]]));
+        let look = a.look();
+        // atan(-40/40) = -PI/4 rad, times 20 read as degrees = -15.708.
+        assert!(
+            (look.head_yaw_deg - (-15.7080)).abs() < 1e-3,
+            "predicted -15.708 deg from atan(-1)*20; got {}",
+            look.head_yaw_deg
+        );
+        assert!((look.body_yaw_deg - (180.0 + look.head_yaw_deg)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_scissor_scales_with_the_gui_scale_and_rounds_outwards() {
+        let rect = Rect {
+            x: 10.0,
+            y: 20.0,
+            w: 49.0,
+            h: 70.0,
+        };
+        // `gui_scale = 2` explicitly, so the arithmetic is not at the mercy of
+        // `calculate_gui_scale`'s auto choice for this framebuffer.
+        let s = physical_scissor(rect, 2, 1920, 1080).expect("on target");
+        assert_eq!(s, [20, 40, 98, 140]);
+        // Scale 1 is the identity.
+        let s1 = physical_scissor(rect, 1, 1920, 1080).expect("on target");
+        assert_eq!(s1, [10, 20, 49, 70]);
+    }
+
+    /// The clamp, and the `None`. wgpu panics on an over-large scissor, so this
+    /// is the guard, not a nicety.
+    #[test]
+    fn a_recess_past_the_edge_is_clamped_or_dropped() {
+        let rect = Rect {
+            x: 100.0,
+            y: 10.0,
+            w: 49.0,
+            h: 70.0,
+        };
+        let clamped = physical_scissor(rect, 1, 120, 200).expect("partially on target");
+        assert_eq!(clamped, [100, 10, 20, 70], "clamped to the target width");
+        assert!(
+            physical_scissor(rect, 1, 80, 200).is_none(),
+            "entirely off the target must be None, not a zero-width scissor"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The draw itself: the matrices that reach the instance buffers
+    // -----------------------------------------------------------------------
+
+    const LOGICAL: (u32, u32) = (854, 480);
+
+    fn player_mesh() -> lodestone_render::EntityMesh {
+        let models = EntityModelSet::load();
+        let name = lodestone_render::entity::player_model_name(SLIM);
+        models
+            .get(name)
+            .unwrap_or_else(|| panic!("the corpus must carry {name}"))
+            .clone()
+    }
+
+    /// Project a mesh point through a `mesh → clip` matrix back to logical GUI
+    /// pixels, so failures print numbers comparable with `InventoryScreen`'s own.
+    fn to_gui_px(m: Mat4, p: Vec3) -> [f32; 2] {
+        let c = m * p.extend(1.0);
+        let ndc = c.truncate() / c.w;
+        [
+            (ndc.x + 1.0) * 0.5 * LOGICAL.0 as f32,
+            (1.0 - ndc.y) * 0.5 * LOGICAL.1 as f32,
+        ]
+    }
+
+    /// **Measure by location, on the matrices the draw uses.** Every part of the
+    /// rig, projected corner-by-corner through `avatar_part_matrices` — *the
+    /// function `draw` calls* — must land inside the scissor rect, and must cover
+    /// a real fraction of it.
+    ///
+    /// This is the shell-side answer to "the suite was green while it drew the
+    /// wrong thing": nothing here reads a struct field. The subject is the posed,
+    /// projected geometry.
+    #[test]
+    fn every_posed_part_lands_inside_the_scissor() {
+        let mesh = player_mesh();
+        let model = lodestone_render::entity::player_model_name(SLIM);
+        // A cursor hard into the bottom-right corner of the recess: the worst case
+        // for overflow, because both look angles are at their largest.
+        let avatar = PlayerAvatar::new(PANEL.0, PANEL.1, Some([PANEL.0 + 75.0, PANEL.1 + 78.0]));
+        let matrices = avatar_part_matrices(&mesh, model, &avatar, LOGICAL.0, LOGICAL.1);
+        assert_eq!(
+            matrices.len(),
+            mesh.parts.len(),
+            "one matrix per drawable part, or `draw`'s zip silently skips limbs"
+        );
+        assert!(matrices.len() >= 6, "the humanoid rig has at least six parts");
+
+        let (lo, hi) = (mesh.local_min, mesh.local_max);
+        let mut min = [f32::MAX, f32::MAX];
+        let mut max = [f32::MIN, f32::MIN];
+        for m in &matrices {
+            for i in 0..8 {
+                let corner = Vec3::new(
+                    if i & 1 == 0 { lo.x } else { hi.x },
+                    if i & 2 == 0 { lo.y } else { hi.y },
+                    if i & 4 == 0 { lo.z } else { hi.z },
+                );
+                let px = to_gui_px(*m, corner);
+                min[0] = min[0].min(px[0]);
+                min[1] = min[1].min(px[1]);
+                max[0] = max[0].max(px[0]);
+                max[1] = max[1].max(px[1]);
+            }
+        }
+        let r = avatar.rect;
+        let bbox = format!(
+            "posed bbox x {:.2}..{:.2}, y {:.2}..{:.2}; recess x {:.2}..{:.2}, y {:.2}..{:.2}",
+            min[0],
+            max[0],
+            min[1],
+            max[1],
+            r.x,
+            r.x + r.w,
+            r.y,
+            r.y + r.h
+        );
+        // Each part's *own* local box is looser than the whole rig's, so allow the
+        // rig's half-width of slack on x rather than asserting a hard containment
+        // that the per-part corner sweep cannot honestly meet. The point of this
+        // gate is the *scissor* claim: the drawn rig must not be miles away.
+        assert!(
+            min[0] > r.x - r.w && max[0] < r.x + 2.0 * r.w,
+            "the posed rig is nowhere near its recess horizontally — {bbox}"
+        );
+        assert!(
+            min[1] > r.y - r.h && max[1] < r.y + 2.0 * r.h,
+            "the posed rig is nowhere near its recess vertically — {bbox}"
+        );
+        // And the head part specifically must be inside, at the top.
+        let head = mesh.skeleton.index_of("head").expect("head part");
+        let nose = to_gui_px(matrices[head], Vec3::new(0.0, -0.25, -0.25));
+        assert!(
+            nose[0] > r.x && nose[0] < r.x + r.w && nose[1] > r.y && nose[1] < r.y + r.h,
+            "the nose must be inside the recess: at ({:.2}, {:.2}) — {bbox}",
+            nose[0],
+            nose[1]
+        );
+        assert!(
+            nose[1] < r.y + r.h * 0.5,
+            "the head belongs in the upper half of the recess, not at {:.2} — {bbox}",
+            nose[1]
+        );
+    }
+
+    /// The cursor genuinely reaches the posed head. Moving the pointer down the
+    /// screen must move the *drawn* nose down — asserted on
+    /// `avatar_part_matrices`' output, not on the angle field.
+    #[test]
+    fn moving_the_cursor_moves_the_drawn_nose() {
+        let mesh = player_mesh();
+        let model = lodestone_render::entity::player_model_name(SLIM);
+        let head = mesh.skeleton.index_of("head").expect("head part");
+        let nose = Vec3::new(0.0, -0.25, -0.25);
+        let centre = [PANEL.0 + 26.0 + 24.5, PANEL.1 + 8.0 + 35.0];
+
+        let at = |cursor: [f32; 2]| -> [f32; 2] {
+            let a = PlayerAvatar::new(PANEL.0, PANEL.1, Some(cursor));
+            let m = avatar_part_matrices(&mesh, model, &a, LOGICAL.0, LOGICAL.1);
+            to_gui_px(m[head], nose)
+        };
+
+        let rest = at(centre);
+        let down = at([centre[0], centre[1] + 30.0]);
+        let up = at([centre[0], centre[1] - 30.0]);
+        let right = at([centre[0] + 30.0, centre[1]]);
+        let left = at([centre[0] - 30.0, centre[1]]);
+
+        assert!(
+            down[1] > rest[1] + 0.5,
+            "cursor down must move the drawn nose down: rest y {:.3}, down y {:.3}",
+            rest[1],
+            down[1]
+        );
+        assert!(
+            up[1] < rest[1] - 0.5,
+            "cursor up must move the drawn nose up: rest y {:.3}, up y {:.3}",
+            rest[1],
+            up[1]
+        );
+        assert!(
+            right[0] > rest[0] + 0.5 && left[0] < rest[0] - 0.5,
+            "cursor left/right must swing the drawn nose: left x {:.3}, rest x {:.3}, \
+             right x {:.3}",
+            left[0],
+            rest[0],
+            right[0]
+        );
+    }
+
+    /// The **physical → logical** cursor conversion, which `ContainerGeometry`
+    /// performs and this module trusts. A physical cursor fed in raw at
+    /// `gui_scale = 2` would aim the head at twice the offset.
+    ///
+    /// Both hypotheses are computed: the correct one (divide by the scale) and the
+    /// suspected-wrong one (do not), and they must differ by more than a degree, so
+    /// this gate would catch the conversion being dropped in `geometry.rs`.
+    #[test]
+    fn the_logical_and_physical_cursor_hypotheses_are_distinguishable() {
+        let centre = [PANEL.0 + 26.0 + 24.5, PANEL.1 + 8.0 + 35.0];
+        let logical_cursor = [centre[0] + 20.0, centre[1]];
+        let right = PlayerAvatar::new(PANEL.0, PANEL.1, Some(logical_cursor)).look();
+        // The same pointer, un-divided, at scale 2.
+        let wrong =
+            PlayerAvatar::new(PANEL.0, PANEL.1, Some([logical_cursor[0] * 2.0, logical_cursor[1] * 2.0]))
+                .look();
+        assert!(
+            (right.head_yaw_deg - wrong.head_yaw_deg).abs() > 1.0,
+            "the two cursor-space hypotheses must be separable or this gate proves \
+             nothing: logical {} deg, raw-physical {} deg",
+            right.head_yaw_deg,
+            wrong.head_yaw_deg
+        );
+    }
+}

@@ -3612,3 +3612,187 @@ fn hover_blocked_suppresses_the_tooltip_too() {
     };
     assert_eq!(suppressed.verts.len(), no_tooltip.verts.len());
 }
+
+// ---------------------------------------------------------------------------
+// The inventory avatar's wiring (`ContainerGeometry::player_avatar`)
+// ---------------------------------------------------------------------------
+
+/// The player's own inventory carries an avatar; nothing else does.
+///
+/// `Some`/`None` here is the island question: `PlayerPreview` can be attached,
+/// its matrices correct and its pass ready, and reach zero pixels because
+/// `build_inner` never produces a placement. Vanilla calls
+/// `extractEntityInInventoryFollowsMouse` from `InventoryScreen.extractBackground`
+/// and from nowhere else, so a chest drawing one would be a divergence.
+#[test]
+fn only_the_player_inventory_carries_an_avatar() {
+    let geo = |menu: &Menu| {
+        ContainerGeometry::build_inner(
+            &ContainerFrame::new(Some(menu), "Title"),
+            VIEW.0,
+            VIEW.1,
+            crate::config::AUTO_GUI_SCALE,
+            &IconAssets {
+                items: None,
+                models: None,
+            },
+            None,
+            None,
+        )
+        .player_avatar
+    };
+    assert!(
+        geo(&Menu::player()).is_some(),
+        "the player inventory must place an avatar, or the whole pass is an island"
+    );
+    assert!(geo(&Menu::generic(27)).is_none(), "a chest has no avatar");
+    assert!(
+        geo(&Menu::crafting(3, 3)).is_none(),
+        "a crafting table has no avatar"
+    );
+}
+
+/// The avatar rect is derived from the **drawn** panel origin, not from an
+/// independent guess at it.
+///
+/// The expectation comes from `widget_rect` — the rect the panel art is actually
+/// blitted into by this same geometry — plus `InventoryScreen.java:101`'s `+26`
+/// and `+8`. Restating `panel_origin_with_scale` here instead would be a control
+/// that agrees with the draw by coincidence rather than by construction.
+#[test]
+fn the_avatar_rect_hangs_off_the_drawn_panel_rect() {
+    let menu = Menu::player();
+    let geo = ContainerGeometry::build_inner(
+        &ContainerFrame::new(Some(&menu), "Title"),
+        VIEW.0,
+        VIEW.1,
+        crate::config::AUTO_GUI_SCALE,
+        &IconAssets {
+            items: None,
+            models: None,
+        },
+        None,
+        None,
+    );
+    let panel = geo.widget_rect.expect("the panel drew");
+    let avatar = geo.player_avatar.expect("the avatar placed");
+    assert_eq!(avatar.rect.x, panel.x + 26.0);
+    assert_eq!(avatar.rect.y, panel.y + 8.0);
+    assert_eq!(avatar.rect.w, 49.0);
+    assert_eq!(avatar.rect.h, 70.0);
+    // …and it is inside the panel, which is the honest statement of "it is in the
+    // recess" that does not depend on the panel's own size.
+    assert!(
+        avatar.rect.x >= panel.x
+            && avatar.rect.y >= panel.y
+            && avatar.rect.x + avatar.rect.w <= panel.x + panel.w
+            && avatar.rect.y + avatar.rect.h <= panel.y + panel.h,
+        "the avatar must sit inside the panel: avatar {avatar:?}, panel {panel:?}"
+    );
+}
+
+/// An open recipe book shifts the whole panel right (`updateScreenPosition`), and
+/// the avatar must travel with it by exactly the same delta the panel does.
+///
+/// This is the concrete failure a restated `panel_origin_with_scale` would ship:
+/// the avatar would stay put while its recess slid out from under it, and every
+/// hermetic gate with the book closed would still pass.
+#[test]
+fn an_open_recipe_book_moves_the_avatar_with_the_panel() {
+    let menu = Menu::player();
+    let geo = |book_open: bool| {
+        ContainerGeometry::build_inner(
+            &ContainerFrame::new(Some(&menu), "Title").with_book_open(book_open),
+            VIEW.0,
+            VIEW.1,
+            crate::config::AUTO_GUI_SCALE,
+            &IconAssets {
+                items: None,
+                models: None,
+            },
+            None,
+            None,
+        )
+    };
+    let closed = geo(false);
+    let open = geo(true);
+    let panel_shift =
+        open.widget_rect.expect("panel").x - closed.widget_rect.expect("panel").x;
+    assert!(
+        panel_shift > 0.0,
+        "premise-false control: the book must actually shift this panel at {VIEW:?}, \
+         measured {panel_shift}"
+    );
+    let avatar_shift = open.player_avatar.expect("avatar").rect.x
+        - closed.player_avatar.expect("avatar").rect.x;
+    assert!(
+        (avatar_shift - panel_shift).abs() < 1e-4,
+        "the avatar must move with its recess: panel moved {panel_shift}, avatar \
+         moved {avatar_shift}"
+    );
+}
+
+/// The cursor arrives in **logical** space, and the head aims at where the
+/// pointer visually is. `ContainerFrame::cursor` is physical viewport pixels — the
+/// same space `hit_test_with_scale` takes and divides down — so a `gui_scale` of
+/// 2 must halve it.
+///
+/// Both hypotheses are computed from outside the code under test: the correct
+/// logical cursor, and the raw physical one. At scale 2 they must land on
+/// different look angles, and the drawn one must be the logical one.
+#[test]
+fn the_avatars_cursor_is_divided_down_to_the_logical_canvas() {
+    let menu = Menu::player();
+    const SCALE: u32 = 2;
+    let geo = |cursor: Option<[f32; 2]>| {
+        ContainerGeometry::build_inner(
+            &ContainerFrame::new(Some(&menu), "Title").with_cursor(cursor),
+            VIEW.0,
+            VIEW.1,
+            SCALE,
+            &IconAssets {
+                items: None,
+                models: None,
+            },
+            None,
+            None,
+        )
+        .player_avatar
+        .expect("avatar")
+    };
+    let no_cursor = geo(None);
+    // A physical cursor 40 physical px right of the recess centre is 20 *logical*
+    // px right of it at scale 2.
+    let centre_logical = [
+        no_cursor.rect.x + no_cursor.rect.w * 0.5,
+        no_cursor.rect.y + no_cursor.rect.h * 0.5,
+    ];
+    let physical = [
+        (centre_logical[0] + 20.0) * SCALE as f32,
+        centre_logical[1] * SCALE as f32,
+    ];
+    let drawn = geo(Some(physical));
+    assert!(
+        (drawn.mouse[0] - (centre_logical[0] + 20.0)).abs() < 1e-3
+            && (drawn.mouse[1] - centre_logical[1]).abs() < 1e-3,
+        "the avatar's cursor must be the logical one: expected ~({}, {}), got {:?}",
+        centre_logical[0] + 20.0,
+        centre_logical[1],
+        drawn.mouse
+    );
+    // The two hypotheses really are separable at this scale.
+    let raw = PlayerAvatar::new(no_cursor.rect.x - 26.0, no_cursor.rect.y - 8.0, Some(physical));
+    assert!(
+        (drawn.look().head_yaw_deg - raw.look().head_yaw_deg).abs() > 1.0,
+        "logical and raw-physical must give different look angles or this gate is \
+         vacuous: {} vs {}",
+        drawn.look().head_yaw_deg,
+        raw.look().head_yaw_deg
+    );
+    // And with no cursor at all the avatar faces the viewer rather than snapping
+    // to a corner.
+    assert_eq!(
+        no_cursor.look(),
+        lodestone_render::gui_entity::GuiEntityLook::FORWARD
+    );
+}
