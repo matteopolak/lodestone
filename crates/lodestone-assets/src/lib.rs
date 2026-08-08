@@ -99,6 +99,7 @@ pub mod particle;
 pub mod particle_atlas;
 mod profile;
 pub mod screen_effects;
+pub mod skin;
 pub mod sky;
 pub mod sound;
 mod source;
@@ -153,6 +154,7 @@ pub use screen_effects::{
     load_nausea_overlay_texture, load_portal_overlay_texture, load_pumpkin_overlay_texture,
     load_spyglass_scope_texture, load_underwater_texture,
 };
+pub use skin::{PlayerModelType, ProfileTextures, SkinTexture, SkinTextureError, decode_textures_property};
 pub use sky::{CelestialAtlas, MOON_PHASE_NAMES, SUN_SPRITE_PATH, load_cloud_texture};
 #[cfg(not(target_arch = "wasm32"))]
 pub use source::DirectorySource;

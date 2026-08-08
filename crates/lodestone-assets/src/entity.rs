@@ -837,18 +837,38 @@ pub fn player_model(slim: bool) -> EntityModelDef {
         );
     root = root.with_child("body", body);
 
-    // Arms differ between wide and slim.
+    // Arms differ between wide and slim — in **two** numbers, not one.
+    //
+    // `PlayerModel.createMesh` (26.2,
+    // `.cache/mc/26.2/client-src/net/minecraft/client/model/player/PlayerModel.java:43-71`)
+    // replaces the arms wholesale rather than narrowing them in place:
+    //
+    // ```text
+    // slim  right_arm: addBox(-2, -2, -2, 3, 12, 4)   left_arm: addBox(-1, -2, -2, 3, 12, 4)
+    // wide  right_arm: addBox(-3, -2, -2, 4, 12, 4)   left_arm: addBox(-1, -2, -2, 4, 12, 4)
+    //       ^ from HumanoidModel.createMesh:101
+    // ```
+    //
+    // The **left** arm keeps origin `-1` in both, so narrowing alone is right
+    // there. The **right** arm's origin moves with the width, because the edge
+    // that must stay put is the one against the body (`origin + width == +1`
+    // relative to the pivot in both cases) — and this port had `-3` for both,
+    // which put the slim right arm a pixel out from the shoulder with a
+    // one-pixel gap beside the body. It was invisible until the slim rig became
+    // reachable at all (#62): nothing in this workspace ever selected it.
     let arm_w = if slim { 3.0 } else { 4.0 };
+    let right_arm_x = 1.0 - arm_w;
     let right_arm = PartDef::new(PartPose::offset(-5.0, 2.0, 0.0))
         .with_cube(CubeDef::new(
-            [-3.0, -2.0, -2.0],
+            [right_arm_x, -2.0, -2.0],
             [arm_w, 12.0, 4.0],
             [40.0, 16.0],
         ))
         .with_child(
             "right_sleeve",
             PartDef::new(PartPose::ZERO).with_cube(
-                CubeDef::new([-3.0, -2.0, -2.0], [arm_w, 12.0, 4.0], [40.0, 32.0]).grown(0.25),
+                CubeDef::new([right_arm_x, -2.0, -2.0], [arm_w, 12.0, 4.0], [40.0, 32.0])
+                    .grown(0.25),
             ),
         );
     let left_arm = PartDef::new(PartPose::offset(5.0, 2.0, 0.0))
@@ -898,5 +918,83 @@ pub fn player_model(slim: bool) -> EntityModelDef {
         texture_width: 64,
         texture_height: 64,
         root,
+    }
+}
+
+#[cfg(test)]
+mod player_model_tests {
+    use super::*;
+
+    /// Finds a named descendant part, depth-first.
+    fn part<'a>(root: &'a PartDef, name: &str) -> Option<&'a PartDef> {
+        for (n, child) in &root.children {
+            if n == name {
+                return Some(child);
+            }
+            if let Some(found) = part(child, name) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// Every arm box in **both** rigs, against `PlayerModel.createMesh`'s own
+    /// literals (26.2,
+    /// `client-src/net/minecraft/client/model/player/PlayerModel.java:43-71`,
+    /// with the wide right arm coming from `HumanoidModel.createMesh:101`).
+    ///
+    /// The load-bearing row is the **slim right arm's origin, `-2` and not
+    /// `-3`**: the left arm keeps origin `-1` in both rigs, so "slim just
+    /// narrows the arms" is true of the left and false of the right, and the
+    /// wrong version put the slim right arm a pixel outboard with a gap at the
+    /// shoulder. This table is transcribed from the jar, not derived from the
+    /// implementation, so `right_arm_x = 1.0 - arm_w` is checked against
+    /// vanilla's two independent literals rather than against itself.
+    #[test]
+    fn both_player_rigs_arms_match_the_vanilla_mesh_definition() {
+        for (slim, want_w, want_right_x) in [(false, 4.0_f32, -3.0_f32), (true, 3.0, -2.0)] {
+            let def = player_model(slim);
+            let checks: [(&str, f32); 4] = [
+                ("right_arm", want_right_x),
+                ("right_sleeve", want_right_x),
+                // The left arm's origin does **not** move with the width.
+                ("left_arm", -1.0),
+                ("left_sleeve", -1.0),
+            ];
+            for (name, want_x) in checks {
+                let p = part(&def.root, name).unwrap_or_else(|| panic!("{name} missing"));
+                let cube = p.cubes.first().unwrap_or_else(|| panic!("{name} has no cube"));
+                assert!(
+                    (cube.origin[0] - want_x).abs() < 1e-6,
+                    "slim={slim} {name} origin.x is {} but vanilla says {want_x}",
+                    cube.origin[0]
+                );
+                assert!(
+                    (cube.size[0] - want_w).abs() < 1e-6,
+                    "slim={slim} {name} width is {} but vanilla says {want_w}",
+                    cube.size[0]
+                );
+                // The edge against the body is the invariant behind the moving
+                // origin: for the right arm it is `origin + width == +1`, and it
+                // must hold for both rigs. This is the *reason* the two literals
+                // above differ, asserted rather than left as a comment.
+                if name.starts_with("right") {
+                    assert!(
+                        (cube.origin[0] + cube.size[0] - 1.0).abs() < 1e-6,
+                        "slim={slim} {name}'s inner edge moved off +1"
+                    );
+                }
+            }
+            // Legs and body never differ between the rigs — the control on the
+            // branch's scope, so a future edit cannot narrow something else too.
+            for name in ["right_leg", "left_leg", "body", "head"] {
+                let p = part(&def.root, name).unwrap_or_else(|| panic!("{name} missing"));
+                let cube = p.cubes.first().unwrap();
+                let wide = player_model(false);
+                let other = part(&wide.root, name).unwrap().cubes[0].clone();
+                assert_eq!(cube.origin, other.origin, "{name} origin differs by rig");
+                assert_eq!(cube.size, other.size, "{name} size differs by rig");
+            }
+        }
     }
 }

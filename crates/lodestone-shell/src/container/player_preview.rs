@@ -64,6 +64,8 @@ use lodestone_render::{
     gui_ortho, upload_instances,
 };
 
+use lodestone_assets::PlayerModelType;
+
 use super::layout::Rect;
 
 /// A standing player's `boundingBoxHeight`, in blocks — the number vanilla reads
@@ -79,12 +81,55 @@ use super::layout::Rect;
 /// inventory releases the crouch.
 const PLAYER_BB_HEIGHT: f32 = 1.8;
 
-/// Which rig to draw. `false` is the wide (`steve`) rig, which is
-/// `player_model_name`'s default and the only honest answer while nothing in this
-/// workspace decodes a skin's declared model — see
-/// `lodestone_render::entity::player_model_name`'s doc. When skins land, this is
-/// the one line that changes.
-const SLIM: bool = false;
+/// The rig to draw when nothing declares one — vanilla's own fallback, since
+/// `PlayerModelType::byLegacyServicesName` resolves every absent or
+/// unrecognised declaration to `WIDE` (see
+/// [`lodestone_assets::PlayerModelType`]).
+///
+/// **This used to be a `const SLIM: bool = false` with a note saying "when
+/// skins land, this is the one line that changes".** It has changed: the model
+/// is now a runtime [`PlayerModelType`], settable through
+/// [`PlayerPreview::set_skin`], and both rigs are reachable. What is still
+/// missing is only the *fetch* — see this module's `local_skin_override` and
+/// `docs/player-skins.md`.
+const DEFAULT_MODEL: PlayerModelType = PlayerModelType::Wide;
+
+/// The interim local skin: `<data_dir>/skin.png`, with an optional sibling
+/// `<data_dir>/skin.model` naming the rig.
+///
+/// This exists so the model switch is not an island. Nothing in this workspace
+/// fetches a skin yet (`lodestone-auth`'s `fetch_profile` reads only `id` and
+/// `name` off `api.minecraftservices.com/minecraft/profile`, discarding its
+/// `skins` array, and `v770`'s `read_add_player` discards the `textures`
+/// property outright — both outside this cluster), so without a local source
+/// `set_skin` would have zero callers and the slim rig would be unreachable
+/// dead code, which is the dominant defect class in this repo.
+///
+/// The marker file holds a **legacy services id** — `slim` or `default`, the
+/// spelling that appears in a real `textures` payload — and is parsed by the
+/// very same [`PlayerModelType::by_legacy_services_name`] the network path will
+/// use, rather than a second bespoke parse that could disagree with it. An
+/// absent, unreadable or unrecognised marker is wide, exactly as an absent
+/// `metadata.model` is.
+fn local_skin_override() -> Option<(PlayerModelType, lodestone_assets::Image)> {
+    let dir = lodestone_auth::paths::data_dir();
+    let png = std::fs::read(dir.join("skin.png")).ok()?;
+    let img = match lodestone_assets::Image::decode_png(&png) {
+        Ok(img) => img,
+        Err(e) => {
+            tracing::warn!(target: "assets", "local skin.png did not decode: {e}");
+            return None;
+        }
+    };
+    let declared = std::fs::read_to_string(dir.join("skin.model")).ok();
+    let model = PlayerModelType::by_legacy_services_name(declared.as_deref().map(str::trim));
+    tracing::info!(
+        target: "assets",
+        model = model.serialized_name(),
+        "using the local skin override for the inventory avatar"
+    );
+    Some((model, img))
+}
 
 /// The avatar's rect and the cursor that aims it, in **logical GUI pixels** —
 /// what [`super::geometry::ContainerGeometry`] hands the draw.
@@ -160,8 +205,15 @@ pub(super) struct PlayerPreview {
     /// skeleton on this side — `part_transforms` is what animates the head.
     mesh: EntityMesh,
     model: &'static str,
+    /// The declared rig, kept so a gate can assert *which* skin is bound rather
+    /// than only that one is — the same reason
+    /// [`super::ContainerRenderer::player_preview_attached`] exists.
+    skin_model: PlayerModelType,
     gpu: GpuEntityModel,
     texture: wgpu::BindGroup,
+    /// Kept so [`Self::set_skin`] can re-bind a new sheet without rebuilding
+    /// the pipeline.
+    sampler: wgpu::Sampler,
     /// This pass's own group-0 uniform. See the module docs' decision 2 — never
     /// share this with the world entity pass.
     cam_buffer: wgpu::Buffer,
@@ -176,15 +228,25 @@ impl PlayerPreview {
         queue: &wgpu::Queue,
         color_format: wgpu::TextureFormat,
     ) -> Option<Self> {
-        let model = lodestone_render::entity::player_model_name(SLIM);
+        // A local skin override, if the user has dropped one in the data
+        // directory; otherwise the pack's own sheet for the default rig.
+        let (skin_model, supplied) = match local_skin_override() {
+            Some((m, img)) => (m, Some(img)),
+            None => (DEFAULT_MODEL, None),
+        };
+        let model = lodestone_render::entity::player_model_name(skin_model.is_slim());
         let models = EntityModelSet::load();
         let mesh = models.get(model)?.clone();
         let gpu = GpuEntityModel::upload(device, &mesh)?;
 
         // The rig's own sheet, by the same candidate list the world entity pass
         // resolves through — not a hardcoded path, so a pack that ships only the
-        // legacy name still finds it.
-        let img = load_skin(model)?;
+        // legacy name still finds it. A supplied sheet wins; a jar-less run with
+        // no supplied sheet is the `None` that leaves the recess empty.
+        let img = match supplied {
+            Some(img) => img,
+            None => load_skin(model)?,
+        };
 
         let pipeline = EntityPipeline::new(device, color_format);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -218,11 +280,74 @@ impl PlayerPreview {
             pipeline,
             mesh,
             model,
+            skin_model,
             gpu,
             texture,
+            sampler,
             cam_buffer,
             cam_bind_group,
         })
+    }
+
+    /// The rig currently bound. `Wide` until something declares otherwise.
+    #[must_use]
+    pub(super) fn skin_model(&self) -> PlayerModelType {
+        self.skin_model
+    }
+
+    /// Bind a different skin: a declared rig and, optionally, a sheet to draw it
+    /// with. `sheet: None` falls back to the pack's own sheet for that rig, so
+    /// `set_skin(.., Slim, None)` draws Alex out of the jar.
+    ///
+    /// **This is the seam the network fetch lands against.** Both halves are
+    /// swapped together on purpose: a sheet authored for the slim rig drawn on
+    /// the wide one puts the arm UVs one pixel out, which reads as a texture bug
+    /// rather than as a model bug and is exactly the failure a "just change the
+    /// texture" API invites.
+    ///
+    /// Returns `false` and leaves the avatar untouched when the rig or its sheet
+    /// cannot be resolved — never a half-applied state where the mesh is slim
+    /// and the sheet is wide.
+    pub(super) fn set_skin(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        model: PlayerModelType,
+        sheet: Option<&lodestone_assets::Image>,
+    ) -> bool {
+        let name = lodestone_render::entity::player_model_name(model.is_slim());
+        let owned;
+        let img = match sheet {
+            Some(img) => img,
+            None => {
+                owned = load_skin(name);
+                match owned.as_ref() {
+                    Some(img) => img,
+                    None => return false,
+                }
+            }
+        };
+        // Only reload the rig when the model actually changed: a skin *change*
+        // on the same rig (the common case — a player edits their skin, not
+        // their model) must not re-bake the whole corpus.
+        if name != self.model {
+            let models = EntityModelSet::load();
+            let Some(mesh) = models.get(name).cloned() else {
+                return false;
+            };
+            let Some(gpu) = GpuEntityModel::upload(device, &mesh) else {
+                return false;
+            };
+            self.mesh = mesh;
+            self.gpu = gpu;
+            self.model = name;
+        }
+        let view = crate::gpu::entities::entity_texture_from_image(device, queue, img);
+        self.texture = self
+            .pipeline
+            .texture_bind_group(device, &view, &self.sampler);
+        self.skin_model = model;
+        true
     }
 
     /// Record the avatar's pass: colour loaded, depth **cleared**, scissored to
@@ -483,7 +608,7 @@ mod tests {
 
     fn player_mesh() -> lodestone_render::EntityMesh {
         let models = EntityModelSet::load();
-        let name = lodestone_render::entity::player_model_name(SLIM);
+        let name = lodestone_render::entity::player_model_name(DEFAULT_MODEL.is_slim());
         models
             .get(name)
             .unwrap_or_else(|| panic!("the corpus must carry {name}"))
@@ -512,7 +637,7 @@ mod tests {
     #[test]
     fn every_posed_part_lands_inside_the_scissor() {
         let mesh = player_mesh();
-        let model = lodestone_render::entity::player_model_name(SLIM);
+        let model = lodestone_render::entity::player_model_name(DEFAULT_MODEL.is_slim());
         // A cursor hard into the bottom-right corner of the recess: the worst case
         // for overflow, because both look angles are at their largest.
         let avatar = PlayerAvatar::new(PANEL.0, PANEL.1, Some([PANEL.0 + 75.0, PANEL.1 + 78.0]));
@@ -587,7 +712,7 @@ mod tests {
     #[test]
     fn moving_the_cursor_moves_the_drawn_nose() {
         let mesh = player_mesh();
-        let model = lodestone_render::entity::player_model_name(SLIM);
+        let model = lodestone_render::entity::player_model_name(DEFAULT_MODEL.is_slim());
         let head = mesh.skeleton.index_of("head").expect("head part");
         let nose = Vec3::new(0.0, -0.25, -0.25);
         let centre = [PANEL.0 + 26.0 + 24.5, PANEL.1 + 8.0 + 35.0];
@@ -624,6 +749,153 @@ mod tests {
             rest[0],
             right[0]
         );
+    }
+
+    /// Every clip-space vertex of one rig, through the **real** composed draw
+    /// matrices — `avatar_part_matrices` is the whole geometric content of the
+    /// pass, so this is an assertion on the draw and not on a struct field.
+    fn clip_positions(model: &'static str, avatar: &PlayerAvatar) -> Vec<Vec3> {
+        let models = EntityModelSet::load();
+        let mesh = models.get(model).expect("a baked player rig");
+        let matrices = avatar_part_matrices(mesh, model, avatar, 854, 480);
+        let mut out = Vec::new();
+        for (range, m) in mesh.parts.iter().zip(&matrices) {
+            let start = range.vertex_start as usize;
+            let end = start + range.vertex_count as usize;
+            for v in &mesh.vertices[start..end] {
+                out.push(m.project_point3(Vec3::from_array(v.position)));
+            }
+        }
+        out
+    }
+
+    /// **The slim rig really does draw narrower, by exactly one model texel.**
+    ///
+    /// `PlayerPreview::set_skin` swapping the model would be indistinguishable
+    /// from a no-op through any vertex *count* or bind-group check — both rigs
+    /// have the same part list, the same skeleton, and (because
+    /// `player_model`'s only difference is the arm boxes) **identical part
+    /// matrices**. So the measurement has to be on the geometry, and it has to
+    /// be a magnitude: the predicted span change is one texel of arm width,
+    /// `1/16` block, times `INVENTORY_SIZE` GUI pixels per block, mapped into
+    /// NDC by `gui_ortho`'s `2 / width`. Both hypotheses are computed — the
+    /// correct delta and the no-op `0` — and the measurement must land on the
+    /// first.
+    ///
+    /// Note the outermost X belongs to the grown sleeves, not the arms
+    /// themselves, and the delta is one texel either way (both boxes narrow by
+    /// one), which is why the prediction does not need to know which.
+    ///
+    /// **The span shrinks by TWO texels, not one, and predicting one is how this
+    /// test earned its keep.** The first version of this gate predicted a single
+    /// texel and measured exactly double, which is right: the two arms narrow
+    /// from *opposite* sides. The right arm's origin moves inward with its width
+    /// (`1 - arm_w`, so `-3 → -2`) while the left arm's origin stays at `-1` and
+    /// its width shrinks — so the left arm's *outer* edge (`origin + width`)
+    /// comes in by one texel too. One texel per arm, on opposite sides, and the
+    /// full-rig span therefore loses two. Hand-checked against the grown
+    /// sleeves: wide `±8.25` texels from the pivots, slim `±7.25`.
+    #[test]
+    fn the_slim_rig_draws_one_texel_narrower_than_the_wide_one() {
+        let avatar = PlayerAvatar::new(PANEL.0, PANEL.1, None);
+        let span = |model: &'static str| {
+            let xs = clip_positions(model, &avatar);
+            let min = xs.iter().map(|p| p.x).fold(f32::MAX, f32::min);
+            let max = xs.iter().map(|p| p.x).fold(f32::MIN, f32::max);
+            max - min
+        };
+        let wide = span("player_wide");
+        let slim = span("player_slim");
+        // Two texels: one per arm, from opposite sides — see this test's doc.
+        let predicted = (2.0 / 16.0) * INVENTORY_SIZE * 2.0 / 854.0;
+        let measured = wide - slim;
+        assert!(
+            (measured - predicted).abs() < predicted * 0.1,
+            "the slim rig should be exactly one model texel narrower: predicted \
+             {predicted} NDC, measured {measured} (wide span {wide}, slim span \
+             {slim}). A measured 0 means the model switch reached nothing."
+        );
+        // The no-op hypothesis, stated so it cannot be satisfied by the above.
+        assert!(measured > predicted * 0.5, "measured {measured} is indistinguishable from a no-op");
+    }
+
+    /// The **depth invariant, both rigs and both arms** — `EntityPipeline` has
+    /// `cull_mode: None`, so a bad transform does not cull anything; the visible
+    /// symptom is the back of the skull winning the depth test against the face.
+    /// A winding-determinant assertion cannot see it, which is why this is the
+    /// gate that matters for anything drawn through that pipeline.
+    ///
+    /// Arm A is a real perspective `Camera` standing in front of a yaw-0 entity;
+    /// arm B is the GUI pose. Both must agree that the head's **front** faces
+    /// (mesh `-Z`, derived from `entity_model_matrix` mapping mesh `-Z` to world
+    /// `+Z` at yaw 0, not assumed) are nearer than its back faces. Run for the
+    /// slim rig as well as the wide one, since making the slim rig reachable is
+    /// the first time anything ever composed it.
+    #[test]
+    fn every_box_front_is_nearer_than_its_back_in_both_arms_for_both_rigs() {
+        let avatar = PlayerAvatar::new(PANEL.0, PANEL.1, None);
+        let models = EntityModelSet::load();
+        // A perspective camera 4 blocks along +Z looking back at a yaw-0 entity.
+        // The rig's front is mesh -Z: `entity_model_matrix` at yaw 0 maps mesh
+        // -Z to world +Z, and Minecraft's yaw 0 faces +Z — derived, not assumed.
+        let camera = lodestone_render::Camera {
+            position: Vec3::new(0.0, 1.4, 4.0),
+            yaw: 180.0,
+            ..lodestone_render::Camera::default()
+        };
+        for model in ["player_wide", "player_slim"] {
+            let mesh = models.get(model).expect("a baked player rig");
+            let gui = avatar_part_matrices(mesh, model, &avatar, 854, 480);
+            let rest = mesh.skeleton.rest_pose();
+            let world_base = camera.view_projection()
+                * lodestone_render::entity_model_matrix(Vec3::ZERO, 0.0, 1.0);
+            let mut checked = 0usize;
+            for (i, range) in mesh.parts.iter().enumerate() {
+                let verts = &mesh.vertices
+                    [range.vertex_start as usize..(range.vertex_start + range.vertex_count) as usize];
+                if verts.is_empty() {
+                    continue;
+                }
+                for (arm, m) in [("world camera", world_base * rest[i]), ("gui ortho", gui[i])] {
+                    let mean = |front: bool| {
+                        let sel: Vec<f32> = verts
+                            .iter()
+                            .filter(|v| {
+                                if front {
+                                    v.position[2] < -0.01
+                                } else {
+                                    v.position[2] > 0.01
+                                }
+                            })
+                            .map(|v| m.project_point3(Vec3::from_array(v.position)).z)
+                            .collect();
+                        (sel.iter().sum::<f32>() / sel.len().max(1) as f32, sel.len())
+                    };
+                    let (front, nf) = mean(true);
+                    let (back, nb) = mean(false);
+                    if nf == 0 || nb == 0 {
+                        continue;
+                    }
+                    assert!(
+                        front < back,
+                        "{model} part {i} through the {arm}: front faces at depth \
+                         {front}, back faces at {back}. Depth is [0,1] with \
+                         smaller nearer, so this draws the inside of the far \
+                         side of the box."
+                    );
+                    checked += 1;
+                }
+            }
+            // The premise: this rig really does have boxes with both faces, in
+            // both arms — otherwise every assertion above was skipped and the
+            // pass is vacuous. `player_model` builds 12 boxes (six parts, each
+            // with an overlay child), so both arms should reach well past ten.
+            assert!(
+                checked >= 20,
+                "{model}: only {checked} front/back comparisons ran — this gate \
+                 measured almost nothing"
+            );
+        }
     }
 
     /// The **physical → logical** cursor conversion, which `ContainerGeometry`

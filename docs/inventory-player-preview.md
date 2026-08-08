@@ -157,10 +157,18 @@ again immediately afterwards, so nothing downstream inherits this pass's depth.
 
 **Not yet handled**, each deliberately:
 
-* **Real skins.** The rig is `player_wide` (`steve`) and the sheet is the jar's
-  `entity/player/wide/steve.png`, because nothing in this workspace decodes a
-  skin's declared wide/slim model yet — see `player_model_name`'s doc. `SLIM` in
-  `player_preview.rs` is the one line that changes when skins land.
+* ~~**Real skins.**~~ **Landed, minus the fetch** — see
+  [`player-skins.md`](player-skins.md). The rig is now a runtime
+  `PlayerModelType` settable through `ContainerRenderer::set_player_skin`, and
+  both rigs are reachable; `<data_dir>/skin.png` + `<data_dir>/skin.model` is the
+  local producer that keeps the slim path from being dead code. What is still
+  missing is the *fetch*: the `textures` property is discarded in
+  `v770`'s `read_add_player`, `PlayerListEntry` has no properties carrier, and
+  `lodestone-auth`'s `fetch_profile` drops the profile's `skins` array — all three
+  named in that doc. Making the slim rig reachable also found a real bug in it
+  (the right arm's cube origin does not move with the width), also recorded
+  there. **The line this bullet used to call "the one line that changes" was
+  `const SLIM: bool = false`; it is gone.**
 * **Live pose.** The avatar is `AnimInput::REST` plus the two look angles: no walk
   cycle, no attack swing, no crouch. Vanilla poses the *live* render state, so a
   sprinting player's inventory avatar has its arms mid-swing. `gui_entity_anim`

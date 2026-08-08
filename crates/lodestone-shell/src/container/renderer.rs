@@ -165,6 +165,34 @@ impl ContainerRenderer {
         self.player_preview.is_some()
     }
 
+    /// Bind a real skin to the inventory avatar: a declared rig, and optionally
+    /// the sheet to draw it with (`None` uses the pack's own sheet for that rig).
+    ///
+    /// **This is the seam issue #62's fetch half lands against.** Nothing in this
+    /// workspace fetches a skin yet — see `player_preview.rs`'s
+    /// `local_skin_override`, which is what keeps the slim rig reachable in the
+    /// meantime — so today's callers are that override and this method's own
+    /// gates. Returns `false` when the avatar is not attached at all, or when the
+    /// rig or sheet cannot be resolved; never leaves a half-applied state.
+    pub fn set_player_skin(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        model: lodestone_assets::PlayerModelType,
+        sheet: Option<&lodestone_assets::Image>,
+    ) -> bool {
+        self.player_preview
+            .as_mut()
+            .is_some_and(|p| p.set_skin(device, queue, model, sheet))
+    }
+
+    /// Which rig the inventory avatar is drawing, or `None` when it is not
+    /// attached. The assertable half of [`set_player_skin`](Self::set_player_skin).
+    #[must_use]
+    pub fn player_preview_model(&self) -> Option<lodestone_assets::PlayerModelType> {
+        self.player_preview.as_ref().map(|p| p.skin_model())
+    }
+
     /// Attach vanilla's real `container/*.png` panel art (issue #51), so the
     /// screen draws the real texture instead of the flat programmatic fill.
     /// Independent of [`attach_items`](Self::attach_items)/
