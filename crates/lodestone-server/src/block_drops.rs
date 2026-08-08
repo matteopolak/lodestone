@@ -262,6 +262,80 @@ pub fn dropped_item_velocity(rng: &mut SpawnRng) -> Vec3 {
     Vec3::new(velocity_x, POP_VELOCITY_Y, velocity_z)
 }
 
+/// Ticks a **player-thrown** stack cannot be picked back up for —
+/// `LivingEntity.createItemStackToDrop`'s `entity.setPickUpDelay(40)`, and
+/// **four times** the 10 a block pop uses (`setDefaultPickUpDelay`).
+///
+/// That difference is the whole point of the constant: at 10 ticks a player who
+/// throws an item while walking forwards immediately walks into it and picks it
+/// straight back up, which reads as "throwing does not work" even though the
+/// entity really did spawn.
+pub const THROWN_PICKUP_DELAY_TICKS: i16 = 40;
+
+/// How far below eye level a thrown stack leaves the player's hand —
+/// `createItemStackToDrop`'s `this.getEyeY() - 0.3F`.
+pub const THROW_HAND_DROP: f64 = 0.3;
+
+/// The forward impulse of a player throw, before the random spread —
+/// `createItemStackToDrop`'s `0.3F`, applied to the look vector.
+const THROW_POWER: f64 = 0.3;
+
+/// Peak of the random horizontal spread cone, `0.02F * random.nextFloat()`.
+const THROW_SPREAD: f64 = 0.02;
+
+/// Constant lift added to a throw on top of the look vector's vertical
+/// component — `+ 0.1F` in `createItemStackToDrop`.
+const THROW_LIFT: f64 = 0.1;
+
+/// Amplitude of the throw's vertical jitter,
+/// `(random.nextFloat() - random.nextFloat()) * 0.1F`. Note this is a
+/// **difference of two draws**, so it is triangular about zero and consumes two
+/// numbers, not one.
+const THROW_VERTICAL_JITTER: f64 = 0.1;
+
+/// The velocity vanilla gives a stack a player throws out of their hand — `Q` /
+/// `Ctrl+Q`, i.e. `LivingEntity.createItemStackToDrop`'s `randomly == false`
+/// branch (26.2 `LivingEntity.java:3455-3465`):
+///
+/// ```text
+/// vx = -sin(yaw)·cos(pitch)·0.3 + cos(dir)·spread
+/// vy = -sin(pitch)·0.3 + 0.1 + (r₁ − r₂)·0.1
+/// vz =  cos(yaw)·cos(pitch)·0.3 + sin(dir)·spread
+/// ```
+///
+/// with `dir = r₃·2π` and `spread = 0.02·r₄`. Angles are degrees on the wire and
+/// radians here, and the leading minus on `x` is Minecraft's yaw convention
+/// (`yaw = 0` looks towards `+Z`, `90` towards `−X`) — dropping it throws items
+/// behind the player's left shoulder, which still *looks* like a throw.
+///
+/// This is **not** [`dropped_item_velocity`]: a block pop is a near-vertical hop
+/// with a tiny random horizontal offset and no notion of facing at all. Reusing it
+/// for a throw drops the item at the player's feet.
+///
+/// # Draw order is load-bearing
+///
+/// Four draws, in this order: the two vertical-jitter floats, then the direction
+/// angle, then the spread magnitude — matching the order the decompiled source
+/// evaluates them in. A `SpawnRng` is a shared stream, so a reordering here
+/// changes every later consumer's numbers as well as this one's.
+#[must_use]
+pub fn thrown_item_velocity(yaw_degrees: f32, pitch_degrees: f32, rng: &mut SpawnRng) -> Vec3 {
+    let yaw = f64::from(yaw_degrees).to_radians();
+    let pitch = f64::from(pitch_degrees).to_radians();
+    // Vanilla evaluates `nextFloat() - nextFloat()` for the vertical jitter
+    // *inside* the `setDeltaMovement` argument list, i.e. after `dir` and
+    // `pow2` are bound. Java evaluates arguments left to right, so `y`'s two
+    // draws come after those two — hence this order.
+    let dir = rng.next_f64() * std::f64::consts::TAU;
+    let spread = THROW_SPREAD * rng.next_f64();
+    let jitter = (rng.next_f64() - rng.next_f64()) * THROW_VERTICAL_JITTER;
+    Vec3::new(
+        -yaw.sin() * pitch.cos() * THROW_POWER + dir.cos() * spread,
+        -pitch.sin() * THROW_POWER + THROW_LIFT + jitter,
+        yaw.cos() * pitch.cos() * THROW_POWER + dir.sin() * spread,
+    )
+}
+
 /// The loot-table key for a mob's death drop — `LivingEntity.getLootTable`, whose
 /// default is `EntityType`'s built-in `entities/<path>`
 /// (`EntityType.Builder`'s `lootTable` supplier).
@@ -1023,6 +1097,83 @@ mod tests {
         assert!(
             !is_within_pickup_range(feet, Vec3::new(0.0, 64.0 - 0.8, 0.0)),
             "0.8 below puts the item's whole 0.25-tall box under the -0.5 floor"
+        );
+    }
+
+    /// **The player-throw velocity, checked against the look vector's geometry
+    /// rather than against a re-typed copy of the formula.**
+    ///
+    /// Re-deriving `-sin(yaw)·cos(pitch)·0.3` inside the assertion would be a
+    /// closed loop: the same transcription error appears on both sides and the
+    /// test agrees with the bug. So the expectation here comes from what the
+    /// numbers *mean* — a `0.3`-long impulse along the direction the player is
+    /// looking, in Minecraft's yaw convention (`0` looks towards `+Z`, `90`
+    /// towards `−X`) — which is a property of the geometry and holds for any
+    /// correct implementation.
+    ///
+    /// The four errors this actually catches, all of which produce a plausible
+    /// non-zero throw:
+    ///
+    /// | mistake | what this sees |
+    /// |---|---|
+    /// | missing leading `−` on `x` | west becomes east |
+    /// | `sin`/`cos` swapped on yaw | south becomes west |
+    /// | degrees passed as radians | every component near the `+Z` axis |
+    /// | `dropped_item_velocity` reused | ~0 horizontal, `+0.2` vertical |
+    ///
+    /// Tolerance is `THROW_SPREAD` (0.02) plus the vertical jitter (0.1), which
+    /// are the only random terms — so it is the exact bound the formula permits,
+    /// not a slack figure.
+    #[test]
+    fn a_thrown_stack_flies_the_way_the_player_is_looking() {
+        let mut rng = SpawnRng::new(0x5EED);
+        // Yaw 0, pitch 0: due +Z, level.
+        let south = thrown_item_velocity(0.0, 0.0, &mut rng);
+        assert!(
+            (south.z - 0.3).abs() <= 0.02,
+            "looking towards +Z must throw at +0.3 on z, got {south:?}"
+        );
+        assert!(
+            south.x.abs() <= 0.02,
+            "…and nothing sideways beyond the 0.02 spread, got {south:?}"
+        );
+
+        // Yaw 90: due −X. This is the assertion that fails if the leading minus
+        // on `x` is dropped, and the one that fails if sin/cos are swapped.
+        let west = thrown_item_velocity(90.0, 0.0, &mut rng);
+        assert!(
+            (west.x + 0.3).abs() <= 0.02,
+            "yaw 90 looks towards −X, so x must be −0.3, got {west:?} — a positive x here is \
+             the dropped sign, and Minecraft's yaw convention is the whole reason for it"
+        );
+        assert!(
+            west.z.abs() <= 0.02,
+            "…and nothing on z, got {west:?}"
+        );
+
+        // Pitch 90 is straight down: the impulse leaves the horizontal plane
+        // entirely and the constant +0.1 lift is all that offsets it.
+        let down = thrown_item_velocity(0.0, 90.0, &mut rng);
+        assert!(
+            (down.y - (-0.3 + 0.1)).abs() <= 0.1,
+            "looking straight down must throw downwards at −0.3 + 0.1 lift, got {down:?}"
+        );
+        assert!(
+            down.x.abs() <= 0.02 && down.z.abs() <= 0.02,
+            "…with no horizontal component left, got {down:?}"
+        );
+
+        // And it is emphatically not the block-pop velocity, which has no notion
+        // of facing at all. Predicting *both* hypotheses rather than asserting a
+        // sign: the pop is +0.2 up with |horizontal| <= 0.1, the throw at level
+        // pitch is +0.1 up with |z| ~ 0.3.
+        let mut pop_rng = SpawnRng::new(0x5EED);
+        let pop = dropped_item_velocity(&mut pop_rng);
+        assert!(
+            pop.z.abs() <= POP_VELOCITY_SPREAD && south.z.abs() > 0.25,
+            "a block pop must stay within {POP_VELOCITY_SPREAD} horizontally while a throw \
+             carries ~0.3; got pop {pop:?} and throw {south:?}. If these are close, the \
+             throw is using the pop formula"
         );
     }
 }

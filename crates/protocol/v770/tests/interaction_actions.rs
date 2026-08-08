@@ -459,3 +459,81 @@ fn interaction_actions_are_ignored_outside_play() {
         .expect("no error");
     assert!(encoded.is_none(), "must be None outside play");
 }
+
+// ---------------------------------------------------------------------------
+// The server-side decode of the two drop ordinals.
+// ---------------------------------------------------------------------------
+
+/// **Pressing `Q` used to do nothing at all, and no `_ =>` arm in a router was to
+/// blame — the information was discarded one layer earlier, at the decode.**
+///
+/// `V770ServerProtocol::decode`'s `PLAYER_ACTION` arm handled ordinals 0-2 and sent
+/// everything else to `ServerBound::Ignored`, with a comment saying item handling
+/// was out of `lodestone-server`'s scope. It had stopped being: that crate owns
+/// `PlayerInventory` and already spawns item entities for block drops. So this is
+/// the *producer*-side island `CLAUDE.md` names — the client encoded
+/// `DropSelectedItem`/`DropSelectedItemStack` correctly (the loop above gates
+/// exactly that), four adapters agreed on the ordinals, and the server threw them
+/// away.
+///
+/// The expected values come from the jar's own enum declaration, not from our
+/// encoder: `ServerboundPlayerActionPacket.Action` is `START_DESTROY_BLOCK,
+/// ABORT_DESTROY_BLOCK, STOP_DESTROY_BLOCK, DROP_ALL_ITEMS, DROP_ITEM,
+/// RELEASE_USE_ITEM, SWAP_ITEM_WITH_OFFHAND, STAB`
+/// (`ServerboundPlayerActionPacket.java:69-78`).
+///
+/// **The transposition is the whole reason this asserts both rows.** `3` is the
+/// *whole stack* and `4` is *one item*, which reads backwards from the key
+/// bindings — `Q` is one item and `Ctrl+Q` is the stack — so the natural mistake
+/// makes a bare `Q` throw the player's entire stack. Both directions decode to a
+/// well-formed variant, so nothing but this assertion can see it.
+#[test]
+fn the_drop_ordinals_decode_to_item_dropped_with_the_stack_flag_the_right_way_round() {
+    use lodestone_server::{ServerBound, ServerProtocol};
+
+    let proto = lodestone_v770::V770ServerProtocol;
+    let body = |ordinal: i32| {
+        let mut payload = varint(ordinal);
+        payload.extend_from_slice(&0i64.to_be_bytes()); // BlockPos.ZERO
+        payload.push(0); // Direction.DOWN
+        payload.extend_from_slice(&varint(0)); // sequence
+        payload
+    };
+
+    for (ordinal, whole_stack) in [(3, true), (4, false)] {
+        let decoded = proto.decode(
+            lodestone_core::State::Play,
+            play::serverbound::PLAYER_ACTION,
+            &body(ordinal),
+        );
+        assert!(
+            matches!(decoded, ServerBound::ItemDropped { whole_stack: w } if w == whole_stack),
+            "ordinal {ordinal} must decode to ItemDropped {{ whole_stack: {whole_stack} }}, got \
+             {decoded:?}. `Ignored` here is the original defect (Q did nothing); the *other* \
+             flag is the transposition that makes a bare Q throw the whole stack"
+        );
+    }
+
+    // The control: the ordinals around them are unchanged, so the arm above is a
+    // narrowing of `_ => Ignored` and not a replacement of it. 2 must still be a
+    // block break, and 5 (RELEASE_USE_ITEM) must still be ignored — a decode that
+    // answered `ItemDropped` for everything would pass the loop above.
+    let stop_destroy = proto.decode(
+        lodestone_core::State::Play,
+        play::serverbound::PLAYER_ACTION,
+        &body(2),
+    );
+    assert!(
+        matches!(stop_destroy, ServerBound::BlockAction { .. }),
+        "ordinal 2 is still STOP_DESTROY_BLOCK, got {stop_destroy:?}"
+    );
+    let release_use = proto.decode(
+        lodestone_core::State::Play,
+        play::serverbound::PLAYER_ACTION,
+        &body(5),
+    );
+    assert!(
+        matches!(release_use, ServerBound::Ignored),
+        "ordinal 5 has no server-side model yet and must still be Ignored, got {release_use:?}"
+    );
+}

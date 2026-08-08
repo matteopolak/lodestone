@@ -2485,11 +2485,18 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // Ordinals 0-2 are the three destroy phases; 3-7 are the item
-            // actions (drop/release/swap/stab) this crate has no inventory
-            // model to act on, so they decode to `Ignored` rather than a new
-            // `ServerBound` variant — see `ServerBound::BlockAction`'s doc
-            // comment.
+            // `ServerboundPlayerActionPacket.Action`, read off the enum's own
+            // declaration order in 26.2 (`ServerboundPlayerActionPacket.java:69-78`)
+            // rather than guessed: START_DESTROY_BLOCK, ABORT_DESTROY_BLOCK,
+            // STOP_DESTROY_BLOCK, **DROP_ALL_ITEMS, DROP_ITEM**, RELEASE_USE_ITEM,
+            // SWAP_ITEM_WITH_OFFHAND, STAB. Note 3 is the *whole stack* and 4 is
+            // one item — the order reads backwards from the key bindings (`Q` is
+            // one item, `Ctrl+Q` is the stack), and swapping them makes `Q` throw
+            // the player's entire stack.
+            //
+            // 3 and 4 used to fall into the `_ => Ignored` arm below, so pressing
+            // `Q` did nothing whatsoever; they now lift to
+            // `ServerBound::ItemDropped`. 5-7 still have no server-side model.
             State::Play if packet_id == play::serverbound::PLAYER_ACTION => {
                 match decode_full::<PlayerAction>(payload) {
                     Some(action) => {
@@ -2514,6 +2521,8 @@ impl ServerProtocol for V770ServerProtocol {
                                 face,
                                 sequence: action.sequence,
                             },
+                            3 => ServerBound::ItemDropped { whole_stack: true },
+                            4 => ServerBound::ItemDropped { whole_stack: false },
                             _ => ServerBound::Ignored,
                         }
                     }

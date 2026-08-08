@@ -119,6 +119,44 @@ per-connection menu state and `PlayerInventory` is the per-connection value ever
 container call site already holds, so neither costs a new parameter on
 `dispatch_play_packet` (which is at 28).
 
+## Throwing items out (`Q` / `Ctrl+Q`)
+
+`ServerBound::ItemDropped { whole_stack }` → `server.rs`'s `apply_item_dropped`,
+which is vanilla's `ServerPlayer.drop(boolean)` in three steps: take from the
+selected hotbar slot (one item, or all of it), spawn the item entity, and reply
+with a `container_set_slot` for that slot.
+
+**This did nothing at all until recently, and the failure was not in a router.**
+The client half was complete — a keybind produced
+`ClientAction::DropSelectedItem`/`DropSelectedItemStack`, and four adapters
+encoded the right ordinals — but `V770ServerProtocol::decode`'s `PLAYER_ACTION`
+arm handled ordinals 0-2 and sent everything else to `ServerBound::Ignored`. So
+there was no `_ =>` arm to find in `ingest`/`session`/`forward`: the packet was
+discarded one layer earlier, before any `ServerBound` variant existed to route.
+When a keypress reaches no pixels, check the *decode* before the routers.
+
+Three specifics worth not rediscovering:
+
+- **Ordinal 3 is `DROP_ALL_ITEMS` and 4 is `DROP_ITEM`.** That reads backwards
+  from the key bindings (`Q` is one item, `Ctrl+Q` is the stack), so the natural
+  transposition makes a bare `Q` throw the whole stack — and both directions
+  decode to a well-formed variant, so only an assertion catches it. Gated in
+  `v770/tests/interaction_actions.rs`.
+- **A thrown stack is not a popped block.** `block_drops::thrown_item_velocity` is
+  a `0.3`-long impulse along the player's look vector plus spread;
+  `dropped_item_velocity` is a `+0.2` vertical hop with no notion of facing.
+  Reusing the latter drops the item at the player's feet, which looks like the
+  throw not working.
+- **Pickup delay is 40 ticks, not 10** (`THROWN_PICKUP_DELAY_TICKS` against
+  `setDefaultPickUpDelay`'s 10). At 10 a player who throws while walking forwards
+  picks their own throw straight back up — the entity really spawned, and the
+  symptom is still "throwing does not work".
+
+The other drop path — clicking outside an open window with a held stack, slot
+`-999` in `container_click.rs`'s `do_click_with` — was already wired and now
+routes through the same velocity and delay, which is what vanilla does
+(`doClick`'s outside case calls the same `Player.drop`).
+
 ## How to change it
 
 - **A new native slot / equipment kind** — extend `PlayerInventory` and
