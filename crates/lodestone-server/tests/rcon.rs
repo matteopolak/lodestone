@@ -88,11 +88,7 @@ fn rcon_server(
 ) -> (IntegratedServer, std::net::SocketAddr) {
     let (mut server, _client_io) = IntegratedServer::open_in_memory(SilentProtocol, EmptyWorld, 0);
     let addr = server
-        .start_rcon(RconConfig {
-            addr: ([127, 0, 0, 1], 0).into(),
-            password: "hunter2".to_owned(),
-            commands,
-        })
+        .start_rcon(RconConfig::new(([127, 0, 0, 1], 0).into(), "hunter2", commands))
         .expect("bind the RCON listener");
     (server, addr)
 }

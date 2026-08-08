@@ -493,6 +493,47 @@ impl AccessLists {
         self.permission_level(uuid) >= level
     }
 
+    /// Whether **no** operator model has been configured: no owner, no ops.
+    ///
+    /// This is the state [`AccessLists::new`] and `AccessLists::default` produce,
+    /// and the state every legacy `serve_connection*` entry point passes. It is
+    /// the singleplayer shape.
+    #[must_use]
+    pub fn is_unconfigured(&self) -> bool {
+        self.owner.is_none() && self.ops.is_empty()
+    }
+
+    /// The permission level to gate a **command** at — [`permission_level`], except
+    /// that an [unconfigured](Self::is_unconfigured) world grants
+    /// [`MAX_PERMISSION_LEVEL`].
+    ///
+    /// # Why this is not just `permission_level`
+    ///
+    /// Measured, not assumed: `grep set_owner crates/lodestone-server/src` finds
+    /// **no production caller**. The module doc above says "`server.rs` passes an
+    /// owner for the in-memory constructors"; that claim is stale. So *every*
+    /// connection in the shipping product resolves to `permission_level == 0`, and
+    /// gating `/gamemode` at its vanilla level 2 against that would make creative
+    /// mode unreachable in singleplayer — a strictly worse outcome than the
+    /// ungated version it replaced.
+    ///
+    /// Answering `MAX_PERMISSION_LEVEL` for a world with no operator model at all
+    /// is the same posture the whole module already documents for the empty
+    /// default ("the one that cannot lock a player out of their own world"), now
+    /// stated where a command can read it. It is **not** a bypass: the moment a
+    /// host names an owner or ops a single player, this collapses to
+    /// [`permission_level`] and a non-op cannot use a level-2 command — which is
+    /// vanilla's LAN behaviour.
+    ///
+    /// [`permission_level`]: Self::permission_level
+    #[must_use]
+    pub fn command_permission_level(&self, uuid: Uuid) -> u8 {
+        if self.is_unconfigured() {
+            return MAX_PERMISSION_LEVEL;
+        }
+        self.permission_level(uuid)
+    }
+
     fn bypasses_player_limit(&self, uuid: Uuid) -> bool {
         self.owner == Some(uuid)
             || self
@@ -645,6 +686,13 @@ impl AccessHandle {
     #[must_use]
     pub fn permission_level(&self, uuid: Uuid) -> u8 {
         self.with(|lists| lists.permission_level(uuid))
+    }
+
+    /// [`AccessLists::command_permission_level`] — what `crate::server` resolves
+    /// once, at the Play handoff, to gate the built-in command tree.
+    #[must_use]
+    pub fn command_permission_level(&self, uuid: Uuid) -> u8 {
+        self.with(|lists| lists.command_permission_level(uuid))
     }
 
     /// Turns whitelist enforcement on or off.

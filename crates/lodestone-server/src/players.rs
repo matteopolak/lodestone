@@ -91,10 +91,10 @@
 //! wire layout — [`ServerProtocol::encode_player_info_add`](crate::ServerProtocol::encode_player_info_add)
 //! and its sibling are the seam a version crate implements.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use lodestone_model::{ResourceKey, Rotation, Vec3};
+use lodestone_model::{GameMode, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
 use crate::protocol::{EntitySnapshot, PlayerListing, ServerDirective, ServerProtocol};
@@ -162,6 +162,17 @@ struct TrackedPlayer {
     /// carries angles — every client sends one within a tick or two of
     /// entering play.
     rotation: Rotation,
+    /// This player's current game mode.
+    ///
+    /// Tracked here, rather than only in `serve_play`'s local `game_mode`,
+    /// because a *command* needs to read other players' modes: `@a[gamemode=
+    /// creative]` is a selector predicate resolved against the roster, and a
+    /// per-connection local is unreachable from another connection's dispatch.
+    /// The local remains the authority for that connection's own behaviour
+    /// (instant break, damage immunity) and republishes here on every change,
+    /// which is the same producer/mirror split `position` and `rotation` already
+    /// have.
+    game_mode: GameMode,
 }
 
 /// A consistent single-lock read of the registry, from one viewer's point of
@@ -201,6 +212,21 @@ struct Inner {
     /// numbers, so trimming the front of the window cannot silently rewind
     /// a reader — it makes the gap detectable instead.
     chat_base: u64,
+    /// Per-player queues of command effects awaiting delivery.
+    ///
+    /// **Directed, and drained rather than cursored** — the two properties that
+    /// make this a different mechanism from `chat` above and not a second copy
+    /// of it. `/gamemode creative Steve` must reach Steve and nobody else, so it
+    /// is keyed by uuid; and it must reach Steve *once*, so the reader takes the
+    /// queue instead of advancing a cursor over a shared log. A cursored
+    /// broadcast would deliver Steve's game-mode change to every connected
+    /// player.
+    ///
+    /// An entry for a uuid with no connection accumulates and is never read.
+    /// That is bounded in practice by [`PlayerRegistry::push_effect`] refusing a
+    /// uuid that is not in `players`, which is also the honest answer for
+    /// `/gamemode creative Steve` when Steve just left: nothing to do.
+    effects: HashMap<Uuid, Vec<crate::commands::Effect>>,
 }
 
 /// One line of player chat, as broadcast to every connection.
@@ -347,6 +373,12 @@ impl PlayerRegistry {
                     yaw: 0.0,
                     pitch: 0.0,
                 },
+                // Survival, matching `serve_connection_inner`'s own join mode.
+                // Restated rather than threaded in because that binding is a
+                // `const`-like local there; if it ever becomes configurable,
+                // `set_game_mode` below is the one call site that has to fire at
+                // join.
+                game_mode: GameMode::Survival,
             });
             entity_id
         };
@@ -465,10 +497,86 @@ impl PlayerRegistry {
         self.len() == 0
     }
 
+    /// Records a player's new game mode, so a selector predicate on another
+    /// connection can read it.
+    ///
+    /// Keyed by uuid rather than entity id because that is what a command has:
+    /// an [`Effect`](crate::commands::Effect) is addressed to a profile uuid, and
+    /// the connection applying it knows its own uuid without having to resolve a
+    /// network entity id. A no-op for an unregistered uuid, for the same reason
+    /// [`set_position`](Self::set_position) is.
+    pub fn set_game_mode(&self, uuid: Uuid, game_mode: GameMode) {
+        if let Some(player) = self.lock().players.iter_mut().find(|p| p.uuid == uuid) {
+            player.game_mode = game_mode;
+        }
+    }
+
+    /// Every connected player as a command-resolution candidate, from one lock
+    /// acquisition.
+    ///
+    /// A flattened snapshot rather than a borrow so selector resolution — which
+    /// sorts, filters and truncates — happens entirely outside this lock. That is
+    /// the same reason `lodestone_command::SuggestionProvider`'s doc gives for
+    /// snapshotting names, and it matters more here: resolution runs a
+    /// caller-supplied predicate list.
+    #[must_use]
+    pub fn candidates(&self) -> Vec<crate::commands::PlayerCandidate> {
+        self.lock()
+            .players
+            .iter()
+            .map(|p| crate::commands::PlayerCandidate {
+                uuid: p.uuid,
+                entity_id: p.entity_id,
+                username: p.username.clone(),
+                position: p.position,
+                game_mode: p.game_mode,
+            })
+            .collect()
+    }
+
+    /// Queue `effect` for delivery to `target`'s own connection.
+    ///
+    /// Returns whether the target is actually connected. `false` is not an
+    /// error — `/gamemode creative Steve` for a Steve who disconnected between
+    /// resolution and delivery has nothing to do — but it is reported so a
+    /// caller can say so rather than claiming success. Refusing an unknown uuid
+    /// is also what bounds the queue map: an effect for a player who will never
+    /// read it is dropped here instead of accumulating forever.
+    pub fn push_effect(&self, target: Uuid, effect: crate::commands::Effect) -> bool {
+        let mut inner = self.lock();
+        if !inner.players.iter().any(|p| p.uuid == target) {
+            return false;
+        }
+        inner.effects.entry(target).or_default().push(effect);
+        true
+    }
+
+    /// Take everything queued for `uuid`, leaving the queue empty.
+    ///
+    /// Single-consumer by construction: the only caller is `uuid`'s own
+    /// connection loop. A second reader would silently steal effects, which is
+    /// exactly the failure a cursor would have prevented and a drain would not —
+    /// hence the directedness, which makes a second reader impossible rather
+    /// than merely unlikely.
+    #[must_use]
+    pub fn take_effects(&self, uuid: Uuid) -> Vec<crate::commands::Effect> {
+        self.lock().effects.remove(&uuid).unwrap_or_default()
+    }
+
     /// Deregisters a player. Private: [`PlayerTicket`]'s `Drop` is the only
     /// caller, so a registration cannot be leaked by forgetting to call this.
     fn remove(&self, entity_id: i32) {
-        self.lock().players.retain(|p| p.entity_id != entity_id);
+        let mut inner = self.lock();
+        // Drop the departing player's undelivered effects along with their
+        // registration. Without this a `/give` aimed at someone who leaves in the
+        // same tick would sit in the map for the life of the process — and would
+        // be delivered to them on a *later* rejoin, which is worse than losing
+        // it.
+        if let Some(index) = inner.players.iter().position(|p| p.entity_id == entity_id) {
+            let uuid = inner.players[index].uuid;
+            inner.players.remove(index);
+            inner.effects.remove(&uuid);
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {

@@ -265,14 +265,33 @@ impl CommandDispatch {
 }
 
 /// Everything the Play loop needs to service one connection's commands: the
-/// host's dispatch plus *this* connection's authenticated identity.
+/// built-in tree, the host's dispatch, this connection's authenticated identity,
+/// and its permission level.
 ///
-/// Bundled into one struct rather than passed as two parameters because
+/// Bundled into one struct rather than passed as four parameters because
 /// `dispatch_play_packet` already takes 24 arguments; this adds one.
+///
+/// # `builtins` comes first, and `dispatch` is the fallback
+///
+/// The built-in tree ([`crate::ServerCommands`]) is consulted before the host
+/// sink, and answers `None` only when no built-in root matched at all — see
+/// `crate::commands`' precedence table. Before that wiring existed, the built-in
+/// tree had no caller anywhere and every command went straight to a sink that
+/// every real constructor leaves empty, which meant `/gamerule` did nothing.
 #[derive(Clone, Debug)]
 pub(crate) struct CommandSession {
+    /// The server's own commands. Cheap to clone (one `Arc`).
+    pub(crate) builtins: crate::commands::ServerCommands,
     pub(crate) dispatch: CommandDispatch,
     pub(crate) caller: CommandCaller,
+    /// This caller's permission level, 0–4, resolved once at the Play handoff
+    /// from [`crate::AccessLists::permission_level`].
+    ///
+    /// Resolved **once**, not per command, and from the connection's *own*
+    /// authenticated uuid — the same property [`CommandCaller`]'s doc comment
+    /// describes, for the same reason: nothing in the command text may influence
+    /// which player's permissions are consulted.
+    pub(crate) permission_level: u8,
 }
 
 #[cfg(test)]

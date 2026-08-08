@@ -10,6 +10,29 @@ use crate::argument::ArgumentType;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(pub(crate) u32);
 
+impl NodeId {
+    /// This handle's arena index.
+    ///
+    /// Exposed for a caller that needs to *project* a whole tree into an
+    /// index-based representation — the `minecraft:commands` wire format is a flat
+    /// node list plus a root index, so its producer needs the arena's own
+    /// numbering rather than a renumbering of its own. Not a general-purpose
+    /// escape hatch: the arena is append-only and never reindexed
+    /// ([`CommandTree`]'s own guarantee), which is what makes the index stable
+    /// enough to transmit.
+    #[must_use]
+    pub fn index(self) -> u32 {
+        self.0
+    }
+
+    /// A handle for arena index `index`, which may not exist — pair it with
+    /// [`CommandTree::try_get`], the only safe way to find out.
+    #[must_use]
+    pub fn from_index(index: u32) -> Self {
+        Self(index)
+    }
+}
+
 /// A type-erased argument value, for an [`ArgumentType`] whose result is a
 /// structured Rust value rather than a primitive — an entity selector AST, a
 /// resolved item stack, a `Vec3`.
@@ -276,6 +299,28 @@ impl CommandTree {
     /// dispatch) without going through `parse`/`suggest`.
     pub fn get(&self, id: NodeId) -> &Node {
         self.node(id)
+    }
+
+    /// [`CommandTree::get`] for an id that may be out of range — how a caller
+    /// enumerates the whole arena without needing a `len()` that would invite
+    /// index arithmetic elsewhere.
+    #[must_use]
+    pub fn try_get(&self, id: NodeId) -> Option<&Node> {
+        self.arena.get(id.0 as usize)
+    }
+
+    /// How many nodes the arena holds, root included.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.arena.len()
+    }
+
+    /// Always `false` — a [`CommandTree`] always has its root. Present because
+    /// clippy requires it alongside [`CommandTree::len`], and answered honestly
+    /// rather than by comparing the length to zero.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        false
     }
 
     fn push_child(&mut self, parent: NodeId, node: Node) -> NodeId {

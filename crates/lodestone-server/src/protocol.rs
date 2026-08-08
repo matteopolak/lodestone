@@ -1148,6 +1148,28 @@ pub trait ServerProtocol: Send + Sync {
         Vec::new()
     }
 
+    /// Updates existing tab-list entries' game modes (vanilla's
+    /// `ClientboundPlayerInfoUpdatePacket` carrying **only** the
+    /// `UPDATE_GAME_MODE` action, ordinal 2).
+    ///
+    /// Needed by `/gamemode`. `encode_player_info_add` sends a game mode too, but
+    /// only at join and only the mode the player joined in — it has no
+    /// per-connection mode to read, and says so in its own doc comment. Without
+    /// this, changing mode leaves every client's tab list reporting the join mode
+    /// forever, including the player's own.
+    ///
+    /// A slice of pairs rather than one uuid because the packet is a list and a
+    /// command may change several players at once; an empty slice must emit
+    /// nothing (a zero-length entry list is a legal but pointless frame).
+    ///
+    /// The default emits nothing, so a protocol without tab-list support needs no
+    /// override and the mode change is simply invisible there rather than a
+    /// failure.
+    fn encode_player_info_game_mode(&self, entries: &[(Uuid, GameMode)]) -> Vec<ServerDirective> {
+        let _ = entries;
+        Vec::new()
+    }
+
     /// Encodes a detonation (issue #425; vanilla `ClientboundExplodePacket`,
     /// wire id `explode`), fed from [`crate::mobs::MobSim::take_detonations`]
     /// via [`crate::tick::ExplosionFeed`] — the handoff that finally gives

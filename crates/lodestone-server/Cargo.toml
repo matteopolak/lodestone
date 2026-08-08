@@ -35,6 +35,12 @@ bevy_ecs = { workspace = true }
 # `Cargo.toml`), so it drags in no ECS, no client vocabulary, no protocol crate
 # and nothing new into the browser bundle. It is a parser, not a runtime.
 lodestone-command = { workspace = true }
+# The Minecraft-flavoured argument types (`McArg`, `GameModeArg`, `EntityArg`,
+# `ItemArg`) the built-in command tree is built from. Depends only on
+# `lodestone-command`/`-model`/`-data` + `uuid`, all of which are already in this
+# graph, so it adds nothing to the browser bundle beyond its own code and names
+# no protocol number — see its own `Cargo.toml`.
+lodestone-command-mc = { workspace = true }
 lodestone-core = { path = "../lodestone-core" }
 lodestone-net = { path = "../lodestone-net" }
 lodestone-worldgen = { path = "../lodestone-worldgen" }
