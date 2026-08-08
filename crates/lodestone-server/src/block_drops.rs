@@ -498,20 +498,51 @@ mod tests {
         );
     }
 
-    /// A block with no bundled table drops nothing, and does not panic. The
-    /// honest behaviour: this crate bundles five block tables, so almost every
-    /// block in the game takes this path today.
+    /// A block with no table at all drops nothing, and does not panic.
+    ///
+    /// Since #538 the bundle is the whole clean vanilla corpus, so this path is
+    /// no longer "almost every block" — it is the blocks vanilla itself gives no
+    /// loot table: `bedrock`, `barrier`, `air`/`cave_air`, the fluids,
+    /// `end_portal`. Each row below is a real 26.2 block for which
+    /// `.cache/mc/26.2/client-src/data/minecraft/loot_table/blocks/` has **no
+    /// file**, checked rather than assumed, plus one unparseable name.
+    ///
+    /// This is also the *world*-species guard for the "no table" branch: a
+    /// fixture naming a block that merely happens not to be bundled would stop
+    /// exercising it the moment the bundle grew, which is exactly what happened
+    /// to this test's previous subject (`deepslate_emerald_ore`, now bundled).
     #[test]
     fn a_block_with_no_bundled_table_drops_nothing() {
         let tables = LootTableSet::load_bundled();
-        let drops = drop_block_loot(
-            &tables,
-            "minecraft:deepslate_emerald_ore",
-            BlockPos::new(0, 0, 0),
-            None,
-            &mut SpawnRng::new(1),
+        for block in [
+            "minecraft:bedrock",
+            "minecraft:barrier",
+            "minecraft:water",
+            "minecraft:lava",
+            "minecraft:cave_air",
+            "minecraft:end_portal",
+        ] {
+            assert!(
+                tables
+                    .get(&block_loot_table_id(block).expect("parses"))
+                    .is_none(),
+                "precondition: vanilla ships no loot table for {block}, so it must \
+                 not be in the bundle either"
+            );
+            let drops = drop_block_loot(
+                &tables,
+                block,
+                BlockPos::new(0, 0, 0),
+                None,
+                &mut SpawnRng::new(1),
+            );
+            assert!(drops.is_empty(), "{block} must drop nothing, got {drops:?}");
+        }
+        // And a name that is not a resource key at all.
+        assert!(
+            drop_block_loot(&tables, "minecraft:", BlockPos::new(0, 0, 0), None, &mut SpawnRng::new(1))
+                .is_empty()
         );
-        assert!(drops.is_empty());
     }
 
     /// A tool for these tests. Enchantments are attached by **key**, which is

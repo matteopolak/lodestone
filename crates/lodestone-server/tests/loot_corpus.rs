@@ -34,9 +34,20 @@ use lodestone_model::ResourceKey;
 use lodestone_server::loot::{LootTable, LootTableSet};
 
 /// The decompiled client's datapack data, relative to `crates/lodestone-server/`.
+///
+/// **`../..`, not `../../..`.** `CARGO_MANIFEST_DIR` is
+/// `<repo>/crates/lodestone-server`, so two levels up is the repo root and three
+/// is its *parent*. This gate carried the three-level version from the day it was
+/// written and therefore had **never once run**: both tests aborted on their own
+/// `root.is_dir()` precondition with "corpus not found at
+/// …/crates/lodestone-server/../../../.cache/…". Because it is `#[ignore]`d, no
+/// health check here could see it — the whole class CLAUDE.md calls the
+/// precondition species, except that the precondition *failed* rather than
+/// silently skipping, and nobody was watching. `just regen-loot-corpus` now exists
+/// so there is a named way to run it.
 fn corpus_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../.cache/mc/26.2/client-src/data/minecraft/loot_table")
+        .join("../../.cache/mc/26.2/client-src/data/minecraft/loot_table")
 }
 
 /// Collects `(id, contents)` for every JSON under `root`, id being the path
@@ -140,4 +151,141 @@ fn every_corpus_table_parses_without_a_hard_error() {
 
 fn parse(id: &str) -> ResourceKey {
     format!("minecraft:{id}").parse().expect("bundled id is a valid key")
+}
+
+/// Where the bundle lives, relative to `crates/lodestone-server/`.
+fn bundle_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/loot_table")
+}
+
+/// The subset of the corpus this crate is allowed to bundle: every table whose
+/// features the roller fully evaluates.
+///
+/// `LootTableSet::load_bundled` debug-asserts zero unsupported features per
+/// bundled table, so "clean" is not a preference — it is the bundling
+/// precondition. Computed here from the **cache**, never from the bundle, which
+/// is what lets the gate below notice a table falling out of scope.
+fn clean_corpus() -> Vec<(String, String)> {
+    let root = corpus_root();
+    assert!(
+        root.is_dir(),
+        "corpus not found at {} — run the oracle-setup steps that populate .cache/mc/26.2",
+        root.display(),
+    );
+    let mut corpus: Vec<(String, String)> = Vec::new();
+    collect(&root, &root, &mut corpus);
+    corpus
+        .into_iter()
+        .filter(|(id, contents)| {
+            let key: ResourceKey = format!("minecraft:{id}").parse().expect("corpus id");
+            LootTable::from_json(&key, contents)
+                .is_ok_and(|table| table.unsupported_features().is_empty())
+        })
+        .collect()
+}
+
+/// **Issue #538: the bundle *is* the clean subset of the vanilla corpus, and this
+/// generates it or asserts it.**
+///
+/// `LODESTONE_REGEN=1` rewrites `assets/loot_table/` from the cache; without it,
+/// the test asserts the two agree exactly — the generate-or-assert shape
+/// `crates/lodestone-data/tests/{collision_shapes,hardness}.rs` established. Run
+/// it with `just regen-loot-corpus`.
+///
+/// # Why the comparison has to be three-sided
+///
+/// `CLAUDE.md`: a gate that compares two things you control cannot tell you a
+/// third thing exists. So this asserts all three directions, and the middle one
+/// is the one a bundle-only drift check structurally cannot make:
+///
+/// 1. every bundled table is **byte-identical** to Mojang's copy (modulo the
+///    trailing newline their generator omits);
+/// 2. every **clean corpus** table is bundled — a table that newly becomes clean
+///    because the roller learned a feature fails here until it is added, and a
+///    bundled table that stops being clean fails the `load_bundled` assertion;
+/// 3. nothing is bundled that is **not** in the clean subset — which catches both
+///    an invented table and one whose features regressed.
+#[test]
+#[ignore = "needs .cache/mc/26.2/client-src (the decompiled client)"]
+fn the_bundle_is_exactly_the_clean_subset_of_the_vanilla_corpus() {
+    let clean = clean_corpus();
+    let bundle = bundle_root();
+    let regen = std::env::var_os("LODESTONE_REGEN").is_some();
+
+    let total_bytes: usize = clean.iter().map(|(_, text)| text.len() + 1).sum();
+    eprintln!(
+        "clean subset: {} tables, {total_bytes} bytes ({:.1} KB) — see docs/loot-tables.md",
+        clean.len(),
+        total_bytes as f64 / 1024.0,
+    );
+
+    if regen {
+        // Remove the whole tree first, so a table that stopped being clean is
+        // *deleted* rather than left behind to trip `load_bundled`.
+        if bundle.is_dir() {
+            fs::remove_dir_all(&bundle).expect("clearing the bundle");
+        }
+        for (id, contents) in &clean {
+            let path = bundle.join(format!("{id}.json"));
+            fs::create_dir_all(path.parent().expect("id has a parent")).expect("mkdir");
+            // Mojang's files end without a newline; the checked-in copies keep a
+            // conventional trailing one, which is the sole permitted difference
+            // (and what `bundled_tables_match_the_vanilla_corpus` allows for).
+            fs::write(&path, format!("{}\n", contents.trim_end_matches('\n'))).expect("write");
+        }
+        eprintln!("regenerated {} into {}", clean.len(), bundle.display());
+        return;
+    }
+
+    let mut on_disk: Vec<(String, String)> = Vec::new();
+    collect(&bundle, &bundle, &mut on_disk);
+
+    let clean_ids: std::collections::BTreeSet<&str> =
+        clean.iter().map(|(id, _)| id.as_str()).collect();
+    let bundled_ids: std::collections::BTreeSet<&str> =
+        on_disk.iter().map(|(id, _)| id.as_str()).collect();
+
+    let missing: Vec<&&str> = clean_ids.difference(&bundled_ids).collect();
+    assert!(
+        missing.is_empty(),
+        "{} clean vanilla tables are not bundled (run `just regen-loot-corpus`): {:?}",
+        missing.len(),
+        &missing[..missing.len().min(20)],
+    );
+    let extra: Vec<&&str> = bundled_ids.difference(&clean_ids).collect();
+    assert!(
+        extra.is_empty(),
+        "{} bundled tables are not in the clean vanilla subset — either invented, \
+         or their features stopped being supported: {:?}",
+        extra.len(),
+        &extra[..extra.len().min(20)],
+    );
+
+    let clean_by_id: std::collections::HashMap<&str, &str> =
+        clean.iter().map(|(id, t)| (id.as_str(), t.as_str())).collect();
+    let mut compared = 0usize;
+    for (id, bundled) in &on_disk {
+        let vanilla = clean_by_id[id.as_str()];
+        assert_eq!(
+            bundled.trim_end_matches('\n'),
+            vanilla.trim_end_matches('\n'),
+            "bundled table {id} drifted from the vanilla corpus",
+        );
+        compared += 1;
+    }
+    assert_eq!(
+        compared,
+        clean.len(),
+        "every clean table must have been compared, not merely enumerated"
+    );
+
+    // And the embedded copy `build.rs` produced must agree with the files, which
+    // is a different question from the files agreeing with the cache: a stale
+    // `OUT_DIR` would pass every assertion above.
+    assert_eq!(
+        LootTableSet::load_bundled().len(),
+        clean.len(),
+        "the embedded bundle and the checked-in files disagree — `build.rs`'s \
+         rerun-if-changed did not fire, or a file is not valid JSON"
+    );
 }
