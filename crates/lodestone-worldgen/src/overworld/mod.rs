@@ -200,6 +200,7 @@
 //! * [`output`] — [`GeneratedColumn`] and [`StageTimes`], the read-mostly result types.
 
 mod biome;
+pub mod biome_cells;
 mod decorate;
 mod fill;
 mod output;
@@ -219,6 +220,7 @@ use crate::surface::{SurfaceSystem, identity_canon};
 use self::biome::DynamicBiome;
 use self::fill::AquiferTrees;
 
+pub use self::biome_cells::BiomeCells;
 pub use self::output::GeneratedColumn;
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::output::StageTimes;
@@ -239,6 +241,14 @@ type PreOreResult = (
     Arc<crate::dense_grid::DenseBlockGrid>,
     [i32; 256],
     [(String, bool); 16],
+    // Issue #512: the full 4x4x4 biome grid for this chunk. Behind an `Arc` for
+    // the same reason the world is -- `vegetation_stage` pulls eight neighbours'
+    // `PreOreResult`s out of the store and must not copy 1,536 cells per
+    // neighbour to do it. The 16-entry surface array above is *derived from* this
+    // one (`surface_quarts_from_cells`), kept alongside rather than recomputed
+    // because every existing consumer -- surface, carve, decorate -- asks the
+    // surface question specifically.
+    Arc<biome_cells::BiomeCells>,
 );
 
 /// One chunk's memoised intermediate products — the payload of a
@@ -761,7 +771,7 @@ impl OverworldGenerator {
         // on a spruce canopy. Running it before vegetation would put snow at the
         // pre-tree surface and then bury it.
         let (world, _) = self.top_layer_stage(cx, cz, world, &cached.2);
-        self.intern_from_dense(world, cached.2.clone())
+        self.intern_from_dense(world, cached.2.clone(), (*cached.3).clone())
     }
 
     /// Stages 1-4 (fill/aquifer, biome, surface, carve) for chunk `(cx, cz)` —
@@ -865,7 +875,12 @@ impl OverworldGenerator {
         let field = self.fill_stage(&aquifer, base_x, base_z);
         let heights = self.heights_from_field(&field);
         let t_biome_start = std::time::Instant::now();
-        let biome_quarts = self.biome_stage(&heights, base_x, base_z);
+        // Issue #512: same two-line shape as `pre_ore_stage_uncached` — the 4x4x4
+        // grid is sampled and the 16 surface quarts are read out of it, so this
+        // timing bucket now covers 96x the samples it used to. That is the point
+        // of measuring it here.
+        let biome_cells = self.biome_cells_stage(base_x, base_z);
+        let biome_quarts = self.biome_stage(&biome_cells, &heights);
         let t_surface_start = std::time::Instant::now();
         let surface_diff = self.surface_stage(&field, &heights, &biome_quarts, base_x, base_z);
         let t_materialize_start = std::time::Instant::now();
@@ -888,7 +903,7 @@ impl OverworldGenerator {
         // believed, and `docs/plans/worldgen-parity.md` §6 predicts <5% for it.
         let (world, _) = self.top_layer_stage(cx, cz, world, &biome_quarts);
         let t_intern_start = std::time::Instant::now();
-        let col = self.intern_from_dense(world, biome_quarts);
+        let col = self.intern_from_dense(world, biome_quarts, biome_cells);
         let t_end = std::time::Instant::now();
 
         (
