@@ -235,21 +235,25 @@ every `cargo test -p lodestone-shell` run.
   on disk and `resolve_streaming` returns `Ok(None)`. Silence is the correct
   default; `--all` adds 92 objects / 293 MB.
 
-- **In-world selection uses the dimension default, not the biome's record.**
-  `world_situation` is passed `BackgroundMusic::overworld()`. That is a narrowing,
-  not the wrong input — it is exactly what vanilla falls back to for a biome setting
-  no `audio/background_music` attribute, and `biome_music::overworld_music_for`
-  collapses to it. Reaching the per-biome record needs a biome **name** at the
-  camera, and the only id→name mapping in the shell is `mesher::biome_name_at`,
-  private to that module and keyed to a provisional table (see its own doc). So the
-  42-biome table this doc describes is *reachable* but not yet *reached*.
+- **In-world selection reaches the 42-biome table.** `Sim::background_music`
+  resolves the standing biome out of the chunk section's palette against the
+  `BiomeNameCell` registry snapshot (`Sim::standing_biome_name`, the same hop
+  `Sim::biome_sky_color` makes — the biome is not on the wire) and looks up its
+  three-slot record; `Sim::music_volume` reads the biome's `audio/music_volume`
+  alongside it.
 
-- **Ambience is still unwired**, and unlike music it can be made audible today:
-  ambient loops and mood sounds are ordinary short events, not streams, so
-  `Sim::play_local_sound` already suffices. `ambient::MoodAccumulator::tick` needs a
-  light probe closure (`FnMut(IVec3) -> LightSample`) and the player's eye, and
-  `biome_ambient::ambient_sounds_at(dimension, biome)` needs the same biome name the
-  bullet above wants.
+  The fallback is **dimension-specific** on purpose, which is why this does not call
+  `overworld_music_for`: the Nether's biomes all set the attribute explicitly, so a
+  Nether biome with no row falls back to `BackgroundMusic::EMPTY` rather than to the
+  overworld's default track. Collapsing both to `overworld()` would play overworld
+  music in the Nether whenever a biome row was missing.
+
+- **Ambience is wired** — see [ambient-sounds.md](./ambient-sounds.md). Cave
+  ambience, the biome/dimension loop and the rain cadence all tick from
+  `Sim::tick_ambience`, and looping playback gained the three primitives it needed
+  (`Mixer::set_voice_volume`, `Voice::set_instance_volume`,
+  `AudioEngine::play_loop`). Unlike music these are ordinary short events, not
+  streams, so nothing here waits on a streaming voice.
 - **Biome attributes over the wire.** On a real vanilla server the attribute is
   `syncable()` and arrives in the biome registry NBT, which
   `protocol/v770/.../registry.rs:531`'s `biome_sky_color` already demonstrates how to

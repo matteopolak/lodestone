@@ -187,23 +187,69 @@ LODESTONE_REGEN=1 cargo test -p lodestone-sound --test biome_ambient_table
   that opens an output device is audible on the owner's machine on every `cargo test`,
   and no health check here can see it).
 
+## The shell wiring (the caller this used to lack)
+
+`crates/lodestone-shell/src/audio/ambient.rs` is the call site. `ShellAmbience` owns the
+`MoodAccumulator`, the `AmbientLoops`, a `RainAmbience`, the `StepAccumulator` and the
+`PredictionLedger`, and lives in the `AmbienceState` ECS resource beside `MusicState` /
+`AudioEngine` — config-scoped, so a reconnect must never reset it.
+
+Two halves, deliberately:
+
+- **`ShellAmbience::tick` is pure.** It returns `AmbienceEvent`s (`OneShot`, `LoopStart`,
+  `LoopVolume`, `LoopStop`) and cannot reach a device, so a gate drives an exact number of
+  ticks with a synthetic light probe and asserts what *would* play. That is also why this
+  module needs no `#[cfg(test)]` playback interception the way `audio/music.rs` does.
+- **`ShellAmbience::submit` is the device half**, and owns the loop **voice table** — a
+  loop handle has to outlive the tick that started it.
+
+`Sim::tick_ambience` (`sim/audio.rs`) gathers the inputs and is called once per frame from
+`app/redraw.rs`, on the same `Instant` as `tick_music`; `ShellAmbience::advance` derives
+whole 20 Hz ticks from it, capped at ten, rather than running once per frame.
+
+Three things about the inputs are worth knowing before changing them:
+
+- **The mood light probe is a real per-tick world read at a randomly sampled block**, via
+  `crate::net::entity_light_at` — the one reader in the shell that applies the dimension's
+  absent-sky policy. Reading `sky_at` directly resolves missing sky to 0, which would bank
+  moodiness in open daylight. An absent sample reports **full sky**, so a streaming world
+  cannot accumulate mood.
+- **The biome is not on the network.** `Sim::standing_biome_name` resolves it out of the
+  chunk section's palette against the `BiomeNameCell` registry snapshot every tick, the
+  same hop `Sim::biome_sky_color` makes and for the same reason.
+- **Rain is narrowed.** `landing` is the listener's own column, gated on sky light, so the
+  muffled `weather.rain.above` variant is never selected. Reaching it needs a real
+  `MOTION_BLOCKING` heightmap read, which nothing in the shell does yet (`app/weather.rs`
+  records the same gap for `canSeeSky`).
+
+Looping playback needed three new primitives, added rather than faked:
+`Mixer::set_voice_volume` / `Voice::set_instance_volume` (the crossfade needs a live
+voice's gain to move), and `AudioEngine::play_loop`, which forces `looping` **and**
+`relative` because vanilla's loop instances are head-relative with no attenuation.
+
+### Predicted footsteps
+
+`Sim::tick_footstep` is called from `Sim::step`'s tick loop, immediately after the walk
+bob, with the position *before* and *after* the tick's movement. That position is the
+input for the same reason the bob's phase is: `moveDist` accumulates the movement
+**actually achieved** after collision, so walking into a wall makes no sound and a
+per-frame velocity read would produce steps anyway.
+
+Steps only, deliberately — swing and attack sounds go through vanilla's
+`playServerSideSound` and are **not** predicted. Every predicted step is recorded in the
+`PredictionLedger`, and the `NetUpdate::Sound` arm in `sim/net_apply.rs` consults
+`Sim::suppresses_echo` before playing. Nothing reachable today double-plays, so that is
+defence in depth rather than a fix.
+
 ## What is deliberately not here
 
-- **Rain.** Issue #183 scopes the weather loop to land with issue #25's rain-level state,
-  and **a correct primitive already exists and is unwired**:
-  `lodestone_render::weather::RainAmbience`, carrying the exact `ClientLevel.java:388-392`
-  constants (`weather.rain` at 0.2/1.0, `weather.rain.above` at 0.1/0.5), vanilla's
-  post-increment `rainSoundTime` counter, and the exact
-  `landing.y > camera.y + 1 && heightmap > floor(camera.y)` conjunction. It needs a
-  *caller*, not a reimplementation — writing a second one would be the duplicate-subsystem
-  mistake this repo warns about.
+- **`weather.rain.above`** — see the narrowing above; it needs a heightmap read.
 - **Underwater ambience.** `LocalPlayer.java:1186`/`:1191` play
   `ambient.underwater.enter`/`.exit` via `playLocalSound` on the water-state transition,
   and `UnderwaterAmbientSoundHandler` owns the loop. A distinct handler, left for whoever
   wires the water-state edge.
-- **A caller.** Nothing in `lodestone-shell` ticks a `MoodAccumulator` or an
-  `AmbientLoops`, so this reaches no speakers yet — the same island risk noted in
-  `music-selection.md`, and left for the same reason.
+- **Swim sounds.** `predict::swim_pitch` and the two swim volume modifiers exist and have
+  no caller; they need the water-entry edge the underwater handler above also wants.
 
 ## Configuration
 

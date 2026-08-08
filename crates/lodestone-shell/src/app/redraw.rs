@@ -327,25 +327,27 @@ impl WindowApp {
         // a gamemode check (`Sim::music_creative`), and `underwater` is
         // water-specific rather than any fluid (`Sim::music_underwater`).
         //
-        // `background_music` is the **dimension** default rather than the biome's
-        // three-slot record, and that is a known narrowing rather than the wrong
-        // input: `BackgroundMusic::overworld()` is exactly what vanilla falls back
-        // to for a biome that sets no `audio/background_music` attribute, and
-        // `biome_music::overworld_music_for` already collapses to it. Reaching the
-        // per-biome record needs a biome *name* here, and the only id→name mapping
-        // in the shell is `mesher::biome_name_at`, which is private to that module
-        // and keyed to a provisional table (see its own doc). Threading it out is
-        // separate wiring, so the honest state is the dimension default.
-        let background = lodestone_sound::music::BackgroundMusic::overworld();
+        // `background_music` is the standing biome's own three-slot record, from
+        // the 42-biome table, with a **dimension-specific** fallback — see
+        // `Sim::background_music`. It is not the biome id: the biome only chooses
+        // the record, and `BackgroundMusic::select` makes the pick.
+        let background = self.sim.background_music();
+        let now = std::time::Instant::now();
         self.sim.tick_music(
-            std::time::Instant::now(),
+            now,
             &crate::audio::music::world_situation(
                 &background,
                 self.sim.music_creative(),
                 self.sim.music_underwater(),
-                1.0,
+                self.sim.music_volume(),
             ),
         );
+        // Cave ambience, the biome/dimension loop and the rain cadence, on the
+        // same clock as the music for the same reason — all three are vanilla's
+        // 20 Hz `BiomeAmbientSoundsHandler`/`tickWeatherEffects` bookkeeping, and
+        // `ShellAmbience::advance` derives whole ticks from this instant rather
+        // than running once per frame.
+        self.sim.tick_ambience(now, weather_state.as_ref());
         let outline = self.sim.target().map(|hit| hit.block);
         let entity_draws = self.sim.entity_draws();
         // Extraction lives in `Sim` because resolving each particle's light

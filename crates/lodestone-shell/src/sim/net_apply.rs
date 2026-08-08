@@ -365,9 +365,16 @@ impl Sim {
                     pitch,
                     seed,
                 } => {
+                    let pos = glam::Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
+                    // Drop a sound we already predicted locally. Nothing reachable
+                    // today double-plays — see `lodestone_sound::predict` — so this
+                    // is defence in depth against a server that forgets vanilla's
+                    // acting-player exclusion, not a fix for a live bug.
+                    if self.suppresses_echo(&name, pos) {
+                        continue;
+                    }
                     self.audio_mut(|audio| {
                         if let Some(audio) = audio {
-                            let pos = glam::Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
                             audio.play_sound(&name, category, pos, volume, pitch, seed);
                         }
                     });

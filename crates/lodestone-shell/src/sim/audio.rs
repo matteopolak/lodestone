@@ -146,6 +146,187 @@ impl Sim {
         });
     }
 
+    /// Advance the ambience clock — cave mood, the biome/dimension loop and the
+    /// rain cadence — and play whatever it decided.
+    ///
+    /// Same two-resources-at-one-instant shape as [`Self::tick_music`], and the
+    /// same move-out slot for the same reason. What differs is that the *tick* is
+    /// pure ([`crate::audio::ambient::ShellAmbience::tick`] returns events) and
+    /// only [`crate::audio::ambient::ShellAmbience::submit`] needs the device, so
+    /// the world reads the mood probe makes happen **outside** the ECS write
+    /// guard rather than inside it.
+    ///
+    /// `weather` is the caller's because the shell's [`crate::app::WindowApp`]
+    /// owns the `WeatherTracker`, not `Sim`.
+    pub(crate) fn tick_ambience(
+        &mut self,
+        now: std::time::Instant,
+        weather: Option<&lodestone_render::WeatherState>,
+    ) {
+        let player = self.player();
+        let eye = glam::DVec3::new(
+            player.position.x,
+            player.position.y + f64::from(player.eye_height),
+            player.position.z,
+        );
+        let ambient = self.ambient_sounds();
+
+        // The light probe, and the sky check the rain cadence rides on. Both go
+        // through `crate::net::entity_light_at`, which is the only reader in the
+        // shell that applies the *dimension's* absent-sky policy — reading
+        // `sky_at` directly resolves missing sky data to 0 and would make cave
+        // ambience accumulate in open daylight.
+        let light_source = self
+            .net()
+            .map(|n| (n.shared_handle(), n.shared_sky_default()));
+        let mut probe = |pos: glam::IVec3| -> lodestone_sound::ambient::LightSample {
+            let packed = light_source.as_ref().and_then(|(handle, policy)| {
+                crate::net::entity_light_at(handle, pos.x, pos.y, pos.z, policy.get())
+            });
+            match packed {
+                Some(p) => lodestone_sound::ambient::LightSample {
+                    sky: i32::from((p >> 4) & 0x0F),
+                    block: i32::from(p & 0x0F),
+                },
+                // No sample is "the column has not streamed in". Report full sky
+                // rather than darkness: guessing dark would bank moodiness while
+                // the world loads and fire cave ambience on the surface.
+                None => lodestone_sound::ambient::LightSample { sky: 15, block: 0 },
+            }
+        };
+        // Rain is only audible where the sky reaches the ear. `landing` is
+        // narrowed to the listener's own column rather than vanilla's random
+        // `rainParticlePosition`, which means the muffled `weather.rain.above`
+        // variant is never selected — reaching it needs a real `MOTION_BLOCKING`
+        // heightmap read, which nothing in the shell does yet
+        // (`app::weather`'s own doc records the same gap for `canSeeSky`).
+        let sky_at_ear = probe(glam::IVec3::new(
+            eye.x.floor() as i32,
+            eye.y.floor() as i32,
+            eye.z.floor() as i32,
+        ));
+        let landing = (sky_at_ear.sky > 0).then_some([
+            eye.x.floor() as i32,
+            eye.y.floor() as i32,
+            eye.z.floor() as i32,
+        ]);
+
+        let taken = self.write(|w| w.resource_mut::<super::AmbienceState>().0.take());
+        let Some(mut ambience) = taken else {
+            return;
+        };
+        let events = ambience.advance(
+            now,
+            &crate::audio::ambient::AmbienceInput {
+                eye,
+                ambient: &ambient,
+                weather,
+                landing,
+                roof_above: false,
+            },
+            &mut probe,
+        );
+        self.write(|w| {
+            {
+                let mut audio = w.resource_mut::<super::AudioEngine>();
+                if let Some(audio) = audio.0.as_mut() {
+                    ambience.submit(&events, audio);
+                }
+            }
+            w.resource_mut::<super::AmbienceState>().0 = Some(ambience);
+        });
+    }
+
+    /// The [`AmbientSounds`](lodestone_sound::ambient::AmbientSounds) in force at
+    /// the player: the standing biome's attribute if it declares one, otherwise
+    /// the dimension's.
+    ///
+    /// The biome hop is the same one [`Self::biome_sky_color`](crate::sim::Sim)
+    /// makes and for the same reason — **the biome is not on the network**, it
+    /// lives in the chunk section's palette, so it has to be resolved at the
+    /// player every tick. Falls back to `overworld` when the dimension is
+    /// unknown, which is what a pre-login frame sees.
+    fn ambient_sounds(&self) -> lodestone_sound::ambient::AmbientSounds {
+        let dimension = self
+            .net
+            .as_ref()
+            .and_then(|net| net.shared_handle().get().and_then(|h| h.player().dimension))
+            .map_or_else(|| "overworld".to_string(), |d| d.path().to_string());
+        let biome = self.standing_biome_name().unwrap_or_default();
+        lodestone_sound::biome_ambient::ambient_sounds_at(&dimension, &biome)
+    }
+
+    /// The three-slot [`BackgroundMusic`](lodestone_sound::music::BackgroundMusic)
+    /// record in force at the player.
+    ///
+    /// The selector's input is this record, never the biome id — see
+    /// [`crate::audio::music::world_situation`]. The biome only *chooses* the
+    /// record, which is why the standing-biome lookup happens here and the pick
+    /// happens in `BackgroundMusic::select`.
+    ///
+    /// The fallback is dimension-specific on purpose, which is why this does not
+    /// simply call `overworld_music_for`: the Nether's biomes all set the attribute
+    /// explicitly, so a Nether biome we have no row for should fall back to
+    /// **nothing** rather than to the overworld's default track.
+    #[must_use]
+    pub(crate) fn background_music(&self) -> lodestone_sound::music::BackgroundMusic {
+        let biome = self.standing_biome_name();
+        if let Some(record) = biome.and_then(lodestone_sound::biome_music::biome_music) {
+            return record.clone();
+        }
+        let overworld = self
+            .net
+            .as_ref()
+            .and_then(|net| net.shared_handle().get().and_then(|h| h.player().dimension))
+            .is_none_or(|d| d.path() == "overworld");
+        if overworld {
+            lodestone_sound::music::BackgroundMusic::overworld()
+        } else {
+            lodestone_sound::music::BackgroundMusic::EMPTY
+        }
+    }
+
+    /// The standing biome's `audio/music_volume`, defaulting to the attribute's
+    /// own `1.0`.
+    #[must_use]
+    pub(crate) fn music_volume(&self) -> f32 {
+        self.standing_biome_name()
+            .map_or(1.0, lodestone_sound::biome_music::biome_music_volume)
+    }
+
+    /// The name of the biome the player is standing in, or `None` when the
+    /// registry has not arrived or the column has not streamed in.
+    fn standing_biome_name(&self) -> Option<&'static str> {
+        let net = self.net.as_ref()?;
+        let names = net.shared_biome_names().snapshot();
+        if names.is_empty() {
+            return None;
+        }
+        let dims = net.world_dimensions()?;
+        let p = self.player().position;
+        let (block_x, block_y, block_z) =
+            (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
+        let si = block_y.div_euclid(16) - dims.min_y.div_euclid(16);
+        if si < 0 || usize::try_from(si).ok()? >= dims.section_count() {
+            return None;
+        }
+        let chunk = lodestone_client::ChunkPos {
+            x: block_x.div_euclid(16),
+            z: block_z.div_euclid(16),
+        };
+        let section = net
+            .sections_at(&[(chunk, usize::try_from(si).ok()?)])
+            .into_iter()
+            .next()
+            .flatten()?;
+        let biome = section.biome_at_block(
+            block_x.rem_euclid(16) as usize,
+            block_y.rem_euclid(16) as usize,
+            block_z.rem_euclid(16) as usize,
+        );
+        names.get(usize::try_from(biome).ok()?).copied()
+    }
+
     /// Whether the player counts as **creative** for music selection.
     ///
     /// `Minecraft.java:2615` — `instabuild && mayfly`, read off `Abilities`, and
@@ -170,6 +351,94 @@ impl Sim {
     pub(crate) fn music_underwater(&self) -> bool {
         let fluid = self.fluid_state();
         fluid.eye_in_water && fluid.in_water()
+    }
+
+    /// The local player's own footstep, **predicted** rather than waited on.
+    ///
+    /// Called once per physics tick from [`Self::step`](crate::sim::Sim) with the
+    /// position before and after this tick's movement, because vanilla accumulates
+    /// `moveDist` from the movement *actually achieved* after collision — which is
+    /// why walking into a wall makes no sound and a per-frame velocity read would.
+    ///
+    /// # Why this is predicted at all
+    ///
+    /// `LocalPlayer.playSound` overrides straight to `playLocalSound`
+    /// (`LocalPlayer.java:540-542`), so every step the local player takes is
+    /// client-side with no round trip. Swing and attack sounds are **not** — they
+    /// go through the method vanilla names `playServerSideSound` — so this is
+    /// deliberately steps only; see [`lodestone_sound::predict`].
+    ///
+    /// The step is also recorded in the echo ledger, so a server that broadcasts
+    /// it back to us degrades to "correct" rather than "doubled". Nothing reachable
+    /// today double-plays (`lodestone-server` sends no sound packets and a vanilla
+    /// server excludes the acting player), which is why that is defence in depth.
+    pub(crate) fn tick_footstep(&mut self, before: Vec3d, after: &PlayerState) {
+        let moved = glam::DVec3::new(
+            after.position.x - before.x,
+            after.position.y - before.y,
+            after.position.z - before.z,
+        );
+        let crossed = self.write(|w| {
+            w.resource_mut::<super::AmbienceState>()
+                .0
+                .as_mut()
+                .is_some_and(|a| a.advance_step(moved, false, !after.on_ground))
+        });
+        if !crossed {
+            return;
+        }
+        // The block being stood on, one below the feet — vanilla's
+        // `getBlockPosBelowThatAffectsMyMovement`, narrowed to the plain block
+        // below (the honeycomb of edge cases it handles is about half-blocks at
+        // section borders, none of which changes which sound plays).
+        let below = [
+            after.position.x.floor() as i32,
+            (after.position.y - 0.2).floor() as i32,
+            after.position.z.floor() as i32,
+        ];
+        let state = self.block_at_world(below);
+        if is_air_state(state) {
+            return;
+        }
+        let Some(sound) = lodestone_data::sound_types::sound_type(state) else {
+            return;
+        };
+        let Some(name) = lodestone_data::sound_types::step_sound_name(state) else {
+            return;
+        };
+        let position = glam::Vec3::new(
+            after.position.x as f32,
+            after.position.y as f32,
+            after.position.z as f32,
+        );
+        let volume = crate::audio::ambient::step_volume(sound.volume);
+        let pitch = sound.pitch;
+        let ticks = self.clock().ticks;
+        self.write(|w| {
+            if let Some(ambience) = w.resource_mut::<super::AmbienceState>().0.as_mut() {
+                ambience.record_step(name, position, ticks);
+            }
+        });
+        self.play_local_sound(
+            name,
+            lodestone_model::event::SoundCategory::Player,
+            position,
+            volume,
+            pitch,
+            block_sound_seed(below, ticks),
+        );
+    }
+
+    /// Whether an incoming server sound is an echo of one we already predicted
+    /// locally, and so must be dropped rather than played twice.
+    pub(crate) fn suppresses_echo(&mut self, name: &str, pos: glam::Vec3) -> bool {
+        let ticks = self.clock().ticks;
+        self.write(|w| {
+            w.resource_mut::<super::AmbienceState>()
+                .0
+                .as_mut()
+                .is_some_and(|a| a.should_suppress(name, pos, ticks))
+        })
     }
 
     /// Play a block's break sound at the centre of `block`, the half of vanilla's

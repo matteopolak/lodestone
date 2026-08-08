@@ -338,11 +338,16 @@ impl Sim {
         // client the identical sequence of gaps between songs. Determinism is not
         // lost where it matters: every gate constructs `ShellMusic::new` with its
         // own explicit seed rather than going through this resource.
+        let audio_seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as i64);
         ecs.insert_resource(MusicState(Some(crate::audio::music::ShellMusic::new(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos() as i64),
+            audio_seed,
         ))));
+        // Ambience shares the music's reasoning wholesale — see `AmbienceState`.
+        ecs.insert_resource(AmbienceState(Some(
+            crate::audio::ambient::ShellAmbience::new(audio_seed),
+        )));
         // Physics-walk is the default everywhere, including live: the shell
         // collides against the live client-owned world (see `LiveCollision` /
         // `Sim::tick_collision`), so the player stands on the server's ground.

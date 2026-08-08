@@ -708,6 +708,15 @@ pub struct AudioEngine(pub Option<ShellAudio>);
 #[derive(Debug, Default, Resource)]
 pub struct MusicState(pub Option<crate::audio::music::ShellMusic>);
 
+/// Vanilla's `BiomeAmbientSoundsHandler` plus the rain cadence, beside
+/// [`MusicState`] and for the same reasons: config-scoped (a reconnect must not
+/// re-roll the mood clock, so it must never gain a line in
+/// [`Sim::end_session`]'s reset list) and an `Option` only because
+/// [`Sim::tick_ambience`] has to hold it and [`AudioEngine`] mutably at one
+/// instant, which two `World::resource_mut` borrows cannot express.
+#[derive(Debug, Default, Resource)]
+pub struct AmbienceState(pub Option<crate::audio::ambient::ShellAmbience>);
+
 impl Sim {
     // -----------------------------------------------------------------------
     // The local player, which lives in `self.ecs` and nowhere else

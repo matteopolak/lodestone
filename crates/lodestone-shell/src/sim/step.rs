@@ -459,6 +459,11 @@ impl Sim {
                 pre_dead,
                 pre_swimming,
             );
+            // The local player's own footstep, client-predicted. Here rather than
+            // in a `GameTick` system for the same reason the bob's phase is: the
+            // input is the movement *achieved* after collision, which only exists
+            // as the difference across the schedule run above.
+            self.tick_footstep(pre_position, &p);
             // Vanilla's auto-jump fires *after* this tick's movement
             // (`LocalPlayer.updateAutoJump` runs at the end of `super.move`),
             // and the jump it requests lands on the *next* tick — the same
