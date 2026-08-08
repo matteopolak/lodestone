@@ -77,6 +77,22 @@ impl Mixer {
         }
     }
 
+    /// Re-sets a playing voice's per-instance volume. Returns `false` when no
+    /// live voice has `handle`.
+    ///
+    /// The ambient-loop crossfade needs this: a loop starts at volume 0 and is
+    /// ramped over 40 ticks by the caller's fade state, so the gain moves while
+    /// the voice plays.
+    pub fn set_voice_volume(&mut self, handle: PlayHandle, volume: f32) -> bool {
+        match self.voices.iter_mut().find(|v| v.handle() == handle) {
+            Some(v) => {
+                v.set_instance_volume(volume);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Read access to the category volumes.
     pub fn volumes(&self) -> &CategoryVolumes {
         &self.volumes

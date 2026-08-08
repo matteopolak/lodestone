@@ -95,6 +95,18 @@ impl Voice {
         self.spat = spat;
     }
 
+    /// Re-sets the per-instance volume on a live voice.
+    ///
+    /// The crossfade primitive: an ambient loop is started at volume 0 and ramped
+    /// over 40 ticks, so its gain has to change *while it plays* rather than being
+    /// fixed at `play` time. Note this also moves the audible range, because
+    /// [`Spatialization::range`] derives from `instance_volume` — which is
+    /// vanilla's behaviour too, and harmless for the head-relative loops this
+    /// exists for (their range is already infinite).
+    pub fn set_instance_volume(&mut self, volume: f32) {
+        self.spat.instance_volume = volume;
+    }
+
     /// Moves the source to a new world-space position, keeping every other
     /// spatial parameter (attenuation mode, range, per-instance volume). This is
     /// the entity-following primitive: a `SOUND_ENTITY` voice tracks its entity

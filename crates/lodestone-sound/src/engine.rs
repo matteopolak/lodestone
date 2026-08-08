@@ -185,6 +185,53 @@ impl AudioEngine {
         self.lock_mixer().set_voice_position(handle, position)
     }
 
+    /// Starts a **looping, head-relative** voice — the ambient biome/dimension
+    /// loop (`BiomeAmbientSoundsHandler.LoopSoundInstance`).
+    ///
+    /// Head-relative and looping are both forced here rather than left to the
+    /// caller, because they are what distinguishes a loop from every other play
+    /// path: vanilla's loop instances are `RELATIVE` with no attenuation, and
+    /// the crossfade below assumes the voice never ends on its own. `volume` is
+    /// normally `0.0` at start; ramp it with
+    /// [`set_voice_volume`](Self::set_voice_volume).
+    ///
+    /// `Ok(None)` means the event resolved to nothing playable (the ordinary
+    /// answer when the `.ogg` corpus is not on disk), not an error.
+    pub fn play_loop(
+        &mut self,
+        event_name: &str,
+        category: ModelCategory,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) -> Result<Option<PlayHandle>, DriverError> {
+        let mut instance = match self.resolver.resolve_instance(
+            event_name,
+            category,
+            Vec3::ZERO,
+            volume,
+            pitch,
+            seed,
+        )? {
+            Some(instance) => instance,
+            None => return Ok(None),
+        };
+        instance.looping = true;
+        instance.relative = true;
+        Ok(Some(self.lock_mixer().play(instance)))
+    }
+
+    /// Re-sets a live voice's volume — the ambient loop's 40-tick crossfade.
+    /// `false` once the voice is gone.
+    pub fn set_voice_volume(&self, handle: PlayHandle, volume: f32) -> bool {
+        self.lock_mixer().set_voice_volume(handle, volume)
+    }
+
+    /// Stops a live voice. `false` when it had already finished.
+    pub fn stop_voice(&self, handle: PlayHandle) -> bool {
+        self.lock_mixer().stop(handle)
+    }
+
     /// Runs `f` with exclusive access to the shared mixer — an escape hatch for
     /// less-common operations (per-category volumes via
     /// [`volumes_mut`](lodestone_audio::Mixer::volumes_mut), inspection). Holds
