@@ -632,6 +632,13 @@ impl<'a> RegionView<'a> {
             return StateId::AIR;
         }
         if let Some(id) = self.overlay.get(&(lx, y, lz)) {
+            // Counted here as well as in [`Self::get`] so `ore_probe`'s
+            // `region_reads_overlay` stays one number across §12.149's change of read
+            // path: `try_place_ore` used to reach the overlay through `get` and now
+            // reaches it through `get_id`, and the row is only a control if it counts
+            // both. It must therefore stay equal across that change — the read
+            // *pattern* did not move, only its cost.
+            super::ore_probe::bump_region_read_overlay(1);
             return id;
         }
         match source_slot(lx, lz).and_then(|slot| self.sources[slot]) {
@@ -653,6 +660,7 @@ impl<'a> RegionView<'a> {
             return "minecraft:air";
         }
         if let Some(id) = self.overlay.get(&(lx, y, lz)) {
+            super::ore_probe::bump_region_read_overlay(1);
             return self.interner.name_of(id);
         }
         match source_slot(lx, lz).and_then(|slot| self.sources[slot]) {

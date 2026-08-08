@@ -78,6 +78,11 @@ pub mod region_view;
 /// engine needs. See its own module doc.
 pub mod top_layer;
 
+/// Event counters for this module's own placement loops — the instrument
+/// DESIGN.md §12.143 asked for before anything touched the `ore` stage. Inert
+/// unless the `gen-counters` feature is on.
+pub mod ore_probe;
+
 /// `GenerationStep.Decoration.UNDERGROUND_ORES.ordinal()`.
 pub const STEP_UNDERGROUND_ORES: i32 = 6;
 
@@ -918,6 +923,7 @@ fn apply_one_source<R: RandomSource>(
     ores: &[PlacedOre],
     working: &mut RegionView<'_>,
 ) -> i64 {
+    ore_probe::bump_source_pass(1);
     let origin = input.origin();
     let decoration_seed = random.set_decoration_seed(seed, origin.x, origin.z);
     let ctx = Ctx {
@@ -1163,16 +1169,21 @@ pub fn place_ore_feature<R: RandomSource>(
     let z_start = origin.z - math::ceil(spread_xy as f64) - max_radius;
     let size_xz = 2 * (math::ceil(spread_xy as f64) + max_radius);
 
+    ore_probe::bump_feature(1);
     let mut proceed = false;
+    let mut probes = 0u64;
     'probe: for xprobe in x_start..=x_start + size_xz {
         for zprobe in z_start..=z_start + size_xz {
+            probes += 1;
             if y_start <= input.get_height(xprobe, zprobe) {
                 proceed = true;
                 break 'probe;
             }
         }
     }
+    ore_probe::bump_height_probes(probes);
     if !proceed {
+        ore_probe::bump_feature_culled(1);
         return;
     }
     do_place(
@@ -1233,6 +1244,8 @@ fn do_place<R: RandomSource>(
     z_start: i32,
 ) {
     let size = config.size;
+    ore_probe::bump_blob(1);
+    ore_probe::bump_spheres(size.max(0) as u64);
     // Reused scratch, not a fresh allocation per blob — see `BLOB_DATA`.
     // `clear` + `resize` reproduces `vec![0.0; size * 4]` exactly (every element
     // is zeroed and the length is the same); the first loop below then writes
@@ -1298,6 +1311,10 @@ fn do_place<R: RandomSource>(
     // can visit, so `VisitedBox` cannot be too small by construction.
     let mut tested =
         VisitedBox::over_spheres(VISITED_BITS.take(), &data, size, x_start, y_start, z_start);
+    // Per-blob, deliberately: see [`TargetCache`]'s "how to change it". One blob is
+    // one `OreConfig`, so the config is not in the key, and a stack-local cache is
+    // what makes that true by construction.
+    let mut cache = TargetCache::empty();
     for i in 0..size {
         let b = (i * 4) as usize;
         let r = data[b + 3];
@@ -1333,9 +1350,11 @@ fn do_place<R: RandomSource>(
                         continue;
                     }
                     if !tested.insert(x, y, z) {
+                        ore_probe::bump_candidate_deduped(1);
                         continue;
                     }
-                    try_place_ore(random, config, input, working, x, y, z);
+                    ore_probe::bump_candidate(1);
+                    try_place_ore(random, config, input, working, x, y, z, &mut cache);
                 }
             }
         }
@@ -1456,6 +1475,154 @@ fn is_outside_build_height(y: i32, min_y: i32, height: i32) -> bool {
     y < min_y || y >= min_y + height
 }
 
+/// How many targets [`TargetCache`] can hold a bitmask for. Vanilla's widest
+/// `UNDERGROUND_ORES` config has **two** (a `stone_ore_replaceables` target and
+/// a `deepslate_ore_replaceables` one), so this is 4× headroom; a config with
+/// more falls back to [`match_targets_by_name`] per candidate, which is exactly
+/// the code path that existed before this cache and therefore cannot diverge.
+const MAX_CACHED_TARGETS: usize = 8;
+
+/// Slots in [`TargetCache`]'s direct-mapped table. A blob visits ~82 candidate
+/// positions (measured: 79,148 candidates over 962 blobs per interior column) and
+/// the states under them are a handful of terrain blocks, so 16 slots keyed on the
+/// low bits of the [`StateId`] is enough for a near-total hit rate while staying
+/// 32 bytes of stack.
+const TARGET_CACHE_SLOTS: usize = 16;
+
+/// Per-**blob** memo for the two string operations `try_place_ore` used to
+/// perform on every candidate position: resolving the cell's base name and
+/// testing it against each of the config's `RuleTest`s.
+///
+/// # Why this is where the ore stage's cost was
+///
+/// DESIGN.md §12.149: with `ore` at 38.7% of a steady-state column, a `samply`
+/// profile of the stage alone put **18.5% of it in `SipHash::write`/`hash_one::<&str>`
+/// plus 3.5% in `memcmp`** — the `ore_tag_map` lookup and its member-set probe,
+/// two string hashes per target per candidate, 81,316 target tests per column —
+/// and a further ~13% of the inlined placement loop in `memchr`, which is
+/// `current.split('[')`. All of it recomputed the same answer for the same
+/// [`StateId`] tens of thousands of times per column, because the *terrain* under
+/// a blob is a handful of distinct states.
+///
+/// # How it works
+///
+/// Direct-mapped on the raw [`StateId`], with a full key compare, holding a
+/// bitmask of which of `config.targets` match that state. A hit is one array
+/// index and one `u16` compare. A miss runs [`match_targets_by_name`] — the
+/// original name-based code, unchanged — and stores the answer.
+///
+/// The mask is only ever *consumed* in ascending target order, so the sequence of
+/// matching targets, and therefore the `should_skip_air_check` draw sequence, is
+/// bit-for-bit what the name-based loop produced. **That is the whole correctness
+/// argument and it is why the mask is a bitmask rather than a "first match"
+/// index:** `canPlaceOre` can refuse a matching target and vanilla then continues
+/// to the *next* matching one, drawing again.
+///
+/// # How to change it, and the trap
+///
+/// **The cache must not outlive one `OreConfig`.** It is constructed inside
+/// [`do_place`], which handles exactly one config, so the config is not part of
+/// the key. Hoisting it to a `thread_local!` (the shape [`BLOB_DATA`] uses) would
+/// make it wrong in the §12.143 way — a value from a *different function* at a
+/// plausible magnitude — unless the config's identity went into the key and was
+/// cleared between generators. Do not hoist it.
+///
+/// `state_ids` caches the placed state's own [`StateId`] per target, which is the
+/// other string cost this removes: `RegionView::set` interned the target's state
+/// *string* on every one of the 62,796 writes a column performs (measured at 4.2%
+/// of the stage in `StateInterner::id_of`), and a blob writes one or two distinct
+/// states.
+struct TargetCache {
+    /// Raw [`StateId`] per slot; `u16::MAX` means empty. `u16::MAX` is safe as a
+    /// sentinel because `intern_locked` panics past 65,536 states, so no live id
+    /// can equal it.
+    keys: [u16; TARGET_CACHE_SLOTS],
+    masks: [u8; TARGET_CACHE_SLOTS],
+    /// Lazily-resolved [`StateId`] of each target's placed state; `u16::MAX` means
+    /// not yet resolved.
+    state_ids: [u16; MAX_CACHED_TARGETS],
+}
+
+/// The sentinel both of [`TargetCache`]'s tables use for "empty".
+const NO_ID: u16 = u16::MAX;
+
+impl TargetCache {
+    fn empty() -> Self {
+        Self {
+            keys: [NO_ID; TARGET_CACHE_SLOTS],
+            masks: [0; TARGET_CACHE_SLOTS],
+            state_ids: [NO_ID; MAX_CACHED_TARGETS],
+        }
+    }
+
+    /// The bitmask of `config.targets` matching the state at `id`, computed by
+    /// [`match_targets_by_name`] on a miss.
+    #[inline]
+    fn mask_for(
+        &mut self,
+        id: crate::interner::StateId,
+        config: &OreConfig,
+        input: &OreInput<'_>,
+        working: &RegionView<'_>,
+    ) -> u8 {
+        let raw = id.raw();
+        let slot = (raw as usize) & (TARGET_CACHE_SLOTS - 1);
+        if self.keys[slot] == raw {
+            return self.masks[slot];
+        }
+        let name = working.interner().name_of(id);
+        let mask = match_targets_by_name(name, config, input);
+        self.keys[slot] = raw;
+        self.masks[slot] = mask;
+        mask
+    }
+
+    /// The [`crate::interner::StateId`] of target `i`'s placed state, interned
+    /// against the view's own interner on first use.
+    #[inline]
+    fn state_id_for(
+        &mut self,
+        i: usize,
+        config: &OreConfig,
+        working: &RegionView<'_>,
+    ) -> crate::interner::StateId {
+        let cached = self.state_ids[i];
+        if cached != NO_ID {
+            return crate::interner::StateId::from_raw(cached);
+        }
+        let id = working.interner().id_of(&config.targets[i].state);
+        self.state_ids[i] = id.raw();
+        id
+    }
+}
+
+/// `TargetBlockState.target.test` for every target of `config` against the block
+/// state named `name`, as a bitmask over target index.
+///
+/// This is the original `try_place_ore` body's inner test, moved out verbatim so
+/// [`TargetCache`] and the uncached path cannot drift: the tag/block comparison,
+/// the `split('[')` base strip and the `in_tag` closure are all still exactly
+/// what they were. Neither test draws, so hoisting them out of the placement loop
+/// cannot move the RNG.
+fn match_targets_by_name(name: &str, config: &OreConfig, input: &OreInput<'_>) -> u8 {
+    let base = name.split('[').next().unwrap_or(name);
+    let mut mask = 0u8;
+    for (i, target) in config.targets.iter().enumerate().take(MAX_CACHED_TARGETS) {
+        ore_probe::bump_target_test(1);
+        let matches = match &target.target {
+            RuleTest::TagMatch(tag) => {
+                ore_probe::bump_target_test_tag(1);
+                (input.in_tag)(base, tag)
+            }
+            RuleTest::BlockMatch(block) => base == block.as_str(),
+        };
+        if matches {
+            mask |= 1 << i;
+        }
+    }
+    mask
+}
+
 fn try_place_ore<R: RandomSource>(
     random: &mut R,
     config: &OreConfig,
@@ -1464,6 +1631,7 @@ fn try_place_ore<R: RandomSource>(
     x: i32,
     y: i32,
     z: i32,
+    cache: &mut TargetCache,
 ) {
     // Writes always land somewhere in the driven 3×3 region (clamped beyond
     // it — see `OreInput::region_local`); whether this particular write is
@@ -1472,34 +1640,40 @@ fn try_place_ore<R: RandomSource>(
     // has to happen so later reads (isAdjacentToAir, a later source's own
     // placement) see it, exactly as vanilla's real, shared block field would.
     let (lx, lz) = input.region_local(x, z);
-    // The base name is a **borrowed slice** of the view's own interned name, not
-    // an owned `String`. It used to be `.to_string()`d purely to end the
-    // immutable borrow of `working` before the `set` below, which cost one heap
-    // allocation for every candidate position of every blob of every ore of all
-    // nine source chunks. Instead the loop now decides *which* target wins under
-    // the immutable borrow and the single write happens after it — so the draw
-    // sequence is untouched (`should_skip_air_check` still fires per matching
-    // target, in target order, and the walk still stops at the first target that
-    // places) while the allocation is gone.
+    // Ids, not names. Until §12.149 this read the cell as a `&str`, stripped its
+    // base name with `split('[')` and hashed that string against `ore_tag_map`
+    // once per target — three string operations per candidate position, ~79,148
+    // candidates per column, all answering the same question about the same
+    // handful of terrain states. `TargetCache` answers it from a `u16` compare;
+    // `match_targets_by_name` is still the only implementation of the test
+    // itself.
+    //
+    // The draw sequence is untouched, as it was by the earlier removal of the
+    // `to_string()` here: `should_skip_air_check` still fires per **matching**
+    // target, in ascending target order, and the walk still stops at the first
+    // target that places.
     let mut chosen: Option<usize> = None;
     {
-        let current = working.get(lx, y, lz);
-        let base = current.split('[').next().unwrap_or(current);
-        for (i, target) in config.targets.iter().enumerate() {
-            let matches = match &target.target {
-                RuleTest::TagMatch(tag) => (input.in_tag)(base, tag),
-                RuleTest::BlockMatch(block) => base == block.as_str(),
-            };
-            // `TargetBlockState.target.test` never draws for tag/block tests, so
-            // a non-match costs nothing — exactly as vanilla loops to the next
-            // target.
-            if !matches {
-                continue;
-            }
+        ore_probe::bump_region_read(1);
+        let id = working.get_id(lx, y, lz);
+        let mut mask = if config.targets.len() <= MAX_CACHED_TARGETS {
+            cache.mask_for(id, config, input, working)
+        } else {
+            // Wider than the cache's mask. Recompute per candidate, which is the
+            // pre-§12.149 behaviour; `MAX_CACHED_TARGETS` documents why no real
+            // config reaches here.
+            match_targets_by_name(working.interner().name_of(id), config, input)
+        };
+        while mask != 0 {
+            let i = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
             // canPlaceOre: shouldSkipAirCheck (may draw a nextFloat) ? true
             // : !isAdjacentToAir.
             let place = should_skip_air_check(random, config.discard_chance_on_air_exposure)
-                || !is_adjacent_to_air(input, working, x, y, z);
+                || {
+                    ore_probe::bump_air_check(1);
+                    !is_adjacent_to_air(input, working, x, y, z)
+                };
             if place {
                 chosen = Some(i);
                 break;
@@ -1508,7 +1682,18 @@ fn try_place_ore<R: RandomSource>(
         }
     }
     if let Some(i) = chosen {
-        working.set(lx, y, lz, &config.targets[i].state);
+        ore_probe::bump_write(1);
+        // The interned id, resolved once per blob rather than once per write —
+        // `RegionView::set` hashed the target's state *string* through
+        // `StateInterner::id_of` on every one of a column's 62,796 ore writes. The
+        // written value is identical: `id_of` is that string's id in this view's
+        // own interner, which is what `set` looked up.
+        let state = if i < MAX_CACHED_TARGETS {
+            cache.state_id_for(i, config, working)
+        } else {
+            working.interner().id_of(&config.targets[i].state)
+        };
+        working.set_id(lx, y, lz, state);
     }
 }
 
@@ -1549,6 +1734,7 @@ fn block_at<'a>(input: &OreInput<'_>, working: &'a RegionView<'_>, x: i32, y: i3
     if is_outside_build_height(y, input.min_y, input.height) {
         return "minecraft:air";
     }
+    ore_probe::bump_region_read(1);
     let (lx, lz) = input.region_local(x, z);
     working.get(lx, y, lz)
 }

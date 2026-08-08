@@ -1045,6 +1045,50 @@ impl OverworldGenerator {
         })
     }
 
+    /// Runs **only** [`Self::ore_stage`] for `(cx, cz)` against a private copy of
+    /// that chunk's already-memoised pre-ore world, and returns how many cells ore
+    /// placement wrote into the centre.
+    ///
+    /// # Why this exists
+    ///
+    /// DESIGN.md §12.143 measured `ore` at 38.7% of a steady-state column with
+    /// nothing ever having profiled it. A sampling profile of `column()` spends
+    /// most of its samples in `shape`/`vegetation`; this isolates the stage so a
+    /// `samply` profile of a sweep over it attributes ore's own cycles.
+    /// `tests/ore_stage_profile.rs` is the driver, and its warm-up is the
+    /// load-bearing part — on a cold store the `pre_ore_stage` call below runs a
+    /// whole terrain pipeline and the profile stops being about ore.
+    ///
+    /// Deliberately **not** routed through [`Self::post_ore_world`]: that memoises,
+    /// so a second call over the same chunk would measure a store hit. The one
+    /// dense-grid clone it costs (98,304 `u16`s) is the same clone
+    /// `post_ore_world`'s consumer pays and is ~0.2% of the stage.
+    ///
+    /// The return value is how many of the centre's own cells the stage changed,
+    /// purely so a caller can assert the workload was not vacuous — a resolver with
+    /// no ore data makes `ore_stage` an early return, which is exactly §12.143's
+    /// "world" species of vacuous benchmark, and a profile of it would be a profile
+    /// of the `if` at the top. The 98,304-cell diff walk that produces it is ~0.05%
+    /// of the stage's own instruction count.
+    #[must_use]
+    pub fn ore_stage_for_profiling(&self, cx: i32, cz: i32) -> u64 {
+        let _view = self.store.open_view((cx, cz), STRUCTURE_CLOSURE_RADIUS);
+        let pre = self.pre_ore_stage(cx, cz);
+        let world = self.ore_stage(cx, cz, (*pre.0).clone(), &pre.1);
+        let (min_x, min_y, min_z, sx, sy, sz) = world.bounds();
+        let mut changed = 0u64;
+        for y in min_y..min_y + sy {
+            for z in min_z..min_z + sz {
+                for x in min_x..min_x + sx {
+                    if world.get_id(x, y, z) != pre.0.get_id(x, y, z) {
+                        changed += 1;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
     /// Identical to [`column`](Self::column), timed per stage. Exists so the
     /// per-stage cost split can be re-measured without maintaining a second,
     /// hand-duplicated copy of the pipeline: this calls the exact same private
