@@ -1249,6 +1249,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   files on disk and writes back everything the world mutated, through
   `lodestone-anvil`'s container codec. Issue
   [#437](https://github.com/matteopolak/lodestone/issues/437).
+- [World-save parity against real vanilla 26.2](./world-save-parity.md) — A gate
+  that hands a world to a **real Mojang 26.2 server** in a container, lets vanilla
+  load and save it, reads it back, and requires semantic identity of every field we
+  author — in both directions.
+  `crates/lodestone-anvil/tests/vanilla_save_parity.rs`, driven by
+  `scripts/live-oracles/save-parity.sh`, reporting through
+  `lodestone_anvil::nbt_diff`. It exists because the owner asked for a roundtrip that
+  proves world saving is 1:1, and because every save test that existed before it
+  compared our writer against our own reader.
 - [World select, and the singleplayer save list](./world-select.md) —
   `Screen::WorldSelect` — vanilla's `SelectWorldScreen`, reached from the title
   screen's **Singleplayer** button. A title, a search field, a world list, and six
