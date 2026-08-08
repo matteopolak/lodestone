@@ -7216,7 +7216,7 @@ it worth doing (`ore` 38.7%, `aquifer + shape` 25.6%) and the instruction to pro
   serial**, and §12.130's note that throughput is a different question from serial cost is the other
   half of the answer.
 
-**12.149 Three producer-side islands in one session, and the latency the owner reported was protocol
+**12.150 Three producer-side islands in one session, and the latency the owner reported was protocol
 encode on the task that owed him the reply.** Reported: *"the integrated server definitely has some lag
 spikes. sometimes if i try to break a block it takes a sec for it to work"*, plus *"throwing out items
 doesnt work"* and a recipe-book click that emptied the source slot. The guess accompanying the first —
