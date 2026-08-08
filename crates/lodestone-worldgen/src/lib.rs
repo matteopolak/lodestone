@@ -42,6 +42,7 @@ pub mod dense_grid;
 pub mod feature;
 pub mod interner;
 pub mod overworld;
+pub mod structure;
 pub mod surface;
 
 /// The numeric core, re-exported so every pre-split path keeps resolving.

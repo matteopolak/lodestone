@@ -1477,6 +1477,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   settings, 92 worldgen tags, and 1212 NBT structure templates. This is phase
   **S-data** of [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md) (issue
   #484) and it is data only — no placement, no jigsaw, no beardifier.
+- [Structure placement and starts (worldgen phase S1)](./worldgen-structure-placement.md) —
+  The engine that decides **which chunk gets which structure** for a seed: the two
+  `StructurePlacement` types, the four `frequency_reduction_method`s, per-set weighted
+  structure selection, per-structure start predicates, and the two new worldgen stages
+  (`structure_starts`, `structure_refs`) that carry the answer. Phase **S1** of
+  [`plans/structures.md`](./plans/structures.md) (issue #514), built on the corpus
+  that [`worldgen-structure-corpus.md`](./worldgen-structure-corpus.md) bundled.
 - [Surface-stage state ids](./worldgen-surface-ids.md) — The surface stage carries
   **interned `StateId`s** rather than `String`s across every seam: the pre-surface
   callback, the rule interpreter's result states, the clay-band table and the sparse

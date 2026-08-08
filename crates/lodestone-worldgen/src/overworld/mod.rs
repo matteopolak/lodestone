@@ -206,6 +206,7 @@ mod decorate;
 mod fill;
 mod output;
 pub mod store;
+pub mod structures;
 mod veins;
 
 use std::collections::{HashMap, HashSet};
@@ -227,6 +228,7 @@ pub use self::block_entities::{BeeOccupant, GeneratedBlockEntity};
 pub use self::output::GeneratedColumn;
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::output::StageTimes;
+pub use self::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
 
 /// The return shape of [`OverworldGenerator::pre_ore_stage`] — one chunk's
 /// own post-carve world, heightmap and biome quarts (stages 1-4). Named so
@@ -268,6 +270,15 @@ type PreOreResult = (
 /// declared *below* it.
 #[derive(Debug, Default)]
 struct ChunkStages {
+    /// Stage 0a (issue #514's S1) — this chunk's own structure starts. **The
+    /// topmost stage**, and the only one whose computation reads no other stage:
+    /// see [`structures`]'s module doc for why starts must precede noise, and
+    /// [`store`]'s for why "above the stages it consumes" is the rule that keeps
+    /// the once-guards deadlock-free.
+    structure_starts: store::StageSlot<Vec<Arc<crate::structure::StructureStart>>>,
+    /// Stage 0b — the 17×17 references walk over `structure_starts`. Consumed by
+    /// `pre_ore` (as the beardifier context) and by the persistence path.
+    structure_refs: store::StageSlot<structures::StructureRefs>,
     /// Stages 1–4 — see [`OverworldGenerator::pre_ore_stage`].
     pre_ore: store::StageSlot<PreOreResult>,
     /// Stages 1–5 — see [`OverworldGenerator::post_ore_world`].
@@ -471,6 +482,15 @@ pub struct OverworldGenerator {
     /// [`Self::top_layer_stage`], and cheap enough (~780 draws) to build
     /// unconditionally.
     climate_noise: crate::noise::ClimateNoise,
+    /// The structure placement engine (issue #514's S1), or `None` when the
+    /// resolver supplied no `structure_set_ids` — which is every fixture resolver
+    /// in this workspace, and the reason this unit changes no parity fixture.
+    ///
+    /// `None` rather than an empty registry so the two structure stages can
+    /// early-return without touching the registry at all: a generator with no
+    /// structure data does zero placement draws per chunk, not twenty
+    /// no-ops.
+    structures: Option<crate::structure::StructureRegistry>,
 }
 
 /// Renders a noise-settings block-state object (`{"Name": ..., "Properties": {...}}`)
@@ -659,6 +679,17 @@ impl OverworldGenerator {
         // doc comment for why this is always a safe bound.
         let slot_count = builder.slot_count();
 
+        // Issue #514's S1. Built here, from the same `resolver` borrow every
+        // other composition table above uses, because the registry parses ~54
+        // JSON documents plus their biome-tag closures and must not do that per
+        // chunk. An empty `structure_set_ids` (the `Resolver` default) yields
+        // `None`, so nothing downstream distinguishes "no structure data" from
+        // "this engine before structures existed".
+        let structures = {
+            let registry = crate::structure::StructureRegistry::new(seed, resolver);
+            if registry.is_empty() { None } else { Some(registry) }
+        };
+
         Self {
             slot_count,
             surface,
@@ -700,6 +731,27 @@ impl OverworldGenerator {
             freeze_biomes,
             snow_support,
             climate_noise: crate::noise::ClimateNoise::new(),
+            structures,
+        }
+    }
+
+    /// `MultiNoiseBiomeSource.getNoiseBiome(qx, qy, qz)` at an arbitrary quart
+    /// cell, sampled fresh rather than read out of a generated chunk.
+    ///
+    /// Needed by the structure stages, which run before any chunk exists.
+    /// [`Self::biome_cells_stage`] resolves the same question for a whole chunk's
+    /// 4×4×4 grid; both go through the same `climate.target` +
+    /// `table.nearest` pair, and the quart-**corner** convention is the same one
+    /// that stage documents. Falls back to the fixed biome for a generator with no
+    /// climate table.
+    #[must_use]
+    pub fn biome_at_quart(&self, qx: i32, qy: i32, qz: i32) -> String {
+        match &self.dynamic_biome {
+            None => self.fallback_biome.clone(),
+            Some(dynamic) => {
+                let target = dynamic.climate.target(qx * 4, qy * 4, qz * 4);
+                dynamic.table.nearest(&target).to_string()
+            }
         }
     }
 
@@ -845,7 +897,35 @@ impl OverworldGenerator {
         let entry = self.store.entry((cx, cz));
         entry.pre_ore.get_or_compute(
             crate::counters::bump_pre_ore,
-            || self.pre_ore_stage_uncached(cx, cz),
+            || {
+                // Issue #514's S1: the one new upstream edge. `fill_stage`'s
+                // density graph still evaluates `Density::Beardifier` as the
+                // constant-`0.0` leaf it has always been (S3 replaces it), so
+                // reading the context here changes nothing about the output —
+                // but it is what makes the *ordering* real rather than planned,
+                // and `structures::StructureRefs::adaptation_bearing` is the
+                // exact seam S3 plugs its evaluator into.
+                //
+                // Gated on the generator actually having structure data so that
+                // every fixture resolver in this workspace (and therefore all 13
+                // parity binaries) pays literally nothing: no 17×17 walk, no
+                // store probes, no allocation.
+                let beardifier_context = self
+                    .structures
+                    .as_ref()
+                    .map(|_| self.structure_refs_stage(cx, cz));
+                debug_assert!(
+                    beardifier_context
+                        .as_ref()
+                        .is_none_or(|refs| refs.adaptation_bearing().next().is_none()),
+                    "an adaptation-bearing start reached the density graph while \
+                     `Density::Beardifier` is still the constant-zero leaf — S3 \
+                     must land before any such structure gets a piece generator, \
+                     or its terrain silently differs from vanilla's",
+                );
+                drop(beardifier_context);
+                self.pre_ore_stage_uncached(cx, cz)
+            },
         )
     }
 

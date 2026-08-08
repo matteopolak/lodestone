@@ -150,6 +150,43 @@ impl<R: RandomSource> WorldgenRandom<R> {
             ^ seed;
         self.set_seed(result);
     }
+
+    /// `setLargeFeatureWithSalt(seed, x, z, blend)` — the seed derivation every
+    /// structure-set placement decision is made against (issue #514's S1).
+    ///
+    /// Transcribed from the record definition,
+    /// `.cache/mc/26.2/src/net/minecraft/world/level/levelgen/WorldgenRandom.java:66-69`,
+    /// not from a call site:
+    ///
+    /// ```text
+    /// long result = x * 341873128712L + z * 132897987541L + seed + blend;
+    /// setSeed(result);
+    /// ```
+    ///
+    /// The decompiler names the fourth parameter `blend`; every caller passes a
+    /// structure placement's `salt`. **`x * 341873128712L` widens before the
+    /// multiply** (the literal is `long`), so both products are 64-bit — this is
+    /// *not* the mixed-width arithmetic [`seed_slime_chunk`] has to reproduce.
+    ///
+    /// # The argument order at the call site is not what you would guess
+    ///
+    /// `StructurePlacement.probabilityReducer` — the `default`
+    /// `frequency_reduction_method`, the one 18 of the 20 bundled structure sets
+    /// use — calls this as `setLargeFeatureWithSalt(seed, salt, sourceX, sourceZ)`:
+    /// the *salt* lands in `x`, the chunk X in `z`, and the chunk Z in `blend`.
+    /// `RandomSpreadStructurePlacement.getPotentialStructureChunk` calls it the
+    /// straightforward way (`seed, gridX, gridZ, salt`). Both spellings are
+    /// vanilla's own and both are load-bearing, so this method takes the
+    /// parameters positionally and refuses to name them after their meaning.
+    /// See [`crate::rng`]'s callers in `lodestone_worldgen::structure::placement`.
+    pub fn set_large_feature_with_salt(&mut self, seed: i64, x: i32, z: i32, blend: i32) {
+        let result = i64::from(x)
+            .wrapping_mul(341_873_128_712)
+            .wrapping_add(i64::from(z).wrapping_mul(132_897_987_541))
+            .wrapping_add(seed)
+            .wrapping_add(i64::from(blend));
+        self.set_seed(result);
+    }
 }
 
 /// `WorldgenRandom.seedSlimeChunk(x, z, seed, salt)` — issue #515.
