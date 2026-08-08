@@ -117,6 +117,20 @@ impl VerticalAnchor {
         }
     }
 
+    /// Non-panicking sibling of [`Self::parse`] — see
+    /// [`HeightProvider::try_parse`] for why the decoration engine needs one.
+    fn try_parse(v: &Value) -> Option<Self> {
+        if let Some(y) = v.get("absolute") {
+            Some(VerticalAnchor::Absolute(y.as_i64()? as i32))
+        } else if let Some(o) = v.get("above_bottom") {
+            Some(VerticalAnchor::AboveBottom(o.as_i64()? as i32))
+        } else if let Some(o) = v.get("below_top") {
+            Some(VerticalAnchor::BelowTop(o.as_i64()? as i32))
+        } else {
+            None
+        }
+    }
+
     fn parse(v: &Value) -> Self {
         if let Some(y) = v.get("absolute") {
             VerticalAnchor::Absolute(y.as_i64().expect("absolute anchor") as i32)
@@ -296,9 +310,42 @@ pub enum HeightProvider {
         max: VerticalAnchor,
         plateau: i32,
     },
+    /// `VeryBiasedToBottomHeight` — three chained `Mth.nextInt` draws, not one.
+    /// Added by issue #513 because two bundled placed features use it in a
+    /// *decoration* step (nothing in the ore step does, which is why
+    /// [`HeightProvider::parse`]'s `panic!` never fired on it).
+    VeryBiasedToBottom {
+        min: VerticalAnchor,
+        max: VerticalAnchor,
+        inner: i32,
+    },
 }
 
 impl HeightProvider {
+    /// The non-panicking sibling of [`Self::parse`], for the vegetal/decoration
+    /// engine, whose blanket rule is that unparseable data degrades a feature to
+    /// `Unsupported` rather than taking down world generation for every biome.
+    /// See `crate::feature::vegetation`'s module doc.
+    pub(crate) fn try_parse(v: &Value) -> Option<Self> {
+        let ty = v["type"].as_str()?;
+        let min = VerticalAnchor::try_parse(&v["min_inclusive"])?;
+        let max = VerticalAnchor::try_parse(&v["max_inclusive"])?;
+        match ty.strip_prefix("minecraft:").unwrap_or(ty) {
+            "uniform" => Some(HeightProvider::Uniform { min, max }),
+            "trapezoid" => Some(HeightProvider::Trapezoid {
+                min,
+                max,
+                plateau: v["plateau"].as_i64().unwrap_or(0) as i32,
+            }),
+            "very_biased_to_bottom" => Some(HeightProvider::VeryBiasedToBottom {
+                min,
+                max,
+                inner: v["inner"].as_i64().unwrap_or(1) as i32,
+            }),
+            _ => None,
+        }
+    }
+
     fn parse(v: &Value) -> Self {
         let ty = v["type"].as_str().expect("height provider type");
         let min = VerticalAnchor::parse(&v["min_inclusive"]);
@@ -316,7 +363,12 @@ impl HeightProvider {
 
     /// Mirrors `UniformHeight.sample` / `TrapezoidHeight.sample`, including their
     /// exact `Mth.randomBetweenInclusive` draw counts.
-    fn sample<R: RandomSource>(&self, random: &mut R, min_gen_y: i32, gen_depth: i32) -> i32 {
+    pub(crate) fn sample<R: RandomSource>(
+        &self,
+        random: &mut R,
+        min_gen_y: i32,
+        gen_depth: i32,
+    ) -> i32 {
         match *self {
             HeightProvider::Uniform { min, max } => {
                 let lo = min.resolve_y(min_gen_y, gen_depth);
@@ -341,6 +393,16 @@ impl HeightProvider {
                 let plateau_end = range - plateau_start;
                 lo + math::random_between_inclusive(random, 0, plateau_end)
                     + math::random_between_inclusive(random, 0, plateau_start)
+            }
+            HeightProvider::VeryBiasedToBottom { min, max, inner } => {
+                let lo = min.resolve_y(min_gen_y, gen_depth);
+                let hi = max.resolve_y(min_gen_y, gen_depth);
+                if hi - lo - inner + 1 <= 0 {
+                    return lo;
+                }
+                let upper = math::random_between_inclusive(random, lo + inner, hi);
+                let biased_upper = math::random_between_inclusive(random, lo, upper - 1);
+                math::random_between_inclusive(random, lo, biased_upper - 1 + inner)
             }
         }
     }

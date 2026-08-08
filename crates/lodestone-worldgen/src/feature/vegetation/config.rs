@@ -76,6 +76,21 @@ pub enum BlockPredicate {
     AllOf(Vec<BlockPredicate>),
     AnyOf(Vec<BlockPredicate>),
     MatchingBlockTag(String),
+    /// `MatchingBlocksPredicate` — issue #513. `blocks` is the JSON's `blocks`
+    /// field, which is either one id or a list; `offset` is added to the tested
+    /// position. Matched by **base** id, so `minecraft:water[level=0]` counts as
+    /// `minecraft:water` — the same collapse [`BlockPredicate::MatchingFluid`]
+    /// already documents, for the same reason (this grid never distinguishes a
+    /// fluid's source/flowing variant).
+    ///
+    /// Before this variant existed, `matching_blocks` fell through to
+    /// [`BlockPredicate::True`], which is the *dangerous* direction: `disk`'s
+    /// `target` would have matched every cell in its radius and paved a
+    /// column of sand through whatever was there.
+    MatchingBlocks {
+        blocks: Vec<String>,
+        offset: (i32, i32, i32),
+    },
     /// `MatchingFluidPredicate` — `fluids` is the JSON's raw
     /// `minecraft:water`/`minecraft:flowing_water`/`minecraft:lava`/
     /// `minecraft:flowing_lava` id list; `offset` is `(dx, dy, dz)` added to
@@ -116,6 +131,23 @@ pub(super) fn parse_predicate_list(v: &Value) -> Vec<BlockPredicate> {
         .unwrap_or_default()
 }
 
+/// A `HolderSet<Block>`-shaped JSON field: one id, or a list of ids. A `#tag`
+/// reference resolves to nothing here (the closure needs a `Resolver` this
+/// function does not have) — every `valid_blocks`/`replaceable`/`can_be_placed_on`
+/// in the bundled data is a literal list, and a tag would degrade to "matches
+/// nothing" rather than "matches everything", which is the safe direction.
+pub(super) fn parse_id_list(v: &Value) -> Vec<String> {
+    match v {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(arr) => arr
+            .iter()
+            .filter_map(|e| e.as_str().map(str::to_string))
+            .filter(|s| !s.starts_with('#'))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub(super) fn parse_offset(v: &Value) -> (i32, i32, i32) {
     let Some(arr) = v.as_array() else {
         return (0, 0, 0);
@@ -151,6 +183,10 @@ impl BlockPredicate {
             "matching_block_tag" => {
                 BlockPredicate::MatchingBlockTag(v["tag"].as_str().unwrap_or_default().to_string())
             }
+            "matching_blocks" => BlockPredicate::MatchingBlocks {
+                blocks: parse_id_list(&v["blocks"]),
+                offset: parse_offset(&v["offset"]),
+            },
             "matching_fluids" => BlockPredicate::MatchingFluid {
                 fluids: v["fluids"]
                     .as_array()
@@ -184,6 +220,11 @@ pub(super)     fn test(&self, grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> 
                 } else {
                     false
                 }
+            }
+            BlockPredicate::MatchingBlocks { blocks, offset } => {
+                let (dx, dy, dz) = *offset;
+                let base = super::base_id(grid.get(pos.x + dx, pos.y + dy, pos.z + dz));
+                blocks.iter().any(|b| b == base)
             }
             BlockPredicate::MatchingFluid { fluids, offset } => {
                 let (dx, dy, dz) = *offset;
@@ -526,6 +567,36 @@ pub enum VegPlacement {
         y: IntProvider,
     },
     BlockPredicateFilter(BlockPredicate),
+    // --- issue #513: the five modifiers neither engine had, plus `height_range`,
+    // which existed only in the ore engine. 86 of the bundled placed features use
+    // `height_range`, so before this every one of them reached a decoration step
+    // and was silently dropped.
+    HeightRange(crate::feature::HeightProvider),
+    /// `CountOnEveryLayerPlacement` — fans out to one position per air/solid
+    /// interface, layer by layer, until a layer produces nothing.
+    CountOnEveryLayer(IntProvider),
+    /// `EnvironmentScanPlacement` — walks up or down until `target` matches.
+    EnvironmentScan {
+        /// `+1` for `up`, `-1` for `down`.
+        dy: i32,
+        target: BlockPredicate,
+        allowed: BlockPredicate,
+        max_steps: i32,
+    },
+    /// `NoiseBasedCountPlacement`.
+    NoiseBasedCount {
+        noise_to_count_ratio: i32,
+        noise_factor: f64,
+        noise_offset: f64,
+    },
+    /// `SurfaceRelativeThresholdFilter`.
+    SurfaceRelativeThresholdFilter {
+        heightmap: HeightmapKind,
+        min_inclusive: i32,
+        max_inclusive: i32,
+    },
+    /// `FixedPlacement` — the listed positions that fall in this chunk.
+    FixedPlacement(Vec<BlockPos>),
 }
 
 /// Parses an `IntProvider` for a vegetal-decoration placement field without
@@ -608,6 +679,52 @@ impl VegPlacement {
             "block_predicate_filter" => Some(VegPlacement::BlockPredicateFilter(
                 BlockPredicate::parse(&v["predicate"]),
             )),
+            "height_range" => Some(VegPlacement::HeightRange(
+                crate::feature::HeightProvider::try_parse(&v["height"])?,
+            )),
+            "count_on_every_layer" => Some(VegPlacement::CountOnEveryLayer(
+                try_parse_int_provider(&v["count"])?,
+            )),
+            "environment_scan" => Some(VegPlacement::EnvironmentScan {
+                dy: match v["direction_of_search"].as_str()? {
+                    "up" => 1,
+                    "down" => -1,
+                    _ => return None,
+                },
+                target: BlockPredicate::parse(&v["target_condition"]),
+                allowed: match v.get("allowed_search_condition") {
+                    Some(p) if !p.is_null() => BlockPredicate::parse(p),
+                    _ => BlockPredicate::True,
+                },
+                max_steps: v["max_steps"].as_i64()? as i32,
+            }),
+            "noise_based_count" => Some(VegPlacement::NoiseBasedCount {
+                noise_to_count_ratio: v["noise_to_count_ratio"].as_i64()? as i32,
+                noise_factor: v["noise_factor"].as_f64()?,
+                noise_offset: v["noise_offset"].as_f64().unwrap_or(0.0),
+            }),
+            "surface_relative_threshold_filter" => {
+                Some(VegPlacement::SurfaceRelativeThresholdFilter {
+                    heightmap: HeightmapKind::parse(v["heightmap"].as_str()?)?,
+                    min_inclusive: v["min_inclusive"].as_i64().unwrap_or(i64::from(i32::MIN)) as i32,
+                    max_inclusive: v["max_inclusive"].as_i64().unwrap_or(i64::from(i32::MAX)) as i32,
+                })
+            }
+            "fixed_placement" => {
+                let positions = v["positions"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(|p| {
+                        let arr = p.as_array()?;
+                        Some(BlockPos {
+                            x: arr.first()?.as_i64()? as i32,
+                            y: arr.get(1)?.as_i64()? as i32,
+                            z: arr.get(2)?.as_i64()? as i32,
+                        })
+                    })
+                    .collect();
+                Some(VegPlacement::FixedPlacement(positions))
+            }
             _ => None,
         }
     }
@@ -692,8 +809,138 @@ pub(super)     fn get_positions<R: RandomSource>(
                     Positions::None
                 }
             }
+            VegPlacement::HeightRange(hp) => {
+                // `VerticalAnchor` resolves against the *generated* column, which
+                // for this engine is the grid's own vertical extent — the same
+                // (min_gen_y, gen_depth) pair the ore engine passes.
+                let y = hp.sample(random, grid.min_y, grid.height);
+                Positions::One(BlockPos { x: pos.x, y, z: pos.z })
+            }
+            VegPlacement::CountOnEveryLayer(ip) => {
+                let mut out = Vec::new();
+                let mut layer = 0;
+                loop {
+                    let mut found_any = false;
+                    let n = ip.sample(random);
+                    for _ in 0..n.max(0) {
+                        let x = random.next_int_bounded(16) + pos.x;
+                        let z = random.next_int_bounded(16) + pos.z;
+                        let start_y = grid.height_world_surface(x, z);
+                        if let Some(y) = find_on_ground_y(grid, tags, x, start_y, z, layer) {
+                            out.push(BlockPos { x, y, z });
+                            found_any = true;
+                        }
+                    }
+                    layer += 1;
+                    // The loop is `do { … } while (foundAny)`. `layer` is bounded
+                    // by the column height in practice, but a grid that answered
+                    // air/solid alternately forever would not terminate — cap it
+                    // at the column height, which no real world can exceed.
+                    if !found_any || layer > grid.height {
+                        break;
+                    }
+                }
+                Positions::from_vec(out)
+            }
+            VegPlacement::EnvironmentScan {
+                dy,
+                target,
+                allowed,
+                max_steps,
+            } => {
+                let mut cur = pos;
+                if !allowed.test(grid, tags, cur) {
+                    return Positions::None;
+                }
+                for _ in 0..*max_steps {
+                    if target.test(grid, tags, cur) {
+                        return Positions::One(cur);
+                    }
+                    cur.y += dy;
+                    if cur.y < grid.min_y || cur.y >= grid.min_y + grid.height {
+                        return Positions::None;
+                    }
+                    if !allowed.test(grid, tags, cur) {
+                        break;
+                    }
+                }
+                if target.test(grid, tags, cur) {
+                    Positions::One(cur)
+                } else {
+                    Positions::None
+                }
+            }
+            VegPlacement::NoiseBasedCount {
+                noise_to_count_ratio,
+                noise_factor,
+                noise_offset,
+            } => {
+                let noise = crate::noise::biome_info_noise_value(
+                    f64::from(pos.x) / noise_factor,
+                    f64::from(pos.z) / noise_factor,
+                );
+                let n = ((noise + noise_offset) * f64::from(*noise_to_count_ratio)).ceil() as i32;
+                Positions::Repeat(pos, n.max(0))
+            }
+            VegPlacement::SurfaceRelativeThresholdFilter {
+                heightmap,
+                min_inclusive,
+                max_inclusive,
+            } => {
+                let surface = i64::from(heightmap.scan(grid, pos.x, pos.z));
+                let min_y = surface + i64::from(*min_inclusive);
+                let max_y = surface + i64::from(*max_inclusive);
+                let y = i64::from(pos.y);
+                if min_y <= y && y <= max_y {
+                    Positions::One(pos)
+                } else {
+                    Positions::None
+                }
+            }
+            VegPlacement::FixedPlacement(positions) => {
+                let (cx, cz) = (pos.x >> 4, pos.z >> 4);
+                let kept: Vec<BlockPos> = positions
+                    .iter()
+                    .copied()
+                    .filter(|p| (p.x >> 4) == cx && (p.z >> 4) == cz)
+                    .collect();
+                Positions::from_vec(kept)
+            }
         }
     }
+}
+
+/// `CountOnEveryLayerPlacement.findOnGroundYPosition` — the `layer`-th
+/// air-above-solid interface below `y_start`, or `None`.
+fn find_on_ground_y(
+    grid: &VegGrid,
+    tags: &VegTags,
+    x: i32,
+    y_start: i32,
+    z: i32,
+    layer_to_place_on: i32,
+) -> Option<i32> {
+    // `isEmpty` is air-or-water-or-lava, which is exactly `Tag::Air | Tag::Fluid`.
+    let empty = |y: i32| {
+        tag_at(grid, tags, Tag::Air, x, y, z) || tag_at(grid, tags, Tag::Fluid, x, y, z)
+    };
+    let mut current_layer = 0;
+    let mut current_empty = empty(y_start);
+    let mut y = y_start;
+    while y >= grid.min_y + 1 {
+        let below_empty = empty(y - 1);
+        let below_bedrock =
+            super::base_id(grid.get(x, y - 1, z)) == "minecraft:bedrock";
+        if !below_empty && current_empty && !below_bedrock {
+            if current_layer == layer_to_place_on {
+                return Some(y);
+            }
+            current_layer += 1;
+        }
+        current_empty = below_empty;
+        y -= 1;
+    }
+    None
 }
 
 /// What one [`VegPlacement`] yields for one input position — the allocation-free
@@ -727,7 +974,7 @@ pub(super)     fn get_positions<R: RandomSource>(
 /// marks U8 **"must not"** change RNG order and names breadth-first
 /// "optimisation" of this exact recursion as instant desync — this change never
 /// touches the recursion's shape, only what it iterates.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Positions {
     /// The modifier filtered this position out.
     None,
@@ -736,6 +983,23 @@ pub enum Positions {
     /// `n` copies of one position — `Count`/`NoiseThresholdCount`'s
     /// `vec![pos; n]`. `n <= 0` means none.
     Repeat(BlockPos, i32),
+    /// `n` **different** positions — the fan-out shape the doc above says must
+    /// not be smuggled in as a `Repeat`. Issue #513 added the two modifiers that
+    /// need it (`count_on_every_layer`, `fixed_placement`); `Positions` stopped
+    /// being `Copy` at the same time, which is why this variant is the only one
+    /// that allocates and why nothing else was converted to use it.
+    List(Vec<BlockPos>),
+}
+
+impl Positions {
+    /// Collapses the degenerate cases so the common paths stay allocation-free.
+    fn from_vec(mut v: Vec<BlockPos>) -> Self {
+        match v.len() {
+            0 => Positions::None,
+            1 => Positions::One(v.pop().expect("len checked")),
+            _ => Positions::List(v),
+        }
+    }
 }
 
 /// `net.minecraft.world.level.levelgen.feature.treedecorators.TreeDecorator`
@@ -937,6 +1201,43 @@ pub enum ConfiguredFeature {
         options: Vec<(f32, PlacedRef)>,
     },
     SimpleRandomSelector(Vec<PlacedRef>),
+    // --- issue #513: the types beyond the original seven. Bodies live in
+    // [`super::features`]; each arm's parse is immediately below in
+    // `parse_configured_feature_doc`.
+    Spring(Box<super::features::SpringCfg>),
+    Disk(Box<super::features::DiskCfg>),
+    BlockPile(BlockStateProvider),
+    NetherForestVegetation(Box<super::features::NetherForestVegetationCfg>),
+    BlockBlob(Box<super::features::BlockBlobCfg>),
+    ReplaceBlobs(Box<super::features::ReplaceBlobsCfg>),
+    GlowstoneBlob,
+    BasaltPillar,
+    DesertWell,
+    BlueIce,
+    Kelp,
+    SeaPickle(IntProvider),
+    Seagrass(f64),
+    Vines,
+    TwistingVines(super::features::TwistingVinesCfg),
+    WeepingVines,
+    MultifaceGrowth(Box<super::features::MultifaceGrowthCfg>),
+    Lake(Box<super::features::LakeCfg>),
+    VegetationPatch(Box<super::features::VegetationPatchCfg>),
+    SculkPatch(Box<super::features::SculkPatchCfg>),
+    /// `RandomBooleanSelectorFeature` — one `nextBoolean()`, then one branch.
+    RandomBooleanSelector {
+        yes: Box<PlacedRef>,
+        no: Box<PlacedRef>,
+    },
+    /// `WeightedRandomSelectorFeature` — a `WeightedList<PlacedFeature>`.
+    WeightedRandomSelector(Vec<(i32, PlacedRef)>),
+    /// `SequenceFeature` — every entry in order, stopping at the first that
+    /// reports failure. This engine's placement bodies do not report success, so
+    /// every entry runs; that matches vanilla for the one bundled instance.
+    Sequence(Vec<PlacedRef>),
+    /// `NoOpFeature` — genuinely nothing, and distinct from
+    /// [`ConfiguredFeature::Unsupported`] so it is not counted as a gap.
+    NoOp,
     Unsupported(String),
 }
 
@@ -1065,6 +1366,246 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                 .unwrap_or_default();
             ConfiguredFeature::SimpleRandomSelector(list)
         }
+        // ------------------------------------------------------------------
+        // Issue #513. Every arm here is `Option`-shaped or defaulted: a field
+        // this engine cannot read degrades the *feature* to `Unsupported`, never
+        // panics, and never silently places the wrong block. See [`super`]'s
+        // module doc for why that rule is absolute in this file.
+        // ------------------------------------------------------------------
+        "spring_feature" => {
+            let c = &doc["config"];
+            ConfiguredFeature::Spring(Box::new(super::features::SpringCfg {
+                state: canon_state(&c["state"]),
+                requires_block_below: c["requires_block_below"].as_bool().unwrap_or(true),
+                rock_count: c["rock_count"].as_i64().unwrap_or(4) as i32,
+                hole_count: c["hole_count"].as_i64().unwrap_or(1) as i32,
+                valid_blocks: parse_id_list(&c["valid_blocks"]).into_iter().collect(),
+            }))
+        }
+        "disk" => {
+            let c = &doc["config"];
+            match (
+                BlockStateProvider::try_parse(&c["state_provider"]),
+                try_parse_int_provider(&c["radius"]),
+            ) {
+                (Some(provider), Some(radius)) => {
+                    ConfiguredFeature::Disk(Box::new(super::features::DiskCfg {
+                        provider,
+                        target: BlockPredicate::parse(&c["target"]),
+                        radius,
+                        half_height: c["half_height"].as_i64().unwrap_or(0) as i32,
+                    }))
+                }
+                _ => ConfiguredFeature::Unsupported("disk: unsupported provider/radius".into()),
+            }
+        }
+        "block_pile" => match BlockStateProvider::try_parse(&doc["config"]["state_provider"]) {
+            Some(p) => ConfiguredFeature::BlockPile(p),
+            None => ConfiguredFeature::Unsupported("block_pile: unsupported provider".into()),
+        },
+        "nether_forest_vegetation" => {
+            let c = &doc["config"];
+            match BlockStateProvider::try_parse(&c["state_provider"]) {
+                Some(provider) => ConfiguredFeature::NetherForestVegetation(Box::new(
+                    super::features::NetherForestVegetationCfg {
+                        provider,
+                        spread_width: c["spread_width"].as_i64().unwrap_or(8) as i32,
+                        spread_height: c["spread_height"].as_i64().unwrap_or(4) as i32,
+                    },
+                )),
+                None => ConfiguredFeature::Unsupported(
+                    "nether_forest_vegetation: unsupported provider".into(),
+                ),
+            }
+        }
+        "block_blob" => {
+            let c = &doc["config"];
+            ConfiguredFeature::BlockBlob(Box::new(super::features::BlockBlobCfg {
+                state: canon_state(&c["state"]),
+                can_place_on: BlockPredicate::parse(&c["can_place_on"]),
+            }))
+        }
+        "netherrack_replace_blobs" => {
+            let c = &doc["config"];
+            match try_parse_int_provider(&c["radius"]) {
+                Some(radius) => {
+                    ConfiguredFeature::ReplaceBlobs(Box::new(super::features::ReplaceBlobsCfg {
+                        target: canon_state(&c["target"]),
+                        state: canon_state(&c["state"]),
+                        radius,
+                    }))
+                }
+                None => ConfiguredFeature::Unsupported(
+                    "netherrack_replace_blobs: unsupported radius".into(),
+                ),
+            }
+        }
+        "glowstone_blob" => ConfiguredFeature::GlowstoneBlob,
+        "basalt_pillar" => ConfiguredFeature::BasaltPillar,
+        "desert_well" => ConfiguredFeature::DesertWell,
+        "blue_ice" => ConfiguredFeature::BlueIce,
+        "kelp" => ConfiguredFeature::Kelp,
+        "sea_pickle" => match try_parse_int_provider(&doc["config"]["count"]) {
+            Some(ip) => ConfiguredFeature::SeaPickle(ip),
+            None => ConfiguredFeature::Unsupported("sea_pickle: unsupported count".into()),
+        },
+        "seagrass" => {
+            ConfiguredFeature::Seagrass(doc["config"]["probability"].as_f64().unwrap_or(0.0))
+        }
+        "vines" => ConfiguredFeature::Vines,
+        "twisting_vines" => {
+            let c = &doc["config"];
+            ConfiguredFeature::TwistingVines(super::features::TwistingVinesCfg {
+                spread_width: c["spread_width"].as_i64().unwrap_or(8) as i32,
+                spread_height: c["spread_height"].as_i64().unwrap_or(4) as i32,
+                max_height: c["max_height"].as_i64().unwrap_or(8) as i32,
+            })
+        }
+        "weeping_vines" => ConfiguredFeature::WeepingVines,
+        // `multiface_growth` (glow lichen, sculk vein) is **deliberately still
+        // unsupported**, and this arm is the record of why. Issue #513 ported it
+        // (body and config both still live in [`super::features`], reachable and
+        // compiled, just not selected here): the port reproduces vanilla's search
+        // loop and every draw, and `tests/vegetation_parity.rs` then matched the
+        // JVM's SINGLE-mode dump on **23 of 24** cells at
+        // `vegetation_plains_land_jvm.txt` — one extra `glow_lichen[up=true]` at
+        // (11, 82, 9) where vanilla wrote nothing.
+        //
+        // Every draw count therefore already agrees (a stream error could not
+        // produce 23 exact matches), so what is missing is a *predicate*: almost
+        // certainly `MultifaceBlock.canAttachTo`'s full-face test, which this crate
+        // has no block-support-shape table to answer, or `MultifaceSpreader`'s own
+        // second placement. Landing it means porting one of those, not tuning this.
+        //
+        // Flipping this to `MultifaceGrowth(...)` is a one-line change once that
+        // exists — and the parity gate is what will tell you it worked.
+        "multiface_growth_disabled_see_comment_above" => {
+            let c = &doc["config"];
+            ConfiguredFeature::MultifaceGrowth(Box::new(super::features::MultifaceGrowthCfg {
+                block: c["block"].as_str().unwrap_or("minecraft:glow_lichen").to_string(),
+                search_range: c["search_range"].as_i64().unwrap_or(10) as i32,
+                // Vanilla's codec defaults: all three false.
+                can_place_on_floor: c["can_place_on_floor"].as_bool().unwrap_or(false),
+                can_place_on_ceiling: c["can_place_on_ceiling"].as_bool().unwrap_or(false),
+                can_place_on_wall: c["can_place_on_wall"].as_bool().unwrap_or(false),
+                chance_of_spreading: c["chance_of_spreading"].as_f64().unwrap_or(0.5) as f32,
+                can_be_placed_on: parse_id_list(&c["can_be_placed_on"]).into_iter().collect(),
+            }))
+        }
+        "lake" => {
+            let c = &doc["config"];
+            match (
+                BlockStateProvider::try_parse(&c["fluid"]),
+                BlockStateProvider::try_parse(&c["barrier"]),
+            ) {
+                (Some(fluid), Some(barrier)) => {
+                    ConfiguredFeature::Lake(Box::new(super::features::LakeCfg {
+                        fluid,
+                        barrier,
+                        can_place_feature: BlockPredicate::parse(&c["can_place_feature"]),
+                        can_replace_with_air_or_fluid: BlockPredicate::parse(
+                            &c["can_replace_with_air_or_fluid"],
+                        ),
+                        can_replace_with_barrier: BlockPredicate::parse(
+                            &c["can_replace_with_barrier"],
+                        ),
+                    }))
+                }
+                _ => ConfiguredFeature::Unsupported("lake: unsupported fluid/barrier".into()),
+            }
+        }
+        "vegetation_patch" | "waterlogged_vegetation_patch" => {
+            let c = &doc["config"];
+            let surface = match c["surface"].as_str().unwrap_or("floor") {
+                "ceiling" => super::features::CaveSurface::Ceiling,
+                _ => super::features::CaveSurface::Floor,
+            };
+            match (
+                BlockStateProvider::try_parse(&c["ground_state"]),
+                try_parse_int_provider(&c["depth"]),
+                try_parse_int_provider(&c["xz_radius"]),
+            ) {
+                (Some(ground_state), Some(depth), Some(xz_radius)) => {
+                    ConfiguredFeature::VegetationPatch(Box::new(
+                        super::features::VegetationPatchCfg {
+                            replaceable: parse_id_list(&c["replaceable"]).into_iter().collect(),
+                            ground_state,
+                            vegetation_feature: resolve_placed_feature_ref(
+                                resolver,
+                                &c["vegetation_feature"],
+                            ),
+                            surface,
+                            depth,
+                            extra_bottom_block_chance: c["extra_bottom_block_chance"]
+                                .as_f64()
+                                .unwrap_or(0.0) as f32,
+                            vertical_range: c["vertical_range"].as_i64().unwrap_or(1) as i32,
+                            vegetation_chance: c["vegetation_chance"].as_f64().unwrap_or(0.0) as f32,
+                            xz_radius,
+                            extra_edge_column_chance: c["extra_edge_column_chance"]
+                                .as_f64()
+                                .unwrap_or(0.0) as f32,
+                            waterlogged: short == "waterlogged_vegetation_patch",
+                        },
+                    ))
+                }
+                _ => ConfiguredFeature::Unsupported(
+                    "vegetation_patch: unsupported ground/depth/radius".into(),
+                ),
+            }
+        }
+        "sculk_patch" => {
+            let c = &doc["config"];
+            match try_parse_int_provider(&c["extra_rare_growths"]) {
+                Some(extra_rare_growths) => {
+                    ConfiguredFeature::SculkPatch(Box::new(super::features::SculkPatchCfg {
+                        charge_count: c["charge_count"].as_i64().unwrap_or(1) as i32,
+                        amount_per_charge: c["amount_per_charge"].as_i64().unwrap_or(1) as i32,
+                        spread_attempts: c["spread_attempts"].as_i64().unwrap_or(1) as i32,
+                        growth_rounds: c["growth_rounds"].as_i64().unwrap_or(0) as i32,
+                        spread_rounds: c["spread_rounds"].as_i64().unwrap_or(0) as i32,
+                        extra_rare_growths,
+                        catalyst_chance: c["catalyst_chance"].as_f64().unwrap_or(0.0) as f32,
+                    }))
+                }
+                None => ConfiguredFeature::Unsupported(
+                    "sculk_patch: unsupported extra_rare_growths".into(),
+                ),
+            }
+        }
+        "random_boolean_selector" => {
+            let c = &doc["config"];
+            ConfiguredFeature::RandomBooleanSelector {
+                yes: Box::new(resolve_placed_feature_ref(resolver, &c["feature_true"])),
+                no: Box::new(resolve_placed_feature_ref(resolver, &c["feature_false"])),
+            }
+        }
+        "weighted_random_selector" => {
+            let list = doc["config"]["features"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|e| {
+                            let weight = e["weight"].as_i64().unwrap_or(1) as i32;
+                            (weight, resolve_placed_feature_ref(resolver, &e["data"]))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            ConfiguredFeature::WeightedRandomSelector(list)
+        }
+        "sequence" => {
+            let list = doc["config"]["features"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|e| resolve_placed_feature_ref(resolver, e))
+                        .collect()
+                })
+                .unwrap_or_default();
+            ConfiguredFeature::Sequence(list)
+        }
+        "no_op" => ConfiguredFeature::NoOp,
         other => ConfiguredFeature::Unsupported(other.to_string()),
     }
 }
@@ -1091,12 +1632,48 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
                     walk(&opt.feature, out);
                 }
             }
-            ConfiguredFeature::SimpleRandomSelector(list) => {
+            ConfiguredFeature::SimpleRandomSelector(list) | ConfiguredFeature::Sequence(list) => {
                 for opt in list {
                     walk(&opt.feature, out);
                 }
             }
-            ConfiguredFeature::SimpleBlock(_) | ConfiguredFeature::Tree(_) | ConfiguredFeature::BlockColumn(_) => {}
+            ConfiguredFeature::RandomBooleanSelector { yes, no } => {
+                walk(&yes.feature, out);
+                walk(&no.feature, out);
+            }
+            ConfiguredFeature::WeightedRandomSelector(list) => {
+                for (_, opt) in list {
+                    walk(&opt.feature, out);
+                }
+            }
+            ConfiguredFeature::VegetationPatch(cfg) => walk(&cfg.vegetation_feature.feature, out),
+            // Every terminal (modelled) feature type. Listed rather than `_ => {}`
+            // so a newly added variant is a compile error here — this walk is the
+            // read side of the "which types are still gaps" instrument, and a
+            // catch-all would silently report a new type as fully modelled.
+            ConfiguredFeature::SimpleBlock(_)
+            | ConfiguredFeature::Tree(_)
+            | ConfiguredFeature::BlockColumn(_)
+            | ConfiguredFeature::Spring(_)
+            | ConfiguredFeature::Disk(_)
+            | ConfiguredFeature::BlockPile(_)
+            | ConfiguredFeature::NetherForestVegetation(_)
+            | ConfiguredFeature::BlockBlob(_)
+            | ConfiguredFeature::ReplaceBlobs(_)
+            | ConfiguredFeature::GlowstoneBlob
+            | ConfiguredFeature::BasaltPillar
+            | ConfiguredFeature::DesertWell
+            | ConfiguredFeature::BlueIce
+            | ConfiguredFeature::Kelp
+            | ConfiguredFeature::SeaPickle(_)
+            | ConfiguredFeature::Seagrass(_)
+            | ConfiguredFeature::Vines
+            | ConfiguredFeature::TwistingVines(_)
+            | ConfiguredFeature::WeepingVines
+            | ConfiguredFeature::MultifaceGrowth(_)
+            | ConfiguredFeature::Lake(_)
+            | ConfiguredFeature::SculkPatch(_)
+            | ConfiguredFeature::NoOp => {}
         }
     }
     let mut out = Vec::new();

@@ -220,6 +220,7 @@
 //! resolves: the submodules are private and glob-re-exported here.
 
 mod config;
+pub mod features;
 mod grid;
 pub mod ids;
 mod place;
@@ -235,8 +236,22 @@ use crate::rng::{RandomSource, WorldgenRandom};
 
 use self::grid::census::bump as census_bump;
 
-fn base_id(state: &str) -> &str {
+pub(super) fn base_id(state: &str) -> &str {
     state.split('[').next().unwrap_or(state)
+}
+
+/// [`place_placed_feature`], reachable from [`features`] — `vegetation_patch`
+/// hangs a whole placed feature off each surface cell it produces, so a feature
+/// body has to be able to re-enter the placement pipeline the same way a
+/// selector's branch does.
+pub(super) fn place_placed_feature_at<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    placed: &PlacedRef,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+) {
+    place_placed_feature(random, origin, placed, grid, tags);
 }
 
 pub fn apply_vegetal_decoration_step<R: RandomSource>(
@@ -262,6 +277,65 @@ pub fn apply_vegetal_decoration_step<R: RandomSource>(
     for (index, placed) in features {
         random.set_feature_seed(decoration_seed, *index as i32, STEP_VEGETAL_DECORATION);
         place_placed_feature(random, origin, placed, grid, tags);
+    }
+}
+
+/// Issue #513: [`apply_vegetal_decoration_step`] over **every** driven decoration
+/// step, not only `VEGETAL_DECORATION`.
+///
+/// `features` is [`crate::compose::build_biome_decoration`]'s output —
+/// `(step, index within that step, feature)`, already in step order. The
+/// `set_feature_seed(decoration_seed, index, step)` pair is what isolates each
+/// feature's stream, so nothing here depends on the list being contiguous or on
+/// unsupported entries having been dropped (they must not be: see
+/// [`ConfiguredFeature::Unsupported`]).
+///
+/// One `set_decoration_seed` per **chunk**, not per step — vanilla derives it
+/// once in `ChunkGenerator.applyBiomeDecoration` and reuses it across all 11
+/// steps. Deriving it per step would give every step after the first a different
+/// stream from vanilla's.
+pub fn apply_decoration_steps<R: RandomSource>(
+    random: &mut WorldgenRandom<R>,
+    seed: i64,
+    chunk_x: i32,
+    chunk_z: i32,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    features: &[(i32, usize, PlacedRef)],
+) {
+    tags.bind(grid.interner());
+    let origin = BlockPos {
+        x: chunk_x * 16,
+        y: grid.min_y,
+        z: chunk_z * 16,
+    };
+    let decoration_seed = random.set_decoration_seed(seed, origin.x, origin.z);
+    for (step, index, placed) in features {
+        random.set_feature_seed(decoration_seed, *index as i32, *step);
+        place_placed_feature(random, origin, placed, grid, tags);
+    }
+}
+
+/// The 3×3 per-source driver for [`apply_decoration_steps`] — the same shape as
+/// [`apply_vegetal_decoration_step_3x3_per_source`], whose doc comment carries
+/// the whole rationale (rim, shared mutation, per-source biome resolution). Read
+/// that one before editing this one; the iteration order is not interchangeable.
+pub fn apply_decoration_steps_3x3_per_source<'a, R: RandomSource>(
+    random: &mut WorldgenRandom<R>,
+    seed: i64,
+    center_x: i32,
+    center_z: i32,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    features_for_source: &dyn Fn(i32, i32) -> &'a [(i32, usize, PlacedRef)],
+) {
+    for dx in -1..=1i32 {
+        for dz in -1..=1i32 {
+            let source_x = center_x + dx;
+            let source_z = center_z + dz;
+            let features = features_for_source(source_x, source_z);
+            apply_decoration_steps(random, seed, source_x, source_z, grid, tags, features);
+        }
     }
 }
 
@@ -373,6 +447,14 @@ fn place_placed_feature<R: RandomSource>(
                     recurse(random, mods, i + 1, next, grid, tags, feature);
                 }
             }
+            // Issue #513's fan-out shape — a *different* position per recursion,
+            // which is why it is not a `Repeat`. Still depth-first, still in the
+            // order the modifier produced.
+            Positions::List(list) => {
+                for next in list {
+                    recurse(random, mods, i + 1, next, grid, tags, feature);
+                }
+            }
         }
     }
     recurse(
@@ -424,6 +506,122 @@ fn place_configured_feature<R: RandomSource>(
             let idx = random.next_int_bounded(list.len() as i32) as usize;
             place_placed_feature(random, pos, &list[idx], grid, tags);
         }
+        // ------------------------------------------------------------------
+        // Issue #513. Bodies in [`features`]; census counters are deliberately
+        // shared under `other_feature` rather than one field per type — the
+        // census exists to answer "did anything place", and 24 new fields would
+        // be 24 new things to keep in sync for no extra answer.
+        // ------------------------------------------------------------------
+        ConfiguredFeature::Spring(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_spring(pos, cfg, grid)
+        }
+        ConfiguredFeature::Disk(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_disk(random, pos, cfg, grid, tags)
+        }
+        ConfiguredFeature::BlockPile(provider) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_block_pile(random, pos, provider, grid, tags)
+        }
+        ConfiguredFeature::NetherForestVegetation(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_nether_forest_vegetation(random, pos, cfg, grid, tags)
+        }
+        ConfiguredFeature::BlockBlob(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_block_blob(random, pos, cfg, grid, tags)
+        }
+        ConfiguredFeature::ReplaceBlobs(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_replace_blobs(random, pos, cfg, grid)
+        }
+        ConfiguredFeature::GlowstoneBlob => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_glowstone_blob(random, pos, grid)
+        }
+        ConfiguredFeature::BasaltPillar => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_basalt_pillar(random, pos, grid)
+        }
+        ConfiguredFeature::DesertWell => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_desert_well(random, pos, grid)
+        }
+        ConfiguredFeature::BlueIce => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_blue_ice(random, pos, grid)
+        }
+        ConfiguredFeature::Kelp => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_kelp(random, pos, grid)
+        }
+        ConfiguredFeature::SeaPickle(count) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_sea_pickle(random, pos, count, grid)
+        }
+        ConfiguredFeature::Seagrass(probability) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_seagrass(random, pos, *probability, grid)
+        }
+        ConfiguredFeature::Vines => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_vines(pos, grid)
+        }
+        ConfiguredFeature::TwistingVines(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_twisting_vines(random, pos, *cfg, grid)
+        }
+        ConfiguredFeature::WeepingVines => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_weeping_vines(random, pos, grid)
+        }
+        ConfiguredFeature::MultifaceGrowth(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_multiface_growth(random, pos, cfg, grid)
+        }
+        ConfiguredFeature::Lake(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_lake(random, pos, cfg, grid, tags)
+        }
+        ConfiguredFeature::VegetationPatch(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_vegetation_patch(random, pos, cfg, grid, tags)
+        }
+        ConfiguredFeature::SculkPatch(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_sculk_patch(random, pos, cfg, grid)
+        }
+        ConfiguredFeature::RandomBooleanSelector { yes, no } => {
+            census_bump(|c| c.other_feature += 1);
+            let branch = if random.next_bool() { yes } else { no };
+            place_placed_feature(random, pos, branch, grid, tags);
+        }
+        ConfiguredFeature::WeightedRandomSelector(list) => {
+            census_bump(|c| c.other_feature += 1);
+            // `WeightedList.getRandom`: one `nextInt(total)`, then a linear walk
+            // subtracting each weight — the draw happens even for an empty list
+            // in vanilla only via `getRandom`'s own guard, which returns early.
+            let total: i32 = list.iter().map(|(w, _)| *w).sum();
+            if total <= 0 {
+                return;
+            }
+            let mut roll = random.next_int_bounded(total);
+            for (weight, option) in list {
+                roll -= *weight;
+                if roll < 0 {
+                    place_placed_feature(random, pos, option, grid, tags);
+                    return;
+                }
+            }
+        }
+        ConfiguredFeature::Sequence(list) => {
+            census_bump(|c| c.other_feature += 1);
+            for option in list {
+                place_placed_feature(random, pos, option, grid, tags);
+            }
+        }
+        ConfiguredFeature::NoOp => {}
         // Issue #478: still a no-op — the module's degrade-don't-crash rule —
         // but a *counted, named* one. `LODESTONE_VEG_STRICT=1` turns it into a
         // panic naming the reason, for answering "which type is missing here"

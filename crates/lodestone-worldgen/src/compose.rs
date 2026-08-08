@@ -168,6 +168,76 @@ pub fn build_biome_vegetation(
     out
 }
 
+/// Issue #513: every decoration step the [`crate::feature::vegetation`] engine
+/// drives, not just `VEGETAL_DECORATION`.
+///
+/// Returns `(step, raw index within that step, resolved feature)` in **step
+/// order**, which is the order `Biome.generate` runs them. The index is the
+/// entry's position in its own step array, because that is what
+/// `WorldgenRandom::set_feature_seed(seed, index, step)` takes — the *pair*
+/// identifies a feature's RNG stream, so a step must never be flattened into a
+/// single running index.
+///
+/// # Which steps, and the one deliberate deviation
+///
+/// [`DRIVEN_STEPS`] is the list. It omits:
+///
+/// * step 6 `UNDERGROUND_ORES` — a separate engine
+///   ([`crate::feature::apply_ore_step_3x3_per_source`]) with its own region
+///   view, already correct, and merging the two is not this issue's scope.
+/// * step 10 `TOP_LAYER_MODIFICATION` — [`crate::feature::top_layer`].
+/// * step 5 `STRONGHOLDS` — zero entries across all 66 bundled biomes.
+///
+/// **The deviation:** because ore runs as its own earlier stage, steps 0-4 run
+/// *after* ores here and *before* them in vanilla. Nothing in steps 0-4 reads a
+/// block that ore placement writes (ore replaces stone with ore in place, so
+/// every solidity/air question those steps ask answers the same either way), so
+/// this is a real ordering difference with no known observable consequence —
+/// stated rather than hidden, because "no known consequence" is not "none".
+#[must_use]
+pub fn build_biome_decoration(
+    resolver: &dyn Resolver,
+    biome: &str,
+) -> Vec<(i32, usize, crate::feature::vegetation::PlacedRef)> {
+    let doc = resolver.biome_document(biome);
+    let Some(steps) = doc.get("features").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for &step in DRIVEN_STEPS {
+        let Some(entries) = steps.get(step as usize).and_then(Value::as_array) else {
+            continue;
+        };
+        for (i, entry) in entries.iter().enumerate() {
+            let Some(id) = entry.as_str() else {
+                continue;
+            };
+            if resolver.placed_feature(id).is_null() {
+                continue;
+            }
+            out.push((
+                step,
+                i,
+                crate::feature::vegetation::resolve_placed_feature_ref(resolver, entry),
+            ));
+        }
+    }
+    out
+}
+
+/// The `GenerationStep.Decoration` indices [`build_biome_decoration`] drives, in
+/// vanilla's own order. See that function's doc for what is missing and why.
+pub const DRIVEN_STEPS: &[i32] = &[
+    0, // RAW_GENERATION
+    1, // LAKES
+    2, // LOCAL_MODIFICATIONS
+    3, // UNDERGROUND_STRUCTURES  (monster_room/fossil are plain features)
+    4, // SURFACE_STRUCTURES
+    7, // UNDERGROUND_DECORATION
+    8, // FLUID_SPRINGS
+    crate::feature::STEP_VEGETAL_DECORATION,
+];
+
 /// Whether a biome document lists `minecraft:freeze_top_layer` in its
 /// `TOP_LAYER_MODIFICATION` step (issue #404's U2).
 ///
