@@ -5569,3 +5569,155 @@ column cost end to end. The wall-clock spread on the *same* repetitions was 2.64
   the *smaller* arm proportionally more, which is exactly how §12.130's 4×-scaling control read 3.663×.
   Amortised over 8 columns it is ~10k. The gate also asserts both arms' spreads stay under 5%, so a
   median gathered on a loaded machine is refused rather than quoted.
+
+**12.132 Generation parallelism was 1× because the window was twice too wide, and *both* recorded
+contention hazards were innocent — the 708 shared `Cache2D` mutexes were deleted and the burst got
+no faster. Instructions retired flat to 1.4% across a 9-arm window sweep is what proved no cache
+was recomputing; a shared-vs-private-generator IPC control is what proved no lock was the stall.**
+
+Measured at `7113ffee`, release, `lto = "thin"`, embedded server data, the 289-column 17×17 join
+burst at seed 42, **fresh generator per arm** (`crates/lodestone-server/tests/join_parallel_efficiency.rs`).
+The unit opened with §12.130's 21.0 ms serial column and §12.112's 361-columns-in-6.3–6.9 s, i.e.
+an effective speedup of about 1× on a 10-core machine, and a named suspect list of three: the 708
+`Cache2D` try-lock slots (§12.102), the interner's `RwLock`, the store's per-entry `OnceLock`
+waits. Two of the three are exonerated and the defect was the fourth thing, which had never been
+swept.
+
+- **The window sweep, and it is a U with a steep right-hand side.** `generation_window()` was
+  `2 × available_parallelism` = 20. Every arm is the same 289 coordinates on its own generator, so
+  the arms differ only in scheduling — which the instruction column is the proof of, not an
+  assumption:
+
+  | window | wall | speedup | Ginsn | I/I_serial | Gcyc/col | IPC | pool parked |
+  |---|---|---|---|---|---|---|---|
+  | serial | 9.55 s | 1.00× | 209.4 | 1.000 | 0.136 | 5.33 | — |
+  | 1 (through the scheduler) | 9.29 s | 1.03× | 209.3 | 0.999 | 0.134 | 5.40 | 0% |
+  | 4 | 4.78 s | 2.00× | 209.5 | 1.001 | 0.137 | 5.27 | 32% |
+  | 6 | 4.19 s | 2.28× | 209.5 | 1.001 | 0.142 | 5.09 | 37% |
+  | 7 | 3.76 s | 2.54× | 209.7 | 1.001 | 0.156 | 4.65 | 36% |
+  | **8** | **3.67 s** | **2.60×** | 209.9 | 1.002 | 0.171 | 4.25 | 32% |
+  | 9 | 3.90 s | 2.45× | 210.0 | 1.003 | 0.211 | 3.45 | 31% |
+  | 10 (`P`) | 4.28 s | 2.23× | 210.3 | 1.004 | 0.267 | 2.73 | 29% |
+  | 12 | 4.87 s | 1.96× | 210.7 | 1.006 | 0.345 | 2.11 | 29% |
+  | 20 (`2P`, shipped) | 6.43 s | **1.49×** | 212.3 | 1.014 | 0.597 | **1.23** | 24% |
+
+  So the shipped value sat **past the floor on the bad side**, and the fix is `parallelism.max(2)`
+  — one in-flight column per hardware thread. Re-measured after the change: window 10 at 2.62×,
+  and **2,000 columns 44.5 s → 28.9 s**. The factor of 2 was there for encode overlap (await a
+  column, then write it to the socket, and at exactly `parallelism` the pool idles for that write).
+  That effect is real and it is worth far less than the concurrency it buys.
+- **Instructions retired is what makes the whole table readable, and it is the reading that killed
+  hazard 1.** 209.3 → 212.4 Ginsn from window 1 to window 20 is **+1.5%**, against a 4.4× rise in
+  cycles per column. A failed `try_lock` in `Cache2DSlot` *is* a recompute, so if a meaningful
+  fraction of the 20.3M lookups per burst had become recomputes the instruction count would have
+  moved. It did not. **Flat instructions with inflated cycles is a stall, and no event counter can
+  size a stall** — which is why `ri_cycles` was added alongside `ri_instructions` out of the same
+  `proc_pid_rusage` call. `ri_phys_footprint` came with them and reads 0.26 GB, which is how the
+  "the machine is swapping" hypothesis was dismissed rather than assumed away.
+- **The `Cache2D` memo had a 0.12% hit rate, and deleting it changed the parallel story not at
+  all.** Counting each of the three try-lock outcomes over the burst: **24,843 hits, 19,899,205
+  misses, 0 contended serially**; 6.1% contended at window 20. So 86 hits per column out of 68,900
+  lookups. It was removed — and the burst's cycle ratio at window 20 went **4.19× → 4.35×**, i.e.
+  the 708 shared mutexes §12.102 flagged were **not** the stall. The deletion is still right, for a
+  different reason: it is worth **3.5% of serial instructions retired** (216.8 → 209.3 Ginsn), so
+  the memo had become net-negative even single-threaded.
+
+  Why it went stale is the useful part. `density/mod.rs`'s own `flat_cache` paragraph already had
+  the argument, applied to the neighbouring node: *"a last-value cache that (almost) never has a
+  matching prior `(x, z)` pays a `Mutex` lock on every visit for (almost) no hits."* It exempted
+  `cache_2d` because that one "sits directly over a scan that revisits one `(x, z)` dozens of times
+  in a row" — true when written, and untrue since U4 (§12.102) made `find_top_surface` a *leaf*
+  whose result the `Scratch` slot layer memoises one level up. **A cache's hit rate is a property
+  of its callers, so a refactor two levels away can invalidate a measured caching decision without
+  touching the cache, and nothing about the code looks wrong afterwards.** The original −4.4%
+  criterion measurement was correct and is now describing a program that no longer exists.
+- **Two independent outside arguments licensed the deletion, and the second was the surprise.**
+  (1) Every `cache_2d` in 26.2's shipped data wraps an xz-only subtree — `shift_a`, `blend_offset`,
+  `blend_alpha`, a spline over `continents` — so a `y`-keyed difference cannot arise. (2) Reading
+  the record definition rather than a summary: vanilla's **unwrapped** `DensityFunctions.Marker`
+  (`DensityFunctions.java:793-797`) is `return this.wrapped.compute(context);` and memoises
+  *nothing*. Only `NoiseChunk.Cache2D` memoises, and that class holds plain non-atomic
+  `long`/`double` fields because vanilla builds one `NoiseChunk` per chunk. So our point
+  interpreter — which is vanilla's `SinglePointContext` path — was memoising where vanilla does
+  not, and the deletion **converges on** vanilla rather than diverging from it. The 45-column/5-seed
+  U15 dump is byte-identical across the change: md5 `c0ef05ac09ba3f90175a14b0f9a69d50`,
+  8,902,157 bytes — the same values §12.130 recorded before this change existed, harness md5
+  `99691badc02cca288a9071f0491d2fa7`, and a one-flipped-byte control makes `cmp` fire (exit 1,
+  `char 4000001`).
+- **What convicts cache capacity rather than a lock is the *shape* of the sweep, and the two
+  purpose-built controls that tried to do it instead both failed — in opposite ways.** A lock
+  contended by 20 workers is contended by 4, so it inflates cycles at *every* window; cache capacity
+  is a threshold that costs nothing until the working sets stop fitting. Measured cycle inflation at
+  a window of 4, five runs: **1.012, 1.035, 1.093, 1.107, 1.153**, against 2.6–4.4× at 20, growing
+  super-linearly in between. That is threshold-shaped, and it is what
+  `a_small_window_shows_no_lock_on_the_shared_generator` now asserts, with the widest window's own
+  reading as its control.
+
+  The two failed controls are worth more than the conclusion:
+
+  **(1) It read 1.49 against 3.79 and was wrong in the direction that would have sent the next unit
+  to shard the interner.** 20 threads over one shared generator against 20 threads with a generator
+  each. Invalid because severing the sharing also makes every thread pay its own full store closure,
+  so the arms ran 53.7 and 303.3 Ginsn of *different* work — `CLAUDE.md`'s **world** species, and it
+  fired damningly.
+
+  **(2) Fixed properly, it then failed its own premise check, and only because the check existed.**
+  A private generator **per column** makes the work identical at every thread count, and normalising
+  each arm by its own single-threaded IPC cancels the mix. That version read shared 5.17 → 3.24
+  (1.59×) against private 5.15 → 3.68 (**1.40×**) — sharing 1.14× of the collapse, machine the rest,
+  the right answer. On the next run it read a *private* collapse of **1.00×** and a shared collapse
+  of 0.84×, i.e. IPC going up with more threads. The arm is 25 columns over 10 threads and builds a
+  generator per column, so it is dominated by JSON parsing and noise init: its single-threaded IPC is
+  3.4–3.8 where the workload's is 5.3. **It was never measuring generation.** The gate asserted
+  `private_collapse > 1.05` before believing anything, so it reported a broken instrument instead of
+  a green — and the fix is deletion, because the contamination is intrinsic (the private arm costs
+  ~12× per column, so it cannot be enlarged until construction is a minority). `CLAUDE.md`'s "ask
+  what else already paints here", one level up from the pixels.
+
+  So the load-bearing evidence for "not a lock" is a *property of the curve*, which cost one extra
+  arm in a sweep that already existed, and the two bespoke controls cost more and delivered less.
+- **What the ceiling actually is, and why the fix is a proxy rather than a derivation.** The
+  mechanism is cache capacity: each in-flight column carries a multi-megabyte working set, and past
+  roughly the core count they stop fitting together. That is a property of the cache and the column,
+  not of the core count, so `available_parallelism` is a *proxy* — and on this machine a poor one,
+  because it counts 4 efficiency cores alongside 6 performance ones, which is most of why the
+  measured floor (8) sits below it (10). The residual is ~7% and was left alone rather than fitted
+  to `0.8 × P`: four runs put `window=8 / window=10` at 0.855, 0.855, 0.916 and 1.079, so a tighter
+  gate would fail half of them on a correct tree. `the_production_window_sits_at_the_measured_optimum`
+  compares against **the same run's best arm** (within 20%), which gives a verdict on a 4-core
+  laptop or a 64-core server without the test knowing anything about either; `2 × P` measured 0.58
+  of the floor in the same run that measured 0.916, so it has 2.3× of clearance against the failure
+  it exists for.
+- **Hazard 3 is the only one left standing, it is a trade rather than a bug, and it is now
+  measurable.** `store::wait_stats()` counts and times the `StageSlot` lookups that were *parked*
+  on another thread's `get_or_init` — a case every counter in `lodestone_worldgen::counters`
+  structurally cannot see, because a parked thread is deliberately counted as a **hit** so the
+  once-only invariant stays exact. It reads **24–37% of pool capacity** (`wait_nanos / (window ×
+  wall)`) across every window from 4 to 20, and **exactly 0** single-threaded, which is its
+  calibration. The cause is that the window is spatially *contiguous*: adjacent columns share 20 of
+  their 25 pre-ore entries, so `window - 1` workers can be parked on the one entry the remaining
+  worker is computing. That sharing is precisely what makes those entries hits rather than cold
+  computes, so it is the design working. Reducing it means making the parallel unit a **store
+  entry** rather than a column — 441 mutually independent `pre_ore` computations for this burst
+  against 289 columns — which no ordering-preserving change to `join_scheduler.rs` reaches.
+  Nothing on the hit path pays for the instrument: `get_or_compute` pre-checks the `OnceLock` and
+  returns before touching an `Instant`, so the ~800 real misses in a burst fund it and the ~26 hits
+  per column do not.
+- **`examples/bench_worldgen.rs`'s `parallel_speedup_vs_serial` is not comparable to any of this,
+  and its 2.4–2.9× should not be quoted.** It runs its parallel arm on the generator its serial arm
+  just warmed, so the parallel arm answers ~83% of every column out of the store (§12.130's
+  repeat-column finding) and is measuring a different, much cheaper program. The stale-worker-sweep
+  number this unit's brief inherited came from there. **A parallel-scaling harness that reuses one
+  generator across arms is measuring its own cache, and the defect is invisible in the output** —
+  the speedup it prints is plausible, monotone and wrong.
+- **Where 2,000 columns now stands: 28.9 s, against 44.5 s before and a target of "a couple of
+  seconds".** So the ordering is now serial cost (21.0 ms/column at §12.130's C_ss; 33 ms here
+  including the burst's cold tail), then the ~30% parked, then a 2.6× ceiling that is the machine.
+  Parallelism is no longer the whole gap: at a perfect 7.6 P-core-equivalents this machine offers,
+  2,000 columns would still be ~9 s. The remaining order-of-magnitude has to come out of the serial
+  column, and the largest identified item is `Program::cache_2d_under_leaves` reading **708** against
+  the handful of `cache_2d` nodes 26.2 declares — the compiler expands a DAG into a tree, which is
+  also *why* the memo could never hit: each parent got its own copy, so no two parents ever asked
+  one slot for the same `(x, z)`. A node-sharing (CSE) pass over the `Op` table is that number's
+  worth of duplicated subtree evaluation, and it is a serial win.
+
