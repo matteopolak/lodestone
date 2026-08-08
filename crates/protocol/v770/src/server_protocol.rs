@@ -4442,21 +4442,45 @@ mod block_edit_tests {
         }
     }
 
-    /// The item-action ordinals (`3`..=`7`: drop/release/swap/stab) share the
-    /// wire packet but carry no terrain edit — this crate has no inventory
-    /// model to act on them, so they must decode to `Ignored`, not silently
-    /// fall into one of the three destroy phases.
+    /// The item-action ordinals share the wire packet with the three destroy
+    /// phases and must not fall into one of them.
+    ///
+    /// **This test used to require `3..=7` to be `Ignored`, and that made it a
+    /// gate asserting a bug.** Its stated premise — *"this crate has no inventory
+    /// model to act on them"* — was true when written and had stopped being:
+    /// `lodestone-server` owns `PlayerInventory` and already spawns item entities
+    /// for block drops. Meanwhile the *client* half was complete (a keybind, four
+    /// adapters encoding ordinals 3 and 4), so `Q` did nothing whatsoever and this
+    /// test required that it keep doing nothing. The premise had to be re-checked
+    /// rather than the assertion trusted; see `DESIGN.md` §12.149.
+    ///
+    /// `5..=7` are still genuinely unmodelled, and keeping them in the loop is
+    /// what stops the two drop arms from having been written as a `3..=7`
+    /// catch-all.
     #[test]
-    fn decode_player_action_item_ordinals_are_ignored() {
+    fn decode_player_action_drop_ordinals_lift_and_the_rest_are_ignored() {
         let proto = V770ServerProtocol;
-        for ordinal in 3..=7 {
-            let body = encode(&PlayerAction {
+        let body = |ordinal: i32| {
+            encode(&PlayerAction {
                 action: ordinal,
                 pos: 0,
                 direction: 0,
                 sequence: 0,
-            });
-            let decoded = proto.decode(State::Play, play::serverbound::PLAYER_ACTION, &body);
+            })
+        };
+        // 3 is DROP_ALL_ITEMS and 4 is DROP_ITEM, per the jar's own enum order —
+        // backwards from the keys, where `Q` is one item and `Ctrl+Q` is the stack.
+        for (ordinal, whole_stack) in [(3, true), (4, false)] {
+            let decoded = proto.decode(State::Play, play::serverbound::PLAYER_ACTION, &body(ordinal));
+            assert_eq!(
+                decoded,
+                ServerBound::ItemDropped { whole_stack },
+                "ordinal {ordinal}"
+            );
+        }
+        // RELEASE_USE_ITEM, SWAP_ITEM_WITH_OFFHAND, STAB: no server-side model.
+        for ordinal in 5..=7 {
+            let decoded = proto.decode(State::Play, play::serverbound::PLAYER_ACTION, &body(ordinal));
             assert_eq!(decoded, ServerBound::Ignored, "ordinal {ordinal}");
         }
     }

@@ -360,16 +360,67 @@ fn resolve_ingredient_items(
     }
 }
 
+/// Whether `grid` currently holds **exactly** `placement`'s shape — every named
+/// cell occupied by a matching item and every unnamed cell empty.
+///
+/// Vanilla's `RecipeBookMenu.recipeMatches`, and the whole of what decides between
+/// "top this up" and "clear it and start over" in [`place_recipe`]. It has to be
+/// an exact shape test in both directions: a grid holding a *superset* (the right
+/// items plus junk in a cell this recipe does not use) is a different craft, and
+/// topping it up would leave it matching nothing.
+fn grid_matches(
+    grid: &CraftingState,
+    placement: &[Option<&lodestone_game::recipe::Ingredient>],
+    cells: usize,
+) -> bool {
+    let tags = recipe_book().tags();
+    (0..cells).all(|cell| {
+        match (grid.input(cell), placement.get(cell).and_then(|slot| slot.as_ref())) {
+            (Some(stack), Some(ingredient)) => {
+                stack.count > 0 && ingredient.matches(&stack.item, tags)
+            }
+            (None, None) => true,
+            // An occupied cell this recipe does not use, or an empty cell it does.
+            (Some(stack), None) => stack.count <= 0,
+            (None, Some(_)) => false,
+        }
+    })
+}
+
 /// Fills `grid` with `recipe`'s ingredients, taken out of `inventory` — vanilla's
 /// `ServerPlaceRecipe` (issue #529 step 4, the `PLACE_RECIPE` consumer).
 ///
-/// Whatever was in the grid goes back to the player first (vanilla's
-/// `clearGrid`), then one item per pattern cell is moved in. `use_max_items` runs
-/// as many rounds as the inventory and the per-item stack cap allow, which is
-/// vanilla's shift-click-a-recipe behaviour.
+/// # Repeated clicks accumulate, and that is the whole behaviour
+///
+/// This used to clear the grid on **every** click and place exactly one craft, so
+/// clicking a recipe twice produced one craft's worth both times — the second
+/// click quietly returned the first click's items and took them straight back out.
+/// Vanilla accumulates: `ServerPlaceRecipe.placeRecipe` asks
+/// `RecipeBookMenu.recipeMatches` first, and `calculateAmountToCraft` answers
+/// `smallestStackSize + 1` when it does, against `1` for a fresh grid
+/// (`ServerPlaceRecipe.java`). So:
+///
+/// | click | grid already holds | result |
+/// |---|---|---|
+/// | plain | nothing, or a different recipe | `clearGrid`, then **one** craft |
+/// | plain | this same recipe | **one more** craft on top, grid not cleared |
+/// | shift (`use_max_items`) | either | as many as the ingredients allow, across multiple source stacks |
+///
+/// Vanilla reaches the accumulate case by clearing and re-placing `n + 1`; this
+/// reaches it by not clearing and merging one more round, which is observationally
+/// the same and cannot lose items to `PlayerInventory::add`'s stack cap on the way
+/// through. That matters: `add` caps every write at 64 regardless of the item's own
+/// maximum (its own doc says so), so a round trip through the inventory is not
+/// free, and the fewer of them a top-up performs the better.
+///
+/// **The grid is only cleared once a placement is actually going to happen**, which
+/// is vanilla's ordering too (`canCraft` is consulted *before* `clearGrid`). A click
+/// the player cannot afford must leave the grid alone rather than empty it into the
+/// inventory — that is a visible change on a click that should have done nothing.
 ///
 /// Returns `false` when the recipe has no placement for this grid's dimensions (a
-/// 3×3 recipe asked for on the player screen's 2×2), in which case nothing moved.
+/// 3×3 recipe asked for on the player screen's 2×2) or when nothing could be taken,
+/// in which case nothing moved.
 pub fn place_recipe(
     inventory: &mut crate::inventory::PlayerInventory,
     grid: &mut CraftingState,
@@ -377,20 +428,24 @@ pub fn place_recipe(
     use_max_items: bool,
 ) -> bool {
     let (width, height) = (grid.width(), grid.height());
+    let cells = width * height;
     let Some(placement) = recipe.placement(width, height) else {
         return false;
     };
 
-    // The grid's current contents go back to the player before anything is taken.
-    for cell in 0..width * height {
-        if let Some(existing) = grid.input(cell).cloned() {
-            grid.set_input(cell, None);
-            inventory.add(existing);
-        }
-    }
+    // The fork. A grid already holding this recipe is topped up in place; anything
+    // else is returned to the player first.
+    let accumulating = grid_matches(grid, &placement, cells);
 
     let tags = recipe_book().tags();
-    let rounds = if use_max_items { 64 } else { 1 };
+    let rounds: usize = if use_max_items {
+        // No fixed count: the loop below stops on the first round that cannot be
+        // completed, which is what "as much as possible" means and is bounded by
+        // the per-cell stack cap regardless.
+        usize::MAX
+    } else {
+        1
+    };
     let mut placed_any = false;
     for _ in 0..rounds {
         // A round is all-or-nothing: a partially-filled extra round would leave the
@@ -399,8 +454,13 @@ pub fn place_recipe(
         let mut ok = true;
         for (cell, ingredient) in placement.iter().enumerate() {
             let Some(ingredient) = ingredient else { continue };
+            // The item's *own* cap, not a constant 64 — vanilla's
+            // `clampToMaxStackSize`. A grid cell holding 16 ender pearls is full.
             let held = grid.input(cell).map_or(0, |s| s.count);
-            if held >= 64 {
+            let cap = grid
+                .input(cell)
+                .map_or(64, crate::container_click::max_stack_size);
+            if held >= cap {
                 ok = false;
                 break;
             }
@@ -418,6 +478,16 @@ pub fn place_recipe(
                 inventory.add(stack);
             }
             break;
+        }
+        // `clearGrid`, deferred to here: the first round that is going to succeed
+        // is the point at which vanilla clears, and a round that fails must not.
+        if !placed_any && !accumulating {
+            for cell in 0..cells {
+                if let Some(existing) = grid.input(cell).cloned() {
+                    grid.set_input(cell, None);
+                    inventory.add(existing);
+                }
+            }
         }
         for (cell, stack) in taken {
             let mut merged = grid.input(cell).cloned().unwrap_or_else(|| {
@@ -704,5 +774,158 @@ mod tests {
         grid.clear();
         assert!(grid.is_empty());
         assert!(grid.result().is_none());
+    }
+
+    /// **The 8-planks case, as the owner described it.** Place `crafting_table`
+    /// twice from a stack of 8 oak planks and the grid must hold *two* crafts'
+    /// worth while the source stack has dropped by exactly eight.
+    ///
+    /// 8 is the right fixture size precisely because it makes 1 / 8 / 64
+    /// distinguishable: a one-craft-per-click implementation leaves 4 in the grid
+    /// and 4 in the slot, a "clears and re-places" one leaves 4 and 4 *as well*,
+    /// and only the accumulate semantics leave 2-per-cell and 0. Reading the source
+    /// slot alone would not separate the first two.
+    ///
+    /// The expected numbers come from `crafting_table.json` (four
+    /// `#minecraft:planks` in a 2×2, yielding one table) plus arithmetic, not from
+    /// this module: two crafts is 8 planks, which is the whole stack.
+    #[test]
+    fn clicking_the_same_recipe_twice_places_two_crafts_worth() {
+        let (_, recipe) = recipe_book()
+            .iter()
+            .find(|(id, _)| id.to_string() == "minecraft:crafting_table")
+            .expect("the bundled corpus carries crafting_table");
+        let mut inventory = crate::inventory::PlayerInventory::new();
+        inventory.set_native(9, Some(stack("minecraft:oak_planks", 8)));
+        let mut grid = CraftingState::player();
+
+        assert!(place_recipe(&mut inventory, &mut grid, recipe, false));
+        for cell in 0..4 {
+            assert_eq!(
+                grid.input(cell).map(|s| s.count),
+                Some(1),
+                "one plain click places exactly one craft's worth per cell"
+            );
+        }
+        assert_eq!(
+            inventory.native(9).map(|s| s.count),
+            Some(4),
+            "four planks left the source slot, not the whole stack"
+        );
+
+        // The second click is the one that used to be a no-op in disguise: it
+        // returned the first click's four planks and took four straight back out.
+        assert!(place_recipe(&mut inventory, &mut grid, recipe, false));
+        for cell in 0..4 {
+            assert_eq!(
+                grid.input(cell).map(|s| s.count),
+                Some(2),
+                "clicking the same recipe again must ADD another craft's worth — 1 here \
+                 means the grid was cleared and re-placed, which is the reported bug"
+            );
+        }
+        assert_eq!(
+            inventory.native(9),
+            None,
+            "and the source stack is now spent exactly: 2 crafts x 4 planks = 8"
+        );
+        assert_eq!(
+            grid.result().map(|r| r.item.to_string()),
+            Some("minecraft:crafting_table".to_string()),
+            "the derived result must survive the top-up, or the grid no longer matches"
+        );
+
+        // A third click cannot be afforded, and must therefore change **nothing** —
+        // not empty the grid into the inventory, which is what a clear-first
+        // implementation does and is a visible change on a click that did nothing.
+        assert!(!place_recipe(&mut inventory, &mut grid, recipe, false));
+        for cell in 0..4 {
+            assert_eq!(grid.input(cell).map(|s| s.count), Some(2));
+        }
+    }
+
+    /// A **different** recipe clears the grid back into the inventory first, which
+    /// is the other half of the owner's spec ("otherwise roll back the previous one
+    /// or put the items back in general, then dispatch this one").
+    ///
+    /// This is the control for the test above: if `grid_matches` answered `true`
+    /// unconditionally, that test would pass and this one would find planks still in
+    /// the grid alongside sticks.
+    #[test]
+    fn a_different_recipe_clears_the_grid_back_to_the_inventory() {
+        let book = recipe_book();
+        let (_, table) = book
+            .iter()
+            .find(|(id, _)| id.to_string() == "minecraft:crafting_table")
+            .expect("crafting_table");
+        let (_, plate) = book
+            .iter()
+            .find(|(id, _)| id.to_string() == "minecraft:oak_pressure_plate")
+            .expect("oak_pressure_plate");
+
+        let mut inventory = crate::inventory::PlayerInventory::new();
+        inventory.set_native(9, Some(stack("minecraft:oak_planks", 8)));
+        let mut grid = CraftingState::player();
+        assert!(place_recipe(&mut inventory, &mut grid, table, false));
+
+        // `oak_pressure_plate` is two planks side by side, so cells 2 and 3 must
+        // end up empty — they are occupied before this call.
+        assert!(place_recipe(&mut inventory, &mut grid, plate, false));
+        assert_eq!(grid.input(0).map(|s| s.count), Some(1));
+        assert_eq!(grid.input(1).map(|s| s.count), Some(1));
+        assert_eq!(
+            (grid.input(2), grid.input(3)),
+            (None, None),
+            "a cell the new recipe does not use must be cleared, not left holding the old \
+             recipe's ingredient"
+        );
+        assert_eq!(
+            grid.result().map(|r| r.item.to_string()),
+            Some("minecraft:oak_pressure_plate".to_string())
+        );
+        // 8 planks total, 2 in the grid, so 6 back in the inventory. Nothing may be
+        // lost on the round trip through `PlayerInventory::add`.
+        let in_inventory: u32 = (0..36)
+            .filter_map(|i| inventory.native(i))
+            .filter(|s| s.item.to_string() == "minecraft:oak_planks")
+            .map(|s| s.count)
+            .sum();
+        assert_eq!(
+            in_inventory, 6,
+            "the cleared grid's planks must come back — 8 total minus the 2 now in the grid"
+        );
+    }
+
+    /// Shift-click draws **across multiple stacks**, which is the third clause of
+    /// the owner's spec, and stops at the per-cell cap rather than at one round.
+    ///
+    /// Two stacks of 40 in different slots: a `use_max_items` fill of a 2×2 recipe
+    /// wants 4 per round, so 80 planks affords 20 crafts and the loop must cross the
+    /// slot boundary to get there. An implementation that only ever read one source
+    /// slot would stop at 10.
+    #[test]
+    fn a_shift_click_draws_across_multiple_source_stacks() {
+        let (_, recipe) = recipe_book()
+            .iter()
+            .find(|(id, _)| id.to_string() == "minecraft:crafting_table")
+            .expect("crafting_table");
+        let mut inventory = crate::inventory::PlayerInventory::new();
+        inventory.set_native(9, Some(stack("minecraft:oak_planks", 40)));
+        inventory.set_native(10, Some(stack("minecraft:oak_planks", 40)));
+        let mut grid = CraftingState::player();
+
+        assert!(place_recipe(&mut inventory, &mut grid, recipe, true));
+        for cell in 0..4 {
+            assert_eq!(
+                grid.input(cell).map(|s| s.count),
+                Some(20),
+                "80 planks over a 4-cell recipe is 20 crafts; 10 means only one source \
+                 stack was consulted"
+            );
+        }
+        assert!(
+            (0..36).all(|i| inventory.native(i).is_none()),
+            "both source stacks must be spent"
+        );
     }
 }
