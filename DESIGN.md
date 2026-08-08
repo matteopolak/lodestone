@@ -7789,3 +7789,69 @@ It is also not data loss: we never write `poi/`, so a vanilla world's own POI fi
 our saves. The format is transcribed into `docs/entity-and-player-persistence.md` for whoever lands
 the first producer. **"Implemented and unreachable" is worse than "absent and documented"**, and the
 distinction is only defensible when the absence is written down where the next author will look.
+
+
+**12.159 Fire, blast resistance and bone meal: five beliefs that were wrong, and the one measurement
+that made the perf follow-up dispatchable.** Wave 1 unit B of the tier-4 server programme — `fire.rs`,
+`explosion_blocks.rs`, `bone_meal.rs`, and a per-block blast/flammability dump in `lodestone-data`.
+
+**The flammability table cannot be transcribed from the decompiled source, and the shortfall is 32
+blocks.** `FireBlock::bootStrap` registers most entries by name, but wool and carpet go through
+`Blocks.WOOL.forEach` / `Blocks.CARPET.forEach`. A reader working from the source alone gets a table
+that is complete-looking and missing every wool and every carpet — i.e. exactly the blocks a player
+notices burning. The JVM dump (reflection over the two private `Object2IntMap<Block>`s, after
+`Bootstrap::bootStrap`, which is what fills them) is the only way to see them.
+
+**Two flammability sets exist and neither contains the other.** Measured over 1,196 blocks: 207 are
+fire-flammable (`igniteOdds > 0`), 312 are `ignitedByLava`, and **both** differences are non-empty.
+Every bed and `note_block` is lava-ignitable with no fire ignite odds; every small flower, `hay_block`,
+`coal_block` and `scaffolding` is the reverse. Deriving one column from the other is wrong in both
+directions, which is why both are dumped. `#minecraft:infiniburn_overworld` is `netherrack` and
+`magma_block` and **not** `bedrock` — the intuitive guess is backwards twice over (eternal fire on
+bedrock, burning-out fire on netherrack), so it has its own test.
+
+**A step is 0.3 blocks, and empty air is cheaper than a zero-resistance block.** Both were got wrong in
+the first draft of the explosion port and both fail in the plausible direction. `ServerExplosion`'s march
+advances `0.3` per step, so `power / step_cost` counts *steps*, not cells — the first version's doc
+claimed a creeper reached "6 to 12 cells" where the truth is 6 to 12 steps, about 2 to 3.7 blocks, which
+is the ~3-block crater a creeper actually leaves. And a cell that is genuinely air yields
+`Optional.empty()` from the damage calculator, so its resistance term is skipped entirely and the step
+costs `0.225`; a *block* of resistance `0.0` still pays `(0 + 0.3) · 0.3` and costs `0.315`. Two
+different numbers for two things that both look like "nothing there". Also: `step_cost(1200)` is
+`360.315`, not `360.225` — a transcription slip in the same paragraph, caught only because the test
+asserted the number rather than the inequality.
+
+**A creeper in solid stone destroys 24 of 27 cells, not 27, and the honest gate says so.** The exact
+arithmetic bound is Chebyshev-adjacency: a ray spends at least `2 × 0.225` leaving a one-cell pocket,
+the first stone cell costs `1.89`, and a second would need `4.455` against a maximum ray power of `3.9`.
+That bound is exact and no seed can exceed it. But which of the 12 edge and 8 corner cells a seed
+reaches is *not* derivable from the constants — they cost three pocket steps rather than two — so the
+first version's `assert_eq!(len, 27)` was a prediction the arithmetic did not support. Pinned exactly:
+the Chebyshev bound and the six face neighbours (which need only `p > 2.34`, 87% of the range). Bracketed
+where it must be: `20..=27`. Predict what the arithmetic gives you and bracket the rest.
+
+**`checkBurnOut` draws even when the neighbour cannot burn, and that fork is invisible to any outcome
+assertion.** The comparison is `nextInt(chance) < odds` evaluated *after* the draw, so a fire surrounded
+by stone still consumes six draws there. The gate that catches it is a draw *count* against an
+independently constructed reference generator — and it took two tries, because the first version asserted
+8 draws for a fire over **stone**, where the tick actually returns early at `isValidFireLocation` having
+drawn 2. The right pair of gates is netherrack (infiniburn skips that return, 8 draws) and stone (2
+draws): together they pin the control flow, and neither is visible in the resulting world.
+
+**Vanilla's explosion drop order is not reproducible outside the JVM.** `interactWithBlocks` opens with
+`Util.shuffle(targetBlocks, level.random)`, a Fisher–Yates over `new ObjectArrayList(toBlowSet)` built
+from a `HashSet<BlockPos>` — so the input order is Java hash-iteration order. The shuffle's *draw count*
+(`n − 1`) is reproducible and must be consumed to keep `createFire` aligned; the *order* is not, at any
+level of care. Worth knowing before someone spends a day trying.
+
+**The perf measurement, and the artefact it nearly shipped.** One open-air creeper blast costs
+**33,475,709 instructions retired** in release — on the order of a fifth of a 50 ms tick, and a cannon is
+the whole thing. The breakdown over 200,000 probes: `ChunkSource::block_state` 758.9 instructions per
+call (39.6%), `block_states::state_id` 1,138.6 (59.4%), the flat `StateId`-indexed resistance array
+**18.0 (0.9%)**. So 99.1% of the per-step cost is turning a bit-packed palette entry into a `String` and
+back into an id, and the section-granularity dense cache is the entire optimisation.
+
+The artefact: the flat-table arm first measured **0.0 instructions per call**, because the probe id was
+loop-invariant and LLVM lifted the whole lookup out. A per-call cost of zero is not a result, and the
+only reason it was caught is that the prediction written down beforehand said "a small minority", not
+"free". **Vary a microbenchmark's input, and disbelieve a measurement that agrees with you too well.**
