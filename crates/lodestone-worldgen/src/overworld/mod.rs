@@ -205,6 +205,7 @@ mod decorate;
 mod fill;
 mod output;
 pub mod store;
+mod veins;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -361,6 +362,10 @@ pub struct OverworldGenerator {
     /// branch differently and still produce a plausible column. The `String`
     /// forms are kept as the definition `surface_stage` re-derives against on
     /// every entry under `debug_assertions`.
+    /// Issue #496: `OreVeinifier`'s three router channels plus its positional RNG,
+    /// or `None` when the settings do not enable veins. Consumed by
+    /// [`Self::materialize_world`]. See [`veins`].
+    veins: Option<veins::VeinPrograms>,
     default_block_pre: crate::surface::PreState,
     default_fluid_pre: crate::surface::PreState,
     default_lava_pre: crate::surface::PreState,
@@ -543,6 +548,10 @@ impl OverworldGenerator {
         let default_fluid =
             canonical_state_from_settings(&settings["default_fluid"], "minecraft:water[level=0]");
         let default_lava = "minecraft:lava[level=0]".to_string();
+        // Issue #496. Built from the same `builder` every other router channel uses,
+        // so `vein_toggle`'s slot indices share one address space with
+        // `final_density`'s -- the property `slot_count` below depends on.
+        let veins = veins::VeinPrograms::build(&builder, settings, &interner);
         let default_block_pre = crate::surface::PreState::from_name(&interner, &default_block);
         let default_fluid_pre = crate::surface::PreState::from_name(&interner, &default_fluid);
         let default_lava_pre = crate::surface::PreState::from_name(&interner, &default_lava);
@@ -669,6 +678,7 @@ impl OverworldGenerator {
             default_block,
             default_fluid,
             default_lava,
+            veins,
             default_block_pre,
             default_fluid_pre,
             default_lava_pre,
