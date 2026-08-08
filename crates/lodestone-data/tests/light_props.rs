@@ -16,9 +16,11 @@
 //! `LeavesBlock` and `TintedGlassBlock`). Reading either needs the running jar,
 //! and this table is generated from two *committed* sources instead:
 //!
-//! 1. **`vendor/minecraft-data/data/pc/1.21.11/blocks.json`** — `filterLight` /
+//! 1. **`tests/support/light_props_mcdata.txt`** — a committed extract of
+//!    `vendor/minecraft-data/data/pc/1.21.11/blocks.json`'s `filterLight` /
 //!    `emitLight`, which are that project's transcription of exactly these two
-//!    vanilla quantities for the block's **default** state.
+//!    vanilla quantities for the block's **default** state. Committed rather than
+//!    read from `vendor/` because `vendor/` is **gitignored** — see [`MCDATA`].
 //! 2. **The decompiled 26.2 tree** (`.cache/mc/26.2/src`), read for the
 //!    per-state corrections and for the 30 blocks 1.21.11 does not have.
 //!
@@ -64,12 +66,34 @@
 //!
 //! # Refreshing after a version bump
 //!
+//! 1. Re-extract source 1 from the (gitignored) vendored data, keeping the `#`
+//!    header, and commit the result:
+//!
+//! ```text
+//! python3 - <<'PY' > crates/lodestone-data/tests/support/light_props_mcdata.txt
+//! import json
+//! bd = json.load(open('vendor/minecraft-data/data/pc/1.21.11/blocks.json'))
+//! rows = sorted((b['name'], int(b.get('filterLight', 0)), int(b.get('emitLight', 0)))
+//!               for b in bd)
+//! print("# Per-block light dampening/emission, extracted from")
+//! print("# vendor/minecraft-data/data/pc/1.21.11/blocks.json (fields filterLight/emitLight).")
+//! print("# Columns: block-name filterLight emitLight. Sorted by name.")
+//! print("# Committed as the external anchor for crates/lodestone-data/src/generated/light_props.rs")
+//! print("# because vendor/ is not repo state. Refresh command is in tests/light_props.rs's module docs.")
+//! print(f"# rows: {len(rows)}")
+//! for n, f, e in rows:
+//!     print(n, f, e)
+//! PY
+//! ```
+//!
+//! 2. Regenerate the committed table:
+//!
 //! ```text
 //! LODESTONE_REGEN=1 cargo test -p lodestone-data --test light_props \
 //!     committed_table_matches_source -- --ignored --nocapture
 //! ```
 //!
-//! If the bump adds blocks `vendor/minecraft-data` does not have,
+//! If the bump adds blocks the extract does not have,
 //! [`unmapped_block_set_is_exactly_the_known_26_2_additions`] fails **naming
 //! them** — deliberately, so a new block can never be silently defaulted.
 
@@ -88,10 +112,19 @@ fn committed_path() -> PathBuf {
     manifest_dir().join("src/generated/light_props.rs")
 }
 
-/// `vendor/minecraft-data`'s 1.21.11 block report, committed repo state.
-fn mcdata_path() -> PathBuf {
-    manifest_dir().join("../../vendor/minecraft-data/data/pc/1.21.11/blocks.json")
-}
+/// The committed extract of `vendor/minecraft-data`'s 1.21.11 `filterLight`/
+/// `emitLight`, one `name dampening emission` row per block.
+///
+/// **`include_str!`, not a path into `vendor/`.** `vendor/minecraft-data` is
+/// gitignored — not even a submodule — so a fresh checkout or a throwaway
+/// `git worktree` does not have it, and a non-`#[ignore]`d test that read it
+/// would fail there while passing on the machine that wrote it. (Caught exactly
+/// that way: these two tests were green in the main checkout and red in a
+/// detached verification worktree.) `crates/protocol/v770/tests/live_terrain_light.rs`
+/// gets away with reading `vendor/` directly only because it is both
+/// feature-gated and `#[ignore]`d. Committing the extract is the same external
+/// anchor the sibling generators use (`support/*_jvm.txt`).
+const MCDATA: &str = include_str!("support/light_props_mcdata.txt");
 
 /// The 30 blocks 26.2 adds that `vendor/minecraft-data 1.21.11` does not carry,
 /// with the `(dampening, emission)` read out of their registrations in
@@ -146,57 +179,70 @@ const NEW_IN_26_2: &[(&str, u8, u8)] = &[
     ("sulfur_wall", 0, 0),
 ];
 
-/// `(dampening, emission)` per block *name*, from `blocks.json` plus
-/// [`NEW_IN_26_2`]. Names are unprefixed, as `blocks.json` writes them.
-fn props_by_block_name() -> BTreeMap<String, (u8, u8)> {
-    let text = std::fs::read_to_string(mcdata_path()).unwrap_or_else(|err| {
-        panic!(
-            "read {} (committed vendor data): {err}",
-            mcdata_path().display()
-        )
-    });
-    let blocks: serde_json::Value =
-        serde_json::from_str(&text).expect("parse minecraft-data blocks.json");
+/// The committed extract, parsed: `(dampening, emission)` per block *name*, names
+/// unprefixed as `blocks.json` writes them. Blank and `#` lines are skipped.
+fn mcdata_rows() -> BTreeMap<String, (u8, u8)> {
     let mut out = BTreeMap::new();
-    for block in blocks.as_array().expect("blocks.json is a JSON array") {
-        let name = block["name"].as_str().expect("block has a name");
-        let dampening = u8::try_from(block["filterLight"].as_u64().unwrap_or(0))
-            .expect("filterLight fits in u8");
-        let emission =
-            u8::try_from(block["emitLight"].as_u64().unwrap_or(0)).expect("emitLight fits in u8");
+    for line in MCDATA.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut tok = line.split_whitespace();
+        let name = tok.next().expect("name column").to_owned();
+        let dampening: u8 = tok
+            .next()
+            .expect("dampening column")
+            .parse()
+            .expect("dampening is a u8");
+        let emission: u8 = tok
+            .next()
+            .expect("emission column")
+            .parse()
+            .expect("emission is a u8");
+        assert!(
+            tok.next().is_none(),
+            "unexpected trailing tokens on {line:?}"
+        );
         assert!(
             dampening <= 15 && emission <= 15,
             "{name}: light values must be 0..=15, got ({dampening}, {emission})"
         );
-        out.insert(name.to_owned(), (dampening, emission));
+        assert!(
+            out.insert(name.clone(), (dampening, emission)).is_none(),
+            "{name} appears twice in the extract"
+        );
     }
+    assert_eq!(
+        out.len(),
+        1166,
+        "the committed extract should carry all 1,166 blocks minecraft-data 1.21.11 has"
+    );
+    out
+}
+
+/// `(dampening, emission)` per block *name*, from the extract plus
+/// [`NEW_IN_26_2`].
+fn props_by_block_name() -> BTreeMap<String, (u8, u8)> {
+    let mut out = mcdata_rows();
     for &(name, dampening, emission) in NEW_IN_26_2 {
-        // Deliberately `insert` rather than `entry().or_insert`: if a future
-        // vendor bump starts carrying one of these, the vendor value wins and
-        // `NEW_IN_26_2` becomes dead — which
+        // Deliberately `or_insert`: if a future data bump starts carrying one of
+        // these, the extract's value wins and `NEW_IN_26_2` becomes dead — which
         // `unmapped_block_set_is_exactly_the_known_26_2_additions` reports.
-        out.entry(name.to_owned())
-            .or_insert((dampening, emission));
+        out.entry(name.to_owned()).or_insert((dampening, emission));
     }
     out
 }
 
-/// Block names in 26.2 (from the committed block-state table) that
-/// `blocks.json` does not carry.
+/// Block names in 26.2 (from the committed block-state table) that the extract
+/// does not carry.
 fn unmapped_block_names() -> BTreeSet<String> {
-    let text = std::fs::read_to_string(mcdata_path()).expect("read vendor blocks.json");
-    let blocks: serde_json::Value = serde_json::from_str(&text).expect("parse");
-    let known: BTreeSet<&str> = blocks
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|b| b["name"].as_str().unwrap())
-        .collect();
+    let known = mcdata_rows();
     let mut out = BTreeSet::new();
     for id in 0..block_states::STATE_COUNT {
         let full = block_states::block_name(id).expect("state id in range");
         let short = full.strip_prefix("minecraft:").unwrap_or(full);
-        if !known.contains(short) {
+        if !known.contains_key(short) {
             out.insert(short.to_owned());
         }
     }
