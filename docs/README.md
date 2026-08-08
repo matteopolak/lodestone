@@ -141,6 +141,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   **moving entity** needs that are not geometry — how slippery a cell is, how much
   it slows you, whether it grabs you, whether you can climb it, and whether it stops
   you at all. Seven values, split across two homes because they are keyed differently:
+- [Block placement conventions](./block-placement-conventions.md) — The server-side
+  table of `Block.getStateForPlacement` conventions: which `facing`, `half`, `axis`,
+  `type`, `shape` or `hinge` a block gets when a player right-clicks it into the
+  world. Lives in `crates/lodestone-server/src/block_placement.rs`, called from
+  `server.rs`'s `placed_block_state`, and is why a placed stair, chest, furnace or
+  anvil now points the way vanilla points it.
 - [Block placement prediction](./block-placement-prediction.md) — When you
   right-click a block on a live server the shell now **writes the placed block into
   the client-owned world immediately**, instead of sending `use_item_on` and waiting
@@ -320,6 +326,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   builds when the server opens a `minecraft:crafting` screen.
 - [Creative flight](./creative-flight.md) — Two things, and separating them was the
   whole design:
+- [Creative inventory screen](./creative-inventory-screen.md) — Vanilla's
+  `CreativeModeInventoryScreen` (issue #158): the 14-tab strip, the scrollable 5×9
+  item grid, the search tab, and the inventory tab. Contents come from
+  `crates/lodestone-shell/src/container/creative_items.rs` — a hand-transcription of
+  the decompiled `CreativeModeTabs.java`, 1725 items over 14 tabs, every id
+  cross-checked against `lodestone-data`'s real item registry.
 - [The credits / end-poem screen](./credits-screen.md) — `Screen::Credits` (issue
   #192): the screen reached after vanilla's dragon fight, on exiting the End through
   the exit portal — vanilla's `WinScreen`. Reachable through
@@ -778,6 +790,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `crates/lodestone-shell/src/offline_identity.rs` and is what `net.rs`'s login-start
   packet carries for **every** join this shell makes today, singleplayer and
   multiplayer alike.
+- [Open to LAN](./open-to-lan.md) — `IntegratedServer::open_to_lan` — the
+  TCP-listening entry point, plus the config surface for the four subsystems that were
+  implemented, gated, and then unreachable because `IntegratedServer::bind` took no
+  way to say anything about them: RCON (#331), the GameSpy4/UT3 query listener (#332),
+  resource-pack pushes (#334), plugin channels (#335) and commands (#48). Adds
+  vanilla's LAN-discovery broadcast so the world shows up in a client's multiplayer
+  list without anyone typing an address.
 - [Which settings actually do something, and what the rest are waiting on](./options-consumption-census.md) —
   A consumption audit of the settings tree: for every option
   `crates/lodestone-shell/src/menu/options.rs` puts on screen, whether the value
@@ -1074,6 +1093,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   describes behaviour, it is describing the design, not shipped code; where it cites
   `crates/lodestone-ecs/` today, that code already exists and this document is
   reporting it directly.
+- [Server game modes](./server-game-modes.md) — The server's game-type state: what
+  mode a connection joins in, how it changes, and the consequences the server applies
+  (flight permission, instant break, damage immunity). Before this, `begin_play`
+  hardcoded `game_type: 0` and the `change_game_mode` packet decoded to
+  `ServerBound::Ignored`, so there was no way to be in creative at all.
 - [Server-side gameplay gap census against vanilla 26.2](./server-gameplay-gap-census.md) —
   An evidenced inventory of what the integrated server actually simulates, measured
   against vanilla 26.2 — block drops, crafting, mob spawning, lighting, drowning,
@@ -1184,6 +1208,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   machine's speakers, and the two things that keep it quiet: a **missing sample
   corpus** and a **missing environment variable**. The mixing engine was already built
   and correct; this doc is mostly about everything either side of it.
+- [Sound subtitle captions](./sound-subtitles.md) — Vanilla's accessibility overlay
+  that names each sound as it plays — a stack of right-aligned plates just above the
+  hotbar, oldest at the bottom, each fading from white to grey over three seconds,
+  with a `<` or `>` arrow when the sound came from behind you. Gated by the
+  `showSubtitles` option (issue #198).
 - [Statistics screen](./statistics-screen.md) — `Screen::Statistics` (issue #188):
   vanilla's `StatsScreen`, reached from the pause menu's Statistics button
   (`crates/lodestone-shell/src/menu/nav.rs`'s `PauseButton::Statistics`, now live).
