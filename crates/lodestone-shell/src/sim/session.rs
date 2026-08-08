@@ -490,6 +490,28 @@ impl Sim {
         })
     }
 
+    /// Push a client-authored system line into the chat feed.
+    ///
+    /// The one writer that is not the wire. Vanilla has the same seam —
+    /// `ChatComponent.addMessage` is called by local commands and by
+    /// `MultiplayerOptionsScreen`'s publish result — and this exists for exactly
+    /// that second caller (issue #535): the LAN port has to be readable while the
+    /// host reads it out, which a toast is not.
+    ///
+    /// **Not for anything the server could say instead.** A client-authored line
+    /// that looks like a server message is how a fabricated state reads as real;
+    /// keep these to statements about the client's own doing.
+    pub fn push_local_chat(&mut self, line: impl Into<String>) {
+        let text = lodestone_model::text::Text::literal(line.into());
+        let now = self.clock().secs;
+        let local = self.local;
+        self.write(|w| {
+            if let Some(mut chat) = w.get_mut::<SessionChat>(local) {
+                chat.0.push_system(text, now);
+            }
+        });
+    }
+
     /// Server-reported health in `0..=20`, or `None` off a live survival server.
     #[must_use]
     pub fn health(&self) -> Option<f32> {

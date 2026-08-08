@@ -186,6 +186,14 @@ pub enum MenuAction {
     /// half fixes is the *submit* path, which was the island: the Done button
     /// computed a fully-tested payload and dropped it on the floor.
     SetCommandBlock(command_block::CommandBlockSubmit),
+    /// The pause menu's **Open to LAN** was activated (issue #535): the app must
+    /// republish the world it is in on a TCP port so other machines can join.
+    ///
+    /// `MenuNav` cannot do it — it holds no `Sim` and no world path — which is the
+    /// same division of labour [`MenuAction::Respawn`] and
+    /// [`MenuAction::Singleplayer`] have. Carries nothing: the world to publish is
+    /// whichever one the app already has open.
+    OpenToLan,
 }
 
 /// Which field of the add/edit form has focus.
@@ -741,9 +749,10 @@ impl MainButton {
 pub enum PauseButton {
     /// Resume play. Equivalent to Escape. Vanilla's `menu.returnToGame`.
     BackToGame,
-    /// Vanilla's `gui.advancements`. Present and disabled: nothing in this
-    /// workspace decodes the `update_advancements` packet, so there is no
-    /// advancement tree to open.
+    /// Vanilla's `gui.advancements` — opens [`super::Screen::Advancements`]
+    /// (issue #167). **Live, and showing real progress**: this used to be
+    /// present-and-disabled because nothing decoded `UPDATE_ADVANCEMENTS`, and
+    /// both halves of that wire have since landed. See [`super::advancements`].
     Advancements,
     /// Vanilla's `gui.stats` — opens [`super::Screen::Statistics`] (issue
     /// #188). **Now live.** What used to be this button's whole disabled
@@ -781,6 +790,22 @@ pub enum PauseButton {
     /// Open the settings screen (reuses [`super::Screen::Settings`] — see
     /// [`super::UiState::open_settings_from_pause`]).
     Options,
+    /// Vanilla's `menu.multiplayerOptions.button`, whose `en_us` value really is
+    /// **"Open to LAN"** — the half-width sibling of [`Self::Options`] that
+    /// `PauseScreen.createPauseMenu`'s `hasSingleplayerServer()` branch adds
+    /// (`PauseScreen.java:157-160`). Issue #535's scope 1.
+    ///
+    /// **Present unconditionally, unlike vanilla.** Vanilla hides the whole
+    /// half-width row when the session is not a hosted world; this layout is
+    /// static, so the button is always there and [`MenuAction::OpenToLan`]'s
+    /// consumer reports honestly when there is no world to publish. That keeps
+    /// `enabled` a pure function of the variant, which every call site relies on.
+    ///
+    /// Vanilla opens a `MultiplayerOptionsScreen` — a form with a LAN/online
+    /// toggle, a port field, a game mode and allow-commands. This publishes
+    /// straight away on [`crate::net::LAN_DEFAULT_PORT`] with commands on; the
+    /// form is a screen of its own and the action it would submit is this one.
+    OpenToLan,
     /// Leave the session for the title screen.
     QuitToTitle,
 }
@@ -788,7 +813,7 @@ pub enum PauseButton {
 /// Every pause-screen widget, in vanilla's display order. As with
 /// [`MAIN_BUTTONS`], these indices are the one index space keyboard selection,
 /// mouse hover, hit-testing and the renderer all share.
-pub const PAUSE_BUTTONS: [PauseButton; 9] = [
+pub const PAUSE_BUTTONS: [PauseButton; 10] = [
     PauseButton::BackToGame,
     PauseButton::Advancements,
     PauseButton::Statistics,
@@ -797,6 +822,7 @@ pub const PAUSE_BUTTONS: [PauseButton; 9] = [
     PauseButton::Friends,
     PauseButton::PlayerReporting,
     PauseButton::Options,
+    PauseButton::OpenToLan,
     PauseButton::QuitToTitle,
 ];
 
@@ -814,6 +840,7 @@ impl PauseButton {
             PauseButton::Friends => "Friends",
             PauseButton::PlayerReporting => "Player Reporting",
             PauseButton::Options => "Options...",
+            PauseButton::OpenToLan => "Open to LAN",
             PauseButton::QuitToTitle => "Disconnect",
         }
     }
@@ -831,11 +858,15 @@ impl PauseButton {
                 | PauseButton::PlayerReporting
                 // Issue #188: likewise.
                 | PauseButton::Statistics
-                // Issue #167: the Advancements screen now exists. Its tree is the
-                // real data pack's; nothing is obtained because nothing decodes
-                // `UPDATE_ADVANCEMENTS`, which is the same honest zero
-                // `Statistics` shows — see `menu::advancements`' module docs.
+                // Issue #167: the Advancements screen exists, and since the
+                // `UPDATE_ADVANCEMENTS` decode landed it shows real progress —
+                // see `menu::advancements`' module docs.
                 | PauseButton::Advancements
+                // Issue #535: `IntegratedServer::open_to_lan` has a caller. Always
+                // enabled rather than session-aware, because `enabled` is a pure
+                // function of the variant at every call site — see the variant's
+                // own doc for what happens outside a hosted world.
+                | PauseButton::OpenToLan
         )
     }
 
@@ -3664,6 +3695,10 @@ impl MenuNav {
                         ui.open_advancements_from_pause();
                         MenuAction::None
                     }
+                    // Issue #535. `MenuNav` holds no `Sim` and no world path, so
+                    // the publish itself is the app's — same division of labour
+                    // as `Respawn` and `Singleplayer`.
+                    PauseButton::OpenToLan => MenuAction::OpenToLan,
                     PauseButton::ReportBugs
                     | PauseButton::Feedback
                     | PauseButton::Friends => MenuAction::None,
@@ -6519,6 +6554,10 @@ mod tests {
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.pause_button(), PauseButton::Options);
         nav.key(&mut ui, MenuKey::Down);
+        // Issue #535: Options' half-width sibling, vanilla's own singleplayer
+        // branch of `createPauseMenu`.
+        assert_eq!(nav.pause_button(), PauseButton::OpenToLan);
+        nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.pause_button(), PauseButton::QuitToTitle);
     }
 
@@ -6689,13 +6728,15 @@ mod tests {
             );
         }
 
-        // Pause screen: Back to Game, Statistics, Player Reporting, Options,
-        // Disconnect (issues #188/#189 made Statistics and Player Reporting
-        // live).
+        // Pause screen: Back to Game, Advancements, Statistics, Player Reporting,
+        // Options, Open to LAN, Disconnect — the three icon buttons in the middle
+        // are the disabled rows Down must step over (issues #188/#189 made
+        // Statistics and Player Reporting live, #167 Advancements, #535 Open to
+        // LAN).
         ui.enter_dev_world();
         ui.pause();
         let mut seen = vec![nav.pause_button()];
-        for _ in 0..5 {
+        for _ in 0..6 {
             nav.key(&mut ui, MenuKey::Down);
             seen.push(nav.pause_button());
         }
@@ -6707,6 +6748,7 @@ mod tests {
                 PauseButton::Statistics,
                 PauseButton::PlayerReporting,
                 PauseButton::Options,
+                PauseButton::OpenToLan,
                 PauseButton::QuitToTitle
             ]
         );

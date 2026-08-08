@@ -735,6 +735,16 @@ pub enum NetUpdate {
     /// screen (`UiState::show_credits`) — the same shape as
     /// [`NetUpdate::Death`]/`Sim::is_dead`/`UiState::die`.
     WinGame,
+    /// The world was published to LAN on `port` (issue #535). Reported rather
+    /// than assumed because the caller may have asked for port `0`, and because a
+    /// player who cannot see the port cannot tell anyone how to join.
+    ///
+    /// `Sim::poll_net` turns this into the chat line vanilla's
+    /// `menu.multiplayerOptions.publish.started.lan` is.
+    LanOpened {
+        /// The TCP port the listener actually bound.
+        port: u16,
+    },
     /// A positioned sound to play (`SOUND` packet). `name` is the sound event
     /// key's path (namespace stripped, e.g. `"entity.slime.squish"`); `seed` is
     /// the server-rolled value that makes weighted variant selection
@@ -949,6 +959,16 @@ enum Origin {
         /// nothing behind asks for.
         #[cfg(not(target_arch = "wasm32"))]
         world_dir: Option<std::path::PathBuf>,
+        /// Open this world to LAN on this TCP port instead of serving it over the
+        /// in-memory duplex (issue #535's scope 1). `0` asks the OS for a port.
+        ///
+        /// `Some` selects `IntegratedServer::open_to_lan`, and the local player
+        /// then joins over loopback like any other LAN client — one transport for
+        /// everybody, which is what stops the host being a second, privileged
+        /// kind of connection. See [`run`]'s own LAN branch for the two
+        /// persistence gaps that come with it.
+        #[cfg(not(target_arch = "wasm32"))]
+        lan_port: Option<u16>,
     },
 }
 
@@ -1001,6 +1021,18 @@ const SINGLEPLAYER_ADDRESS: (&str, u16) = ("singleplayer", 0);
 /// arm reports the loss — no new disconnect wiring, which is why this is one
 /// line on the builder.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The port the pause menu's Open to LAN asks for (issue #535).
+///
+/// Vanilla's `MultiplayerOptionsScreen` defaults to `HttpUtil.getAvailablePort()`
+/// — a random free one — and lets the host type another. There is no port field
+/// on this side yet, so this is the well-known Minecraft port instead, which is
+/// the one a joining player will try first if they only know the host's address.
+/// It is a **request**: a port already in use fails the publish loudly rather
+/// than silently sliding to another, because a host who reads "opened on 25565"
+/// and is actually on 25566 has been given a wrong answer.
+#[cfg(not(target_arch = "wasm32"))]
+pub const LAN_DEFAULT_PORT: u16 = 25565;
 
 /// How often a persistent singleplayer world writes its dirty chunks (issue
 /// #468).
@@ -1208,6 +1240,44 @@ impl NetClient {
                 view_radius,
                 #[cfg(not(target_arch = "wasm32"))]
                 world_dir,
+                #[cfg(not(target_arch = "wasm32"))]
+                lan_port: None,
+            },
+            protocol,
+            session,
+            OfflineIdentity::load(),
+        )
+    }
+
+    /// [`Self::open_singleplayer`], but the world is hosted on a **TCP port** so
+    /// other machines can join it — the pause menu's Open to LAN (issue #535).
+    ///
+    /// Identical in every other respect: same registry-resolved
+    /// `ServerProtocol`, same seed and world directory, same offline identity,
+    /// same net thread. The local player joins over `127.0.0.1:<port>` rather
+    /// than the in-memory duplex, so there is exactly one kind of connection on
+    /// this server and the host is not a special case.
+    ///
+    /// `port` of `0` asks the OS for a free one, which is what a test wants;
+    /// [`LAN_DEFAULT_PORT`] is what the menu passes.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn open_to_lan(
+        server_protocol: Box<dyn lodestone_server::ServerProtocol>,
+        protocol: i32,
+        seed: i64,
+        view_radius: i32,
+        session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+        world_dir: Option<std::path::PathBuf>,
+        port: u16,
+    ) -> Self {
+        Self::connect_impl(
+            Origin::Integrated {
+                protocol: server_protocol,
+                seed,
+                view_radius,
+                world_dir,
+                lan_port: Some(port),
             },
             protocol,
             session,
@@ -1771,6 +1841,11 @@ fn run(
         // the serving task**, so binding it inside a `match` arm would kill the
         // server the instant the arm ended.
         let mut integrated_server = None;
+        // The Open-to-LAN world's own save handle (issue #535). `open_to_lan` sets
+        // `save: None` and so flushes nothing at shutdown; this is what the
+        // teardown below writes through, and it is `None` for every other origin.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut lan_autosave: Option<lodestone_server::region_source::WorldSaveHandle> = None;
         let (server, auth, integrated_io) = match origin {
             Origin::Remote { host, port, auth } => (ServerAddress { host, port }, auth, None),
             Origin::Integrated {
@@ -1779,6 +1854,8 @@ fn run(
                 view_radius,
                 #[cfg(not(target_arch = "wasm32"))]
                 world_dir,
+                #[cfg(not(target_arch = "wasm32"))]
+                lan_port,
             } => {
                 // Issue #468: the world's **stored** seed wins over the
                 // requested one, so this has to be resolved before the
@@ -1837,6 +1914,65 @@ fn run(
                 // `docs/chunk-memory-pool-footprint.md` predates carvers, ores and
                 // vegetation composing in and is not the figure to reason from.
                 let source = lodestone_server::overworld_chunk_source(seed);
+                // Open to LAN (issue #535's scope 1). Taken before the
+                // in-memory constructors below because it is a *different
+                // server*: `IntegratedServer::open_to_lan` binds a TCP listener
+                // and every client — this one included — dials it, so there is no
+                // duplex to hand back and the transport falls through to the
+                // ordinary remote path.
+                //
+                // # Two persistence gaps, both in the server crate
+                //
+                // `open_to_lan` sets `save: None`, so it starts no autosave task
+                // and flushes nothing at shutdown. This branch therefore drives
+                // the save itself: it wraps `source` in a `RegionChunkSource` (so
+                // a saved world's existing terrain and edits *load*) and holds the
+                // `WorldSaveHandle`, writing on the same `AUTOSAVE_INTERVAL`
+                // singleplayer uses and once more before the handle drops.
+                //
+                // What it still cannot carry: `open_to_lan` builds its own
+                // `BlockEntityHandle::default()` rather than taking the source's,
+                // so **container contents and scheduled ticks placed while hosting
+                // do not persist** — chest lids animate and furnaces cook, and
+                // none of it survives a restart. Closing that needs `LanConfig` to
+                // grow a world directory and reuse `open_persistent_with_mobs`'s
+                // save wiring, which is a `crates/lodestone-server` change.
+                //
+                // Structured as one `open_lan_world` call whose result is threaded
+                // into the same `(server, client_io)` pair the in-memory
+                // constructors produce, with `client_io: None` standing for "there
+                // is a socket, dial it". A bare `if lan_port.is_some()` around the
+                // whole open cannot work here: both branches consume `source` and
+                // `server_protocol`, and `#[cfg]` does not attach to an `if` in a
+                // match arm's tail.
+                #[cfg(not(target_arch = "wasm32"))]
+                let (server, client_io, lan_address) = match lan_port {
+                    Some(port) => {
+                        match open_lan_world(server_protocol, source, &world_dir, view_radius, port)
+                            .await
+                        {
+                            Ok((server, address, save)) => {
+                                if let Some(save) = save {
+                                    lan_autosave = Some(save.clone());
+                                    tokio::spawn(async move {
+                                        loop {
+                                            tokio::time::sleep(AUTOSAVE_INTERVAL).await;
+                                            let save = save.clone();
+                                            let _ = tokio::task::spawn_blocking(move || save.save())
+                                                .await;
+                                        }
+                                    });
+                                }
+                                let _ = tx.send(NetUpdate::LanOpened { port: address.port });
+                                (server, None, Some(address))
+                            }
+                            Err(message) => {
+                                let _ = tx.send(NetUpdate::Error(message));
+                                return;
+                            }
+                        }
+                    }
+                    None => {
                 // Issue #217: `MobSim` computed AI motion server-side with no
                 // production consumer streaming it anywhere — an island by its
                 // own module doc's admission. `open_in_memory_with_mobs` is
@@ -1851,8 +1987,6 @@ fn run(
                 // unavailable there (see `lodestone_server`'s own doc
                 // comment on `mobs::run_mob_tick_loop`) — a real, documented
                 // gap, not a silent one.
-                #[cfg(not(target_arch = "wasm32"))]
-                let (server, client_io) = {
                     // A small fixed radius around the join spawn (chunk
                     // (0,0), matching `V770ServerProtocol::begin_play`'s
                     // hardcoded `spawn_x`/`spawn_z` = 8) — independent of
@@ -1877,7 +2011,7 @@ fn run(
                     // gotcha is that they must match the world the columns came
                     // from, and a literal at this call site is a copy that can
                     // drift from the generator that produced them.
-                    match &world_dir {
+                    let (server, client_io) = match &world_dir {
                         Some(dir) => {
                             let (min_y, height) = (source.min_y(), source.height());
                             match lodestone_server::IntegratedServer::open_persistent_with_mobs(
@@ -1923,24 +2057,41 @@ fn run(
                             6,
                             view_radius,
                         ),
+                    };
+                    (server, Some(client_io), None)
                     }
                 };
                 #[cfg(target_arch = "wasm32")]
-                let (server, client_io) = lodestone_server::IntegratedServer::open_in_memory(
-                    server_protocol,
-                    source,
-                    view_radius,
-                );
+                let (server, client_io, lan_address): (_, _, Option<ServerAddress>) = {
+                    let (server, io) = lodestone_server::IntegratedServer::open_in_memory(
+                        server_protocol,
+                        source,
+                        view_radius,
+                    );
+                    (server, Some(io), None)
+                };
                 integrated_server = Some(server);
-                let (host, port) = SINGLEPLAYER_ADDRESS;
-                (
-                    ServerAddress {
-                        host: host.to_string(),
-                        port,
-                    },
-                    None,
-                    Some(client_io),
-                )
+                match (client_io, lan_address) {
+                    // Singleplayer over the in-memory duplex: the address is
+                    // synthetic and only echoed into the handshake.
+                    (Some(io), _) => {
+                        let (host, port) = SINGLEPLAYER_ADDRESS;
+                        (
+                            ServerAddress {
+                                host: host.to_string(),
+                                port,
+                            },
+                            None,
+                            Some(io),
+                        )
+                    }
+                    // Open to LAN: there is a real socket, so the host dials it
+                    // over loopback exactly as a remote join would.
+                    (None, Some(address)) => (address, None, None),
+                    // Unreachable by construction — `open_lan_world` returns an
+                    // address on success and this arm returns early on failure.
+                    (None, None) => unreachable!("an integrated server with no transport"),
+                }
             }
         };
 
@@ -2111,10 +2262,123 @@ fn run(
         // exit.
         if let Some(server) = integrated_server {
             tracing::info!(target: "net", "stopping the integrated server and saving the world");
+            // **`drop`, not `shutdown().await`, for a LAN handle.** `shutdown`
+            // joins the accept loop, which is parked in `accept()` where the
+            // notify cannot reach it, and joining it hung indefinitely for a
+            // `view_radius: 0` handle while #535's own gate was written. Dropping
+            // aborts both loops. There is nothing to lose by not joining: a LAN
+            // handle has `save: None`, so its flush is the explicit one below.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(save) = lan_autosave.take() {
+                drop(server);
+                match tokio::task::spawn_blocking(move || save.save()).await {
+                    Ok(Ok(columns)) => {
+                        tracing::info!(target: "net", columns, "LAN world saved");
+                    }
+                    Ok(Err(e)) => tracing::warn!(target: "net", "saving the LAN world failed: {e}"),
+                    Err(e) => tracing::warn!(target: "net", "the LAN world save task failed: {e}"),
+                }
+                tracing::info!(target: "net", "integrated server stopped");
+                return;
+            }
             server.shutdown().await;
             tracing::info!(target: "net", "integrated server stopped");
         }
     });
+}
+
+/// The world name a LAN ping advertises — the world directory's own final
+/// component, or a generic label for a throwaway in-memory world.
+///
+/// Vanilla's `LanServerPinger` sends `getMotd()`, which for a published
+/// singleplayer world is the level name. There is no level-name field on this
+/// side (`crate::saves` calls the one implicit world by its directory), so the
+/// directory name is the closest true answer rather than a fabricated one.
+#[cfg(not(target_arch = "wasm32"))]
+fn lan_motd(world_dir: Option<&std::path::Path>) -> String {
+    world_dir
+        .and_then(|dir| dir.file_name())
+        .map_or_else(|| "Lodestone World".to_string(), |name| name.to_string_lossy().into_owned())
+}
+
+/// Bind the world to a TCP port with `IntegratedServer::open_to_lan` (issue
+/// #535's scope 1), returning the handle, the address the host's own client
+/// should dial, and the save handle when there is a world on disk.
+///
+/// Split out of [`run`]'s already-long `Origin::Integrated` arm, and `async`
+/// because `open_to_lan` binds the listener before returning — which is what makes
+/// `local_addr` immediately available, and so what lets a caller pass port `0`.
+///
+/// `Err` carries the message to surface on the Error screen. Both causes are
+/// worth failing the whole session for: a world we cannot save must not be
+/// published (an hour of building disappears behind a toast nobody read), and a
+/// port we cannot bind means nobody can join, which is the entire request.
+#[cfg(not(target_arch = "wasm32"))]
+async fn open_lan_world(
+    protocol: Box<dyn lodestone_server::ServerProtocol>,
+    source: lodestone_server::OverworldChunkSource,
+    world_dir: &Option<std::path::PathBuf>,
+    view_radius: i32,
+    port: u16,
+) -> Result<
+    (
+        lodestone_server::IntegratedServer,
+        ServerAddress,
+        Option<lodestone_server::region_source::WorldSaveHandle>,
+    ),
+    String,
+> {
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let config = |motd: String| lodestone_server::LanConfig {
+        view_radius,
+        // The whole point of the feature: without the multicast ping the world
+        // never appears in anyone's server list and the address has to be read out
+        // loud.
+        discovery: Some(lodestone_server::LanDiscovery { motd }),
+        ..lodestone_server::LanConfig::default()
+    };
+    let motd = lan_motd(world_dir.as_deref());
+    let (server, save) = match world_dir {
+        // `min_y`/`height` off the source, never a `(-64, 384)` literal — the
+        // same gotcha `open_persistent_with_mobs`' call site carries.
+        Some(dir) => {
+            let (min_y, height) = (source.min_y(), source.height());
+            let region = lodestone_server::region_source::RegionChunkSource::new(
+                source, dir, min_y, height,
+            )
+            .map_err(|e| format!("cannot open {} for saving: {e}", dir.display()))?;
+            let save = region.save_handle();
+            let server = lodestone_server::IntegratedServer::open_to_lan(
+                addr,
+                protocol,
+                region,
+                config(motd),
+            )
+            .await
+            .map_err(|e| format!("cannot open port {port} to LAN: {e}"))?;
+            (server, Some(save))
+        }
+        None => (
+            lodestone_server::IntegratedServer::open_to_lan(addr, protocol, source, config(motd))
+                .await
+                .map_err(|e| format!("cannot open port {port} to LAN: {e}"))?,
+            None,
+        ),
+    };
+    // The OS-assigned port when `port` was `0`, the requested one otherwise.
+    // Reported because nobody can join a world whose port they cannot see.
+    let bound_port = server.local_addr().map_or(port, |a| a.port());
+    tracing::info!(target: "net", port = bound_port, "opened the world to LAN");
+    Ok((
+        server,
+        // Loopback, not the bind address: `0.0.0.0` is where the listener
+        // accepts, and the host's own client dials the same machine.
+        ServerAddress {
+            host: "127.0.0.1".to_string(),
+            port: bound_port,
+        },
+        save,
+    ))
 }
 
 /// Forward one event; `Err` signals the loop to stop.
