@@ -1127,6 +1127,12 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     block_ticks.schedule((x, y, z), crate::redstone::TICK_OBSERVER.to_string(), game_tick + 2, TickPriority::Normal);
                 }
                 Some(new_state)
+            } else if due.kind == crate::hand_use::TICK_BUTTON {
+                // Issue #532: a pressed button releasing itself after its
+                // `ticksToStayPressed`. The same shape as the redstone families
+                // above — a pure decision on the state, re-propagated below — so a
+                // button feeding a door closes it again when the button pops up.
+                crate::hand_use::release_button(&state)
             } else {
                 // No other block-tick behaviour is modeled — see this
                 // function's own doc comment.
