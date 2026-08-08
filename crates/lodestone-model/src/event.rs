@@ -2335,6 +2335,119 @@ pub enum ClientEvent {
     ///
     /// Another zero-byte `StreamCodec.unit` packet.
     DialogCleared,
+
+    // ---- issue #26's recipe/trade tranche ----------------------------------
+    //
+    // These five needed `SlotDisplay` — a *recursive* registry-dispatched union
+    // of eleven variants with no length prefix anywhere — so none of them could
+    // land before the walker existed and all five landed together.
+    //
+    // Each carries **result item ids** rather than a modelled display tree. A
+    // recipe panel and a toast both key on the result; the ingredient slots are
+    // walked only because they must be consumed to reach it. Modelling the whole
+    // tree would be a second recipe representation next to
+    // `lodestone_game::recipe`, which already has one.
+    /// The server unlocked recipes (`ClientboundRecipeBookAddPacket`).
+    ///
+    /// `replace` is the server's first-sync flag: discard the known set and treat
+    /// `entries` as the whole book. **It sits after the entry list on the wire**,
+    /// which is why the list cannot be carried as opaque trailing bytes.
+    RecipeBookAdded {
+        /// The unlocked recipes.
+        entries: Vec<RecipeBookEntry>,
+        /// Whether this replaces the known set rather than adding to it.
+        replace: bool,
+    },
+    /// The server un-learned recipes (`ClientboundRecipeBookRemovePacket`),
+    /// e.g. after a datapack reload.
+    RecipeBookRemoved {
+        /// `RecipeDisplayId`s to forget.
+        display_ids: Vec<i32>,
+    },
+    /// The server is showing a ghost recipe in an open crafting grid
+    /// (`ClientboundPlaceGhostRecipePacket`) — the faded preview after clicking a
+    /// recipe in the book.
+    GhostRecipeShown {
+        /// The container the ghost belongs to.
+        window_id: i32,
+        /// Item ids the ghost's result slot can display.
+        result_items: Vec<i32>,
+    },
+    /// The server's recipe *property sets* changed
+    /// (`ClientboundUpdateRecipesPacket`).
+    ///
+    /// Not the recipe corpus: these are the "which items are valid in this slot"
+    /// sets vanilla's screens use to grey out an input (fuel, smithing template,
+    /// and so on), plus the stonecutter's own input→result list.
+    RecipePropertySetsUpdated {
+        /// `(property set key, valid item registry ids)`.
+        item_sets: Vec<(Identifier, Vec<i32>)>,
+        /// One entry per stonecutter recipe: the item ids its result can display.
+        stonecutter_results: Vec<Vec<i32>>,
+    },
+    /// A villager or wandering trader opened its trade list
+    /// (`ClientboundMerchantOffersPacket`).
+    MerchantOffersReceived {
+        /// The trade container's window id.
+        window_id: i32,
+        /// The offers, in the order shown.
+        offers: Vec<MerchantOffer>,
+        /// The villager's level, 1–5.
+        villager_level: i32,
+        /// The villager's experience toward its next level.
+        villager_xp: i32,
+        /// Whether the level/xp bar should be shown.
+        show_progress: bool,
+        /// Whether this merchant restocks (false for a wandering trader).
+        can_restock: bool,
+    },
+}
+
+/// One unlocked recipe, from `ClientboundRecipeBookAddPacket`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipeBookEntry {
+    /// The server's `RecipeDisplayId` — the handle
+    /// [`ClientEvent::RecipeBookRemoved`] and
+    /// [`crate::ClientAction::PlaceRecipe`] both use. **Not** a recipe
+    /// `Identifier`: 26.x replaced the name with a per-session index.
+    pub display_id: i32,
+    /// Item ids the recipe's result slot can display. Usually one; a display can
+    /// legitimately offer several (a `composite`, or a tag-driven slot).
+    pub result_items: Vec<i32>,
+    /// Whether this unlock should raise a toast (`flags` bit 0).
+    pub notification: bool,
+    /// Whether its recipe-book tab should highlight (`flags` bit 1).
+    pub highlight: bool,
+}
+
+/// One villager trade, from `ClientboundMerchantOffersPacket`.
+///
+/// Note the arithmetic fields are **big-endian `i32`s on the wire, not VarInts** —
+/// `MerchantOffer`'s codec uses `writeInt` for `uses`, `maxUses`, `xp`,
+/// `specialPriceDiff` and `demand`, which is unusual enough in this protocol that
+/// a VarInt-by-default encoder or decoder gets all five wrong at once.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MerchantOffer {
+    /// First input: `(item registry id, count)`.
+    pub cost_a: (i32, i32),
+    /// Optional second input.
+    pub cost_b: Option<(i32, i32)>,
+    /// What the trade produces.
+    pub result: Option<ItemStack>,
+    /// Whether the trade is currently exhausted.
+    pub out_of_stock: bool,
+    /// Times used since the last restock.
+    pub uses: i32,
+    /// Uses before it locks.
+    pub max_uses: i32,
+    /// Villager xp granted.
+    pub xp: i32,
+    /// Demand/reputation price adjustment, in items.
+    pub special_price_diff: i32,
+    /// Demand price multiplier.
+    pub price_multiplier: f32,
+    /// Accumulated demand.
+    pub demand: i32,
 }
 
 /// One statistic the server reported, from `ClientboundAwardStatsPacket`.
@@ -2997,7 +3110,16 @@ pub fn route(event: &ClientEvent) -> Route {
         // consumer -- `Sim` holds the session `World` -- with no shell edit and
         // no second table. `BiomeRegistryNames` predates the session-fold
         // convention; it is not a precedent to copy.
-        ClientEvent::EnchantmentRegistryNames { .. }
+        // The recipe/trade tranche folds into `SessionRecipeBook` and
+        // `SessionTrades`; `MerchantOffersReceived` is a *menu* the way the other
+        // container events are, so it is session state and not per-entity state
+        // about the villager.
+        ClientEvent::RecipeBookAdded { .. }
+        | ClientEvent::RecipeBookRemoved { .. }
+        | ClientEvent::GhostRecipeShown { .. }
+        | ClientEvent::RecipePropertySetsUpdated { .. }
+        | ClientEvent::MerchantOffersReceived { .. }
+        | ClientEvent::EnchantmentRegistryNames { .. }
         | ClientEvent::StatisticsAwarded { .. }
         | ClientEvent::ChatCompletionsChanged { .. }
         | ClientEvent::DebugBlockValue { .. }
@@ -3190,7 +3312,7 @@ mod route_tests {
         // Asserting the two counts agree turns it into evidence a reader can see,
         // and catches a variant named twice.
         assert_eq!(
-            total, 125,
+            total, 130,
             "the `ClientEvent` variant count changed. That is fine and expected — \
              update `docs/event-routing.md` and this number together, which is the \
              whole point of this gate firing."

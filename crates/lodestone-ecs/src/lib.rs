@@ -214,8 +214,8 @@ pub use session::{
     Abilities, ActionBarOverlay, HudEffects, Phase, RespawnCount, Riding, ServerAlive,
     ServerDifficulty, ServerDimension, ServerEntityId, ServerGameMode, SessionBlockDestruction,
     SessionBossBars, SessionChat, SessionDebugFeeds, SessionHudPlugin, SessionMenus, SessionPhase,
-    SessionPlugin, SessionRegistryOrder, SessionScoreboard, SessionServerInfo, SessionSet,
-    SessionStatistics,
+    SessionPlugin, SessionRecipeBook, SessionRegistryOrder, SessionScoreboard, SessionServerInfo,
+    SessionSet, SessionStatistics, SessionTrades,
     SessionTabList, SessionWaypoints, TitleOverlay, Vitals, Xp, insert_hud_components,
     insert_session_components, spawn_session,
 };

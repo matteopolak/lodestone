@@ -159,17 +159,18 @@ reviewable commit, not as a drive-by while landing something else.
 
 ## Islands: variants this table found reaching nothing
 
-**29 of 125** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
+**29 of 130** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
 consumer, which is a normal state for a from-scratch client.
 
-> **The numerator did not move when issue #26 added nineteen variants**, and that
-> is the useful reading of this line rather than a coincidence: the nineteen
-> clientbound packets that had no decode arm at all now decode *and* fold, all
-> nineteen into `session` components (`SessionStatistics`, `SessionDebugFeeds`,
-> `SessionServerInfo`, `SessionWaypoints`, `SessionRegistryOrder`). Nineteen new
-> islands would have read as "29 of 125" too if the numerator had been carried
-> forward instead of recomputed — which is exactly the failure the paragraph below
-> describes.
+> **The numerator did not move when issue #26 added twenty-four variants**, and
+> that is the useful reading of this line rather than a coincidence: the
+> twenty-three clientbound packets that had no decode arm at all — plus the
+> enchantment registry order — now decode *and* fold, all of them into `session`
+> components (`SessionStatistics`, `SessionDebugFeeds`, `SessionServerInfo`,
+> `SessionWaypoints`, `SessionRegistryOrder`, `SessionRecipeBook`,
+> `SessionTrades`). Twenty-four new islands would have read as "29 of 130" too if
+> the numerator had been carried forward instead of recomputed — which is exactly
+> the failure the paragraph below describes.
 
 > **On these two numbers, because both have been wrong in the record.** This line
 > read "38 of 98" until the world-state sweep below, and the numerator was right

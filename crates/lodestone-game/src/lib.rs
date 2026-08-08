@@ -64,11 +64,13 @@ pub mod progress;
 pub mod recipe;
 #[cfg(feature = "json")]
 pub mod recipe_json;
+pub mod recipe_sync;
 pub mod registry_order;
 pub mod reconcile;
 pub mod scoreboard;
 pub mod serverinfo;
 pub mod tablist;
+pub mod trades;
 pub mod text;
 pub mod waypoints;
 pub mod worldborder;

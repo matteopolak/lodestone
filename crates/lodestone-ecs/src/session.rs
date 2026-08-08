@@ -188,6 +188,27 @@ pub struct SessionAdvancements(pub lodestone_game::advancement::AdvancementStore
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionStatistics(pub lodestone_game::progress::Statistics);
 
+/// The server's recipe-book sync -- unlocks, the ghost preview, and the property
+/// sets -- from `recipe_book_add`/`remove`, `place_ghost_recipe` and
+/// `update_recipes` (issue #26).
+///
+/// **Not** the recipe corpus (that is `RecipeRegistry`), and note 26.x identifies
+/// a recipe by a per-session `RecipeDisplayId` `i32` rather than an `Identifier`,
+/// so `lodestone_game::recipe::RecipeUnlockState` -- which keys on `Identifier` --
+/// cannot be fed from this packet family. See
+/// [`lodestone_game::recipe_sync::RecipeBookSync`].
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct SessionRecipeBook(pub lodestone_game::recipe_sync::RecipeBookSync);
+
+/// The open merchant's trade list, from `ClientEvent::MerchantOffersReceived`
+/// (issue #26).
+///
+/// Session state rather than per-entity state about the villager: it is a *menu*,
+/// the same as every other container event, and it dies with the screen.
+/// See [`lodestone_game::trades::TradeOffers`].
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct SessionTrades(pub lodestone_game::trades::TradeOffers);
+
 /// The server's own registry orders by holder id, from the `*RegistryNames`
 /// events (issue #26 / the enchantment half).
 ///
@@ -721,6 +742,24 @@ pub fn apply_statistics(batch: Res<IngestBatch>, mut stats: Query<&mut SessionSt
     }
 }
 
+/// `IngestSet::Apply`: the recipe-book family -> [`SessionRecipeBook`] (issue #26).
+pub fn apply_recipe_book_sync(batch: Res<IngestBatch>, mut books: Query<&mut SessionRecipeBook>) {
+    for event in batch.events() {
+        for mut store in &mut books {
+            let _ = store.0.apply(event);
+        }
+    }
+}
+
+/// `IngestSet::Apply`: `MerchantOffersReceived` -> [`SessionTrades`] (issue #26).
+pub fn apply_trades(batch: Res<IngestBatch>, mut trades: Query<&mut SessionTrades>) {
+    for event in batch.events() {
+        for mut store in &mut trades {
+            let _ = store.0.apply(event);
+        }
+    }
+}
+
 /// `IngestSet::Apply`: the `*RegistryNames` events -> [`SessionRegistryOrder`].
 pub fn apply_registry_order(batch: Res<IngestBatch>, mut orders: Query<&mut SessionRegistryOrder>) {
     for event in batch.events() {
@@ -1106,6 +1145,8 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             SessionServerInfo::default(),
             SessionWaypoints::default(),
             SessionRegistryOrder::default(),
+            SessionRecipeBook::default(),
+            SessionTrades::default(),
         ));
     }
 }
@@ -1157,6 +1198,8 @@ impl Plugin for SessionPlugin {
                 apply_advancements,
                 apply_statistics,
                 apply_registry_order,
+                apply_recipe_book_sync,
+                apply_trades,
                 apply_debug_feeds,
                 apply_server_info,
                 apply_waypoints,
