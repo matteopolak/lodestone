@@ -1190,12 +1190,33 @@ fn connected_sim_emits_one_move_per_physics_tick() {
     sim.poll_net(); // → Connected
     assert_eq!(sim.session_phase(), SessionPhase::Connected);
     sim.step(5.0 / 20.0); // ~5 ticks, all now in-world.
-    let sent = std::iter::from_fn(|| actions.try_recv().ok()).count();
-    assert!(sent > 0, "a connected sim should send movement packets");
+    // Counted by *variant*, not as a total: the tick tail also emits one
+    // `EndClientTick` per tick (vanilla's `Minecraft.tick` does the same), so a
+    // bare count answers "how many actions" rather than "how many moves".
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    let moves = sent
+        .iter()
+        .filter(|a| matches!(a, ClientAction::Move { .. }))
+        .count();
+    assert!(moves > 0, "a connected sim should send movement packets");
     assert_eq!(
-        sent as u64,
+        moves as u64,
         sim.tick_count(),
         "exactly one outbound Move per physics tick"
+    );
+    // The tick tail rides along one-for-one, and is the *last* thing each tick
+    // sends — the ordering vanilla's own send site has.
+    assert_eq!(
+        sent.iter()
+            .filter(|a| matches!(a, ClientAction::EndClientTick))
+            .count() as u64,
+        sim.tick_count(),
+        "exactly one EndClientTick per physics tick"
+    );
+    assert!(
+        matches!(sent.last(), Some(ClientAction::EndClientTick)),
+        "the tick tail must be last in the tick's stream, got {:?}",
+        sent.last()
     );
 }
 
@@ -3361,8 +3382,19 @@ fn sprint_edges_reach_the_wire_as_player_commands() {
     );
     while actions.try_recv().is_ok() {}
 
+    // `EndClientTick` is filtered out, not asserted on: `drain_action_queue`
+    // appends vanilla's tick tail on every call once `Egress::in_world` holds
+    // (see its own doc), and `sprint_once` below sets `in_world`. This test is
+    // about the sprint *edge*, and the tail is exactly as much noise here as the
+    // per-tick movement packet the comment below explains away — that packet is
+    // avoided by running one system rather than the schedule, which cannot work
+    // for something the drain itself adds.
+    // `connected_sim_emits_one_move_per_physics_tick` is where the tail is
+    // asserted, so filtering here does not hide it from every gate.
     let drain = |actions: &std::sync::mpsc::Receiver<ClientAction>| -> Vec<ClientAction> {
-        std::iter::from_fn(|| actions.try_recv().ok()).collect()
+        std::iter::from_fn(|| actions.try_recv().ok())
+            .filter(|a| !matches!(a, ClientAction::EndClientTick))
+            .collect()
     };
 
     // Since Stage 5 the sprint edge is `crate::interact::send_sprint_command`,

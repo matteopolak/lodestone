@@ -14,8 +14,13 @@ present-and-inactive.
 > `ClientCommand(REQUEST_STATS)` and handed it to a seam that dropped it. It now
 > emits a real `award_stats` frame — see
 > [`map-and-advancement-wire.md`](./map-and-advancement-wire.md) for the per-stat-
-> type registry dispatch. The client-side decode of that packet is still not
-> written, so this screen's numbers are still its own.
+> type registry dispatch.
+>
+> **Second update: the client now decodes it, and the screen now shows it.**
+> `award_stats` folds into `lodestone_ecs::SessionStatistics`, and this screen
+> reads it — see [Where the numbers come from](#where-the-numbers-come-from).
+> The section below that used to be titled "Why every value is zero" is kept as
+> the record of the state it described.
 
 ## How it works
 
@@ -30,28 +35,54 @@ present-and-inactive.
   vanilla either), and `frame` (the whole screen).
 - `menu/nav.rs` — `MenuNav::stats`, `key_statistics`, and
   `PauseButton::Statistics`'s `enabled()`/Enter arm.
-- `menu/render.rs` — wired into `owns_frame` and `frame_for`'s match, passing
-  `StatsSnapshot::default()` — see below for why that is not a stand-in.
+- `menu/render/dispatch.rs` — wired into `owns_frame` and `frame_for`'s match,
+  passing `nav.stats_snapshot()`.
 
-## Why every value is zero
+## Where the numbers come from
 
-**Nothing in this workspace decodes the `award_stats`/statistics packet.**
-Confirmed by grep (`/usr/bin/grep -rln 'award_stats\|AwardStats\|ClientboundAwardStatsPacket'`
-over `crates/` — nothing) and by `cargo xtask connectedness`, which names no
-stat packet either. Decoding it is `crates/protocol/*` work, out of this
-batch's file ownership.
+```text
+award_stats -> lodestone_game::progress::Statistics   (SessionStatistics component)
+  -> Sim::statistics()                                -- a clone, per frame, in-session only
+  -> StatsSnapshot::from_statistics                   -- projection onto GENERAL_STATS
+  -> MenuNav::refresh_stats                           -- app::session's reconciliation
+  -> dispatch: stats::frame(nav.stats(), nav.stats_snapshot())
+```
 
-So `StatsSnapshot::default()` — an empty table, `StatsSnapshot::get`
-returning `0` for everything — is not a placeholder standing in for real
-data; it is *the* data, because nothing has ever populated anything else.
-This is a different situation from a settings row showing a fabricated `ON`
-for a feature that does not work (`docs/settings-screen.md`'s departure 1): a
-stat reading zero is the **true** state of "nothing has been decoded yet",
-the same way a freshly created vanilla world's own Statistics screen reads
-zero for everything a player has not yet done. Nothing here claims a stat is
-tracked that is not — no stat is tracked yet, uniformly and honestly.
+**The load-bearing detail is the key shape.** The screen's ids are bare paths
+(`"jump"`, `"sleep_in_bed"`), and the wire key is `StatKey { category:
+"minecraft:custom", value: "minecraft:jump" }` — the category is the **stat
+type's** registry name (`Stats.CUSTOM`), not the tab's. Get either half wrong and
+*every* lookup misses, which is indistinguishable from "the server awarded
+nothing" and therefore from the state this screen was stuck in before.
+`the_projection_reads_the_custom_category_and_the_namespaced_value` computes both
+wrong hypotheses and requires them to miss.
 
-This is also why Items and Mobs are correctly empty rather than approximately
+The projection is driven by `GENERAL_STATS` rather than by the store's keys, for
+two reasons: the snapshot's keys are `&'static str` and so must come from the
+table, and a `minecraft:mined`/`minecraft:killed` counter has nowhere to go on
+this screen (those are the Items and Mobs tabs). Such a counter is dropped, not
+squeezed onto a General row.
+
+The snapshot lives on `MenuNav` beside `StatsNav`, not inside it: `StatsNav` is
+`Copy` and a sparse counter map is not, and the lifetimes differ — the scroll and
+focus reset when the screen opens, the counters belong to the session.
+
+### The state this replaced, kept as a record
+
+This section used to be titled *"Why every value is zero"*, and it was right:
+nothing decoded `award_stats`, confirmed by grep and by `cargo xtask
+connectedness`, so `StatsSnapshot::default()` was not a placeholder standing in
+for real data — it was *the* data. A stat reading zero was the **true** state,
+unlike a settings row showing a fabricated `ON` for a feature that does not work
+(`docs/settings-screen.md`'s departure 1).
+
+The failure mode when that stopped being true is worth keeping: the empty
+`StatsSnapshot::default()` was a **literal at the call site**, so the moment the
+decode landed the screen kept drawing zeros with nothing anywhere reporting a
+problem. An honest zero and an island look identical from the outside.
+
+An empty table is still correct outside a session, and still correct for a world
+where nothing has happened yet. It is also still why Items and Mobs are correctly empty rather than approximately
 so: vanilla's own `ItemStatisticsList`/`MobsStatisticsList` filter to
 non-zero counts, and `StatsScreen.setTabActiveStateAndTooltip` (`:124-133`)
 disables a tab whose list is empty. With every stat at zero, an empty list
@@ -155,13 +186,12 @@ anyway. Worth deciding, not worth guessing.
 
 ## How to change it
 
-- **The real dependency**: a decoder for the statistics packet in
-  `crates/protocol/*` (out of this batch's ownership) that produces a
-  populated `StatsSnapshot` (or an equivalent this module can be handed).
-  Once one exists, `render.rs`'s `Screen::Statistics` arm is the one line to
-  change — swap `StatsSnapshot::default()` for the real snapshot, sourced the
-  same way `nav.social()`'s roster would eventually be (a `MenuNav` field
-  refreshed from `app.rs` each frame, or on each `award_stats` packet).
+- ~~**The real dependency**: a decoder for the statistics packet.~~ **Landed**, and
+  the prediction this bullet made was exactly right: the decode arrived in
+  `crates/protocol/*` and the fix here was "a `MenuNav` field refreshed from
+  `app` each frame", sourced the same way `nav.social()`'s roster is. To add a
+  General stat now, the only question is whether its id is a `minecraft:custom`
+  path — see [Where the numbers come from](#where-the-numbers-come-from).
 - **Items/Mobs**: once real per-item/per-mob counts exist, these need their
   own list model (id, icon, per-column counts, non-zero filter) — a natural
   sibling to `crate::menu::social::SocialNav`'s shape, not a fold into

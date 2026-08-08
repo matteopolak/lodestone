@@ -198,6 +198,42 @@ impl Sim {
         // write guard into it would deadlock the moment one of those was reached.
         let actions = self.write(|w| {
             let mut actions = std::mem::take(&mut w.resource_mut::<ActionQueue>().0);
+            // Vanilla's tick tail. `Minecraft.tick` ends with
+            // `connection.send(ServerboundClientTickEndPacket.INSTANCE)`
+            // (`client-src/net/minecraft/client/Minecraft.java:1832-1835`) — every
+            // tick, after everything else the tick queued, whenever a connection
+            // exists and the game is not paused.
+            //
+            // **`ClientAction::EndClientTick` had no producer outside a test**:
+            // v770 encodes it and nothing sent it, the `SetFlying` shape. It is
+            // not cosmetic. `ServerGamePacketListenerImpl.handleClientTickEnd`
+            // (`:2195-2202`) sets `knownMovement` to `Vec3.ZERO` when **no**
+            // movement packet arrived that tick, so without this the server keeps
+            // our last movement vector forever — `resetLastActionTime` (the AFK
+            // clock) and every server-side `getKnownMovement()` reader see a
+            // player still travelling after they stop.
+            //
+            // Appended here rather than by a `TickSet::Send` system for two
+            // reasons: it must be **last**, which is a fragile thing to express as
+            // system ordering among the interaction systems, and vanilla's own
+            // send site is likewise outside the per-entity tick. It goes in
+            // *before* the egress filter below on purpose — a plugin that
+            // suppresses everything should be able to suppress this too.
+            //
+            // Gated on `Egress::in_world` — **the movement packet's gate, not the
+            // player-input packet's.** `send_move_action` asks `in_world` alone
+            // while `send_player_input` also asks `live`, and vanilla's send site
+            // matches the former: it sits inside `if (this.level != null)` with a
+            // `connection != null && !this.pause` guard, and has nothing to do
+            // with whether a resource pack resolved (which is what `live` means
+            // here). Ungated entirely, a merely-*Connecting* sim emits one per
+            // tick before the adapter has a Play-state packet for it — the same
+            // dropped-action noise `move_is_withheld_until_connected` forbids.
+            if w.get_resource::<lodestone_ecs::Egress>()
+                .is_some_and(|egress| egress.in_world)
+            {
+                actions.push(ClientAction::EndClientTick);
+            }
             // Issue #157's outbound hook: a plugin's chance to inspect, replace
             // or suppress what another plugin queued, before any of it reaches
             // the socket. Inside the guard we already hold — the filters receive

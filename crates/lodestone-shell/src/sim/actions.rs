@@ -44,8 +44,13 @@ const FIREWORK_BOOST_TICKS: u32 = 20;
 /// `minecraft:riptide`'s holder id in the synced `minecraft:enchantment`
 /// registry, derived from the alphabetical position of
 /// `data/minecraft/enchantment/riptide.json` among 26.2's 43 built-in
-/// enchantments (33rd, so id `32`). See [`Sim::riptide_level`] for why this is a
-/// derived index rather than a name lookup, and what breaks it. Issue #208.
+/// enchantments (33rd, so id `32`). Issue #208.
+///
+/// **No longer the primary resolution** — [`Sim::riptide_enchantment_id`] asks
+/// the server's own `minecraft:enchantment` registry order first. This is the
+/// fallback for the window before that table arrives, and it is kept rather than
+/// deleted because "no table yet" and "this server has no riptide" are different
+/// answers and only one of them should read as level 0.
 const RIPTIDE_ENCHANTMENT_ID: i32 = 32;
 
 impl Sim {
@@ -670,29 +675,48 @@ impl Sim {
 
     /// The Riptide level on the held stack, or `0`.
     ///
-    /// # Why this is an id comparison against a hardcoded index
+    /// # The id now comes from the server's own registry, not from arithmetic
     ///
     /// [`lodestone_model::ItemEnchantment`] carries the **session-scoped
-    /// `minecraft:enchantment` registry id**, not a name, and nothing in this
-    /// client resolves that registry: the id → name table *is* decoded (the v770
-    /// adapter's `ClientRegistries::entry_names`) but is never emitted as a
-    /// `ClientEvent`, so the shell cannot see it. `crate::entities`' own doc
-    /// records the same gap for the enchantment level a rendered item wants.
+    /// `minecraft:enchantment` registry id**, not a name. That id → name table
+    /// was always decoded by the v770 adapter's
+    /// `ClientRegistries::entry_names` and used to stop there, never leaving the
+    /// version crate — so this method resolved `riptide` through
+    /// [`RIPTIDE_ENCHANTMENT_ID`], a *derived* index (dynamic registries arrive
+    /// sorted by resource location, and `riptide` is the 33rd of 26.2's 43
+    /// built-in enchantments). It is now emitted as
+    /// `ClientEvent::EnchantmentRegistryNames` and folded into
+    /// [`lodestone_ecs::SessionRegistryOrder`], so the real holder id is
+    /// available and a data pack that reorders the registry no longer shifts us
+    /// onto some *other* enchantment's level.
     ///
-    /// Until an `EnchantmentRegistryNames` event exists, the id is derived the
-    /// one way the wire allows: **dynamic registries arrive sorted by resource
-    /// location** (measured on the creative oracle for `dimension_type` — see
-    /// `crates/protocol/v770/src/packets/registry.rs`'s module doc), and 26.2
-    /// ships 43 built-in enchantments, of which `riptide` is the **33rd**
-    /// alphabetically (`data/minecraft/enchantment/*.json`, C-locale sorted) —
-    /// holder id `32`.
-    ///
-    /// **What this is wrong about, and how it fails.** A data pack that adds or
-    /// removes an enchantment sorting before `riptide` shifts every id, and this
-    /// would then read some *other* enchantment's level. It fails toward
-    /// launching on the wrong trident, not toward launching without one, so it is
-    /// a real limitation — recorded in `docs/riptide-and-firework-boost.md` with
-    /// the fix (emit the registry names, then match on `"minecraft:riptide"`).
+    /// **The fallback is still here and is still load-bearing**, because the
+    /// table is empty until the server sends it: a pre-`Login` call, or a server
+    /// that sends no enchantment registry at all, gets the derived index rather
+    /// than "no riptide". `RegistryOrder::enchantment_id`'s own doc explains why
+    /// `None` alone cannot distinguish "no such enchantment" from "no table
+    /// yet"; the emptiness check below is that distinction, and without it a
+    /// server whose registry genuinely lacks `riptide` would silently inherit the
+    /// hardcoded id.
+    #[must_use]
+    fn riptide_enchantment_id(&self) -> i32 {
+        self.read(|w| {
+            w.get::<lodestone_ecs::SessionRegistryOrder>(self.local)
+                .and_then(|order| {
+                    if order.0.enchantments().is_empty() {
+                        // No table yet — the derived index is the best we have.
+                        None
+                    } else {
+                        // A real table: trust it even when it has no `riptide`,
+                        // and let the id-comparison below find nothing. Falling
+                        // back here would resolve *some* enchantment at id 32.
+                        Some(order.0.enchantment_id("minecraft:riptide").unwrap_or(-1))
+                    }
+                })
+        })
+        .unwrap_or(RIPTIDE_ENCHANTMENT_ID)
+    }
+
     #[must_use]
     fn riptide_level(&self) -> u32 {
         let menu = self.player_menu();
@@ -707,10 +731,11 @@ impl Sim {
         if stack.item().to_string() != "minecraft:trident" {
             return 0;
         }
+        let riptide_id = self.riptide_enchantment_id();
         stack
             .enchantments()
             .iter()
-            .find(|enchantment| enchantment.id == RIPTIDE_ENCHANTMENT_ID)
+            .find(|enchantment| enchantment.id == riptide_id)
             .map_or(0, |enchantment| enchantment.level)
     }
 
