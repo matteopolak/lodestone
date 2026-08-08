@@ -123,30 +123,45 @@ as the exact inverse of the existing menu→native table rather than by restatin
   full player brushing past cannot reset the despawn clock), because `ItemEntityRegistry` in
   `lodestone-entity` exposes no count setter.
 
-## The one thing still invisible, and the exact patch it needs
+## How the drop becomes *visible* — `ItemEntity.DATA_ITEM` (#537)
 
-**A dropped item spawns, streams as a real item entity, falls, merges and can be picked up — but its 3-D
-model does not draw yet.** A client draws nothing for an item entity whose stack it has not been told
-(vanilla's `ItemEntityRenderer.submit` returns early on `state.item.isEmpty()`, and this project's client does
-the same). The pickup *is* visible, because the inventory slot updates.
+A client draws nothing for an item entity whose stack it has not been told: vanilla's
+`ItemEntityRenderer.submit` returns early on `state.item.isEmpty()`, and this project's client does the same.
+For one landing this server sent `EntitySnapshot::metadata: Vec::new()` for every drop, so a broken block
+spawned a real item entity that fell, merged and could be picked up — the pickup *visibly*, because the
+inventory slot updates — while drawing zero pixels, with every link on the path green.
 
-The stack travels as `ItemEntity.DATA_ITEM`. Carrying it needs two changes, and the second is outside
-`lodestone-server`:
+The stack travels as `ItemEntity.DATA_ITEM`, carried by `MetadataField::Item { item, count }`:
 
-1. `protocol.rs`: a `MetadataField::Item { item: ResourceKey, count: u8 }` variant. This forces `Copy` off the
-   enum, since `ResourceKey` is not `Copy`.
-2. `crates/protocol/v770/src/server_protocol.rs`: an arm in `encode_set_entity_data`. That function does
-   `match *field` on a `Copy` enum with **no wildcard arm**, so both the new variant and the dropped `Copy`
-   break it — dropping `Copy` means changing `match *field` to `match field`. The index is `8`
-   (`ItemEntity.DATA_ITEM`) with the `ITEM_STACK` serializer; confirm both against
-   `EntityDataIndexOracle.java` rather than hand-counting, and note index 8 already collides with
-   `LivingEntity.DATA_LIVING_ENTITY_FLAGS` and `AbstractArrow.ID_FLAGS` — an item entity is neither, so the
-   census column that separates the claimants needs checking rather than inheriting.
+1. `protocol.rs` defines the variant. It carries a `ResourceKey`, which is not `Copy`, so **`MetadataField`
+   no longer derives `Copy`** — deliberately, and permanently: a version-free vocabulary enum that derives
+   `Copy` silently forbids every future field with an owned value, and the whole cost of dropping it is that
+   an implementor writes `match field` rather than `match *field`.
+2. `crates/protocol/v770/src/server_protocol.rs` encodes it: index **8**, serializer **7** (`ITEM_STACK`),
+   then `write_optional_item_stack`'s VarInt count / VarInt registry id / empty `DataComponentPatch`. There is
+   still **no `_ =>` arm** in `encode_set_entity_data`, on purpose — a new field must be encoded or fail to
+   compile.
+3. `MobSim::snapshots`' item loop fills `metadata` from `ItemState::item` plus the lifecycle count. The
+   client's existing chain (`Value::Item` decode → `DisplayItem` → `resolve_entity_facts` → `EntityDraw::item`
+   → `world_items.rs`) needed no change; it was already live and gated by
+   `crates/lodestone-shell/tests/live_dropped_item.rs`.
 
-Then `MobSim::snapshots` sets `metadata` from `ItemState::item` plus the lifecycle count, and the client's
-existing chain (`Value::Item` decode → `DisplayItem` → `resolve_entity_facts` → `EntityDraw::item` →
-`world_items.rs`) draws it with no further change. That chain is already live and gated by
-`crates/lodestone-shell/tests/live_dropped_item.rs`.
+### Where the index came from, and the collision that is *not* inheritable
+
+Both numbers were read off the `EntityDataIndexOracle` dump already in the tree
+(`crates/protocol/v770/tests/support/entity_data_index_jvm.txt:55` — `8 ItemEntity.DATA_ITEM 7 ITEM_STACK`),
+never hand-counted, and the same two bytes appear in a packet captured off a real vanilla 26.2 server
+(`crates/protocol/v770/tests/fixtures/item_entity_metadata_diamond.hex`).
+
+Index 8 is the most contended index in the dump — **nineteen** claimants, including
+`LivingEntity.DATA_LIVING_ENTITY_FLAGS`, `AbstractArrow.ID_FLAGS`, `ExperienceOrb.DATA_VALUE`,
+`PrimedTnt.DATA_FUSE_ID`, and six other `ITEM_STACK` fields. **Neither `entity_census::is_living` (index 8's
+living-vs-arrow precedent) nor `is_mob` (index 15's mob-vs-armour-stand precedent) separates the claimants
+here**: both report *false* for `minecraft:item`, which does not distinguish it from `AbstractArrow` or
+`PrimedTnt`. The encoder needs no census column because the guard is structural — the field list is built by
+`snapshots`' **item** loop, so every `MetadataField::Item` belongs to a `minecraft:item` entity by
+construction. **The invariant to keep is on the producer: never push a `MetadataField::Item` from the mob or
+projectile loops.**
 
 ## Gates and their controls
 
@@ -160,6 +175,13 @@ world. Every control below was run and observed failing:
 | a collected drop leaves the world and announces menu slot 36 | — (positive) | — |
 | a freshly popped drop is not collectable | ignore `can_be_picked_up` | `left: 0, right: 1` |
 | a drop 10 blocks away is not collected | make `is_within_pickup_range` return `true` | `left: 0, right: 1` |
+| the drop's snapshot carries `Item { cobblestone, 1 }` | revert `metadata` to `Vec::new()` | `left: [], right: [Item { … "cobblestone" …, count: 1 }]` |
+
+`crates/protocol/v770/tests/server_item_entity_metadata.rs` gates the wire half against the **captured
+vanilla packet**, so the expected value predates the encoder: our metadata list must be byte-identical to
+`08 07 01 9e 07 00 00 ff`. Control — drop the `DataComponentPatch` from the item write (the single most
+plausible transcription error): `ours = [08, 07, 01, 9e, 07, ff], vanilla = [08, 07, 01, 9e, 07, 00, 00, ff]`,
+and the same neuter also made the real client adapter raise no `EntityMetadataUpdated` at all.
 
 The fixture is stone rather than "a block" deliberately: stone's table exercises `alternatives` +
 `match_tool`, so the fall-through to cobblestone is proved rather than "an item dropped". `block_drops.rs`'s

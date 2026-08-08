@@ -145,6 +145,47 @@ const METADATA_IDX_CREEPER_SWELL_DIR: u8 = 16;
 const METADATA_IDX_CREEPER_IGNITED: u8 = 18;
 const METADATA_SER_BOOLEAN: i32 = 8;
 
+/// `ItemEntity.DATA_ITEM`'s metadata index and the `ITEM_STACK` serializer id
+/// it is registered under (issue #537).
+///
+/// **Not hand-counted.** Both numbers are read straight off the
+/// `EntityDataIndexOracle` dump in the tree
+/// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt:55`:
+/// `8 ItemEntity.DATA_ITEM 7 ITEM_STACK`), and the same two bytes appear in a
+/// packet captured off a real vanilla 26.2 server
+/// (`tests/fixtures/item_entity_metadata_diamond.hex`: `08 07 …`), so there are
+/// two independent outside sources agreeing.
+///
+/// # The index-8 collision, and why the separating column is neither `is_living`
+/// nor `is_mob`
+///
+/// Index 8 is the single most crowded index in the dump — **nineteen** claimants,
+/// including `LivingEntity.DATA_LIVING_ENTITY_FLAGS` (`BYTE`),
+/// `AbstractArrow.ID_FLAGS` (`BYTE`), `ExperienceOrb.DATA_VALUE` (`INT`),
+/// `PrimedTnt.DATA_FUSE_ID` (`INT`) and six other `ITEM_STACK` fields
+/// (`EyeOfEnder`, `Fireball`, `FireworkRocketEntity`, `OminousItemSpawner`,
+/// `ThrowableItemProjectile`, plus `ItemEntity` itself). CLAUDE.md's rule is that
+/// the census column you need depends on which classes actually collide, and
+/// **an item entity is neither living nor a mob**, so both of the columns the two
+/// previously-recorded collisions used (`entity_census::is_living` for index 8's
+/// living-vs-arrow split, `is_mob` for index 15's mob-vs-armour-stand split) are
+/// the wrong instrument here: `is_living` and `is_mob` both report *false* for
+/// `minecraft:item`, which does not distinguish it from `AbstractArrow` or
+/// `PrimedTnt`.
+///
+/// This *encoder* needs no census column at all, and the reason is structural
+/// rather than lucky. The decode side needs one because it is handed a byte with
+/// no idea what entity it belongs to; here the field list is built by
+/// [`MobSim::snapshots`](lodestone_server::MobSim)'s **item** loop, which
+/// iterates the item-entity registry, so every [`MetadataField::Item`] that
+/// reaches this arm belongs to an entity whose `entity_type` is `minecraft:item`
+/// by construction — the same argument (and the same one call site) that
+/// [`METADATA_IDX_CREEPER_SWELL_DIR`] records for the creeper fields. The guard
+/// to keep is therefore on the *producer*: never push a `MetadataField::Item`
+/// for anything but an item entity.
+const METADATA_IDX_ITEM_ENTITY_ITEM: u8 = 8;
+const METADATA_SER_ITEM_STACK: i32 = 7;
+
 /// The overworld world-clock's registry holder id
 /// (`WorldClocks::bootstrap` registers `minecraft:overworld` first,
 /// `minecraft:the_end` second — see `packets::time::ClockUpdate::holder_id`'s
@@ -3096,16 +3137,34 @@ impl ServerProtocol for V770ServerProtocol {
         let mut w = Writer::default();
         w.var_i32(entity_id);
         for field in fields {
-            match *field {
+            // `match field`, by reference, not `match *field`: `MetadataField`
+            // stopped deriving `Copy` when it gained its first owned-value
+            // variant (`Item`'s `ResourceKey`). There is deliberately still no
+            // `_ =>` arm — a new field must be encoded or fail to compile, which
+            // is the only thing that stops the next one becoming an island.
+            match field {
                 MetadataField::CreeperSwellDir(v) => {
                     w.u8(METADATA_IDX_CREEPER_SWELL_DIR);
                     w.var_i32(METADATA_SER_INT);
-                    w.var_i32(v);
+                    w.var_i32(*v);
                 }
                 MetadataField::CreeperIgnited(b) => {
                     w.u8(METADATA_IDX_CREEPER_IGNITED);
                     w.var_i32(METADATA_SER_BOOLEAN);
-                    w.bool(b);
+                    w.bool(*b);
+                }
+                MetadataField::Item { item, count } => {
+                    w.u8(METADATA_IDX_ITEM_ENTITY_ITEM);
+                    w.var_i32(METADATA_SER_ITEM_STACK);
+                    // The `ITEM_STACK` serializer's payload is
+                    // `ItemStack.OPTIONAL_STREAM_CODEC` — the same VarInt
+                    // count / VarInt registry id / empty `DataComponentPatch`
+                    // shape [`write_optional_item_stack`] already writes for
+                    // container slots, so this reuses it rather than restating
+                    // it a third time. Byte-checked against a real vanilla
+                    // capture: `tests/fixtures/item_entity_metadata_diamond.hex`.
+                    let stack = ItemStack::new(item.clone(), u32::from(*count));
+                    write_optional_item_stack(&mut w, Some(&stack));
                 }
             }
         }
