@@ -98,10 +98,55 @@ pub mod compression;
 mod lz4_block;
 pub mod level_dat;
 pub mod nbt_diff;
+pub mod player_dat;
 pub mod region;
 pub mod world_gen_settings;
 
 pub use compression::CompressionScheme;
+
+/// Refuses an on-disk `DataVersion` this build cannot read correctly (issue
+/// [#305](https://github.com/matteopolak/lodestone/issues/305)).
+///
+/// # Why this refuses instead of upgrading
+///
+/// Vanilla answers a stale `DataVersion` with `DataFixerUpper`: several hundred
+/// schema-to-schema fixes, one per format change since 2011. This repo writes
+/// **exactly one** version ([`level_dat::DATA_VERSION_26_2`]) and has no fix
+/// chain at all. The two available behaviours were therefore "read an older
+/// world with 26.2's schema and silently mis-decode whatever moved" or "refuse".
+///
+/// Mis-decoding is not hypothetical here and the failure mode is not cosmetic:
+/// re-saving a real world through a schema mismatch has already, in this repo,
+/// erased every cave biome in it (see `chunk_nbt`'s biome-container comment), and
+/// a chunk we read wrongly is a chunk we then *write back* wrongly, destroying
+/// the original. A world we cannot correctly upgrade must not be half-read.
+///
+/// So this is a deliberate, recorded refusal rather than an oversight, and the
+/// place to change it is here: when a real fix chain exists, this function grows
+/// a "can upgrade from" range and the callers stay as they are.
+///
+/// # What counts as unsupported
+///
+/// Anything that is not exactly [`level_dat::DATA_VERSION_26_2`], **including a
+/// newer version**: a world written by a later game is one whose schema this
+/// build has never seen, and guessing forward is strictly worse than guessing
+/// backward. A `None` — no `DataVersion` field at all — is unsupported too;
+/// vanilla treats an absent version as "pre-1.9, run the whole fix chain", which
+/// is precisely the chain we do not have.
+///
+/// # Errors
+///
+/// [`Error::UnsupportedDataVersion`], carrying both numbers so the message names
+/// the world's version rather than only ours.
+pub fn require_supported_data_version(found: Option<i32>) -> Result<()> {
+    if found == Some(level_dat::DATA_VERSION_26_2) {
+        return Ok(());
+    }
+    Err(Error::UnsupportedDataVersion {
+        found,
+        expected: level_dat::DATA_VERSION_26_2,
+    })
+}
 
 /// Convenient result alias for this crate's operations.
 pub type Result<T> = core::result::Result<T, Error>;
@@ -271,4 +316,40 @@ pub enum Error {
     /// issue #468's whole subject, so it is an error rather than a default.
     #[error(r#"world_gen_settings.dat has no numeric "seed" field"#)]
     MissingSeed,
+
+    /// An on-disk file carried a `DataVersion` this build cannot read, and was
+    /// refused rather than mis-decoded. See
+    /// [`require_supported_data_version`] for the full argument.
+    #[error(
+        "world was written by a different game version (DataVersion {}, this build reads only {expected}); \
+         no upgrade path exists, so it is refused rather than partially read",
+        match found { Some(v) => v.to_string(), None => "absent".to_owned() }
+    )]
+    UnsupportedDataVersion {
+        /// The version found on disk, or `None` if the field was absent.
+        found: Option<i32>,
+        /// The only version this build reads and writes.
+        expected: i32,
+    },
+}
+
+#[cfg(test)]
+mod data_version_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_the_version_we_write() {
+        require_supported_data_version(Some(level_dat::DATA_VERSION_26_2)).expect("current");
+        // Both directions, and absent. The older arm is the one #305 is about;
+        // the newer arm is the one an "upgrade only" reading of it would miss.
+        for found in [None, Some(0), Some(3955), Some(4902), Some(4904), Some(i32::MAX)] {
+            assert!(
+                matches!(
+                    require_supported_data_version(found),
+                    Err(Error::UnsupportedDataVersion { .. })
+                ),
+                "DataVersion {found:?} must be refused"
+            );
+        }
+    }
 }

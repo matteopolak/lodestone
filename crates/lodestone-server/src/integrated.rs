@@ -277,6 +277,25 @@ pub struct IntegratedServer {
     /// lives there rather than in [`TickClock`].
     #[cfg(not(target_arch = "wasm32"))]
     level_dat: Option<std::sync::Arc<crate::region_source::LevelDatHandle>>,
+    /// The `entities/` region store (issue #303), `Some` alongside `save`.
+    ///
+    /// Paired with `mobs` below, and both are needed rather than one: the store
+    /// is the disk, the handle is the population, and an entity save is a read of
+    /// the second written through the first. Held here for the same reason
+    /// `level_dat` is — [`shutdown`](Self::shutdown) must flush the mobs before
+    /// the handle goes away, or a clean quit loses every mob spawned since the
+    /// last autosave.
+    #[cfg(not(target_arch = "wasm32"))]
+    entity_storage: Option<crate::entity_storage::EntityStorage>,
+    /// The live mob simulation, `Some` for every constructor that starts a tick
+    /// loop.
+    ///
+    /// **Not new shared state**: [`MobHandle`] already exists and is already
+    /// cloned into the tick task and every connection. This field is a third
+    /// clone of the same handle so the save path can read the population without
+    /// a channel, exactly as `save`/`level_dat` above reach persistence.
+    #[cfg(not(target_arch = "wasm32"))]
+    mobs: Option<MobHandle>,
     /// Issues #327/#328/#323: the world's shared game rules, difficulty and clock.
     /// The **same** handle the tick loop advances and every connection reads; kept
     /// here so the persistence path can load it at open and stamp it on save.
@@ -500,6 +519,11 @@ impl IntegratedServer {
                 autosave_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 level_dat: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                entity_storage: None,
+                // Nothing persists here, so the save path has no population to read.
+                #[cfg(not(target_arch = "wasm32"))]
+                mobs: None,
                 // No tick loop here, so there is nothing to share a store *with*.
                 world_state: crate::world_state::WorldStateHandle::default(),
                 // No RCON listener (issue #331) unless the caller starts one
@@ -580,6 +604,8 @@ impl IntegratedServer {
             view_radius,
             BlockEntityHandle::default(),
             crate::region_source::ScheduledTickHandle::default(),
+            // No world directory, so no `entities/` set to restore from.
+            None,
         )
     }
 
@@ -617,6 +643,13 @@ impl IntegratedServer {
         // whether there is a world on disk to save to. In-memory passes a fresh
         // default; `open_persistent_with_mobs` passes the region source's own.
         scheduled: crate::region_source::ScheduledTickHandle,
+        // Issue #303. `Some` only for `open_persistent_with_mobs`: the store the
+        // seeding task restores this world's saved mobs and dropped items from,
+        // once it has replaced the `Default` sim. Threaded here rather than
+        // applied by the caller for the reason the restore site documents —
+        // `MobHandle::reseed` discards the whole sim, so a restore that ran
+        // before it would be silently undone.
+        entities_on_disk: Option<crate::entity_storage::EntityStorage>,
     ) -> (Self, DuplexStream)
     where
         P: ServerProtocol + 'static,
@@ -742,6 +775,13 @@ impl IntegratedServer {
         let seed_source = Arc::clone(&source);
         let mob_handle = MobHandle::default();
         let seed_mobs = mob_handle.clone();
+        // Issue #303. A third clone, for the handle this constructor returns, so
+        // `open_persistent_with_mobs`'s autosave and `shutdown`'s flush can read
+        // the population. `mob_handle` itself is moved into the tick task below.
+        let handle_mobs = mob_handle.clone();
+        // Issue #303: the entity area to restore, and where from. Cloned here
+        // because the ranges are consumed by `seed_coords` above.
+        let restore_area = (cx_range.clone(), cz_range.clone());
         let seed_task = spawn_tick_task(&shutdown, async move {
             let t_seed = std::time::Instant::now();
             tracing::info!(
@@ -762,6 +802,33 @@ impl IntegratedServer {
                 center_z,
                 demo_mob_count(mob_count),
             );
+            // Issue #303: **after** the reseed, never before. `MobHandle::reseed`
+            // replaces the whole `MobSim` (see its own doc comment — "everything
+            // is thrown away"), so restoring first would delete every saved mob
+            // and leave a green tree with an empty world. This is also why the
+            // restore lives in the seed task rather than in
+            // `open_persistent_with_mobs`: that function returns before this task
+            // has run.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(storage) = &entities_on_disk {
+                let (cx_range, cz_range) = restore_area;
+                match storage.load_area(cx_range, cz_range) {
+                    Ok(saved) if !saved.is_empty() => {
+                        let restored = seed_mobs.with(|sim| sim.restore_saved(&saved));
+                        tracing::info!(
+                            "entity load: restored {restored} of {} saved entities",
+                            saved.len(),
+                        );
+                    }
+                    Ok(_) => {}
+                    // Logged rather than propagated: this task has no error
+                    // channel, and a world whose mobs cannot be read is still a
+                    // world worth playing. The load is *not* silent, which is the
+                    // property that matters — a blank `entities/` read as "no
+                    // mobs here" is exactly the failure #303 exists to stop.
+                    Err(err) => tracing::error!("entity load failed, mobs not restored: {err}"),
+                }
+            }
             // Read the clock **once**: the previous form called `elapsed()` twice, so
             // the logged parts did not sum to the logged total. `saturating_sub` for
             // the same reason as `server.rs`'s welcome timing — `as_millis()` is
@@ -904,6 +971,12 @@ impl IntegratedServer {
                 autosave_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 level_dat: None,
+                // Set by `open_persistent_with_mobs` after this returns; an
+                // in-memory world has no `entities/` directory to write into.
+                #[cfg(not(target_arch = "wasm32"))]
+                entity_storage: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                mobs: Some(handle_mobs),
                 world_state: world_state_for_handle,
                 #[cfg(not(target_arch = "wasm32"))]
                 rcon_task: None,
@@ -1015,6 +1088,10 @@ impl IntegratedServer {
         // correctly, and writes an empty `block_entities` list forever — the
         // island #468 names.
         let block_entities = persistent.block_entities();
+        // Issue #303: the `entities/` region set, created eagerly next to
+        // `region/` so a later entity save cannot fail for a reason the caller
+        // could have been told about here.
+        let entity_storage = crate::entity_storage::EntityStorage::new(world_dir)?;
         let (mut server, client_end) = Self::open_in_memory_with_mobs_using(
             protocol,
             persistent,
@@ -1026,6 +1103,10 @@ impl IntegratedServer {
             // Issue #468's last wire: the same handle the save path reads, so a
             // pending repeater tick survives a quit.
             persistent_scheduled,
+            // Issue #303: the same store the autosave below writes through, so a
+            // restored cow is one the next save recognises as its own (see
+            // `EntityStorage::save`'s uuid-identity clearing).
+            Some(entity_storage.clone()),
         );
 
         let autosave_handle = save.clone();
@@ -1047,6 +1128,11 @@ impl IntegratedServer {
         // in the constructor above: an `Arc::clone` inside the `async move`
         // would move the binding into the coroutine.
         let autosave_clock = server.clock.clone();
+        // Issue #303: the two halves of an entity save — where to write, and what
+        // population to read. Cloned out here for the same reason `autosave_clock`
+        // is: a clone made inside the `async move` would move the binding.
+        let autosave_entities = entity_storage.clone();
+        let autosave_mobs = server.mobs.clone();
         let autosave_task = spawn_tick_task(&server.shutdown, async move {
             let mut ticker = tokio::time::interval(autosave);
             // The first tick of a tokio interval completes immediately; a save
@@ -1079,10 +1165,28 @@ impl IntegratedServer {
                 if let Ok(Err(err)) = result {
                     tracing::warn!("autosave could not stamp level.dat: {err}");
                 }
+                // Issue #303: the mobs and dropped items, on the same interval and
+                // the same blocking pool as the terrain.
+                //
+                // **Snapshotted on this thread, written on the pool.** The sim
+                // lives behind `MobHandle`'s mutex, which the tick loop takes
+                // every tick; holding it across a region write would stall the
+                // world for the length of a filesystem operation. `saved_entities`
+                // is a `Vec` build under the lock and nothing else — no I/O, no
+                // compression.
+                if let Some(mobs) = &autosave_mobs {
+                    let saved = mobs.with(|sim| sim.saved_entities());
+                    let storage = autosave_entities.clone();
+                    let result = tokio::task::spawn_blocking(move || storage.save(&saved)).await;
+                    if let Ok(Err(err)) = result {
+                        tracing::warn!("autosave could not write entities: {err}");
+                    }
+                }
             }
         });
         server.save = Some(save);
         server.level_dat = Some(level_dat);
+        server.entity_storage = Some(entity_storage);
         // Replaces the mob-seeding task slot only if it is free; seeding owns
         // it for `open_in_memory_with_mobs`, so the autosave task is kept
         // alive by racing the same `shutdown` notify and is dropped with the
@@ -1100,6 +1204,27 @@ impl IntegratedServer {
     #[must_use]
     pub fn world_state(&self) -> &crate::world_state::WorldStateHandle {
         &self.world_state
+    }
+
+    /// The live mob simulation, for a host that needs to read or seed the
+    /// population from outside the tick loop (issue #303).
+    ///
+    /// The **same** handle the tick loop advances, every connection attacks
+    /// against, and the entity save reads — not a copy, on the same argument
+    /// [`world_state`](Self::world_state) makes. `None` for a constructor that
+    /// starts no tick loop, where there is nothing to share.
+    ///
+    /// # Racing world open
+    ///
+    /// The mob-seeding task ([`crate::MobHandle::reseed`]) **replaces** the whole
+    /// sim once the terrain it needs has been generated off-thread, so anything
+    /// inserted through this handle before that point is discarded. Poll
+    /// [`crate::MobSim::next_id`] — `>= 1000` once the reseed has run — before
+    /// seeding through it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn mobs(&self) -> Option<&MobHandle> {
+        self.mobs.as_ref()
     }
 
     /// Writes every dirty chunk now, on the calling thread, returning how many
@@ -1617,6 +1742,12 @@ impl IntegratedServer {
             autosave_task: None,
             #[cfg(not(target_arch = "wasm32"))]
             level_dat: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            entity_storage: None,
+            // LAN worlds are not persistent yet (`save` is `None` above), so
+            // there is nothing for an entity save to write to.
+            #[cfg(not(target_arch = "wasm32"))]
+            mobs: None,
             world_state: handle_world_state,
             // Set by the `start_rcon` call just below when the caller asked for
             // one (issue #331). It needs a password, so it stays opt-in.
@@ -1809,6 +1940,26 @@ impl IntegratedServer {
                 }
                 Ok(Err(err)) => tracing::warn!("world save on shutdown failed: {err}"),
                 Err(err) => tracing::warn!("world save on shutdown panicked: {err}"),
+            }
+        }
+        // Issue #303: the mobs and dropped items, last, and for the same
+        // ordering reason as the terrain above — the tick task has stopped, so
+        // `saved_entities` cannot observe a half-advanced sim, and nothing can
+        // spawn a mob after this point that we would then lose.
+        //
+        // A world with an autosave timer alone loses every mob spawned since the
+        // last tick of it on a clean quit, which is the common case rather than
+        // the rare one.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(storage), Some(mobs)) = (self.entity_storage.take(), self.mobs.take()) {
+            let saved = mobs.with(|sim| sim.saved_entities());
+            let count = saved.len();
+            match tokio::task::spawn_blocking(move || storage.save(&saved)).await {
+                Ok(Ok(written)) => {
+                    tracing::debug!("entities saved on shutdown: {written} of {count}");
+                }
+                Ok(Err(err)) => tracing::warn!("entity save on shutdown failed: {err}"),
+                Err(err) => tracing::warn!("entity save on shutdown panicked: {err}"),
             }
         }
     }

@@ -423,6 +423,9 @@ pub struct PersistenceStats {
 struct WorldState {
     /// `<world>/dimensions/minecraft/overworld/region`.
     region_dir: PathBuf,
+    /// `<world>/players/data`, or `None` if it could not be created (issue
+    /// #302). Handed out through [`ChunkSource::world_registries`].
+    player_data: Option<crate::player_data::PlayerDataStore>,
     min_y: i32,
     height: i32,
     /// The **authoritative** columns: everything a `set_block` has touched.
@@ -611,6 +614,84 @@ impl ScheduledTickHandle {
     }
 }
 
+/// Refuses to open a world whose stored chunks this build cannot read (issue
+/// [#305](https://github.com/matteopolak/lodestone/issues/305)).
+///
+/// # Why the check is here and not in [`RegionChunkSource::load`]
+///
+/// `load` returns `Option<LoadedChunk>` and its `None` means "never saved", which
+/// `ChunkSource::column` answers by **generating fresh terrain**. So a per-chunk
+/// version check could only report a mismatch by regenerating the chunk — and the
+/// regenerated column then enters the edit map on the next `set_block` and is
+/// written straight over the original. The per-chunk position is structurally
+/// unable to refuse; it can only destroy.
+///
+/// At open, refusing is total and costs nothing: the constructor returns `Err`,
+/// no task has spawned, and not one byte has been written. There is no upgrade
+/// path in this repo (see
+/// [`lodestone_anvil::require_supported_data_version`]), so this is the whole of
+/// #305's answer and it is deliberate rather than unfinished.
+///
+/// # What it samples
+///
+/// The **first** chunk found in the **first** region file that has one. A world
+/// is written by one game version, so one chunk answers the question; walking all
+/// 89 region files of a real world at every open would put a multi-second scan on
+/// the world-open path this repo has already spent an issue removing
+/// (`docs/world-open-latency.md`). A brand-new world — no region directory, no
+/// files, or files with no chunks — is accepted, because there is nothing to
+/// mis-read.
+///
+/// # Errors
+///
+/// [`Error::Anvil`] wrapping
+/// [`lodestone_anvil::Error::UnsupportedDataVersion`] when the sampled chunk was
+/// written by another game version. An unreadable or unparseable region file is
+/// **not** an error here: that is the existing read path's tolerance (a corrupt
+/// file is treated as absent), and turning it into an open-time refusal would
+/// strand a world for a reason unrelated to versioning.
+fn refuse_unreadable_world(region_dir: &Path) -> Result<(), Error> {
+    let Ok(entries) = std::fs::read_dir(region_dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("mca") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(region) = RegionFile::parse(&bytes) else {
+            continue;
+        };
+        for local_z in 0..32u8 {
+            for local_x in 0..32u8 {
+                let Ok(Some(raw)) = region.read_chunk_nbt_bytes(local_x, local_z) else {
+                    continue;
+                };
+                let mut reader = Reader::new(&raw);
+                let Ok((_, nbt)) = read_named_nbt(&mut reader) else {
+                    continue;
+                };
+                let found = match &nbt {
+                    lodestone_core::Nbt::Compound(fields) => fields
+                        .iter()
+                        .find(|(name, _)| name == "DataVersion")
+                        .and_then(|(_, value)| match value {
+                            lodestone_core::Nbt::Int(v) => Some(*v),
+                            _ => None,
+                        }),
+                    _ => None,
+                };
+                return lodestone_anvil::require_supported_data_version(found)
+                    .map_err(Error::Anvil);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The chunk a block position belongs to.
 ///
 /// `>> 4` rather than `/ 16`: an arithmetic shift floors, and truncating
@@ -658,10 +739,27 @@ impl<S: ChunkSource> RegionChunkSource<S> {
             .join("overworld")
             .join("region");
         std::fs::create_dir_all(&region_dir).map_err(io(&region_dir))?;
+        // Issue #305, and it happens **here**, before any task spawns and before
+        // any chunk is read. See `refuse_unreadable_world`'s own doc comment for
+        // why the check has to be at open rather than per chunk.
+        refuse_unreadable_world(&region_dir)?;
+        // Issue #302. Created eagerly, and a failure is *not* fatal: a world whose
+        // `players/data` cannot be created is still playable, it just cannot
+        // persist a player — and refusing to open it would be a worse trade than
+        // the terrain case, where refusing is the only thing that protects the
+        // data. The warning is what stops that being silent.
+        let player_data = match crate::player_data::PlayerDataStore::new(world_dir) {
+            Ok(store) => Some(store),
+            Err(err) => {
+                tracing::warn!("player data will not persist for this world: {err}");
+                None
+            }
+        };
         Ok(Self {
             inner: Arc::new(inner),
             state: Arc::new(WorldState {
                 region_dir,
+                player_data,
                 min_y,
                 height,
                 edits: Mutex::new(HashMap::new()),
@@ -822,6 +920,7 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         Some(crate::chunk::WorldRegistries {
             block_entities: self.block_entities(),
             scheduled: self.scheduled_ticks(),
+            player_data: self.state.player_data.clone(),
         })
     }
 

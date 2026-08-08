@@ -975,17 +975,31 @@ pub trait ChunkSource: Send + Sync {
     }
 }
 
-/// The pair of live registries a persistent [`ChunkSource`] owns, handed to a
+/// The live registries a persistent [`ChunkSource`] owns, handed to a
 /// server constructor so the tick loop and the save path share one instance.
 ///
-/// Both are cheap handles over shared state, so this is a clone of two `Arc`s
-/// rather than a borrow.
+/// All are cheap handles, so this is a clone of a few `Arc`s rather than a
+/// borrow.
 #[derive(Debug, Clone)]
 pub struct WorldRegistries {
     /// Every container, sign and furnace a player has placed or mutated.
     pub block_entities: crate::block_entities::BlockEntityHandle,
     /// Pending scheduled and fluid ticks.
     pub scheduled: crate::region_source::ScheduledTickHandle,
+    /// Where per-player `.dat` files live for this world (issue #302).
+    ///
+    /// **This is how the player store reaches a connection**, and the routing is
+    /// deliberate: `crate::server`'s join path already threads a `ChunkSource`
+    /// everywhere it needs one, and `serve_connection_inner`/`serve_play` are at
+    /// 30-odd parameters between them across eleven wrapper call sites. Riding
+    /// the accessor a persistent source already answers costs no new parameter
+    /// and, more usefully, makes it *structurally* impossible for a persistent
+    /// world to be served by a connection that cannot see its player files —
+    /// which is exactly the island shape #468 was for block entities.
+    ///
+    /// Unlike its two siblings this is an `Option`, because a world can have a
+    /// region directory and still fail to create `players/data`.
+    pub player_data: Option<crate::player_data::PlayerDataStore>,
 }
 
 /// Generates every column in `coords` across scoped OS threads over `&source`,

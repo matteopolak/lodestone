@@ -286,6 +286,21 @@ const SPRINT_ATTACK_KNOCKBACK_POWER: f64 = 0.5;
 #[cfg(not(target_arch = "wasm32"))]
 const VITALS_TICK_INTERVAL: Duration = Duration::from_millis(50);
 
+/// How many [`VITALS_TICK_INTERVAL`] ticks between periodic player saves
+/// (issue #302) — 600, i.e. 30 s at this crate's 20 TPS stand-in.
+///
+/// **A tick count, not a `Duration`, and that is deliberate.** This crate links
+/// into a wasm32 browser bundle where `std::time::Instant::now()` compiles and
+/// then panics at runtime under `panic = "abort"` with no log line — three sites
+/// in one day. Hanging the cadence off a counter on a timer that already exists
+/// means no clock is read at all.
+///
+/// 30 s rather than the autosave's default: a player file is a few hundred bytes
+/// against a region file's megabytes, and the thing being bounded is *how much of
+/// a session an alt-F4 costs*, not disk bandwidth.
+#[cfg(not(target_arch = "wasm32"))]
+const PLAYER_SAVE_EVERY_VITALS_TICKS: u32 = 600;
+
 /// A read-only view of the entities in the world right now, supplied by the
 /// caller that owns the simulation and its tick.
 ///
@@ -1070,6 +1085,71 @@ async fn apply<T: Transport>(
         ServerDirective::None => {}
     }
     Ok(())
+}
+
+/// This world's per-player `.dat` store, if it has one (issue #302).
+///
+/// One accessor rather than the same `world_registries().and_then(...)` chain at
+/// three call sites, because the failure mode of getting it wrong is invisible:
+/// a chain that returns `None` where a store exists produces a server that joins,
+/// plays and saves nothing, with no error and no failing test — the island shape
+/// this repo's first rule is about.
+#[cfg(not(target_arch = "wasm32"))]
+fn player_store<S: ChunkSource>(source: &S) -> Option<crate::player_data::PlayerDataStore> {
+    source
+        .world_registries()
+        .and_then(|registries| registries.player_data)
+}
+
+/// Writes this connection's live state to its `.dat` file (issue #302).
+///
+/// # Why the position is an `Option`
+///
+/// `player_pos` is `None` until the client sends its first movement packet, and
+/// this really does happen: a client that joins and closes the window
+/// immediately never sends one. Persisting a `(0, 0, 0)` in that case would
+/// teleport the player into the void on their next join, so `fallback` — the
+/// position they joined at — is written instead. Neither value is a guess: both
+/// are positions the server itself placed them at.
+///
+/// A `None` store is a world with nothing to save into, and this is then a no-op
+/// rather than an error; that is the in-memory and browser case.
+///
+/// Blocking (a gzip encode plus two renames, a few hundred bytes) and called
+/// from the connection task. Deliberately *not* `spawn_blocking`: it is orders of
+/// magnitude smaller than a region write, and the call at the disconnect return
+/// has to complete before the task ends — handing it to a pool there would race
+/// the runtime shutting the pool down, which loses exactly the save that matters
+/// most.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn persist_player(
+    store: Option<&crate::player_data::PlayerDataStore>,
+    uuid: uuid::Uuid,
+    player_pos: Option<(f64, f64, f64)>,
+    player_rot: Option<Rotation>,
+    fallback: Vec3,
+    vitals: &PlayerVitals,
+    game_mode: GameMode,
+    inventory: &PlayerInventory,
+    preserved: &[(String, lodestone_core::Nbt)],
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let pos = player_pos.map_or(fallback, |(x, y, z)| Vec3::new(x, y, z));
+    let data = crate::player_data::PlayerData::capture(
+        pos,
+        player_rot.unwrap_or(Rotation::new(0.0, 0.0)),
+        vitals.health(),
+        vitals.air_supply(),
+        game_mode,
+        inventory,
+        preserved.to_vec(),
+    );
+    if let Err(err) = store.write(uuid, &data) {
+        tracing::warn!("could not save player data for {uuid}: {err}");
+    }
 }
 
 /// Turns one [`ColumnPayload`](crate::join_scheduler::ColumnPayload) into the
@@ -2114,8 +2194,58 @@ where
                 // instead of stranding the player.
                 let spawn = find_initial_spawn(source.get());
 
+                // Issue #302: this player's own saved state, if this world has
+                // any. Reached through `ChunkSource::world_registries` rather
+                // than a new parameter — see `crate::chunk::WorldRegistries`'s
+                // `player_data` field for why that routing was chosen over
+                // threading a 31st argument through eleven wrappers.
+                //
+                // An in-memory world answers `None` and every existing caller
+                // therefore behaves exactly as before.
+                #[cfg(not(target_arch = "wasm32"))]
+                let saved_player = player_store(source.get()).and_then(|store| {
+                    match store.read(login_uuid.unwrap_or_default()) {
+                        Ok(data) => data,
+                        // Logged, never swallowed. A save we cannot read is not a
+                        // player with no save: joining them empty-handed would
+                        // overwrite the file they still own on the first
+                        // autosave, which is the one outcome that loses the
+                        // inventory irrecoverably.
+                        Err(err) => {
+                            tracing::error!(
+                                "player data for {:?} could not be read and will NOT be \
+                                 overwritten this session: {err}",
+                                login_uuid,
+                            );
+                            None
+                        }
+                    }
+                });
+                #[cfg(target_arch = "wasm32")]
+                let saved_player: Option<()> = None;
+
+                // Where the player actually re-enters the world. `spawn.pos`
+                // stays the **world** spawn: it is what `serve_play` uses for a
+                // respawn, and overwriting it with the player's last position
+                // would respawn a dead player back where they died.
+                #[cfg(not(target_arch = "wasm32"))]
+                let join_pos = saved_player
+                    .as_ref()
+                    .map_or(spawn.pos, |data| data.spawn_state().pos);
+                #[cfg(target_arch = "wasm32")]
+                let join_pos = spawn.pos;
+                // Vanilla's `playerGameType`, restored — a player who typed
+                // `/gamemode survival` and quit comes back in survival. Shadowed
+                // rather than assigned so a world with no save keeps the mode the
+                // host opened with.
+                #[cfg(not(target_arch = "wasm32"))]
+                let game_mode = saved_player
+                    .as_ref()
+                    .and_then(|data| data.game_mode)
+                    .unwrap_or(game_mode);
+
                 state = State::Play;
-                for directive in proto.begin_play_at(view_radius, spawn.pos, game_mode) {
+                for directive in proto.begin_play_at(view_radius, join_pos, game_mode) {
                     apply(conn, &mut state, directive).await?;
                 }
                 // Vanilla's `PlayerList.placeNewPlayer` sends the abilities
@@ -2343,7 +2473,7 @@ where
                     registry.join(
                         &username,
                         login_uuid.unwrap_or_else(uuid::Uuid::nil),
-                        spawn.pos,
+                        join_pos,
                     )
                 });
 
@@ -2368,8 +2498,13 @@ where
                 // 8) both floor to 0, so the centre does not change today;
                 // the derivation is the point — when the spawn column or
                 // the X/Z offsets move, this follows automatically.
-                let spawn_cx = (spawn.pos.x / 16.0).floor() as i32;
-                let spawn_cz = (spawn.pos.z / 16.0).floor() as i32;
+                // `join_pos`, not `spawn.pos`: a restored player standing 400
+                // blocks from world spawn must be sent the chunks under *their*
+                // feet. Centring on world spawn instead would stream a square of
+                // terrain the player cannot see and leave them suspended over
+                // nothing — a total chunk blackout with a perfectly healthy join.
+                let spawn_cx = (join_pos.x / 16.0).floor() as i32;
+                let spawn_cz = (join_pos.z / 16.0).floor() as i32;
                 // Issue #545: two radii, two roles — the square that was just
                 // streamed, and the ceiling a later `ClientInformationChanged`
                 // may raise this connection to. See `ViewTracker::max_radius`.
@@ -6245,9 +6380,30 @@ where
     // Issue #262, alongside `player_pos` — see `dispatch_play_packet`'s own
     // parameter comment.
     let mut player_rot: Option<Rotation> = None;
-    let mut vitals = PlayerVitals::default();
+    // Issue #302. Read here rather than passed in from `serve_connection_inner`
+    // (which already read it to place the join): that would be a 31st parameter
+    // through eleven wrapper call sites, and this is a few-hundred-byte gzip
+    // decode once per join. `player_uuid` is the same uuid that file is keyed by.
+    let player_store = player_store(source.get());
+    let saved_player = player_store
+        .as_ref()
+        .and_then(|store| store.read(player_uuid).ok().flatten());
+    // The fields `crate::player_data` does not model — hunger, experience, the
+    // ender chest, the recipe book. Carried from the loaded file into every save
+    // this session makes, so a full load/modify/save cycle preserves them rather
+    // than deleting them the first time this player quits. See
+    // `PlayerData::preserved`.
+    let preserved_player_fields: Vec<(String, lodestone_core::Nbt)> =
+        saved_player.as_ref().map(|d| d.preserved.clone()).unwrap_or_default();
+    let mut vitals = saved_player
+        .as_ref()
+        .map_or_else(PlayerVitals::default, |data| {
+            PlayerVitals::restored(data.health, data.air_supply)
+        });
     let mut fall = FallTracker::default();
-    let mut inventory = PlayerInventory::default();
+    let mut inventory = saved_player
+        .as_ref()
+        .map_or_else(PlayerInventory::default, crate::player_data::PlayerData::to_inventory);
     let mut open_container: Option<OpenContainer> = None;
     let mut container_sync = ContainerSync::default();
     // This connection's last-known `ServerBound::PlayerInput` sprint flag —
@@ -6344,6 +6500,8 @@ where
     // inside it.
     let mut join_batch_open = false;
     let mut join_batch_size: i32 = 0;
+    // Issue #302, counted down on `vitals_tick` — see that arm.
+    let mut player_save_countdown = PLAYER_SAVE_EVERY_VITALS_TICKS;
 
     loop {
         tokio::select! {
@@ -6380,6 +6538,22 @@ where
             }
             packet = conn.read_packet() => {
                 let Some((packet_id, payload)) = packet? else {
+                    // Issue #302: the disconnect save. Vanilla's own
+                    // `PlayerList.remove` writes the player file here, and this is
+                    // the only exit that is reached with the loop's state still
+                    // intact — see the periodic save on `vitals_tick` below for
+                    // what covers a crash, a cancelled task and every `?`.
+                    persist_player(
+                        player_store.as_ref(),
+                        player_uuid,
+                        player_pos,
+                        player_rot,
+                        world_spawn,
+                        &vitals,
+                        game_mode,
+                        &inventory,
+                        &preserved_player_fields,
+                    );
                     return Ok(ServeSummary { username, chunks_sent, inventory });
                 };
                 dispatch_play_packet(
@@ -6603,6 +6777,34 @@ where
             }
 
             _ = vitals_tick.tick() => {
+                // Issue #302: the periodic player save, on a counter rather than a
+                // clock. `PLAYER_SAVE_EVERY_VITALS_TICKS` of these 50 ms ticks, so
+                // no `Instant::now()` is involved — this crate links into a wasm32
+                // browser bundle where `Instant::now()` compiles and then panics at
+                // runtime under `panic = "abort"` with no log line.
+                //
+                // **This is not redundant with the disconnect save.** That one is
+                // reached on exactly one of this function's exit paths; every `?`,
+                // a keep-alive timeout, a task cancelled at shutdown and a crash
+                // all skip it. A player who alt-F4s (the common case, not the rare
+                // one) would otherwise lose the whole session, which is precisely
+                // the silent data loss #302 is about.
+                player_save_countdown = player_save_countdown.saturating_sub(1);
+                if player_save_countdown == 0 {
+                    player_save_countdown = PLAYER_SAVE_EVERY_VITALS_TICKS;
+                    persist_player(
+                        player_store.as_ref(),
+                        player_uuid,
+                        player_pos,
+                        player_rot,
+                        world_spawn,
+                        &vitals,
+                        game_mode,
+                        &inventory,
+                        &preserved_player_fields,
+                    );
+                }
+
                 // Vanilla's `ServerPlayerGameMode.tick` deferred-destroy pass,
                 // riding this timer because it is the one that already fires
                 // every 50ms — one server tick, exactly the cadence the
