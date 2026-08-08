@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web",
+      "runtimeExecutable": "trunk",
+      "runtimeArgs": ["serve", "--config", "web/Trunk.toml"],
+      "port": 8080
+    }
+  ]
+}

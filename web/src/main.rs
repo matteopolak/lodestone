@@ -167,8 +167,53 @@ struct State {
     last_dt: f32,
 }
 
+// The live `State`, reachable from outside the `requestAnimationFrame` closure.
+// (A `//` comment, not a doc comment: rustdoc does not document items produced by
+// a macro invocation, and `#[warn(unused_doc_comments)]` fires on `///` here.)
+//
+// It used to be *owned* by that closure, which made the render path
+// **unobservable from anywhere else** — a verification hole, not a style point. A
+// hidden or backgrounded tab does not run `requestAnimationFrame` at all
+// (measured in a headless Chrome pane: `document.visibilityState == "hidden"` =>
+// `requestAnimationFrame` fired **0** times in 600 ms), so a browser harness sees
+// a transparent canvas and *no* error while every HUD line still reports success
+// — the island failure exactly, tree green and screen wrong. Parking the state
+// here lets `lodestone_render_frames` drive frames directly, so "does it draw?"
+// becomes a measurement instead of an inference from a HUD string.
+thread_local! {
+    static RENDER_STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+}
+
+/// Renders `frames` frames synchronously, bypassing `requestAnimationFrame`, and
+/// returns the number of frames this `State` has drawn in total.
+///
+/// This exists so a browser gate can assert **pixels**, the only evidence that
+/// separates "compiled and initialised" from "drew something".
+/// `draw_geometry = false` is the **negative control**: it runs the identical
+/// pass — same surface, same clear colour, same depth attachment — and submits no
+/// draws, so the canvas must come back as exactly the clear colour. A gate whose
+/// control does not go one way while its subject goes the other is measuring
+/// nothing. See `web/README.md` -> "Verifying that it actually draws" for the
+/// measured control/subject numbers this hook produced.
+///
+/// Returns `u32::MAX` when the state is not initialised (async setup still in
+/// flight, or it failed) — deliberately not `0`, which a caller would read as
+/// "rendered 0 frames, fine".
+#[wasm_bindgen]
+pub fn lodestone_render_frames(frames: u32, draw_geometry: bool) -> u32 {
+    RENDER_STATE.with_borrow_mut(|slot| match slot.as_mut() {
+        Some(state) => {
+            for _ in 0..frames {
+                state.render(draw_geometry);
+            }
+            state.frame
+        }
+        None => u32::MAX,
+    })
+}
+
 impl State {
-    fn render(&mut self) {
+    fn render(&mut self, draw_geometry: bool) {
         let device = self.ctx.device();
         let queue = self.ctx.queue();
 
@@ -280,13 +325,37 @@ impl State {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.pipeline.pipeline);
-            pass.set_bind_group(1, &atlas_bg, &[]);
-            for ((mesh, _origin), cam_bg) in self.meshes.iter().zip(&cam_bgs) {
-                pass.set_bind_group(0, cam_bg, &[]);
-                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            // `draw_geometry == false` is the negative control's only difference
+            // from a real frame: the pass, the clear and the depth attachment are
+            // identical, and nothing is drawn into it.
+            if draw_geometry {
+                pass.set_pipeline(&self.pipeline.pipeline);
+                pass.set_bind_group(1, &atlas_bg, &[]);
+                for ((mesh, _origin), cam_bg) in self.meshes.iter().zip(&cam_bgs) {
+                    // `&[0]`, not `&[]`. `lodestone-camera-bgl` binding 1 (the
+                    // section origin) is declared `has_dynamic_offset: true` by
+                    // issue #76's group-0 split, so this call must supply exactly
+                    // ONE dynamic offset. Passing an empty slice made every
+                    // command buffer invalid, and the browser said so:
+                    //
+                    //   The number of dynamic offsets (0) does not match the
+                    //   number of dynamic buffers (1) in [BindGroupLayoutInternal
+                    //   "lodestone-camera-bgl"]
+                    //   [Invalid CommandBuffer] is invalid due to a previous error
+                    //
+                    // The failure mode is why it survived: the clear still lands,
+                    // so the canvas shows a clean sky and every HUD line reports
+                    // success ("250 greedy quads"), while zero geometry pixels
+                    // reach the screen. wgpu reports it as a **warning**, not a
+                    // panic, so nothing fails loudly and no `cargo` command can
+                    // see it. Each section owns its own 16-byte
+                    // `section_origin_buffer`, so the offset here is 0 — the arena
+                    // route the native client uses is what passes a non-zero one.
+                    pass.set_bind_group(0, cam_bg, &[0]);
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
             }
         }
         queue.submit(std::iter::once(encoder.finish()));
@@ -644,7 +713,8 @@ async fn run() {
         set_line("frame", "clock: performance.now() unavailable");
     }
 
-    let mut state = State {
+    // Not `mut`: the state is mutated through `RENDER_STATE` now, not here.
+    let state = State {
         ctx,
         target,
         pipeline,
@@ -691,11 +761,21 @@ async fn run() {
         }
     });
 
+    // Park the state where `lodestone_render_frames` can reach it, then drive it
+    // from `requestAnimationFrame` as before. The closure no longer *owns* the
+    // state — that is what makes the render path measurable from a harness (see
+    // `RENDER_STATE`).
+    RENDER_STATE.set(Some(state));
+
     // Standard wasm-bindgen requestAnimationFrame loop.
     let cb = Rc::new(RefCell::new(None));
     let cb2 = cb.clone();
     *cb2.borrow_mut() = Some(Closure::wrap(Box::new(move || {
-        state.render();
+        RENDER_STATE.with_borrow_mut(|slot| {
+            if let Some(state) = slot.as_mut() {
+                state.render(true);
+            }
+        });
         request_animation_frame(cb.borrow().as_ref().unwrap());
     }) as Box<dyn FnMut()>));
     request_animation_frame(cb2.borrow().as_ref().unwrap());

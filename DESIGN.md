@@ -4689,3 +4689,87 @@ per-fluid-cell row. Baseline re-measured at `4e0ffdf2` in a detached worktree: `
   cluster. Beyond that, adjacent cells' radius-2 blend boxes share 20 of 25 columns, so a separable
   sliding-window sum over `blend_box` is bit-exact — vanilla's per-channel floor division happens
   once, at the end — and worth roughly 5× again on what remains, which is still ~63% tint.
+
+**12.125 The wasm build was six red rows from three ungated `Instant::now()` calls, and fixing them
+revealed the real defect: the browser had never drawn a single terrain pixel. `set_bind_group(0, bg,
+&[])` against a `has_dynamic_offset: true` layout invalidated every command buffer, so the clear
+still landed and every draw was discarded — a clean sky, a HUD reporting `250 greedy quads`, and wgpu
+logging it as a *warning*.**
+
+Baseline `cargo xtask wasm-check` at `40dd9612`: **6 failures** (the owner's unverified figure, now
+confirmed) — `lodestone-registry`, `lodestone-v770`, `lodestone-client`, `lodestone-controller`,
+`lodestone-server`, and the `trunk build` of `web/`. Five of the six were **one** cause:
+`crates/lodestone-server/src/server.rs` gates its `use std::time::{Duration, Instant}` behind
+`cfg(not(target_arch = "wasm32"))`, and three `PERF INSTRUMENT` timers added by the join-view work
+(lines 1621/1692/1753) call bare `Instant::now()` **ungated**. Everything depending on that crate
+inherits the `E0433`. After the fix: **1 failure**, `lodestone-v770`, and the count was predicted
+before the run rather than read off it.
+
+- **`tokio::time::Instant` is not a wasm-safe substitute for `std::time::Instant`, and it is the fix
+  a reader reaches for first.** rustc's own `help:` suggests exactly those two imports, side by side,
+  with nothing to distinguish them. But `tokio::time::Instant::now()` bottoms out in
+  `std::time::Instant::now()` (tokio 1.53.1, `src/time/clock.rs:16`), which panics on
+  `wasm32-unknown-unknown` — so taking the suggestion converts a compile error into a runtime crash
+  on the join path, **invisible to every `cargo check`**. Note the rest of `server.rs` already uses
+  `tokio::time::Instant` in `serve_play`, which reads as precedent and is not one. The patch instead
+  carries a `JoinStopwatch` whose wasm arm holds no clock and reports 0 ms; the timers feed two
+  `tracing::info!` lines and nothing branches on them.
+- **The blank canvas was NOT the 4-bind-group floor, and the limit check still earned its place.**
+  Chrome reports `maxBindGroups: 4` where this M5's native Metal path reports **8** — so CLAUDE.md's
+  rule is now measured in the browser rather than inferred, and the browser is confirmed as where the
+  low-limit adapter lives. `BlockPipeline` spends only groups 0 and 1, so it was not the cause here;
+  a five-group shader would be, with an identical symptom.
+- **The real cause was a dynamic offset, and its failure mode is why it survived.** Issue #76 split
+  group 0 into a shared camera uniform (binding 0) and a `has_dynamic_offset: true` section-origin
+  slot (binding 1). `web/src/main.rs` never passed the offset. WebGPU: *"The number of dynamic offsets
+  (0) does not match the number of dynamic buffers (1) … [Invalid CommandBuffer] is invalid due to a
+  previous error."* An invalid command buffer discards the draws **and keeps the clear**, so the page
+  looked like a working renderer aimed at empty space. wgpu emits it at `warn`, not `error`, and no
+  `cargo` command compiles a shader or submits a queue, so nothing in the health-check set could see
+  it. The native client uses the arena route and passes a real offset, which is why only the browser
+  was wrong. Fix: `&[0]`.
+- **A hidden tab reports zero `requestAnimationFrame` callbacks, so an rAF-only render loop is
+  unverifiable — and this nearly hid the bug behind a second, unrelated one.** First measurement in
+  the headless pane: transparent canvas, frame counter frozen at `frame 0`, and **no** error.
+  `document.visibilityState == "hidden"` gave **0** rAF callbacks in 600 ms. Two different reasons for
+  "no pixels" stacked, and the outer one looks exactly like the inner one. The render state moved out
+  of the rAF closure into a `thread_local`, with a `#[wasm_bindgen]`
+  `lodestone_render_frames(frames, draw_geometry)` that drives frames synchronously and returns
+  `u32::MAX` — never `0` — when init has not finished, because `0` reads as "rendered 0 frames, fine".
+- **The control was built first and it fired.** `draw_geometry = false` runs the identical pass, clear
+  and depth attachment with no draws. Predicted from `main.rs`'s own `LoadOp::Clear` constants before
+  measuring: exactly **1** distinct colour, `round(255 × {0.55, 0.68, 0.85})` = `140,173,217`, and 0
+  non-clear pixels. Measured: exactly that — which also establishes the surface is a non-sRGB format
+  written raw. Subject after the fix: **2299** distinct colours, **41588** non-clear pixels (7.22%),
+  bbox `[298,263,634,483]`. **The bbox is the load-bearing assertion**, not the fraction: a strict
+  sub-rectangle of 900×640 is what a slab viewed from outside must produce, and a full-canvas result
+  would mean something else is painting everything. Before the fix, subject and control were
+  byte-identical — 1 colour, 0 non-clear pixels — which is the cleanest possible statement that 250
+  submitted quads reached nothing.
+- **`window.wasmBindings`, not a fresh `import()`.** A second dynamic import is a second wasm instance
+  with its own empty `thread_local`, so the hook correctly reports "not initialised" and a careless
+  reading of that is "the render path is broken".
+- **Two claims in the written record were false, both in the flattering direction.** `web/README.md`
+  said terrain was "drawn under **WebGPU** at ~120 fps" when no terrain pixel had ever reached the
+  canvas; a frame *rate* was recorded for a frame that did not exist, because the rAF loop really was
+  spinning and the pacer really was ticking. And `scripts/wasm-size.sh`'s baseline read raw 4.12 MiB /
+  gzip 1.24 / brotli 0.89, measured now at **2.69 / 0.84 / 0.60** — stale by about a third since the
+  WebGL2 fallback was dropped. Quoting the old figure would make a ~30% regression look like the
+  baseline. gzip 882220 B sits at 55% of the 1600000 B ceiling, so nothing needed raising.
+- **Browser multiplayer is an island in the producer direction, and the transport under it is
+  genuinely green.** Verified in-browser against a live vanilla 26.2 server through
+  `lodestone-relay`: the server returned **its own** status JSON (`version.name = "26.2"`, protocol
+  776) — an expected value from entirely outside our code. But the only `WsWebTransport::connect` in
+  `web/` is inside `ping_via_relay`, a Server-List-Ping; `ClientBuilder::connect` exists and `web/`
+  never calls it. So "the relay has tests" and "the browser can join" are different claims (CLAUDE.md
+  rule 1, the `SetFlying` shape). Wiring it needs no new dependency.
+- **`web/src/singleplayer.rs` reaches `Play` against a `StandInProtocol`, not `v770`** — the *world*
+  species from §12.43's table, where the source reads as a real integration test and the flaw is which
+  implementation its transport resolves to. It is not evidence that a real 26.2 join works in a
+  browser.
+- **The one row that cannot pass without a `Cargo.lock` change** is `lodestone-v770`: `getrandom` 0.2
+  has a hard `compile_error!` on `wasm32-unknown-unknown` without its `js` feature, reached three
+  levels down (`v770` → `rand` 0.8 → `rand_core` 0.6 → `getrandom` 0.2), and under feature unification
+  only a *leaf* can enable it. `web/Cargo.toml` already does, target-scoped — which is why the
+  `trunk build` row passes while the standalone crate row fails. **That row has therefore been red for
+  its whole life and has never been able to catch a regression.**
