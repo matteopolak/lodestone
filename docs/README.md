@@ -1171,6 +1171,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   "Telemetry Data..." button (flipped from `no_screen` to `nav()`). Built as an honest
   prose screen: a title, a two-paragraph description, and four buttons — two of them
   real.
+- [Terrain culling and draw submission](./terrain-culling.md) — The per-frame
+  decision about which resident chunk sections actually get a draw call, and the
+  shared vertex/index arena that makes each of those draws cheap. Together they are
+  what makes render distance 30+ playable: before this, every resident section issued
+  a draw at every heading, measured at **19,024 instructions per section** — 17.7M
+  per frame at the shipped render distance 8 (issue #543).
 - [Text colour](./text-colour.md) — Server-authored text colour and formatting —
   the sixteen legacy `§` colours, modern `TextColor` hex values, and the five format
   flags — carried from the wire through to the emitted vertex on every surface that

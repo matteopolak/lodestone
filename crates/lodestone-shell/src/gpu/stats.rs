@@ -3,12 +3,49 @@
 /// Aggregate numbers for one rendered frame, surfaced to the debug overlay.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RenderStats {
-    /// Sections with non-empty geometry drawn this frame.
+    /// Sections with non-empty **opaque** geometry drawn this frame.
     pub sections_drawn: usize,
+    /// Opaque sections rejected by vanilla's circular view membership
+    /// ([`lodestone_render::within_view_distance`]) this frame.
+    pub sections_culled_distance: usize,
+    /// Opaque sections rejected by the view frustum this frame — i.e. resident,
+    /// inside the view circle, and still off screen.
+    pub sections_culled_frustum: usize,
+    /// Opaque sections rejected by the section occlusion graph this frame:
+    /// on screen and in range, but not reachable from the camera through
+    /// connected open space. Always `0` while
+    /// [`TerrainCull::occlusion_active`](lodestone_render::TerrainCull::occlusion_active)
+    /// is false, which is how a walk that silently degraded to pure frustum is
+    /// told apart from one that found nothing to cull.
+    pub sections_culled_occlusion: usize,
+    /// Sections with **water** geometry drawn this frame.
+    ///
+    /// Its own counter because the invariant only closes per pass: a water-only
+    /// section carries `mesh: None`, so it never reaches
+    /// [`sections_drawn`](Self::sections_drawn) while still issuing a draw.
+    /// Measured 189 `sections_drawn` against 195 uploads and 304 `draw_calls`
+    /// before culling existed (issue #543) — a single combined invariant reads
+    /// as a cull bug on a perfectly healthy frame.
+    pub water_sections_drawn: usize,
+    /// Water sections culled this frame, all three reasons summed (the split is
+    /// only tracked for the opaque pass, which is the dominant one).
+    pub water_sections_culled: usize,
     /// Total merged quads across all drawn sections.
     pub total_quads: usize,
     /// Draw calls issued (one per non-empty section).
     pub draw_calls: usize,
+    /// Vertex+index **buffer-bind pairs** the two live terrain passes issued this
+    /// frame — one per arena block actually drawn from, plus one for each section
+    /// that fell back to a dedicated buffer.
+    ///
+    /// This is the number issue #543's second half moves: before the shared mesh
+    /// arena it was exactly `sections_drawn + water_sections_drawn` (every section
+    /// bound its own two buffers), and it should now be in the low tens
+    /// regardless of render distance. A value that tracks `sections_drawn` again
+    /// means either the arena is refusing placements (check for the
+    /// dedicated-buffer warning) or the per-block grouping in
+    /// `emit_terrain_draws` stopped grouping.
+    pub terrain_buffer_binds: usize,
     /// Approximate mesh VRAM in bytes.
     pub vram_bytes: usize,
     /// Entity instances drawn this frame (post-frustum-cull).

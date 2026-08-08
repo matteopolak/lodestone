@@ -32,13 +32,14 @@
 //! `renderItemInHand`), and the screen overlays get theirs, on `Load`, last.
 //! See [`super::first_person`] and `docs/screen-overlays.md`.
 use lodestone_render::{
-    Camera, CameraUniform, crack_pipeline::GpuCrackMesh, spinning_effect_angle_degrees,
-    update_model_shared_camera_buffer, vertex::vram_bytes,
+    Camera, CameraUniform, CullVerdict, TerrainCull, crack_pipeline::GpuCrackMesh,
+    spinning_effect_angle_degrees, update_model_shared_camera_buffer, vertex::vram_bytes,
 };
 
 use crate::entities::EntityDraw;
 
 use super::first_person::FirstPersonHand;
+use super::terrain::TerrainDraw;
 use super::{CrackTarget, RenderState, RenderStats, ScreenEffects};
 
 impl RenderState {
@@ -246,6 +247,23 @@ impl RenderState {
                 .prepare(queue, &view_proj, &self.debug_lines_source.sample());
 
         let mut stats = RenderStats::default();
+
+        // This frame's terrain cull, computed **once** and consulted by all three
+        // terrain loops below (packed table, live opaque, live water) so water and
+        // terrain physically cannot disagree about what exists. Vanilla's circular
+        // view membership ∩ the camera-cube-offset frustum ∩ (when a walk is
+        // installed) the occlusion graph's reachable set — see
+        // `lodestone_render::cull`. Before this, every resident section issued a
+        // draw at every heading: 19,024 instructions per section, 17.7M per frame
+        // at the shipped render distance 8 (issue #543).
+        //
+        // Deliberately *not* the warped `view_proj` above: the nausea/portal warp
+        // is a post-projection screen distortion with no live producer, and
+        // culling against a warped frustum would drop geometry the warp pulls back
+        // into view. `camera.frustum()` is the honest view volume.
+        let terrain_cull = TerrainCull::new(camera, self.render_distance_chunks)
+            .with_reachable(None)
+            .disabled(!self.terrain_culling);
 
         // The local player's own third-person body, if a caller has wired one
         // in (see `set_third_person_body_source`). `None` — true for every
@@ -463,7 +481,10 @@ impl RenderState {
             });
             pass.set_pipeline(&self.pipeline.pipeline);
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
-            for section in self.sections.values() {
+            for (key, section) in &self.sections {
+                if !terrain_cull.visible(key.coord()) {
+                    continue;
+                }
                 // One bind group for the whole packed table; the section is
                 // selected by the dynamic offset of its origin slot (issue #76).
                 pass.set_bind_group(
@@ -484,25 +505,50 @@ impl RenderState {
                 pass.set_bind_group(1, &model.atlas_bind_group, &[]);
                 pass.set_bind_group(2, &model.palette_bind_group, &[]);
                 pass.set_bind_group(3, &model.anim_bind_group, &[]);
-                for section in model.sections.values() {
+                // Resolve the visible set first, then emit it grouped by arena
+                // block. Two reasons this is a collect-then-emit rather than one
+                // loop: the cull is evaluated exactly once per section (a
+                // block-outer/section-inner loop would re-run it per block), and
+                // consecutive draws from one block share a single pair of buffer
+                // binds — which is the whole saving, since every section's
+                // geometry is now a span of a shared buffer rather than its own
+                // (see `ResidentMesh`).
+                let mut draws: Vec<TerrainDraw> = Vec::with_capacity(model.sections.len());
+                for (key, section) in &model.sections {
                     let Some(mesh) = section.mesh.as_ref() else {
                         continue;
                     };
-                    // One shared bind group for every section; only the
-                    // dynamic offset (this section's slot in the origin
-                    // arena) changes per draw.
-                    pass.set_bind_group(
-                        0,
-                        &model.cam_bind_group,
-                        &[section.origin_alloc.offset() as u32],
-                    );
-                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    // The cull, per pass. The counters split by *reason* rather
+                    // than one total because the split is the live diagnosis: a
+                    // frustum false cull is angle-dependent, a distance one is
+                    // position-dependent, and an occlusion one only exists once a
+                    // walk is installed. `sections_drawn + the three culled
+                    // counters == resident sections with opaque geometry` — and
+                    // only that; the water pass closes against its own set below.
+                    match terrain_cull.classify(key.coord()) {
+                        CullVerdict::Visible => {}
+                        CullVerdict::Distance => {
+                            stats.sections_culled_distance += 1;
+                            continue;
+                        }
+                        CullVerdict::Frustum => {
+                            stats.sections_culled_frustum += 1;
+                            continue;
+                        }
+                        CullVerdict::Occlusion => {
+                            stats.sections_culled_occlusion += 1;
+                            continue;
+                        }
+                    }
+                    draws.push(TerrainDraw::new(
+                        mesh,
+                        section.origin_alloc.offset() as u32,
+                    ));
                     stats.sections_drawn += 1;
-                    stats.draw_calls += 1;
                     stats.total_quads += section.quad_count;
                 }
+                stats.draw_calls += draws.len();
+                stats.terrain_buffer_binds += emit_terrain_draws(&mut pass, model, &mut draws);
             }
 
             // Entities share the terrain depth buffer (depth test + write on, so
@@ -747,21 +793,30 @@ impl RenderState {
                 pass.set_pipeline(&model.water_pipeline.pipeline);
                 pass.set_bind_group(1, &model.atlas_bind_group, &[]);
                 pass.set_bind_group(2, &model.water_anim_bind_group, &[]);
-                for section in model.sections.values() {
+                // Same collect-then-emit-by-block shape as the opaque pass above;
+                // water shares the arena, so a water span and an opaque span from
+                // the same section usually land in the same block and share its
+                // bind.
+                let mut water_draws: Vec<TerrainDraw> =
+                    Vec::with_capacity(model.sections.len() / 4);
+                for (key, section) in &model.sections {
                     let Some(water) = section.water.as_ref() else {
                         continue;
                     };
-                    pass.set_bind_group(
-                        0,
-                        &model.cam_bind_group,
-                        &[section.origin_alloc.offset() as u32],
-                    );
-                    pass.set_vertex_buffer(0, water.vertices.slice(..));
-                    pass.set_index_buffer(water.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..water.index_count, 0, 0..1);
-                    stats.draw_calls += 1;
+                    if !terrain_cull.visible(key.coord()) {
+                        stats.water_sections_culled += 1;
+                        continue;
+                    }
+                    stats.water_sections_drawn += 1;
+                    water_draws.push(TerrainDraw::new(
+                        water,
+                        section.origin_alloc.offset() as u32,
+                    ));
                     stats.total_quads += section.water_quad_count;
                 }
+                stats.draw_calls += water_draws.len();
+                stats.terrain_buffer_binds +=
+                    emit_terrain_draws(&mut pass, model, &mut water_draws);
             }
 
             // The *translucent* half of the debris last among the world geometry
@@ -884,4 +939,59 @@ impl RenderState {
         stats.vram_bytes = vram_bytes(stats.total_quads);
         stats
     }
+}
+
+/// Emit one pass's worth of resolved terrain draws, grouped so that consecutive
+/// draws out of the same arena block share a single vertex+index bind. Returns the
+/// number of buffer-bind *pairs* issued — the counter that says whether the
+/// grouping is actually working.
+///
+/// `draws` is sorted in place: [`DEDICATED_BLOCK`] is `u32::MAX`, so the rare
+/// section that fell back to its own buffers sorts to the end and never splits an
+/// arena run. A dedicated draw always pays its own bind pair, which is exactly the
+/// pre-arena cost for that one section.
+fn emit_terrain_draws(
+    pass: &mut wgpu::RenderPass<'_>,
+    model: &super::terrain::ModelRenderer,
+    draws: &mut [TerrainDraw<'_>],
+) -> usize {
+    draws.sort_unstable_by_key(|d| d.block);
+    let mut bound: Option<u32> = None;
+    let mut bind_pairs = 0usize;
+    for draw in draws.iter() {
+        match draw.dedicated {
+            Some(mesh) => {
+                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                bound = None;
+                bind_pairs += 1;
+            }
+            None if bound != Some(draw.block) => {
+                let (Some(vertices), Some(indices)) = (
+                    model.mesh_arena.vertex_buffer(draw.block),
+                    model.mesh_arena.index_buffer(draw.block),
+                ) else {
+                    // Unreachable: a live `ArenaMesh` names a block that exists,
+                    // and blocks are never released. Skipping the draw rather than
+                    // indexing blind keeps a future change to block lifetime from
+                    // turning into a panic in the render loop.
+                    continue;
+                };
+                pass.set_vertex_buffer(0, vertices.slice(..));
+                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                bound = Some(draw.block);
+                bind_pairs += 1;
+            }
+            None => {}
+        }
+        // One shared bind group for every section; only the dynamic offset (this
+        // section's slot in the origin arena) changes per draw.
+        pass.set_bind_group(0, &model.cam_bind_group, &[draw.origin_offset]);
+        pass.draw_indexed(
+            draw.first_index..draw.first_index + draw.index_count,
+            draw.base_vertex,
+            0..1,
+        );
+    }
+    bind_pairs
 }

@@ -31,7 +31,43 @@ use crate::mesher::{SectionGeometry, SectionKey};
 static FIRST_SECTION_UPLOADED: AtomicBool = AtomicBool::new(false);
 
 use super::RenderState;
-use super::terrain::{ModelSectionGpu, SectionGpu, anim_slots_at};
+use super::terrain::{ModelSectionGpu, ResidentMesh, SectionGpu, anim_slots_at};
+
+/// Upload one `ModelMesh` into the shared arena, falling back to a dedicated
+/// buffer pair if the arena cannot place it.
+///
+/// `None` means the mesh was empty — the caller treats that as "this half of the
+/// section has no geometry", which is what drops an all-air or all-solid section.
+/// It never means "the upload failed": a failed *arena* placement degrades to
+/// [`ResidentMesh::Dedicated`] rather than losing the section, because a silently
+/// dropped section is a hole in the world that looks exactly like a meshing bug.
+fn upload_resident(
+    arena: &mut lodestone_render::ModelMeshArena,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    mesh: &lodestone_render::models::ModelMesh,
+) -> Option<ResidentMesh> {
+    if mesh.indices.is_empty() {
+        return None;
+    }
+    if let Some(placed) = arena.upload(device, queue, mesh) {
+        return Some(ResidentMesh::Arena(placed));
+    }
+    tracing::warn!(
+        vertices = mesh.vertices.len(),
+        indices = mesh.indices.len(),
+        "model mesh arena could not place a section mesh; falling back to a dedicated buffer"
+    );
+    GpuModelMesh::upload(device, mesh).map(ResidentMesh::Dedicated)
+}
+
+/// Return a resident mesh's arena spans to the free pool. A dedicated buffer pair
+/// needs nothing: dropping it releases the `wgpu::Buffer`s.
+fn free_resident(arena: &mut lodestone_render::ModelMeshArena, mesh: Option<&ResidentMesh>) {
+    if let Some(ResidentMesh::Arena(span)) = mesh {
+        arena.free(*span);
+    }
+}
 
 impl RenderState {
 
@@ -76,13 +112,20 @@ impl RenderState {
                 };
                 let origin = key.origin();
                 let origin_f = [origin[0] as f32, origin[1] as f32, origin[2] as f32];
-                let opaque_gpu = GpuModelMesh::upload(device, opaque);
-                let water_gpu = GpuModelMesh::upload(device, water);
+                let opaque_gpu = upload_resident(&mut model.mesh_arena, device, queue, opaque);
+                let water_gpu = upload_resident(&mut model.mesh_arena, device, queue, water);
                 // A remesh of an already-resident coord (the dirty-propagation
                 // case) reuses that coord's origin slot rather than leaking it —
                 // the origin is a pure function of `key`, so it never actually
-                // changes.
+                // changes. Its **arena spans** are not reusable, though — a
+                // remesh changes the quad count — so the old spans are returned
+                // to the free pool below, or the arena leaks one section's
+                // geometry per remesh and fills up while walking around.
                 let existing = model.sections.remove(&key);
+                if let Some(old) = &existing {
+                    free_resident(&mut model.mesh_arena, old.mesh.as_ref());
+                    free_resident(&mut model.mesh_arena, old.water.as_ref());
+                }
                 // A section may carry only opaque terrain, only water (an ocean
                 // surface section with no solid blocks), or both. Drop it only
                 // when neither has geometry.
@@ -186,6 +229,8 @@ impl RenderState {
         if let Some(model) = self.model.as_mut()
             && let Some(old) = model.sections.remove(key)
         {
+            free_resident(&mut model.mesh_arena, old.mesh.as_ref());
+            free_resident(&mut model.mesh_arena, old.water.as_ref());
             model.origin_arena.free(old.origin_alloc);
         }
     }

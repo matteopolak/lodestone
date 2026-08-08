@@ -211,6 +211,12 @@ pub struct RenderState {
     /// because the sky disc's gradient end is clamped to it (#399). Defaults to
     /// [`DEFAULT_RENDER_DISTANCE_CHUNKS`] alongside `fog`.
     render_distance_chunks: u32,
+    /// Whether the per-frame terrain cull runs at all — vanilla's `smartCull`
+    /// switch, and this client's false-cull diagnostic. `true` by default; set it
+    /// with [`RenderState::set_terrain_culling`]. With it off, every resident
+    /// section submits a draw at every heading, which is the pre-#543 behaviour
+    /// and the A/B arm the instruction harness measures against.
+    terrain_culling: bool,
     /// How each mob's world light is sampled. Full-bright until the shell wires
     /// a real world in via [`RenderState::set_entity_light_source`].
     entity_light: EntityLightSource,
