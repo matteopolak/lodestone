@@ -68,6 +68,7 @@ use lodestone_render::Camera;
 use lodestone_sound::AudioEngine;
 use lodestone_sound::music::{Music, MusicStart};
 
+pub(crate) mod ambient;
 pub(crate) mod music;
 
 /// Environment variable naming the Minecraft asset root directly. Re-exported
@@ -268,6 +269,35 @@ impl ShellAudio {
                 MusicStart::Silent
             }
         }
+    }
+
+    /// Start an ambient **loop** voice at `volume`, returning its handle.
+    ///
+    /// `None` means nothing playable resolved — the ordinary answer with no
+    /// `.ogg` corpus on disk. The caller keeps the handle to ramp the volume
+    /// ([`Self::set_loop_volume`]) and to stop it ([`Self::stop_loop`]); a loop
+    /// never finishes on its own.
+    pub fn start_loop(&mut self, name: &str, volume: f32) -> Option<lodestone_sound::PlayHandle> {
+        match self
+            .engine
+            .play_loop(name, SoundCategory::Ambient, volume, 1.0, 0)
+        {
+            Ok(handle) => handle,
+            Err(e) => {
+                self.report_failure(name, &e);
+                None
+            }
+        }
+    }
+
+    /// Push a live loop's crossfade volume.
+    pub fn set_loop_volume(&self, handle: lodestone_sound::PlayHandle, volume: f32) {
+        self.engine.set_voice_volume(handle, volume);
+    }
+
+    /// Stop a live loop.
+    pub fn stop_loop(&self, handle: lodestone_sound::PlayHandle) {
+        self.engine.stop_voice(handle);
     }
 
     /// Plays an entity-attached sound (the `SOUND_ENTITY` packet path) at the
