@@ -118,6 +118,15 @@ pub struct RenderStats {
     /// and "the map never reached the pipeline" are the same number of visible
     /// pixels. This counter separates them.
     pub filled_maps_drawn: usize,
+    /// Banner **pattern layers** drawn this frame — one per mask per banner, so a
+    /// plain undyed banner counts 1 (its `base`) and a heavily decorated one up to
+    /// 17 (issue #23).
+    ///
+    /// Its own counter because a banner's pole and cloth draw through the ordinary
+    /// opaque batch and are therefore already counted in `block_entities_drawn`: a
+    /// banner whose *patterns* never reached the translucent pass looks like a
+    /// blank white banner, which is a perfectly ordinary thing to see.
+    pub banner_layers_drawn: usize,
     /// Humanoid armour **layers** drawn this frame — one per
     /// `(wearer, slot, texture layer)`, so a leather chestplate counts 2 (its
     /// dyeable base and its overlay) and a diamond one counts 1.

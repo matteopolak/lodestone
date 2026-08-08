@@ -349,7 +349,8 @@ impl RenderState {
         // chest is a *block*, gathered from the world's block-entity records by
         // the installed source — but uploaded here for the same reason as
         // everything above: buffers cannot be created mid-pass.
-        let block_entity_batches = self.prepare_block_entities(device, queue, camera, &mut stats);
+        let (block_entity_batches, banner_layer_batches) =
+            self.prepare_block_entities(device, queue, camera, &mut stats);
 
         // Dropped items *and* items in mobs' hands, meshed and uploaded before
         // the pass for the same reason as everything else here (no buffer
@@ -770,6 +771,42 @@ impl RenderState {
                         pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
                         stats.draw_calls += 1;
                     }
+                }
+            }
+
+            // Banner pattern layers (issue #23/#174), immediately after the
+            // opaque block entities whose depth they sit on.
+            //
+            // Three things about this loop are load-bearing and none of them fits
+            // the batched loop above. It is **ordered**: layer 0 is the base colour
+            // and each mask paints over the last, so the list must be drawn in
+            // sequence and never sorted or coalesced. It binds a **different mask
+            // per draw**, so there is nothing to instance. And it uses the
+            // alpha-blended, depth-write-off `banner_layer_pipeline` with
+            // `fs_main_no_cutout`, because a mask's soft edges must blend rather
+            // than be discarded at alpha 0.5 — the ordinary entity pipeline's
+            // cutout is exactly what would turn a pattern into jagged confetti.
+            //
+            // The geometry is the flag part's, and only the flag's: the pole and
+            // bar carry no patterns.
+            if !banner_layer_batches.is_empty()
+                && let Some(flag) = self.block_entities.gpu_models.get("banner_flag")
+                && let Some(range) = flag.parts.first()
+                && range.index_count > 0
+            {
+                pass.set_pipeline(&self.block_entities.banner_layer_pipeline);
+                pass.set_bind_group(0, &self.block_entities.cam_bind_group, &[]);
+                pass.set_vertex_buffer(0, flag.vertices.slice(..));
+                pass.set_index_buffer(flag.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for layer in &banner_layer_batches {
+                    let Some(mask) = self.block_entities.banner_patterns.get(&layer.pattern) else {
+                        continue;
+                    };
+                    pass.set_bind_group(1, mask, &[]);
+                    pass.set_vertex_buffer(1, layer.instances.slice(..));
+                    let end = range.index_start + range.index_count;
+                    pass.draw_indexed(range.index_start..end, 0, 0..1);
+                    stats.draw_calls += 1;
                 }
             }
 

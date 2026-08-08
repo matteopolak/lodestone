@@ -108,10 +108,11 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 use lodestone_render::{
-    BellShakeDirection, BellSpawn, ChestHalf, ChestMaterial, ChestSpawn, SHULKER_COLOURS,
-    ShulkerFacing, ShulkerSpawn, SignOrientation, SignSpawn, SkullOrientation, SkullSpawn,
-    SkullType, horizontal_facing_yaw,
+    BannerSpawn, BellShakeDirection, BellSpawn, ChestHalf, ChestMaterial, ChestSpawn,
+    SHULKER_COLOURS, ShulkerFacing, ShulkerSpawn, SignOrientation, SignSpawn, SkullOrientation,
+    SkullSpawn, SkullType, horizontal_facing_yaw,
 };
+use lodestone_render::banner_pattern::{DyeColor, StoredPatternLayer};
 use lodestone_world::{ChunkPos, SignText, World};
 
 use crate::net::{SharedHandle, entity_light_at};
@@ -973,6 +974,189 @@ pub fn sign_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<SignSpawn> {
         let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
             .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
         if let Some(spawn) = sign_spawn(block, state_id, text, light) {
+            out.push(spawn);
+        }
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
+/// The block's own dye colour, for a **standing** banner — `white_banner` →
+/// `DyeColor::White` (issue #23).
+///
+/// The base colour is the *block*, not a state property: vanilla ships sixteen
+/// separate banner blocks. Grepping for a `color` property here finds nothing and
+/// draws every banner white, which is the natural mistake because shulker boxes
+/// are spelled the same way and skulls are not.
+///
+/// Wall banners (`*_wall_banner`) return `None` deliberately: their body layer is
+/// `createBodyLayer(false)`, a different mesh the asset corpus does not build, so
+/// drawing one with the standing rig would hang a full pole in mid-air.
+#[must_use]
+fn standing_banner_colour(state_id: u32) -> Option<DyeColor> {
+    let name = lodestone_data::block_states::block_name(state_id)?;
+    let path = name.strip_prefix("minecraft:").unwrap_or(name);
+    DyeColor::from_name(path.strip_suffix("_banner")?)
+}
+
+/// A banner's `rotation` state property, `0..16`. Vanilla's `RotationSegment`,
+/// not a four-way `facing` — see `banner_ground_placement_matrix`.
+#[must_use]
+fn banner_rotation_segment(state_id: u32) -> Option<u8> {
+    let props = lodestone_data::block_states::properties(state_id)?;
+    props
+        .iter()
+        .find(|(name, _)| *name == "rotation")
+        .and_then(|(_, value)| value.parse::<u8>().ok())
+}
+
+/// The block entity's stored pattern stack, parsed out of its NBT.
+///
+/// `BannerPatternLayers.Layer.CODEC` is `{pattern: <id>, color: <dye name>}` and
+/// the list key is `patterns`. Both fields are namespaced ids on the wire, so the
+/// namespace is stripped — [`lodestone_assets::banner_pattern_atlas`] keys its
+/// sprites on the **bare** asset id (`"creeper"`), and passing
+/// `"minecraft:creeper"` through resolves nothing and silently drops the layer.
+///
+/// A layer whose colour or pattern does not parse is dropped rather than
+/// defaulted: a wrong-coloured layer is harder to notice than a missing one.
+#[must_use]
+fn banner_patterns(nbt: &lodestone_core::Nbt) -> Vec<StoredPatternLayer> {
+    use lodestone_core::Nbt;
+
+    let field = |compound: &'_ Nbt, key: &str| -> Option<String> {
+        let Nbt::Compound(fields) = compound else {
+            return None;
+        };
+        match fields.iter().find(|(name, _)| name == key).map(|(_, v)| v) {
+            Some(Nbt::String(value)) => Some(value.clone()),
+            _ => None,
+        }
+    };
+    let Nbt::Compound(fields) = nbt else {
+        return Vec::new();
+    };
+    let Some(Nbt::List { elements, .. }) = fields
+        .iter()
+        .find(|(name, _)| name == "patterns")
+        .map(|(_, v)| v)
+    else {
+        return Vec::new();
+    };
+    elements
+        .iter()
+        .filter_map(|layer| {
+            let pattern = field(layer, "pattern")?;
+            let colour = field(layer, "color")?;
+            Some(StoredPatternLayer {
+                pattern_asset_id: pattern
+                    .strip_prefix("minecraft:")
+                    .unwrap_or(&pattern)
+                    .to_string(),
+                color: DyeColor::from_name(colour.strip_prefix("minecraft:").unwrap_or(&colour))?,
+            })
+        })
+        .collect()
+}
+
+/// Every banner position within [`VIEW_DISTANCE`], paired with its block state and
+/// pattern stack.
+///
+/// A second NBT-reading candidate gather beside [`sign_candidates`], and for the
+/// same reason that one exists: [`chest_candidates`] discards `be.nbt`, and a
+/// banner's whole appearance past its base colour lives there.
+#[must_use]
+fn banner_candidates(
+    world: &World,
+    chunks: impl IntoIterator<Item = ChunkPos>,
+    eye: Vec3,
+) -> Vec<([i32; 3], u32, Vec<StoredPatternLayer>)> {
+    let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
+    let mut candidates = Vec::new();
+    for pos in chunks {
+        let Some(chunk) = world.get(pos) else {
+            continue;
+        };
+        for be in &chunk.block_entities {
+            let x = pos.x * 16 + i32::from(be.rel_x);
+            let z = pos.z * 16 + i32::from(be.rel_z);
+            let y = i32::from(be.y);
+            let centre = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+            if centre.distance_squared(eye) > cutoff {
+                continue;
+            }
+            let state_id = chunk
+                .column
+                .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+            candidates.push(([x, y, z], state_id, banner_patterns(&be.nbt)));
+        }
+    }
+    candidates
+}
+
+/// One candidate resolved into a [`BannerSpawn`], or `None` when the state is not
+/// a standing banner.
+#[must_use]
+fn banner_spawn(
+    block: [i32; 3],
+    state_id: u32,
+    patterns: Vec<StoredPatternLayer>,
+    phase: f32,
+    light: u8,
+) -> Option<BannerSpawn> {
+    Some(BannerSpawn {
+        pos: block,
+        rotation_segment: banner_rotation_segment(state_id)?,
+        base_color: standing_banner_colour(state_id)?,
+        patterns,
+        phase,
+        light,
+    })
+}
+
+/// Every banner to draw this frame (issue #23).
+///
+/// `game_time` and `partial_tick` are both needed and both come from the caller:
+/// `banner_phase` mixes the block position into the tick so two adjacent banners
+/// sway out of step, and the partial tick is what makes the sway smooth rather
+/// than 20 Hz. A source that captured either would freeze every banner — the same
+/// warning `bell_source` carries.
+#[must_use]
+pub fn banner_spawns(
+    handle: &SharedHandle,
+    eye: Vec3,
+    game_time: i64,
+    partial_tick: f32,
+) -> Vec<BannerSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+
+    let candidates = {
+        let world = store.read();
+        banner_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
+
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+
+    let mut out = Vec::new();
+    for (block, state_id, patterns) in candidates {
+        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        let phase = lodestone_render::block_entity::banner_phase(block, game_time, partial_tick);
+        if let Some(spawn) = banner_spawn(block, state_id, patterns, phase, light) {
             out.push(spawn);
         }
     }

@@ -277,6 +277,57 @@ fn every_humanoid_armour_sheet_decodes_from_the_real_jar() {
     assert_eq!(sheets.len(), 17, "expected 9 humanoid + 8 leggings sheets");
 }
 
+/// Banner masks resolve, and they resolve under **the key the draw site derives**
+/// (issue #23).
+///
+/// `resolve_banner` hands back `BannerLayerDraw::sprite` as a full
+/// `minecraft:entity/banner/<id>` location, while `BannerPatternAtlas` keys on the
+/// bare `<id>`. `prepare_block_entities` bridges the two with a `rsplit('/')`, and
+/// if that bridge is wrong every layer is silently skipped and a banner draws blank
+/// white — an entirely plausible-looking banner. This is the join, checked on a real
+/// pattern stack rather than an empty one.
+#[test]
+#[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+fn banner_masks_resolve_under_the_key_the_draw_site_derives() {
+    use lodestone_assets::banner_pattern_atlas::BannerPatternAtlas;
+    use lodestone_render::banner_pattern::{DyeColor, StoredPatternLayer};
+    use lodestone_render::{BannerSpawn, BlockEntityModelSet};
+
+    let manager = crate::resources::vanilla_manager()
+        .expect("no vanilla client.jar under .cache/mc/<version>/; fetch it first");
+    let masks = BannerPatternAtlas::load(&manager).expect("load banner pattern masks");
+    assert!(!masks.is_empty(), "the mask atlas must not be empty");
+
+    let models = BlockEntityModelSet::load();
+    let mut spawn = BannerSpawn::at([4, 65, -9]);
+    spawn.base_color = DyeColor::Red;
+    spawn.patterns = vec![
+        StoredPatternLayer { pattern_asset_id: "creeper".into(), color: DyeColor::Lime },
+        StoredPatternLayer { pattern_asset_id: "stripe_downright".into(), color: DyeColor::Black },
+    ];
+    let resolved = models.resolve_banner(&spawn).expect("the banner rig is in the corpus");
+    // Base plus the two stored layers — `banner_pattern_layers` always prepends
+    // layer 0, so an empty-looking banner still has one mask to draw.
+    assert_eq!(resolved.layers.len(), 3);
+    for layer in &resolved.layers {
+        let key = layer
+            .sprite
+            .path()
+            .rsplit('/')
+            .next()
+            .expect("a sprite path always has a last segment");
+        assert!(
+            masks.get(key).is_some(),
+            "{} did not resolve under the bare key {key:?}",
+            layer.sprite
+        );
+    }
+    // The base layer carries the block's dye, not white — the whole reason the
+    // base colour rides the mask list rather than a per-instance tint.
+    let base = &resolved.layers[0];
+    assert_eq!(base.color, DyeColor::Red.gamma_rgb());
+}
+
 /// The trim-sprite loader against the real jar (issue #17) — the entry point that
 /// did not exist while `lodestone_assets::trim` had zero callers.
 ///

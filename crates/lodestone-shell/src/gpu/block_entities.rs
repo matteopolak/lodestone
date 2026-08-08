@@ -72,6 +72,25 @@ pub(super) struct BlockEntityRenderer {
     pub(super) textures: HashMap<&'static str, wgpu::BindGroup>,
     pub(super) cam_buffer: wgpu::Buffer,
     pub(super) cam_bind_group: wgpu::BindGroup,
+    /// The banner **pattern-layer** pass (issue #23/#174):
+    /// [`EntityPipeline::banner_layer_pipeline`] — alpha-blended, depth-test
+    /// `LessEqual`, depth-**write off**, and `fs_main_no_cutout` so a mask's
+    /// partially-transparent texels blend instead of being discarded.
+    ///
+    /// A second pipeline rather than a wider batch key, because the opaque loop
+    /// next door structurally cannot express these: each layer is one draw of the
+    /// *same* flag geometry with its own mask texture and its own colour, in a
+    /// strict order, and the batcher's whole job is to collapse repeats.
+    pub(super) banner_layer_pipeline: wgpu::RenderPipeline,
+    /// One texture bind group per banner **mask**, keyed by the bare pattern asset
+    /// id (`"creeper"`, `"base"`) — the form
+    /// [`lodestone_assets::banner_pattern_atlas::BannerPatternAtlas`] uses.
+    ///
+    /// Not a stitched atlas: each mask is its own full-size image, so each is its
+    /// own bind group and its own draw. Empty without a vanilla pack, and a banner
+    /// then draws its pole and blank cloth with no patterns — the fail-open every
+    /// other sheet here uses.
+    pub(super) banner_patterns: HashMap<String, wgpu::BindGroup>,
 }
 
 impl BlockEntityRenderer {
@@ -131,6 +150,34 @@ impl BlockEntityRenderer {
         );
         let cam_bind_group = pipeline.camera_bind_group(device, &cam_buffer);
 
+        // The banner masks (issue #23). `BannerPatternAtlas` reads
+        // `atlases/banner_patterns.json` and decodes one image per pattern; this
+        // turns each into a bind group over the same texture layout every sheet
+        // above uses. `base` is included — it is layer 0 of every banner's mask
+        // list, tinted by the block's own dye colour.
+        let mut banner_patterns = HashMap::new();
+        if let Some(manager) = crate::resources::vanilla_manager() {
+            match lodestone_assets::banner_pattern_atlas::BannerPatternAtlas::load(&manager) {
+                Ok(masks) => {
+                    let ids: Vec<String> = masks.pattern_ids().map(str::to_string).collect();
+                    for id in ids {
+                        if let Some(img) = masks.get(&id) {
+                            let view = super::entities::entity_texture_from_image(device, queue, img);
+                            banner_patterns
+                                .insert(id, pipeline.texture_bind_group(device, &view, &sampler));
+                        }
+                    }
+                    tracing::info!(
+                        target: "assets",
+                        loaded = banner_patterns.len(),
+                        "loaded vanilla banner pattern masks"
+                    );
+                }
+                Err(e) => tracing::warn!(target: "assets", "load banner patterns: {e}"),
+            }
+        }
+        let banner_layer_pipeline = pipeline.banner_layer_pipeline(device, color_format);
+
         Self {
             pipeline,
             models,
@@ -138,6 +185,8 @@ impl BlockEntityRenderer {
             textures,
             cam_buffer,
             cam_bind_group,
+            banner_layer_pipeline,
+            banner_patterns,
         }
     }
 
@@ -156,4 +205,19 @@ pub(super) struct BlockEntityDrawBatch {
     pub(super) texture: &'static str,
     pub(super) count: u32,
     pub(super) parts: Vec<Option<wgpu::Buffer>>,
+}
+
+/// One banner pattern layer, uploaded and ready to draw (issue #23).
+///
+/// **The `Vec` these come in is strictly ordered and that order is the whole
+/// feature**: layer 0 is the base colour and each subsequent mask paints over it.
+/// Sorting or batching them would composite a banner's design wrong, which is why
+/// this is a flat list of one-instance draws rather than a `BlockEntityDrawBatch`.
+#[derive(Debug)]
+pub(super) struct BannerLayerDrawBatch {
+    /// Bare pattern asset id, keying [`BlockEntityRenderer::banner_patterns`].
+    pub(super) pattern: String,
+    /// A one-instance buffer carrying the flag part's world matrix, this layer's
+    /// gamma-space colour as the instance tint, and the block's light.
+    pub(super) instances: wgpu::Buffer,
 }

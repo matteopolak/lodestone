@@ -35,7 +35,7 @@ use lodestone_render::{
 
 use crate::entities::EntityDraw;
 
-use super::block_entities::BlockEntityDrawBatch;
+use super::block_entities::{BannerLayerDrawBatch, BlockEntityDrawBatch};
 use super::{
     ArmourAccum, ArmourDrawBatch, ArmourPartAccum, ArmourTextureKey, EntityDrawBatch, FlameBatch,
     RenderState, RenderStats, WoolPartAccum, humanoid_armour_slot,
@@ -654,7 +654,7 @@ impl RenderState {
         queue: &wgpu::Queue,
         camera: &Camera,
         stats: &mut RenderStats,
-    ) -> Vec<BlockEntityDrawBatch> {
+    ) -> (Vec<BlockEntityDrawBatch>, Vec<BannerLayerDrawBatch>) {
         // Always reported, even on an empty frame: this is what separates "no
         // chests in view" from "no pack, so nothing can ever draw" — a chest with
         // no sheet draws nothing rather than a placeholder.
@@ -665,13 +665,19 @@ impl RenderState {
         let skulls = self.skull_source.skulls(eye);
         let bells = self.bell_source.bells(eye);
         let shulkers = self.shulker_source.shulkers(eye);
-        // All four, not any subset: an early return on only `chests`/`skulls`
+        let banners = self.banner_source.banners(eye);
+        // All five, not any subset: an early return on only `chests`/`skulls`
         // would make a bell in an otherwise chestless, skull-less room draw
         // nothing, which is exactly how this pass would have grown a third
-        // island — and a shulker box in an empty end-city room is the fourth
-        // instance of the same shape.
-        if chests.is_empty() && skulls.is_empty() && bells.is_empty() && shulkers.is_empty() {
-            return Vec::new();
+        // island — a shulker box in an empty end-city room is the fourth
+        // instance of the same shape, and a banner in a village the fifth.
+        if chests.is_empty()
+            && skulls.is_empty()
+            && bells.is_empty()
+            && shulkers.is_empty()
+            && banners.is_empty()
+        {
+            return (Vec::new(), Vec::new());
         }
 
         // Same group-0 contents as the entity pass, written to this pass's own
@@ -718,11 +724,63 @@ impl RenderState {
                 .filter_map(|spawn| self.block_entities.models.resolve_shulker(spawn)),
         );
 
+        // Banners (issue #23). `resolve_banner` returns three things at once: the
+        // pole/bar `body` and the swaying `flag` are ordinary opaque instances that
+        // join the batch above, while `layers` is an **ordered** list of masks that
+        // cannot be batched at all — see [`BannerLayerDrawBatch`].
+        let mut banner_layers = Vec::new();
+        for resolved in banners
+            .iter()
+            .filter_map(|spawn| self.block_entities.models.resolve_banner(spawn))
+        {
+            for layer in &resolved.layers {
+                // The mask's bare asset id — `PatternLayer::sprite` is
+                // `minecraft:entity/banner/<id>`, and `banner_patterns` keys on
+                // `<id>` alone. Passing the full location through resolves nothing
+                // and the layer silently disappears.
+                let Some(pattern) = layer.sprite.path().rsplit('/').next() else {
+                    continue;
+                };
+                if !self.block_entities.banner_patterns.contains_key(pattern) {
+                    continue;
+                }
+                // Gamma-space `0.0..=1.0` from the compositor, quantised to the
+                // gamma-space bytes `InstanceTint` carries. Doing this in linear
+                // would wash every dye toward white — vanilla is not
+                // colour-managed, and the shader multiplies in gamma too.
+                let rgb = layer.color.map(|c| {
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "clamped into 0..=255 first"
+                    )]
+                    {
+                        (c.clamp(0.0, 1.0) * 255.0).round() as u8
+                    }
+                });
+                let Some(buffer) = upload_instances_tinted(
+                    device,
+                    &[layer.transform],
+                    &[u32::from(layer.light)],
+                    &[InstanceTint::rgb(rgb)],
+                ) else {
+                    continue;
+                };
+                banner_layers.push(BannerLayerDrawBatch {
+                    pattern: pattern.to_string(),
+                    instances: buffer,
+                });
+            }
+            instances.push(resolved.body);
+            instances.push(resolved.flag);
+        }
+        stats.banner_layers_drawn = banner_layers.len();
+
         let frame = plan_block_entities(&instances, &camera.frustum());
         stats.block_entities_drawn = frame.stats.drawn;
         stats.block_entities_culled = frame.stats.culled_frustum;
 
-        frame
+        let opaque = frame
             .batches
             .iter()
             .map(|batch| BlockEntityDrawBatch {
@@ -734,20 +792,25 @@ impl RenderState {
                 // matrices are uploaded separately from the bottom's.
                 //
                 // `_tinted`, not the plain `upload_instances`: block entities
-                // now carry a per-instance `InstanceTint` (Job 2 step A,
-                // `lodestone_render::block_entity::BlockEntityBatch::tints`),
+                // carry a per-instance `InstanceTint`
+                // (`lodestone_render::block_entity::BlockEntityBatch::tints`),
                 // the same plumbing sheep wool/dyed armour/the hurt overlay
-                // already use. Every resolver still passes white
-                // (`[255, 255, 255]`, `InstanceTint::NONE`'s rgb), so this is
-                // a no-op today — proved by the chest/skull/bell pixel gates
-                // coming out byte-identical — and the hook the next tinted
-                // block-entity type (e.g. a banner base colour) plugs into.
+                // already use.
+                //
+                // **Every resolver here still passes white, banner included, and
+                // that is correct rather than pending.** A banner's base colour is
+                // not a tint on its cloth: vanilla draws `banner_base` untinted and
+                // puts the dye on *layer 0 of the mask list*, which is why it rides
+                // `BannerLayerDrawBatch` and not this field. The tint hook remains
+                // unused, and the next genuinely tinted block-entity type is the
+                // one that will use it.
                 parts: batch
                     .parts
                     .iter()
                     .map(|p| upload_instances_tinted(device, p, &batch.lights, &batch.tints))
                     .collect(),
             })
-            .collect()
+            .collect();
+        (opaque, banner_layers)
     }
 }

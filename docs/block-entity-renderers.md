@@ -1057,11 +1057,15 @@ Against the real 26-entry registration list (see above), not the issue's origina
 - **Shulker box — landed** (see [Shulker box](#shulker-box) above), including the live per-frame
   install. Still open within shulker scope: the lid open/close animation, which needs the
   `BLOCK_EVENT` fold `ChestLids` already has a shape for.
-- Banners (layered patterns from the `banner_patterns` atlas — tracked separately as
-  [#174](https://github.com/matteopolak/lodestone/issues/174), which also covers the shield item
-  sharing the same compositing function; see `docs/banner-shield-patterns.md` for why that
-  compositing function is a confirmed island and what actually blocks a consumer), the
-  enchanting-table book (a full animation state machine —
+- **Banner — landed**, including the live per-frame install: the block-name base colour and NBT
+  pattern gather (`block_entities::banner_spawns`), the pole/bar/flag rig with vanilla's sway, and
+  the **ordered translucent mask pass** that composites the pattern layers through
+  `EntityPipeline::banner_layer_pipeline`. See `docs/banner-shield-patterns.md`. Still open within
+  banner scope: **wall banners** (`createBodyLayer(false)`, a second body mesh the corpus does not
+  build — `standing_banner_colour` returns `None` for them so nothing is drawn wrong), and the
+  **shield** form of the same compositing function (`shield_pattern_layers` still has no consumer —
+  a shield is an item model in the hand, not a block entity, so it is a different pass).
+- The enchanting-table book (a full animation state machine —
   `open`/`flip`/`rot`/`time`, all client-simulated, none of it on the wire, closer in scope to the
   chest lid than to a static model), mob spawner (draws a miniature spinning entity inside the cage —
   reuses full entity rendering, not a simple cuboid rig), piston head, campfire, brushable block,
@@ -1082,7 +1086,7 @@ share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behin
 - `lodestone-assets` — `entity::{CubeDef, PartDef, EntityModelDef, PartPose, Affine, bake_entity_parts}`,
   `Image::decode_png`, `ResourceManager`/`ZipSource` for the jar.
 - `lodestone-render` — `entity::{push_part_quads, PartRange}`, `entity_pipeline::{EntityPipeline,
-  GpuEntityModel, EntityCameraUniform, upload_instances}`, `camera::Frustum`, `models::ModelVertex`.
+  GpuEntityModel, EntityCameraUniform, upload_instances_tinted}`, `camera::Frustum`, `models::ModelVertex`.
 - `lodestone-world` — `BlockEntity`, `LoadedChunk::block_entities`, `ChunkColumn::get_block`,
   `World::sync_block_entity` / `BlockEntitySync`, and (for sign text) `sign_text::{SignText, SignSide,
   SignDyeColor}` plus a real (non-dev) `serde_json` dependency for the JSON-text message parse.
@@ -1108,6 +1112,8 @@ share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behin
   properties and the `BLOCK_EVENT` trigger bell does not yet decode.
   `BlockEntityRenderers.java` is the registration list itself — read it directly rather than trusting
   any summary of it, including this doc's, the next time the scope needs re-deriving.
-- [`banner-shield-patterns.md`](./banner-shield-patterns.md) — issue #174's compositing function,
-  confirmed still an island this session (grep evidence there), and what its next consumer actually
-  needs.
+- [`banner-shield-patterns.md`](./banner-shield-patterns.md) — the pattern compositing function and
+  its now-live block-entity consumer. **This entry used to say the function was "confirmed still an
+  island this session"; that is stale twice over** — `resolve_banner` has called
+  `banner_pattern_layers` since #174's step D, and the shell now installs a banner source and draws
+  the layers. The shield form is still without a consumer.

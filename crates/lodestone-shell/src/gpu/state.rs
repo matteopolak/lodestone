@@ -38,7 +38,8 @@ use super::terrain::{
     anim_slots_at,
 };
 use super::{
-    BellSource, BlockEntityRenderer, BlockEntitySource, DEFAULT_RENDER_DISTANCE_CHUNKS, ShulkerSource,
+    BannerSource, BellSource, BlockEntityRenderer, BlockEntitySource,
+    DEFAULT_RENDER_DISTANCE_CHUNKS, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
     HandSwingSource, MainHandSource, MapSource, NameTagRenderer, OutlineRenderer,
     OutlineShapeSource,
@@ -299,6 +300,8 @@ impl RenderState {
             shulker_source: ShulkerSource::default(),
             // Likewise `set_map_source` (issue #184).
             map_source: MapSource::default(),
+            // Likewise `set_banner_source` (issue #23).
+            banner_source: BannerSource::default(),
             sign_text,
             // No signs until the shell installs a world source; see
             // `set_sign_source`.
@@ -978,6 +981,18 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::ShulkerSpawn> + Send + Sync + 'static,
     ) {
         self.shulker_source = ShulkerSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's banners (issue #23).
+    ///
+    /// Must be re-installed every frame: the closure captures the game tick and the
+    /// partial tick, so a stale one freezes every banner's cloth mid-sway — the
+    /// same hazard [`set_bell_source`](Self::set_bell_source) documents.
+    pub fn set_banner_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::BannerSpawn> + Send + Sync + 'static,
+    ) {
+        self.banner_source = BannerSource(Some(Box::new(f)));
     }
 
     /// Install the source for this frame's filled-map pictures (issue #184).

@@ -4,10 +4,16 @@ Issues #178 (ambient/environmental types) and #182 (combat/event types). Both st
 same measured gap: `crates/protocol/v770/src/generated/particle_types.rs` (registry id →
 name) and `crates/lodestone-data/src/generated/particle_types.rs`
 (`PARTICLE_TYPE_COUNT: u32 = 125`) decode the full vanilla particle registry and network
-dispatch resolves ids correctly, but `Particles::spawn_one`
-(`crates/lodestone-shell/src/particles.rs`) only had a `match` arm for six of them
-(`"flame"`, `"smoke"`, `"large_smoke"`, `"crit"`, `"splash"`, `"bubble"`) — every other name
-fell into the `other => tracing::debug!(...)` catch-all and was silently dropped.
+dispatch resolves ids correctly, while `Particles::spawn_one`
+(`crates/lodestone-shell/src/particles.rs`) matches a growing subset and every other name falls
+into the `other => tracing::debug!(...)` catch-all and is silently dropped. It started at six
+(`"flame"`, `"smoke"`, `"large_smoke"`, `"crit"`, `"splash"`, `"bubble"`); the "What was built,
+per issue" section below is the live inventory — **read that rather than any count in this
+paragraph.**
+
+Not every type arrives over the network at all: a large group is spawned client-side from
+`Block.animateTick`, and those come from `Particles::ambient_tick` instead. A type can
+legitimately have both.
 
 ## What it is
 
@@ -84,9 +90,10 @@ renders it. Two instances that mattered here:
   block/particle atlas mix-up.
 - `ParticleTypes.TOTEM_OF_UNDYING` and `ParticleTypes.END_ROD` both name `glitter_0..7` —
   `totem_of_undying` (built here) reuses the pre-existing `Sheet::Glitter` variant directly.
-  `end_rod` was **not** built this pass (see "What's still open" below) even though it shares
-  the sheet, because its `move()` override (no collision at all) needs a `Behaviour` shape
-  this pass didn't add.
+  `end_rod` shares the sheet and is now built too — its `move()` override turned out to be
+  `has_physics = false`, which `move_by` already honours, not a new `Behaviour`.
+  **Both `end_rod.json` and `totem_of_undying.json` list `glitter_7 … glitter_0`, descending**,
+  which is why `Sheet::Glitter`'s frame list runs that way.
 
 ### What was built, per issue
 
@@ -183,15 +190,35 @@ have a `Behaviour`, an `emit::` function and a `spawn_one` dispatch arm:
   `ClientEvent::Particles` already forwards generically into `Particles::spawn_particles` (see
   "The dispatch is reachable independently of any specific gameplay trigger" above).
 
-**#178 (ambient/environmental): not started this pass.** Every type on its checklist needs
-either a bespoke `Behaviour` (`portal`, `soul`, `end_rod`, `gust`, `sonic_boom` each have a
-`tick()`/`getQuadSize()`/`getLightCoords()` override with no existing analogue in this crate
-— `PortalParticle` in particular recomputes position from a closed-form easing curve every
-tick rather than integrating velocity at all) or is blocked on the same `ParticleOptions`
-decoder (`dust`, `sculk_charge`). None of that is started. Separately, and regardless of the
-render-side work: #178's own issue body is right that the real vanilla trigger for most of
-these is a client-side per-block-state tick (torch flame, soul fire, portal), which is
-`sim.rs` territory and was off-limits for this pass anyway.
+**#178 (ambient/environmental): landed.** Fourteen new sheets, two new behaviours, seventeen
+new `spawn_one` arms and — the half this section previously called out as the real gap — a
+client-predicted per-block-state emitter.
+
+* **The `Sheet` frame list.** `Sheet::frames()` now returns the pack's own texture list rather
+  than synthesising `<stem>_<n>`. That was a **shipped bug**, not a refactor: `smoke.json`,
+  `cloud.json`, `large_smoke.json`, `snowflake.json`, `effect.json`, `witch.json`,
+  `instant_effect.json`, `end_rod.json` and `totem_of_undying.json` all list their frames
+  **descending**, so every smoke plume, potion mote, witch mote and totem sparkle animated
+  backwards. A sprite lookup still resolved, which is why nothing caught it. It is also the only
+  way `enchant.json` is expressible at all — its frames are `sga_a` … `sga_z`.
+  `Sheet::Generic` (descending) and `Sheet::PortalGeneric` (ascending) are two variants over the
+  *same eight textures*, because a sheet's identity here is its **sequence**.
+* **Two new behaviours, both full `tick()` overrides.** `Behaviour::Portal` recomputes position
+  from `Particle::spawn` every tick — `xd/yd/zd` are an **amplitude**, never a speed, and neither
+  `gravity` nor `friction` is read. `Behaviour::CampfireSmoke` applies a `3.0e-6` gravity straight
+  to `yd`, has no friction at all, and fades over the **last 60 ticks** rather than the back half
+  of life; a signal fire lives ~300 ticks, so a back-half fade makes it transparent halfway up.
+* **`end_rod` needed no new behaviour after all.** It is a `SimpleAnimatedParticle` and the
+  no-collision override is `has_physics = false`, which `move_by` already honours — the note above
+  claiming it needed a new `Behaviour` shape was wrong.
+* **`Particles::ambient_tick`** is the client-predicted emitter: a bounded random scan of nearby
+  block states, at vanilla's own sample density, for torches, soul torches, nether portals, end
+  gateways, end rods and lit campfires. **None of these is on the wire** — vanilla spawns them from
+  `Block.animateTick` — so no dispatch table however complete could have produced them. It rides
+  the collision snapshot `Sim::tick_particles` already holds, so it costs no extra lock.
+* **Still not wired:** `enchant` (its motes travel toward a target the enchanting-table block
+  entity supplies, a different wiring shape from everything here), and `dust`/`dust_color_transition`
+  and the other option-carrying types, which still want the shared `ParticleOptions` decoder.
 
 ## Verification
 
@@ -246,7 +273,11 @@ transcribed vanilla constant, documented inline with its Java source line.
   later. `explosion`/`explosion_emitter` looked like they belonged on this list too, and did
   not — see "Built, issue #416" above for how that was checked before being ruled out, not
   assumed.
-- Before touching `portal`, `soul`, `end_rod`, `gust`, or `sonic_boom`: each needs its own
-  bespoke `Behaviour` (see "What's still open" above for why `PortalParticle` in particular
-  is not a `move_by`-based particle at all). Read the Java class's `tick()`/`getQuadSize()`/
-  `getLightCoords()` overrides before assuming any existing `Behaviour` fits.
+- **Read the type's `particles/<type>.json` frame list out of the jar, never infer it.** Half of
+  vanilla's multi-frame sheets are listed descending and one (`enchant`) is alphabetic. A wrong
+  order animates backwards and every test still passes, because the sprite resolves either way.
+- Read the Java class's `tick()`/`getQuadSize()`/`getLightCoords()` overrides before assuming an
+  existing `Behaviour` fits — but also before adding a new one: `Behaviour::AshSmoke` already
+  means "ordinary physics, advance the sheet by age" and covers `SoulParticle`, `SculkCharge`,
+  `Gust` and `SonicBoom`, and `has_physics = false` already covers a `move()` override that only
+  skips collision.
