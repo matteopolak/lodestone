@@ -173,3 +173,76 @@ fn on_ground_the_launch_also_pops_the_player_up_by_1_2_blocks() {
         "control: airborne must not get the on-ground pop-up"
     );
 }
+
+/// The strength ladder, read out of the enchantment's own data file rather than
+/// recollected — issue #208's driver has to resolve a *level* into the `strength`
+/// every test above passes in by hand, and getting the per-level term wrong is
+/// worth a full block per tick at Riptide III.
+///
+/// `data/minecraft/enchantment/riptide.json`:
+///
+/// ```json
+/// "minecraft:trident_spin_attack_strength": {
+///   "type": "minecraft:add",
+///   "value": { "type": "minecraft:linear", "base": 1.5, "per_level_above_first": 0.75 }
+/// }
+/// ```
+///
+/// So `1.5 + 0.75 * (level - 1)`, and **not** the `1.5 / 2.0 / 2.5` a `0.5`
+/// per-level term would give. The expected values below are computed from that
+/// file, outside this crate.
+#[test]
+fn the_riptide_strength_ladder_matches_the_enchantment_data() {
+    use lodestone_physics::riptide_spin_attack_strength;
+
+    assert_eq!(
+        riptide_spin_attack_strength(0),
+        0.0,
+        "no Riptide is exactly the `> 0.0F` test TridentItem.releaseUsing gates on"
+    );
+    assert_eq!(riptide_spin_attack_strength(1), 1.5);
+    assert_eq!(riptide_spin_attack_strength(2), 2.25);
+    assert_eq!(riptide_spin_attack_strength(3), 3.0);
+    // The wrong-hypothesis arm: a `0.5` per-level term (the ladder a
+    // half-remembered `1.5, 2.0, 2.5` implies) lands on 2.0 at level II. The
+    // assertion above already excludes it; this states it so a future edit that
+    // "simplifies" the constant cannot pass by changing both the code and the
+    // expectation together.
+    assert_ne!(
+        riptide_spin_attack_strength(2),
+        2.0,
+        "per_level_above_first is 0.75, not 0.5"
+    );
+}
+
+/// A riptide launch enters the spin-attack pose, and it lapses on its own.
+///
+/// `startAutoSpinAttack(20, …)` and `LivingEntity.aiStep`'s unconditional
+/// `if (autoSpinAttackTicks > 0) autoSpinAttackTicks--`
+/// (`LivingEntity.java:3158-3159`) — 20 ticks, exactly one second, then the pose
+/// is released. Predicted count, not "it eventually stops".
+#[test]
+fn the_spin_attack_lasts_exactly_twenty_ticks() {
+    let world = Empty;
+    let profile = PhysicsProfile::mc_1_21();
+    let mut s = PlayerState::at(Vec3d::new(0.5, 60.0, 0.5), 0.0);
+    s.on_ground = false;
+
+    apply_riptide(&mut s, &world, &profile, 3.0);
+    assert_eq!(s.auto_spin_attack_ticks, 20);
+    assert!(s.is_auto_spin_attack());
+
+    for elapsed in 1..=19 {
+        tick(&mut s, MovementInput::NONE, &world, &profile);
+        assert!(
+            s.is_auto_spin_attack(),
+            "still spinning after {elapsed} of 20 ticks"
+        );
+    }
+    tick(&mut s, MovementInput::NONE, &world, &profile);
+    assert!(
+        !s.is_auto_spin_attack(),
+        "the 20th tick is the last one; a 21-tick spin would be an off-by-one \
+         in the countdown's placement relative to travel"
+    );
+}

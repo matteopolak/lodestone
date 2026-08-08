@@ -2,15 +2,19 @@
 
 ## What it is
 
-Two item-driven velocity impulses in `lodestone-physics`: the riptide-trident
-launch (#208) and the elytra firework-rocket glide boost (#206). Both are
-landed as **physics-only, partial** — the arithmetic is implemented and
-tested against the decompiled source; the *trigger* (item use, held-duration,
-weather, rocket entity lifetime) is not, because none of it is physics state
-this crate models. See "What is not modelled" in each section — this is not
-an oversight, it is the scope boundary `lodestone-physics` draws everywhere
-else in this codebase (equipment, entity spawning and item state all live
-outside it).
+Two item-driven velocity impulses: the riptide-trident launch (#208) and the
+elytra firework-rocket glide boost (#206). The **arithmetic** lives in
+`lodestone-physics` and the **triggers** — item use, held duration, the wet
+gate, the enchantment level, the glide flag, the rocket's duration — live in
+the shell and `lodestone-ecs`, because none of them is physics state.
+
+**This doc used to say the triggers did not exist**, and for two commits that
+was true: both functions were islands, reachable only from their own tests, and
+using a firework while gliding or releasing a Riptide trident in water did
+nothing at all. The drivers landed with #206/#208's second pass and have their
+own section below. What is still missing is enumerated there rather than in
+prose: the spin-attack damage sweep (server-side), the rocket's random lifetime
+term (server-side RNG), and a real enchantment-registry name lookup.
 
 ## How it works
 
@@ -45,15 +49,18 @@ variant in `crate::pose`, inserted into `desired_pose`'s priority exactly
 where vanilla's `getDesiredPose` puts it: after `SWIMMING`/`FALL_FLYING`,
 before the crouch/stand pair.
 
-**What is not modelled**: the three gates vanilla checks before reaching
-this code at all (`EnchantmentHelper.getTridentSpinAttackStrength(...) >
-0.0F` — equipment/enchantment data; `timeHeld >= 10` — item-use duration;
-`isInWaterOrRain()` — fluid presence *or* weather, and this crate has no
-weather concept) — a driver must evaluate all three and call
-`apply_riptide` once, on the release edge, with `strength` already resolved.
-Also not modelled: the attack-damage half of `startAutoSpinAttack`
-(`autoSpinAttackDmg`, the entity-hit sweep in `checkAutoSpinAttack`) — this
-crate applies no damage anywhere.
+`lodestone_physics::riptide_spin_attack_strength(level)` resolves a Riptide
+level into that `strength`, read out of
+`data/minecraft/enchantment/riptide.json` — `1.5 + 0.75 * (level - 1)`, so
+**1.5 / 2.25 / 3.0**. The per-level term is `0.75`, *not* the `0.5` a
+half-remembered `1.5, 2.0, 2.5` ladder implies, and the difference at Riptide
+III is a full block per tick. `tests/riptide.rs` asserts the whole ladder and
+explicitly excludes the `0.5` hypothesis.
+
+**Still not modelled**: the attack-damage half of `startAutoSpinAttack`
+(`autoSpinAttackDmg`, the entity-hit sweep in `checkAutoSpinAttack`). That is
+`hurtServer` on the server side, and this client applies no damage anywhere —
+the spin *state* and *pose* are client-side and are modelled.
 
 ### Elytra firework boost (#206)
 
@@ -77,18 +84,98 @@ the same `Entity.getLookAngle()` port `update_fall_flying_movement` already
 uses for the elytra glide itself, so there is one look-vector
 implementation in the crate, not two.
 
-**What is not modelled, and could not be without more than this crate
-owns**: the rocket is its own entity, ticked independently by the level's
-normal entity loop. Spawning it on right-click, tracking the "attached"
-relationship, and its `life` counter (which decides how many ticks the
-boost lasts before the rocket detonates) are entity/item state this crate
-has no model of. A driver must spawn/track the rocket (or an equivalent
-per-use counter) and call `apply_firework_boost` once per tick for as long
-as vanilla's attached rocket would still be ticking, with
-`PlayerState::fall_flying` already `true`. Vanilla itself does not pin the
-boost's tick order relative to the player's own travel (the rocket ticks in
-level entity-iteration order, independent of the player), so there is no
-"before or after `tick_elytra`" answer to reproduce either.
+The rocket is its own entity in vanilla, ticked by the level's normal entity
+loop, and `apply_firework_boost` deliberately models only the one line above.
+The driver is `lodestone_ecs::player::FireworkBoost` — a **per-use tick
+countdown**, not a tracked entity, because this client does not decode the
+rocket's `DATA_ATTACHED_TO_TARGET` entity data and so cannot see the
+attachment. See "The drivers" below for the duration it predicts.
+
+Vanilla itself does not pin the boost's tick order relative to the player's own
+travel (the rocket ticks in level entity-iteration order, independent of the
+player), so there is no "before or after `tick_elytra`" answer to reproduce.
+`tick_firework_boost` runs **before** `player_physics`, which is the
+lower-latency of the two indistinguishable choices.
+
+### The drivers
+
+Both triggers are **client-predicted**, because vanilla's are. A vanilla client
+runs `TridentItem.releaseUsing` itself (`MultiPlayerGameMode.releaseUsingItem` →
+`LivingEntity.releaseUsingItem`) and applies the launch locally, and its copy of
+the firework rocket applies the boost from the rocket's own client-side `tick`.
+That is why both feel instant, and why doing them server-only would feel wrong
+even if it were possible here.
+
+#### Riptide: the release edge
+
+`Sim::use_item_live` arms `ItemUseTicks(Some(0))`; `tick_item_use` advances it
+once per 20 Hz tick; `Sim::end_use_live` takes it and calls `Sim::maybe_riptide`,
+**before** sending `RELEASE_USE_ITEM` — vanilla's own order. The three gates:
+
+| vanilla | here |
+|---|---|
+| `timeHeld >= 10` (`TridentItem.THROW_THRESHOLD_TIME`) | `ItemUseTicks`, in ticks not frames |
+| `getTridentSpinAttackStrength(stack, player) > 0.0F` | `Sim::riptide_level` × `riptide_spin_attack_strength` |
+| `isInWaterOrRain() && !isPassenger()` | `Sim::is_in_water_or_rain` |
+
+A dry-land release with a Riptide trident does nothing, exactly as in vanilla —
+the wet gate is a gate, not a decoration on the impulse.
+
+**Two known wrong edges, both recorded rather than hidden:**
+
+- **`is_in_water_or_rain` has no `canSeeSky`.** Vanilla's `Level.isRainingAt` is
+  `isRaining() && canSeeSky(pos) && precipitationAt(pos) == RAIN`; this client
+  has neither (`app/weather.rs`'s own doc records the same gap for the
+  rain-muffling sound path), so a non-zero rain level stands in for the whole
+  predicate. It fails toward *allowing* a riptide under a roof, costing one
+  corrective teleport in that case. Refusing in the open — where riptide is
+  actually used — would make the feature unreachable, which is the worse error.
+- **`riptide_level` compares a hardcoded registry id.** `ItemEnchantment` carries
+  the session-scoped `minecraft:enchantment` registry id, not a name, and nothing
+  in this client surfaces that registry: the id → name table *is* decoded (the
+  v770 adapter's `ClientRegistries::entry_names`) but is never emitted as a
+  `ClientEvent`. So the id is derived the one way the wire allows — dynamic
+  registries arrive **sorted by resource location** (measured on the creative
+  oracle for `dimension_type`, see `crates/protocol/v770/src/packets/registry.rs`),
+  and `riptide` is the 33rd of 26.2's 43 built-in enchantments alphabetically,
+  holder id **32**.
+
+  A data pack that adds or removes an enchantment sorting before `riptide` shifts
+  every id, and this would then read some other enchantment's level — failing
+  toward launching on the *wrong* trident. **The fix is a protocol change, not a
+  change here**: emit `ClientEvent::EnchantmentRegistryNames { names }` at Login
+  from `registries.entry_names("minecraft:enchantment")`, exactly as
+  `BiomeRegistryNames` already does, then match on `"minecraft:riptide"` and
+  delete the constant.
+
+#### Elytra firework boost: the use edge
+
+`Sim::use_item_live` → `start_firework_boost_if_gliding`: held item is
+`minecraft:firework_rocket` and `PlayerState::fall_flying` is set, so
+`FireworkBoost(20)`. `tick_firework_boost` spends one per tick and applies the
+impulse only while still gliding (`FireworkRocketEntity.tick`'s attached branch is
+gated on `attachedToEntity.isFallFlying()`, so a rocket on a player who stops
+gliding keeps ticking down and boosts nothing).
+
+**The 20 is the deterministic floor of vanilla's lifetime, and that is a
+deliberate under-prediction.** Vanilla's rocket lives
+`10 * flightCount + random.nextInt(6) + random.nextInt(7)` ticks with
+`flightCount = 1 + fireworks.flightDuration()`. The two random terms are rolled on
+the *server's* RNG — the vanilla client never computes them at all, because its
+rocket arrives with `lifetime = 0` and simply keeps boosting until the server
+removes the entity. With no rocket entity here, `10 * 2 = 20` is what can be
+predicted honestly: about five ticks short of vanilla's average, never long. The
+player is authoritative over their own position, so there is nothing to desync —
+only a slightly weaker boost. `flightDuration` is itself an undecoded
+`minecraft:fireworks` component, hence the standard 1-gunpowder rocket's `2`.
+
+#### Getting into a glide at all
+
+`fall_flying` had **zero writers** in this tree before #206 — `tick_elytra` was
+reachable only from `lodestone_physics::tick`'s dispatch on a flag nothing set. The
+state machine is `lodestone_ecs::player::update_fall_flying_state`; see
+[`local-player-components.md`](./local-player-components.md)'s "Glide state is
+client-authoritative on the way in and predicted on the way out".
 
 ## How to change it
 
@@ -112,6 +199,12 @@ None.
 - `lodestone-physics` — `apply_riptide`, `apply_firework_boost`,
   `PlayerState::{auto_spin_attack_ticks, is_auto_spin_attack}`,
   `Pose::SpinAttack`, `entity::move_entity`, `mth::{sin, cos}`.
-- Not yet wired to any consumer outside `lodestone-physics` — see "What is
-  not modelled" above. The next owner is whichever layer handles item use
-  and entity spawning (outside this crate's cluster in this repo).
+- `lodestone-ecs` — `player::{FireworkBoost, ItemUseTicks, GliderEquipped,
+  tick_firework_boost, tick_item_use, update_fall_flying_state,
+  send_fall_flying_command}`.
+- `lodestone-shell` — `sim/actions.rs`'s `maybe_riptide`,
+  `start_firework_boost_if_gliding`, `riptide_level`, `is_in_water_or_rain`,
+  `glider_equipped`; `sim/step.rs` pushes `GliderEquipped` once per tick.
+- `lodestone-model` — `PlayerCommand::StartFallFlying` (whose **first producer**
+  is `send_fall_flying_command`; four adapters encoded it and nothing sent it),
+  `ItemEnchantment`.
