@@ -4363,6 +4363,108 @@ menu/render/*}`.
   the footer buttons"*. That comment is why this landing needed no rediscovery, and it is the best argument
   in this file for writing down the consequence of a limitation at the site of the limitation.
 
+**12.122 The client gave the player a new offline account on every launch, and the reason was one line of
+`Cargo.toml`: `lodestone-testsupport` was a *normal* dependency of `lodestone-shell` — the only crate in
+the workspace where it was — so `net.rs` could re-export a helper whose documented guarantee is that it
+never returns the same value twice, straight into the shipped join path.**
+
+The owner's report was *"I keep spawning in the air even if I rejoin — might be because the client changes
+my offline username each time"*. That diagnosis was right, and the mechanism was worse than it read. The
+fix is `crates/lodestone-shell/src/offline_identity.rs` plus `net.rs`/`sim/session.rs`; the record is
+`docs/offline-identity.md`.
+
+- **`unique_username()` reaching production was invisible to every health check here, and the reason is
+  the same one §12.44 records.** The tree was green, all four commands passed, and the only symptom was in
+  the owner's game. What made it *reachable* was not a bad `use` — it was a dependency-table entry, and the
+  structural fix is to move it: under `[dev-dependencies]` the lib target cannot name the crate at all, so
+  the defect becomes a compile error. **A scan for the effect is the second layer, not the first**, and it
+  scans for the underscored Rust path under `src/` rather than for `Cargo.toml` shapes, because a
+  Cargo-shaped gate would have to model `[dependencies]`, `cfg`-gated tables, workspace inheritance and
+  `optional` entries, and getting one wrong fails in the safe-looking direction. The census that made the
+  fix obvious took one script over every `crates/**/Cargo.toml`: **11 crates had it under
+  `[dev-dependencies]`, `lodestone-sound` had it `optional` behind its `live-v770` feature and named it only
+  from `tests/`, and exactly one — `lodestone-shell` — had it plain.** Ask "which crate is the outlier"
+  before asking "which line is wrong".
+- **The framing this unit was handed was wrong in a way that made the fix look smaller than it is: the
+  `session.profile.name` arm at the other side of the same `match` is dead code.** The brief said
+  singleplayer takes the generated-name arm and the Microsoft arm "is presumably already correct for that
+  path". Verified instead: `Origin::Integrated` carries no `auth` field at all, `NetClient::connect` passes
+  `auth: None`, and `NetClient::connect_online` — the only constructor that passes `Some` — has **zero
+  callers in the shell**, with `lodestone_auth::login::try_cached_session` called from nowhere under
+  `crates/lodestone-shell/src/`. So *every* join this client makes is an offline one, multiplayer included,
+  and the owner's signed-in `propagated` account is in the switcher and used by nothing. An island in the
+  "nothing produces this" direction, exactly §12.38's shape, sitting behind a doc comment that said so
+  when it was written and is still true.
+- **"Offline mode derives the UUID from the username, ignoring the one the client sends" is a rule about
+  *vanilla*, and applying it to our own server inverts the diagnosis.** `lodestone-server`'s login handler
+  does `login_uuid = Some(uuid)` — it echoes back whatever the client presented and keys the player entity
+  on it (#438). So in **singleplayer**, the one place the owner actually saw the bug, a stable *name* alone
+  would have fixed nothing: `Uuid::new_v4()` was the operative instability, and a name-only fix would have
+  shipped, looked correct, and left the symptom exactly as reported. The gate carries all three arms for
+  this reason — name unstable, uuid unstable, and both — because two of the three would have passed a
+  weaker predicate. **When a rule in `CLAUDE.md` names "the server", check which server the code under test
+  is talking to.**
+- **The same asymmetry found a second, latent defect nobody was looking for.** Against real vanilla the
+  server *does* derive the id and sends it back in `LOGIN_FINISHED` — and `v770`'s `handle_login` binds it
+  to `_profile` and throws it away, so `NetClient::local_uuid` keeps whatever we presented. A random v4
+  therefore meant the client's idea of its own identity disagreed with the server's for the whole session,
+  latent in anything keyed on "am I this player?" (#189's roster exclusion included). Deriving the UUID
+  vanilla's way — `nameUUIDFromBytes("OfflinePlayer:" + name)` — makes the two agree by construction, which
+  is why the derivation is the right fix rather than "any stable UUID". Fixing the discard is a
+  `crates/protocol/**` change and was not made.
+- **The wrong derivation is indistinguishable from the right one by every test except an exact external
+  value.** `uuid`'s own `Uuid::new_v3` is a *namespaced* v3 — `md5(namespace ‖ name)` — where Java's
+  `nameUUIDFromBytes` hashes the name bytes alone. The namespaced reading is stable, deterministic, version
+  3, RFC-4122-variant and passes every stability and well-formedness assertion; only the byte value
+  differs. So the vectors come from CPython's `hashlib.md5` over the documented rule (no JVM on this
+  machine, §12.117), and there is a **control asserting the namespaced reading disagrees with all five** —
+  without it the vectors could have been generated by either derivation and nothing would have said which.
+  Same species as §12.115's singularity: every well-formedness check passes and the value is wrong.
+- **The control caught the gate's own arithmetic, which is the argument for asserting an exact list rather
+  than a count.** The `#[cfg(test)]`-exclusion control asserts *which lines* a fixture flags; the first
+  draft predicted `[2, 15]` and the truth was `[2, 14]` — a miscounted fixture line. A length assertion
+  (`flagged.len() == 2`) would have passed, and the off-by-one would have sat in the scanner's only proof
+  that its exclusion stops at the closing brace.
+- **The control observed failing, verbatim, before the fix landed** (probe was `verdict.expect(..)` on the
+  pre-fix expression, then inverted to `expect_err`):
+
+  ```text
+  thread 'the_pre_fix_expression_fails_the_same_stability_predicate' panicked at
+  crates/lodestone-shell/tests/offline_identity_is_stable.rs:190:21:
+  TEMPORARY-CONTROL-PROBE: "the two constructions produced different usernames:
+  \"E0_172dq2y\" then \"E1_172dq2y\" — a new offline account every launch"
+  ```
+
+  `E0_`/`E1_` is the atomic counter in the leading field — the two differ **within one process**, not
+  merely across runs, which is why no amount of clock resolution was ever going to save this.
+- **Both *worlds* had to be tested, and the fallback is the one that mattered.** A fixture with a stored
+  name cannot exercise the no-file path, and the no-file path is precisely where the generated name lived.
+  Each arm asserts `path.exists()` in its own direction and fails loudly rather than skipping — the
+  precondition species — so a missing fixture cannot silently turn the stored-name gate into a second copy
+  of the default one.
+- **The island check is the published `local_uuid` on a dead port, not the module's own tests.** A
+  well-tested `OfflineIdentity` with nothing calling it is the dominant defect class here. `local_uuid` is
+  set from the `LoginProfile` *before* `run` dials anything (#189), so two `NetClient::connect`s to
+  `127.0.0.1:1` observe the real production expression with no server involved: same uuid twice, equal to
+  `OfflineIdentity::load().uuid()`, and **version 3** — that last assertion alone fails on the pre-fix code
+  regardless of what the machine's persisted name happens to be. `connect_as` with two `unique_username()`s
+  is its negative control, so "the two matched" cannot be satisfied by `local_uuid` publishing a constant.
+- **The requirement the helper existed for did not go away; it moved to where it belongs.** A shared
+  offline name is a shared player file and a dead player is held on the death screen sending no chunks, so
+  every live gate still needs a fresh identity. `NetClient::connect_as`/`Sim::connect_as` take the name
+  explicitly and 16 call sites across 14 gate files pass `unique_username()` there. **Deleting a test
+  helper's production reachability is not the same as deleting its requirement** — the requirement is a
+  parameter now, stated at each call site, instead of a default nobody chose.
+- **The obvious model was rejected for three reasons that are properties of the schema, not preferences.**
+  "Make the offline placeholder a row in `profiles.json` so the switcher carries it" fails because
+  `AccountProfile` is keyed by `profile_id` and an offline UUID is a *function of the name* (so a rename
+  produces a second entry rather than editing the first); because `selected: None` already means offline
+  mode, so a row would create two encodings of one state; and because three of `AccountProfile`'s four
+  fields are meaningless for a placeholder that has no Mojang id, no skin and no keychain entry.
+  **`profiles.json` cannot distinguish an offline entry from a Microsoft one today** — the gap
+  `menu/accounts.rs` already recorded — and a single-valued setting in its own file routes around it
+  without a `lodestone-auth` schema change or any coordination with the screen that owns the list.
+
 **12.123 Finishing block drops: an invisible drop was one `Copy` derive, six of 1,207 loot tables were
 bundled because an `#[ignore]`d oracle gate had *never run*, the issue body's own restatement of
 `ore_drops` was draw-count wrong, and the grass-to-dirt bug the owner reported was a proxy that only
@@ -4475,3 +4577,115 @@ bodies could not have said.
   by a follow-up (`e23a50b3`) rather than an amend. **A cross-reference is a claim like any other and this
   document's own §12.2 rule applies to it: verify before relying on it — including when you are the one
   writing it.**
+
+**12.124 Issue #542's `mesh_fluids` cost is real and now 2.07× lower, but its diagnosis named the
+wrong dominant term: 46% of the per-fluid-cell cost was a **linear string scan of a 66-entry biome
+table**, run 25 times per cell, and nothing to do with the `&dyn` virtual calls the issue blamed. The
+precomputed grid the issue designed also made the *untargeted* arm 2.9× worse until a second change
+landed, and the "this is a locality fix so watch cycles not instructions" framing was false — the
+loop starts at IPC 7.64.**
+
+Instrument: `crates/lodestone-shell/tests/client_chunk_cycles.rs` (§12.120), unchanged except for a
+per-fluid-cell row. Baseline re-measured at `4e0ffdf2` in a detached worktree: `mesh_fluids`
+65,965,170 instructions / 8,952,036 cycles over 4,704 fluid cells — **13,709 per cell**, reproducing
+§12.120's 13,711 to 0.01%. Byte-identity proof:
+`crates/lodestone-render/tests/fluid_mesh_identity_gate.rs`. Doc:
+[`docs/fluid-rendering.md`](./docs/fluid-rendering.md)'s two new "How it works" subsections.
+
+- **The ledger, three separable commits, each measured on its own:**
+
+  | arm | instr/cell | cycles/cell | IPC | dry section (instr) |
+  |---|---|---|---|---|
+  | before | 13,709 | 1,793 | 7.64 | 490,885 |
+  | `mesh_fluids` generic over `V: FluidSectionView + ?Sized` | 12,406 | 1,622 | 7.65 | 356,874 |
+  | + padded 18³ `FluidGrid` + `FluidSectionView::cell_at` | 8,709 | 1,166 | 7.46 | 404,542 |
+  | + four-entry name→effects memo on `NamedBiomeTint` | **6,629** | **857** | 7.74 | 404,471 |
+
+  Column one-off total 112,215,407 → 78,653,989. Monomorphisation is worth 9.5% of the term, the
+  grid 29.8% of what is left, the memo 23.9% of what is left after that.
+
+- **The dominant term was `water_tint_at`, and it was found by refusing to start coding.** The issue
+  and the briefing both said the cost was ~30 (really ~50) virtual calls through
+  `&dyn FluidSectionView`. A 20,000-iteration micro-measurement of `blend_box` over
+  `NamedBiomeTint` — 30 lines, one compile of `lodestone-render` — returned **6,263 instructions per
+  `water_tint_at` call, 97.8% of it inside `lodestone_assets::tint::biome_effects`**. That function
+  is `BIOME_EFFECTS.iter().find(|(name, _)| *name == path)` over **66 entries**, and vanilla's
+  default biome blend is a radius-2 box, so it runs **25 times per water cell** — ~825 string
+  comparisons per cell. 6,263 of 13,709 is **46% of `mesh_fluids`, in a string compare**. The two
+  changes the issue proposed together bought 5,000 instructions/cell; a four-entry pointer-keyed memo
+  bought 2,080 more from a term the issue never mentioned. **A cost hypothesis in an issue body is a
+  claim like any other, and the cheapest possible measurement of it is a micro-benchmark of the one
+  function you suspect — do that before implementing the plan you were handed.**
+
+- **"`mesh_models` is generic and inlines; `mesh_fluids` takes `&dyn` and cannot" is false, and it
+  was the briefing's second independent axis.** `mesh_models` is `pub fn mesh_models(view: &dyn
+  ModelSectionView)` — `models.rs:737`, one line to check. Both were `&dyn`. The *conclusion*
+  (monomorphise) survived and is worth 9.5%, but the reasoning behind it was wrong, and the real
+  reason `mesh_models` is cheaper per cell is that it makes a handful of neighbourhood probes where
+  `mesh_fluids` makes fifty. **When a briefing offers a comparison as its evidence, read both sides
+  of it.**
+
+- **The instrument's known blind spot was the wrong worry, and it cost nothing to find out.** §12.120
+  records that instructions are blind to locality and that `heap_bytes` met that limit in practice.
+  This change is explicitly a locality change, so the expectation was a win visible in cycles more
+  than in instructions. Measured, `mesh_fluids` starts at **IPC 7.64** — at or near this core's
+  retire width, so it was never memory-bound, and instructions and cycles fell 2.07× and 2.09×.
+  **A documented instrument limitation is a hypothesis about a particular measurement, not a
+  property of the subject; read the IPC before deciding which counter is the honest one.**
+
+- **The precomputed grid regressed the arm it was not aimed at, by 2.9×, and only a split
+  measurement could see it.** `FluidGrid` fills 4,096 interior cells through a new
+  `FluidSectionView::cell_at`, whose *default* composes `fluid_at` + `occludes_at` + `overlay_at`.
+  A fluid-free section previously called `fluid_at` once per cell; with the default it made three
+  calls, each redoing three `split16`s, three range checks, a snapshot-slot index and a
+  `PalettedContainer::get`. Dry sections went **356,874 → 1,021,034 instructions**. Overriding
+  `cell_at` in `SnapshotFluidView` to resolve the state id **once** and derive all three answers
+  brought it to 404,542 — below the pre-change 490,885. Most sections in real terrain are dry, so
+  shipping the first version would have been a net loss on inland worlds while the headline number
+  improved. **A cache that is a win amortised over its hits is a loss on a workload with none;
+  measure the arm your optimisation does not target, and keep it in the harness as its own row.**
+
+- **The identity gate's golden bytes come from the implementation being replaced, which is legitimate
+  here and would not be for a parity fix.** No JVM and no Docker this session (§12.117, `789c6869`),
+  so there is no vanilla oracle. But #542 is a refactor: the correct expected output *is* the old
+  output. The gate meshes 13 real-state scenes and compares FNV-1a digests of the exact `bytemuck`
+  byte images of `FluidMeshes`'s vertex and index arrays against a file generated by running the same
+  test file at `4e0ffdf2`. FNV-1a is hand-rolled and pinned to the spec's published vectors, because
+  `std::hash::DefaultHasher` is documented as unstable across releases and a golden keyed on it would
+  rot silently at the next toolchain bump. All 13 scenes are byte-identical.
+
+- **The control corrected a prediction, in the direction that matters.** The gate re-meshes every
+  scene through a view that answers every probe outside `0..16` as air — the exact failure mode a
+  mis-sized or mis-signed padded grid produces — and asserts the *count* of scenes that change.
+  Predicted 10 of 12 on the reasoning that `dry` (emits nothing) and `water_only` (uniform, all-water
+  in every padded cell) could not separate. It measured 11: clamping turns `water_only`'s
+  out-of-section neighbours into air, which un-culls its entire outer shell. **A uniform scene is
+  still sensitive to its padding**, and the assertion now predicts 12 of 13 exactly rather than
+  "some differed". The memo's own control was run too: neutering the hit path to
+  `.flatten().take(0)` produced *"25 samples of one biome must leave exactly one memo entry — more
+  means the memo is not being consulted and every sample re-scanned the table; left: 4, right: 1"*.
+
+- **Two fixture categories were wrong on the first pass and the census printout is what said so.**
+  `WaterOnly` (all water, no solid) and `OceanFloor` (water on a floor) both mesh to **zero quads** —
+  correct (every face is culled against the same fluid) but vacuous as *identity* fixtures, since
+  they only ever hash the empty buffer. And the briefing's "water-only section" category is not the
+  all-water section at all: it is a section whose **opaque** mesh is empty while its water mesh is
+  not — `Surface` here, water below `y = 8` with air above and nothing solid inside the section, 512
+  quads. The gate now asserts both halves of that (`0` in-section occluders **and** a non-empty water
+  mesh) and adds `SubmergedCave`, an air pocket at the section centre, for faces in all six
+  directions away from any boundary. **A scene that emits nothing passes every byte-identity
+  assertion; print the quad count beside the census and read it.**
+
+- **A doc claim two sections apart from its own contradiction.** `docs/fluid-rendering.md` said
+  `SnapshotFluidView` "does not yet implement `partial_occluder_y_range_at`" and gave the patch to
+  apply — in both "Known gaps" and "Dependencies" — while `mesher.rs:1154` has implemented it, with
+  a doc comment explaining why. Same shape as §12.111's `289`/`361`. Corrected, and the gate's
+  `path_bank` scene now exercises it with a non-zero partial-occluder census so it cannot go vacuous.
+
+- **Still open, and both are arithmetic rather than guesses.** `BIOME_EFFECTS` is already
+  alphabetically sorted, so `biome_effects` could be a `binary_search_by`: ~6 compares instead of
+  ~33, fixing every caller (`mesh_models`'s grass/foliage tints call `effects` up to four times per
+  sample) rather than the one memoised here. It lives in `lodestone-assets`, outside this unit's
+  cluster. Beyond that, adjacent cells' radius-2 blend boxes share 20 of 25 columns, so a separable
+  sliding-window sum over `blend_box` is bit-exact — vanilla's per-channel floor division happens
+  once, at the end — and worth roughly 5× again on what remains, which is still ~63% tint.

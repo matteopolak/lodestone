@@ -1203,7 +1203,7 @@ fn should_render_backward_up_face_in(
 /// Note this was the *second* axis issue #542 proposed, on the stated grounds
 /// that "`mesh_models` is generic and inlines". **That premise is false** —
 /// `mesh_models` above is `&dyn` too. The conclusion survives (measured 9.5% of
-/// the term, `DESIGN.md` §12.123); the reasoning behind it did not.
+/// the term, `DESIGN.md` §12.124); the reasoning behind it did not.
 #[must_use]
 pub fn mesh_fluids<V: FluidSectionView + ?Sized>(view: &V) -> FluidMeshes {
     let mut out = FluidMeshes::default();

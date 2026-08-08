@@ -1167,7 +1167,7 @@ fn client_chunk_path_cycle_attribution() {
          empty. It is NOT free and it is NOT the target: issue #542 measured a palette-level \n\
          `contains no fluid` precheck at ~2% of the term. `FluidGrid::any_fluid` now gives \n\
          that precheck away as a by-product of the fill — but the fill itself is what makes \n\
-         this arm move, so watch it when changing `cell_at` (DESIGN.md §12.123).",
+         this arm move, so watch it when changing `cell_at` (DESIGN.md §12.124).",
         dry.len()
     );
     println!(
