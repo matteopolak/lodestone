@@ -151,6 +151,15 @@ already wrote this frame — see `RenderState::render_inner`.
   jar-derived census cannot resolve (an unregistered/synthetic type path,
   or the rare `0`-height marker types) — not a crash, not a `0`-height tag
   glued to the entity's feet.
+- **`layout_ink_runs` is cached, and per-frame callers must go through
+  `InkLayoutCache`** (issue #527 (b)). The ink walk probes
+  `cell_width * cell_height` texels per character and its output is pure local
+  space, so it depends only on `(text, RasterFont)` — the anchor and the
+  billboard basis are applied afterwards. `NameTagRenderer` and
+  `SignTextRenderer` each own one cache. **The font is not part of the key**:
+  each renderer owns one `RasterFont` for its whole lifetime, so if a renderer
+  ever swaps fonts in place, its cache must be cleared at that point or it
+  will keep serving the old font's rects.
 
 ## Configuration
 

@@ -413,6 +413,11 @@ struct WindowApp {
     keybinds: Keybinds,
     /// Editable buffer for the chat prompt; only consumed while chat is open.
     chat_input: ChatInput,
+    /// Wrapped chat rows, persisted across frames — see
+    /// [`crate::hud::ChatWrapCache`]. Lives here rather than in `hud` because
+    /// the HUD `Frame` is rebuilt from scratch every frame and so can hold no
+    /// state of its own; issue #527 (a).
+    chat_wrap: crate::hud::ChatWrapCache,
     /// Press/drag/release state machine for the open container screen; see
     /// [`container::MenuInput`]. Drives every predicted click this app sends.
     menu_input: MenuInput,

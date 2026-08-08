@@ -480,6 +480,11 @@ pub struct HudFrame<'a> {
     /// exactly as the fields alone would suggest, not as some other implicit
     /// baseline.
     pub chat_options: ChatDisplayOptions,
+    /// Where the chat log's wrapped rows are persisted between frames — see
+    /// [`ChatWrapCache`]. `None` (every hermetic test, and any caller with no
+    /// frame-to-frame state) wraps from scratch, which is correct, just not
+    /// free; the running app always supplies one.
+    pub chat_wrap: Option<&'a ChatWrapCache>,
     /// Formatted player-list rows, `Some` only while the tab overlay is held.
     pub players: Option<&'a [String]>,
     /// The server's tab-list header, one entry per line, drawn centred **above**
@@ -634,6 +639,7 @@ impl<'a> HudFrame<'a> {
             chat_input: None,
             chat_caret_visible: true,
             chat_options: ChatDisplayOptions::default(),
+            chat_wrap: None,
             players: None,
             tab_header: &[],
             tab_footer: &[],
@@ -1033,9 +1039,18 @@ impl HudGeometry {
             // just ignoring them while drawing, matching vanilla.
             let stripped = if opts.colors { None } else { Some(strip_legacy(line)) };
             let display: &str = stripped.as_deref().unwrap_or(line);
-            let mut sub_rows = b.wrap_legacy(display, chat_box_w, chat_pose_scale);
-            sub_rows.reverse();
-            for sub in sub_rows {
+            // Wrapped once per message, not once per frame (issue #527 (a)):
+            // the cache keys on the display text plus this frame's box width
+            // and pose scale, so a frame with no new line, no resize and no
+            // options edit performs zero wraps. Without a cache attached this
+            // is the old behaviour, just spelled through the same call.
+            let sub_rows = match frame.chat_wrap {
+                Some(cache) => cache.rows(display, chat_box_w, chat_pose_scale, |t| {
+                    b.wrap_legacy(t, chat_box_w, chat_pose_scale)
+                }),
+                None => std::rc::Rc::from(b.wrap_legacy(display, chat_box_w, chat_pose_scale)),
+            };
+            for sub in sub_rows.iter().rev() {
                 if row_i >= max_visual_rows {
                     break 'entries;
                 }
@@ -1051,7 +1066,7 @@ impl HudGeometry {
                     [0.0, 0.0, 0.0, chat_bg_opacity * alpha],
                 );
                 b.text_legacy(
-                    &sub,
+                    sub,
                     margin,
                     y,
                     chat_pose_scale,
@@ -1863,65 +1878,184 @@ fn strip_legacy(s: &str) -> String {
 /// Never returns an empty vector: an empty `s` yields one empty row, and a
 /// `max_width_px <= 0.0` (or a line that already fits) is returned as a
 /// single unwrapped row rather than looping forever trying to shrink it.
+///
+/// Builds every candidate row **in place** in one reusable buffer, pushing and
+/// truncating rather than `format!`-ing a fresh `String` per word (and per
+/// character on a hard break) — the wrap *decisions* are identical, only the
+/// allocation count changes. `pending_code` is likewise the selector `char`
+/// alone rather than an owned two-character `String`. Combined with
+/// [`ChatWrapCache`], which persists the result so a frame with no new message
+/// re-wraps nothing at all, this is issue #527's half (a).
 fn wrap_legacy_with(measure: impl Fn(&str) -> f32, s: &str, max_width_px: f32) -> Vec<String> {
     if max_width_px <= 0.0 || measure(s) <= max_width_px {
         return vec![s.to_string()];
     }
     let mut rows = Vec::new();
     let mut current = String::new();
-    let mut pending_code: Option<String> = None;
+    let mut pending_code: Option<char> = None;
+    // Flush `current` as a finished row and re-seed the buffer with the colour
+    // code in force, keeping `current`'s allocation across rows.
+    let flush = |rows: &mut Vec<String>, current: &mut String, code: Option<char>| {
+        rows.push(current.clone());
+        current.clear();
+        if let Some(c) = code {
+            current.push('\u{00a7}');
+            current.push(c);
+        }
+    };
     for word in s.split(' ') {
         // The last `§`+selector pair inside this word, if any — what a
         // continuation line started *after* this word must be seeded with to
         // keep reading the same colour.
-        let mut word_pending = pending_code.clone();
+        let mut word_pending = pending_code;
         let mut chars = word.chars();
         while let Some(ch) = chars.next() {
             if ch == '\u{00a7}' {
                 if let Some(code) = chars.next() {
-                    word_pending = Some(format!("\u{00a7}{code}"));
+                    word_pending = Some(code);
                 }
             }
         }
 
-        let candidate = if current.is_empty() {
-            word.to_string()
-        } else {
-            format!("{current} {word}")
-        };
-        if measure(&candidate) <= max_width_px {
-            current = candidate;
+        let before_word = current.len();
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+        if measure(&current) <= max_width_px {
             pending_code = word_pending;
             continue;
         }
+        current.truncate(before_word);
         if !current.is_empty() {
-            rows.push(std::mem::take(&mut current));
-            if let Some(code) = &pending_code {
-                current.push_str(code);
-            }
+            flush(&mut rows, &mut current, pending_code);
         }
-        let seeded = format!("{current}{word}");
-        if measure(&seeded) <= max_width_px {
-            current = seeded;
-        } else {
+        let seed_len = current.len();
+        current.push_str(word);
+        if measure(&current) > max_width_px {
             // The word alone overflows even a fresh line: hard-break it
             // character by character. `§`/selector characters are
             // zero-width, so they never trigger a break by themselves.
+            current.truncate(seed_len);
             for ch in word.chars() {
-                let attempt = format!("{current}{ch}");
-                if !current.is_empty() && measure(&attempt) > max_width_px {
-                    rows.push(std::mem::take(&mut current));
-                    if let Some(code) = &pending_code {
-                        current.push_str(code);
-                    }
-                }
+                let was_empty = current.is_empty();
                 current.push(ch);
+                if !was_empty && measure(&current) > max_width_px {
+                    current.pop();
+                    flush(&mut rows, &mut current, pending_code);
+                    current.push(ch);
+                }
             }
         }
         pending_code = word_pending;
     }
     rows.push(current);
     rows
+}
+
+/// Persisted wrapped-row cache for the chat log — vanilla's `GuiMessage.Line`s,
+/// which `GuiMessage.splitLines` fills **once, when the message arrives**
+/// (`ChatComponent.addMessageToDisplayQueue`) rather than once per frame.
+///
+/// ## What it is
+///
+/// The wrap is a pure function of `(display text, chat box width, chat pose
+/// scale, font)`. The text changes on a `SYSTEM_CHAT`/`PLAYER_CHAT` packet; the
+/// width and scale change on a resize or an options edit. Nothing in that set
+/// changes per frame, so without a cache the whole log is re-wrapped every
+/// frame — the defect issue #527 (a) reports.
+///
+/// ## How to change it
+///
+/// The geometry key is the whole invalidation story: any *new* input the wrap
+/// starts depending on must join `width`/`scale` here, or the cache will serve
+/// a stale layout. The font is not keyed because a resource reload rebuilds the
+/// owning `App`. Entries are `Rc<[String]>` so a hit is a refcount bump rather
+/// than a per-row `String` clone; the map is cleared wholesale when it grows
+/// past [`Self::MAX_ENTRIES`] rather than evicted by age, which is adequate for
+/// a bounded chat log and keeps the type free of ordering state.
+#[derive(Debug, Default)]
+pub struct ChatWrapCache {
+    inner: std::cell::RefCell<ChatWrapInner>,
+}
+
+#[derive(Debug, Default)]
+struct ChatWrapInner {
+    /// The geometry the cached rows were wrapped for. `None` before the first
+    /// wrap; any mismatch clears `rows`.
+    geometry: Option<(u32, u32)>,
+    rows: std::collections::HashMap<String, std::rc::Rc<[String]>>,
+}
+
+impl ChatWrapCache {
+    /// Cleared wholesale past this many distinct lines.
+    const MAX_ENTRIES: usize = 256;
+
+    /// The wrapped rows for `text` at this geometry, computing them with `wrap`
+    /// only on a miss.
+    fn rows(
+        &self,
+        text: &str,
+        width_px: f32,
+        scale: f32,
+        wrap: impl FnOnce(&str) -> Vec<String>,
+    ) -> std::rc::Rc<[String]> {
+        // Bit patterns, not the floats: the key must be `Hash`/`Eq`, and an
+        // exact-bits comparison is the right test here anyway — these are
+        // recomputed from the same expressions every frame, so equal geometry
+        // is bit-equal geometry.
+        let geometry = (width_px.to_bits(), scale.to_bits());
+        let mut inner = self.inner.borrow_mut();
+        if inner.geometry != Some(geometry) {
+            inner.geometry = Some(geometry);
+            inner.rows.clear();
+        }
+        if let Some(hit) = inner.rows.get(text) {
+            return std::rc::Rc::clone(hit);
+        }
+        if inner.rows.len() >= Self::MAX_ENTRIES {
+            inner.rows.clear();
+        }
+        let rows: std::rc::Rc<[String]> = wrap(text).into();
+        inner.rows.insert(text.to_string(), std::rc::Rc::clone(&rows));
+        rows
+    }
+}
+
+#[cfg(test)]
+mod chat_wrap_cache_tests {
+    use super::ChatWrapCache;
+
+    /// The whole point of the cache: a repeat frame with the same line at the
+    /// same geometry must not call the wrapper again, and a geometry change
+    /// must. The counter is the assertion — a test that only compared the
+    /// returned rows would pass with no cache at all.
+    #[test]
+    fn a_repeat_line_at_the_same_geometry_wraps_exactly_once() {
+        let cache = ChatWrapCache::default();
+        let wraps = std::cell::Cell::new(0usize);
+        let wrap = |_: &str| {
+            wraps.set(wraps.get() + 1);
+            vec!["hello".to_string(), "world".to_string()]
+        };
+
+        let first = cache.rows("hello world", 80.0, 1.0, &wrap);
+        assert_eq!(wraps.get(), 1, "the first call must wrap");
+        let second = cache.rows("hello world", 80.0, 1.0, &wrap);
+        assert_eq!(wraps.get(), 1, "the second call at the same geometry must not");
+        assert_eq!(&*first, &*second);
+
+        // A different line at the same geometry is a genuine miss.
+        let _ = cache.rows("another line", 80.0, 1.0, &wrap);
+        assert_eq!(wraps.get(), 2);
+
+        // A resize or a chat-scale change invalidates everything: the same
+        // text must be re-wrapped at the new width.
+        let _ = cache.rows("hello world", 120.0, 1.0, &wrap);
+        assert_eq!(wraps.get(), 3, "a width change must invalidate the cache");
+        let _ = cache.rows("hello world", 120.0, 2.0, &wrap);
+        assert_eq!(wraps.get(), 4, "a scale change must invalidate the cache");
+    }
 }
 
 /// The RGB of one of the sixteen legacy `§` colour codes (`0`..=`9`, `a`..=`f`),

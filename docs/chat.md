@@ -111,6 +111,17 @@ for the same note in code.
   unit-tested against a hand-specified width table (see
   `wrap_uses_real_per_glyph_widths_not_a_flat_character_count`) without a GPU,
   an atlas, or a loaded jar.
+- **The wrap result is cached** (`hud::ChatWrapCache`, issue #527). Vanilla
+  splits once, on arrival — `GuiMessage.splitLines` from
+  `ChatComponent.addMessageToDisplayQueue` — and this is the equivalent: the
+  cache is owned by `WindowApp::chat_wrap` (the `HudFrame` is rebuilt every
+  frame and can hold no state), keyed by the display text plus the box width
+  and pose scale, and cleared wholesale when either changes.
+  **Gotcha: if the wrap starts depending on a new input, that input must join
+  the key** — otherwise the cache serves a stale layout, which looks like a
+  wrap bug rather than a cache bug. A `chat_wrap: None` frame (every hermetic
+  test) wraps from scratch, so a test never observes the cache unless it
+  attaches one.
 - **Gotcha**: `chat_pose_scale = scale * chat_options.scale` folds this HUD's
   own fixed 2× legibility factor (`scale`, shared with the F3 debug overlay)
   together with the option. Do not apply the option to the shared `scale`

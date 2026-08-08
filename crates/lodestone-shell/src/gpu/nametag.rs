@@ -176,11 +176,72 @@ pub(super) struct LocalRect {
     pub(super) h: f32,
 }
 
+/// One string's finished ink-run layout: the rects and the total advance
+/// [`layout_ink_runs`] returns, behind an `Arc` so a cache hit is a refcount
+/// bump rather than a `Vec` clone.
+pub(super) type InkLayout = std::sync::Arc<(Vec<LocalRect>, f32)>;
+
+/// Persisted [`layout_ink_runs`] results, keyed by the string alone.
+///
+/// ## What it is
+///
+/// The ink-run walk probes `is_ink` for every texel of every glyph cell of the
+/// string — `cell_width * cell_height` per character. Its output is pure
+/// local space with an accumulating cursor, so it depends on nothing that
+/// changes per frame: only `(text, RasterFont)`. The anchor and the billboard
+/// basis are applied *after* it, by the caller. Without this cache every
+/// visible nametag and every sign line re-walked its texels every frame — issue
+/// #527 (b).
+///
+/// ## How to change it
+///
+/// The font is not part of the key because each renderer owns exactly one
+/// `RasterFont` for its whole lifetime (a resource reload rebuilds the GPU
+/// state). **If a renderer ever swaps fonts in place, this cache must be
+/// cleared at that point** or it will serve the old font's rects. Entries are
+/// dropped wholesale past [`Self::MAX_ENTRIES`] rather than by age: names and
+/// sign lines are a small, slowly-changing set, and a wholesale clear keeps
+/// this type free of ordering state.
+///
+/// `Mutex` rather than `RefCell` so the owning renderer stays `Send`/`Sync`
+/// like every other field around it; the lock is uncontended (one render
+/// thread) and taken once per string per frame.
+#[derive(Debug, Default)]
+pub(super) struct InkLayoutCache {
+    inner: std::sync::Mutex<std::collections::HashMap<String, InkLayout>>,
+}
+
+impl InkLayoutCache {
+    /// Cleared wholesale past this many distinct strings.
+    const MAX_ENTRIES: usize = 512;
+
+    /// This string's ink-run layout, walking the texels only on a miss.
+    pub(super) fn layout(&self, raster: &RasterFont, text: &str) -> InkLayout {
+        let mut map = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(hit) = map.get(text) {
+            return std::sync::Arc::clone(hit);
+        }
+        if map.len() >= Self::MAX_ENTRIES {
+            map.clear();
+        }
+        let layout: InkLayout = std::sync::Arc::new(layout_ink_runs(raster, text));
+        map.insert(text.to_string(), std::sync::Arc::clone(&layout));
+        layout
+    }
+}
+
 /// Walks `text` through `raster` exactly as `VanillaFont::glyph` does (same
 /// per-row run-length merge over ink texels), but returns the local rects
 /// instead of emitting to a 2-D `ColourStream` — see the module doc for why
 /// this cannot just call that method. Returns the rects and the string's
 /// total advance (for horizontal centring).
+///
+/// **Per-frame callers should go through [`InkLayoutCache`] rather than calling
+/// this directly** — the walk is `O(chars * cell_width * cell_height)` and its
+/// result changes only when the string does.
 ///
 /// A codepoint the font does not cover at all (not even as whitespace)
 /// contributes no rect and [`MISSING_ADVANCE`] of blank space — the hollow
@@ -299,6 +360,7 @@ fn quad_vertices(
 /// tag, or one further than [`MAX_DISTANCE`] from the camera.
 fn push_entity_quads(
     raster: &RasterFont,
+    ink: &InkLayoutCache,
     draw: &EntityDraw,
     camera_position: Vec3,
     right: Vec3,
@@ -319,7 +381,10 @@ fn push_entity_quads(
     let height = entity_base_height(&draw.type_path) * draw.scale;
     let anchor = draw.feet + Vec3::new(0.0, height + ATTACHMENT_PADDING, 0.0);
 
-    let (rects, total_width) = layout_ink_runs(raster, &tag.text);
+    // Cached: the walk depends only on `(text, font)`, and this is called once
+    // per visible named entity per frame (issue #527 (b)).
+    let layout = ink.layout(raster, &tag.text);
+    let (rects, total_width) = (&layout.0, layout.1);
     if rects.is_empty() {
         return;
     }
@@ -330,7 +395,7 @@ fn push_entity_quads(
     // must sit on top of an earlier glyph's shadow, not the other way
     // round).
     let shadow_offset = metrics::SHADOW_OFFSET;
-    for rect in &rects {
+    for rect in rects {
         let shadow_rect = LocalRect {
             x: rect.x + shadow_offset,
             y: rect.y + shadow_offset,
@@ -345,7 +410,7 @@ fn push_entity_quads(
             SHADOW_COLOR,
         ));
     }
-    for rect in &rects {
+    for rect in rects {
         normal_out.extend(quad_vertices(
             *rect,
             half_width,
@@ -356,7 +421,7 @@ fn push_entity_quads(
         ));
     }
     if tag.see_through {
-        for rect in &rects {
+        for rect in rects {
             see_through_out.extend(quad_vertices(
                 *rect,
                 half_width,
@@ -385,6 +450,8 @@ pub(super) struct NameTagRenderer {
     /// every caller below already treats "no font" as "draw nothing" rather
     /// than panicking.
     font: Option<RasterFont>,
+    /// Ink-run layouts, persisted across frames (issue #527 (b)).
+    ink: InkLayoutCache,
 }
 
 impl NameTagRenderer {
@@ -533,6 +600,7 @@ impl NameTagRenderer {
             normal_vertices,
             see_through_vertices,
             font: load_font(),
+            ink: InkLayoutCache::default(),
         }
     }
 
@@ -564,6 +632,7 @@ impl NameTagRenderer {
         for draw in entities {
             push_entity_quads(
                 raster,
+                &self.ink,
                 draw,
                 camera.position,
                 right,
@@ -727,6 +796,7 @@ mod tests {
         };
         push_entity_quads(
             &raster,
+            &InkLayoutCache::default(),
             &draw,
             Vec3::ZERO,
             Vec3::X,
@@ -779,6 +849,7 @@ mod tests {
         };
         push_entity_quads(
             &raster,
+            &InkLayoutCache::default(),
             &draw,
             Vec3::ZERO,
             Vec3::X,
@@ -808,6 +879,7 @@ mod tests {
         };
         push_entity_quads(
             &raster,
+            &InkLayoutCache::default(),
             &sneaking,
             Vec3::ZERO,
             Vec3::X,
@@ -862,6 +934,7 @@ mod tests {
         };
         push_entity_quads(
             &raster,
+            &InkLayoutCache::default(),
             &draw,
             Vec3::ZERO,
             Vec3::X,

@@ -38,6 +38,7 @@ impl WindowApp {
             // — see `Keybinds::from_json_value`.
             keybinds: crate::config::Options::load().keybinds,
             chat_input: ChatInput::new(),
+            chat_wrap: crate::hud::ChatWrapCache::default(),
             menu_input: MenuInput::new(),
             shift_held: false,
             ctrl_held: false,
