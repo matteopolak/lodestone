@@ -290,6 +290,27 @@ impl Resolver for EmbeddedResolver {
             .map(|i| EMBEDDED_STRUCTURE_TEMPLATES[i].1.to_vec())
     }
 
+    /// `worldgen/template_pool/<name>.json` — 188 files (issue #514's S4).
+    ///
+    /// **The third entry point to the structure engine**, and it fails exactly the
+    /// way the other two do: the trait default is `Value::Null`, and a resolver
+    /// taking it makes every *jigsaw* structure demote to `Unsupported` and land
+    /// on the ledger — the five villages, `pillager_outpost`, `ancient_city`,
+    /// `trail_ruins`, `trial_chambers` and the bastion, i.e. every structure whose
+    /// terrain adaptation S3's beardifier exists to apply.
+    fn template_pool(&self, id: &str) -> Value {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        self.try_json(&format!("template_pool/{name}"))
+    }
+
+    /// `worldgen/processor_list/<name>.json` — 40 files. A pool element's
+    /// `processors` field is either an inline object or a reference to one of
+    /// these; only the reference form reaches this method.
+    fn processor_list(&self, id: &str) -> Value {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        self.try_json(&format!("processor_list/{name}"))
+    }
+
     /// `tags/worldgen/biome/<name>.json`. Load-bearing rather than a nicety:
     /// every bundled structure spells its `biomes` field as a single tag
     /// reference (`"#minecraft:has_structure/shipwreck"`), so without this every
