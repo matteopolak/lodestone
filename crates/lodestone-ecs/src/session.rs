@@ -1504,6 +1504,7 @@ mod tests {
                     latency: Some(12),
                     display_name: None,
                     listed: Some(true),
+                    properties: None,
                 }],
             },
         );

@@ -972,6 +972,21 @@ impl SharedState {
                 latency: Some(entry.latency),
                 display_name: entry.display_name.clone(),
                 listed: Some(entry.listed),
+                // Issue #62: `Some` even when empty, because a folded entry *has*
+                // a value for every field — the wire `Option`s meant "this delta
+                // did not mention it" and the fold has already merged them.
+                properties: Some(
+                    entry
+                        .profile
+                        .properties
+                        .iter()
+                        .map(|property| lodestone_model::ProfileProperty {
+                            name: property.name.clone(),
+                            value: property.value.clone(),
+                            signature: property.signature.clone(),
+                        })
+                        .collect(),
+                ),
             })
             .collect()
     }

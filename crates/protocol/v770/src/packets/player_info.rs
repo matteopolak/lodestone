@@ -59,6 +59,26 @@ pub struct PlayerInfoEntry {
     pub latency: Option<i32>,
     /// Display-name component reduced to plain text, from `UPDATE_DISPLAY_NAME`.
     pub display_name: Option<String>,
+    /// Profile properties, from `ADD_PLAYER`.
+    ///
+    /// **These carry the skin.** They were decoded and discarded into `let _`
+    /// until issue #62's decode half: `minecraft:textures`' base64 payload never
+    /// left this crate, so no remote player could have a skin. `None` means the
+    /// update had no `ADD_PLAYER` action at all, which a merging fold must treat
+    /// as "unchanged" rather than "no properties".
+    pub properties: Option<Vec<ProfileProperty>>,
+}
+
+/// One profile property from `ADD_PLAYER`: a name, a value, and an optional
+/// Mojang signature over the value (present only in online mode).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileProperty {
+    /// Property name, e.g. `textures`.
+    pub name: String,
+    /// Property value. Base64-encoded JSON for `textures`.
+    pub value: String,
+    /// Signature over the value, when the server supplied one.
+    pub signature: Option<String>,
 }
 
 /// Clientbound `player_info_update` (id 70).
@@ -92,9 +112,18 @@ fn skip_chat_session(r: &mut Reader<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Consumes the `ADD_PLAYER` profile-property multimap, returning the player
-/// name. Each property is a name, a value, and an optional signature.
-fn read_add_player(r: &mut Reader<'_>) -> Result<String> {
+/// Reads the `ADD_PLAYER` action: the player name, then the profile-property
+/// multimap. Each property is a name, a value, and an optional signature.
+///
+/// **This used to discard the properties**, and that was the whole of issue #62's
+/// remote-player gap: `minecraft:textures` — base64 JSON holding the skin URL and
+/// its model declaration — was read off the wire into `let _` and never left this
+/// crate, so every remote player rendered with the default skin. The bytes were
+/// always correct; nothing carried them.
+///
+/// The limits are unchanged and still enforced before any allocation, so a hostile
+/// server cannot turn "keep the properties" into an allocation attack.
+fn read_add_player(r: &mut Reader<'_>) -> Result<(String, Vec<ProfileProperty>)> {
     let name = r.string(MAX_NAME)?;
     let count = r.var_i32()?;
     if count < 0 {
@@ -106,14 +135,22 @@ fn read_add_player(r: &mut Reader<'_>) -> Result<String> {
             actual: count as usize,
         });
     }
+    let mut properties = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        let _prop_name = r.string(MAX_PROP_NAME)?;
-        let _prop_value = r.string(MAX_PROP_VALUE)?;
-        if r.bool()? {
-            let _signature = r.string(MAX_PROP_SIGNATURE)?;
-        }
+        let prop_name = r.string(MAX_PROP_NAME)?;
+        let value = r.string(MAX_PROP_VALUE)?;
+        let signature = if r.bool()? {
+            Some(r.string(MAX_PROP_SIGNATURE)?)
+        } else {
+            None
+        };
+        properties.push(ProfileProperty {
+            name: prop_name,
+            value,
+            signature,
+        });
     }
-    Ok(name)
+    Ok((name, properties))
 }
 
 impl Decode for PlayerInfoUpdate {
@@ -136,10 +173,13 @@ impl Decode for PlayerInfoUpdate {
                 listed: None,
                 latency: None,
                 display_name: None,
+                properties: None,
             };
             // Fields appear in Action ordinal order for whichever bits are set.
             if has(action::ADD_PLAYER) {
-                entry.name = Some(read_add_player(r)?);
+                let (name, properties) = read_add_player(r)?;
+                entry.name = Some(name);
+                entry.properties = Some(properties);
             }
             if has(action::INITIALIZE_CHAT) {
                 skip_chat_session(r)?;
@@ -260,6 +300,69 @@ mod tests {
         assert_eq!(e.listed, Some(true));
         assert_eq!(e.latency, Some(42));
         assert_eq!(e.display_name.as_deref(), Some("Notch!"));
+        assert_eq!(
+            e.properties.as_deref(),
+            Some(&[][..]),
+            "ADD_PLAYER was present with zero properties -- Some(empty), not None"
+        );
+    }
+
+    /// Issue #62. `read_add_player` used to consume all three fields of every
+    /// property into `let _`, so `minecraft:textures` — the skin — was read off the
+    /// wire and discarded, and no remote player could have one. The bytes were
+    /// always right; nothing carried them.
+    ///
+    /// Two properties, one signed and one not, because the signature is a
+    /// bool-prefixed optional *inside* the loop: getting that wrong mis-frames
+    /// every property after the first, and a single-property test cannot see it.
+    #[test]
+    fn add_player_keeps_the_profile_properties_including_the_skin() {
+        let uuid = Uuid::from_u128(7);
+        let mut w = Writer::default();
+        w.u8(1 << 0); // ADD_PLAYER only
+        w.var_i32(1);
+        w.uuid(uuid);
+        w.string("Skinned");
+        w.var_i32(2);
+        // Property 1: signed, as an online-mode server sends `textures`.
+        w.string("textures");
+        w.string("eyJ0ZXh0dXJlcyI6e319");
+        w.bool(true);
+        w.string("MOJANG_SIGNATURE");
+        // Property 2: unsigned, which is what makes the optional's framing
+        // observable — a decoder that always read a signature would consume this
+        // property's name as one.
+        w.string("unsigned_prop");
+        w.string("value");
+        w.bool(false);
+
+        let update: PlayerInfoUpdate = decode_exact(&w.into_vec());
+        let properties = update.entries[0]
+            .properties
+            .as_ref()
+            .expect("ADD_PLAYER was set, so properties must be Some");
+        assert_eq!(properties.len(), 2, "the second property was mis-framed");
+        assert_eq!(properties[0].name, "textures");
+        assert_eq!(properties[0].value, "eyJ0ZXh0dXJlcyI6e319");
+        assert_eq!(properties[0].signature.as_deref(), Some("MOJANG_SIGNATURE"));
+        assert_eq!(properties[1].name, "unsigned_prop");
+        assert_eq!(properties[1].signature, None);
+    }
+
+    /// The control for the merge rule: an update with **no** `ADD_PLAYER` action
+    /// must report `None`, not `Some(vec![])`. The tab-list fold keys the
+    /// keep-versus-clear decision on exactly that, so collapsing the two here
+    /// would drop every remote skin on the next latency ping.
+    #[test]
+    fn an_update_without_add_player_reports_no_properties_rather_than_empty() {
+        let mut w = Writer::default();
+        w.u8(1 << 4); // UPDATE_LATENCY only
+        w.var_i32(1);
+        w.uuid(Uuid::from_u128(3));
+        w.var_i32(15);
+
+        let update: PlayerInfoUpdate = decode_exact(&w.into_vec());
+        assert_eq!(update.entries[0].properties, None);
     }
 
     #[test]

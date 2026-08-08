@@ -35,6 +35,7 @@ use lodestone_model::{
     LookAnchor, MainHand, MapDecoration, MapPatch, MerchantOffer as ModelMerchantOffer,
     NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
     ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry, PlayerLookAtEntity,
+    ProfileProperty as ModelProfileProperty,
     RecipeBookEntry, RecipeBookType,
     RecipeBookTypeSettings,
     ResourceKey, ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, ServerLink,
@@ -4016,6 +4017,19 @@ impl V770Adapter {
                     latency: entry.latency,
                     display_name: entry.display_name.map(Text::literal),
                     listed: entry.listed,
+                    // Issue #62: carried through rather than dropped. The v770
+                    // `ProfileProperty` and the model's are separate types by the
+                    // usual version-seam rule, so this is a lower, not a move.
+                    properties: entry.properties.map(|properties| {
+                        properties
+                            .into_iter()
+                            .map(|property| ModelProfileProperty {
+                                name: property.name,
+                                value: property.value,
+                                signature: property.signature,
+                            })
+                            .collect()
+                    }),
                 })
                 .collect();
             return Ok(vec![Directive::Emit(ClientEvent::PlayerListUpdate {
@@ -5655,7 +5669,7 @@ fn read_recipe_display(reader: &mut Reader<'_>) -> Result<Option<Vec<i32>>, Adap
     // and `station_last` is true for every variant because `craftingStation` is
     // always the final `SlotDisplay`.
     let mut walked: Vec<Vec<i32>> = Vec::new();
-    let mut walk = |reader: &mut Reader<'_>, walked: &mut Vec<Vec<i32>>| -> Result<bool, AdapterError> {
+    let walk = |reader: &mut Reader<'_>, walked: &mut Vec<Vec<i32>>| -> Result<bool, AdapterError> {
         let display = read_slot_display(reader, 0)?;
         if !display.complete {
             return Ok(false);

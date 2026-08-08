@@ -217,10 +217,15 @@ fn spectator_rank(e: &PlayerListEntry) -> u8 {
 // existing entry keeps fields the update omitted. That makes the fold correct
 // whether an adapter emits full snapshots or per-field deltas.
 //
-// One model gap to surface upward: the model's `PlayerListEntry` carries no
-// profile properties, so a folded profile has no `textures` (skin) blob yet.
-// When impl-model adds a properties carrier, seed it here; until then the shell
-// gets identity, game mode, latency, listed and display name but no skin.
+// The model gap this comment used to name is **closed** (issue #62):
+// `m::PlayerListEntry::properties` now carries the `ADD_PLAYER` profile-property
+// multimap, and `fold_entry` seeds `GameProfile::properties` from it, so a folded
+// profile has its `textures` blob.
+//
+// Note the merge rule for it, which differs from the scalars above: `None` means
+// the update had no `ADD_PLAYER` action, so the existing properties are **kept**.
+// `Some(vec![])` means it did and the profile genuinely has none — an offline-mode
+// server. Collapsing those two would clear a skin on every latency ping.
 
 impl TabList {
     /// Folds a tab-list [`ClientEvent`] into this state, returning whether the
@@ -284,6 +289,18 @@ impl TabList {
                 if let Some(listed) = e.listed {
                     existing.listed = listed;
                 }
+                // Only when the update actually carried `ADD_PLAYER`; see the
+                // note above this impl on why `None` and `Some(vec![])` differ.
+                if let Some(properties) = &e.properties {
+                    existing.profile.properties = properties
+                        .iter()
+                        .map(|property| ProfileProperty {
+                            name: property.name.clone(),
+                            value: property.value.clone(),
+                            signature: property.signature.clone(),
+                        })
+                        .collect();
+                }
             }
             None => {
                 let name = e.name.clone().unwrap_or_default();
@@ -297,6 +314,16 @@ impl TabList {
                 entry.display_name = e.display_name.clone();
                 if let Some(listed) = e.listed {
                     entry.listed = listed;
+                }
+                if let Some(properties) = &e.properties {
+                    entry.profile.properties = properties
+                        .iter()
+                        .map(|property| ProfileProperty {
+                            name: property.name.clone(),
+                            value: property.value.clone(),
+                            signature: property.signature.clone(),
+                        })
+                        .collect();
                 }
                 self.insert(entry);
             }
@@ -320,6 +347,7 @@ mod fold_tests {
             latency: Some(latency),
             display_name: None,
             listed: Some(true),
+            properties: None,
         }
     }
 
@@ -353,6 +381,7 @@ mod fold_tests {
                 latency: Some(250),
                 display_name: None,
                 listed: None,
+                properties: None,
             }],
         });
         let entry = tabs.get(&id).expect("entry present");
@@ -360,6 +389,78 @@ mod fold_tests {
         assert_eq!(entry.game_mode, GameMode::Survival);
         assert_eq!(entry.latency, 250);
         assert!(entry.listed);
+    }
+
+    /// Issue #62's merge rule, and the one that has a user-visible failure mode:
+    /// a latency-only delta carries `properties: None` and **must not clear** the
+    /// skin. `Some(vec![])` is the different case — an offline-mode server saying
+    /// the profile genuinely has none.
+    #[test]
+    fn a_delta_without_add_player_keeps_the_existing_profile_properties() {
+        let mut tabs = TabList::new();
+        let id = uid(9);
+        tabs.apply(&ClientEvent::PlayerListUpdate {
+            entries: vec![m::PlayerListEntry {
+                uuid: id,
+                name: Some("Dana".into()),
+                game_mode: Some(GameMode::Survival),
+                latency: Some(1),
+                display_name: None,
+                listed: Some(true),
+                properties: Some(vec![m::ProfileProperty {
+                    name: "textures".into(),
+                    value: "eyJ0ZXh0dXJlcyI6e319".into(),
+                    signature: Some("sig".into()),
+                }]),
+            }],
+        });
+        assert_eq!(
+            tabs.get(&id).expect("entry present").profile.properties.len(),
+            1,
+            "the textures property must survive the fold at all"
+        );
+
+        // A latency ping: `properties` absent.
+        tabs.apply(&ClientEvent::PlayerListUpdate {
+            entries: vec![m::PlayerListEntry {
+                uuid: id,
+                name: None,
+                game_mode: None,
+                latency: Some(99),
+                display_name: None,
+                listed: None,
+                properties: None,
+            }],
+        });
+        let entry = tabs.get(&id).expect("entry present");
+        assert_eq!(entry.latency, 99);
+        assert_eq!(
+            entry.profile.properties.len(),
+            1,
+            "a delta with no ADD_PLAYER must keep the skin -- clearing it here              would drop every remote skin on the next latency ping"
+        );
+        assert_eq!(entry.profile.properties[0].name, "textures");
+
+        // The control for the distinction: an explicit empty set *does* clear.
+        tabs.apply(&ClientEvent::PlayerListUpdate {
+            entries: vec![m::PlayerListEntry {
+                uuid: id,
+                name: None,
+                game_mode: None,
+                latency: None,
+                display_name: None,
+                listed: None,
+                properties: Some(Vec::new()),
+            }],
+        });
+        assert!(
+            tabs.get(&id)
+                .expect("entry present")
+                .profile
+                .properties
+                .is_empty(),
+            "Some(vec![]) means the profile really has none, unlike None"
+        );
     }
 
     #[test]
@@ -374,6 +475,7 @@ mod fold_tests {
                 latency: Some(5),
                 display_name: Some(Text::literal("[VIP] Cara")),
                 listed: Some(true),
+                properties: None,
             }],
         });
         let entry = tabs.get(&id).expect("entry present");
