@@ -1320,7 +1320,7 @@ pub struct SetTestBlock {
 /// (`ServerboundEntityTagQueryPacket`, decompiled `.cache/mc/26.2/src`). No
 /// clientbound `tag_query` encoder exists yet to answer it — see this
 /// struct's decode-side consumer for why it is decoded but not acted on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Decode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub struct EntityTagQuery {
     /// Transaction id echoed back in the reply.
     #[mc(varint)]
@@ -1336,7 +1336,7 @@ pub struct EntityTagQuery {
 /// Wire layout: VarInt transaction id, then a packed `BlockPos` long
 /// (`ServerboundBlockEntityTagQueryPacket`). Same "decoded, no reply
 /// encoder yet" situation as [`EntityTagQuery`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Decode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub struct BlockEntityTagQuery {
     /// Transaction id echoed back in the reply.
     #[mc(varint)]
