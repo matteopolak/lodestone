@@ -1627,6 +1627,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   linearly and without bound at **21 entries (~7.9 MiB) per chunk of travel** for a
   normal 17×17 view. The instrument is
   [`crates/lodestone-server/tests/walk_distance_curve.rs`](../crates/lodestone-server/tests/walk_distance_curve.rs).
+- [Coded structure pieces](./worldgen-structure-coded.md) — The half of the
+  structure engine whose blocks are Java statements rather than an `.nbt` template —
+  `crates/lodestone-worldgen/src/structure/coded.rs`, issue #514's phase S5. It ports
+  `StructurePiece`'s block-writing helpers and `ScatteredFeaturePiece`'s two
+  ground-height rules, and on top of them the piece generators for **`swamp_hut`** and
+  **`desert_pyramid`**.
 - [The bundled 26.2 structure corpus (worldgen phase S-data)](./worldgen-structure-corpus.md) —
   The complete vanilla 26.2 structure dataset, extracted verbatim from the server jar
   into `crates/lodestone-server/assets/`, plus the drift gate that keeps it
