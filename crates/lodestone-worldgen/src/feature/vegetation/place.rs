@@ -420,8 +420,29 @@ pub(super) fn place_beehive_decorator<R: RandomSource>(
     // used to build was pure waste. Unit 8.
     let state = grid.interner().id_of("minecraft:bee_nest[facing=south,honey_level=0]");
     grid.set_id_if_in_bounds(hx, hy, hz, state);
-    // Bee-entity storage (2-3 bees) is not modelled — this engine has no
-    // block-entity/NBT layer for a freshly generated chunk to carry it in;
-    // named here rather than silently pretending the hive is fully stocked.
-    let _bee_count = 2 + random.next_int_bounded(2);
+    // Issue #520: the bees. This draw was already here and its result was
+    // discarded — the nest reached the client empty — and the fix was never to add
+    // a draw but to start using one.
+    let bee_count = 2 + random.next_int_bounded(2);
+    // **`nextInt(599)` per bee is a NEW draw**, and that is the one behavioural
+    // risk in this change: `BeehiveDecorator.place` really does call
+    // `Occupant.create(random.nextInt(599))` in a loop
+    // (`BeehiveDecorator.java:59`), so omitting it left this engine's stream
+    // 2-3 draws *short* of vanilla's after every hive. Adding them moves this
+    // engine toward vanilla and moves every later feature in the same step; the
+    // JVM parity fixtures are what arbitrate whether that landed correctly.
+    let bees = (0..bee_count)
+        .map(|_| crate::overworld::block_entities::BeeOccupant {
+            ticks_in_hive: random.next_int_bounded(599),
+            // `Occupant.create`'s constant. See that type's own doc for why it is
+            // carried rather than implied.
+            min_ticks_in_hive: 600,
+        })
+        .collect();
+    grid.push_block_entity(crate::overworld::block_entities::GeneratedBlockEntity::Beehive {
+        x: hx,
+        y: hy,
+        z: hz,
+        bees,
+    });
 }

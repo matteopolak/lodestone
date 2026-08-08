@@ -310,14 +310,24 @@ impl OverworldGenerator {
     /// No-op (returns `world` unchanged) when the resolver supplied no biome
     /// with a vegetation step, matching every other #295/#406/#427 resolver
     /// "no data supplied" convention.
+    /// Issue #520 widened the return: the second element is the block entities
+    /// decoration produced **inside the served 16x16**, in write order. Spill into a
+    /// neighbour is dropped here for the same reason a spilled *block* is — the
+    /// neighbour's own pass produces its own copy, and keeping both would double it.
     pub(super) fn vegetation_stage(
         &self,
         cx: i32,
         cz: i32,
         world: Arc<crate::dense_grid::DenseBlockGrid>,
-    ) -> crate::dense_grid::DenseBlockGrid {
+    ) -> (
+        crate::dense_grid::DenseBlockGrid,
+        Vec<super::block_entities::GeneratedBlockEntity>,
+    ) {
         if self.vegetation_by_biome.values().all(Vec::is_empty) {
-            return Arc::try_unwrap(world).unwrap_or_else(|shared| (*shared).clone());
+            return (
+                Arc::try_unwrap(world).unwrap_or_else(|shared| (*shared).clone()),
+                Vec::new(),
+            );
         }
         // After the early return — see `ore_stage`'s note on why.
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Vegetation);
@@ -483,7 +493,18 @@ impl OverworldGenerator {
         for (x, y, z, state) in grid.dirty_cell_ids() {
             world.set_id(x, y, z, state);
         }
-        world
+        // Issue #520. Filtered to the served chunk exactly as the fold-back above
+        // is: `DenseBlockGrid::set` silently drops an out-of-box write, so the block
+        // half needs no explicit test; this half does.
+        let block_entities = grid
+            .take_block_entities()
+            .into_iter()
+            .filter(|be| {
+                let (x, _, z) = be.position();
+                (x >> 4) == cx && (z >> 4) == cz
+            })
+            .collect();
+        (world, block_entities)
     }
 
     /// Stage 7 (issue #404's U2): the `TOP_LAYER_MODIFICATION` step —
