@@ -6266,3 +6266,122 @@ wrong.** (#514 S5, `afb517ed`/`1762faa1`.)
   literal `> 300` would have passed with two thirds of the pyramid missing. The piece list is produced by
   the *start* stage and the measurement comes from the *placement* stage, which is what makes the
   equality meaningful rather than circular.
+
+**12.140 The 4.87× evaluation redundancy is real, is collectable, and was invisible for one reason: it
+lives in the *point* interpreter, which has no memo at all — and the memo §12.132 deleted at a 0.12% hit
+rate was a correct measurement of the wrong *structure*. A one-slot last-`(x, z)` memo hits 2.1% here; a
+`(node, x, z)` map hits 78.2%; instructions retired per column fall 11.22%.**
+
+Measured at `577ab413`, release, `lto = "thin"`, embedded server data, seed 42, the 12×12 sweep whose 100
+interior columns define `C_ss`/`I_ss`. Both arms are `git worktree --detach 577ab413` with their **own**
+`CARGO_TARGET_DIR`, the after arm being that worktree with only this unit's files copied in, and the two
+bench binaries were built once and then run **alternately**, ten rounds, in one shell invocation.
+
+- **The instrument that decided the design measured three hypothetical memos at once, which is what made
+  the previous unit's number readable rather than contradictory.**
+  `crates/lodestone-worldgen/tests/density_redundancy_probe.rs` records, per node kind and per evaluator,
+  how many visits would have been answered by (a) **one slot per node holding the last `(x, z)`** —
+  vanilla's `NoiseChunk.Cache2D`, and exactly what §12.132 deleted; (b) a full **`(node, x, z)`** map; (c)
+  a full **`(node, x, y, z)`** map. Per interior column:
+
+  | evaluator | visits/column | 1-slot `(x, z)` | map `(x, z)` | map `(x, y, z)` |
+  |---|---|---|---|---|
+  | point interpreter (`Density::compute`) | 172,888 | **2.1%** | **78.2%** | 0.9% |
+  | field evaluator (`Field::eval`) | 978,101 | 93.0% | 99.2% | 2.5% |
+
+  **A single number for "the memo's hit rate" cannot distinguish a cache that is the wrong size from one
+  that is the wrong shape**, and §12.132's 0.12% was the second. Measuring the alternatives *side by side
+  in one run* is what separates them; measuring one candidate and reporting its rate cannot.
+- **Why the one-slot form cannot work here, which is a property of the *caller* and not of the node.**
+  `Field::interpolate` fills a cell by fetching eight corners in the order
+  `(x0,z0) (x1,z0) (x0,z0) (x1,z0) (x0,z1) (x1,z1) (x0,z1) (x1,z1)`, so consecutive visits to one node
+  alternate between four `(x, z)` pairs and a single slot is evicted before it is ever read. Vanilla does
+  not have this problem **because vanilla's `FlatCache` is a chunk-wide `double[]` over the quart grid,
+  not a slot** — the one-slot structure is `Cache2D`'s, and vanilla reaches these subtrees through
+  `FlatCache`. So §12.132's "the deletion converges on vanilla" was true of the *unwrapped*
+  `Marker.compute` and false of the path vanilla actually generates through. **Reading the record
+  definition of the class you named is not the same as reading the one the caller instantiates.**
+- **Where the redundancy was hiding, and why no `Op`-level pass could see it.** The point interpreter is
+  what every leaf (`spline`, `old_blended_noise`, `find_top_surface`, `end_islands`) is evaluated by, and
+  it is a recursive descent with no memo of any kind. Its 40,902 `NormalNoise` evaluations per column —
+  `shifted_noise` + `shift_a` + `shift_b`, 13,634 each — are ~74% of all `NormalNoise` evaluations in a
+  column, and **84.9%** of them are at an `(x, z)` that same node has already been asked about. §12.134's
+  node-sharing pass collapsed *compilation and storage* and left every one of those evaluations in place.
+- **Value invariance is structural, not a property of 26.2's data, and that is the whole reason this was
+  safe to ship.** A `flat_cache`/`cache_2d` node carries a memo id only if `Density::is_xz_pure` proves
+  its **whole subtree** cannot read `ctx.y`. Three arms of that analysis are places a plausible
+  simplification is wrong:
+
+  | arm | verdict | why |
+  |---|---|---|
+  | `shift_a`, `shift_b` | pure | both pass a literal `0.0` where `y` would go (`(x,0,z)` / `(z,x,0)`) |
+  | `shift` | impure | passes `ctx.y` |
+  | `shifted_noise` | pure **only** with `y_scale == 0.0` *and* a `Const` `shift_y` that is not `-0.0` | `f64::from(y) * 0.0` is `-0.0` for negative `y`, and `-0.0 + -0.0` is `-0.0` while `+0.0 + -0.0` is `+0.0` |
+  | plain `noise` | impure even at `y_scale == 0.0` | nothing absorbs that `±0.0`, so the answer would depend on `ImprovedNoise`'s internals rather than on IEEE addition. Worth 0.04% of point visits — the conservative answer costs nothing |
+
+  Anything unproved is simply not memoised, so a datapack cannot defeat it, and **the negative control
+  already existed**: `engine_semantics.rs`'s `cache_2d_is_transparent_in_both_evaluators` keeps a
+  *deliberately* `y`-dependent `cache_2d` fixture, which this analysis must reject and does — that gate
+  passes unchanged. A `is_xz_pure` that returned `true` unconditionally would satisfy every value
+  assertion in the new tests and fail that one.
+- **Identity is a process-wide monotonic id, not an address, and the reason is a wrong *value* rather
+  than a missed hit.** Keying on the node's address is free and correct while the tree is alive; after it
+  is dropped, a new node landing on the same address reads the old one's entries. There is no cheap way to
+  be sure that cannot happen, so ids come from an `AtomicU32` and are never reused — which is also why the
+  table needs no clearing, no epoch and no lifetime coupling to a `Graph`. The counter **saturates** at
+  `u32::MAX` into "not memoised" rather than wrapping, because wrapping is exactly the aliasing it exists
+  to prevent. Ids are excluded from `Density::write_signature` for the same reason `slot` is, and the
+  existing slot-collapse test now carries two distinct ids so it doubles as that gate.
+- **The numbers, alternated, and the one place the prediction was wrong.** Ten rounds, before/after
+  interleaved in a single shell invocation:
+
+  | quantity | before | after | delta |
+  |---|---|---|---|
+  | `I_ss` median of 100 interior | 485,075,828 | **430,649,795** | **−11.220%** |
+  | `I_ss` min of ten rounds | 484,908,007 | 430,542,413 | −11.212% |
+  | within-arm `I_ss` spread | 0.135% | 0.246% | — |
+  | point-interpreter visits/column | 172,888 | **56,877** | −67.1% |
+  | leaf `NormalNoise` evaluations/column | 40,902 | **8,311** | −79.7% |
+  | `C_ss` min of ten rounds | 20,153.8 µs | 17,920.5 µs | −11.08% |
+
+  The memo reads **23,619 lookups per column at a 54.7% hit rate** (12,912 hits/column), which
+  cross-checks against the probe: `flat_cache` 18,530 visits × 68.2% + `cache_2d` 5,089 × 6.0% = 12,942,
+  i.e. two independent instruments within 0.2%. **The prediction was −4% to −6% and the measurement was
+  −11.2%**, because the prediction costed the avoided *noise* and not the avoided tree walk: a hit skips a
+  whole subtree, and 116,011 of the 172,888 point visits per column disappear.
+- **Wall clock was unusable and its min-to-min agreement is still the load-bearing locality evidence.**
+  Within-arm `C_ss` spread was 50% and 124% (swap in use, load average 10 — other agents building), so no
+  median wall figure here is a claim. But instructions are blind to locality and this change adds a 98 KB
+  per-thread table, so a wall reading was *required*: **min-to-min `C_ss` −11.08% against instructions
+  −11.21%** says the memo is not trading evaluations for memory traffic. Had the table been a locality
+  loss, wall would have fallen materially less than instructions.
+- **The table size was chosen by measurement and deliberately not maximised.** Direct-mapped, so a bigger
+  table conflict-misses less and evicts more of everything else:
+
+  | entries | bytes/thread | `I_ss` | vs before |
+  |---|---|---|---|
+  | 1,024 | 24 KB | 434.77 M | −10.38% |
+  | **4,096** | **98 KB** | **430.65 M** | **−11.22%** |
+  | 16,384 | 393 KB | 426.46 M | −11.88% |
+
+  4,096 ships because the last 0.66% costs **4× the per-worker footprint**, and §12.132's finding is that
+  per-worker cache footprint — not locking — is what caps generation parallelism at 2.6× on this machine.
+  The serial gain is measured and small; the parallel cost is *unmeasured*, and the 289-column join burst
+  is where it would appear. **A serial-only measurement is not licence to grow a per-worker cache**, which
+  is the same mistake in the opposite direction from the one §12.102 made. The table is thread-local with
+  no atomics on the hot path, which is the one thing the deleted `Mutex`-backed memo got wrong.
+- **Byte identity, with its control.** The 45-column/5-seed U15 dump is byte-identical across the change:
+  8,902,157 bytes, md5 `c0ef05ac09ba3f90175a14b0f9a69d50` on both arms — the value §12.130, §12.132 and
+  §12.134 recorded, reproduced rather than quoted — harness md5 `99691badc02cca288a9071f0491d2fa7` equal
+  on both arms, and a one-flipped-byte control makes `cmp` fire (exit 1, `char 4000001`). Note this is
+  still a *pure density* change, so §12.135's caveat about the dump near a structure does not apply.
+- **What is left, measured rather than guessed, and it is not this evaluator.** After the change the point
+  interpreter's residual `map(x, z)` redundancy is `flat_cache` 68.2% — which *is* the memo hitting, since
+  the probe counts the visit before the lookup — plus `y_clamped_gradient` 2,157 visits/column that the
+  purity analysis correctly refuses. The next-largest item the probe names is in the **field** evaluator
+  and is cross-*sampler* rather than cross-node: `old_blended_noise` is evaluated 1,954 times per column
+  with **50% of those at a duplicated `(x, y, z)`**, and `flat_cache` 6,248 times with 46.9% duplicated.
+  A `Scratch` is per-sampler and a column builds several over one `Arc<Graph>`, so the shape stage and the
+  aquifer's own `final_density` sampler recompute each other's corners. That is worth ~1,000 `BlendedNoise`
+  evaluations per column and it needs a shared scratch, i.e. a change in `aquifer/mod.rs` and
+  `overworld/mod.rs` rather than in `engine/`.
