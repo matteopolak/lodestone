@@ -10,8 +10,7 @@
 #   FireBlock's private burnOdds map (reflection)      -- FireBlock.getBurnOdds
 #   BlockState.ignitedByLava() on the default state    -- LavaFluid.isFlammable
 #
-# Bootstrap.bootStrap() is what runs FireBlock.bootStrap() (Bootstrap.java:51),
-# which is what populates the two odds maps -- they are empty before it.
+# Bootstrap.bootStrap() is what runs FireBlock.bootStrap(), which is what populates the two odds maps -- they are empty before it.
 #
 # Generator: crates/lodestone-data/oracle-java/BlastFireOracle.java, run under
 # Apple `container` with eclipse-temurin:25-jdk (see docs/oracle-runtimes.md and

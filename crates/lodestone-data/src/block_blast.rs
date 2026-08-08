@@ -1,6 +1,7 @@
-//! Per-block-type blast resistance and flammability for protocol 776
-//! (Minecraft 26.2) — the four numbers vanilla's explosion and fire code read
-//! off a *block* (rather than off a block state).
+//! Per-block blast resistance and flammability for protocol 776 (Minecraft
+//! 26.2) — the four numbers vanilla's explosion and fire code read off a
+//! *block*, plus a flat per-block-**state** resistance table for the ray-walk
+//! hot path.
 //!
 //! # What it is
 //!
@@ -9,10 +10,10 @@
 //!
 //! | field | vanilla | consumer |
 //! |---|---|---|
-//! | [`BlockBlast::explosion_resistance`] | `Block.getExplosionResistance()` | `ServerExplosion.calculateExplodedPositions`'s per-step ray cost |
-//! | [`BlockBlast::ignite_odds`] | `FireBlock`'s `igniteOdds` map | `FireBlock.getIgniteOdds` — *can this cell catch* |
-//! | [`BlockBlast::burn_odds`] | `FireBlock`'s `burnOdds` map | `FireBlock.checkBurnOut` — *can this block be consumed* |
-//! | [`BlockBlast::ignited_by_lava`] | `BlockState.ignitedByLava()` | `LavaFluid.isFlammable` — lava starting a fire nearby |
+//! | [`BlockBlast::explosion_resistance`] | `Block::getExplosionResistance` | `ServerExplosion::calculateExplodedPositions`' per-step ray cost |
+//! | [`BlockBlast::ignite_odds`] | `FireBlock`'s `igniteOdds` map | `FireBlock::getIgniteOdds` — *can fire start on this cell* |
+//! | [`BlockBlast::burn_odds`] | `FireBlock`'s `burnOdds` map | `FireBlock::checkBurnOut` — *can this block be consumed* |
+//! | [`BlockBlast::ignited_by_lava`] | `BlockStateBase::ignitedByLava` | `LavaFluid::isFlammable` — lava starting a fire nearby |
 //!
 //! **`ignite_odds > 0` and `ignited_by_lava` are different sets and neither
 //! contains the other.** Measured on the real dump: 207 blocks are flammable to
@@ -22,31 +23,38 @@
 //! but is **not** lava-ignitable. Deriving one from the other is therefore wrong
 //! in both directions, which is exactly why both columns are dumped.
 //!
-//! # Why per-block-type, not per-block-state
+//! # Two shapes, deliberately
 //!
-//! Unlike [`crate::hardness`] (which really is per state — a `type=double` slab
-//! differs), all four of these live on the `Block`, so a per-state table would
-//! be 32,366 rows of at most 1,196 distinct values. Issue #313's own body calls
-//! this out as a trap and it is confirmed by the dump.
+//! The four-column table is keyed **per block type**, because all four values
+//! live on the `Block` — a per-state copy would be 32,366 rows of at most 1,196
+//! distinct values, which is the trap the explosion issue's own body calls out.
 //!
-//! Two *state*-level rules do exist, and they are the consumer's job because
-//! they are cheap string checks that would otherwise force the 32,366-row shape:
+//! Resistance additionally gets a **flat per-block-state array**
+//! ([`explosion_resistance_for_state_id`]), because that lookup is the explosion
+//! ray walk's innermost operation: 1,352 rays × up to ~13 steps each, so tens of
+//! thousands of lookups per blast. Two things are folded into it at generation
+//! time so the hot path is a single bounds-checked index with no string work at
+//! all:
 //!
-//! * `FireBlock.getBurnOdds`/`getIgniteOdds` (`FireBlock.java:213-223`) return
-//!   `0` for any state with `waterlogged=true`, regardless of the block's own
-//!   odds — see [`ignite_odds_for_state`]/[`burn_odds_for_state`], which apply
-//!   it.
-//! * `ExplosionDamageCalculator.getBlockExplosionResistance`
-//!   (`ExplosionDamageCalculator.java:11-17`) takes
-//!   `max(block resistance, fluid resistance)`, and water/lava both carry
-//!   `100.0`, so a waterlogged cell resists at `100.0` even when its block is a
-//!   fence. See [`explosion_resistance_for_state`].
+//! * `FluidState::getExplosionResistance`, via
+//!   `ExplosionDamageCalculator::getBlockExplosionResistance`'s
+//!   `max(block, fluid)` — so a waterlogged fence already reads `100.0`;
+//! * vanilla's `Optional.empty()` for a cell that is both air and fluid-free,
+//!   encoded as [`EMPTY_RESISTANCE`].
+//!
+//! The neighbouring per-state string helper exists for callers that hold a state
+//! string rather than an id and is documented as the slow path.
+//!
+//! The two *fire* odds columns keep only the by-name form: `FireBlock`'s tick
+//! reads at most a couple of dozen cells, so nothing there is hot, and the one
+//! state-level rule (`getBurnOdds`/`getIgniteOdds` return `0` for
+//! `waterlogged=true`) is a cheap property check.
 //!
 //! # Data provenance
 //!
 //! `blocks.json` carries neither `explosionResistance` nor any flammability
 //! field, and the fire odds are not even reachable from a block's *properties* —
-//! they live in two private `Object2IntMap<Block>`s that `FireBlock.bootStrap()`
+//! they live in two private `Object2IntMap<Block>`s that `FireBlock::bootStrap`
 //! fills at boot. So this is a JVM dump, generated the same way
 //! [`crate::hardness`] and [`crate::collision_shapes`] are: boot the real 26.2
 //! server headlessly and ask it. See `tests/block_blast.rs` for the generator
@@ -54,43 +62,46 @@
 //! `just oracle-blast-fire` / `just regen-blast-fire` to refresh.
 //!
 //! **A hand-transcribed flammability table would have been wrong.**
-//! `FireBlock.bootStrap()` registers two of its entries through
+//! `FireBlock::bootStrap` registers two of its entries through
 //! `Blocks.WOOL.forEach` / `Blocks.CARPET.forEach` rather than by name, so
 //! reading the decompiled source alone yields a table missing 32 blocks.
 //!
 //! # Memory design
 //!
 //! The 1,196 blocks collapse to a few dozen distinct
-//! `(resistance, ignite, burn, lava)` tuples, so the table is a de-duplicated
-//! `ENTRIES` array plus a name-sorted `(name, entry index)` array. Lookup is one
-//! binary search over `&'static str`s and no allocation; the resistance is
-//! stored as raw `f32` bits and rebuilt with [`f32::from_bits`], so nothing is
-//! lost to float-literal formatting.
+//! `(resistance, ignite, burn, lava)` tuples, so the by-block table is a
+//! de-duplicated `ENTRIES` array plus a name-sorted `(name, entry index)` array;
+//! lookup is one binary search over `&'static str`s and no allocation. The
+//! per-state resistance array is a `u16` index per state into a small
+//! `RESISTANCE_VALUES` table — the same shape [`crate::light_props`] uses, so
+//! 32,366 states cost 65 KB of rodata and zero heap. Resistances are stored as
+//! raw `f32` bits and rebuilt with [`f32::from_bits`], so nothing is lost to
+//! float-literal formatting.
 //!
 //! # Dependencies
 //!
-//! None beyond [`crate::generated_block_blast`]. Consumers: `lodestone-server`'s
-//! `fire` (spread and burnout) and `explosion_blocks` (blast destruction).
+//! [`crate::generated_block_blast`], and [`crate::block_states`] for the
+//! string→id resolution on the slow path. Consumers: `lodestone-server`'s `fire`
+//! (spread and burnout) and `explosion_blocks` (blast destruction).
 
 use crate::generated_block_blast as table;
 
-pub use table::BLOCK_COUNT;
+pub use table::{BLOCK_COUNT, EMPTY_RESISTANCE, STATE_COUNT};
 
 /// One block's blast/flammability facts.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlockBlast {
-    /// `Block.getExplosionResistance()`. `0.0` for a block that costs a blast
-    /// ray nothing beyond the fixed `0.3` step term; `3600000.0` for bedrock
-    /// and friends.
+    /// `Block::getExplosionResistance`. `0.0` for a block that costs a blast ray
+    /// nothing beyond the fixed step term; `3600000.0` for bedrock and friends.
     pub explosion_resistance: f32,
-    /// `FireBlock`'s `igniteOdds` for this block — `0` means fire can never
-    /// start *on* it (`FireBlock.canBurn` is `igniteOdds > 0`). Values in the
-    /// real table are exactly `{0, 5, 15, 30, 60}`.
+    /// `FireBlock`'s `igniteOdds` for this block — `0` means fire can never start
+    /// *on* it (`FireBlock::canBurn` is `igniteOdds > 0`). Values in the real
+    /// table are exactly `{0, 5, 15, 30, 60}`.
     pub ignite_odds: u8,
     /// `FireBlock`'s `burnOdds` — how readily `checkBurnOut` consumes the block
     /// itself. Values are exactly `{0, 5, 20, 60, 100}`.
     pub burn_odds: u8,
-    /// `BlockState.ignitedByLava()`. Read off the default state; the flag is a
+    /// `BlockStateBase::ignitedByLava`. Read off the default state; the flag is a
     /// per-block property, identical for every state.
     pub ignited_by_lava: bool,
 }
@@ -124,11 +135,11 @@ fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
     })
 }
 
-/// The blast/flammability facts for `block`, which may be a bare block name or
-/// a full canonical state string (the `[...]` suffix is ignored).
+/// The blast/flammability facts for `block`, which may be a bare block name or a
+/// full canonical state string (the `[...]` suffix is ignored).
 ///
-/// `None` for a name not in the 26.2 block registry. Prefer
-/// [`blast_or_inert`] when an unknown name should simply behave like air.
+/// `None` for a name not in the 26.2 block registry. Prefer [`blast_or_inert`]
+/// when an unknown name should simply behave like air.
 #[must_use]
 pub fn blast(block: &str) -> Option<BlockBlast> {
     let name = base_name(block);
@@ -151,12 +162,12 @@ pub fn blast_or_inert(block: &str) -> BlockBlast {
     blast(block).unwrap_or(BlockBlast::INERT)
 }
 
-/// `FireBlock.getIgniteOdds(BlockState)` (`FireBlock.java:220-223`) — the
-/// block's ignite odds, **or `0` when the state is `waterlogged=true`**.
+/// `FireBlock::getIgniteOdds` — the block's ignite odds, **or `0` when the state
+/// is `waterlogged=true`**.
 ///
-/// The waterlogged override is the whole reason this exists next to
-/// [`blast`]: a waterlogged oak fence must not catch fire, and the block-level
-/// table says `5`.
+/// The waterlogged override is the whole reason this exists next to [`blast`]: a
+/// waterlogged oak fence must not catch fire, and the block-level table says
+/// `5`.
 #[must_use]
 pub fn ignite_odds_for_state(state: &str) -> u8 {
     if property_of(state, "waterlogged") == Some("true") {
@@ -165,8 +176,8 @@ pub fn ignite_odds_for_state(state: &str) -> u8 {
     blast_or_inert(state).ignite_odds
 }
 
-/// `FireBlock.getBurnOdds(BlockState)` (`FireBlock.java:213-218`) — the block's
-/// burn odds, **or `0` when the state is `waterlogged=true`**.
+/// `FireBlock::getBurnOdds` — the block's burn odds, **or `0` when the state is
+/// `waterlogged=true`**.
 #[must_use]
 pub fn burn_odds_for_state(state: &str) -> u8 {
     if property_of(state, "waterlogged") == Some("true") {
@@ -177,18 +188,36 @@ pub fn burn_odds_for_state(state: &str) -> u8 {
 
 /// The fluid `explosionResistance` both vanilla fluids report
 /// (`WaterFluid`/`LavaFluid` inherit `Fluid`'s `100.0F`), reachable through
-/// `FluidState.getExplosionResistance` (`FluidState.java:112-114`).
+/// `FluidState::getExplosionResistance`.
 pub const FLUID_EXPLOSION_RESISTANCE: f32 = 100.0;
 
-/// `ExplosionDamageCalculator.getBlockExplosionResistance`
-/// (`ExplosionDamageCalculator.java:11-17`) reduced to a state string:
-/// `max(block resistance, fluid resistance)`, where the fluid is water for any
-/// `waterlogged=true` state and the block's own for `minecraft:water`/`lava`.
+/// **The explosion hot path.** `ExplosionDamageCalculator::getBlockExplosionResistance`
+/// for the block state whose global id is `id`, as a single flat array index.
 ///
-/// Returns `None` for air with no fluid — vanilla's `Optional.empty()`, which is
-/// the case a blast ray pays **nothing** for, not even the `+0.3` term.
+/// `None` is vanilla's `Optional.empty()` — the cell is air *and* holds no fluid,
+/// so a blast ray pays no resistance term for it at all. `None` is also returned
+/// for an id outside `0..`[`STATE_COUNT`], which is the same inert answer.
+///
+/// The `max(block, fluid)` is already folded in at generation time, so a
+/// waterlogged state answers `100.0` with no property parsing here.
+#[must_use]
+pub fn explosion_resistance_for_state_id(id: u32) -> Option<f32> {
+    let &entry = table::STATE_RESISTANCE_ENTRY.get(id as usize)?;
+    let bits = table::RESISTANCE_VALUES[entry as usize];
+    (bits != EMPTY_RESISTANCE).then(|| f32::from_bits(bits))
+}
+
+/// The string-keyed form of [`explosion_resistance_for_state_id`] — **the slow
+/// path**, kept for callers holding a state string rather than an id.
+///
+/// Resolves through [`crate::block_states::state_id`] when it can, so the answer
+/// is byte-identical to the flat table's, and falls back to name + `waterlogged`
+/// parsing for a state string the registry cannot resolve at all.
 #[must_use]
 pub fn explosion_resistance_for_state(state: &str) -> Option<f32> {
+    if let Some(id) = crate::block_states::state_id(state) {
+        return explosion_resistance_for_state_id(id);
+    }
     let name = base_name(state);
     let is_air = matches!(
         name,
@@ -238,8 +267,8 @@ mod tests {
     }
 
     /// `Blocks.WOOL.forEach`/`Blocks.CARPET.forEach` are the two entries a
-    /// source-only transcription of `FireBlock.bootStrap()` would miss, so pin
-    /// one member of each: wool is `(30, 60)`, carpet `(60, 20)`.
+    /// source-only transcription of `FireBlock::bootStrap` would miss, so pin one
+    /// member of each: wool is `(30, 60)`, carpet `(60, 20)`.
     #[test]
     fn the_two_list_registered_families_are_present() {
         for colour in ["white", "red", "black", "lime"] {
@@ -281,6 +310,51 @@ mod tests {
         // Obsidian beats the fluid, so the `max` really is a max and not a
         // "waterlogged wins" shortcut.
         assert_eq!(explosion_resistance_for_state("minecraft:obsidian"), Some(1200.0));
+    }
+
+    /// The flat per-state array and the string path must agree on every state —
+    /// the property that lets the hot path skip the string work entirely. Run
+    /// over all 32,366 states, so a single transposed row fails.
+    #[test]
+    fn the_flat_state_table_agrees_with_the_string_path_on_every_state() {
+        let mut empty = 0usize;
+        let mut fluid_capped = 0usize;
+        for id in 0..STATE_COUNT {
+            let name = crate::block_states::block_name(id).expect("every id has a block");
+            let waterlogged = crate::block_states::properties(id)
+                .expect("every id has properties")
+                .iter()
+                .any(|(k, v)| *k == "waterlogged" && *v == "true");
+            let flat = explosion_resistance_for_state_id(id);
+            let block = blast_or_inert(name).explosion_resistance;
+            let is_air = matches!(
+                name,
+                "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
+            );
+            let expected = if is_air && !waterlogged {
+                empty += 1;
+                None
+            } else if waterlogged {
+                fluid_capped += 1;
+                Some(block.max(FLUID_EXPLOSION_RESISTANCE))
+            } else {
+                Some(block)
+            };
+            assert_eq!(flat, expected, "state id {id} ({name}, waterlogged={waterlogged})");
+        }
+        // Magnitude, not sign: 26.2 has exactly three air states and a large but
+        // finite set of waterloggable ones. A table that answered `None`
+        // everywhere would pass an "agrees" loop written the lazy way.
+        assert_eq!(empty, 3, "exactly air, cave_air and void_air are Optional.empty()");
+        assert!(fluid_capped > 1000, "waterloggable states, got {fluid_capped}");
+    }
+
+    /// Out-of-range ids are inert rather than a panic — the ray walk indexes this
+    /// with whatever the world hands it.
+    #[test]
+    fn out_of_range_state_ids_are_empty() {
+        assert_eq!(explosion_resistance_for_state_id(STATE_COUNT), None);
+        assert_eq!(explosion_resistance_for_state_id(u32::MAX), None);
     }
 
     /// The two sets that must not be conflated — see this module's own doc

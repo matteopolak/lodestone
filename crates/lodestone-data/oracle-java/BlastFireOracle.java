@@ -10,8 +10,7 @@ import net.minecraft.world.level.block.FireBlock;
 
 /**
  * Authoritative per-block-<em>type</em> blast-resistance and flammability
- * extractor — the data half of issues #312 (fire spread) and #313 (explosion
- * block destruction). Boots the real 26.2 server (registries only, no world)
+ * extractor for the fire-spread and explosion-destruction rules. Boots the real 26.2 server (registries only, no world)
  * and reads four quantities straight off the game's own objects, mirroring
  * {@code HardnessOracle} in this same directory.
  *
@@ -27,22 +26,22 @@ import net.minecraft.world.level.block.FireBlock;
  *       overrides it.</li>
  *   <li>{@code FireBlock}'s {@code igniteOdds}/{@code burnOdds} are
  *       {@code Object2IntMap<Block>}s populated by {@code FireBlock.bootStrap()}
- *       ({@code Bootstrap.java:51} calls it, so {@code Bootstrap.bootStrap()}
- *       above is sufficient — the maps are empty before it runs). They are
+ *       (which {@code Bootstrap.bootStrap()} above calls, so that boot is
+ *       sufficient — the maps are empty before it runs). They are
  *       private, hence the reflection below; both implement
  *       {@code java.util.Map<Block, Integer>}, so no fastutil type is named
  *       here.</li>
  *   <li>{@code BlockBehaviour.BlockStateBase.ignitedByLava()}
- *       ({@code BlockBehaviour.java:588-589}) reads a boolean copied from
- *       {@code Properties.ignitedByLava} ({@code :466}) — identical for every
- *       state of a block, so it is read off the default state.</li>
+ *       reads a boolean copied from {@code Properties.ignitedByLava} —
+ *       identical for every state of a block, so it is read off the default
+ *       state.</li>
  * </ul>
  *
  * <p>The two <em>state</em>-level rules that do exist are deliberately left to
  * the consumer rather than baked in here, because they are cheap string checks
  * on our side and baking them in would need the 32,366-row shape this avoids:
  * {@code FireBlock.getBurnOdds}/{@code getIgniteOdds} both return {@code 0} for
- * a state with {@code waterlogged=true}, and {@code ExplosionDamageCalculator}
+ * a state with {@code waterlogged=true}, and {@code ExplosionDamageCalculator.getBlockExplosionResistance}
  * takes {@code max(block resistance, fluid resistance)} so a waterlogged or
  * fluid-filled cell resists at the fluid's 100.0.
  *
