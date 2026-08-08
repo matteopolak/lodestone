@@ -4268,7 +4268,7 @@ fn swing_progress_is_tick_driven_not_frame_driven() {
 #[test]
 fn the_third_person_body_swings_off_the_same_clock_as_the_arm() {
     let mut sim = Sim::new(test_config());
-    sim.toggle_third_person();
+    sim.cycle_camera_type();
     sim.swing_hand();
     // Step to a tick where the swing is genuinely mid-arc, so `assert_eq` is
     // comparing something other than two zeroes.

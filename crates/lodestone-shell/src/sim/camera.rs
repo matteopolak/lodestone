@@ -1,7 +1,7 @@
 //! `Sim`'s camera cluster: the fog helpers (`fog_for_render_distance`,
 //! `water_fog`, `lava_fog`), `fog_settings`/`biome_sky_color`, and the
 //! eye/render camera derivation (`interpolated_player`, `camera`,
-//! `toggle_third_person`, `set_view_bobbing`, `bob_frame`, `render_camera`,
+//! `cycle_camera_type`, `set_view_bobbing`, `bob_frame`, `render_camera`,
 //! `spyglass_scoping`, `third_person_body_state`) plus the `NoCollision`
 //! stand-in `render_camera`'s third-person pullback falls back to — seam 6
 //! of the sim.rs decomposition sequence (seam 1 was the test module,
@@ -299,14 +299,6 @@ impl Sim {
     #[must_use]
     pub fn camera_type(&self) -> crate::camera_rig::CameraType {
         self.camera_type
-    }
-
-    /// The pre-front-view name for [`Self::cycle_camera_type`], kept so
-    /// `app/lifecycle.rs`'s `KeyOutcome::TogglePerspective` arm still compiles.
-    /// **It no longer toggles** — there are three states — so the call site
-    /// should be renamed to [`Self::cycle_camera_type`] and this removed.
-    pub fn toggle_third_person(&mut self) {
-        self.cycle_camera_type();
     }
 
     /// The camera the frame is actually **drawn** from: [`Self::camera`]

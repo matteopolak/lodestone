@@ -868,7 +868,7 @@ impl ApplicationHandler for WindowApp {
                         self.set_grab(false);
                     }
                     // Vanilla's own third-/first-person toggle.
-                    Some(KeyOutcome::TogglePerspective) => self.sim.toggle_third_person(),
+                    Some(KeyOutcome::TogglePerspective) => self.sim.cycle_camera_type(),
                     Some(KeyOutcome::SelectSlot(slot)) => self.sim.select_slot(slot),
                     Some(KeyOutcome::ContainerSwap { button }) => {
                         self.send_container_swap(button);
