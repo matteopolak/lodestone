@@ -311,6 +311,11 @@ pub struct Options {
     /// (`ComponentRenderUtils.stripColor`, `ComponentRenderUtils.java:21`) —
     /// it does not affect the input line, which never carries codes.
     pub chat_colors: bool,
+    /// Vanilla's `options.showSubtitles` (`Options.java`), default `false` —
+    /// the accessibility toggle for the sound-subtitle caption overlay
+    /// (issue #198). Vanilla exposes it on **two** settings pages, Sound and
+    /// Accessibility, both writing this one field.
+    pub show_subtitles: bool,
     /// Vanilla's look **sensitivity** (`options.sensitivity`,
     /// `Options.java:100-106`): `UnitDouble`, `0.0..=1.0`, default `0.5`. The
     /// displayed label is `percentValueLabel(caption, 2.0 * value)`, so the
@@ -387,6 +392,7 @@ impl Default for Options {
             chat_opacity: 1.0,
             chat_background_opacity: 0.5,
             chat_colors: true,
+            show_subtitles: false,
             sensitivity: DEFAULT_SENSITIVITY,
             render_distance: DEFAULT_RENDER_DISTANCE,
             advanced_item_tooltips: false,
@@ -509,6 +515,12 @@ impl Options {
             .get("chat_colors")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
+        // Absent or malformed is **off**, vanilla's own default — the mirror of
+        // `chat_colors` above, whose default is on.
+        let show_subtitles = obj
+            .get("show_subtitles")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         // A `UnitDouble`, so the same `0.0..=1.0` rule as the chat sliders —
         // reusing `unit` rather than restating the range, because a hand-written
         // second copy is how the two would drift.
@@ -550,6 +562,7 @@ impl Options {
             chat_opacity,
             chat_background_opacity,
             chat_colors,
+            show_subtitles,
             sensitivity,
             render_distance,
             advanced_item_tooltips,
@@ -656,6 +669,9 @@ impl Options {
         put_unit("sensitivity", self.sensitivity, default.sensitivity);
         if !self.chat_colors {
             obj.insert("chat_colors".into(), false.into());
+        }
+        if self.show_subtitles {
+            obj.insert("show_subtitles".into(), true.into());
         }
         if self.render_distance != default.render_distance {
             obj.insert("render_distance".into(), self.render_distance.into());

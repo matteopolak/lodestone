@@ -3357,6 +3357,10 @@ impl MenuNav {
                 self.toggle_view_bobbing();
                 MenuAction::None
             }
+            SettingsOutcome::Cycle(LiveOption::ShowSubtitles) => {
+                self.toggle_show_subtitles();
+                MenuAction::None
+            }
             SettingsOutcome::Cycle(LiveOption::ToggleSneak) => {
                 self.toggle_toggle_sneak();
                 MenuAction::None
@@ -3817,6 +3821,13 @@ impl MenuNav {
     /// eager-persistence rule as [`MenuNav::cycle_gui_scale`].
     fn toggle_view_bobbing(&mut self) {
         self.options.view_bobbing = !self.options.view_bobbing;
+        self.persist_options();
+    }
+
+    /// Flips `options.showSubtitles` (issue #198) and saves immediately, same
+    /// eager-persistence rule as [`MenuNav::toggle_view_bobbing`].
+    fn toggle_show_subtitles(&mut self) {
+        self.options.show_subtitles = !self.options.show_subtitles;
         self.persist_options();
     }
 
