@@ -3850,6 +3850,13 @@ fn insert_into_brewing_stand(
 /// given insert sees — the shared fill state lives in the registry regardless.
 const COMPOSTER_BEHAVIOR_SEED: u64 = 0x5EED_C011;
 
+/// The seed for the per-connection [`SpawnRng`] that draws bone meal's crop-age
+/// and sapling-success values — its own stream rather than the composter's, for
+/// the reason that constant's own comment gives about coupling two features
+/// through one RNG. `crate::bone_meal`'s draw-count gates hold only against a
+/// stream nothing else advances.
+const BONE_MEAL_BEHAVIOR_SEED: u64 = 0x5EED_B04E;
+
 /// What a right-click on a composter did, so [`apply_use_item_on`] can decide
 /// whether the ordinary placement logic may still run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4168,6 +4175,13 @@ async fn apply_use_item_on<T, P, S>(
     // under — see `dispatch_play_packet`'s parameter comment.
     sleep_vote: &SleepVote,
     player_entity_id: i32,
+    // This connection's bone-meal roll source. A whole `SpawnRng` rather than a
+    // pre-drawn value like the composter's `roll` above, because
+    // `crate::bone_meal::apply_bone_meal` draws a *variable* number of values —
+    // one for a crop, one for a sapling, none for a non-target — and the draw
+    // count per use is part of the specification its own tests pin. Pre-drawing
+    // would fix the count at one and desynchronise the stream.
+    bone_meal_rng: &mut SpawnRng,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -4297,6 +4311,80 @@ where
         ComposterUseOutcome::Noop => return Ok(()),
         ComposterUseOutcome::NotComposter => {
             // Fall through to the ordinary placement logic below.
+        }
+    }
+
+    // Bone meal on a growable block — `BoneMealItem::useOn`, the consuming half
+    // of [`crate::bone_meal`]'s rule layer. Ahead of the placement branch for
+    // the same reason the composter and brewing arms are: bone meal is not a
+    // block item, but the *clicked* cell is often air-adjacent and a fall-through
+    // would try to place whatever else is in hand.
+    //
+    // The three outcomes are not two: `ConsumedNoChange` is a real vanilla
+    // result, because `BoneMealItem` shrinks the stack *outside* the success
+    // branch — a failed sapling roll (55% of them) eats the item for nothing,
+    // and treating that as a no-op would make bone meal infinitely efficient.
+    // `NotModelled` deliberately consumes nothing: the grass-block and
+    // stage-1-sapling paths need a worldgen feature placer this crate does not
+    // have, and a partial version would consume a *different* number of RNG
+    // draws and desynchronise every later use in the same stream.
+    if inventory
+        .selected_item()
+        .is_some_and(|held| held.item.to_string() == crate::bone_meal::BONE_MEAL)
+    {
+        let clicked = source.block_state(pos.x, pos.y, pos.z);
+        // The cell above is what `SaplingBlock`/`CropBlock` light checks read;
+        // resolved here because `bone_meal` has no world access of its own.
+        let above = source.block_state(pos.x, pos.y + 1, pos.z);
+        let outcome = crate::bone_meal::apply_bone_meal(&clicked, &above, bone_meal_rng);
+        // One helper for both consuming arms — vanilla `itemStack.consume(1)`,
+        // the identical shrink the composter's `Consumed` arm performs.
+        let consume = |inventory: &mut PlayerInventory| {
+            let native = usize::from(inventory.selected_hotbar_slot());
+            let remainder = inventory.native(native).cloned().and_then(|mut stack| {
+                stack.count -= 1;
+                (stack.count > 0).then_some(stack)
+            });
+            inventory.set_native(native, remainder.clone());
+            remainder
+        };
+        match outcome {
+            crate::bone_meal::BoneMealOutcome::Grew { state: new_state } => {
+                source.set_block(pos.x, pos.y, pos.z, &new_state);
+                apply(
+                    conn,
+                    state,
+                    proto.encode_block_update(pos.x, pos.y, pos.z, &new_state),
+                )
+                .await?;
+                let remainder = consume(inventory);
+                let hotbar_slot =
+                    i32::from(inventory.selected_hotbar_slot()) + WINDOW_ZERO_HOTBAR_FIRST;
+                apply(
+                    conn,
+                    state,
+                    proto.encode_container_slot(0, 0, hotbar_slot, remainder.as_ref()),
+                )
+                .await?;
+                return Ok(());
+            }
+            crate::bone_meal::BoneMealOutcome::ConsumedNoChange => {
+                let remainder = consume(inventory);
+                let hotbar_slot =
+                    i32::from(inventory.selected_hotbar_slot()) + WINDOW_ZERO_HOTBAR_FIRST;
+                apply(
+                    conn,
+                    state,
+                    proto.encode_container_slot(0, 0, hotbar_slot, remainder.as_ref()),
+                )
+                .await?;
+                return Ok(());
+            }
+            // Not a target, or a family whose growth this crate cannot model:
+            // fall through to the ordinary placement logic below, consuming
+            // nothing.
+            crate::bone_meal::BoneMealOutcome::NotBonemealable
+            | crate::bone_meal::BoneMealOutcome::NotModelled { .. } => {}
         }
     }
 
@@ -5619,6 +5707,11 @@ async fn dispatch_play_packet<T, P, S>(
     // `serve_play`, advanced once per right-click (see
     // [`apply_composter_use`]'s `roll` parameter).
     composter_rng: &mut SpawnRng,
+    // This connection's bone-meal roll source — seeded once in `serve_play`,
+    // advanced by a bone-meal right-click on a growable block. Its own stream, so
+    // fertilising a crop cannot shift which roll a later composter insert or
+    // block drop sees.
+    bone_meal_rng: &mut SpawnRng,
     // Issue #337. This connection's block-drop roll source — seeded once in
     // `serve_play`, advanced by every break that rolls a table (see
     // `apply_block_action`'s parameter comment). A second stream rather than
@@ -5919,6 +6012,7 @@ where
                 block_ticks,
                 sleep_vote,
                 player_entity_id,
+                bone_meal_rng,
             )
             .await?;
         }
@@ -6417,6 +6511,7 @@ where
     // Issue #249. This connection's composter roll stream — see
     // `COMPOSTER_BEHAVIOR_SEED` and `dispatch_play_packet`'s parameter comment.
     let mut composter_rng = SpawnRng::new(COMPOSTER_BEHAVIOR_SEED);
+    let mut bone_meal_rng = SpawnRng::new(BONE_MEAL_BEHAVIOR_SEED);
     // Issue #337. This connection's block-drop roll stream — see
     // `block_drops::BLOCK_DROPS_BEHAVIOR_SEED` and `dispatch_play_packet`'s
     // parameter comment for why it is separate from the composter's.
@@ -6586,6 +6681,7 @@ where
                     entities.players(),
                     block_ticks,
                     &mut composter_rng,
+                    &mut bone_meal_rng,
                     &mut drops_rng,
                     client_channels,
                     plugin_channels,
@@ -7238,6 +7334,7 @@ where
     // composter roll stream has no timer and no wasm32 dependency, so it is
     // wired identically on this target.
     let mut composter_rng = SpawnRng::new(COMPOSTER_BEHAVIOR_SEED);
+    let mut bone_meal_rng = SpawnRng::new(BONE_MEAL_BEHAVIOR_SEED);
     // Issue #337 — see the native `serve_play`'s identical binding: the
     // block-drop roll stream has no timer and no wasm32 dependency either.
     let mut drops_rng = SpawnRng::new(crate::block_drops::BLOCK_DROPS_BEHAVIOR_SEED);
@@ -7302,6 +7399,7 @@ where
             entities.players(),
             block_ticks,
             &mut composter_rng,
+            &mut bone_meal_rng,
             &mut drops_rng,
             client_channels,
             plugin_channels,
