@@ -1529,6 +1529,19 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).begin_play(view_radius)
     }
 
+    // **Issue #329's live bug was the absence of exactly this three-line
+    // forward.** `begin_play_at` has a default that discards `spawn` and calls
+    // `begin_play`, so without this the box silently took that default: the
+    // spiral search ran, `server.rs` passed its answer in, and the boxed
+    // protocol threw it away and emitted `V770ServerProtocol::begin_play`'s
+    // hardcoded `(8, 100, 8)`. Singleplayer is the *only* path that boxes the
+    // protocol, so the symptom was "every join lands at y=100 at (8, 8)" with a
+    // fully correct spawn search sitting one call frame away — and no live
+    // oracle covers the boxed path, which is what the parity test below is for.
+    fn begin_play_at(&self, view_radius: i32, spawn: Vec3) -> Vec<ServerDirective> {
+        (**self).begin_play_at(view_radius, spawn)
+    }
+
     fn begin_chunk_batch(&self) -> ServerDirective {
         (**self).begin_chunk_batch()
     }
@@ -1728,6 +1741,17 @@ mod tests {
         fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
             vec![send(100 + view_radius)]
         }
+        /// Encodes the **spawn** into the answer, not just the view radius, so
+        /// "the box forwarded `begin_play_at`" and "the box took the default,
+        /// which discards `spawn` and calls `begin_play`" are different values.
+        /// Without this override both sides would answer `send(100 + radius)` and
+        /// the parity assertion would pass with the forward missing — which is
+        /// exactly how #329's bug survived this test file.
+        fn begin_play_at(&self, view_radius: i32, spawn: Vec3) -> Vec<ServerDirective> {
+            vec![send(
+                300 + view_radius + spawn.x as i32 + spawn.y as i32 + spawn.z as i32,
+            )]
+        }
         fn begin_chunk_batch(&self) -> ServerDirective {
             send(5)
         }
@@ -1903,6 +1927,16 @@ mod tests {
             direct.encode_registry_data()
         );
         assert_eq!(boxed.begin_play(7), direct.begin_play(7));
+        // The one this test was missing, and the reason #329's fix never reached
+        // a player: `begin_play_at`'s default discards its `spawn` argument, so
+        // an unforwarded box answers with the family's hardcoded literal instead.
+        // `Numbered` overrides it, so the two sides differ unless the forward
+        // exists.
+        let spawn = Vec3::new(-101.0, 71.0, 202.0);
+        assert_eq!(
+            boxed.begin_play_at(7, spawn),
+            direct.begin_play_at(7, spawn)
+        );
         assert_eq!(boxed.begin_chunk_batch(), direct.begin_chunk_batch());
         assert_eq!(
             boxed.encode_chunk(3, 4, &column),
