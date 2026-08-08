@@ -2085,6 +2085,172 @@ pub enum ClientEvent {
         /// The suggested replacement strings.
         suggestions: Vec<CommandSuggestionEntry>,
     },
+    /// A filled map's contents changed, from `ClientboundMapItemDataPacket`.
+    ///
+    /// Keyed on the **map id**, not on an entity: one map item can be held by
+    /// several players and hung in several item frames at once, so this is
+    /// session-scoped map state rather than per-entity state.
+    ///
+    /// Both payload halves are genuinely optional and independently so
+    /// (`Optional<List<MapDecoration>>` and `Optional<MapPatch>`): a decoration-only
+    /// update carries no pixels, and a pixel-only update carries no icons. `None`
+    /// means "unchanged", never "empty" — clearing the decorations is
+    /// `Some(vec![])`.
+    MapItemData {
+        /// The map's id (`MapId`), which is what the `minecraft:map_id` item
+        /// component on a filled-map stack points at.
+        map_id: i32,
+        /// Zoom level, 0 (1 pixel per block) to 4 (16 blocks per pixel).
+        scale: i8,
+        /// Whether the map has been locked with a cartography table.
+        locked: bool,
+        /// Icons to draw over the map, replacing the previous set, or `None` if
+        /// this update does not touch them.
+        decorations: Option<Vec<MapDecoration>>,
+        /// The changed sub-rectangle of the 128×128 colour grid, or `None`.
+        color_patch: Option<MapPatch>,
+    },
+    /// The advancement tree and/or the local player's progress on it changed,
+    /// from `ClientboundUpdateAdvancementsPacket`.
+    AdvancementsUpdated {
+        /// `true` on the server's first packet: discard all known advancements
+        /// and progress and treat `added` as the whole tree.
+        reset: bool,
+        /// Advancements added or redefined.
+        added: Vec<AdvancementEntry>,
+        /// Advancement ids that are no longer visible.
+        removed: Vec<Identifier>,
+        /// Per-advancement criterion progress, as
+        /// `(advancement id, [(criterion, obtained epoch-millis)])`. A criterion
+        /// present with `None` is known but not obtained.
+        progress: Vec<(Identifier, Vec<(String, Option<i64>)>)>,
+        /// Vanilla's `showAdvancements` flag — whether completions announce.
+        show_advancements: bool,
+    },
+}
+
+/// One icon drawn over a filled map, from vanilla's `MapDecoration`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapDecoration {
+    /// The `minecraft:map_decoration_type` registry key (e.g.
+    /// `minecraft:player`, `minecraft:banner_red`), resolved from the wire's
+    /// numeric id.
+    pub kind: Identifier,
+    /// Position across the map, as vanilla's signed byte in the ±127 space that
+    /// spans the whole 128-pixel width (so 2 wire units ≈ 1 pixel).
+    pub x: i8,
+    /// Position down the map, same space as [`Self::x`].
+    pub y: i8,
+    /// Facing, 0–15 in sixteenths of a turn. Vanilla masks the wire byte with
+    /// `& 15`, so this is always in range.
+    pub rotation: u8,
+    /// Custom label (a named banner), if any.
+    pub name: Option<Text>,
+}
+
+/// A rectangular sub-region of a map's 128×128 colour grid, from vanilla's
+/// `MapItemSavedData.MapPatch`.
+///
+/// **This is a sub-rectangle, not the whole frame.** Vanilla only ever sends the
+/// dirty columns, so a moving player produces a tall 1-or-2-column-wide patch,
+/// and treating `colors` as a full 16 384-byte image reads garbage. Index it as
+/// `colors[x + y * width]` and offset by `start_x`/`start_y`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapPatch {
+    /// Left edge of the patch within the 128-wide grid.
+    pub start_x: u8,
+    /// Top edge of the patch within the 128-tall grid.
+    pub start_y: u8,
+    /// Patch width in pixels, always ≥ 1 (a zero width is how the wire spells
+    /// "no patch", which decodes to `None` instead).
+    pub width: u8,
+    /// Patch height in pixels.
+    pub height: u8,
+    /// `width * height` map-palette colour indices, row-major.
+    pub colors: Vec<u8>,
+}
+
+/// Which frame vanilla draws around an advancement's icon — the wire ordinal
+/// order of `AdvancementType`.
+///
+/// **The ordinals are `TASK`, `CHALLENGE`, `GOAL`**, which is not the order the
+/// three are usually listed in; reading it as task/goal/challenge swaps the two
+/// rarest frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AdvancementFrame {
+    /// Ordinal 0 — the plain square frame.
+    Task,
+    /// Ordinal 1 — the spiked frame.
+    Challenge,
+    /// Ordinal 2 — the rounded frame.
+    Goal,
+}
+
+impl AdvancementFrame {
+    /// From the wire ordinal (`FriendlyByteBuf::readEnum`, a VarInt).
+    #[must_use]
+    pub const fn from_ordinal(ordinal: i32) -> Option<Self> {
+        Some(match ordinal {
+            0 => Self::Task,
+            1 => Self::Challenge,
+            2 => Self::Goal,
+            _ => return None,
+        })
+    }
+}
+
+/// The presentation half of an advancement, from vanilla's `DisplayInfo`.
+///
+/// # `x`/`y` exist only here
+///
+/// 26.2's advancement JSON on disk carries no position — vanilla computes the
+/// tidy-tree layout server-side in `TreeNodePosition` and writes the result to
+/// the wire. So these two floats are the *only* source of vanilla's own layout,
+/// which is what makes this decode load-bearing rather than cosmetic.
+///
+/// # Field order is not the datapack's
+///
+/// `DisplayInfo.serializeToNetwork` writes title, description, icon, frame, an
+/// `int` flag word, the optional background, then x and y. `announceChat` is
+/// **not on the wire at all** (vanilla's reader hardcodes `false`), and the flag
+/// word is a raw big-endian `int`, not a byte.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdvancementDisplay {
+    /// Title component.
+    pub title: Text,
+    /// Description component.
+    pub description: Text,
+    /// The icon stack (`ItemStackTemplate`: item, count, components).
+    pub icon: ItemStack,
+    /// Frame shape.
+    pub frame: AdvancementFrame,
+    /// Tab background texture, present on root advancements only.
+    pub background: Option<Identifier>,
+    /// Whether completing it pops a toast.
+    pub show_toast: bool,
+    /// Whether it is hidden until obtained.
+    pub hidden: bool,
+    /// Server-computed tree column, in advancement-grid units.
+    pub x: f32,
+    /// Server-computed tree row, in advancement-grid units.
+    pub y: f32,
+}
+
+/// One node of the advancement tree, from vanilla's `AdvancementHolder`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdvancementEntry {
+    /// The advancement id, e.g. `minecraft:story/mine_stone`.
+    pub id: Identifier,
+    /// Parent id; `None` makes this a root (a tab).
+    pub parent: Option<Identifier>,
+    /// Presentation, absent for an advancement vanilla does not draw (recipe
+    /// unlocks). A node without display is hidden by vanilla's own screen.
+    pub display: Option<AdvancementDisplay>,
+    /// AND-of-ORs completion shape: done when every group has one obtained
+    /// criterion.
+    pub requirements: Vec<Vec<String>>,
+    /// Vanilla's `sendsTelemetryEvent` bit, carried because it is on the wire.
+    pub sends_telemetry_event: bool,
 }
 
 /// Which of the client's event routers claim a [`ClientEvent`].
@@ -2466,6 +2632,14 @@ pub fn route(event: &ClientEvent) -> Route {
         // here — it is per-*player* UI state the server persists — but `session`
         // for exactly that reason, and certainly not `ingest`.
         ClientEvent::RecipeBookSettingsChanged { .. } => SESSION,
+        // Keyed on map id, not on an entity: several players and several item
+        // frames can show the same map, so this is session-scoped state
+        // (`SessionMaps`) and never a component on the holder.
+        ClientEvent::MapItemData { .. } => SESSION,
+        // The tree and progress are the local player's, so `session`
+        // (`SessionAdvancements`). The advancements *screen* reads that
+        // component; it needs no `forward` arm.
+        ClientEvent::AdvancementsUpdated { .. } => SESSION,
         // `lodestone_game::worldborder::WorldBorder` via `apply_world_border`.
         // The largest single cluster in `docs/event-routing.md`'s island list.
         ClientEvent::WorldBorderCenterChanged { .. }

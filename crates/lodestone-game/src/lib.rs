@@ -42,6 +42,7 @@
 //! * [`bossbar`] — boss bars.
 //! * [`progress`] — advancements and statistics.
 
+pub mod advancement;
 pub mod bossbar;
 pub mod chat;
 pub mod chat_ack;
@@ -52,6 +53,7 @@ pub mod effect;
 pub mod hud;
 pub mod item;
 pub mod levelstate;
+pub mod maps;
 pub mod menu;
 pub mod menus;
 pub mod mining;

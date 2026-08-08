@@ -157,6 +157,24 @@ pub struct SessionGameRules(pub lodestone_game::levelstate::GameRuleValues);
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionRecipeBookSettings(pub lodestone_game::recipe::RecipeBookSettings);
 
+/// Filled-map contents by map id, from `ClientEvent::MapItemData`.
+///
+/// Session-scoped rather than per-entity: one map id can be held by several
+/// players and hung in several item frames at once. See
+/// [`lodestone_game::maps::MapStore`], and note the colour half of the packet is
+/// a sub-rectangle, not a frame.
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct SessionMaps(pub lodestone_game::maps::MapStore);
+
+/// The advancement tree and the local player's progress, from
+/// `ClientEvent::AdvancementsUpdated`.
+///
+/// The server-computed `x`/`y` inside each node's display are the only source of
+/// vanilla's own tree layout — 26.2's advancement JSON on disk carries no
+/// position. See [`lodestone_game::advancement::AdvancementStore`].
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct SessionAdvancements(pub lodestone_game::advancement::AdvancementStore);
+
 /// The active boss bars, in server insertion (render) order.
 ///
 /// `lodestone_game::bossbar::BossBarSet` was a fully implemented, unit-tested
@@ -617,6 +635,24 @@ pub fn apply_recipe_book_settings(
     }
 }
 
+/// `IngestSet::Apply`: `MapItemData` → [`SessionMaps`].
+pub fn apply_maps(batch: Res<IngestBatch>, mut maps: Query<&mut SessionMaps>) {
+    for event in batch.events() {
+        for mut store in &mut maps {
+            let _ = store.0.apply(event);
+        }
+    }
+}
+
+/// `IngestSet::Apply`: `AdvancementsUpdated` → [`SessionAdvancements`].
+pub fn apply_advancements(batch: Res<IngestBatch>, mut trees: Query<&mut SessionAdvancements>) {
+    for event in batch.events() {
+        for mut store in &mut trees {
+            let _ = store.0.apply(event);
+        }
+    }
+}
+
 /// `IngestSet::Apply`: `GameRulesChanged` → [`SessionGameRules`].
 pub fn apply_game_rules(batch: Res<IngestBatch>, mut rules: Query<&mut SessionGameRules>) {
     for event in batch.events() {
@@ -963,6 +999,8 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             SessionSpawnPoint::default(),
             SessionGameRules::default(),
             SessionRecipeBookSettings::default(),
+            SessionMaps::default(),
+            SessionAdvancements::default(),
         ));
     }
 }
@@ -1010,6 +1048,8 @@ impl Plugin for SessionPlugin {
                 apply_spawn_point,
                 apply_game_rules,
                 apply_recipe_book_settings,
+                apply_maps,
+                apply_advancements,
                 apply_local_player_state,
             )
                 .chain()
@@ -3206,6 +3246,22 @@ mod tests {
             furnace: lodestone_model::RecipeBookTypeSettings::default(),
             blast_furnace: lodestone_model::RecipeBookTypeSettings::default(),
             smoker: lodestone_model::RecipeBookTypeSettings::default(),
+        }));
+        // MapItemData — apply_maps.
+        assert!(handles_event(&ClientEvent::MapItemData {
+            map_id: 1,
+            scale: 0,
+            locked: false,
+            decorations: None,
+            color_patch: None,
+        }));
+        // AdvancementsUpdated — apply_advancements.
+        assert!(handles_event(&ClientEvent::AdvancementsUpdated {
+            reset: true,
+            added: Vec::new(),
+            removed: Vec::new(),
+            progress: Vec::new(),
+            show_advancements: true,
         }));
 
         // ---- the negative controls: ingest-only and client-only events ----
