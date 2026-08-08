@@ -227,6 +227,119 @@ pub struct RecipeBookPanelLayout {
     /// layer's `recipe_panel_layout` overwrites it from the panel's own state,
     /// which is the single place that knows the user's filter choice.
     pub filtering: bool,
+    /// One entry per visible tab, in [`Self::tabs`] order — the **item icon**
+    /// each category tab draws.
+    ///
+    /// Carried on the layout for [`Self::filtering`]'s reason: the geometry layer
+    /// is given neither the [`RecipeBookType`](lodestone_model::RecipeBookType)
+    /// nor the browsed category list, and threading both through six public
+    /// entry points for a two-sprite draw is the churn that field's doc already
+    /// declined once. [`recipe_tab_icons`] is the mapping;
+    /// [`recipe_book_panel_layout_with_scale`] leaves this empty and the app
+    /// layer's `recipe_panel_layout` fills it.
+    ///
+    /// Empty means "draw no tab icons", which is what a jar-less run and every
+    /// existing geometry gate get.
+    pub tab_icons: Vec<RecipeTabIcons>,
+    /// The search box's current text, and whether it has focus — vanilla's
+    /// `EditBox` value and `isFocused()`.
+    ///
+    /// Same carrying argument as [`Self::tab_icons`]. Focus matters to the draw
+    /// because vanilla shows the greyed hint *only* when the value is empty **and**
+    /// the box is unfocused (`EditBox.java:438`), and draws a cursor when focused.
+    pub search: String,
+    /// See [`Self::search`].
+    pub search_focused: bool,
+}
+
+/// The item icon(s) one recipe-book category tab draws — vanilla's
+/// `RecipeBookComponent.TabInfo` `(primaryIcon, secondaryIcon)`
+/// (`RecipeBookComponent.java:576-588`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecipeTabIcons {
+    /// Always drawn.
+    pub primary: ItemStack,
+    /// Drawn beside the primary when present, which also **moves** the primary:
+    /// see [`RECIPE_TAB_ICON_SOLO_X`].
+    pub secondary: Option<ItemStack>,
+}
+
+/// Local x of a tab's icon when it is the only one —
+/// `graphics.fakeItem(primaryIcon, getX() + 9 + moveLeft, getY() + 5)`
+/// (`RecipeBookTabButton.java:79`).
+const RECIPE_TAB_ICON_SOLO_X: f32 = 9.0;
+/// Local x of the **first** of two icons — `getX() + 3 + moveLeft` (`:76`).
+const RECIPE_TAB_ICON_PAIR_X: f32 = 3.0;
+/// Local x of the **second** of two icons — `getX() + 14 + moveLeft` (`:77`).
+const RECIPE_TAB_ICON_PAIR2_X: f32 = 14.0;
+/// Local y of every tab icon — `getY() + 5` (`:76-79`).
+const RECIPE_TAB_ICON_Y: f32 = 5.0;
+
+/// A `minecraft:`-namespaced [`ItemStack`] of one, for the icon tables below.
+///
+/// Panics-free: the paths are compile-time literals from the jar, so
+/// `Identifier::new` cannot fail on them, and an `unwrap_or_else` fallback would
+/// be dead code pretending otherwise. `expect` names the offender if someone
+/// mistypes one.
+fn icon(path: &str) -> ItemStack {
+    ItemStack::new(
+        lodestone_model::Identifier::new("minecraft", path).expect("a literal item path"),
+        1,
+    )
+}
+
+/// The tab icons for one book type's visible `categories`, in the same order —
+/// feed the result straight into [`RecipeBookPanelLayout::tab_icons`].
+///
+/// # Where these come from
+///
+/// Each `TabInfo` list is declared per *screen*, not per category, so the same
+/// [`RecipeCategory`](lodestone_game::recipe::RecipeCategory) has a different
+/// icon in different books — `Blocks` is `stone` in a furnace and
+/// `redstone_ore` in a blast furnace, `Misc` is `lava_bucket + apple` at a
+/// crafting table and `lava_bucket + emerald` in a furnace. That is exactly why
+/// this takes the book type and not just the category; keying on the category
+/// alone would put a porkchop on the blast furnace.
+///
+/// | book | declared in | tabs |
+/// |---|---|---|
+/// | Crafting | `CraftingRecipeBookComponent.java:26-32` | `bricks`, `redstone`, `iron_axe + golden_sword`, `lava_bucket + apple` |
+/// | Furnace | `FurnaceScreen.java:19-22` | `porkchop`, `stone`, `lava_bucket + emerald` |
+/// | BlastFurnace | `BlastFurnaceScreen.java:19-21` | `redstone_ore`, `iron_shovel + golden_leggings` |
+/// | Smoker | `SmokerScreen.java:19` | `porkchop` |
+///
+/// Vanilla's leading `TabInfo(SearchRecipeBookCategory)` — the `compass` "all"
+/// tab — has no counterpart here: this client models "all categories" as
+/// `tab == None` with no tab widget of its own (see
+/// [`RecipeBookPanelContents`]), so the compass is deliberately absent rather
+/// than missing.
+#[must_use]
+pub fn recipe_tab_icons(
+    book_type: lodestone_model::RecipeBookType,
+    categories: &[lodestone_game::recipe::RecipeCategory],
+) -> Vec<RecipeTabIcons> {
+    use lodestone_game::recipe::RecipeCategory as C;
+    use lodestone_model::RecipeBookType as B;
+    let one = |p: &str| RecipeTabIcons { primary: icon(p), secondary: None };
+    let two = |a: &str, b: &str| RecipeTabIcons {
+        primary: icon(a),
+        secondary: Some(icon(b)),
+    };
+    categories
+        .iter()
+        .map(|&c| match (book_type, c) {
+            (B::Crafting, C::Building) => one("bricks"),
+            (B::Crafting, C::Redstone) => one("redstone"),
+            (B::Crafting, C::Equipment) => two("iron_axe", "golden_sword"),
+            (B::Crafting, _) => two("lava_bucket", "apple"),
+            (B::Furnace, C::Food) => one("porkchop"),
+            (B::Furnace, C::Blocks) => one("stone"),
+            (B::Furnace, _) => two("lava_bucket", "emerald"),
+            (B::BlastFurnace, C::Blocks) => one("redstone_ore"),
+            (B::BlastFurnace, _) => two("iron_shovel", "golden_leggings"),
+            (B::Smoker, _) => one("porkchop"),
+        })
+        .collect()
 }
 
 /// Builds [`RecipeBookPanelLayout`] for `menu`'s own screen geometry — see
@@ -307,8 +420,13 @@ pub fn recipe_book_panel_layout_with_scale(
         recipes: std::array::from_fn(|i| at(recipe_grid_cell_local(i))),
         page_forward: has_next_page.then(|| at(RECIPE_PAGE_FORWARD)),
         page_back: has_prev_page.then(|| at(RECIPE_PAGE_BACK)),
-        // Geometry cannot know the filter state — see the field's own doc.
+        // Geometry cannot know the filter state, the browsed categories or the
+        // search text — see those fields' own docs. The app layer's
+        // `recipe_panel_layout` fills all four.
         filtering: false,
+        tab_icons: Vec::new(),
+        search: String::new(),
+        search_focused: false,
     }
 }
 
@@ -664,6 +782,23 @@ impl RecipeBookPanelGeometry {
     }
 }
 
+/// `EditBox`'s bordered text inset — `textX = getX() + 4`
+/// (`EditBox.java:490`).
+const SEARCH_TEXT_INSET: f32 = 4.0;
+/// The glyph height `EditBox` centres its text against — the literal `8` in
+/// `textY = getY() + (height - 8) / 2` (`EditBox.java:491`). Note this is `8`,
+/// not the `9` line *pitch* the caret height uses, and the two are different
+/// numbers in the same expression pair in vanilla too.
+const SEARCH_GLYPH_H: f32 = 8.0;
+/// `EditBox.setTextColor(-1)` (`RecipeBookComponent.java:127`) — opaque white.
+const SEARCH_TEXT_COLOUR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+/// `EditBox.SEARCH_HINT_STYLE`'s `ChatFormatting.GRAY` (`EditBox.java:37`),
+/// which is `0xAAAAAA`.
+const SEARCH_HINT_COLOUR: [f32; 4] = [0.666_666_7, 0.666_666_7, 0.666_666_7, 1.0];
+/// `RecipeBookComponent.SEARCH_HINT`'s `gui.recipebook.search_hint`, whose
+/// `en_us` value is `"Search..."`.
+const SEARCH_HINT: &str = "Search...";
+
 /// Vanilla's own icon inset within a `RecipeButton` — `offset = 4`
 /// (`RecipeButton.java:104`, the non-multi-recipe branch — the "stack two
 /// icons" `offset` dance for a multi-recipe button is not modelled, see the
@@ -712,13 +847,19 @@ pub fn recipe_book_panel_geometry(
         width,
         height,
         &IconAssets { items: None, models: None },
+        None,
     )
 }
 
 /// As [`recipe_book_panel_geometry`], drawing **real item icons** from the
 /// atlases — the recipe-grid analogue of
 /// [`ContainerGeometry::build_with_icons`].
+///
+/// `font` is the only thing that can draw the search box's *text*; with `None`
+/// the box is chrome and nothing else, which is the jar-less picture (there is no
+/// vanilla font to draw with there either).
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn recipe_book_panel_geometry_with_icons(
     layout: &RecipeBookPanelLayout,
     open: bool,
@@ -729,6 +870,7 @@ pub fn recipe_book_panel_geometry_with_icons(
     height: u32,
     items: &ItemAtlas,
     models: Option<&BlockModels>,
+    font: Option<&crate::hud::VanillaFont>,
 ) -> RecipeBookPanelGeometry {
     recipe_book_panel_geometry_inner(
         layout,
@@ -739,6 +881,7 @@ pub fn recipe_book_panel_geometry_with_icons(
         width,
         height,
         &IconAssets { items: Some(items), models },
+        font,
     )
 }
 
@@ -752,6 +895,7 @@ fn recipe_book_panel_geometry_inner(
     width: u32,
     height: u32,
     assets: &IconAssets<'_>,
+    font: Option<&crate::hud::VanillaFont>,
 ) -> RecipeBookPanelGeometry {
     // The same logical-canvas expression `recipe_book_panel_layout_with_scale`
     // (via `panel_origin_with_scale`) and `ContainerGeometry::build_inner`
@@ -763,7 +907,7 @@ fn recipe_book_panel_geometry_inner(
     // The toggle button is the one widget that draws even when the panel
     // itself is closed — vanilla's toggle lives on the screen, not inside
     // `RecipeBookComponent` (see `RecipeBookPanelHit::Toggle`'s own doc).
-    let mut b = Builder::new(w, h, None);
+    let mut b = Builder::new(w, h, font);
     b.rect_px(layout.toggle.x, layout.toggle.y, layout.toggle.w, layout.toggle.h, TOGGLE_COLOUR);
     // The real art, in draw order. Built alongside the flat fills rather than
     // instead of them: the fills stay as the jar-less picture and the renderer
@@ -907,6 +1051,68 @@ fn recipe_book_panel_geometry_inner(
     for (i, r) in layout.recipes.iter().enumerate() {
         if let Some(stack) = page_results.get(i) {
             b.draw_stack(assets, stack, r.x + RECIPE_ICON_INSET, r.y + RECIPE_ICON_INSET);
+        }
+    }
+
+    // The category tabs' own item icons — `RecipeBookTabButton.extractIcon`
+    // (`RecipeBookTabButton.java:74-81`), which the panel had none of: the tabs
+    // drew their sprite and nothing on it, so every category slot was blank.
+    //
+    // In the icon half of the stream on purpose. `extractIcon` is called *after*
+    // the tab's own `blitSprite` (`:60-61`), and this path's tab sprite is in
+    // `sprites` — which the caller draws between the two colour ranges — so an
+    // icon emitted before the split would be buried by its own tab.
+    //
+    // `moveLeft` is vanilla's: the selected tab's art shifts 2 px left
+    // (`RECIPE_TAB_SELECTED_NUDGE`) and its icon goes with it, while the widget
+    // rect does not move.
+    for (i, r) in layout.tabs.iter().enumerate() {
+        let Some(icons) = layout.tab_icons.get(i) else {
+            continue;
+        };
+        let move_left = if selected_tab == Some(i) { -RECIPE_TAB_SELECTED_NUDGE } else { 0.0 };
+        let y = r.y + RECIPE_TAB_ICON_Y;
+        match &icons.secondary {
+            Some(second) => {
+                b.draw_stack(assets, &icons.primary, r.x + RECIPE_TAB_ICON_PAIR_X + move_left, y);
+                b.draw_stack(assets, second, r.x + RECIPE_TAB_ICON_PAIR2_X + move_left, y);
+            }
+            None => {
+                b.draw_stack(assets, &icons.primary, r.x + RECIPE_TAB_ICON_SOLO_X + move_left, y);
+            }
+        }
+    }
+
+    // The search box's text. Vanilla's is a plain `EditBox`, so there is no
+    // sprite for it (the well is baked into the panel sheet) and the *text* was
+    // the whole widget — which is why the box read as "completely missing" even
+    // though the state behind it (`RecipePanelState::search`) was already live
+    // and already edited by typing.
+    //
+    // `EditBox.renderWidget` (`EditBox.java:489-491`): `textX = getX() + 4`
+    // (bordered), `textY = getY() + (height - 8) / 2`. With this box's declared
+    // `9 + 5` height that is `y + 3`.
+    //
+    // The hint is drawn **only** when the value is empty *and* the box is
+    // unfocused (`:438`), in `SEARCH_HINT_STYLE`'s grey; a focused empty box
+    // shows the cursor instead, which is how a player can tell typing will land
+    // here. Italic is not modelled — this font has no italic variant, and a
+    // fabricated slant would be worse than upright grey.
+    if font.is_some() {
+        let tx = layout.search_box.x + SEARCH_TEXT_INSET;
+        let ty = layout.search_box.y + ((layout.search_box.h - SEARCH_GLYPH_H) * 0.5).floor();
+        if layout.search.is_empty() && !layout.search_focused {
+            b.shadowed_label(SEARCH_HINT, tx, ty, 1.0, SEARCH_HINT_COLOUR);
+        } else {
+            b.shadowed_label(&layout.search, tx, ty, 1.0, SEARCH_TEXT_COLOUR);
+            if layout.search_focused {
+                // `TextCursorUtils.extractInsertCursor(graphics, cursorX, textY,
+                // color, 9 + 1)` (`EditBox.java:459`) — a 1 px caret one glyph
+                // line tall, at the end of the value because this client has no
+                // cursor position within it.
+                let cx = tx + b.font.map_or(0.0, |f| f.width(&layout.search, 1.0));
+                b.rect_px(cx, ty - 1.0, 1.0, SEARCH_GLYPH_H + 2.0, SEARCH_TEXT_COLOUR);
+            }
         }
     }
 

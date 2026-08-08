@@ -785,6 +785,10 @@ impl WindowApp {
             // zero pixels because nothing composited the vertices.
             if let Some(menu) = container_menu {
                 let items = hud.item_atlas();
+                // The search box's *text* needs the same vanilla font the
+                // container's own labels use — without it the box drew as an
+                // empty well, which is why it read as missing entirely.
+                let font = hud.font();
                 if let Some(geo) = recipe_panel_geometry(
                     self.recipe_book.as_ref(),
                     &self.recipe_panel,
@@ -792,6 +796,7 @@ impl WindowApp {
                     self.nav.gui_scale(),
                     items.as_deref(),
                     item_models,
+                    font.as_deref(),
                     w,
                     h,
                 ) {

@@ -2794,6 +2794,18 @@ impl HudRenderer {
         self.font.is_some()
     }
 
+    /// The vanilla font, for a caller that builds its **own** geometry and needs
+    /// to lay out text with the same metrics this HUD does — the recipe-book
+    /// panel's search box is the first (`app/redraw.rs`).
+    ///
+    /// Returns the `Arc` rather than a borrow so the caller can hold it across a
+    /// `&mut self.render` borrow, which is the same constraint that made
+    /// `recipe_toast_view` a free function.
+    #[must_use]
+    pub fn font(&self) -> Option<Arc<VanillaFont>> {
+        self.font.clone()
+    }
+
     /// Override the font the HUD draws with (a resource pack, or a gate pinning
     /// one specific pack). [`HudRenderer::new`] already resolves the vanilla
     /// default, so this is only needed to *replace* it.
@@ -3328,8 +3340,24 @@ impl HudRenderer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("hud-recipe-panel"),
         });
-        // Pass 1: chrome, under everything.
+        // Pass 1: chrome, under everything — **but only when the real art did
+        // not resolve.**
+        //
+        // The flat fills are the jar-less fallback and nothing else (see
+        // `RecipeBookPanelGeometry::sprites` and the palette's own doc), and
+        // drawing them *under* the art is not free: vanilla's `recipe_book.png`
+        // page has **transparent rounded corners**, so an opaque near-black
+        // rectangle behind it shows through at all four of them and the panel
+        // reads as a square with dark corner pixels. That is the owner's "the
+        // rounded corners have pixels filling them in to be square" report — the
+        // fill is not covered by the sprite, it is *revealed* by it.
+        //
+        // Keyed on `panel_art_count`, not on `self.gui.is_some()`: a pack that
+        // carries the atlas but none of the `recipe_book/**` ids resolves no
+        // sprites, and that run still wants the fallback rather than an invisible
+        // panel.
         if chrome_count > 0
+            && panel_art_count == 0
             && let Some(buffer) = &self.recipe_panel_buffer
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
