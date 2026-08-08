@@ -71,6 +71,17 @@ impl SimplexNoise {
         Self { p }
     }
 
+    /// Appends a complete, bit-exact description of this octave to `out` — see
+    /// [`crate::noise::ImprovedNoise::write_signature`] for the contract.
+    ///
+    /// The permutation *is* the whole state (the three `nextDouble`s vanilla
+    /// draws are discarded), so this is the entire struct.
+    pub fn write_signature(&self, out: &mut Vec<u64>) {
+        for word in self.p.chunks_exact(8) {
+            out.push(u64::from_le_bytes(word.try_into().unwrap()));
+        }
+    }
+
     fn p(&self, x: i32) -> i32 {
         i32::from(self.p[(x & 0xFF) as usize])
     }

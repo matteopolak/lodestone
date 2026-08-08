@@ -33,6 +33,31 @@ pub struct SplinePoint {
 }
 
 impl Spline {
+    /// Appends a complete, bit-exact description of this spline to `out` — see
+    /// [`crate::noise::ImprovedNoise::write_signature`] for the contract, and
+    /// [`Density::write_signature`] for why the node-sharing pass needs it.
+    ///
+    /// `f32` fields go in as `to_bits()` widened to `u64`, for the same
+    /// `0.0`/`-0.0`/`NaN` reason floats never go in as compared values.
+    pub fn write_signature(&self, out: &mut Vec<u64>) {
+        match self {
+            Spline::Constant(v) => {
+                out.push(0);
+                out.push(u64::from(v.to_bits()));
+            }
+            Spline::Multipoint { coordinate, points } => {
+                out.push(1);
+                coordinate.write_signature(out);
+                out.push(points.len() as u64);
+                for p in points {
+                    out.push(u64::from(p.location.to_bits()));
+                    out.push(u64::from(p.derivative.to_bits()));
+                    p.value.write_signature(out);
+                }
+            }
+        }
+    }
+
     /// Evaluates the spline at `ctx`, in `f32` to match vanilla exactly.
     #[must_use]
     pub fn compute(&self, ctx: Context) -> f32 {

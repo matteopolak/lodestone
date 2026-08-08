@@ -25,12 +25,12 @@
 //!
 //! # What it deliberately does *not* flatten
 //!
-//! `spline`, `old_blended_noise` and `find_top_surface` are **leaves** to the
-//! block-field evaluator: it does not recurse into them, it calls the *point*
-//! interpreter ([`Density::compute`]). Everything beneath one of those is
+//! `spline`, `old_blended_noise`, `find_top_surface` and `end_islands` are
+//! **leaves** to the block-field evaluator: it does not recurse into them, it
+//! calls the *point* interpreter ([`Density::compute`]). Everything beneath one of those is
 //! therefore evaluated with point semantics — no quart snapping, no
 //! interpolation. That is a real semantic, not an optimisation
-//! (`docs/worldgen-density-engine.md`), so those three kinds compile to an
+//! (`docs/worldgen-density-engine.md`), so those four kinds compile to an
 //! index into [`Graph::leaves`], which holds the original `Density` subtree
 //! untouched. Flattening beneath them would silently change their semantics.
 //!
@@ -44,6 +44,7 @@
 //! which is otherwise invisible (a mislabelled node still *evaluates*, it just
 //! evaluates as the wrong operator).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::density::{Density, Spline};
@@ -92,6 +93,7 @@ pub(crate) enum OpKind {
     Spline = 28,
     Blended = 29,
     FindTopSurface = 30,
+    EndIslands = 31,
 }
 
 /// One flattened node: an operator plus up to three `u32` payload slots.
@@ -127,11 +129,106 @@ pub struct Graph {
     /// `PerlinNoise` stacks — the very payload whose inlining makes `Density`
     /// wide.
     noises: Vec<NormalNoise>,
-    /// `spline` / `old_blended_noise` / `find_top_surface` subtrees, held as
-    /// the original `Density` because the block-field evaluator treats them as
-    /// opaque point-evaluated leaves (module doc).
+    /// `spline` / `old_blended_noise` / `find_top_surface` / `end_islands`
+    /// subtrees, held as the original `Density` because the block-field evaluator
+    /// treats them as opaque point-evaluated leaves (module doc).
     leaves: Vec<Density>,
+    /// Compile-time-only node-sharing tables. Emptied (and its allocations
+    /// dropped) by [`Program::compile`] the moment compilation finishes, so a
+    /// live `Graph` carries five empty `HashMap`s — see [`Interner`].
+    interner: Interner,
 }
+
+/// The node-sharing (common-subexpression-elimination) tables, live only while
+/// [`Program::compile`] runs.
+///
+/// # What it is for
+///
+/// [`Builder::build`](crate::density::Builder::build) resolves every `"minecraft:…"`
+/// reference by *re-parsing* the referenced document, so vanilla's shared
+/// density-function **DAG** arrives here as a **tree**: the same subtree appears
+/// once per reference to it. §12.132 measured the consequence —
+/// [`Program::cache_2d_under_leaves`] reading **708** against the handful of
+/// `cache_2d` nodes 26.2's data declares — and identified it as the largest
+/// remaining serial item in chunk generation. This restores the sharing.
+///
+/// # Why it is safe, and where the safety comes from
+///
+/// **Every RNG draw has already happened.** Noises are instantiated by
+/// `Builder`, whose only sources are `master.from_hash_of(id)` (a *positional*
+/// factory keyed by the noise's registry id) and `LegacyRandomSource::new(seed + n)`
+/// — neither of which advances any shared stream. Compilation runs strictly
+/// *after* every one of those draws and performs none of its own, so RNG draw
+/// order and count, which are the specification of the generated world, are
+/// unchanged by construction rather than by argument. Sharing at `Builder` level
+/// would need that argument; sharing here does not, which is why the pass lives
+/// on this side of the boundary.
+///
+/// **Every node kind is a pure function of position.** [`Graph`] holds no
+/// mutable state at all (that is its module doc's point 3 — all memoisation is
+/// in [`super::Scratch`]), every evaluator entry point takes `&self`, and no
+/// `Op` and no [`Density`] variant reads anything but its own payload and the
+/// `(x, y, z)` it is handed. So collapsing two structurally identical nodes into
+/// one cannot change a value, cannot change an order, and cannot skip a side
+/// effect — there are none to skip. The exclusion list this pass would otherwise
+/// carry is therefore empty, and
+/// [`Density::write_signature`](crate::density::Density::write_signature)
+/// documents what to do if a future leaf kind breaks that property.
+///
+/// # The one thing that is not purely structural
+///
+/// `interpolated` and `flat_cache` carry a `slot` — an index into the
+/// evaluator's per-chunk memo, assigned by a running counter in `Builder` and so
+/// *different* for every duplicated copy. The signature deliberately excludes it
+/// (see [`Density::write_signature`](crate::density::Density::write_signature)),
+/// which is the whole point: collapsing two copies onto the surviving node's slot
+/// is what makes the second parent hit [`super::Scratch`]'s slot memo instead of
+/// re-evaluating the subtree. Slots freed this way are simply never used;
+/// `Builder::slot_count` still sizes the scratch, so nothing downstream needs to
+/// know.
+///
+/// # How the keys work
+///
+/// Side tables are interned first, so by the time an `Op` is keyed, `a`/`b`/`c`
+/// are either already-canonical child [`NodeId`]s or already-canonical
+/// side-table offsets — which makes `(kind, a, b, c)` a **complete** structural
+/// key with no recursion and no deep comparison. Noises and leaves are keyed by
+/// their exact bit-level signature (`write_signature`), never by a hash alone:
+/// `HashMap` compares the full key on a hash collision, so a collision costs a
+/// comparison rather than the wrong noise.
+#[derive(Default)]
+struct Interner {
+    /// Exact `f64`-bit runs → offset into [`Graph::params`].
+    params: HashMap<Box<[u64]>, u32>,
+    /// Exact child-id runs → offset into [`Graph::children`].
+    children: HashMap<Box<[u32]>, u32>,
+    /// [`NormalNoise::write_signature`] → index into [`Graph::noises`].
+    noises: HashMap<Box<[u64]>, u32>,
+    /// [`Density::write_signature`] → index into [`Graph::leaves`].
+    leaves: HashMap<Box<[u64]>, u32>,
+    /// `(kind, a, b, c)` → the canonical node with that shape. `b` is replaced by
+    /// [`SLOT_WILDCARD`] for `interpolated`/`flat_cache`.
+    ops: HashMap<(u8, u32, u32, u32), NodeId>,
+    /// Nodes answered by an existing entry rather than pushed. Exposed through
+    /// [`Program::shared_nodes`] so a gate can assert the pass ran at all: a pass
+    /// that shared nothing would satisfy every value assertion.
+    shared_ops: u32,
+    /// Of those, how many were an `interpolated`/`flat_cache` whose slot was
+    /// collapsed onto an earlier one — the subset that removes *evaluation*
+    /// rather than only memory.
+    collapsed_slots: u32,
+    /// Duplicate `NormalNoise` instantiations answered from the table. Reported
+    /// rather than derived because `noises.len()` after the pass cannot tell you
+    /// what it was before it.
+    shared_noises: u32,
+    /// Duplicate point-evaluated leaf subtrees answered from the table.
+    shared_leaves: u32,
+}
+
+/// Stands in for the `slot` payload in an `interpolated`/`flat_cache` op key, so
+/// two copies differing only in slot hash to the same bucket. Not a real slot
+/// index: it is used for *every* node of those two kinds, so it cannot alias one.
+const SLOT_WILDCARD: u32 = u32::MAX;
 
 /// A root into a shared [`Graph`] — the unit callers hold and clone.
 ///
@@ -156,6 +253,10 @@ impl Program {
     /// assembled. It is supplied to
     /// [`NoiseChunkSampler::from_program`](crate::density::NoiseChunkSampler::from_program)
     /// instead.
+    /// Compilation is a **node-sharing** pass: an identical subtree is compiled
+    /// once no matter how many times `Builder`'s reference expansion duplicated
+    /// it. See [`Interner`] for why that is value- and RNG-invariant, and
+    /// [`shared_nodes`](Self::shared_nodes) for the counter that proves it ran.
     #[must_use]
     pub fn compile(root: &Density) -> Self {
         let mut g = Graph {
@@ -164,8 +265,19 @@ impl Program {
             children: Vec::new(),
             noises: Vec::new(),
             leaves: Vec::new(),
+            interner: Interner::default(),
         };
         let id = g.compile_node(root);
+        // The tables are only useful while compiling, and they are large (a leaf
+        // signature includes every octave's 256-byte permutation table). Dropping
+        // them here is most of the point of interning in the first place: the
+        // whole `Graph` is meant to be small enough to stay cache-resident across
+        // the 1,225 corner evaluations of a chunk.
+        g.interner.params = HashMap::new();
+        g.interner.children = HashMap::new();
+        g.interner.noises = HashMap::new();
+        g.interner.leaves = HashMap::new();
+        g.interner.ops = HashMap::new();
         Self {
             graph: Arc::new(g),
             root: id,
@@ -194,12 +306,65 @@ impl Program {
     }
 
     /// Number of opaque point-evaluated leaves (`spline`, `old_blended_noise`,
-    /// `find_top_surface`). Exposed for the same reason as
+    /// `find_top_surface`, `end_islands`). Exposed for the same reason as
     /// [`node_count`](Self::node_count): a gate needs to be able to see that
     /// the leaf boundary exists where the semantics say it does.
     #[must_use]
     pub fn leaf_count(&self) -> usize {
         self.graph.leaves.len()
+    }
+
+    /// Distinct instantiated noises in the shared graph.
+    ///
+    /// Before the node-sharing pass this equalled the number of `noise`/`shift*`/
+    /// `shifted_noise` occurrences in the expanded tree, so one noise id
+    /// referenced from ten places held ten full copies of its octave permutation
+    /// tables. It now counts *distinct* noises, which is the quantity the noise
+    /// kernel's cache footprint is proportional to.
+    #[must_use]
+    pub fn noise_count(&self) -> usize {
+        self.graph.noises.len()
+    }
+
+    /// How many nodes the node-sharing pass answered from an existing entry
+    /// instead of emitting.
+    ///
+    /// This is the pass's own "did it run" control, and it needs to be a counter
+    /// rather than a value assertion for the reason §12.132's `Cache2D` deletion
+    /// records: a sharing pass that shares *nothing* leaves every generated byte
+    /// identical, so no terrain gate and no parity dump can distinguish it from a
+    /// working one. Pair it with [`node_count`](Self::node_count): shared + kept
+    /// is the size of the tree `Builder` handed over.
+    #[must_use]
+    pub fn shared_nodes(&self) -> usize {
+        self.graph.interner.shared_ops as usize
+    }
+
+    /// Of [`shared_nodes`](Self::shared_nodes), how many were an
+    /// `interpolated`/`flat_cache` collapsed onto an *earlier* node's cache slot.
+    ///
+    /// This is the subset that removes evaluation rather than only memory: the
+    /// second parent of a collapsed node now hits [`super::Scratch`]'s slot memo
+    /// where it used to re-evaluate the whole subtree beneath it. A pass with a
+    /// large `shared_nodes` and a zero here would have made the graph smaller and
+    /// the work identical.
+    #[must_use]
+    pub fn collapsed_slots(&self) -> usize {
+        self.graph.interner.collapsed_slots as usize
+    }
+
+    /// Duplicate noise instantiations the pass collapsed. `noise_count() +
+    /// shared_noises()` is how many copies `Builder` handed over.
+    #[must_use]
+    pub fn shared_noises(&self) -> usize {
+        self.graph.interner.shared_noises as usize
+    }
+
+    /// Duplicate point-evaluated leaf subtrees the pass collapsed. `leaf_count() +
+    /// shared_leaves()` is how many copies `Builder` handed over.
+    #[must_use]
+    pub fn shared_leaves(&self) -> usize {
+        self.graph.interner.shared_leaves as usize
     }
 
     /// Counts nodes of one JSON type name (as spelled in
@@ -263,8 +428,19 @@ impl Program {
     /// under the leaves. 708 against vanilla's handful is the compiler expanding
     /// a DAG into a tree, which is why the memo could never hit — each parent got
     /// its own copy, so no two parents ever asked one slot for the same `(x, z)`.
-    /// A node-sharing (CSE) pass over the `Op` table is the open work that number
-    /// is the size of; see `docs/worldgen-density-engine.md`.
+    ///
+    /// **Since [`Interner`] this reads 236 for the real `final_density`, and the
+    /// residual is the interesting part.** Exactly 708 / 3: the leaf *table* held
+    /// three copies of each `cache_2d`-bearing subtree and now holds one. The 236
+    /// that remain are duplication *inside* a single leaf, which an `Op`-level
+    /// pass structurally cannot see — a leaf is an untouched [`Density`] subtree
+    /// evaluated by the point interpreter, so the pass interns it whole or not at
+    /// all. `preliminary_surface_level` is the extreme case: **one** op, **one**
+    /// leaf, **416** `cache_2d` nodes inside it. Removing that needs sharing in
+    /// the `Density` tree itself (`Box` → `Arc` plus hash-consing in `Builder`),
+    /// which is a different unit and carries the RNG-order argument this pass
+    /// deliberately avoids needing. See `docs/worldgen-density-engine.md` and
+    /// DESIGN.md §12.134.
     #[must_use]
     pub fn cache_2d_under_leaves(&self) -> usize {
         self.graph
@@ -294,7 +470,8 @@ fn child_densities(d: &Density) -> Vec<&Density> {
         | Density::ShiftA(_)
         | Density::ShiftB(_)
         | Density::Shift(_)
-        | Density::Blended(_) => Vec::new(),
+        | Density::Blended(_)
+        | Density::EndIslands(_) => Vec::new(),
         Density::Add(a, b) | Density::Mul(a, b) | Density::Min(a, b) | Density::Max(a, b) => {
             vec![a, b]
         }
@@ -372,33 +549,80 @@ impl Graph {
         &self.leaves[at as usize]
     }
 
+    /// Emits a node, or returns the existing node with the same shape.
+    ///
+    /// `a`/`b`/`c` are already canonical when this is reached (children are
+    /// compiled first; side-table payloads are interned first), so the key needs
+    /// no recursion — see [`Interner`]'s *How the keys work*.
     fn push(&mut self, kind: OpKind, a: u32, b: u32, c: u32) -> NodeId {
+        // `interpolated`/`flat_cache` key on their child alone: the `slot` in `b`
+        // is a memo index, not part of the function, and collapsing it is the
+        // point of the pass.
+        let slotted = matches!(kind, OpKind::Interpolated | OpKind::FlatCache);
+        let key = (kind as u8, a, if slotted { SLOT_WILDCARD } else { b }, c);
+        if let Some(&existing) = self.interner.ops.get(&key) {
+            self.interner.shared_ops += 1;
+            if slotted && self.ops[existing as usize].b != b {
+                self.interner.collapsed_slots += 1;
+            }
+            return existing;
+        }
         let id = self.ops.len() as NodeId;
         self.ops.push(Op { kind, a, b, c });
+        self.interner.ops.insert(key, id);
         id
     }
 
+    /// Interns an exact `f64` run. Only whole-run matches count — deliberately no
+    /// suffix/overlap sharing, because every read is `offset + known arity` and a
+    /// partial match would need the arity to be part of the key.
     fn push_params(&mut self, vals: &[f64]) -> u32 {
+        let key: Box<[u64]> = vals.iter().map(|v| v.to_bits()).collect();
+        if let Some(&at) = self.interner.params.get(&key) {
+            return at;
+        }
         let at = self.params.len() as u32;
         self.params.extend_from_slice(vals);
+        self.interner.params.insert(key, at);
         at
     }
 
     fn push_children(&mut self, ids: &[NodeId]) -> u32 {
+        let key: Box<[u32]> = ids.into();
+        if let Some(&at) = self.interner.children.get(&key) {
+            return at;
+        }
         let at = self.children.len() as u32;
         self.children.extend_from_slice(ids);
+        self.interner.children.insert(key, at);
         at
     }
 
     fn push_noise(&mut self, n: &NormalNoise) -> u32 {
+        let mut sig = Vec::new();
+        n.write_signature(&mut sig);
+        let key: Box<[u64]> = sig.into();
+        if let Some(&at) = self.interner.noises.get(&key) {
+            self.interner.shared_noises += 1;
+            return at;
+        }
         let at = self.noises.len() as u32;
         self.noises.push(n.clone());
+        self.interner.noises.insert(key, at);
         at
     }
 
     fn push_leaf(&mut self, d: &Density) -> u32 {
+        let mut sig = Vec::new();
+        d.write_signature(&mut sig);
+        let key: Box<[u64]> = sig.into();
+        if let Some(&at) = self.interner.leaves.get(&key) {
+            self.interner.shared_leaves += 1;
+            return at;
+        }
         let at = self.leaves.len() as u32;
         self.leaves.push(d.clone());
+        self.interner.leaves.insert(key, at);
         at
     }
 
@@ -424,7 +648,7 @@ impl Graph {
     /// | `ShiftA`/`ShiftB`/`Shift` | noise idx | — | — |
     /// | `RangeChoice` | children\[3\] | params\[2\] | — |
     /// | `IntervalSelect` | children\[n\] | n | params\[n-1\] |
-    /// | `Spline`/`Blended`/`FindTopSurface` | leaf idx | — | — |
+    /// | `Spline`/`Blended`/`FindTopSurface`/`EndIslands` | leaf idx | — | — |
     fn compile_node(&mut self, d: &Density) -> NodeId {
         match d {
             Density::Const(v) => {
@@ -573,6 +797,16 @@ impl Graph {
                 let l = self.push_leaf(d);
                 self.push(OpKind::FindTopSurface, l, 0, 0)
             }
+            // A fourth point-evaluated leaf. It has no children to flatten (a
+            // vanilla `SimpleFunction`) and it is xz-only, so nothing beneath it
+            // could gain block-field semantics anyway — the leaf table is both
+            // the simplest and the correct home. Interning it by signature is
+            // what makes the End's two occurrences share one 256-byte
+            // permutation instead of two.
+            Density::EndIslands(_) => {
+                let l = self.push_leaf(d);
+                self.push(OpKind::EndIslands, l, 0, 0)
+            }
         }
     }
 
@@ -639,7 +873,8 @@ impl Graph {
             | OpKind::Shift
             | OpKind::Spline
             | OpKind::Blended
-            | OpKind::FindTopSurface => {}
+            | OpKind::FindTopSurface
+            | OpKind::EndIslands => {}
         }
     }
 
@@ -758,6 +993,14 @@ mod tests {
                     cell_height: 8,
                 },
             ),
+            // The real payload rather than a stand-in, because this pairing is
+            // the *only* thing that catches `OpKind` and `kind_index` disagreeing
+            // about `end_islands`, and a case omitted from this list is a case the
+            // gate does not cover. ~17,500 RNG draws, microseconds.
+            (
+                OpKind::EndIslands,
+                Density::EndIslands(Arc::new(crate::noise::EndIslandNoise::new(0))),
+            ),
         ];
 
         for (kind, density) in &cases {
@@ -785,11 +1028,13 @@ mod tests {
 
         // Control on the control: the three noise-payload kinds and `Spline`
         // need a resolver to construct and are not in the list, so state the
-        // coverage rather than letting silence imply completeness.
+        // coverage rather than letting silence imply completeness. `EndIslands`
+        // used to be in that group and no longer is — its payload is seeded from a
+        // bare `i64`, so it is constructible here and is covered exactly.
         assert_eq!(
             cases.len(),
-            24,
-            "the case list changed size; 24 of the 31 kinds are constructible \
+            25,
+            "the case list changed size; 25 of the 32 kinds are constructible \
              without a resolver (the 7 needing a NormalNoise/BlendedNoise/Spline \
              payload are covered by `compiles_the_real_router` in \
              tests/engine_semantics.rs against real data)"
@@ -849,5 +1094,250 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    /// One `NormalNoise` instantiated twice from the same seed and id — what
+    /// `Builder` produces for every reference to a shared density function. Two
+    /// separate objects, bit-identical contents.
+    fn twin_noises() -> (NormalNoise, NormalNoise) {
+        use crate::rng::{Algorithm, PositionalRandomFactory};
+        let master = Algorithm::Xoroshiro.root_positional(42);
+        let amps = [1.0, 1.0, 1.0];
+        let mut a = master.from_hash_of("minecraft:continentalness");
+        let first = NormalNoise::create(&mut a, -9, &amps);
+        let mut b = master.from_hash_of("minecraft:continentalness");
+        let second = NormalNoise::create(&mut b, -9, &amps);
+        (first, second)
+    }
+
+    /// The node-sharing pass, on the shape `Builder`'s reference expansion
+    /// actually produces: the same subtree twice, as two independent objects.
+    ///
+    /// The prediction is computed, not observed. The subtree
+    /// `add(abs(noise), const)` is 4 nodes; `add(sub, sub)` over two *separate
+    /// but identical* copies is 9 nodes as a tree (4 + 4 + 1) and 5 as a DAG
+    /// (4 + 1), so `shared_nodes` must be exactly 4 and `node_count` exactly 5.
+    /// Asserting only "fewer than 9" would pass for a pass that shared one node
+    /// out of four — the *magnitude* species of vacuous test.
+    #[test]
+    fn an_identical_subtree_is_compiled_once() {
+        let (n1, n2) = twin_noises();
+        let sub = |n: NormalNoise| {
+            Density::Add(
+                b(Density::Abs(b(Density::Noise {
+                    noise: n,
+                    xz_scale: 0.25,
+                    y_scale: 0.0,
+                }))),
+                b(Density::Const(1.5)),
+            )
+        };
+        let d = Density::Add(b(sub(n1)), b(sub(n2)));
+        let p = Program::compile(&d);
+        assert_eq!(p.node_count(), 5, "noise + abs + const + inner add + outer add");
+        assert_eq!(p.shared_nodes(), 4, "the second copy's four nodes");
+        assert_eq!(p.noise_count(), 1, "two instantiations, one stored noise");
+        assert_eq!(p.shared_noises(), 1);
+
+        // …and the value is unchanged. `Density::compute` is the independent
+        // arm: it walks the original *tree*, so it never sees the sharing.
+        let mut scratch = super::super::Scratch::acquire(0, 4, 8, None);
+        for (x, y, z) in [(0, 0, 0), (13, -37, 91), (-5, 200, 7)] {
+            let flat =
+                super::super::Field::new(p.graph(), super::super::Geom { cell_width: 4, cell_height: 8 }, &mut scratch)
+                    .eval(p.root(), x, y, z, true);
+            let tree = d.compute(crate::density::Context::new(x, y, z));
+            assert_eq!(flat.to_bits(), tree.to_bits(), "at ({x}, {y}, {z})");
+        }
+        scratch.release();
+    }
+
+    /// `0.0` and `-0.0` compare *equal* under `==` and are different values
+    /// under `1.0 / x`, so a signature built from compared floats rather than
+    /// raw bits would fuse them and silently change terrain. Predict 2 nodes,
+    /// not "at least 1".
+    #[test]
+    fn signed_zero_constants_do_not_share_a_node() {
+        let d = Density::Add(b(Density::Const(0.0)), b(Density::Const(-0.0)));
+        let p = Program::compile(&d);
+        assert_eq!(p.node_count(), 3, "two distinct consts plus the add");
+        assert_eq!(p.shared_nodes(), 0);
+
+        // The control: two constants that really are the same value do share,
+        // so the assertion above is about signed zero and not about the pass
+        // being switched off.
+        let same = Density::Add(b(Density::Const(0.0)), b(Density::Const(0.0)));
+        let q = Program::compile(&same);
+        assert_eq!(q.node_count(), 2, "one const plus the add");
+        assert_eq!(q.shared_nodes(), 1);
+    }
+
+    /// The slot collapse: two `flat_cache` nodes over one inner, carrying the
+    /// *different* slot indices `Builder`'s running counter would have given
+    /// them. They must fuse onto the first slot — this is the part of the pass
+    /// that removes evaluation rather than only memory, because the second
+    /// parent now reads [`super::Scratch`]'s slot memo.
+    #[test]
+    fn duplicate_flat_cache_slots_collapse_onto_one() {
+        let (n1, n2) = twin_noises();
+        let inner = |n: NormalNoise| {
+            Density::Noise {
+                noise: n,
+                xz_scale: 1.0,
+                y_scale: 0.0,
+            }
+        };
+        let d = Density::Add(
+            b(Density::FlatCache {
+                inner: b(inner(n1)),
+                slot: 0,
+            }),
+            b(Density::FlatCache {
+                inner: b(inner(n2)),
+                slot: 1,
+            }),
+        );
+        let p = Program::compile(&d);
+        assert_eq!(p.node_count(), 3, "noise + one flat_cache + add");
+        assert_eq!(p.collapsed_slots(), 1, "slot 1 folded onto slot 0");
+        assert_eq!(
+            p.interpolating_slots(),
+            Vec::<u32>::new(),
+            "flat_cache is not an interpolating slot"
+        );
+
+        // Value identity against the tree walker, which has no slots at all.
+        let mut scratch = super::super::Scratch::acquire(2, 4, 8, None);
+        for (x, y, z) in [(0, 0, 0), (7, 44, -19)] {
+            let flat = super::super::Field::new(
+                p.graph(),
+                super::super::Geom { cell_width: 4, cell_height: 8 },
+                &mut scratch,
+            )
+            .eval(p.root(), x, y, z, true);
+            // `flat_cache` snaps XZ to the quart grid and forces y = 0, so the
+            // expectation is the tree walker at the *snapped* position — the
+            // semantic the collapse must not disturb.
+            let (qx, qz) = ((x >> 2) << 2, (z >> 2) << 2);
+            let one = Density::Noise {
+                noise: twin_noises().0,
+                xz_scale: 1.0,
+                y_scale: 0.0,
+            }
+            .compute(crate::density::Context::new(qx, 0, qz));
+            assert_eq!(flat.to_bits(), (one + one).to_bits(), "at ({x}, {y}, {z})");
+        }
+        scratch.release();
+    }
+
+    /// Two noises that differ must not share, or the pass would be handing one
+    /// channel another channel's field. The control for
+    /// [`an_identical_subtree_is_compiled_once`]: same shape, different data,
+    /// opposite verdict.
+    #[test]
+    fn different_noises_do_not_share_a_table_entry() {
+        use crate::rng::{Algorithm, PositionalRandomFactory};
+        let master = Algorithm::Xoroshiro.root_positional(42);
+        let amps = [1.0, 1.0, 1.0];
+        let mut a = master.from_hash_of("minecraft:continentalness");
+        let mut b_src = master.from_hash_of("minecraft:erosion");
+        let d = Density::Add(
+            b(Density::Noise {
+                noise: NormalNoise::create(&mut a, -9, &amps),
+                xz_scale: 1.0,
+                y_scale: 1.0,
+            }),
+            b(Density::Noise {
+                noise: NormalNoise::create(&mut b_src, -9, &amps),
+                xz_scale: 1.0,
+                y_scale: 1.0,
+            }),
+        );
+        let p = Program::compile(&d);
+        assert_eq!(p.noise_count(), 2, "different ids, different fields");
+        assert_eq!(p.shared_noises(), 0);
+        assert_eq!(p.node_count(), 3);
+    }
+
+    /// The End's `end_islands` leaf, which appears **twice** in 26.2's data
+    /// (`noise_settings/end.json`'s `erosion` and `end/sloped_cheese.json`), and
+    /// the two things that must be true of the pair.
+    ///
+    /// The subject is deliberately **two separately constructed**
+    /// `EndIslandNoise`s rather than two clones of one `Arc`: that is the strong
+    /// form. `Builder` shares an `Arc` so the ~17,500 draws are paid once, but if
+    /// this pass only deduped by pointer it would silently stop working the moment
+    /// anything built the leaf twice. Interning by signature covers both.
+    ///
+    /// What this does **not** claim: sharing the leaf does not make the End
+    /// evaluate `end_islands` once per `(x, z)`. The point interpreter has no
+    /// per-node memo and `cache_2d` is transparent (§12.132), so both occurrences
+    /// still *evaluate*; what is shared is the compiled node and its 256-byte
+    /// permutation. §12.134 records the same distinction for the overworld.
+    #[test]
+    fn the_two_end_islands_occurrences_share_one_leaf() {
+        let d = Density::Add(
+            b(Density::Cache2D {
+                inner: b(Density::EndIslands(Arc::new(
+                    crate::noise::EndIslandNoise::new(42),
+                ))),
+            }),
+            b(Density::EndIslands(Arc::new(
+                crate::noise::EndIslandNoise::new(42),
+            ))),
+        );
+        let p = Program::compile(&d);
+        assert_eq!(p.leaf_count(), 1, "one leaf for both occurrences");
+        assert_eq!(p.shared_leaves(), 1, "the second occurrence was interned");
+        // ops: end_islands + cache_2d + add. The bare occurrence shares the
+        // end_islands node with the one under cache_2d.
+        assert_eq!(p.node_count(), 3);
+        assert_eq!(p.shared_nodes(), 1);
+
+        // A different seed must not share — the control that says the assertion
+        // above is about identity and not about the table swallowing everything.
+        let other = Density::Add(
+            b(Density::EndIslands(Arc::new(
+                crate::noise::EndIslandNoise::new(42),
+            ))),
+            b(Density::EndIslands(Arc::new(
+                crate::noise::EndIslandNoise::new(43),
+            ))),
+        );
+        let q = Program::compile(&other);
+        assert_eq!(q.leaf_count(), 2, "different seeds, different fields");
+        assert_eq!(q.shared_leaves(), 0);
+    }
+
+    /// `IntervalSelect` stores `n` as `children[a]` and its thresholds in
+    /// `params`, so interning those runs is what makes two identical copies
+    /// key alike. Without run interning the child offsets differ and the op key
+    /// never matches — a silently ineffective pass on exactly the node kind
+    /// whose payload is widest.
+    #[test]
+    fn wide_payload_nodes_share_through_their_interned_runs() {
+        let arm = || Density::IntervalSelect {
+            input: b(Density::Const(0.5)),
+            thresholds: vec![0.0, 1.0],
+            functions: vec![Density::Const(1.0), Density::Const(2.0), Density::Const(3.0)],
+        };
+        let d = Density::Add(b(arm()), b(arm()));
+        let p = Program::compile(&d);
+        // Tree: 2 x (input const + 3 function consts + the select) = 10, + add.
+        // DAG: 4 distinct consts + 1 select + add = 6.
+        assert_eq!(p.node_count(), 6, "4 consts, 1 interval_select, 1 add");
+        assert_eq!(p.shared_nodes(), 5, "the whole second arm");
+        let mut scratch = super::super::Scratch::acquire(0, 4, 8, None);
+        let flat = super::super::Field::new(
+            p.graph(),
+            super::super::Geom { cell_width: 4, cell_height: 8 },
+            &mut scratch,
+        )
+        .eval(p.root(), 1, 2, 3, true);
+        assert_eq!(
+            flat.to_bits(),
+            d.compute(crate::density::Context::new(1, 2, 3)).to_bits()
+        );
+        scratch.release();
     }
 }

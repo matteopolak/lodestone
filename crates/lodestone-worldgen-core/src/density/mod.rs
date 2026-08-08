@@ -120,7 +120,7 @@ use serde_json::Value;
 
 use crate::math::{clamp, clamped_map};
 use crate::noise::{BlendedNoise, NormalNoise};
-use crate::rng::{PositionalRandomFactory, RandomSource};
+use crate::rng::PositionalRandomFactory;
 
 mod chunk;
 mod spline;
@@ -299,6 +299,36 @@ pub trait Resolver {
     /// `StructureRegistry::unsupported` — it never silently places nothing.
     fn structure_template(&self, _id: &str) -> Option<Vec<u8>> {
         None
+    }
+
+    /// `worldgen/template_pool/<name>.json` — one **jigsaw template pool**
+    /// (`{fallback, elements: [{element, weight}]}`, issue #514's S4).
+    ///
+    /// The third entry point to the structure engine, after
+    /// [`structure_set_ids`](Self::structure_set_ids) and
+    /// [`structure_template`](Self::structure_template): a jigsaw structure names
+    /// a `start_pool` and every jigsaw block inside a placed element names the
+    /// next pool, so a resolver that supplies none of them makes every jigsaw
+    /// structure (the five villages, `pillager_outpost`, `ancient_city`,
+    /// `trail_ruins`, `trial_chambers`, the bastion) demote to `Unsupported` and
+    /// appear in `StructureRegistry::unsupported` — placed, but with no blocks.
+    ///
+    /// Default: `Value::Null` ("no such pool"), the same no-data-supplied
+    /// convention as [`biome_parameters`](Self::biome_parameters).
+    fn template_pool(&self, _id: &str) -> Value {
+        Value::Null
+    }
+
+    /// `worldgen/processor_list/<name>.json` — one named
+    /// **structure-processor list** (`{"processors": [...]}`).
+    ///
+    /// A pool element spells its `processors` field either inline (an object) or
+    /// as a reference to one of these 40 documents, so the reference form needs a
+    /// lookup. Default: `Value::Null`, which resolves to an empty processor
+    /// chain — an element then places its template unfiltered rather than not at
+    /// all, so this one degrades quietly and is recorded on the ledger by name.
+    fn processor_list(&self, _id: &str) -> Value {
+        Value::Null
     }
 }
 
@@ -482,6 +512,20 @@ pub enum Density {
         /// Cell step size.
         cell_height: i32,
     },
+    /// `end_islands` — `DensityFunctions.EndIslandDensityFunction`, the End's
+    /// island height field. A `SimpleFunction`: no children, no arguments, and
+    /// **xz-only** (`compute(x, z)`; `y` is not read).
+    ///
+    /// Behind an [`Arc`] because construction burns 17,292 discarded `nextInt`s
+    /// plus a 256-step shuffle, and the type appears **twice** in 26.2's data —
+    /// `noise_settings/end.json`'s `erosion` channel (wrapped in `cache_2d`) and
+    /// `density_function/end/sloped_cheese.json`. [`Builder`] therefore builds one
+    /// and shares it; see [`Builder::build_object`]'s arm.
+    ///
+    /// Appended at the end of the enum on purpose — [`Self::kind_index`]'s values
+    /// index recorded counter tables, so a variant inserted in the middle
+    /// renumbers every later kind.
+    EndIslands(std::sync::Arc<crate::noise::EndIslandNoise>),
 }
 
 impl Density {
@@ -493,11 +537,12 @@ impl Density {
     /// plus `tests::kind_index_matches_names_for_constructible_variants` check
     /// the rest. **The residual gap, stated rather than glossed:** an exhaustive
     /// match would still compile if two variants shared one index, and the
-    /// index test can only cover the variants cheap to construct (24 of 31 — the
-    /// seven needing a `NormalNoise`/`BlendedNoise`/`Spline` payload are checked
+    /// index test can only cover the variants cheap to construct (24 of 32 — the
+    /// eight needing a `NormalNoise`/`BlendedNoise`/`Spline`/`EndIslandNoise`
+    /// payload are checked
     /// by reading, not by assertion). Distinctness of the *names* is asserted for
-    /// all 31, which catches a copy-paste in the table itself.
-    pub const KIND_COUNT: usize = 31;
+    /// all 32, which catches a copy-paste in the table itself.
+    pub const KIND_COUNT: usize = 32;
 
     /// Human-readable variant names, indexed by [`Self::kind_index`].
     pub const KIND_NAMES: [&'static str; Self::KIND_COUNT] = [
@@ -532,6 +577,7 @@ impl Density {
         "spline",
         "blended",
         "find_top_surface",
+        "end_islands",
     ];
 
     /// This node's variant as a dense index into `0..KIND_COUNT`.
@@ -580,6 +626,140 @@ impl Density {
             Density::Spline { .. } => 28,
             Density::Blended { .. } => 29,
             Density::FindTopSurface { .. } => 30,
+            Density::EndIslands { .. } => 31,
+        }
+    }
+
+    /// Appends a **complete, bit-exact** description of this subtree to `out`.
+    ///
+    /// Two `Density` values produce equal signatures iff they are bit-identical
+    /// in every field, transitively — see
+    /// [`crate::noise::ImprovedNoise::write_signature`] for the contract and the
+    /// float/`NaN` traps it exists to avoid. `engine::graph`'s node-sharing pass
+    /// uses this to decide that two separately-built copies of one subtree are
+    /// the *same* function and can share one compiled node, so an
+    /// under-specified signature here is a wrong-terrain bug, not a missed
+    /// optimisation.
+    ///
+    /// **`slot` is deliberately excluded** for `interpolated`/`flat_cache`. A
+    /// slot is an index into the *evaluator's* per-chunk memo, not part of the
+    /// function the node denotes: two `flat_cache` nodes over the same inner
+    /// compute the same value at every position regardless of which slot they
+    /// were assigned, so collapsing them onto one slot is value-invariant and is
+    /// exactly the duplication §12.132 measured. Every other field of every
+    /// variant is included.
+    ///
+    /// **How to extend this.** A new `Density` variant must add an arm here, and
+    /// the discriminant word must be [`Self::kind_index`] so no two variants can
+    /// collide. Lengths precede their contents (see
+    /// [`crate::noise::PerlinNoise::write_signature`] for why). If a new leaf
+    /// kind is *not* a pure function of position — anything that would advance an
+    /// RNG, read wall-clock state, or otherwise depend on evaluation order — it
+    /// must **not** be given a signature arm that lets it dedupe; make it
+    /// `unreachable_signature` (push a per-instance unique word) or exclude its
+    /// `OpKind` from `engine::graph`'s interner. Nothing in 26.2's density data
+    /// is in that class today.
+    pub fn write_signature(&self, out: &mut Vec<u64>) {
+        out.push(self.kind_index() as u64);
+        match self {
+            Density::Const(v) => out.push(v.to_bits()),
+            Density::BlendAlpha | Density::BlendOffset | Density::Beardifier => {}
+            Density::YClampedGradient {
+                from_y,
+                to_y,
+                from_value,
+                to_value,
+            } => {
+                for v in [from_y, to_y, from_value, to_value] {
+                    out.push(v.to_bits());
+                }
+            }
+            Density::Add(a, b) | Density::Mul(a, b) | Density::Min(a, b) | Density::Max(a, b) => {
+                a.write_signature(out);
+                b.write_signature(out);
+            }
+            Density::Abs(a)
+            | Density::Square(a)
+            | Density::Cube(a)
+            | Density::HalfNegative(a)
+            | Density::QuarterNegative(a)
+            | Density::Squeeze(a)
+            | Density::Invert(a)
+            | Density::Marker(a) => a.write_signature(out),
+            Density::Clamp { input, min, max } => {
+                input.write_signature(out);
+                out.push(min.to_bits());
+                out.push(max.to_bits());
+            }
+            // `slot` excluded — see the doc comment.
+            Density::Interpolated { inner, slot: _ }
+            | Density::FlatCache { inner, slot: _ }
+            | Density::Cache2D { inner } => inner.write_signature(out),
+            Density::Noise {
+                noise,
+                xz_scale,
+                y_scale,
+            } => {
+                noise.write_signature(out);
+                out.push(xz_scale.to_bits());
+                out.push(y_scale.to_bits());
+            }
+            Density::ShiftedNoise {
+                shift_x,
+                shift_y,
+                shift_z,
+                xz_scale,
+                y_scale,
+                noise,
+            } => {
+                shift_x.write_signature(out);
+                shift_y.write_signature(out);
+                shift_z.write_signature(out);
+                out.push(xz_scale.to_bits());
+                out.push(y_scale.to_bits());
+                noise.write_signature(out);
+            }
+            Density::ShiftA(n) | Density::ShiftB(n) | Density::Shift(n) => n.write_signature(out),
+            Density::RangeChoice {
+                input,
+                min_inclusive,
+                max_exclusive,
+                when_in_range,
+                when_out_of_range,
+            } => {
+                input.write_signature(out);
+                out.push(min_inclusive.to_bits());
+                out.push(max_exclusive.to_bits());
+                when_in_range.write_signature(out);
+                when_out_of_range.write_signature(out);
+            }
+            Density::IntervalSelect {
+                input,
+                thresholds,
+                functions,
+            } => {
+                input.write_signature(out);
+                out.push(thresholds.len() as u64);
+                out.extend(thresholds.iter().map(|t| t.to_bits()));
+                out.push(functions.len() as u64);
+                for f in functions {
+                    f.write_signature(out);
+                }
+            }
+            Density::EndIslands(n) => n.write_signature(out),
+            Density::Spline(s) => s.write_signature(out),
+            Density::Blended(b) => b.write_signature(out),
+            Density::FindTopSurface {
+                density,
+                upper_bound,
+                lower_bound,
+                cell_height,
+            } => {
+                density.write_signature(out);
+                upper_bound.write_signature(out);
+                out.push(*lower_bound as u32 as u64);
+                out.push(*cell_height as u32 as u64);
+            }
         }
     }
 
@@ -687,6 +867,10 @@ impl Density {
             }
             Density::Spline(s) => f64::from(s.compute(ctx)),
             Density::Blended(b) => b.compute(ctx.x, ctx.y, ctx.z),
+            // xz-only: `y` is deliberately not passed. `EndIslandDensityFunction`
+            // takes `(blockX, blockZ)` and the End's `erosion` channel wraps it in
+            // `cache_2d` for exactly that reason.
+            Density::EndIslands(n) => n.compute(ctx.x, ctx.z),
             Density::FindTopSurface {
                 density,
                 upper_bound,
@@ -735,6 +919,19 @@ pub struct Builder<'a> {
     algorithm: crate::rng::Algorithm,
     resolver: &'a dyn Resolver,
     slots: std::cell::Cell<usize>,
+    /// The one `end_islands` instance this builder hands to every occurrence.
+    ///
+    /// Built lazily and **exactly once**, which is a correctness requirement and
+    /// not only a cost one: `EndIslandNoise::new` burns 17,292 discarded
+    /// `nextInt`s plus a 256-step shuffle, and vanilla's
+    /// `EndIslandDensityFunction` is *one object* substituted into both of the
+    /// type's occurrences in 26.2's data (`noise_settings/end.json`'s `erosion`
+    /// and `density_function/end/sloped_cheese.json`). Constructing it twice is
+    /// value-identical here — it reads a fresh `LegacyRandomSource(seed)` and
+    /// advances no shared stream, the same property `engine::graph`'s node-sharing
+    /// pass relies on — but it is ~35,000 wasted draws per builder, and sharing
+    /// the `Arc` also lets the compiler's leaf table hold one copy.
+    end_islands: std::cell::OnceCell<std::sync::Arc<crate::noise::EndIslandNoise>>,
 }
 
 /// `Noises.TEMPERATURE_NETHER` — one of the two ids `RandomState` special-cases.
@@ -767,6 +964,7 @@ impl<'a> Builder<'a> {
             algorithm,
             resolver,
             slots: std::cell::Cell::new(0),
+            end_islands: std::cell::OnceCell::new(),
         }
     }
 
@@ -963,6 +1161,15 @@ impl<'a> Builder<'a> {
                     functions,
                 }
             }
+            // `MapCodec.unit(new EndIslandDensityFunction(0L))` — the document
+            // carries no arguments at all and always deserialises with seed 0;
+            // `RandomState.java:74` substitutes the raw world seed afterwards,
+            // which is `self.seed` and *not* a positional fork.
+            "end_islands" => Density::EndIslands(std::sync::Arc::clone(
+                self.end_islands.get_or_init(|| {
+                    std::sync::Arc::new(crate::noise::EndIslandNoise::new(self.seed))
+                }),
+            )),
             "spline" => Density::Spline(self.build_spline(&node["spline"])),
             "old_blended_noise" => Density::Blended(self.instantiate_blended(node)),
             "find_top_surface" => Density::FindTopSurface {
@@ -1029,8 +1236,9 @@ mod kind_index_tests {
     ///
     /// The exhaustive `match` in `kind_index` guarantees total coverage but
     /// **not** injectivity — it would compile happily with two variants sharing
-    /// an index. This is the control for that. It covers 24 of the 31 variants;
-    /// the seven needing a `NormalNoise`/`BlendedNoise`/`Spline` payload
+    /// an index. This is the control for that. It covers 24 of the 32 variants;
+    /// the eight needing a `NormalNoise`/`BlendedNoise`/`Spline`/`EndIslandNoise`
+    /// payload
     /// (`noise`, `shifted_noise`, `shift_a`, `shift_b`, `shift`, `spline`,
     /// `blended`) are not constructible here without a resolver and are checked
     /// by reading the match. Stated as a known gap rather than implied by

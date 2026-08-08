@@ -158,6 +158,33 @@ impl ImprovedNoise {
         Self { p, xo, yo, zo }
     }
 
+    /// Appends a **complete, bit-exact** description of this octave to `out`.
+    ///
+    /// The contract every `write_signature` in this crate shares: two values
+    /// produce equal signatures **iff** they are bit-identical, so a signature
+    /// comparison is exact structural equality and never a probabilistic hash.
+    /// That is what lets `engine::graph`'s node-sharing pass collapse two
+    /// separately-instantiated copies of one noise without a value argument —
+    /// see its `Interner`.
+    ///
+    /// Two traps this deliberately avoids. Floats go in as **raw bits**
+    /// (`to_bits`), not as `f64` compared with `==`: `0.0 == -0.0` is true while
+    /// the two are different values under `1.0 / x` and under `Mul`'s
+    /// `v1 == 0.0` short-circuit, and `NaN != NaN` would make an identical node
+    /// fail to match itself. And the 256-byte permutation table is included in
+    /// full rather than trusting `(xo, yo, zo)` to identify the octave: those
+    /// three doubles and the shuffle come from the same `RandomSource`, so
+    /// equal offsets *almost* imply an equal table — "almost" being exactly the
+    /// kind of argument that has no place in a determinism-critical comparison.
+    pub fn write_signature(&self, out: &mut Vec<u64>) {
+        out.push(self.xo.to_bits());
+        out.push(self.yo.to_bits());
+        out.push(self.zo.to_bits());
+        for word in self.p.chunks_exact(8) {
+            out.push(u64::from_le_bytes(word.try_into().unwrap()));
+        }
+    }
+
     #[inline]
     fn perm(&self, x: i32) -> i32 {
         i32::from(self.p[(x & 0xFF) as usize])
