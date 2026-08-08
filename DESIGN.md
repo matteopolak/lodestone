@@ -5176,3 +5176,187 @@ instrument controls passing on every quoted run. Doc:
   check with its threshold now *derived* from the premise floor. **A control's threshold must come
   from the hypothesis it separates, never from one machine's observation of a quantity the hypothesis
   does not mention — otherwise it decays into a load flake that blocks everyone.**
+
+**12.129 Making singleplayer playable: the spawn→fall→death→no-screen chain is real and is four
+separate defects, and §12.127's diagnosis of the last one was exactly right. Two of four probe seeds
+spawned the player inside bedrock; the fall tracker had no cancellation cases at all; dropped items
+had never landed because a documented "the world crate's job" was never done by anybody.**
+
+The owner reported four things — spawning in the air, no death screen, demo mobs, and (earlier) the
+server hanging with hearts at zero. They are one chain, and confirming that was the first job.
+§12.127 had already established the death-screen half by grep. This entry is the measurement behind
+the other three plus the implementation of that one.
+
+**The chain, confirmed:** spawn lands the player above the terrain (or inside it) → they fall → fall
+damage applies with no cancellation → health reaches `0.0` → `PlayerVitals` guards make every
+subsequent damage call a no-op → the server sends `set_health(0.0)` and **nothing else** → the client
+sits at zero hearts with a complete, correct, unreachable death screen. "The server hung and then timed
+out" and "the death screen is missing" are the same event seen twice.
+
+**The spawn was wrong in two independent ways, and no hermetic fixture could have shown either.**
+`world_spawn.rs` had eleven tests, all green, all against columns its own test code wrote. Pointed at
+the real generator for the first time (seeds 0, 42, 1234, -195764831):
+
+| seed | measured spawn | origin column valid positions | what it is |
+|---|---|---|---|
+| 0 | `(0, 69, 8)` | 84/256 | on a **birch leaf canopy** with air from 66 down |
+| 42 | `(28, 70, 0)` | 0/256 | land found at Chebyshev r=1 |
+| 1234 | `(8, -63, 8)` | 0/256 | **inside the bedrock floor**, first valid chunk at r=15 |
+| -195764831 | `(8, -63, 8)` | 0/256 | **inside the bedrock floor**, first valid chunk at r=6 |
+
+- **`get_level_respawn_pos` used `is_air_or_fluid`'s negation as its "can a player stand here" test,
+  justified by a `worldgen_data` scope note that had gone stale.** The note said "no vegetation at
+  surface"; the generator now places `short_grass`, `dandelion`, `poppy` and snow layers. Vanilla's
+  actual test is `Block.isFaceFull(state.getCollisionShape(…), UP)`, and
+  `lodestone-data::snow_support::face_full_up` is a jar dump of exactly that predicate — measured
+  `false` for all four of those and `true` for `grass_block`/`stone`/`oak_log`/`oak_leaves`. So the
+  spawn Y was one block above the block a player can stand on. Note what the correct predicate does
+  *not* do: leaves are genuinely face-full, so seed 0's treetop spawn is **faithful to vanilla** and
+  "fixing" it would have been the divergence. The measurement is what separated the two cases; the
+  report of "spawning in the air" covers both.
+- **The full-invalid-box fallback was `origin.min_y + 1`, and that is `y = -63` — inside bedrock,
+  under an ocean, in the dark.** Vanilla's own pre-seed is
+  `ChunkGenerator.getSpawnHeight(level)`, a literal **`64`** that `NoiseBasedChunkGenerator` does not
+  override (only `FlatLevelSource` does), two blocks above the generator's sea level of 62. The old
+  value's comment defended itself — *"a silent Y regression is worse than a fixed X/Z"* — which was a
+  reasonable belief and is measurably false: **two of four seeds take that arm**, because without
+  vanilla's climate sampler the search centres on chunk `(0, 0)` and the ±5 box is all ocean far more
+  often than anyone assumed. The pre-existing gate asserted X and Z **and not Y**, which is how the
+  arm shipped: `fully_ocean_box_falls_back_to_the_origin_surface` checked `pos.x == 8.0` and
+  `pos.z == 8.0` and stopped there. **A fallback whose whole purpose is to choose a Y needs its Y
+  asserted, and a two-of-three assertion reads exactly as complete as a three-of-three one.**
+
+**A block-state → census-id join keyed by base name was wrong for waterlogged states, and its own
+audit test found it on the first run.** Resolving `face_full_up`/`has_fluid_state` from a
+`ChunkColumn`'s string needs a join into `lodestone-data`'s per-state bitsets. The obvious key is the
+base name, and `worldgen_data`'s `freeze_facts` already documents why you need it (the generator emits
+fluids without their `level` property, so water arrives as bare `minecraft:water`). But
+`oak_leaves[…,waterlogged=true]` is state id 253 and its `has_fluid_state` is `true` while its
+`waterlogged=false` default is `false` — so a base-name join reports a waterlogged canopy as dry and
+would have treated it as standable ground. The join now tries the exact canonical state first and falls
+back to the default. **The gate that caught it asserts the resolution function against the census for
+*every state of every surface block*, not for the default state of each** — the audit question is not
+"is the lookup right for the case I thought of" but "is it right for every input the world can
+produce".
+
+**#534: `FallTracker` reproduced vanilla's formula exactly and had zero cancellation cases.** A dive
+into a lake banked its distance and cashed it in on the next dry landing, so a one-block step could
+kill you minutes later. The module doc claimed otherwise — that water was *"exercised indirectly"*
+because *"`crate::server`'s wiring correctly withholds fall-distance accumulation for underwater
+ticks"*. That was false when written and stayed false: the wiring passed `(y, on_ground)` and nothing
+else. **A doc comment asserting that a caller handles something is a claim about a file the reader is
+not looking at, and it is the cheapest possible place to be wrong.**
+
+Vanilla resets `fallDistance` in seven places, and finding all seven took one grep for
+`resetFallDistance()` rather than reasoning from `checkFallDamage` alone — which is the trap, because
+`checkFallDamage`'s water guard only *suppresses accumulation*. The reset that actually fixes #534 is a
+second, separate site: `Entity.updateFluidInteraction:1658`'s `if (inWater) resetFallDistance()`. An
+implementation with only the guard still charges the next dry landing, and it is the more plausible
+implementation. Two of the seven remain unmodelled for stated reasons (no vehicle state, no potion
+effects).
+
+**Lava does not cancel, and the plausible generalisation is the bug.** `checkFallDamage`'s guard is
+`isInWater()` and `updateFluidInteraction` resets only `if (inWater)`, so an "any fluid cancels"
+implementation makes a lava dive a safe landing while passing every water test. `is_water` already
+existed as the narrow predicate for precisely this distinction (`vitals.rs` documents it for drowning);
+the gate that pins it asserts a predicted **17** damage for a 20-block drop into lava.
+
+**Powder snow is not a modifier and reads like one.** `HayBlock`/`HoneyBlock` pass `0.2F` to
+`causeFallDamage` and `SlimeBlock` passes `0.0F`, but `PowderSnowBlock.fallOn` plays a sound and
+**never calls `causeFallDamage` at all**. Same outcome, different mechanism — so its drift gate greps
+for the *absence* of the call rather than for a number, because asserting a modifier for it would be
+asserting something the jar does not say.
+
+**#533: dropped items had never landed, and the merge bug was the same defect wearing a different
+hat.** `ItemMotion::tick`'s doc comment says *"block collision that would zero a component is the world
+crate's job and is expressed here through `on_ground`"*. Nothing ever did that job: `ItemMotion::new`
+set `on_ground: false` and no code path anywhere wrote it again. Every dropped item accelerated
+downward forever and fell through the terrain. The merge half follows arithmetically:
+`merge_neighbouring_items` requires `|dy| < 0.25` (vanilla inflates y by exactly `0.0`), and two stacks
+dropped even *one tick* apart fall at permanently different speeds — so the vertical test could only
+ever pass for two items spawned on the same tick, which is not how a player drops things. **A test
+written with two same-tick drops would have been green throughout**, which is why the gate drops the
+second 30 ticks after the first and asserts the gap exceeds the merge reach as a precondition.
+
+**The demo mobs were a development fixture that shipped, and `DEMO_SPECIES`' own doc said so.** Six
+mobs — zombie, cow, wolf, blaze, **guardian**, creeper, deliberately one per roster family — seeded in
+a ring at world open, because until then five of six roster families reached zero pixels. That was the
+right call for #217 and the wrong one for a world someone is playing; the doc even conceded *"a
+guardian on land is a real consequence and an accepted one"*. Two findings from removing it:
+
+- **`seed_demo_mobs` had `for i in 0..count.max(1)`, so "no demo mobs" was not expressible at all.** A
+  request for zero produced one zombie. A floor like that is invisible until someone needs the zero.
+- **The wire says seven, not six.** The gate that counts non-player `add_entity` packets against the
+  pre-fix code reported *"got 7 add_entity packets for non-player types [(1000, 151), (1001, 30),
+  (1002, 149), (1003, 14), (1004, 63), (1005, 32), (1006, 118)]"* — the demo blaze was shooting at the
+  player. Six seeded mobs plus a projectile is not something a count on the sim would have shown, and
+  it is the second reason to measure this on the wire rather than on a counter: **a counter on the sim
+  would also pass against a sim that seeded mobs and failed to stream them.**
+
+**The death-screen implementation, and the half that fails worse when missing.** §12.127 named
+`encode_player_combat_kill`. There are two encoders, not one, and `encode_respawn` is the nastier
+omission: the client clears its `Dead` marker only on `ClientEvent::Respawned`, decoded from `respawn`
+(id 82), so the pre-existing answer to `perform_respawn` — reset vitals, send `set_health(20.0)` —
+refilled the hearts **behind a screen that never closed**. Sending health without the respawn packet is
+strictly worse than sending neither, because it looks like it worked. Ordering is therefore gated, not
+just presence.
+
+- **No "already announced" latch is needed, and that is a property of someone else's guards.** Every
+  `PlayerVitals` damage entry point returns `None` once `health <= 0.0`, so a landed hit crosses zero
+  exactly once per life. Correct today and silently breakable by any future unconditional damage path,
+  so it has its own gate rather than a comment.
+- **`FallTracker::reset` clearing only the distance would have been a fresh bug in the fix.** Its
+  `last_y` reference is the y the player died at; a death at 70 and a respawn at 64 banks six blocks of
+  fall nobody fell. The control observed *"a 2-block fall after a respawn must deal no damage… got
+  [17.0]"*. `reset` (position snap: drop the reference) and `cancel` (vanilla `resetFallDistance`: keep
+  it) are now separate operations, because using either for the other's job is wrong in a different
+  direction.
+- **`DeathCause::message_id` guessed `outside_border` and the jar says `outsideBorder`.** The
+  damage-type records are snake_case file names carrying camelCase message ids for exactly two entries
+  (`outside_border.json` → `outsideBorder`, `generic_kill.json` → `genericKill`) while `fall`, `drown`
+  and `generic` match their file names. The wrong key would have rendered as itself, indistinguishable
+  from the already-documented "the client shows death messages untranslated" gap. **A comment warning
+  about a trap is not protection from it** — this one was written *in the same function* that then
+  fell into it, and only a gate reading the JSON at test time caught it.
+
+**A control found a hole in the gate it was controlling, which is the whole argument for running
+controls rather than describing them.** The end-to-end water gate's first draft discarded its
+climb-out step, and that step silently absorbed the banked distance — so the later assertion was free
+under both hypotheses. It was invisible on a green run and obvious the moment `fall_sample` was pointed
+at the wrong cell and the gate *still passed*. The arriving sample now carries `on_ground: true`,
+which is what a real client reports for a player standing in one block of water, making it the landing
+the absence is actually about. **A control that fails is evidence about the code; a control that passes
+when it should not is evidence about the test.**
+
+Controls run and observed, each reverted by `cp` from a scratchpad backup with an md5 check, all in a
+throwaway detached worktree — the shared tree could not build for most of this work (another agent's
+`lodestone-worldgen` was mid-edit with a doc-comment-before-a-field parse error), which is what the
+worktree route is for:
+
+| neuter | observed failure |
+|---|---|
+| death packet removed from `publish_health` | *"exactly one player_combat_kill (id 68) must follow the lethal hit; got 0 — with none, the client sits at zero hearts with no death screen"* |
+| respawn packet removed | *"exactly one respawn packet (id 82) must answer perform_respawn; without it the client's `Dead` marker is never cleared and the death screen stays up forever"* |
+| `FallTracker::reset` keeps `last_y` | *"a 2-block fall after a respawn must deal no damage… got [17.0]"* |
+| mid-flight cancellation removed | *"water discards the banked distance — left: 40.0, right: 0.0"* and *"grabbing a ladder discards the fall — left: 31.0, right: 0.0"* |
+| `fall_sample` reads the eye cell and `y - 1` | *"a 20-block fall landing in one block of water must deal no damage; 17 is what it costs on stone… got [3.0]"* |
+| `settle_item` removed | *"the item must still exist — it landed, it did not despawn"* and *"the two settled stacks must have merged into one entity — left: 0, right: 1"* |
+| demo seeding restored | *"a fresh singleplayer world must stream no mobs; got 7 add_entity packets…"* |
+| `LODESTONE_DEMO_MOBS=1` (the positive control) | passes — proving the absence above is a decision and not a broken entity path |
+
+Every damage assertion predicts a value rather than a sign, and each names the wrong-hypothesis number
+it separates itself from: **27** damage for a 30-block fall (which kills a 20-HP player outright, so
+`0.0` health exactly), **19.0** for the survivable 4-block control, **17** for a 20-block drop on
+stone, **18** for the banked-distance hypothesis, **3** for the hay arm because `floor(17.000001 * 0.2)`
+is 3 and the modifier must be applied *inside* the floor.
+
+**What remains, named rather than left unfindable.** The `mob_count` parameter on both production
+constructors is now a debug request routed through `demo_mob_count`, which answers `0` unless
+`LODESTONE_DEMO_MOBS` is set; the honest end state removes the parameter along with
+`lodestone-shell/src/net.rs`'s literal `6`, which is a cross-crate change. Player *state* is still not
+persisted at all (`playerdata`/`save_player` have zero hits under `crates/lodestone-server/src/`), so
+"rejoin puts me back where I was" needs persistence and a fresh spawn being on the ground is all this
+work claims. The ±5 search box still fails for an ocean origin — seed 1234 needs Chebyshev **r=15**,
+842 columns — and widening it affordably needs vanilla's climate sampler (`findSpawnPosition`), which
+samples noise rather than composing columns; the fallback is now survivable rather than fatal, which is
+the difference between a bad spawn and a world that looks hung.
