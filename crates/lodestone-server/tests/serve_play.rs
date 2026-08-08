@@ -2282,6 +2282,16 @@ impl ChunkSource for StoneSource {
 /// inside `StoneSource`'s 0..16 stone band.
 const BREAK_POS: BlockPos = BlockPos::new(4, 9, 4);
 
+/// How long a bare-handed dig is held for, between `StartDestroy` and
+/// `StopDestroy`, in tests that break without a tool.
+///
+/// Comfortably over the slowest dig any of them performs: bare-handed stone is
+/// `1.0 / 1.5 / 100` progress per server tick, so with
+/// `block_breaking::UNTRACKED_SPEED_HEADROOM` it needs 14 ticks (700 ms) to reach
+/// `STOP_DESTROY_PROGRESS`. Kept under `TIME_SYNC_INTERVAL`'s 1 s so the wait does
+/// not also inject a time broadcast into the drained stream.
+const BARE_HANDED_DIG: std::time::Duration = std::time::Duration::from_millis(800);
+
 /// Puts a plain diamond pickaxe in the selected hand, breaks `pos`, and then
 /// **empties the hand again**.
 ///
@@ -2507,7 +2517,24 @@ async fn bare_handed_stone_drops_nothing_while_bare_handed_dirt_still_drops() {
 
     // No creative-slot write at all: the selected slot is empty, which is the
     // bare hand.
+    //
+    // A held dig between the two ordinals, and only in this test, because it is
+    // the only one that breaks **bare-handed**: since issue #531 the server
+    // prices the dig (`crate::block_breaking`) and refuses a `StopDestroy` that
+    // arrives too early, and a bare hand on stone is the slowest dig in the
+    // file. Without the advance both packets land on one server tick, the break
+    // is *refused*, and this test's first assertion — an absence — would pass
+    // for the wrong reason while the dirt half failed. `break_with_a_pickaxe`
+    // needs none of this: a diamond pickaxe on stone clears the threshold in a
+    // single tick, which is why every other break gate here still holds.
+    //
+    // `sleep`, **not** `tokio::time::advance`: `advance` jumps the clock before
+    // yielding, so the server had not yet read the `StartDestroy` and stamped it
+    // with the *old* tick — both packets then landed on one tick anyway and the
+    // break was still refused. A paused-clock `sleep` lets the runtime drain the
+    // start packet first and only auto-advances once everything is idle.
     send_block_action(&mut client, 0, BREAK_POS).await;
+    tokio::time::sleep(BARE_HANDED_DIG).await;
     send_block_action(&mut client, 2, BREAK_POS).await;
     let _ = drain_available(&mut client).await;
     assert_eq!(
@@ -2518,6 +2545,7 @@ async fn bare_handed_stone_drops_nothing_while_bare_handed_dirt_still_drops() {
     );
 
     send_block_action(&mut client, 0, DIRT_POS).await;
+    tokio::time::sleep(BARE_HANDED_DIG).await;
     send_block_action(&mut client, 2, DIRT_POS).await;
     let _ = drain_available(&mut client).await;
     let snapshots = mobs.with(|sim| sim.snapshots());
@@ -2794,3 +2822,4 @@ async fn a_drop_outside_the_pickup_volume_is_not_collected() {
     drop(client);
     let _ = server.await.expect("server task panicked");
 }
+

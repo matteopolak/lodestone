@@ -14,16 +14,20 @@ the edit to the server's own retained chunk data, confirming it back to the acti
 client with a real `block_update` packet, and respecting the break *sequence*
 (start/abort/finish) as three distinct events rather than collapsing them into one.
 
-**Out of scope, deliberately:** break timing/hardness validation (the client's own
-`lodestone-shell` predictor already gates when it sends `StopDestroy`, using real
-per-state hardness — see `lodestone-shell/src/interact.rs`'s `drive_mining`), item
+**No longer out of scope:** break timing/hardness validation and the
+interaction-range check. Both moved in with issue #531 and now live in
+`crates/lodestone-server/src/block_breaking.rs` — see
+[`server-block-break-validation.md`](./server-block-break-validation.md), which also
+covers why `StartDestroy` can now break a block by itself.
+
+**Out of scope, deliberately:** item
 consumption from inventory (placement resolves the held item but never *spends* it —
 see "Placement resolves the held item" below), drops, block-entity data beyond the six
 ticking blocks, redstone/neighbour updates, and
 any placement rule beyond "the state implied by clicking a face" (stairs, slabs, doors,
-fences all need a cursor-derived orientation this does not compute). Interaction-range
-and spawn-protection checks are also skipped: this crate tracks no player position
-beyond the view-tracking column, so there is nothing to check a range against.
+fences all need a cursor-derived orientation this does not compute). Spawn protection
+and creative mode are still skipped — the latter because nothing in this crate tracks
+a game mode.
 
 ## How it works
 
@@ -75,19 +79,28 @@ whose retention is under test.
 
 ### The break sequence
 
-`apply_block_action` tracks one `pending_break: Option<BlockPos>` per connection —
-the version-free analogue of vanilla's `ServerPlayerGameMode.destroyPos` field:
+`apply_block_action` tracks one `pending_break: Option<PendingBreak>` per connection
+— the version-free analogue of vanilla's `destroyPos` + `destroyProgressStart` pair.
+Since issue #531 it carries the dig's price and start tick, not just a position
+(`block_breaking::PendingBreak`):
 
-* `StartDestroy` sets `pending_break = Some(pos)`. No terrain mutation, no packet sent
-  — matching vanilla's own non-instamine path, and correct given hardness/timing
-  validation is out of scope here.
+* `StartDestroy` prices the block. If destroy progress reaches `1.0` in one tick it
+  **breaks immediately** — vanilla's `"insta mine"` branch, and the reason
+  zero-hardness blocks are breakable at all, since a client that knows a block is
+  instant sends no `StopDestroy`. Otherwise the dig is recorded and nothing is
+  mutated.
 * `AbortDestroy` clears `pending_break` **only if it matches `pos`**, mirroring
   vanilla's `pos.equals(this.destroyPos)` guard (`ServerPlayerGameMode.java:217`,
   `:239-248`). No mutation, no packet.
-* `StopDestroy` only breaks the block **if `pending_break` still equals `pos`** —
-  writes `minecraft:air` via `ChunkSource::set_block`, then sends one
-  `encode_block_update` confirming it. A `StopDestroy` for a position nobody started
-  (or one already aborted) is a no-op, same as vanilla.
+* `StopDestroy` breaks the block **if `pending_break` still names `pos` and the dig
+  has accrued enough progress** — writes `minecraft:air` via `ChunkSource::set_block`,
+  then sends one `encode_block_update` confirming it. A `StopDestroy` for a position
+  nobody started (or one already aborted) is a no-op, same as vanilla; one that
+  arrives too early is answered with the block's *real* state so the client rolls its
+  prediction back.
+
+The arithmetic behind "enough progress" is
+[`server-block-break-validation.md`](./server-block-break-validation.md).
 
 This is what makes `Start` + `Stop` break a block while `Start` + `Abort` does not —
 the block-edit end-to-end test drives exactly that sequence and asserts the abort left

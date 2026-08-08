@@ -990,6 +990,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   persistence for the #437 world-save hook, and a statistics counter answered on
   `REQUEST_STATS`. It is the "server plumbing" half of the epic — the data model and
   rules, never the wire bytes.
+- [Server-side block-break validation](./server-block-break-validation.md) — The
+  server's answer to "may this player really break that block, now?" — vanilla's
+  `ServerPlayerGameMode.handleBlockBreakAction` destroy-progress arithmetic, ported to
+  `crates/lodestone-server/src/block_breaking.rs` and consulted by `server.rs`'s
+  `apply_block_action`. It fixes two defects that were opposite ends of one missing
+  computation: a zero-hardness block (grass, flowers, sugar cane) could not be broken
+  *at all*, and any block — bedrock included — could be broken *instantly*.
 - [Server chunk generation: fanned out over scoped threads (issue #414)](./server-chunk-generation-parallelism.md) —
   `crates/lodestone-server/src/chunk.rs`'s `generate_columns_parallel` runs a batch of
   `ChunkSource::column()` calls across `std::thread::scope` worker threads and hands
