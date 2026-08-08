@@ -286,6 +286,21 @@ impl ContainerRenderer {
             .attach_items(device, queue, color_format, atlas, "container-item");
     }
 
+    /// Attach the 2-D GUI enchantment-glint pass, so an enchanted stack in a slot
+    /// or on the cursor shimmers (issue #452). Mirrors
+    /// [`HudRenderer::attach_glint`](crate::hud::HudRenderer::attach_glint), and
+    /// like it must follow [`attach_items`](Self::attach_items).
+    pub fn attach_glint(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+        img: &lodestone_assets::Image,
+    ) {
+        self.icons
+            .attach_glint(device, queue, color_format, img, "container-glint");
+    }
+
     /// Attach the **3-D block-item** pass, so container slots holding a block
     /// draw vanilla's isometric mini-block. Every resource is borrowed from the
     /// world renderer — the same block atlas, tint palette and animation slots
@@ -482,6 +497,9 @@ impl ContainerRenderer {
             logical_h.max(1.0) as u32,
             "container-item-verts",
         );
+        let glint_count =
+            self.icons
+                .upload_glint(device, queue, &geo.glint_verts, "container-glint-verts");
 
         let vertex_count = geo.vertex_count() as u32;
         let chrome_count = (geo.chrome_vertex_count as u32).min(vertex_count);
@@ -491,6 +509,7 @@ impl ContainerRenderer {
         // atlas, no depth) still yields an empty range rather than a bogus one.
         let slot_colour_count = (geo.slot_vertex_count as u32).clamp(chrome_count, vertex_count);
         let slot_item_count = (geo.slot_item_vertex_count as u32).min(item_count);
+        let slot_glint_count = (geo.slot_glint_vertex_count as u32).min(glint_count);
         let slot_model_count = (geo.slot_model_vertex_count as u32).min(model_count);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("container"),
@@ -570,6 +589,9 @@ impl ContainerRenderer {
                 multiview_mask: None,
             });
             self.icons.draw_sprites_range(&mut pass, 0..slot_item_count);
+            // The glint over the slot icons, before the counts and bars so those
+            // stay legible on an enchanted stack.
+            self.icons.draw_glint_range(&mut pass, 0..slot_glint_count);
             // Stack counts, durability bars and the atlas-less swatch fallback,
             // over whichever kind of icon drew beneath them.
             if slot_colour_count > chrome_count {
@@ -614,7 +636,10 @@ impl ContainerRenderer {
             item_icon::IconStratum::Carried,
             "container-carried-model-pass",
         );
-        if item_count > slot_item_count || vertex_count > slot_colour_count {
+        if item_count > slot_item_count
+            || glint_count > slot_glint_count
+            || vertex_count > slot_colour_count
+        {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("container-carried-pass"),
                 color_attachments: &[Some(item_icon::load_colour_attachment(view))],
@@ -625,6 +650,8 @@ impl ContainerRenderer {
             });
             self.icons
                 .draw_sprites_range(&mut pass, slot_item_count..item_count);
+            self.icons
+                .draw_glint_range(&mut pass, slot_glint_count..glint_count);
             if vertex_count > slot_colour_count {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_vertex_buffer(0, self.buffer.slice(..));

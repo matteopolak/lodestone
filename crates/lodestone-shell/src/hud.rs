@@ -922,6 +922,11 @@ pub struct HudGeometry {
     /// from the separate [`ItemAtlas`] texture. Empty unless an item atlas and
     /// [`HudFrame::hotbar_items`] were both supplied.
     pub item_verts: Vec<f32>,
+    /// The **enchantment-glint** copies of [`item_verts`](Self::item_verts):
+    /// one quad per flat sprite layer of every enchanted stack, same rect and
+    /// same atlas UVs, drawn on its own pipeline over the icon (issue #452).
+    /// Empty when nothing on screen is enchanted.
+    pub glint_verts: Vec<f32>,
     /// The 3-D **block-item** icons: baked model geometry already posed into GUI
     /// pixel space on the CPU, in the wide [`ModelVertex`] format the shared
     /// [`ModelPipeline`] consumes. Non-indexed (six vertices per quad, expanded
@@ -1660,6 +1665,7 @@ impl HudGeometry {
             verts: b.verts,
             sprite_verts: b.sprite_verts,
             item_verts: b.item_verts,
+            glint_verts: b.glint_verts,
             model_verts: b.model_verts,
             special: b.special,
         }
@@ -2306,6 +2312,8 @@ struct Builder<'a> {
     verts: Vec<f32>,
     sprite_verts: Vec<f32>,
     item_verts: Vec<f32>,
+    /// The enchantment-glint copies of `item_verts`; see [`IconSink::glint`].
+    glint_verts: Vec<f32>,
     model_verts: Vec<ModelVertex>,
     /// Special-renderer (block-entity) icons; see [`HudGeometry::special`].
     special: Vec<SpecialIconDraw>,
@@ -2337,6 +2345,7 @@ impl<'a> Builder<'a> {
             verts: Vec::new(),
             sprite_verts: Vec::new(),
             item_verts: Vec::new(),
+            glint_verts: Vec::new(),
             model_verts: Vec::new(),
             special: Vec::new(),
             gui,
@@ -2425,6 +2434,7 @@ impl<'a> Builder<'a> {
             sprite: &mut self.item_verts,
             model: &mut self.model_verts,
             special: &mut self.special,
+            glint: &mut self.glint_verts,
         };
         item_icon::draw_item_icon(&mut sink, &assets, (w, h), slot, x, y, size, self.font);
     }
@@ -2449,6 +2459,7 @@ impl<'a> Builder<'a> {
             sprite: &mut self.item_verts,
             model: &mut self.model_verts,
             special: &mut self.special,
+            glint: &mut self.glint_verts,
         };
         item_icon::draw_item_icon_popped(&mut sink, &assets, (w, h), slot, x, y, size, self.font, pop);
     }
@@ -2915,6 +2926,20 @@ impl HudRenderer {
             .attach_items(device, queue, color_format, atlas, "hud-item");
     }
 
+    /// Attach the 2-D GUI enchantment-glint pass, so an enchanted hotbar item
+    /// shimmers (issue #452). Must follow [`Self::attach_items`] — the pass masks
+    /// itself against the item atlas — and is a no-op otherwise.
+    pub fn attach_glint(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+        img: &lodestone_assets::Image,
+    ) {
+        self.icons
+            .attach_glint(device, queue, color_format, img, "hud-glint");
+    }
+
     /// Attach the GPU side of the **3-D block-item** icon pass, so hotbar slots
     /// holding a block draw vanilla's isometric mini-block instead of an empty
     /// well.
@@ -3152,6 +3177,9 @@ impl HudRenderer {
             logical_h.max(1.0) as u32,
             "hud-item-verts",
         );
+        let glint_count = self
+            .icons
+            .upload_glint(device, queue, &geo.glint_verts, "hud-glint-verts");
 
         let colour_count = geo.vertex_count() as u32;
         let sprite_count = geo.sprite_vertex_count() as u32;
@@ -3177,6 +3205,9 @@ impl HudRenderer {
                 pass.draw(0..sprite_count, 0..1);
             }
             self.icons.draw_sprites(&mut pass, item_count);
+            // The glint over the icons it belongs to, in the same pass so it
+            // lands on top of them.
+            self.icons.draw_glint_range(&mut pass, 0..glint_count);
         }
 
         // The 3-D block items, in their own pass because they are the only part
@@ -3480,6 +3511,11 @@ impl HudRenderer {
 const HUD_WGSL: &str = include_str!("shaders/hud.wgsl");
 
 const HUD_SPRITE_WGSL: &str = include_str!("shaders/hud_sprite.wgsl");
+
+/// The 2-D GUI enchantment glint (issue #452). Shares `hud_sprite.wgsl`'s vertex
+/// layout — see `item_icon::GuiGlint` for why it cannot share
+/// `lodestone_render`'s own glint pipeline.
+const HUD_GLINT_WGSL: &str = include_str!("shaders/hud_glint.wgsl");
 
 #[cfg(test)]
 mod tests {

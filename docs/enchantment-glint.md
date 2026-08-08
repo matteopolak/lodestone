@@ -105,51 +105,67 @@ is recorded in `lodestone-shell`, which is where the remaining work is:
    one submit — one buffer written twice hands both passes the last value and the
    shimmer lands nowhere.
 
-   **The 2-D GUI icon site is still open**, and is the one that matters most; see
-   below for why it is a bigger change than it looks.
+   ~~**The 2-D GUI icon site is still open**~~ **Done (#452).** Hotbar cells,
+   inventory slots, container slots and the carried (cursor) stack all glint now,
+   through a *second* glint pipeline in the shell — see "The 2-D GUI glint is its
+   own pipeline" below.
 3. ~~**Load the texture.**~~ **Done (#452).** `crate::resources::load_glint_texture`
    reads `glint::textures::ITEM` out of the jar and `RenderState::install_glint`
    uploads it **non-sRGB** (see the gotcha below) with `glint::glint_sampler`.
    `glint::textures::ARMOUR` is still unused — armour glint needs the armour pass
    to grow a second rasterisation the same way the item pass just did.
 
-The 2-D GUI *sprite* path is a separate problem, and it is the one that matters
-most: flat sprites are the majority of what a hotbar holds (every sword, tool and
-ingot), so a 3-D hook in `item_icon.rs` would cover only block and chest icons.
-It draws flat quads through `hud_sprite.wgsl`, not the model pipeline, so it needs
-its own glint pipeline over the same quads. `GlintPipeline` **cannot be reused**
+## The 2-D GUI glint is its own pipeline
+
+Flat sprites are the majority of what a hotbar holds (every sword, tool and ingot),
+so the 3-D hook covers only block and chest icons. Those flat quads go through
+`hud_sprite.wgsl`, not the model pipeline, and `GlintPipeline` **cannot be reused**
 there: it mandates a `depth_format` and depth-`EQUAL`, and its vertex layout is
 `ModelVertex`, whereas `draw_sprites_range` records into a caller-owned pass with
 **no depth attachment** and an 8-float `[x, y, u, v, r, g, b, a]` stream.
 
-Three findings for whoever picks this up, each of which costs a design cycle to
-rediscover:
+So there is a second, shell-side pipeline: `item_icon::GuiGlint` plus
+`crates/lodestone-shell/src/shaders/hud_glint.wgsl`. Everything *numeric* still
+comes from `lodestone_render::glint` — `glint_texture_matrix`, `Scale::Item`,
+`DEFAULT_SPEED`/`DEFAULT_STRENGTH`, `glint_blend`, `glint_sampler` — so there is
+still exactly one owner of the maths and the blend.
 
-- **Masking is the hard part.** Without depth-`EQUAL` or a stencil, a glint quad
-  over the item's rect paints glint across the sprite's *transparent* pixels too —
-  a sword's glint would fill its whole 16×16 square. The pass therefore has to
-  sample the item atlas for the mask and the glint sheet for the shimmer, and
-  discard on low atlas alpha (vanilla's own `glint.fsh` discards at `a < 0.1`).
-  That means one pipeline with **two** textures bound, not a re-draw of the
-  existing quads.
-- **The glint UV comes from the quad's local 0..1 coords, not its atlas UV.**
-  Vanilla applies `glint_texture_matrix` to the *model's* UVs; our sprite quad's
-  UVs are an atlas sub-rect, so feeding them in scrolls the shimmer at the wrong
-  scale and offset. Transform local coords with `glint_texture_matrix(millis,
-  speed, Scale::Item)` — the same expression the render crate's gate uses.
-- **The plumbing, not the pipeline, is what makes this a bigger change than it
-  looks.** A second draw needs its own *contiguous* vertex range, so it needs a
-  glint stream on `IconSink` and a third count out of `IconRenderer::upload`. Those
-  are constructed and consumed at four call sites in `hud.rs` (×2) and
-  `container/renderer.rs` (×2) — `hud.rs` being the most contended file in the
-  repo. Interleaving the glint quads into the existing sprite stream does *not*
-  avoid this: the blend differs (`SRC_COLOR/ONE` versus `ALPHA_BLENDING`), so it
-  must be a separate draw, and a separate draw needs a range.
+Four things about it, each of which costs a design cycle to rediscover:
 
-Also worth wiring at the same time: `menu/options.rs` already carries live
-`glintSpeed` (0.5) and `glintStrength` (0.75) sliders whose values match
+- **The mask comes from the item atlas, not from depth.** Without depth-`EQUAL` or a
+  stencil, a glint quad over the item's rect would paint glint across the sprite's
+  *transparent* pixels too — a sword's glint filling its whole 16×16 cell. The
+  pass therefore binds **two** textures and discards where the item atlas's alpha
+  is below vanilla's own `glint.fsh` threshold of `0.1`. Two textures in one group
+  (bindings 0–3) plus the uniform group: 2 of 4 bind groups, same as the 3-D one.
+- **The glint UV is the atlas UV, fed straight in.** An earlier revision of this
+  doc claimed it had to be the quad's local `0..1` coords; that is wrong, and
+  `glint.wgsl`'s own comment (transcribed from `glint.vsh`) says so: vanilla's
+  `texCoord0 = (TextureMat * vec4(UV0, 0, 1)).xy` takes the *baked model's* UVs,
+  which for a `item/generated` item are atlas UVs. Using local coords would give
+  every item the same phase; atlas UVs give each sprite its own, which is what the
+  game looks like.
+- **The glint quads are a separate stream, not a flag.** `IconSink::glint` collects
+  a copy of each enchanted stack's sprite quad. The blend differs (`SRC_COLOR/ONE`
+  versus `ALPHA_BLENDING`) so it must be a separate draw, a separate draw needs a
+  contiguous range, and the enchanted quads are *not* contiguous inside the sprite
+  stream — one enchanted sword among nine hotbar cells would otherwise need nine
+  ranges.
+- **The carried stack needs its own split.** `ContainerGeometry` records
+  `slot_glint_vertex_count` alongside `slot_item_vertex_count` for the same reason:
+  the cursor's stack replays every stream in a later stratum, and a glint drawn in
+  the *slot* pass would be painted over by the carried sprite in the pass after it,
+  which looks exactly like "the glint doesn't work" rather than like an ordering
+  bug.
+
+It has **its own uniform buffer**, like each of the other two sites, for the reason
+given above: `queue.write_buffer` is ordered against the submit, not the encoder.
+
+Still worth wiring: `menu/options.rs` already carries live `glintSpeed` (0.5) and
+`glintStrength` (0.75) sliders whose values match
 `glint::DEFAULT_SPEED`/`DEFAULT_STRENGTH`, so feeding them into `GlintUniform::new`
-is behaviour-preserving today and correct once a player moves the slider.
+and `gui_glint_uniform` is behaviour-preserving today and correct once a player
+moves a slider.
 
 ## How to change it, and the gotchas
 

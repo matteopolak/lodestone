@@ -74,6 +74,8 @@ pub(super) struct Builder<'a> {
     h: f32,
     pub(super) verts: Vec<f32>,
     pub(super) item_verts: Vec<f32>,
+    /// The enchantment-glint copies of `item_verts`; see [`IconSink::glint`].
+    pub(super) glint_verts: Vec<f32>,
     pub(super) model_verts: Vec<ModelVertex>,
     /// Special-renderer (block-entity) icons; see [`ContainerGeometry::special`].
     pub(super) special: Vec<SpecialIconDraw>,
@@ -93,6 +95,7 @@ impl<'a> Builder<'a> {
             h,
             verts: Vec::new(),
             item_verts: Vec::new(),
+            glint_verts: Vec::new(),
             model_verts: Vec::new(),
             special: Vec::new(),
             bg_verts: Vec::new(),
@@ -187,6 +190,7 @@ impl<'a> Builder<'a> {
             sprite: &mut self.item_verts,
             model: &mut self.model_verts,
             special: &mut self.special,
+            glint: &mut self.glint_verts,
         };
         item_icon::draw_item_icon_counted(
             &mut sink,
