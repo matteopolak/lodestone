@@ -5798,3 +5798,113 @@ satisfied by a uniform density offset, which is what a flipped operand order or 
 >10,000 cells outside so the claim is not vacuous, and a bounding box of the differing cells printed
 on failure — is what separates a beard from a global shift. §12.41's rule, applied before it had a
 chance to bite.
+
+**12.134 The Nether generates, and the measurement that proves it is vanilla's own stored biome
+containers — 17,855 of 17,856 quarts, with the one exception provably unfixable.** Issue #485's
+engine half. The data half had landed and the engine half was five items; this closed items 1–4 plus
+the carver, and the End's biome source and density algorithm.
+
+**`legacy_random_source` was a wiring gap, and the size of the job was set by one type.**
+`LegacyRandomSource` was already in production use; what was missing is that the flag was read
+nowhere and `density::Builder`'s `master` field was the *concrete*
+`XoroshiroPositionalFactory`, as was `positional_factory()`'s return type. The fix that kept the blast
+radius to a type *name* in four files rather than a generic parameter through every stage struct is
+that **both concrete factories are `Copy`, so the two-variant enum can be `Copy` too** — every use
+site already went through `PositionalRandomFactory`, and `SurfaceSystem::master`,
+`Cond::VerticalGradient::factory` and `AquiferSystem::positional` are all stored by value. A boxed
+trait object was not available at all: `PositionalRandomFactory` has an associated `Source` type and
+returns `Self::Source` by value, so it is not object-safe.
+
+**Two of `RandomState`'s wirings are keyed on the noise *id*, not on the flag, and one is not a
+positional fork.** `nether/temperature` and `nether/vegetation` are `NormalNoise.createLegacyNetherBiome`
+on `new LegacyRandomSource(seed + 0)` and `(seed + 1)` — the **raw world seed**, and the branch is
+taken regardless of `legacy_random_source`. That is *why* they were the only 2 of 63 noises the bundle
+had ever lacked. The trap inside them is a draw count, not a structure: both are `firstOctave -7,
+amplitudes [1.0, 1.0]`, so `zeroOctaveIndex` is 7 against 2 octaves and vanilla builds an
+`ImprovedNoise` for the zero octave, **throws it away**, then `skipOctave`s (262 discarded `nextInt`s)
+five times before building the two it keeps. A port that built two levels and stopped would consume
+1,317 fewer draws and produce an entirely plausible Nether.
+
+**`aquifer/mod.rs` had a latent wrong constant that only a second dimension could expose.**
+`global_fluid` hardcoded `Fluid::Water` as the sea status' type, which is right for the Overworld and
+would have filled the Nether with water: vanilla builds it from `settings.defaultFluid()`
+(`NoiseBasedChunkGenerator.java:70-71`). Nothing was wrong with the Overworld and no Overworld gate
+could have seen it — the fully-connected-wire-carrying-the-wrong-value shape, latent until a caller
+with a different value existed. The neighbouring correction is that the Nether's lava is **not**
+aquifer behaviour at all: `aquifers_enabled` is false, so `min(-54, 32) = -54` against a `min_y 0`
+dimension makes the deep-lava branch unreachable and everything resolves to `FluidStatus(32, LAVA)`.
+
+**Three of `nether_cave`'s four overrides are RNG draws.** `getCaveBound()` 10 vs 15 (same three
+draws, different bound), `getYScale()` 5.0 vs 1.0 (no draws, trunk only), and `getThickness` —
+`(nextFloat()*2 + nextFloat()) * 2.0`, **exactly two draws**, against the Overworld's two plus a
+`nextInt(10)` plus a conditional two more. Routing a nether carver through the Overworld formula
+desyncs the stream on the first tunnel and every later cave in the chunk is wrong. `carveBlock` is a
+replacement rather than a specialisation: `y <= minGenY + 31 ? LAVA : CAVE_AIR` and nothing else — no
+aquifer, no grass tracking, no `topMaterial`, which is what makes a *disabled* aquifer harmless on
+that path. The `+ 31` is hardcoded and is **not** `sea_level` (32).
+
+**The gate: 1,116 chunks × 16 quarts, element-wise, against biome containers a real Mojang server
+wrote.** The oracle world's `the_nether` region files carry 2,444 chunks, of which **1,328 sit at
+`Status: minecraft:structure_starts`** — a step before `fillBiomesFromNoise` — and store the registry
+placeholder, all 64 cells `minecraft:plains`, in the Nether. The extractor *asserts* that rather than
+filtering on the name. The remaining 1,116 give the census CLAUDE.md records exactly (wastes 487,
+crimson 327, soul_sand 255, basalt 172, **warped_forest 0**), which is how the extractor was itself
+validated before being trusted. Biomes are the decisive gate because in this dimension **the biome is
+the noise**: four of six climate channels are literal `0.0` and the other two are the bespoke pair
+above, so 17,856 agreeing quarts cannot happen with the family, the legacy init or the `seed + n`
+seeding wrong. The second gate is the **bedrock shell** — 8 `full` chunks × 256 columns × 10 y,
+**20,480/20,480 exact** — which is the one surface-rule product later stages cannot touch (absent from
+`#nether_carver_replaceables`, and no Nether feature places or removes it), so it is comparable
+against a fully-generated vanilla chunk even though decoration is not composed. It compares the full
+5-bit masks deliberately: y = 0 and y = 127 are the `vertical_gradient`'s saturated ends and come out
+right under the **wrong** RNG family too.
+
+**The one divergent quart is where bit-identity and determinism are genuinely incompatible, and
+determinism has to win.** Chunk (−20, −21) quart (0, 1): the target is `temperature 2000, humidity
+1457`, and `nether_wastes` (degenerate at `0, 0`) and `crimson_forest` (at `4000, 0`) are both
+`2000² + 1457² = 6,122,849` away — 2000 is the exact midpoint. At an exact tie **vanilla's answer is a
+function of the previous query on the same thread**: `Climate.RTree.search` seeds the descent with
+`this.lastResult.get()`, a `ThreadLocal<Leaf>`, and `SubTree.search`'s comparison is a strict
+`minDistance > childDistance`, so a tied candidate never displaces the incumbent
+(`Climate.java:389-392, 443-460`). That `ThreadLocal` persists **across chunks**, and the neighbouring
+quart at (−80, −84) really is `crimson_forest`. `BiomeTable::nearest_row_seeded` already exists and
+would reproduce it — at the cost of making column output depend on the order columns are requested in,
+which the view-first re-sortable join scheduler makes unacceptable. So the gate **classifies** rather
+than tolerates: a disagreement is admissible only when the two fitnesses are *equal*, a derived
+condition on the data rather than a threshold, with the count and position pinned.
+
+**The End: the biome source is complete without the density interpreter, and that was worth
+noticing.** `TheEndBiomeSource.getNoiseBiome` samples the `erosion` channel and nothing else, and for
+the End that channel is literally `cache_2d(end_islands)` — so the whole End biome layout is a pure
+function of `EndIslandNoise`, and coupling it to a `Density` variant would have made it wait for
+another cluster's file. Two details are load-bearing and both look like details: the sample position is
+`(chunkX * 2 + 1) * 8`, the **chunk centre**, so all 16 quarts of a chunk share one sample and every
+End chunk is biome-uniform; and the `4096` main-island gate is `i64` and is the *same* constant
+`end_islands`' own centre hole uses.
+
+**An End gate's premise was false on its first run, and the premise assertion is what caught it.**
+The plateau test claims that inside the centre hole no island can contribute, so the height is the
+closed form `clamp(100 − sqrt(sx² + sz²) · 8, −100, 80)` — an expectation from geometry, with the
+simplex noise provably not consulted. Reading the radius off one axis gives a safe window of
+`|chunk| <= 52`, but the binding candidate is the **diagonal** corner `(chunk + 12, chunk + 12)`, so
+the real condition is `2 · (|chunk| + 12)² <= 4096`, i.e. `|chunk| <= 33`. The test asserts its own
+precondition per sample and failed on it immediately rather than silently comparing against a formula
+that no longer applied — §12.41's rule, and the reason a control that *can* be premise-false must
+state its premise as an assertion.
+
+**What the End still cannot be gated on, stated rather than papered over.** There is no End block
+oracle anywhere: `.cache/mc/survival/world/dimensions/minecraft/the_end/` has a `data/` directory and
+**no `region/` directory at all**. So `consumeCount(17292)` — exactly the kind of wrong-draw-count that
+leaves the plateau and the declared bounds intact — is ungated. A `DensityOracle` dump of `end_islands`
+at known coordinates would close it and is unblocked (`scripts/worldgen-oracle/DensityOracle.java` and
+`run.sh` both exist and run under Apple `container`); it was not done because the density leaf it would
+gate has not landed.
+
+**Operational note.** The whole verification ran in a throwaway `git worktree add --detach HEAD` with
+its own `CARGO_TARGET_DIR`, because a neighbouring agent's in-flight jigsaw refactor left
+`crates/lodestone-worldgen/src/structure/**` with 8 compile errors for the duration. Copying the
+15 dirty files whose content mattered and leaving `structure/**` at `HEAD` gave a green tree in 31 s of
+`cargo check`; the full suite there measured **247 passed, 0 failed, 35 binaries**, up from 230 before
+this work, with `aquifer_parity` / `carver_parity` / `surface_parity` / `region_parity` /
+`overworld_gen` all unchanged. Re-running in the shared checkout was not an option and waiting was not
+either — the isolated worktree is the only route that is both.

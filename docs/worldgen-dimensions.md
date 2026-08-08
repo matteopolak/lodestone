@@ -87,6 +87,21 @@ unverified; this phase did not touch it.
 
 ### Shared by both dimensions
 
+> **Items 1–3 landed.** `crate::rng::Algorithm` (`rng/any.rs`) is
+> `WorldgenRandom.Algorithm`, and `AnyRandomSource`/`AnyPositionalFactory` are
+> the two-variant enums it produces. `density::Builder::with_algorithm(seed,
+> algorithm, resolver)` is the dimension-aware constructor;
+> `Builder::new` is now that call with `Algorithm::Xoroshiro`, so the Overworld
+> is unchanged (230 worldgen tests, including `region_parity`/`density_parity`/
+> `noise_parity` against the JVM dumps, are byte-identical across the change).
+> `Builder::positional_factory()` returns `AnyPositionalFactory`, which is
+> `Copy` because both variants are — that is what kept the ripple to a type name
+> in four files (`surface/mod.rs`, `aquifer/mod.rs`, `overworld/fill.rs`,
+> `overworld/veins.rs`) instead of a generic parameter through every stage
+> struct. The bespoke Nether noises and the legacy `BlendedNoise` arm are in
+> `Builder::instantiate_noise` / `instantiate_blended`; see
+> [`worldgen-nether.md`](./worldgen-nether.md).
+
 **1. `legacy_random_source: true`** — [engine], and the largest item.
 
 Both `nether.json` and `end.json` set it; `overworld.json` does not. Vanilla

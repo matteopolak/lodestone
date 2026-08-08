@@ -31,6 +31,10 @@ use crate::rng::RandomSource;
 const AIR: &str = "minecraft:air";
 const WATER: &str = "minecraft:water[level=0]";
 const LAVA: &str = "minecraft:lava[level=0]";
+/// `WorldCarver.CAVE_AIR`. Only `NetherWorldCarver.carveBlock` writes it — the
+/// Overworld's `getCarveState` goes through the aquifer, whose air is plain
+/// `Blocks.AIR`.
+const CAVE_AIR: &str = "minecraft:cave_air";
 
 /// The carver neighbourhood radius (`applyCarvers`: `dx,dz ∈ [-8, 8]`).
 ///
@@ -157,6 +161,11 @@ impl HeightProvider {
 }
 
 /// Cave carver configuration (`CaveCarverConfiguration`).
+///
+/// One struct for `minecraft:cave` **and** `minecraft:nether_cave`: they share the
+/// codec exactly (`WorldCarver.java:32-34` registers both against
+/// `CaveCarverConfiguration`), and `NetherWorldCarver extends CaveWorldCarver`
+/// overriding only the four things [`CaveConfig::nether`] selects.
 #[derive(Clone, Debug)]
 pub struct CaveConfig {
     pub probability: f32,
@@ -166,6 +175,17 @@ pub struct CaveConfig {
     pub vertical_radius_multiplier: FloatProvider,
     pub floor_level: FloatProvider,
     pub lava_level: VerticalAnchor,
+    /// `minecraft:nether_cave` rather than `minecraft:cave`.
+    ///
+    /// **Three of the four differences are RNG draws, so this is not cosmetic.**
+    /// `getCaveBound()` is 10 instead of 15 (same three draws, different bound),
+    /// and `getThickness` is `(nextFloat()*2 + nextFloat()) * 2.0` — **two**
+    /// draws, where the Overworld's is 2 plus a `nextInt(10)` plus a conditional
+    /// 2 more. Routing a nether carver through the Overworld formula desyncs the
+    /// stream on the first tunnel and every later cave in the chunk is wrong.
+    /// The fourth, `getYScale() = 5.0`, consumes nothing but stretches every
+    /// trunk tunnel vertically; the recursive splits still pass `1.0`.
+    pub nether: bool,
 }
 
 /// Canyon (ravine) carver configuration (`CanyonCarverConfiguration`).
@@ -199,7 +219,7 @@ impl CarverConfig {
         let c = &doc["config"];
         let lava_level = VerticalAnchor::parse(&c["lava_level"]);
         match kind {
-            "minecraft:cave" => CarverConfig::Cave(CaveConfig {
+            "minecraft:cave" | "minecraft:nether_cave" => CarverConfig::Cave(CaveConfig {
                 probability: c["probability"].as_f64().unwrap() as f32,
                 y: HeightProvider::parse(&c["y"]),
                 y_scale: FloatProvider::parse(&c["yScale"]),
@@ -209,6 +229,7 @@ impl CarverConfig {
                 vertical_radius_multiplier: FloatProvider::parse(&c["vertical_radius_multiplier"]),
                 floor_level: FloatProvider::parse(&c["floor_level"]),
                 lava_level,
+                nether: kind == "minecraft:nether_cave",
             }),
             "minecraft:canyon" => {
                 let shape = &c["shape"];
@@ -362,6 +383,10 @@ struct CarveEnv<'a> {
     center_x: i32,
     center_z: i32,
     lava_level_y: i32,
+    /// Whether the carver currently running is `minecraft:nether_cave`, which
+    /// overrides `carveBlock` wholesale. Set per carver in [`apply_carvers`]
+    /// rather than per env, because a biome's list can in principle mix types.
+    nether: bool,
 }
 
 impl CarveEnv<'_> {
@@ -388,6 +413,9 @@ impl CarveEnv<'_> {
     /// directly beneath a carved block is re-capped with the biome's
     /// `topMaterial`.
     fn carve_block(&mut self, x: i32, y: i32, z: i32, has_grass: &mut bool) -> bool {
+        if self.nether {
+            return self.carve_block_nether(x, y, z);
+        }
         let block = self.grid.get(x, y, z).to_string();
         let base = base_name(&block);
         if base == "minecraft:grass_block" || base == "minecraft:mycelium" {
@@ -411,6 +439,33 @@ impl CarveEnv<'_> {
                 }
             }
         }
+        true
+    }
+
+    /// `NetherWorldCarver.carveBlock` — the whole method, which is *not* a
+    /// specialisation of the Overworld one but a replacement:
+    ///
+    /// ```text
+    /// if (canReplaceBlock(config, chunk.getBlockState(pos))) {
+    ///    chunk.setBlockState(pos, pos.getY() <= context.getMinGenY() + 31
+    ///        ? LAVA : CAVE_AIR);
+    ///    return true;
+    /// }
+    /// return false;
+    /// ```
+    ///
+    /// No aquifer consultation, no `lava_level` from the config (the `+ 31` is
+    /// hardcoded and, at `min_y 0`, means y ≤ 31 — one below the Nether's
+    /// `sea_level` of 32), no grass tracking and no `topMaterial` re-cap. So none
+    /// of [`CarveEnv::carve_state`]'s inputs are read on this path, which is what
+    /// makes a *disabled* aquifer harmless here.
+    fn carve_block_nether(&mut self, x: i32, y: i32, z: i32) -> bool {
+        let block = self.grid.get(x, y, z).to_string();
+        if !self.can_replace(&block) {
+            return false;
+        }
+        let state = if y <= self.min_gen_y + 31 { LAVA } else { CAVE_AIR };
+        self.grid.set(x, y, z, state);
         true
     }
 }
@@ -478,8 +533,33 @@ fn cave_should_skip(xd: f64, yd: f64, zd: f64, floor_level: f64) -> bool {
 
 const CAVE_BOUND: i32 = 15;
 const CAVE_Y_SCALE: f64 = 1.0;
+/// `NetherWorldCarver.getCaveBound()`.
+const NETHER_CAVE_BOUND: i32 = 10;
+/// `NetherWorldCarver.getYScale()`. Applied to the **trunk** tunnel only; the
+/// two recursive splits pass a literal `1.0` in both carvers.
+const NETHER_CAVE_Y_SCALE: f64 = 5.0;
 
 impl CaveConfig {
+    /// `getCaveBound()`.
+    fn cave_bound(&self) -> i32 {
+        if self.nether { NETHER_CAVE_BOUND } else { CAVE_BOUND }
+    }
+
+    /// `getYScale()`.
+    fn trunk_y_scale(&self) -> f64 {
+        if self.nether { NETHER_CAVE_Y_SCALE } else { CAVE_Y_SCALE }
+    }
+
+    /// `getThickness(random)` — **different draw counts per family**, see
+    /// [`CaveConfig::nether`].
+    fn thickness<R: RandomSource>(&self, random: &mut R) -> f32 {
+        if self.nether {
+            (random.next_float() * 2.0 + random.next_float()) * 2.0
+        } else {
+            get_cave_thickness(random)
+        }
+    }
+
     fn carve<R: RandomSource>(
         &self,
         env: &mut CarveEnv,
@@ -487,7 +567,7 @@ impl CaveConfig {
         source_x: i32,
         source_z: i32,
     ) {
-        let inner = random.next_int_bounded(CAVE_BOUND);
+        let inner = random.next_int_bounded(self.cave_bound());
         let mid = random.next_int_bounded(inner + 1);
         let cave_count = random.next_int_bounded(mid + 1);
 
@@ -510,7 +590,7 @@ impl CaveConfig {
             for _ in 0..tunnels {
                 let horizontal_rotation = random.next_float() * std::f32::consts::TAU;
                 let vertical_rotation = (random.next_float() - 0.5) / 4.0;
-                let thickness = get_cave_thickness(random);
+                let thickness = self.thickness(random);
                 let distance = MAX_DISTANCE - random.next_int_bounded(MAX_DISTANCE / 4);
                 let seed = random.next_long();
                 self.create_tunnel(
@@ -526,7 +606,7 @@ impl CaveConfig {
                     vertical_rotation,
                     0,
                     distance,
-                    CAVE_Y_SCALE,
+                    self.trunk_y_scale(),
                     floor_level,
                 );
             }
@@ -905,6 +985,7 @@ pub fn apply_carvers<O: CarveObserver>(
         center_x: chunk_x,
         center_z: chunk_z,
         lava_level_y: 0,
+        nether: false,
     };
 
     for dx in -NEIGHBOURHOOD_RANGE..=NEIGHBOURHOOD_RANGE {
@@ -917,6 +998,7 @@ pub fn apply_carvers<O: CarveObserver>(
                 let started = random.next_float() <= carver.probability();
                 if started {
                     env.lava_level_y = carver.lava_level().resolve_y(min_gen_y, gen_depth);
+                    env.nether = matches!(carver, CarverConfig::Cave(c) if c.nether);
                     match carver {
                         CarverConfig::Cave(c) => c.carve(&mut env, &mut random, source_x, source_z),
                         CarverConfig::Canyon(c) => {

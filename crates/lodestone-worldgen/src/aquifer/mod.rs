@@ -46,6 +46,22 @@ pub use crate::rng::AnyPositionalFactory;
 const CELL_WIDTH: i32 = 4;
 const CELL_HEIGHT: i32 = 8;
 
+/// `NoiseSettings`'s derived cell size — `QuartPos.toBlock(size_horizontal)` and
+/// `toBlock(size_vertical)`, i.e. `size * 4` (`NoiseSettings.java:46-52`).
+///
+/// **Not the same for every dimension.** The Overworld and the Nether are
+/// `1, 2` → 4 wide / 8 tall (the [`CELL_WIDTH`]/[`CELL_HEIGHT`] this file's
+/// Overworld path uses as constants); **the End is `2, 1` → 8 wide / 4 tall**.
+/// Interpolation happens on cell corners, so a wrong cell size does not fail —
+/// it produces smoothly wrong terrain.
+#[must_use]
+pub fn cell_geometry(settings: &Value) -> (i32, i32) {
+    let noise = &settings["noise"];
+    let horizontal = noise["size_horizontal"].as_i64().unwrap_or(1) as i32;
+    let vertical = noise["size_vertical"].as_i64().unwrap_or(2) as i32;
+    (horizontal * 4, vertical * 4)
+}
+
 /// `DimensionType.WAY_BELOW_MIN_Y` for the standard 1.18+ height (`MIN_Y << 4`,
 /// `MIN_Y = -2032`). Used as the "no fluid here" sentinel level.
 const WAY_BELOW_MIN_Y: i32 = -2032 << 4;
@@ -65,6 +81,27 @@ pub enum BlockKind {
     Water,
     /// Lava.
     Lava,
+}
+
+/// `settings.defaultFluid()` as a [`BlockKind`] — water for the Overworld, lava
+/// for the Nether. Reads only the `Name`, since the fluid's `level` property is
+/// not part of the identity the fill decision turns on.
+///
+/// `minecraft:air` is a real answer, not a missing one: `noise_settings/end.json`
+/// says exactly that (with `sea_level: 0`), so the End's global picker returns air
+/// at every height and the dimension has no fluid at all.
+///
+/// # Panics
+/// Panics on anything else: this engine's [`BlockKind`] has no fourth fluid, and
+/// defaulting would silently fill a dimension with the wrong liquid.
+#[must_use]
+pub fn fluid_from_settings(settings: &Value) -> BlockKind {
+    match settings["default_fluid"]["Name"].as_str() {
+        Some("minecraft:lava") => BlockKind::Lava,
+        Some("minecraft:water") | None => BlockKind::Water,
+        Some("minecraft:air") => BlockKind::Air,
+        Some(other) => panic!("unsupported default_fluid: {other}"),
+    }
 }
 
 /// The fluid identity carried inside vanilla's `Aquifer.FluidStatus`.
@@ -182,6 +219,22 @@ pub struct AquiferSystem {
 
     positional: AnyPositionalFactory,
     sea_level: i32,
+    /// `settings.defaultFluid()` — the fluid the *global* picker's sea status
+    /// carries (`NoiseBasedChunkGenerator.java:70-71`).
+    ///
+    /// Was hardcoded to water, which is right for the Overworld and wrong for
+    /// the Nether: `noise_settings/nether.json` says `minecraft:lava` with
+    /// `sea_level: 32`, so the whole "lava sea" comes from here rather than from
+    /// any aquifer behaviour. The `-54` deep-lava status below is a *separate*
+    /// Overworld status and is unreachable in the Nether (`min(-54, 32) = -54`
+    /// against a `min_y 0` dimension).
+    default_fluid: Fluid,
+    /// `false` when the settings say `aquifers_enabled: false` — the Nether and
+    /// the End. Vanilla swaps the whole implementation
+    /// (`NoiseChunk.java:145-152` picks `Aquifer.createDisabled`), so this is a
+    /// bypass in [`Self::compute_substance`] rather than a tuning parameter, and
+    /// every noise field and grid cache below is left empty in that mode.
+    enabled: bool,
 
     min_grid_x: i32,
     min_grid_y: i32,
@@ -205,6 +258,28 @@ impl AquiferSystem {
         let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(-64) as i32;
         let height = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
         let sea_level = settings["sea_level"].as_i64().unwrap_or(63) as i32;
+
+        // `NoiseChunk.java:145-152`. A dimension with `aquifers_enabled: false`
+        // gets a *different implementation*, not a tuned one, and none of the
+        // four aquifer noise fields is instantiated for it — so this branch is
+        // taken before any of the `builder.build` calls below.
+        if !settings["aquifers_enabled"].as_bool().unwrap_or(true) {
+            let (cell_width, cell_height) = cell_geometry(settings);
+            let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(-64) as i32;
+            let height = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
+            return Self::disabled(
+                Program::compile(&builder.build(&router["final_density"])),
+                builder.slot_count(),
+                sea_level,
+                fluid_from_settings(settings),
+                min_y,
+                height,
+                chunk_x,
+                chunk_z,
+                cell_width,
+                cell_height,
+            );
+        }
 
         let final_density_node = Program::compile(&builder.build(&router["final_density"]));
         let erosion_node = Program::compile(&builder.build(&router["erosion"]));
@@ -335,6 +410,8 @@ impl AquiferSystem {
             prelim,
             positional,
             sea_level,
+            default_fluid: Fluid::Water,
+            enabled: true,
             min_grid_x,
             min_grid_y,
             min_grid_z,
@@ -357,6 +434,92 @@ impl AquiferSystem {
         system.skip_sampling_above_y = from_grid_y(skip_grid_y, 11) - 1;
 
         system
+    }
+
+    /// `Aquifer.createDisabled(globalFluidPicker)` — the whole aquifer for a
+    /// dimension whose settings say `aquifers_enabled: false`, which is the
+    /// Nether and the End (`Aquifer.java:30-41`).
+    ///
+    /// ```text
+    /// density > 0.0 ? null : fluidRule.computeFluid(x, y, z).at(y)
+    /// ```
+    ///
+    /// So: solid where the interpolated density is positive, otherwise the
+    /// *global* picker's answer — the dimension's `default_fluid` below
+    /// `sea_level`, air above. Nothing positional, nothing cached, no barrier
+    /// pressure pushed back into the density. That is why every noise field and
+    /// grid cache below is a stub: reading one in this mode would be a bug, and
+    /// `enabled: false` makes [`Self::compute_substance`] return before it can.
+    ///
+    /// **The Nether's lava sea comes out of here, not out of aquifer logic.**
+    /// With `sea_level 32` and `default_fluid` lava, every position below y=32
+    /// whose density is `<= 0` is lava and everything above it is air. Modelling
+    /// it as "an aquifer whose second fluid is lava" would be a different, wrong
+    /// mechanism — the `-54` deep-lava status is an Overworld feature and is
+    /// unreachable against `min_y 0`.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn disabled(
+        final_density_node: Program,
+        slots: usize,
+        sea_level: i32,
+        default_fluid: BlockKind,
+        min_y: i32,
+        height: i32,
+        chunk_x: i32,
+        chunk_z: i32,
+        cell_width: i32,
+        cell_height: i32,
+    ) -> Self {
+        let min_block_x = chunk_x * 16;
+        let min_block_z = chunk_z * 16;
+        let final_density = NoiseChunkSampler::from_program(
+            final_density_node,
+            slots,
+            cell_width,
+            cell_height,
+            Some(Bounds {
+                x: (min_block_x, min_block_x + 15),
+                y: (min_y, min_y + height - 1),
+                z: (min_block_z, min_block_z + 15),
+            }),
+        );
+        let stub = || Arc::new(Density::Const(0.0));
+        let stub_sampler =
+            || NoiseChunkSampler::new(Density::Const(0.0), 0, cell_width, cell_height);
+        Self {
+            final_density,
+            erosion: stub_sampler(),
+            depth: stub_sampler(),
+            barrier: stub(),
+            floodedness: stub(),
+            spread: stub(),
+            lava: stub(),
+            prelim: stub(),
+            // `createDisabled` takes no `PositionalRandomFactory` at all; this
+            // is the cheapest inert stand-in and is never sampled.
+            positional: crate::rng::Algorithm::Legacy.root_positional(0),
+            sea_level,
+            default_fluid: match default_fluid {
+                BlockKind::Lava => Fluid::Lava,
+                BlockKind::Water => Fluid::Water,
+                // The End's `default_fluid` really is air, so this arm is not a
+                // degenerate case — see `fluid_from_settings`.
+                BlockKind::Air => Fluid::Air,
+                // A silent fall-through to water would produce a plausible world.
+                BlockKind::Stone => panic!("default_fluid is not a fluid: Stone"),
+            },
+            enabled: false,
+            min_grid_x: 0,
+            min_grid_y: 0,
+            min_grid_z: 0,
+            grid_size_x: 0,
+            grid_size_z: 0,
+            skip_sampling_above_y: i32::MAX,
+            aquifer_cache: RefCell::new(Vec::new()),
+            location_cache: RefCell::new(Vec::new()),
+            prelim_cache: RefCell::new(HashMap::new()),
+        }
     }
 
     /// The pre-surface block at world coordinates — vanilla `doFill`'s decision:
@@ -442,7 +605,8 @@ impl AquiferSystem {
     }
 
     fn global_fluid(&self, y: i32) -> FluidStatus {
-        // createFluidPicker: lava below min(-54, seaLevel), else the sea fluid.
+        // createFluidPicker: lava below min(-54, seaLevel), else the sea fluid,
+        // whose type is the dimension's own `default_fluid`.
         if y < (-54).min(self.sea_level) {
             FluidStatus {
                 fluid_level: -54,
@@ -451,7 +615,7 @@ impl AquiferSystem {
         } else {
             FluidStatus {
                 fluid_level: self.sea_level,
-                fluid_type: Fluid::Water,
+                fluid_type: self.default_fluid,
             }
         }
     }
@@ -494,6 +658,14 @@ impl AquiferSystem {
         }
 
         let global_fluid = self.global_fluid(pos_y);
+        if !self.enabled {
+            // `Aquifer.createDisabled`'s entire body. Deliberately before the
+            // `skip_sampling_above_y` shortcut rather than folded into it: that
+            // shortcut is an optimisation inside the *noise* aquifer with its own
+            // derivation, and reusing it here would make the disabled path's
+            // correctness depend on it.
+            return Some(global_fluid.at(pos_y));
+        }
         if pos_y > self.skip_sampling_above_y {
             return Some(global_fluid.at(pos_y));
         }
