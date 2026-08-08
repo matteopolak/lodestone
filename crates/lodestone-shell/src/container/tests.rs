@@ -2212,11 +2212,27 @@ fn id(name: &str) -> lodestone_model::Identifier {
 /// (`176x166` centred in a `426.667x240` logical canvas — see
 /// `panel_origin_with_scale`'s own arithmetic).
 ///
-/// The **rejected hypothesis** is the *unclamped* book-panel x,
-/// `mx - 147 - 8 ≈ -29.667` — negative, i.e. partly off-canvas to the
-/// left. The clamp (`RECIPE_PANEL_MIN_X == 4.0`) is what this test
-/// actually exercises: the panel's real x is `4.0`, not the negative
-/// value the unclamped formula would produce.
+/// # The expected x changed, and the old one was the bug
+///
+/// This used to assert `x == 4.0` and called that "the clamp actually
+/// engaging", with the *unclamped* `mx - 147 - 8 ≈ -29.667` as the
+/// rejected hypothesis. Both hypotheses were wrong, because both placed
+/// the book relative to the **container panel**. Vanilla's
+/// `getXOrigin()` is `(width - 147) / 2 - xOffset`
+/// (`RecipeBookComponent.java:167-169`) — screen-centred — and the
+/// *panel* is what moves (`updateScreenPosition`).
+///
+/// So the expected value now comes from that expression, computed here
+/// from the logical canvas width rather than from anything the code
+/// under test produced:
+///
+/// * logical canvas `1280 / 3 = 426.67`, floored by
+///   `logical_canvas` to `426`
+/// * `426 >= 379`, so not too narrow, so `xOffset == 86`
+/// * `floor((426 - 147) / 2) - 86 == 139 - 86 == 53`
+///
+/// The **rejected hypotheses** are therefore the two old answers, `4.0`
+/// and `-29.667`, both asserted against below.
 #[test]
 fn recipe_panel_layout_matches_predicted_vanilla_derived_rects_at_1280x720() {
     let menu = Menu::crafting(3, 3);
@@ -2224,46 +2240,68 @@ fn recipe_panel_layout_matches_predicted_vanilla_derived_rects_at_1280x720() {
     let (mx, my) = panel_origin(&main, VIEW.0, VIEW.1);
     assert!((mx - 125.333_33).abs() < 0.01, "unexpected main panel x: {mx}");
     assert!((my - 37.0).abs() < 0.001, "unexpected main panel y: {my}");
-    let unclamped_bx = mx - RECIPE_PANEL_W - RECIPE_PANEL_GAP;
-    assert!(unclamped_bx < 0.0, "the clamp test is vacuous unless the raw formula goes negative");
+    // The two rejected hypotheses, both from before the layout was inverted.
+    let panel_relative_bx = mx - RECIPE_PANEL_W - RECIPE_PANEL_GAP;
+    assert!(
+        panel_relative_bx < 0.0,
+        "the old panel-relative formula must still go negative here, or this \
+         test is no longer exercising the case that produced the bug"
+    );
+    // Hand-computed from the canvas, not from the code under test — see the doc.
+    let bx = 53.0;
 
     let layout = recipe_book_panel_layout(&menu, VIEW.0, VIEW.1, 4, false, true);
 
-    assert_eq!(layout.panel, Rect { x: 4.0, y: my, w: RECIPE_PANEL_W, h: RECIPE_PANEL_H });
-    assert_ne!(layout.panel.x, unclamped_bx, "the clamp must have actually engaged");
-
-    // `CraftingScreen.getRecipeBookButtonPosition`: local (5, 34) off the
-    // *main* panel's own origin, not the book panel's.
-    assert_eq!(layout.toggle, Rect { x: mx + 5.0, y: my + 34.0, w: 20.0, h: 18.0 });
-
-    assert_eq!(layout.search_box, Rect { x: 4.0 + 25.0, y: my + 13.0, w: 81.0, h: 14.0 });
-    assert_eq!(layout.magnifier, Rect { x: 4.0 + 8.0, y: my + 13.0, w: 25.0, h: 14.0 });
-    assert_eq!(layout.filter_button, Rect { x: 4.0 + 110.0, y: my + 12.0, w: 26.0, h: 16.0 });
-
-    // Tabs are clamped to the same `RECIPE_PANEL_MIN_X` floor as the
-    // panel itself: the unclamped `bx + RECIPE_TAB_X` would be
-    // `4.0 - 30.0 == -26.0`, off-canvas. The rejected (unclamped)
-    // hypothesis is exactly that negative value.
-    assert_eq!(layout.tabs.len(), 4);
-    assert_eq!(layout.tabs[0], Rect { x: 4.0, y: my + 3.0, w: 35.0, h: 27.0 });
-    assert_ne!(layout.tabs[0].x, 4.0 - 30.0, "the tab-x clamp must have actually engaged");
-    assert_eq!(
-        layout.tabs[3],
-        Rect { x: 4.0, y: my + 3.0 + 27.0 * 3.0, w: 35.0, h: 27.0 }
+    assert_eq!(layout.panel, Rect { x: bx, y: my, w: RECIPE_PANEL_W, h: RECIPE_PANEL_H });
+    assert_ne!(layout.panel.x, 4.0, "the old clamp floor must not be the answer");
+    assert_ne!(
+        layout.panel.x, panel_relative_bx,
+        "the old panel-relative formula must not be the answer either"
     );
 
+    // `CraftingScreen.getRecipeBookButtonPosition`: local (5, 34) off the
+    // *main* panel's own origin, not the book panel's. `recipe_book_panel_layout`
+    // reports the **closed**-book layout (its `book_open` is `false`), so the
+    // panel is unshifted and the toggle sits at the plain centred `mx`.
+    assert_eq!(layout.toggle, Rect { x: mx + 5.0, y: my + 34.0, w: 20.0, h: 18.0 });
+
+    assert_eq!(layout.search_box, Rect { x: bx + 25.0, y: my + 13.0, w: 81.0, h: 14.0 });
+    assert_eq!(layout.magnifier, Rect { x: bx + 8.0, y: my + 13.0, w: 25.0, h: 14.0 });
+    assert_eq!(layout.filter_button, Rect { x: bx + 110.0, y: my + 12.0, w: 26.0, h: 16.0 });
+
+    // Tabs are `xo - 30` and **no longer clamped** — the clamp is what stacked
+    // all four on the page ("squished into the menu"). `53 - 30 == 23`, on
+    // canvas, which is the whole point of placing the book from the screen: at
+    // this width the tabs have 23 px of room and at `RECIPE_BOOK_MIN_WIDTH` they
+    // have exactly 0.
+    assert_eq!(layout.tabs.len(), 4);
+    assert_eq!(layout.tabs[0], Rect { x: bx - 30.0, y: my + 3.0, w: 35.0, h: 27.0 });
+    assert!(layout.tabs[0].x > 0.0, "every tab must be on canvas");
+    assert_ne!(
+        layout.tabs[0].x, 4.0,
+        "a tab parked on the old clamp floor is the reported bug"
+    );
+    assert_eq!(
+        layout.tabs[3],
+        Rect { x: bx - 30.0, y: my + 3.0 + 27.0 * 3.0, w: 35.0, h: 27.0 }
+    );
+    // And the four tabs are at four *distinct* y positions rather than stacked.
+    for i in 1..4 {
+        assert_ne!(layout.tabs[i].y, layout.tabs[i - 1].y);
+    }
+
     assert_eq!(layout.recipes.len(), RECIPE_ITEMS_PER_PAGE);
-    assert_eq!(layout.recipes[0], Rect { x: 4.0 + 11.0, y: my + 31.0, w: 25.0, h: 25.0 });
+    assert_eq!(layout.recipes[0], Rect { x: bx + 11.0, y: my + 31.0, w: 25.0, h: 25.0 });
     // Cell 19 = column 4, row 3 (20 cells, 5 columns).
     assert_eq!(
         layout.recipes[19],
-        Rect { x: 4.0 + 11.0 + 25.0 * 4.0, y: my + 31.0 + 25.0 * 3.0, w: 25.0, h: 25.0 }
+        Rect { x: bx + 11.0 + 25.0 * 4.0, y: my + 31.0 + 25.0 * 3.0, w: 25.0, h: 25.0 }
     );
 
     assert!(layout.page_back.is_none(), "has_prev_page was false");
     assert_eq!(
         layout.page_forward,
-        Some(Rect { x: 4.0 + 93.0, y: my + 137.0, w: 12.0, h: 17.0 })
+        Some(Rect { x: bx + 93.0, y: my + 137.0, w: 12.0, h: 17.0 })
     );
 
     // Composition: the grid must sit *below* the header row it visually

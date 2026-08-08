@@ -688,6 +688,11 @@ impl ApplicationHandler for WindowApp {
                     container_open: self.active_container_menu().is_some(),
                     gameplay: self.ui.accepts_gameplay_input(),
                     debug_held: self.debug_held,
+                    // The recipe book's search box. **Gated on `open` as well as
+                    // `search_focused`**: the focus flag is only cleared by a
+                    // click, so closing the panel with the box focused would
+                    // otherwise leave every key routed into an invisible field.
+                    recipe_search: self.recipe_panel.open && self.recipe_panel.search_focused,
                 };
                 let code = match event.physical_key {
                     PhysicalKey::Code(code) => Some(code),
@@ -791,6 +796,44 @@ impl ApplicationHandler for WindowApp {
                         self.debug_chord_used = true;
                         let was = self.debug_chunk_borders.load(Ordering::Relaxed);
                         self.debug_chunk_borders.store(!was, Ordering::Relaxed);
+                    }
+                    Some(KeyOutcome::RecipeSearch) => {
+                        // `RecipePanelState::search` had **no writer at all** —
+                        // the field was read by `RecipeBook::browse` and (since
+                        // the search box learned to draw) by the layout, and
+                        // written by nothing. The owner's "I can't type in the
+                        // search bar" is that island, one layer up from the
+                        // missing draw.
+                        //
+                        // `event.text` rather than a `KeyCode` mapping: winit has
+                        // already applied the keyboard layout, which is the same
+                        // reason `menu_key_for` reads it. Control characters are
+                        // filtered out because winit reports Backspace/Enter with
+                        // `text` set on some platforms.
+                        if code == Some(KeyCode::Backspace) {
+                            self.recipe_panel.search.pop();
+                            self.recipe_panel.page = 0;
+                        } else if let Some(text) = event.text.as_deref() {
+                            let mut typed = false;
+                            for ch in text.chars().filter(|c| !c.is_control()) {
+                                // `searchBox.setMaxLength(50)`
+                                // (`RecipeBookComponent.java:126`).
+                                if self.recipe_panel.search.chars().count() < RECIPE_SEARCH_MAX_LEN {
+                                    self.recipe_panel.search.push(ch);
+                                    typed = true;
+                                }
+                            }
+                            if typed {
+                                self.recipe_panel.page = 0;
+                            }
+                        }
+                        // Back to page 0 on any edit, both branches:
+                        // `checkSearchStringUpdate` calls `updateCollections`,
+                        // which re-pages from the start. Without it, narrowing a
+                        // search while parked on page 3 shows an empty grid —
+                        // `recipe_book_panel_contents` would clamp it, but to the
+                        // *last* page rather than the first, which is not where a
+                        // player expects a fresh search to begin.
                     }
                     Some(KeyOutcome::ToggleAdvancedTooltips) => {
                         // A persisted option, not a render flag — see the

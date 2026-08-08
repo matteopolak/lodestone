@@ -199,6 +199,12 @@ impl ContainerGeometry {
         // rather than by coincidence.
         let (w, h) = crate::menu::render::logical_canvas(gui_scale, width, height);
         let (x, y) = panel_origin_with_scale(&layout, gui_scale, width, height);
+        // An open recipe book moves the whole panel right — vanilla's
+        // `updateScreenPosition`. Applied **here**, at the single origin every
+        // slot, label, sprite and cost readout below is measured from, so nothing
+        // downstream needs to know about it. Zero with the book closed, which is
+        // every existing caller. `hit_test_with_book` adds the same delta.
+        let x = x + super::layout::recipe_book_panel_shift(w, layout.width, frame.book_open);
         let mut b = Builder::new(w, h, font);
 
         // Vanilla's own dim behind an open container screen (issue #61's
@@ -701,6 +707,7 @@ impl ContainerGeometry {
                 width,
                 height,
                 (w, h),
+                frame.book_open,
             );
         }
 

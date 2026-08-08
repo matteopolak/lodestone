@@ -737,6 +737,10 @@ impl WindowApp {
                 // — and the flag it passes is vanilla's persisted
                 // `advancedItemTooltips`, toggled by F3+H.
                 .with_tooltips(self.nav.advanced_item_tooltips())
+                // An open recipe book moves the panel right (vanilla's
+                // `updateScreenPosition`). `container_input`'s hit-test passes the
+                // same flag through `hit_test_with_book` — the two must agree.
+                .with_book_open(self.recipe_panel.open)
                 .with_drag(self.menu_input.drag_paint())
                 // The wire `menu_type`, which is what `menu_type_title_anchor`
                 // keys on. Without this line the nine per-screen title anchors

@@ -92,8 +92,9 @@ pub(crate) use pacing::{
 };
 #[allow(unused_imports)]
 use recipe_panel::{
-    RecipePanelState, auto_fill_clicks, recipe_book_type_for, recipe_panel_contents,
-    recipe_panel_geometry, recipe_panel_layout, recipe_toast_now_ms, recipe_toast_view,
+    RECIPE_SEARCH_MAX_LEN, RecipePanelState, auto_fill_clicks, recipe_book_type_for,
+    recipe_panel_contents, recipe_panel_geometry, recipe_panel_layout, recipe_toast_now_ms,
+    recipe_toast_view,
 };
 #[allow(unused_imports)]
 use runners::{run_connect, run_headless, run_windowed};

@@ -281,6 +281,42 @@ fn panel_rect_ndc(panel: &RecipePanelState, menu: &Menu, tabs: usize, pages: usi
     )
 }
 
+/// [`panel_rect_ndc`] narrowed to the part of the book page **no other widget
+/// can reach**: everything strictly left of the container panel's own left edge.
+///
+/// The control below needs this, and needing it is the finding. `panel_rect_ndc`
+/// is the whole 147-wide page, and since the book became screen-centred
+/// (vanilla's `getXOrigin`) that page overlaps the container panel — so the
+/// recipe-book *toggle button*, at `mx + 5`, now paints inside it. A control
+/// asserting "a closed panel covers none of the book rect" was therefore
+/// measuring the toggle, not the page: premise false, in the direction that looks
+/// safe, exactly the class `CLAUDE.md` says to ask "what else already paints
+/// here?" about.
+fn book_only_rect_ndc(panel: &RecipePanelState, menu: &Menu, tabs: usize, pages: usize) -> (f32, f32, f32, f32) {
+    let layout = recipe_panel_layout(panel, menu, 1, W, H, tabs, pages, &[]);
+    let main = crate::container::slot_layout(menu);
+    let (mx, _) = crate::container::panel_origin_with_scale(&main, 1, W, H);
+    let (cw, ch) = crate::menu::render::logical_canvas(1, W, H);
+    let r = layout.panel;
+    // The book always starts left of the panel here — `getXOrigin` puts it 86 px
+    // left of screen centre while the panel is centred — so this is non-empty.
+    let right = r.x + r.w;
+    let right = if right < mx { right } else { mx };
+    assert!(
+        right > r.x + 8.0,
+        "the book-only strip must be wide enough to measure: book x {} .. {}, \
+         panel x {mx}",
+        r.x,
+        r.x + r.w
+    );
+    (
+        2.0 * r.x / cw - 1.0,
+        1.0 - 2.0 * (r.y + r.h) / ch,
+        2.0 * right / cw - 1.0,
+        1.0 - 2.0 * r.y / ch,
+    )
+}
+
 fn open_panel() -> RecipePanelState {
     RecipePanelState {
         open: true,
@@ -424,17 +460,19 @@ fn a_closed_panel_fails_the_coverage_assertion() {
         &menu,
         lodestone_model::RecipeBookType::Crafting,
     );
-    // The *same* rect the positive gate measures — derived from the open
-    // layout, so the control differs only in what was drawn.
-    let rect = panel_rect_ndc(&open, &menu, tabs, pages);
+    // Derived from the **open** layout, so the control differs from the positive
+    // gate only in what was drawn — but narrowed to the strip no other widget can
+    // reach. See `book_only_rect_ndc` for why the un-narrowed rect made this
+    // control's premise false.
+    let rect = book_only_rect_ndc(&open, &menu, tabs, pages);
     let geo = recipe_panel_geometry(Some(&book), &closed, &menu, 1, None, None, None, W, H)
         .expect("recipe book");
 
     let (covered, bbox) = coverage(&geo.verts, rect, 128);
     assert_eq!(
         covered, 0,
-        "a closed panel must cover NONE of the book rect (bbox {bbox:?}) — if \
-         this ever passes, the positive gate above is measuring something \
+        "a closed panel must cover NONE of the book-only strip (bbox {bbox:?}) \
+         — if this ever passes, the positive gate above is measuring something \
          other than the panel body"
     );
     assert!(

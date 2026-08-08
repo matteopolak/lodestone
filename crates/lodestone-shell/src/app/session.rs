@@ -361,6 +361,23 @@ impl WindowApp {
         // `start_singleplayer`'s `view_radius` adds one: the outermost streamed
         // ring can never be meshed, so asking for exactly `render_distance`
         // loses the last visible ring.
+        //
+        // # Increasing is currently capped server-side, and the cap is not here
+        //
+        // `dispatch_play_packet`'s `ClientInformationChanged` arm does
+        // `i32::from(view_distance).clamp(0, view_radius.max(0))`, where
+        // `view_radius` is *this connection's own* `serve_connection` argument —
+        // i.e. the `render_distance + 1` the shell asked for at join. So a
+        // **decrease** takes effect immediately and an **increase past the launch
+        // value** is silently clamped back.
+        //
+        // That cannot be fixed from this side: `serve_connection` takes one
+        // `view_radius` and uses it both to seed `ViewTracker::new` and as the
+        // clamp ceiling, so passing the slider's maximum to raise the ceiling
+        // would also make the *initial* stream 33 chunks. The fix is one line in
+        // `crates/lodestone-server/src/server.rs` — clamp against the server's
+        // configured maximum rather than the connection's current radius — and
+        // that file is not this cluster's.
         let radius = wanted.saturating_add(1);
         if let Some(net) = self.sim.net() {
             net.send_action(lodestone_model::action::ClientAction::SetClientSettings(

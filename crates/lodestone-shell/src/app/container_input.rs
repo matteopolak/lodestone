@@ -238,7 +238,18 @@ impl WindowApp {
         if menu.carried().is_some() {
             return;
         }
-        let hit = hit_test_with_scale(&menu, self.nav.gui_scale(), w, h, self.cursor.0, self.cursor.1);
+        let hit = crate::container::hit_test_with_book(
+            &menu,
+            self.nav.gui_scale(),
+            w,
+            h,
+            self.cursor.0,
+            self.cursor.1,
+            // The same flag `redraw` gives `ContainerFrame::with_book_open`; an
+            // open book shifts the panel, so an unshifted hit-test would send
+            // every click one panel-offset to the left.
+            self.recipe_panel.open,
+        );
         let MenuHit::Slot(index) = hit else { return };
         // Vanilla's `40` is the off-hand button and `do_swap`'s `button == 40` arm
         // handles it. Since #382 freed `F` the off-hand binding does reach here;
@@ -272,7 +283,18 @@ impl WindowApp {
         ) else {
             return;
         };
-        let hit = hit_test_with_scale(&menu, self.nav.gui_scale(), w, h, self.cursor.0, self.cursor.1);
+        let hit = crate::container::hit_test_with_book(
+            &menu,
+            self.nav.gui_scale(),
+            w,
+            h,
+            self.cursor.0,
+            self.cursor.1,
+            // The same flag `redraw` gives `ContainerFrame::with_book_open`; an
+            // open book shifts the panel, so an unshifted hit-test would send
+            // every click one panel-offset to the left.
+            self.recipe_panel.open,
+        );
         let ctx = MenuContext {
             cursor_loaded: menu.carried().is_some(),
             // Same gap `send_container_swap`'s own click construction has: no
@@ -301,7 +323,18 @@ impl WindowApp {
         ) else {
             return;
         };
-        let hit = hit_test_with_scale(&menu, self.nav.gui_scale(), w, h, self.cursor.0, self.cursor.1);
+        let hit = crate::container::hit_test_with_book(
+            &menu,
+            self.nav.gui_scale(),
+            w,
+            h,
+            self.cursor.0,
+            self.cursor.1,
+            // The same flag `redraw` gives `ContainerFrame::with_book_open`; an
+            // open book shifts the panel, so an unshifted hit-test would send
+            // every click one panel-offset to the left.
+            self.recipe_panel.open,
+        );
         let ctx = MenuContext {
             cursor_loaded: menu.carried().is_some(),
             creative: false,
