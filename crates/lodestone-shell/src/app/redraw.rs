@@ -523,6 +523,17 @@ impl WindowApp {
         self.sim.stats.particles_alive = particle_frame.alive;
         self.sim.stats.particles_drawn = stats.particles_drawn;
         self.sim.stats.particles_unresolved = particle_frame.unresolved;
+        // The occlusion-cull split (U3/U5). These five `RenderStats` fields were
+        // populated and reached the test harness but no pixels — the same island
+        // shape `stats.adapter` and `stats.difficulty` were fixed for, one field
+        // set over. `occlusion_active` is the one that has to be on screen: every
+        // failure mode of this cull draws *more*, so a zero cull count cannot
+        // distinguish an open surface from a graph that refused to walk.
+        self.sim.stats.occlusion_graph_sections = stats.occlusion_graph_sections;
+        self.sim.stats.sections_culled_occlusion = stats.sections_culled_occlusion;
+        self.sim.stats.sections_occlusion_shadow = stats.sections_occlusion_shadow;
+        self.sim.stats.occlusion_active = stats.occlusion_active;
+        self.sim.stats.occlusion_walks = stats.occlusion_walks;
         self.sim.stats.frame_ms = frame_ms;
         self.sim.stats.fps = self.fps_ema;
         // Issue #411: `ServerDifficulty` reached a real, tested ECS fold but
