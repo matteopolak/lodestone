@@ -2097,8 +2097,36 @@ impl<'w> MobSim<'w> {
         for despawned_item_id in self.items.tick() {
             self.item_state.remove(&despawned_item_id);
         }
-        for state in self.item_state.values_mut() {
+        // Issue #533: **items land.** `ItemMotion::tick` is the entity's own
+        // motion — gravity, translate, drag — and its doc comment has always said
+        // "block collision that would zero a component is the world crate's job
+        // and is expressed here through `on_ground`". Nothing ever did that job:
+        // `on_ground` was set `false` by `ItemMotion::new` and never written
+        // again, so every dropped item accelerated downward forever, fell through
+        // the terrain, and streamed to the client until its 6000-tick despawn.
+        //
+        // That is also why merging never happened. `merge_neighbouring_items`
+        // requires `|dy| < ITEM_MERGE_REACH_Y` (0.25), and two stacks dropped even
+        // one tick apart fall at permanently different speeds — so the vertical
+        // test could never pass for anything but two items spawned on the same
+        // tick. Settling them onto a surface is what makes the merge reachable,
+        // which is why #533's two halves are one fix.
+        let world = self.world;
+        let mut fell_out_of_the_world: Vec<i32> = Vec::new();
+        for (&id, state) in &mut self.item_state {
             state.motion.tick();
+            settle_item(world, &mut state.motion);
+            if state.motion.position.y < f64::from(world.min_y) - VOID_DESPAWN_DEPTH {
+                fell_out_of_the_world.push(id);
+            }
+        }
+        // `Entity.checkBelowWorld`'s discard, and not merely tidiness: an item
+        // that escapes the world (a column the snapshot does not cover, so
+        // `is_solid` is false everywhere) would otherwise keep being ticked and
+        // streamed for its full 6000-tick life at ever-increasing depth.
+        for id in fell_out_of_the_world {
+            self.item_state.remove(&id);
+            self.items.remove(id);
         }
         self.merge_neighbouring_items();
 
@@ -3038,6 +3066,69 @@ impl<'w> MobSim<'w> {
     }
 }
 
+/// How far below the world's floor an item may sink before it is discarded —
+/// vanilla's `Entity.checkBelowWorld` threshold (`Entity.java`'s
+/// `this.getY() < (double)(this.level().getMinY() - 64)`).
+const VOID_DESPAWN_DEPTH: f64 = 64.0;
+
+/// The vertical epsilon used to ask "is the cell directly beneath this item's
+/// bottom face solid".
+///
+/// A resting item's bottom face sits *exactly* on a block boundary, so
+/// `position.y.floor()` is the cell **above** the supporting block and testing it
+/// would always answer air. Subtracting a small epsilon first is what makes the
+/// support test look at the block the item is standing on. It has to be smaller
+/// than any real movement and larger than f64 noise; vanilla's own equivalent is
+/// the `1.0E-7` deflation in `ItemEntity.tick`'s `noCollision` check.
+const ITEM_SUPPORT_EPSILON: f64 = 1.0e-7;
+
+/// Resolves one item's collision with the terrain after [`ItemMotion::tick`] has
+/// already moved it, and records whether it is resting (issue #533).
+///
+/// This is the "world crate's job" [`ItemMotion::tick`]'s doc comment always
+/// deferred and nothing ever did.
+///
+/// # What it models, and what it does not
+///
+/// Vertical only. Vanilla resolves the item's full `0.25 × 0.25 × 0.25` AABB
+/// against every intersecting shape in `Entity.move`; this pushes the item out of
+/// a solid cell it has sunk into, zeroes a downward velocity when that happens,
+/// and sets `on_ground` from the cell beneath. Horizontal collision is left out
+/// deliberately rather than by oversight: a dropped item's horizontal velocity is
+/// a fraction of a block per tick and decays by `ITEM_AIR_DRAG` every tick, so it
+/// cannot cross a wall in the time it takes to stop — whereas gravity is
+/// unbounded, which is why the vertical case was the one with a visible symptom.
+/// The single-column test also means an item is treated as a point at its own
+/// centre rather than a cube, so it can settle in a cell whose neighbour is where
+/// vanilla's wider box would have caught it. Both are visible as an item resting
+/// slightly off-centre in a corner, never as an item falling through the floor.
+///
+/// Per-block friction is likewise not looked up: `block_friction` keeps
+/// [`lodestone_entity::item_entity::DEFAULT_BLOCK_FRICTION`], so an item slides on
+/// ice exactly as it does on stone. Vanilla reads
+/// `getBlockPosBelowThatAffectsMyMovement().getBlock().getFriction()`; wiring that
+/// needs a per-block friction census this crate does not carry.
+fn settle_item(world: &ChunkWorld, motion: &mut ItemMotion) {
+    let bx = motion.position.x.floor() as i32;
+    let bz = motion.position.z.floor() as i32;
+
+    // Sunk into a solid cell this tick: lift the bottom face onto its top.
+    let by = motion.position.y.floor() as i32;
+    if world.is_solid(bx, by, bz) {
+        motion.position.y = f64::from(by + 1);
+        if motion.velocity.y < 0.0 {
+            // `Entity.move`'s collision resolution zeroes the delta component it
+            // could not apply. Note this is also why the `-0.5` bounce in
+            // `ItemMotion::tick` does not fire for a landed item in vanilla
+            // either: by the time that branch runs, `y` is already `0.0`.
+            motion.velocity.y = 0.0;
+        }
+    }
+
+    let supporting_y = (motion.position.y - ITEM_SUPPORT_EPSILON).floor() as i32;
+    motion.on_ground = world.is_solid(bx, supporting_y, bz);
+}
+
 /// Horizontal reach of `mergeWithNeighbours`' search: the item's own half-width
 /// on both boxes plus vanilla's `inflate(0.5, …, 0.5)`.
 const ITEM_MERGE_REACH_XZ: f64 = 0.125 + 0.5 + 0.125;
@@ -3269,6 +3360,7 @@ impl MobHandle {
             // See `MobSim::set_next_id`'s own doc comment: id `1` collides
             // with `LOCAL_PLAYER_ENTITY_ID` on the wire.
             sim.set_next_id(1000);
+            // Exactly `mob_count`, including zero — see [`seed_demo_mobs`].
             seed_demo_mobs(sim, center_x, center_z, mob_count);
         });
     }
@@ -3323,7 +3415,12 @@ fn surface_y(world: &ChunkWorld, x: i32, z: i32) -> Option<i32> {
 /// [`MobSim::run_spawn_cycle`] in its place once a real source exists.
 fn seed_demo_mobs(sim: &mut MobSim<'_>, center_x: i32, center_z: i32, count: usize) {
     let world = sim.world();
-    for i in 0..count.max(1) {
+    // `count`, **not** `count.max(1)`. The floor was here until singleplayer
+    // needed to be mob-free: it made a request for zero demo mobs silently
+    // produce one zombie, so "turn the demo population off" was not expressible
+    // at all. Vanilla does not seed a demo population; a caller asking for none
+    // must get none.
+    for i in 0..count {
         let species = DEMO_SPECIES[i % DEMO_SPECIES.len()];
         let key = ResourceKey::from_str(&format!("minecraft:{species}"))
             .expect("DEMO_SPECIES entries are valid paths");
