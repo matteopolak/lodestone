@@ -211,6 +211,63 @@ entity at all (`lodestone_ecs::entity::EntityIndex` never holds our own id — s
 `apply_local_player_login`'s doc), and goes through `Sim::body_pose`/
 `Sim::hand_swing_progress` instead, per the sections above.
 
+### The five per-tick interpolation rules, and why there is no shared `TickScalar` (issue #218)
+
+#218 proposed extracting a `TickScalar<Kind>` with `Cyclic | Clamped | Eased`
+variants, on the grounds that the arm-swing bug above is a class and the next
+per-tick scalar will re-derive it. **The audit says no**, and the census is the
+reason. Every per-tick scalar in the client, with its *advance* rule and its
+*read* rule:
+
+| scalar | where | advance | read for partial tick `α` |
+|---|---|---|---|
+| `attack_anim` | `lodestone-entity/src/pose.rs` | sawtooth from a countdown | wrap the **delta** forward by 1 when negative |
+| `body_yaw`/`head_yaw`/`head_pitch` | same | assignment | `rot_lerp` — wrap the delta into ±180° **both** ways |
+| `ViewBob::bob` | `lodestone-shell/src/camera_rig.rs` | ease `+= (target - bob) * 0.4` | plain lerp |
+| `ViewBob::walk_dist` | same | accumulate `moved * 0.6` | **extrapolate forward then negate**: `-(v + Δα)` |
+| `ViewBob::hurt_time` | same | integer countdown | **subtract**: `hurt_time - α` |
+| `EyeHeightSmoother` | same | ease halfway toward target | plain lerp |
+| `walk.position`/`walk.speed` | `lodestone-entity/src/pose.rs` | accumulate / ease | plain lerp |
+| `swim_amount`/`swim_amount_o` | `lodestone-physics/src/player.rs` | clamped ±0.09 ramp | **nothing reads it interpolated** |
+
+Four findings, and each one costs the proposal:
+
+1. **There are five read rules, not three.** Two of them — `walk_dist`'s
+   negated forward extrapolation and `hurt_time`'s bare subtraction — are not
+   interpolations at all, so no `interpolate(alpha)` signature covers them. Both
+   are vanilla's own expressions (`getBackwardsInterpolatedWalkDistance`, and
+   `Camera.setup`'s `hurtTime - partialTicks`), and `ViewBob::frame`'s comment
+   records that reading the *lerping* sibling instead is a plausible-looking
+   half-tick phase error. An abstraction that made the lerp the default would
+   make that mistake easier, not harder.
+2. **"Cyclic" is two incompatible rules.** `attack_anim` wraps a negative delta
+   forward by exactly `1` — a monotone sawtooth, never backwards. `rot_lerp`
+   wraps in **both** directions into ±180°, because an angle can legitimately
+   move either way. A single `Cyclic` variant is wrong for one of them unless it
+   is parameterised by period *and* signedness, at which point the enum carries
+   more configuration than the two functions it replaces.
+3. **`swim_amount` is not an instance.** Nothing interpolates it. `camera_rig.rs`
+   states outright that the camera's swim ramp is deliberately *not*
+   `PlayerState::swim_amount`. So the count the issue conditions on is three
+   consumers, not four.
+4. **The predicted accumulation did not happen.** #218 says to re-audit once
+   `bobView` (#58) lands and after the next movement features. #58 landed;
+   #206 and #208 landed; between them they added **zero** interpolated scalars
+   (`FireworkBoost` and `ItemUseTicks` are integer counters read by no renderer).
+   The trend the refactor was reserved for is not there.
+
+**What actually prevented the recurrence** is not a type — it is that each read
+site names the vanilla expression it reproduces and says what the wrong choice
+looks like on screen. A `TickScalar<Cyclic>` declaration is exactly as easy to
+write on the wrong value as a hand-rolled lerp is, because the failure was never
+"picked the wrong Kind"; it was "did not notice the value wraps". Moving the
+prose away from the value would make that worse.
+
+**Keep this table current instead.** A new per-tick scalar should land a row here
+and cite the vanilla expression. If a *sixth* rule ever appears, or if two
+consumers ever end up needing the same non-obvious wrap, reopen #218 — that is
+the trigger, not the instance count.
+
 ## Configuration
 
 None. No env vars, flags or constants to set. `DEFAULT_SWING_DURATION` is 6
