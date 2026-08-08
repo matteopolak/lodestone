@@ -83,8 +83,17 @@ impl ApplicationHandler for WindowApp {
         // `ItemAtlas` is behind an `Arc` precisely so the second consumer is a
         // refcount bump rather than a second stitch of the whole item corpus.
         let item_atlas = crate::resources::load_item_atlas();
+        // The 2-D GUI glint sheet, shared by the hotbar and the container screen.
+        // Loaded once here rather than twice below; `None` on a jar-less run, in
+        // which case enchanted icons draw without their shimmer.
+        let glint_sheet = item_atlas
+            .as_ref()
+            .and_then(|_| crate::resources::load_glint_texture());
         if let Some(items) = item_atlas.clone() {
             hud.attach_items(gpu.device(), gpu.queue(), format, items);
+            if let Some(img) = &glint_sheet {
+                hud.attach_glint(gpu.device(), gpu.queue(), format, img);
+            }
         }
         // Attach the 3-D block-item pass, which borrows the world renderer's own
         // block atlas, tint palette and animation slots rather than uploading a
@@ -116,6 +125,9 @@ impl ApplicationHandler for WindowApp {
         let mut container = ContainerRenderer::new(gpu.device(), format);
         if let Some(items) = item_atlas {
             container.attach_items(gpu.device(), gpu.queue(), format, items);
+            if let Some(img) = &glint_sheet {
+                container.attach_glint(gpu.device(), gpu.queue(), format, img);
+            }
         }
         if let (Some(atlas_view), Some(atlas_sampler), Some(palette), Some(anim)) = (
             render.model_atlas_view(),

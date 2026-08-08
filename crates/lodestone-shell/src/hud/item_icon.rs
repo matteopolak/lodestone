@@ -99,7 +99,7 @@ use lodestone_render::{
 
 use super::font;
 use super::vanilla_font::{self, VanillaFont};
-use super::{FLOATS_PER_VERTEX, HUD_SPRITE_WGSL, SPRITE_FLOATS_PER_VERTEX};
+use super::{FLOATS_PER_VERTEX, HUD_GLINT_WGSL, HUD_SPRITE_WGSL, SPRITE_FLOATS_PER_VERTEX};
 
 /// One occupied slot's drawable state, resolved shell-side from a
 /// [`lodestone_game::menu::Menu`]. `item` is the item id
@@ -190,6 +190,18 @@ pub(crate) struct IconSink<'o> {
     /// per-part instance buffer, exactly as the world pass does, so a chest icon
     /// costs ~14 matrices rather than a re-transformed vertex copy.
     pub special: &'o mut Vec<SpecialIconDraw>,
+    /// The **glint** stream: a copy of every flat sprite quad belonging to an
+    /// enchanted stack, in the same `[x, y, u, v, r, g, b, a]` layout as
+    /// [`Self::sprite`] so one `push_sprite_quad` builds both.
+    ///
+    /// A separate stream rather than a per-vertex flag because the enchanted
+    /// quads are not contiguous within [`Self::sprite`] — one enchanted sword
+    /// among nine hotbar cells would need nine draw ranges — and because the
+    /// glint draws on its own pipeline with its own blend anyway. Only
+    /// [`IconPart::Sprite`] reaches here: the 3-D block-item and special-renderer
+    /// streams glint through `lodestone_render::glint`'s depth-`EQUAL` pipeline,
+    /// which this one exists precisely because it cannot serve.
+    pub glint: &'o mut Vec<f32>,
 }
 
 /// One special-renderer icon to draw: a baked block-entity mesh, the sheet it
@@ -315,17 +327,15 @@ pub(crate) fn draw_item_icon_counted(
                 IconPart::Sprite { layers } => {
                     for layer in layers {
                         if let Some(spr) = atlas.sprite(&layer.sprite) {
-                            push_sprite_quad(
-                                sink.sprite,
-                                vw,
-                                vh,
-                                GuiSpriteQuad {
-                                    dst: [x, y, size, size],
-                                    uv_min: spr.uv_min,
-                                    uv_max: spr.uv_max,
-                                },
-                                sprite_layer_tint(layer),
-                            );
+                            let quad = GuiSpriteQuad {
+                                dst: [x, y, size, size],
+                                uv_min: spr.uv_min,
+                                uv_max: spr.uv_max,
+                            };
+                            push_sprite_quad(sink.sprite, vw, vh, quad, sprite_layer_tint(layer));
+                            if slot.enchanted {
+                                push_glint_quad(sink.glint, vw, vh, quad);
+                            }
                         }
                     }
                 }
@@ -490,17 +500,15 @@ pub(crate) fn draw_item_icon_popped(
                 IconPart::Sprite { layers } => {
                     for layer in layers {
                         if let Some(spr) = atlas.sprite(&layer.sprite) {
-                            push_sprite_quad(
-                                sink.sprite,
-                                vw,
-                                vh,
-                                GuiSpriteQuad {
-                                    dst: [dst_x, dst_y, dst_w, dst_h],
-                                    uv_min: spr.uv_min,
-                                    uv_max: spr.uv_max,
-                                },
-                                sprite_layer_tint(layer),
-                            );
+                            let quad = GuiSpriteQuad {
+                                dst: [dst_x, dst_y, dst_w, dst_h],
+                                uv_min: spr.uv_min,
+                                uv_max: spr.uv_max,
+                            };
+                            push_sprite_quad(sink.sprite, vw, vh, quad, sprite_layer_tint(layer));
+                            if slot.enchanted {
+                                push_glint_quad(sink.glint, vw, vh, quad);
+                            }
                         }
                     }
                 }
@@ -750,6 +758,17 @@ pub(crate) fn push_sprite_quad(
     v(x0, y0, u0, v0);
     v(x1, y1, u1, v1);
     v(x0, y1, u0, v1);
+}
+
+/// Push the glint copy of one item-sprite quad into [`IconSink::glint`].
+///
+/// Same rect, same atlas UVs, white tint — `hud_glint.wgsl` samples the item
+/// atlas at those UVs for its silhouette mask and ignores the tint entirely, so
+/// the colour is only there to fill the shared vertex layout. Kept as its own
+/// function rather than a `push_sprite_quad(.., WHITE)` call at the two sites so
+/// the "why is this quad duplicated" answer is where the duplication is.
+fn push_glint_quad(verts: &mut Vec<f32>, vw: f32, vh: f32, q: GuiSpriteQuad) {
+    push_sprite_quad(verts, vw, vh, q, [1.0, 1.0, 1.0, 1.0]);
 }
 
 /// A borrowed handle onto a screen's **colour** vertex stream plus the viewport
@@ -1288,6 +1307,222 @@ pub(crate) fn build_sprite_pipeline(
     }
 }
 
+/// This frame's [`GuiGlintUniform`], at the shipped option defaults.
+///
+/// The clock is wall-clock milliseconds, vanilla's `Util.getMillis()` — the same
+/// origin `gpu/glint.rs` keys the world and hand glint off, so all three shimmer
+/// in phase.
+fn gui_glint_uniform() -> GuiGlintUniform {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64() * 1000.0);
+    GuiGlintUniform {
+        tex_matrix: lodestone_render::glint::glint_texture_matrix(
+            millis,
+            lodestone_render::glint::DEFAULT_SPEED,
+            // `Scale::Item` — the `glint` render type, which is every item form
+            // including a GUI slot icon.
+            lodestone_render::glint::Scale::Item,
+        )
+        .to_cols_array_2d(),
+        fade: [lodestone_render::glint::DEFAULT_STRENGTH, 0.0, 0.0, 0.0],
+    }
+}
+
+impl GuiGlint {
+    fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+        items: &GpuAtlas,
+        img: &lodestone_assets::Image,
+        label: &'static str,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(HUD_GLINT_WGSL.into()),
+        });
+        // `Rgba8Unorm`, **not** `_Srgb`, for the reason `gpu/glint.rs`'s module
+        // doc gives at length: the GLINT blend squares the sampled byte in gamma
+        // space, so the hardware must not decode it to linear on the way in.
+        let size = wgpu::Extent3d {
+            width: img.width,
+            height: img.height,
+            depth_or_array_layers: 1,
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &img.rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(img.width * 4),
+                rows_per_image: Some(img.height),
+            },
+            size,
+        );
+        let glint_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let glint_sampler = lodestone_render::glint::glint_sampler(device);
+
+        let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some(label),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let tex_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let smp_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
+        let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some(label),
+            entries: &[tex_entry(0), smp_entry(1), tex_entry(2), smp_entry(3)],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(label),
+            bind_group_layouts: &[Some(&uniform_layout), Some(&texture_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                // `hud_sprite.wgsl`'s layout verbatim: the glint stream is built
+                // by the same `push_sprite_quad`, and the tint at offset 16 is
+                // declared here but not consumed by the shader.
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: (SPRITE_FLOATS_PER_VERTEX * 4) as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 8,
+                            shader_location: 1,
+                        },
+                    ],
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    // `BlendFunction.GLINT`: `dst += src * src`, destination alpha
+                    // untouched. Not ADDITIVE and not TRANSLUCENT — both are the
+                    // obvious guess and both were measured wrong.
+                    blend: Some(lodestone_render::glint::glint_blend()),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            // No depth: every GUI sprite pass here runs without a depth
+            // attachment, which is the whole reason this pipeline exists rather
+            // than `lodestone_render::glint`'s depth-`EQUAL` one.
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: std::mem::size_of::<GuiGlintUniform>() as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: &uniform_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform.as_entire_binding(),
+            }],
+        });
+        let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: &texture_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&items.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&items.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&glint_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&glint_sampler),
+                },
+            ],
+        });
+        let capacity_floats = 1024;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: (capacity_floats * 4) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            pipeline,
+            texture,
+            uniform,
+            uniform_bind_group,
+            texture_bind_group,
+            buffer,
+            capacity_floats,
+        }
+    }
+}
+
 /// The GPU half of the item-icon pass, held by every screen that draws slots.
 ///
 /// Both halves start detached. `attach_items` gives flat icons somewhere to
@@ -1311,6 +1546,50 @@ pub(crate) struct IconRenderer {
     /// same "there is somewhere to draw 3-D icons" signal, and both gates' negative
     /// control turns exactly on it.
     color_format: Option<wgpu::TextureFormat>,
+    /// The 2-D GUI glint pass, attached by [`Self::attach_glint`]. `None` on a
+    /// jar-less run or a pack with no glint sheet, in which case enchanted icons
+    /// draw without their shimmer — the same "is a thing attached" degradation
+    /// every other stream here has.
+    glint: Option<GuiGlint>,
+}
+
+/// The GPU resources for the **2-D GUI glint**: the shimmer over a flat item
+/// icon in a slot.
+///
+/// A separate pipeline from `lodestone_render::glint`'s and it has to be. That
+/// one consumes [`ModelVertex`] and depth-tests `EQUAL` against the pass beneath
+/// it; a GUI sprite pass has an 8-float vertex and no depth attachment at all. So
+/// the silhouette mask comes from re-sampling the *item atlas* instead — see
+/// `shaders/hud_glint.wgsl`.
+///
+/// Two bind groups (uniform / the two textures), well under `wgpu`'s portable
+/// `max_bind_groups` floor of 4, and its own uniform buffer rather than a share
+/// of anyone else's: `queue.write_buffer` is ordered against the **submit**, not
+/// the encoder, so a buffer shared with the world or hand glint would hand every
+/// pass in the frame the last value written.
+#[derive(Debug)]
+struct GuiGlint {
+    pipeline: wgpu::RenderPipeline,
+    /// The uploaded glint sheet, kept alive explicitly — it is the subject here,
+    /// not a side effect of the bind group's strong reference.
+    #[allow(dead_code)]
+    texture: wgpu::Texture,
+    uniform: wgpu::Buffer,
+    uniform_bind_group: wgpu::BindGroup,
+    /// Group 1: the item atlas and the glint sheet, with a sampler each.
+    texture_bind_group: wgpu::BindGroup,
+    buffer: wgpu::Buffer,
+    capacity_floats: usize,
+}
+
+/// `hud_glint.wgsl`'s group-0 uniform: the glint texture matrix plus
+/// `GlintAlpha`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GuiGlintUniform {
+    tex_matrix: [[f32; 4]; 4],
+    /// `.x` is `GlintAlpha`; the rest is padding to the 16-byte alignment.
+    fade: [f32; 4],
 }
 
 impl IconRenderer {
@@ -1371,6 +1650,92 @@ impl IconRenderer {
             buffer: sp.buffer,
             capacity_floats: sp.capacity_floats,
         });
+    }
+
+    /// Attach the **2-D GUI glint** pass, so an enchanted flat item icon in a
+    /// slot shimmers. `img` is the decoded `enchanted_glint_item.png`
+    /// ([`crate::resources::load_glint_texture`]).
+    ///
+    /// Must be called **after** [`Self::attach_items`] — the pass masks itself
+    /// against the item atlas, so there is nothing to bind without one, and this
+    /// is a no-op in that case. Nothing else in the frame changes: a renderer
+    /// without this pass draws every icon exactly as before.
+    pub(crate) fn attach_glint(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+        img: &lodestone_assets::Image,
+        label: &'static str,
+    ) {
+        let Some(sprites) = self.sprites.as_ref() else {
+            return;
+        };
+        self.glint = Some(GuiGlint::new(
+            device,
+            queue,
+            color_format,
+            &sprites.gpu,
+            img,
+            label,
+        ));
+    }
+
+    /// Grow and upload the glint stream, returning the vertex count to draw.
+    /// Zero when the stream is empty or the pass is not attached, so the caller's
+    /// draw can be unconditional.
+    ///
+    /// Also rewrites the pass's own uniform with this frame's scroll offsets —
+    /// that is what makes the shimmer move, and it is why this is a separate
+    /// method rather than another parameter on [`Self::upload`]: the uniform is
+    /// per-frame, not per-screen.
+    pub(crate) fn upload_glint(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        verts: &[f32],
+        label: &'static str,
+    ) -> u32 {
+        if verts.is_empty() {
+            return 0;
+        }
+        let Some(g) = self.glint.as_mut() else {
+            return 0;
+        };
+        if verts.len() > g.capacity_floats {
+            g.capacity_floats = verts.len().next_power_of_two();
+            g.buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: (g.capacity_floats * 4) as wgpu::BufferAddress,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        queue.write_buffer(&g.buffer, 0, bytemuck::cast_slice(verts));
+        queue.write_buffer(&g.uniform, 0, bytemuck::bytes_of(&gui_glint_uniform()));
+        (verts.len() / SPRITE_FLOATS_PER_VERTEX) as u32
+    }
+
+    /// Record the glint draw for one sub-range of the uploaded stream into an
+    /// **already-open** pass — the same shape as
+    /// [`Self::draw_sprites_range`], and it must be recorded *after* it in the
+    /// same pass so the shimmer lands over the icon rather than under it.
+    pub(crate) fn draw_glint_range(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        range: std::ops::Range<u32>,
+    ) {
+        if range.is_empty() {
+            return;
+        }
+        let Some(g) = &self.glint else {
+            return;
+        };
+        pass.set_pipeline(&g.pipeline);
+        pass.set_bind_group(0, &g.uniform_bind_group, &[]);
+        pass.set_bind_group(1, &g.texture_bind_group, &[]);
+        pass.set_vertex_buffer(0, g.buffer.slice(..));
+        pass.draw(range, 0..1);
     }
 
     /// Attach the GPU side of the **3-D block-item** icon pass, so slots holding

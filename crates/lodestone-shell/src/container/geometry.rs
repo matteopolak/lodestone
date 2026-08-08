@@ -33,6 +33,11 @@ pub struct ContainerGeometry {
     /// Flat `[x, y, u, v, r, g, b, a]` per textured **item**-sprite vertex,
     /// sampling the [`ItemAtlas`]. Empty unless one was supplied.
     pub item_verts: Vec<f32>,
+    /// The **enchantment-glint** copies of [`item_verts`](Self::item_verts) —
+    /// see [`crate::hud::HudGeometry::glint_verts`]. Split at
+    /// [`slot_glint_vertex_count`](Self::slot_glint_vertex_count) for the same
+    /// reason the sprite stream is.
+    pub glint_verts: Vec<f32>,
     /// The 3-D **block-item** icons, already posed into GUI pixel space on the
     /// CPU. Empty unless a [`BlockModels`] was supplied.
     pub model_verts: Vec<ModelVertex>,
@@ -92,6 +97,11 @@ pub struct ContainerGeometry {
     /// icons; the remainder is the carried stack's flat sprite. See
     /// [`slot_vertex_count`](Self::slot_vertex_count).
     pub slot_item_vertex_count: usize,
+    /// How many leading vertices of [`glint_verts`](Self::glint_verts) are slot
+    /// icons; the remainder belongs to the carried stack. Without this split an
+    /// enchanted stack on the cursor would have its glint drawn in the slot pass
+    /// and then covered by its own sprite in the carried pass — invisible.
+    pub slot_glint_vertex_count: usize,
     /// How many leading vertices of [`model_verts`](Self::model_verts) are slot
     /// icons; the remainder is the carried stack's 3-D block. **This one is not
     /// an ordering nicety** — the model pass is depth-tested, so a carried block
@@ -176,6 +186,7 @@ impl ContainerGeometry {
             return Self {
                 verts: Vec::new(),
                 item_verts: Vec::new(),
+                glint_verts: Vec::new(),
                 model_verts: Vec::new(),
                 special: Vec::new(),
                 bg_verts: Vec::new(),
@@ -184,6 +195,7 @@ impl ContainerGeometry {
                 chrome_vertex_count: 0,
                 slot_vertex_count: 0,
                 slot_item_vertex_count: 0,
+                slot_glint_vertex_count: 0,
                 slot_model_vertex_count: 0,
                 slot_special_count: 0,
                 widget_rect: None,
@@ -656,6 +668,7 @@ impl ContainerGeometry {
         // second stratum whose model pass clears depth again.
         let slot_floats = b.verts.len();
         let slot_item_floats = b.item_verts.len();
+        let slot_glint_floats = b.glint_verts.len();
         let slot_model_verts = b.model_verts.len();
         let slot_special = b.special.len();
 
@@ -717,10 +730,12 @@ impl ContainerGeometry {
             chrome_vertex_count: chrome_floats / FLOATS_PER_VERTEX,
             slot_vertex_count: slot_floats / FLOATS_PER_VERTEX,
             slot_item_vertex_count: slot_item_floats / crate::hud::SPRITE_FLOATS_PER_VERTEX,
+            slot_glint_vertex_count: slot_glint_floats / crate::hud::SPRITE_FLOATS_PER_VERTEX,
             slot_model_vertex_count: slot_model_verts,
             slot_special_count: slot_special,
             verts: b.verts,
             item_verts: b.item_verts,
+            glint_verts: b.glint_verts,
             model_verts: b.model_verts,
             special: b.special,
             bg_verts: b.bg_verts,
