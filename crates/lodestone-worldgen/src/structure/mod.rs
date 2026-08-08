@@ -244,7 +244,14 @@ impl BoundingBox {
 }
 
 /// `TerrainAdjustment` — how (and whether) the beardifier reshapes terrain under
-/// a structure. Carried by S1 so S3 has it; **nothing here evaluates it**.
+/// a structure.
+///
+/// Carried by S1 and **evaluated since S3** by [`beardifier::Beardifier::compute`],
+/// which is the only reader: nothing in this file branches on it. Every variant
+/// below names its structures, and every one of those structures is still on the
+/// ledger (jigsaw is S4, `stronghold`/`nether_fossil` are S5), so no *real* start
+/// carries a non-`None` value in a generated world yet — see
+/// `docs/worldgen-beardifier.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerrainAdjustment {
     /// `none` — 23 of the 34 bundled structures.
