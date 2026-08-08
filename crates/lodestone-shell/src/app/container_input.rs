@@ -85,6 +85,9 @@ impl WindowApp {
             h,
             tab_count,
             total_pages,
+            // Icons only, and the hit-test reads no icons — see
+            // `recipe_panel_layout`'s own doc.
+            &[],
         );
         let Some(hit) = crate::container::recipe_book_panel_hit_test_with_scale(
             &layout,

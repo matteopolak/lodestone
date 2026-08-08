@@ -270,7 +270,7 @@ fn coverage(
 /// moving anchor and reported 0 px for a row that was rendering perfectly.
 /// This calls `recipe_panel_layout` exactly as `recipe_panel_geometry` does.
 fn panel_rect_ndc(panel: &RecipePanelState, menu: &Menu, tabs: usize, pages: usize) -> (f32, f32, f32, f32) {
-    let layout = recipe_panel_layout(panel, menu, 1, W, H, tabs, pages);
+    let layout = recipe_panel_layout(panel, menu, 1, W, H, tabs, pages, &[]);
     let (cw, ch) = crate::menu::render::logical_canvas(1, W, H);
     let r = layout.panel;
     (
@@ -307,6 +307,7 @@ fn every_panel_vertex_lands_inside_the_ndc_clip_range() {
         1,
         None,
         None,
+        None,
         W,
         H,
     )
@@ -341,6 +342,7 @@ fn panel_vertices_stay_on_canvas_at_the_min_x_clamp() {
         1,
         None,
         None,
+        None,
         420,
         400,
     )
@@ -373,7 +375,7 @@ fn an_open_panel_covers_its_own_screen_rect() {
         lodestone_model::RecipeBookType::Crafting,
     );
     let rect = panel_rect_ndc(&panel, &menu, tabs, pages);
-    let geo = recipe_panel_geometry(Some(&book), &panel, &menu, 1, None, None, W, H)
+    let geo = recipe_panel_geometry(Some(&book), &panel, &menu, 1, None, None, None, W, H)
         .expect("recipe book");
 
     let res = 128;
@@ -425,7 +427,7 @@ fn a_closed_panel_fails_the_coverage_assertion() {
     // The *same* rect the positive gate measures — derived from the open
     // layout, so the control differs only in what was drawn.
     let rect = panel_rect_ndc(&open, &menu, tabs, pages);
-    let geo = recipe_panel_geometry(Some(&book), &closed, &menu, 1, None, None, W, H)
+    let geo = recipe_panel_geometry(Some(&book), &closed, &menu, 1, None, None, None, W, H)
         .expect("recipe book");
 
     let (covered, bbox) = coverage(&geo.verts, rect, 128);
@@ -452,7 +454,7 @@ fn a_menu_without_a_recipe_book_draws_no_panel() {
         "a chest has no recipe book"
     );
     assert!(
-        recipe_panel_geometry(None, &open_panel(), &chest, 1, None, None, W, H).is_none(),
+        recipe_panel_geometry(None, &open_panel(), &chest, 1, None, None, None, W, H).is_none(),
         "and therefore emits no geometry"
     );
 }
@@ -546,8 +548,8 @@ fn the_filter_button_swaps_its_art_between_all_and_craftable() {
         let panel = RecipePanelState { open: true, filtering, ..RecipePanelState::default() };
         let (tabs, pages, _) =
             recipe_panel_contents(Some(&book), &panel, &menu, lodestone_model::RecipeBookType::Crafting);
-        let layout = recipe_panel_layout(&panel, &menu, 1, W, H, tabs, pages);
-        let geo = recipe_panel_geometry(Some(&book), &panel, &menu, 1, None, None, W, H)
+        let layout = recipe_panel_layout(&panel, &menu, 1, W, H, tabs, pages, &[]);
+        let geo = recipe_panel_geometry(Some(&book), &panel, &menu, 1, None, None, None, W, H)
             .expect("recipe book");
         let want = layout.filter_button;
         geo.sprites
@@ -652,7 +654,7 @@ fn a_filtered_empty_page_still_paginates_and_draws() {
         recipe_panel_contents(Some(&book), &panel, &menu, lodestone_model::RecipeBookType::Crafting);
     assert_eq!(pages, 1, "an empty filtered set is page 0 of 1, never 0 of 0");
     assert!(ids.is_empty(), "nothing is craftable here");
-    let geo = recipe_panel_geometry(Some(&book), &panel, &menu, 1, None, None, W, H)
+    let geo = recipe_panel_geometry(Some(&book), &panel, &menu, 1, None, None, None, W, H)
         .expect("the panel must still be built with an empty filtered page");
     assert!(
         geo.chrome_vertex_count > 0,

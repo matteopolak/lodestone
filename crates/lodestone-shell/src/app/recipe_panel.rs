@@ -103,6 +103,16 @@ pub(super) fn recipe_toast_view(
 /// `hit_test_with_scale` carries a warning that a layout built with a different
 /// `gui_scale` than the frame was drawn with silently mis-resolves every click,
 /// and one function used twice is the only way to guarantee they agree.
+///
+/// `tab_categories` feeds the tab **icon** table only
+/// ([`crate::container::RecipeBookPanelLayout::tab_icons`]) and must be
+/// [`crate::container::recipe_book_panel_contents_filtered`]'s own `tabs`, in
+/// order. `&[]` is legal and means "no tab icons" — the *hit-test* path passes
+/// that deliberately, because `recipe_book_panel_hit_test` reads rects and
+/// nothing else, so the two layouts can differ in this field without being able
+/// to disagree about where a click lands. Every field the hit-test *does* read is
+/// still produced here exactly once.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn recipe_panel_layout(
     panel: &RecipePanelState,
     menu: &Menu,
@@ -111,6 +121,7 @@ pub(super) fn recipe_panel_layout(
     h: u32,
     tab_count: usize,
     total_pages: usize,
+    tab_categories: &[lodestone_game::recipe::RecipeCategory],
 ) -> crate::container::RecipeBookPanelLayout {
     let mut layout = crate::container::recipe_book_panel_layout_with_scale(
         menu,
@@ -126,6 +137,16 @@ pub(super) fn recipe_panel_layout(
     // shared layout builder rather than at the draw site so the hit-test and
     // the draw cannot disagree about which button is on screen.
     layout.filtering = panel.filtering;
+    // Same argument for the tab icons and the search text: this is the one
+    // function both the hit-test and the draw go through, so filling them here
+    // is what stops the two seeing different panels. `recipe_book_type_for` is
+    // `None` only for a menu with no book at all, and such a menu never gets a
+    // layout drawn — an empty icon list there simply draws no icons.
+    layout.tab_icons = recipe_book_type_for(menu)
+        .map(|book_type| crate::container::recipe_tab_icons(book_type, tab_categories))
+        .unwrap_or_default();
+    layout.search = panel.search.clone();
+    layout.search_focused = panel.search_focused;
     layout
 }
 
@@ -198,11 +219,12 @@ pub(super) fn recipe_panel_geometry(
     gui_scale: u32,
     items: Option<&lodestone_assets::ItemAtlas>,
     models: Option<&lodestone_render::BlockModels>,
+    font: Option<&crate::hud::VanillaFont>,
     w: u32,
     h: u32,
 ) -> Option<crate::container::RecipeBookPanelGeometry> {
     let book_type = recipe_book_type_for(menu)?;
-    let (tab_count, total_pages, results) = match book {
+    let (tab_categories, total_pages, results) = match book {
         Some(book) => {
             let contents = crate::container::recipe_book_panel_contents_filtered(
                 book,
@@ -228,11 +250,20 @@ pub(super) fn recipe_panel_geometry(
                         .and_then(lodestone_game::recipe::Recipe::result_stack)
                 })
                 .collect();
-            (contents.tabs.len(), contents.total_pages, results)
+            (contents.tabs.clone(), contents.total_pages, results)
         }
-        None => (0, 1, Vec::new()),
+        None => (Vec::new(), 1, Vec::new()),
     };
-    let layout = recipe_panel_layout(panel, menu, gui_scale, w, h, tab_count, total_pages);
+    let layout = recipe_panel_layout(
+        panel,
+        menu,
+        gui_scale,
+        w,
+        h,
+        tab_categories.len(),
+        total_pages,
+        &tab_categories,
+    );
     Some(match items {
         Some(items) => crate::container::recipe_book_panel_geometry_with_icons(
             &layout,
@@ -244,6 +275,7 @@ pub(super) fn recipe_panel_geometry(
             h,
             items,
             models,
+            font,
         ),
         None => crate::container::recipe_book_panel_geometry(
             &layout,
