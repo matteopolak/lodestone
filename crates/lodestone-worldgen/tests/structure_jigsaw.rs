@@ -145,12 +145,16 @@ fn generator(resolver: &dyn Resolver, settings: &Value) -> OverworldGenerator {
     OverworldGenerator::new(SEED, settings, resolver, "minecraft:plains", false)
 }
 
-/// The five villages and `pillager_outpost` load their whole pool graph and are
-/// **absent** from the ledger; the four jigsaw structures S4 does not model are
-/// **present** on it, each with a reason.
+/// Every bundled jigsaw structure loads its whole pool graph and is **absent**
+/// from the ledger, and the engine gaps that are not structures are **present** on
+/// it, each with a reason.
 ///
 /// The negative half is the load-bearing half: a registry that silently demoted
 /// `village_plains` would still pass every "the ledger names its gaps" assertion.
+/// As of S5's Part A there is no jigsaw structure left to demote — the three that
+/// were (`trial_chambers` on `pool_aliases`, `trail_ruins` on `capped`,
+/// `bastion_remnant` on `axis_aligned_linear_pos`) are asserted **supported** here,
+/// which is what stops a regression in any of the three from looking like data.
 #[test]
 fn the_jigsaw_structures_s4_models_are_not_on_the_ledger() {
     let registry = StructureRegistry::new(SEED, &ServerAssets::new());
@@ -165,6 +169,10 @@ fn the_jigsaw_structures_s4_models_are_not_on_the_ledger() {
         // Supported despite vanilla's own dangling wall reference — see the
         // `dangling:` ledger row asserted below.
         "minecraft:ancient_city",
+        // The three S5 Part A closed, each by one named blocker.
+        "minecraft:trial_chambers",
+        "minecraft:trail_ruins",
+        "minecraft:bastion_remnant",
     ] {
         assert!(
             !ledger.contains_key(supported),
@@ -173,9 +181,9 @@ fn the_jigsaw_structures_s4_models_are_not_on_the_ledger() {
         );
     }
     for (unsupported, expected) in [
-        ("minecraft:trial_chambers", "pool_aliases"),
-        ("minecraft:trail_ruins", "capped"),
-        ("minecraft:bastion_remnant", "axis_aligned_linear_pos"),
+        // The block-entity half of a `capped` archaeology rule: the suspicious
+        // block is placed, its loot table is not.
+        ("block_entity:append_loot", "append_loot"),
         // Vanilla's own data references
         // `ancient_city/walls/intact_horizontal_wall_stairs_5`
         // (`AncientCityStructurePools.java:113`), of which only `_1`..`_4` ship in
