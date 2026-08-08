@@ -111,10 +111,27 @@ gate green while destroying its argument.
 unchanged: *MP consumes server light; SP computes it.* This change makes the server hold up its end; it does
 not move the client.
 
-**A per-block-change relight does not exist anywhere in this tree** (issue #94), and this change does not
-create a caller for one: light is computed per column at serve time, so a block edit is reflected the next
-time that column is sent. `LIGHT_UPDATE` (packet 48) still has a decode arm and **no encoder** — a separate
-concern, deliberately out of #517's scope.
+**A per-block-change relight does not exist anywhere in this tree** (issue #94), and #517 did not create a
+caller for one: light is computed per column at serve time, so a block edit is reflected the next time that
+column is sent.
+
+**`LIGHT_UPDATE` (packet 48) now has an encoder**, which it did not when the paragraph above was written:
+`ServerProtocol::encode_light_update` plus `ServerProtocol::compute_column_light`, with the v770 overrides
+beside `encode_chunk`, and `lodestone-server`'s `resend_column_for_light` as the consumer. `light_update.rs`'s
+`encode_light_update_matches_the_golden_wire_body` pins it byte-for-byte against the hand-written golden body
+the decode arm was already gated on — the only kind of expectation that can catch the real trap, which is that
+the wire order is sky / block / empty-sky / empty-block masks *then* the two array lists and is **not**
+`LightPatch::from_light_masks`' argument order. A transposition is a well-formed packet the client mis-merges
+in silence, so a round-trip through our own decoder cannot see it.
+
+**But the encoder was not what the two open items were blocked on, and building it did not close either.**
+Both this doc's Δ5 seam and `lodestone_server::light`'s "light does not cross a chunk border" are properties of
+the *computation*; `light_update` is a cheaper carrier for the same values. `compute_column_light` is still the
+isolated compute. What closes them is what §12.117 already names — compute light in the chunk source, where
+the 3×3 neighbourhood is resident, and carry it on the column — and that carries a trap worth restating: **if
+`ChunkColumn` gains precomputed light, `ChunkColumn::set_block` *and* `ChunkStore::set_block` must invalidate
+it.** Both write blocks into a retained column without touching anything derived from them, so stale light
+would produce a correct-looking wire, a re-meshed client, and no change on screen.
 
 **Fixture warning, because it is unreadable from a test's source.** Seed 1234, chunk (0, 0) — the fixture the
 neighbouring `encode_chunk_*` tests use — is a **vacuous world for light**: ocean, so its light is sky 15

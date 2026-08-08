@@ -1122,6 +1122,66 @@ pub trait ServerProtocol: Send + Sync {
     /// `CHUNK_BATCH_FINISHED`).
     fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective;
 
+    /// Encodes a **light-only** update for one column (vanilla's
+    /// `ClientboundLightUpdatePacket`, wire id `light_update`) — the packet that
+    /// makes a placed torch light its column without re-sending the terrain.
+    ///
+    /// This is the ninth of nine links in the "torches emit no light" chain, and
+    /// it was the only missing one: the client decode, `LightPatch`'s three-state
+    /// merge and the re-mesh signal all already existed. See [`crate::light`] for
+    /// the audit and `docs/server-chunk-light.md` for the wire format.
+    ///
+    /// # The wire order is not [`ColumnLight`]'s argument order
+    ///
+    /// The body is `cx`, `cz`, then **exactly** what
+    /// [`lodestone_world::ColumnLight::encode`] writes: four section bitsets in
+    /// the order sky / block / empty-sky / empty-block, then the two array lists.
+    /// That is *not* the order `LightPatch::from_light_masks` takes its arguments
+    /// in (it interleaves each layer's mask with its empty mask), and an
+    /// implementor that follows the constructor instead produces a packet a real
+    /// client mis-merges silently. `ColumnLight::encode` is already the exact
+    /// `ClientboundLightUpdatePacketData` shape, so an implementor should call it
+    /// rather than reimplement the four bitsets.
+    ///
+    /// The default emits nothing, so a family without light support falls back to
+    /// the whole-column resend [`crate::light`] describes.
+    fn encode_light_update(
+        &self,
+        cx: i32,
+        cz: i32,
+        light: &lodestone_world::ColumnLight,
+    ) -> ServerDirective {
+        let _ = (cx, cz, light);
+        ServerDirective::None
+    }
+
+    /// Computes the light for one column, so
+    /// [`encode_light_update`](Self::encode_light_update) has something to send.
+    ///
+    /// This is version-specific and this crate cannot do it: the light engine
+    /// runs over `lodestone_world`'s **state-id** column, and resolving a
+    /// canonical state string to a registry id is exactly the seam
+    /// [`encode_chunk`](Self::encode_chunk) crosses. So the implementor converts
+    /// and floods, and the server only decides *when* to ask.
+    ///
+    /// The result is the **isolated** compute — light entering from a neighbouring
+    /// column is not pulled in. That is the same residual `encode_chunk` already
+    /// carries (`docs/server-chunk-light.md` records it as a measured Δ5 sky-light
+    /// dark bias at column borders), and closing it needs light computed in the
+    /// chunk source where the 3×3 neighbourhood is resident, not a wider signature
+    /// here. **If a column ever carries precomputed light, `ChunkColumn::set_block`
+    /// and `ChunkStore::set_block` must invalidate it** — both write blocks into a
+    /// retained column without touching anything derived from them, and stale
+    /// light produces a correct-looking wire, a re-meshed client, and no change on
+    /// screen.
+    ///
+    /// The default answers `None`, which the server reads as "this family cannot
+    /// compute light", and it falls back to the column resend.
+    fn compute_column_light(&self, column: &ChunkColumn) -> Option<lodestone_world::ColumnLight> {
+        let _ = column;
+        None
+    }
+
     /// Emits any directives to send right after the initial chunk batch has
     /// gone out (a post-join system chat message, say). Optional: the default
     /// sends nothing, so an implementor that has no such content need not
@@ -1892,6 +1952,19 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective {
         (**self).end_chunk_batch(batch_size)
+    }
+
+    fn encode_light_update(
+        &self,
+        cx: i32,
+        cz: i32,
+        light: &lodestone_world::ColumnLight,
+    ) -> ServerDirective {
+        (**self).encode_light_update(cx, cz, light)
+    }
+
+    fn compute_column_light(&self, column: &ChunkColumn) -> Option<lodestone_world::ColumnLight> {
+        (**self).compute_column_light(column)
     }
 
     fn welcome_message(&self) -> Vec<ServerDirective> {

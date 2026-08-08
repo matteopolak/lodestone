@@ -224,3 +224,111 @@ fn light_update_for_unloaded_chunk_is_a_safe_noop_notification() {
     // Sanity: the reader is fully consumed by the arm (no panic, no leftover).
     let _ = Reader::new(&payload);
 }
+
+// ---------------------------------------------------------------------------
+// The server-side encoder — the ninth of nine links (`lodestone_server::light`).
+// ---------------------------------------------------------------------------
+
+/// The [`ColumnLight`] whose wire form is exactly [`golden_light_update`]'s
+/// payload: sky section 1 a full array of 15s, block section 2 explicitly empty,
+/// everything else absent.
+///
+/// Built from the *fixture's* description rather than from anything the encoder
+/// does, which is what makes the assertion below an outside expectation: the
+/// golden body was hand-written from the wire spec to gate the **decode** arm,
+/// long before an encoder existed, and it makes sky ≠ block and full ≠ empty on
+/// purpose.
+fn golden_light_column() -> ColumnLight {
+    let mut light = ColumnLight::new(SECTION_COUNT);
+    // 4096 nibbles of 15 ⇒ 2048 bytes of 0xFF, which is what the fixture carries.
+    for index in 0..4096 {
+        light.set_sky_light(1, index, 15);
+    }
+    *light.block_mut(2) = LightData::Uniform(0);
+    light
+}
+
+/// **`ServerProtocol::encode_light_update` must produce the hand-written golden
+/// body, byte for byte.**
+///
+/// This is the assertion that catches the trap the encoder exists to fall into:
+/// the wire order is sky / block / empty-sky / empty-block masks and *then* the
+/// two array lists, which is **not** `LightPatch::from_light_masks`' argument
+/// order. A swap there produces a well-formed packet the client mis-merges
+/// silently — no error, no trailing bytes, just light in the wrong layer — so a
+/// round-trip through our own decoder would not see it. The expected value here
+/// comes from the fixture instead, and the fixture is independent of both.
+#[test]
+fn encode_light_update_matches_the_golden_wire_body() {
+    let directive = lodestone_server::ServerProtocol::encode_light_update(
+        &lodestone_v770::V770ServerProtocol,
+        0,
+        0,
+        &golden_light_column(),
+    );
+    match directive {
+        lodestone_server::ServerDirective::Send { packet_id, payload } => {
+            assert_eq!(
+                packet_id,
+                play::clientbound::LIGHT_UPDATE,
+                "a light-only update is packet 48, not level_chunk_with_light"
+            );
+            assert_eq!(
+                payload,
+                golden_light_update(),
+                "the encoded body must equal the hand-written golden `light_update` payload; \
+                 a mask/empty or sky/block transposition lands here and nowhere else"
+            );
+        }
+        other => panic!("encode_light_update must send a packet, got {other:?}"),
+    }
+}
+
+/// …and the client really does merge what the server just encoded, so the ninth
+/// link closes onto the eight that already existed.
+///
+/// Not a `decode(encode(x)) == x` substitute for the gate above — that one owns
+/// the byte-exactness against an outside fixture. This one owns the *join*: it
+/// asserts the two halves are wired to each other at all, which is the failure
+/// mode `lodestone_server::light`'s audit found (eight green links and a missing
+/// ninth). A non-zero `cx`/`cz` is deliberate: a coordinate dropped or swapped in
+/// the encoder would merge the light into the wrong chunk, and `merge_light` is a
+/// silent no-op for a chunk that is not loaded.
+#[test]
+fn the_encoder_and_the_decode_arm_are_wired_to_each_other() {
+    let pos = WorldChunkPos::new(3, -5);
+    let mut world = world_with_empty_chunk(pos);
+    let directive = lodestone_server::ServerProtocol::encode_light_update(
+        &lodestone_v770::V770ServerProtocol,
+        pos.x,
+        pos.z,
+        &golden_light_column(),
+    );
+    let lodestone_server::ServerDirective::Send { packet_id, payload } = directive else {
+        panic!("encode_light_update must send a packet");
+    };
+
+    let adapter = V770Adapter::new();
+    let directives = adapter
+        .handle_packet(&mut world, ConnectionState::Play, packet_id, &payload)
+        .expect("the client must decode what the server encodes");
+
+    let chunk = world.get(pos).expect("chunk still loaded");
+    assert_eq!(
+        chunk.light.sky(1).get(4095),
+        Some(15),
+        "the whole 2048-byte sky array must land, at the chunk the coordinates named"
+    );
+    assert_eq!(
+        *chunk.light.block(2),
+        LightData::Uniform(0),
+        "the empty-mask block section must arrive as explicit zero, not absent"
+    );
+    assert!(
+        matches!(
+            directives.as_slice(),
+            [Directive::Emit(ClientEvent::ChunkLoaded { .. })]
+        ),
+        "and the re-mesh signal must fire, or the light arrives and nothing redraws"
+    );
+}

@@ -3452,6 +3452,39 @@ impl ServerProtocol for V770ServerProtocol {
         )
     }
 
+    /// `ClientboundLightUpdatePacket`: `cx`, `cz`, then the six-field light
+    /// payload verbatim.
+    ///
+    /// [`ColumnLight::encode`] is *already* the exact
+    /// `ClientboundLightUpdatePacketData` shape — the same bytes
+    /// [`encode_column_body`] embeds inside `level_chunk_with_light` — so this is
+    /// two varints and a delegation, deliberately. Note the wire order it writes
+    /// is sky / block / empty-sky / empty-block masks and then the two array
+    /// lists, which is **not** `LightPatch::from_light_masks`' argument order;
+    /// `tests/light_update.rs` pins the encoder against the hand-written golden
+    /// body the decode arm is gated on.
+    fn encode_light_update(&self, cx: i32, cz: i32, light: &ColumnLight) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(cx);
+        w.var_i32(cz);
+        light.encode(&mut w);
+        ServerDirective::Send {
+            packet_id: play::clientbound::LIGHT_UPDATE,
+            payload: w.as_slice().to_vec(),
+        }
+    }
+
+    /// The same computation [`encode_chunk`](ServerProtocol::encode_chunk)
+    /// performs — [`build_world_column`] to resolve state ids, then
+    /// [`compute_served_light`] — so a `light_update` and a full column resend
+    /// carry identical light for identical terrain. Read
+    /// [`compute_served_light`]'s doc for why this is the isolated compute and
+    /// what the residual is.
+    fn compute_column_light(&self, column: &ServerChunkColumn) -> Option<ColumnLight> {
+        let shape = ChunkShape::overworld_1_21();
+        Some(compute_served_light(&build_world_column(&shape, column)))
+    }
+
     fn welcome_message(&self) -> Vec<ServerDirective> {
         vec![ServerDirective::Send {
             packet_id: play::clientbound::SYSTEM_CHAT,
@@ -4687,7 +4720,11 @@ mod block_edit_tests {
         let served_column = source.column(0, 0);
 
         let proto = V770ServerProtocol;
-        let directive = proto.encode_chunk(0, 0, &served_column);
+        // Named through the trait: `V770ServerProtocol` implements both
+        // `ServerProtocol` and `ChunkEncoder`, whose `encode_chunk` methods are
+        // deliberately the same body (see the `ChunkEncoder` impl), so an
+        // unqualified call is ambiguous rather than wrong.
+        let directive = ServerProtocol::encode_chunk(&proto, 0, 0, &served_column);
         let payload = match directive {
             ServerDirective::Send { payload, .. } => payload,
             other => panic!("expected Send, got {other:?}"),
@@ -4729,7 +4766,8 @@ mod block_edit_tests {
             .expect("the bundled generator computes MOTION_BLOCKING");
 
         let source = overworld_chunk_source(seed);
-        let directive = V770ServerProtocol.encode_chunk(0, 0, &source.column(0, 0));
+        let directive =
+            ServerProtocol::encode_chunk(&V770ServerProtocol, 0, 0, &source.column(0, 0));
         let payload = match directive {
             ServerDirective::Send { payload, .. } => payload,
             other => panic!("expected Send, got {other:?}"),
@@ -4763,7 +4801,7 @@ mod block_edit_tests {
         // An all-air column has no generated map at all, and still frames a
         // valid zero-entry NBT.
         let empty = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
-        let directive = V770ServerProtocol.encode_chunk(0, 0, &empty);
+        let directive = ServerProtocol::encode_chunk(&V770ServerProtocol, 0, 0, &empty);
         let payload = match directive {
             ServerDirective::Send { payload, .. } => payload,
             other => panic!("expected Send, got {other:?}"),
@@ -4803,7 +4841,11 @@ mod block_edit_tests {
         );
 
         let proto = V770ServerProtocol;
-        let directive = proto.encode_chunk(0, 0, &served_column);
+        // Named through the trait: `V770ServerProtocol` implements both
+        // `ServerProtocol` and `ChunkEncoder`, whose `encode_chunk` methods are
+        // deliberately the same body (see the `ChunkEncoder` impl), so an
+        // unqualified call is ambiguous rather than wrong.
+        let directive = ServerProtocol::encode_chunk(&proto, 0, 0, &served_column);
         let payload = match directive {
             ServerDirective::Send { payload, .. } => payload,
             other => panic!("expected Send, got {other:?}"),
