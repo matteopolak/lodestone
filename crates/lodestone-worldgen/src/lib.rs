@@ -54,5 +54,5 @@ pub use lodestone_worldgen_core::{counters, density, engine, hash, math, noise, 
 pub use noise::{ImprovedNoise, NormalNoise, PerlinNoise};
 pub use rng::{
     LegacyRandomSource, PositionalRandomFactory, RandomSource, WorldgenRandom,
-    XoroshiroRandomSource,
+    XoroshiroRandomSource, is_slime_chunk, seed_slime_chunk,
 };

@@ -152,6 +152,63 @@ impl<R: RandomSource> WorldgenRandom<R> {
     }
 }
 
+/// `WorldgenRandom.seedSlimeChunk(x, z, seed, salt)` — issue #515.
+///
+/// A free function rather than a method because vanilla's is `static` and needs no
+/// carrier state: it derives a fresh [`LegacyRandomSource`]
+/// (`RandomSource.createThreadLocalInstance`, i.e. plain `java.util.Random`, **not**
+/// xoroshiro) from the chunk coordinates and the world seed.
+///
+/// # The three ways to get this subtly wrong
+///
+/// ```text
+/// seed + x * x * 4987142 + x * 5947611 + z * z * 4392871L + z * 389711 ^ salt
+/// ```
+///
+/// 1. **The arithmetic mixes widths on purpose.** `x * x * 4987142` and
+///    `x * 5947611` and `z * 389711` are Java `int` multiplications — 32-bit,
+///    wrapping — while `z * z * 4392871L` widens *after* `z * z` because only the
+///    last factor carries the `L`. Transcribing all four as `i64` gives a different
+///    seed for large coordinates and an identical one for small ones, which is why
+///    a fixture confined to small positive coordinates cannot tell the two apart.
+/// 2. **`^` binds looser than `+`**, so the XOR applies to the whole sum.
+/// 3. **The additions are `long`**, so each `int` product is sign-extended before
+///    being added — hence the `as i64` on the wrapped 32-bit results rather than on
+///    their operands.
+#[must_use]
+pub fn seed_slime_chunk(x: i32, z: i32, seed: i64, salt: i64) -> LegacyRandomSource {
+    // Each `let` is one Java sub-expression, in Java's own evaluation order, so the
+    // width of every operation is visible on its own line.
+    let x_sq: i64 = i64::from(x.wrapping_mul(x).wrapping_mul(4_987_142));
+    let x_lin: i64 = i64::from(x.wrapping_mul(5_947_611));
+    let z_sq: i64 = i64::from(z.wrapping_mul(z)).wrapping_mul(4_392_871);
+    let z_lin: i64 = i64::from(z.wrapping_mul(389_711));
+    let mixed = seed
+        .wrapping_add(x_sq)
+        .wrapping_add(x_lin)
+        .wrapping_add(z_sq)
+        .wrapping_add(z_lin)
+        ^ salt;
+    LegacyRandomSource::new(mixed)
+}
+
+/// `Slime.checkSlimeSpawnRules`' slime-chunk salt (`Slime.java:93`).
+pub const SLIME_CHUNK_SALT: i64 = 987_234_911;
+
+/// Whether `(chunk_x, chunk_z)` is a slime chunk for `seed` — a **pure function**
+/// of those three values, so it is bit-exact or wrong; there is no tolerance
+/// available and no way for a green test to be vacuous about magnitude.
+///
+/// The `nextInt(10) == 0` lives here rather than in [`seed_slime_chunk`] because
+/// vanilla puts it at the call site: the derivation is worldgen's, the predicate is
+/// spawning's. `Slime.checkSlimeSpawnRules` combines this with a *separate*
+/// `random.nextInt(10) == 0` off the spawn RNG and `pos.getY() < 40`, neither of
+/// which belongs to this function.
+#[must_use]
+pub fn is_slime_chunk(chunk_x: i32, chunk_z: i32, seed: i64) -> bool {
+    seed_slime_chunk(chunk_x, chunk_z, seed, SLIME_CHUNK_SALT).next_int_bounded(10) == 0
+}
+
 impl<R: RandomSource> RandomSource for WorldgenRandom<R> {
     type Positional = LegacyPositionalFactory;
 
@@ -240,5 +297,103 @@ mod tests {
     fn get_seed_matches_known_origin() {
         // Mth.getSeed(0,0,0) == 0 (0*0*.. == 0, >>16 == 0).
         assert_eq!(get_seed(0, 0, 0), 0);
+    }
+    /// Issue #515. `is_slime_chunk` is a pure function of `(chunk_x, chunk_z,
+    /// seed)`, so this is element-wise and exact — not a match count and not a
+    /// "roughly 10%" statistic, which would be the *magnitude* species of vacuous
+    /// test.
+    ///
+    /// # Where the expected values come from, stated honestly
+    ///
+    /// **Not a JVM run** — there is no JDK on this machine and the oracles run under
+    /// Apple `container`, which was more setup than this warranted. They come from
+    /// an independent transcription of `java.util.Random` plus the
+    /// `seedSlimeChunk` expression in **Python**, where integers are arbitrary
+    /// precision and every 32-bit wrap therefore had to be written out explicitly
+    /// rather than happening for free. That is weaker than a captured JVM dump
+    /// (same author, so a shared misreading of the spec survives), and stronger than
+    /// `decode(encode(x))`: it is a different language, a different LCG
+    /// implementation, and the width discipline is forced to be visible.
+    ///
+    /// # What makes the lattice discriminating
+    ///
+    /// The named trap for this unit is transcribing all four products as `i64`. The
+    /// two hypotheses agree on every small coordinate, so a fixture confined to
+    /// those cannot separate them. These do, measured at seed 42:
+    ///
+    /// | coordinate | correct seed | all-`i64` seed |
+    /// |---|---|---|
+    /// | (46341, 0) | 3,079,240,536 | 10,710,105,327,237,976 |
+    /// | (65536, 65536) | −1,980,628,363 | 40,287,263,702,254,197 |
+    /// | (100000, −100000) | 6,194,237,115,429,365 | 93,800,686,506,701,301 |
+    ///
+    /// 46341 is just above `sqrt(i32::MAX)`, so `x * x` alone overflows there.
+    /// Negatives on both axes are present for the sign-extension half.
+    #[test]
+    fn slime_chunks_match_the_derivation_element_wise() {
+        const COORDS: [(i32, i32); 16] = [
+            (0, 0),
+            (1, 0),
+            (0, 1),
+            (-1, -1),
+            (-13, 7),
+            (7, -13),
+            (1234, -5678),
+            (46341, 0),
+            (0, 46341),
+            (-46341, 46341),
+            (65536, 65536),
+            (100_000, -100_000),
+            (2, 3),
+            (4, 5),
+            (-8, -9),
+            (31, -64),
+        ];
+        // One character per coordinate, in `COORDS` order.
+        const EXPECTED: [(i64, &str); 4] = [
+            (42, "0000000001000000"),
+            (-1, "0000000100000100"),
+            (1_234_567_890_123, "0000000100001000"),
+            (0, "0000010000010000"),
+        ];
+        for (seed, expected) in EXPECTED {
+            let got: String = COORDS
+                .iter()
+                .map(|&(x, z)| if is_slime_chunk(x, z, seed) { '1' } else { '0' })
+                .collect();
+            assert_eq!(
+                got, expected,
+                "seed {seed}: slime-chunk lattice differs element-wise\n  coords {COORDS:?}"
+            );
+        }
+    }
+
+    /// The control for the test above: the all-`i64` transcription — the one
+    /// mistake the issue names — must produce a *different* answer somewhere on
+    /// this lattice. Observed, not described; without it the lattice could be
+    /// passing because it never leaves the range where both hypotheses agree.
+    #[test]
+    fn the_all_i64_transcription_is_separated_by_this_lattice() {
+        fn wrong(x: i32, z: i32, seed: i64, salt: i64) -> i64 {
+            let x = i64::from(x);
+            let z = i64::from(z);
+            (seed
+                .wrapping_add(x.wrapping_mul(x).wrapping_mul(4_987_142))
+                .wrapping_add(x.wrapping_mul(5_947_611))
+                .wrapping_add(z.wrapping_mul(z).wrapping_mul(4_392_871))
+                .wrapping_add(z.wrapping_mul(389_711)))
+                ^ salt
+        }
+        // Chosen because `x * x` overflows `i32` there; 46340^2 does not.
+        let (x, z, seed) = (46341, 0, 42);
+        let right = seed_slime_chunk(x, z, seed, SLIME_CHUNK_SALT);
+        let mut wrong_src = LegacyRandomSource::new(wrong(x, z, seed, SLIME_CHUNK_SALT));
+        let mut right_src = right;
+        assert_ne!(
+            right_src.next_int_bounded(1 << 30),
+            wrong_src.next_int_bounded(1 << 30),
+            "the all-i64 hypothesis must diverge at ({x}, {z}), or this lattice proves \
+             nothing about the width mixing"
+        );
     }
 }
