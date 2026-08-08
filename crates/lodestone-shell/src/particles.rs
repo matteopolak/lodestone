@@ -56,6 +56,14 @@ use lodestone_physics::{CollisionView, Vec3d};
 use lodestone_render::{BlockModels, Camera};
 use wgpu::util::DeviceExt;
 
+/// `DripParticle.WaterHangProvider`'s tint — vanilla sets water drips to
+/// `0.2F, 0.3F, 1.0F` rather than the biome water colour, so a cave drip reads
+/// blue everywhere including in swamp water.
+const WATER_DRIP_COLOUR: [f32; 3] = [0.2, 0.3, 1.0];
+
+/// `DripParticle.createLavaHang`'s tint, `1.0F, 0.2857F, 0.083F`.
+const LAVA_DRIP_COLOUR: [f32; 3] = [1.0, 0.2857, 0.083];
+
 /// Which stitched texture a [`ParticleInstance`]'s UVs address.
 ///
 /// This travels *with* the UVs, decided by the same
@@ -518,6 +526,64 @@ impl Particles {
                 )]
                 let size = xa as f32;
                 emit::huge_explosion(&mut self.engine, x, y, z, size);
+            }
+
+            // -- Ambient and environmental types (issue #178) ----------------
+            //
+            // Every arm below is an argument-less `SimpleParticleType`, so the
+            // three velocity words are exactly what the wire sent and nothing
+            // needs the `ParticleOptions` decoder. Several *also* have a
+            // client-predicted emitter — see `Sim::tick_ambient_particles` —
+            // because vanilla spawns them from `Block.animateTick` rather than
+            // over the network; a type can legitimately have both.
+            "soul" => emit::soul(&mut self.engine, x, y, z, xa, ya, za),
+            "soul_fire_flame" => emit::soul_fire_flame(&mut self.engine, x, y, z, xa, ya, za),
+            // `reverse_portal` shares `PortalParticle` and differs only in the
+            // sign the *caller* gives the offset, which the wire already carries.
+            "portal" | "reverse_portal" => emit::portal(&mut self.engine, x, y, z, xa, ya, za),
+            "campfire_cosy_smoke" => {
+                emit::campfire_smoke(&mut self.engine, x, y, z, xa, ya, za, false);
+            }
+            "campfire_signal_smoke" => {
+                emit::campfire_smoke(&mut self.engine, x, y, z, xa, ya, za, true);
+            }
+            "end_rod" => emit::end_rod(&mut self.engine, x, y, z, xa, ya, za),
+            "electric_spark" | "glow" => emit::spark(&mut self.engine, x, y, z, xa, ya, za),
+            // Sheet, scale and lifetime are what separate these four; the tick
+            // shape is identical. Lifetimes are each class's own constructor.
+            "sculk_charge" => emit::animated_ambient(
+                &mut self.engine, x, y, z, xa, ya, za, Sheet::SculkCharge, 1.0, 15,
+            ),
+            "gust" => {
+                emit::animated_ambient(&mut self.engine, x, y, z, 0.0, 0.0, 0.0, Sheet::Gust, 3.0, 12)
+            }
+            "small_gust" => {
+                emit::animated_ambient(&mut self.engine, x, y, z, 0.0, 0.0, 0.0, Sheet::Gust, 1.0, 12)
+            }
+            "sonic_boom" => emit::animated_ambient(
+                &mut self.engine, x, y, z, 0.0, 0.0, 0.0, Sheet::SonicBoom, 3.0, 16,
+            ),
+            // The drip family. Three sheets for three phases, and the fluid's own
+            // colour is the only thing telling a water drip from a lava one —
+            // both use the same sprite. `DripParticle`'s hanging phase has no
+            // gravity at all until it lets go; the falling phase does.
+            "dripping_water" => {
+                emit::drip(&mut self.engine, x, y, z, Sheet::DripHang, WATER_DRIP_COLOUR, 0.0);
+            }
+            "falling_water" => {
+                emit::drip(&mut self.engine, x, y, z, Sheet::DripFall, WATER_DRIP_COLOUR, 1.0);
+            }
+            "dripping_lava" => {
+                emit::drip(&mut self.engine, x, y, z, Sheet::DripHang, LAVA_DRIP_COLOUR, 0.0);
+            }
+            "falling_lava" => {
+                emit::drip(&mut self.engine, x, y, z, Sheet::DripFall, LAVA_DRIP_COLOUR, 1.0);
+            }
+            "landing_lava" => {
+                emit::drip(&mut self.engine, x, y, z, Sheet::DripLand, LAVA_DRIP_COLOUR, 0.0);
+            }
+            "spore_blossom_air" => {
+                emit::drip(&mut self.engine, x, y, z, Sheet::DripFall, [0.32, 0.5, 0.22], 0.0);
             }
             other => tracing::debug!(
                 target: "particles",
@@ -1820,8 +1886,26 @@ mod tests {
         // that `frame_count()`'s per-frame `explosion_N` naming resolves
         // every one of those sixteen files, not just frame 0.
         emit::huge_explosion(p.engine_mut(), 0.5, 65.0, 0.5, 0.0);
+        // The ambient/environmental batch (issue #178). Ten more `Sheet`
+        // variants, and this is the only place that proves each names real files:
+        // `soul` is 11 frames, `enchant` is alphabetic (`sga_a`…`sga_z`) rather
+        // than numbered at all, `big_smoke` is 12, `sonic_boom` is 16, and the
+        // drip phases are three separate single-frame sheets. A hermetic fixture
+        // cannot see any of that.
+        emit::soul(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.05, 0.0);
+        emit::soul_fire_flame(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.05, 0.0);
+        emit::portal(p.engine_mut(), 0.5, 65.0, 0.5, 0.25, 0.0, 0.25);
+        emit::campfire_smoke(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.07, 0.0, false);
+        emit::end_rod(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0);
+        emit::spark(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0);
+        for sheet in [Sheet::SculkCharge, Sheet::Gust, Sheet::SonicBoom, Sheet::Enchant] {
+            emit::animated_ambient(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0, sheet, 1.0, 15);
+        }
+        for sheet in [Sheet::DripHang, Sheet::DripFall, Sheet::DripLand] {
+            emit::drip(p.engine_mut(), 0.5, 65.0, 0.5, sheet, [1.0, 1.0, 1.0], 0.0);
+        }
         let alive = p.engine.particles().len();
-        assert!(alive >= 11, "all eleven emitters must have added a particle");
+        assert!(alive >= 24, "every emitter must have added a particle, got {alive}");
 
         let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
             Some(lodestone_particle::FULL_BRIGHT)
@@ -1836,5 +1920,187 @@ mod tests {
              against the stitched atlas"
         );
         assert_eq!(frame.drawn, frame.alive);
+    }
+}
+
+/// How many random block positions the ambient emitter samples per tick, and how
+/// far from the eye it looks.
+///
+/// Vanilla's `ClientLevel.animateTick` draws **667** positions in a ±16 box twice
+/// per tick, i.e. ~1.9% of the 33³ volume. `128` in a ±8 box is ~2.6% of 17³ —
+/// the same *density* at a fraction of the cost, which is the number that decides
+/// how often a given torch flickers. Dropping the density is what makes torches
+/// look dead rather than making the scan cheap.
+const AMBIENT_SAMPLES: usize = 128;
+/// Half-extent of the ambient scan box, in blocks. Bounded by
+/// `LiveCollision`'s own 3×3-column snapshot, which is ±16 at best and clips
+/// asymmetrically depending on where in its chunk the player stands.
+const AMBIENT_RANGE: i32 = 8;
+
+impl Particles {
+    /// Emit this tick's **client-predicted** ambient particles — vanilla's
+    /// `Block.animateTick`, which is not on the wire at all (issue #178).
+    ///
+    /// # Why this cannot be a server-event consumer
+    ///
+    /// A torch's flame, a nether portal's shimmer and an end rod's sparkle are
+    /// spawned by `ClientLevel.animateTick` walking random nearby positions and
+    /// calling each block's own `animateTick`. **No packet carries them**, so a
+    /// client that only consumed `LEVEL_PARTICLES` would show a torch-lit room
+    /// with no flames however complete its dispatch table was. That is the shape
+    /// of the gap this closes, and it is why several of the types below *also*
+    /// have a `spawn_one` arm: the same type can arrive both ways.
+    ///
+    /// # The probe, and why it is a closure
+    ///
+    /// `probe` answers "what block state is at this position" and is injected
+    /// rather than taken as a world reference, exactly as `ShellAmbience::tick`
+    /// injects its light probe: the two callers hold *different* view types (a
+    /// live 3×3 column snapshot, or the offline demo world) and neither is
+    /// nameable here. A probe returning `0` (air) for an unloaded position is
+    /// correct — nothing should be emitted there.
+    ///
+    /// Sampling is uniform over a box around `eye`, so the cost is
+    /// [`AMBIENT_SAMPLES`] probes per tick regardless of how much is nearby.
+    pub fn ambient_tick(&mut self, eye: [f64; 3], probe: &mut impl FnMut([i32; 3]) -> u32) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "block coordinates; the eye is always within i32 range"
+        )]
+        let centre = [
+            eye[0].floor() as i32,
+            eye[1].floor() as i32,
+            eye[2].floor() as i32,
+        ];
+        for _ in 0..AMBIENT_SAMPLES {
+            let span = AMBIENT_RANGE * 2 + 1;
+            let rng = self.engine.rng();
+            let offset = [
+                rng.next_int_bound(span) - AMBIENT_RANGE,
+                rng.next_int_bound(span) - AMBIENT_RANGE,
+                rng.next_int_bound(span) - AMBIENT_RANGE,
+            ];
+            let block = [
+                centre[0] + offset[0],
+                centre[1] + offset[1],
+                centre[2] + offset[2],
+            ];
+            let state = probe(block);
+            if state == 0 {
+                continue;
+            }
+            self.animate_block(block, state);
+        }
+    }
+
+    /// One block's `animateTick`, for the handful of blocks a survival player
+    /// actually notices. Silent for everything else.
+    fn animate_block(&mut self, block: [i32; 3], state: u32) {
+        let Some(name) = lodestone_data::block_states::block_name(state) else {
+            return;
+        };
+        let props = lodestone_data::block_states::properties(state).unwrap_or(&[]);
+        let prop = |key: &str| props.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
+        let [bx, by, bz] = [
+            f64::from(block[0]),
+            f64::from(block[1]),
+            f64::from(block[2]),
+        ];
+        match name.strip_prefix("minecraft:").unwrap_or(name) {
+            // `TorchBlock.animateTick`: one flame and one smoke at the flame's
+            // own position, which for a wall torch is offset *away* from the wall
+            // it hangs on. Using the block centre for both puts the flame inside
+            // the wall.
+            "torch" | "soul_torch" | "wall_torch" | "soul_wall_torch" => {
+                let (dx, dz, dy) = match prop("facing") {
+                    Some("north") => (0.0, 0.27, 0.22),
+                    Some("south") => (0.0, -0.27, 0.22),
+                    Some("west") => (0.27, 0.0, 0.22),
+                    Some("east") => (-0.27, 0.0, 0.22),
+                    // A standing torch: centred, flame at the tip.
+                    _ => (0.0, 0.0, 0.0),
+                };
+                let (x, y, z) = (bx + 0.5 + dx, by + 0.7 + dy, bz + 0.5 + dz);
+                emit::smoke(&mut self.engine, x, y, z, 0.0, 0.0, 0.0, 1.0);
+                if name.contains("soul") {
+                    emit::soul_fire_flame(&mut self.engine, x, y, z, 0.0, 0.0, 0.0);
+                } else {
+                    emit::flame(&mut self.engine, x, y, z, 0.0, 0.0, 0.0);
+                }
+            }
+            // `NetherPortalBlock.animateTick`: four motes per tick at random
+            // points inside the block, drifting on a signed offset — which for
+            // `PortalParticle` is the *amplitude* it converges from, not a speed.
+            "nether_portal" | "end_gateway" => {
+                for _ in 0..4 {
+                    let rng = self.engine.rng();
+                    let (rx, ry, rz) = (
+                        f64::from(rng.next_float()),
+                        f64::from(rng.next_float()),
+                        f64::from(rng.next_float()),
+                    );
+                    let sign = |r: &mut lodestone_particle::rng::JavaRandom| {
+                        if r.next_bool() { 1.0 } else { -1.0 }
+                    };
+                    let rng = self.engine.rng();
+                    let (sx, sz) = (sign(rng), sign(rng));
+                    emit::portal(
+                        &mut self.engine,
+                        bx + rx,
+                        by + ry,
+                        bz + rz,
+                        sx * 0.25,
+                        (ry - 0.5) * 0.25,
+                        sz * 0.25,
+                    );
+                }
+            }
+            // `EndRodBlock.animateTick`: one sparkle just off the rod's tip,
+            // along whatever axis it points.
+            "end_rod" => {
+                let (dx, dy, dz) = match prop("facing") {
+                    Some("up") => (0.0, 0.4, 0.0),
+                    Some("down") => (0.0, -0.4, 0.0),
+                    Some("north") => (0.0, 0.0, -0.4),
+                    Some("south") => (0.0, 0.0, 0.4),
+                    Some("west") => (-0.4, 0.0, 0.0),
+                    _ => (0.4, 0.0, 0.0),
+                };
+                emit::end_rod(
+                    &mut self.engine,
+                    bx + 0.5 + dx,
+                    by + 0.5 + dy,
+                    bz + 0.5 + dz,
+                    0.0,
+                    0.0,
+                    0.0,
+                );
+            }
+            // `CampfireBlock.animateTick`, gated on `lit` — an unlit campfire
+            // must be silent, and the property is the only thing distinguishing
+            // the two states.
+            "campfire" | "soul_campfire" => {
+                if prop("lit") != Some("true") {
+                    return;
+                }
+                let signal = prop("signal_fire") == Some("true");
+                let rng = self.engine.rng();
+                let (rx, rz) = (
+                    f64::from(rng.next_float()) * 0.2 - 0.1,
+                    f64::from(rng.next_float()) * 0.2 - 0.1,
+                );
+                emit::campfire_smoke(
+                    &mut self.engine,
+                    bx + 0.5 + rx,
+                    by + 1.0,
+                    bz + 0.5 + rz,
+                    0.0,
+                    0.07,
+                    0.0,
+                    signal,
+                );
+            }
+            _ => {}
+        }
     }
 }

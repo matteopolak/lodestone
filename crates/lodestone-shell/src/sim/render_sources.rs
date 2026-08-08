@@ -371,11 +371,22 @@ impl Sim {
     /// regardless, so an absent view falls back to the offline world rather than
     /// freezing them.
     pub(crate) fn tick_particles(&mut self) {
+        // The eye, for the ambient scan below. Read before either guard is taken.
+        let player = self.player();
+        let eye = [player.position.x, player.position.y, player.position.z];
         if self.vanilla_atlas.is_some() && self.net.is_some() && self.collide_against_live_world {
             if let Some(view) = self.live_collision() {
                 // `O(live particles)`, so the emitter comes out of the `World`
                 // first — the same reason `extract_particles` does it.
-                self.with_particles_unlocked(|p| p.tick(&view));
+                //
+                // The ambient scan (issue #178) rides the *same* snapshot rather
+                // than taking a second lock: it is a bounded number of block
+                // probes, and this is the one place per tick that already holds a
+                // block view with no `World` guard over it.
+                self.with_particles_unlocked(|p| {
+                    p.tick(&view);
+                    p.ambient_tick(eye, &mut |b| view.block_at(b[0], b[1], b[2]));
+                });
                 return;
             }
         }
@@ -391,6 +402,23 @@ impl Sim {
         self.with_particles_unlocked(|p| {
             let world = store.read();
             p.tick(&WorldCollision::new(&world));
+            p.ambient_tick(eye, &mut |b| {
+                let pos = lodestone_world::ChunkPos {
+                    x: b[0].div_euclid(16),
+                    z: b[2].div_euclid(16),
+                };
+                world
+                    .get(pos)
+                    .filter(|c| b[1] >= c.column.min_y() && b[1] < c.column.max_y())
+                    .map_or(0, |c| {
+                        lodestone_world::BlockVolume::block(
+                            &c.column,
+                            b[0].rem_euclid(16) as usize,
+                            b[1],
+                            b[2].rem_euclid(16) as usize,
+                        )
+                    })
+            });
         });
     }
 

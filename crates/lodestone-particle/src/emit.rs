@@ -1495,3 +1495,285 @@ mod tests {
         assert_ne!(run(500), run(501));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Ambient and environmental types (issue #178)
+// ---------------------------------------------------------------------------
+//
+// Vanilla's `RisingParticle` is the shared base for `flame`, `soul_fire_flame`
+// and `soul`, and its whole constructor is the four lines [`rising`] transcribes.
+// `flame` above predates it and keeps its own copy; everything below goes through
+// this one.
+
+/// `RisingParticle`'s constructor: `friction = 0.96`, the requested velocity with
+/// a 1% scatter, a ±0.05 positional jitter and a `8 / (rand*0.8 + 0.2) + 4`
+/// lifetime.
+///
+/// The velocity line is `this.xd * 0.01F + xd`: the *scattered* component is
+/// almost entirely discarded and replaced by what the caller asked for, which is
+/// what makes a rising column tight rather than a puff.
+fn rising(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xd: f64,
+    yd: f64,
+    zd: f64,
+    sheet: Sheet,
+) -> Particle {
+    let rng = engine.rng();
+    let mut p = Particle::with_velocity(x, y, z, xd, yd, zd, SpriteSource::Sheet { sheet, frame: 0 }, rng);
+    p.friction = 0.96;
+    let damp = f64::from(0.01_f32);
+    p.xd = p.xd.mul_add(damp, xd);
+    p.yd = p.yd.mul_add(damp, yd);
+    p.zd = p.zd.mul_add(damp, zd);
+    let jitter = |r: &mut JavaRandom| f64::from((r.next_float() - r.next_float()) * 0.05);
+    let rng = engine.rng();
+    let (jx, jy, jz) = (jitter(rng), jitter(rng), jitter(rng));
+    p.set_pos(p.x + jx, p.y + jy, p.z + jz);
+    p.xo = p.x;
+    p.yo = p.y;
+    p.zo = p.z;
+    p.spawn = [p.x, p.y, p.z];
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Java's `(int)` cast truncates; the value is small"
+    )]
+    let lifetime = (f64::from(8.0_f32) / f64::from(rng_next(engine)).mul_add(0.8, 0.2)) as i32 + 4;
+    p.lifetime = lifetime;
+    p
+}
+
+/// `SOUL_FIRE_FLAME` — `FlameParticle.Provider` over the `soul_fire_flame`
+/// sprite, so the physics are `flame`'s exactly and only the sheet differs.
+pub fn soul_fire_flame(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f64, zd: f64) {
+    let mut p = rising(engine, x, y, z, xd, yd, zd, Sheet::SoulFireFlame);
+    p.behaviour = Behaviour::Flame;
+    engine.add(p);
+}
+
+/// `SoulParticle` — a rising, sheet-animated mote, 1.5× scale and translucent.
+///
+/// [`Behaviour::AshSmoke`] is the right behaviour despite the name: what that
+/// variant *does* is "ordinary physics, advance the sheet by age", which is
+/// `SoulParticle.tick`'s `super.tick(); setSpriteFromAge(sprites);` verbatim.
+/// Unlike `flame` it does **not** override `move`, so a soul mote collides.
+pub fn soul(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f64, zd: f64) {
+    let mut p = rising(engine, x, y, z, xd, yd, zd, Sheet::Soul);
+    p.scale(1.5);
+    p.alpha = 1.0;
+    p.behaviour = Behaviour::AshSmoke;
+    p.sprite = SpriteSource::Sheet {
+        sheet: Sheet::Soul,
+        frame: Sheet::Soul.frame_for_age(0, p.lifetime),
+    };
+    engine.add(p);
+}
+
+/// `PortalParticle` — the nether-portal / ender shimmer.
+///
+/// `xd/yd/zd` here are an **amplitude**, not a velocity: [`Behaviour::Portal`]
+/// recomputes the position from [`Particle::spawn`] every tick and never damps
+/// them. The caller passes the offset the mote should converge *from*, which for
+/// a portal block is a unit-normal-distributed offset and for
+/// `EnderMan`/chorus-fruit teleports is the distance travelled.
+pub fn portal(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xd: f64, yd: f64, zd: f64) {
+    let rng = engine.rng();
+    let mut p = Particle::new(
+        x,
+        y,
+        z,
+        SpriteSource::Sheet {
+            sheet: Sheet::PortalGeneric,
+            frame: 0,
+        },
+        rng,
+    );
+    p.xd = xd;
+    p.yd = yd;
+    p.zd = zd;
+    p.spawn = [x, y, z];
+    p.quad_size = 0.1 * rng_next(engine).mul_add(0.2, 0.5);
+    let br = rng_next(engine).mul_add(0.6, 0.4);
+    p.colour = [br * 0.9, br * 0.3, br];
+    #[expect(clippy::cast_possible_truncation, reason = "Java's `(int)` cast; small")]
+    let lifetime = (rng_next(engine) * 10.0) as i32 + 40;
+    p.lifetime = lifetime;
+    p.behaviour = Behaviour::Portal;
+    engine.add(p);
+}
+
+/// `CampfireSmokeParticle` — the tall column over a campfire.
+///
+/// `signal` picks between the two lifetimes, and they are far apart on purpose:
+/// `rand(50) + 80` cosy against `rand(50) + 280` signal, which is the whole
+/// reason a signal fire's plume reaches above the treeline.
+pub fn campfire_smoke(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+    signal: bool,
+) {
+    let rng = engine.rng();
+    let mut p = Particle::new(
+        x,
+        y,
+        z,
+        SpriteSource::Sheet {
+            sheet: Sheet::BigSmoke,
+            frame: 0,
+        },
+        rng,
+    );
+    p.scale(3.0);
+    p.set_size(0.25, 0.25);
+    let base = if signal { 280 } else { 80 };
+    p.lifetime = engine.rng().next_int_bound(50) + base;
+    p.gravity = 3.0e-6;
+    p.xd = xa;
+    p.yd = ya + f64::from(rng_next(engine)) / 500.0;
+    p.zd = za;
+    p.behaviour = Behaviour::CampfireSmoke;
+    engine.add(p);
+}
+
+/// `EndRodParticle` — a `SimpleAnimatedParticle` at `gravity = 0.0125` that fades
+/// toward `0xF2E9C9` and, like the flame, passes through the block it sits on.
+pub fn end_rod(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let rng = engine.rng();
+    let mut p = Particle::new(
+        x,
+        y,
+        z,
+        SpriteSource::Sheet {
+            sheet: Sheet::Glitter,
+            frame: 0,
+        },
+        rng,
+    );
+    p.friction = 0.91;
+    p.gravity = 0.0125;
+    p.xd = xa;
+    p.yd = ya;
+    p.zd = za;
+    p.quad_size *= 0.75;
+    p.lifetime = 60 + engine.rng().next_int_bound(12);
+    // `has_physics = false` rather than `Behaviour::Flame`: vanilla overrides
+    // `move` to skip collision but keeps the ordinary base tick, and the `Flame`
+    // behaviour would take flame's own quad-size curve with it.
+    p.has_physics = false;
+    p.behaviour = Behaviour::SimpleAnimated {
+        // `setFadeColor(15916745)` == `0xF2D9C9`, split the way
+        // `SimpleAnimatedParticle.setFadeColor` splits it: each channel `/ 255`.
+        fade: Some([0xF2 as f32 / 255.0, 0xDE as f32 / 255.0, 0xC9 as f32 / 255.0]),
+    };
+    p.sprite = SpriteSource::Sheet {
+        sheet: Sheet::Glitter,
+        frame: Sheet::Glitter.frame_for_age(0, p.lifetime),
+    };
+    engine.add(p);
+}
+
+/// A single-sprite spark: `ELECTRIC_SPARK` and `GLOW`, both `particle/glow`.
+///
+/// `ElectricSparkParticle` is a plain `SingleQuadParticle` with `friction = 0.9`,
+/// a 0.25 velocity scale and a short life; `GlowParticle` is a
+/// `SimpleAnimatedParticle`, but over a one-frame sheet the two are visually the
+/// same thing and share this emitter.
+pub fn spark(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let rng = engine.rng();
+    let mut p = Particle::new(
+        x,
+        y,
+        z,
+        SpriteSource::Sheet {
+            sheet: Sheet::Glow,
+            frame: 0,
+        },
+        rng,
+    );
+    p.friction = 0.9;
+    p.gravity = 0.0;
+    let scale = 0.25;
+    p.xd = xa * scale;
+    p.yd = ya * scale;
+    p.zd = za * scale;
+    p.lifetime = 8 + engine.rng().next_int_bound(4);
+    p.behaviour = Behaviour::Plain;
+    engine.add(p);
+}
+
+/// An animated ambient sheet with ordinary physics — `SCULK_CHARGE`, `GUST`,
+/// `SMALL_GUST` and `SONIC_BOOM`, which differ from each other in sheet, scale
+/// and lifetime rather than in tick shape.
+///
+/// [`Behaviour::AshSmoke`] again for [`soul`]'s reason: it means "advance the
+/// sheet by age", which is all `setSpriteFromAge` in each of these classes does.
+pub fn animated_ambient(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+    sheet: Sheet,
+    scale: f32,
+    lifetime: i32,
+) {
+    let rng = engine.rng();
+    let mut p = Particle::new(x, y, z, SpriteSource::Sheet { sheet, frame: 0 }, rng);
+    p.friction = 0.96;
+    p.gravity = 0.0;
+    p.xd = xa;
+    p.yd = ya;
+    p.zd = za;
+    p.scale(scale);
+    p.lifetime = lifetime.max(1);
+    p.behaviour = Behaviour::AshSmoke;
+    p.sprite = SpriteSource::Sheet {
+        sheet,
+        frame: sheet.frame_for_age(0, p.lifetime),
+    };
+    engine.add(p);
+}
+
+/// A `DripParticle` — hanging, falling or landing.
+///
+/// The three sheets are the three phases vanilla models as separate particle
+/// types (`dripping_*` hangs under a block, `falling_*` is in free fall,
+/// `landing_*` is the splash), and `colour` is the fluid's own: water is
+/// `0x2389D8`-ish and lava a hot orange, which is the only thing distinguishing a
+/// water drip from a lava drip on screen since both share the sprite.
+pub fn drip(
+    engine: &mut ParticleEngine,
+    x: f64,
+    y: f64,
+    z: f64,
+    sheet: Sheet,
+    colour: [f32; 3],
+    gravity: f32,
+) {
+    let rng = engine.rng();
+    let mut p = Particle::new(x, y, z, SpriteSource::Sheet { sheet, frame: 0 }, rng);
+    p.xd = 0.0;
+    p.yd = 0.0;
+    p.zd = 0.0;
+    p.gravity = gravity;
+    p.colour = colour;
+    p.set_size(0.01, 0.01);
+    // `DripParticle`'s own `lifetime = (int)(64.0 / (random.nextDouble() * 0.8 +
+    // 0.2))` — a hanging drip waits a long, *variable* time before it falls,
+    // which is what stops a cave ceiling dripping in lockstep.
+    #[expect(clippy::cast_possible_truncation, reason = "Java's `(int)` cast; small")]
+    let lifetime = (64.0 / f64::from(rng_next(engine)).mul_add(0.8, 0.2)) as i32;
+    p.lifetime = lifetime.max(1);
+    p.behaviour = Behaviour::WaterDrop;
+    engine.add(p);
+}
