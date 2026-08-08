@@ -123,12 +123,6 @@ pub struct InputState {
     /// jump intent by [`movement_intent`], then cleared by [`Self::tick`] at
     /// the end of the same physics tick it was consumed in.
     ///
-    /// Deliberately separate from `jump`: the real key's flag is latched until
-    /// the platform reports a release, so an auto-jump that wrote `jump` would
-    /// leave the player bunny-hopping forever. This is a transient, cleared
-    /// every tick, and never preserved across [`Self::release_all`] — unlike
-    /// the config flags above, it is per-tick state, not an option.
-    auto_jump_requested: bool,
     /// Vanilla's `options.sprintWindow` (`Options.java:631-640`, issue #444) —
     /// how many 20 Hz ticks the double-tap-forward window stays armed. `0`
     /// disables double-tap sprint (`LocalPlayer.java:807` arms
@@ -160,7 +154,6 @@ impl Default for InputState {
             toggle_sprint: false,
             toggle_attack: false,
             toggle_use: false,
-            auto_jump_requested: false,
             // Vanilla's shipped default — see [`Self::sprint_window_ticks`].
             sprint_window_ticks: SPRINT_TRIGGER_WINDOW_TICKS,
             mouse_dx: 0.0,
@@ -191,18 +184,6 @@ impl InputState {
         self.toggle_sprint = toggle_sprint;
         self.toggle_attack = toggle_attack;
         self.toggle_use = toggle_use;
-    }
-
-    /// Set this physics tick's auto-jump request (issue #444).
-    ///
-    /// The shell calls this on a tick its obstacle check fires (auto-jump is
-    /// on, the player is on the ground, and collision clipped this tick's
-    /// horizontal motion). [`Self::tick`] clears it at the end of the same
-    /// schedule, so a stale request can never re-jump a later tick — the
-    /// transient half of the pair whose config half is pushed by the shell,
-    /// never stored here.
-    pub fn set_auto_jump_request(&mut self, request: bool) {
-        self.auto_jump_requested = request;
     }
 
     /// Set vanilla's `options.sprintWindow` (issue #444) — the
@@ -304,10 +285,6 @@ impl InputState {
             self.sprint_trigger_ticks = 0;
             self.sprint_latched = false;
         }
-        // Auto-jump requests are one-shot: the intent system consumed it
-        // this tick (it runs before this), so clear it for the next one. A
-        // request that survived here would re-jump on an unrelated later tick.
-        self.auto_jump_requested = false;
     }
 
     /// Accumulate a raw mouse-motion delta (device pixels).
@@ -337,9 +314,7 @@ impl InputState {
     /// [`Self::mouse_dx`]/[`Self::mouse_dy`] are: they are the *options*, not
     /// per-key transient state, and losing them here would silently revert a
     /// player's toggle-mode choice or sprint-window setting the next time the
-    /// cursor is released. [`Self::auto_jump_requested`] is deliberately *not*
-    /// preserved — it is one-tick state, reset by [`Self::default`] like every
-    /// held key.
+    /// cursor is released.
     pub fn release_all(&mut self) {
         let mouse = (self.mouse_dx, self.mouse_dy);
         let options = (
@@ -391,11 +366,15 @@ impl InputState {
 /// says sprint was requested, this gate says whether it's allowed to apply
 /// right now, exactly like vanilla's `isSprinting()` vs `canStartSprinting()`.
 ///
-/// Auto-jump surfaces through this same function: the shell decides *when* to
-/// ask (grounded, blocked ahead, moving) and sets
-/// [`InputState::auto_jump_requested`]; this crate only forwards it, and
-/// [`InputState::tick`] clears it so a stale request can never re-fire on an
-/// unrelated later tick.
+/// **Auto-jump is deliberately not here.** This used to OR in an
+/// `auto_jump_requested` transient the shell set from its own simplified
+/// obstacle probe. Issue #201 removed that probe: the real detector is
+/// `lodestone_physics`'s exact port of `LocalPlayer.updateAutoJump`, which arms
+/// `PlayerState::auto_jump_time` and spends it inside `tick_air` — so the forced
+/// jump never passes through an input at all, exactly as vanilla's
+/// `input.makeJump()` deferral does not pass through the keyboard. Nothing
+/// produced the transient after that, and an input bit with no producer is the
+/// island shape `CLAUDE.md` names, so the field is gone too.
 #[must_use]
 pub fn movement_intent(state: &InputState) -> MovementInput {
     let forward = f32::from(state.forward) - f32::from(state.back);
@@ -405,7 +384,7 @@ pub fn movement_intent(state: &InputState) -> MovementInput {
     MovementInput {
         forward,
         strafe,
-        jump: state.jump || state.auto_jump_requested,
+        jump: state.jump,
         sneak: state.sneak,
         sprint,
     }

@@ -7357,3 +7357,94 @@ wiring gates, and feeding the raw physical cursor through instead of dividing by
 reddens exactly the one that computes both hypotheses. `cargo test -p lodestone-shell -p lodestone-render
 --no-fail-fast -- --test-threads=2`: **143 binaries, 2,236 passed, 0 failed**, counted by a program reading
 the captured log rather than by a pipeline.
+
+**12.152 A complete, exact port with a hardcoded gate is indistinguishable from a missing feature, and the
+duplicate in front of it is what made the option look wired.** (#201, #206, #208)
+
+Three issues in one cluster, and all three were mis-titled the same way: **the maths existed and the trigger
+did not.** #201 said "auto-jump is not implemented" and the port was complete down to a `Float.MIN_VALUE`
+sentinel; #206 and #208 had already been corrected once by a verify-and-close sweep to say the same thing.
+The measurement worth keeping is *why the first one survived*.
+
+`lodestone_physics::update_auto_jump` is a full transcription of `LocalPlayer.updateAutoJump` — the swept
+look-ahead box, the `0.51F` probe-segment lift, the `Float.MIN_VALUE`-not-`f32::MIN` sentinel, the
+`-0.15F` facing-vs-moving dot product, the `moveDistSq <= 0.001` input-vector fallback and the `JUMP_BOOST`
+term. Its single gate is `PlayerState::auto_jump_enabled`, which **defaults to `true`** and whose only
+setter, `with_auto_jump`, had **no caller outside tests**. Meanwhile `sim/step.rs` carried a *second*,
+deliberately simplified probe, correctly gated on `Options::auto_jump`, whose own doc comment
+described the simplification honestly.
+
+So the settings toggle worked perfectly on the copy that did not matter. Turning Auto-Jump **off** silenced
+the simplification and the real detector armed a jump anyway; turning it **on** produced two probes. This is
+the `parse_gamemode_command`-in-front-of-a-complete-command-tree shape (§12.150's producer-side islands are
+the mirror image), with one addition that is new here: **the duplicate is what made the option look wired.**
+Grepping `auto_jump` returned a config field, a menu row, a `Sim` setter, a push site and a gate — five hits
+in a chain, all real, all reaching a probe that was not the one doing the work. A connectedness check on the
+option would have been green. **Ask not "does the option reach a consumer" but "does it reach *every*
+consumer", and count the consumers first.**
+
+The fix is one resource (`lodestone_ecs::player::AutoJump`), one line in `player_physics` alongside the
+existing `with_flight` push, and two deletions: the shell probe, and `InputState::auto_jump_requested`,
+whose only producer that probe was. That last deletion is the reverse-island rule applied without being
+asked — an input bit with no producer.
+
+**The gate that proves a threshold rather than a direction.** "Ours does not auto-jump when walking
+backwards" was reported as a suspected bug. Vanilla refuses it too (`dot ≈ -1.0 < -0.15`), so the
+observation is consistent with both a correct port *and* with no check at all — a port lacking the test
+would also fail to jump backwards, because nothing is in front of the probe, while wrongly jumping on a hard
+strafe. The discriminating gate does not test backwards at all. With yaw `0`, pitch `0` and the input-vector
+fallback engaged (a player pinned in a one-block pit, so the actual delta is zero and the direction is
+reconstructed from the input), the dot product collapses to `-f / sqrt(1 + f²)` for input `(strafe 1,
+forward -f)`, crossing `-0.15` at `f = 0.151717…`. Two arms, `f = 0.14` (must fire) and `f = 0.16` (must
+refuse), bracket the constant to `±0.01`. A missing check fires on both; a `0.0` threshold refuses both;
+`-0.5` fires on both. `tests/auto_jump_facing_gate.rs`, five tests, including the forward-facing positive
+control without which a refuse-everything bug would read as three passes.
+
+**Two islands closed on the way, and each needed a *state machine* the crate deliberately lacked, not more
+maths.** `apply_riptide` and `apply_firework_boost` were both exact and both unreachable. What was missing:
+
+- `PlayerState::fall_flying` had **zero writers in the tree**. `tick_elytra` was reachable only through
+  `lodestone_physics::tick`'s dispatch on a flag nothing ever set, so the elytra glide — not just the rocket
+  boost — was dead code. The start is client-authoritative in vanilla (`LocalPlayer` sets the shared flag
+  itself, then sends `START_FALL_FLYING`); the **stop is server-side only** (`updateFallFlying`'s
+  `!canGlide()` branch) and had to be predicted here, because nothing server-side in this repo tracks glide
+  state. Omitting the predicted stop is not a cosmetic gap: a landed player keeps routing through
+  `tick_elytra` and **can never walk again**.
+- `PlayerCommand::StartFallFlying` was encoded by four adapters with **no producer** — the
+  `ClientAction::SetFlying` shape exactly, and the third instance of it recorded in this file.
+
+**A second consumer of one edge needs a second latch, and the failure is silent.** The glide start reads the
+jump rising edge, which `apply_creative_flight_input` already tracks in `WasJumping` — and overwrites at the
+end of its own body. A later system in the same tick reading that component sees *this* tick's value and can
+never observe an edge at all. It compiles, it is registered in the right set, its own unit test passes if it
+sets the component itself, and it never fires in production. `WasJumpingGlide` exists for that reason alone.
+
+**The strict-ambiguity build is a real gate and it caught a wire-order mistake as a memory-safety-shaped
+error.** `send_fall_flying_command` was first registered in `TickSet::Send`, next to the sprint edge's own
+command — which reddened `lodestone_controller`'s `exactly_one_system_writes_movement_intent`, a test about
+`MovementIntent` that actually asserts *the whole shipped schedule has no unordered conflicting pair*. Two
+unordered `ResMut<ActionQueue>` writers. And `lodestone-ecs` structurally **cannot** order against the
+controller's writers, because the controller depends on it. The resolution turned out to be more faithful
+than the original: vanilla sends `START_FALL_FLYING` from inside `aiStep`, **before** `sendPosition()`, so
+the tail of the `TickSet::Physics` chain is where it belongs. A test named after one component was the only
+thing standing between this and a nondeterministic wire order.
+
+**Where the honest limits are, named rather than smoothed over.** Riptide's enchantment gate needs a level,
+and `ItemEnchantment` carries the session-scoped registry **id**. The id → name table *is already decoded*
+(`ClientRegistries::entry_names` in the v770 adapter) and is simply never emitted as a `ClientEvent` — so
+the shell derives the id from the fact that dynamic registries arrive sorted by resource location (measured
+on the creative oracle for `dimension_type`), putting `riptide` 33rd of 26.2's 43 built-in enchantments,
+holder id 32. That fails toward launching on the **wrong** trident under a data pack, so it is recorded in
+`docs/riptide-and-firework-boost.md` with the one-event protocol fix rather than left to be discovered.
+`is_in_water_or_rain` has no `canSeeSky` and fails the other way (allowing a riptide under a roof, costing a
+corrective teleport). The firework boost predicts `10 * flightCount` and drops vanilla's two `nextInt`
+terms, which are **rolled on the server's RNG and never computed by the vanilla client at all** — its rocket
+arrives with `lifetime = 0` and keeps boosting until the server removes the entity. Under-predicting by ~5
+ticks costs boost strength and cannot desync, because the player owns their own position.
+
+`cargo check --workspace --all-targets` green apart from six pre-existing errors in
+`crates/protocol/v770/tests/operator_encoders.rs` (another unit's in-flight `encode_action` signature
+change, confirmed by location); `cargo check -p lodestone-shell --no-default-features` green;
+`cargo test -p lodestone-physics -p lodestone-ecs -p lodestone-controller -p lodestone-shell --no-fail-fast
+-- --test-threads=2`: physics 24 binaries / 265 passed, ecs 334 passed, controller 44 passed, shell **83
+binaries / 1,481 passed, 0 failed** — counted by a program reading the captured logs, not by a pipeline.

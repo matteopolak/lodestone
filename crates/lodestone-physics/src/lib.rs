@@ -64,8 +64,9 @@ pub use geometry::{Aabb, Axis, Vec3d};
 pub use knockback::{attack_direction, knockback_impulse};
 pub use player::{
     EdgeBackOff, MovementInput, PlayerState, StatusEffects, apply_firework_boost, apply_riptide,
-    input_vector, player_flying_speed, tick, tick_air, tick_among_entities, tick_elytra,
-    tick_lava, tick_water,
+    can_glide, input_vector, player_flying_speed, riptide_spin_attack_strength, tick, tick_air,
+    tick_among_entities, tick_elytra, tick_lava, tick_water, try_start_fall_flying,
+    update_fall_flying,
 };
 pub use pose::{
     Pose, can_player_fit_within_blocks_and_entities_when, can_player_fit_within_blocks_when,

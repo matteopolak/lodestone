@@ -15,7 +15,7 @@ use lodestone_client::{BlockPos, ClientAction, Hand, OpenMenuSnapshot, Rotation}
 // `ControllerPlugin` is no longer named here: composition moved to
 // `Sim::client_app`, which reaches it through `lodestone_app::client_app` along
 // with `CorePlugin`, `LocalPlayerPlugin` and `SessionHudPlugin`.
-use lodestone_controller::{InputState, RawInput, apply_look_inverted, movement_intent};
+use lodestone_controller::{InputState, RawInput, apply_look_inverted};
 pub use lodestone_ecs::SessionPhase;
 use lodestone_ecs::entity::{Attributes, EntityIndex, EntityKind, MinecraftEntityId, Position};
 use lodestone_ecs::player::{

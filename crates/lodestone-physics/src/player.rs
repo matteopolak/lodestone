@@ -136,8 +136,14 @@ pub struct PlayerState {
     pub no_jump_delay: i32,
     /// `LocalPlayer.autoJumpEnabled` — the client Options Auto-Jump toggle,
     /// defaulting **on** exactly like the `LocalPlayer` field
-    /// (`LocalPlayer.java:152-153, 299`). The shell's settings toggle wires into
-    /// this field; until then it stays at vanilla's default.
+    /// (`LocalPlayer.java:152-153, 299`).
+    ///
+    /// **This is the only gate on the detector, and it is now really driven.**
+    /// The shell's `Options::auto_jump` reaches it once per tick through
+    /// `lodestone_ecs::player::AutoJump` (issue #201): before that the field sat
+    /// at its `true` default for the whole session, so the settings toggle was
+    /// decorative — the option read OFF and [`update_auto_jump`] still armed
+    /// jumps. See that resource's doc for the seam.
     pub auto_jump_enabled: bool,
     /// `LocalPlayer.autoJumpTime` — the one-tick deferral that carries the
     /// auto-jump *decision* (made at the end of `move()` by [`update_auto_jump`])
@@ -1321,6 +1327,109 @@ pub fn apply_riptide(
             MoveContext::default(),
         );
         state.position = motion.position;
+    }
+}
+
+/// The strength `apply_riptide` wants for one level of Riptide, straight out of
+/// the enchantment's own data file.
+///
+/// `data/minecraft/enchantment/riptide.json` declares
+/// `minecraft:trident_spin_attack_strength` as `{"type": "minecraft:add",
+/// "value": {"type": "minecraft:linear", "base": 1.5,
+/// "per_level_above_first": 0.75}}`, and `EnchantmentHelper.
+/// getTridentSpinAttackStrength` sums that effect over the stack's
+/// enchantments — so a single Riptide N contributes exactly
+/// `1.5 + 0.75 * (N - 1)`: **1.5 / 2.25 / 3.0** for I / II / III.
+///
+/// Read from the data file rather than from a recollected constant: the
+/// per-level term is `0.75`, not the `0.5` a `1.5, 2.0, 2.5` ladder would
+/// imply, and the difference at Riptide III is a full block per tick.
+///
+/// `level == 0` (no Riptide) is `0.0`, which is exactly the `> 0.0F` test
+/// `TridentItem.releaseUsing` gates the whole launch on.
+#[must_use]
+pub fn riptide_spin_attack_strength(level: u32) -> f32 {
+    if level == 0 {
+        return 0.0;
+    }
+    1.5f32 + 0.75f32 * (level as f32 - 1.0)
+}
+
+/// `LivingEntity.canGlide()` (`LivingEntity.java:3205-3217`) with `Player`'s
+/// override (`Player.java:1428-1430`), issue #206.
+///
+/// `!flying && !onGround && !isPassenger && !hasEffect(LEVITATION)` plus "some
+/// equipment slot holds a glider". The last conjunct is **not** physics state —
+/// vanilla walks `EquipmentSlot.VALUES` looking for a `DataComponents.GLIDER`
+/// component — so the caller resolves it and passes the answer in, the same
+/// division of labour [`apply_riptide`] uses for the enchantment gate.
+///
+/// This engine has no riding state on [`PlayerState`], so the `!isPassenger()`
+/// conjunct is the caller's too (the ECS driver holds it as a component); it is
+/// vacuous here.
+#[must_use]
+pub fn can_glide(state: &PlayerState, glider_equipped: bool) -> bool {
+    !state.flying
+        && !state.on_ground
+        && state.effects.levitation.is_none()
+        && glider_equipped
+}
+
+/// `Player.tryToStartFallFlying()` (`Player.java:1463-1474`), issue #206 — the
+/// **client-predicted** start of an elytra glide.
+///
+/// ```text
+/// if (!this.isFallFlying() && this.canGlide() && !this.isInWater()) {
+///    this.startFallFlying();   // setSharedFlag(7, true)
+///    return true;
+/// }
+/// ```
+///
+/// Returns whether the glide started, which is exactly the bit
+/// `LocalPlayer.aiStep` turns into one `START_FALL_FLYING` player command
+/// (`LocalPlayer.java:850-852`) — so a driver should send that command if and
+/// only if this returned `true`.
+///
+/// **The start is client-authoritative and the stop is not.** Vanilla's client
+/// sets the shared flag itself here and only then tells the server; the *end* of
+/// a glide is decided server-side by `LivingEntity.updateFallFlying`'s
+/// `!canGlide()` branch (`LivingEntity.java:3183-3189`) and synced back as
+/// entity data. A client that models the start but not the stop glides forever
+/// once it lands, so a driver must also run [`update_fall_flying`] each tick.
+pub fn try_start_fall_flying(
+    state: &mut PlayerState,
+    glider_equipped: bool,
+    in_water: bool,
+) -> bool {
+    if state.fall_flying || !can_glide(state, glider_equipped) || in_water {
+        return false;
+    }
+    state.fall_flying = true;
+    true
+}
+
+/// The half of `LivingEntity.updateFallFlying()` that ends a glide
+/// (`LivingEntity.java:3183-3189`), issue #206.
+///
+/// ```text
+/// if (!this.level().isClientSide()) {
+///    if (!this.canGlide()) {
+///       this.setSharedFlag(7, false);
+/// ```
+///
+/// Vanilla runs this **server-side only** and syncs the cleared flag; we run it
+/// on the client because this client has no server that tracks glide state
+/// (issue #206's residue names exactly that gap). Predicting the stop locally is
+/// the safe direction: the dominant trigger is `onGround`, and a client that
+/// keeps `fall_flying` set after touching down routes every subsequent tick
+/// through [`tick_elytra`] and can never walk again.
+///
+/// The elytra-durability and `ELYTRA_GLIDE` game-event halves of vanilla's
+/// method are deliberately not modelled — both are `!isClientSide` effects on
+/// server-owned item state.
+pub fn update_fall_flying(state: &mut PlayerState, glider_equipped: bool) {
+    if state.fall_flying && !can_glide(state, glider_equipped) {
+        state.fall_flying = false;
     }
 }
 
