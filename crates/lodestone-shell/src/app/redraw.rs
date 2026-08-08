@@ -547,6 +547,18 @@ impl WindowApp {
         // HUD hotbar further down. It borrows `self.sim`, so it cannot be hoisted
         // above the `self.sim.stats` writes just above — but it must exist before
         // the container overlay, which is the pass that was missing it.
+        // Sound-subtitle captions (issue #198). Gated on the persisted
+        // `showSubtitles` accessibility option. Collected **here**, above
+        // `item_models`, and not beside the rest of the HUD frame: this needs
+        // `&mut self.sim` (the caption queue purges as it is read) while
+        // `item_models` holds an immutable borrow of `self.sim` all the way to the
+        // hotbar draw.
+        let sound_subtitles = if self.nav.options().show_subtitles {
+            self.sim.sound_subtitles(&camera)
+        } else {
+            Vec::new()
+        };
+
         let item_models = self.sim.vanilla_atlas().and_then(|a| a.models());
 
         // Assemble the HUD frame: debug overlay, chat log + prompt, tab list,
@@ -596,6 +608,7 @@ impl WindowApp {
         hud_frame.show_debug = self.show_debug;
         hud_frame.crosshair = crosshair;
         hud_frame.chat = &chat_lines;
+        hud_frame.sound_subtitles = &sound_subtitles;
         // Persisted wrap results (issue #527 (a)): without this the whole
         // visible log is re-wrapped, quadratically, every frame.
         hud_frame.chat_wrap = Some(&self.chat_wrap);

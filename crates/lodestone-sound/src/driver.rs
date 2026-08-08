@@ -92,6 +92,17 @@ impl SoundResolver {
         self.cache.len()
     }
 
+    /// The event's `subtitles` translation key, for vanilla's sound-subtitle
+    /// captions (issue #198). `None` for an unknown event or one that declares no
+    /// subtitle — vanilla shows no caption in either case.
+    ///
+    /// Reads the event *before* weighted selection, deliberately: the subtitle is
+    /// a property of the event, not of the chosen entry, so this must not go
+    /// through [`resolve`](SoundRegistry::resolve) and consume an RNG roll.
+    pub fn subtitle(&self, event_name: &str) -> Option<&str> {
+        self.registry.event(event_name)?.subtitle.as_deref()
+    }
+
     /// Resolves an event to a ready-to-play [`SoundInstance`] without touching
     /// any mixer. Decoding happens here, so callers holding a realtime mixer
     /// lock must call this *outside* the lock. Returns `Ok(None)` for vanilla's

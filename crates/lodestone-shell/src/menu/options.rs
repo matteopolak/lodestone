@@ -254,6 +254,11 @@ pub enum LiveOption {
     /// per presented frame by `app.rs` and handed to `Sim::set_view_bobbing`;
     /// see `docs/view-bobbing.md`.
     ViewBobbing,
+    /// `options.showSubtitles` → [`crate::config::Options::show_subtitles`]
+    /// (issue #198). Gates the sound-subtitle caption overlay; read per presented
+    /// frame by `app/redraw.rs`. Vanilla carries the same option on **two** pages
+    /// (Sound and Accessibility), and so do both rows here.
+    ShowSubtitles,
     /// `key.sneak` → [`crate::config::Options::toggle_sneak`] (issue #202).
     /// Fed to `InputState::set_toggle_modes` every tick.
     ToggleSneak,
@@ -368,6 +373,7 @@ impl LiveOption {
             LiveOption::RenderDistance
             | LiveOption::GuiScale
             | LiveOption::ViewBobbing
+            | LiveOption::ShowSubtitles
             | LiveOption::ToggleSneak
             | LiveOption::ToggleSprint
             | LiveOption::ToggleAttack
@@ -408,6 +414,7 @@ impl LiveOption {
             LiveOption::RenderDistance
             | LiveOption::GuiScale
             | LiveOption::ViewBobbing
+            | LiveOption::ShowSubtitles
             | LiveOption::ToggleSneak
             | LiveOption::ToggleSprint
             | LiveOption::ToggleAttack
@@ -1085,6 +1092,9 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         LiveOption::ViewBobbing => {
             if options.view_bobbing { "ON" } else { "OFF" }.to_string()
         }
+        LiveOption::ShowSubtitles => {
+            if options.show_subtitles { "ON" } else { "OFF" }.to_string()
+        }
         // `ToggleKeyMapping`'s own stringifier is `value ? KEY_TOGGLE :
         // KEY_HOLD` (`ToggleKeyMapping`'s caller in `Options.java:605-609`),
         // i.e. "Toggle"/"Hold" — **not** ON/OFF, unlike every other boolean
@@ -1510,7 +1520,7 @@ static SOUND: &[Entry] = &[
     ),
     big(cycle("soundDevice", "Device")),
     pair(
-        cycle("showSubtitles", "Closed Captions"),
+        live_cycle("showSubtitles", "Closed Captions", LiveOption::ShowSubtitles),
         cycle("directionalAudio", "Directional Audio"),
     ),
     pair(
@@ -1587,7 +1597,7 @@ static ACCESSIBILITY: &[Entry] = &[
         nav("Controls...", SettingsPage::Controls),
     ),
     pair(
-        cycle("showSubtitles", "Closed Captions"),
+        live_cycle("showSubtitles", "Closed Captions", LiveOption::ShowSubtitles),
         cycle("highContrast", "High Contrast"),
     ),
     pair(
@@ -3319,6 +3329,10 @@ mod tests {
                 LiveOption::DiscreteMouseScroll,
                 LiveOption::InvertMouseX,
                 LiveOption::InvertMouseY,
+                // Sound page: Closed Captions, issue #198. Vanilla places
+                // `showSubtitles` on *both* the Sound and Accessibility screens,
+                // so it appears twice below, like the three chat options do.
+                LiveOption::ShowSubtitles,
                 // Chat page, in `ChatOptionsScreen.options` order.
                 LiveOption::ChatColors,
                 LiveOption::ChatOpacity,
@@ -3328,8 +3342,9 @@ mod tests {
                 LiveOption::ChatWidth,
                 LiveOption::ChatHeightFocused,
                 LiveOption::ChatHeightUnfocused,
-                // Accessibility page: the three shared with Chat, then
-                // View Bobbing.
+                // Accessibility page: Closed Captions (again), the three shared
+                // with Chat, then View Bobbing.
+                LiveOption::ShowSubtitles,
                 LiveOption::TextBackgroundOpacity,
                 LiveOption::ChatOpacity,
                 LiveOption::ChatLineSpacing,
@@ -3338,8 +3353,9 @@ mod tests {
             "GUI Scale and Render Distance on Video (the latter from #443); \
              the four toggle rows and Auto-Jump/Sprint Window on Controls \
              (#202/#444); look sensitivity (#443), scroll sensitivity and both \
-             inverts on Mouse (#203); the eight chat options on Chat with three \
-             of them repeated on Accessibility; View Bobbing on Accessibility \
+             inverts on Mouse (#203); Closed Captions on Sound (#198); the eight \
+             chat options on Chat with three of them repeated on Accessibility; \
+             Closed Captions again and View Bobbing on Accessibility \
              — and nothing else"
         );
         // The control: an option we do not persist must report itself inactive,
@@ -3374,8 +3390,8 @@ mod tests {
             render_distance.is_live(),
             "renderDistance is a persisted `Options` field since #443"
         );
-        // The count itself, not just the ratio's ingredients: 25 live option
-        // *rows* (22 distinct options, three of them placed twice — see above)
+        // The count itself, not just the ratio's ingredients: 27 live option
+        // *rows* (23 distinct options, four of them placed twice — see above)
         // + 9 Done buttons (one per page, always live) + 13 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
         // **Telemetry**/**Resource Packs** from the root grid — issue #415
@@ -3383,7 +3399,7 @@ mod tests {
         // Controls -> Key Binds, and the root's own Online button, live
         // outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 47, "outside a world: {live:?}");
+        assert_eq!(live.len(), 49, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -3405,8 +3421,10 @@ mod tests {
             .flat_map(|&p| all_controls(p, true))
             .filter(|c| c.is_live())
             .collect();
-        assert_eq!(outside.len(), 47);
-        assert_eq!(inside.len(), 46, "one fewer: the root's Online button");
+        // 49, not 47: issue #198 made `showSubtitles` live on **both** the pages
+        // vanilla places it on (Sound and Accessibility).
+        assert_eq!(outside.len(), 49);
+        assert_eq!(inside.len(), 48, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -3999,6 +4017,7 @@ mod tests {
     const ALL_LIVE_OPTIONS: &[LiveOption] = &[
         LiveOption::GuiScale,
         LiveOption::ViewBobbing,
+        LiveOption::ShowSubtitles,
         LiveOption::ToggleSneak,
         LiveOption::ToggleSprint,
         LiveOption::ToggleAttack,
@@ -4061,6 +4080,7 @@ mod tests {
             match live {
                 LiveOption::GuiScale
                 | LiveOption::ViewBobbing
+                | LiveOption::ShowSubtitles
                 | LiveOption::ToggleSneak
                 | LiveOption::ToggleSprint
                 | LiveOption::ToggleAttack
@@ -4083,7 +4103,7 @@ mod tests {
                 | LiveOption::SprintWindow => {}
             }
         }
-        assert_eq!(ALL.len(), 22, "twenty-two distinct live options");
+        assert_eq!(ALL.len(), 23, "twenty-three distinct live options");
     }
 
     /// [`crate::config::step_unit_double`]'s wrap, including the two places it

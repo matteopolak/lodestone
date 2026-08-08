@@ -65,6 +65,36 @@ impl Sim {
         });
     }
 
+    /// This frame's sound-subtitle caption rows (issue #198), already translated
+    /// against the loaded language table.
+    ///
+    /// Empty when audio is disabled or nothing is live, so the caller can assign
+    /// it unconditionally. A key with no translation falls back to the raw key —
+    /// the same degradation every other translated string in this crate takes,
+    /// which keeps a jar-less run showing *something* rather than silently
+    /// dropping the caption and looking like the feature is broken.
+    pub fn sound_subtitles(
+        &mut self,
+        camera: &Camera,
+    ) -> Vec<crate::audio::subtitles::SubtitleCaption> {
+        // Two steps rather than one closure: `translator` borrows `&self` and
+        // `audio_mut` wants `&mut self`, so the keys come out first and the table
+        // is consulted after the mutable borrow has ended.
+        let mut captions = self.audio_mut(|audio| match audio {
+            Some(audio) => audio.subtitle_captions(camera),
+            None => Vec::new(),
+        });
+        if !captions.is_empty() {
+            let translate = self.translator();
+            for c in &mut captions {
+                if let Some(text) = translate(&c.text) {
+                    c.text = text;
+                }
+            }
+        }
+        captions
+    }
+
     /// Play a sound with no wire origin at all — a **local** decision, not a
     /// server one, matching vanilla's own `Level.playLocalSound` (the same
     /// call [`Self::play_block_break_sound`]/[`Self::play_block_place_sound`]

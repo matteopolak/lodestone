@@ -70,6 +70,16 @@ use lodestone_sound::music::{Music, MusicStart};
 
 pub(crate) mod ambient;
 pub(crate) mod music;
+pub(crate) mod subtitles;
+
+/// Wall-clock milliseconds for the caption clock — vanilla's `Util.getMillis()`,
+/// the same origin `gpu/glint.rs` and `app::recipe_toast_now_ms` use, so a caption
+/// ages against the same clock every other timed overlay does.
+fn caption_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
 
 /// Environment variable naming the Minecraft asset root directly. Re-exported
 /// from [`crate::asset_objects`], which owns the whole resolution order — it is
@@ -85,6 +95,11 @@ pub use crate::asset_objects::ASSET_ROOT_ENV;
 #[derive(Debug)]
 pub struct ShellAudio {
     engine: AudioEngine,
+    /// The sound-subtitle captions (issue #198). Fed here rather than at each
+    /// caller because this struct's two `play_*` methods are the single choke
+    /// point every sound in the client passes through — captions cannot drift out
+    /// of sync with what is audible if they are recorded where playing happens.
+    subtitles: subtitles::SubtitleQueue,
     /// Whether the "a sound could not be played" warning has already fired. The
     /// first failure is the one worth a `warn` — it names the missing corpus and
     /// the command that fixes it — and every one after it is the same story, so
@@ -180,6 +195,7 @@ impl ShellAudio {
         Ok(Self {
             engine,
             reported_failure: false,
+            subtitles: subtitles::SubtitleQueue::default(),
         })
     }
 
@@ -226,12 +242,43 @@ impl ShellAudio {
         pitch: f32,
         seed: i64,
     ) {
+        self.record_caption(name, pos);
         if let Err(e) = self
             .engine
             .play_sound(name, category, pos, volume, pitch, seed)
         {
             self.report_failure(name, &e);
         }
+    }
+
+    /// Record this sound's caption, if its event declares a `subtitles` key.
+    ///
+    /// Called before the engine, not after: a resolve failure (a missing `.ogg`)
+    /// still means the event fired, and vanilla's own listener hook likewise runs
+    /// off the *submission* rather than off successful decode.
+    fn record_caption(&mut self, name: &str, pos: Vec3) {
+        if let Some(key) = self.engine.subtitle(name) {
+            let key = key.to_string();
+            self.subtitles.push(&key, pos, caption_now_ms());
+        }
+    }
+
+    /// This frame's drawable caption rows against the listener basis, or an empty
+    /// vector when nothing is live. `forward` is the camera's own forward; `right`
+    /// is derived from it here so every caller shares one basis.
+    pub fn subtitle_captions(
+        &mut self,
+        camera: &Camera,
+    ) -> Vec<subtitles::SubtitleCaption> {
+        if self.subtitles.is_empty() {
+            return Vec::new();
+        }
+        let forward = camera.forward();
+        // `forward x up`, which for a non-rolling FPS camera is the listener's
+        // right — the same basis `set_listener` hands the mixer.
+        let right = forward.cross(Vec3::Y).normalize_or_zero();
+        self.subtitles
+            .views(camera.position, forward, right, caption_now_ms())
     }
 
     /// Ask the engine for a music track, reporting whether it produced anything.
@@ -318,6 +365,7 @@ impl ShellAudio {
         pitch: f32,
         seed: i64,
     ) {
+        self.record_caption(name, pos);
         if let Err(e) = self
             .engine
             .play_entity_sound(name, category, pos, volume, pitch, seed)

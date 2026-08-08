@@ -91,6 +91,12 @@ impl AudioEngine {
         self.resolver.decoded_file_count()
     }
 
+    /// The event's `subtitles` translation key, for the HUD's sound-subtitle
+    /// captions (issue #198). See [`SoundResolver::subtitle`].
+    pub fn subtitle(&self, event_name: &str) -> Option<&str> {
+        self.resolver.subtitle(event_name)
+    }
+
     /// Updates the listener transform from the camera. Call every frame with the
     /// camera's world position and forward/up basis; spatialisation of every
     /// live voice follows on the next rendered block.
