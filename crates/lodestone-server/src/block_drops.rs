@@ -245,10 +245,37 @@ pub fn pop_resource_placement(pos: BlockPos, rng: &mut SpawnRng) -> (Vec3, Vec3)
     );
     // Draws 4-5: horizontal velocity. `y` is the constant `0.2` and draws
     // nothing — the single easiest thing to get wrong here.
+    (position, dropped_item_velocity(rng))
+}
+
+/// The `ItemEntity` constructor's own initial velocity — two horizontal draws
+/// and a constant `0.2` upward (`ItemEntity.java`'s
+/// `setDeltaMovement(random.nextDouble() * 0.2 - 0.1, 0.2, random.nextDouble() * 0.2 - 0.1)`).
+///
+/// Shared by [`pop_resource_placement`] (a block's drop) and mob death loot
+/// (`Entity.spawnAtLocation`), which differ only in the *position*: a block's is
+/// jittered inside its cell, a mob's is the mob's own position.
+#[must_use]
+pub fn dropped_item_velocity(rng: &mut SpawnRng) -> Vec3 {
     let velocity_x = rng.next_f64() * (POP_VELOCITY_SPREAD * 2.0) - POP_VELOCITY_SPREAD;
     let velocity_z = rng.next_f64() * (POP_VELOCITY_SPREAD * 2.0) - POP_VELOCITY_SPREAD;
-    let velocity = Vec3::new(velocity_x, POP_VELOCITY_Y, velocity_z);
-    (position, velocity)
+    Vec3::new(velocity_x, POP_VELOCITY_Y, velocity_z)
+}
+
+/// The loot-table key for a mob's death drop — `LivingEntity.getLootTable`, whose
+/// default is `EntityType`'s built-in `entities/<path>`
+/// (`EntityType.Builder`'s `lootTable` supplier).
+///
+/// Same shape as [`block_loot_table_id`] one directory over, and the same
+/// tolerance: a name that parses but has no bundled table misses in
+/// [`LootTableSet::get`], which is where a missing table belongs.
+#[must_use]
+pub fn mob_loot_table_id(entity_type: &ResourceKey) -> Option<ResourceKey> {
+    let path = entity_type.path();
+    if path.is_empty() {
+        return None;
+    }
+    format!("minecraft:entities/{path}").parse().ok()
 }
 
 /// `Mth.nextDouble(random, min, max)` (`util/Mth.java:154-156`):

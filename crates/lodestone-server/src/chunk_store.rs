@@ -858,6 +858,27 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             .unwrap_or_else(|| self.source.block_state(x, y, z))
     }
 
+    /// One generated block entity out of the retained column, without cloning the
+    /// whole thing — the same reason [`block_state`](Self::block_state) is
+    /// overridden here.
+    fn block_entity(&self, x: i32, y: i32, z: i32) -> Option<crate::block_entities::BlockEntity> {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let pos = lodestone_model::BlockPos::new(x, y, z);
+        let find = |column: &crate::chunk::ChunkColumn| {
+            column
+                .block_entities()
+                .iter()
+                .find(|(at, _)| *at == pos)
+                .map(|(_, entity)| entity.clone())
+        };
+        if let Some(fresh) = self.ensure(cx, cz) {
+            return find(&fresh);
+        }
+        self.read(cx, cz, find)
+            .unwrap_or_else(|| self.source.block_entity(x, y, z))
+    }
+
     /// Re-derives the capacity for `view_radius` under this store's
     /// [`CapacityPolicy`], evicting down to it if it shrank — issue #551's
     /// second half.

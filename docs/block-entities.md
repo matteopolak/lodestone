@@ -111,10 +111,14 @@ placed furnace; that is no longer true for a furnace or a hopper.
 **Two scope cuts worth being explicit about**, found while wiring the tick
 loop:
 
-* **Hopper adjacency only resolves another hopper.** `BlockEntity::hopper_slots_mut`
-  answers `None` for every non-hopper variant — a hopper next to a furnace or
-  composter never transfers anything, the same "no `Container` seam over the
-  furnace's three separate slots" gap the original write-up predicted below.
+* **Hopper adjacency resolves a hopper or a chest/barrel, and nothing else.**
+  ~~only another hopper~~ — issue #337 added `BlockEntity::Container { id, slots }`
+  for `minecraft:chest`/`trapped_chest`/`barrel` (27 slots, `generic_9x3`, no tick
+  of its own), and a flat slot array is exactly what `hopper_slots_mut` wants, so
+  it now answers `Some` for those three. A hopper next to a **furnace** or
+  composter still transfers nothing — that is the "no `Container` seam over the
+  furnace's three separate slots" gap the original write-up predicted below, and it
+  is unchanged.
   Two hoppers stacked *do* transfer, and — proven by
   `tick_all_moves_two_items_between_a_stacked_hopper_pair_on_the_first_tick`,
   run and its outcome checked rather than assumed — they move **two** items

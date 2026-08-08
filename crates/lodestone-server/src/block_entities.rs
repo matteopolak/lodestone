@@ -74,10 +74,52 @@ pub enum BlockEntity {
     Hopper(Hopper),
     /// `minecraft:brewing_stand`.
     BrewingStand(BrewingStand),
-    /// A block entity this crate has no simulation for (chest, spawner, vault, …).
+    /// A plain item container with no simulation of its own — a chest, trapped
+    /// chest or barrel. `id` is the block-entity type key, `slots` its
+    /// [`CONTAINER_9X3_SIZE`] inventory.
+    ///
+    /// It has no `tick`: vanilla's `ChestBlockEntity.lidAnimateTick` is client-side
+    /// animation only, and nothing about its contents changes on its own.
+    Container {
+        /// The `minecraft:block_entity_type` key (`minecraft:chest`, …).
+        id: String,
+        /// The container's own slots, in menu order.
+        slots: Vec<Option<ItemStack>>,
+    },
+    /// A block entity this crate has no simulation for (spawner, vault, …).
     /// The vanilla id and the full NBT compound are preserved verbatim so the entity
     /// round-trips through a save/load cycle unchanged.
     Opaque { id: String, nbt: Nbt },
+}
+
+/// Slot count of vanilla's `generic_9x3` menu — a chest, trapped chest or
+/// barrel (`ChestBlockEntity`'s `NonNullList.withSize(27, …)`).
+pub const CONTAINER_9X3_SIZE: usize = 27;
+
+/// The block-entity type key for a container block, or `None` if that block is
+/// not one of the `generic_9x3` containers this crate models.
+///
+/// Keyed on the block *name* with no properties, so a caller holding a canonical
+/// state string must split it first.
+#[must_use]
+pub fn container_type_for_block(block: &str) -> Option<&'static str> {
+    match block {
+        "minecraft:chest" => Some("minecraft:chest"),
+        "minecraft:trapped_chest" => Some("minecraft:trapped_chest"),
+        "minecraft:barrel" => Some("minecraft:barrel"),
+        _ => None,
+    }
+}
+
+impl BlockEntity {
+    /// A fresh, empty `generic_9x3` container of type `id`.
+    #[must_use]
+    pub fn container(id: &str) -> Self {
+        BlockEntity::Container {
+            id: id.to_owned(),
+            slots: vec![None; CONTAINER_9X3_SIZE],
+        }
+    }
 }
 
 impl BlockEntity {
@@ -101,7 +143,7 @@ impl BlockEntity {
             },
             BlockEntity::Hopper(_) => "minecraft:hopper",
             BlockEntity::BrewingStand(_) => "minecraft:brewing_stand",
-            BlockEntity::Opaque { id, .. } => id,
+            BlockEntity::Container { id, .. } | BlockEntity::Opaque { id, .. } => id,
         }
     }
 
@@ -112,6 +154,10 @@ impl BlockEntity {
     fn hopper_slots_mut(&mut self) -> Option<&mut [Option<ItemStack>]> {
         match self {
             BlockEntity::Hopper(h) => Some(h.slots_mut()),
+            // A chest/barrel *is* a flat slot array, so hopper adjacency into
+            // one works — the "no real container at the adjacent position"
+            // scope note in the module doc no longer covers these three.
+            BlockEntity::Container { slots, .. } => Some(slots),
             BlockEntity::Composter(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Opaque { .. } => {
                 None
@@ -153,6 +199,7 @@ impl BlockEntity {
                 FurnaceKind::BlastFurnace => "minecraft:blast_furnace",
             }),
             BlockEntity::Hopper(_) => Some("minecraft:hopper"),
+            BlockEntity::Container { .. } => Some("minecraft:generic_9x3"),
             BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. } => None,
         }
     }
@@ -169,6 +216,7 @@ impl BlockEntity {
         match self {
             BlockEntity::Furnace(f) => vec![f.input().cloned(), f.fuel().cloned(), f.output().cloned()],
             BlockEntity::Hopper(h) => h.slots().to_vec(),
+            BlockEntity::Container { slots, .. } => slots.clone(),
             BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. } => Vec::new(),
         }
     }
@@ -194,6 +242,11 @@ impl BlockEntity {
                     h.set_slot(slot, item);
                 }
             }
+            BlockEntity::Container { slots, .. } => {
+                if let Some(cell) = slots.get_mut(slot) {
+                    *cell = item;
+                }
+            }
             BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. } => {}
         }
     }
@@ -211,7 +264,7 @@ impl BlockEntity {
         match self {
             BlockEntity::Furnace(f) => (0..4).map(|i| f.container_data(i)).collect(),
             BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_)
-            | BlockEntity::Opaque { .. } => {
+            | BlockEntity::Container { .. } | BlockEntity::Opaque { .. } => {
                 Vec::new()
             }
         }
@@ -236,7 +289,7 @@ impl BlockEntity {
             BlockEntity::Hopper(_) => {
                 debug_assert!(false, "hoppers are ticked via tick_hopper, not this path");
             }
-            BlockEntity::Opaque { .. } => {}
+            BlockEntity::Container { .. } | BlockEntity::Opaque { .. } => {}
         }
     }
 }
@@ -275,6 +328,12 @@ pub fn block_entity_for_item(item: &str) -> Option<(&'static str, BlockEntity)> 
             "minecraft:brewing_stand",
             BlockEntity::BrewingStand(BrewingStand::new()),
         )),
+        "minecraft:chest" => Some(("minecraft:chest", BlockEntity::container("minecraft:chest"))),
+        "minecraft:trapped_chest" => Some((
+            "minecraft:trapped_chest",
+            BlockEntity::container("minecraft:trapped_chest"),
+        )),
+        "minecraft:barrel" => Some(("minecraft:barrel", BlockEntity::container("minecraft:barrel"))),
         _ => None,
     }
 }

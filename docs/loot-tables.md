@@ -111,28 +111,45 @@ A feature this module does not recognise is **parsed but marked unsupported**
 ([`LootTable::unsupported_features`]) rather than aborting the load — the same
 tolerance `recipe_json` shows — and contributes nothing to a roll: an
 unsupported condition fails, an unsupported function/entry/provider is a no-op.
-Every table bundled under `assets/loot_table/` has **zero** unsupported features,
-so `LootTableSet::load_bundled` rolls exactly the vanilla loot those JSON files
-define.
+Every table bundled under `assets/loot_table/` has zero unsupported features
+**except** the four decoration-only functions listed below, so
+`LootTableSet::load_bundled` rolls the right item and the right count for every
+bundled table.
 
 ### The bundle is the clean subset of the whole corpus (issue #538)
 
 `assets/loot_table/` used to be six hand-picked tables, so almost every block in
-the game dropped nothing. It is now **1,230 of Mojang's 1,355** 26.2 loot tables —
-every one whose features this roller fully evaluates — copied verbatim, **823 KB**
-(`843,212` bytes) across 1,035 block tables plus chests, entities, archaeology,
-shearing, brushing, dispensers, harvest, pots, spawners and gameplay. For scale,
-`crates/lodestone-server/assets/` already carried 13.5 MB of worldgen and
-structure data.
+the game dropped nothing. It is now **1,241 of Mojang's 1,355** 26.2 loot tables,
+copied verbatim (**885 KB**), across block tables plus chests, entities,
+archaeology, shearing, brushing, dispensers, harvest, pots, spawners and gameplay.
+For scale, `crates/lodestone-server/assets/` already carried 13.5 MB of worldgen
+and structure data.
 
-The subset is not a curation preference: `load_bundled` debug-asserts zero
-unsupported features per table, so "clean" *is* the bundling precondition. The
-125 excluded tables are exactly the ones using a feature the roller does not
-model — mostly `copy_components` (71), `enchant_randomly` (52), `set_potion` (48),
-`enchant_with_levels` (34), `set_damage` (28), plus one `minecraft:tag` entry and
-one `minecraft:dynamic`. Teaching the roller one of those moves tables into the
-subset; **regenerate and re-commit rather than adding files by hand**, and update
-`loot.rs`'s own `bundled_tables_are_all_fully_supported_and_roll` count.
+The subset is not a curation preference: `load_bundled` debug-asserts it, so
+"clean" *is* the bundling precondition. The excluded tables are the ones using a
+feature the roller does not model — mostly `copy_components`, `set_potion`,
+`enchant_with_levels`, `set_damage`, plus one `minecraft:tag` entry and one
+`minecraft:dynamic`. Teaching the roller one of those moves tables into the subset;
+**regenerate and re-commit rather than adding files by hand** (`just
+regen-loot-corpus`), and update `loot.rs`'s own
+`bundled_tables_are_all_fully_supported_and_roll` count.
+
+#### The one relaxation: decoration-only functions (issue #337)
+
+`loot::DECORATION_ONLY_UNSUPPORTED` is a four-entry allowlist —
+`enchant_randomly`, `exploration_map`, `set_name`, `set_stew_effect` — that a
+bundled table *is* allowed to use. Each one only decorates an item the roll already
+produced correctly, so the item id and the count are right and the enchantment /
+name / map target / stew effect is absent.
+
+**This is deliberately not a blanket relaxation, and the asymmetry is the point.**
+An unsupported *condition* **fails**, so a table using one drops items it should
+have produced — a silently short chest rather than a cosmetically plain one — and
+an unsupported entry or number provider loses the same way. Those still keep a
+table out of the bundle. It is the allowlist that let the four structure-chest
+tables (`chests/shipwreck_{map,supply}`, `chests/underwater_ruin_{small,big}`) in,
+without which a shipwreck's supply and map chests would have had no table to roll
+at all.
 
 Regenerate with `just regen-loot-corpus`. Its gate
 (`tests/loot_corpus.rs::the_bundle_is_exactly_the_clean_subset_of_the_vanilla_corpus`)
@@ -194,16 +211,16 @@ to run it.
 
 ## Configuration
 
-Nothing to configure: the bundled tables live in `assets/loot_table/` (1,230
-files, 823 KB) and are embedded by `crates/lodestone-server/build.rs` into
-`$OUT_DIR/embedded_loot.rs` as 1,230 `include_str!`s (the same mechanism
+Nothing to configure: the bundled tables live in `assets/loot_table/` (1,241
+files, 885 KB) and are embedded by `crates/lodestone-server/build.rs` into
+`$OUT_DIR/embedded_loot.rs` as 1,241 `include_str!`s (the same mechanism
 `assets/worldgen/` uses for 7 MB). `cargo::rerun-if-changed` on
 `assets/loot_table` rebuilds on a data change.
 
 `block_drops::bundled_tables()` parses the whole set once per process behind a
 `OnceLock`. Measured in release, `load_bundled` **plus** a roll of every one of the
-1,230 tables completes inside a test reporting `0.01s`, so nothing here needs a
-lazier scheme. `LootTableSet::get` is still a linear scan — 1,230 key comparisons
+1,241 tables completes inside a test reporting `0.01s`, so nothing here needs a
+lazier scheme. `LootTableSet::get` is still a linear scan — 1,241 key comparisons
 once per block break, which is not worth an index.
 
 ## Dependencies

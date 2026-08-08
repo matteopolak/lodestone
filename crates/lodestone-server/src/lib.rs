@@ -193,6 +193,9 @@ mod scheduled_tick;
 mod server;
 mod sleep;
 mod spawn;
+/// Structure chests (issue #337): the data-marker pass that fills a shipwreck's,
+/// igloo's or ocean ruin's chest with a rolled loot table at generation time.
+mod structure_loot;
 mod tick;
 mod vitals;
 mod weather;

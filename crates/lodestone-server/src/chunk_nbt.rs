@@ -1102,6 +1102,9 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
                 ("Items".to_owned(), items_to_nbt(h.slots())),
             ],
         ),
+        BlockEntity::Container { id, slots } => {
+            (id.as_str(), vec![("Items".to_owned(), items_to_nbt(slots))])
+        }
         BlockEntity::Composter(c) => (
             COMPOSTER_ID,
             vec![
@@ -1321,6 +1324,15 @@ fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)> {
                 brew_time,
                 locked,
             ))
+        }
+        "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" => {
+            BlockEntity::Container {
+                id: id.to_owned(),
+                slots: items_from_nbt(
+                    field(nbt, "Items"),
+                    crate::block_entities::CONTAINER_9X3_SIZE,
+                ),
+            }
         }
         _ => BlockEntity::Opaque {
             id: id.to_owned(),
