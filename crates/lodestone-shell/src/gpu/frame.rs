@@ -358,7 +358,16 @@ impl RenderState {
         // (possibly body-extended) `entities` slice above, so the local
         // player's own held item renders through `merge_held_items` exactly
         // like a mob's does, for free.
-        let item_mesh = self.prepare_item_geometry(device, camera, entities, &mut stats);
+        let (item_mesh, item_glint_mesh) =
+            self.prepare_item_geometry(device, camera, entities, &mut stats);
+        // The world glint's group 0, written here (the `&self` + queue point of the
+        // frame) and consumed inside the pass below. Item geometry bakes world
+        // positions into its vertices, so the matrix is the plain camera one — the
+        // same clip positions the base draw produces, which is what depth-`EQUAL`
+        // requires.
+        if item_glint_mesh.is_some() {
+            self.write_world_glint_uniform(queue, camera.view_projection().to_cols_array_2d());
+        }
 
         // The first-person arm. Skipped whenever a third-person body drew this
         // frame — see `set_third_person_body_source`'s doc for why the two
@@ -776,6 +785,25 @@ impl RenderState {
                     pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                     stats.draw_calls += 1;
+
+                    // The enchantment glint, in this **same** pass and right
+                    // after the base draw whose depth it matches — the glint
+                    // pipeline compares depth `EQUAL`, so a later pass would
+                    // find the buffer already advanced and match nothing.
+                    if let Some(glint_mesh) = &item_glint_mesh
+                        && let Some(glint) = self.glint.as_ref()
+                    {
+                        pass.set_pipeline(&glint.pipeline.pipeline);
+                        pass.set_bind_group(0, &glint.world_uniform_bind_group, &[]);
+                        pass.set_bind_group(1, &glint.texture_bind_group, &[]);
+                        pass.set_vertex_buffer(0, glint_mesh.vertices.slice(..));
+                        pass.set_index_buffer(
+                            glint_mesh.indices.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        pass.draw_indexed(0..glint_mesh.index_count, 0, 0..1);
+                        stats.draw_calls += 1;
+                    }
                 }
 
                 // Mining-crack overlays, drawn after the opaque terrain they sit

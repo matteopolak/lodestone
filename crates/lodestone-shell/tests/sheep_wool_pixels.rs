@@ -129,6 +129,7 @@ fn a_woolly_sheep_draws_more_silhouette_than_a_sheared_one() {
             sheared: false,
         }),
         count: 1,
+        foil: false,
         name_tag: None,
         item_use: None,
         creeper_swelling: 0.0,

@@ -136,6 +136,7 @@ fn base_draw(id: i32, type_path: &str, feet: glam::Vec3, scale: f32) -> EntityDr
         anim: AnimInput::REST,
         wool: None,
         count: 1,
+        foil: false,
         name_tag: None,
         item_use: None,
         creeper_swelling: 0.0,

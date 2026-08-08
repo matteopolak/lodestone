@@ -773,6 +773,7 @@ mod tests {
             anim: lodestone_render::AnimInput::REST,
             wool: None,
             count: 1,
+            foil: false,
             name_tag: Some(crate::entities::NameTag {
                 text: "Babe".to_owned(),
                 see_through: true,
@@ -836,6 +837,7 @@ mod tests {
             anim: lodestone_render::AnimInput::REST,
             wool: None,
             count: 1,
+            foil: false,
             name_tag: Some(crate::entities::NameTag {
                 text: "Babe".to_owned(),
                 see_through: true,
@@ -921,6 +923,7 @@ mod tests {
             anim: lodestone_render::AnimInput::REST,
             wool: None,
             count: 1,
+            foil: false,
             name_tag: Some(crate::entities::NameTag {
                 text: String::new(),
                 see_through: true,

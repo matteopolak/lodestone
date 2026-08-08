@@ -240,6 +240,7 @@ impl ThirdPersonBodyState {
             // `item` is `None`.
             wool: None,
             count: 1,
+            foil: false,
             // The local third-person body does not draw its own nametag
             // (issue #100 scope: other entities/players, not the camera's
             // own body) — a deliberate gap, not an oversight; see
