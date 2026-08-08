@@ -511,3 +511,49 @@ anywhere above.
    faithful `VisGraph` port and the measured Metal multi-draw verdict. The work is
    dominated by wiring and by the walk-fidelity gap (U3b's source-direction merge), not by
    new architecture.
+
+## Measured baseline in instructions retired (added after the plan, issue #543)
+
+This plan says of its projected draw counts: *"re-measure with the U1 counters before quoting
+any of these"*. The submission term has now been measured **before** U1 exists, so each unit's
+expected win can be stated in instructions rather than only in section counts.
+`crates/lodestone-shell/tests/client_chunk_cycles.rs` (`d7b823f6`), method and controls in
+[`../client-chunk-cycles.md`](../client-chunk-cycles.md), record in `DESIGN.md` §12.120.
+
+| quantity | measured |
+|---|---|
+| frame with no terrain resident | 2,055,154 instructions |
+| frame with 189 sections drawn / 304 draw calls | 5,762,063 instructions |
+| **marginal cost per section drawn** | **19,024–19,613 instructions** |
+| extrapolated to `45a93e4`'s 931 sections | **17.7M–18.3M instructions/frame** |
+
+Three consequences for the units above:
+
+1. **The ordering is confirmed, not reordered.** Submission is **36×** `step.rs`'s
+   `heap_bytes` term (490,238 instructions/frame at rd 8, now throttled in `f4e73530`) and
+   ~160× the per-frame `Vec<ChunkPos>`. Culling first is right. Using the measured
+   19,024/section against this plan's own cull fractions, **U1 alone is worth 10.7M–12.4M
+   instructions/frame** — more than an order of magnitude beyond every per-frame F3 field
+   combined.
+
+2. **U1's stated invariant will not hold as written.** `sections_drawn` is incremented only by
+   the opaque loop (`frame.rs:480`), and a water-only section carries `mesh: None` there while
+   still issuing a water draw at `frame.rs:720` — measured **189** `sections_drawn` against
+   **195** uploads and **304** `draw_calls`. So
+   `sections_drawn + sections_culled_frustum == resident_with_geometry` needs either a
+   water-only term or a `resident_with_geometry` defined against the opaque table. Fix it in the
+   gate before it is written, or it reads 189 against 195 and looks like a cull bug. The
+   189-vs-304 gap is also, directly, U4's target quantified.
+
+3. **Gate U1–U3 on section counts, not on instructions.** The per-column terms in that harness
+   reproduce to 0.01–0.02% across processes; the submission term reproduces to only **3.1%**,
+   because the Metal driver's own threads retire instructions asynchronously inside the
+   measurement window. Section counts are exact; use instructions for magnitude.
+
+**The plan's biggest miss, from the same measurement:** this document scopes itself to
+submission and culling, which is correct for *frame* cost — but the client chunk path's
+one-off cost is **96.3% meshing** (112,245,079 instructions per column, of which `mesh_fluids`
+is 58.8% at 13,708 instructions per fluid cell — issue #542). `docs/mesh-fill-rate.md`'s
+"the mesher is not the bottleneck" is a statement about the mesher not being the *rate limiter*
+for filling the view, and it is true; it does not mean meshing is not where the CPU work is.
+Both statements hold, and this plan should not be read as implying the second.
