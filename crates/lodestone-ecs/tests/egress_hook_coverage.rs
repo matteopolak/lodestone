@@ -66,6 +66,10 @@ const KNOWN_DIRECT_SEND_FILES: &[&str] = &[
     // Respawn, container-close, and carried-item selection from session code
     // (four sites) — `ClientAction::Respawn`, `ContainerClose`, `SetCarriedItem`.
     "lodestone-shell/src/sim/session.rs",
+    // The live render-distance slider re-declaring `SetClientSettings` mid-session.
+    // A real bypass, but a settings re-declaration rather than a gameplay verb, so
+    // there is nothing for a filter to police.
+    "lodestone-shell/src/app/session.rs",
 ];
 
 fn crates_dir() -> PathBuf {
