@@ -795,6 +795,18 @@ pub struct HudFrame<'a> {
     /// distinction the compass needs too — see
     /// [`Sim::spawn_point`](crate::sim::Sim::spawn_point).
     pub spawn_debug: Option<lodestone_model::BlockPos>,
+    /// `(map count, the lowest-numbered map's explored fraction)` from
+    /// `SessionMaps` (issue #184), for the F3 overlay.
+    ///
+    /// **This is the fold's only reader today, and it is deliberately a
+    /// diagnostic rather than the map's own picture.** `MAP_ITEM_DATA` decodes
+    /// and `MapStore` blits its sub-rectangle patches correctly; what is missing
+    /// is the *renderer* — a per-map 128x128 dynamic texture plus the held/framed
+    /// quad, which is a texture-and-bind-group job of its own (see
+    /// `docs/filled-map-item.md`). Same shape as [`Self::border_debug`] and
+    /// [`Self::spawn_debug`], and for the same reason: a fold with no reader at
+    /// all cannot be told apart from a fold that never runs.
+    pub map_debug: Option<(usize, f32)>,
     /// The attack-cooldown fraction (`0.0..=1.0`, full strength at `1.0`) the
     /// crosshair indicator fills to — `Sim::attack_strength_scale`'s value,
     /// vanilla's `getAttackStrengthScale(0.0F)`. Drawn only while
@@ -857,6 +869,7 @@ impl<'a> HudFrame<'a> {
             recipe_stats: None,
             border_debug: None,
             spawn_debug: None,
+            map_debug: None,
             attack_cooldown: None,
             recipe_toast: None,
             advancement_toast: None,
@@ -1152,6 +1165,9 @@ impl HudGeometry {
             }
             if let Some(spawn) = frame.spawn_debug {
                 left.push(format!("spawn {} {} {}", spawn.x, spawn.y, spawn.z));
+            }
+            if let Some((count, explored)) = frame.map_debug {
+                right.push(format!("maps={count} explored={:.0}%", explored * 100.0));
             }
             // Vanilla fills a plate behind every non-empty line *before* drawing
             // any text (`extractLines` does two passes for exactly this reason),
