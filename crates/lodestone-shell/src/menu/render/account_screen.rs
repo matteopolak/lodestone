@@ -74,6 +74,8 @@ const ACCOUNTS_TITLE: &str = "Accounts";
 const ACCOUNTS_SIGN_IN_TITLE: &str = "Sign in with Microsoft";
 /// The failure state's title.
 const ACCOUNTS_FAILED_TITLE: &str = "Sign-in failed";
+/// The offline-name editor's title.
+const ACCOUNTS_EDIT_NAME_TITLE: &str = "Edit offline name";
 /// How many lines a save-error notice is allowed. Two, because it sits *above*
 /// the footer band and therefore grows upward into the list — unlike the
 /// sign-in states' notice, which owns the whole content band.
@@ -484,7 +486,6 @@ pub(super) fn accounts_idle_frame(accounts: &super::accounts::AccountsNav) -> Me
 
     let all_rows = accounts.rows();
     let list_len = all_rows.len();
-    let accounts_len = list_len.saturating_sub(1); // the offline row is always last
     let scroll = accounts.scroll();
     let highlighted = accounts.highlighted();
     let focus = accounts.focus();
@@ -528,7 +529,13 @@ pub(super) fn accounts_idle_frame(accounts: &super::accounts::AccountsNav) -> Me
                 // `selected.is_none()` **is** its selected state — see
                 // `super::accounts`' module docs before changing this.
                 AccountRow::Offline => MenuRow {
-                    label: "Play offline".to_string(),
+                    // **The persisted name, not the string `"Play offline"`.**
+                    // That literal is what made `crate::offline_identity`'s
+                    // editable name unreachable: the one name every join in this
+                    // client uses was stored, validated, UUID-derived — and
+                    // never displayed, so nothing on screen changed when it
+                    // changed. See `super::accounts`' module docs.
+                    label: accounts.offline_username(),
                     detail: "No sign-in required".to_string(),
                     trailing: if accounts.offline_selected() {
                         "Selected".to_string()
@@ -556,14 +563,18 @@ pub(super) fn accounts_idle_frame(accounts: &super::accounts::AccountsNav) -> Me
     };
     rows.push(button_row(BUTTON_ADD, "Add Account", true));
     rows.push(button_row(BUTTON_SELECT, "Select", true));
-    // The offline row cannot be removed (`AccountsNav::remove_highlighted`
-    // refuses), so the button is inactive while the cursor is on it — the same
-    // present-and-disabled treatment the multiplayer footer gives Join with an
-    // empty list, rather than a button that silently does nothing.
+    // **The third slot changes identity, and is now always active.** It used to
+    // read "Remove", drawn inactive whenever the cursor sat on the offline row
+    // (which cannot be removed — `AccountsNav::remove_highlighted` refuses). So
+    // the slot was dead space for exactly the row that needed an Edit
+    // affordance, and a fifth 74 px button would overflow `MIN_SCALED_WIDTH` —
+    // see `super::accounts`' module docs for that measurement. The caption comes
+    // from `AccountsNav::third_button`, the same expression `activate_button`
+    // dispatches on, so the label and the action cannot disagree.
     rows.push(button_row(
         BUTTON_REMOVE,
-        "Remove",
-        highlighted < accounts_len,
+        accounts.third_button().label(),
+        true,
     ));
     rows.push(button_row(BUTTON_CANCEL, "Back", true));
 
@@ -579,7 +590,19 @@ pub(super) fn accounts_idle_frame(accounts: &super::accounts::AccountsNav) -> Me
 
     let mut labels = vec![
         accounts_title_label(ACCOUNTS_TITLE),
-        accounts_hint_label("Enter select   Del remove   Esc back"),
+        // **One line, whose middle term follows the third button.** A second
+        // hint line is not available here: `accounts_hint_dy` already sits in
+        // the lower half of the 40 px of slack `ACCOUNTS_FOOTER_H` leaves, so a
+        // line `LINE_H` below it lands ~3 px from the bottom edge and a 9 px
+        // glyph would draw off-canvas. `Del` is also *wrong* on the offline row
+        // — it cannot be removed — so making the term conditional fixes a
+        // pre-existing lie rather than only adding a hint.
+        accounts_hint_label(match accounts.third_button() {
+            super::accounts::ThirdButton::Remove => "Enter select   Del remove   Esc back",
+            super::accounts::ThirdButton::EditName => {
+                "Enter select   Edit Name renames   Esc back"
+            }
+        }),
     ];
     if list_len == 1 {
         // Placed under the last row rather than under the title: the header band
@@ -685,6 +708,116 @@ pub(super) fn accounts_flow_frame(
             notice.dy += LINE_H * 5.0;
             notice
         }),
+        ..Default::default()
+    }
+}
+
+/// The name field on the offline-name editor.
+///
+/// [`create_world::row_slot`](super::create_world::row_slot)'s `FIELD_W` of 200
+/// and [`EDIT_BOX_H`], because that is the other screen in this shell with a real
+/// typed field and the two should not be different sizes for no reason. The `dy`
+/// is [`accounts_band_top`] plus two [`LINE_H`] lines, so the field sits under
+/// the explanatory line above it on the same grid
+/// [`accounts_band_label`] places every other content-band string on — derived,
+/// not restated, per `CLAUDE.md`'s rule about a rect a gate restates.
+fn accounts_name_field_slot() -> Slot {
+    const FIELD_W: f32 = 200.0;
+    Slot {
+        origin: Origin::ScreenTop,
+        dx: -(FIELD_W * 0.5),
+        dy: accounts_band_top() + LINE_H * 2.0,
+        w: FIELD_W,
+        h: EDIT_BOX_H,
+    }
+}
+
+/// Builds the offline-name editor: one [`super::edit_box::EditBox`] row, the
+/// UUID the typed name would join under, and a Done button.
+///
+/// ## The UUID line is the point, not decoration
+///
+/// `crate::offline_identity`'s whole reason for existing is that the name **is**
+/// the identity: an offline-mode server derives the account UUID from it, so
+/// changing the name changes which player file the server opens. Showing
+/// [`super::accounts::NameEditView::uuid`] live, off the *typed* value rather
+/// than the saved one, is the only way that consequence is visible before the
+/// player commits to it — and it is derived on every keystroke rather than
+/// stored, exactly as `offline_uuid` is everywhere else.
+///
+/// ## Row order is a coupling, again
+///
+/// `super::accounts::NAME_EDIT_FIELD_ROW` then `NAME_EDIT_DONE_ROW`, and
+/// `AccountsNav::click_name_edit_row` maps a click back through those same two
+/// constants — `accounts_idle_frame`'s footer note applies here unchanged.
+///
+/// [`MenuFrame::selected`] is the Done row rather than the field: a field's own
+/// highlight is its caret, drawn by `draw_edit_box` off the box's `focused` flag,
+/// so pointing the row cursor at row 0 would draw a button highlight *behind* a
+/// text field.
+#[must_use]
+pub(super) fn accounts_name_edit_frame(
+    view: &super::accounts::NameEditView,
+) -> MenuFrame<'static> {
+    use super::accounts::{NAME_EDIT_DONE_ROW, NAME_EDIT_FIELD_ROW};
+
+    let mut labels = vec![
+        accounts_title_label(ACCOUNTS_EDIT_NAME_TITLE),
+        accounts_band_label("Name this client joins under:".to_string(), 0.0, LABEL),
+        // Below the field (two lines down for the label, plus the field's own
+        // height expressed in `LINE_H` lines), so the two cannot overlap at any
+        // canvas — the field's `dy` and this one come off the same expression.
+        accounts_band_label(
+            format!("Joins as {}", view.uuid),
+            2.0 + (EDIT_BOX_H / LINE_H).ceil() + 1.0,
+            ACCOUNTS_DIM,
+        ),
+        accounts_hint_label("Enter save   Esc cancel"),
+    ];
+    // A refusal is a *notice*, not a `message`, for `accounts_failed_frame`'s
+    // reason: it is wrapped and bounded to the band rather than one unwrapped
+    // uppercase line. `set_username` left the old name live, so this is the only
+    // thing that tells the player nothing was saved.
+    if view.error.is_none() {
+        labels.push(accounts_band_label(
+            "at most 16 characters, no spaces".to_string(),
+            2.0 + (EDIT_BOX_H / LINE_H).ceil() + 2.0,
+            ACCOUNTS_DIM,
+        ));
+    }
+
+    let mut rows = vec![MenuRow::default(); 2];
+    rows[NAME_EDIT_FIELD_ROW] = MenuRow {
+        // The field's own text comes from the widget; `label` is carried for the
+        // same reason `create_world::frame`'s field rows carry it.
+        label: view.edit.value().to_string(),
+        enabled: true,
+        field: true,
+        edit: Some(view.edit.clone()),
+        slot: Some(accounts_name_field_slot()),
+        ..Default::default()
+    };
+    rows[NAME_EDIT_DONE_ROW] = MenuRow {
+        label: "Done".to_string(),
+        enabled: true,
+        slot: Some(accounts_wide_button_slot()),
+        ..Default::default()
+    };
+
+    MenuFrame {
+        rows,
+        selected: NAME_EDIT_DONE_ROW,
+        vanilla: true,
+        labels,
+        notice: view
+            .error
+            .as_ref()
+            .map(|e| {
+                let mut notice = accounts_notice(e.clone(), FG_BAD);
+                // Under the UUID line, on the same `LINE_H` grid.
+                notice.dy += LINE_H * (4.0 + (EDIT_BOX_H / LINE_H).ceil());
+                notice
+            }),
         ..Default::default()
     }
 }

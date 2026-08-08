@@ -181,12 +181,32 @@ canvas-derived, which needs `frame_for` to know the canvas.
   ours, it wants a `MenuNotice`, not `message`.
 - **The row order is a coupling.** `AccountsNav::hover` maps a rendered row index
   through the scroll window and then onto the four button slots, so `shown` list
-  rows followed by Add / Select / Remove / Back is load-bearing.
+  rows followed by Add / Select / Remove-or-Edit-Name / Back is load-bearing.
   `the_account_rows_are_in_the_order_click_assumes` is the guard, the same shape
   the settings and multiplayer screens carry against the same #391 bug.
+- **There must not be a fifth footer button.** Four 74 px buttons with
+  `spacing(4)` measure 308, inside `config::MIN_SCALED_WIDTH`'s 320; five measure
+  386 and hang 33 px off *each* edge at the smallest supported GUI scale. That is
+  why the **third slot changes identity** instead — `Remove` on an account row,
+  `Edit Name` on the offline row, which cannot be removed and so had a dead
+  button there already. `AccountsNav::third_button` is the one expression the
+  caption and `activate_button` share; do not give either its own copy of the
+  predicate. The key-hint line follows the same call, because `Del remove` was
+  false on that row.
 - **The offline entry is not an account.** `selected.is_none()` *is* its selected
   state — read `accounts.rs`'s module docs before touching selection; there is no
-  third state on disk and adding one is a `lodestone-auth` schema change.
+  third state on disk and adding one is a `lodestone-auth` schema change. Its
+  **label is the persisted offline name**, not a literal — see
+  [`offline-identity.md`](./offline-identity.md) for the editor the third button
+  opens and for why `with_path` derives `offline.json` from `profiles.json`'s own
+  directory.
+- **The name editor is a fourth frame, and `frame_for` must consult it.** The
+  `Screen::Accounts` arm checks `name_edit_view()` before `sign_in_view()`, and it
+  does so as a `match` **expression** rather than an early `return`: everything in
+  `frame_for` feeds a tail `frame.map` that stamps `gui_scale` and `list`, so a
+  `return` would produce one screen that silently ignored the GUI-scale setting.
+  `frame_for_reaches_the_name_editor_and_still_stamps_the_frame` is the guard for
+  both halves.
 - **Do not move `AccountsNav::pump`.** It is driven from `render::frame_for`
   through a `&AccountsNav` with interior mutability, deliberately: `frame_for` is
   the one call site that runs every frame regardless of input, which is what lets

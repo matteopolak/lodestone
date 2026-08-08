@@ -36,6 +36,34 @@
 //! wants to tell "never asked" apart from "explicitly offline" needs a schema
 //! change in `lodestone-auth` this change does not make. See `docs/accounts.md`.
 //!
+//! ## The offline *name*, and why the third footer button changes identity
+//!
+//! [`crate::offline_identity`] landed the model, the persistence and the derived
+//! UUID with **no editor** — `accounts_idle_frame` hardcoded the string
+//! `"Play offline"`, so the one name every join in this client actually uses was
+//! unreachable from the UI. This module now owns both halves: the offline row's
+//! label *is* [`AccountsNav::offline_username`], and [`ThirdButton::EditName`]
+//! opens a real [`EditBox`] over the screen.
+//!
+//! **The editor is not a fifth footer button, and that is a measurement rather
+//! than a preference.** `render::ACCOUNTS_BUTTON_W` is 74 px with `spacing(4)`,
+//! so four buttons measure `4 * 74 + 3 * 4 = 308` — which fits
+//! [`crate::config::MIN_SCALED_WIDTH`]'s 320. A fifth would measure
+//! `5 * 74 + 4 * 4 = 386` and hang 33 px off *each* edge at the smallest
+//! supported GUI scale. Instead the third slot changes what it is: the offline
+//! row **cannot be removed** (`remove_highlighted` refuses, and the button was
+//! already drawn inactive whenever the cursor sat on it), so that slot is dead
+//! space for exactly the row that needs an Edit affordance.
+//! [`AccountsNav::third_button`] is the single expression both the label and
+//! `activate_button` read, so the two cannot drift — the `BUTTON_*` ordering
+//! coupling `accounts_idle_frame` documents applies to this as well.
+//!
+//! **Validation is not re-implemented here.** `set_username` is the validating
+//! door and it guarantees the old name stays live when it refuses, so a rejected
+//! edit shows [`crate::offline_identity::NameError`]'s own `Display` and keeps
+//! the field open. Re-deriving the rule locally would be a second copy of
+//! vanilla's `StringUtil.isValidPlayerName` to drift from the server's.
+//!
 //! ## Credentials never touch this screen
 //!
 //! The device-code flow's `user_code`/`verification_uri` are the only strings
@@ -53,7 +81,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use lodestone_auth::metadata::{AccountProfile, AccountsMetadata};
 use uuid::Uuid;
 
+use super::edit_box::EditBox;
+use super::focus::KeyEvent;
 use super::nav::MenuKey;
+use crate::offline_identity::{OfflineIdentity, offline_uuid};
 
 /// Rows of the account list visible at once. The list scrolls past this,
 /// rather than the server list's current unbounded stack — see
@@ -202,11 +233,81 @@ struct State {
     scroll: f32,
     save_error: Option<String>,
     sign_in: SignIn,
+    /// The persisted "Play offline" identity — the name the offline row shows
+    /// and the editor writes. Held here rather than re-read per frame because
+    /// `frame_for` runs every frame and a file read per frame to draw one label
+    /// is the shape `docs/accounts.md` already forbids for the keychain.
+    identity: OfflineIdentity,
+    /// The in-flight name edit, if any. `None` is the ordinary list screen.
+    name_edit: Option<NameEdit>,
+}
+
+/// The offline-name editor while it is open.
+struct NameEdit {
+    /// The live widget — a real [`EditBox`], so the caret, the selection and the
+    /// horizontal scroll are `edit_box.rs`'s arithmetic rather than restated.
+    edit: EditBox,
+    /// The last refusal from `OfflineIdentity::set_username`, already rendered
+    /// through [`crate::offline_identity::NameError`]'s `Display`. `Some` means
+    /// the *old* name is still the live one.
+    error: Option<String>,
+}
+
+impl std::fmt::Debug for NameEdit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NameEdit")
+            .field("value", &self.edit.value())
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
+/// A read-only snapshot of the name editor for the renderer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NameEditView {
+    /// The live widget, cloned for the frame — `draw_edit_box` repositions the
+    /// clone into the row's rect (see [`super::render::MenuRow::edit`]).
+    pub edit: EditBox,
+    /// Why the last attempt was refused, if it was.
+    pub error: Option<String>,
+    /// The UUID the **typed** name would join under, so the identity visibly
+    /// changes with the name rather than only after a save. Derived, never
+    /// stored — [`crate::offline_identity::offline_uuid`].
+    pub uuid: Uuid,
+}
+
+/// What the account screen's **third** footer slot does right now.
+///
+/// Two labels for one slot, for the reason the module docs give: a fifth 74 px
+/// button overflows [`crate::config::MIN_SCALED_WIDTH`], and the offline row can
+/// never be removed, so `Remove` is dead for exactly the row `EditName` serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThirdButton {
+    /// Remove the highlighted Microsoft account.
+    Remove,
+    /// Open the offline-name editor (the highlighted row is the offline entry).
+    EditName,
+}
+
+impl ThirdButton {
+    /// The button's caption.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            ThirdButton::Remove => "Remove",
+            ThirdButton::EditName => "Edit Name",
+        }
+    }
 }
 
 /// Account list + sign-in flow state for [`Screen::Accounts`](super::Screen).
 pub struct AccountsNav {
     path: PathBuf,
+    /// Where the offline identity is read and written — `offline.json` beside
+    /// `path`'s `profiles.json`, so a test that points `path` at a temp
+    /// directory cannot reach the developer's real file even by accident. This
+    /// is the same structural defence `MenuNav` uses for its saves root.
+    offline_path: PathBuf,
     state: RefCell<State>,
 }
 
@@ -218,6 +319,8 @@ impl std::fmt::Debug for AccountsNav {
             .field("accounts", &st.metadata.profiles.len())
             .field("highlighted", &st.highlighted)
             .field("sign_in", &st.sign_in)
+            .field("offline_username", &st.identity.username())
+            .field("name_edit", &st.name_edit)
             .finish()
     }
 }
@@ -233,6 +336,24 @@ pub const BUTTON_REMOVE: usize = 2;
 pub const BUTTON_CANCEL: usize = 3;
 /// Number of trailing button rows after the account list.
 pub const BUTTON_COUNT: usize = 4;
+
+/// The name editor's text field, row 0 of `render::accounts_name_edit_frame`.
+///
+/// The two rows are constants for [`BUTTON_ADD`]'s reason: the frame's order and
+/// what a click on each row does are two lists that must not drift.
+pub const NAME_EDIT_FIELD_ROW: usize = 0;
+/// The name editor's Done button, row 1. See [`NAME_EDIT_FIELD_ROW`].
+pub const NAME_EDIT_DONE_ROW: usize = 1;
+
+/// The longest offline name a server will accept — vanilla's
+/// `StringUtil.isValidPlayerName` cap, the same 16 `char`s
+/// [`crate::offline_identity::validate_username`] enforces.
+///
+/// Set on the [`EditBox`] as well as checked on commit, and the duplication is
+/// deliberate: the cap stops the 17th keystroke rather than letting a player type
+/// a long name and only learn on Done that it was refused. The commit check stays
+/// because the box cap cannot see the *character* rule at all.
+const NAME_MAX_LENGTH: usize = 16;
 
 /// What [`AccountsNav::handle_key`] asks the screen-level caller to do. Kept
 /// tiny and free of `UiState`/`MenuAction` so this module does not need to
@@ -254,8 +375,19 @@ impl AccountsNav {
 
     /// Loads metadata from `path` — for tests, so nothing touches a
     /// developer's real `profiles.json`.
+    ///
+    /// The offline identity is loaded from `offline.json` **in `path`'s own
+    /// directory**, never from [`crate::offline_identity::offline_identity_path`]:
+    /// a test that hands in a temp `profiles.json` gets a temp `offline.json`
+    /// with it, so the two cannot disagree about which root this screen is on.
+    /// A `path` with no parent (a bare file name) falls back to the current
+    /// directory, which is what `Path::parent` reports as `Some("")`.
     #[must_use]
     pub fn with_path(path: PathBuf) -> Self {
+        let offline_path = path
+            .parent()
+            .unwrap_or(Path::new(""))
+            .join("offline.json");
         Self {
             state: RefCell::new(State {
                 metadata: AccountsMetadata::load_from(&path),
@@ -264,8 +396,11 @@ impl AccountsNav {
                 scroll: 0.0,
                 save_error: None,
                 sign_in: SignIn::Idle,
+                identity: OfflineIdentity::load_from(&offline_path),
+                name_edit: None,
             }),
             path,
+            offline_path,
         }
     }
 
@@ -290,6 +425,65 @@ impl AccountsNav {
     #[must_use]
     pub fn offline_selected(&self) -> bool {
         self.state.borrow().metadata.selected.is_none()
+    }
+
+    /// The persisted offline name — the offline row's own label.
+    ///
+    /// **A `String`, not a `&str`.** The brief that specified this asked for a
+    /// borrow; the state lives behind a [`RefCell`] (see the module docs on why),
+    /// and a reference cannot outlive the `Ref` guard, so a borrow here is not
+    /// expressible without leaking the guard into the signature. Every sibling
+    /// accessor on this type has the same shape for the same reason.
+    #[must_use]
+    pub fn offline_username(&self) -> String {
+        self.state.borrow().identity.username().to_owned()
+    }
+
+    /// The UUID the persisted offline name joins under — the *saved* name, not a
+    /// name being typed (that one is [`NameEditView::uuid`]).
+    #[must_use]
+    pub fn offline_uuid(&self) -> Uuid {
+        self.state.borrow().identity.uuid()
+    }
+
+    /// What the third footer slot means for the row the cursor is on — see
+    /// [`ThirdButton`] and the module docs.
+    #[must_use]
+    pub fn third_button(&self) -> ThirdButton {
+        third_button(&self.state.borrow())
+    }
+
+    /// The open name editor, or `None` on the ordinary list screen.
+    #[must_use]
+    pub fn name_edit_view(&self) -> Option<NameEditView> {
+        let st = self.state.borrow();
+        st.name_edit.as_ref().map(|e| NameEditView {
+            edit: e.edit.clone(),
+            error: e.error.clone(),
+            uuid: offline_uuid(e.edit.value()),
+        })
+    }
+
+    /// Whether the name editor is open — the predicate `nav.rs` routes a click
+    /// on this screen through, so a click on the field is caret placement rather
+    /// than "save the form" (#391's shape).
+    #[must_use]
+    pub fn is_editing_name(&self) -> bool {
+        self.state.borrow().name_edit.is_some()
+    }
+
+    /// A click on rendered row `row` of the **name editor**'s frame.
+    ///
+    /// Only meaningful while [`Self::is_editing_name`]; the ordinary list screen
+    /// still goes through `hover` + `Enter`. Row 0 is the field, which is always
+    /// focused and therefore has nothing to move focus *to* — a no-op, exactly
+    /// like the world list's search row. Row 1 is Done.
+    pub fn click_name_edit_row(&self, row: usize) -> AccountsSignal {
+        if row == NAME_EDIT_DONE_ROW {
+            let mut st = self.state.borrow_mut();
+            commit_name_edit(&mut st, &self.offline_path);
+        }
+        AccountsSignal::None
     }
 
     /// Whether `id` is the metadata's currently-selected account.
@@ -398,6 +592,13 @@ impl AccountsNav {
         if !matches!(st.sign_in, SignIn::Idle) {
             return;
         }
+        // The name editor draws a *different* frame too (a field and one wide
+        // button, no list rows), so the same reasoning applies verbatim: a row
+        // index there means nothing to the mapping below. `click_name_edit_row`
+        // is that frame's click path.
+        if st.name_edit.is_some() {
+            return;
+        }
         let list_len = list_len(&st);
         // **`rendered_row` *is* the logical row now, and this mapping is gone rather
         // than converted.** `accounts_idle_frame` emits every logical row and places
@@ -464,6 +665,13 @@ impl AccountsNav {
         let mut st = self.state.borrow_mut();
         let list_len = st.metadata.profiles.len() + 1;
 
+        // **The name editor comes first, and it swallows every key.** Without
+        // this ordering `Delete` would reach `remove_highlighted` while the
+        // player was deleting a character, and `Up`/`Down` would move the list
+        // cursor out from under a field they cannot see.
+        if st.name_edit.is_some() {
+            return handle_key_editing_name(&mut st, key, &self.offline_path);
+        }
         if matches!(st.sign_in, SignIn::Requesting { .. } | SignIn::Waiting { .. }) {
             return handle_key_mid_flow(&mut st, key);
         }
@@ -571,6 +779,10 @@ fn remove_highlighted(st: &mut State, path: &Path) {
     scroll_to_show(st);
 }
 
+/// `path` is `profiles.json`. **No `offline.json` path is taken**, deliberately:
+/// opening the editor writes nothing, so the only place `offline_path` is needed
+/// is [`commit_name_edit`] — one writer, reached from exactly two call sites
+/// (Enter and the Done click), both of which hold `AccountsNav`'s own field.
 fn activate_button(st: &mut State, button: usize, path: &Path, spawn: Spawn) -> AccountsSignal {
     match button {
         BUTTON_ADD => {
@@ -583,12 +795,127 @@ fn activate_button(st: &mut State, button: usize, path: &Path, spawn: Spawn) -> 
             select(st, h, path);
             AccountsSignal::None
         }
+        // **One slot, two verbs** — see [`third_button`], which is the single
+        // expression the label and this arm share.
         BUTTON_REMOVE => {
-            remove_highlighted(st, path);
+            match third_button(st) {
+                ThirdButton::Remove => remove_highlighted(st, path),
+                ThirdButton::EditName => begin_name_edit(st),
+            }
             AccountsSignal::None
         }
         BUTTON_CANCEL => AccountsSignal::Back,
         _ => AccountsSignal::None,
+    }
+}
+
+/// What the third footer slot means for the currently-highlighted row.
+///
+/// The **one** expression both the button's caption
+/// (`render::accounts_idle_frame`) and [`activate_button`]'s `BUTTON_REMOVE` arm
+/// read. `highlighted >= profiles.len()` is the offline row — the same test
+/// [`remove_highlighted`] refuses on and the same one that used to draw the
+/// button inactive, so the button that was dead for that row is now the one that
+/// does the useful thing.
+fn third_button(st: &State) -> ThirdButton {
+    if st.highlighted >= st.metadata.profiles.len() {
+        ThirdButton::EditName
+    } else {
+        ThirdButton::Remove
+    }
+}
+
+/// Opens the editor on the *persisted* name, caret at the end.
+///
+/// Seeded from the stored value rather than left empty: an editor that starts
+/// blank reads as "your name has been cleared", and the overwhelmingly common
+/// edit is a change to an existing name rather than a fresh one.
+fn begin_name_edit(st: &mut State) {
+    // Geometry is a placeholder: `draw_edit_box` repositions its clone into the
+    // row's `Slot` before reading any of it (`OptionsSubScreen.init`'s
+    // build-then-reposition order), so seeding real numbers here would be a
+    // second, unread source of truth for the field's rect.
+    let mut edit = EditBox::default_sized("Offline name");
+    edit.set_max_length(NAME_MAX_LENGTH);
+    edit.set_value(st.identity.username());
+    edit.move_cursor_to_end(false);
+    // Always focused: this frame has exactly one widget that takes text and no
+    // Tab traversal, so a caret must be visible from the first frame.
+    edit.widget.focused = true;
+    st.name_edit = Some(NameEdit { edit, error: None });
+}
+
+/// Commits whatever is typed, or reports why it was refused and stays open.
+///
+/// Both halves matter. `set_username` **leaves the old name live** on `Err`
+/// (`offline_identity`'s `set_username_leaves_the_old_name_live_when_it_refuses`
+/// is that guarantee's own gate), so a refusal here cannot lose the name the
+/// player is already joining under — which is why the error is shown in place
+/// rather than closing the editor.
+///
+/// A *write* failure is different from a *validation* failure and is reported
+/// differently: the name is already live in memory, so the editor closes and the
+/// filesystem error goes to `save_error`, the same notice a failed
+/// `profiles.json` write uses.
+fn commit_name_edit(st: &mut State, offline_path: &Path) {
+    let Some(pending) = st.name_edit.as_ref() else {
+        return;
+    };
+    let typed = pending.edit.value().to_owned();
+    match st.identity.set_username(&typed) {
+        Ok(()) => {
+            st.save_error = st
+                .identity
+                .save_to(offline_path)
+                .err()
+                .map(|e| format!("could not save the offline name: {e}"));
+            st.name_edit = None;
+        }
+        Err(e) => {
+            if let Some(pending) = st.name_edit.as_mut() {
+                pending.error = Some(e.to_string());
+            }
+        }
+    }
+}
+
+/// The name editor's key handling. Escape abandons, Enter commits, everything
+/// else is the [`EditBox`]'s.
+///
+/// `MenuKey::Char` before `KeyEvent::from_menu_key`, matching
+/// `create_world::handle_key`: `from_menu_key` returns `None` for a `Char`, and
+/// treating that `None` as "unhandled" would silently drop every keystroke.
+fn handle_key_editing_name(st: &mut State, key: MenuKey, offline_path: &Path) -> AccountsSignal {
+    match key {
+        // Abandon: the stored name is untouched (nothing has been written yet),
+        // so this needs no restore step. `AccountsSignal::None`, not `Back` —
+        // Escape closes the editor, not the screen.
+        MenuKey::Escape => {
+            st.name_edit = None;
+            AccountsSignal::None
+        }
+        MenuKey::Enter => {
+            commit_name_edit(st, offline_path);
+            AccountsSignal::None
+        }
+        MenuKey::Char(ch) => {
+            if let Some(pending) = st.name_edit.as_mut() {
+                pending.edit.handle_char(ch);
+                // A keystroke invalidates the previous refusal: leaving it up
+                // would report "no spaces" at a name that no longer has one.
+                pending.error = None;
+            }
+            AccountsSignal::None
+        }
+        other => {
+            if let Some(event) = KeyEvent::from_menu_key(other)
+                && let Some(pending) = st.name_edit.as_mut()
+            {
+                pending.edit.handle_key(event);
+                pending.error = None;
+            }
+            AccountsSignal::None
+        }
     }
 }
 
@@ -1732,5 +2059,345 @@ mod tests {
             !shown.contains("XErr"),
             "the raw Microsoft response body must not leak into the UI text: {shown}"
         );
+    }
+
+    // -- the offline-name editor ---------------------------------------------
+
+    /// A nav on a temp root, with `accounts` Microsoft profiles and `offline`
+    /// already persisted as the offline name.
+    ///
+    /// Both files land in the *same* temp directory, which is the property the
+    /// production `with_path` derivation is under test here: nothing in these
+    /// tests names `offline_identity_path()`, so nothing can reach the
+    /// developer's real `offline.json`.
+    fn nav_with_offline(tag: &str, accounts: &[&str], offline: Option<&str>) -> (AccountsNav, PathBuf) {
+        let path = temp_path(tag);
+        let dir = path.parent().expect("temp_path always has a parent");
+        std::fs::create_dir_all(dir).expect("temp dir");
+        let mut meta = AccountsMetadata::default();
+        for (i, name) in accounts.iter().enumerate() {
+            meta.upsert(profile(name, (accounts.len() - i) as u64));
+        }
+        meta.save_to(&path).expect("temp profiles must be writable");
+        if let Some(name) = offline {
+            let mut id = OfflineIdentity::default();
+            id.set_username(name).expect("fixture name must be valid");
+            id.save_to(&dir.join("offline.json")).expect("temp offline must be writable");
+        }
+        let nav = AccountsNav::with_path(path.clone());
+        (nav, path)
+    }
+
+    /// Drives the real production path: highlight the offline row, press the
+    /// third footer button, type `typed`, press Enter.
+    ///
+    /// Every step is a `handle_key` through `handle_key_with`'s state machine —
+    /// no direct field pokes — so this exercises the same code a keyboard does.
+    /// `spawn_stub` is never reached (nothing here presses Add Account) but a
+    /// `Spawn` has to be supplied, so it is fed a dead channel.
+    fn edit_offline_name(nav: &AccountsNav, typed: &str) {
+        let offline_row = nav.rows().len() - 1;
+        while nav.highlighted() != offline_row {
+            nav.handle_key(MenuKey::Down);
+        }
+        // Focus the third footer button and press it. `focus` past the end of
+        // the list is how a mouse reaches a button, and `hover` is the only
+        // writer of it — the same path `MenuNav::click` uses.
+        nav.hover(nav.rows().len() + BUTTON_REMOVE);
+        nav.handle_key(MenuKey::Enter);
+        assert!(nav.is_editing_name(), "the third button did not open the editor");
+        // Clear the seeded value the way a player would, then type.
+        for _ in 0..NAME_MAX_LENGTH + 1 {
+            nav.handle_key(MenuKey::Backspace);
+        }
+        assert_eq!(
+            nav.name_edit_view().expect("still editing").edit.value(),
+            "",
+            "Backspace did not reach the field"
+        );
+        for ch in typed.chars() {
+            nav.handle_key(MenuKey::Char(ch));
+        }
+        nav.handle_key(MenuKey::Enter);
+    }
+
+    #[test]
+    fn the_offline_row_label_is_the_persisted_name_not_a_literal() {
+        // The island this closes: `offline_identity` stored, validated and
+        // UUID-derived a name that **nothing displayed**, because
+        // `accounts_idle_frame` hardcoded `"Play offline"`.
+        let (nav, path) = nav_with_offline("label", &[], Some("Steve"));
+        assert_eq!(nav.offline_username(), "Steve");
+        assert_eq!(nav.offline_uuid(), offline_uuid("Steve"));
+        // Control: a fresh root shows the *default*, and in particular not the
+        // pre-fix literal. Without this, "the label is Steve" is equally
+        // consistent with a label that happens to echo the fixture.
+        let (fresh, fresh_path) = nav_with_offline("label-default", &[], None);
+        assert_eq!(fresh.offline_username(), crate::offline_identity::DEFAULT_USERNAME);
+        assert_ne!(fresh.offline_username(), "Play offline");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let _ = std::fs::remove_dir_all(fresh_path.parent().unwrap());
+    }
+
+    #[test]
+    fn the_third_button_is_remove_for_an_account_and_edit_name_for_the_offline_row() {
+        // Both arms observed in one test, because a predicate that always
+        // answered `EditName` would satisfy every other test in this section.
+        let (nav, path) = nav_with_offline("third", &["Alex"], None);
+        assert_eq!(nav.highlighted(), 0, "row 0 is the one account");
+        assert_eq!(nav.third_button(), ThirdButton::Remove);
+        assert_eq!(nav.third_button().label(), "Remove");
+        nav.handle_key(MenuKey::Down);
+        assert_eq!(nav.highlighted(), 1, "row 1 is the offline entry");
+        assert_eq!(nav.third_button(), ThirdButton::EditName);
+        assert_eq!(nav.third_button().label(), "Edit Name");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn editing_the_name_persists_it_and_the_row_follows() {
+        let (nav, path) = nav_with_offline("edit", &[], Some("Steve"));
+        edit_offline_name(&nav, "Notch");
+
+        assert!(!nav.is_editing_name(), "a valid name must close the editor");
+        assert_eq!(nav.offline_username(), "Notch", "the live name did not change");
+        assert_eq!(nav.save_error(), None, "a temp dir write must not fail");
+        // **The expected UUID comes from outside this module**: it is one of
+        // `offline_identity`'s externally-computed vectors (CPython's
+        // `hashlib.md5` plus the documented `nameUUIDFromBytes` stamping), not
+        // `offline_uuid("Notch")` re-derived here.
+        assert_eq!(
+            nav.offline_uuid(),
+            Uuid::parse_str("b50ad385-829d-3141-a216-7e7d7539ba7f").unwrap(),
+            "the derived identity must follow the name"
+        );
+        // And it reached the file, read back through the loader production uses.
+        let offline_file = path.parent().unwrap().join("offline.json");
+        assert_eq!(
+            OfflineIdentity::load_from(&offline_file).username(),
+            "Notch",
+            "the name was not persisted to {}",
+            offline_file.display()
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_refused_name_keeps_the_old_one_live_shows_why_and_writes_nothing() {
+        let (nav, path) = nav_with_offline("refused", &[], Some("Steve"));
+        let offline_file = path.parent().unwrap().join("offline.json");
+        edit_offline_name(&nav, "has space");
+
+        assert!(
+            nav.is_editing_name(),
+            "a refused name must leave the editor open so it can be corrected"
+        );
+        let view = nav.name_edit_view().expect("still editing");
+        // The message is `NameError`'s own `Display`, not one written twice.
+        assert_eq!(
+            view.error.as_deref(),
+            Some(
+                crate::offline_identity::NameError::IllegalCharacter
+                    .to_string()
+                    .as_str()
+            ),
+            "the refusal reason is not the validator's own text"
+        );
+        assert_eq!(view.edit.value(), "has space", "the typed text must survive the refusal");
+        assert_eq!(nav.offline_username(), "Steve", "the old name must stay live");
+        assert_eq!(
+            OfflineIdentity::load_from(&offline_file).username(),
+            "Steve",
+            "a refused name must not reach the file"
+        );
+
+        // Control: the same editor *can* still commit, so the assertions above
+        // are not passing because commit is broken outright.
+        for _ in 0..NAME_MAX_LENGTH + 1 {
+            nav.handle_key(MenuKey::Backspace);
+        }
+        for ch in "Dev".chars() {
+            nav.handle_key(MenuKey::Char(ch));
+        }
+        nav.handle_key(MenuKey::Enter);
+        assert!(!nav.is_editing_name(), "a corrected name must commit");
+        assert_eq!(
+            OfflineIdentity::load_from(&offline_file).username(),
+            "Dev",
+            "the corrected name did not reach the file"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn the_length_cap_stops_the_seventeenth_character_rather_than_refusing_on_done() {
+        let (nav, path) = nav_with_offline("cap", &[], None);
+        // 17 characters typed; the box must hold 16 and the commit must succeed,
+        // rather than the player learning on Done that the name was too long.
+        edit_offline_name(&nav, "0123456789abcdefg");
+        assert!(!nav.is_editing_name(), "a capped name is a valid name");
+        assert_eq!(nav.offline_username(), "0123456789abcdef");
+        assert_eq!(nav.offline_username().chars().count(), NAME_MAX_LENGTH);
+        // Control: the *validator* really would have refused the untruncated
+        // string, so the cap is doing work rather than the name being short.
+        assert_eq!(
+            crate::offline_identity::validate_username("0123456789abcdefg"),
+            Err(crate::offline_identity::NameError::TooLong)
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn escape_abandons_the_edit_and_writes_nothing() {
+        let (nav, path) = nav_with_offline("escape", &[], Some("Steve"));
+        let offline_file = path.parent().unwrap().join("offline.json");
+        let offline_row = nav.rows().len() - 1;
+        while nav.highlighted() != offline_row {
+            nav.handle_key(MenuKey::Down);
+        }
+        nav.hover(nav.rows().len() + BUTTON_REMOVE);
+        nav.handle_key(MenuKey::Enter);
+        for ch in "Notch".chars() {
+            nav.handle_key(MenuKey::Char(ch));
+        }
+        assert_eq!(
+            nav.handle_key(MenuKey::Escape),
+            AccountsSignal::None,
+            "Escape closes the editor, not the screen"
+        );
+        assert!(!nav.is_editing_name());
+        assert_eq!(nav.offline_username(), "Steve");
+        assert_eq!(OfflineIdentity::load_from(&offline_file).username(), "Steve");
+        // ...and the screen is still there to leave, which is what makes the
+        // `AccountsSignal::None` above meaningful.
+        assert_eq!(nav.handle_key(MenuKey::Escape), AccountsSignal::Back);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn the_shown_uuid_follows_the_typed_name_not_the_saved_one() {
+        // The editor's whole reason for showing a UUID: the name *is* the
+        // identity, so the consequence must be visible before Done.
+        let (nav, path) = nav_with_offline("uuid", &[], Some("Steve"));
+        let offline_row = nav.rows().len() - 1;
+        while nav.highlighted() != offline_row {
+            nav.handle_key(MenuKey::Down);
+        }
+        nav.hover(nav.rows().len() + BUTTON_REMOVE);
+        nav.handle_key(MenuKey::Enter);
+        // Seeded from the stored name, so it starts equal to the saved identity.
+        assert_eq!(nav.name_edit_view().unwrap().uuid, nav.offline_uuid());
+        for _ in 0..NAME_MAX_LENGTH + 1 {
+            nav.handle_key(MenuKey::Backspace);
+        }
+        for ch in "Notch".chars() {
+            nav.handle_key(MenuKey::Char(ch));
+        }
+        let view = nav.name_edit_view().unwrap();
+        // External vector again, and it differs from the still-saved one — which
+        // is the assertion a view reading `identity.uuid()` would fail.
+        assert_eq!(
+            view.uuid,
+            Uuid::parse_str("b50ad385-829d-3141-a216-7e7d7539ba7f").unwrap()
+        );
+        assert_ne!(
+            view.uuid,
+            nav.offline_uuid(),
+            "mid-edit the shown UUID must be the typed name's, not the saved name's"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_key_that_means_something_to_the_list_is_swallowed_by_the_open_editor() {
+        // **The layered-guard control.** `Delete` on this screen removes the
+        // highlighted account; while a name is being edited it must delete a
+        // *character*. The editor is only reachable with the offline row
+        // highlighted, so `remove_highlighted` would refuse anyway — which would
+        // make a test driven purely through the UI vacuous. The state is
+        // therefore poked directly: an account row highlighted **and** the editor
+        // open, a combination the UI cannot reach, so that the assertion is about
+        // `handle_key_with`'s ordering and nothing else.
+        let (nav, path) = nav_with_offline("swallow", &["Alex", "Steve"], None);
+        {
+            let mut st = nav.state.borrow_mut();
+            st.highlighted = 0;
+            begin_name_edit(&mut st);
+            st.name_edit.as_mut().unwrap().edit.set_value("abc");
+            // `move_cursor_to`, **not** `set_cursor_position`: the latter moves
+            // the caret and leaves `highlight_pos` at the end, so "abc" is a live
+            // *selection* and `delete_text` deletes all of it. Measured — the
+            // first draft of this test asserted `"bc"` and got `""`.
+            st.name_edit.as_mut().unwrap().edit.move_cursor_to(0, false);
+        }
+        assert_eq!(nav.ordered().len(), 2, "precondition: two accounts to lose");
+        nav.handle_key(MenuKey::Delete);
+        assert_eq!(
+            nav.ordered().len(),
+            2,
+            "Delete while editing removed an account — the editor's branch does \
+             not come first in `handle_key_with`"
+        );
+        assert_eq!(
+            nav.name_edit_view().unwrap().edit.value(),
+            "bc",
+            "Delete did not reach the field either, so this test proves nothing"
+        );
+
+        // The control: with the editor **closed**, the very same key really does
+        // remove that account. Without this, "two accounts survived" is equally
+        // consistent with a `Delete` that never removes anything.
+        nav.handle_key(MenuKey::Escape);
+        assert!(!nav.is_editing_name());
+        nav.handle_key(MenuKey::Delete);
+        assert_eq!(
+            nav.ordered().len(),
+            1,
+            "the control failed: Delete does not remove an account even with the \
+             editor closed, so the assertion above measures nothing"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_click_on_the_field_does_not_save_but_a_click_on_done_does() {
+        // The two rows of the editor's frame, through the path `MenuNav::click`
+        // routes to (`nav.rs`'s `Screen::Accounts` arm). Row 0 is an
+        // always-focused field: clicking it used to arrive as `hover` + `Enter`
+        // and therefore *save*, which is #391's shape on a sixth screen.
+        let (nav, path) = nav_with_offline("click", &[], Some("Steve"));
+        let offline_file = path.parent().unwrap().join("offline.json");
+        let offline_row = nav.rows().len() - 1;
+        while nav.highlighted() != offline_row {
+            nav.handle_key(MenuKey::Down);
+        }
+        nav.hover(nav.rows().len() + BUTTON_REMOVE);
+        nav.handle_key(MenuKey::Enter);
+        for _ in 0..NAME_MAX_LENGTH + 1 {
+            nav.handle_key(MenuKey::Backspace);
+        }
+        for ch in "Notch".chars() {
+            nav.handle_key(MenuKey::Char(ch));
+        }
+
+        nav.click_name_edit_row(NAME_EDIT_FIELD_ROW);
+        assert!(nav.is_editing_name(), "a click on the field must not save");
+        assert_eq!(
+            OfflineIdentity::load_from(&offline_file).username(),
+            "Steve",
+            "a click on the field wrote the file"
+        );
+        // And a hover while the editor is open must move neither cursor: the
+        // editor's frame has no list rows, so a row index there means nothing —
+        // the same argument `hover`'s sign-in guard already makes.
+        let (highlighted, focus) = (nav.highlighted(), nav.focus());
+        nav.hover(0);
+        assert_eq!(nav.highlighted(), highlighted, "hover moved the selection");
+        assert_eq!(nav.focus(), focus, "hover moved the button focus");
+
+        nav.click_name_edit_row(NAME_EDIT_DONE_ROW);
+        assert!(!nav.is_editing_name(), "a click on Done must save");
+        assert_eq!(OfflineIdentity::load_from(&offline_file).username(), "Notch");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

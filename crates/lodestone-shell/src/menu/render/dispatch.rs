@@ -7,7 +7,9 @@
 //! Split out of `menu/render.rs` verbatim: a pure move by line range.
 
 use super::*;
-use super::account_screen::{accounts_failed_frame, accounts_flow_frame, accounts_idle_frame};
+use super::account_screen::{
+    accounts_failed_frame, accounts_flow_frame, accounts_idle_frame, accounts_name_edit_frame,
+};
 use super::measure::{MANAGE_SERVER_TITLE_Y, manage_server_slot};
 use super::screens::{COPYRIGHT, credits_frame, error_frame, loading_frame, version_line};
 use super::server_list::SERVER_LIST_FOOTER_H;
@@ -469,23 +471,40 @@ pub fn frame_for<'a>(
             use super::accounts::SignInView;
             let accounts = nav.accounts();
             accounts.pump();
-            Some(match accounts.sign_in_view() {
-                SignInView::Idle => accounts_idle_frame(accounts),
-                SignInView::Requesting => accounts_flow_frame(None, None, false),
-                SignInView::Waiting {
-                    user_code,
-                    verification_uri,
-                } => accounts_flow_frame(
-                    // Empty means "no code to show", which is the loopback flow:
-                    // the browser is already open at the URL and there is nothing
-                    // to type. The device-code flow still fills both. `None` is a
-                    // shape `accounts_flow_frame` already handles — see the
-                    // `Requesting` arm above, which passes it for both.
-                    (!user_code.is_empty()).then_some(user_code.as_str()),
-                    Some(&verification_uri),
-                    true,
-                ),
-                SignInView::Failed { message } => accounts_failed_frame(&message),
+            // **The name editor is checked before the sign-in state, not folded
+            // into it.** `SignInView` is about the Microsoft device-code flow;
+            // adding a rename variant to it would make every `match` on that
+            // enum answer a question it is not about. The editor is also
+            // unreachable *while* a sign-in is in flight (`handle_key_with`
+            // returns early in that state), so the two cannot both be open and
+            // this ordering is a readability choice rather than a precedence
+            // rule.
+            //
+            // **Not `return Some(..)`.** Everything in this function is a `let
+            // frame = match ..` feeding the `frame.map` below, which stamps
+            // `gui_scale` and `list` onto whatever comes out — an early return
+            // would produce an editor that ignored the GUI-scale setting and had
+            // no scrollbar declaration, silently and only on that one screen.
+            Some(match accounts.name_edit_view() {
+                Some(view) => accounts_name_edit_frame(&view),
+                None => match accounts.sign_in_view() {
+                    SignInView::Idle => accounts_idle_frame(accounts),
+                    SignInView::Requesting => accounts_flow_frame(None, None, false),
+                    SignInView::Waiting {
+                        user_code,
+                        verification_uri,
+                    } => accounts_flow_frame(
+                        // Empty means "no code to show", which is the loopback flow:
+                        // the browser is already open at the URL and there is nothing
+                        // to type. The device-code flow still fills both. `None` is a
+                        // shape `accounts_flow_frame` already handles — see the
+                        // `Requesting` arm above, which passes it for both.
+                        (!user_code.is_empty()).then_some(user_code.as_str()),
+                        Some(&verification_uri),
+                        true,
+                    ),
+                    SignInView::Failed { message } => accounts_failed_frame(&message),
+                },
             })
         }
         // The loading screen (issue #449): "Connecting..." over a flat dark

@@ -163,13 +163,54 @@ Two layers stop the helper reaching production again:
 - **The name is sent to every server the player joins.** Do not default it from
   `$USER` or any other machine-derived string.
 
+### The editor
+
+`crates/lodestone-shell/src/menu/accounts.rs` owns it; the frames are in
+`menu/render/account_screen.rs`. Three moving parts:
+
+1. **`AccountsNav` holds the identity.** `with_path` loads it from
+   `offline.json` **in the directory `profiles.json` came from**, never from
+   `offline_identity_path()`. That is the same structural defence `MenuNav` uses
+   for its saves root: a test that hands in a temp `profiles.json` cannot reach
+   the developer's real `offline.json` even by accident, and nothing in the test
+   suite names the no-argument `load`.
+2. **The offline row's label *is* the name.** It used to be the literal
+   `"Play offline"`, which is why this module's whole model — stored, validated,
+   UUID-derived — reached **zero pixels**. `offline_username()` returns a
+   `String` rather than the `&str` the original patch note asked for: the state
+   is behind a `RefCell`, so a borrow cannot outlive the guard.
+3. **The affordance is the third footer button, which changes identity.** It
+   reads `Remove` on an account row and `Edit Name` on the offline row.
+   `AccountsNav::third_button` is the single expression the caption and
+   `activate_button`'s dispatch share.
+
+**Why not a fifth footer button** — a measurement, not a preference.
+`ACCOUNTS_BUTTON_W` is 74 px with `spacing(4)`, so four buttons measure
+`4 * 74 + 3 * 4 = 308`, inside `config::MIN_SCALED_WIDTH`'s 320. Five would
+measure `5 * 74 + 4 * 4 = 386` and hang 33 px off *each* edge at the smallest
+supported GUI scale. The third slot was already dead for the offline row — it
+cannot be removed, so the button was drawn inactive whenever the cursor sat on
+it — which is exactly the row that needs an Edit affordance. The key hint's
+middle term follows the same predicate, because `Del remove` was a *lie* on that
+row before this.
+
+The editor itself is a real `EditBox` (so the caret, the selection and the
+horizontal scroll are `edit_box.rs`'s arithmetic, not restated), capped at 16
+`char`s, seeded from the stored name with the caret at the end. Enter commits,
+Escape abandons, and everything else goes to the box — the editor's branch is
+**first** in `handle_key_with`, so `Delete` deletes a character rather than
+removing an account. A refusal shows `NameError`'s own `Display` and leaves the
+editor open with the old name still live, which `set_username` guarantees. The
+frame also shows `offline_uuid` of the **typed** name, live, because the name
+*is* the identity and that consequence should be visible before Done.
+
+**Do not hand-roll validation in the menu.** `validate_username` mirrors the
+server's rule; a second copy would drift. The box's own length cap is not a
+second copy — it stops the 17th keystroke rather than deciding whether a name is
+legal, and the commit still calls `set_username`.
+
 ### Residual gaps
 
-- **No UI to edit the name yet.** `crates/lodestone-shell/src/menu/**` is where
-  that goes: the account screen's offline row should show
-  `OfflineIdentity::load().username()` instead of a hardcoded label, and offer
-  an edit affordance that calls `set_username` + `save`. A stable *default* with
-  no editor already fixes the rejoin defect; the editor is additive.
 - **The stored-name world is not exercised through production's `load()`.**
   `std::env::set_var` is `unsafe` under this workspace's `deny(unsafe_code)`, so
   a test cannot point `LODESTONE_DATA_DIR` at a fixture. What is untested is the
@@ -210,3 +251,9 @@ transitive dependency already, so the edge adds no compilation), and
 | `net::tests::two_offline_sessions_publish_the_same_identity` | production's `NetClient::connect` actually consumes it — the island check, via the published `local_uuid` on a dead port |
 | `net::tests::connect_as_varies_the_published_identity_with_the_name` | control for the above, and that live gates really do get their name through |
 | `tests/no_production_source_names_testsupport.rs` | the test helper is not reachable from production source |
+| `menu::render::tests::the_offline_row_carries_the_persisted_name_through_the_real_frame` | the label is the persisted name, through the real `accounts_idle_frame`, with a no-file root as the control |
+| `menu::render::tests::frame_for_reaches_the_name_editor_and_still_stamps_the_frame` | the **island check**: `frame_for` — the function `app.rs` calls every frame — really reaches the editor's frame, and it is still `gui_scale`-stamped |
+| `menu::nav::tests::clicking_the_offline_name_field_does_not_save_but_clicking_done_does` | `MenuNav::click`'s `Screen::Accounts` arm exists, so clicking the field is not "hover + Enter" (which saved) |
+| `menu::accounts::tests::a_refused_name_keeps_the_old_one_live_shows_why_and_writes_nothing` | a refusal reports `NameError`'s own text, leaves the old name live and writes nothing, with a corrected commit as the control |
+| `menu::accounts::tests::a_key_that_means_something_to_the_list_is_swallowed_by_the_open_editor` | the editor's branch is first in `handle_key_with`, so `Delete` cannot remove an account; the control removes one with the editor closed |
+| `menu::accounts::tests::the_third_button_is_remove_for_an_account_and_edit_name_for_the_offline_row` | both arms of the shared predicate observed in one test |
