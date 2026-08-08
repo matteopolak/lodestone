@@ -269,6 +269,30 @@ impl ContainerRenderer {
         self.font.is_some()
     }
 
+    /// The attached vanilla proportional font, for a caller building its own
+    /// [`ContainerGeometry`] to hand to
+    /// [`render_geometry_scaled`](Self::render_geometry_scaled) — the creative
+    /// screen (issue #158). Reading it here rather than threading a second copy
+    /// through `app.rs` is what keeps the two screens' text identical.
+    #[must_use]
+    pub fn font(&self) -> Option<&VanillaFont> {
+        self.font.as_deref()
+    }
+
+    /// The attached [`ContainerBackground`], for the same reason
+    /// [`font`](Self::font) exists.
+    #[must_use]
+    pub fn background_data(&self) -> Option<&ContainerBackground> {
+        self.background.as_ref().map(|bg| bg.data.as_ref())
+    }
+
+    /// The attached flat item-sprite atlas, for the same reason
+    /// [`font`](Self::font) exists.
+    #[must_use]
+    pub fn item_atlas(&self) -> Option<Arc<ItemAtlas>> {
+        self.icons.item_atlas()
+    }
+
     /// Attach the flat item-sprite [`ItemAtlas`] so container slots draw real
     /// item icons instead of the colour-swatch fallback. Mirrors
     /// [`HudRenderer::attach_items`](crate::hud::HudRenderer::attach_items) and
@@ -439,6 +463,34 @@ impl ContainerRenderer {
             self.font.as_deref(),
             self.background.as_ref().map(|bg| bg.data.as_ref()),
         );
+        self.render_geometry_scaled(device, queue, view, depth, &geo, gui_scale, width, height);
+    }
+
+    /// Draw an already-built [`ContainerGeometry`] through this renderer's
+    /// passes.
+    ///
+    /// Split out of [`render_with_icons_scaled`](Self::render_with_icons_scaled)
+    /// for the creative-inventory screen (issue #158), which builds its own
+    /// geometry from [`super::creative_geometry`] rather than from a
+    /// [`ContainerFrame`] — vanilla's creative screen is backed by a client-only
+    /// `ItemPickerMenu` with no `Menu` behind it, so it cannot go through
+    /// `build_inner`. Everything *below* that seam is shared: same pipelines,
+    /// same bind groups, same four-pass order, and therefore the same guarantee
+    /// about stack counts landing over their icons rather than under them.
+    ///
+    /// `gui_scale`/`width`/`height` must be the triple `geo` was built with.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_geometry_scaled(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        depth: Option<&wgpu::TextureView>,
+        geo: &ContainerGeometry,
+        gui_scale: u32,
+        width: u32,
+        height: u32,
+    ) {
         // `geo.special` counts too — see the same guard in
         // `HudRenderer::render_with_item_models`. A frame whose only content is a
         // chest icon must not be discarded before it reaches `upload`.

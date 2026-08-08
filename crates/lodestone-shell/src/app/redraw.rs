@@ -74,6 +74,14 @@ impl WindowApp {
             return;
         }
 
+        // Resolved **before** the field-borrow split below, because both are
+        // `&self` methods and everything past this point holds `&mut` borrows of
+        // individual fields — the same constraint that makes
+        // `recipe_panel_geometry` a free function.
+        let creative_open = self.creative_screen_open();
+        let creative_title = self.creative_frame_title().unwrap_or_default();
+        let creative_menu = creative_open.then(|| self.sim.player_menu());
+
         let (Some(gpu), Some(target), Some(render), Some(hud), Some(container_renderer)) = (
             self.gpu.as_ref(),
             self.target.as_mut(),
@@ -710,6 +718,33 @@ impl WindowApp {
         // and the HUD's own model sub-pass independently clear the shared depth
         // buffer immediately before drawing their own GUI items, so swapping the
         // two relative to each other is safe — see `docs/container-screen.md`.
+        // The creative-inventory screen (issue #158) **replaces** the player's
+        // inventory screen rather than overlaying it, exactly as vanilla's
+        // `Minecraft.openInventory` picks one screen or the other. So it is
+        // resolved before the container block below and short-circuits it — two
+        // panels drawn over each other is what an overlay would give.
+        if creative_open {
+            let geo = creative_panel_geometry(
+                &self.creative,
+                creative_menu.as_ref(),
+                &creative_title,
+                container_renderer,
+                item_models,
+                self.nav.gui_scale(),
+                w,
+                h,
+            );
+            container_renderer.render_geometry_scaled(
+                device,
+                queue,
+                frame.view(),
+                Some(render.depth_view()),
+                &geo,
+                self.nav.gui_scale(),
+                w,
+                h,
+            );
+        }
         let open_menu = self.sim.open_menu();
         let player_menu;
         let (container_menu, container_title) = if let Some(open) = open_menu.as_ref() {
@@ -738,7 +773,7 @@ impl WindowApp {
         } else {
             (None, String::new())
         };
-        if container_menu.is_some() {
+        if container_menu.is_some() && !creative_open {
             // `playerInventoryTitle` through the same language table. A local
             // constant here is not the #52 defect class repeating: vanilla reads
             // it from `Inventory.getDisplayName()`, itself the client-side

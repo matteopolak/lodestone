@@ -445,7 +445,15 @@ impl ApplicationHandler for WindowApp {
             // container overlay draws over the world, it does not replace it.
             WindowEvent::CursorMoved { position, .. } if self.ui.is_container_open() => {
                 self.cursor = (position.x as f32, position.y as f32);
-                if self.menu_input.is_dragging() {
+                // The creative screen's scrollbar drag (issue #158). Checked
+                // first and exclusively: on that screen there is no slot layout
+                // to paint a quick-craft across, so the drag below has nothing
+                // to do.
+                if self.creative_screen_open() {
+                    if let Some((w, h)) = self.target.as_ref().map(RenderTarget::size) {
+                        self.drag_creative_scroll(w, h);
+                    }
+                } else if self.menu_input.is_dragging() {
                     if let (Some(menu), Some((w, h))) = (
                         self.active_container_menu(),
                         self.target.as_ref().map(RenderTarget::size),
@@ -463,6 +471,29 @@ impl ApplicationHandler for WindowApp {
                         // `MenuInput::dragged`, and issue #378 part 1 for what an
                         // unfiltered paint set costs.
                         self.menu_input.dragged(hit, &menu);
+                    }
+                }
+            }
+            // The creative screen (issue #158) owns every click while it is up: it
+            // *replaces* the inventory screen rather than overlaying it (see
+            // `creative_screen_open`), so falling through to the slot path would
+            // click a panel that is not on screen. Its own arm rather than a
+            // first-refusal call inside the arm below, for that reason.
+            WindowEvent::MouseInput { state, button, .. }
+                if self.ui.is_container_open() && self.creative_screen_open() =>
+            {
+                if let (Some(MenuButton::Left), Some((w, h))) = (
+                    menu_button_for(button),
+                    self.target.as_ref().map(RenderTarget::size),
+                ) {
+                    match state {
+                        ElementState::Pressed => {
+                            self.handle_creative_click(w, h);
+                        }
+                        // The thumb drag ends on release, wherever the pointer
+                        // is — vanilla's `mouseReleased` sets `scrolling = false`
+                        // unconditionally (`:513`).
+                        ElementState::Released => self.creative.scrolling = false,
                     }
                 }
             }
@@ -575,6 +606,18 @@ impl ApplicationHandler for WindowApp {
             // uses, so sensitivity below 1.0 can take more than one notch to
             // move a slot and sensitivity above 1.0 can cross several in one
             // notch — not just a threshold on the existing ±1 step.
+            // The creative grid scrolls by whole rows (issue #158). Its own arm
+            // and placed first, because none of the arms below can see it: the
+            // hotbar's is gated on `accepts_gameplay_input`, which an open
+            // container makes false, and `scroll_active_list` only knows about
+            // `MenuNav`'s list screens. That is exactly the gap that left every
+            // non-list screen ignoring the wheel entirely.
+            WindowEvent::MouseWheel { delta, .. } if self.creative_screen_open() => {
+                // Vanilla's `subtractInputFromScroll` takes the raw `scrollY`, so
+                // the notch count goes through verbatim — no `accumulate_scroll`,
+                // which exists for the hotbar's discrete-slot quantization.
+                self.scroll_creative_screen(wheel_notches(delta) as f32);
+            }
             WindowEvent::MouseWheel { delta, .. } if self.ui.accepts_gameplay_input() => {
                 let dy = wheel_notches(delta);
                 let scaled = scale_scroll(dy, self.nav.discrete_mouse_scroll(), self.nav.mouse_wheel_sensitivity());
@@ -705,6 +748,12 @@ impl ApplicationHandler for WindowApp {
                     // click, so closing the panel with the box focused would
                     // otherwise leave every key routed into an invisible field.
                     recipe_search: self.recipe_panel.open && self.recipe_panel.search_focused,
+                    // Gated on the screen being up as well as the box being
+                    // focused, for the same reason `recipe_search` is: the focus
+                    // flag persists across close, so closing the screen with the
+                    // box focused would otherwise leave every key routed into an
+                    // invisible field.
+                    creative_search: self.creative_search_active(),
                 };
                 let code = match event.physical_key {
                     PhysicalKey::Code(code) => Some(code),
@@ -846,6 +895,19 @@ impl ApplicationHandler for WindowApp {
                         // `recipe_book_panel_contents` would clamp it, but to the
                         // *last* page rather than the first, which is not where a
                         // player expects a fresh search to begin.
+                    }
+                    Some(KeyOutcome::CreativeSearch) => {
+                        // Same shape as the recipe box above, through
+                        // `edit_creative_search` so the max-length rule and the
+                        // scroll reset live with the rest of the screen's state
+                        // rather than in this driver arm.
+                        if code == Some(KeyCode::Backspace) {
+                            self.edit_creative_search(CreativeSearchEdit::Backspace);
+                        } else if let Some(text) = event.text.as_deref() {
+                            for ch in text.chars().filter(|c| !c.is_control()) {
+                                self.edit_creative_search(CreativeSearchEdit::Char(ch));
+                            }
+                        }
                     }
                     Some(KeyOutcome::ToggleAdvancedTooltips) => {
                         // A persisted option, not a render flag — see the

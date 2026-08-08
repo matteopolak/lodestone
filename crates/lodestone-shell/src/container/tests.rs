@@ -1524,6 +1524,13 @@ fn synthetic_background() -> ContainerBackground {
         "cartography_table",
         "dispenser",
         "hopper",
+        // The creative screen's three sheets (issue #158) — loaded by
+        // `ContainerBackground::build` alongside the sixteen above, so a
+        // missing stand-in fails every test in this module rather than just
+        // the creative ones.
+        "creative_inventory/tab_items",
+        "creative_inventory/tab_item_search",
+        "creative_inventory/tab_inventory",
     ] {
         src.insert(
             format!("assets/minecraft/textures/gui/container/{name}.png"),
@@ -1535,30 +1542,36 @@ fn synthetic_background() -> ContainerBackground {
     // pair is natively 24x24 and the five placeholders are 16x16. Built from
     // the same const the loader walks, so a sprite added there cannot be
     // forgotten here — `ContainerBackground::build` would fail instead.
-    for id in GUI_SPRITES {
+    for id in super::all_gui_sprites() {
         // The furnace/brewing progress sprites (issue #28) are sized at
         // their own real vanilla dimensions rather than folded into the
         // `CELL` default, so a test reading back a sub-region through
         // `sprite_subregion_quad` is exercising the same native size
         // vanilla's own sprite is, not a same-sized stand-in.
-        let (w, h) = if *id == SLOT_HIGHLIGHT_BACK || *id == SLOT_HIGHLIGHT_FRONT {
+        let (w, h) = if id == SLOT_HIGHLIGHT_BACK || id == SLOT_HIGHLIGHT_FRONT {
             (HIGHLIGHT as u32, HIGHLIGHT as u32)
-        } else if *id == FURNACE_LIT_PROGRESS
-            || *id == BLAST_FURNACE_LIT_PROGRESS
-            || *id == SMOKER_LIT_PROGRESS
+        } else if id == FURNACE_LIT_PROGRESS
+            || id == BLAST_FURNACE_LIT_PROGRESS
+            || id == SMOKER_LIT_PROGRESS
         {
             (14, 14)
-        } else if *id == FURNACE_BURN_PROGRESS
-            || *id == BLAST_FURNACE_BURN_PROGRESS
-            || *id == SMOKER_BURN_PROGRESS
+        } else if id == FURNACE_BURN_PROGRESS
+            || id == BLAST_FURNACE_BURN_PROGRESS
+            || id == SMOKER_BURN_PROGRESS
         {
             (24, 16)
-        } else if *id == BREWING_FUEL_LENGTH {
+        } else if id == BREWING_FUEL_LENGTH {
             (18, 4)
-        } else if *id == BREWING_BREW_PROGRESS {
+        } else if id == BREWING_BREW_PROGRESS {
             (9, 28)
-        } else if *id == BREWING_BUBBLES {
+        } else if id == BREWING_BUBBLES {
             (12, 29)
+        } else if id.starts_with("container/creative_inventory/tab_") {
+            // `26 x 32` (`CreativeModeInventoryScreen.java:827`).
+            (26, 32)
+        } else if id.starts_with("container/creative_inventory/scroller") {
+            // `12 x 15` (`:753`).
+            (12, 15)
         } else {
             (CELL as u32, CELL as u32)
         };

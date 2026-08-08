@@ -31,13 +31,11 @@
 
 mod background;
 mod builder;
-/// Vanilla's creative-inventory tab contents (issue #158). **Data only, with no
-/// consumer yet** — the screen is the remainder of that issue, and this is
-/// committed ahead of it deliberately: the table is a hand-transcription of the
-/// decompiled `CreativeModeTabs.java` cross-checked against `lodestone-data`'s
-/// real item registry, so landing it separately means the screen work starts from
-/// a verified list rather than re-deriving 1725 ids and eleven expansion rules.
-/// A *named* pending consumer, not a silent island; see #158.
+mod creative;
+/// Vanilla's creative-inventory tab contents (issue #158) — a hand-transcription
+/// of the decompiled `CreativeModeTabs.java`, cross-checked against
+/// `lodestone-data`'s real item registry. Read by [`creative`], the screen that
+/// draws it.
 mod creative_items;
 mod frame;
 mod geometry;
@@ -48,6 +46,13 @@ mod renderer;
 mod tooltip;
 
 pub use background::ContainerBackground;
+pub use creative::{
+    CREATIVE_COLS, CREATIVE_DEFAULT_TAB, CREATIVE_PAGE, CREATIVE_PANEL_H, CREATIVE_PANEL_W,
+    CREATIVE_ROWS, CREATIVE_SEARCH_MAX_LEN, CreativeBackground, CreativeHit, CreativeLayout,
+    CreativeState, CreativeTabKind, CreativeView, can_scroll, creative_geometry, creative_hit_test,
+    creative_items_for, creative_layout, creative_page_items, creative_tab_count,
+    creative_tab_kind, creative_tab_title_key, row_count, row_for_scroll,
+};
 pub use frame::{
     ContainerFrame, LabelLayout, label_layout, menu_title, menu_type_title_anchor,
     player_inventory_label, player_inventory_title,
@@ -146,6 +151,19 @@ const GUI_SPRITES: &[&str] = &[
     BREWING_BREW_PROGRESS,
     BREWING_BUBBLES,
 ];
+
+/// [`GUI_SPRITES`] plus the creative screen's 28 tab buttons and 2 scroller
+/// sprites (issue #158) — all `gui/sprites/container/creative_inventory/**`, so
+/// they belong in this atlas rather than needing one of their own. Kept as a
+/// separate concatenation only because `GUI_SPRITES` is indexed by nothing and
+/// this keeps the creative ids next to the module that names them.
+fn all_gui_sprites() -> impl Iterator<Item = &'static str> {
+    GUI_SPRITES
+        .iter()
+        .copied()
+        .chain(creative::CREATIVE_TAB_SPRITES)
+        .chain(creative::CREATIVE_SCROLLER_SPRITES)
+}
 
 const CONTAINER_WGSL: &str = include_str!("shaders/container.wgsl");
 

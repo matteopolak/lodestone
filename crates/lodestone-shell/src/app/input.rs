@@ -47,6 +47,17 @@ pub(crate) struct KeyGate {
     /// case and Escape falls through — to `InputAction::Pause`, which closes the
     /// screen, exactly as it did before this existed.
     pub recipe_search: bool,
+    /// The creative screen's search box has focus (issue #158) — the same
+    /// swallow-everything-but-Escape rule as [`recipe_search`](Self::recipe_search),
+    /// and for the same vanilla reason: `CreativeModeInventoryScreen.keyPressed`
+    /// (`:428`) returns `true` for any key while the box is focused and visible
+    /// and the event is not Escape.
+    ///
+    /// Vanilla is *stronger* here than for the recipe book — it calls
+    /// `setCanLoseFocus(false)` on entering the search tab (`:610`), so the box
+    /// cannot be unfocused by clicking elsewhere. `CreativeState::select_tab`
+    /// mirrors that.
+    pub creative_search: bool,
 }
 
 /// The single thing a key event means, once precedence has been applied.
@@ -81,6 +92,10 @@ pub(crate) enum KeyOutcome {
     /// `text` for the character, which this enum (deliberately `Copy` and
     /// `'static`) cannot hold. Same shape as [`Self::Menu`].
     RecipeSearch,
+    /// A key aimed at the creative screen's focused search box — see
+    /// [`KeyGate::creative_search`]. Payload-free for the same reason
+    /// [`Self::RecipeSearch`] is.
+    CreativeSearch,
     /// F3+H — vanilla's `key.debug.advancedTooltips`.
     ///
     /// Unlike its two siblings above this does **not** toggle a render flag: it
@@ -268,6 +283,11 @@ pub(crate) fn resolve_key(
         // never see a single key — and `Pause` above it is Escape, which vanilla
         // deliberately does not route into the box (see `KeyGate::recipe_search`).
         Some(KeyOutcome::RecipeSearch)
+    } else if gate.creative_search && pressed {
+        // Same position and the same reason as the recipe box above: after
+        // `Pause` so Escape still closes the screen, before the container
+        // swallow so the box sees any key at all.
+        Some(KeyOutcome::CreativeSearch)
     } else if gate.container_open && pressed {
         // Vanilla's order, from `AbstractContainerScreen.keyPressed`
         // (`AbstractContainerScreen.java:489-503`): the inventory binding closes

@@ -68,6 +68,7 @@ impl WindowApp {
             // No session yet, so no weather cell to read; see
             // `install_session_render_sources`.
             weather: None,
+            creative: crate::container::CreativeState::default(),
         }
     }
 
