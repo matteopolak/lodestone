@@ -5,9 +5,10 @@
 `Screen::WorldSelect` — vanilla's `SelectWorldScreen`, reached from the title
 screen's **Singleplayer** button. A title, a search field, a world list, and six
 footer buttons: Play Selected World, Create New World, Edit, Delete, Re-Create,
-Back. The list holds **one row per world in `saves/`**, and **three of the six
-buttons are present and disabled**: Edit and Re-Create have no screen to open, and
-Delete has no confirmation step.
+Back. The list holds **one row per world in `saves/`**, it **scrolls**, and **two
+of the six buttons are present and disabled**: Edit and Re-Create have no screen
+to open. Delete is live since issue #540 and opens a real
+[confirmation screen](./confirm-screen.md); the list scrolls since #541.
 
 This is issue #397, the fifth child of the menu-framework epic #392, and the first
 consumer of #394's `HeaderAndFooterLayout` — which landed as a knowing exception to
@@ -117,9 +118,10 @@ Vanilla disables Play, Edit, Delete and Re-Create together whenever nothing is
 selected (`updateButtonStatus(null)`, `SelectWorldScreen.java:159-166`), and this
 screen now really does reach that state — an empty `saves/`, or a search matching
 nothing — so all four go grey together exactly as vanilla's do. With a playable
-selection, Play comes back and the other three stay off for their own reasons: no
-`EditWorldScreen` (210 lines), no re-create flow, and no confirmation step for a
-Delete that cannot be undone.
+selection, Play and Delete come back and the other two stay off for their own
+reasons: no `EditWorldScreen` (210 lines) and no re-create flow. Delete used to be
+a third — "no confirmation step for a Delete that cannot be undone" — until #540
+built the confirmation.
 
 **Create New World was the one deviation** — vanilla leaves it active and #397 left
 it greyed, pending `CreateWorldScreen` (828 lines) plus `WorldCreationUiState`
@@ -143,7 +145,7 @@ summary. Vanilla's non-null branch reads `primaryActionActive()`, `canEdit()`,
 | Play Selected World | live | `can_play()` — `false` for a world whose `level.dat` will not decode |
 | Create New World | live | always |
 | Edit | **never** | no `EditWorldScreen` (210 lines) is ported |
-| Delete | **never** | no confirmation step exists — see `saves.rs` on why a cheap one was rejected |
+| Delete | live (#540) | `can_delete()` — unconditionally `true`, in vanilla too |
 | Re-Create | **never** | routes through `CreateWorldScreen` |
 | Back | live | always |
 
@@ -213,19 +215,77 @@ pins that. A world *row*'s three lines are clipped, matching
 `StringWidget.setMaxWidth` (`:418`), and
 `a_long_world_name_is_clipped_to_its_row_rather_than_overhanging_it` is the gate.
 
-**The list does not scroll.** `AbstractSelectionList`'s scroll model is not ported
-here — #396 ported it for the *server* list, and this screen has no equivalent yet.
-So `world_list_row_visible` rejects any row that would fall outside the content
-band, and `row_rect` then reports **no rect at all** for it: not drawn, and not
-clickable, which is the same gate `server_row_visible` applies and for the same
-reason (`row_rect` is also `app.rs`'s hit-test). `world_list_max_rows()` caps the
-list at what the reference canvas can show — 10 — so a player with more worlds than
-that cannot reach the rest, and at a canvas shorter than 480 the last few of those
-ten are not drawn either. Both are the same missing feature, filed as
-[#541](https://github.com/matteopolak/lodestone/issues/541), and both are stated here
-rather than discovered.
+### The list scrolls (issue #541)
 
-One behavioural deviation follows from it: **row 0 is selected on open**, where
+This section used to say the list did not, and named the two consequences: a
+player with more than `world_list_max_rows()` worlds — 10 at the reference canvas
+— could not reach the rest, and at a canvas shorter than 480 the last few of those
+ten were not drawn either. Both are gone. What landed is the second consumer of
+#396/#445's existing machinery rather than new work:
+
+- `WorldEntryView` carries a `scroll: f32` in **pixels**, denormalised onto every
+  row for `ServerEntryView::scroll`'s reason: `world_list_row_rect` is also
+  `app.rs`'s hit-test, so it has to resolve a row's position from the row alone.
+  One wheel notch is **18 px** — `scrollRate = defaultEntryHeight / 2`
+  (`AbstractScrollArea.java:34`, `:141-142`) — not a whole 36 px row; #445 is the
+  record of getting that wrong with a `usize` counter.
+- `MenuNav::active_list` has a `world_select` arm, so the scrollbar draws and the
+  wheel arrives for free. Its length is the **post-filter** row count, so typing
+  in the search box shortens the thumb.
+- `world_list_row_visible` is a **partial-overlap** band test now, not
+  `index < visible_rows`: with a pixel offset a row straddling the band's bottom
+  edge is the normal case, and `draw_world_entry` runs inside `Quads::with_clip`
+  so it is cut exactly as vanilla's `enableScissor` cuts it. Without the clip it
+  paints into the 8 px gutter above the footer — measured, with the unclipped
+  frame as the executed control.
+- **The row cap is gone, and with it the one genuinely wrong behaviour #541
+  named**: Tab could focus a row that was not drawn. Every world now has a widget,
+  and `WorldSelectNav::scroll_to_focus` — vanilla's `setSelected` →
+  `scrollToEntry` (`AbstractSelectionList.java:53-62`, `:251-261`) — brings the
+  focused row into the band instead. A focusable row with no rect is a trap; the
+  fix is to give it a rect, not to refuse it focus.
+
+**One residue, stated rather than hidden.** `scroll_to_focus` runs on a keypress,
+which has no canvas, so it uses `world_list_window_rows()`' shortest band — the
+same trade `scroll_server_to_show` makes. That can ask for more scroll than a
+*taller* canvas allows, so `world_list_scroll_for` re-clamps at draw time through
+the same `ListSpec::model` the scrollbar uses, and the visible effect is that
+arrowing down reaches the bottom of the list slightly earlier than it strictly had
+to. Never the other way round.
+
+### Deleting a world (issue #540)
+
+Delete is live, and **the whole design is that its affirmative control is
+somewhere else**. Arming this button and treating a second press as confirmation
+is deletable-by-double-click, which for an irreversible operation is worse than no
+Delete at all — `saves.rs` carried that argument for a release with no screen to
+discharge it. The screen is [`menu/confirm.rs`](./confirm-screen.md); read its doc
+for why geometry and focus, not a timer, are what make it safe.
+
+The chain: Delete returns `WorldSelectOutcome::DeleteWorld { dir_name,
+display_name }` — a request to *ask*, carrying the folder for the delete and the
+display name for the warning, because vanilla's `selectWorld.deleteWarning`
+interpolates `getLevelName()` and quoting the wrong one of the two is how a player
+confirms the deletion of a different world. `MenuNav::apply_world_select` builds a
+fresh `ConfirmNav` and opens `Screen::Confirm`; **nothing has been deleted yet**.
+`MenuNav::apply_confirm`'s affirmative arm is the only caller of
+`saves::delete_world_in` anywhere in the shell, and both answers re-read the list
+(vanilla's `returnToScreen()` sits outside its own `if (result)`).
+
+**A corrupt world is deletable, and that took a change to this screen's selection
+model.** `LevelSummary.canDelete()` is unconditionally `true` in vanilla, and the
+world whose `level.dat` will not decode is the one you most need to remove — but
+Delete acts on the *selection*, and this screen refused to select an inactive row,
+so exactly that world was unreachable. Selection and activation are two facts now:
+a click selects **any** row, while the row's own `active` flag stays `can_play()`
+and still decides whether it can take **focus** (so a corrupt row is still never a
+tab stop) and whether Play lights up (it does not). `play_selected` gained the
+`can_play()` guard vanilla has always had in `joinWorld`
+(`WorldSelectionList.java:610`) — it was implicit while a corrupt row could not be
+selected, and making the row selectable removed that protection. The gate caught
+it on the first run.
+
+**Row 0 is selected on open**, where
 vanilla starts with `updateButtonStatus(null)` and waits for a click. With no
 keyboard selection model, requiring a click would leave a keyboard-only player
 unable to play at all; row 0 is the most recently played world, which is both the
@@ -374,6 +434,43 @@ reachable again the moment this list has a world.
   owner's report as an assertion, driven through the real screen flow (title → list →
   create → list → Play), so it fails if any hop is unwired rather than only if
   `saves.rs` is wrong.
+- `saves.rs`'s `every_delete_guard_fires_and_a_legitimate_name_is_the_control`,
+  `delete_removes_exactly_the_selected_world_and_nothing_else` and
+  `a_corrupt_world_is_still_deletable`. Each of `delete_world_in`'s three refusals
+  was **run neutered and observed to fail**, and every arm compares the saves
+  root's entry *set* before and after, so an error return that had already deleted
+  something cannot look like a refusal. The symlink arm asserts the link's
+  **target** survives, which is what says a delete cannot reach outside `saves/`.
+- `nav.rs`'s `deleting_a_world_removes_that_world_and_nothing_else` drives the
+  whole flow through the real screens (title → list → Delete → the confirmation →
+  its affirmative control) over a fixture that also holds a non-world directory
+  and a stray file, so "it left everything else alone" is a question the root can
+  ask. Its three cancel arms — the Cancel button, Escape, and a click on nothing
+  then Escape — each require the world intact, with the affirmative arm as their
+  control. `a_corrupt_world_can_be_deleted_and_never_played` and
+  `a_delete_the_filesystem_refuses_is_reported_on_the_world_list` cover the two
+  remaining paths.
+- `confirm.rs`'s own gates: the affirmative button's rect must not overlap the
+  Delete button's (both resolved through the slot machinery the draw and the
+  hit-test read, with the overlap detector shown to detect an overlap), nothing is
+  focused on open so Enter presses nothing, and the warning fits its own block
+  with a 255-character name.
+- `world_select.rs`'s `every_world_gets_a_row_and_the_list_scrolls_to_the_ones_past_the_band`
+  over a **25-world** fixture, with `shown_len() > world_list_visible_rows(480)`
+  asserted as the precondition — a fixture that fits cannot exercise scrolling at
+  all, and the `world` species of vacuous test is unreadable from the source. It
+  predicts `max_scroll` exactly (`904 - 371` = 533, where the wrong hypothesis
+  forgetting `contentHeight`'s `+ 4` is 529 — the first draft predicted 529 and
+  the measurement said 533) and walks Tab through all 25 rows requiring the
+  focused row to be inside the band at every step.
+- `render.rs`'s `a_scrolled_world_list_is_cut_at_the_band_and_stops_drawing_the_rows_above_it`
+  is the pixel half: a straddling row must paint nothing in the 8 px gutter
+  between the band's bottom and the footer's own top — both edges derived, the
+  title screen checked as a second premise — with the **same frame minus its
+  `ListSpec`** as the executed control, which takes the unclipped branch and
+  spills. It then scrolls by exactly ten rows and requires row 0's selection
+  outline to be gone from the band's first row position while that position still
+  has ink, so "nothing drew" cannot pass for "the right row drew".
 - `render.rs`'s `every_world_in_the_list_draws_inside_its_own_row_band` measures
   **each** row's own content rect. The single-row gate it replaces could not tell
   "the list drew" from "row 0 drew", which is exactly the failure a hardcoded row
@@ -441,3 +538,7 @@ canvas through `render::logical_canvas`.
   machinery this screen is the consumer of.
 - [Main menu](./main-menu.md) — the title screen this hangs off, and the server
   list beside it.
+- [Confirmation screen](./confirm-screen.md) — vanilla's `ConfirmScreen`, which
+  Delete opens.
+- [Server list](./server-list.md) — the first consumer of the scroll model this
+  screen is now the second of.

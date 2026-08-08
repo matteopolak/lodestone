@@ -107,15 +107,19 @@ pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(
     // A world-list row (the save list) is placed the same way and for the same
     // reason again — `getRowLeft()` is `floor(width / 2) - floor(270 / 2)`, two
     // integer divisions rather than `anchor + dx`. The visibility gate is
-    // load-bearing here rather than tidy: this screen's list does **not** scroll
-    // (`world_select`'s module docs), so a row past the content band's last slot
-    // must report no rect at all — otherwise it would draw over the footer
-    // buttons *and* steal their clicks.
+    // load-bearing here rather than tidy: since #541 this list **scrolls**, so a
+    // row scrolled out of the band must report no rect at all — otherwise a click
+    // below the last visible row would land on a row that is nowhere near the
+    // cursor, and (in the other direction) a focusable row could sit off-screen.
     if let Some(view) = row.world.as_ref() {
-        if !world_list_row_visible(view.index, height) {
+        // The **re-clamped** offset, not `view.scroll`: see
+        // `world_list_scroll_for`. The draw reads the same function, so the rect a
+        // click hits and the rect that was painted are one expression.
+        let scroll = world_list_scroll_for(rows, height);
+        if !world_list_row_visible(view.index, height, scroll) {
             return None;
         }
-        return Some(world_list_row_rect(view.index, width));
+        return Some(world_list_row_rect(view.index, width, scroll));
     }
     if let Some(slot) = row.slot {
         return Some(slot.resolve(width, height));
