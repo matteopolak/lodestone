@@ -81,6 +81,30 @@ pub enum BlockEntity {
 }
 
 impl BlockEntity {
+    /// This entity's `minecraft:block_entity_type` registry key — the `id` field
+    /// vanilla writes into the chunk NBT, and the key a protocol crate resolves
+    /// to the VarInt type id the chunk packet's block-entity array carries
+    /// (issue #520).
+    ///
+    /// Deliberately *not* [`menu_name`](Self::menu_name): those two agree for
+    /// the furnace family and the hopper by coincidence, and disagree for every
+    /// variant with no container screen — a composter has a real block-entity
+    /// type and no menu at all.
+    #[must_use]
+    pub fn type_id(&self) -> &str {
+        match self {
+            BlockEntity::Composter(_) => "minecraft:composter",
+            BlockEntity::Furnace(f) => match f.kind() {
+                FurnaceKind::Furnace => "minecraft:furnace",
+                FurnaceKind::Smoker => "minecraft:smoker",
+                FurnaceKind::BlastFurnace => "minecraft:blast_furnace",
+            },
+            BlockEntity::Hopper(_) => "minecraft:hopper",
+            BlockEntity::BrewingStand(_) => "minecraft:brewing_stand",
+            BlockEntity::Opaque { id, .. } => id,
+        }
+    }
+
     /// A mutable view of this entity's flat item-slot array, if it has one
     /// shaped that way — today, only [`Hopper`]. See the module doc comment's
     /// "hopper adjacency" scope note for why every other variant answers

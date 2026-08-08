@@ -39,8 +39,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use lodestone_model::BlockPos;
 use lodestone_worldgen::density::{Context, Density};
 use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
+
+use crate::block_entities::BlockEntity;
 
 pub(crate) const AIR: &str = "minecraft:air";
 pub(crate) const STONE: &str = "minecraft:stone";
@@ -54,6 +57,14 @@ pub(crate) const SECTION_ROWS: usize = 16;
 /// adopted from the real generator via [`ChunkColumn::from_generated`] always
 /// overwrites this with real per-quart biome data (issue #405).
 pub(crate) const DEFAULT_BIOME: &str = "minecraft:plains";
+
+/// Vertical quart layers in a column of `height` block rows — the one place the
+/// 3-D biome grid's Y extent is written down (issue #512). Matches
+/// [`lodestone_worldgen::overworld::BiomeCells`]'s own arithmetic exactly, which
+/// is what lets [`ChunkColumn::from_generated`] adopt its indices verbatim.
+fn y_quarts_for(height: i32) -> usize {
+    (height as usize).div_ceil(4).max(1)
+}
 
 /// Returns `true` for blocks that do not count as collidable terrain: air
 /// variants and fluids. `is_solid` is the negation of this over the block name.
@@ -131,11 +142,52 @@ pub struct ChunkColumn {
     /// `crate::random_tick::is_randomly_ticking` later cannot strand a stale
     /// persisted count.
     section_ticking: Vec<u16>,
-    /// Biome id per horizontal quart, row-major `qz * 4 + qx` (issue #405),
-    /// constant across `y` — see [`GeneratedColumn::biome_state`]'s doc for
-    /// why this port broadcasts one climate sample per quart column instead
-    /// of a full 3-D grid.
+    /// Biome id per horizontal quart, row-major `qz * 4 + qx` (issue #405).
+    ///
+    /// **The surface answer, not the column's biome.** This is what a player
+    /// standing on the column sees, and what surface material, carve and
+    /// decorate consumed on the generator side. It is deliberately *not* what
+    /// the wire or a region file's per-section biome container is built from —
+    /// see [`biome_cells`](Self::biome_cells) and issue #512.
     biome_quarts: [String; 16],
+    /// Issue #512: the distinct biome ids in this column, first-use order.
+    /// `biome_palette[0]` always exists.
+    biome_palette: Vec<String>,
+    /// Issue #512: palette indices for the full 4×4×4-per-section biome grid,
+    /// laid out `(qy * 4 + qz) * 4 + qx` with `qy` counting up from
+    /// `min_y >> 2` — the same major-to-minor order as
+    /// [`lodestone_worldgen::overworld::BiomeCells`], vanilla's own biome
+    /// container order, and `blocks` above.
+    ///
+    /// `len == biome_y_quarts() * 16`. Broadcasting [`biome_quarts`] vertically
+    /// instead of carrying this is what made `lush_caves`/`dripstone_caves`/
+    /// `deep_dark` unreachable, and what erased them from every re-saved
+    /// vanilla world.
+    biome_cells: Vec<u16>,
+    /// Issue #520: block entities living in this column, at **absolute**
+    /// positions.
+    ///
+    /// Populated by [`from_generated`](Self::from_generated) (a generated bee
+    /// nest and its occupants) and by `crate::region_source`'s load path (so a
+    /// chest read off disk reaches the client, not only the tick loop's
+    /// registry). This is the list a `ServerProtocol::encode_chunk` writes into
+    /// the chunk packet's block-entity array; the *save* path takes its own
+    /// list from the live [`crate::block_entities::BlockEntityRegistry`]
+    /// instead, because that one is newer.
+    block_entities: Vec<(BlockPos, BlockEntity)>,
+    /// Issue #514's S1: the structure starts whose **origin** is this column, and
+    /// this column's `structures.References`.
+    ///
+    /// Empty unless [`OverworldChunkSource::column`] filled them — they are not
+    /// part of [`GeneratedColumn`] because they are answered per *chunk
+    /// coordinate*, which a column does not carry, so the seam is the chunk
+    /// source rather than `from_generated`. `crate::chunk_nbt` is the only
+    /// consumer: they go in a region file's `structures` compound and nowhere on
+    /// the wire (there is no clientbound structure packet).
+    structure_starts: Vec<std::sync::Arc<lodestone_worldgen::structure::StructureStart>>,
+    /// Structure id → packed origin-chunk keys. See
+    /// [`structure_starts`](Self::structure_starts).
+    structure_references: std::collections::BTreeMap<String, Vec<i64>>,
 }
 
 impl ChunkColumn {
@@ -160,14 +212,44 @@ impl ChunkColumn {
             palette_ticking: vec![crate::random_tick::is_randomly_ticking(AIR)],
             section_ticking: vec![0u16; (height as usize).div_ceil(SECTION_ROWS)],
             biome_quarts: std::array::from_fn(|_| DEFAULT_BIOME.to_string()),
+            biome_palette: vec![DEFAULT_BIOME.to_string()],
+            biome_cells: vec![0u16; y_quarts_for(height) * 16],
+            block_entities: Vec::new(),
+            structure_starts: Vec::new(),
+            structure_references: std::collections::BTreeMap::new(),
         }
     }
 
-    /// Adopts a [`GeneratedColumn`] from the real worldgen pipeline. Zero-copy:
-    /// the palette and block grid are moved as-is (their index layout is the
-    /// same), including the real per-quart biome data (issue #405).
+    /// Adopts a [`GeneratedColumn`] from the real worldgen pipeline. Zero-copy
+    /// for the bulk: the palette and block grid are moved as-is (their index
+    /// layout is the same), including the real per-quart biome data (issue
+    /// #405).
+    ///
+    /// The 3-D biome grid (issue #512) and the block-entity list (issue #520)
+    /// are *copied* rather than moved, because `GeneratedColumn::into_raw`
+    /// deliberately does not carry them — see that method's doc comment. Both
+    /// are small: a column's biome grid is `height / 4 * 16` `u16`s over a
+    /// handful of palette entries (~3 KB), and nearly every column has zero
+    /// block entities.
     #[must_use]
     pub fn from_generated(column: GeneratedColumn) -> Self {
+        let cells = column.biome_cells();
+        let biome_palette = cells.palette().to_vec();
+        let y_quarts = cells.y_quarts();
+        let mut biome_cells = Vec::with_capacity(y_quarts * 16);
+        for qy in 0..y_quarts {
+            for qz in 0..4usize {
+                for qx in 0..4usize {
+                    biome_cells.push(cells.index_at_quart(qx, qy, qz));
+                }
+            }
+        }
+        let block_entities = column
+            .block_entities()
+            .iter()
+            .map(crate::chunk_nbt::generated_block_entity)
+            .collect();
+
         let (min_y, height, palette, blocks, biome_quarts) = column.into_raw();
         debug_assert_eq!(
             palette.first().map(String::as_str),
@@ -188,17 +270,143 @@ impl ChunkColumn {
             palette_ticking: Vec::new(),
             section_ticking: Vec::new(),
             biome_quarts,
+            biome_palette,
+            biome_cells,
+            block_entities,
+            structure_starts: Vec::new(),
+            structure_references: std::collections::BTreeMap::new(),
         };
         column.recalc_ticking_counts();
+        debug_assert_eq!(
+            column.biome_cells.len(),
+            column.biome_y_quarts() * 16,
+            "generated biome grid must span the column's own height"
+        );
         column
     }
 
-    /// Biome id at local `(x, z)` in `0..16` — quart resolution, same value
-    /// for every `y` at this `(x, z)` (issue #405).
+    /// Biome id at local `(x, z)` in `0..16` — quart resolution, the column's
+    /// **surface** answer, the same value for every `y` (issue #405).
+    ///
+    /// **Wrong question for anything with a `y`** — underground tint, fog,
+    /// spawn rules, a wire or region-file biome container. Use
+    /// [`biome_state_at`](Self::biome_state_at) for those; see issue #512.
     #[must_use]
     pub fn biome_state(&self, x: i32, z: i32) -> &str {
         debug_assert!((0..16).contains(&x) && (0..16).contains(&z));
         &self.biome_quarts[((z >> 2) * 4 + (x >> 2)) as usize]
+    }
+
+    /// Number of vertical quart layers in the 3-D biome grid — `height / 4`,
+    /// rounded up, and always at least one.
+    #[must_use]
+    pub fn biome_y_quarts(&self) -> usize {
+        y_quarts_for(self.height)
+    }
+
+    /// The distinct biome ids in this column, first-use order — what
+    /// [`biome_cell_index`](Self::biome_cell_index) indexes into. A section
+    /// encoder resolves each of these to a registry id once and then indexes,
+    /// rather than resolving per cell.
+    #[must_use]
+    pub fn biome_cell_palette(&self) -> &[String] {
+        &self.biome_palette
+    }
+
+    /// Palette index at quart `(qx, qy, qz)`, `qy` counting up from the bottom
+    /// of the column. Every coordinate is clamped into range, matching
+    /// [`lodestone_worldgen::overworld::BiomeCells::index_at_quart`].
+    #[must_use]
+    pub fn biome_cell_index(&self, qx: usize, qy: usize, qz: usize) -> u16 {
+        let qx = qx.min(3);
+        let qz = qz.min(3);
+        let qy = qy.min(self.biome_y_quarts().saturating_sub(1));
+        self.biome_cells[(qy * 4 + qz) * 4 + qx]
+    }
+
+    /// Biome id at quart `(qx, qy, qz)` (issue #512).
+    #[must_use]
+    pub fn biome_cell(&self, qx: usize, qy: usize, qz: usize) -> &str {
+        &self.biome_palette[self.biome_cell_index(qx, qy, qz) as usize]
+    }
+
+    /// Biome id at a block position — local `x`/`z` in `0..16`, world `y`
+    /// (issue #512). Out-of-column `y` clamps to the nearest layer, as every
+    /// other accessor here does.
+    #[must_use]
+    pub fn biome_state_at(&self, x: i32, y: i32, z: i32) -> &str {
+        let qy = ((y - self.min_y) >> 2).max(0) as usize;
+        self.biome_cell((x >> 2) as usize, qy, (z >> 2) as usize)
+    }
+
+    /// Overwrites one biome quart cell, interning `name` into the cell palette.
+    ///
+    /// The counterpart of [`set_biome_quarts`](Self::set_biome_quarts) for the
+    /// 3-D grid, and only `crate::chunk_nbt` calls it — restoring the
+    /// per-section biome containers read off disk. Out-of-range coordinates are
+    /// a silent no-op rather than a panic, because the caller's `qy` comes from
+    /// a section index in a file we did not write.
+    pub fn set_biome_cell(&mut self, qx: usize, qy: usize, qz: usize, name: &str) {
+        if qx >= 4 || qz >= 4 || qy >= self.biome_y_quarts() {
+            return;
+        }
+        let id = match self.biome_palette.iter().position(|p| p == name) {
+            Some(i) => i as u16,
+            None => {
+                self.biome_palette.push(name.to_string());
+                (self.biome_palette.len() - 1) as u16
+            }
+        };
+        self.biome_cells[(qy * 4 + qz) * 4 + qx] = id;
+    }
+
+    /// Every block entity in this column, at its **absolute** position (issue
+    /// #520). Empty for the overwhelming majority of columns.
+    #[must_use]
+    pub fn block_entities(&self) -> &[(BlockPos, BlockEntity)] {
+        &self.block_entities
+    }
+
+    /// Replaces this column's block-entity list.
+    ///
+    /// `crate::region_source` calls it after reading a chunk off disk, so the
+    /// column a client is served carries the same entities the tick-loop
+    /// registry just took. Nothing derives block state from this list, so it
+    /// cannot desync the block grid.
+    pub fn set_block_entities(&mut self, entities: Vec<(BlockPos, BlockEntity)>) {
+        self.block_entities = entities;
+    }
+
+    /// The structure starts originating in this column (issue #514's S1).
+    #[must_use]
+    pub fn structure_starts(
+        &self,
+    ) -> &[std::sync::Arc<lodestone_worldgen::structure::StructureStart>] {
+        &self.structure_starts
+    }
+
+    /// This column's `structures.References`: structure id → packed origin-chunk
+    /// keys.
+    #[must_use]
+    pub fn structure_references(&self) -> &std::collections::BTreeMap<String, Vec<i64>> {
+        &self.structure_references
+    }
+
+    /// Attaches the structure placement answer for this column's own chunk
+    /// coordinates.
+    ///
+    /// Called by [`OverworldChunkSource::column`], which is the only place that
+    /// holds both the column and the `(cx, cz)` the generator needs. Purely
+    /// additive: nothing derives a block from this, so a source that does not
+    /// call it serves a column whose `structures` compound is empty — which is
+    /// what every source other than the real overworld generator does.
+    pub fn set_structures(
+        &mut self,
+        starts: Vec<std::sync::Arc<lodestone_worldgen::structure::StructureStart>>,
+        references: std::collections::BTreeMap<String, Vec<i64>>,
+    ) {
+        self.structure_starts = starts;
+        self.structure_references = references;
     }
 
     #[inline]
@@ -719,6 +927,20 @@ impl OverworldChunkSource {
     pub fn generator(&self) -> &OverworldGenerator {
         &self.generator
     }
+
+    /// Copies the generator's structure placement answer for `(cx, cz)` onto a
+    /// freshly built column (issue #514's S1).
+    ///
+    /// Both calls are memoised store reads on the two stages that already ran
+    /// above terrain (`structure_starts` / `structure_refs`), so this adds no
+    /// generation work — it only moves an answer the generator already computed
+    /// somewhere the NBT writer can see it. Without it the placement engine is an
+    /// island: fully built, oracle-verified, and reaching zero chunks.
+    fn attach_structures(&self, column: &mut ChunkColumn, cx: i32, cz: i32) {
+        let starts = self.generator.structure_starts(cx, cz);
+        let references = self.generator.structure_references(cx, cz);
+        column.set_structures(starts, references);
+    }
 }
 
 impl std::fmt::Debug for OverworldChunkSource {
@@ -735,7 +957,9 @@ impl ChunkSource for OverworldChunkSource {
             return edited.clone();
         }
         drop(edits);
-        ChunkColumn::from_generated(self.generator.column(cx, cz))
+        let mut column = ChunkColumn::from_generated(self.generator.column(cx, cz));
+        self.attach_structures(&mut column, cx, cz);
+        column
     }
 
     // There is no cheaper single-block path here: the generator only answers
@@ -759,9 +983,16 @@ impl ChunkSource for OverworldChunkSource {
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
         let mut edits = self.edits.lock().expect("chunk edit cache lock poisoned");
-        let column = edits
-            .entry((cx, cz))
-            .or_insert_with(|| ChunkColumn::from_generated(self.generator.column(cx, cz)));
+        let column = edits.entry((cx, cz)).or_insert_with(|| {
+            let mut column = ChunkColumn::from_generated(self.generator.column(cx, cz));
+            // Same attachment as `column()`, because an edited column is the one
+            // that gets *saved* — dropping the structures here would delete a
+            // village's `starts` from the first chunk a player breaks a block in.
+            let starts = self.generator.structure_starts(cx, cz);
+            let references = self.generator.structure_references(cx, cz);
+            column.set_structures(starts, references);
+            column
+        });
         column.set_block(lx, y, lz, name);
     }
 }

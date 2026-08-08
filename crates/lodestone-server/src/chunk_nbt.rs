@@ -110,6 +110,7 @@ use std::collections::HashMap;
 
 use lodestone_core::{Nbt, NbtTag};
 use lodestone_model::{BlockPos, ItemStack};
+use lodestone_worldgen::overworld::block_entities::GeneratedBlockEntity;
 
 use crate::block_entities::BlockEntity;
 use crate::brewing::{Bottle, BottleKind, BrewingStand};
@@ -383,15 +384,17 @@ pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &Chunk
             block_states.push(("data".to_owned(), Nbt::LongArray(data)));
         }
 
-        // Biomes are one climate sample per horizontal quart, constant in y
-        // (issue #405 — see `ChunkColumn::biome_state`), so all four y-layers
-        // of the 4×4×4 grid repeat the same 16 values.
-        let quarts = column.biome_quarts();
+        // Biomes are a real 4×4×4 grid per section (issue #512), read out of the
+        // column's own 3-D cells. This used to repeat the 16 surface quarts
+        // across all four y-layers, which is why re-saving a vanilla world
+        // erased every `lush_caves`/`dripstone_caves`/`deep_dark` cell it held:
+        // the surface value overwrote them. The cell order — `(qy * 4 + qz) * 4
+        // + qx` — is vanilla's biome container order and `ChunkColumn`'s alike,
+        // so `cell` decomposes directly.
         let mut biome_local: Vec<&str> = Vec::new();
         let mut biome_indices = Vec::with_capacity(BIOME_CELLS);
         for cell in 0..BIOME_CELLS {
-            let quart = cell % 16;
-            let name = quarts[quart].as_str();
+            let name = column.biome_cell(cell % 4, s * 4 + cell / 16, (cell / 4) % 4);
             let index = biome_local
                 .iter()
                 .position(|b| *b == name)
@@ -462,13 +465,83 @@ pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &Chunk
             "fluid_ticks".to_owned(),
             nbt_list(extras.fluid_ticks.iter().map(saved_tick_to_nbt).collect()),
         ),
-        (
-            "structures".to_owned(),
-            Nbt::Compound(vec![
-                ("References".to_owned(), Nbt::Compound(Vec::new())),
-                ("starts".to_owned(), Nbt::Compound(Vec::new())),
-            ]),
-        ),
+        ("structures".to_owned(), structures_to_nbt(column)),
+    ])
+}
+
+/// The chunk's `structures` compound (issue #514's S1): `starts` for the
+/// structures whose origin is this chunk, `References` for the ones it merely
+/// participates in.
+///
+/// **This shipped as two permanently empty compounds** — the same "populated
+/// empty" defect as the omitted heightmaps: a field that exists, is well-formed,
+/// and always says nothing, so no reader ever errors and the absence is invisible
+/// until you look for a village that should be there.
+///
+/// Field names and shapes are vanilla's `StructureStart.createTag` /
+/// `SerializableChunkData`: `starts` is keyed by structure id, each value
+/// `{id, ChunkX, ChunkZ, references, Children}` — with `id: "INVALID"` for an
+/// absent start, which is why an *incomplete* start must not be written at all
+/// rather than written empty (see
+/// [`StructureStart::pieces_complete`](lodestone_worldgen::structure::StructureStart::pieces_complete);
+/// the generator's own `structure_starts` already filters those out). Each child
+/// is `{id, BB, O, GD}` plus `Template` for a template-driven piece; `BB` is the
+/// six-int `[minx, miny, minz, maxx, maxy, maxz]` array and `O` is `-1` for an
+/// unoriented piece.
+#[must_use]
+fn structures_to_nbt(column: &ChunkColumn) -> Nbt {
+    let starts: Vec<(String, Nbt)> = column
+        .structure_starts()
+        .iter()
+        .map(|start| {
+            let children: Vec<Nbt> = start
+                .pieces
+                .iter()
+                .map(|piece| {
+                    let mut fields = vec![
+                        ("id".to_owned(), Nbt::String(piece.id.clone())),
+                        (
+                            "BB".to_owned(),
+                            Nbt::IntArray(vec![
+                                piece.bounding_box.min[0],
+                                piece.bounding_box.min[1],
+                                piece.bounding_box.min[2],
+                                piece.bounding_box.max[0],
+                                piece.bounding_box.max[1],
+                                piece.bounding_box.max[2],
+                            ]),
+                        ),
+                        ("O".to_owned(), Nbt::Int(piece.orientation.unwrap_or(-1))),
+                        ("GD".to_owned(), Nbt::Int(piece.gen_depth)),
+                    ];
+                    if let Some(template) = &piece.template {
+                        fields.push(("Template".to_owned(), Nbt::String(template.clone())));
+                    }
+                    Nbt::Compound(fields)
+                })
+                .collect();
+            (
+                start.structure.clone(),
+                Nbt::Compound(vec![
+                    ("id".to_owned(), Nbt::String(start.structure.clone())),
+                    ("ChunkX".to_owned(), Nbt::Int(start.chunk_x)),
+                    ("ChunkZ".to_owned(), Nbt::Int(start.chunk_z)),
+                    ("references".to_owned(), Nbt::Int(start.references)),
+                    ("Children".to_owned(), nbt_list(children)),
+                ]),
+            )
+        })
+        .collect();
+
+    let references: Vec<(String, Nbt)> = column
+        .structure_references()
+        .iter()
+        .map(|(id, packed)| (id.clone(), Nbt::LongArray(packed.clone())))
+        .collect();
+
+    Nbt::Compound(vec![
+        ("References".to_owned(), Nbt::Compound(references)),
+        ("starts".to_owned(), Nbt::Compound(starts)),
     ])
 }
 
@@ -560,10 +633,16 @@ pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn
             );
         }
 
-        // Biomes: take the y=0 layer of the lowest section that carries one,
-        // matching this column type's one-sample-per-quart model.
-        if section_index == 0
-            && let Some(biomes) = field(section, "biomes")
+        // Biomes: every section's full 4×4×4 container, into the column's 3-D
+        // grid (issue #512). Reading only section 0's y=0 layer — what this did
+        // before — is the load half of the cave-biome erasure: the deepest
+        // section's value was broadcast over the whole column, and every cave
+        // biome above it was gone before the writer ever ran.
+        //
+        // The surface array (`set_biome_quarts`) still comes from the lowest
+        // section that carries one. It is not the same question as the grid and
+        // nothing derives one from the other, so it is left exactly as it was.
+        if let Some(biomes) = field(section, "biomes")
             && let Some(Nbt::List {
                 elements: biome_palette,
                 ..
@@ -587,12 +666,26 @@ pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn
                 )?,
                 Some(_) => return Err(bad(&format!("sections[{i}].biomes.data"))),
             };
-            let mut quarts: Vec<String> = Vec::with_capacity(16);
-            for quart in 0..16 {
-                let index = cells[quart] as usize;
-                quarts.push(names.get(index).cloned().unwrap_or_default());
+            for (cell, &index) in cells.iter().enumerate() {
+                let name = names.get(index as usize).map_or("", String::as_str);
+                if !name.is_empty() {
+                    column.set_biome_cell(
+                        cell % 4,
+                        section_index as usize * 4 + cell / 16,
+                        (cell / 4) % 4,
+                        name,
+                    );
+                }
             }
-            column.set_biome_quarts(&quarts);
+
+            if section_index == 0 {
+                let mut quarts: Vec<String> = Vec::with_capacity(16);
+                for quart in 0..16 {
+                    let index = cells[quart] as usize;
+                    quarts.push(names.get(index).cloned().unwrap_or_default());
+                }
+                column.set_biome_quarts(&quarts);
+            }
         }
     }
 
@@ -866,14 +959,92 @@ const COMPOSTER_ID: &str = "lodestone:composter";
 /// vanilla's codec, which reads only the keys it knows.
 const RECIPES_USED_FIELD: &str = "lodestone:recipes_used";
 
+/// Turns one [`GeneratedBlockEntity`] into the `(position, block entity)` pair
+/// [`ChunkColumn`] carries (issue #520).
+///
+/// The generator's typed enum becomes a [`BlockEntity::Opaque`] holding the full
+/// vanilla save-form compound: this crate has no beehive *simulation* to put the
+/// occupants into, and `Opaque` is exactly the variant for "a real block entity
+/// we preserve verbatim but do not tick". Both consumers — the region writer
+/// ([`block_entity_to_nbt`], which returns an `Opaque`'s tree unchanged) and the
+/// chunk packet's block-entity array — want that same tree.
+///
+/// # Schema provenance
+///
+/// `BeehiveBlockEntity.saveAdditional` stores one field, `bees`, through
+/// `Occupant.LIST_CODEC` (`BeehiveBlockEntity.java:303-306`), whose records are
+/// `{entity_data, ticks_in_hive, min_ticks_in_hive}` (`:366-374`). `entity_data`
+/// is a `TypedEntityData` whose codec writes the type under the key `"id"` into
+/// the entity tag (`TypedEntityData.java:35`, `TYPE_TAG`), and every generated
+/// occupant's tag is an otherwise-empty compound (`Occupant.create`, `:397`), so
+/// `{id: "minecraft:bee"}` is the whole of it — not a guess about what a bee's
+/// NBT looks like.
+///
+/// `flower_pos` is `storeNullable` and a generated nest has none, so it is
+/// omitted rather than written null — which is what vanilla's own writer does.
+#[must_use]
+pub fn generated_block_entity(entity: &GeneratedBlockEntity) -> (BlockPos, BlockEntity) {
+    let (x, y, z) = entity.position();
+    let id = entity.type_id().to_owned();
+    let mut fields: Vec<(String, Nbt)> = vec![
+        ("id".to_owned(), Nbt::String(id.clone())),
+        ("x".to_owned(), Nbt::Int(x)),
+        ("y".to_owned(), Nbt::Int(y)),
+        ("z".to_owned(), Nbt::Int(z)),
+        ("keepPacked".to_owned(), Nbt::Byte(0)),
+        ("components".to_owned(), Nbt::Compound(Vec::new())),
+    ];
+    match entity {
+        GeneratedBlockEntity::Beehive { bees, .. } => {
+            fields.push((
+                "bees".to_owned(),
+                nbt_list(
+                    bees.iter()
+                        .map(|bee| {
+                            Nbt::Compound(vec![
+                                (
+                                    "entity_data".to_owned(),
+                                    Nbt::Compound(vec![(
+                                        "id".to_owned(),
+                                        Nbt::String("minecraft:bee".to_owned()),
+                                    )]),
+                                ),
+                                ("ticks_in_hive".to_owned(), Nbt::Int(bee.ticks_in_hive)),
+                                (
+                                    "min_ticks_in_hive".to_owned(),
+                                    Nbt::Int(bee.min_ticks_in_hive),
+                                ),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ));
+        }
+    }
+    (
+        BlockPos::new(x, y, z),
+        BlockEntity::Opaque {
+            id,
+            nbt: Nbt::Compound(fields),
+        },
+    )
+}
+
 /// Encodes one block entity as the chunk NBT list element vanilla holds.
 ///
 /// The `x`/`y`/`z` are **absolute** and `keepPacked` is `0`, both matching
 /// every real entry measured. `components` is written as an empty compound
 /// because vanilla writes one unconditionally and this crate models no
 /// block-entity components.
+///
+/// `pub` because the **chunk packet** wants the same tree the region file does:
+/// a `ServerProtocol::encode_chunk` writes it as the block entity's network NBT
+/// (issue #520). The extra `id`/`x`/`y`/`z`/`keepPacked` fields are redundant
+/// there — position and type travel in the record header — but harmless, since
+/// both our own decoder and vanilla's `BlockEntity.loadWithComponents` read the
+/// fields they know and ignore the rest.
 #[must_use]
-fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
+pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
     let (id, mut extra): (&str, Vec<(String, Nbt)>) = match entity {
         BlockEntity::Opaque { nbt, .. } => return nbt.clone(),
         BlockEntity::Furnace(f) => {
