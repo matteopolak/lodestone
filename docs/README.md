@@ -415,6 +415,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   the render substrate — `crates/lodestone-render/src/glint.rs` and
   `crates/lodestone-render/src/shaders/glint.wgsl` — plus what still has to happen
   in `lodestone-shell` for a player to see it.
+- [Entity and player persistence](./entity-and-player-persistence.md) — The wiring
+  that makes mobs, dropped items and the player's own inventory survive quitting a
+  Lodestone world. Issues [#302](https://github.com/matteopolak/lodestone/issues/302)
+  (per-player `.dat`), [#303](https://github.com/matteopolak/lodestone/issues/303)
+  (per-chunk entity storage) and
+  [#305](https://github.com/matteopolak/lodestone/issues/305) (the `DataVersion`
+  decision). It sits alongside [`world-save-load.md`](./world-save-load.md), which
+  covers terrain, block entities and scheduled ticks — everything *except* the
+  things that move.
 - [Entity state as ECS components](./entity-components.md) — Every non-player
   entity's state — position, rotation, health, equipment, the item a drop is made
   of, and the render-side interpolation that turns 20 Hz reports into per-frame
