@@ -124,8 +124,10 @@ use crate::rng::PositionalRandomFactory;
 
 mod chunk;
 mod spline;
+pub mod xz_memo;
 pub use chunk::NoiseChunkSampler;
 pub use spline::{Spline, SplinePoint};
+pub use xz_memo::XzMemoId;
 
 /// Noise parameters loaded from a `worldgen/noise/*.json` file.
 #[derive(Debug, Clone)]
@@ -415,27 +417,32 @@ pub enum Density {
         /// Cache slot for the block-field sampler.
         slot: usize,
     },
-    /// `flat_cache` — for point evaluation this is transparent (module
-    /// `## Caching`: same `(x, z)`-only value shape as `cache_2d`, but a real
-    /// cache here measured as a net *regression*, so it deliberately stays
-    /// uncached); for the block field it snaps XZ to the quart grid and
-    /// forces `y = 0` (see [`chunk`], unaffected by this module's caching).
+    /// `flat_cache` — in the block field it snaps XZ to the quart grid and forces
+    /// `y = 0` (see [`chunk`]); in the point interpreter it is transparent
+    /// *value-wise* and carries a `(node, x, z)` memo (see [`xz_memo`], and
+    /// `## Caching` for the measurement).
     FlatCache {
         /// Wrapped function.
         inner: Box<Density>,
         /// Cache slot for the block-field sampler.
         slot: usize,
+        /// Point-interpreter memo id, or [`XzMemoId::NONE`] if
+        /// [`Density::is_xz_pure`] declined this subtree.
+        memo: XzMemoId,
     },
-    /// `cache_2d` — **transparent in both evaluators** since §12.132 retired its
-    /// 0.12%-hit-rate memo (module `## Caching` carries the measurement and the
-    /// two independent value-invariance arguments). Kept as its own variant
-    /// rather than folded into [`Marker`](Self::Marker) so
+    /// `cache_2d` — transparent *value-wise* in both evaluators (the
+    /// `Mutex`-backed one-slot memo §12.132 measured at a 0.12% hit rate is still
+    /// gone; module `## Caching` carries both measurements), and in the point
+    /// interpreter it now carries the same `(node, x, z)` memo `flat_cache` does.
+    /// Kept as its own variant rather than folded into [`Marker`](Self::Marker) so
     /// [`kind_index`](Self::kind_index) — and therefore `engine::graph`'s
     /// `OpKind` discriminants — do not shift, and so
     /// `Program::cache_2d_under_leaves` still has something to count.
     Cache2D {
         /// Wrapped function.
         inner: Box<Density>,
+        /// Point-interpreter memo id, or [`XzMemoId::NONE`].
+        memo: XzMemoId,
     },
     /// A transparent marker (`cache_once`, `cache_all_in_cell`,
     /// `blend_density`): mathematically identical to its wrapped function in
@@ -691,10 +698,17 @@ impl Density {
                 out.push(min.to_bits());
                 out.push(max.to_bits());
             }
-            // `slot` excluded — see the doc comment.
+            // `slot` and `memo` excluded — see the doc comment. Both are indices
+            // into an evaluator's memo, not part of the denoted function, and both
+            // differ between two copies of one subtree that must still share a
+            // compiled node.
             Density::Interpolated { inner, slot: _ }
-            | Density::FlatCache { inner, slot: _ }
-            | Density::Cache2D { inner } => inner.write_signature(out),
+            | Density::FlatCache {
+                inner,
+                slot: _,
+                memo: _,
+            }
+            | Density::Cache2D { inner, memo: _ } => inner.write_signature(out),
             Density::Noise {
                 noise,
                 xz_scale,
@@ -763,10 +777,110 @@ impl Density {
         }
     }
 
+    /// Whether **no** node in this subtree reads `ctx.y`, so that its value at
+    /// `(x, y, z)` is bit-identical for every `y`.
+    ///
+    /// This is the licence for [`xz_memo`]: a `flat_cache`/`cache_2d` node only
+    /// gets a memo id if this returns `true`, which makes the memo
+    /// value-invariant **structurally** rather than because 26.2's data happens to
+    /// put xz-only subtrees under those markers. A datapack cannot defeat it.
+    ///
+    /// # How to extend it
+    ///
+    /// It is a whitelist and it must stay one: the default for anything new is
+    /// "reads y". The three arms worth reading twice, because each is a place a
+    /// plausible simplification is wrong:
+    ///
+    /// * **`shift_a`/`shift_b` are xz-pure and `shift` is not.** `shift_a` samples
+    ///   at `(x, 0, z)` and `shift_b` at `(z, x, 0)` — both pass a literal `0.0`
+    ///   where `y` would go — while `shift` passes `ctx.y`.
+    /// * **`shifted_noise` needs `y_scale == 0.0` *and* a constant `shift_y` that
+    ///   is not `-0.0`.** The sampled ordinate is `f64::from(y) * y_scale +
+    ///   shift_y`, and `f64::from(y) * 0.0` is `-0.0` for negative `y` and `+0.0`
+    ///   otherwise. `-0.0 + c` equals `+0.0 + c` for every `c` except `c == -0.0`
+    ///   (where the results are `-0.0` and `+0.0`), so the sum is bit-identical
+    ///   across `y` exactly when `shift_y` is a constant other than `-0.0`.
+    ///   Requiring a *constant* rather than merely an xz-pure `shift_y` is what
+    ///   makes that check possible at build time.
+    /// * **Plain `noise` is excluded even at `y_scale == 0.0`.** Same `±0.0`
+    ///   question with nothing to absorb it, and the answer would depend on
+    ///   `ImprovedNoise`'s internals rather than on IEEE addition. It is worth
+    ///   0.04% of point visits, so the conservative answer costs nothing.
+    ///
+    /// `find_top_surface` is excluded because its `upper_bound` is evaluated at the
+    /// query context and may read `y`; `old_blended_noise` and
+    /// `y_clamped_gradient` read `y` directly; `interpolated` is excluded because
+    /// this is only ever asked about the *point* semantics and a nested
+    /// `interpolated` is transparent there, so it would have to be
+    /// `inner.is_xz_pure()` — which is true and harmless, but no `interpolated`
+    /// node is ever memoised, so the arm would be dead.
+    #[must_use]
+    pub fn is_xz_pure(&self) -> bool {
+        match self {
+            Density::Const(_)
+            | Density::BlendAlpha
+            | Density::BlendOffset
+            | Density::Beardifier
+            | Density::ShiftA(_)
+            | Density::ShiftB(_)
+            | Density::EndIslands(_) => true,
+
+            Density::YClampedGradient { .. }
+            | Density::Shift(_)
+            | Density::Noise { .. }
+            | Density::Blended(_)
+            | Density::FindTopSurface { .. }
+            | Density::Interpolated { .. } => false,
+
+            Density::Add(a, b) | Density::Mul(a, b) | Density::Min(a, b) | Density::Max(a, b) => {
+                a.is_xz_pure() && b.is_xz_pure()
+            }
+            Density::Abs(a)
+            | Density::Square(a)
+            | Density::Cube(a)
+            | Density::HalfNegative(a)
+            | Density::QuarterNegative(a)
+            | Density::Squeeze(a)
+            | Density::Invert(a)
+            | Density::Marker(a) => a.is_xz_pure(),
+            Density::Clamp { input, .. } => input.is_xz_pure(),
+            Density::FlatCache { inner, .. } | Density::Cache2D { inner, .. } => inner.is_xz_pure(),
+            Density::ShiftedNoise {
+                shift_x,
+                shift_y,
+                shift_z,
+                y_scale,
+                ..
+            } => {
+                *y_scale == 0.0
+                    && matches!(**shift_y, Density::Const(c) if c.to_bits() != (-0.0f64).to_bits())
+                    && shift_x.is_xz_pure()
+                    && shift_z.is_xz_pure()
+            }
+            Density::RangeChoice {
+                input,
+                when_in_range,
+                when_out_of_range,
+                ..
+            } => input.is_xz_pure() && when_in_range.is_xz_pure() && when_out_of_range.is_xz_pure(),
+            Density::IntervalSelect {
+                input, functions, ..
+            } => input.is_xz_pure() && functions.iter().all(Density::is_xz_pure),
+            Density::Spline(s) => s.is_xz_pure(),
+        }
+    }
+
     /// Evaluates the node at `ctx`.
     #[must_use]
     pub fn compute(&self, ctx: Context) -> f64 {
         crate::counters::bump_density_point_compute(self.kind_index());
+        crate::engine::redundancy_probe::visit_point(
+            std::ptr::from_ref(self).cast::<()>(),
+            self.kind_index(),
+            ctx.x,
+            ctx.y,
+            ctx.z,
+        );
         match self {
             Density::Const(v) => *v,
             Density::BlendAlpha => 1.0,
@@ -807,10 +921,25 @@ impl Density {
             }
             Density::Invert(a) => 1.0 / a.compute(ctx),
             Density::Clamp { input, min, max } => clamp(input.compute(ctx), *min, *max),
-            Density::Interpolated { inner, .. }
-            | Density::Marker(inner)
-            | Density::FlatCache { inner, .. }
-            | Density::Cache2D { inner } => inner.compute(ctx),
+            Density::Interpolated { inner, .. } | Density::Marker(inner) => inner.compute(ctx),
+            // The two memoised markers. Value-transparent, exactly as they were —
+            // a hit returns the value this same node computed at this same
+            // `(x, z)`, and `memo` is only ever set when
+            // [`Self::is_xz_pure`] proved the subtree cannot read `ctx.y`. Skipping
+            // the subtree is safe here and would not be in `engine::field`, where a
+            // skipped subtree can contain a cache-slot write.
+            Density::FlatCache { inner, memo, .. } | Density::Cache2D { inner, memo } => {
+                if memo.is_some() {
+                    if let Some(v) = xz_memo::get(*memo, ctx.x, ctx.z) {
+                        return v;
+                    }
+                    let v = inner.compute(ctx);
+                    xz_memo::put(*memo, ctx.x, ctx.z, v);
+                    v
+                } else {
+                    inner.compute(ctx)
+                }
+            }
             Density::Noise {
                 noise,
                 xz_scale,
@@ -932,6 +1061,28 @@ pub struct Builder<'a> {
     /// pass relies on — but it is ~35,000 wasted draws per builder, and sharing
     /// the `Arc` also lets the compiler's leaf table hold one copy.
     end_islands: std::cell::OnceCell<std::sync::Arc<crate::noise::EndIslandNoise>>,
+}
+
+/// The memo id a `flat_cache`/`cache_2d` over `inner` should carry: a fresh id if
+/// the subtree provably never reads `ctx.y`, [`XzMemoId::NONE`] otherwise.
+///
+/// A free function rather than a `Builder` method because
+/// `engine::graph`'s fixtures build these nodes without a `Builder`, and a node
+/// built without an id would silently never be memoised — a whole-feature island
+/// with no symptom other than a hit rate of zero.
+///
+/// **Ids are allocated per constructed node, not per distinct function**, so the
+/// duplicated copies `Builder`'s reference expansion produces do *not* share memo
+/// entries. That is the conservative direction: `engine::graph`'s interner
+/// collapses the duplicates to one compiled node anyway, and letting two
+/// separately-built nodes share an id would need the same structural-equality
+/// argument the interner makes, one layer earlier.
+pub(crate) fn memo_id_for(inner: &Density) -> XzMemoId {
+    if inner.is_xz_pure() {
+        XzMemoId::allocate()
+    } else {
+        XzMemoId::NONE
+    }
 }
 
 /// `Noises.TEMPERATURE_NETHER` — one of the two ids `RandomState` special-cases.
@@ -1107,13 +1258,21 @@ impl<'a> Builder<'a> {
                 inner: self.child(node, "argument"),
                 slot: self.next_slot(),
             },
-            "flat_cache" => Density::FlatCache {
-                inner: self.child(node, "argument"),
-                slot: self.next_slot(),
-            },
-            "cache_2d" => Density::Cache2D {
-                inner: self.child(node, "argument"),
-            },
+            "flat_cache" => {
+                let inner = self.child(node, "argument");
+                Density::FlatCache {
+                    memo: memo_id_for(&inner),
+                    inner,
+                    slot: self.next_slot(),
+                }
+            }
+            "cache_2d" => {
+                let inner = self.child(node, "argument");
+                Density::Cache2D {
+                    memo: memo_id_for(&inner),
+                    inner,
+                }
+            }
             "cache_once" | "cache_all_in_cell" | "blend_density" => {
                 Density::Marker(self.child(node, "argument"))
             }
@@ -1283,9 +1442,19 @@ mod kind_index_tests {
                 Density::Interpolated { inner: b(), slot: 0 },
                 "interpolated",
             ),
-            (Density::FlatCache { inner: b(), slot: 0 }, "flat_cache"),
             (
-                Density::Cache2D { inner: b() },
+                Density::FlatCache {
+                    inner: b(),
+                    slot: 0,
+                    memo: crate::density::XzMemoId::NONE,
+                },
+                "flat_cache",
+            ),
+            (
+                Density::Cache2D {
+                    inner: b(),
+                    memo: crate::density::XzMemoId::NONE,
+                },
                 "cache_2d",
             ),
             (Density::Marker(b()), "marker"),
@@ -1342,5 +1511,169 @@ mod kind_index_tests {
              deliberately rather than letting the test measure fewer variants \
              than it claims"
         );
+    }
+}
+
+/// Gates for [`Density::is_xz_pure`] and the [`xz_memo`] it licenses.
+///
+/// The value-invariance argument for the memo is *structural* — a node only gets
+/// an id if the analysis proves its subtree cannot read `ctx.y` — so these tests
+/// are the analysis's own gate, and one of them is a negative control: a pass that
+/// answered `true` for everything would satisfy every value assertion here and
+/// silently move terrain on any y-dependent subtree.
+#[cfg(test)]
+mod xz_purity_tests {
+    use super::{Context, Density, Spline, SplinePoint, XzMemoId, memo_id_for};
+    use crate::noise::NormalNoise;
+    use crate::rng::{Algorithm, PositionalRandomFactory};
+
+    fn b(d: Density) -> Box<Density> {
+        Box::new(d)
+    }
+
+    fn noise(id: &str) -> NormalNoise {
+        let f = Algorithm::Xoroshiro.root_positional(42);
+        NormalNoise::create(&mut f.from_hash_of(id), -3, &[1.0, 1.0, 1.0])
+    }
+
+    /// The exact shape 26.2 puts under every `flat_cache`
+    /// (`shifted_noise(shift_a, 0, shift_b, …, y_scale: 0.0)`) must qualify — if it
+    /// did not, the memo would be built, wired, and reach zero nodes.
+    #[test]
+    fn the_real_flat_cache_payload_is_xz_pure() {
+        let inner = Density::ShiftedNoise {
+            shift_x: b(Density::ShiftA(noise("minecraft:offset"))),
+            shift_y: b(Density::Const(0.0)),
+            shift_z: b(Density::ShiftB(noise("minecraft:offset"))),
+            xz_scale: 0.25,
+            y_scale: 0.0,
+            noise: noise("minecraft:continentalness"),
+        };
+        assert!(inner.is_xz_pure());
+        assert!(memo_id_for(&inner).is_some(), "the node must get a memo id");
+
+        // And through a spline, which is how `continents` is actually reached.
+        let spline = Density::Spline(Spline::Multipoint {
+            coordinate: b(inner.clone()),
+            points: vec![SplinePoint {
+                location: 0.0,
+                derivative: 0.0,
+                value: Box::new(Spline::Constant(1.0)),
+            }],
+        });
+        assert!(spline.is_xz_pure());
+    }
+
+    /// The negative control, and the four rejections that matter. Each of these
+    /// would be memoised by a `true`-returning stub, and each would then return one
+    /// `y`'s value for every other `y`.
+    #[test]
+    fn y_reading_subtrees_are_rejected() {
+        let cases: Vec<(Density, &str)> = vec![
+            (
+                Density::YClampedGradient {
+                    from_y: 0.0,
+                    to_y: 1.0,
+                    from_value: 0.0,
+                    to_value: 1.0,
+                },
+                "y_clamped_gradient reads y directly",
+            ),
+            (Density::Shift(noise("minecraft:offset")), "shift passes ctx.y"),
+            (
+                Density::Noise {
+                    noise: noise("minecraft:continentalness"),
+                    xz_scale: 1.0,
+                    y_scale: 0.0,
+                },
+                "plain noise is excluded even at y_scale 0",
+            ),
+            (
+                Density::ShiftedNoise {
+                    shift_x: b(Density::Const(0.0)),
+                    shift_y: b(Density::Const(0.0)),
+                    shift_z: b(Density::Const(0.0)),
+                    xz_scale: 1.0,
+                    y_scale: 1.0,
+                    noise: noise("minecraft:continentalness"),
+                },
+                "shifted_noise with a non-zero y_scale",
+            ),
+            (
+                Density::ShiftedNoise {
+                    shift_x: b(Density::Const(0.0)),
+                    // A non-constant shift_y: its value could depend on y, and even
+                    // when it does not, `-0.0 + s` vs `+0.0 + s` is only provably
+                    // equal for a literal `s`.
+                    shift_y: b(Density::ShiftA(noise("minecraft:offset"))),
+                    shift_z: b(Density::Const(0.0)),
+                    xz_scale: 1.0,
+                    y_scale: 0.0,
+                    noise: noise("minecraft:continentalness"),
+                },
+                "shifted_noise with a non-constant shift_y",
+            ),
+            (
+                Density::ShiftedNoise {
+                    shift_x: b(Density::Const(0.0)),
+                    shift_y: b(Density::Const(-0.0)),
+                    shift_z: b(Density::Const(0.0)),
+                    xz_scale: 1.0,
+                    y_scale: 0.0,
+                    noise: noise("minecraft:continentalness"),
+                },
+                "shift_y of -0.0: `-0.0 + -0.0` is -0.0 while `+0.0 + -0.0` is +0.0",
+            ),
+        ];
+        for (d, why) in cases {
+            assert!(!d.is_xz_pure(), "{why}");
+            assert_eq!(memo_id_for(&d), XzMemoId::NONE, "{why}");
+            // …and impurity must propagate up through a parent.
+            assert!(!Density::Add(b(Density::Const(1.0)), b(d)).is_xz_pure(), "{why}");
+        }
+    }
+
+    /// The memo must be **value-transparent**: a memoised `cache_2d` and an
+    /// identical un-memoised one have to agree at every position, including the
+    /// interleaved `(x, z)` order that made the one-slot form useless.
+    ///
+    /// The control is that the memoised arm really is memoised
+    /// (`memo.is_some()`), which is checkable in any build — without it a
+    /// `XzMemoId::NONE` on both arms would make the comparison vacuous.
+    #[test]
+    fn the_memo_is_value_transparent() {
+        let inner = Density::Add(
+            b(Density::ShiftA(noise("minecraft:offset"))),
+            b(Density::ShiftB(noise("minecraft:offset"))),
+        );
+        let memoised = Density::Cache2D {
+            memo: memo_id_for(&inner),
+            inner: b(inner.clone()),
+        };
+        let plain = Density::Cache2D {
+            memo: XzMemoId::NONE,
+            inner: b(inner),
+        };
+        let Density::Cache2D { memo, .. } = &memoised else {
+            unreachable!()
+        };
+        assert!(memo.is_some(), "the memoised arm is not memoised — vacuous");
+
+        crate::density::xz_memo::clear();
+        // The corner fetch order the field evaluator uses: four `(x, z)` pairs
+        // alternating, each revisited at many `y`.
+        let mut compared = 0;
+        for y in [-64, -8, 0, 7, 64, 200] {
+            for (x, z) in [(0, 0), (4, 0), (0, 4), (4, 4), (0, 0), (4, 0)] {
+                let ctx = Context::new(x, y, z);
+                assert_eq!(
+                    memoised.compute(ctx),
+                    plain.compute(ctx),
+                    "memoised and plain diverged at {x},{y},{z}"
+                );
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, 36);
     }
 }

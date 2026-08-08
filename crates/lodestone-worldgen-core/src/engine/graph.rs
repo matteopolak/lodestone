@@ -687,7 +687,7 @@ impl Graph {
                 let child = self.compile_node(inner);
                 self.push(OpKind::Interpolated, child, u32::try_from(*slot).unwrap(), 0)
             }
-            Density::FlatCache { inner, slot } => {
+            Density::FlatCache { inner, slot, .. } => {
                 let child = self.compile_node(inner);
                 self.push(OpKind::FlatCache, child, u32::try_from(*slot).unwrap(), 0)
             }
@@ -957,12 +957,14 @@ mod tests {
                 Density::FlatCache {
                     inner: b(Density::Const(0.0)),
                     slot: 0,
+                    memo: crate::density::memo_id_for(&Density::Const(0.0)),
                 },
             ),
             (
                 OpKind::Cache2D,
                 Density::Cache2D {
                     inner: b(Density::Const(0.0)),
+                    memo: crate::density::memo_id_for(&Density::Const(0.0)),
                 },
             ),
             (OpKind::Marker, Density::Marker(b(Density::Const(0.0)))),
@@ -1188,11 +1190,16 @@ mod tests {
             }
         };
         let d = Density::Add(
+            // Distinct `memo` ids as well as distinct slots, so this doubles as
+            // the gate that `write_signature` excludes the memo id: if it did
+            // not, the two nodes would no longer collapse.
             b(Density::FlatCache {
+                memo: crate::density::memo_id_for(&inner(n1.clone())),
                 inner: b(inner(n1)),
                 slot: 0,
             }),
             b(Density::FlatCache {
+                memo: crate::density::memo_id_for(&inner(n2.clone())),
                 inner: b(inner(n2)),
                 slot: 1,
             }),
@@ -1281,6 +1288,7 @@ mod tests {
                 inner: b(Density::EndIslands(Arc::new(
                     crate::noise::EndIslandNoise::new(42),
                 ))),
+                memo: crate::density::XzMemoId::NONE,
             }),
             b(Density::EndIslands(Arc::new(
                 crate::noise::EndIslandNoise::new(42),

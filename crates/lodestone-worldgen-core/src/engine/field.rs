@@ -72,6 +72,14 @@ impl<'a> Field<'a> {
     pub(crate) fn eval(&mut self, id: NodeId, x: i32, y: i32, z: i32, interpolate: bool) -> f64 {
         let op = self.graph.op(id);
         crate::counters::bump_density_eval(op.kind as usize);
+        super::redundancy_probe::visit_field(
+            std::ptr::from_ref(self.graph).cast::<()>(),
+            id,
+            op.kind as usize,
+            x,
+            y,
+            z,
+        );
         match op.kind {
             OpKind::Const => self.graph.param(op.a),
             OpKind::BlendAlpha => 1.0,

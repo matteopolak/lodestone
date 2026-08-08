@@ -351,6 +351,66 @@ Perlin/blended noise have a fixed vanilla evaluation order). Batching across
 independent lattice positions is safe by construction; batching across an
 accumulation chain is not.
 
+## The point interpreter's `(node, x, z)` memo — vanilla's `FlatCache`, finally
+
+The two cache layers above belong to the **block-field** evaluator. The **point**
+interpreter (`Density::compute`, which is what every leaf — `spline`,
+`old_blended_noise`, `find_top_surface`, `end_islands` — is evaluated by) had no
+memo of any kind, and that is where the 4.87× noise redundancy §12.134 measured
+turned out to live. `density/xz_memo.rs` is the fix, and three things about it are
+worth reading before touching it.
+
+**Three memo shapes were measured at once, and only one of them works here.**
+`tests/density_redundancy_probe.rs` counts, per node kind, how many visits each of
+three hypothetical memos would have answered, over the 100 interior columns of the
+12×12 sweep. In the point interpreter:
+
+| memo | hit rate |
+|---|---|
+| one slot per node, last `(x, z)` — vanilla's `Cache2D` | **2.1%** |
+| full `(node, x, z)` map | **78.2%** |
+| full `(node, x, y, z)` map | 0.9% |
+
+So §12.132's decision to delete a one-slot `cache_2d` memo at a 0.12% hit rate was
+a correct measurement **of the wrong structure**. The reason the one-slot form
+cannot work is the corner fetch order: `Field::interpolate` fills a cell by
+fetching `(x0,z0) (x1,z0) (x0,z0) (x1,z0) (x0,z1) (x1,z1) (x0,z1) (x1,z1)`, so
+consecutive visits to one node alternate between four `(x, z)` pairs and a single
+slot is evicted before it is ever read. **Vanilla does not have this problem
+because vanilla's `FlatCache` is a chunk-wide `double[]` over the quart grid, not
+a slot** — the one-slot structure is `Cache2D`'s, and vanilla reaches these
+subtrees through `FlatCache`. The map is the faithful shape, not an invention.
+
+**Value invariance is structural, not a property of 26.2's data.** A
+`flat_cache`/`cache_2d` node carries a memo id only if `Density::is_xz_pure` proves
+its *whole subtree* cannot read `ctx.y`. Three arms of that analysis are places a
+plausible simplification is wrong: `shift_a`/`shift_b` pass a literal `0.0` where
+`y` would go and are pure while `shift` is not; `shifted_noise` qualifies only with
+`y_scale == 0.0` **and** a constant `shift_y` that is not `-0.0`, because
+`f64::from(y) * 0.0` is `-0.0` for negative `y` and `-0.0 + -0.0` is `-0.0` while
+`+0.0 + -0.0` is `+0.0`; and plain `noise` is excluded even at `y_scale == 0.0`
+because nothing absorbs that `±0.0` and the answer would depend on
+`ImprovedNoise`'s internals rather than on IEEE addition. Anything unproved is
+simply not memoised, so a datapack cannot defeat it.
+`engine_semantics.rs`'s `cache_2d_is_transparent_in_both_evaluators` — whose
+fixture is *deliberately* `y`-dependent — is the negative control that this
+analysis rejects what it should: that gate passes unchanged.
+
+**Ids come from a process-wide monotonic counter and are never reused**, which is
+why the table needs no clearing, no epoch and no lifetime coupling to a `Graph`. A
+pointer-keyed version would have had to reason about a tree being dropped and a new
+node landing on the same address; there is no cheap way to be sure of that, and the
+failure would be a wrong value, not a missed hit.
+
+Measured on the 12×12 sweep, before/after alternated ten times in one shell
+invocation: **I_ss 485.08 M → 430.65 M instructions per column, −11.22%**, against
+a within-arm spread of 0.14%/0.25%. Point-interpreter node visits per column
+**172,888 → 56,877**, and the `NormalNoise` evaluations inside leaves
+(`shifted_noise` + `shift_a` + `shift_b`) **40,902 → 8,311**. The memo itself reads
+23,619 lookups per column at a **54.7%** hit rate. The 45-column/5-seed U15 dump is
+byte-identical across the change (8,902,157 bytes, md5
+`c0ef05ac09ba3f90175a14b0f9a69d50`, one-flipped-byte control fires).
+
 ## How to change it
 
 - **Do not "fix" `lerp3` to the incremental chain.** Read
@@ -465,6 +525,17 @@ accumulation chain is not.
   exactly like one: §12.102 flagged the 708 shared slots as a contention hazard, and
   removing them changed the 289-column burst's cycle ratio from 4.19× to 4.35× —
   i.e. not at all. The window was the defect (§12.132).
+- **`xz_memo`'s `LOG2_LEN` is a locality trade — re-measure, do not reason.** The
+  table is direct-mapped, so a bigger one conflict-misses less and evicts more of
+  everything else. Measured I_ss: 1,024 entries −10.38%, **4,096 −11.22%**, 16,384
+  −11.88%. 12 is shipped because the last 0.66% costs 4× the per-worker footprint
+  (98 KB → 393 KB) and §12.132 measured per-worker cache footprint, not locking, as
+  what caps generation parallelism at 2.6×. Raise it only with the 289-column join
+  burst measured, not on the serial number alone. The table is **thread-local with
+  no atomics on the hot path**, which is the one thing the deleted `Mutex`-backed
+  memo got wrong.
+- **Do not add `y` to the memo key.** Measured at 0.9% in this evaluator: it would
+  pay the lookup and return nothing.
 - `new_bounded`'s contract is unchecked in release: every query must fall inside
   the declared inclusive bounds or it silently aliases another cell. `erosion`
   and `depth` deliberately stay on the unbounded `new` because
