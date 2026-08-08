@@ -217,7 +217,7 @@ WebGPU is required; there is no WebGL2 fallback. It was measured and removed: it
 cost 537 KB brotli *and* never rendered a frame, because the atlas bind group
 layout needs a vertex-stage storage buffer WebGL2 categorically lacks.
 
-## Multiplayer: what is green and what is an island
+## Multiplayer: a real browser join, and what it needs
 
 Stated precisely, because "the relay has tests" is not the same claim as "the
 browser joins a server":
@@ -226,22 +226,75 @@ browser joins a server":
 |---|---|
 | `WsWebTransport` (browser `WebSocket` as a `Transport`) | **green**, exercised in-browser |
 | browser → `lodestone-relay` → live TCP server | **green** — verified in-browser against a real vanilla 26.2 server, which returned its own status JSON (`version.name = "26.2"`, protocol 776) |
-| a browser **play join** | **island** — no producer |
+| a browser **play join**, rendered | **green** — `src/multiplayer.rs`, measured below. **Needs two brokered clock patches**; see "The clock wall" |
 
-`wasm32` cannot open a raw TCP socket (`lodestone-net/src/connection.rs`
-documents this), so a browser must go through the relay. The relay leg works. What
-does not exist is anything in `web/` that drives a *client* over it:
-`ClientBuilder::connect` exists in `lodestone-client`, and the only
-`WsWebTransport::connect` call in `web/` is inside `ping_via_relay`, a
-Server-List-Ping. So the transport is proven and the join is unwritten — an island
-in the "no producer" direction (CLAUDE.md rule 1). Wiring it is the next step for
-browser multiplayer, and it needs no new dependency.
+`wasm32` cannot open a raw TCP socket (`lodestone-net/src/connection.rs` documents
+this), so a browser must go through the relay. `src/multiplayer.rs` is the producer
+that had been missing: it opens `WsWebTransport`, hands it to
+`ClientBuilder::connect_with` with the real `lodestone_v770::adapter()`, and then
+rebuilds the drawn scene by **querying** the client-owned chunk store
+(`ClientHandle::sections_at`) rather than folding `ChunkLoaded` events — which is
+idempotent, so it converges no matter when the loop starts relative to the stream.
 
-Note also that `src/singleplayer.rs` reaches `Play` against a **`StandInProtocol`**
-test double, not `v770`. That is the *world* species of vacuous test in CLAUDE.md's
-table: the source reads as a real integration test, and the flaw is in which
-implementation its transport resolves to. Do not cite it as evidence that a real
-26.2 join works in a browser.
+Measured in Chrome against the live survival oracle (normal terrain, offline mode)
+through a local relay:
+
+```
+join: Play reached (entity id 2101) — streaming world…
+LIVE world from 127.0.0.1:25565 — 81 of 150 columns, 584 sections,
+  97447 greedy quads | player chunk (-3, -24) | atlas: 62 blocks → 47 sprites,
+  256×1024 px | 69 block(s) skipped — no assets in the trimmed pack
+```
+
+**This has only been driven against a relay and a server on `localhost`.** Nothing
+about the path is loopback-specific — the relay takes any `--target` and the page
+takes any `?relay=` — but a remote deployment additionally needs a `wss://` relay
+(an `https` page cannot open `ws://`) and a relay reachable from the browser, and
+neither has been tried.
+
+### Running it
+
+```sh
+cargo run -p lodestone-relay -- --listen 127.0.0.1:25580 --target 127.0.0.1:25565
+cd web && trunk serve --release
+# then: fill in the relay/host/port/name boxes and press Join,
+# or load http://127.0.0.1:8080/?join=1 to join on page load.
+```
+
+`host`/`port` are only what the **handshake advertises**; where the bytes go is the
+relay's `--target`. `?join=1` skips the singleplayer probe on purpose — in-browser
+worldgen is synchronous, so its ~1 s columns starve the live socket.
+
+### The clock wall
+
+Two `std::time::Instant::now()` calls sit on the join path. Both compile for wasm
+and **panic at runtime** ("time not implemented on this platform"), and because
+the release profile is `panic = "abort"` they kill the session with no unwind:
+
+| site | when it fires | fix |
+|---|---|---|
+| `lodestone-ecs`'s `hold_read`/`hold_write` | the first ingested event, just after `Login` | **landed** — `hold_clock()` returns `None` on wasm and the hold goes unmeasured |
+| `V770Adapter::new`'s `batch_start` | adapter construction, before the first byte | **brokered** (`crates/protocol/` is owned elsewhere) — make `batch_start` an `Option<Instant>` |
+
+Neither is findable by any `cargo` command, and the *first* is why
+`src/singleplayer.rs` was never evidence of anything here: it reaches `Play`
+against a **`StandInProtocol`** whose only event is `ChunkLoaded`, which routes to
+the echo branch and never reaches `hold_write`. That is CLAUDE.md's *world*
+species of vacuous test exactly — the source reads as a real integration test and
+the flaw is in which implementation its transport resolves to.
+
+The breadcrumb `log::info!`s in `multiplayer.rs` are deliberate: with `abort` and
+no unwind, the last line logged is the only evidence of where it stopped.
+
+### The trimmed pack is why a live world has holes
+
+`assets/blocks_pack.zip` (88 KB, 73 blockstates) is a **subset** of vanilla's block
+corpus — the full set is ~21 MB uncompressed. A live server sends whatever it
+likes, so the live path builds its atlas with `skip_missing = true`: a block with no
+assets becomes a non-occluding hole and is **counted and named on the HUD**, so
+"patchy terrain" is never mistaken for a decode or transport fault. Regenerate with
+a wider list via `scripts/wasm-blocks-pack.sh`. The *fixture* path stays strict —
+a block in `fixtures/chunks.bin` that the pack lacks is a real defect.
 
 ## Saving worlds in the browser — the storage options, unbuilt
 
