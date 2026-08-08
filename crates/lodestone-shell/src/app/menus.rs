@@ -219,12 +219,81 @@ impl WindowApp {
         // plumbing at either site. Recorded before the hit-test, so a cursor over
         // the backdrop still updates it.
         self.nav.set_menu_cursor(lx, ly, w, h);
+        // The active list's band, if this screen has one. **A scrolling-list row
+        // outside it is not hit-testable**, which is the other half of the clip
+        // `Origin::is_scrolling_list_row` gave the *draw*.
+        //
+        // Vanilla's `AbstractSelectionList.getEntryAtPosition`
+        // (`AbstractSelectionList.java:296-306`) tests the cursor against the
+        // list's own box before it ever walks the entries, so an entry scrolled
+        // past the bottom cannot be clicked even where it would have painted.
+        // Here the rows and the footer share **one flat index space** and the
+        // first rect containing the cursor wins, with the footer last — so a row
+        // that overhangs the band was stealing the Done button's clicks along
+        // exactly the strip it overhung. That is the "Done is only partly
+        // clickable" report: the draw stopped painting over it at #445 and the
+        // hit-test kept routing to it.
+        //
+        // The band comes from `frame.list` through `ListSpec::model`, the same
+        // two calls `render::draw` makes for its clip, so the two cannot
+        // disagree about where the list ends.
+        let band = frame
+            .list
+            .as_ref()
+            .and_then(|spec| spec.model(h))
+            .map(|list| (list.top(), list.bottom()));
         (0..frame.rows.len()).find(|&i| {
+            if let (Some((top, bottom)), Some(slot)) = (band, frame.rows[i].slot) {
+                if slot.origin.is_scrolling_list_row() && (ly < top || ly > bottom) {
+                    return false;
+                }
+            }
             crate::menu::render::row_rect(&frame.rows, i, w, h)
                 .is_some_and(|(rx, ry, rw, rh)| {
                     lx >= rx && lx <= rx + rw && ly >= ry && ly <= ry + rh
                 })
         })
+    }
+
+    /// The slider track fraction for `row` at physical cursor `(x, y)`.
+    ///
+    /// Vanilla's `AbstractSliderButton.setValueFromMouse`
+    /// (`AbstractSliderButton.java`), verbatim:
+    ///
+    /// ```java
+    /// this.setValue((event.x() - (this.getX() + 4)) / (this.width - 8));
+    /// ```
+    ///
+    /// The `4` is `HANDLE_HALF_WIDTH` and the `8` is `HANDLE_WIDTH`: the handle's
+    /// *centre* tracks the cursor, so the usable travel is the track minus one
+    /// handle width and the origin is offset by half of it. Getting either wrong
+    /// is the classic "the handle lags the cursor near the ends" slider bug.
+    /// `setValue` clamps, which is why dragging past either edge pins rather than
+    /// overshooting.
+    ///
+    /// Takes the row **index** rather than hit-testing, because a drag continues
+    /// while the cursor is outside the row: once the drag has started, the row is
+    /// fixed and only the x matters. That is exactly why this is a separate
+    /// function from [`Self::menu_row_at`] rather than a field on its result.
+    pub(super) fn menu_slider_fraction(&mut self, row: usize, x: f32, _y: f32) -> Option<f32> {
+        let (fb_w, fb_h) = self.target.as_ref().map(RenderTarget::size)?;
+        let frame = crate::menu::nav::on_screen_frame(
+            &self.ui,
+            &self.nav,
+            self.sim.death_message(),
+            &self.statuses,
+            &mut self.favicons,
+        )?;
+        let (w, h) = crate::menu::render::logical_canvas(frame.gui_scale, fb_w, fb_h);
+        let scale = crate::config::calculate_gui_scale(frame.gui_scale, fb_w, fb_h).max(1) as f32;
+        let lx = x / scale;
+        let (rx, _, rw, _) = crate::menu::render::row_rect(&frame.rows, row, w, h)?;
+        let travel = rw - crate::menu::render::SLIDER_HANDLE_WIDTH;
+        if travel <= 0.0 {
+            return None;
+        }
+        let half = crate::menu::render::SLIDER_HANDLE_WIDTH * 0.5;
+        Some(((lx - (rx + half)) / travel).clamp(0.0, 1.0))
     }
 
     /// Draw one menu screen. Returns `false` when the current screen is not a

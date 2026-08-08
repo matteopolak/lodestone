@@ -319,7 +319,13 @@ const ROW_OFF: [f32; 4] = [0.16, 0.16, 0.18, 1.0];
 const FG: [f32; 4] = [0.94, 0.94, 0.94, 1.0];
 /// `AbstractSliderButton.HANDLE_WIDTH` (`AbstractSliderButton.java:26`): the
 /// handle is always 8 px wide, whatever the track's own width is.
-const SLIDER_HANDLE_WIDTH: f32 = 8.0;
+///
+/// `pub` because the mouse-drag hit-test needs it too — vanilla's
+/// `setValueFromMouse` is `(mouse_x - (x + HANDLE_WIDTH/2)) / (width -
+/// HANDLE_WIDTH)`, so the draw and the hit-test must use the *same* handle
+/// width or the handle lags the cursor near the ends. See
+/// `crate::app::menus`'s `menu_slider_fraction`.
+pub const SLIDER_HANDLE_WIDTH: f32 = 8.0;
 /// Secondary text (MOTD, address, hints).
 const FG_DIM: [f32; 4] = [0.66, 0.68, 0.72, 1.0];
 /// Failure text.

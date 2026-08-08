@@ -35,6 +35,7 @@ use super::edit_box::EditBox;
 use super::focus::{self, FocusChildren, FocusSet, FocusTarget, KeyEvent, KeyOutcome};
 use super::servers::{MAX_NAME_CHARS, ServerEntry, ServerList, servers_path};
 use super::widget;
+use super::options::LiveOption;
 use super::{Screen, SessionKind, UiState};
 use crate::config::{MAX_MANUAL_GUI_SCALE, Options};
 
@@ -1356,6 +1357,19 @@ impl MenuNav {
         self.options.sensitivity
     }
 
+    /// Vanilla's `options.renderDistance` in chunks — see
+    /// [`crate::config::Options::render_distance`].
+    ///
+    /// Polled once per frame by `app/redraw.rs` and committed on vanilla's
+    /// 600 ms delay (`WindowApp::render_distance_apply_at`), **not** pushed
+    /// straight through like [`Self::sensitivity`]: this is the one option whose
+    /// `IntRange` vanilla builds with `applyValueImmediately == false`, because
+    /// applying it reloads chunks.
+    #[must_use]
+    pub fn render_distance(&self) -> u32 {
+        self.options.render_distance
+    }
+
     /// Vanilla's `options.invertMouseX` (issue #203) — see
     /// [`crate::config::Options::invert_mouse_x`]. Read per look-integration
     /// call and handed to `apply_look_inverted`.
@@ -2065,6 +2079,37 @@ impl MenuNav {
     /// every page at every scroll position and asserts the two agree, so a table
     /// edit fails a test instead of silently rebinding the mouse to the wrong
     /// control.
+    /// Whether visible `row` is a live slider the mouse can drag.
+    ///
+    /// The app asks this on mouse-down to decide between the drag path and the
+    /// ordinary click path; only the settings tree has sliders.
+    #[must_use]
+    pub fn slider_row(&self, ui: &UiState, row: usize) -> bool {
+        ui.screen() == Screen::Settings && self.settings.slider_row_option(row).is_some()
+    }
+
+    /// Set the slider at visible `row` from a track `fraction` — vanilla's
+    /// `AbstractSliderButton.setValueFromMouse`, reached from both the initial
+    /// click and every subsequent drag position.
+    ///
+    /// Returns `true` when it was applied. `false` means "not a draggable
+    /// slider", and the app then falls back to [`Self::click`] so nothing that
+    /// used to work stops working.
+    ///
+    /// The row is put under the cursor first ([`super::options::SettingsNav::hover_row`]),
+    /// so a drag also moves the keyboard cursor — matching vanilla, where
+    /// clicking a widget focuses it.
+    pub fn drag_slider(&mut self, ui: &UiState, row: usize, fraction: f32) -> bool {
+        if ui.screen() != Screen::Settings {
+            return false;
+        }
+        let Some(live) = self.settings.slider_row_option(row) else {
+            return false;
+        };
+        self.settings.hover_row(row);
+        self.set_live_slider(live, fraction)
+    }
+
     pub fn click(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
         // The edit form is the second screen where "hover then Enter" is wrong,
         // and #395 is what makes it visible. `ContainerEventHandler.mouseClicked`
@@ -3378,6 +3423,58 @@ impl MenuNav {
         let wrapped = (offset + delta).rem_euclid(span);
         self.options.render_distance = MIN_RENDER_DISTANCE + wrapped as u32;
         self.persist_options();
+    }
+
+    /// Set a live slider's value from a track fraction — the drag half of
+    /// vanilla's `AbstractSliderButton` (`onClick`/`onDrag` both call
+    /// `setValueFromMouse`).
+    ///
+    /// Returns `true` when the fraction was applied, `false` for a
+    /// [`LiveOption`] that is not slider-shaped (every toggle, and the two the
+    /// ranges below do not cover) — the caller falls back to the click-step
+    /// path on `false` rather than swallowing the click, so a control this does
+    /// not understand keeps working exactly as it did.
+    ///
+    /// **This is the one place the departure recorded on
+    /// [`Self::step_render_distance`] is lifted.** That doc says "a click is the
+    /// only way to move these rows, so a value parked at the maximum has to be
+    /// able to come back down", which is why every `step_*` wraps. With a real
+    /// drag the wrap is no longer load-bearing for reachability — but the
+    /// `step_*` functions keep it, because they are still what a *keyboard*
+    /// Enter uses and that has no other way down.
+    ///
+    /// The two conversions both come from the tables the *handle draw* uses
+    /// (`LiveOption::unit_double_mut`, `LiveOption::int_range`), never from a
+    /// restated range: a slider whose drag and whose handle disagreed about the
+    /// bounds would land the handle somewhere the value cannot be.
+    fn set_live_slider(&mut self, live: LiveOption, fraction: f32) -> bool {
+        let f = fraction.clamp(0.0, 1.0);
+        // The eight `UnitDouble` options plus `sensitivity`: the fraction *is*
+        // the value, so this needs no conversion at all.
+        if let Some(slot) = live.unit_double_mut(&mut self.options) {
+            *slot = f;
+            self.persist_options();
+            return true;
+        }
+        // The `IntRange` options, through vanilla's own bucket map.
+        if let Some(range) = live.int_range() {
+            let value = range.from_slider_value(f);
+            match live {
+                LiveOption::RenderDistance => {
+                    self.options.render_distance = value.max(0) as u32;
+                }
+                LiveOption::SprintWindow => {
+                    self.options.sprint_window_ticks = value.clamp(0, 255) as u8;
+                }
+                // `int_range` only answers for the two above; a third would
+                // have to add its own write here, and falling through to
+                // `false` is the honest result until it does.
+                _ => return false,
+            }
+            self.persist_options();
+            return true;
+        }
+        false
     }
 
     /// Steps one `UnitDouble`-backed chat option and persists it eagerly.
