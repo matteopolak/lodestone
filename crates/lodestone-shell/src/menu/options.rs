@@ -1736,7 +1736,7 @@ static ROOT_GRID: &[Cell] = &[
 /// | `KeyBindsScreen` | a different list-widget kind again (`KeyBindsList`, not `OptionsList`) — see [`SettingsPage::KeyBinds`]/[`super::key_binds`]. |
 /// | `OnlineOptionsScreen` | no new widget at all — the root's own header button was permanently inactive; see [`SettingsPage::Online`]. |
 /// | `TelemetryInfoScreen` | no new widget either, once the event log and opt-in state this client structurally cannot have are recognised as *absent* rather than *unbuilt* — see [`SettingsPage::Telemetry`]/[`super::telemetry`]. |
-/// | `PackSelectionScreen` | vanilla's own shape needs two drag-between `ObjectSelectionList`s over a filesystem-backed `PackRepository`, which this client's asset-loading layer has no analogue for at all. Landed as a declared reduction instead — one always-empty list, one always-one-entry list, no transfer controls — rather than left absent; see [`SettingsPage::ResourcePacks`]/[`super::packs`]. |
+/// | `PackSelectionScreen` | two transferable `ObjectSelectionList`s over a filesystem-backed `PackRepository`. Landed first as a declared reduction (one always-empty list, one always-one-entry list, no transfer controls), then **built for real**: a `resourcepacks/` folder scan accepting directories and zips, click-to-transfer, per-row reordering, `pack.mcmeta` descriptions and `pack.png` thumbnails, and the order fed into `ResourceManager`'s stack. See [`SettingsPage::ResourcePacks`]/[`super::packs`]. |
 /// widget — `KeyBindsList`, not `OptionsList` — and got one: see
 /// [`SettingsPage::KeyBinds`] and [`super::key_binds`], the second list-widget
 /// kind #392's plan always said this tree would eventually need.
@@ -1827,10 +1827,12 @@ pub enum SettingsPage {
     Telemetry,
     /// `PackSelectionScreen` (issue #415) — **not** an `OptionsList` page,
     /// for the same structural reason as [`SettingsPage::Language`]/
-    /// [`SettingsPage::Telemetry`]. Landed as a deliberately reduced
-    /// selection list rather than vanilla's own drag-between-two-lists
-    /// shape, which this client's asset-loading layer has no analogue for
-    /// at all — see [`super::packs`]'s module doc for the full reasoning.
+    /// [`SettingsPage::Telemetry`]: two transferable columns over a real pack
+    /// repository. Landed first as a reduced one-entry list and now built for
+    /// real — the folder scan, the transfer, the priority order and the feed
+    /// into [`lodestone_assets::ResourceManager`]'s stack. See
+    /// [`super::packs`]'s module doc, including the one thing still skipped
+    /// (pack-format validation).
     ///
     /// Reached from the **root grid**, vanilla's own wiring
     /// (`OptionsScreen.java:76-86`, `helper.addChild(this.openScreenButton(

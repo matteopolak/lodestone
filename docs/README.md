@@ -912,13 +912,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   guesses — chunk column height, sky-light presence, and which world clock is "the"
   day clock — with values the server actually declared.
 - [Resource Packs screen](./resource-packs-screen.md) —
-  `SettingsPage::ResourcePacks` (issue #415): vanilla's `PackSelectionScreen`, reached
-  from the root settings grid's own "Resource Packs..." button (flipped from
-  `no_screen` to `nav()`). Landed as a **deliberately reduced** selection list rather
-  than vanilla's own drag-between-two-lists screen — this client's asset-loading
-  layer has no `PackRepository` analogue at all, and #415 itself invited "land a
-  simpler selection list and declare the divergence" as the honest alternative to
-  leaving it unbuilt.
+  `SettingsPage::ResourcePacks` (issue #415): vanilla's `PackSelectionScreen`, two
+  transferable columns over a real pack repository. **Available** on the left lists
+  every pack in the user's `resourcepacks/` folder — directories *and* `.zip`
+  archives — with its `pack.mcmeta` description and `pack.png` thumbnail;
+  **Selected** on the right is the priority order, highest first. Clicking a row moves
+  it between the columns, per-row buttons reorder it, and leaving the screen feeds the
+  order into `ResourceManager`'s pack stack so the next atlas and model build see it.
 - [Riding](./riding.md) — `ClientboundSetPassengersPacket` tells the client which
   entities are riding which. Before this change it was a **complete island**: decoded
   at `crates/protocol/v770/src/adapter.rs`'s `SET_PASSENGERS` arm, round-tripped by

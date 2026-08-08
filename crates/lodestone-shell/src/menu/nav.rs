@@ -1642,6 +1642,21 @@ impl MenuNav {
                     lang.scroll(),
                 ))
             }
+            // Resource Packs (issue #415). Its two columns share **one**
+            // vertical band, so one spec is the right clip rect for both; the
+            // length and offset are the column the cursor is in
+            // (`PacksNav::focused_list`), which is also the column the wheel
+            // acts on. See `packs`'s module doc on why the thumb reflects one
+            // column rather than both.
+            super::Screen::Settings
+                if self.settings.page() == crate::menu::options::SettingsPage::ResourcePacks =>
+            {
+                let packs = self.settings.packs();
+                Some(super::packs::list_spec(
+                    packs.focused_len(),
+                    packs.scroll(),
+                ))
+            }
             // Social Interactions (#445's fourth and last adoption, and the only
             // user of `RowBand::Inset` — its rows are full-width, so no constant
             // `row_w` could place its scrollbar; see `social::list_spec`).
@@ -1735,6 +1750,16 @@ impl MenuNav {
                 let before = lang.scroll();
                 lang.scroll_by(notches, canvas_height);
                 lang.scroll() != before
+            }
+            // Resource Packs (issue #415). Same page guard as `active_list`'s
+            // arm; the wheel moves whichever column the cursor is in.
+            super::Screen::Settings
+                if self.settings.page() == crate::menu::options::SettingsPage::ResourcePacks =>
+            {
+                let packs = self.settings.packs_mut();
+                let before = packs.scroll();
+                packs.scroll_by(notches, canvas_height);
+                packs.scroll() != before
             }
             // Social Interactions (#445). Same screen as `active_list`'s arm.
             super::Screen::Social => {
@@ -3291,6 +3316,13 @@ impl MenuNav {
         match outcome {
             PacksOutcome::None => MenuAction::None,
             PacksOutcome::Back => {
+                // **This is the call that makes the screen do anything** (issue
+                // #415): it installs the column's order into
+                // `resources::selected_packs` and persists it. It has to happen
+                // *before* `leave_packs`, which resets the nav — vanilla commits
+                // in `PackSelectionScreen.onClose` for the same reason, and
+                // Escape comes through here too, so leaving is never a cancel.
+                crate::menu::packs::commit(self.settings.packs());
                 let outcome = self.settings.leave_packs();
                 self.apply_settings(ui, outcome)
             }
