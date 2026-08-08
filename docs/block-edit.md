@@ -144,11 +144,26 @@ wire was fully connected and merely carrying the wrong value (the failure
 `cargo xtask connectedness` structurally cannot see); and the blocks a developer reaches
 for when testing containers — chest, furnace — are exactly the ones that worked.
 
-**Block *state* is still out of scope.** Placement writes each block's bare name, so a
-log lands without its `axis`, a stair without its `facing`/`half`, and redstone dust
-without its connection properties. Getting the right *state* needs the cursor position,
-click face and neighbour states, and is a separate and larger piece of work than getting
-the right *block*.
+**Block state is now partly in scope, and the bare-name path itself changed.** Two
+separate fixes, and it is worth keeping them apart:
+
+* `placed_block_state` (`server.rs`) computes a real `getStateForPlacement` for the
+  families whose inputs this path already has: `facing` from the placer's yaw for
+  repeater / comparator / observer (issue #475), and `axis` from the **clicked face**
+  for every pillar block — logs, stripped wood, basalt, quartz and purpur pillars, bone
+  blocks, froglights, hay (`RotatedPillarBlock.java:44`). "Is it a pillar" is read off
+  `lodestone_data::block_states` — a block whose default state carries a three-valued
+  `axis` — rather than a name list that would miss the next one added.
+* Everything else still writes the **bare name**, but a bare name no longer means "the
+  lowest id with that name". `resolve_state_id` resolves it to the block's real
+  **default state** (issue #546 — see below), so a bare `minecraft:oak_stairs` at least
+  arrives as vanilla's default stair rather than an arbitrary one.
+
+Still out of scope: `half` for stairs and slabs, and `facing` for the horizontal
+families whose convention varies per block (a stair takes `getHorizontalDirection()`, a
+chest and a furnace take its `.getOpposite()`, an anvil its `.getClockWise()`). Those
+need the **cursor position** within the clicked face, which `ServerBound::UseItemOn`
+does not currently decode, plus a per-block table — a separate and larger piece of work.
 
 ### `is_air_or_fluid` doubles as "replaceable"
 
@@ -199,7 +214,23 @@ encoder produced.
   on the default, the way `OverworldChunkSource` could but currently does not need to
   (its `column()` already consults the edit cache, so the default is already correct
   and cheap enough there).
-* **`resolve_state_id` (`server_protocol.rs`) is a linear scan over the ~32k-entry
+* **`resolve_state_id`'s fallback is the block's default state, not its lowest id**
+  (issue #546). It resolves a partially-specified string the way vanilla builds one:
+  `defaultBlockState().setValue(k, v)…` for every property the caller named that the
+  block really has, dropping any *synthetic* one the server models but vanilla keeps
+  outside the block state (comparator `output`, issue #476). The default comes from
+  `lodestone_data::snow_support::is_default_state` — `state == block.defaultBlockState()`
+  dumped from the real 26.2 server.
+
+  It used to fall back to the lowest id sharing the name, which is right for water
+  (`86`) and lava (`102`) and **wrong for 661 of the 797 multi-state blocks**. Three
+  shipped consequences: every blade of spread grass rendered snowy (bare
+  `grass_block` → id 8, `snowy=true`); bare directional blocks came out at whatever
+  the lowest id's `facing` happened to be; and dust's four connection properties came
+  out `up`, so wire rendered climbing rather than flat. **A test that hand-duplicates
+  this fallback is a silent caller** — two did, and one of them failed as a 30-second
+  live *timeout* rather than a mismatch. Both now read the jar column instead.
+* **`resolve_state_id` is a linear scan over the ~32k-entry
   generated state table**, matching name *and* properties. Fine for an occasional
   confirmation packet on its own; `build_world_column` (issue #363) now also calls it,
   but only once per *distinct* block-state string in a column (memoized in a local

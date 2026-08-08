@@ -2734,7 +2734,22 @@ fn horizontal_look_direction(yaw: f32) -> Direction {
 /// the player. Not opposite: an observer placed while looking north watches
 /// north.
 #[must_use]
-fn placed_block_state(block: &str, player_yaw: Option<f32>) -> Option<String> {
+fn placed_block_state(block: &str, player_yaw: Option<f32>, face: BlockFace) -> Option<String> {
+    // `RotatedPillarBlock.getStateForPlacement` (`RotatedPillarBlock.java:44`) is
+    // `defaultBlockState().setValue(AXIS, context.getClickedFace().getAxis())`,
+    // needing no yaw — so it is checked before the `player_yaw?` bail below.
+    // Recognised from the census rather than a name list: every pillar block
+    // (logs, stripped wood, basalt, quartz/purpur pillars, bone blocks,
+    // froglights, hay) is exactly a block whose default state carries `axis`,
+    // and a name list would silently miss the next one added.
+    if pillar_axis_block(block) {
+        let axis = match face {
+            BlockFace::Up | BlockFace::Down => "y",
+            BlockFace::North | BlockFace::South => "z",
+            BlockFace::East | BlockFace::West => "x",
+        };
+        return Some(format!("{block}[axis={axis}]"));
+    }
     let look = horizontal_look_direction(player_yaw?);
     match block {
         REPEATER => Some(set_repeater(look.opposite(), 1, false, false)),
@@ -2742,6 +2757,35 @@ fn placed_block_state(block: &str, player_yaw: Option<f32>) -> Option<String> {
         OBSERVER => Some(set_observer(look, false)),
         _ => None,
     }
+}
+
+/// `true` iff `block`'s states carry an `axis` property whose domain is the
+/// three coordinate axes — i.e. it is a `RotatedPillarBlock`. Read off
+/// `lodestone_data::block_states` so no name list can go stale.
+///
+/// Deliberately excludes the two-value `axis` blocks (`nether_portal` and
+/// `chain`'s `x`/`z` and `x`/`y`/`z`-less forms are not placed by this path),
+/// by requiring all three values to exist.
+#[must_use]
+fn pillar_axis_block(block: &str) -> bool {
+    let mut seen = [false; 3];
+    for id in 0..lodestone_data::block_states::STATE_COUNT {
+        if lodestone_data::block_states::block_name(id) != Some(block) {
+            continue;
+        }
+        for &(key, value) in lodestone_data::block_states::properties(id).unwrap_or(&[]) {
+            if key != "axis" {
+                continue;
+            }
+            match value {
+                "x" => seen[0] = true,
+                "y" => seen[1] = true,
+                "z" => seen[2] = true,
+                _ => {}
+            }
+        }
+    }
+    seen == [true; 3]
 }
 
 /// Which of a brewing stand's five slots a held item routes to — decided by
@@ -3475,8 +3519,10 @@ where
             }
             // Issue #475. `placed_block_state` overrides the census's bare
             // name with a `facing=`-bearing state for the redstone directional
-            // families; everything else keeps the default state.
-            let state = placed_block_state(block_name, player_yaw).unwrap_or_else(|| block_name.to_string());
+            // families and an `axis=` for pillars; everything else keeps the
+            // default state, which `resolve_state_id` now resolves faithfully.
+            let state =
+                placed_block_state(block_name, player_yaw, face).unwrap_or_else(|| block_name.to_string());
             source.set_block(target.x, target.y, target.z, &state);
             // Issue #465: placing a block is a mutation like any other, so it
             // owes its neighbours the same fan-out a random tick or a drained
@@ -5122,6 +5168,16 @@ where
                 for (x, y, z, block_state) in block_ticks.drain_all() {
                     apply(conn, &mut state, proto.encode_block_update(x, y, z, &block_state)).await?;
                 }
+                // Issue #530: the same feed's effect lane — every sound,
+                // particle and level event the world tick produced. This is what
+                // finally gives the server a way to say "play this here": before
+                // it, `ServerProtocol` had no sound encoder at all, so a mob
+                // could be beaten to death in silence and a redstone door opened
+                // without a click. Single-consumer for the reason the drain above
+                // is; see `BlockTickFeed`'s own doc comment.
+                for effect in block_ticks.drain_effects() {
+                    apply(conn, &mut state, proto.encode_world_effect(&effect)).await?;
+                }
                 // Issue #425: same shape again, one timer tick later —
                 // `MobSim::tick` already calls `MobSim::explode` the tick a
                 // creeper's fuse completes; this is what finally turns that
@@ -6562,26 +6618,46 @@ mod tests {
         // Looking north (yaw 180): a repeater and comparator face the player —
         // south — while an observer watches north.
         assert_eq!(
-            placed_block_state("minecraft:repeater", Some(180.0)),
+            placed_block_state("minecraft:repeater", Some(180.0), BlockFace::Up),
             Some("minecraft:repeater[facing=south,delay=1,locked=false,powered=false]".to_string())
         );
         assert_eq!(
-            placed_block_state("minecraft:comparator", Some(180.0)),
+            placed_block_state("minecraft:comparator", Some(180.0), BlockFace::Up),
             Some("minecraft:comparator[facing=south,mode=compare,powered=false,output=0]".to_string())
         );
         assert_eq!(
-            placed_block_state("minecraft:observer", Some(180.0)),
+            placed_block_state("minecraft:observer", Some(180.0), BlockFace::Up),
             Some("minecraft:observer[facing=north,powered=false]".to_string())
         );
         // Looking east (yaw -90): a repeater faces west.
         assert_eq!(
-            placed_block_state("minecraft:repeater", Some(-90.0)),
+            placed_block_state("minecraft:repeater", Some(-90.0), BlockFace::Up),
             Some("minecraft:repeater[facing=west,delay=1,locked=false,powered=false]".to_string())
         );
         // Blocks without a yaw-derived orientation keep the bare census name.
-        assert_eq!(placed_block_state("minecraft:dirt", Some(0.0)), None);
+        assert_eq!(placed_block_state("minecraft:dirt", Some(0.0), BlockFace::Up), None);
         // And no yaw reported yet keeps the bare name for the directional
         // families too.
-        assert_eq!(placed_block_state("minecraft:repeater", None), None);
+        assert_eq!(placed_block_state("minecraft:repeater", None, BlockFace::Up), None);
+    }
+
+    /// A pillar takes its `axis` from the clicked face, not from yaw — and needs
+    /// no yaw at all (`RotatedPillarBlock.java:44`). Without this an oak log
+    /// placed against a wall stood upright.
+    #[test]
+    fn placed_pillars_take_their_axis_from_the_clicked_face() {
+        assert_eq!(
+            placed_block_state("minecraft:oak_log", None, BlockFace::North),
+            Some("minecraft:oak_log[axis=z]".to_string())
+        );
+        assert_eq!(
+            placed_block_state("minecraft:basalt", None, BlockFace::West),
+            Some("minecraft:basalt[axis=x]".to_string())
+        );
+        assert_eq!(
+            placed_block_state("minecraft:hay_block", None, BlockFace::Up),
+            Some("minecraft:hay_block[axis=y]".to_string())
+        );
+        assert!(!pillar_axis_block("minecraft:dirt"));
     }
 }

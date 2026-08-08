@@ -85,13 +85,18 @@ fn resolve_state(state: &str) -> u32 {
     };
     wanted.sort_unstable();
 
-    let mut same_name_default: Option<u32> = None;
+    // The middle tier's expectation comes from the jar's own default-state
+    // column, not from a second copy of the resolver's arithmetic. It used to be
+    // "the lowest id sharing the name", which is right for water (`86`) and wrong
+    // for 661 of the 797 multi-state blocks — issue #546. `block_entities_live`'s
+    // sibling helper broke on exactly that, as a timeout rather than a mismatch.
+    let mut jar_default: Option<u32> = None;
     for id in 0..lodestone_data::block_states::STATE_COUNT {
         if block_name(id) != Some(name) {
             continue;
         }
-        if same_name_default.is_none() {
-            same_name_default = Some(id);
+        if lodestone_data::snow_support::is_default_state(id) == Some(true) {
+            jar_default = Some(id);
         }
         let mut have: Vec<(&str, &str)> = properties(id).unwrap_or(&[]).to_vec();
         have.sort_unstable();
@@ -99,7 +104,7 @@ fn resolve_state(state: &str) -> u32 {
             return id;
         }
     }
-    same_name_default.unwrap_or_else(|| state_id("minecraft:air"))
+    jar_default.unwrap_or_else(|| state_id("minecraft:air"))
 }
 
 /// The base block name (properties stripped) `lodestone-client`'s `block_at`

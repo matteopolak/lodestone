@@ -118,6 +118,9 @@ mod chunk_store;
 mod command;
 mod composter;
 pub mod ecs;
+/// Issue #530: sounds, particles and level events the server owns. Public
+/// because `ServerProtocol`'s three new encoders name [`effects::WorldEffect`].
+pub mod effects;
 mod fall;
 mod furnace;
 mod gravity_tick;
@@ -289,3 +292,11 @@ pub use worldgen_data::{
 // Re-exported so a caller (e.g. the shell's local world) can name the generator
 // and its output without depending on `lodestone-worldgen` directly.
 pub use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
+
+/// `Heightmap.Types.MOTION_BLOCKING`'s registry id, re-exported for the same
+/// reason (issue #516): `lodestone-worldgen` is only a *dev*-dependency of
+/// `lodestone-v770`, so the encoder that writes
+/// [`ChunkColumn::motion_blocking`] into the chunk packet cannot name the
+/// constant at its source. Re-exported rather than restated so the id is never
+/// retyped from memory.
+pub use lodestone_worldgen::overworld::MOTION_BLOCKING_HEIGHTMAP_TYPE_ID;

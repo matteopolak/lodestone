@@ -180,6 +180,8 @@ pub const DEFAULT_RANDOM_TICK_SPEED: u32 = 3;
 /// only ever a *target* of a neighbouring grass block's own tick.
 const GRASS_BLOCK: &str = "minecraft:grass_block";
 const DIRT_BLOCK: &str = "minecraft:dirt";
+const MYCELIUM_BLOCK: &str = "minecraft:mycelium";
+const PODZOL_BLOCK: &str = "minecraft:podzol";
 
 /// Strips any `[...]` block-state property suffix, mirroring every other
 /// canonical-name comparison in this crate (`crate::chunk::is_air_or_fluid`,
@@ -316,6 +318,49 @@ pub fn grass_can_stay_alive(above_state: &str) -> bool {
         None => true,
     }
 }
+
+/// Vanilla `SnowyBlock.isSnowySetting` (`SnowyBlock.java:53-55`) —
+/// `state.is(BlockTags.SNOW)`, which is **three** blocks in 26.2
+/// (`data/minecraft/tags/block/snow.json`), given the state directly above.
+///
+/// Deliberately *not* shared with [`grass_can_stay_alive`]'s own snow branch,
+/// which is the narrower `is(Blocks.SNOW) && LAYERS == 1`: the two predicates
+/// live in the same vanilla class and are different on purpose.
+#[must_use]
+pub fn is_snowy_setting(above_state: &str) -> bool {
+    matches!(
+        base_name(above_state),
+        "minecraft:snow" | "minecraft:snow_block" | "minecraft:powder_snow"
+    )
+}
+
+/// `defaultBlockState().setValue(SNOWY, isSnowySetting(above))` for a
+/// `SpreadingSnowyBlock` — the write vanilla performs both when grass spreads
+/// (`SpreadingSnowyBlock.java:63`) and when the block above one changes
+/// (`SnowyBlock.updateShape`, `SnowyBlock.java:41-45`).
+///
+/// The property is not optional. `v770`'s `resolve_state_id` resolves a bare
+/// name to the block's default state, so a bare `minecraft:grass_block` is
+/// *now* correct on the wire — but it is still the wrong value half the time,
+/// and the server's own state string is what everything downstream reads.
+#[must_use]
+fn spreading_snowy_state(block: &str, above_state: &str) -> &'static str {
+    match (block, is_snowy_setting(above_state)) {
+        (GRASS_BLOCK, true) => "minecraft:grass_block[snowy=true]",
+        (GRASS_BLOCK, false) => "minecraft:grass_block[snowy=false]",
+        (MYCELIUM_BLOCK, true) => "minecraft:mycelium[snowy=true]",
+        (MYCELIUM_BLOCK, false) => "minecraft:mycelium[snowy=false]",
+        (PODZOL_BLOCK, true) => "minecraft:podzol[snowy=true]",
+        _ => "minecraft:podzol[snowy=false]",
+    }
+}
+
+/// The three blocks carrying `BlockStateProperties.SNOWY` in 26.2 — exactly the
+/// six states `lodestone_data::snow_support::has_snowy_property` marks. Only
+/// `grass_block` is spread-ticked by this crate today (see [`GRASS_BLOCK`]);
+/// the other two still need their `snowy` kept current when snow lands on or
+/// leaves them.
+const SNOWY_FAMILY: [&str; 3] = [GRASS_BLOCK, MYCELIUM_BLOCK, PODZOL_BLOCK];
 
 /// `true` iff `block_state` is one this crate models a random tick for.
 /// Mirrors `BlockState.isRandomlyTicking()`
@@ -876,11 +921,13 @@ impl RandomTickScheduler {
                     let tz = z + dz;
                     let tlx = tx - min_x;
                     let tlz = tz - min_z;
-                    column.set_block(tlx, ty, tlz, GRASS_BLOCK);
+                    let above_target = column.block_state(tlx, ty + 1, tlz).to_string();
+                    let spread_state = spreading_snowy_state(GRASS_BLOCK, &above_target);
+                    column.set_block(tlx, ty, tlz, spread_state);
                     events.push(RandomTickEvent {
                         pos: (tx, ty, tz),
                         from: DIRT_BLOCK.to_string(),
-                        to: GRASS_BLOCK.to_string(),
+                        to: spread_state.to_string(),
                     });
                 }
             }
@@ -1182,6 +1229,35 @@ fn react_to_notification(
         }
 
         let state = column.block_state(tlx, n.pos.y, tlz).to_string();
+
+        // 1b. `snowy` upkeep (#546). `SnowyBlock.updateShape`
+        // (`SnowyBlock.java:41-45`) recomputes `snowy` from the block above
+        // whenever that neighbour changes, so placing or breaking snow on grass
+        // flips it in both directions. Nothing did this before, so `snowy` was
+        // whatever it was written as and never moved.
+        //
+        // Recomputed unconditionally rather than only for a from-above
+        // notification: the value depends solely on the block above, so the two
+        // agree, and this needs no assumption about `Notification::from`'s
+        // orientation. Flag 2 in vanilla's own `setBlock` — clients told, no
+        // further fan-out, hence the empty return.
+        if SNOWY_FAMILY.contains(&base_name(&state)) {
+            let above = column.block_state(tlx, n.pos.y + 1, tlz).to_string();
+            let want_snowy = is_snowy_setting(&above);
+            // Compared on the *value*, not on the whole string: a property-less
+            // `minecraft:grass_block` already means the default, `snowy=false`,
+            // so this rewrites only when the value really has to flip.
+            if (property_of(&state, "snowy") == Some("true")) != want_snowy {
+                let want = spreading_snowy_state(base_name(&state), &above);
+                column.set_block(tlx, n.pos.y, tlz, want);
+                events.push(RandomTickEvent {
+                    pos: (n.pos.x, n.pos.y, n.pos.z),
+                    from: state,
+                    to: want.to_string(),
+                });
+            }
+            return Vec::new();
+        }
 
         // 2. Redstone dust (#314).
         if redstone::is_wire(&state) {
@@ -1875,12 +1951,36 @@ mod tests {
         let mut spread = false;
         for _ in 0..3000 {
             let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
-            if events.iter().any(|e| e.pos == (6, 5, 5) && e.to == GRASS_BLOCK) {
+            if events.iter().any(|e| e.pos == (6, 5, 5) && base_name(&e.to) == GRASS_BLOCK) {
                 spread = true;
                 break;
             }
         }
         assert!(spread, "an eligible adjacent dirt block must eventually turn to grass");
+    }
+
+    /// #546, the two halves of `snowy`. The tag is `#minecraft:snow` — three
+    /// blocks, so `snow_block` counts and this is not a `minecraft:snow` check
+    /// — and `SnowyBlock.updateShape` moves the property in both directions
+    /// when the block above changes.
+    #[test]
+    fn snowy_tracks_the_block_above_in_both_directions() {
+        assert!(is_snowy_setting("minecraft:snow_block"));
+        assert!(is_snowy_setting("minecraft:powder_snow"));
+        assert!(is_snowy_setting("minecraft:snow[layers=1]"));
+        assert!(!is_snowy_setting("minecraft:short_grass"));
+
+        let mut column = ChunkColumn::new(0, 16);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        column.set_block(5, 5, 5, "minecraft:grass_block[snowy=false]");
+
+        column.set_block(5, 6, 5, "minecraft:snow_block");
+        propagate_and_react(&mut column, 0, 0, 5, 6, 5, &mut block_ticks, 0);
+        assert_eq!(column.block_state(5, 5, 5), "minecraft:grass_block[snowy=true]");
+
+        column.set_block(5, 6, 5, crate::chunk::AIR);
+        propagate_and_react(&mut column, 0, 0, 5, 6, 5, &mut block_ticks, 0);
+        assert_eq!(column.block_state(5, 5, 5), "minecraft:grass_block[snowy=false]");
     }
 
     /// Determinism control: two independently constructed schedulers, same
@@ -2204,7 +2304,7 @@ mod tests {
         let mut spread = false;
         for _ in 0..3000 {
             let events = scheduler.tick_chunk(&mut column, CX, CZ, 200, &mut block_ticks, 0);
-            if events.iter().any(|e| e.pos == target_abs && e.to == GRASS_BLOCK) {
+            if events.iter().any(|e| e.pos == target_abs && base_name(&e.to) == GRASS_BLOCK) {
                 spread = true;
                 break;
             }
@@ -2217,7 +2317,9 @@ mod tests {
             column.block_state(6, 5, 5),
             column.block_state(6, 8, 5),
         );
-        assert_eq!(column.block_state(6, 5, 5), GRASS_BLOCK, "at local (6, 5, 5)");
+        // `snowy=false` explicitly (#546): the spread write sets the property
+        // vanilla's `SpreadingSnowyBlock.randomTick` sets, air being above.
+        assert_eq!(column.block_state(6, 5, 5), "minecraft:grass_block[snowy=false]", "at local (6, 5, 5)");
         // Nothing may have been written at the alias cells.
         assert_eq!(column.block_state(6, 8, 5), "minecraft:stone", "at alias cell local (6, 8, 5)");
         assert_eq!(column.block_state(6, 9, 5), "minecraft:stone", "at alias cell local (6, 9, 5)");
@@ -2253,10 +2355,10 @@ mod tests {
         for _ in 0..3000 {
             let events = scheduler.tick_chunk(&mut column, CX, CZ, 200, &mut block_ticks, 0);
             assert!(
-                !events.iter().any(|e| e.to == GRASS_BLOCK),
+                !events.iter().any(|e| base_name(&e.to) == GRASS_BLOCK),
                 "no grass conversion is legal here, but one landed at {:?} (#472: the probe read \
                  the absolute-z alias local (6, 8, 5) and the write used the correct local (6, 5, 5))",
-                events.iter().find(|e| e.to == GRASS_BLOCK).map(|e| e.pos),
+                events.iter().find(|e| base_name(&e.to) == GRASS_BLOCK).map(|e| e.pos),
             );
         }
         assert_eq!(column.block_state(6, 5, 5), "minecraft:stone", "at local (6, 5, 5) in chunk (2, 3)");

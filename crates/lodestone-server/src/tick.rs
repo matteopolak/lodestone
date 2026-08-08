@@ -305,6 +305,16 @@ pub struct BlockTickFeed(
     /// to be rebased onto the tick loop's counter and hosted in its
     /// `block_ticks` queue. `trigger_tick` is a relative delay.
     Arc<Mutex<Vec<ScheduledTick<String>>>>,
+    /// Issue #530: sounds, particles and level events the world tick produced —
+    /// see [`crate::effects`].
+    ///
+    /// **A third lane here rather than a feed of its own**, because a feed is
+    /// nine `serve_connection*` signatures wide and an effect is the same kind
+    /// of thing as the block update in lane 0: something the world tick did that
+    /// this connection has no other way to learn about. Outbound, so it splits
+    /// per-connection under [`subscriber`](Self::subscriber) exactly as lane 0
+    /// does.
+    Arc<Mutex<Vec<crate::effects::WorldEffect>>>,
 );
 
 impl BlockTickFeed {
@@ -324,6 +334,25 @@ impl BlockTickFeed {
         std::mem::take(&mut *self.0.lock().expect("block tick feed lock poisoned"))
     }
 
+    /// Records one world effect (issue #530) for this feed's consumer to learn
+    /// about on their next [`drain_effects`](Self::drain_effects).
+    ///
+    /// Publish only effects the *server* caused: the shell predicts its own
+    /// break and place sounds locally, so an effect the acting client would also
+    /// predict plays twice. See [`crate::effects`]'s module doc.
+    pub(crate) fn publish_effect(&self, effect: crate::effects::WorldEffect) {
+        self.2
+            .lock()
+            .expect("block tick feed lock poisoned")
+            .push(effect);
+    }
+
+    /// Drains every world effect published since the last call — single-consumer
+    /// for the same reason [`drain_all`](Self::drain_all) is.
+    pub fn drain_effects(&self) -> Vec<crate::effects::WorldEffect> {
+        std::mem::take(&mut *self.2.lock().expect("block tick feed lock poisoned"))
+    }
+
     /// A feed with its **own** outbound queue and this one's **shared**
     /// inbound queue — the shape a LAN per-connection subscriber needs (issue
     /// #465). See the struct doc comment: outbound must be per-connection
@@ -336,7 +365,7 @@ impl BlockTickFeed {
     // `a_subscriber_shares_the_inbound_queue_and_splits_the_outbound_one`.
     #[allow(dead_code)]
     pub(crate) fn subscriber(&self) -> Self {
-        Self(Arc::default(), Arc::clone(&self.1))
+        Self(Arc::default(), Arc::clone(&self.1), Arc::default())
     }
 
     /// Hands the tick loop block ticks that a connection's own mutation
@@ -397,6 +426,21 @@ impl ExplosionFeed {
     /// consumer.
     pub fn drain_all(&self) -> Vec<Detonation> {
         std::mem::take(&mut *self.0.lock().expect("explosion feed lock poisoned"))
+    }
+}
+
+/// Publishes the open/close sound for a state transition, if it was one (issue
+/// #530). A no-op for every other block, so call sites need no guard of their own.
+///
+/// `game_tick` stands in for vanilla's `random.nextFloat() * 0.1F + 0.9F` pitch
+/// draw: this loop's per-tick RNG is owned by the random-tick scheduler and a
+/// door sound must not consume from it (the draw *sequence* is what
+/// `crate::random_tick`'s parity gates pin). Cycling the pitch over the tick
+/// counter keeps the audible variation without touching that sequence.
+fn publish_openable_sound(out: &BlockTickFeed, pos: BlockPos, from: &str, to: &str, game_tick: u64) {
+    let pitch = 0.9 + (game_tick % 11) as f32 * 0.01;
+    if let Some(effect) = crate::effects::openable_toggled(pos, from, to, pitch) {
+        out.publish_effect(effect);
     }
 }
 
@@ -944,8 +988,23 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 EatenBlock::AtFeet => (pos, "minecraft:air"),
                 EatenBlock::Below => (BlockPos::new(pos.x, pos.y - 1, pos.z), "minecraft:dirt"),
             };
+            // Issue #530: `EatBlockGoal` sends level event 2001 for the break
+            // particles (`crate::mobs::MobSim::take_grazes`'s own doc says so),
+            // which is a server-caused effect no client predicts. The *old* state
+            // is what the particles are made of, so it is read before the write.
+            let broken = world.block_state(target.x, target.y, target.z);
+            if let Some(effect) = crate::effects::block_destroyed(target, &broken) {
+                block_tick_out.publish_effect(effect);
+            }
             world.set_block(target.x, target.y, target.z, state);
             block_tick_out.publish(target.x, target.y, target.z, state.to_owned());
+        }
+        // Issue #530: mob hurt and death sounds. `MobSim::apply_damage` already
+        // damaged and killed mobs with no audible result at all — the sim records
+        // the vocalisation for the same reason it records a detonation (it holds
+        // the world immutably and owns no connection).
+        for effect in mobs.with(MobSim::take_vocalisations) {
+            block_tick_out.publish_effect(effect);
         }
         // Issue #321: the hopper redstone lock. `tick_all`'s unlocked shorthand
         // would tick every hopper as `enabled: true` forever, which is what this
@@ -1141,12 +1200,18 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
 
             if let Some(new_state) = new_state {
                 if new_state != state {
+                    // Issue #530: a door, trapdoor or fence gate a scheduled tick
+                    // just toggled — vanilla's `DoorBlock.playSound`. The one
+                    // openable path that is genuinely server-driven, so nothing
+                    // predicts it and it was silent.
+                    publish_openable_sound(&block_tick_out, BlockPos::new(x, y, z), &state, &new_state, game_tick);
                     column.set_block(lx, y, lz, &new_state);
                     world.set_block(x, y, z, &new_state);
                     block_tick_out.publish(x, y, z, new_state);
                 }
                 for event in crate::random_tick::propagate_and_react(&mut column, min_x, min_z, x, y, z, &mut block_ticks, game_tick) {
                     let (ex, ey, ez) = event.pos;
+                    publish_openable_sound(&block_tick_out, BlockPos::new(ex, ey, ez), &event.from, &event.to, game_tick);
                     world.set_block(ex, ey, ez, &event.to);
                     block_tick_out.publish(ex, ey, ez, event.to);
                 }

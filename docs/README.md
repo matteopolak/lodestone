@@ -40,6 +40,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   on screen. Four cuboid meshes baked at **two different inflations**, painted by
   per-material sheets resolved through the `equipment_asset` chain, drawn through the
   entity pipeline over the wearer's own already-animated part matrices.
+- [Armour trim decoding, and the component-patch decode cliff](./armour-trim-decode.md) —
+  `minecraft:trim` now decodes off the wire into
+  `lodestone_model::ItemComponents::trim`, so a smithing-table armour trim reaches the
+  client as a `(material, pattern)` pair. The asset layer it feeds
+  (`lodestone_assets::trim`, `trim_decal_pipeline`) was already complete with zero
+  callers; this is the missing link.
 - [Autonomous navigation: `lodestone-nav` + `lodestone-autopilot`](./autonomous-navigation.md) —
   Two crates under [`crates/plugins/`](../crates/plugins/) implementing M1 and part of
   M2 of [`docs/baritone-port.md`](./baritone-port.md)'s Baritone-class navigation
@@ -745,13 +751,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   is the "not Minecraft" tell issue
   [#22](https://github.com/matteopolak/lodestone/issues/22) named: flat per-block
   light plus directional shade, with no darkening in corners and crevices.
-- [The `MOTION_BLOCKING` heightmap: generator half](./motion-blocking-heightmap.md) —
-  Every served chunk used to carry a well-framed, **zero-entry** heightmap NBT:
-  `crates/protocol/v770/src/server_protocol.rs:1465` writes
-  `Heightmaps::new().encode(&mut w)`, which is an empty `Vec<(u32, Heightmap)>`.
-  `lodestone-worldgen` now computes the real `MOTION_BLOCKING` map per column and
-  exposes it on `GeneratedColumn`, so the value exists; **nothing consumes it yet**,
-  because `ChunkColumn` and the encoder are in another cluster.
+- [The `MOTION_BLOCKING` heightmap](./motion-blocking-heightmap.md) — Every served
+  chunk used to carry a well-framed, **zero-entry** heightmap NBT —
+  `encode_column_body` wrote `Heightmaps::new().encode(&mut w)`, an empty `Vec<(u32,
+  Heightmap)>`. `lodestone-worldgen` computes the real `MOTION_BLOCKING` map per
+  column and exposes it on `GeneratedColumn`; `ChunkColumn` now carries it across the
+  generator/server seam and `encode_column_body` packs it into the chunk packet, so a
+  client receives a real map instead of an empty one.
 - [The multi-protocol seam: constructing an adapter for the protocol it negotiated](./multi-protocol-seam.md) —
   The change that lets one `crates/protocol/vNNN` crate serve several protocol
   revisions instead of exactly one. Unit U2 of epic #343's dispatch plan
@@ -1125,6 +1131,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   to be spawned side-by-side, and adds the accounting #285 asked for: ticks-run,
   most-recent and rolling-average tick duration (MSPT), a derived TPS figure, and an
   overrun counter for when the loop falls behind schedule.
+- [Server-owned sounds, particles and level events](./server-world-effects.md) — The
+  path by which the integrated server tells a client "play this here". Before it, the
+  `ServerProtocol` trait had **no sound encoder and no particle encoder** — so the
+  server emitted no `sound`, no `level_event` and no `level_particles` packet, ever,
+  and anything the client could not predict for itself was silent and invisible. A
+  player could beat a cow to death without a sound.
 - [v770 serverbound `play` packet wiring, and why decoding is not the bar](./serverbound-packet-wiring.md) —
   The measured state of protocol 776's **serverbound** `play` packets on the hosting
   side — what `V770ServerProtocol::decode` understands, what actually reaches a
