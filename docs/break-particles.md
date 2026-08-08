@@ -127,12 +127,77 @@ states** carry a tint on a complete 26.2 pack.
 ### Shading and the fragment shader
 
 `Particles::extract` maps the quarter-window's sprite-local UVs into absolute atlas UVs,
-then multiplies the colour by the terrain shader's own light term — vanilla's
-`lightmap.fsh` curve, via `lodestone_render::light_term_from_levels` (see
-[light-ramp.md](./light-ramp.md)); note a particle does not yet dim at night,
-because `Particles` has no clock to pass as `sky_darken`. The fragment shader is `texel * colour`, discarding `a < 0.02`. Both
-atlas and colour target are sRGB, so the multiply happens in **linear** space — unlike
-block tint and face shade, which vanilla multiplies in gamma space (see `CLAUDE.md`).
+and computes the terrain shader's own light term — vanilla's `lightmap.fsh` curve, via
+`lodestone_render::light_term_from_levels` (see [light-ramp.md](./light-ramp.md)) — from
+the packed light coords `ParticleEngine::extract` sampled at the particle's own block.
+
+That term is **not** multiplied into the instance colour. It rides in
+`ParticleInstance::roll_light.y` and is applied by `particles.wgsl` inside one gamma
+round-trip, `srgb_to_linear(linear_to_srgb(texel) * colour * light)`, byte-for-byte the
+shape `model.wgsl` uses for tint and AO×light. The fragment shader discards
+`texel.a * colour.a < 0.02` first, so the round-trip only runs on fragments that survive.
+
+**It used to be a linear multiply, and that was the "particles are always super bright"
+bug.** Vanilla is not colour-managed (see `CLAUDE.md`): multiplying a linear texel by a
+gamma-space factor and re-encoding pulls every factor toward 1.0. An unlit particle's
+`0.0935` came out at about `0.34`, so a break in a pitch-black cave looked barely dimmer
+than one at noon, and the light plumbing behind it — which was correct end to end, from
+`Sim::extract_particles`'s chunk-light closure through `ParticleQuad::light` — read as
+missing. Nothing was missing; the multiply was in the wrong space.
+
+Two narrower gaps remain, both separate from the space bug:
+
+- **`sky_darken` is `1.0`.** `Particles` has no clock, so a particle does not dim at
+  night. Terrain and entities do.
+- **This is the scalar light model**, i.e. exactly vanilla's blue channel, where
+  `model.wgsl` and `fluid.wgsl` sample the three-channel `light_color_from_levels` with
+  its warm `BLOCK_LIGHT_TINT` and additive sky/block combine. A torch-lit particle is
+  therefore the right brightness and slightly the wrong hue. Closing this means passing
+  a `vec3` in place of `roll_light.y` and widening the lane; the curve itself is already
+  shared.
+
+### Draw order: opaque before water, translucent after
+
+Vanilla submits one particle group **twice** — `SubmitNodeCollection::submitQuadParticleGroup`
+puts it in the `solid` phase *and* in `afterTerrain`, and `QuadParticleFeatureRenderer::prepareGroup`
+keeps only the layers whose `translucent()` matches the submission. So
+`SingleQuadParticle.Layer.OPAQUE*` draws **before** translucent terrain and
+`TRANSLUCENT*` after it. `lodestone_particle::Layer` is that flag, and
+`Behaviour::layer()` assigns it.
+
+`ParticleRenderer` reproduces the split with one instance buffer and two draws:
+
+| | `draw_opaque` | `draw` |
+|---|---|---|
+| vanilla | `OPAQUE_PARTICLE`, `solid` phase | `TRANSLUCENT_PARTICLE`, `afterTerrain` |
+| where in `gpu/frame.rs` | just before the water draw | after it, with weather and the outline |
+| depth write | **on** | off |
+| blend | `ALPHA_BLENDING` | `ALPHA_BLENDING` |
+
+Both halves used to draw after the water, which is why breaking a block underwater threw
+debris painted on top of the surface. **The depth write is the mechanism, not the move.**
+Water tests depth and does not write it, so it can only blend over a submerged particle
+that is already in the depth buffer — and can only be depth-rejected in front of a nearer
+one. Moving the draw without the write would tint particles in front of the surface too.
+
+`depth_compare` is `Less`, not vanilla's `GREATER_THAN_OR_EQUAL`: depth here is `[0,1]`
+DirectX-style rather than reversed-Z, so every ported comparison flips.
+
+The one deliberate deviation from vanilla is that `draw_opaque`'s pipeline keeps
+`ALPHA_BLENDING` where vanilla's `OPAQUE_PARTICLE` has no blending at all.
+`Behaviour::layer()` sends every `Terrain` particle to `Layer::Opaque` unconditionally,
+where vanilla's `Layer.bySprite` consults the sprite's own transparency — so a broken
+glass or ice block reaches this pipeline here and would not in vanilla, and a
+non-blending pipeline would draw it as opaque squares. For a genuinely opaque texel the
+two are identical. Teaching `layer()` about sprite transparency is what would let the
+blend go.
+
+**`prepare` does the partitioning, not `extract`.** `ParticleInstance::translucent` rides
+in the instance and `ParticleRenderer::prepare` sorts the upload into opaque-then-translucent,
+so the two draws are byte ranges of one buffer. That placement is the same argument the
+issue #45 section below makes about `SpriteAtlas`: an ordering invariant established
+upstream is one a future sort can silently undo, and the last place that sees the
+uploaded bytes is the only place it cannot.
 
 ## The white-debris bug (fixed), and what was measured
 
@@ -216,6 +281,17 @@ a gate can prove the table is populated rather than trusting that it is.
   first-model-wins rule beside it.
 - **Debris draws nothing** → check `ParticleFrame::unresolved` before anything else; an
   unresolved sprite is silent in pixels but loud in that counter.
+- **Debris is too bright everywhere, or barely changes between noon and a dark cave** →
+  the light term is being applied in the wrong space, not missing. Check that
+  `Particles::extract` leaves `ParticleInstance::colour` as the bare tint and that
+  `particles.wgsl` still does the multiply between `linear_to_srgb` and `srgb_to_linear`.
+  `particles::tests::light_term_matches_the_terrain_shader` asserts both halves — the
+  shade lane's value against a hand-written `lightmap.fsh`, and that `colour` is still
+  `TerrainParticle`'s bare `0.6`.
+- **Debris draws on top of water, or a particle in front of the surface is water-tinted**
+  → the layer split. The first is the opaque half having slipped back after the water
+  draw in `gpu/frame.rs`; the second is `draw_opaque`'s pipeline having lost its depth
+  write. `ParticleRenderer::opaque_count` is non-zero whenever a break burst is live.
 - **A flame/smoke/crit particle is the wrong texture, or draws nothing while
   `unresolved == 0`** → this is issue #45's shape. Check
   `RenderStats::particle_sheet_atlas_bound` and `particles_from_sheet` together, in that
@@ -354,8 +430,11 @@ the thing that was wrong.
 
 **Not** the two-pass split the issue proposed. A second bind group plus "block instances
 then sheet instances" makes correctness depend on the instance list staying **partitioned
-by atlas** — an invariant nothing holds, and which any future sort (by depth, for the
-translucent-ordering gap noted above) would silently break, reproducing this exact bug.
+by atlas** — an invariant nothing holds, and which any future sort (by depth, say) would
+silently break, reproducing this exact bug. Note that the layer split described above
+*does* partition the buffer, and deliberately does it inside `prepare` for this reason:
+`atlas` stays a per-instance selector, so the ordering carries no correctness weight for
+texturing.
 
 Instead: group 1 binds **both** stitches (four bindings — two textures, two samplers), and
 every `ParticleInstance` carries a `SpriteAtlas` selector chosen by the same

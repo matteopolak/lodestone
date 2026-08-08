@@ -82,10 +82,25 @@ pub struct ParticleInstance {
     centre_size: [f32; 4],
     /// Absolute atlas UVs `[u0, v0, u1, v1]`, in the space of [`Self::atlas`].
     uv: [f32; 4],
-    /// Linear RGBA tint, already multiplied by the light term.
+    /// Vanilla's own RGBA tint (`rCol`/`gCol`/`bCol`/`alpha`), and **not**
+    /// premultiplied by the light term.
+    ///
+    /// It used to be. Folding the lightmap value in here multiplied it against
+    /// a *linear* texel in the shader, and per `CLAUDE.md` vanilla is not
+    /// colour-managed: shade and tint multiply in **gamma** space. A linear
+    /// multiply pulls every factor toward 1.0 — an unlit particle's `0.0935`
+    /// re-encodes to `0.34`, which is why particles read as permanently
+    /// full-bright even though the light plumbing behind them was correct all
+    /// along. The multiply now happens in `particles.wgsl` between a
+    /// `linear_to_srgb` and an `srgb_to_linear`, exactly as `model.wgsl` does
+    /// it, so both this tint and [`Self::roll_light`]'s shade land in the
+    /// space vanilla applies them in.
     colour: [f32; 4],
-    /// `x` = roll about the view axis in radians; `yzw` padding.
-    roll: [f32; 4],
+    /// `x` = roll about the view axis in radians; `y` = the lightmap term for
+    /// this particle's own block position (`lodestone_render::light`'s scalar
+    /// model, the one Rust mirror of `lightmap.fsh` the model and fluid
+    /// shaders duplicate); `zw` padding.
+    roll_light: [f32; 4],
     /// [`SpriteAtlas`] as `u32` — which of the fragment shader's two bound
     /// textures [`Self::uv`] addresses. A separate vertex attribute rather
     /// than a spare lane of `roll` so that reading the struct tells you the
@@ -93,6 +108,20 @@ pub struct ParticleInstance {
     /// (`u32` needs 4-byte alignment, so there is no padding and `Pod` still
     /// derives).
     atlas: u32,
+    /// `1` for [`Layer::Translucent`], `0` for [`Layer::Opaque`].
+    ///
+    /// The fragment shader never reads this — [`ParticleRenderer::prepare`]
+    /// does, to partition the upload into the two draws vanilla splits
+    /// particles across (`SubmitNodeCollection::submitQuadParticleGroup`
+    /// submits the same group twice, once into the `solid` phase and once into
+    /// `afterTerrain`, and `QuadParticleFeatureRenderer` keeps only the layers
+    /// whose `translucent()` matches). It rides in the instance rather than
+    /// being passed alongside it because `RenderState::prepare_particles`'s
+    /// signature is fixed by callers outside this module, and because deriving
+    /// the split from the bytes actually uploaded is the same reasoning
+    /// [`Self::atlas`] records: a count plumbed separately can disagree with
+    /// them.
+    translucent: u32,
 }
 
 /// The particle camera uniform. Positions are camera-relative, so the matrix is
@@ -551,11 +580,6 @@ impl Particles {
         let mut unresolved = 0usize;
         let mut sheet_drawn = 0usize;
         for q in &self.quads {
-            // Translucent-layer ordering is not implemented; every particle
-            // draws in one blended pass with depth writes off, which is correct
-            // for the additive-looking terrain debris and slightly wrong for
-            // overlapping alpha sprites. Recorded rather than hidden.
-            let _ = matches!(q.layer, Layer::Translucent);
             let Some((rect, atlas)) = self.sprite_rect(q.sprite) else {
                 unresolved += 1;
                 continue;
@@ -578,24 +602,27 @@ impl Particles {
             // rendering bug in the terrain. Vanilla packs block light at bit 4
             // and sky light at bit 20.
             //
-            // `sky_darken` is `1.0` here: `Particles` has no clock, so a particle
-            // does not yet dim at night. That is a *separate* gap from the curve,
-            // and it is the one thing left before particles match terrain at
-            // every hour rather than only at noon.
+            // The *value* goes to the shader untouched; it is applied there, in
+            // gamma space. See `ParticleInstance::colour`.
+            //
+            // Two gaps remain, both narrower than the space bug and both
+            // separate from the curve. `sky_darken` is `1.0`: `Particles` has no
+            // clock, so a particle does not yet dim at night. And this is the
+            // *scalar* model, i.e. exactly vanilla's blue channel, where
+            // `model.wgsl`/`fluid.wgsl` sample the three-channel
+            // `light_color_from_levels` with its warm block tint and additive
+            // sky/block combine — so a torch-lit particle is the right
+            // brightness and slightly the wrong hue.
             let block = ((q.light >> 4) & 15) as f32 / 15.0;
             let sky = ((q.light >> 20) & 15) as f32 / 15.0;
             let shade = lodestone_render::light_term_from_levels(sky, block, 1.0);
             self.instances.push(ParticleInstance {
                 centre_size: [q.position[0], q.position[1], q.position[2], q.size],
                 uv,
-                colour: [
-                    q.colour[0] * shade,
-                    q.colour[1] * shade,
-                    q.colour[2] * shade,
-                    q.colour[3],
-                ],
-                roll: [q.roll, 0.0, 0.0, 0.0],
+                colour: q.colour,
+                roll_light: [q.roll, shade, 0.0, 0.0],
                 atlas: atlas as u32,
+                translucent: u32::from(matches!(q.layer, Layer::Translucent)),
             });
         }
 
@@ -690,13 +717,21 @@ fn sheet_uv_table(atlas: &ParticleAtlas) -> HashMap<(Sheet, u16), [f32; 4]> {
 #[derive(Debug)]
 pub struct ParticleRenderer {
     pipeline: wgpu::RenderPipeline,
+    opaque_pipeline: wgpu::RenderPipeline,
     cam_layout: wgpu::BindGroupLayout,
     tex_layout: wgpu::BindGroupLayout,
     cam_buffer: wgpu::Buffer,
     cam_bind_group: wgpu::BindGroup,
     instances: wgpu::Buffer,
+    /// The upload staging list, opaque-layer instances first. Held across
+    /// frames so the partition is not a per-frame allocation.
+    ordered: Vec<ParticleInstance>,
     capacity: u32,
     count: u32,
+    /// How many of the leading [`Self::count`] instances are opaque-layer, i.e.
+    /// the split point between [`ParticleRenderer::draw_opaque`] and
+    /// [`ParticleRenderer::draw`].
+    opaque_count: u32,
     /// Of [`Self::count`], how many address the particle sheet. Kept so a
     /// caller that never installed a sheet texture can *notice* it is
     /// submitting sheet instances instead of drawing nothing — see
@@ -770,54 +805,82 @@ impl ParticleRenderer {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("lodestone-particle-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<ParticleInstance>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
-                        4 => Uint32
-                    ],
-                })],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                // A billboard is built from the camera basis, so its winding
-                // flips as the camera passes it. Culling would blink particles
-                // out; vanilla draws them double-sided too.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                // Tested against terrain so particles hide behind blocks, but
-                // not written: overlapping particles would otherwise punch
-                // holes in each other in draw order.
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        // Two pipelines over one shader and one layout, differing **only** in
+        // depth write. They are vanilla's `OPAQUE_PARTICLE` and
+        // `TRANSLUCENT_PARTICLE` (`RenderPipelines.java:625`), both built from
+        // the same `PARTICLE_SNIPPET`.
+        //
+        // One deliberate deviation: vanilla's opaque pipeline has no blending at
+        // all, and this one keeps `ALPHA_BLENDING`. `Behaviour::layer()` assigns
+        // every `Terrain` particle to `Layer::Opaque` unconditionally, where
+        // vanilla's `Layer.bySprite` consults the sprite's own transparency and
+        // sends a translucent block texture to `TRANSLUCENT_TERRAIN` instead. So
+        // a broken glass or ice block reaches this pipeline here and would not
+        // in vanilla, and a non-blending pipeline would draw it as opaque
+        // squares. For a genuinely opaque texel the two are identical, so
+        // blending is the strictly safer of the two until `layer()` learns about
+        // sprite transparency.
+        let make_pipeline = |label: &str, depth_write: bool| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<ParticleInstance>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
+                            4 => Uint32, 5 => Uint32
+                        ],
+                    })],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    // A billboard is built from the camera basis, so its winding
+                    // flips as the camera passes it. Culling would blink particles
+                    // out; vanilla draws them double-sided too.
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(depth_write),
+                    // `Less`, not vanilla's `GREATER_THAN_OR_EQUAL`: depth here
+                    // is `[0,1]` DirectX-style rather than vanilla's reversed-Z,
+                    // so every ported comparison flips (`CLAUDE.md`,
+                    // "Rendering constraints").
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: color_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        // Depth **write on**, which is the whole mechanism behind the water fix:
+        // water draws with depth test on and depth write off, so it can only
+        // blend over a submerged particle if that particle is already in the
+        // depth buffer. Without the write, water passes against the sea floor
+        // and the particle stays in the framebuffer untinted *and* a particle in
+        // front of the surface gets tinted anyway.
+        let opaque_pipeline = make_pipeline("lodestone-particle-pipeline-opaque", true);
+        // Depth write off: these draw after translucent terrain, and overlapping
+        // blended sprites would punch holes in each other in draw order.
+        let pipeline = make_pipeline("lodestone-particle-pipeline", false);
 
         let cam_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("lodestone-particle-camera"),
@@ -846,13 +909,16 @@ impl ParticleRenderer {
 
         Self {
             pipeline,
+            opaque_pipeline,
             cam_layout,
             tex_layout,
             cam_buffer,
             cam_bind_group,
             instances,
+            ordered: Vec::new(),
             capacity: INITIAL_CAPACITY,
             count: 0,
+            opaque_count: 0,
             sheet_count: 0,
         }
     }
@@ -928,6 +994,26 @@ impl ParticleRenderer {
                 .count(),
         )
         .unwrap_or(u32::MAX);
+
+        // Partition here rather than asking `Particles::extract` to emit the two
+        // layers in order. Vanilla splits the same particle group across two
+        // draws — the `solid` phase before translucent terrain and `afterTerrain`
+        // after it — and this pass reproduces that with one buffer and two
+        // instance ranges, which only works if the buffer is partitioned.
+        //
+        // Doing it at the last place that sees the uploaded bytes means the
+        // invariant cannot be broken by a producer: the module doc above rejects
+        // an atlas-partitioned instance list for exactly the reason that a
+        // future sort would silently undo it, and the same objection would apply
+        // to a layer-partitioned one built upstream. `atlas` stays per-instance,
+        // so nothing about issue #45 depends on this ordering either.
+        self.ordered.clear();
+        self.ordered
+            .extend(instances.iter().filter(|i| i.translucent == 0));
+        self.opaque_count = u32::try_from(self.ordered.len()).unwrap_or(u32::MAX);
+        self.ordered
+            .extend(instances.iter().filter(|i| i.translucent != 0));
+
         if self.count == 0 {
             return;
         }
@@ -941,7 +1027,7 @@ impl ParticleRenderer {
                 mapped_at_creation: false,
             });
         }
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
+        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.ordered));
 
         // Camera-relative positions, so fold the camera translation into the
         // matrix rather than adding it back per vertex.
@@ -973,17 +1059,57 @@ impl ParticleRenderer {
         self.sheet_count as usize
     }
 
-    /// Record the draw. No-op when the last [`prepare`](Self::prepare) produced
-    /// nothing.
+    /// Of [`count`](Self::count), how many are [`Layer::Opaque`] — i.e. what
+    /// [`draw_opaque`](Self::draw_opaque) will submit. The remainder is
+    /// [`draw`](Self::draw)'s.
+    pub fn opaque_count(&self) -> usize {
+        self.opaque_count as usize
+    }
+
+    /// Record the **opaque-layer** draw, which must run *before* translucent
+    /// water. No-op when the last [`prepare`](Self::prepare) produced no opaque
+    /// instances.
+    ///
+    /// This is vanilla's `solid` submission of the particle group: block-break
+    /// debris, crits, flame, bubbles and the rest of [`Layer::Opaque`] go in
+    /// here, with depth write on, so the water surface blends over the ones
+    /// beneath it and depth-rejects over the ones in front of it. See
+    /// [`ParticleRenderer::new`] on the pipelines and `gpu/frame.rs`'s module
+    /// doc on the ordering rule.
+    pub fn draw_opaque(&self, pass: &mut wgpu::RenderPass<'_>, atlas: &wgpu::BindGroup) {
+        self.draw_range(pass, atlas, &self.opaque_pipeline, 0, self.opaque_count);
+    }
+
+    /// Record the **translucent-layer** draw, which runs after translucent
+    /// water as vanilla's `afterTerrain` phase does. No-op when the last
+    /// [`prepare`](Self::prepare) produced no translucent instances.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, atlas: &wgpu::BindGroup) {
-        if self.count == 0 {
+        self.draw_range(pass, atlas, &self.pipeline, self.opaque_count, self.count);
+    }
+
+    /// The half of a draw both layers share.
+    ///
+    /// The instance range is expressed as a **vertex-buffer byte offset** rather
+    /// than as a non-zero `first_instance`, because `first_instance` interacts
+    /// with backend feature gates (`INDIRECT_FIRST_INSTANCE`) and an offset
+    /// slice does not.
+    fn draw_range(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        atlas: &wgpu::BindGroup,
+        pipeline: &wgpu::RenderPipeline,
+        first: u32,
+        end: u32,
+    ) {
+        if end <= first {
             return;
         }
-        pass.set_pipeline(&self.pipeline);
+        let stride = std::mem::size_of::<ParticleInstance>() as u64;
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &self.cam_bind_group, &[]);
         pass.set_bind_group(1, atlas, &[]);
-        pass.set_vertex_buffer(0, self.instances.slice(..));
-        pass.draw(0..4, 0..self.count);
+        pass.set_vertex_buffer(0, self.instances.slice(u64::from(first) * stride..));
+        pass.draw(0..4, 0..(end - first));
     }
 
     /// The camera bind-group layout, exposed so a caller can rebuild the
@@ -1375,16 +1501,32 @@ mod tests {
         p.state_uv = Arc::new(vec![None, Some(rect)]);
         p.destroy_block([0, 64, 0], 1, [1.0, 1.0, 1.0]);
 
-        // Full bright first, to learn the particle's own base tint. Vanilla's
-        // `TerrainParticle` scales the block colour by 0.6 in its constructor,
-        // so the instance colour is `base * shade` rather than `shade`, and
-        // asserting on the absolute value would be asserting on that 0.6.
+        // The shade now travels in its own instance lane instead of being folded
+        // into `colour`, so these read it directly rather than dividing out the
+        // 0.6 `TerrainParticle` scales the block colour by in its constructor.
+        // Full bright must be exactly 1.0 — `apply_brightness_option` is the
+        // identity at 1.0, which is what keeps every full-bright path in the tree
+        // byte-identical.
+        let shade_of = |p: &Particles| p.instances[0].roll_light[1];
         let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
             Some(lodestone_particle::FULL_BRIGHT)
         });
         assert!(frame.drawn > 0);
-        let base = p.instances[0].colour[0];
-        assert!(base > 0.0, "a black particle makes the ratio meaningless");
+        let base = shade_of(&p);
+        assert!(
+            (base - 1.0).abs() < 1e-6,
+            "a full-bright particle must shade at exactly 1.0, got {base}"
+        );
+        // The tint itself must survive un-multiplied now, since the shader is
+        // what applies the shade: a build that still folded light into `colour`
+        // would leave 0.6 here under full bright and something smaller under any
+        // other light.
+        assert!(
+            (p.instances[0].colour[0] - 0.6).abs() < 1e-5,
+            "instance colour {} is not `TerrainParticle`'s bare 0.6 tint — the light \
+             term is being premultiplied into it again, which is the gamma-space bug",
+            p.instances[0].colour[0]
+        );
 
         // Block light 0, sky light 0. `get_brightness(0)` is 0, but vanilla seeds
         // the accumulator with `AmbientColor` — `0x0A0A0A` in the overworld, per
@@ -1393,8 +1535,8 @@ mod tests {
         // 0.2, which is still the floor issue #386 named; the correct replacement
         // is a *smaller* floor, not none.
         //
-        // This is also why the ratio below is worth asserting at all. Against a
-        // pure-black expectation, `dark / base` is 0.000 under any build that
+        // This is also why the value below is worth asserting at all. Against a
+        // pure-black expectation, an unlit shade is 0.000 under any build that
         // darkens — including one that draws nothing at all — so the assertion
         // would have been vacuous in the sense CLAUDE.md calls the *world*
         // species. A non-zero floor makes it discriminating again.
@@ -1402,12 +1544,11 @@ mod tests {
         let floor = ambient + ((1.0 - (1.0 - ambient).powi(4)) - ambient) * 0.5;
         assert!((floor - 0.093_545).abs() < 1e-5, "hypothesis drifted: {floor}");
         let _ = p.extract(&Camera::default(), 0.0, &|_, _, _| Some(0));
-        let dark = p.instances[0].colour[0];
+        let dark = shade_of(&p);
         assert!(
-            (dark / base - floor).abs() < 1e-5,
-            "unlit particle shade {} must be vanilla's ambient floor {floor} — not pure \
-             black, and not the retired ramp's 0.2",
-            dark / base
+            (dark - floor).abs() < 1e-5,
+            "unlit particle shade {dark} must be vanilla's ambient floor {floor} — not pure \
+             black, and not the retired ramp's 0.2"
         );
 
         // The interior of the curve, which is where the hypotheses differ most.
@@ -1427,7 +1568,7 @@ mod tests {
         );
         assert!((retired_ramp - 0.626_667).abs() < 1e-5, "hypothesis drifted: {retired_ramp}");
         let _ = p.extract(&Camera::default(), 0.0, &|_, _, _| Some(8 << 4));
-        let mid = p.instances[0].colour[0] / base;
+        let mid = shade_of(&p);
         assert!(
             (mid - vanilla).abs() < 1e-5,
             "block light 8 must shade at vanilla's {vanilla} — not the retired ramp's \
@@ -1437,7 +1578,7 @@ mod tests {
         // Sky-only and block-only must agree: the shader takes the max, so a
         // particle in full skylight is as bright as one beside a torch.
         let _ = p.extract(&Camera::default(), 0.0, &|_, _, _| Some(15 << 20));
-        let sky_only = p.instances[0].colour[0];
+        let sky_only = shade_of(&p);
         assert!(
             (sky_only - base).abs() < 1e-5,
             "sky-lit particle {sky_only} != block-lit {base}"
