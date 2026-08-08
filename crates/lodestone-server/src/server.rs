@@ -2079,6 +2079,19 @@ where
                 let mut advancements = AdvancementManager::builtin();
                 let initial = advancements.initial_update(player_uuid, true);
                 apply(conn, &mut state, proto.encode_update_advancements(&initial)).await?;
+                // Issue #547: the recipe book, `replace: true` — vanilla's
+                // `ServerPlayer.initMenu`/`RecipeBookMenu` join path sends the
+                // whole book once. **This is what hands out `RecipeDisplayId`s**,
+                // so without it `PLACE_RECIPE` is not merely unimplemented but
+                // unreachable: the id a client echoes back is a position in this
+                // list. Same trait-default no-op story as the advancements above
+                // for a protocol with no override.
+                apply(
+                    conn,
+                    &mut state,
+                    proto.encode_recipe_book_add(crate::crafting::recipe_book_entries(), true),
+                )
+                .await?;
                 let total_ms = t_cfg.elapsed().as_millis();
                 // `saturating_sub`, not `- 1`: `as_millis()` is `u128`, and over an
                 // in-memory or loopback transport the welcome phase completes in

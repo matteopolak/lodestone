@@ -59,7 +59,7 @@ Closing the menu returns the grid **and** the cursor to the player
 (`take_table_crafting` + `ClickState::reset`), with the overflow dropped in the
 world. A grid silently discarded on close deletes items on every close.
 
-## `PLACE_RECIPE` (step 4): the server half is here, and nothing sends it yet
+## `PLACE_RECIPE` (step 4): reachable, because the book is now sent
 
 `ServerBound::RecipePlaced` decodes, and `apply_recipe_placed` →
 `crafting::place_recipe` is vanilla's `ServerPlaceRecipe`: the grid goes back to the
@@ -68,16 +68,42 @@ never armour or the off-hand). `use_max_items` runs as many all-or-nothing round
 the inventory allows; a partially-filled extra round would leave a shape matching no
 recipe.
 
+### The id space, and the packet that hands it out (issue #547)
+
 **`RecipeDisplayId` is an opaque index the *server* assigns**, not a recipe name:
 vanilla sends the whole book with `ClientboundRecipeBookAddPacket` and the client
-echoes back a position in that list. This crate does not encode that packet, so
-`crafting::recipe_at_index` defines the index as the bundled corpus's own id-sorted
-order — the order such an encoder would emit, so the two cannot disagree once it
-exists. Until it does, **no client learns an id and no client sends a valid
-`PLACE_RECIPE`**: this half is complete and unreachable. Closing that needs
-`encode_recipe_book_add` in `lodestone-v770` (the `RecipeDisplay`/`SlotDisplay`
-hierarchy) plus, for *our own* client, a decode in `lodestone-shell`, which already
-has four separate notes saying that decode does not exist.
+echoes back a position in that list. That packet is now encoded, so `PLACE_RECIPE` is
+reachable rather than structurally dead.
+
+* `crafting::recipe_book_entries()` builds the whole bundled corpus as
+  `RecipeBookEntry` values, walking **the same id-sorted order**
+  `crafting::recipe_at_index` resolves. One index space by construction, and
+  `crates/protocol/v770/tests/recipe_book_add.rs`'s
+  `every_entry_id_resolves_to_the_same_recipe` asserts it — a drift here places a
+  *different* recipe on every click, silently and plausibly.
+* `ServerProtocol::encode_recipe_book_add` is the seam; `lodestone-v770` implements
+  it. `server.rs` sends it once at the Configuration→Play handoff with
+  `replace: true`, beside the advancements packet.
+* Only `crafting_shaped` and `crafting_shapeless` displays exist. The corpus this
+  crate bundles is those two recipe types, so a furnace/stonecutter/smithing display
+  would have nothing to describe.
+
+Three wire details worth keeping, each a place a transcription goes wrong:
+
+| field | shape |
+|---|---|
+| `SlotDisplay` dispatch | `SlotDisplays.bootstrap` **registration order**: `empty` 0, `item` 4, `item_stack` 5, `tag` 6, `composite` 10 |
+| `ItemStackTemplate` | item **then** count — the *opposite* order from `ItemStack.OPTIONAL_STREAM_CODEC`, which leads with the count |
+| `Ingredient` (`HolderSet<Item>`) | a VarInt of `0` means "a tag reference follows"; `n + 1` means "`n` direct entries follow". Every list we emit is direct, so every count is `len + 1` |
+
+An item id the 26.2 census cannot resolve degrades to `empty` rather than writing a
+guessed id: a wrong id desyncs the whole 1,000-entry list, which surfaces as a
+disconnect about some unrelated later field.
+
+**Our own client still does not decode it.** `lodestone-shell` has four separate
+notes saying so, and its recipe-book screen is fed from the client's own jar corpus.
+That is a client-side gap, not a server one — a real vanilla 26.2 client is a genuine
+consumer of this packet today.
 
 ## What is not here
 

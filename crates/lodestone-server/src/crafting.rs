@@ -9,10 +9,11 @@
 //! including the result slot — so a container diff could name any item as a
 //! crafting output and the server would store it.
 //!
-//! **What is still not here**: a crafting-*table* menu (nothing opens one, so the
-//! 3×3 [`CraftingState::table`] has no production caller yet) and
-//! `PLACE_RECIPE`. Both are steps 2 and 4 of issue #529's scope and are still
-//! open on it.
+//! **What is still not here**: a crafting-*table* menu — nothing opens one, so the
+//! 3×3 [`CraftingState::table`] has no production caller yet. `PLACE_RECIPE` *is*
+//! here and is now reachable: [`recipe_book_entries`] plus
+//! `ServerProtocol::encode_recipe_book_add` hand out the `RecipeDisplayId`s a
+//! client echoes back (issue #547), and the join path sends the whole book.
 //!
 //! ## How it works
 //!
@@ -95,18 +96,268 @@ pub fn recipe_book() -> &'static RecipeBook {
 ///
 /// **`RecipeDisplayId` is an opaque index the *server* assigns**, not a name:
 /// vanilla hands the client its whole book with `ClientboundRecipeBookAddPacket`
-/// and the client echoes back a position in that list. This crate does not encode
-/// that packet yet, so it defines the index as the corpus's own sorted order —
-/// which is exactly the order such an encoder would emit, so the two cannot
-/// disagree once it exists.
-///
-/// The consequence is worth stating: until `recipe_book_add` is encoded, **our own
-/// client never learns any id and so never sends a valid `PLACE_RECIPE`.** A real
-/// vanilla 26.2 client is in the same position. So this half is complete and the
-/// packet is currently unreachable; see `docs/server-side-crafting.md`.
+/// and the client echoes back a position in that list. [`recipe_book_entries`]
+/// encodes that packet, walking this same id-sorted order, so the two index
+/// spaces are one by construction — and
+/// `crates/protocol/v770/tests/recipe_book_add.rs`'s
+/// `every_entry_id_resolves_to_the_same_recipe` asserts it, because a drift here
+/// places a *different* recipe on every click, silently and plausibly.
 #[must_use]
 pub fn recipe_at_index(index: usize) -> Option<(&'static lodestone_model::Identifier, &'static lodestone_game::recipe::Recipe)> {
     recipe_book().iter().nth(index)
+}
+
+/// Vanilla's `SlotDisplay`, restricted to the variants a crafting recipe can
+/// produce (issue #547).
+///
+/// `SlotDisplay` is recursive and has eleven registered types; a shaped or
+/// shapeless crafting recipe reaches exactly these five, because
+/// `Ingredient.display()` yields either a `tag` or a `composite` of `item`s, a
+/// result is an `item_stack`, an absent pattern cell is `empty`, and the crafting
+/// station is an `item`. The other six (`any_fuel`, `with_any_potion`,
+/// `only_with_component`, `dyed`, `smithing_trim`, `with_remainder`) belong to
+/// furnace, brewing and smithing displays, which this corpus does not encode.
+///
+/// **The variant order below is not the wire order.** Registry ids come from
+/// `SlotDisplays.bootstrap`, and the encoder is the one place that knows them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SlotDisplay {
+    /// `empty` — an unfilled pattern cell.
+    Empty,
+    /// `item` — one item by id, no count and no components.
+    Item(lodestone_model::Identifier),
+    /// `item_stack` — an `ItemStackTemplate`: item id and count. Components are
+    /// not carried because the bundled corpus's results have none; a recipe that
+    /// grew one would need this widened, not worked around at the encoder.
+    Stack {
+        /// The result item id.
+        item: lodestone_model::Identifier,
+        /// The result count.
+        count: i32,
+    },
+    /// `tag` — an item tag the client resolves itself.
+    Tag(lodestone_model::Identifier),
+    /// `composite` — any of the contained displays.
+    Composite(Vec<SlotDisplay>),
+}
+
+impl SlotDisplay {
+    /// Vanilla `Ingredient.display()`: a tag stays a tag (so the client shows the
+    /// whole cycling set), and an explicit list becomes a composite of items.
+    #[must_use]
+    fn of_ingredient(ingredient: &lodestone_game::recipe::Ingredient) -> Self {
+        use lodestone_game::recipe::Ingredient;
+        match ingredient {
+            Ingredient::Item(id) => Self::Item(id.clone()),
+            Ingredient::Tag(tag) => Self::Tag(tag.clone()),
+            Ingredient::Any(options) => {
+                Self::Composite(options.iter().map(Self::of_ingredient).collect())
+            }
+        }
+    }
+}
+
+/// Vanilla's `RecipeDisplay`, restricted to the two crafting types.
+///
+/// `crafting_station` is `minecraft:crafting_table` for both, exactly as
+/// `ShapedRecipe.display()`/`ShapelessRecipe.display()` hardcode it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecipeDisplay {
+    /// `crafting_shaped`. `ingredients.len()` **must** equal `width * height` —
+    /// vanilla's own record throws otherwise, and a real client's reader will
+    /// disagree about where the list ends if it does not.
+    Shaped {
+        /// Pattern width, not the grid's.
+        width: i32,
+        /// Pattern height, not the grid's.
+        height: i32,
+        /// Row-major, `width * height` entries.
+        ingredients: Vec<SlotDisplay>,
+        /// The output.
+        result: SlotDisplay,
+    },
+    /// `crafting_shapeless`.
+    Shapeless {
+        /// In declaration order.
+        ingredients: Vec<SlotDisplay>,
+        /// The output.
+        result: SlotDisplay,
+    },
+}
+
+/// One `ClientboundRecipeBookAddPacket.Entry` — a `RecipeDisplayEntry` plus its
+/// notification/highlight flag byte.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecipeBookEntry {
+    /// `RecipeDisplayId.index` — the position this entry occupies, which is what
+    /// a later `PLACE_RECIPE` echoes back. **The same index
+    /// [`recipe_at_index`] resolves**, by construction: both walk
+    /// [`recipe_book`]'s id-sorted order.
+    pub id: i32,
+    /// The display the client draws and lays out from.
+    pub display: RecipeDisplay,
+    /// `OptionalInt group` — vanilla's numeric group id for the book's
+    /// "alternatives" cycling. `None` for a recipe with no `group`.
+    pub group: Option<i32>,
+    /// `minecraft:recipe_book_category` id (e.g. `crafting_misc`).
+    pub category: &'static str,
+    /// `Optional<List<Ingredient>>` — what the client's own "can I craft this"
+    /// highlight uses. Each entry is one ingredient's flattened item set; an
+    /// entry naming a tag is left for the encoder to resolve, so this is the
+    /// resolved item list.
+    pub crafting_requirements: Vec<Vec<lodestone_model::Identifier>>,
+}
+
+impl RecipeBookEntry {
+    /// The entry's result display, whichever display type it carries.
+    #[must_use]
+    pub fn display_result(&self) -> &SlotDisplay {
+        match &self.display {
+            RecipeDisplay::Shaped { result, .. } | RecipeDisplay::Shapeless { result, .. } => {
+                result
+            }
+        }
+    }
+}
+
+/// The whole bundled crafting corpus as recipe-book entries, in the id-sorted
+/// order [`recipe_at_index`] indexes.
+///
+/// Built once and cached, for the same reason [`recipe_book`] is: it is the same
+/// ~1,000 immutable recipes for every player, and it is sent at every join.
+///
+/// Only grid recipes appear. A cooking/stonecutter/smithing recipe would need its
+/// own `RecipeDisplay` type and its own book, and the corpus this crate bundles is
+/// `crafting_shaped` + `crafting_shapeless` only.
+pub fn recipe_book_entries() -> &'static [RecipeBookEntry] {
+    static ENTRIES: OnceLock<Vec<RecipeBookEntry>> = OnceLock::new();
+    ENTRIES.get_or_init(|| {
+        use lodestone_game::recipe::Recipe;
+        let tags = recipe_book().tags();
+        // Group ids are assigned in first-encounter order over the same sorted
+        // walk, so they are stable for a given corpus without needing to be
+        // stored anywhere.
+        let mut groups: Vec<String> = Vec::new();
+        let mut group_id = |name: Option<&str>| -> Option<i32> {
+            let name = name?;
+            let index = match groups.iter().position(|g| g == name) {
+                Some(i) => i,
+                None => {
+                    groups.push(name.to_string());
+                    groups.len() - 1
+                }
+            };
+            i32::try_from(index).ok()
+        };
+        let requirements = |ingredients: Vec<&lodestone_game::recipe::Ingredient>| {
+            ingredients
+                .into_iter()
+                .map(|ingredient| resolve_ingredient_items(ingredient, tags))
+                .collect()
+        };
+
+        recipe_book()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (_, recipe))| {
+                let id = i32::try_from(index).ok()?;
+                let (display, reqs, group) = match recipe {
+                    Recipe::Shaped(shaped) => {
+                        let ingredients: Vec<SlotDisplay> = shaped
+                            .pattern()
+                            .iter()
+                            .map(|cell| {
+                                cell.as_ref().map_or(SlotDisplay::Empty, |i| {
+                                    SlotDisplay::of_ingredient(i)
+                                })
+                            })
+                            .collect();
+                        let reqs = requirements(shaped.pattern().iter().flatten().collect());
+                        (
+                            RecipeDisplay::Shaped {
+                                width: i32::try_from(shaped.width()).unwrap_or(0),
+                                height: i32::try_from(shaped.height()).unwrap_or(0),
+                                ingredients,
+                                result: SlotDisplay::Stack {
+                                    item: shaped.result().item().clone(),
+                                    count: shaped.result().count(),
+                                },
+                            },
+                            reqs,
+                            group_id(shaped.group()),
+                        )
+                    }
+                    Recipe::Shapeless(shapeless) => {
+                        let ingredients = shapeless
+                            .ingredients()
+                            .iter()
+                            .map(SlotDisplay::of_ingredient)
+                            .collect();
+                        let reqs = requirements(shapeless.ingredients().iter().collect());
+                        (
+                            RecipeDisplay::Shapeless {
+                                ingredients,
+                                result: SlotDisplay::Stack {
+                                    item: shapeless.result().item().clone(),
+                                    count: shapeless.result().count(),
+                                },
+                            },
+                            reqs,
+                            group_id(shapeless.group()),
+                        )
+                    }
+                    // Not a grid recipe: no crafting `RecipeDisplay` exists for it.
+                    // The index is still consumed, so `recipe_at_index` and this
+                    // list cannot drift.
+                    _ => return None,
+                };
+                Some(RecipeBookEntry {
+                    id,
+                    display,
+                    group,
+                    category: book_category(recipe),
+                    crafting_requirements: reqs,
+                })
+            })
+            .collect()
+    })
+}
+
+/// The `minecraft:recipe_book_category` id for a grid recipe —
+/// `RecipeBookCategories.java:7-10` for the crafting book's four tabs.
+fn book_category(recipe: &lodestone_game::recipe::Recipe) -> &'static str {
+    use lodestone_game::recipe::RecipeCategory;
+    match recipe.category() {
+        Some(RecipeCategory::Building) => "crafting_building_blocks",
+        Some(RecipeCategory::Redstone) => "crafting_redstone",
+        Some(RecipeCategory::Equipment) => "crafting_equipment",
+        _ => "crafting_misc",
+    }
+}
+
+/// Flattens one ingredient to the item ids that satisfy it, resolving tags —
+/// what `Ingredient.CONTENTS_STREAM_CODEC` puts on the wire (a `HolderSet<Item>`,
+/// which for our purposes is always the explicit list form).
+fn resolve_ingredient_items(
+    ingredient: &lodestone_game::recipe::Ingredient,
+    tags: &lodestone_game::recipe::TagResolver,
+) -> Vec<lodestone_model::Identifier> {
+    use lodestone_game::recipe::Ingredient;
+    match ingredient {
+        Ingredient::Item(id) => vec![id.clone()],
+        Ingredient::Tag(tag) => {
+            // Sorted, so the wire order is stable across runs — a `HashSet`'s
+            // iteration order is not, and a per-join reshuffle of an ingredient's
+            // item list is the sort of thing that shows up as a flaky byte gate.
+            let mut items: Vec<_> = tags.resolve(tag).into_iter().collect();
+            items.sort();
+            items
+        }
+        Ingredient::Any(options) => options
+            .iter()
+            .flat_map(|o| resolve_ingredient_items(o, tags))
+            .collect(),
+    }
 }
 
 /// Fills `grid` with `recipe`'s ingredients, taken out of `inventory` — vanilla's
