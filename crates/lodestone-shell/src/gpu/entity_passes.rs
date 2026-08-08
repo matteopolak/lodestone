@@ -570,11 +570,13 @@ impl RenderState {
         let chests = self.block_entity_source.chests(eye);
         let skulls = self.skull_source.skulls(eye);
         let bells = self.bell_source.bells(eye);
-        // All three, not any pair: an early return on only `chests`/`skulls`
+        let shulkers = self.shulker_source.shulkers(eye);
+        // All four, not any subset: an early return on only `chests`/`skulls`
         // would make a bell in an otherwise chestless, skull-less room draw
         // nothing, which is exactly how this pass would have grown a third
-        // island.
-        if chests.is_empty() && skulls.is_empty() && bells.is_empty() {
+        // island — and a shulker box in an empty end-city room is the fourth
+        // instance of the same shape.
+        if chests.is_empty() && skulls.is_empty() && bells.is_empty() && shulkers.is_empty() {
             return Vec::new();
         }
 
@@ -612,6 +614,14 @@ impl RenderState {
             bells
                 .iter()
                 .filter_map(|spawn| self.block_entities.models.resolve_bell(spawn)),
+        );
+        // Shulker boxes batch by `(model, texture)` like everything else here, and
+        // the seventeen dye sheets mean up to seventeen batches — one per colour
+        // actually in view, which is what the batcher is for.
+        instances.extend(
+            shulkers
+                .iter()
+                .filter_map(|spawn| self.block_entities.models.resolve_shulker(spawn)),
         );
 
         let frame = plan_block_entities(&instances, &camera.frustum());

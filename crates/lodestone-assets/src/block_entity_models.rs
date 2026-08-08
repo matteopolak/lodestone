@@ -91,6 +91,11 @@ const BELL_SHEET: (u32, u32) = (32, 32);
 /// size, same as [`CHEST_SHEET`]).
 const BANNER_SHEET: (u32, u32) = (64, 64);
 
+/// The shulker sheet is 64×64 (`ShulkerModel.createBoxLayer`'s
+/// `LayerDefinition.create(mesh, 64, 64)`). Same size as [`CHEST_SHEET`] and
+/// [`BANNER_SHEET`], named separately so a jar change is one edit per family.
+const SHULKER_SHEET: (u32, u32) = (64, 64);
+
 /// `entity::FACE_ORDER` index of the `West` face — see the module doc on why
 /// this is not `Direction as usize`.
 const FACE_WEST: usize = 2;
@@ -163,6 +168,11 @@ pub const BLOCK_ENTITY_MODELS: &[BlockEntityModelEntry] = &[
         name: "banner_flag",
         texture: "entity/banner/banner_base",
         build: banner_flag_model,
+    },
+    BlockEntityModelEntry {
+        name: "shulker_box",
+        texture: "entity/shulker/shulker",
+        build: shulker_box_model,
     },
 ];
 
@@ -470,6 +480,53 @@ pub fn banner_flag_model() -> EntityModelDef {
     EntityModelDef {
         texture_width: BANNER_SHEET.0,
         texture_height: BANNER_SHEET.1,
+        root,
+    }
+}
+
+/// A shulker box's shell — `ShulkerModel.createBoxLayer()`
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/model/monster/shulker/ShulkerModel.java:27-46`):
+///
+/// ```text
+/// lid   texOffs(0,  0)  addBox(-8, -16, -8,  16, 12, 16)  pose offset(0, 24, 0)
+/// base  texOffs(0, 28)  addBox(-8,  -8, -8,  16,  8, 16)  pose offset(0, 24, 0)
+/// ```
+///
+/// **`createBoxLayer`, not `createBodyLayer`** — the two share `createShellMesh`
+/// and the body layer adds a third `head` part for the *mob*. A block-entity
+/// shulker box has no head, and baking the body layer here would draw a shulker's
+/// face floating inside every box in the world.
+///
+/// `lid` and `base` are siblings with the **same** pivot `(0, 24, 0)`, which is
+/// the sole reason this type "fits the existing `(model, texture)` batch key as
+/// is": `ShulkerBoxRenderer.ShulkerBoxModel.setupAnim` only ever moves `lid`, and
+/// a closed box (`progress == 0`) needs no pose override at all — so a shulker
+/// box is one static mesh per dye colour and nothing per instance. The open
+/// animation is `lid.y = 24 - progress * 8` and `lid.yRot = 270° * progress`, and
+/// it needs a container-open signal this client does not have yet; see
+/// `docs/block-entity-renderers.md`.
+///
+/// Authored **block-space-up** like [`chest_single_model`] and [`bell_model`]:
+/// `ShulkerBoxRenderer.createModelTransform` folds its own
+/// `scale(1, -1, -1) · translate(0, -1, 0)` flip into the *placement* matrix, so
+/// the box origins here add to `PartPose` with no sign change.
+#[must_use]
+pub fn shulker_box_model() -> EntityModelDef {
+    let pivot = PartPose::offset(0.0, 24.0, 0.0);
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "lid",
+            PartDef::new(pivot)
+                .with_cube(CubeDef::new([-8.0, -16.0, -8.0], [16.0, 12.0, 16.0], [0.0, 0.0])),
+        )
+        .with_child(
+            "base",
+            PartDef::new(pivot)
+                .with_cube(CubeDef::new([-8.0, -8.0, -8.0], [16.0, 8.0, 16.0], [0.0, 28.0])),
+        );
+    EntityModelDef {
+        texture_width: SHULKER_SHEET.0,
+        texture_height: SHULKER_SHEET.1,
         root,
     }
 }

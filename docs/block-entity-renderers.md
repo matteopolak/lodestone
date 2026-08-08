@@ -54,10 +54,10 @@ wrong in both directions:
   `vault`, and two 26.x additions, `copper golem statue` and `shelf`.
 
 So the honest count is: **3 of 26 registrations landed** (chest/ender chest/trapped chest all through
-`ChestRenderer`), **3 more landed and wired** (skull; standing/wall sign text, geometry excepted since
-a sign's board is a real block model; and the bell body/rim, wired as a render pass but not installed
-from the live per-frame path — see [Bell](#bell)), and the rest still absent. Picking the next few
-should read this list, not the original issue body.
+`ChestRenderer`), **4 more landed and wired end to end** (skull; standing/wall sign text, geometry
+excepted since a sign's board is a real block model; the bell body/rim; and the shulker box — see
+[Shulker box](#shulker-box)), and the rest still absent. Picking the next few should read this list,
+not the original issue body.
 
 ## What it is
 
@@ -704,6 +704,84 @@ never reaches the mesh
 the neutered line. The line was restored and the suite re-run green (matching the measurements above
 exactly) before anything was committed.
 
+## Shulker box
+
+The cheapest type to add after bell, and the reason is structural rather than a coincidence: a shulker
+box's whole appearance is a function of its **block state**. There is no animation state to carry, so
+it slots into `plan_block_entities`' existing `(model, texture)` batch key with nothing new.
+
+### Geometry — two sibling boxes, `createBoxLayer` and not `createBodyLayer`
+
+`ShulkerModel.createShellMesh()`
+(`.cache/mc/26.2/client-src/net/minecraft/client/model/monster/shulker/ShulkerModel.java:27-36`), on a
+64x64 canvas:
+
+```text
+lid   texOffs(0,  0)  addBox(-8, -16, -8,  16, 12, 16)  pose offset(0, 24, 0)
+base  texOffs(0, 28)  addBox(-8,  -8, -8,  16,  8, 16)  pose offset(0, 24, 0)
+```
+
+`createBodyLayer` shares that mesh and adds a third `head` part — for the **mob**. Baking the body
+layer for a block entity draws a shulker's face floating inside every box in the world, which reads as
+a texture bug rather than a wrong layer.
+
+The two parts are **siblings on the same pivot**, not parent and child. That is what makes the lid
+animation a single-part override.
+
+### Placement is its own matrix, not `block_entity_placement_matrix` with a yaw
+
+`ShulkerBoxRenderer.createModelTransform` (`ShulkerBoxRenderer.java:110-121`):
+
+```text
+translation(0.5, 0.5, 0.5) . scale(0.9995) . rotate(facing.getRotation())
+  . scale(1, -1, -1) . translate(0, -1, 0)
+```
+
+Three differences from the chest matrix, each visible:
+
+| | chest | shulker |
+|---|---|---|
+| pivot | block floor `(0.5, 0, 0.5)` | block **centre** `(0.5, 0.5, 0.5)` |
+| rotation | a Y yaw (four horizontals) | `Direction.getRotation()`, **all six** faces |
+| flip/lift | none | `scale(1, -1, -1)` then `translate(0, -1, 0)` |
+
+Reusing the chest matrix draws an upside-down box a half-block low for `facing=up`, which is the common
+case. The `0.9995` shrink is vanilla's own z-fighting guard against a neighbouring full block — keep it.
+
+`ShulkerFacing::rotation` ports `Direction.getRotation()` (`Direction.java:144-153`). JOML's
+`rotationXYZ(x, y, z)` is **X then Y then Z intrinsic**, so for the four horizontals the Z term is
+applied *last*: `Mat4::from_rotation_z(..) * Mat4::from_rotation_x(FRAC_PI_2)`. Composing them the other
+way round rotates a wall-mounted box about the wrong axis and the result still looks like a box.
+
+### Seventeen sheets, keyed by block id
+
+`Sheets.getShulkerBoxSprite(color)` indexes `SHULKER_TEXTURE_LOCATION` by `DyeColor.getId()`
+(`Sheets.java:48,89`), so `SHULKER_COLOURS` is in **dye ordinal order** — `white, orange, magenta,
+light_blue, …`, *not* the alphabetical order the texture directory listing suggests. Reading it off the
+listing shifts every dyed box one sprite along, which draws a plausible wrong colour rather than
+nothing.
+
+And the colour comes off the **block id**, not a property and not NBT: vanilla has seventeen shulker
+box *blocks*. A `color` property lookup finds nothing on any of them and draws every box undyed, which
+reads as a texture-loading failure rather than a resolver bug.
+
+### The lid animation is ported and not triggered
+
+`ShulkerBoxRenderer.ShulkerBoxModel.setupAnim` (`:135-138`) is
+`lid.setPos(0, 24 - progress * 0.5 * 16, 0)` and `lid.yRot = 270 deg * progress`, ported as
+`shulker_lid_pose`. `progress` is `ShulkerBoxBlockEntity.getProgress(partialTicks)`, driven by the same
+`BLOCK_EVENT` path a chest lid uses — and nothing in this workspace folds a shulker box's event yet, so
+`ShulkerSpawn::progress` is always `0.0`. A closed box is what a shulker box looks like whenever nobody
+has it open, so this is the honest state. Closing it is the `ChestLids`-shaped job: a per-position
+counter fed from `net.rs`'s `BlockEvent` arm.
+
+### Status: fully wired, including the live install
+
+All six steps of the checklist below are done, including the one bell needed a second pass for:
+`app/redraw.rs` installs `Sim::shulker_source` every frame. **That call site is not optional** — a 26.2
+shulker box declares no block model of its own, so an unset source leaves a hole in the world exactly
+where every box is, the chest failure mode.
+
 ## How to change it
 
 ### Adding a block-entity type
@@ -976,11 +1054,14 @@ Against the real 26-entry registration list (see above), not the issue's origina
   `sim.rs`/`app.rs` call site installs the render source from the live per-frame path — both named
   explicitly in that section rather than silently missing. A bell in a live game today still shows
   only its (real) attachment-frame block model, unchanged from before this session.
+- **Shulker box — landed** (see [Shulker box](#shulker-box) above), including the live per-frame
+  install. Still open within shulker scope: the lid open/close animation, which needs the
+  `BLOCK_EVENT` fold `ChestLids` already has a shape for.
 - Banners (layered patterns from the `banner_patterns` atlas — tracked separately as
   [#174](https://github.com/matteopolak/lodestone/issues/174), which also covers the shield item
   sharing the same compositing function; see `docs/banner-shield-patterns.md` for why that
-  compositing function is a confirmed island and what actually blocks a consumer), shulker boxes
-  (`shulker_boxes` atlas, 16 dyes), the enchanting-table book (a full animation state machine —
+  compositing function is a confirmed island and what actually blocks a consumer), the
+  enchanting-table book (a full animation state machine —
   `open`/`flip`/`rot`/`time`, all client-simulated, none of it on the wire, closer in scope to the
   chest lid than to a static model), mob spawner (draws a miniature spinning entity inside the cage —
   reuses full entity rendering, not a simple cuboid rig), piston head, campfire, brushable block,

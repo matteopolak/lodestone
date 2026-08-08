@@ -38,7 +38,7 @@ use super::terrain::{
     anim_slots_at,
 };
 use super::{
-    BellSource, BlockEntityRenderer, BlockEntitySource, DEFAULT_RENDER_DISTANCE_CHUNKS,
+    BellSource, BlockEntityRenderer, BlockEntitySource, DEFAULT_RENDER_DISTANCE_CHUNKS, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
     HandSwingSource, MainHandSource, NameTagRenderer, OutlineRenderer, OutlineShapeSource,
     RenderState, SKY_COLOR, SignSource, SignTextRenderer, SkullSource, SkyDarkenSource,
@@ -292,10 +292,10 @@ impl RenderState {
             block_entity_source: BlockEntitySource::default(),
             skull_source: SkullSource::default(),
             // No bells until a caller installs a world source; see
-            // `set_bell_source`. Nothing in this workspace installs one yet
-            // (see that method's doc), so this stays empty in the live
-            // client today — a hermetic test can still set it directly.
+            // `set_bell_source`, installed per frame by `app::redraw`.
             bell_source: BellSource::default(),
+            // Likewise `set_shulker_source`.
+            shulker_source: ShulkerSource::default(),
             sign_text,
             // No signs until the shell installs a world source; see
             // `set_sign_source`.
@@ -961,6 +961,20 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::BellSpawn> + Send + Sync + 'static,
     ) {
         self.bell_source = BellSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's shulker boxes (issue #23) — the
+    /// shulker equivalent of [`set_bell_source`](Self::set_bell_source), and the
+    /// thinnest of the family: no clock, no animation map.
+    ///
+    /// Leaving it unset is a **hole in the world**, not a missing decoration: a
+    /// 26.2 shulker box declares no block model, so the terrain mesher draws
+    /// nothing at all where one stands. Same failure mode as chest.
+    pub fn set_shulker_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::ShulkerSpawn> + Send + Sync + 'static,
+    ) {
+        self.shulker_source = ShulkerSource(Some(Box::new(f)));
     }
 
     /// Install the source for this frame's sign text — same shape as
