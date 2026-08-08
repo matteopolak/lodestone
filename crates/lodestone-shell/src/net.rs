@@ -128,11 +128,10 @@ use lodestone_model::event::SoundCategory;
 // `sections_and_light_at` hands back.
 use lodestone_render::{SectionLight as _, SkyDefault, WorldSectionLight};
 
-pub use lodestone_testsupport::unique_username;
-
 use uuid::Uuid;
 
 use crate::entities::NameTag;
+use crate::offline_identity::OfflineIdentity;
 
 /// A handle to the live client, published by the net thread once the session is
 /// up and read by the render/mesh thread. `None` until login completes.
@@ -1034,6 +1033,16 @@ impl NetClient {
     /// Prefer [`crate::sim::Sim::connect`] over calling this with `Some(..)` by
     /// hand: passing `None` where a `Sim` exists is silent — the session fold lands
     /// in a `World` nothing reads and every HUD accessor returns an empty default.
+    ///
+    /// # Identity
+    ///
+    /// Joins as the **persisted "Play offline" identity**
+    /// ([`OfflineIdentity::load`]) — the same name and the same derived UUID
+    /// every launch, which is the whole point (see
+    /// [`crate::offline_identity`]). A **live gate must not use this**: a shared
+    /// offline name is a shared player file, and a dead player is held on the
+    /// death screen, which sends no chunks. Use [`Self::connect_as`] with
+    /// `lodestone-testsupport`'s `unique_username()`.
     #[must_use]
     pub fn connect(
         host: String,
@@ -1049,6 +1058,46 @@ impl NetClient {
             },
             protocol,
             session,
+            OfflineIdentity::load(),
+        )
+    }
+
+    /// As [`Self::connect`], but joining under `username` instead of the
+    /// persisted offline identity.
+    ///
+    /// **This exists for live gates, and it is the reason
+    /// `lodestone-testsupport` no longer needs to be reachable from production.**
+    /// Every gate that dials a shared oracle server needs a fresh name per run —
+    /// two sessions sharing an offline name evict each other, and a dead player
+    /// under a reused name blacks out chunk data silently — so it passes
+    /// `lodestone-testsupport`'s `unique_username()` here. Production goes
+    /// through [`Self::connect`], which is stable by design. The underscored
+    /// Rust path is deliberately not spelled in this doc comment:
+    /// `tests/no_production_source_names_testsupport.rs` scans for it, and prose
+    /// that spells it is a false positive.
+    ///
+    /// `username` is used **verbatim** — not validated, and not persisted. A
+    /// name a server will not accept produces its disconnect reason, which is
+    /// what a gate driving one wants to see;
+    /// [`crate::offline_identity::validate_username`] is the check that belongs
+    /// in front of *storing* a name.
+    #[must_use]
+    pub fn connect_as(
+        host: String,
+        port: u16,
+        protocol: i32,
+        session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+        username: String,
+    ) -> Self {
+        Self::connect_impl(
+            Origin::Remote {
+                host,
+                port,
+                auth: None,
+            },
+            protocol,
+            session,
+            OfflineIdentity::from_username_unchecked(username),
         )
     }
 
@@ -1058,12 +1107,20 @@ impl NetClient {
     /// token or a completed interactive device-code sign-in) that the net
     /// thread hands to [`lodestone_client::ClientBuilder::online_session`],
     /// and the real profile identity (`auth.profile.name`/`.id`) replaces the
-    /// [`unique_username`] offline-mode name path for the login-start packet.
+    /// [`crate::offline_identity`] name path for the login-start packet.
     ///
     /// This is purely additive: [`Self::connect`] is completely unchanged and
-    /// remains the offline-mode default every existing caller uses. Nothing
-    /// in the shell calls this yet — wiring an actual "sign in" UI action to
-    /// it is issue #66's job; this method is the seam that work connects to.
+    /// remains the offline-mode default every existing caller uses.
+    ///
+    /// **Still zero callers in the shell** — an island in the "nothing produces
+    /// this" direction, verified by grep rather than assumed: `connect_online`
+    /// appears only here and in `docs/accounts.md`, and
+    /// `lodestone_auth::login::try_cached_session` is called from nowhere in
+    /// `crates/lodestone-shell/src/`. So the `Some(session)` arm of `run`'s
+    /// profile match is unreachable from production, and **every** join this
+    /// shell makes is an offline one. Wiring a real "sign in and connect" action
+    /// to it is issue #66's remaining half; until then the account switcher can
+    /// hold a signed-in Microsoft account that no join ever uses.
     #[must_use]
     pub fn connect_online(
         host: String,
@@ -1080,6 +1137,11 @@ impl NetClient {
             },
             protocol,
             session,
+            // Unused on this path (the `Some(auth)` arm wins), but the parameter
+            // is not optional: an online session that failed to produce a
+            // profile has no business silently falling back to a *different*
+            // identity, so the value here is the same one `connect` would use.
+            OfflineIdentity::load(),
         )
     }
 
@@ -1113,6 +1175,15 @@ impl NetClient {
     /// exist yet — an existing world's own stored seed always wins, or
     /// reopening it would regenerate every unexplored chunk from different
     /// terrain.
+    ///
+    /// # Identity
+    ///
+    /// The persisted "Play offline" identity, same as [`Self::connect`], and
+    /// singleplayer is where its instability was visible: the integrated server
+    /// **echoes the UUID the client presents** (`login_uuid = Some(uuid)`) rather
+    /// than deriving one from the name, so the old `Uuid::new_v4()` gave the
+    /// player a different account on every launch even before the name did. See
+    /// [`crate::offline_identity`].
     #[must_use]
     pub fn open_singleplayer(
         server_protocol: Box<dyn lodestone_server::ServerProtocol>,
@@ -1132,16 +1203,24 @@ impl NetClient {
             },
             protocol,
             session,
+            OfflineIdentity::load(),
         )
     }
 
-    /// Shared implementation behind [`Self::connect`]/[`Self::connect_online`]/
-    /// [`Self::open_singleplayer`]: spawns the background net thread and returns
-    /// immediately.
+    /// Shared implementation behind [`Self::connect`]/[`Self::connect_as`]/
+    /// [`Self::connect_online`]/[`Self::open_singleplayer`]: spawns the
+    /// background net thread and returns immediately.
+    ///
+    /// `offline` is the identity the login-start packet carries whenever the
+    /// origin has no authenticated session — which today is every join. It is a
+    /// **parameter rather than a `load()` inside `run`** so the four entry points
+    /// above each state where their identity comes from, and so `connect_as` can
+    /// supply one without a file at all.
     fn connect_impl(
         origin: Origin,
         protocol: i32,
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+        offline: OfflineIdentity,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         let (action_tx, action_rx) = mpsc::channel();
@@ -1176,6 +1255,7 @@ impl NetClient {
                     command_tree_thread,
                     local_uuid_thread,
                     session,
+                    offline,
                 )
             })
             .expect("spawn net thread");
@@ -1653,6 +1733,7 @@ fn run(
     command_tree: SharedCommandTree,
     local_uuid: SharedLocalUuid,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+    offline: OfflineIdentity,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1855,22 +1936,27 @@ fn run(
             }
         };
 
-        // Online mode (issue #65) supplies the account's real identity;
-        // offline mode keeps the existing unique-per-run name so
-        // `lodestone-testsupport`'s dead-player-blackout hazard (see that
-        // crate's docs and `CLAUDE.md`) stays avoided for every test oracle,
-        // every one of which is an offline server. Singleplayer takes the offline
-        // path too: the integrated server persists no player file, so the hazard
-        // does not exist there, but there is also no account to name it after.
+        // Online mode (issue #65) supplies the account's real identity; offline
+        // mode presents the caller's [`OfflineIdentity`] — for `connect` /
+        // `open_singleplayer` the *persisted* one, so the player is the same
+        // account on every launch, and for `connect_as` whatever a live gate
+        // asked for.
+        //
+        // **This arm used to be `unique_username()` + `Uuid::new_v4()`**, which
+        // is a new offline account every launch: the name because that helper
+        // cannot repeat by construction, and the uuid because it is random. The
+        // owner's "I keep spawning in the air even if I rejoin" was the visible
+        // half. The comment that lived here justified it by the
+        // dead-player-blackout hazard, which is real — but that is a *test*
+        // requirement, and it is now met where it belongs, at `connect_as`. See
+        // `crate::offline_identity` for why both halves had to change and which
+        // server derives which.
         let profile = match &auth {
             Some(session) => LoginProfile {
                 username: session.profile.name.clone(),
                 uuid: session.profile.id,
             },
-            None => LoginProfile {
-                username: unique_username(),
-                uuid: uuid::Uuid::new_v4(),
-            },
+            None => offline.login_profile(),
         };
         // Published immediately, not after login: issue #189's roster refresh
         // needs the identity to exclude as soon as a session exists, and there
@@ -2378,18 +2464,120 @@ fn forward(
 mod tests {
     use super::*;
 
+    // `unique_username` is a `lodestone-testsupport` helper and this crate now
+    // depends on that crate **only** as a dev dependency, so this `use` is
+    // reachable from `#[cfg(test)]` and from nowhere else in the lib. That is the
+    // structural half of the offline-identity fix — see
+    // `crate::offline_identity`'s module docs and
+    // `tests/no_production_source_names_testsupport.rs`.
+    use lodestone_testsupport::unique_username;
+
+    /// `usernames_are_unique_per_call` used to live here, asserting a property
+    /// of `lodestone_testsupport::unique_username` — which this crate re-exported
+    /// into production. It has moved to where it belongs, beside the helper
+    /// (`crates/lodestone-testsupport/tests/unique_username.rs`), and what
+    /// replaces it here is the opposite assertion about the *shell's own* join
+    /// path: two independent constructions must produce the **same** identity.
+    ///
+    /// The dead port is the same trick
+    /// [`local_uuid_is_published_before_the_connection_even_resolves`] uses:
+    /// `local_uuid` is set from the `LoginProfile` before `run` dials anything, so
+    /// this observes the real production expression with no server involved.
+    ///
+    /// This gate reads the developer's real `offline.json` (via
+    /// `OfflineIdentity::load`, which is what production calls) and **never
+    /// writes** — the expected value is whatever that file says, i.e. it comes
+    /// from outside this code. On a machine with no such file that is
+    /// `DEFAULT_USERNAME`, which is still an outside constant and still
+    /// deterministic; the failure message names the path so the run says which of
+    /// the two it landed in rather than skipping.
+    ///
+    /// **The residual gap, stated rather than hidden:** on a machine with no
+    /// `offline.json` this exercises only the *default* world, because
+    /// `std::env::set_var` is `unsafe` under this workspace's `deny(unsafe_code)`
+    /// so a test cannot point `LODESTONE_DATA_DIR` at a fixture. The
+    /// stored-name world is covered hermetically by
+    /// `tests/offline_identity_is_stable.rs` against `load_from`, which is the
+    /// same function `load` delegates to — so what is untested here is only the
+    /// path join, not the parse.
     #[test]
-    fn usernames_are_unique_per_call() {
-        // The shell relies on a fresh name per run: offline UUIDs derive from the
-        // *name*, so reusing a dead shared player blacks out every later join.
-        // Uniqueness is the load-bearing property, not any particular prefix.
-        let a = unique_username();
-        let b = unique_username();
-        assert_ne!(a, b, "two runs must not collide on a username");
-        assert!(
-            !a.is_empty() && a.len() <= 16,
-            "not a valid Minecraft username length: {a:?}"
+    fn two_offline_sessions_publish_the_same_identity() {
+        let expected = crate::offline_identity::OfflineIdentity::load();
+        let observed: Vec<Uuid> = (0..2)
+            .map(|_| {
+                let client = NetClient::connect("127.0.0.1".into(), 1, 776, None);
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut uuid = None;
+                while std::time::Instant::now() < deadline && uuid.is_none() {
+                    uuid = client.local_uuid();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                uuid.expect("local_uuid publishes before the dial resolves")
+            })
+            .collect();
+
+        assert_eq!(
+            observed[0], observed[1],
+            "two launches must join as the same offline account; \
+             a fresh identity per launch is the defect this gate exists for"
         );
+        assert_eq!(
+            observed[0],
+            expected.uuid(),
+            "the published identity must be the *persisted* offline one \
+             ({:?} at {}), not something the join path minted",
+            expected.username(),
+            crate::offline_identity::offline_identity_path().display()
+        );
+        // A random `Uuid::new_v4()` — the expression this replaced — is version
+        // 4. A name-derived offline uuid is version 3. This one assertion fails
+        // on the pre-fix code no matter what the persisted name happens to be.
+        assert_eq!(
+            observed[0].get_version_num(),
+            3,
+            "the offline uuid must be name-derived (version 3), not random"
+        );
+    }
+
+    /// **The negative control** for the equality above: the same predicate,
+    /// applied to the path that is *supposed* to vary, must disagree.
+    ///
+    /// Without it, "the two uuids matched" is equally consistent with
+    /// `local_uuid` publishing a constant — nil, or the same default whatever the
+    /// name — in which case the gate above proves nothing about the identity
+    /// actually reaching the login packet. It also re-checks the thing the live
+    /// gates depend on: [`NetClient::connect_as`] really does carry the caller's
+    /// name through to the published identity.
+    #[test]
+    fn connect_as_varies_the_published_identity_with_the_name() {
+        let names = [unique_username(), unique_username()];
+        assert_ne!(names[0], names[1], "the fixture itself must differ");
+        let observed: Vec<Uuid> = names
+            .iter()
+            .map(|name| {
+                let client =
+                    NetClient::connect_as("127.0.0.1".into(), 1, 776, None, name.clone());
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut uuid = None;
+                while std::time::Instant::now() < deadline && uuid.is_none() {
+                    uuid = client.local_uuid();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                uuid.expect("local_uuid publishes before the dial resolves")
+            })
+            .collect();
+        assert_ne!(
+            observed[0], observed[1],
+            "`connect_as` must thread the caller's name through to the login \
+             identity, or every live gate silently shares one player file"
+        );
+        for (name, uuid) in names.iter().zip(&observed) {
+            assert_eq!(
+                *uuid,
+                crate::offline_identity::offline_uuid(name),
+                "the published uuid must be derived from the name we passed"
+            );
+        }
     }
 
     #[test]

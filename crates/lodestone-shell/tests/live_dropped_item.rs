@@ -57,7 +57,7 @@ use lodestone_ecs::entity::{
 };
 use lodestone_model::Reported;
 use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget};
-use lodestone_testsupport::RconClient;
+use lodestone_testsupport::{RconClient, unique_username};
 
 /// Translates a raw, version-free [`EntityView`] into the ingest components
 /// the live path itself reads (`entities.rs`'s `resolve_entity_facts`),
@@ -247,7 +247,11 @@ fn a_server_spawned_drop_knows_which_item_it_is_and_reaches_pixels() {
     let sprite_item: ResourceLocation = SPRITE_ITEM.parse().expect("valid item id");
 
     // --- connect ---------------------------------------------------------
-    let net = NetClient::connect(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2, None);
+    // `connect_as`, not `connect`: a live gate needs a fresh identity per run
+    // (a shared offline name is a shared player file, and a dead player is held
+    // on the death screen, which sends no chunks). `connect` is the *stable*
+    // persisted offline identity, which is production's job, not a gate's.
+    let net = NetClient::connect_as(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2, None, unique_username());
     let ready = Instant::now() + Duration::from_secs(25);
     let mut in_world = false;
     while Instant::now() < ready {

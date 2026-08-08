@@ -32,7 +32,7 @@ use lodestone::net::NetClient;
 use lodestone::hud::{DebugStats, HudFrame, HudRenderer};
 use lodestone::{scoreboard, tablist};
 use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget};
-use lodestone_testsupport::RconClient;
+use lodestone_testsupport::{RconClient, unique_username};
 
 const GAME_HOST: &str = "127.0.0.1";
 /// The flat creative 26.2 oracle: game on `:25570`, RCON on `:25571`.
@@ -77,7 +77,11 @@ fn live_tab_list_and_scoreboard_reach_pixels() {
         ));
     }
 
-    let net = NetClient::connect(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2, None);
+    // `connect_as`, not `connect`: a live gate needs a fresh identity per run
+    // (a shared offline name is a shared player file, and a dead player is held
+    // on the death screen, which sends no chunks). `connect` is the *stable*
+    // persisted offline identity, which is production's job, not a gate's.
+    let net = NetClient::connect_as(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2, None, unique_username());
 
     let deadline = Instant::now() + Duration::from_secs(25);
     let mut rows = Vec::new();

@@ -725,6 +725,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   is pure logic over the player's situation plus a randomised countdown, and it lives
   in `crates/lodestone-sound/src/music.rs` with a generated biome table beside it in
   `src/biome_music.rs`.
+- [The "Play offline" identity](./offline-identity.md) — The one persisted,
+  user-editable name the client joins under when no Microsoft account is signed in,
+  plus the stable UUID derived from it. It lives in
+  `crates/lodestone-shell/src/offline_identity.rs` and is what `net.rs`'s login-start
+  packet carries for **every** join this shell makes today, singleplayer and
+  multiplayer alike.
 - [Which settings actually do something, and what the rest are waiting on](./options-consumption-census.md) —
   A consumption audit of the settings tree: for every option
   `crates/lodestone-shell/src/menu/options.rs` puts on screen, whether the value

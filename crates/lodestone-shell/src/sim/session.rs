@@ -72,12 +72,31 @@ impl Sim {
     /// and every HUD read here returns an empty default. Prefer this over
     /// [`Self::attach_net`], which exists for a client that has no connection to
     /// share (the loopback test double).
+    ///
+    /// Joins as the persisted "Play offline" identity — see
+    /// [`NetClient::connect`]. A **live gate must use [`Self::connect_as`]**
+    /// instead: a shared offline name is a shared player file, and a dead player
+    /// is held on the death screen, which sends no chunks.
     pub fn connect(&mut self, host: String, port: u16, protocol: i32) {
         let net = NetClient::connect(
             host,
             port,
             protocol,
             Some((Arc::clone(&self.ecs), self.local)),
+        );
+        self.attach_net(net);
+    }
+
+    /// As [`Self::connect`], but joining under `username` rather than the
+    /// persisted offline identity — [`NetClient::connect_as`] with this `Sim`'s
+    /// `World` threaded in. For live gates, which need a fresh name per run.
+    pub fn connect_as(&mut self, host: String, port: u16, protocol: i32, username: String) {
+        let net = NetClient::connect_as(
+            host,
+            port,
+            protocol,
+            Some((Arc::clone(&self.ecs), self.local)),
+            username,
         );
         self.attach_net(net);
     }
