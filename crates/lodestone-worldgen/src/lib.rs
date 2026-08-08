@@ -42,6 +42,7 @@ pub mod dense_grid;
 pub mod feature;
 pub mod interner;
 pub mod overworld;
+pub mod spawners;
 pub mod structure;
 pub mod surface;
 

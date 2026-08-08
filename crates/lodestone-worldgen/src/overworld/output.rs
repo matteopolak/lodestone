@@ -25,6 +25,23 @@ impl OverworldGenerator {
         debug_assert_eq!(world.bounds().4, self.height, "centre chunk height must match the generator's");
         debug_assert_eq!(world.bounds().5, 16, "centre chunk depth must be 16");
         let (palette, blocks) = world.into_palette_and_blocks();
+        // Issue #516. Computed here rather than in its own stage for two
+        // reasons: this is the one place that already holds the *final* palette
+        // and block field (so the scan is integer-only — see
+        // `motion_blocking_from_palette`), and both `column` and `column_timed`
+        // route through this function, so nothing in the pipeline had to grow a
+        // call site. Its cost lands in `StageTimes::intern`, which that field's
+        // own doc now says.
+        let motion_blocking = if self.snow_support.is_empty() {
+            None
+        } else {
+            Some(motion_blocking_from_palette(
+                &palette,
+                &blocks,
+                self.height,
+                &self.snow_support,
+            ))
+        };
 
         GeneratedColumn {
             min_y: self.min_y,
@@ -34,8 +51,92 @@ impl OverworldGenerator {
             biome_quarts: biome_quarts.map(|(name, _)| name),
             biome_cells,
             block_entities,
+            motion_blocking,
         }
     }
+}
+
+/// `Heightmap.Types.MOTION_BLOCKING`'s registry id — `MOTION_BLOCKING(4,
+/// "MOTION_BLOCKING", Heightmap.Usage.CLIENT, …)`
+/// (`.cache/mc/26.2/src/net/minecraft/world/level/levelgen/Heightmap.java:151`).
+///
+/// This is the key the 1.21.5+ typed-list heightmap framing carries on the wire
+/// (a VarInt registry id, then a VarInt-prefixed long array — see
+/// `lodestone_world::heightmap`'s module doc), so a consumer inserts
+/// [`GeneratedColumn::motion_blocking_heightmap`] under *this* id and no other.
+/// The id is the enum's own first constructor argument, not its ordinal position
+/// in the source file — read them off the same line if a second map is added.
+pub const MOTION_BLOCKING_HEIGHTMAP_TYPE_ID: u32 = 4;
+
+/// Columns one heightmap covers (16 × 16), and the length of
+/// [`GeneratedColumn::motion_blocking_heightmap`]'s array.
+pub const HEIGHTMAP_COLUMNS: usize = 256;
+
+/// The `MOTION_BLOCKING` heightmap for a finished column, in vanilla's **stored**
+/// form: `first_free_y - min_y`, indexed `lx + lz * 16`.
+///
+/// # Both halves come from the record definition
+///
+/// * The **predicate** is `input.blocksMotion() || !input.getFluidState().isEmpty()`,
+///   read off `Heightmap.java:151` itself rather than off a summary, and it is
+///   already ported as [`crate::feature::top_layer::SnowSupport::motion_blocking`]
+///   over two jar-dumped per-state columns. Nothing new is guessed here.
+/// * The **stored value** is `topMatchingY + 1`, offset by `minY`:
+///   `Heightmap.primeHeightmaps` scans each column downward and calls
+///   `setHeight(x, z, m + 1)` at the first matching block
+///   (`Heightmap.java:60-64`), and `setHeight` stores `y - chunk.getMinY()` while
+///   `getFirstAvailable` adds it back (`Heightmap.java:70-78`). A column with no
+///   matching block never gets a `setHeight` call at all, so its slot stays `0`,
+///   i.e. `minY` — which is why an all-air column here is `0` and not a sentinel.
+///
+/// The index is `Heightmap.getIndex(x, z) = x + z * 16`, matching
+/// `lodestone_world::heightmap::Heightmap::index`, so a consumer can `set` each
+/// column straight across with no re-ordering.
+///
+/// # Why a fresh scan is equivalent to vanilla's incremental maintenance
+///
+/// The same argument [`crate::feature::top_layer::motion_blocking_first_free`]
+/// makes: vanilla primes the heightmaps at the start of the `features` status and
+/// maintains them through `Heightmap.update` per placed block, which is an
+/// incremental form of exactly this scan. This runs after **every** stage
+/// including `TOP_LAYER_MODIFICATION`, so there is nothing left to place and a
+/// top-down scan of the finished field lands on the same answer. Issue #516's
+/// scope asks for incremental maintenance through the region view; that is a
+/// *cost* refinement (worldgen-rewrite candidate 3), not a correctness one, and
+/// doing it here would not change a single stored height.
+///
+/// # It is integer-only, deliberately
+///
+/// [`crate::feature::top_layer::motion_blocking_first_free`] tests the predicate
+/// against a **string** per block, which is right for it (it runs inside a stage
+/// that holds a `DenseBlockGrid`). Here the palette is already built, so the
+/// predicate is evaluated once per *palette entry* — a few dozen times — and the
+/// 256-column scan is `u16` compares against a `bool` slice. Reaching for the
+/// string form here instead would cost ~200k hash lookups per column for an
+/// identical answer.
+fn motion_blocking_from_palette(
+    palette: &[String],
+    blocks: &[u16],
+    height: i32,
+    support: &crate::feature::top_layer::SnowSupport,
+) -> [u16; HEIGHTMAP_COLUMNS] {
+    let motion: Vec<bool> = palette
+        .iter()
+        .map(|state| support.motion_blocking(state))
+        .collect();
+    let mut out = [0u16; HEIGHTMAP_COLUMNS];
+    for lz in 0..16usize {
+        for lx in 0..16usize {
+            for ly in (0..height as usize).rev() {
+                if motion[blocks[(ly * 16 + lz) * 16 + lx] as usize] {
+                    // `m + 1`, already relative to `min_y` because `ly` is.
+                    out[lx + lz * 16] = (ly + 1) as u16;
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Per-stage wall-clock cost of one [`OverworldGenerator::column_timed`] call:
@@ -104,7 +205,14 @@ pub struct StageTimes {
     /// *quantitative* prediction about it (<5% of composed column cost) that
     /// something has to be able to check.
     pub top_layer: std::time::Duration,
-    /// Palette interning only — nothing else, now.
+    /// Palette interning, plus issue #516's `MOTION_BLOCKING` heightmap scan —
+    /// and nothing else.
+    ///
+    /// The heightmap is folded in here rather than given its own field because
+    /// it is not a *stage*: it reads the finished palette and block field that
+    /// `intern_from_dense` already holds, and no prediction is made about its
+    /// cost (unlike `top_layer` above, which has one). If a figure for it is ever
+    /// needed, split it here — do not re-derive it from a `column_timed` delta.
     pub intern: std::time::Duration,
 }
 
@@ -156,6 +264,21 @@ pub struct GeneratedColumn {
     /// Issue #520: block entities decoration produced inside this chunk, in write
     /// order. Empty for every chunk with no bee nest, which is nearly all of them.
     block_entities: Vec<super::block_entities::GeneratedBlockEntity>,
+    /// Issue #516: the `MOTION_BLOCKING` heightmap in vanilla's stored form —
+    /// see [`motion_blocking_from_palette`] and
+    /// [`Self::motion_blocking_heightmap`].
+    ///
+    /// `None`, not a zeroed array, when the resolver supplied no
+    /// `block_freeze_facts`: the predicate is two jar-dumped per-state columns and
+    /// without them there is nothing to evaluate. A zeroed array would be
+    /// indistinguishable from "every column is air" and would encode a **wrong**
+    /// heightmap, which the save-parity work found is worse than none — vanilla
+    /// re-derives any type we omit but trusts one we send.
+    ///
+    /// Inline rather than boxed on purpose: `blocks` is already ~196 KB per
+    /// column, so 512 bytes is noise, and a `Box` would add one allocation per
+    /// column to a crate with four allocation-attribution gates.
+    motion_blocking: Option<[u16; HEIGHTMAP_COLUMNS]>,
 }
 
 impl GeneratedColumn {
@@ -263,6 +386,58 @@ impl GeneratedColumn {
         &self.biome_quarts
     }
 
+    /// Issue #516: this column's `MOTION_BLOCKING` heightmap, ready to pack — 256
+    /// heights in vanilla's **stored** form (`first_free_y - min_y`, so a value in
+    /// `0..=height`), indexed `lx + lz * 16`.
+    ///
+    /// `None` when the generator has no `block_freeze_facts` (every fixture
+    /// `Resolver` in this workspace), which is why this unit changes no parity
+    /// fixture. See the field's own doc for why that is `None` rather than zeros.
+    ///
+    /// **Nothing downstream consumes this yet**, the same as
+    /// [`Self::block_entities`]: `ChunkColumn` has no heightmap field and
+    /// `crates/protocol/v770/src/server_protocol.rs:1465` still writes
+    /// `Heightmaps::new().encode(&mut w)` — a well-framed, zero-entry NBT. Both are
+    /// outside this crate. The consumer patch is three lines, and the only
+    /// non-obvious part is which registry id to key it under:
+    /// [`MOTION_BLOCKING_HEIGHTMAP_TYPE_ID`].
+    ///
+    /// ```text
+    /// let mut maps = Heightmaps::new();
+    /// let mut map = Heightmap::new(height as u32);
+    /// for lz in 0..16 { for lx in 0..16 {
+    ///     map.set(lx, lz, u32::from(stored[lx + lz * 16]));
+    /// } }
+    /// maps.insert(MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, map);
+    /// ```
+    ///
+    /// `Heightmap::new(world_height)` sizes itself with
+    /// `height_bits(world_height)` = 9 bits for the overworld's 384, which is the
+    /// same `ceillog2(getHeight() + 1)` vanilla's own `BitStorage` uses — so no
+    /// width has to be chosen here either.
+    #[must_use]
+    pub fn motion_blocking_heightmap(&self) -> Option<&[u16; HEIGHTMAP_COLUMNS]> {
+        self.motion_blocking.as_ref()
+    }
+
+    /// The world Y `Heightmap.getFirstAvailable(MOTION_BLOCKING, lx, lz)` would
+    /// return for one column: the first **free** Y above the topmost
+    /// motion-blocking-or-fluid block, or `min_y` for a column with none.
+    ///
+    /// The convenience form of [`Self::motion_blocking_heightmap`] for a caller
+    /// that wants one column in world coordinates rather than the packed set —
+    /// `min_y` is added back exactly as `Heightmap.getFirstAvailable` does.
+    ///
+    /// # Panics
+    /// Panics if `lx`/`lz` are not in `0..16`.
+    #[must_use]
+    pub fn motion_blocking_first_free_y(&self, lx: usize, lz: usize) -> Option<i32> {
+        assert!(lx < 16 && lz < 16, "motion_blocking coordinates out of range");
+        self.motion_blocking
+            .as_ref()
+            .map(|stored| self.min_y + i32::from(stored[lx + lz * 16]))
+    }
+
 
     /// This is the zero-copy hand-off a downstream carrier (e.g. the integrated
     /// server's chunk column) uses to adopt the generated block field without
@@ -277,5 +452,92 @@ impl GeneratedColumn {
             self.blocks,
             self.biome_quarts,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+    use crate::feature::top_layer::{SnowSupport, StatePredicate};
+
+    /// The three claims a wrong `MOTION_BLOCKING` port gets wrong, on a
+    /// hand-built field: the `+1`, the `lx + lz * 16` index, and that an air
+    /// column stores `0` (i.e. `min_y`) rather than a sentinel.
+    ///
+    /// The expected values come from `Heightmap.primeHeightmaps`'s
+    /// `setHeight(x, z, m + 1)` and `setHeight`'s own `y - getMinY()`
+    /// (`Heightmap.java:60-70`), not from this function.
+    #[test]
+    fn motion_blocking_stores_the_first_free_row_at_the_vanilla_index() {
+        let height = 8i32;
+        // palette 0 must be air (the layout contract `intern_from_dense` asserts).
+        let palette = vec![
+            "minecraft:air".to_owned(),
+            "minecraft:stone".to_owned(),
+            "minecraft:water".to_owned(),
+            "minecraft:short_grass".to_owned(),
+        ];
+        let support = SnowSupport {
+            // `blocksMotion()` — stone yes, water/short_grass no.
+            blocks_motion: StatePredicate::new(
+                ["minecraft:stone".to_owned()].into_iter().collect(),
+                HashMap::new(),
+            ),
+            // `!getFluidState().isEmpty()` — water only. This is the half a port
+            // that only thinks about solids drops, and it is why a water column
+            // must be checked here.
+            has_fluid_state: StatePredicate::new(
+                ["minecraft:water".to_owned()].into_iter().collect(),
+                HashMap::new(),
+            ),
+            face_full_up: StatePredicate::new(HashSet::new(), HashMap::new()),
+            ..SnowSupport::default()
+        };
+
+        let idx = |ly: usize, lz: usize, lx: usize| (ly * 16 + lz) * 16 + lx;
+        let mut blocks = vec![0u16; 16 * 16 * height as usize];
+        // (0,0): stone rows 0..=2 -> first free row 3.
+        for ly in 0..3 {
+            blocks[idx(ly, 0, 0)] = 1;
+        }
+        // (5,9): stone row 0, water rows 1..=4 -> water counts, first free 5.
+        blocks[idx(0, 9, 5)] = 1;
+        for ly in 1..5 {
+            blocks[idx(ly, 9, 5)] = 2;
+        }
+        // (7,2): stone row 0, short_grass row 1 -> short grass does NOT count,
+        // so the answer is 1, the row the grass itself occupies.
+        blocks[idx(0, 2, 7)] = 1;
+        blocks[idx(1, 2, 7)] = 3;
+        // (15,15): stone in the very top row -> first free is `height`, the
+        // largest value the packing must hold.
+        blocks[idx(height as usize - 1, 15, 15)] = 1;
+
+        let map = motion_blocking_from_palette(&palette, &blocks, height, &support);
+
+        assert_eq!(map[0 + 0 * 16], 3, "three stone rows store 2 + 1");
+        assert_eq!(map[5 + 9 * 16], 5, "fluid rows count for MOTION_BLOCKING");
+        assert_eq!(map[7 + 2 * 16], 1, "a non-blocking, fluid-less block does not");
+        assert_eq!(map[15 + 15 * 16], height as u16, "the top row stores `height`");
+        // Every untouched column is an all-air column, and vanilla never calls
+        // `setHeight` for one — its slot stays 0, meaning `min_y`.
+        assert_eq!(
+            map.iter().filter(|v| **v == 0).count(),
+            HEIGHTMAP_COLUMNS - 4,
+            "an air column stores 0 (= min_y), not a sentinel"
+        );
+        // Transposing the index would put (5,9)'s answer at (9,5).
+        assert_eq!(map[9 + 5 * 16], 0, "the index is `lx + lz * 16`, not transposed");
+    }
+
+    /// The registry id is read off `Heightmap.java:151`'s own first constructor
+    /// argument. Pinned here so a consumer keying a heightmap under the wrong id
+    /// — which vanilla would trust rather than re-derive — cannot happen quietly.
+    #[test]
+    fn motion_blocking_type_id_is_vanillas_own() {
+        assert_eq!(MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, 4);
+        assert_eq!(HEIGHTMAP_COLUMNS, 16 * 16);
     }
 }
