@@ -714,6 +714,10 @@ impl WindowApp {
         // yet the vignette tint vanilla draws.
         hud_frame.border_debug = self.sim.world_border_warning();
         hud_frame.spawn_debug = self.sim.spawn_point().pos();
+        // Issue #184's `SessionMaps` fold reaching the screen. A diagnostic and
+        // not the map's own picture — see `HudFrame::map_debug` for what is still
+        // missing and why it is a texture job rather than a wiring one.
+        hud_frame.map_debug = self.sim.map_debug();
         // The recipe-unlock toast (issue #163). `None` on every real session
         // today, because the queue's only possible producer is the
         // `recipe_book_add` decode that does not exist yet — see the field's own

@@ -1237,6 +1237,27 @@ impl Sim {
         })
     }
 
+    /// `(how many maps the server has sent, the lowest-numbered map's explored
+    /// fraction)` for the F3 overlay, or `None` when none have arrived.
+    ///
+    /// "Explored" is the fraction of the 128×128 grid whose colour byte is
+    /// non-zero — `0` is vanilla's transparent/unexplored `MapColor.NONE`, so a
+    /// freshly crafted map reads `0%` and one carried across a continent
+    /// approaches `100%`. That makes this a real observation of the fold rather
+    /// than a count of packets: a wire that arrived but blitted its patch
+    /// rectangle into the wrong place still moves this number, but a patch
+    /// decoded as 128×128 when it is really two columns wide would jump to a
+    /// suspiciously round figure.
+    #[must_use]
+    pub fn map_debug(&self) -> Option<(usize, f32)> {
+        let store = self.maps();
+        let first = store.ids().next()?;
+        let map = store.get(first)?;
+        let total = lodestone_game::maps::MAP_SIZE * lodestone_game::maps::MAP_SIZE;
+        let explored = map.colors.iter().filter(|c| **c != 0).count();
+        Some((store.len(), explored as f32 / total as f32))
+    }
+
     /// The player's spawn point, as `SET_DEFAULT_SPAWN_POSITION` last reported
     /// it (issue #436's `SessionSpawnPoint` island).
     ///

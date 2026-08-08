@@ -1,4 +1,4 @@
-# Filled map item rendering (issue #184) — the decode has landed
+# Filled map item rendering (issue #184) — the wire and the fold are landed, the renderer is not
 
 ## What it is
 
@@ -6,14 +6,24 @@ Issue #184 asks for the filled map item's own visual: the generated
 per-map pixel texture, player/marker icons, and the border frame, whether
 held, in an item frame, or shown as a GUI icon.
 
-> **Update: the blocker below is resolved.** `MAP_ITEM_DATA` (id 51) now decodes
-> into `ClientEvent::MapItemData` and folds into `SessionMaps` — see
+> **Update: the blocker below is resolved, and the shell now reads the fold.**
+> `MAP_ITEM_DATA` (id 51) decodes into `ClientEvent::MapItemData`, `route` sends it
+> to **`session`** (`apply_maps` → `SessionMaps`) with `shell: false`, so there is
+> deliberately **no `net.rs` `forward` arm** — see
 > [`map-and-advancement-wire.md`](./map-and-advancement-wire.md), including the
 > `MapPatch` field order and the fact that the colour half is a **sub-rectangle**,
-> not a 128×128 frame. What is still missing is the renderer half named below: the
-> map colour palette and the icon sprites. The survey that follows is kept because
-> its reasoning about *where* the renderer belongs is unaffected; only its premise
-> ("nothing decodes it") has changed.
+> not a 128×128 frame. `MapStore::apply` blits the patch itself, so a reader calls
+> `MapState::color_at(x, y)` and never handles rectangles.
+>
+> `Sim::maps()` is the shell's read seam, and `Sim::map_debug()` is its only reader
+> today: an F3 line reporting the map count and the lowest-numbered map's explored
+> fraction. That is a **diagnostic**, the same shape `border_debug`/`spawn_debug`
+> have, and it exists so a live fold cannot be mistaken for one that never runs. It
+> is not the map's picture. What the picture needs is in "What is still missing"
+> below.
+>
+> The survey that follows is kept because its reasoning about *where* the renderer
+> belongs is unaffected; only its premise ("nothing decodes it") has changed.
 
 ## The finding as it stood: the data did not reach the client at all
 
@@ -101,22 +111,38 @@ compute it from yet — it correctly falls back to the tint's `default`, the
 same "untinted/default until real data exists" behaviour every other
 undecoded tint source in this codebase has today.
 
-## Next steps, in order
+## What is still missing
 
-1. **Decode `Map Item Data`** (`crates/protocol/v770/src/packets/`, id `51`
-   in play/clientbound — server-decode agent's territory per this task's
-   file ownership, not this crate's). Fields, per vanilla's packet
-   definition: map id (varint), scale, locked flag, optional marker icon
-   list, optional colour-patch update (x/z origin + width/height + raw
-   index bytes into the map colour palette).
-2. **A colour palette lookup** — vanilla's map colours are *indexed*
-   (`MapColor` base id × 4 shade variants), not raw RGB; this is real
-   render-crate work once (1) lands, and belongs in `lodestone-render`.
-3. **Marker icons and the border frame** — GUI + held + item-frame poses,
-   again render-crate work once real per-map pixel data exists to draw.
-4. **Held-item pose** — this issue's own text says to land it after #54/#57
-   establish the held-item pose-selection mechanism, to avoid a second,
-   divergent pose seam.
+Step 1 (the decode) is done. What remains is one coherent unit, and it is a
+**texture** job rather than a wiring one — which is why it was not bolted onto a
+session that had no budget to do it properly:
 
-Nothing here was spread across multiple crates speculatively; steps 2-4 all
-wait on step 1, which is outside this task's ownership.
+1. **A colour palette lookup.** Vanilla's map colours are *indexed*: a
+   `MapColor` base id times four shade variants, packed as `index * 4 + shade`,
+   which is exactly the byte `MapState::colors` stores. The table is
+   `net/minecraft/world/level/material/MapColor.java` — an outside source, hand
+   expandable, and the right home is `lodestone-render` beside the drawing code
+   (`lodestone-game`'s `maps` module deliberately does **not** resolve to RGB, and
+   says so).
+2. **A per-map dynamic texture.** 128x128 `Rgba8UnormSrgb`, one per known map id,
+   uploaded when the store changes and cached by id. This is the part that makes
+   it a unit of its own: it needs a texture, a bind group over an existing layout,
+   and an invalidation signal — and `queue.write_buffer`/`write_texture` is ordered
+   against the *submit*, not the encoder, so two maps sharing one staging buffer
+   would both show the last one written.
+3. **The draws.** Held (first person, `ItemInHandRenderer.renderMap`), in an item
+   frame, and the `map_background` border quad plus the decoration sprites over
+   both. **Do not add a fifth bind group**: the model shader is already at wgpu's
+   4-group floor, so this goes through `EntityPipeline` (two groups) the way the
+   chest GUI icon does — see `docs/block-entity-renderers.md`'s "two consumers"
+   section for that precedent.
+
+### Two stale pointers, corrected
+
+* **The held-item pose does not wait on "#54/#57".** There is no issue #54, and #57
+  is bow-draw arm poses. The real seam is `ItemVariants::resolve`'s
+  `display_context` branch, which `spyglass_in_hand` already uses — 26 of 26.2's
+  items name a different model in the hand than in the slot, and that fork is
+  already built.
+* **There is no `net.rs` `forward` arm to add.** `route` marks `MapItemData`
+  `shell: false` on purpose; adding one would put a second writer on `SessionMaps`.
