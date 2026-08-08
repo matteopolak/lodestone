@@ -5908,3 +5908,248 @@ its own `CARGO_TARGET_DIR`, because a neighbouring agent's in-flight jigsaw refa
 this work, with `aquifer_parity` / `carver_parity` / `surface_parity` / `region_parity` /
 `overworld_gen` all unchanged. Re-running in the shared checkout was not an option and waiting was not
 either — the isolated worktree is the only route that is both.
+
+
+**12.135 Jigsaw assembly: `groundLevelDelta` is not in the NBT any more, vanilla ships a dangling
+template reference, and the biome filter sits in the middle of the RNG stream** (#514 S4, villages /
+`pillager_outpost` / `ancient_city`).
+
+Three beliefs held going in, two of them written down in the S3→S4 handoff, and all three were wrong.
+
+- **"`groundLevelDelta` is in the jigsaw block's NBT compound."** It is not, in 26.2.
+  `grep -rn getGroundLevelDelta .cache/mc/26.2/src` returns five hits and **no override**:
+  `StructurePoolElement.getGroundLevelDelta()` is a literal `return 1`. Older versions read a `bottom`
+  data marker. So the S4 prerequisite really was *only* retaining `nbt` for the jigsaw fields (`name`,
+  `target`, `pool`, `final_state`, `joint`, and the two priorities) — the marker path was never needed,
+  and building it would have been a whole mechanism for a constant. Read the *record definition*, not
+  the handoff note: §12's own rule, and the note was true when written for a different version.
+- **"A template a bundled pool names is bundled."** `AncientCityStructurePools.java:113` names
+  `ancient_city/walls/intact_horizontal_wall_stairs_5`; `.cache/mc/26.2/src/data/minecraft/structure/
+  ancient_city/walls/` ships `_1`..`_4` and nothing else. Vanilla tolerates its own dangling reference:
+  `StructureTemplateManager.getOrCreate` logs, caches an **empty** `StructureTemplate` (zero size, no
+  palette, no blocks), and the element stays in its pool — offered by the shuffle, consuming its draws,
+  never attaching. A first implementation refused the pool and demoted `ancient_city` over one wall
+  variant, which is a whole structure deleted by a data quirk. **The fix has to keep one detector
+  alive while removing the other**: a resolver serving *no* templates is the S2 island and still
+  hard-fails (that is what `lodestone-server`'s `no_structure_is_demoted_for_unloadable_templates`
+  gate sees); a *single* missing template in an otherwise complete bundle is vanilla's dangling
+  reference and is substituted, with the id on the ledger under a `dangling:` key. Collapsing the two
+  would either delete `ancient_city` or make an entirely unwired resolver look healthy.
+- **"A structure's `findGenerationPoint` draws no RNG, so `generate_pieces` can re-seed."** True for
+  every kind S1/S2 landed, and false for jigsaw. `JigsawPlacement.addPieces` draws `start_height`,
+  `Rotation.getRandom` and `startPool.getRandomTemplate` **before** returning the stub, and
+  `Structure.isValidBiome` then tests the *centre piece's centre* — so the biome filter sits in the
+  middle of one continuous stream and the BFS continues from it. Re-seeding across the filter compiles,
+  passes every "a village assembled" assertion, and builds a village that is not vanilla's. This is why
+  `StructureKind::find_stub` returns a `Stub` that *owns* a half-consumed `WorldgenRandom`, and why the
+  enum keeps a `Plain([i32; 3])` variant: the old behaviour is correct for the other kinds, and making
+  them all carry a random would have hidden that the distinction exists.
+
+**The draw-count trap that has no compile error and no plausible symptom.**
+`StructureTemplatePool`'s constructor pushes each element `weight` times into `templates`, and *that*
+list is what `getRandomTemplate` indexes and `getShuffledTemplates` shuffles.
+`village/plains/town_centers` has weights `50,50,50,50,1,1,1,1`, so the expanded list is **204** entries
+and one shuffle of it draws **203** times; shuffling the 8 raw entries draws 7. Both produce a village.
+`Util.shuffle` is the same class of thing: it walks **downward** (`for (int i = size; i > 1; i--)`), and
+an upward Fisher–Yates draws the same *number* of values and yields a different permutation. Neither is
+detectable from output that "looks like a village" — the gate for both is a **stream-position**
+assertion, not a value comparison. The `start_height` unit test's first version compared
+`c.next_int_bounded(1000)` against another stream's and would have passed 999 times in 1000 with the
+draw count wrong; it now advances an oracle stream by hand exactly once and compares positions.
+
+**`Shapes.joinIsNotEmpty(free, target.deflate(0.25), ONLY_SECOND)` is exactly two integer tests, and
+that is provable rather than convenient.** Every operation `JigsawPlacement` performs on its
+`VoxelShape` is "subtract an axis-aligned box", so the shape is always `positive \ (b₁ ∪ b₂ ∪ …)` and
+`target ⊆ free ⟺ target ⊆ positive ∧ ∀i target ∩ bᵢ = ∅`. The `deflate(0.25)` changes no answer over
+integer boxes (it only stops two boxes sharing a face from colliding, which integer strict-inequality
+overlap already gets right) and is kept anyway so the expression stays vanilla's. Worth recording
+because the tempting alternative — a real voxel rasteriser — is ~500 lines for the same set. The arena
+detail is the one that is *not* free: vanilla's `MutableObject<VoxelShape>` is **shared and mutated**
+between sibling `PieceState`s, so the shapes are held in an index-addressed arena; a clone per state
+lets two siblings occupy the same space and builds a village with houses inside each other.
+
+**What this makes observable, and what it un-observes.** S3's beardifier had reached **zero** structures
+— `docs/worldgen-beardifier.md` said so, and its negative control asserted a byte-identical 45-column
+dump precisely because `adaptation_bearing` was empty for every chunk in the world. With villages,
+`pillager_outpost` and `ancient_city` placing, that is no longer true near a structure, and the dump is
+only a valid control for a column with no adaptation-bearing start in reach. **A negative control whose
+premise is "this feature reaches nothing" expires the moment the feature reaches something**, and
+nothing about the control's source says so — the same shape as §12.41.
+
+**Operational.** Two neighbouring agents broke the shared tree twice during verification (a
+`crafting.rs`/`container_click.rs` signature mismatch, then a new `Density::EndIslands` variant with
+five non-exhaustive matches). Both cleared in under two minutes of bounded re-polling inside one shell
+invocation; neither was worth a worktree. Final state: `cargo check --workspace --all-targets` green,
+`cargo check -p lodestone-shell --no-default-features` green, `lodestone-worldgen` +
+`lodestone-worldgen-core` **272 passed / 0 failed**, `lodestone-server` **850 passed / 0 failed**.
+
+**12.134 The density compiler really did expand a shared DAG into a tree — 431 nodes into 210, 54 noise
+instantiations into 21, 708 `cache_2d`-under-leaves into 236 — and removing all of it is worth **0.26%**
+of instructions retired per column. The 4.87× evaluation redundancy that sized the prize is still there
+afterwards, and the reason is the one thing node sharing structurally cannot do: the evaluator is a
+recursive descent with no per-node memo, so a node with two parents is still evaluated twice.**
+
+Measured at `aaad613e`, release, `lto = "thin"`, embedded server data, seed 42. Both arms are
+`git worktree --detach aaad613e` with their own `CARGO_TARGET_DIR` — never the shared `target/` — and the
+"after" arm is that same worktree with **only** this unit's files copied in, so no neighbouring agent's
+in-flight work is in either arm. §12.132 named this as the largest identified serial item left in chunk
+generation; it is real and it is small, and the two facts have different causes.
+
+- **Phase 0, the measurement that was supposed to size the prize, and does — for something else.**
+  `ImprovedNoise::noise_scaled` instrumented with a thread-local count of calls against **distinct
+  `(octave identity, coordinate)` tuples**, octave identity being `(xo, yo, zo)` so that two
+  separately-instantiated copies of one noise id count as *one* subject rather than two. Over the 100
+  interior columns of §12.130's 12×12 sweep:
+
+  | quantity | before sharing | after sharing |
+  |---|---|---|
+  | `noise_scaled` calls, median interior column | 326,514 | 322,014 |
+  | distinct `(octave, coordinate)`, median | 68,286 | 68,286 |
+  | **redundancy ratio, median column** | **4.872** | **4.803** |
+  | ratio, aggregate over the 100 | 5.712 | 5.614 |
+  | ratio, min / max column | 4.456 / 12.139 | 4.393 / 11.987 |
+
+  So the ratio is **≥ 2 by a factor of two and a half**, which by the audit's own framing makes the
+  5–10 ms serial target arithmetic rather than aspirational — but **per-position memoisation is the
+  mechanism, and node sharing is not that**. Two things in the table are worth more than the ratio: the
+  distinct count is **byte-identical across the change** (6,826,860 summed over the 100 columns, both
+  arms), which is a value-invariance control nothing else in this unit provides; and 68,286 is within
+  1% of §12.132's independently-measured 68,900 `cache_2d` lookups per column, two instruments arriving
+  at the same population.
+- **A repeat of an already-generated column measures a ratio of `0/0`.** The first version of the probe
+  warmed a 3×3 patch and then instrumented `column(0, 0)` again: **zero** `noise_scaled` calls, because
+  the store answers the whole thing. That is §12.130's repeat-column trap in a second instrument, and it
+  fails in the direction that looks like a spectacular win rather than like an error.
+- **The pass, and what it collapses on the real 26.2 router.** `Program::compile` now hash-conses the
+  `Op` table: side tables (params runs, child runs, noises, point-evaluated leaves) are interned first,
+  so `(kind, a, b, c)` becomes a complete structural key needing no recursion and no deep comparison.
+
+  | channel | ops, tree → DAG | leaves | noises | slots collapsed | `cache_2d_under_leaves` |
+  |---|---|---|---|---|---|
+  | `final_density` | **431 → 210** | 12 → 4 | **54 → 21** | 8 | **708 → 236** |
+  | `depth` | 19 → 17 | 1 | 0 | 0 | 106 |
+  | `preliminary_surface_level` | 1 → 1 | 1 | 0 | 0 | **416** |
+  | `vein_ridged` | 15 → 13 | 0 | 2 | 0 | 0 |
+  | `continents`/`erosion`/`ridges`/`temperature`/`vegetation` | 8–9, unchanged | 0 | 2 → 1 each | 0 | 0 |
+
+  **708 → 236 is exactly 708/3**: the leaf *table* held three copies of each `cache_2d`-bearing subtree.
+  The 236 that remain are duplication **inside one leaf**, and an `Op`-level pass structurally cannot
+  see it — a leaf is an untouched `Density` subtree the point interpreter walks, interned whole or not at
+  all. `preliminary_surface_level` is the extreme case and the one to read twice: **one** op, **one**
+  leaf, **416** `cache_2d` nodes inside it. So "708 against a handful" was two different defects wearing
+  one number, and only the smaller one is an `Op`-table problem.
+- **Determinism did not need an argument, and that is a property of *where* the pass lives.** Every RNG
+  draw in the density pipeline happens in `Builder`, whose only sources are `master.from_hash_of(id)` (a
+  positional factory keyed by the registry id) and `LegacyRandomSource::new(seed + n)` — neither advances
+  a shared stream. Compilation runs strictly *after* all of them and draws nothing. So RNG draw order and
+  count, which are the specification of the generated world, are unchanged **by construction**. A pass
+  that shared subtrees at `Builder` level instead would have needed the argument rather than the
+  structure, which is the whole reason this one sits on the compiler side of the boundary. **The exclusion
+  list is therefore empty**, and that is a measurement of the current data, not a general licence:
+  `Graph` holds no mutable state at all, every evaluator entry takes `&self`, and no `Op` and no
+  `Density` variant reads anything but its own payload and the position handed to it.
+- **The one thing that is not purely structural, and it is the only part that removes work.** The `slot`
+  of `interpolated`/`flat_cache` is excluded from the signature: it is an index into `Scratch`'s memo,
+  not part of the function the node denotes. Collapsing two copies onto the first one's slot is what
+  makes the second parent read the memo instead of re-evaluating the subtree, and it is the entire
+  measured instruction win — **8 slots** in `final_density`. Everything else the pass collapses is memory
+  and locality, not evaluation.
+- **Two float traps in the signature, both of which would have shipped silently.** Floats go in as
+  `to_bits()`, never as compared values: `0.0 == -0.0` is **true** while the two are different values
+  under `1.0 / x` and under `Mul`'s `v1 == 0.0` short-circuit, so a derived `PartialEq` would have fused
+  `Const(0.0)` with `Const(-0.0)` and moved terrain; and `NaN != NaN` would stop an identical node
+  matching itself, which is merely a missed collapse but is the same defect seen from the other side.
+  `signed_zero_constants_do_not_share_a_node` asserts **2 nodes, with a same-value control asserting 1**,
+  because "at least one node" is satisfied by the pass being switched off. Noise identity is the whole
+  256-byte permutation table, not `(xo, yo, zo)`: those three doubles and the shuffle come from one
+  `RandomSource`, so equal offsets *almost* imply an equal table, and "almost" has no place here.
+- **The numbers, paired and alternated, because the first unpaired reading was 20% wrong in the
+  interesting direction.** A single before-run then after-run measured C_ss **21,169 → 25,347 µs
+  (+19.7%)** and C_cold **432 → 586 ms**, i.e. a large wall regression against flat instructions — which
+  is exactly the locality signature §12.120 warns about, and it was entirely machine load from
+  neighbouring agents' builds. Re-measured by building both bench binaries, keeping them, and running
+  them **alternately** in one shell invocation:
+
+  | round | C_ss before | C_ss after | I_ss before | I_ss after |
+  |---|---|---|---|---|
+  | 1 | 21,313.7 µs | 21,037.9 µs | 486,165,076 | 485,024,941 |
+  | 2 | 21,263.1 µs | 20,916.9 µs | 486,079,022 | 484,823,798 |
+  | 3 | 20,983.1 µs | 20,952.4 µs | 486,061,398 | 484,829,891 |
+  | **median** | **21,263.1** | **20,952.4** | **486,079,022** | **484,829,891** |
+
+  **I_ss −0.257%** (−1.25 M instructions/column), spread 0.02% within the before arm and 0.04% within
+  the after arm — a real reading, far outside the instrument's noise and far inside anything that matters.
+  C_ss −1.3%, which is inside wall clock's own 13.5–14.2% repeatability and is therefore *not* a claim.
+  `insn/µs` rose slightly (22,810–23,164 → 23,055–23,179), the direction fewer distinct noise permutation
+  tables predicts, and it is the only locality evidence here that is not noise-limited.
+  **The lesson is the alternation, not the number:** two arms measured minutes apart on this machine
+  differ by 20%, and the same two arms interleaved differ by 1%.
+- **Byte identity, twice, with the control both times.** The 45-column/5-seed U15 dump is byte-identical
+  across the change: 8,902,157 bytes, md5 `c0ef05ac09ba3f90175a14b0f9a69d50` on both arms — the same value
+  §12.130 and §12.132 recorded, reproduced here rather than quoted — harness md5
+  `99691badc02cca288a9071f0491d2fa7` equal on both arms, and a one-flipped-byte control makes `cmp` fire
+  (exit 1, `char 4000001`). Re-run after the `end_islands` leaf landed on top, with the same result: the
+  End's leaf is unreachable from the overworld router, and this is the measurement that says so rather
+  than the reasoning.
+- **`end_islands` landed here as the worked example of the classification the pass now demands.** A
+  fourth point-evaluated leaf, `Density::EndIslands(Arc<EndIslandNoise>)` at index 31, appended to
+  `OpKind` and to `field.rs` (two tables, one gate —
+  `op_kind_discriminants_match_density_kind_index`, **and a case omitted from that list is a case the
+  gate does not cover**, so the real 17,500-draw payload is constructed in it). It is pure of position
+  (`compute(x, z)`, xz-only), so it is a legitimate collapse candidate; `Builder` holds a `OnceCell` so
+  the 17,292 discarded `nextInt`s plus the 256-step shuffle are paid once for the type's two occurrences
+  in 26.2's data, as vanilla's single substituted object is. `the_two_end_islands_occurrences_share_one_leaf`
+  uses **two separately constructed** noises rather than two clones of one `Arc`, because a pass that
+  deduped by pointer would pass the weak form and silently stop working.
+- **What is left, and it is not a parallelism item.** The redundancy ratio says a factor of ~4.8 of noise
+  evaluation is repeat work at coordinates already computed. Three routes, in descending size: sharing
+  inside the point-interpreter leaves (`Box` → `Arc` plus hash-consing in `Builder`, which reaches
+  `preliminary_surface_level`'s 416 and needs the RNG-order argument this pass avoided); a per-position
+  memo on the now-*shared* xz-only nodes — the memo §12.132 deleted at a 0.12% hit rate, whose hit rate
+  was 0.12% **because** each parent held its own copy, which is the duplication this pass removes; and
+  vanilla's own answer, `NoiseChunk.wrap`'s `computeIfAbsent` map, which preserves the DAG through
+  wrapping so one `FlatCache` instance serves every reference. The second is closed by instruction, and
+  the reason it was closed has just changed underneath it — which is §12.132's own lesson about a caching
+  decision going stale two levels away, pointing the other way this time.
+
+**12.137 "Write-protected" was read as "un-clickable", and one vacuous comparison produced three
+different-looking bugs.**
+
+Server-side crafting shipped with the result slot correctly *unwritable* from the wire and with the
+*taking* half unreachable in play. The owner reported three symptoms — a dimmed unclickable output, a
+shift-clicked input that "crafts the item", and a crafting table needing a close+reopen before the craft
+appeared — and all three are one cause.
+
+- **The cause is an agreement check that could not fail.** `apply_container_clicked` answers a click with
+  a corrective `container_set_content` only when the client's prediction disagrees with what the server
+  derived, and that comparison walked **only the slots the client claimed**. A client claims nothing for a
+  change it cannot predict, and the server-derived crafting result is exactly that, so every crafting
+  click "agreed" and slot 0 was never sent. Vanilla has no equivalent: `doClick` is followed
+  unconditionally by `broadcastChanges`, which diffs *every* slot against `remoteSlots`, and
+  `CraftingMenu.slotChangedCraftingGrid` additionally pushes slot 0 on any grid change. The fix is the
+  same shape — compare the pre-click state overwritten by the client's claims against the **whole** derived
+  menu. `MP_OLD=1` reinstated the old predicate for one run as the control: the new gate fails at exactly
+  the first grid click, and passes with it removed.
+- **This is `decode(encode(x)) == x` wearing container clothes.** The comparison's subject was chosen *by
+  the thing being checked* — the client picks which slots it claims — so the check verified only what the
+  client already agreed with. A gate over "the slots someone else nominated" is not a gate.
+- **A ghost preview turned a missing packet into a plausible rendering decision.** The container screen
+  draws a dimmed prediction when the result slot is empty (`ContainerFrame::with_recipe_book`), which is
+  correct for the one round trip it was designed for and indistinguishable from "the server said the slot
+  is empty" forever. That is why the report reads as three UI bugs rather than one absent packet: the
+  optimistic fallback was more convincing than the failure.
+- **Repeated shift-crafting is an emergent property of a loop, not a feature to add.**
+  `AbstractContainerMenu.doClick`'s `QUICK_MOVE` arm loops `quickMoveStack` *while the clicked slot still
+  holds the same item*. For every slot but a result that runs once; for a result it crafts until the grid
+  drains, and it only terminates because `slotsChanged` refills slot 0 between iterations. Porting
+  `quickMoveStack` without the loop, or the loop without the refill, yields exactly one craft and looks
+  right. `do_click_with` now takes the menu's corpus so the result slot is live *inside* one click;
+  `do_click` keeps the recipe-free single craft.
+- **Measured, and the expected value comes from vanilla's datapack rather than from our matcher**:
+  `chest.json` is eight `#minecraft:planks` around an empty centre and `ResultSlot.onTake` removes one per
+  occupied cell, so eight planks per cell is **eight** chests — distinguishing the old single-shot
+  behaviour (1) and a naive 64-round cap (64) from the truth.
+- **One plank alone in a 2×2 is a real recipe** (`oak_button.json`; two side by side are
+  `oak_pressure_plate.json`). A test premise of "no result yet" while filling a grid one cell at a time is
+  therefore false, and it failed in the safe-looking direction — an assertion that *no* packet was needed.
+  The corpus answered a question the test's author had not asked.
