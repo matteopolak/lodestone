@@ -1,0 +1,35 @@
+[package]
+name = "lodestone-command-mc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# The Minecraft-flavoured half of the Brigadier port. `lodestone-command` is
+# deliberately dependency-free and version-free — see its own `Cargo.toml` — so
+# the argument types that need to know what a game mode, an item or an entity
+# *is* cannot live there. They live here, and this crate is where the wire
+# identity of a node (`lodestone_model::command_tree::ArgumentParser`) is stated
+# alongside the parser that consumes its text, so the two cannot drift.
+#
+# Nothing here names a protocol number: `ArgumentParser` is the *symbolic*
+# version-free enum from `lodestone-model`, and the numeric
+# `minecraft:command_argument_type` registry ids live in `lodestone-data` and the
+# version crates. That is what keeps this crate — and therefore
+# `lodestone-server`, and therefore `lodestone-shell` — off the version seam.
+#
+# Also, deliberately: no `std::time`, no timers, no async. `lodestone-server`
+# links into the browser bundle and the whole dispatcher is synchronous.
+[dependencies]
+lodestone-command = { workspace = true }
+lodestone-model = { workspace = true }
+# Item and entity-type name→id censuses, for validating an `ItemArgument`'s item
+# and an `@e[type=…]` predicate at *parse* time rather than in an executor.
+lodestone-data = { path = "../lodestone-data" }
+# A bare `<targets>` may be a raw uuid rather than a name or a selector
+# (`EntitySelectorParser.parseNameOrUUID`), so the AST has to be able to carry
+# one.
+uuid = { workspace = true }
