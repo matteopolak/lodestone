@@ -666,12 +666,116 @@ impl Sim {
         self.stats.pitch = player.pitch;
         let store = self.chunk_world();
         self.stats.chunk_count = store.len();
-        self.stats.live_columns = self.net.as_ref().map_or(0, |n| n.loaded_chunks().len());
         self.stats.mesh_drops = self.terrain(|t| t.drops);
-        self.stats.world_bytes = store.read().heap_bytes();
-        self.stats.rss_bytes = process_rss_bytes();
         self.stats.frames_per_tick = self.frames_per_tick();
         self.stats.target = self.target().map(|h| h.block);
-        self.stats.status = self.status.clone();
+        // The three fields whose cost is O(resident world) or a syscall, throttled
+        // to one frame in [`WORLD_STATS_PERIOD`]. See that constant for the
+        // measured numbers and why the whole overlay is not simply gated on `F3`.
+        if refreshes_world_stats(self.clock().frames) {
+            self.stats.live_columns = self.net.as_ref().map_or(0, |n| n.loaded_chunks().len());
+            self.stats.world_bytes = store.read().heap_bytes();
+            self.stats.rss_bytes = process_rss_bytes();
+        }
+        // `clone_from` reuses the existing `String`'s buffer, and the comparison
+        // skips even that on the overwhelmingly common frame where the status line
+        // has not changed. This used to be an unconditional `self.status.clone()`
+        // — one heap allocation and free per frame, for a field that changes a
+        // handful of times per session.
+        if self.stats.status != self.status {
+            self.stats.status.clone_from(&self.status);
+        }
+    }
+}
+
+/// How many frames apart [`Sim::refresh_stats`] recomputes the debug fields whose
+/// cost scales with the resident world.
+///
+/// Three fields were recomputed **every frame** for an overlay that is usually
+/// not on screen:
+///
+/// * `world_bytes` — `World::heap_bytes` walks every resident chunk, every
+///   section and every paletted container, under the world **read lock**;
+/// * `live_columns` — `NetClient::loaded_chunks` allocates a `Vec<ChunkPos>` of
+///   every loaded column and the caller immediately takes `.len()`;
+/// * `rss_bytes` — a `task_info` syscall.
+///
+/// Measured in instructions retired at render distance 8 (361 resident columns),
+/// by `crates/lodestone-shell/tests/client_chunk_cycles.rs`: `heap_bytes`
+/// **494,570 instructions per frame** and the position `Vec` **116,242**. Both
+/// scale linearly in resident columns, so both get worse at render distance 16
+/// and 32 — the direction the render plan is trying to move.
+///
+/// **30 frames is ~0.5 s at 60 fps.** That is below the rate a human reads a
+/// changing debug figure, and it divides both terms by 30.
+///
+/// Why a throttle and not a `show_debug` gate: `DebugStats` has a second consumer,
+/// `DebugStats::one_line`, which `app/redraw.rs` and `app/runners.rs` print in
+/// headless and logged runs where no overlay is visible. Gating on overlay
+/// visibility would silently zero those logs — the shape of defect this repo
+/// calls a signal that looks like evidence and isn't. A throttle keeps every
+/// consumer correct and merely slightly stale. See `docs/client-chunk-cycles.md`.
+const WORLD_STATS_PERIOD: u64 = 30;
+
+/// Whether the frame numbered `frames` (from [`FrameClock::frames`]) recomputes
+/// the O(resident-world) debug fields.
+///
+/// `FrameClock::begin_frame` increments before the step body, so `frames` is `1`
+/// on the first frame; subtracting one makes that first frame a refresh frame, so
+/// the overlay is populated immediately instead of reading zeros for half a
+/// second. Exactly one frame in every [`WORLD_STATS_PERIOD`] returns `true` —
+/// pinned by `world_stats_refresh_is_exactly_one_frame_per_period`, which computes
+/// both the correct count (1) and the unthrottled one (`WORLD_STATS_PERIOD`).
+const fn refreshes_world_stats(frames: u64) -> bool {
+    frames.saturating_sub(1) % WORLD_STATS_PERIOD == 0
+}
+
+#[cfg(test)]
+mod stats_throttle_tests {
+    use super::{WORLD_STATS_PERIOD, refreshes_world_stats};
+
+    /// The throttle's whole claim, as a count rather than a sign: over any window
+    /// of [`WORLD_STATS_PERIOD`] consecutive frames, exactly **one** recomputes.
+    ///
+    /// Both hypotheses are computed from the constant rather than restated: the
+    /// correct one is `1` per window, and the pre-fix (unthrottled) one is
+    /// `WORLD_STATS_PERIOD` per window. Asserting only "fewer than before" would
+    /// be the *magnitude* species of vacuous test — a throttle that fired on 29
+    /// frames in 30 would pass it.
+    #[test]
+    fn world_stats_refresh_is_exactly_one_frame_per_period() {
+        const WINDOWS: u64 = 7;
+        let unthrottled_hypothesis = WORLD_STATS_PERIOD;
+        assert_ne!(
+            1, unthrottled_hypothesis,
+            "with a period of 1 the throttle is a no-op and this test cannot distinguish the \
+             two hypotheses"
+        );
+        for window in 0..WINDOWS {
+            let first = window * WORLD_STATS_PERIOD + 1;
+            let hits = (first..first + WORLD_STATS_PERIOD)
+                .filter(|&f| refreshes_world_stats(f))
+                .count() as u64;
+            assert_eq!(
+                hits, 1,
+                "frames {first}..{} recomputed the world stats {hits} times; the correct \
+                 hypothesis is 1 and the unthrottled hypothesis is {unthrottled_hypothesis}",
+                first + WORLD_STATS_PERIOD
+            );
+        }
+    }
+
+    /// The first frame must refresh, or the overlay and the `one_line` log read
+    /// zeros for the first half-second of every session — which is exactly the
+    /// "flat zero that looks like evidence" failure the RSS field already had once.
+    #[test]
+    fn the_first_frame_refreshes() {
+        assert!(
+            refreshes_world_stats(1),
+            "FrameClock::frames is 1 on the first frame and it must be a refresh frame"
+        );
+        // And frame 0, in case a caller reaches `refresh_stats` before any
+        // `begin_frame` (the hermetic-test path).
+        assert!(refreshes_world_stats(0), "frame 0 must also refresh");
     }
 }
