@@ -2567,6 +2567,204 @@ async fn bare_handed_stone_drops_nothing_while_bare_handed_dirt_still_drops() {
     let _ = server.await.expect("server task panicked");
 }
 
+/// Stone everywhere except one dandelion at [`FLOWER_POS`], for the one-shot
+/// gate below.
+struct StoneWithFlowerSource;
+
+/// The dandelion in [`StoneWithFlowerSource`] — a zero-hardness block, so
+/// `progress_per_tick` is `+inf` and vanilla's `"insta mine"` branch fires on the
+/// `StartDestroy`.
+const FLOWER_POS: BlockPos = BlockPos::new(8, 9, 4);
+
+impl ChunkSource for StoneWithFlowerSource {
+    fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+        let mut col = ChunkColumn::new(0, 16);
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 0..16 {
+                    col.set_block(x, y, z, "minecraft:stone");
+                }
+            }
+        }
+        col.set_block(FLOWER_POS.x, FLOWER_POS.y, FLOWER_POS.z, "minecraft:dandelion");
+        col
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+        // As `StoneSource`: no storage, and the drop is rolled from the state
+        // read before `set_block`.
+    }
+}
+
+/// **The one-shot-block gate, end to end: a `StartDestroy` with no `StopDestroy`
+/// after it pops a flower.**
+///
+/// This is the behaviour issue #531's commit introduced and whose only test was a
+/// unit assertion on `progress_per_tick >= 1.0` — a closed loop that says nothing
+/// about whether `apply_block_action` reaches `destroy_block` on the start
+/// ordinal. A real client that knows a block is instant sends *only* the start
+/// action, so this is the whole packet sequence for pulling grass.
+///
+/// The control is the pair below it: the same single start action on **stone**
+/// drops nothing, so this cannot pass by breaking on every `StartDestroy`.
+#[tokio::test(start_paused = true)]
+async fn a_start_action_alone_pops_a_one_shot_flower_but_not_stone() {
+    let (client_end, server_end) = memory_pair();
+    let mobs = MobHandle::default();
+    let mobs_for_server = mobs.clone();
+    let source = StoneWithFlowerSource;
+    assert_eq!(
+        source.block_state(FLOWER_POS.x, FLOWER_POS.y, FLOWER_POS.z),
+        "minecraft:dandelion",
+        "precondition: FLOWER_POS is the zero-hardness block under test"
+    );
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &StoneWithFlowerSource,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+            &mobs_for_server,
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Picker", 1).await;
+
+    // The control first, so a failure cannot be blamed on session ordering: one
+    // start action on stone, bare-handed, and *nothing* after it.
+    send_block_action(&mut client, 0, BREAK_POS).await;
+    let _ = drain_available(&mut client).await;
+    assert_eq!(
+        mobs.with(|sim| sim.item_count()),
+        0,
+        "a bare-handed start action on stone must not break it — if this is \
+         non-zero the flower assertion below proves nothing"
+    );
+
+    send_block_action(&mut client, 0, FLOWER_POS).await;
+    let _ = drain_available(&mut client).await;
+    let snapshots = mobs.with(|sim| sim.snapshots());
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "a start action alone must pop a zero-hardness block: {snapshots:?}"
+    );
+    assert_eq!(
+        snapshots[0].metadata,
+        vec![MetadataField::Item {
+            item: "minecraft:dandelion".parse().expect("valid key"),
+            count: 1,
+        }],
+    );
+
+    drop(client);
+    let _ = server.await.expect("server task panicked");
+}
+
+/// **The regression gate for ordinary block breaking: a `StopDestroy` that
+/// arrives on the same tick as its `StartDestroy` still breaks the block, a
+/// tick or two later.**
+///
+/// This is what #531 broke. That commit refused a shortfall outright, but
+/// vanilla's shortfall branch arms `hasDelayedDestroy` and keeps accruing
+/// progress in `ServerPlayerGameMode.tick` until the block is fully earned
+/// (`ServerPlayerGameMode.java:229-234`). A local integrated server reads both
+/// packets off one buffer, so *every* non-instant block took the shortfall path
+/// and nothing but flowers could be broken at all.
+///
+/// Dirt bare-handed, because it is the one block in this file that both takes a
+/// real dig and drops without a tool: `1.0 / 0.5 / 100` per tick, so with
+/// `UNTRACKED_SPEED_HEADROOM` the *deferred* target of a whole block needs 7
+/// ticks. The wait below is deliberately longer than that and shorter than the
+/// slower blocks around it.
+///
+/// Two controls, and the first is the one that matters: **the drop is absent
+/// immediately after the pair is sent** and present only after the wait, so this
+/// is a gate on the deferred continuation rather than on the pair being accepted
+/// outright. The second replaces the stop with an abort, which must never break
+/// however long you wait.
+#[tokio::test(start_paused = true)]
+async fn a_same_tick_stop_breaks_the_block_a_few_ticks_later() {
+    let (client_end, server_end) = memory_pair();
+    let mobs = MobHandle::default();
+    let mobs_for_server = mobs.clone();
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &StoneWithDirtSource,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+            &mobs_for_server,
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Releaser", 1).await;
+
+    // Control: start then abort, back to back, then the same wait. An abort
+    // clears the dig, so no deferred continuation may exist to finish it.
+    send_block_action(&mut client, 0, DIRT_POS).await;
+    send_block_action(&mut client, 1, DIRT_POS).await;
+    tokio::time::sleep(BARE_HANDED_DIG).await;
+    let _ = drain_available(&mut client).await;
+    assert_eq!(
+        mobs.with(|sim| sim.item_count()),
+        0,
+        "an aborted dig must not be finished by the deferred-destroy tick pass"
+    );
+
+    // The subject: start then stop, back to back, with no wait between them —
+    // both land on one server tick, which is the case #531 refused.
+    send_block_action(&mut client, 0, DIRT_POS).await;
+    send_block_action(&mut client, 2, DIRT_POS).await;
+    let _ = drain_available(&mut client).await;
+    assert_eq!(
+        mobs.with(|sim| sim.item_count()),
+        0,
+        "a same-tick stop has not earned the block yet — if it drops here the \
+         wait below is not what this gate is measuring"
+    );
+
+    // `sleep`, **not** `tokio::time::advance`: see
+    // `bare_handed_stone_drops_nothing_while_bare_handed_dirt_still_drops`'s own
+    // note. Only a paused-clock `sleep` lets the server's 50ms timer arm run.
+    tokio::time::sleep(BARE_HANDED_DIG).await;
+    let _ = drain_available(&mut client).await;
+    let snapshots = mobs.with(|sim| sim.snapshots());
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "the deferred dig must finish on the server's own clock: {snapshots:?}"
+    );
+    assert_eq!(
+        snapshots[0].metadata,
+        vec![MetadataField::Item {
+            item: "minecraft:dirt".parse().expect("valid key"),
+            count: 1,
+        }],
+    );
+
+    drop(client);
+    let _ = server.await.expect("server task panicked");
+}
+
 /// **The control for the gate above, and it must fail the same assertion.**
 ///
 /// Same world, same block, same packets — except the second phase is
