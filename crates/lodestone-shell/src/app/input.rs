@@ -96,6 +96,14 @@ pub(crate) enum KeyOutcome {
     /// [`KeyGate::creative_search`]. Payload-free for the same reason
     /// [`Self::RecipeSearch`] is.
     CreativeSearch,
+    /// F3+N — vanilla's `key.debug.spectate` (keysym 78): in and out of spectator.
+    ///
+    /// The first producer of `ClientAction::ChangeGameMode` outside
+    /// `crates/protocol/`; see [`WindowApp::toggle_spectator`].
+    ToggleSpectator,
+    /// F3+F4 — vanilla's `key.debug.switchGameMode` (keysym 293). Cycles rather
+    /// than opening the radial picker; see [`WindowApp::cycle_game_mode`].
+    CycleGameMode,
     /// F3+H — vanilla's `key.debug.advancedTooltips`.
     ///
     /// Unlike its two siblings above this does **not** toggle a render flag: it
@@ -351,6 +359,12 @@ pub(crate) fn resolve_key(
     } else if gate.debug_held && pressed && code == KeyCode::KeyG {
         // `key.debug.showChunkBorders`, vanilla keysym 71.
         Some(KeyOutcome::ToggleChunkBorders)
+    } else if gate.debug_held && pressed && code == KeyCode::KeyN {
+        // `key.debug.spectate`, vanilla keysym 78.
+        Some(KeyOutcome::ToggleSpectator)
+    } else if gate.debug_held && pressed && code == KeyCode::F4 {
+        // `key.debug.switchGameMode`, vanilla keysym 293 (GLFW's F4).
+        Some(KeyOutcome::CycleGameMode)
     } else if gate.debug_held && pressed && code == KeyCode::KeyH {
         // `key.debug.advancedTooltips`, vanilla keysym 72. **Not gated on
         // `gate.gameplay`**, the same as its two siblings: F3 chords are debug
