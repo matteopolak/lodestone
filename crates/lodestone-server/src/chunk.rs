@@ -1113,6 +1113,59 @@ pub(crate) async fn generate_columns_offloaded<S: ChunkSource + 'static>(
     }
 }
 
+/// [`generate_columns_offloaded`], with **protocol encode folded into the same
+/// blocking closure** — so the caller receives finished frames and never touches
+/// a column.
+///
+/// # Why the encode has to move too, and not only the generation
+///
+/// `generate_columns_offloaded` fixed *generation*; it left the encode where it
+/// was, on the connection task, which is the task that owes the player a reply
+/// to their block break. `crate::protocol::ChunkEncoder` carries the measurement
+/// — 62 M instructions / ≈2.4 ms per column — and the path this exists for is
+/// `crate::server`'s `ViewTracker::build_batch`: every chunk boundary the player
+/// walks across produces a strip of `2r + 1` newly visible columns, 33 of them at
+/// `view_radius = 16`, and encoding them inline is ≈80 ms of hitch **per
+/// boundary**, repeating for as long as the player keeps walking. That is the
+/// steady-state half of the owner's report; the join burst is the one-off half.
+///
+/// The wire is unaffected: the returned `Vec` is aligned index-for-index with
+/// `coords`, exactly as `generate_columns_offloaded`'s is, so which function a
+/// caller uses cannot change the emitted byte sequence.
+///
+/// Returns `None` when `encoder` is `None` — a protocol with no off-task encoder,
+/// which is the default — so the caller falls back to
+/// [`generate_columns_offloaded`] plus its own encode loop. Returning an `Option`
+/// rather than taking a non-optional encoder keeps the fallback a property of
+/// this function instead of a branch every call site repeats.
+#[cfg_attr(not(target_arch = "wasm32"), tracing::instrument(skip_all, fields(count = coords.len())))]
+pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'static>(
+    source: Arc<S>,
+    coords: Vec<(i32, i32)>,
+    encoder: Option<Arc<dyn crate::protocol::ChunkEncoder>>,
+) -> Option<Vec<crate::protocol::ServerDirective>> {
+    let encoder = encoder?;
+    let encode = move || {
+        generate_columns_parallel(&*source, &coords)
+            .iter()
+            .zip(&coords)
+            .map(|(column, &(cx, cz))| encoder.encode_chunk(cx, cz, column))
+            .collect::<Vec<_>>()
+    };
+    #[cfg(target_arch = "wasm32")]
+    {
+        Some(encode())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Some(
+            tokio::task::spawn_blocking(encode)
+                .await
+                .expect("worldgen blocking task panicked"),
+        )
+    }
+}
+
 /// The real terrain source: the composed, JVM-verified overworld generator.
 ///
 /// This is what a client connecting to the integrated server should be served —
