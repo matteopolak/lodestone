@@ -80,4 +80,4 @@ mod scratch;
 pub(crate) use field::Field;
 pub use field::Geom;
 pub use graph::Program;
-pub use scratch::{Bounds, Scratch};
+pub use scratch::{Bounds, Scratch, leaf_memo_stats, reset_leaf_memo_stats};
