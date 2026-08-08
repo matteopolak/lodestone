@@ -39,7 +39,8 @@ use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::{ChunkWorld, ChunkWorldWrite, FrameSet, Update};
 use lodestone_render::{
     BlockClassifier, BlockModels, ChunkSectionView, FluidCell, FluidKind, FluidMeshes,
-    FluidSectionView, FluidSprites, Mesh, ModelMesh, ModelSectionView, SectionLight,
+    FluidNeighborCell, FluidSectionView, FluidSprites, Mesh, ModelMesh, ModelSectionView,
+    SectionLight,
     SectionNeighborhood, SkyDefault, UniformLight, WorldSectionLight, biome_tint_kind_for_slot,
     face_of_direction, mesh_fluids, mesh_models, mesh_simple,
 };
@@ -1101,6 +1102,35 @@ struct SnapshotFluidView<'a> {
 }
 
 impl FluidSectionView for SnapshotFluidView<'_> {
+    /// [`Self::fluid_at`], [`Self::occludes_at`] and [`Self::overlay_at`] in
+    /// **one** call, sharing the single expensive part: three `split16`s, three
+    /// range checks, one 27-entry snapshot-slot index and one
+    /// `PalettedContainer::get` bit-unpack, after which all three answers are
+    /// `Vec` lookups on the same state id.
+    ///
+    /// This is [`lodestone_render::FluidGrid`]'s fill primitive and it runs at
+    /// least 4,096 times per section, so the sharing is what makes the grid pay
+    /// for itself. Without this override the default composition triples the
+    /// fill's coordinate work and a **fluid-free** section costs 2.9× what it
+    /// did before the grid existed — measured, not predicted (`DESIGN.md`
+    /// §12.123). The out-of-neighbourhood answer is
+    /// `FluidNeighborCell::default()`, which is exactly the `None`/`false`/
+    /// `false` the three methods below return there.
+    fn cell_at(&self, x: i32, y: i32, z: i32) -> FluidNeighborCell {
+        let (dx, lx) = split16(x);
+        let (dy, ly) = split16(y);
+        let (dz, lz) = split16(z);
+        if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
+            return FluidNeighborCell::default();
+        }
+        let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
+        FluidNeighborCell {
+            fluid: self.models.fluid(id),
+            occludes: self.models.occludes(id),
+            overlay: self.models.fluid_overlay(id),
+        }
+    }
+
     fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<FluidCell> {
         let (dx, lx) = split16(x);
         let (dy, ly) = split16(y);
