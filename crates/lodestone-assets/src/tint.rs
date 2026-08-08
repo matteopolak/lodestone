@@ -685,6 +685,177 @@ pub fn blend_box<F: FnMut(i32, i32) -> Rgb>(x: i32, z: i32, radius: i32, mut sam
 /// [`blend_box`]'s doc for why this is the only reachable value right now.
 pub const DEFAULT_BLEND_RADIUS: i32 = 2;
 
+/// The largest `biomeBlendRadius` vanilla's option exposes — `Options.java:472`'s
+/// `new OptionInstance.IntRange(0, 7, false)`. It bounds [`BlendRowCursor`]'s
+/// window, which is why that type needs no allocation.
+pub const MAX_BLEND_RADIUS: i32 = 7;
+
+/// Window width for [`MAX_BLEND_RADIUS`], the size of [`BlendRowCursor`]'s ring.
+const MAX_BLEND_WIDTH: usize = (2 * MAX_BLEND_RADIUS + 1) as usize;
+
+/// [`blend_box`], evaluated incrementally along a row of constant `z`.
+///
+/// # What it is for
+///
+/// Two horizontally adjacent cells' radius-2 boxes overlap in **20 of their 25
+/// columns**, and vanilla's per-channel floor division happens once at the end
+/// rather than per sample — so a running per-channel sum over a sliding window of
+/// *column* sums yields the same `Rgb` for **5** new `sample` calls per step
+/// instead of 25. `mesh_fluids` and `mesh_models` both iterate `y → z → x` with
+/// `x` innermost (`models.rs`), which is exactly the order this exploits. The
+/// biome tint was still ~63% of `mesh_fluids`'s per-cell cost after issue #542's
+/// three commits (`DESIGN.md` §12.124), and this is where that goes.
+///
+/// # Why it is bit-identical, not merely close
+///
+/// [`blend_box`] computes each channel as `Σ_dz Σ_dx byte`; this computes
+/// `Σ_dx (Σ_dz byte)`. Both are exact `u32` sums of the *same* `(2r+1)²` bytes:
+/// integer addition is associative, and the largest possible total is
+/// `15² × 255 = 57,375`, five orders of magnitude below `u32::MAX`, so no
+/// intermediate rounds or wraps. The subtraction on a slide removes a column that
+/// the ring invariant guarantees is currently *part* of the total, so it cannot
+/// underflow. The final `/ count` is the same expression on the same integer.
+/// Nothing here is floating point and nothing divides early — the two properties
+/// that would make a reassociated blend drift by a byte, invisibly.
+///
+/// **Consequently `sample` must be pure.** A counting or logging closure will see
+/// a different number of calls in a different order, which is the point of the
+/// type; a closure whose *return value* depends on how often it was called will
+/// produce a different colour. `crate::tint`'s callers pass a pure
+/// `Colormaps::resolve`.
+///
+/// # How to change it
+///
+/// The ring invariant is: `cols[(head + i) % width]` holds the column sums for
+/// `x - radius + i`, for `i in 0..width`. Every method preserves it, and
+/// `blend_row_cursor_is_bit_identical_to_blend_box` in `tests/tint.rs` walks rows
+/// forward, backward and in jumps at five radii against [`blend_box`] itself —
+/// keep that reference arm, because it is the implementation this replaces and
+/// the only outside expectation available for it.
+///
+/// A `z` different from the loaded window's, or a jump of `width` or more in `x`,
+/// rebuilds from scratch (`width²` samples, i.e. exactly [`blend_box`]) rather
+/// than sliding, so the cursor is never *worse* than the function it wraps. State
+/// that does not belong to the current caller must be dropped with
+/// [`invalidate`](Self::invalidate) — the cursor keys itself on `(x, z)` only, so
+/// anything else the sample closure depends on (which tint kind, which `y`) is the
+/// caller's to track. `lodestone_render::biome_tint::BlendedTintCursor` is the
+/// worked example.
+#[derive(Debug, Clone)]
+pub struct BlendRowCursor {
+    radius: i32,
+    /// `2 * radius + 1`, cached because it indexes the ring on every call.
+    width: usize,
+    /// Per-channel sums for one column each (`2 * radius + 1` samples at fixed
+    /// `x`), in ring order — see the invariant in the type docs.
+    cols: [[u32; 3]; MAX_BLEND_WIDTH],
+    head: usize,
+    /// `Σ cols[..width]`, maintained incrementally.
+    total: [u32; 3],
+    /// The centre the loaded window belongs to, or `None` when empty.
+    at: Option<(i32, i32)>,
+}
+
+impl BlendRowCursor {
+    /// A cursor for a fixed `radius`, clamped to `0..=MAX_BLEND_RADIUS`. The
+    /// radius is fixed at construction rather than passed per call so a caller
+    /// cannot silently mix two radii into one window.
+    #[must_use]
+    pub fn new(radius: i32) -> Self {
+        let radius = radius.clamp(0, MAX_BLEND_RADIUS);
+        Self {
+            radius,
+            width: (radius * 2 + 1) as usize,
+            cols: [[0; 3]; MAX_BLEND_WIDTH],
+            head: 0,
+            total: [0; 3],
+            at: None,
+        }
+    }
+
+    /// The radius this cursor was built with, after clamping.
+    #[must_use]
+    pub const fn radius(&self) -> i32 {
+        self.radius
+    }
+
+    /// Drops the loaded window, so the next [`blend`](Self::blend) rebuilds. Call
+    /// this whenever anything the `sample` closure depends on changes other than
+    /// the `(x, z)` this type tracks itself.
+    pub fn invalidate(&mut self) {
+        self.at = None;
+    }
+
+    /// The blended colour at `(x, z)` — bit-identical to
+    /// `blend_box(x, z, self.radius(), sample)`, at 5 samples per single-step
+    /// move along the row instead of 25.
+    pub fn blend<F: FnMut(i32, i32) -> Rgb>(&mut self, x: i32, z: i32, mut sample: F) -> Rgb {
+        if self.radius <= 0 {
+            // `blend_box`'s own `radius <= 0` fast path, and the same result.
+            return sample(x, z);
+        }
+        let width = self.width;
+        // Sliding costs `|dx| * width` samples against a rebuild's `width²`, so it
+        // is only taken while `|dx| < width` — which is what makes the cursor
+        // never more expensive than the function it wraps.
+        let slide_from = self.at.filter(|&(cx, cz)| {
+            cz == z && ((x - cx).unsigned_abs() as usize) < width
+        });
+        if let Some((mut cx, _)) = slide_from {
+            while cx < x {
+                // The column at `cx - radius` leaves and the one at
+                // `cx + 1 + radius` enters, and both are ring slot `head`.
+                let col = self.column(cx + 1 + self.radius, z, &mut sample);
+                self.replace(self.head, col);
+                self.head = (self.head + 1) % width;
+                cx += 1;
+            }
+            while cx > x {
+                let slot = (self.head + width - 1) % width;
+                let col = self.column(cx - 1 - self.radius, z, &mut sample);
+                self.replace(slot, col);
+                self.head = slot;
+                cx -= 1;
+            }
+        } else {
+            self.total = [0; 3];
+            self.head = 0;
+            for i in 0..width {
+                let col = self.column(x - self.radius + i as i32, z, &mut sample);
+                self.cols[i] = col;
+                for c in 0..3 {
+                    self.total[c] += col[c];
+                }
+            }
+        }
+        self.at = Some((x, z));
+        // The same division `blend_box` performs, on the same integer.
+        let count = (width * width) as u32;
+        ((self.total[0] / count) << 16) | ((self.total[1] / count) << 8) | (self.total[2] / count)
+    }
+
+    /// Swaps one ring slot, keeping [`total`](Self::total) exact. The subtraction
+    /// cannot underflow: `cols[slot]` is part of `total` by the ring invariant.
+    fn replace(&mut self, slot: usize, col: [u32; 3]) {
+        for c in 0..3 {
+            self.total[c] = self.total[c] - self.cols[slot][c] + col[c];
+        }
+        self.cols[slot] = col;
+    }
+
+    /// One column's per-channel sums: `2 * radius + 1` samples at fixed `cx`.
+    fn column<F: FnMut(i32, i32) -> Rgb>(&self, cx: i32, z: i32, sample: &mut F) -> [u32; 3] {
+        let mut col = [0u32; 3];
+        for dz in -self.radius..=self.radius {
+            let c = sample(cx, z + dz);
+            col[0] += (c >> 16) & 0xFF;
+            col[1] += (c >> 8) & 0xFF;
+            col[2] += c & 0xFF;
+        }
+        col
+    }
+}
+
 /// Tests for invariants of *private* items — [`BIOME_EFFECTS`]'s sort order in
 /// particular, which the crate's public surface cannot see. Everything testable
 /// through the public API lives in `tests/tint.rs`.

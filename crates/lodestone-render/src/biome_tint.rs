@@ -82,26 +82,30 @@ const EFFECTS_MEMO: usize = 4;
 ///
 /// # The memo, and why it is here rather than in `biome_effects`
 ///
-/// [`biome_effects`] is a **linear scan of 66 `(&str, BiomeEffects)` entries
-/// with a string compare per entry**, and this type calls it once per
-/// [`BiomeTint`] method call — which [`resolve_blended_tint`] makes 25 times per
-/// tinted quad (vanilla's radius-2 blend box), and up to four times *per sample*
-/// for grass (`grass_override` + `temperature` + `downfall` + `grass_modifier`).
-/// Measured on the fluid path: one `water_tint_at` cost **6,263 instructions, of
-/// which 97.8% was `biome_effects`** — 46% of `mesh_fluids`'s entire per-cell
-/// cost, and a term issue #542's own diagnosis did not name (`DESIGN.md`
-/// §12.124).
+/// [`biome_effects`] is a lookup in a 66-entry `(&str, BiomeEffects)` table, and
+/// this type calls it once per [`BiomeTint`] method call — which
+/// [`resolve_blended_tint`] makes 25 times per tinted quad (vanilla's radius-2
+/// blend box), and up to four times *per sample* for grass (`grass_override` +
+/// `temperature` + `downfall` + `grass_modifier`). When that lookup was a linear
+/// `find` with a string compare per entry, one `water_tint_at` cost **6,263
+/// instructions, of which 97.8% was `biome_effects`** — 46% of `mesh_fluids`'s
+/// entire per-cell cost, and a term issue #542's own diagnosis did not name
+/// (`DESIGN.md` §12.124).
 ///
 /// A blend box covers 25 columns and terrain has *one or two* biomes there, so
-/// the same handful of names is re-scanned dozens of times. This memo keys on
+/// the same handful of names is re-looked-up dozens of times. This memo keys on
 /// the `&'static str`'s **data pointer and length**, not its contents: names come
 /// from static tables, so the same biome yields the same pointer. A pointer miss
 /// on an equal string is merely slow, never wrong — the fallback is the real
 /// [`biome_effects`] call.
 ///
-/// Making the scan itself `O(log n)` (the table *is* alphabetically sorted, so a
-/// `binary_search_by` is a few lines) would fix every caller rather than this
-/// one, and is the better long-term change; it lives in `lodestone-assets`.
+/// [`biome_effects`] now narrows its scan with a compile-time first-byte index
+/// (3.79 compares on an average hit rather than 33.5, and usually one or none on a
+/// miss), which fixed every caller rather than this one — so the memo is no longer
+/// load-bearing for the *scan*, only for the `strip_prefix` + call + branch around
+/// it. It is kept because it still measures as a win and because it is what makes
+/// a boundary cell cheap. §12.128 has what each is worth on its own, including why
+/// the `binary_search_by` this comment used to recommend measured **worse**.
 pub struct NamedBiomeTint<F> {
     biome_name_at: F,
     /// `(ptr, len, effects)` for the last few resolved names. `Cell` rather than
@@ -223,15 +227,111 @@ pub fn resolve_blended_tint(
     y: i32,
     z: i32,
 ) -> Option<Rgb> {
-    match kind {
-        TintKind::None | TintKind::Constant(_) | TintKind::RedstonePower(_) => None,
-        TintKind::Grass | TintKind::Foliage | TintKind::DryFoliage | TintKind::Water => {
-            Some(blend_box(x, z, radius, |sx, sz| {
-                colormaps
-                    .resolve(kind, biome, BlockPos::new(sx, y, sz))
-                    .unwrap_or(0)
-            }))
+    if !is_blended_kind(kind) {
+        return None;
+    }
+    Some(blend_box(x, z, radius, |sx, sz| {
+        colormaps
+            .resolve(kind, biome, BlockPos::new(sx, y, sz))
+            .unwrap_or(0)
+    }))
+}
+
+/// Whether `kind` is one of the four position-dependent kinds a blend applies to.
+///
+/// Shared by [`resolve_blended_tint`] and [`BlendedTintCursor::resolve`] rather
+/// than written twice, so the two cannot drift into disagreeing about which kinds
+/// return `None` — a disagreement that would show up as a *tinted* quad on one
+/// path and an untinted one on the other, with both paths individually green.
+#[must_use]
+pub const fn is_blended_kind(kind: TintKind) -> bool {
+    matches!(
+        kind,
+        TintKind::Grass | TintKind::Foliage | TintKind::DryFoliage | TintKind::Water
+    )
+}
+
+/// [`resolve_blended_tint`] with the blend box **shared between adjacent cells of
+/// the same row** — bit-identical output, ~5× fewer `Colormaps::resolve` samples.
+///
+/// # Why this exists
+///
+/// After issue #542's three commits the biome tint was still ~63% of
+/// `mesh_fluids`'s per-cell cost (`DESIGN.md` §12.124), and almost all of that is
+/// the 25 samples vanilla's radius-2 box takes per tinted quad. Adjacent cells
+/// share 20 of those 25 columns; [`lodestone_assets::tint::BlendRowCursor`] turns
+/// that into a sliding per-channel sum, and its docs carry the bit-exactness
+/// argument. This type adds the part the row cursor cannot know: a blend also
+/// depends on the [`TintKind`] and on the `y` every sample is taken at, neither of
+/// which is `(x, z)`.
+///
+/// # How to use it, and the one way to get it wrong
+///
+/// Hold one per mesh pass (`mesher.rs`'s `SnapshotFluidView`/`SnapshotModelView`
+/// keep one in a `RefCell`) and call [`resolve`](Self::resolve) in place of
+/// [`resolve_blended_tint`]. **The cursor caches sampled colours, so it is only
+/// correct while the world it samples is unchanging** — that holds inside one
+/// `mesh_fluids`/`mesh_models` call over an immutable snapshot, and it is why this
+/// is not a global cache. It also assumes the `biome`/`colormaps` handed to
+/// successive calls answer identically; passing a *different* biome source with
+/// the same `(kind, y, z, x)` would read the previous one's columns. Both are
+/// caller obligations that no signature can express, which is why the identity
+/// gate drives it through the real `mesh_fluids`/`mesh_models` loops rather than
+/// calling it directly.
+///
+/// A mismatch on `kind` or `y` invalidates the window and costs one full rebuild,
+/// i.e. exactly [`resolve_blended_tint`] — so a caller whose access pattern is
+/// hostile pays nothing extra beyond the key comparison.
+#[derive(Debug)]
+pub struct BlendedTintCursor {
+    row: lodestone_assets::tint::BlendRowCursor,
+    /// The `(kind, y)` the loaded window belongs to. `BlendRowCursor` keys itself
+    /// on `(x, z)`; these two are the rest of what `Colormaps::resolve` reads, and
+    /// are invisible to it.
+    key: Option<(TintKind, i32)>,
+}
+
+impl BlendedTintCursor {
+    /// A cursor for a fixed blend `radius` — [`BLEND_RADIUS`] for everything in
+    /// this client today. Fixed at construction, so two radii cannot end up
+    /// mixed into one window.
+    #[must_use]
+    pub fn new(radius: i32) -> Self {
+        Self {
+            row: lodestone_assets::tint::BlendRowCursor::new(radius),
+            key: None,
         }
+    }
+
+    /// The blend radius this cursor was built with.
+    #[must_use]
+    pub fn radius(&self) -> i32 {
+        self.row.radius()
+    }
+
+    /// Bit-identical to
+    /// `resolve_blended_tint(kind, colormaps, biome, self.radius(), x, y, z)`.
+    pub fn resolve(
+        &mut self,
+        kind: TintKind,
+        colormaps: &Colormaps,
+        biome: &dyn BiomeTint,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Option<Rgb> {
+        if !is_blended_kind(kind) {
+            return None;
+        }
+        if self.key != Some((kind, y)) {
+            self.key = Some((kind, y));
+            self.row.invalidate();
+        }
+        Some(self.row.blend(x, z, |sx, sz| {
+            colormaps
+                .resolve(kind, biome, BlockPos::new(sx, y, sz))
+                .unwrap_or(0)
+        }))
     }
 }
 

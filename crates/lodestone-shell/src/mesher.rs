@@ -25,6 +25,7 @@
 //! coordinate in `{0,1}`, mapping exactly onto each sprite rect. (A texture-array
 //! atlas would let greedy back in — noted in the report.)
 
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet};
 use std::sync::{
     Arc, Mutex, OnceLock,
@@ -44,7 +45,9 @@ use lodestone_render::{
     SectionNeighborhood, SkyDefault, UniformLight, WorldSectionLight, biome_tint_kind_for_slot,
     face_of_direction, mesh_fluids, mesh_models, mesh_simple,
 };
-use lodestone_render::biome_tint::{BLEND_RADIUS, NamedBiomeTint, resolve_blended_tint, rgb_to_bytes};
+use lodestone_render::biome_tint::{
+    BLEND_RADIUS, BlendedTintCursor, NamedBiomeTint, rgb_to_bytes,
+};
 use lodestone_assets::{BakedQuad, Direction};
 use lodestone_model::BlockPos;
 use lodestone_world::{
@@ -841,6 +844,10 @@ struct SnapshotModelView<'a> {
     snapshot: &'a SectionSnapshot,
     models: &'a BlockModels,
     light: SnapshotLight<'a>,
+    /// Vanilla's radius-2 biome blend, shared between adjacent cells of a row —
+    /// see [`SnapshotFluidView::tint`] for why this is a `RefCell` and what makes
+    /// it safe.
+    tint: RefCell<BlendedTintCursor>,
 }
 
 /// Split a signed section coordinate into a neighbour offset (`dx ∈ {-1,0,1}`)
@@ -1050,7 +1057,7 @@ impl ModelSectionView for SnapshotModelView<'_> {
 
     /// The real, position-blended biome colour for a grass/foliage/
     /// dry-foliage/water quad — the live consumer of [`biome_name_at`] +
-    /// [`resolve_blended_tint`], and the whole reason issue #171/#174's
+    /// [`BlendedTintCursor`], and the whole reason issue #171/#174's
     /// `BiomeTint` trait now has an implementor outside a test mock. `slot`
     /// tells us *which* of the four kinds this quad is
     /// ([`biome_tint_kind_for_slot`]); `None` when it's not one of them (no
@@ -1061,11 +1068,16 @@ impl ModelSectionView for SnapshotModelView<'_> {
         let kind = biome_tint_kind_for_slot(slot)?;
         let colormaps = self.models.colormaps()?;
         let biome = NamedBiomeTint::new(|pos| biome_name_at(self.snapshot, pos));
-        let rgb = resolve_blended_tint(
+        // `self.tint.resolve` in place of `resolve_blended_tint`: bit-identical,
+        // ~5x fewer samples along a row. It keys itself on `(kind, y, z, x)`, and
+        // `kind` is per *quad* here rather than per cell (a grass block's own quads
+        // are all `Grass`, but a neighbouring foliage quad is not), so a mixed
+        // section rebuilds more often than the fluid path does — never worse than
+        // the plain call, which is what a rebuild is.
+        let rgb = self.tint.borrow_mut().resolve(
             kind,
             colormaps,
             &biome,
-            BLEND_RADIUS,
             x as i32,
             y as i32,
             z as i32,
@@ -1087,6 +1099,7 @@ pub fn mesh_snapshot_models(snapshot: &SectionSnapshot, models: &BlockModels) ->
         snapshot,
         models,
         light: SnapshotLight::new(snapshot),
+        tint: RefCell::new(BlendedTintCursor::new(BLEND_RADIUS)),
     };
     mesh_models(&view)
 }
@@ -1099,6 +1112,22 @@ struct SnapshotFluidView<'a> {
     snapshot: &'a SectionSnapshot,
     models: &'a BlockModels,
     light: SnapshotLight<'a>,
+    /// Vanilla's radius-2 biome blend is 25 samples per tinted quad, and two
+    /// adjacent cells' boxes share 20 of their 25 columns —
+    /// [`BlendedTintCursor`] turns that into a sliding sum, bit-identically
+    /// (`DESIGN.md` §12.128).
+    ///
+    /// `RefCell` because [`FluidSectionView::water_tint_at`] takes `&self` and the
+    /// cursor is mutable state; `Cell` will not do, since the cursor is ~200 bytes
+    /// and not `Copy`. **This makes the view `!Sync`**, which is sound because
+    /// [`mesh_snapshot_fluids`] builds one per call and `mesh_fluids` never shares
+    /// it — the mesh worker pool parallelises over *sections*, one view each. The
+    /// same reasoning `NamedBiomeTint` already relies on since #542.
+    ///
+    /// The cursor caches sampled colours, so it is only correct because a
+    /// [`SectionSnapshot`] is immutable for the life of the view. Do not hoist one
+    /// into anything longer-lived.
+    tint: RefCell<BlendedTintCursor>,
 }
 
 impl FluidSectionView for SnapshotFluidView<'_> {
@@ -1213,11 +1242,13 @@ impl FluidSectionView for SnapshotFluidView<'_> {
     fn water_tint_at(&self, x: i32, y: i32, z: i32) -> Option<[u8; 3]> {
         let colormaps = self.models.colormaps()?;
         let biome = NamedBiomeTint::new(|pos| biome_name_at(self.snapshot, pos));
-        let rgb = resolve_blended_tint(
+        // See `SnapshotModelView::biome_tint_at`. `mesh_fluids` iterates
+        // `y -> z -> x` with `x` innermost, so consecutive water cells in a row
+        // hit the sliding path and pay 5 samples instead of 25.
+        let rgb = self.tint.borrow_mut().resolve(
             lodestone_assets::tint::TintKind::Water,
             colormaps,
             &biome,
-            BLEND_RADIUS,
             x,
             y,
             z,
@@ -1240,6 +1271,7 @@ pub fn mesh_snapshot_fluids(snapshot: &SectionSnapshot, models: &BlockModels) ->
         snapshot,
         models,
         light: SnapshotLight::new(snapshot),
+        tint: RefCell::new(BlendedTintCursor::new(BLEND_RADIUS)),
     };
     mesh_fluids(&view)
 }

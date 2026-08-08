@@ -5030,3 +5030,149 @@ was mid-keystroke with a `matches!` parse error, which is what the worktree rout
 The second is the one that matters: `accounts_name_edit_frame` plus all eight `AccountsNav` editor tests
 are a closed loop that stays green while the screen draws the account list under an invisible field. Only
 a gate through `frame_for` — the function `app.rs` calls every frame — can see it.
+
+**12.128 Biome tint was still ~63% of `mesh_fluids` after #542, and the two changes designed to fix
+it split cleanly into one that was wrong and one that was worth 1.95×. `binary_search_by` over the
+sorted 66-entry biome table measured *worse* than the linear scan it replaced — 58 → 309
+instructions per call for the first entry, and `mesh_fluids` regressed 6,629 → 6,815 per fluid
+cell — because `str::eq` compares lengths first (8.6 instructions per entry) while an `Ordering`
+comparator has to `memcmp`. Bucketing by first byte instead gave 6.2× on a late entry and 10× on an
+absent name. The sliding blend box took the per-fluid-cell figure 6,572 → 3,365, bit-identically.**
+
+Instrument: `crates/lodestone-shell/tests/client_chunk_cycles.rs` (§12.120, §12.124), extended with
+an **S3c** stage that measures `biome_effects` and `resolve_blended_tint` on their own. All three
+arms measured from one harness build in a detached worktree at `60904e01`, own target dir, all three
+instrument controls passing on every quoted run. Doc:
+[`docs/biome-tint.md`](./docs/biome-tint.md) plus
+[`docs/client-chunk-cycles.md`](./docs/client-chunk-cycles.md)'s new S3c section.
+
+- **The ledger. Two separable commits, each measured alone:**
+
+  | arm | instr/fluid cell | cycles/cell | IPC | mesh models | dry section |
+  |---|---|---|---|---|---|
+  | before (`60904e01`) | 6,629 | 873 | 7.59 | 42,065,096 | 404,518 |
+  | + `biome_effects` first-byte index | 6,572 | 857 | 7.67 | 42,059,463 | 404,590 |
+  | + sliding `BlendRowCursor` | **3,365** | **438** | 7.68 | 42,084,383 | 416,555 |
+
+  `mesh_fluids` for the column **32,392,636 → 17,072,964**; the column's one-off cost to meshed
+  geometry **78,636,976 → 63,336,018**, so meshing is now 93.4% of the client chunk path rather than
+  94.7%. Instruction counts reproduced to the digit across runs of an identical binary (three runs
+  checked); cycles moved 1.95× against instructions' 1.95×, so as in §12.124 this was not a locality
+  change and IPC stayed at 7.6–7.7 throughout.
+
+- **`binary_search_by` was the brief's prescription, it is arithmetically sound about *compares*, and
+  it is slower. Not all string compares cost the same.** `find`'s predicate is `*name == path`, i.e.
+  `str::eq`, which compares **lengths** and only reaches `memcmp` when they match; most of the 66
+  entries differ from any given probe in length, so the scan measured **8.6 instructions per entry**
+  (58.30 for entry 0, 526.65 for entry 59 — a clean line through 59 entries). A `binary_search_by`
+  comparator must return an `Ordering`, which has no length shortcut, so each of its ~7 probes is a
+  real `memcmp` call: measured 309 instructions per call for entry 0 (5.3× *worse*), 352 for entry 65
+  (only 1.75× better), and the real mesh path went **6,629 → 6,815 per fluid cell, a 2.8%
+  regression**. Seven expensive compares beat thirty-three cheap ones only if you never price them.
+  **When a plan says "O(log n) beats O(n) here", the thing to check is not the exponent but the
+  constant, and the cheapest way to check is to measure one call.**
+
+- **What worked was doing fewer of the *cheap* compares.** A `const fn`-built `FIRST_BYTE_INDEX`
+  narrows the scan to entries sharing the probe's first byte: 3.79 compares on an average hit against
+  33.5, computed from the table's own first-byte distribution (max bucket `s` at 14, mean 3.9), an
+  8.8× narrowing asserted as arithmetic in a unit test rather than quoted from a run. Per call:
+
+  | probe | linear | bucketed | factor |
+  |---|---|---|---|
+  | `badlands` (table 0, bucket 0) | 58.30 | 73.30 | **0.80× — worse** |
+  | `warm_ocean` (table 59, bucket 0) | 524.30 | 85.30 | 6.15× |
+  | `swamp` (table 55, bucket 13 of 14) | 499.30 | 154.30 | 3.24× |
+  | absent name | 503.41 | 50.30 | 10.01× |
+
+  The first row is the honest cost: an early entry pays the index lookup and saves nothing. The
+  sort order of `BIOME_EFFECTS` is now load-bearing (it makes equal first bytes contiguous) where its
+  own doc previously said the order "carries no meaning of its own"; a unit test asserts strict
+  ascending order, with a control proving the ascending-check fires on both a swapped pair and a
+  duplicate.
+
+- **The change worth 10× moved the mesh by 0.86%, and that is a general law about optimising behind a
+  cache.** #542's four-entry memo already reduced `biome_effects` to *one* call per tinted quad, so
+  the reachable saving was one call's worth per cell, not 25. **An optimisation behind a cache is
+  bounded by the cache's miss rate, not by its own speedup** — and the corollary is where the real
+  win sat: `NamedBiomeTint` deliberately does not memoise an *unresolvable* name, so a section whose
+  biome id is past the registry reaches the table on all 25 samples. That arm measured
+  **13,410 → 4,160 instructions per blend (3.22×)**, the largest movement of the whole change, on a
+  case no per-cell average would have shown. The harness now carries it as its own probe, and its
+  ratio to the resolved arm (3.60× before, 1.38× after) doubles as a control on the memo: if the memo
+  were dead the two arms would cost the same.
+
+- **The sliding blend box is bit-exact by integer arithmetic, not by tolerance.** Adjacent cells'
+  radius-2 boxes share 20 of 25 columns. `blend_box` computes each channel as `Σ_dz Σ_dx byte`;
+  `BlendRowCursor` computes `Σ_dx (Σ_dz byte)` over a ring of column sums, retiring one column and
+  admitting one per step. Both are exact `u32` sums of the same bytes — addition is associative, the
+  largest possible total is `15² × 255 = 57,375`, the slide's subtraction removes a column the ring
+  invariant guarantees is part of the total, and vanilla's floor division still happens exactly once
+  at the end. That last property is the whole reason this is available: **vanilla is not
+  colour-managed, so a blend that divided per sample or accumulated in floating point would shift
+  colours by a byte or two — invisible in a screenshot and wrong.** Sample count is predicted
+  exactly rather than asserted to be smaller: a 16-cell row costs **100** samples against
+  `blend_box`'s 400, a same-centre revisit costs 0, and a jump of the window width or more rebuilds,
+  so the cursor is never the more expensive choice.
+
+- **1.95× on fluids, +0.06% on models, and the difference is the share of the stage rather than the
+  per-sample saving.** `mesh_models` barely moved because tinted quads are a small fraction of this
+  column's block geometry while nearly every fluid quad is tinted, and because `kind` varies per
+  *quad* there, so the model path rebuilds its window more often. The per-sample saving is the same
+  on both paths; what differs is how much of the path is tint. **A per-cell headline is a weighted
+  average, and quoting one optimisation's factor for a second caller is how a 1.95× becomes a
+  0.06%.**
+
+- **The dry arm regressed 3.0%, and only the split row shows it.** 404,590 → 416,555 instructions per
+  fluid-free section, from the `RefCell<BlendedTintCursor>` the view now carries — about 12,000
+  instructions per section that does no tint work at all, against 3,207 saved per fluid cell. Same
+  shape as #542's 2.9× regression, two orders of magnitude smaller, and left unchased. The row exists
+  because #542 added it for exactly this reason.
+
+- **The identity evidence, and where the reference arm lives.** `resolve_blended_tint` is deliberately
+  **kept** rather than replaced: it is the reference the cursor is compared against, both arms run in
+  the same process on the same fixture, so unlike a committed golden it cannot rot and stays
+  exercised. `crates/lodestone-render/tests/biome_tint_row_identity_gate.rs` sweeps ~3,800 positions
+  of a **four-way biome junction** (one biome per `(sign x, sign z)` quadrant — a single-biome fixture
+  is the *world* species, since all 25 samples return the same entry and any window arithmetic passes)
+  through a 256×256 gradient colormap decoded by the real `Colormap::from_image` — a 1×1 stand-in
+  would make `temperature`/`downfall`, half of what a grass blend reads, silently inert. The kind
+  rotates per cell and `x` runs backwards on odd rows, so the invalidation path is hit on >1/8 of
+  steps (asserted). Then the same comparison runs through the real `mesh_fluids`/`mesh_models` loops
+  as FNV-1a digests of the `bytemuck` byte images.
+
+- **Three controls, all executed.** (1) A **mis-keyed cursor**, rebuilt out of the same public
+  `BlendRowCursor` but keyed on `(x, z)` alone and never invalidating on a `(kind, y)` change — the
+  real mistake, not a straw man — must be rejected by the sweep's own comparison; the same test then
+  shows that cursor agreeing everywhere when fed a single kind and `y`, so its divergences are
+  evidence of mis-keying rather than of being broken outright. (2) Shifting the biome junction one
+  column must move **both** mesh digests while leaving the vertex and index counts identical, so the
+  digests demonstrably carry tint rather than culling. (3) The junction blend must differ from all
+  four pure-quadrant blends for every kind. The `biome_effects` shape control fired as designed
+  against the unmodified linear scan and its text is worth keeping, because it is constant-free:
+  *"biome_effects costs 524.30 instructions per call for `warm_ocean` (table entry 59, first of its
+  `w` bucket) against 58.30 for `badlands` (table entry 0, first of its `b` bucket) — a ratio of
+  8.99x. Both are one compare into their own bucket, so a bucketed scan must cost the same for both
+  and this ratio must be ~1."* Two probes chosen to be **first in their bucket and 59 table entries
+  apart** discriminate the two hypotheses with no instructions-per-compare constant entering at all.
+
+- **A predicted sample count caught the test's own arithmetic, which is what predicting is for.** The
+  first draft of `blend_row_cursor_samples_five_per_step_and_never_more_than_blend_box` wrote
+  `15 - width + 1` intending "width − 1 away from 15" and measured a one-step slide: *"a jump of
+  width-1 must slide, not rebuild — left: 5, right: 20"*. An assertion of "fewer than 25" would have
+  passed. The test now tracks an explicit centre.
+
+- **The instrument's own locality control had a threshold that contradicted its premise check, and it
+  cost 12 consecutive aborted runs.** The discriminator was `separation > 4.0`, calibrated when this
+  machine's DRAM/L1 cycle ratio measured ~13, while the premise check immediately above it required
+  only `cycle_ratio > 2.0`. Any machine state between the two passes the premise and fails the
+  discriminator while being nowhere near the swapped-field hypothesis. Under concurrent-agent memory
+  pressure — `Swapouts` climbing **983,444 → 1,174,980** and swap `used` 1,027 → 1,689 MB within one
+  session, with the compressor flat across readings — the *hot* 4 KiB arm stalls too and the ratio
+  compressed to 2.79–3.94, so the whole harness aborted before reaching any measurement, on code the
+  control has no opinion about. The primary discriminator is now `insn_ratio < 1.5`, which is
+  **load-invariant**: under the swapped reading that field carries the cycle ratio, which the premise
+  has already required to exceed 2.0, so it rejects the wrong hypothesis using no assumption about
+  how slow DRAM is today. Strictly stronger than the ratio of ratios, which is kept as a secondary
+  check with its threshold now *derived* from the premise floor. **A control's threshold must come
+  from the hypothesis it separates, never from one machine's observation of a quantity the hypothesis
+  does not mention — otherwise it decays into a load flake that blocks everyone.**

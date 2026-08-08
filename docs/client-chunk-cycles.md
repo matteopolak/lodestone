@@ -50,7 +50,15 @@ Stage boundaries are the ones production already crosses, read from
 | S2 insert | `World::load` over pre-cloned `LoadedChunk`s |
 | S3a snapshot | `snapshot_section` — the 27-section gather |
 | S3b mesh | `mesh_snapshot_models` + `mesh_snapshot_fluids` |
+| S3c tint | `biome_effects` and `resolve_blended_tint` on their own, per call and per blend sample |
 | S4 submit | the **marginal** cost of one more section in `RenderState::render` |
+
+S3c is not a stage of the path — it is a *term inside* S3b, measured separately because the per-cell
+mesh figure cannot attribute a movement to the 66-entry biome table lookup or to the 25-sample blend
+kernel. Its `biome_effects` probes are chosen by **position in the table versus position in their own
+first-byte bucket**, which makes the ratio between two of them a discriminator needing no
+instructions-per-compare constant at all. Its tint probes use a two-biome boundary, because a
+single-biome fixture makes all 25 samples identical and any blend arithmetic passes.
 
 S4 is a difference: the same frame with no terrain resident and then with every fixture
 section, divided by the section count. The fixed per-frame cost cancels, leaving the term that
@@ -148,6 +156,42 @@ Same harness, same fixture, same 4,704 fluid cells, three separable commits. Eac
   one `get_block` brought it to 404,542 — below the pre-#542 490,885. **Measure the arm your
   optimisation does not target.**
 
+### The biome-tint term, and the fluid decomposition after it (§12.128)
+
+Same fixture, same 4,704 fluid cells, one harness build shared by all three arms so the blend
+probes are comparable. A new **S3c** stage measures the tint term directly, because the per-cell
+mesh figure cannot say whether a movement came from the 66-entry table lookup or from the
+25-sample blend kernel.
+
+| arm | instr/fluid cell | cycles/cell | IPC | mesh models | dry section |
+|---|---|---|---|---|---|
+| before (`60904e01`) | 6,629 | 873 | 7.59 | 42,065,096 | 404,518 |
+| + `biome_effects` first-byte index | 6,572 | 857 | 7.67 | 42,059,463 | 404,590 |
+| + sliding `BlendRowCursor` | **3,365** | **438** | 7.68 | 42,084,383 | 416,555 |
+
+`mesh_fluids` for the column **32,392,636 → 17,072,964**; the column's one-off total
+**78,636,976 → 63,336,018**. Four things worth reading off this rather than assuming:
+
+- **The first-byte index is worth 0.86% here and up to 10× in isolation.** #542's four-entry memo
+  already reduced `biome_effects` to *one* call per tinted quad, so making that call cheaper cannot
+  move the mesh much. The isolated per-call figures are where it shows: 524 → 85 instructions for a
+  late table entry, 503 → 50 for an absent name, and 58 → **73** (worse) for the first entry, which
+  pays the index lookup and saves nothing. **An optimisation behind a cache is bounded by the cache's
+  miss rate, not by its own speedup.**
+- **The absent-name arm is the one that moved most: 13,410 → 4,160 instructions per blend.**
+  `NamedBiomeTint` deliberately does not memoise an unresolvable name, so a section whose biome id is
+  past the registry reaches the table on all 25 samples instead of once. The harness now measures that
+  arm, and its ratio to the resolved arm (3.60× before, 1.38× after) doubles as a control on the memo:
+  if the memo were dead the two would cost the same.
+- **The sliding blend box is worth 1.95× on the fluid path and ~nothing on the model path.**
+  `mesh_models` moved +0.06%, because tinted quads are a small fraction of this column's block
+  geometry while nearly every fluid quad is tinted. The per-*sample* saving is the same on both; the
+  share of the stage is not.
+- **The dry arm regressed 3.0%** (404,590 → 416,555 per fluid-free section), from the
+  `RefCell<BlendedTintCursor>` the view now carries. Same shape as #542's 2.9× regression, two orders
+  of magnitude smaller, and not chased further; it is ~12,000 instructions per fluid-free section
+  against 3,207 saved per fluid cell.
+
 ## Where instructions understate, and this is not hypothetical
 
 `heap_bytes` measured 494,570 instructions per frame at 361 columns, at IPC 4.47 — about 31 µs.
@@ -181,8 +225,20 @@ as the memory-bound signal it is.
   draw at `frame.rs:720`. Measured 189 of 195 uploads. `draw_calls` counts both passes, and the
   gap between the two *is* the render plan's U4 target.
 - **Page faults retire kernel instructions that count toward this process.** The locality
-  control's instruction ratio was 1.17× before the tables were pre-faulted, and remains ~1.16×
-  after. That is why the assertion is on the ratio of ratios, not a tight band.
+  control's instruction ratio was 1.17× before the tables were pre-faulted, and remains 1.00–1.03×
+  after.
+- **A control's threshold must come from the hypothesis, not from one machine's observation — the
+  locality control failed this and became unrunnable.** Its discriminator was `separation > 4.0`,
+  calibrated when the DRAM/L1 cycle ratio measured ~13, while the premise check immediately above it
+  only required `cycle_ratio > 2.0`. The two are mutually inconsistent: any machine state with a
+  cycle ratio between 2 and 4 passes the premise and fails the discriminator. Under
+  concurrent-agent memory pressure (`Swapouts` climbing 983,444 → 1,174,980 within one session) the
+  *hot* arm stalls too, the ratio compressed to 2.8–3.9, and the harness aborted before reaching any
+  measurement — 12 consecutive runs, on code the control has no opinion about. The primary
+  discriminator is now `insn_ratio < 1.5`, which is **load-invariant**: under the swapped reading
+  that field would carry the cycle ratio, which the premise has already required to exceed 2.0. The
+  ratio of ratios is kept as a secondary check with its threshold derived from the premise floor.
+  Strictly stronger, and it no longer encodes today's DRAM latency.
 - **The fixture guards are load-bearing.** Five assertions (non-air cells, distinct states,
   indirect palettes, sections with geometry, section count) exist because the *world* species of
   vacuous test cannot be read from the source. Seed 1234 chunk (0,0) is ocean and a light gate
