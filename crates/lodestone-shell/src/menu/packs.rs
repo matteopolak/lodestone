@@ -41,16 +41,34 @@
 //! its own (`pack.nameAndSource` = `"%s (%s)"` over
 //! `resourcePack.vanilla.name`/`pack.source.builtin` = `"Default (built-in)"`).
 //!
+//! ## The row itself
+//!
+//! A pack row is a **selection-list entry**, not a button:
+//! [`super::render::MenuRow::pack`] routes it to `draw_pack_entry`, which draws
+//! the 32×32 `pack.png` thumbnail (or vanilla's own `unknown_pack` fallback), the
+//! name, up to two grey description lines and the `transferable_list/select`
+//! overlay — `TransferableSelectionList.PackEntry.extractContent`'s shape, with
+//! that function's doc naming the three departures.
+//!
+//! It was a button for one release, and worth recording *why* nothing caught it:
+//! this module's tests all assert on the **frame data**, which carried the icon
+//! and the description correctly throughout. The fault was one branch further on,
+//! in which draw the row dispatched to — so a green suite and a screen showing a
+//! big centred label were entirely consistent.
+//!
 //! ## What is deliberately not built
 //!
 //! - **Pack-format validation.** Vanilla checks `pack_format` against the host's
-//!   and shows an "incompatible" warning plus a confirmation prompt
-//!   (`PackSelectionScreen.java`'s `Component` for `pack.incompatible.*`).
+//!   and shows an "incompatible" warning, a red content box and a confirmation
+//!   prompt (`TransferableSelectionList.java:137-144`, `pack.incompatible.*`).
 //!   [`lodestone_assets::PackMeta::accepts`] already exists to answer it and
 //!   [`crate::resources::DiscoveredPack::pack_format`] already carries the
-//!   number — it is simply not consulted. Deliberately out of scope for this
-//!   pass, and worth knowing this client is *more* permissive than vanilla here:
-//!   an old pack loads and its stale paths silently resolve to nothing.
+//!   number, but **nothing in this client declares a host `pack_format`** to
+//!   compare against, and the scan drops `pack.mcmeta`'s `supported_formats`
+//!   range — so a guessed host number would paint a warning over packs that are
+//!   in fact fine. Painting nothing is the honest reduction; a wrong warning is
+//!   not. Worth knowing this client is *more* permissive than vanilla here: an
+//!   old pack loads and its stale paths silently resolve to nothing.
 //! - **A search box** and the **drag-and-drop-file hint** (`pack.dropInfo`).
 //!   The hint would advertise a file-drop handler that does not exist; the
 //!   header stays the generic 33 px `OptionsSubScreen` band rather than
@@ -77,11 +95,15 @@
 //!   height 36, and the underlined header entry's `(int)(9.0F * 1.5F) = 13`
 //!   (`:59-60`, Java's truncating cast).
 //! - The per-row move buttons are **this client's shape, not vanilla's**:
-//!   vanilla draws hover-revealed 32 px sprite zones over the pack icon
-//!   (`TransferableSelectionList.Entry.render`). Two right-anchored square
-//!   buttons per row is [`super::key_binds`]'s existing row shape, which this
-//!   pipeline already draws and hit-tests, and is recorded here rather than
-//!   presented as transcribed.
+//!   vanilla draws hover-revealed 32 px sprite zones over the pack icon's two
+//!   right quadrants (`TransferableSelectionList.PackEntry.extractContent`,
+//!   `:187-209`). Two right-anchored square buttons per row is
+//!   [`super::key_binds`]'s existing row shape, which this pipeline already draws
+//!   and hit-tests, and is recorded here rather than presented as transcribed.
+//!   What they *carry* is vanilla's: a triangle
+//!   ([`super::render::MenuRow::arrow`]) rather than the letters `"U"`/`"D"` they
+//!   shipped with, drawn as geometry because the fallback bitmap font is
+//!   upper-case 5×7 and has no arrow glyph.
 //!
 //! ## Dependencies
 //!
@@ -101,7 +123,9 @@
 //!   `resourcePack.vanilla.name`, `pack.source.builtin`, `gui.done`).
 
 use super::options::{self, Placement};
-use super::render::{Align, FaviconMosaic, MenuFrame, MenuLabel, MenuRow, Origin, Slot};
+use super::render::{
+    Align, Arrow, FaviconMosaic, MenuFrame, MenuLabel, MenuRow, Origin, PackEntryView, Slot,
+};
 
 /// One pack row, in either column.
 #[derive(Debug, Clone, PartialEq)]
@@ -772,29 +796,70 @@ fn open_pack_folder() {}
 pub fn frame(nav: &PacksNav) -> MenuFrame<'static> {
     let mut rows: Vec<MenuRow> = Vec::new();
     for &control in &nav.controls() {
-        let (label, detail, icon) = match control {
+        let (label, detail, icon, pack, arrow) = match control {
             PacksControl::Entry { list, row } => {
                 let column = match list {
                     PackList::Available => nav.available(),
                     PackList::Selected => nav.selected(),
                 };
                 match column.get(usize::from(row)) {
-                    Some(pack) => (pack.label(), pack.description.clone(), pack.icon.clone()),
+                    // `pack` is what routes this row to `draw_pack_entry` — the
+                    // icon, name and description below are drawn as a
+                    // selection-list entry rather than as a button's centred
+                    // label. Without it they are computed and discarded, which
+                    // is exactly the bug this field was added to fix.
+                    Some(entry) => (
+                        entry.label(),
+                        entry.description.clone(),
+                        entry.icon.clone(),
+                        Some(PackEntryView {
+                            // `canSelect()`/`canUnselect()`: an Available row can
+                            // be selected, a Selected row unselected — except the
+                            // built-in one, which is neither and therefore draws
+                            // no hover overlay at all, as vanilla's does not.
+                            can_select: list == PackList::Available,
+                            can_unselect: list == PackList::Selected && !entry.builtin,
+                        }),
+                        None,
+                    ),
                     None => continue,
                 }
             }
-            // The bitmap font is upper-case 5×7 and has no arrow glyphs, so the
-            // move buttons are lettered rather than drawn — see the module docs
-            // on why this pair is not vanilla's sprite shape.
-            PacksControl::Move { up: true, .. } => ("U".to_string(), String::new(), None),
-            PacksControl::Move { up: false, .. } => ("D".to_string(), String::new(), None),
-            PacksControl::OpenPackFolder => ("Open Pack Folder".to_string(), String::new(), None),
-            PacksControl::Done => ("Done".to_string(), String::new(), None),
+            // Vanilla's reorder affordance is a pair of 32 px sprite arrows in the
+            // icon's right quadrants; these two are separate square buttons (see
+            // the module docs on why), but they are *arrows* now rather than the
+            // letters `"U"`/`"D"` they used to be — drawn as geometry, because the
+            // fallback bitmap font is upper-case 5×7 and has no arrow glyph. The
+            // label is kept as the control's real name; nothing draws it.
+            PacksControl::Move { up: true, .. } => (
+                "Move Up".to_string(),
+                String::new(),
+                None,
+                None,
+                Some(Arrow::Up),
+            ),
+            PacksControl::Move { up: false, .. } => (
+                "Move Down".to_string(),
+                String::new(),
+                None,
+                None,
+                Some(Arrow::Down),
+            ),
+            PacksControl::OpenPackFolder => (
+                "Open Pack Folder".to_string(),
+                String::new(),
+                None,
+                None,
+                None,
+            ),
+            PacksControl::Done => ("Done".to_string(), String::new(), None, None, None),
         };
         rows.push(MenuRow {
             label,
             detail,
             favicon: icon,
+            pack,
+            arrow,
             enabled: nav.is_live(control),
             slot: Some(slot_for(control, nav)),
             ..Default::default()
@@ -1057,5 +1122,44 @@ mod tests {
         let list = list_spec(50, 0.0).model(240.0).expect("a band at 240 px");
         assert_eq!(list.first_entry_y(), first_entry_y());
         assert!(list.scrollable(), "50 rows of 36 px must overflow a 240 px canvas");
+    }
+
+    /// The **last** row is reachable: wheeling to the clamp puts its bottom edge
+    /// inside the band, not under the footer.
+    ///
+    /// Asked because a player reported settings-screen scrolling "doesn't reach the
+    /// end", and this screen shares that band arithmetic
+    /// ([`super::widget::ListSpec`]). The row's position comes from [`row_y`] — the
+    /// same expression [`placement_anchor`] and therefore the draw use — rather than
+    /// from the list model, so this compares the *draw's* answer against the band,
+    /// which is the only pairing that could show the reported symptom.
+    #[test]
+    fn wheeling_to_the_clamp_brings_the_last_row_fully_inside_the_band() {
+        for canvas in [crate::config::MIN_SCALED_HEIGHT as f32, 480.0, 763.0] {
+            let len = 40;
+            let mut list = list_spec(len, 0.0).model(canvas).expect("a band");
+            assert!(list.scrollable(), "40 rows of 36 px overflow {canvas} px");
+            // Bounded, and inside one loop: negative notches scroll toward the end.
+            for _ in 0..500 {
+                list.mouse_scrolled(-1.0);
+            }
+            let scroll = list.scroll();
+            assert_eq!(scroll, list.max_scroll(), "the wheel reaches the clamp");
+            let last_top = row_y(len as u16 - 1, scroll);
+            let band_bottom = list.top() + list.height();
+            assert!(
+                last_top + ROW_H <= band_bottom,
+                "at {canvas} px the last row bottoms out at {} against a band ending at \
+                 {band_bottom}",
+                last_top + ROW_H
+            );
+            // And it is not scrolled clean past the top either — the failure mode in
+            // the other direction, which "reaches the end" alone cannot see.
+            assert!(
+                last_top >= list.top(),
+                "the last row's top {last_top} is above the band's {}",
+                list.top()
+            );
+        }
     }
 }

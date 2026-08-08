@@ -3841,6 +3841,26 @@ fn every_sprite_id_the_vanilla_screens_name_exists_in_the_real_pack() {
     assert_eq!(atlas.native_size("title/minecraft"), Some((1024, 256)));
     assert_eq!(atlas.native_size("title/edition"), Some((512, 64)));
 
+    // The Resource Packs screen's own sprites (issue #415): the two hover overlays
+    // off `gui/sprites/transferable_list/**`, plus the *loose*
+    // `misc/unknown_pack` fallback icon, which only reaches the atlas because
+    // `MENU_TEXTURES` names it. A typo in any of them draws nothing at all, in
+    // silence — which is this gate's whole reason.
+    for id in [
+        super::draw::PACK_SELECT_SPRITES.0,
+        super::draw::PACK_SELECT_SPRITES.1,
+        super::draw::PACK_UNSELECT_SPRITES.0,
+        super::draw::PACK_UNSELECT_SPRITES.1,
+        super::draw::PACK_UNKNOWN_ICON,
+    ] {
+        assert!(atlas.contains(id), "the pack has no {id}");
+    }
+    assert_eq!(
+        atlas.native_size(super::draw::PACK_SELECT_SPRITES.0),
+        Some((32, 32)),
+        "the overlay sprites are PackEntry.ICON_SIZE square"
+    );
+
     // The real pack's nine-slice borders, which is where the hardcoding trap
     // is: 3 for button and button_highlighted, **1** for button_disabled.
     let corner = |id: &str| {
@@ -5292,5 +5312,188 @@ fn the_loading_bar_fill_tracks_the_real_column_count() {
     assert!(
         colour_bounds(&v0, V_W, V_H, PROGRESS_BAR_FG).is_none(),
         "a zero-column view must draw no green fill"
+    );
+}
+
+/// A pack fixture for the two gates below: `name`, its description, and either a
+/// flat single-pixel `pack.png` or none at all.
+///
+/// One flat colour rather than a picture, because `head_mosaic`'s box filter
+/// averages each cell — so a uniform source makes every mosaic cell exactly
+/// [`PACK_FIXTURE_ICON`], and `coverage_of` can then ask whether the *icon* landed
+/// rather than whether anything did.
+fn pack_fixture(name: &str, description: &str, icon: bool) -> crate::resources::DiscoveredPack {
+    crate::resources::DiscoveredPack {
+        id: format!("file/{name}"),
+        title: name.to_string(),
+        description: description.to_string(),
+        pack_format: 64,
+        icon: icon.then(|| lodestone_assets::Image {
+            width: 1,
+            height: 1,
+            rgba: vec![0x20, 0xC0, 0x40, 0xFF],
+        }),
+        path: std::path::PathBuf::from("/nonexistent").join(name),
+        kind: crate::resources::PackKind::Directory,
+    }
+}
+
+/// [`pack_fixture`]'s flat `pack.png` (`0x20C040`) as a mosaic cell.
+const PACK_FIXTURE_ICON: [f32; 4] = [32.0 / 255.0, 192.0 / 255.0, 64.0 / 255.0, 1.0];
+
+/// A resource-pack row draws vanilla's selection-list entry — thumbnail, name and
+/// description — and **no button fill**, with or without a `pack.png`.
+///
+/// This is the assertion the reported bug walked straight past. `packs::frame` has
+/// always carried the icon, the label and the description, and every test in
+/// `menu::packs` asserts on that frame *data* — so the suite stayed green while the
+/// row was dispatched to `draw_widget` and came out as a button with one centred
+/// label. The discriminator here is therefore the button fill: `ROW_BG`/`ROW_SEL`
+/// is exactly what the wrong draw painted over the whole row, and a pack row must
+/// paint none of it.
+///
+/// The built-in row is checked as well as an iconed one because it is the row a
+/// player with an empty `resourcepacks/` folder sees — it has no `pack.png` at all,
+/// which is how the old draw's `MenuRow::favicon` gate missed it completely.
+#[test]
+fn a_resource_pack_row_draws_its_icon_and_description_not_a_centred_button_label() {
+    use super::draw::{PACK_DESC_DY, PACK_ENTRY_DIM, PACK_ICON, PACK_ROW_PAD, PACK_TEXT_DX};
+    use crate::menu::packs::{self, MOVE_BTN, PackList, PacksNav, PacksPlacement, ROW_H, ROW_W};
+
+    // `alpha` ships the icon and is **selected**, so it is Selected row 0 with the
+    // built-in row under it; `bravo.zip` stays Available and takes the cursor
+    // (control 0), which keeps the iconed row clear of the selection's own hover
+    // overlay — that overlay deliberately dims the icon, and dimming it is not
+    // what this gate is about.
+    let nav = PacksNav::rebuild(
+        vec![
+            pack_fixture("alpha", "green everywhere", true),
+            pack_fixture("bravo.zip", "a zip pack", false),
+        ],
+        &["file/alpha".to_string()],
+    );
+    let v = geometry(&packs::frame(&nav), V_W, V_H);
+    let anchor = |list, row| {
+        packs::placement_anchor(PacksPlacement::Row { list, row, scroll: 0.0 }, V_W, V_H)
+    };
+    // The reorder buttons live inside a Selected row's right edge (that is their
+    // own gate in `menu::packs`), and they *are* buttons — so a "no button fill"
+    // assertion has to stop short of them.
+    let content_w = ROW_W - MOVE_BTN - 2.0 * PACK_ROW_PAD;
+
+    // -- the iconed row ------------------------------------------------------
+    let (x, y) = anchor(PackList::Selected, 0);
+    let (cx, cy) = (x + PACK_ROW_PAD, y + PACK_ROW_PAD);
+    let icon = coverage_of(&v, V_W, V_H, (cx, cy, PACK_ICON, PACK_ICON), PACK_FIXTURE_ICON);
+    assert!(
+        icon > 0.9,
+        "the pack.png mosaic should fill the 32x32 icon column, covered {icon}"
+    );
+    let desc = coverage_of(
+        &v,
+        V_W,
+        V_H,
+        (cx + PACK_TEXT_DX, cy + PACK_DESC_DY, 100.0, LINE_H),
+        PACK_ENTRY_DIM,
+    );
+    assert!(
+        desc > 0.0,
+        "the description draws in vanilla's own -8355712 grey, on the second line \
+         past the icon column"
+    );
+    for (fill, what) in [(ROW_BG, "ROW_BG"), (ROW_SEL, "ROW_SEL"), (ROW_OFF, "ROW_OFF")] {
+        let painted = coverage_of(&v, V_W, V_H, (x, y, content_w, ROW_H), fill);
+        assert_eq!(
+            painted, 0.0,
+            "a pack row must draw no {what} button fill; it is a list entry"
+        );
+    }
+
+    // -- the built-in row, which has no `pack.png` at all --------------------
+    let (bx, by) = anchor(PackList::Selected, 1);
+    let (bcx, bcy) = (bx + PACK_ROW_PAD, by + PACK_ROW_PAD);
+    let line = (bcx + PACK_TEXT_DX, bcy + PACK_DESC_DY, 100.0, LINE_H);
+    assert!(
+        coverage_of(&v, V_W, V_H, line, PACK_ENTRY_DIM) > 0.0,
+        "the built-in row draws its description too — it has no icon at all, which \
+         is precisely the case the old `favicon`-gated draw missed"
+    );
+    // And it draws it *past* the icon column rather than across the row, which the
+    // empty icon column here can actually witness: nothing else paints there.
+    assert_eq!(
+        coverage_of(
+            &v,
+            V_W,
+            V_H,
+            (bcx, bcy + PACK_DESC_DY, PACK_ICON, LINE_H),
+            PACK_ENTRY_DIM
+        ),
+        0.0,
+        "the icon column is reserved even when there is no icon to put in it"
+    );
+    for (fill, what) in [(ROW_BG, "ROW_BG"), (ROW_SEL, "ROW_SEL"), (ROW_OFF, "ROW_OFF")] {
+        let painted = coverage_of(&v, V_W, V_H, (bx, by, ROW_W, ROW_H), fill);
+        assert_eq!(painted, 0.0, "the built-in pack row must draw no {what} either");
+    }
+}
+
+/// The two reorder buttons carry a **triangle**, and it points the way the button
+/// says it does.
+///
+/// Measured by where the ink is, not by whether any is: an up arrow's apex row is
+/// its narrowest, so its top half must carry less ink than its bottom half, and a
+/// down arrow the reverse. A letter, a square, or a pair of arrows drawn the same
+/// way round all fail that.
+#[test]
+fn a_move_button_draws_a_triangle_pointing_its_own_way() {
+    use crate::menu::packs::{self, MOVE_BTN, PacksNav, PacksPlacement};
+
+    // Three packs, all selected, so **row 1**'s buttons are both live (it has a
+    // neighbour above and a non-built-in one below) and neither is the cursor —
+    // which is control 0, Selected row 0. Row 1's arrows are therefore the only
+    // `ACTIVE_LABEL` ink inside their own rects.
+    let nav = PacksNav::rebuild(
+        vec![
+            pack_fixture("alpha", "a folder pack", false),
+            pack_fixture("bravo.zip", "a zip pack", false),
+            pack_fixture("charlie", "a third pack", false),
+        ],
+        &[
+            "file/alpha".to_string(),
+            "file/bravo.zip".to_string(),
+            "file/charlie".to_string(),
+        ],
+    );
+    let v = geometry(&packs::frame(&nav), V_W, V_H);
+
+    let halves = |up: bool| {
+        let (bx, by) = packs::placement_anchor(
+            PacksPlacement::MoveButton { row: 1, up, scroll: 0.0 },
+            V_W,
+            V_H,
+        );
+        let half = MOVE_BTN * 0.5;
+        (
+            coverage_of(&v, V_W, V_H, (bx, by, MOVE_BTN, half), widget::ACTIVE_LABEL),
+            coverage_of(
+                &v,
+                V_W,
+                V_H,
+                (bx, by + half, MOVE_BTN, half),
+                widget::ACTIVE_LABEL,
+            ),
+        )
+    };
+
+    let (up_top, up_bottom) = halves(true);
+    assert!(up_top > 0.0 && up_bottom > 0.0, "the up button draws something");
+    assert!(
+        up_top < up_bottom,
+        "an up arrow's apex is its narrowest row: top {up_top} should be under bottom {up_bottom}"
+    );
+    let (down_top, down_bottom) = halves(false);
+    assert!(
+        down_top > down_bottom,
+        "a down arrow is the mirror image: top {down_top} should be over bottom {down_bottom}"
     );
 }

@@ -156,6 +156,69 @@ pub struct MenuRow {
     /// duplicating them here — so this view carries only what has nowhere else to
     /// live.
     pub world: Option<WorldEntryView>,
+    /// Set on a [`super::packs::PacksControl::Entry`] row — the Resource Packs
+    /// screen's pack entries (issue #415).
+    ///
+    /// Its presence routes the row to [`draw_pack_entry`] instead of
+    /// [`draw_widget`], which is the **only** thing it decides. Unlike
+    /// [`Self::entry`]/[`Self::account`]/[`Self::world`] it is tested *after*
+    /// `slot` rather than before, and that is not an inconsistency: those three
+    /// lists are positioned by `getRowLeft()`'s two integer divisions, which a
+    /// [`Slot`] cannot express, so they need their own [`row_rect`] arm as well.
+    /// A pack row's rect **is** a `Slot` ([`super::packs::placement_anchor`]), so
+    /// `row_rect` needs no arm and this field is a draw selector alone.
+    ///
+    /// The row's own `label` (the pack title), `detail` (its `pack.mcmeta`
+    /// description) and `favicon` (its `pack.png`) are read off the row, exactly
+    /// as the three lists above read theirs — so this view carries only the two
+    /// facts that have nowhere else to live.
+    ///
+    /// **Why this exists at all**: a pack row used to be a plain slotted row, so
+    /// it fell through to `draw_widget` and was drawn as a vanilla *button* with
+    /// a centred label — its icon and description computed and then discarded.
+    /// That was the reported bug, and it was invisible to every test on this
+    /// screen because they all assert on frame data, which was correct
+    /// throughout.
+    pub pack: Option<PackEntryView>,
+    /// A small solid triangle drawn centred in the widget **instead of**
+    /// `label`, the way [`Self::icon`] draws a sprite instead of one.
+    ///
+    /// The Resource Packs screen's two per-row reorder buttons. Vanilla has
+    /// sprite arrows for these (`transferable_list/move_up`, `move_down`), but
+    /// they are 32×32 quadrant overlays for a hover model this client does not
+    /// use (see [`super::packs`]'s module doc), so a triangle drawn as geometry
+    /// is both closer to what vanilla shows and independent of the font — which
+    /// is upper-case 5×7 with no arrow glyph, and is why these buttons were
+    /// lettered `"U"`/`"D"` before this existed.
+    pub arrow: Option<Arrow>,
+}
+
+/// Which way a [`MenuRow::arrow`] triangle points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrow {
+    /// Apex at the top — "raise priority".
+    Up,
+    /// Apex at the bottom — "lower priority".
+    Down,
+}
+
+/// One resource-pack row's state (issue #415).
+///
+/// Two fields, for [`WorldEntryView`]'s reason: everything else a pack row draws
+/// is already a [`MenuRow`] field. Both of these say what the **hover overlay**
+/// over the 32×32 icon is — vanilla's `transferable_list/select` /
+/// `unselect` sprites, drawn only when `PackEntry.showHoverOverlay()`
+/// (`TransferableSelectionList.java:272-274`) — and neither is derivable from the
+/// row: which column a pack is in is the screen's fact, not the row's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PackEntryView {
+    /// `PackSelectionModel.Entry.canSelect()` — this row is in **Available**, so
+    /// activating it moves the pack into Selected.
+    pub can_select: bool,
+    /// `canUnselect()` — this row is a removable **Selected** entry. False for
+    /// the built-in pack, which is `isFixedPosition() && isRequired()` and
+    /// therefore draws no overlay at all, exactly as vanilla's does not.
+    pub can_unselect: bool,
 }
 
 /// One world-list row's state (the save list, issue #468's reading 2).

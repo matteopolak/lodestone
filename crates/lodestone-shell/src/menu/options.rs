@@ -1720,9 +1720,12 @@ static ROOT_GRID: &[Cell] = &[
     // list widget. See `SettingsPage::Language`'s own doc.
     nav("Language...", SettingsPage::Language),
     nav("Chat Settings...", SettingsPage::Chat),
-    // Issue #415 — the third and last of the three unbuilt sub-screens,
-    // landed as a deliberately reduced selection list. See
-    // `SettingsPage::ResourcePacks`'s own doc.
+    // Issue #415 — the third and last of the three unbuilt sub-screens. It
+    // *landed* as a deliberately reduced selection list (`2d9d3a18`) and this
+    // comment said so until well after the real two-column screen replaced it
+    // (`6bbc9940`): a folder scan, click-to-transfer between Available and
+    // Selected, per-row reordering, and vanilla's own pack rows. See
+    // `SettingsPage::ResourcePacks`'s own doc and `super::packs`'s.
     nav("Resource Packs...", SettingsPage::ResourcePacks),
     nav("Accessibility Settings...", SettingsPage::Accessibility),
     // Issue #415 — the second of the three unbuilt sub-screens to get its

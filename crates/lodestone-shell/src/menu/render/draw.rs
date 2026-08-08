@@ -24,11 +24,69 @@ use super::server_list::{SERVER_ENTRY_BAD, SERVER_ENTRY_DIM, SERVER_ENTRY_ICON, 
 /// centre, so one flat quad is the whole of it. Decoded straight out of the 26.2
 /// `client.jar`. `pub(super)` so the draw's gate can assert the box by colour.
 pub(super) const TOOLTIP_BG: [f32; 4] = [16.0 / 255.0, 0.0, 16.0 / 255.0, 240.0 / 255.0];
-/// Inset of a resource-pack row's thumbnail and text from its own edges (issue
-/// #415). Two pixels, so a 36 px row's icon comes out at the [`ICON`] 32 the
-/// account and server lists already draw their mosaics at — the same box-filtered
-/// drawable, so there is one size and not three.
-const PACK_ROW_PAD: f32 = 2.0;
+/// Inset of a resource-pack row's content box from the entry's own edges (issue
+/// #415) — `AbstractSelectionList.Entry.CONTENT_PADDING` (`:436`), the same 2 px
+/// every other selection list here insets by. It is what makes a 36 px row's
+/// content box exactly 32 px tall, which is exactly
+/// `TransferableSelectionList.PackEntry.ICON_SIZE`.
+pub(super) const PACK_ROW_PAD: f32 = 2.0;
+/// `PackEntry.ICON_SIZE` (`TransferableSelectionList.java:112`) — and the [`ICON`]
+/// 32 the account and server lists already draw their mosaics at, so there is one
+/// mosaic size on this pass and not three.
+pub(super) const PACK_ICON: f32 = 32.0;
+/// `nameWidget.setPosition(getContentX() + 32 + 2, …)` /
+/// `descriptionWidget.setPosition(getContentX() + 32 + 2, …)` (`:214,217`) — the
+/// icon column plus a 2 px gutter, which both text lines measure from.
+pub(super) const PACK_TEXT_DX: f32 = PACK_ICON + 2.0;
+/// The name line's y within the content box: `getContentY() + 1` (`:214`).
+pub(super) const PACK_NAME_DY: f32 = 1.0;
+/// The description block's y within the content box: `getContentY() + 12`
+/// (`:217`).
+pub(super) const PACK_DESC_DY: f32 = 12.0;
+/// `PackEntry.MAX_DESCRIPTION_WIDTH_PIXELS` (`:111`), which vanilla applies to
+/// **both** widgets' `setMaxWidth` (`:213,216`).
+///
+/// Vanilla subtracts a further 6 when its own list is scrollable, because its
+/// scrollbar sits at `getRight() - scrollbarWidth()` — *inside* the 200 px list.
+/// This screen's bar does not: both columns share one [`super::packs::BAND_W`]
+/// band, so the bar is outside either column and there is nothing for the text to
+/// run under. Deliberately unported for that reason, not overlooked.
+const PACK_TEXT_MAX_W: f32 = 157.0;
+/// `descriptionWidget.setMaxRows(2)` (`:127`).
+const PACK_DESC_ROWS: usize = 2;
+/// The description's colour: `Style.EMPTY.withColor(-8355712)` (`:125,152`) —
+/// `0x808080`, vanilla's flat mid-grey, not this pass's own [`FG_DIM`].
+pub(super) const PACK_ENTRY_DIM: [f32; 4] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
+/// The selected row's interior, `-16777216` — opaque black inside the 1 px
+/// outline (`AbstractSelectionList.java:363-370`), exactly as the server, account
+/// and world lists draw theirs.
+const PACK_SELECTION_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+/// The hovered row's icon dim, `fill(…, -1601138544)`
+/// (`TransferableSelectionList.java:156`) — `0xA0909090`, the same translucent
+/// grey the multiplayer list puts under its own hover arrows, cited here from its
+/// own call site rather than shared with it.
+pub(super) const PACK_ICON_DARKEN: [f32; 4] = [144.0 / 255.0, 144.0 / 255.0, 144.0 / 255.0, 160.0 / 255.0];
+/// `SELECT_SPRITE` / `SELECT_HIGHLIGHTED_SPRITE` (`:24-25`) — the overlay an
+/// **Available** row shows on hover. `pub(super)` so the real-pack sprite gate can
+/// assert the ids exist.
+pub(super) const PACK_SELECT_SPRITES: (&str, &str) = (
+    "transferable_list/select",
+    "transferable_list/select_highlighted",
+);
+/// `UNSELECT_SPRITE` / `UNSELECT_HIGHLIGHTED_SPRITE` (`:26-27`) — a removable
+/// **Selected** row's overlay.
+pub(super) const PACK_UNSELECT_SPRITES: (&str, &str) = (
+    "transferable_list/unselect",
+    "transferable_list/unselect_highlighted",
+);
+/// The fallback pack icon: vanilla's `PackSelectionScreen.DEFAULT_ICON`
+/// (`PackSelectionScreen.java:67`), `textures/misc/unknown_pack.png`, blitted for
+/// any pack that ships no readable `pack.png` — which is every built-in row and
+/// most hand-made packs.
+///
+/// A **loose** texture like `misc/unknown_server`, so it reaches the atlas through
+/// [`crate::resources::MENU_TEXTURES`] rather than the `gui/sprites/**` glob.
+pub(super) const PACK_UNKNOWN_ICON: &str = "misc/unknown_pack";
 /// `tooltip/frame.png`'s top bar and the light end of its side gradient —
 /// (80, 0, 255, 80).
 const TOOLTIP_FRAME_TOP: [f32; 4] = [80.0 / 255.0, 0.0, 1.0, 80.0 / 255.0];
@@ -384,6 +442,26 @@ pub fn build(
             }
             let selected = i == frame.selected;
             let hovered = frame.hovered == Some(i);
+            // A **resource-pack entry** (issue #415) is a selection-list row, not a
+            // button: a 32×32 icon, a name, and up to two description lines. It is
+            // tested here rather than before `slot` — unlike the three lists above —
+            // because its rect *is* the slot; see `MenuRow::pack`.
+            //
+            // The reported bug this branch fixes: without it a pack row fell through
+            // to `draw_widget` and came out as a button with a centred label, its
+            // icon and description computed by `packs::frame` and then discarded.
+            if row.pack.is_some() {
+                let cursor = frame.cursor;
+                match clip {
+                    Some((top, band_h)) => b.with_clip(0.0, top, width, band_h, |b| {
+                        draw_pack_entry(b, &frame.rows, i, width, height, selected, cursor);
+                    }),
+                    None => {
+                        draw_pack_entry(&mut b, &frame.rows, i, width, height, selected, cursor);
+                    }
+                }
+                continue;
+            }
             match clip {
                 Some((top, band_h)) => b.with_clip(0.0, top, width, band_h, |b| {
                     draw_widget(b, &frame.rows, i, width, height, selected, hovered);
@@ -1100,6 +1178,129 @@ fn draw_world_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32, h
     }
 }
 
+/// Draws one resource-pack row — `TransferableSelectionList.PackEntry.extractContent`
+/// (`TransferableSelectionList.java:136-219`).
+///
+/// The selection outline, the 32×32 `pack.png` thumbnail, the pack name, up to two
+/// description lines under it, and — while the row is the list's selection or under
+/// the cursor — vanilla's `transferable_list/select`/`unselect` overlay on the icon.
+///
+/// Like [`draw_world_entry`] it **decides nothing**: the name is the row's `label`,
+/// the description its `detail`, the thumbnail its `favicon`, and which overlay
+/// applies is resolved into [`PackEntryView`] by [`super::packs::frame`]. What it
+/// owns is the canvas-dependent part, which is the rects.
+///
+/// ## Three named departures from the jar
+///
+/// - **The overlay is an indicator, not a hit zone.** Vanilla's icon carries four
+///   click quadrants (select/unselect on the icon or its left half, move up/down on
+///   the two right quarters); here the *whole row* transfers the pack and the two
+///   reorder buttons are separate widgets to its right — this client's shape, for
+///   the reason [`super::packs`]'s module doc records. So the `_highlighted` sprite
+///   variant still tracks the cursor being over the icon, exactly as vanilla's
+///   `mouseOverIcon` does, but the plain variant is not a "click elsewhere" hint:
+///   clicking anywhere on the row does the same thing.
+/// - **Unselect uses the whole icon rather than its left half.** `mouseOverLeftHalf`
+///   exists in vanilla because the right half holds the move quadrants. Nothing is
+///   drawn there here, so splitting the icon would leave a dead half.
+/// - **No incompatible marking.** Vanilla fills the content box dark red
+///   (`-8978432`, `:139-144`) and swaps the name for `pack.incompatible` when
+///   `PackCompatibility` rejects the pack's format. Still deliberately out of scope
+///   for the reason `packs`'s module doc gives: nothing in this client declares a
+///   *host* `pack_format` to compare against, and
+///   [`crate::resources::DiscoveredPack`] drops `pack.mcmeta`'s
+///   `supported_formats` range, so a guessed host number would paint a red bar over
+///   packs that are in fact fine. Painting nothing is the honest reduction; a
+///   wrong warning is not.
+fn draw_pack_entry(
+    b: &mut Quads<'_>,
+    rows: &[MenuRow],
+    i: usize,
+    width: f32,
+    height: f32,
+    selected: bool,
+    cursor: Option<(f32, f32)>,
+) {
+    let Some(row) = rows.get(i) else { return };
+    let Some(view) = row.pack.as_ref() else {
+        return;
+    };
+    let Some((x, y, w, h)) = row_rect(rows, i, width, height) else {
+        return;
+    };
+
+    // `AbstractSelectionList.extractItem`'s selection pass: a 1 px outline with the
+    // interior filled black, drawn *under* the content (`:354-370`). Focused
+    // variant, for `draw_server_entry`'s reason — this screen's list is focused
+    // whenever the cursor is on one of its rows.
+    if selected {
+        b.rect(x, y, w, h, LABEL);
+        b.rect(x + 1.0, y + 1.0, w - 2.0, h - 2.0, PACK_SELECTION_FILL);
+    }
+
+    // The content box: `getContentX()`/`getContentY()`, the entry inset by
+    // `CONTENT_PADDING` (`AbstractSelectionList.java:477-495`).
+    let (cx, cy) = (x + PACK_ROW_PAD, y + PACK_ROW_PAD);
+
+    // `graphics.blit(…, this.pack.getIconTexture(), getContentX(), getContentY(), …,
+    // 32, 32, …)` (`:146`). The mosaic path is this shell's stand-in for a per-pack
+    // runtime texture, the same one a server favicon and an account head take; a
+    // pack that ships no readable `pack.png` gets vanilla's own `DEFAULT_ICON`.
+    match row.favicon.as_ref() {
+        Some(icon) => b.mosaic(icon, cx, cy, PACK_ICON),
+        None => b.sprite(PACK_UNKNOWN_ICON, cx, cy, PACK_ICON, PACK_ICON, LABEL),
+    }
+
+    // `if (this.showHoverOverlay() && (hovered || getSelected() == this && isFocused()))`
+    // (`:155`) — so the overlay follows the *selection* as well as the mouse, which
+    // is what makes it visible under keyboard navigation. A pack that can neither be
+    // selected nor unselected (the built-in one: `isFixedPosition() && isRequired()`)
+    // draws none at all, exactly as vanilla's does not.
+    let in_rect = |(mx, my): (f32, f32), rx: f32, ry: f32, rw: f32, rh: f32| {
+        mx >= rx && mx < rx + rw && my >= ry && my < ry + rh
+    };
+    let hovered = cursor.is_some_and(|at| in_rect(at, x, y, w, h));
+    let sprites = if view.can_select {
+        Some(PACK_SELECT_SPRITES)
+    } else if view.can_unselect {
+        Some(PACK_UNSELECT_SPRITES)
+    } else {
+        None
+    };
+    if let Some(sprites) = sprites {
+        if selected || hovered {
+            b.rect(cx, cy, PACK_ICON, PACK_ICON, PACK_ICON_DARKEN);
+            let over_icon = cursor.is_some_and(|at| in_rect(at, cx, cy, PACK_ICON, PACK_ICON));
+            let id = if over_icon { sprites.1 } else { sprites.0 };
+            b.sprite(id, cx, cy, PACK_ICON, PACK_ICON, LABEL);
+        }
+    }
+
+    // `nameWidget` at `getContentX() + 32 + 2, getContentY() + 1`, then
+    // `descriptionWidget` at `+ 12` (`:213-218`), both `setMaxWidth(157)`. Vanilla's
+    // `StringWidget`/`MultiLineTextWidget` clip and wrap to that width; here that is
+    // `clip_measured` and `wrap_measured`, measured in the font this `Quads` will
+    // actually draw with.
+    let tx = cx + PACK_TEXT_DX;
+    b.text(
+        clip_measured(b, &row.label, PACK_TEXT_MAX_W),
+        tx,
+        cy + PACK_NAME_DY,
+        1.0,
+        LABEL,
+    );
+    let lines = wrap_measured(b, &row.detail, PACK_TEXT_MAX_W, PACK_DESC_ROWS);
+    for (line, text) in lines.iter().enumerate() {
+        b.text(
+            text,
+            tx,
+            cy + PACK_DESC_DY + LINE_H * line as f32,
+            1.0,
+            PACK_ENTRY_DIM,
+        );
+    }
+}
+
 /// Draws one vanilla widget: its `widget/button*` nine-slice background, then
 /// either its centred label or its centred 15×15 icon sprite.
 ///
@@ -1268,37 +1469,19 @@ fn draw_widget(
         return;
     }
 
-    // A **resource-pack row** (issue #415): its `pack.png` thumbnail at the left
-    // edge, the pack name on the first line and its `pack.mcmeta` description
-    // under it, both left-aligned past the icon — vanilla's
-    // `TransferableSelectionList.Entry.render` shape.
+    // A **triangle** drawn centred instead of the label, for a button whose whole
+    // meaning is a direction: the Resource Packs screen's two reorder buttons
+    // (issue #415). Geometry rather than a glyph because the fallback font is
+    // upper-case 5×7 with no arrow in it — see `MenuRow::arrow`.
     //
-    // Gated on `MenuRow::favicon`, which **no other slotted row anywhere sets**
-    // (checked: the only producer is `dispatch.rs`'s server-list arm, whose rows
-    // carry a `ServerEntryView` and are drawn by `draw_server_entry` before this
-    // function is ever reached). So this branch is additive: it cannot change a
-    // pixel on any pre-existing screen. `detail` rides along inside the same
-    // `if` for that reason — several slotted rows do set `detail`, and drawing it
-    // unconditionally here would move them.
-    if let Some(icon) = row.favicon.as_ref() {
-        let side = (h - PACK_ROW_PAD * 2.0).min(ICON);
-        b.mosaic(icon, x + PACK_ROW_PAD, y + PACK_ROW_PAD, side);
-        let colour = widget.message_colour();
-        let (_, right) = widget.content_span();
-        let tx = (x + PACK_ROW_PAD + side + PACK_ROW_PAD).floor();
-        let room = (right - tx).max(0.0);
-        let title = clip_measured(b, &widget.message, room);
-        b.text(title, tx, (y + PACK_ROW_PAD + 2.0).floor(), 1.0, colour);
-        if !row.detail.is_empty() {
-            let detail = clip_measured(b, &row.detail, room);
-            b.text(
-                detail,
-                tx,
-                (y + PACK_ROW_PAD + 2.0 + LINE_H + 2.0).floor(),
-                1.0,
-                FG_DIM,
-            );
-        }
+    // This replaces the pack-*row* draw that used to live here, gated on
+    // `MenuRow::favicon`: a pack row is a selection-list entry, not a button with
+    // an icon in it, so it is `draw_pack_entry`'s now and never reaches this
+    // function. Drawing it here was the reported bug — a pack with no `pack.png`
+    // has no `favicon`, so the built-in row (and any hand-made pack) missed the
+    // branch entirely and came out as a plain centred-label button.
+    if let Some(arrow) = row.arrow {
+        draw_arrow(b, arrow, x, y, w, h, widget.message_colour());
         return;
     }
 
@@ -1321,6 +1504,43 @@ fn draw_widget(
     let tx = ((left + right) * 0.5 - tw * 0.5).floor();
     let ty = widget.label_top(LINE_H);
     b.text(label, tx, ty, 1.0, colour);
+}
+
+/// Width of a [`MenuRow::arrow`] triangle, in logical pixels. Odd, so the apex
+/// row is a single centred pixel column and the whole shape is symmetric about
+/// the widget's centre.
+const ARROW_W: f32 = 7.0;
+/// Height of a [`MenuRow::arrow`] triangle: four 1 px rows of 1, 3, 5 and 7 —
+/// `(ARROW_W + 1) / 2`, which is what makes the two edges a clean 45°.
+const ARROW_H: f32 = (ARROW_W + 1.0) * 0.5;
+
+/// A solid triangle centred in `(x, y, w, h)`, apex up or down.
+///
+/// Four stacked 1 px rows rather than a real triangle mesh: [`Quads`] emits
+/// axis-aligned quads only (its clip is a rect intersection, and its text path
+/// reconstructs glyphs from their bounding boxes), so a diagonal edge has to be a
+/// staircase either way — which is also what vanilla's own 32×32
+/// `transferable_list/move_up` sprite is, at a larger size.
+fn draw_arrow(b: &mut Quads<'_>, arrow: Arrow, x: f32, y: f32, w: f32, h: f32, colour: [f32; 4]) {
+    let ax = (x + (w - ARROW_W) * 0.5).floor();
+    let ay = (y + (h - ARROW_H) * 0.5).floor();
+    let rows = ARROW_H as usize;
+    for row in 0..rows {
+        // Widths 1, 3, 5, 7 measured from the apex, which is the top row for `Up`
+        // and the bottom row for `Down`.
+        let step = match arrow {
+            Arrow::Up => row,
+            Arrow::Down => rows - 1 - row,
+        };
+        let run = 1.0 + 2.0 * step as f32;
+        b.rect(
+            ax + (ARROW_W - run) * 0.5,
+            ay + row as f32,
+            run,
+            1.0,
+            colour,
+        );
+    }
 }
 
 /// Draws one [`EditBox`]: its `widget/text_field` background, the selection

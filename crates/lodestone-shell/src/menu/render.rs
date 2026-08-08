@@ -101,9 +101,9 @@ pub use dispatch::frame_for;
 pub use draw::{MenuGeometry, build, geometry};
 pub use favicon::{FaviconMosaic, default_head_icon, favicon_mosaic, head_mosaic};
 pub use frame::{
-    AccountEntryView, Align, FaviconCache, MenuFrame, MenuLabel, MenuNotice, MenuProgress, MenuRow,
-    PROGRESS_BAR_BG, PROGRESS_BAR_FG, PROGRESS_BAR_H, PROGRESS_BAR_W, ServerEntryView,
-    WorldEntryView, notice_rect, owns_frame,
+    AccountEntryView, Align, Arrow, FaviconCache, MenuFrame, MenuLabel, MenuNotice, MenuProgress,
+    MenuRow, PROGRESS_BAR_BG, PROGRESS_BAR_FG, PROGRESS_BAR_H, PROGRESS_BAR_W, PackEntryView,
+    ServerEntryView, WorldEntryView, notice_rect, owns_frame,
 };
 pub use measure::{EDIT_BOX_H, field_rect, field_row_rects, logical_canvas, row_rect, text_px};
 pub use origin::{Origin, Slot};
