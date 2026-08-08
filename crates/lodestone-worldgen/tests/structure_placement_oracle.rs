@@ -198,7 +198,19 @@ fn the_unsupported_ledger_names_what_is_not_implemented() {
             "{expected} should be on the ledger; ledger = {ledger:#?}"
         );
     }
+    // `CLOSED_SET_STRUCTURES` is a list of structures whose *placement* is closed,
+    // which is not the same as having a piece generator — `monument`'s placement and
+    // start predicate are complete and `OceanMonumentPieces` has not landed, so it
+    // is legitimately on the ledger. Conflating the two is what left `monument`
+    // unnamed on the ledger for three phases.
     for implemented in CLOSED_SET_STRUCTURES {
+        if *implemented == "minecraft:monument" {
+            assert!(
+                ledger.contains_key(*implemented),
+                "monument has no piece generator and must say so"
+            );
+            continue;
+        }
         assert!(
             !ledger.contains_key(*implemented),
             "{implemented} has a generator but is on the unsupported ledger"
