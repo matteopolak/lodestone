@@ -23,6 +23,18 @@
 //! an ink-run layout walk (`gpu/nametag.rs`) that this reuses rather than
 //! reinventing.
 //!
+//! **Hanging signs are the same story, not a second one.** In 26.2
+//! `HangingSignRenderer` is `AbstractSignRenderer` plus a single
+//! `textTransformation` and **no model** either — the board, bar and chains
+//! come from `block/template_hanging_sign_rot_N` and
+//! `block/template_wall_hanging_sign`, real block models the terrain mesher
+//! already draws. So both sign families are text-only here and the whole
+//! difference between them is the four numbers in [`SignKind`]'s table plus
+//! two text metrics. (This was worth measuring rather than inheriting: 1.20's
+//! `HangingSignRenderer` *did* own a rig, and
+//! `docs/block-entity-renderers.md` recorded the 1.20 shape as if it were
+//! 26.2's.)
+//!
 //! # The placement matrix, ported term for term
 //!
 //! `StandingSignRenderer.textTransformation`
@@ -97,6 +109,86 @@ use lodestone_world::{SignDyeColor, SignSide};
 
 use crate::entity::ENTITY_FULLBRIGHT;
 
+/// Which of vanilla's **two** sign renderers a block uses. Both are
+/// text-only — `StandingSignRenderer` and `HangingSignRenderer` each declare
+/// no model whatsoever (verified against
+/// `.cache/mc/26.2/client-src/net/minecraft/client/renderer/blockentity/
+/// HangingSignRenderer.java`, which is `AbstractSignRenderer` plus one
+/// `textTransformation`) — and the hanging board, its bar and its chains are
+/// all real block-model geometry
+/// (`assets/minecraft/models/block/oak_hanging_sign_rot_0.json` parents
+/// `block/template_hanging_sign_rot_0`, which has genuine elements). **The
+/// note in `docs/block-entity-renderers.md` calling hanging signs "a
+/// different model set again (chains, a bar)" was reasoning from 1.20, where
+/// `HangingSignRenderer` really did own a `HangingSignModel`; in 26.2 there
+/// is no rig to port and the only difference is four numbers.**
+///
+/// Those four numbers, and nothing else:
+///
+/// | | plain | hanging |
+/// |---|---|---|
+/// | base translate `y` | `0.5` | `0.9375` |
+/// | pre-offset | `(0, -0.3125, -0.4375)`, **wall only** | `(0, -0.3125, 0)`, **always** |
+/// | `TEXT_OFFSET` | `(0, 0.33333334, 0.046666667)` | `(0, -0.32, 0.073)` |
+/// | render scale | `0.010416667` (`0.6666667 / 64`) | `0.0140625` (`0.9 / 64`) |
+///
+/// plus the two text metrics ([`SignKind::text_line_height`],
+/// [`SignKind::max_text_line_width`]), which live on the **block entity** in
+/// vanilla (`SignBlockEntity` returns `10`/`90`,
+/// `HangingSignBlockEntity` overrides to `9`/`60`) rather than on the
+/// renderer. A hanging sign's text is therefore *larger* per glyph and
+/// *narrower* per line than a plain sign's, which reads as a mistake and is
+/// not one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SignKind {
+    /// `oak_sign`/`oak_wall_sign` and every other wood —
+    /// `StandingSignRenderer`.
+    #[default]
+    Plain,
+    /// `oak_hanging_sign`/`oak_wall_hanging_sign` and every other wood —
+    /// `HangingSignRenderer`.
+    Hanging,
+}
+
+impl SignKind {
+    /// `SignBlockEntity.getTextLineHeight()` (`10`) or
+    /// `HangingSignBlockEntity`'s override (`9`), in font pixels.
+    #[must_use]
+    pub const fn text_line_height(self) -> f32 {
+        match self {
+            SignKind::Plain => TEXT_LINE_HEIGHT,
+            SignKind::Hanging => HANGING_TEXT_LINE_HEIGHT,
+        }
+    }
+
+    /// `SignBlockEntity.getMaxTextLineWidth()` (`90`) or
+    /// `HangingSignBlockEntity`'s override (`60`), in font pixels. Not used
+    /// by the placement matrix — this is the width vanilla *splits* a line
+    /// at, which this port defers (see the module doc), and the bound a
+    /// pixel gate needs for "the widest area this side's text can occupy".
+    #[must_use]
+    pub const fn max_text_line_width(self) -> f32 {
+        match self {
+            SignKind::Plain => 90.0,
+            SignKind::Hanging => 60.0,
+        }
+    }
+
+    /// The uniform scale in [`sign_text_transform`]'s last term —
+    /// `StandingSignRenderer`'s `0.010416667` or `HangingSignRenderer`'s
+    /// `0.0140625`. Both are `RENDER_SCALE / 64`, transcribed as the literal
+    /// each renderer actually passes rather than recomputed from the
+    /// `RENDER_SCALE`/`TEXT_RENDER_SCALE` field, so a float that does not
+    /// round-trip cannot drift.
+    #[must_use]
+    pub const fn render_scale(self) -> f32 {
+        match self {
+            SignKind::Plain => 0.010_416_667,
+            SignKind::Hanging => 0.014_062_5,
+        }
+    }
+}
+
 /// Vanilla's `PlainSignBlock.Attachment` (`GROUND`/`WALL`) plus the angle
 /// that goes with each, folded into one type the way
 /// [`crate::block_entity::SkullOrientation`] folds skull placement — a real
@@ -122,12 +214,25 @@ pub enum SignOrientation {
 }
 
 /// The world placement matrix for one text side of a sign —
-/// `StandingSignRenderer.textTransformation`, see the module doc for the
-/// term-by-term port. Feed it a local point in **font-pixel space**
+/// `StandingSignRenderer.textTransformation` for [`SignKind::Plain`] and
+/// `HangingSignRenderer.textTransformation` for [`SignKind::Hanging`], see
+/// the module doc and [`SignKind`] for the term-by-term port and the four
+/// numbers that differ. Feed it a local point in **font-pixel space**
 /// (`x` right, `y` down from the block of text's own top, `z = 0`); the
-/// result is that point's world position.
+/// result is that world position.
+///
+/// A hanging sign's `is_wall` is **not** a branch in the matrix: a wall
+/// hanging sign differs from a ceiling one only in where its `angle` comes
+/// from (`WallHangingSignBlock.FACING.toYRot()` versus
+/// `RotationSegment.convertToDegrees(ROTATION)`), which is the caller's
+/// [`SignOrientation`] and already resolved by the time this runs.
 #[must_use]
-pub fn sign_text_transform(pos: [i32; 3], orientation: SignOrientation, is_front: bool) -> Mat4 {
+pub fn sign_text_transform(
+    pos: [i32; 3],
+    kind: SignKind,
+    orientation: SignOrientation,
+    is_front: bool,
+) -> Mat4 {
     let (is_wall, angle_deg) = match orientation {
         SignOrientation::Ground { rotation_segment } => {
             (false, f32::from(rotation_segment) * (360.0 / 16.0))
@@ -135,17 +240,35 @@ pub fn sign_text_transform(pos: [i32; 3], orientation: SignOrientation, is_front
         SignOrientation::Wall { facing_yaw_deg } => (true, facing_yaw_deg),
     };
     let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
+    let base_y = match kind {
+        SignKind::Plain => 0.5,
+        SignKind::Hanging => 0.9375,
+    };
     let mut m = Mat4::from_translation(origin)
-        * Mat4::from_translation(Vec3::new(0.5, 0.5, 0.5))
+        * Mat4::from_translation(Vec3::new(0.5, base_y, 0.5))
         * Mat4::from_rotation_y(-angle_deg.to_radians());
-    if is_wall {
-        m *= Mat4::from_translation(Vec3::new(0.0, -0.3125, -0.4375));
+    match kind {
+        // `if (attachmentType == WALL) result.translate(0, -0.3125, -0.4375)`
+        // — pulls a wall sign's text off the board's own face and onto the
+        // wall-mounted board's lower, nearer plane.
+        SignKind::Plain if is_wall => {
+            m *= Mat4::from_translation(Vec3::new(0.0, -0.3125, -0.4375));
+        }
+        // `HangingSignRenderer` translates `(0, -0.3125, 0)`
+        // unconditionally — no attachment branch at all, even though it
+        // *computes* `state.attachmentType` for the crumbling overlay.
+        SignKind::Hanging => m *= Mat4::from_translation(Vec3::new(0.0, -0.3125, 0.0)),
+        SignKind::Plain => {}
     }
     if !is_front {
         m *= Mat4::from_rotation_y(180f32.to_radians());
     }
-    m * Mat4::from_translation(Vec3::new(0.0, 0.333_333_34, 0.046_666_667))
-        * Mat4::from_scale(Vec3::new(0.010_416_667, -0.010_416_667, 0.010_416_667))
+    let text_offset = match kind {
+        SignKind::Plain => Vec3::new(0.0, 0.333_333_34, 0.046_666_667),
+        SignKind::Hanging => Vec3::new(0.0, -0.32, 0.073),
+    };
+    let s = kind.render_scale();
+    m * Mat4::from_translation(text_offset) * Mat4::from_scale(Vec3::new(s, -s, s))
 }
 
 /// `DyeColor.getTextColor()`, transcribed from
@@ -204,10 +327,17 @@ pub fn sign_side_color(side: &SignSide) -> [f32; 4] {
     ]
 }
 
-/// Vanilla's fixed text-line height in font pixels
-/// (`SignBlockEntity.getTextLineHeight()`, always `10` — the per-instance
-/// method never varies in the real jar).
+/// A plain sign's text-line height in font pixels
+/// (`SignBlockEntity.getTextLineHeight()`, `10`). **This used to be
+/// documented as "always `10` — the per-instance method never varies in the
+/// real jar", which was wrong**: `HangingSignBlockEntity` overrides it to
+/// `9`. Prefer [`SignKind::text_line_height`], which cannot be reached for
+/// the wrong kind.
 pub const TEXT_LINE_HEIGHT: f32 = 10.0;
+
+/// A hanging sign's text-line height in font pixels
+/// (`HangingSignBlockEntity.getTextLineHeight()`, `9`).
+pub const HANGING_TEXT_LINE_HEIGHT: f32 = 9.0;
 
 /// The version-free description of one sign to draw this frame. The caller
 /// owns every field: block state → `pos`/`orientation`, block-entity NBT →
@@ -218,6 +348,10 @@ pub const TEXT_LINE_HEIGHT: f32 = 10.0;
 pub struct SignSpawn {
     /// Block position (the block's minimum corner).
     pub pos: [i32; 3],
+    /// Which vanilla renderer's transform and text metrics apply — see
+    /// [`SignKind`]. Independent of [`SignSpawn::orientation`]: all four
+    /// combinations are real blocks.
+    pub kind: SignKind,
     /// Ground or wall placement.
     pub orientation: SignOrientation,
     /// The side read facing the sign from in front.
@@ -238,10 +372,21 @@ impl SignSpawn {
     pub fn at(pos: [i32; 3]) -> Self {
         SignSpawn {
             pos,
+            kind: SignKind::Plain,
             orientation: SignOrientation::Ground { rotation_segment: 0 },
             front: SignSide::default(),
             back: SignSide::default(),
             light: ENTITY_FULLBRIGHT,
+        }
+    }
+
+    /// [`SignSpawn::at`]'s hanging counterpart — a ceiling hanging sign at
+    /// `pos`, `rotation_segment = 0`, no text.
+    #[must_use]
+    pub fn hanging_at(pos: [i32; 3]) -> Self {
+        SignSpawn {
+            kind: SignKind::Hanging,
+            ..SignSpawn::at(pos)
         }
     }
 }
@@ -260,7 +405,12 @@ mod tests {
     /// wall-offset term fails here rather than only looking "plausible".
     #[test]
     fn wall_transform_origin_matches_the_hand_computed_expression() {
-        let m = sign_text_transform([0, 0, 0], SignOrientation::Wall { facing_yaw_deg: 0.0 }, true);
+        let m = sign_text_transform(
+            [0, 0, 0],
+            SignKind::Plain,
+            SignOrientation::Wall { facing_yaw_deg: 0.0 },
+            true,
+        );
         let origin = m.transform_point3(Vec3::ZERO);
         assert!((origin.x - 0.5).abs() < 1e-4, "x {}", origin.x);
         assert!((origin.y - 0.520_833_34).abs() < 1e-4, "y {}", origin.y);
@@ -274,6 +424,7 @@ mod tests {
     fn ground_transform_has_no_wall_offset() {
         let m = sign_text_transform(
             [0, 0, 0],
+            SignKind::Plain,
             SignOrientation::Ground { rotation_segment: 0 },
             true,
         );
@@ -295,8 +446,8 @@ mod tests {
     #[test]
     fn back_text_sits_behind_front_text_on_the_boards_two_faces() {
         let orientation = SignOrientation::Ground { rotation_segment: 0 };
-        let front = sign_text_transform([0, 0, 0], orientation, true);
-        let back = sign_text_transform([0, 0, 0], orientation, false);
+        let front = sign_text_transform([0, 0, 0], SignKind::Plain, orientation, true);
+        let back = sign_text_transform([0, 0, 0], SignKind::Plain, orientation, false);
         let front_origin = front.transform_point3(Vec3::ZERO);
         let back_origin = back.transform_point3(Vec3::ZERO);
         assert!((front_origin.x - 0.5).abs() < 1e-4);
@@ -321,7 +472,12 @@ mod tests {
     #[test]
     fn ground_rotation_segments_span_a_full_turn_in_sixteen_steps() {
         let at = |segment: u8| {
-            sign_text_transform([0, 0, 0], SignOrientation::Ground { rotation_segment: segment }, true)
+            sign_text_transform(
+                [0, 0, 0],
+                SignKind::Plain,
+                SignOrientation::Ground { rotation_segment: segment },
+                true,
+            )
         };
         // Segment 0 and segment 8 (half the circle) must place a probe point
         // on opposite sides of the origin.
@@ -358,6 +514,114 @@ mod tests {
         let glow = SignSide { glowing: true, ..side };
         let bright = sign_side_color(&glow);
         assert!((bright[0] - 1.0).abs() < 1e-4, "{bright:?}");
+    }
+
+    /// Hand-computed from `HangingSignRenderer.textTransformation`'s own
+    /// expression at angle `0`, where every step is a plain translate:
+    /// `y = 0.9375 - 0.3125 - 0.32 = 0.305`, `z = 0.5 + 0.073 = 0.573`.
+    /// Pinned exactly, and **the plain hypothesis is computed alongside and
+    /// required to disagree** — a hanging sign fed through the plain branch
+    /// would land at `y = 0.83333`, so an accidentally-shared branch fails
+    /// here rather than looking plausible.
+    #[test]
+    fn hanging_transform_origin_matches_the_hand_computed_expression() {
+        let orientation = SignOrientation::Ground { rotation_segment: 0 };
+        let hanging = sign_text_transform([0, 0, 0], SignKind::Hanging, orientation, true)
+            .transform_point3(Vec3::ZERO);
+        assert!((hanging.x - 0.5).abs() < 1e-4, "x {}", hanging.x);
+        assert!((hanging.y - 0.305).abs() < 1e-4, "y {}", hanging.y);
+        assert!((hanging.z - 0.573).abs() < 1e-4, "z {}", hanging.z);
+
+        let plain = sign_text_transform([0, 0, 0], SignKind::Plain, orientation, true)
+            .transform_point3(Vec3::ZERO);
+        assert!(
+            (plain.y - hanging.y).abs() > 0.5,
+            "the plain and hanging text planes must be far apart vertically, \
+             got plain {plain:?} hanging {hanging:?}"
+        );
+    }
+
+    /// The back side of a hanging sign sits on the board's opposite face,
+    /// the same `rotate-before-TEXT_OFFSET` consequence the plain sign has —
+    /// hand-computed `z = 0.5 - 0.073 = 0.427` against the front's `0.573`.
+    #[test]
+    fn hanging_back_text_sits_on_the_other_face() {
+        let orientation = SignOrientation::Ground { rotation_segment: 0 };
+        let back = sign_text_transform([0, 0, 0], SignKind::Hanging, orientation, false)
+            .transform_point3(Vec3::ZERO);
+        assert!((back.z - 0.427).abs() < 1e-4, "{back:?}");
+        // Same height as the front: the 180° turn is about Y, so it cannot
+        // move the text up or down.
+        assert!((back.y - 0.305).abs() < 1e-4, "{back:?}");
+    }
+
+    /// The render scales are the *magnitude* assertion, not a sign check: a
+    /// 64-font-pixel run spans `0.9` blocks on a hanging sign and
+    /// `0.6666667` on a plain one (`RENDER_SCALE * 64 / 64`, i.e. the
+    /// `RENDER_SCALE` field itself). Both hypotheses are computed and the
+    /// measurement must land on the right one — swapping the two constants
+    /// still produces a plausible-looking sign and fails here.
+    #[test]
+    fn the_two_render_scales_span_their_own_vanilla_render_scale() {
+        let orientation = SignOrientation::Ground { rotation_segment: 0 };
+        let span = |kind: SignKind| {
+            let m = sign_text_transform([0, 0, 0], kind, orientation, true);
+            (m.transform_point3(Vec3::new(64.0, 0.0, 0.0)) - m.transform_point3(Vec3::ZERO)).length()
+        };
+        assert!((span(SignKind::Hanging) - 0.9).abs() < 1e-3, "{}", span(SignKind::Hanging));
+        assert!(
+            (span(SignKind::Plain) - 0.666_666_7).abs() < 1e-3,
+            "{}",
+            span(SignKind::Plain)
+        );
+    }
+
+    /// The two text metrics really are per-kind, and in *opposite*
+    /// directions from the scale — a hanging sign draws bigger glyphs over a
+    /// narrower line. Transcribed from `HangingSignBlockEntity`'s two
+    /// overrides.
+    #[test]
+    fn hanging_text_metrics_override_the_plain_ones() {
+        assert_eq!(SignKind::Plain.text_line_height(), 10.0);
+        assert_eq!(SignKind::Hanging.text_line_height(), 9.0);
+        assert_eq!(SignKind::Plain.max_text_line_width(), 90.0);
+        assert_eq!(SignKind::Hanging.max_text_line_width(), 60.0);
+        assert!(SignKind::Hanging.render_scale() > SignKind::Plain.render_scale());
+    }
+
+    /// A wall hanging sign takes its angle from `facing` and a ceiling one
+    /// from `rotation`, but neither adds the plain sign's wall offset — the
+    /// hanging branch is unconditional, so the two differ **only** by the
+    /// rotation. Ceiling segment `4` is `90°`, the same angle
+    /// `Direction.toYRot()` gives `WEST`.
+    #[test]
+    fn a_wall_hanging_sign_differs_from_a_ceiling_one_only_by_its_angle() {
+        let ceiling = sign_text_transform(
+            [0, 0, 0],
+            SignKind::Hanging,
+            SignOrientation::Ground { rotation_segment: 4 },
+            true,
+        );
+        let wall = sign_text_transform(
+            [0, 0, 0],
+            SignKind::Hanging,
+            SignOrientation::Wall { facing_yaw_deg: 90.0 },
+            true,
+        );
+        let probe = Vec3::new(10.0, 3.0, 0.0);
+        let a = ceiling.transform_point3(probe);
+        let b = wall.transform_point3(probe);
+        assert!((a - b).length() < 1e-5, "ceiling {a:?} vs wall {b:?}");
+        // The control: a *plain* wall sign at the same angle does not agree
+        // with either, because it carries the `-0.4375` face offset.
+        let plain_wall = sign_text_transform(
+            [0, 0, 0],
+            SignKind::Plain,
+            SignOrientation::Wall { facing_yaw_deg: 90.0 },
+            true,
+        )
+        .transform_point3(probe);
+        assert!((plain_wall - b).length() > 0.2, "plain {plain_wall:?} vs hanging {b:?}");
     }
 
     #[test]

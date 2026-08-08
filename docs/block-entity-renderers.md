@@ -54,10 +54,18 @@ wrong in both directions:
   `vault`, and two 26.x additions, `copper golem statue` and `shelf`.
 
 So the honest count is: **3 of 26 registrations landed** (chest/ender chest/trapped chest all through
-`ChestRenderer`), **4 more landed and wired end to end** (skull; standing/wall sign text, geometry
-excepted since a sign's board is a real block model; the bell body/rim; and the shulker box — see
-[Shulker box](#shulker-box)), and the rest still absent. Picking the next few should read this list,
-not the original issue body.
+`ChestRenderer`), **5 more landed and wired end to end** (skull; sign text for **both** sign
+registrations — `SIGN` and `HANGING_SIGN` — geometry excepted since a sign's board is a real block
+model; the bell body/rim; and the shulker box — see [Shulker box](#shulker-box)), plus the banner, so
+**9 of 26**. The rest are still absent. Picking the next few should read this list, not the original
+issue body.
+
+**The registration list has two entries this document's "what is not built" section never mentioned
+either way: `LECTERN` (`LecternRenderer`, the open book on a lectern) and `CONDUIT` (`ConduitRenderer`,
+the shell/eye rig).** Neither is landed and neither was named as deferred — a *silent* gap, which is
+worse than a recorded one. They are the two most player-visible remaining entries after the piston
+head, and `LecternRenderer`'s `BookModel` is shared with `EnchantTableRenderer`, so porting one rig
+covers two registrations.
 
 ## What it is
 
@@ -464,11 +472,71 @@ gamma-space, matching every other tint/shade in this codebase.
   NBT payload could send an over-width line.
 - Rich per-run formatting (colour/bold/italic/click events) inside one line. `resolve_message`
   extracts plain text only; the whole line draws in the side's own dye colour.
-- **Hanging signs** (`oak_hanging_sign`/`oak_wall_hanging_sign`, 13 woods × 2 attachments) — a
-  different model set again (chains, a bar, its own text transform), out of scope for this pass.
-  `crate::block_entities::is_plain_sign_path` declines every block whose path contains `hanging`
-  rather than drawing one wrong; `hanging_signs_are_present_but_declined` proves the decline against
-  the real 26.2 state table rather than assuming the name pattern holds.
+**No longer deferred: hanging signs — see [Hanging signs](#hanging-signs-the-same-renderer-four-numbers-apart)
+below.** The bullet that used to sit here said they needed "a different model set again (chains, a
+bar, its own text transform)" and cost the next reader a wrong estimate: that is **1.20's** shape.
+In 26.2 there is no rig to port.
+
+### Hanging signs: the same renderer, four numbers apart
+
+**26.2's `HangingSignRenderer` declares no model.** It is `AbstractSignRenderer` plus one
+`textTransformation` — read
+`.cache/mc/26.2/client-src/net/minecraft/client/renderer/blockentity/HangingSignRenderer.java`
+straight through; it is 75 lines and there is no `HangingSignModel` anywhere in `client-src`. The
+board, its bar and its chains are all **block-model** geometry the terrain mesher already draws:
+`assets/minecraft/blockstates/oak_hanging_sign.json` maps `attached`×`rotation` onto
+`block/oak_hanging_sign[_attached]_rot_N`, which parent `block/template_hanging_sign_rot_N`, and
+`oak_wall_hanging_sign.json` onto `block/template_wall_hanging_sign`. So hanging signs are the same
+text-only case standing signs are, and the whole difference is `lodestone_render::SignKind`:
+
+| | plain | hanging |
+|---|---|---|
+| base translate `y` | `0.5` | `0.9375` |
+| pre-offset | `(0, -0.3125, -0.4375)`, **wall only** | `(0, -0.3125, 0)`, **always** |
+| `TEXT_OFFSET` | `(0, 0.33333334, 0.046666667)` | `(0, -0.32, 0.073)` |
+| render scale | `0.010416667` (`RENDER_SCALE 0.6666667 / 64`) | `0.0140625` (`TEXT_RENDER_SCALE 0.9 / 64`) |
+| `getTextLineHeight()` | `10` | `9` |
+| `getMaxTextLineWidth()` | `90` | `60` |
+
+Three of those are worth stating out loud because each reads as a mistake:
+
+- **The last two live on the block entity, not the renderer.** `SignBlockEntity` returns `10`/`90` and
+  `HangingSignBlockEntity` *overrides* both. `TEXT_LINE_HEIGHT`'s doc in `sign.rs` used to say the
+  value was "always `10` — the per-instance method never varies in the real jar", which was simply
+  false; prefer `SignKind::text_line_height()`, which cannot be reached for the wrong kind.
+- **A hanging sign's glyphs are bigger and its lines narrower.** Scale up (`0.9` vs `0.667`), width
+  down (`60` vs `90`). Both directions are real. The live gate corroborates it independently: the same
+  string draws **60 px** wide on a hanging sign against **44 px** on a plain one, and `60/44 = 1.36`
+  is `0.0140625 / 0.010416667` — a magnitude the gate never asserts directly but which falls out of
+  it.
+- **The hanging pre-offset has no attachment branch.** `HangingSignRenderer` computes
+  `state.attachmentType` (for the crumbling overlay) and then ignores it in `textTransformation` —
+  wall and ceiling hanging signs differ *only* in where the angle comes from
+  (`WallHangingSignBlock.FACING.toYRot()` versus `RotationSegment.convertToDegrees(ROTATION)`), which
+  is already resolved into `SignOrientation` before the matrix runs. A "wall means add the wall
+  offset" generalisation from the plain sign is wrong, and
+  `a_wall_hanging_sign_differs_from_a_ceiling_one_only_by_its_angle` holds it down with the plain wall
+  sign as its control.
+
+Nothing else changed. `sign_candidates`, `sign_spawns`, the gather's NBT parse, the pass, the shader
+and the pipeline are all shared — hanging signs needed **no** new source install in `sim/`, because
+they arrive through the sign source that was already there. That is the whole reason this was cheap.
+
+**The pixel gate is cross-arm, not a count.** `a_hanging_signs_text_draws_in_its_own_area_and_not_the_plain_ones`
+projects both kinds' text planes through the real transform, asserts the two screen bands are
+**disjoint in `y`** (the premise), then requires each kind's *changed* pixels to land in its own band
+and not the other's. Two things made it worth building rather than trusting a vertex count:
+
+- **A `SignKind` that reached the spawn but not the transform passes every count-based check** — both
+  kinds produce ink at the same block. Neutering `gpu/sign_text.rs` to pass `SignKind::Plain` to the
+  transform (leaving everything else live) was run and reddens this gate with exactly that diagnosis;
+  neutering the *transform's* three branches instead reddens the premise check, which is the correct
+  behaviour for a rect derived from the same expression the draw uses.
+- **The first-person arm paints unconditionally, low on screen, which is where a hanging sign's text
+  lands** (measured: arm bbox `x0:247 y0:169`, hanging band `y0:147 y1:189`). So the gate is
+  differential against a sign-free frame rather than asserting "nothing else paints in this band" —
+  an absolute version would have been measuring the arm, the premise-false control failure
+  `CLAUDE.md` records.
 
 ### The GPU pass — `gpu/sign_text.rs`, beside `gpu/nametag.rs`, not inside it
 
@@ -502,11 +570,13 @@ sorted by position), with one structural difference: **`sign_candidates` cannot 
 `chest_candidates`**, because chest and skull only ever need the block state at a candidate position
 and `chest_candidates` deliberately discards `BlockEntity.nbt`; sign text needs the NBT, so
 `sign_candidates` parses it into a typed `SignText` right there in the gather rather than threading a
-raw `Nbt` value any further than it has to. `is_plain_sign_path`/`sign_kind_for_state` gate on the
-block's registry path (every plain sign ends `_sign`, checked for `hanging` first so a hanging sign's
-shared `_sign` suffix cannot be mistaken for a plain one); `sign_orientation` reads `rotation`
-(ground) or `facing` (wall) off the block state, the identical shape `skull_orientation` already uses
-for the same two property names.
+raw `Nbt` value any further than it has to. `sign_kind_for_path`/`sign_kind_for_state` resolve the
+block's registry path into a `SignKind` (every sign ends `_sign`, checked for `hanging` **first**
+because both families share that suffix — get the order wrong and every hanging sign's text draws at
+a plain sign's height and scale, which is why the test asserts the *kind* and not merely
+`is_some()`); `sign_orientation` reads `rotation` (ground/ceiling) or `facing` (either wall variant)
+off the block state, the identical shape `skull_orientation` already uses for the same two property
+names, and it is shared unchanged by both kinds.
 
 ### The whole chain, hop by hop
 
@@ -1042,11 +1112,14 @@ but that is the pure function, not the gate.
 
 Against the real 26-entry registration list (see above), not the issue's original twelve-item guess:
 
-- **Signs — landed** (see the [Sign](#sign-standingwall-text) section above) for standing and wall
-  signs. Still open within sign scope: **hanging signs** (a different model set — chains, a bar, its
-  own text transform), the black-dye-glowing outline, per-glyph world-light modulation, line wrapping
-  past 90px, and rich per-run text formatting — all named and reasoned about in that section rather
-  than silently missing.
+- **Signs — landed, both registrations** (see the [Sign](#sign-standingwall-text) section above):
+  standing, wall, ceiling-hanging and wall-hanging. Still open within sign scope: the
+  black-dye-glowing outline, per-glyph world-light modulation, line wrapping past the per-kind
+  `max_text_line_width`, and rich per-run text formatting — all named and reasoned about in that
+  section rather than silently missing. **The "hanging signs need a different model set" item that
+  used to head this list was a 1.20 memory, not a 26.2 measurement** — it was four numbers.
+- **Lectern and conduit are the two registrations nothing here has ever named**, in either
+  direction — see the correction under [the registration list](#the-real-vanilla-scope-from-the-registration-list--not-the-issues-guess-list).
 - **Bell — the body/rim geometry, placement and shake formula are landed** (see [Bell](#bell)
   above), wired through a real GPU pixel gate. **Still open within bell scope: the `BLOCK_EVENT`
   trigger** (`b0 == 1`, a **different** `b0` meaning than chest's own `b0 == 1` — direction packed
