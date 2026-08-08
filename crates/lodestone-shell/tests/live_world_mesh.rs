@@ -52,7 +52,7 @@ use lodestone::blocks::ShellClassifier;
 use lodestone::mesher::{SectionKey, mesh_snapshot, snapshot_section_live};
 use lodestone::net::{NetClient, NetUpdate};
 use lodestone::resources::BlockResources;
-use lodestone_testsupport::RconClient;
+use lodestone_testsupport::{RconClient, unique_username};
 
 const HOST: &str = "127.0.0.1";
 /// The flat creative 26.2 oracle: game on `:25570`, RCON on `:25571`. Named only
@@ -146,7 +146,11 @@ fn live_world_meshes_into_lit_geometry_and_the_bridge_cannot_tell() {
     // A player must be online before RCON can find the spawn column and before
     // the flat oracle keeps chunks resident. Connect a *scout* client, learn where
     // it spawned, then build the room in its column.
-    let scout = NetClient::connect(HOST.into(), PORT, PROTOCOL, None);
+    // `connect_as`, not `connect`: a live gate needs a fresh identity per run
+    // (a shared offline name is a shared player file, and a dead player is held
+    // on the death screen, which sends no chunks). `connect` is the *stable*
+    // persisted offline identity, which is production's job, not a gate's.
+    let scout = NetClient::connect_as(HOST.into(), PORT, PROTOCOL, None, unique_username());
     wait_logged_in(&scout, "scout");
 
     let mut rcon = RconClient::connect(RCON_ADDR, RCON_PASSWORD).unwrap_or_else(|e| {
@@ -210,7 +214,11 @@ fn live_world_meshes_into_lit_geometry_and_the_bridge_cannot_tell() {
     // chunk-data packet carrying the server's now-seam-complete light — far more
     // reliable than depending on incremental LIGHT_UPDATE deltas reaching the
     // scout. The scout stays connected to keep the area active while B streams.
-    let net = NetClient::connect(HOST.into(), PORT, PROTOCOL, None);
+    // `connect_as`, not `connect`: a live gate needs a fresh identity per run
+    // (a shared offline name is a shared player file, and a dead player is held
+    // on the death screen, which sends no chunks). `connect` is the *stable*
+    // persisted offline identity, which is production's job, not a gate's.
+    let net = NetClient::connect_as(HOST.into(), PORT, PROTOCOL, None, unique_username());
     wait_logged_in(&net, "reader");
     let dims = net.world_dimensions().expect(
         "logged in but the client never reported world dimensions — the column geometry seam \

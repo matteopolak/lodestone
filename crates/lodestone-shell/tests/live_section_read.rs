@@ -22,6 +22,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use lodestone::net::{NetClient, NetUpdate};
+use lodestone_testsupport::unique_username;
 
 const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25565;
@@ -32,7 +33,11 @@ const PROTOCOL: i32 = 776;
 #[test]
 #[ignore = "requires the live lodestone-mc262 server on 127.0.0.1:25565 (`docker start lodestone-mc262`) and `--features live`"]
 fn live_sections_cross_the_shell_seam_as_real_terrain() {
-    let net = NetClient::connect(HOST.into(), PORT, PROTOCOL, None);
+    // `connect_as`, not `connect`: a live gate needs a fresh identity per run
+    // (a shared offline name is a shared player file, and a dead player is held
+    // on the death screen, which sends no chunks). `connect` is the *stable*
+    // persisted offline identity, which is production's job, not a gate's.
+    let net = NetClient::connect_as(HOST.into(), PORT, PROTOCOL, None, unique_username());
 
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut logged_in = false;

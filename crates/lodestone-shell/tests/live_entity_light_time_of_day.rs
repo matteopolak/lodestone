@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use lodestone::net::{NetClient, NetUpdate, entity_light_at};
 use lodestone_model::math::Vec3;
-use lodestone_testsupport::RconClient;
+use lodestone_testsupport::{RconClient, unique_username};
 
 const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25565;
@@ -171,7 +171,11 @@ fn the_servers_sky_light_byte_is_identical_at_noon_and_midnight() {
     rcon.cmd("gamerule doDaylightCycle false");
     rcon.cmd("weather clear");
 
-    let net = NetClient::connect(HOST.into(), PORT, PROTOCOL, None);
+    // `connect_as`, not `connect`: a live gate needs a fresh identity per run
+    // (a shared offline name is a shared player file, and a dead player is held
+    // on the death screen, which sends no chunks). `connect` is the *stable*
+    // persisted offline identity, which is production's job, not a gate's.
+    let net = NetClient::connect_as(HOST.into(), PORT, PROTOCOL, None, unique_username());
     let feet = join(&net);
 
     rcon.cmd("time set noon");

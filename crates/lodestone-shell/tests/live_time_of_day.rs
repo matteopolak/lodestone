@@ -56,7 +56,7 @@ use std::time::{Duration, Instant};
 
 use lodestone::net::{NetClient, NetUpdate};
 use lodestone_render::entity::sky_darken_for_time_of_day;
-use lodestone_testsupport::RconClient;
+use lodestone_testsupport::{RconClient, unique_username};
 
 const HOST: &str = "127.0.0.1";
 /// The survival oracle: normal terrain, RCON on `:25566`. Used rather than the
@@ -129,7 +129,11 @@ fn world_time(net: &NetClient) -> (i64, i64) {
 #[test]
 #[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566) and `--features live`"]
 fn the_clients_day_clock_follows_the_servers() {
-    let net = NetClient::connect(HOST.into(), PORT, PROTOCOL, None);
+    // `connect_as`, not `connect`: a live gate needs a fresh identity per run
+    // (a shared offline name is a shared player file, and a dead player is held
+    // on the death screen, which sends no chunks). `connect` is the *stable*
+    // persisted offline identity, which is production's job, not a gate's.
+    let net = NetClient::connect_as(HOST.into(), PORT, PROTOCOL, None, unique_username());
     join(&net);
 
     let mut rcon = RconClient::connect(RCON_ADDR, RCON_PASSWORD).unwrap_or_else(|e| {

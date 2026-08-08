@@ -71,7 +71,16 @@ lodestone-particle = { workspace = true }
 # The wasm-safe controller core, shared with the browser client so movement has
 # one implementation. The shell adds only the winit key/mouse mapping on top.
 lodestone-controller = { path = "../lodestone-controller" }
-lodestone-testsupport = { workspace = true }
+# The workspace's one RFC 1321 MD5, for `offline_identity::offline_uuid` —
+# Java's `UUID.nameUUIDFromBytes("OfflinePlayer:" + name)`, the derivation an
+# offline-mode server keys player data under. Already in this crate's graph
+# transitively (`lodestone-server` → `lodestone-worldgen` → here), so this edge
+# adds no compilation, and it is version-free, so `--no-default-features` is
+# unaffected. The alternative was a second MD5 in this crate or a new external
+# dependency; `uuid`'s own `new_v3` is **not** an alternative — it hashes a
+# namespace before the name, which is a different value (see
+# `offline_identity`'s module docs).
+lodestone-worldgen-core = { path = "../lodestone-worldgen-core" }
 # The integrated server hosts the bundled singleplayer overworld generator
 # (`lodestone_server::overworld_generator`), which wraps the version-free,
 # JVM-verified `lodestone-worldgen` pipeline. Depending on it here is what
@@ -159,6 +168,22 @@ png = { workspace = true }
 # Same pin as every other bench site in the workspace. `default-features = false`
 # is load-bearing: it drops plotters and criterion's own rayon.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# **A dev dependency, and that is the structural fix — do not move it back up
+# into `[dependencies]`.** It was a *normal* dependency here — the only crate in
+# the workspace where it was: 11 others have it under `[dev-dependencies]`, and
+# `lodestone-sound` has it `optional` behind `live-v770` and names it only from
+# `tests/`. That one line is how `net.rs` came to re-export
+# `unique_username` — a helper that cannot return the same name twice by
+# construction — straight into the production join path, giving the player a new
+# offline account every launch. Under `[dev-dependencies]` the lib target cannot
+# name this crate at all, so the defect is a compile error rather than a
+# convention; `tests/no_production_source_names_testsupport.rs` is the second
+# layer, for the case where someone adds the edge back.
+#
+# `#[cfg(test)] mod tests` inside `src/` still sees it — unit tests are part of
+# the lib *test* target, which links dev dependencies — so `net.rs`'s,
+# `app/tests.rs`'s and `sim/tests.rs`'s live gates are unaffected.
+lodestone-testsupport = { workspace = true }
 
 # Entity tick throughput and interpolation cost (issues #97/#99). CPU-only: no
 # GPU adapter, no window, no server. Must stay free of anything version-gated so

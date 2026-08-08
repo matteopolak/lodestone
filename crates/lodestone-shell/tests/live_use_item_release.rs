@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use lodestone::config::{Config, Mode};
 use lodestone::sim::{SessionPhase, Sim};
-use lodestone_testsupport::RconClient;
+use lodestone_testsupport::{RconClient, unique_username};
 
 const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25565;
@@ -65,7 +65,11 @@ fn a_bow_drawn_at_an_entity_and_released_fires_an_arrow() {
 
     let mut sim = Sim::new(live_config());
     let demo_spawn = sim.player().position;
-    sim.connect(HOST.into(), PORT, PROTOCOL);
+    // `connect_as`, not `connect`: a live gate needs a fresh identity per run
+    // (a shared offline name is a shared player file, and a dead player is held
+    // on the death screen, which sends no chunks). `connect` is the *stable*
+    // persisted offline identity, which is production's job, not a gate's.
+    sim.connect_as(HOST.into(), PORT, PROTOCOL, unique_username());
 
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut placed = false;
@@ -296,7 +300,11 @@ fn a_bow_drawn_at_open_sky_and_released_fires_an_arrow() {
 
     let mut sim = Sim::new(live_config());
     let demo_spawn = sim.player().position;
-    sim.connect(HOST.into(), PORT, PROTOCOL);
+    // `connect_as`, not `connect`: a live gate needs a fresh identity per run
+    // (a shared offline name is a shared player file, and a dead player is held
+    // on the death screen, which sends no chunks). `connect` is the *stable*
+    // persisted offline identity, which is production's job, not a gate's.
+    sim.connect_as(HOST.into(), PORT, PROTOCOL, unique_username());
 
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut placed = false;

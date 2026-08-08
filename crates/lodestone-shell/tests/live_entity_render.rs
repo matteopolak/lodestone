@@ -43,7 +43,7 @@ use lodestone_ecs::entity::{
 };
 use lodestone_model::Reported;
 use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget};
-use lodestone_testsupport::RconClient;
+use lodestone_testsupport::{RconClient, unique_username};
 
 /// Translates a raw, version-free [`EntityView`] into the ingest components
 /// [`crate::entities::resolve_entity_facts`] (the live path's own reader)
@@ -154,7 +154,11 @@ fn server_sent_mob_reaches_pixels_through_shell() {
     let mut target = HeadlessTarget::new(device, w, h, format);
 
     // --- Connect the shell's own net client to the live oracle. --------------
-    let net = NetClient::connect(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2, None);
+    // `connect_as`, not `connect`: a live gate needs a fresh identity per run
+    // (a shared offline name is a shared player file, and a dead player is held
+    // on the death screen, which sends no chunks). `connect` is the *stable*
+    // persisted offline identity, which is production's job, not a gate's.
+    let net = NetClient::connect_as(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2, None, unique_username());
 
     // Wait until the bot is actually in the world (chunks streaming). The net
     // thread drives independently; draining poll() keeps its update channel from

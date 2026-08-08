@@ -43,6 +43,7 @@ pub mod keybinds;
 pub mod menu;
 pub mod mesher;
 pub mod net;
+pub mod offline_identity;
 pub mod overlay;
 pub mod particles;
 pub mod raycast;
