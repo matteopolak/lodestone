@@ -105,6 +105,7 @@ mod block_entities;
 /// (issue #337's missing consumer) — the join between [`loot`],
 /// [`MobSim::spawn_item`] and `server`'s block-break arm.
 pub mod block_drops;
+mod block_placement;
 mod border;
 mod brewing;
 mod chunk;

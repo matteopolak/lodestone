@@ -68,6 +68,7 @@ use lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE;
 use lodestone_entity::{DamageFlags, ItemLifecycle};
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Rotation, Text, TextContent, Vec3,
+    Vec3f,
 };
 use lodestone_data::block_items;
 use lodestone_net::{Connection, NetError, Transport};
@@ -2714,78 +2715,67 @@ fn horizontal_look_direction(yaw: f32) -> Direction {
     }
 }
 
-/// `BlockState.getStateForPlacement` for the blocks this crate places with a
-/// yaw-derived orientation, and `None` for every other block — the caller
-/// then keeps the census's bare default-state name (stairs/slabs/logs/dust
-/// need click-face, cursor and neighbour state this path does not decode,
-/// `docs/block-edit.md`).
+/// `BlockState.getStateForPlacement` for the block a player just placed, or
+/// `None` when no convention applies and the caller should keep the census's
+/// bare default-state name.
 ///
-/// `player_yaw` is `None` before the first packet carrying angles arrives;
-/// placement then falls back to the block's default state.
+/// The per-block table lives in [`crate::block_placement`]; this wrapper exists
+/// only to keep the three redstone families ahead of it. They are not a
+/// different convention — a repeater does take `getHorizontalDirection().getOpposite()`
+/// like a furnace — but the redstone model reads `delay`/`locked`/`powered`
+/// straight off the state *string*, so their placement must name the full
+/// property set rather than leaving it to be defaulted downstream.
 ///
-/// The two `DiodeBlock` families cite `DiodeBlock.getStateForPlacement`
-/// (`DiodeBlock.java:155-158`): `FACING = getHorizontalDirection().getOpposite()`
-/// — the block faces the player, so the **opposite** of the player's look
-/// direction. The observer is the deliberate exception:
-/// `ObserverBlock.getStateForPlacement` (`ObserverBlock.java:133-136`) sets
-/// `FACING = getNearestLookingDirection().getOpposite().getOpposite()`, a
-/// double negation that is the player's **look** direction — the observer
-/// watches the block the player is looking at, and its redstone output faces
-/// the player. Not opposite: an observer placed while looking north watches
-/// north.
-#[must_use]
-fn placed_block_state(block: &str, player_yaw: Option<f32>, face: BlockFace) -> Option<String> {
-    // `RotatedPillarBlock.getStateForPlacement` (`RotatedPillarBlock.java:44`) is
-    // `defaultBlockState().setValue(AXIS, context.getClickedFace().getAxis())`,
-    // needing no yaw — so it is checked before the `player_yaw?` bail below.
-    // Recognised from the census rather than a name list: every pillar block
-    // (logs, stripped wood, basalt, quartz/purpur pillars, bone blocks,
-    // froglights, hay) is exactly a block whose default state carries `axis`,
-    // and a name list would silently miss the next one added.
-    if pillar_axis_block(block) {
-        let axis = match face {
-            BlockFace::Up | BlockFace::Down => "y",
-            BlockFace::North | BlockFace::South => "z",
-            BlockFace::East | BlockFace::West => "x",
+/// The observer is deliberately still yaw-only here, where vanilla's
+/// `ObserverBlock.getStateForPlacement` (`:134`) resolves a vertical facing too;
+/// `crate::redstone_observer` models horizontal observers only, so a
+/// `facing=up` observer would be a state the signal model cannot read.
+fn placed_block_state<F>(
+    block: &str,
+    ctx: &crate::block_placement::PlaceContext,
+    block_at: F,
+) -> Option<crate::block_placement::Placement>
+where
+    F: Fn(BlockPos) -> String,
+{
+    if let Some(yaw) = ctx.yaw {
+        let look = horizontal_look_direction(yaw);
+        let full = match block {
+            REPEATER => Some(set_repeater(look.opposite(), 1, false, false)),
+            COMPARATOR => Some(set_comparator(look.opposite(), false, false, 0)),
+            OBSERVER => Some(set_observer(look, false)),
+            _ => None,
         };
-        return Some(format!("{block}[axis={axis}]"));
+        if let Some(state) = full {
+            return Some(crate::block_placement::Placement {
+                state,
+                extra: Vec::new(),
+            });
+        }
     }
-    let look = horizontal_look_direction(player_yaw?);
-    match block {
-        REPEATER => Some(set_repeater(look.opposite(), 1, false, false)),
-        COMPARATOR => Some(set_comparator(look.opposite(), false, false, 0)),
-        OBSERVER => Some(set_observer(look, false)),
-        _ => None,
-    }
+    crate::block_placement::placement(block, ctx, block_at)
 }
 
-/// `true` iff `block`'s states carry an `axis` property whose domain is the
-/// three coordinate axes — i.e. it is a `RotatedPillarBlock`. Read off
-/// `lodestone_data::block_states` so no name list can go stale.
+/// `SlabBlock.canBeReplaced` (`SlabBlock.java:84-97`) for the clicked block:
+/// `true` when placing `held` onto `clicked` should turn it into a double slab
+/// rather than start a new one in the next cell.
 ///
-/// Deliberately excludes the two-value `axis` blocks (`nether_portal` and
-/// `chain`'s `x`/`z` and `x`/`y`/`z`-less forms are not placed by this path),
-/// by requiring all three values to exist.
+/// Vanilla's `replacingClickedOnBlock()` branch is the only one reachable here
+/// — this is asked about the clicked block itself — so the whole predicate is
+/// "same slab, not already double, and the click was on the side the existing
+/// half does not already fill".
 #[must_use]
-fn pillar_axis_block(block: &str) -> bool {
-    let mut seen = [false; 3];
-    for id in 0..lodestone_data::block_states::STATE_COUNT {
-        if lodestone_data::block_states::block_name(id) != Some(block) {
-            continue;
-        }
-        for &(key, value) in lodestone_data::block_states::properties(id).unwrap_or(&[]) {
-            if key != "axis" {
-                continue;
-            }
-            match value {
-                "x" => seen[0] = true,
-                "y" => seen[1] = true,
-                "z" => seen[2] = true,
-                _ => {}
-            }
-        }
+fn slab_doubles(clicked: &str, held: &str, face: BlockFace, cursor: Vec3f) -> bool {
+    if crate::redstone::base_name(clicked) != held {
+        return false;
     }
-    seen == [true; 3]
+    let above_middle = cursor.y > 0.5;
+    let horizontal = !matches!(face, BlockFace::Up | BlockFace::Down);
+    match crate::redstone::get_str_property(clicked, "type") {
+        Some("bottom") => matches!(face, BlockFace::Up) || (above_middle && horizontal),
+        Some("top") => matches!(face, BlockFace::Down) || (!above_middle && horizontal),
+        _ => false,
+    }
 }
 
 /// Which of a brewing stand's five slots a held item routes to — decided by
@@ -3175,12 +3165,10 @@ fn apply_composter_use(
 /// clicked block if it `canBeReplaced`, otherwise at its `face`-neighbour) —
 /// simplified per this crate's documented scope (`docs/block-edit.md`): no
 /// survival/collision validation beyond "is the target cell currently
-/// replaceable" (air or a fluid — see [`is_air_or_fluid`]). Per-block
-/// orientation is partial: the redstone directional families (repeater,
-/// comparator, observer) derive their facing from the placing player's yaw
-/// via [`placed_block_state`] (issue #475), while the click-face/cursor-driven
-/// families (stairs/slabs/doors) would need a precise cursor hit this crate
-/// does not decode and still place with their default state.
+/// replaceable" (air or a fluid — see [`is_air_or_fluid`], plus
+/// [`slab_doubles`] for the one `canBeReplaced` override a hand placement can
+/// hit). Per-block orientation now goes through [`crate::block_placement`],
+/// which carries each family's own `getStateForPlacement` convention.
 ///
 /// **Placement honours the held item for every block in the game** (#466).
 /// `inventory`'s currently selected item is resolved through
@@ -3203,13 +3191,14 @@ fn apply_composter_use(
 /// one; the `block_update` for both cells is still sent below, so a client
 /// that predicted a placement is corrected rather than left desynchronised.
 ///
-/// **Block *state* is now partial** (`docs/block-edit.md`): the redstone
-/// directional families place with a yaw-derived `facing` (issue #475 — the
-/// repeater that always faced north is fixed), but the state that depends on
-/// the click face, cursor and neighbours — stairs, slabs, logs and redstone
-/// dust's connection state — still places with the block's default state.
-/// #466 is about placing the *right block*; the right *state* for the
-/// remaining families is a separate and larger piece of work.
+/// **Block *state* comes from the block's own convention.** The clicked face,
+/// the cursor hit within it and the placing player's yaw/pitch all reach
+/// [`crate::block_placement`], so a stair faces the way the player does and is
+/// upper or lower depending on where in the face they clicked, a chest and a
+/// furnace face the *other* way, an anvil is turned a quarter further, and a
+/// torch clicked against a wall becomes a `wall_torch`. Two-cell placements (a
+/// door's upper half, a bed's head, a paired chest's partner) travel out as
+/// `Placement::extra` and are written and notified with the primary cell.
 ///
 /// Sends [`ServerProtocol::encode_block_update`] for **both** `pos` and its
 /// `face`-neighbour unconditionally, matching vanilla's own
@@ -3244,6 +3233,11 @@ async fn apply_use_item_on<T, P, S>(
     state: &mut State,
     pos: BlockPos,
     face: BlockFace,
+    // The block-local hit position within `pos`. `crate::block_placement` reads
+    // its `y` for every `half`/`type`-bearing block (a stair, slab or trapdoor
+    // clicked high on a side face is an upper one) and its `x`/`z` for a door's
+    // hinge tie-break.
+    cursor: Vec3f,
     // Issue #329. The player's world-space position, for the bed-respawn
     // reach test (vanilla's `bedInRange`, bed ±3 x/z and ±2 y). `None` until
     // the first `PlayerMoved` packet arrives; a bed click before any move
@@ -3254,11 +3248,15 @@ async fn apply_use_item_on<T, P, S>(
     // bed is right-clicked (see the bed arm below). `&mut`: the set writes
     // through this slot.
     respawn: &mut Option<RespawnPoint>,
-    // Issue #475. The placing player's yaw, so the redstone directional
-    // families can derive their `facing` (see [`placed_block_state`]). `None`
-    // until the first packet carrying angles arrives; placement then falls
-    // back to the block's default state.
+    // Issue #475. The placing player's yaw, so the directional families can
+    // derive their `facing` (see [`placed_block_state`]). `None` until the
+    // first packet carrying angles arrives; placement then falls back to the
+    // block's default state.
     player_yaw: Option<f32>,
+    // Pitch, for the `getNearestLookingDirection` families alone (a dispenser
+    // or piston placed while looking down points up). `None` on the same
+    // terms as `player_yaw`.
+    player_pitch: Option<f32>,
     // `&mut`, not `&`: a brewing-stand insertion consumes one item from the
     // player's selected hotbar stack (issue #252), and only a mutable
     // inventory can write the remainder back.
@@ -3489,20 +3487,29 @@ where
 
     let neighbour = relative(pos, face);
     let clicked = source.block_state(pos.x, pos.y, pos.z);
-    let target = if is_air_or_fluid(&clicked) { pos } else { neighbour };
+    let held_item = inventory.selected_item().map(|stack| stack.item.to_string());
+    // The census is the gate: it decides *whether* a placement happens at
+    // all and *which* block it writes. `block_entity_for_item` no longer
+    // makes that decision — it only supplies the live `BlockEntity` for
+    // the six items this crate ticks, and is consulted second.
+    let placed = held_item
+        .as_deref()
+        .and_then(|item| block_items::block_for_item(item).map(|block| (item, block)));
+    // `SlabBlock.canBeReplaced` (`SlabBlock.java:84-97`) is the one
+    // `canBeReplaced` override a hand placement can hit, and without it a slab
+    // clicked onto a matching half-slab lands in the cell *above* instead of
+    // doubling. Every other block reaches the plain air-or-fluid test.
+    let doubling_slab = placed.is_some_and(|(_, block)| slab_doubles(&clicked, block, face, cursor));
+    let target = if is_air_or_fluid(&clicked) || doubling_slab {
+        pos
+    } else {
+        neighbour
+    };
     let target_state = source.block_state(target.x, target.y, target.z);
     // Every cell the placement's neighbour fan-out rewrote (issue #465) —
     // empty unless a placement actually happened below.
     let mut changed: Vec<(BlockPos, String)> = Vec::new();
-    if is_air_or_fluid(&target_state) {
-        let held_item = inventory.selected_item().map(|stack| stack.item.to_string());
-        // The census is the gate: it decides *whether* a placement happens at
-        // all and *which* block it writes. `block_entity_for_item` no longer
-        // makes that decision — it only supplies the live `BlockEntity` for
-        // the six items this crate ticks, and is consulted second.
-        let placed = held_item
-            .as_deref()
-            .and_then(|item| block_items::block_for_item(item).map(|block| (item, block)));
+    if is_air_or_fluid(&target_state) || doubling_slab {
         if let Some((item, block_name)) = placed {
             if let Some((entity_block, entity)) = block_entity_for_item(item) {
                 // The two sources must agree on the block name, or we would
@@ -3517,20 +3524,37 @@ where
                 );
                 block_entities.with(|registry| registry.insert(target, entity));
             }
-            // Issue #475. `placed_block_state` overrides the census's bare
-            // name with a `facing=`-bearing state for the redstone directional
-            // families and an `axis=` for pillars; everything else keeps the
-            // default state, which `resolve_state_id` now resolves faithfully.
-            let state =
-                placed_block_state(block_name, player_yaw, face).unwrap_or_else(|| block_name.to_string());
+            // `placed_block_state` applies the block's own
+            // `getStateForPlacement` convention (`crate::block_placement`);
+            // a block with no convention keeps the census's bare default
+            // state, which `resolve_state_id` resolves faithfully.
+            let ctx = crate::block_placement::PlaceContext {
+                target,
+                face,
+                cursor,
+                yaw: player_yaw,
+                pitch: player_pitch,
+            };
+            let (state, extra) =
+                match placed_block_state(block_name, &ctx, |p| source.block_state(p.x, p.y, p.z)) {
+                    Some(placed) => (placed.state, placed.extra),
+                    None => (block_name.to_string(), Vec::new()),
+                };
             source.set_block(target.x, target.y, target.z, &state);
+            // A door's upper half, a bed's head, a chest partner's re-typing:
+            // cells the placement owns but the client did not predict, so each
+            // needs its own `block_update` below.
+            for (p, s) in &extra {
+                source.set_block(p.x, p.y, p.z, s);
+                changed.push((*p, s.clone()));
+            }
             // Issue #465: placing a block is a mutation like any other, so it
             // owes its neighbours the same fan-out a random tick or a drained
             // scheduled tick already performs. Without this the redstone model
             // is correct but unreachable from any player action — dust placed
             // beside a powered line stays at `power=0` forever.
-            let scheduled;
-            (changed, scheduled) = propagate_placement(source, target);
+            let (mut fanout, scheduled) = propagate_placement(source, target);
+            changed.append(&mut fanout);
             // Issue #465: and the delayed half, which `propagate_placement`
             // structurally cannot host — the queue those land in belongs to the
             // world tick loop. Handed over unconditionally rather than only
@@ -4447,6 +4471,7 @@ where
         ServerBound::UseItemOn {
             pos,
             face,
+            cursor,
             sequence: _,
         } => {
             // Issue #249: one roll per right-click, whatever block was hit —
@@ -4461,15 +4486,17 @@ where
                 state,
                 pos,
                 face,
+                cursor,
                 // Issue #329. The player's position, for the bed reach test —
                 // `None` until a `PlayerMoved` packet carries one.
                 player_pos.as_ref().map(|&(x, y, z)| Vec3::new(x, y, z)),
                 respawn,
-                // Issue #475. The placing player's yaw, so
+                // Issue #475. The placing player's yaw and pitch, so
                 // `apply_use_item_on` can give directional blocks their
                 // placement facing. `None` until a packet carrying angles
                 // arrives — placement then uses the block's default state.
                 player_rot.map(|rotation| rotation.yaw),
+                player_rot.map(|rotation| rotation.pitch),
                 inventory,
                 block_entities,
                 next_window_id,
@@ -6607,57 +6634,53 @@ mod tests {
         assert_eq!(horizontal_look_direction(-450.0), Direction::East);
     }
 
-    /// `placed_block_state` gives the three redstone directional families a
-    /// yaw-derived facing and leaves every other block alone. The observer is
+    /// The three redstone families keep the full property set the signal model
+    /// reads, and everything else falls through to `crate::block_placement`
+    /// (whose own tests cover the per-block conventions). The observer is
     /// deliberately **not** inverted: `ObserverBlock.getStateForPlacement`
     /// applies `.getOpposite()` twice (`ObserverBlock.java:133-136`), so it
     /// watches in the player's look direction — unlike the diodes' single
     /// inversion (`DiodeBlock.java:155-158`), which makes them face the player.
     #[test]
     fn placed_block_state_faces_diodes_at_the_player_and_observers_with_the_player() {
+        let looking = |yaw: Option<f32>| crate::block_placement::PlaceContext {
+            target: BlockPos::new(0, 64, 0),
+            face: BlockFace::Up,
+            cursor: Vec3f {
+                x: 0.5,
+                y: 0.0,
+                z: 0.5,
+            },
+            yaw,
+            pitch: Some(0.0),
+        };
+        let air = |_: BlockPos| "minecraft:air".to_string();
+        let state = |block: &str, yaw: Option<f32>| {
+            placed_block_state(block, &looking(yaw), air).map(|placed| placed.state)
+        };
         // Looking north (yaw 180): a repeater and comparator face the player —
         // south — while an observer watches north.
         assert_eq!(
-            placed_block_state("minecraft:repeater", Some(180.0), BlockFace::Up),
+            state("minecraft:repeater", Some(180.0)),
             Some("minecraft:repeater[facing=south,delay=1,locked=false,powered=false]".to_string())
         );
         assert_eq!(
-            placed_block_state("minecraft:comparator", Some(180.0), BlockFace::Up),
+            state("minecraft:comparator", Some(180.0)),
             Some("minecraft:comparator[facing=south,mode=compare,powered=false,output=0]".to_string())
         );
         assert_eq!(
-            placed_block_state("minecraft:observer", Some(180.0), BlockFace::Up),
+            state("minecraft:observer", Some(180.0)),
             Some("minecraft:observer[facing=north,powered=false]".to_string())
         );
         // Looking east (yaw -90): a repeater faces west.
         assert_eq!(
-            placed_block_state("minecraft:repeater", Some(-90.0), BlockFace::Up),
+            state("minecraft:repeater", Some(-90.0)),
             Some("minecraft:repeater[facing=west,delay=1,locked=false,powered=false]".to_string())
         );
-        // Blocks without a yaw-derived orientation keep the bare census name.
-        assert_eq!(placed_block_state("minecraft:dirt", Some(0.0), BlockFace::Up), None);
+        // Blocks without any orientation keep the bare census name.
+        assert_eq!(state("minecraft:dirt", Some(0.0)), None);
         // And no yaw reported yet keeps the bare name for the directional
         // families too.
-        assert_eq!(placed_block_state("minecraft:repeater", None, BlockFace::Up), None);
-    }
-
-    /// A pillar takes its `axis` from the clicked face, not from yaw — and needs
-    /// no yaw at all (`RotatedPillarBlock.java:44`). Without this an oak log
-    /// placed against a wall stood upright.
-    #[test]
-    fn placed_pillars_take_their_axis_from_the_clicked_face() {
-        assert_eq!(
-            placed_block_state("minecraft:oak_log", None, BlockFace::North),
-            Some("minecraft:oak_log[axis=z]".to_string())
-        );
-        assert_eq!(
-            placed_block_state("minecraft:basalt", None, BlockFace::West),
-            Some("minecraft:basalt[axis=x]".to_string())
-        );
-        assert_eq!(
-            placed_block_state("minecraft:hay_block", None, BlockFace::Up),
-            Some("minecraft:hay_block[axis=y]".to_string())
-        );
-        assert!(!pillar_axis_block("minecraft:dirt"));
+        assert_eq!(state("minecraft:repeater", None), None);
     }
 }

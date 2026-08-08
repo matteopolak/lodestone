@@ -2181,6 +2181,11 @@ impl ServerProtocol for V770ServerProtocol {
                     Some(use_item) => ServerBound::UseItemOn {
                         pos: unpack_block_pos(use_item.pos),
                         face: face_from_ordinal(use_item.face),
+                        cursor: Vec3f {
+                            x: use_item.cursor_x,
+                            y: use_item.cursor_y,
+                            z: use_item.cursor_z,
+                        },
                         sequence: use_item.sequence,
                     },
                     None => ServerBound::Ignored,
@@ -3938,6 +3943,11 @@ mod block_edit_tests {
             ServerBound::UseItemOn {
                 pos: BlockPos::new(5, -10, -7),
                 face: BlockFace::South,
+                cursor: Vec3f {
+                    x: 0.5,
+                    y: 1.0,
+                    z: 0.5,
+                },
                 sequence: 7,
             }
         );

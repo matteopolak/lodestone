@@ -351,18 +351,20 @@ pub enum ServerBound {
     /// Right-click placement against a block face
     /// (`ServerboundUseItemOnPacket`).
     ///
-    /// Carries only what full-cube placement needs: the clicked block and
-    /// the face that was clicked determine the placement cell (see
-    /// `crate::server`'s handling). The packet's hand and cursor-position
-    /// fields are decoded off the wire by `ServerProtocol::decode` but not
-    /// threaded through here — this crate has no inventory model to pick an
-    /// item with, and no per-block placement rules (stairs/slabs/doors) that
-    /// would need a precise cursor hit; see `docs/block-edit.md`'s scope note.
+    /// The clicked block and face determine the placement cell (see
+    /// `crate::server`'s handling); `cursor` is vanilla's
+    /// `BlockHitResult.getLocation()` reduced to block-local coordinates, and
+    /// is what decides a stair/slab/trapdoor's `half`. The packet's hand is
+    /// still not threaded through — this crate always uses the main hand.
     UseItemOn {
         /// The block face the client clicked.
         pos: BlockPos,
         /// Which face of `pos` was clicked.
         face: BlockFace,
+        /// Block-local hit position within `pos`, each component `0.0`–`1.0`.
+        /// `crate::block_placement` reads its `y` for the upper/lower-half
+        /// decision every `Half`-bearing block makes.
+        cursor: Vec3f,
         /// Client block-prediction sequence number (see
         /// [`BlockAction::sequence`](Self::BlockAction) for why it is
         /// decoded but not yet acted on).
