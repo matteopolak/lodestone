@@ -967,6 +967,21 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // are borrowed out of it once per tick below.
     // #307.
     let mut random_ticks = RandomTickScheduler::new(RANDOM_TICK_POSITION_SEED, RANDOM_TICK_BEHAVIOR_SEED);
+    // `crate::fluid`'s per-dimension constants, resolved **lazily** on the first
+    // fluid tick rather than here.
+    //
+    // The vertical extent is the load-bearing field and it has to come from a
+    // real column, not from `FluidEnv::OVERWORLD`'s 26.2 literals: fluid spread
+    // reads the cell below whatever it looks at, so a fluid on the floor of the
+    // world asks for `min_y - 1`, and `ChunkColumn::block_state` panics there.
+    // Every test double in this crate is shorter than 384 rows.
+    //
+    // Lazy because #481's whole point is that a `world.column()` call before the
+    // background seeding task has run costs a full generation on this thread. A
+    // world with no fluid ticks never pays for this at all, and one that has them
+    // pays a single column clone — the same cost the block drain above already
+    // pays *per due tick*.
+    let mut fluid_env: Option<crate::fluid::FluidEnv> = None;
     let (tick_cx_range, tick_cz_range) = tick_area;
     // Issues #221/#222: the natural-spawn driver. Long-lived rather than built
     // per tick because it owns the per-column light cache — see
@@ -1267,11 +1282,22 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // for the measurement, and note that `has_scheduled` is consulted here
         // for the same reason `propagate_and_react` consults it: two placements
         // in one inter-tick window must not double-schedule one position.
+        //
+        // Issue: fluid spread rides the **fluid** queue, not the block one, so
+        // this loop routes on `kind`. `BlockTickFeed` carries one relative-delay
+        // stream because it is one channel from the connection tasks; the split
+        // has to happen somewhere, and here is where both queues are in scope.
+        // `crate::fluid::TICK_FLUID` is the only kind that goes left.
         for pending in block_tick_out.drain_scheduled_ticks() {
-            if block_ticks.has_scheduled(pending.pos, &pending.kind) {
+            let queue = if pending.kind == crate::fluid::TICK_FLUID {
+                &mut *fluid_ticks
+            } else {
+                &mut *block_ticks
+            };
+            if queue.has_scheduled(pending.pos, &pending.kind) {
                 continue;
             }
-            block_ticks.schedule(
+            queue.schedule(
                 pending.pos,
                 pending.kind,
                 game_tick + pending.trigger_tick,
@@ -1371,8 +1397,45 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 }
             }
         }
-        for _due in fluid_ticks.drain_due(game_tick, MAX_SCHEDULED_TICKS_PER_TICK) {
-            // Same acknowledgement as above, for fluid ticks.
+        // Fluid spread — `crate::fluid`, the port of `FlowingFluid.tick`. This
+        // loop was an empty acknowledgement until that module landed; it is now
+        // the only thing that makes a placed or exposed liquid actually move.
+        //
+        // Unlike the block drain above, this runs against `world` in **world
+        // coordinates** rather than against one `ChunkColumn`: fluid spread
+        // crosses chunk borders (a source three cells from a border reaches four
+        // cells past it), and a column-bounded reaction would stop dead at the
+        // seam. `ChunkSource::block_state`/`set_block` already take world
+        // coordinates and already reflect prior edits, so no neighbourhood
+        // assembly is needed here.
+        //
+        // The reschedules `run_scheduled_tick` makes land in `fluid_ticks` while
+        // it is being drained, which `drain_due`'s collect-then-run split keeps
+        // out of this same pass — so a flow advances one cell per delay period
+        // rather than resolving the whole pool inside one tick.
+        let mut fluid_changes: Vec<(BlockPos, String)> = Vec::new();
+        for due in fluid_ticks.drain_due(game_tick, MAX_SCHEDULED_TICKS_PER_TICK) {
+            let (x, y, z) = due.pos;
+            let env = *fluid_env.get_or_insert_with(|| {
+                let probe = world.column(x.div_euclid(16), z.div_euclid(16));
+                crate::fluid::FluidEnv::overworld_in(probe.min_y, probe.height)
+            });
+            fluid_changes.clear();
+            crate::fluid::run_scheduled_tick(
+                &*world,
+                env,
+                BlockPos::new(x, y, z),
+                fluid_ticks,
+                game_tick,
+                &mut fluid_changes,
+            );
+            // `run_scheduled_tick` has already written every one of these through
+            // `world` (it reads the world back as it spreads, exactly as
+            // vanilla's immediate `setBlock` does), so this loop only forwards
+            // them to connected clients.
+            for (pos, state) in fluid_changes.drain(..) {
+                block_tick_out.publish(pos.x, pos.y, pos.z, state);
+            }
         }
 
         // #307, after both scheduled-tick queues (`ServerChunkCache.java:403`
