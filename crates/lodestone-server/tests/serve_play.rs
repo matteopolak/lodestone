@@ -68,6 +68,8 @@ const FORGET_LEVEL_CHUNK_S2C: i32 = 45;
 const AIR_SUPPLY_S2C: i32 = 46;
 const SET_HEALTH_S2C: i32 = 47;
 const CHANGE_DIFFICULTY_C2S: i32 = 48;
+/// Issue #336's refusal, so the disconnect reason is readable from the client side.
+const DISCONNECT_S2C: i32 = 90;
 const CHANGE_DIFFICULTY_S2C: i32 = 49;
 // Issue #270's four newly-connected packets (creative-slot writes reuse
 // #266's existing `PlayerInventory`/`apply_menu_slot_change` path and so need
@@ -353,6 +355,17 @@ impl ServerProtocol for FakeProtocol {
         w.i64(id);
         ServerDirective::Send {
             packet_id: KEEP_ALIVE_S2C,
+            payload: w.as_slice().to_vec(),
+        }
+    }
+
+    /// Issue #336: the login refusal has to reach the wire for its reason to be
+    /// assertable at all. The stand-in's own id, like every other here.
+    fn encode_disconnect(&self, _state: State, reason: &lodestone_model::Text) -> ServerDirective {
+        let mut w = Writer::default();
+        w.string(&reason.to_plain_string());
+        ServerDirective::Send {
+            packet_id: DISCONNECT_S2C,
             payload: w.as_slice().to_vec(),
         }
     }
@@ -3156,3 +3169,105 @@ async fn a_drop_outside_the_pickup_volume_is_not_collected() {
     let _ = server.await.expect("server task panicked");
 }
 
+
+/// **Issue #336: a banned uuid is refused at login**, before `login_success`, with
+/// vanilla's own translation key on the wire — and the identical connection is
+/// admitted once the ban is lifted.
+///
+/// The lifted-ban arm is the control: without it, a test that only asserts the
+/// refusal cannot tell "the ban was enforced" from "this fixture never joins".
+#[tokio::test]
+async fn a_banned_uuid_is_refused_at_login_and_admitted_once_pardoned() {
+    use lodestone_server::access::{AccessHandle, BanEntry};
+
+    // `FakeProtocol` decodes every login as `Uuid::nil()`, so that is the identity
+    // to ban.
+    let access = AccessHandle::default();
+    access.with(|lists| {
+        lists.ban(
+            Uuid::nil(),
+            BanEntry::permanent("tester", "gate", "no reason at all"),
+        );
+    });
+
+    let (client_end, server_end) = memory_pair();
+    let mut client = Connection::new(client_end);
+    let serving = {
+        let access = access.clone();
+        tokio::spawn(async move {
+            let mut conn = Connection::new(server_end);
+            lodestone_server::serve_connection_with_access(
+                &mut conn,
+                &FakeProtocol,
+                &AirSource,
+                &NoEntities,
+                0,
+                &access,
+                None,
+            )
+            .await
+        })
+    };
+
+    client.write_packet(HANDSHAKE, &[2]).await.expect("hs");
+    let mut w = Writer::default();
+    w.string("tester");
+    client
+        .write_packet(LOGIN_START, w.as_slice())
+        .await
+        .expect("login start");
+
+    let (id, payload) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(
+        id, DISCONNECT_S2C,
+        "a banned uuid must be disconnected, not sent login_success"
+    );
+    let mut r = Reader::new(&payload);
+    let reason = r.string(256).expect("reason");
+    assert!(
+        reason.starts_with("multiplayer.disconnect.banned.reason"),
+        "the refusal must carry vanilla's own translation key; got {reason:?}"
+    );
+    assert!(reason.contains("no reason at all"), "and the ban's reason: {reason:?}");
+
+    let outcome = serving.await.expect("server task panicked");
+    assert!(
+        matches!(outcome, Err(ServerError::AccessDenied(_))),
+        "the refusal must be reported as AccessDenied; got {outcome:?}"
+    );
+
+    // Control: pardon and the same sequence joins.
+    access.with(|lists| assert!(lists.pardon(Uuid::nil())));
+    let (client_end, server_end) = memory_pair();
+    let mut client = Connection::new(client_end);
+    let serving = {
+        let access = access.clone();
+        tokio::spawn(async move {
+            let mut conn = Connection::new(server_end);
+            lodestone_server::serve_connection_with_access(
+                &mut conn,
+                &FakeProtocol,
+                &AirSource,
+                &NoEntities,
+                0,
+                &access,
+                None,
+            )
+            .await
+        })
+    };
+    client.write_packet(HANDSHAKE, &[2]).await.expect("hs");
+    let mut w = Writer::default();
+    w.string("tester");
+    client
+        .write_packet(LOGIN_START, w.as_slice())
+        .await
+        .expect("login start");
+    let (id, _payload) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(
+        id, LOGIN_SUCCESS,
+        "a pardoned uuid must reach login_success"
+    );
+    drop(client);
+    let _ = serving.await.expect("server task panicked");
+}

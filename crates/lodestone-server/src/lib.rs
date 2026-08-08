@@ -99,6 +99,11 @@
 //!
 //! [`Transport`]: lodestone_net::Transport
 
+/// Server access control (issue #336): ops, whitelist, player bans and IP bans in
+/// vanilla's own four JSON files, enforced at join. Native only — a browser world
+/// has no filesystem and no remote players.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod access;
 mod advancements;
 mod block_breaking;
 mod block_entities;
@@ -224,6 +229,8 @@ mod world_spawn;
 pub mod world_state;
 mod worldgen_data;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use access::{AccessHandle, AccessLists, BanEntry, JoinRefusal, OpEntry, WhitelistEntry};
 pub use advancements::{
     Advancement, AdvancementError, AdvancementManager, AdvancementProgress, AdvancementProgressUpdate,
     AdvancementUpdate, GrantOutcome, PlayerAdvancementState, PlayerProgress, PlayerStatistics, StatKey,
@@ -316,6 +323,8 @@ pub use server::{
     serve_connection_with_commands, serve_connection_with_mob_events,
     serve_connection_with_plugin_channels, serve_connection_with_resource_pack,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use server::serve_connection_with_access;
 pub use tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 pub use weather::{WeatherEvent, WeatherFeed, WeatherState};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};

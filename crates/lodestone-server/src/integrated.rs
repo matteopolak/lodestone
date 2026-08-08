@@ -344,6 +344,15 @@ pub struct LanConfig {
     pub resource_packs: crate::server::ResourcePackPushFeed,
     /// The wire-level plugin-channel registry (#335).
     pub plugin_channels: crate::plugin_channels::PluginChannelRegistry,
+    /// Ops, whitelist and the two ban lists this host enforces at join (#336).
+    ///
+    /// The `Default` is empty: nobody is banned, nobody is an operator and the
+    /// whitelist is off — which is what `bind` has always done, so no existing
+    /// caller changes behaviour. A host that wants real access control loads the
+    /// four JSON files with `AccessHandle::load(world_dir)` and passes the result;
+    /// the same handle is shared by every accepted connection, so an op granted on
+    /// one is an op on the next.
+    pub access: crate::access::AccessHandle,
 }
 
 /// How to announce a LAN world on vanilla's discovery multicast group.
@@ -1219,6 +1228,7 @@ impl IntegratedServer {
             commands,
             resource_packs,
             plugin_channels,
+            access,
         } = config;
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr().ok();
@@ -1390,6 +1400,9 @@ impl IntegratedServer {
         let conn_commands = commands;
         let conn_resource_packs = resource_packs;
         let conn_plugin_channels = plugin_channels;
+        // Issue #336: moved into the accept loop like the three above it, and
+        // cloned per socket below.
+        let conn_access = access;
         // Issue #438: **one** registry for every connection this listener
         // accepts, created out here for the same reason the tick loop above is
         // spawned out here. A registry per connection would make each player
@@ -1487,7 +1500,9 @@ impl IntegratedServer {
                         }
                     }
                     accepted = listener.accept() => {
-                        let Ok((socket, _peer)) = accepted else { break };
+                        let Ok((socket, peer)) = accepted else { break };
+                        // Issue #336: the address the IP ban list is matched on.
+                        let peer_ip = Some(peer.ip());
                         let protocol = protocol.clone();
                         let source = source.clone();
                         let block_entities = block_entities.clone();
@@ -1497,6 +1512,10 @@ impl IntegratedServer {
                         let plugin_channels = conn_plugin_channels.clone();
                         // One clone per accepted socket, all naming the same store.
                         let world_state = lan_world_state.clone();
+                        // Issue #336: one clone per accepted socket, all naming
+                        // the same lists — an op granted by one connection is an
+                        // op for the next.
+                        let access = conn_access.clone();
                         // Issue #438: the mob source and the shared player
                         // registry, composed. `PlayerAwareSource::snapshots`
                         // still returns only the mobs — the players travel
@@ -1557,6 +1576,7 @@ impl IntegratedServer {
                                 &block_entities, &mobs,
                                 &conn_block_ticks, &conn_explosions,
                                 &commands, &resource_packs, &plugin_channels, &world_state,
+                                &access, peer_ip,
                             )
                             .await;
                             // Lets the relay arm above drop this connection's

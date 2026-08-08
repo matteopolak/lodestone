@@ -943,6 +943,15 @@ pub enum ServerError {
     /// sent a login-phase disconnect explaining so (issue #279).
     #[error("login rejected: invalid username")]
     InvalidUsername,
+    /// The client was refused by the access lists (issue #336) — banned, IP
+    /// banned, not whitelisted, or the server was full — and was sent a
+    /// login-phase disconnect carrying vanilla's own translation key.
+    ///
+    /// Native-only in practice: `crate::access` is `cfg`-gated off on `wasm32`,
+    /// where there is no filesystem to hold the lists and no remote player to
+    /// refuse.
+    #[error("login rejected: {0}")]
+    AccessDenied(String),
 }
 
 async fn apply<T: Transport>(
@@ -1150,6 +1159,11 @@ where
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
+        // Issue #336: the inert default — admits everybody, ops nobody.
+        #[cfg(not(target_arch = "wasm32"))]
+        &crate::access::AccessHandle::default(),
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
     )
     .await
 }
@@ -1215,6 +1229,69 @@ where
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
+        // Issue #336: the inert default — admits everybody, ops nobody.
+        #[cfg(not(target_arch = "wasm32"))]
+        &crate::access::AccessHandle::default(),
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
+    )
+    .await
+}
+
+/// [`serve_connection`], plus the host's access lists and this connection's
+/// remote address (issue #336).
+///
+/// Added *beside* [`serve_connection`] rather than by widening it, for the reason
+/// every wrapper in this file exists: `crates/protocol/v770/tests/*` call the
+/// narrow ones directly. The production LAN path goes through
+/// [`serve_connection_with_mob_events_and_commands_shared`], which carries the
+/// same two arguments; this exists so the enforcement is drivable from outside the
+/// crate — an access check nothing can call from a test is exactly the island the
+/// repo rules are about.
+///
+/// # Errors
+///
+/// As [`serve_connection`], plus [`ServerError::AccessDenied`] when the lists
+/// refuse the login.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_connection_with_access<T, P, S, E>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    entities: &E,
+    view_radius: i32,
+    access: &crate::access::AccessHandle,
+    peer_ip: Option<std::net::IpAddr>,
+) -> Result<ServeSummary, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + 'static,
+    E: EntitySource,
+{
+    let world = &crate::world_state::WorldStateHandle::default();
+    serve_connection_inner(
+        conn,
+        proto,
+        SourceRef::Borrowed(source),
+        entities,
+        view_radius,
+        view_radius,
+        &BlockEntityHandle::default(),
+        &MobHandle::default(),
+        &BlockTickFeed::default(),
+        &ExplosionFeed::default(),
+        &WeatherFeed::default(),
+        &SleepVote::default(),
+        &SleepFeed::default(),
+        &CommandDispatch::none(),
+        &BorderFeed::default(),
+        &ResourcePackPushFeed::default(),
+        &PluginChannelRegistry::default(),
+        world,
+        access,
+        peer_ip,
     )
     .await
 }
@@ -1260,6 +1337,12 @@ pub(crate) async fn serve_connection_with_mob_events_and_commands_shared<T, P, S
     // Issues #327/#328/#323: the world's shared scalars, the *same* handle
     // `run_tick_loop` ticks. See `serve_connection_inner`'s parameter comment.
     world: &crate::world_state::WorldStateHandle,
+    // Issue #336. The host's ops/whitelist/ban lists, shared by every accepted
+    // connection, plus this connection's own remote address for the IP ban list.
+    // Parameters here and nowhere else for the same reason the three above are:
+    // `open_to_lan` is the one caller that can carry a configured one.
+    access: &crate::access::AccessHandle,
+    peer_ip: Option<std::net::IpAddr>,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1290,6 +1373,8 @@ where
         resource_packs,
         plugin_channels,
         world,
+        access,
+        peer_ip,
     )
     .await
 }
@@ -1350,6 +1435,11 @@ where
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
+        // Issue #336: the inert default — admits everybody, ops nobody.
+        #[cfg(not(target_arch = "wasm32"))]
+        &crate::access::AccessHandle::default(),
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
     )
     .await
 }
@@ -1427,6 +1517,11 @@ where
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
+        // Issue #336: the inert default — admits everybody, ops nobody.
+        #[cfg(not(target_arch = "wasm32"))]
+        &crate::access::AccessHandle::default(),
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
     )
     .await
 }
@@ -1495,6 +1590,11 @@ where
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
+        // Issue #336: the inert default — admits everybody, ops nobody.
+        #[cfg(not(target_arch = "wasm32"))]
+        &crate::access::AccessHandle::default(),
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
     )
     .await
 }
@@ -1563,6 +1663,11 @@ where
         resource_packs,
         &PluginChannelRegistry::default(),
         world,
+        // Issue #336: the inert default — admits everybody, ops nobody.
+        #[cfg(not(target_arch = "wasm32"))]
+        &crate::access::AccessHandle::default(),
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
     )
     .await
 }
@@ -1631,6 +1736,11 @@ where
         &ResourcePackPushFeed::default(),
         plugin_channels,
         world,
+        // Issue #336: the inert default — admits everybody, ops nobody.
+        #[cfg(not(target_arch = "wasm32"))]
+        &crate::access::AccessHandle::default(),
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
     )
     .await
 }
@@ -1724,6 +1834,17 @@ async fn serve_connection_inner<T, P, S, E>(
     // sharing is the whole point: a per-connection store is the bug both #327 and
     // #328 were reported for.
     world: &crate::world_state::WorldStateHandle,
+    // Issue #336. Ops, whitelist and the two ban lists, consulted once at
+    // `LoginStart`. Same compatibility shape as every feed above: each
+    // pre-existing entry point passes a fresh, empty `AccessHandle::default()`,
+    // which admits everybody and makes nobody an operator — the singleplayer
+    // shape, and the one that cannot lock a player out of their own world. A
+    // *host* opts in through `LanConfig::access`.
+    #[cfg(not(target_arch = "wasm32"))] access: &crate::access::AccessHandle,
+    // The remote address this connection came from, for the IP ban list. `None`
+    // for an in-memory duplex, which has no address — and an IP ban therefore
+    // cannot apply to singleplayer, which is correct rather than a gap.
+    #[cfg(not(target_arch = "wasm32"))] peer_ip: Option<std::net::IpAddr>,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1814,6 +1935,21 @@ where
                     let directive = proto.encode_disconnect(state, &invalid_username_reason());
                     apply(conn, &mut state, directive).await?;
                     return Err(ServerError::InvalidUsername);
+                }
+                // Issue #336: vanilla `PlayerList.canPlayerLogin`, at vanilla's
+                // own point in the sequence — after the name check, before
+                // `login_success`, so a refused player never reaches
+                // Configuration. `online` is 0 because this crate has no
+                // cross-connection player registry to count from; the player
+                // *limit* is therefore inert while the ban and whitelist checks
+                // are live, which is the honest split rather than a fabricated
+                // count.
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Err(refusal) = access.may_join(uuid, peer_ip, 0) {
+                    let reason = Text::literal(refusal.message());
+                    let directive = proto.encode_disconnect(state, &reason);
+                    apply(conn, &mut state, directive).await?;
+                    return Err(ServerError::AccessDenied(refusal.message()));
                 }
                 username = Some(name.clone());
                 login_uuid = Some(uuid);

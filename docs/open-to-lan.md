@@ -138,6 +138,15 @@ losing containers again with nothing failing.
 `integrated.rs`'s `a_persistent_source_hands_its_registries_through_the_chunk_store_wrap`
 asserts the join, since playing cannot reveal it.
 
+### Access control is a `LanConfig` field
+
+`LanConfig::access` carries the host's ops/whitelist/ban lists (issue #336,
+[`server-access-control.md`](./server-access-control.md)). The accept loop shares one
+`AccessHandle` across every connection and hands each one its own `peer_addr().ip()` for the IP ban
+list, so an op granted on one connection is an op on the next and a banned address is refused before
+it reaches Configuration. The `Default` is empty — admits everybody, ops nobody — which is exactly
+what `bind` has always done.
+
 ### Teardown uses `drop`, not `shutdown().await`
 
 `shutdown().await` joins the accept loop, which parks in `accept()` where the shutdown notify
