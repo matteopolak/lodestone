@@ -187,3 +187,180 @@ None. Everything is data:
   through.
 * `crate::dense_grid::DenseBlockGrid` — the write target, and the thing that
   clips a piece to a chunk.
+
+---
+
+## Jigsaw assembly (phase S4)
+
+S4 is built on top of everything above; it adds no new *placement* concept, only a
+way of choosing which templates go where. Three modules:
+
+| file | role |
+|---|---|
+| `structure/pool.rs` | `worldgen/template_pool/*.json` (188) and `worldgen/processor_list/*.json` (40) → `TemplatePool`s of `PoolElement`s |
+| `structure/jigsaw.rs` | `JigsawPlacement.addPieces` + its `Placer`: the BFS, the free-space accumulator, `canAttach` |
+| `structure/mod.rs` | `StructureKind::Jigsaw`, the `Stub` that carries a half-consumed RNG across the biome filter |
+
+**What places blocks:** `village_plains`, `village_desert`, `village_savanna`,
+`village_snowy`, `village_taiga`, `pillager_outpost`, `ancient_city`.
+
+### The prerequisite: block NBT had to be retained
+
+`StructureTemplate::parse` used to drop each block's `nbt` compound — correct for
+an ordinary block, and what vanilla's own placement loop does. But a **jigsaw
+block's entire configuration lives in that compound**: `name`, `target`, `pool`,
+`final_state`, `joint`, `placement_priority`, `selection_priority`. So S4's real
+first commit was `TemplateBlock::nbt: Option<Arc<BlockNbt>>` plus
+`StructureTemplate::filter_blocks`, which is vanilla's
+`filterBlocks(position, settings, block, absolute = true)`.
+
+`groundLevelDelta` was expected to be in there too and **is not**: in 26.2
+`StructurePoolElement.getGroundLevelDelta()` is a constant `1` and nothing
+overrides it. Older versions read a `bottom` data marker; the handoff note into S4
+repeated that, and it is wrong for this version.
+
+### RNG draw order is the whole specification
+
+Assembly is a long stream out of one `WorldgenRandom` seeded
+`setLargeFeatureSeed(seed, cx, cz)`. The nesting is where mistakes hide:
+
+```text
+start_height.sample(random)                      0 draws for `absolute`, 1 for `uniform`
+Rotation.getRandom(random)                       1
+startPool.getRandomTemplate(random)              1
+                        <- biome filter runs here, on the centre piece's centre ->
+per source jigsaw (shuffled: n-1 draws):
+    targetPool.getShuffledTemplates(random)      size-1 draws, over the WEIGHT-EXPANDED list
+    fallback.getShuffledTemplates(random)        size-1
+    per candidate element:
+        Rotation.getShuffled(random)             3
+        per rotation:
+            element.getShuffledJigsawBlocks(...) m-1
+```
+
+Two traps worth naming:
+
+* **The element list is weight-expanded before the shuffle.**
+  `village/plains/town_centers` has weights `50,50,50,50,1,1,1,1`, so its expanded
+  list is **204** entries and one shuffle draws **203** times. Shuffling the 8 raw
+  entries draws 7 and desynchronises everything after it.
+* **`Util.shuffle` walks downward** (`for (int i = size; i > 1; i--)`). An upward
+  Fisher–Yates consumes the same *number* of draws and produces a different
+  permutation, which is the most plausible-looking way to be wrong here.
+
+The biome filter sits *between* the centre draws and the BFS, which is why
+`StructureKind::find_stub` returns a `Stub` that owns the half-consumed random
+rather than a bare position: re-seeding across the filter would restart the stream.
+Every other structure kind draws nothing in `findGenerationPoint`, so for them a
+fresh stream in `generate_pieces` is exactly vanilla — that is why the `Stub` enum
+has a `Plain` variant carrying only a position.
+
+### Free space is exact, not approximate
+
+Vanilla keeps free space in a `VoxelShape` and asks
+`joinIsNotEmpty(free, AABB.of(targetBox).deflate(0.25), ONLY_SECOND)`. Every
+operation it performs on that shape is "subtract an axis-aligned box", so the shape
+is always `positive \ (b₁ ∪ b₂ ∪ …)`, and
+
+```text
+target ⊆ free   ⟺   target ⊆ positive  ∧  ∀i. target ∩ bᵢ = ∅
+```
+
+which is what `jigsaw::FreeSpace` evaluates, in `f64`, with the `deflate(0.25)`
+kept. This is the *same set*, not a simplification that happens to work on
+villages. The deflation is what makes two boxes sharing a face non-colliding; over
+integer boxes it changes no answer, but keeping it keeps the expression vanilla's.
+
+The accumulator is an **arena of shapes indexed by a `PieceState`**, because
+vanilla's `MutableObject<VoxelShape>` is *shared and mutated* between sibling
+states — cloning one per state would let two siblings occupy the same space. A
+child whose target jigsaw lands *inside* the source piece's own box gets a
+separate, lazily created shape (`sourceFree`), one per `tryPlacingChildren` call.
+
+### Where assembly happens, and the two deviations that follow
+
+Vanilla assembles lazily in `getPiecesBuilder()` and fixes piece Y in
+`postProcess`, mutating a shared `StructureStart`. Assembly here is **eager, at
+start time**, for the reason S2 recorded above: per-chunk memoised generation would
+otherwise shear a village along a chunk border. Jigsaw assembly is a
+whole-structure computation anyway, so this costs almost nothing — but two
+consequences are real and both are on the ledger:
+
+* **`GravityProcessor` reads a pre-beard column.** A `terrain_matching` element
+  (village streets, farms) carries
+  `GravityProcessor(WORLD_SURFACE_WG, -1)` from its projection, which vanilla
+  evaluates against the decorating chunk's own heightmap — i.e. *after* the
+  beardifier flattened it. Here the heights are sampled once per piece over its
+  footprint at start time (`processor::ColumnHeights`) from a fresh `_WG` noise
+  column. Chunk-independent by construction, which is the point; slightly
+  different from vanilla on a slope.
+* **Step order.** Every structure this engine places is written at the end of
+  `pre_ore`, vanilla's `surface_structures` slot. Villages and outposts are
+  `surface_structures`, so they are exact. `ancient_city` is
+  `underground_decoration` (step 7, *after* ores), so ores can overwrite it here.
+
+### Processors S4 added
+
+`JigsawReplacementProcessor` (a jigsaw block becomes its own `final_state`, or is
+dropped when that is `structure_void`), `GravityProcessor`,
+`ProtectedBlockProcessor`, `BlockRotProcessor`'s `rottable_blocks` narrowing, and
+`RuleProcessor`'s `location_predicate` — which reads the **world** state at the
+target. That last one is why `StructureTemplate::place` is now two passes: vanilla's
+`processBlockInfos` runs the whole chain over the whole block list before
+`placeInWorld` writes anything, so a village street's bridge rule (`dirt_path` over
+`water` → `oak_planks`) sees the pre-structure world and never an earlier block of
+its own template.
+
+`ProcessorList` parsing **refuses rather than defaults**. A rule with a real
+`position_predicate` is not treated as `always_true`, because
+`PosAlwaysTrueTest` draws nothing and `AxisAlignedLinearPosTest` draws one float:
+defaulting would shift every later rule's roll and produce a structure that is
+quietly wrong instead of loudly absent. The refusal demotes the structure and the
+ledger names the `predicate_type`.
+
+### Vanilla's own dangling template reference
+
+`AncientCityStructurePools.java:113` names
+`ancient_city/walls/intact_horizontal_wall_stairs_5`, and only `_1`..`_4` ship in
+`.cache/mc/26.2/src/data/minecraft/structure/`. Vanilla tolerates this:
+`StructureTemplateManager.getOrCreate` logs, caches an **empty** template (zero
+size, no palette, no blocks), and the element stays in its pool — offered by the
+shuffle, consuming its draws, never attaching. `StructureTemplate::empty()` does
+the same, and the id is reported under a `dangling:` ledger key.
+
+The distinction that keeps this from swallowing a real bundling gap: a resolver
+serving **no** templates at all still hard-fails and demotes the structure, which
+is the S2 island `lodestone-server`'s own
+`no_structure_is_demoted_for_unloadable_templates` gate detects. Only a *single*
+missing template in an otherwise complete bundle is treated as vanilla's dangling
+reference.
+
+### What S4 does not do, all on the ledger
+
+| ledger key | gap |
+|---|---|
+| `minecraft:trail_ruins` | its processor lists use `capped` |
+| `minecraft:trial_chambers` | `pool_aliases` (a `random_group` binding redirects a pool per instance) |
+| `minecraft:bastion_remnant` | `high_rampart`'s `axis_aligned_linear_pos` position predicate |
+| `pool:feature_pool_element` | participates in the joint graph and the free-space accumulator (so the village around it is vanilla's) but places no blocks |
+| `nbt:jigsaw_pool_element` | a persisted jigsaw child carries `Template`, not vanilla's `pool_element` compound |
+| `jigsaw:step_order` | see above |
+| `jigsaw:gravity_reads_a_pre_beard_column` | see above |
+| `dangling:<template>` | see above |
+
+### Evidence
+
+`crates/lodestone-worldgen/tests/structure_jigsaw.rs`, seven arms. The *where*
+comes from outside the repo: the two `village_plains` chunks are read out of the
+vanilla-authored survival oracle world's `structures.starts` NBT
+(`tests/support/structure_starts_survival.txt`, seed −195764831).
+
+| arm | asserts |
+|---|---|
+| `the_jigsaw_structures_s4_models_are_not_on_the_ledger` | six structures **absent** from the ledger and four gaps **present** with the right reason; `town_centers` expands to `4×50 + 4` |
+| `a_village_start_assembles_many_pieces_with_junctions` | > 5 pieces, junctions ≥ pieces, box wider than one chunk, both projections present |
+| `a_village_chunk_gains_village_blocks_a_structureless_chunk_does_not` | > 200 village blocks over the covered chunks, **0** in the structure-free control, and **0** surviving jigsaw blocks |
+| `the_beardifier_is_non_empty_inside_a_village` | S3 fires: a non-empty beard with a rigid box inside the village, empty everywhere in the control |
+| `assembly_is_reproducible_across_generators` | two independently built generators produce identical piece lists — a real question, since `PoolStore` is a `HashMap` |
+| `a_pillager_outpost_assembles_and_carries_a_list_element` | the only `list_pool_element` path, i.e. `extra_placements` |
+| `an_ancient_city_assembles_underground` | the `start_jigsaw_name` anchor and the *absent* `project_start_to_heightmap`: the box must sit below y = 0 |

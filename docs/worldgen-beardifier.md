@@ -99,29 +99,41 @@ box. One product, two consumers, no second chance to disagree about reach.
 
 ## What actually adapts today
 
-**Nothing, in a generated world** — and that is a phase-order fact, not a defect.
-All seven adaptation-bearing kinds are jigsaw (S4) or coded (S5):
+**Villages, `pillager_outpost` and `ancient_city` — since S4 landed jigsaw
+assembly.** Until then this section read "nothing, in a generated world", which was
+a phase-order fact rather than a defect; it is now stale in the direction that
+matters, so here is the current table.
 
-| structure | adaptation | why it does not adapt yet |
+| structure | adaptation | adapts? |
 |---|---|---|
-| `village_{plains,desert,savanna,snowy,taiga}` | `beard_thin` | jigsaw (S4) |
-| `pillager_outpost` | `beard_thin` | jigsaw (S4) |
-| `ancient_city` | `beard_box` | jigsaw (S4) |
-| `trail_ruins` | `bury` | jigsaw (S4) |
-| `trial_chambers` | `encapsulate` | jigsaw (S4) |
-| `stronghold` | `bury` | coded (S5) |
-| `nether_fossil` | `beard_thin` | coded (S5), and Nether-only |
+| `village_{plains,desert,savanna,snowy,taiga}` | `beard_thin` | **yes** (S4) |
+| `pillager_outpost` | `beard_thin` | **yes** (S4) |
+| `ancient_city` | `beard_box` | **yes** (S4) |
+| `trail_ruins` | `bury` | no — jigsaw, but its `capped` processor is ledgered |
+| `trial_chambers` | `encapsulate` | no — jigsaw, but `pool_aliases` is ledgered |
+| `stronghold` | `bury` | no — coded pieces (S5) |
+| `nether_fossil` | `beard_thin` | no — coded pieces (S5), and Nether-only |
 
-So `StructureRefs::adaptation_bearing` is empty for every chunk, `fill_stage`
-takes its no-beard branch, and the world is byte-identical to pre-S3. The moment
-S4 lands villages, this engine starts flattening under them with no further work
-— which is the point of landing S3 first rather than bundling it into S4.
+So `StructureRefs::adaptation_bearing` is **no longer empty**: a chunk within 12
+blocks of any village piece yields a real rigid list plus junctions, and
+`fill_stage` takes its per-block branch there. Consequently **the generated world is
+no longer byte-identical to pre-S3 around a village**, which is exactly what S3 was
+built for — the 45-column/5-seed byte-identity dump that was S3's negative control
+is only a valid *control* for a column with no adaptation-bearing start in reach.
 
-`PieceBeard` is the seam S4 fills: `rigid` (a `terrain_matching` element
-contributes no rigid box, only junctions — bearding one would flatten a village's
-roads), `ground_level_delta` from the template's marker, and `junctions`. A coded
-piece leaves it `None`, which is vanilla's own `else` branch: rigid box,
-`groundLevelDelta` 0, no junctions.
+`PieceBeard` is the seam S4 fills, and it now really is filled by
+`jigsaw::Placer::into_pieces`: `rigid` (a `terrain_matching` element contributes no
+rigid box, only junctions — bearding one would flatten a village's roads),
+`ground_level_delta`, and `junctions`. A coded piece leaves it `None`, which is
+vanilla's own `else` branch: rigid box, `groundLevelDelta` 0, no junctions.
+
+**One correction to what this doc used to say about `ground_level_delta`:** it is
+*not* read from a template marker. In 26.2 `StructurePoolElement.getGroundLevelDelta`
+returns a **constant 1** and nothing overrides it; older versions read a `bottom`
+data marker, and the S3→S4 handoff note repeated that. The value a piece carries is
+`1` for the centre and for every `terrain_matching` child, and
+`sourceGroundLevelDelta - deltaY` for a rigid child — computed by
+`JigsawPlacement`, not read from NBT.
 
 ## Evidence
 
