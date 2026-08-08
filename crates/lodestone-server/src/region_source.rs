@@ -816,6 +816,15 @@ struct LoadedChunk {
 }
 
 impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
+    /// The one implementor that answers `Some`: this source *is* the world on
+    /// disk, so these are the registries whose contents a save writes.
+    fn world_registries(&self) -> Option<crate::chunk::WorldRegistries> {
+        Some(crate::chunk::WorldRegistries {
+            block_entities: self.block_entities(),
+            scheduled: self.scheduled_ticks(),
+        })
+    }
+
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         {
             let edits = self.state.edits.lock().expect("world edit lock poisoned");

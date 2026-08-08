@@ -824,6 +824,13 @@ impl<S: ChunkSource> ChunkStore<S> {
 }
 
 impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
+    /// Forwarded, not answered: a cache owns no registries of its own, and a
+    /// constructor that wraps before asking would otherwise see `None` and build
+    /// a private pair the save path cannot read.
+    fn world_registries(&self) -> Option<crate::chunk::WorldRegistries> {
+        self.source.world_registries()
+    }
+
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         // `Some` means retention is off (the negative-control configuration) —
         // the column was just generated and there is nothing to read it from.

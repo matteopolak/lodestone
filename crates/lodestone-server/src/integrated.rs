@@ -1259,7 +1259,19 @@ impl IntegratedServer {
         // `MobHandle::default`'s own doc comment) rather than a
         // special-cased no-op path, and the tick loop ticks whatever is
         // there.
-        let block_entities = BlockEntityHandle::default();
+        //
+        // **Taken from the source when the source has a world on disk.** A
+        // `default()` here compiles, ticks correctly and loses every chest a LAN
+        // guest fills, because the save path reads the *source's* registry — the
+        // same island #468 closed for singleplayer, which survived here only
+        // because this constructor is generic over `S` and could not name
+        // `RegionChunkSource::block_entities`. `ChunkSource::world_registries`
+        // is that name; `ChunkStore` forwards it, so the wrap above is
+        // transparent.
+        let registries = source.world_registries();
+        let block_entities = registries
+            .as_ref()
+            .map_or_else(BlockEntityHandle::default, |r| r.block_entities.clone());
         let mobs = MobHandle::default();
 
         // Issue #439: LAN worlds had **no world tick at all**. `run_tick_loop`
@@ -1316,6 +1328,9 @@ impl IntegratedServer {
         let tick_block_entities = block_entities.clone();
         let tick_block_ticks = hub_block_ticks.clone();
         let tick_explosions = hub_explosions.clone();
+        let tick_scheduled = registries
+            .as_ref()
+            .map_or_else(Default::default, |r| r.scheduled.clone());
         // Issues #327/#328/#323: one store for the LAN world, so a rule a LAN
         // player sets is the rule the tick loop reads and the clock the loop
         // advances is the clock every connection broadcasts. `bind` used to give
@@ -1356,10 +1371,11 @@ impl IntegratedServer {
                 // Issue #325: LAN stays sleep-free, matching the wrapper.
                 &crate::sleep::SleepVote::new(),
                 &crate::sleep::SleepFeed::default(),
-                // Issue #468: LAN has no world on disk (`save: None` below), so
-                // there is nothing to persist these into — a fresh handle, which
-                // makes the queues behave exactly as the locals they replaced.
-                crate::region_source::ScheduledTickHandle::default(),
+                // Issue #468: the source's own queues when it has a world on
+                // disk, so a repeater delay or a fluid tick set while hosting
+                // survives a restart; a fresh handle only for a truly in-memory
+                // source, where there is nothing to persist into.
+                tick_scheduled,
                 tick_world_state,
             )
             .await;
@@ -2064,6 +2080,49 @@ mod tests {
         // where `shutdown` *joins* the accept loop and the tick loop, and this
         // gate has no reason to wait out a tick.
         drop(server);
+    }
+
+    /// **An open-to-LAN host must tick the world's *own* registries, not private
+    /// ones.** Silent data loss: `open_to_lan` built a
+    /// `BlockEntityHandle::default()`, so every chest filled while hosting was
+    /// ticked correctly, sent correctly, and never written — the save path reads
+    /// the source's registry, not the server's.
+    ///
+    /// The join is `ChunkSource::world_registries` surviving the `ChunkStore`
+    /// wrap the constructor puts in front of the source, which is the part that
+    /// cannot be seen by playing.
+    #[test]
+    fn a_persistent_source_hands_its_registries_through_the_chunk_store_wrap() {
+        let dir = std::env::temp_dir().join("lodestone-lan-registries-k4m9");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch world dir");
+
+        let calls = Arc::new(Mutex::new(HashMap::new()));
+        let region = crate::region_source::RegionChunkSource::new(
+            CountingSource::new(&calls),
+            &dir,
+            -64,
+            384,
+        )
+        .expect("open world");
+        let world_side = region.block_entities();
+
+        // Exactly what `open_to_lan` does to the source before asking.
+        let wrapped = ChunkStore::for_view_radius(region, 2);
+        let registries = wrapped
+            .world_registries()
+            .expect("a world on disk must report its registries through the cache wrap");
+
+        let pos = lodestone_model::BlockPos::new(3, 70, 5);
+        registries
+            .block_entities
+            .with(|reg| reg.insert(pos, crate::block_entities::BlockEntity::Hopper(crate::hopper::Hopper::new())));
+        assert!(
+            world_side.with(|reg| reg.get(pos).is_some()),
+            "the registry the LAN tick loop mutates must be the one the save path reads"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The tick area, in the order the seeding task asks for it.
