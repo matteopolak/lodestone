@@ -19,6 +19,14 @@ pub struct NormalNoise {
 }
 
 impl NormalNoise {
+    /// Appends a complete, bit-exact description of this noise to `out` — see
+    /// [`crate::noise::ImprovedNoise::write_signature`] for the contract.
+    pub fn write_signature(&self, out: &mut Vec<u64>) {
+        self.first.write_signature(out);
+        self.second.write_signature(out);
+        out.push(self.value_factor.to_bits());
+    }
+
     /// Builds from `(first_octave, amplitudes)` — the `NoiseParameters` shape
     /// used by every named noise in the router.
     pub fn create<R: RandomSource>(random: &mut R, first_octave: i32, amplitudes: &[f64]) -> Self {

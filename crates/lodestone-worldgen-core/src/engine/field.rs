@@ -236,7 +236,7 @@ impl<'a> Field<'a> {
             // interpolation). That is a real vanilla semantic — see
             // `super::graph`'s module doc — and it is why these hold an
             // untouched `Density` subtree rather than compiled nodes.
-            OpKind::Spline | OpKind::Blended | OpKind::FindTopSurface => {
+            OpKind::Spline | OpKind::Blended | OpKind::FindTopSurface | OpKind::EndIslands => {
                 self.graph.leaf(op.a).compute(Context::new(x, y, z))
             }
         }

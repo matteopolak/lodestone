@@ -23,6 +23,23 @@ pub struct BlendedNoise {
 }
 
 impl BlendedNoise {
+    /// Appends a complete, bit-exact description of this noise to `out` — see
+    /// [`crate::noise::ImprovedNoise::write_signature`] for the contract.
+    pub fn write_signature(&self, out: &mut Vec<u64>) {
+        self.min_limit_noise.write_signature(out);
+        self.max_limit_noise.write_signature(out);
+        self.main_noise.write_signature(out);
+        for v in [
+            self.xz_multiplier,
+            self.y_multiplier,
+            self.xz_factor,
+            self.y_factor,
+            self.smear_scale_multiplier,
+        ] {
+            out.push(v.to_bits());
+        }
+    }
+
     /// Builds from a freshly-seeded source (the `withNewRandom` path), consuming
     /// the min, max, then main noise stacks in order.
     pub fn new<R: RandomSource>(

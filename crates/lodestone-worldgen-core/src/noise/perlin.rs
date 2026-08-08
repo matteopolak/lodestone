@@ -26,6 +26,30 @@ pub struct PerlinNoise {
 }
 
 impl PerlinNoise {
+    /// Appends a complete, bit-exact description of this stack to `out` — see
+    /// [`ImprovedNoise::write_signature`] for the contract and the two traps.
+    ///
+    /// Lengths are written before their contents so that no two differently
+    /// shaped stacks can produce the same word sequence by concatenation
+    /// (`[a] ++ [b, c]` against `[a, b] ++ [c]`), and a `None` octave writes a
+    /// discriminant word so an absent level cannot alias a present one.
+    pub fn write_signature(&self, out: &mut Vec<u64>) {
+        out.push(self.noise_levels.len() as u64);
+        for level in &self.noise_levels {
+            match level {
+                Some(n) => {
+                    out.push(1);
+                    n.write_signature(out);
+                }
+                None => out.push(0),
+            }
+        }
+        out.push(self.amplitudes.len() as u64);
+        out.extend(self.amplitudes.iter().map(|a| a.to_bits()));
+        out.push(self.lowest_freq_value_factor.to_bits());
+        out.push(self.lowest_freq_input_factor.to_bits());
+    }
+
     /// Builds from an explicit `(first_octave, amplitudes)` pair — the
     /// `NormalNoise.NoiseParameters` shape. Uses new-style positional seeding.
     pub fn create<R: RandomSource>(random: &mut R, first_octave: i32, amplitudes: &[f64]) -> Self {

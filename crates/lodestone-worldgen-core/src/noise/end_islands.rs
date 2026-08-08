@@ -91,6 +91,17 @@ impl EndIslandNoise {
         }
     }
 
+    /// Appends a complete, bit-exact description of this noise to `out` — see
+    /// [`crate::noise::ImprovedNoise::write_signature`] for the contract.
+    ///
+    /// Needed because `engine::graph`'s node-sharing pass keys its leaf table on
+    /// this: the End's `erosion` channel and `end/sloped_cheese.json` both reach
+    /// `end_islands`, so without a signature the two occurrences compile to two
+    /// leaves holding two copies of the same 256-byte permutation.
+    pub fn write_signature(&self, out: &mut Vec<u64>) {
+        self.island_noise.write_signature(out);
+    }
+
     /// `getHeightValue(islandNoise, sectionX, sectionZ)` — the raw height in
     /// `[-100, 80]`, before `compute`'s offset and scale.
     ///
