@@ -699,11 +699,17 @@ mod tests {
     /// restated, because it is private to that module. Only ever compared against
     /// as an upper bound, so a stale value here weakens the gate rather than
     /// breaking it; re-read `overworld/mod.rs` before trusting it.
-    const WALK_RETENTION: usize = 512;
+    const WALK_RETENTION: usize = 2048;
 
-    /// `overworld::COLUMN_CLOSURE_RADIUS`, restated for the same reason. The 5×5
-    /// pin every `column()` call opens.
-    const WALK_CLOSURE_RADIUS: i32 = 2;
+    /// `overworld::STRUCTURE_CLOSURE_RADIUS`, restated for the same reason. The
+    /// 21×21 pin every `column()` call opens.
+    ///
+    /// **This was 2 and it had to move.** Issue #514 put a `structure_refs` walk
+    /// (`REFS_RADIUS` = 8) upstream of `pre_ore`, so the real pin is `2 + 8`. A
+    /// model at radius 2 is not a cheaper version of production's shape — it is a
+    /// 59-entry-per-column shape where production is 1,243, and every number below
+    /// is derived from it (DESIGN.md §12.118).
+    const WALK_CLOSURE_RADIUS: i32 = 10;
 
     /// View radius the walk gate slides: 8 gives a 17×17 = 289-column view, the
     /// same render distance `STORE_RETENTION` was sized against.
@@ -712,11 +718,12 @@ mod tests {
     /// Chunk steps the walk gate slides the view.
     ///
     /// **Derived from the leak's own slope, not picked.** A `+x` step exposes a
-    /// leading strip of `2R + 1` columns whose pins add `2R + 1 + 4` = 21 entries
-    /// at `R = 8`, so an unreclaimed store reaches `441 + 21 · steps`. 100 steps
-    /// puts that at 2,541 — ~5× the ceiling, and far enough past it that the
-    /// bounded assertion cannot pass by accident of a short walk.
-    const WALK_STEPS: i32 = 100;
+    /// leading strip of `2R + 1` columns whose pins add `2(R + closure) + 1` = 37
+    /// entries at `R = 8`, `closure = 10`, so an unreclaimed store reaches
+    /// `1,369 + 37 · steps`. 240 steps puts that at 10,249 — over 4× the ceiling
+    /// of 2,489, which is the separation the magnitude assertion below needs and
+    /// which that assertion now checks as a premise rather than assuming.
+    const WALK_STEPS: i32 = 240;
 
     /// One `OverworldGenerator::column` call's store traffic, in its real shape.
     ///
@@ -753,8 +760,8 @@ mod tests {
     ///
     /// | hypothesis | predicted final `len()` |
     /// |---|---|
-    /// | reclamation reaches the `open_view` path | ≤ 512 + 25 (a pass's peak overshoot is one view's box) |
-    /// | it does not (the shipped defect) | 441 + 21 × 100 = **2,541** |
+    /// | reclamation reaches the `open_view` path | ≤ 2,048 + 441 (a pass's peak overshoot is one view's box) |
+    /// | it does not (the shipped defect) | 1,369 + 37 × 240 = **10,249** |
     ///
     /// The measurement has to land on the first and be nowhere near the second.
     #[test]
@@ -770,16 +777,17 @@ mod tests {
         }
         let join_len = store.len();
 
-        // The closure of a 17×17 view is 21×21 = 441, and this is the number the
-        // real instrument measured in a live session. Asserting it here is what
-        // says this hermetic model reproduces production's geometry rather than
-        // some cheaper shape that could not leak in the first place — and it is
-        // under the ceiling, so it holds on both arms.
+        // The closure of a 17×17 view is 37×37 = 1,369 (it was 21×21 = 441 before
+        // issue #514 widened the pin). Asserting it here is what says this hermetic
+        // model reproduces production's geometry rather than some cheaper shape
+        // that could not leak in the first place — and it is under the ceiling, so
+        // it holds on both arms.
         assert_eq!(
             join_len,
             (2 * (r + WALK_CLOSURE_RADIUS) + 1).pow(2) as usize,
-            "the join view's closure is not the 441 entries production reaches, so this \
-             gate is not modelling `column()`"
+            "the join view's closure is not the {} entries production reaches, so this \
+             gate is not modelling `column()`",
+            (2 * (r + WALK_CLOSURE_RADIUS) + 1).pow(2)
         );
 
         // A curve, not a point: the claim is about shape, so every sample is
@@ -802,6 +810,17 @@ mod tests {
             .map(|(step, len, evicted)| format!("step={step} len={len} evicted={evicted}"))
             .collect::<Vec<_>>()
             .join("; ");
+
+        // **Premise of the magnitude assertion at the end**, checked rather than
+        // assumed: the walk has to be long enough that the two hypotheses are far
+        // apart. At radius 2 this held for free; at radius 10 the ceiling is 4.7×
+        // larger and `WALK_STEPS` had to move with it.
+        assert!(
+            unreclaimed >= 4 * ceiling,
+            "the walk is too short for the two hypotheses to be distinguishable: \
+             unreclaimed {unreclaimed} is not 4x the ceiling {ceiling}. Raise \
+             WALK_STEPS."
+        );
 
         for &(step, len, _) in &curve {
             assert!(
@@ -836,14 +855,24 @@ mod tests {
     /// stage-computation counter equal to `chunks x stages` exactly.
     #[test]
     fn nothing_is_evicted_below_the_retention_ceiling() {
-        let store: StagedStore<Stages> = StagedStore::new(512);
-        // The pre-ore closure of a 17x17 join burst: 21x21 = 441 chunks.
-        for cx in -2..19 {
-            for cz in -2..19 {
+        let store: StagedStore<Stages> = StagedStore::new(WALK_RETENTION);
+        // The full closure of a 17x17 join burst: 37x37 = 1,369 chunks, since
+        // `column()`'s pin is `COLUMN_CLOSURE_RADIUS + REFS_RADIUS` = 10 deep.
+        // This used to read 21x21 = 441 against a 512 ceiling; both numbers moved
+        // together, and the point of the test is that the second still exceeds the
+        // first.
+        for cx in -10..27 {
+            for cz in -10..27 {
                 store.entry((cx, cz)).a.get_or_compute(|_| {}, || 1);
             }
         }
-        assert_eq!(store.len(), 441);
+        assert_eq!(store.len(), 1369);
+        assert!(
+            WALK_RETENTION > 1369,
+            "the retention ceiling {WALK_RETENTION} no longer exceeds the D4 burst \
+             closure of 1,369, so the assertion below would be trivially false rather \
+             than a property of the store"
+        );
         assert_eq!(store.evicted(), 0, "the D4 burst closure must not evict");
     }
 }

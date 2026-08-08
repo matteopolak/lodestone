@@ -103,6 +103,24 @@ fn build_profile() -> &'static str {
 /// `bytes` entirely). Read the run, not the grep.
 const ABSOLUTE_TIME_UNITS: &[&str] = &["ns", "us", "µs", "ms", "s"];
 
+/// Units measuring **work the process actually performed**, which the counters
+/// themselves add to.
+///
+/// `instructions` (and `cycles`, listed ahead of need) belong here and **not**
+/// with the structural counts above, and the distinction is the whole point:
+/// `allocs`, `calls` and `draws` count events in the pipeline, and the counter
+/// hooks add none of those. Retired instructions count *every* instruction the
+/// process executed, and a `bump` is `fetch_add` plus a thread-local read at
+/// hundreds of thousands of sites per column — so an instruction count from a
+/// `gen-counters` build is inflated by the instrument, in the same way and for a
+/// stronger reason than a timing is.
+///
+/// This mattered immediately: `i_ss_median_instructions_per_column` was added in
+/// a unit whose whole method was running with counters on, and without this list
+/// its first recorded value would have been a counters-build number that
+/// `bench-compare` would later ratio against clean runs forever.
+const WORK_PERFORMED_UNITS: &[&str] = &["instructions", "cycles"];
+
 /// Whether recording `unit` while the structural counters are compiled in would
 /// write a number that is not comparable to anything.
 ///
@@ -111,8 +129,13 @@ const ABSOLUTE_TIME_UNITS: &[&str] = &["ns", "us", "µs", "ms", "s"];
 /// drive had to rediscover from memory; encoding it here makes it structural
 /// instead. Split out as a pure function of its inputs so the rule can be read
 /// and checked without running a bench.
+///
+/// Covers both [`ABSOLUTE_TIME_UNITS`] and [`WORK_PERFORMED_UNITS`]; the function
+/// keeps its name because "timing" is what every caller is protecting, and an
+/// instruction count is a timing that happens to be reproducible.
 pub fn timing_is_poisoned_by_counters(unit: &str, counters_enabled: bool) -> bool {
-    counters_enabled && ABSOLUTE_TIME_UNITS.contains(&unit)
+    counters_enabled
+        && (ABSOLUTE_TIME_UNITS.contains(&unit) || WORK_PERFORMED_UNITS.contains(&unit))
 }
 
 /// One recorded measurement: a named metric (e.g. `"column_us_median"`), a

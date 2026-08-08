@@ -103,11 +103,21 @@ pub enum Stage {
     Vegetation = 7,
     TopLayer = 8,
     Intern = 9,
-    Other = 10,
+    /// Issue #514's structure stages (`structure_starts`, `structure_place`).
+    ///
+    /// **Not one of "the ten stages"** and deliberately has no `StageTimes`
+    /// field: it runs *above* `pre_ore` (starts/refs) and *inside* it (placement),
+    /// so it does not fit the flat per-column timing table. It exists because the
+    /// allocation binning in `benches/generation.rs` reads [`current_stage`], and
+    /// before this variant every structure allocation landed in [`Stage::Other`]
+    /// alongside generator construction — which is exactly the bin an
+    /// attribution cannot act on.
+    Structure = 10,
+    Other = 11,
 }
 
 /// Number of [`Stage`] variants, including [`Stage::Other`].
-pub const STAGE_COUNT: usize = 11;
+pub const STAGE_COUNT: usize = 12;
 
 /// [`Stage`] names in discriminant order — the same strings `StageTimes`'
 /// fields use, so a counter table and a timing table can be joined by name.
@@ -122,6 +132,7 @@ pub const STAGE_NAMES: [&str; STAGE_COUNT] = [
     "vegetation",
     "top_layer",
     "intern",
+    "structure",
     "other",
 ];
 
@@ -143,7 +154,10 @@ pub const MAX_TRACKED_SLOTS: usize = 64;
 /// impls. Widening a bucket array is therefore an edit here too.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
-    /// `AquiferSystem::block_at` calls. Exactly `256 * height` per chunk fill.
+    /// `AquiferSystem::block_at` calls. Exactly `256 * height` per chunk fill —
+    /// **plus** [`Self::structure_probe_block_at`], which is a second consumer
+    /// with no per-chunk shape at all. Never divide this by the fill count without
+    /// subtracting that term first.
     pub block_at: u64,
     /// `NoiseChunkSampler::eval` entries, indexed by
     /// [`Density::kind_index`](crate::density::Density::kind_index) — the
@@ -274,6 +288,34 @@ pub struct Snapshot {
     /// regression into per-block string resolution visible. Expected to fall
     /// toward zero as Unit 8 ports the vegetation engine off strings.
     pub state_name_lookups: u64,
+    /// Chunks whose `structure_starts` really ran (bumped inside the store slot's
+    /// once-guard, so a cache hit does not count).
+    ///
+    /// This is the closure-size counter for issue #514's stage 0a, and it is the
+    /// one that explains why a cold column touches far more chunks than the 5×5
+    /// pre-ore closure: `pre_ore` reads `structure_refs`, which walks
+    /// `REFS_RADIUS` = 8 chunks in every direction.
+    pub structure_starts_computed: u64,
+    /// `StartContext::first_occupied_height` calls — structure placement asking
+    /// for a heightmap value on a chunk whose terrain does not exist yet.
+    pub structure_height_probes: u64,
+    /// [`Self::block_at`] calls issued *by* those probes.
+    ///
+    /// The reason this counter exists: `block_at` used to be exactly
+    /// `256 × height` per chunk fill, and `benches/generation.rs`'s calibration
+    /// asserted that. Structure starts added a second, data-dependent consumer,
+    /// so the calibration is now the identity
+    /// `block_at == fill cells + structure_probe_block_at` — which keeps the
+    /// per-fill figure pinned instead of absorbing the new term into a literal.
+    pub structure_probe_block_at: u64,
+    /// `AquiferSystem`s built *for* those probes, rather than for a chunk fill.
+    ///
+    /// Same job as [`Self::structure_probe_block_at`], one level up:
+    /// `stage_entered[Aquifer]` used to equal the pre-ore closure size exactly,
+    /// and a structure probe needs a real aquifer for a chunk whose terrain may
+    /// never be generated. Counted so that assertion can stay an exact
+    /// decomposition.
+    pub structure_aquifers_built: u64,
 }
 
 impl Default for Snapshot {
@@ -303,6 +345,10 @@ impl Default for Snapshot {
             string_allocs: 0,
             state_intern_new: 0,
             state_name_lookups: 0,
+            structure_starts_computed: 0,
+            structure_height_probes: 0,
+            structure_probe_block_at: 0,
+            structure_aquifers_built: 0,
         }
     }
 }
@@ -375,6 +421,10 @@ mod imp {
         string_allocs: AtomicU64,
         state_intern_new: AtomicU64,
         state_name_lookups: AtomicU64,
+        structure_starts_computed: AtomicU64,
+        structure_height_probes: AtomicU64,
+        structure_probe_block_at: AtomicU64,
+        structure_aquifers_built: AtomicU64,
     }
 
     static C: Counters = Counters {
@@ -402,6 +452,10 @@ mod imp {
         string_allocs: AtomicU64::new(0),
         state_intern_new: AtomicU64::new(0),
         state_name_lookups: AtomicU64::new(0),
+        structure_starts_computed: AtomicU64::new(0),
+        structure_height_probes: AtomicU64::new(0),
+        structure_probe_block_at: AtomicU64::new(0),
+        structure_aquifers_built: AtomicU64::new(0),
     };
 
     thread_local! {
@@ -542,6 +596,27 @@ mod imp {
         bump_by(&C.state_name_lookups, 1);
     }
 
+    /// One chunk's `structure_starts` really ran (call from inside the once-guard).
+    #[inline]
+    pub fn bump_structure_start() {
+        bump(&C.structure_starts_computed);
+    }
+
+    /// One `first_occupied_height` probe finished, having issued `queries`
+    /// `block_at` calls. Bumped once per probe rather than once per query so the
+    /// per-probe scan depth is recoverable as a ratio.
+    #[inline]
+    pub fn bump_structure_height_probe(queries: u64) {
+        bump(&C.structure_height_probes);
+        bump_by(&C.structure_probe_block_at, queries);
+    }
+
+    /// One `AquiferSystem` was built for a structure probe rather than a fill.
+    #[inline]
+    pub fn bump_structure_aquifer() {
+        bump(&C.structure_aquifers_built);
+    }
+
     /// Enters `stage` on this thread; the previous tag is restored on drop.
     #[derive(Debug)]
     pub struct StageGuard(Stage);
@@ -596,6 +671,10 @@ mod imp {
         C.string_allocs.store(0, Relaxed);
         C.state_intern_new.store(0, Relaxed);
         C.state_name_lookups.store(0, Relaxed);
+        C.structure_starts_computed.store(0, Relaxed);
+        C.structure_height_probes.store(0, Relaxed);
+        C.structure_probe_block_at.store(0, Relaxed);
+        C.structure_aquifers_built.store(0, Relaxed);
     }
 
     pub fn snapshot() -> Snapshot {
@@ -626,6 +705,10 @@ mod imp {
             string_allocs: C.string_allocs.load(Relaxed),
             state_intern_new: C.state_intern_new.load(Relaxed),
             state_name_lookups: C.state_name_lookups.load(Relaxed),
+            structure_starts_computed: C.structure_starts_computed.load(Relaxed),
+            structure_height_probes: C.structure_height_probes.load(Relaxed),
+            structure_probe_block_at: C.structure_probe_block_at.load(Relaxed),
+            structure_aquifers_built: C.structure_aquifers_built.load(Relaxed),
         }
     }
 }
@@ -679,6 +762,12 @@ mod imp {
     pub fn bump_state_intern_new() {}
     #[inline(always)]
     pub fn bump_state_name_lookup() {}
+    #[inline(always)]
+    pub fn bump_structure_start() {}
+    #[inline(always)]
+    pub fn bump_structure_height_probe(_queries: u64) {}
+    #[inline(always)]
+    pub fn bump_structure_aquifer() {}
 
     /// Zero-sized in the default build: `StageGuard::enter` compiles to nothing.
     #[derive(Debug)]
@@ -706,7 +795,8 @@ pub use imp::{
     bump_density_point_compute, bump_noise_corner_batch, bump_palette_intern_hit,
     bump_palette_intern_new, bump_post_ore,
     bump_pre_ore, bump_rng_draw, bump_slot_hit, bump_slot_miss, bump_state_intern_new,
-    bump_state_name_lookup, bump_stitch_cells, bump_string_allocs, current_stage, reset, snapshot,
+    bump_state_name_lookup, bump_stitch_cells, bump_string_allocs, bump_structure_aquifer,
+    bump_structure_height_probe, bump_structure_start, current_stage, reset, snapshot,
 };
 
 /// Whether this build has counters compiled in.

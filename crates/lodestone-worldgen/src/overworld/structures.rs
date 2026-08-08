@@ -140,6 +140,10 @@ impl StartSampler<'_> {
         if let Some(existing) = self.aquifers.borrow().get(&(cx, cz)) {
             return Arc::clone(existing);
         }
+        // Counted separately from the fill path's aquifers: `build_aquifer` bumps
+        // `stage_entered[Aquifer]`, which the calibration bench predicts as the
+        // pre-ore closure size, and this one is not part of that closure.
+        crate::counters::bump_structure_aquifer();
         let built = Arc::new(self.generator.build_aquifer(cx, cz));
         self.aquifers
             .borrow_mut()
@@ -167,17 +171,28 @@ impl StartContext for StartSampler<'_> {
         let generator = self.generator;
         let aquifer = self.aquifer(x >> 4, z >> 4);
         let min_y = generator.min_y();
+        // `queries` is the scan depth, reported to the counters once at the end
+        // rather than per iteration. It is what makes `block_at` predictable
+        // again: this probe is the *second* consumer of `AquiferSystem::block_at`
+        // (the first is `fill_stage`'s one-per-cell loop), it is data-dependent,
+        // and `benches/generation.rs`'s calibration decomposes the total into the
+        // two terms rather than asserting a literal that quietly absorbed this
+        // one. See `counters::Snapshot::structure_probe_block_at`.
+        let mut queries = 0u64;
         for ly in (0..generator.height()).rev() {
             let y = min_y + ly;
+            queries += 1;
             let kind = aquifer.block_at(x, y, z);
             let matched = match heightmap {
                 HeightmapKind::WorldSurfaceWg => kind != BlockKind::Air,
                 HeightmapKind::OceanFloorWg => kind == BlockKind::Stone,
             };
             if matched {
+                crate::counters::bump_structure_height_probe(queries);
                 return y;
             }
         }
+        crate::counters::bump_structure_height_probe(queries);
         min_y - 1
     }
 
@@ -201,6 +216,13 @@ impl OverworldGenerator {
             .entry((cx, cz))
             .structure_starts
             .get_or_compute(drop, || {
+                // Inside the once-guard, so this counts chunks whose starts
+                // really ran — a cache hit adds nothing. Tagged `Structure` so
+                // the bench's allocation binning attributes this work to
+                // something narrower than `Other` (which also holds generator
+                // construction).
+                let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Structure);
+                crate::counters::bump_structure_start();
                 let Some(registry) = &self.structures else {
                     return Vec::new();
                 };
@@ -259,7 +281,10 @@ impl OverworldGenerator {
     /// answer, which is complete today even where the pieces are not.
     #[must_use]
     pub fn structure_starts(&self, cx: i32, cz: i32) -> Vec<Arc<StructureStart>> {
-        let _view = self.store.open_view((cx, cz), super::COLUMN_CLOSURE_RADIUS);
+        // Radius 0: computing a chunk's own starts reads no other store slot (that
+        // is what keeps stage 0a the topmost stage), so there is nothing wider to
+        // pin. `column()`'s pin is the wide one — see `STRUCTURE_CLOSURE_RADIUS`.
+        let _view = self.store.open_view((cx, cz), 0);
         self.structure_starts_stage(cx, cz)
             .iter()
             .filter(|start| start.pieces_complete)
@@ -280,7 +305,7 @@ impl OverworldGenerator {
         cx: i32,
         cz: i32,
     ) -> Vec<Arc<StructureStart>> {
-        let _view = self.store.open_view((cx, cz), super::COLUMN_CLOSURE_RADIUS);
+        let _view = self.store.open_view((cx, cz), 0);
         self.structure_starts_stage(cx, cz).to_vec()
     }
 
@@ -289,7 +314,9 @@ impl OverworldGenerator {
     /// intersection test.
     #[must_use]
     pub fn structure_references(&self, cx: i32, cz: i32) -> std::collections::BTreeMap<String, Vec<i64>> {
-        let _view = self.store.open_view((cx, cz), super::COLUMN_CLOSURE_RADIUS);
+        // `REFS_RADIUS`, not the wider column closure: this reads `structure_refs`
+        // for one chunk, whose own walk is exactly the 17×17.
+        let _view = self.store.open_view((cx, cz), REFS_RADIUS);
         let refs = self.structure_refs_stage(cx, cz);
         let (bx, bz) = (cx * 16, cz * 16);
         let mut narrowed = StructureRefs::default();
@@ -340,6 +367,9 @@ impl OverworldGenerator {
         if self.structures.is_none() {
             return world;
         }
+        // Below the early return, per this file's own rule about stage guards:
+        // a guard above it would count a fixture-tree no-op as a run.
+        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Structure);
         let (bx, bz) = (cx * 16, cz * 16);
         for (_, _, start) in &self.structure_refs_stage(cx, cz).entries {
             if !start.pieces_complete {
