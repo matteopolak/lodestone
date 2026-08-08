@@ -136,6 +136,17 @@ pub enum Origin {
     /// [`Origin::Settings`]`(`[`super::options::Placement::Footer`]`)`
     /// directly, same as [`Origin::Telemetry`].
     Packs(super::packs::PacksPlacement),
+    /// A leaf of the confirmation screen's centred block (issue #540), resolved
+    /// by [`super::confirm::placement_anchor`].
+    ///
+    /// A data-carrying variant rather than a fixed offset from [`Origin::Centre`]
+    /// for the reason that makes this screen safe at all: the "a second click
+    /// where Delete was cannot press Yes" property is a statement about two
+    /// **arranged** rects, and a restated offset could be right while the drawn
+    /// rect was not. `ConfirmScreen.repositionElements` arranges the tree and then
+    /// `centerInRectangle`s it (`ConfirmScreen.java:59-62`), so the canvas is an
+    /// input and the tree has to be run.
+    Confirm(super::confirm::ConfirmPlacement),
     /// The command block edit screen's Done/Cancel row (issue #47):
     /// `(floor(w/2), floor(h/4) + 132)` —
     /// `AbstractCommandBlockEditScreen.java:71,74`'s
@@ -170,6 +181,54 @@ pub enum Origin {
 }
 
 impl Origin {
+    /// Whether a widget at this origin is a **row of a scrolling list**, and must
+    /// therefore be clipped to that list's band.
+    ///
+    /// ## Why this predicate exists
+    ///
+    /// Because it did not, and a player reported the symptom (2026-08-07): *"the
+    /// settings menu is weird — some text overlaps, is in the wrong place"*. This
+    /// pipeline has no GPU scissor, so `draw` clips on the CPU
+    /// ([`Quads::with_clip`]) — and it did so for the three screens whose rows are
+    /// **list entries** (`MenuRow::entry`/`account`/`world`) and for
+    /// [`MenuFrame::list_labels`], but *not* for a row that reaches the draw as a
+    /// slotted widget. Every settings-tree list is that shape: an `OptionsList`
+    /// control row is a `MenuRow` with a [`Slot`], so it went down `draw_widget`'s
+    /// unclipped path and a row scrolled past the band's bottom painted straight
+    /// over the footer's Done button.
+    ///
+    /// Note the module doc of `super::options` said the opposite — "this menu
+    /// pipeline has no scissor, so a row that overran the band would paint over
+    /// the footer" was written as the *reason* the window had to be conservative,
+    /// and it stayed true only until #445 gave the pipeline `with_clip`. That is
+    /// `CLAUDE.md`'s staleness class: the claim was measured and correct when
+    /// written, and nothing about it looked out of date.
+    ///
+    /// ## What is in the set, and what is not
+    ///
+    /// Exactly the list-row variants of the five data-carrying origins whose
+    /// screens declare a [`widget::ListSpec`]. A footer button, a title, a search
+    /// field and `OptionsScreen`'s own arranged grid are **not** list rows: they
+    /// live outside the band by construction, and clipping them to it would erase
+    /// them. That asymmetry is why this is a predicate on the placement rather than
+    /// "clip every slotted row on a screen that has a list".
+    ///
+    /// [`Origin::Packs`] and [`Origin::Telemetry`] are absent because neither
+    /// screen returns a spec from `MenuNav::active_list` — they do not scroll at
+    /// all, so there is no band to clip to. Adding one is the point at which its
+    /// row variant joins this list.
+    #[must_use]
+    pub fn is_scrolling_list_row(self) -> bool {
+        use super::options::Placement;
+        match self {
+            Origin::Settings(Placement::ListCell { .. } | Placement::ListHeader { .. }) => true,
+            Origin::KeyBinds(_) => true,
+            Origin::Language(super::language::LanguagePlacement::Row { .. }) => true,
+            Origin::Social(_) => true,
+            _ => false,
+        }
+    }
+
     /// The anchor point in logical pixels for a canvas of `width`×`height`.
     #[must_use]
     pub fn anchor(self, width: f32, height: f32) -> (f32, f32) {
@@ -208,6 +267,9 @@ impl Origin {
                 super::telemetry::placement_anchor(placement, width, height)
             }
             Origin::Packs(placement) => super::packs::placement_anchor(placement, width, height),
+            Origin::Confirm(placement) => {
+                super::confirm::placement_anchor(placement, width, height)
+            }
             Origin::CommandBlockFooter => {
                 ((width * 0.5).floor(), (height / 4.0).floor() + 132.0)
             }
