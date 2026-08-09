@@ -2315,6 +2315,7 @@ dependencies = [
  "lodestone-world",
  "parking_lot",
  "uuid",
+ "web-time",
 ]
 
 [[package]]
@@ -2370,6 +2371,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "web-time",
 ]
 
 [[package]]
@@ -2377,6 +2379,7 @@ name = "lodestone-particle"
 version = "0.1.0"
 dependencies = [
  "lodestone-physics",
+ "web-time",
 ]
 
 [[package]]
@@ -2434,6 +2437,7 @@ dependencies = [
  "tracing",
  "uuid",
  "wasm-bindgen-futures",
+ "web-time",
 ]
 
 [[package]]
@@ -2548,6 +2552,7 @@ dependencies = [
  "lodestone-core",
  "lodestone-worldgen-core",
  "serde_json",
+ "web-time",
 ]
 
 [[package]]
