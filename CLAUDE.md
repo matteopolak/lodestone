@@ -351,6 +351,12 @@ lerps the **player toward the item**. So for any packet, assert against a byte s
 decodes, and choose **pairwise-distinct** field values (`11, 1, 4`, never `1, 1, 4`) so a transposition cannot
 survive. A field's value being distinct from its neighbours' is part of the fixture's job.
 
+**Two adjacent `bool`s are the worst case of this, not an exception to it.** They coincide half the time by
+chance, so a fixture that happens to set them equal cannot see a transposition *at all* — and unlike a numeric
+field there is no "obviously wrong" value to notice downstream. Measured while formatting two debug toggles
+into one `format!`: setting them deliberately **different** is what makes the arm able to fail. Applies to any
+adjacent same-typed pair in one expression, not just on a wire.
+
 **And the transposition can come from the record itself: a packet's declaration order is not its wire order.**
 `ClientboundSetExperiencePacket` is constructed at its `doTick` call site as `(progress, total, level)` and
 declares its fields in that same order — but its `write` emits progress, **level**, total. Transcribing the
