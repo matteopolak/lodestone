@@ -722,9 +722,9 @@ impl WindowApp {
         self.sim.stats.occlusion_walks = stats.occlusion_walks;
         self.sim.stats.frame_ms = frame_ms;
         self.sim.stats.fps = self.fps_ema;
-        // Issue #411: `ServerDifficulty` reached a real, tested ECS fold but
-        // nothing in the shell read it — this is that last hop, onto the F3
-        // debug overlay's own `DIFFICULTY` line (`hud.rs`'s `DebugStats::lines`).
+        // `ServerDifficulty` reached a real, tested ECS fold but nothing in the
+        // shell read it — this is that last hop, onto the F3 overlay's own
+        // `Difficulty:` line (`hud.rs`'s `DebugStats::left_lines`).
         self.sim.stats.difficulty = self.sim.difficulty();
 
         // The baked 3-D item geometry, shared by the container screen below and the

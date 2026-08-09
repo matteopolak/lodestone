@@ -116,17 +116,24 @@ pub(crate) fn hud_line_h() -> f32 {
     (font::GLYPH_H as f32 + 2.0) * HUD_TEXT_SCALE
 }
 
-/// `DebugScreenOverlay.MARGIN_LEFT`/`MARGIN_RIGHT`/`MARGIN_TOP`, all `2`
-/// (`DebugScreenOverlay.java:50-52`).
+/// `DebugScreenOverlay.MARGIN_LEFT`/`MARGIN_RIGHT`/`MARGIN_TOP`, all `2`.
+///
+/// `extractLines` spends them as `left = alignLeft ? 2 : guiWidth() - 2 - width`
+/// and `top = 2 + height * i`, so the same `2` is the left inset, the right
+/// inset and the top inset.
 ///
 /// **Not [`HUD_MARGIN`]**: the F3 overlay is vanilla's own screen with vanilla's
 /// own metrics, and it draws in the already-`gui_scale`-divided logical canvas,
 /// so it needs no HUD-side scaling of any kind.
 pub(crate) const DEBUG_MARGIN: f32 = 2.0;
 
-/// The F3 overlay's line pitch — vanilla's literal `9`
-/// (`DebugScreenOverlay.java:278`), not [`hud_line_h`]'s `(GLYPH_H + 2) *
+/// The F3 overlay's line pitch — vanilla's literal `int height = 9` in
+/// `DebugScreenOverlay.extractLines`, not [`hud_line_h`]'s `(GLYPH_H + 2) *
 /// HUD_TEXT_SCALE`.
+///
+/// It is both the pitch (`top = 2 + height * i`) and the plate's own height
+/// (`fill(…, top - 1, …, top + height - 1, …)` spans exactly `height` rows), so
+/// consecutive plates tile with no seam and no overlap.
 ///
 /// The overlay used to use the HUD's pitch at the HUD's 2× text scale, which is
 /// what "the text is way too big" was: exactly the mistake the XP level number's
@@ -135,9 +142,9 @@ pub(crate) const DEBUG_LINE_H: f32 = 9.0;
 
 /// The plate behind each F3 overlay line — vanilla's
 /// `fill(left - 1, top - 1, left + width + 1, top + height - 1, -1873784752)`,
-/// i.e. `0x90505050` (`DebugScreenOverlay.extractLines`). The shell had no plate
-/// at all before issue #197, which is why the overlay was unreadable over bright
-/// terrain.
+/// i.e. `0x90505050` (`DebugScreenOverlay.extractLines`) — mid grey at 56%
+/// alpha. Without it the overlay is unreadable over bright terrain, which is
+/// what the shell shipped before it had one.
 pub(crate) const DEBUG_LINE_BG: [f32; 4] = [
     0x50 as f32 / 255.0,
     0x50 as f32 / 255.0,
@@ -466,16 +473,16 @@ pub struct DebugStats {
     /// A short connection/status line ("local world", "connecting…", …).
     pub status: String,
     /// The world difficulty and lock state, as the server last reported it
-    /// (`Sim::difficulty`) — `None` until the first report arrives (issue
-    /// #411). `ServerDifficulty` reached a real, tested ECS fold in `44485e4`
-    /// but nothing in the shell read it; this is that last hop.
+    /// (`Sim::difficulty`) — `None` until the first report arrives.
+    /// `ServerDifficulty` reached a real, tested ECS fold in `44485e4` but
+    /// nothing in the shell read it; this is that last hop.
     pub difficulty: Option<(lodestone_model::Difficulty, bool)>,
     /// Sky and block light at the player's feet, as the client's own world
     /// reports them — `None` before login or for an unloaded section, which is
     /// the honest "no data" state and is drawn as such.
     ///
-    /// Issue #197 asked for the "light-level pie chart"; **26.2 does not have
-    /// one.** `DebugScreenEntries` registers a `minecraft:light` *text* entry
+    /// There is no "light-level pie chart" to draw: **26.2 does not have one.**
+    /// `DebugScreenEntries` registers a `minecraft:light_levels` *text* entry
     /// (`DebugEntryLight`) that prints `Client Light: <raw> (<sky> sky, <block>
     /// block)`, and the pie was removed. So this reproduces the entry that
     /// actually exists rather than a chart that no longer does — see
@@ -501,17 +508,38 @@ pub struct DebugStats {
     pub adapter: Vec<String>,
 }
 
-/// All-caps display name for a [`lodestone_model::Difficulty`], matching the
-/// debug overlay's own `LODESTONE`/`XYZ`/`FACING`-style convention rather than
-/// vanilla's `options.difficulty.*` translation strings (this overlay has no
-/// translation table to draw from — see the module doc's "jar-less" path).
+/// Display name for a [`lodestone_model::Difficulty`] — vanilla's own
+/// serialized keys (`Difficulty`'s `PEACEFUL(0, "peaceful")` … `HARD(3,
+/// "hard")`), lowercase.
+///
+/// **Not the translated `options.difficulty.*` component**, which this overlay
+/// has no translation table to draw from (see the module doc's "jar-less"
+/// path). Lowercase rather than shouted because that is the F3 overlay's own
+/// convention for an enum: `DebugEntryPosition` prints `Direction.toString()`,
+/// which is the lowercase `name`, and the dimension as `minecraft:overworld`.
 fn difficulty_name(d: lodestone_model::Difficulty) -> &'static str {
     match d {
-        lodestone_model::Difficulty::Peaceful => "PEACEFUL",
-        lodestone_model::Difficulty::Easy => "EASY",
-        lodestone_model::Difficulty::Normal => "NORMAL",
-        lodestone_model::Difficulty::Hard => "HARD",
+        lodestone_model::Difficulty::Peaceful => "peaceful",
+        lodestone_model::Difficulty::Easy => "easy",
+        lodestone_model::Difficulty::Normal => "normal",
+        lodestone_model::Difficulty::Hard => "hard",
     }
+}
+
+/// `Mth.wrapDegrees(float)` — `angle % 360`, pulled into `[-180, 180)`.
+///
+/// `DebugEntryPosition` wraps both angles before printing them, so a player who
+/// has spun twice reads `-12.3` rather than `708.0`. Rust's `%` and Java's `%`
+/// agree on sign for floats, so this is the same two branches.
+fn wrap_degrees(angle: f32) -> f32 {
+    let mut wrapped = angle % 360.0;
+    if wrapped >= 180.0 {
+        wrapped -= 360.0;
+    }
+    if wrapped < -180.0 {
+        wrapped += 360.0;
+    }
+    wrapped
 }
 
 impl DebugStats {
@@ -529,6 +557,42 @@ impl DebugStats {
         }
     }
 
+    /// The two halves of vanilla's `Facing:` line — `Direction.toString()` (the
+    /// lowercase enum `name`) and `DebugEntryPosition`'s own `faceString`.
+    ///
+    /// The thresholds are [`Self::facing`]'s, which are already vanilla's:
+    /// `Direction.fromYRot` is `from2DDataValue(floor(yRot / 90 + 0.5) & 3)`
+    /// with `0 = SOUTH, 1 = WEST, 2 = NORTH, 3 = EAST`, and that flips exactly
+    /// at yaw 45/135/225/315. Kept separate from `facing` because that method's
+    /// `south (+Z)` shorthand is [`Self::one_line`]'s stdout format and is not
+    /// what the overlay draws.
+    #[must_use]
+    pub fn facing_parts(&self) -> (&'static str, &'static str) {
+        let y = self.yaw.rem_euclid(360.0);
+        match y {
+            v if !(45.0..315.0).contains(&v) => ("south", "Towards positive Z"),
+            v if v < 135.0 => ("west", "Towards negative X"),
+            v if v < 225.0 => ("north", "Towards negative Z"),
+            _ => ("east", "Towards positive X"),
+        }
+    }
+
+    /// The player's block position — `Entity.blockPosition()`, i.e. `Mth.floor`
+    /// of each coordinate.
+    ///
+    /// **Not `as i64`.** A cast truncates toward zero, so it maps `-0.5` to `0`
+    /// and puts a player just west of the origin in chunk `0` instead of chunk
+    /// `-1`; every line below that divides or masks a coordinate inherits the
+    /// error, and it is invisible at the origin.
+    #[must_use]
+    pub fn block_position(&self) -> [i64; 3] {
+        [
+            self.position[0].floor() as i64,
+            self.position[1].floor() as i64,
+            self.position[2].floor() as i64,
+        ]
+    }
+
     /// The overlay's text lines, in one flat list.
     ///
     /// Kept as the concatenation of [`Self::left_lines`] and
@@ -544,106 +608,224 @@ impl DebugStats {
 
     /// The **left** column: the player and the world around them.
     ///
-    /// Vanilla's own split is mechanical in 26.2 (`DebugScreenOverlay`
-    /// balances `regularLines` at `mid = (n + 1) / 2` and keeps named groups
-    /// contiguous), but issue #197 asks for the *semantic* split the layout
-    /// reads as — player/world on the left, engine internals on the right — so
-    /// the assignment is by hand here. That is deliberate: a mechanical halve
-    /// would reshuffle both columns every time a line is added or removed.
+    /// # How the column split was decided
+    ///
+    /// An earlier note here recorded a *deliberate* refusal to follow vanilla,
+    /// on the grounds that "vanilla's split is mechanical, and a mechanical
+    /// halve would reshuffle both columns every time a line is added".
+    /// **That is superseded.** The premise was half right and the conclusion
+    /// does not follow from it. `DebugScreenOverlay.extractRenderState` does not
+    /// halve *lines*; it halves within three **categories**, and the categories
+    /// are semantic:
+    ///
+    /// | category | how a line gets there | how it is placed |
+    /// |---|---|---|
+    /// | priority | `addPriorityLine` | into whichever column is currently shorter |
+    /// | regular | `addLine` | the flat list halved at `mid = (n + 1) / 2` |
+    /// | group | `addToGroup(id, …)` | whole named groups, halved by *group count* |
+    ///
+    /// So the thing that decides a line's column is which category its entry
+    /// used, and each category block is separated from the next by a `""`
+    /// spacer. Reproducing *that* is what makes the overlay look like vanilla's,
+    /// and it is stable in exactly the way the old note wanted: adding a line to
+    /// a group cannot move any other line across columns.
+    ///
+    /// What is **not** reproduced is running vanilla's halve over *our* entry
+    /// set, because our set differs (no JVM entries, extra engine ones) and the
+    /// arithmetic would then put `XYZ:` on the right — further from vanilla's
+    /// screen, not closer. The category→column assignment below is therefore
+    /// still by hand, but it is now *derived from vanilla's own default-profile
+    /// output* rather than chosen freely: with `DebugScreenProfile.DEFAULT` the
+    /// enabled entries are `3d_crosshair`, `fps`, `game_version`, `memory`,
+    /// `player_position`, `player_section_position`,
+    /// `simple_performance_impactors`, `system_specs` and `tps` (sorted by
+    /// `Identifier.compareTo`, which compares *path* first), and vanilla's
+    /// algorithm puts the fps line, the perf-impactor lines, the memory group
+    /// and the position group on the **left**, and the version line, the tps
+    /// line and the system group on the **right**. Ours match that placement.
+    ///
+    /// Order *within* a column is vanilla's, and so are the format strings —
+    /// see `docs/debug-overlay.md` for the per-line ported/replaced/dropped
+    /// table.
     #[must_use]
     pub fn left_lines(&self) -> Vec<String> {
+        let [bx, by, bz] = self.block_position();
+        // `ChunkPos.containing` / `SectionPos.blockToSectionCoord`, both `>> 4`.
+        let (cx, cy, cz) = (bx >> 4, by >> 4, bz >> 4);
+        let (facing, face_hint) = self.facing_parts();
         vec![
-            "LODESTONE".to_string(),
-            format!(
-                "XYZ {:.2} {:.2} {:.2}",
-                self.position[0], self.position[1], self.position[2]
-            ),
-            format!(
-                "CHUNK {} {} {}",
-                (self.position[0] as i64).div_euclid(16),
-                (self.position[1] as i64),
-                (self.position[2] as i64).div_euclid(16)
-            ),
-            format!(
-                "FACING {} ({:.1}/{:.1})",
-                self.facing(),
-                self.yaw,
-                self.pitch
-            ),
-            match self.target {
-                Some([x, y, z]) => format!("TARGET {x} {y} {z}"),
-                None => "TARGET -".to_string(),
-            },
-            // `DebugEntryLight`'s line, with vanilla's own raw/sky/block shape.
+            // `DebugEntryFps`: `"%d fps T: %s%s"`, a *priority* line, and the
+            // first one added — so it lands left, because `addPriorityLine`
+            // fills the shorter column and both start empty.
+            //
+            // `T:` is the framerate-limit target and the parenthetical after it
+            // is the swapchain present mode. Neither is an option this shell
+            // honours, and printing a limit we do not enforce is the same
+            // fabrication `menu::options` refuses for an unhonoured option, so
+            // the slot carries the frame time we do measure.
+            format!("{:.0} fps ({:.2} ms)", self.fps, self.frame_ms),
+            String::new(),
+            // `DebugEntryLight`'s group, verbatim: `"Client Light: " +
+            // rawBrightness + " (" + sky + " sky, " + block + " block)"`.
             // `getRawBrightness` is the max of the two, which is what the
             // renderer actually samples.
             match self.light {
                 Some((sky, block)) => {
-                    format!("LIGHT {} ({sky} SKY, {block} BLOCK)", sky.max(block))
+                    format!("Client Light: {} ({sky} sky, {block} block)", sky.max(block))
                 }
-                None => "LIGHT -".to_string(),
+                None => "Client Light: -".to_string(),
             },
+            // Vanilla's neighbouring entry is `DebugEntryLocalDifficulty`,
+            // `"Local Difficulty: %.2f // %.2f"` — a *server*-side scalar folded
+            // from inhabited time and moon brightness, which we do not compute.
+            // This is the world difficulty the server reported instead, so the
+            // prefix deliberately omits `Local`.
             match self.difficulty {
                 Some((d, locked)) => format!(
-                    "DIFFICULTY {}{}",
+                    "Difficulty: {}{}",
                     difficulty_name(d),
-                    if locked { " (LOCKED)" } else { "" }
+                    if locked { " (locked)" } else { "" }
                 ),
-                None => "DIFFICULTY -".to_string(),
+                None => "Difficulty: -".to_string(),
             },
-            self.status.to_uppercase(),
+            String::new(),
+            // `DebugEntryPosition`'s group. The four format strings are
+            // vanilla's, including the asymmetric `%.3f / %.5f / %.3f` (Y gets
+            // five places because a step height or a fluid offset lives in the
+            // fourth), the `r.X.Z.mca` region hint, and the `%02d` pad on the
+            // section-relative triple.
+            format!(
+                "XYZ: {:.3} / {:.5} / {:.3}",
+                self.position[0], self.position[1], self.position[2]
+            ),
+            format!("Block: {bx} {by} {bz}"),
+            format!(
+                "Chunk: {cx} {cy} {cz} [{} {} in r.{}.{}.mca]",
+                cx & 31,
+                cz & 31,
+                cx >> 5,
+                cz >> 5
+            ),
+            format!(
+                "Facing: {facing} ({face_hint}) ({:.1} / {:.1})",
+                wrap_degrees(self.yaw),
+                wrap_degrees(self.pitch)
+            ),
+            // `DebugEntrySectionPosition`, which joins the *position* group.
+            format!("Section-relative: {:02} {:02} {:02}", bx & 15, by & 15, bz & 15),
+            // `DebugEntryLookingAt.BlockStateInfo`'s first line, whose prefix is
+            // the literal `"Targeted Block"` and whose separators are commas.
+            // The block state and its properties are the rest of that group and
+            // are not plumbed here — see the doc's table.
+            match self.target {
+                Some([x, y, z]) => format!("Targeted Block: {x}, {y}, {z}"),
+                None => "Targeted Block: -".to_string(),
+            },
         ]
     }
 
-    /// The **right** column: frame timing and render-engine internals — the
-    /// half vanilla fills from `getSystemInformation`'s descendants.
+    /// The **right** column: the client's identity, then the render engine —
+    /// where vanilla puts its version line, its server/tps line and its
+    /// `system` group.
+    ///
+    /// See [`Self::left_lines`] for why each block sits in this column.
     #[must_use]
     pub fn right_lines(&self) -> Vec<String> {
         let mut out = vec![
-            format!("FPS {:.0} ({:.2} MS)", self.fps, self.frame_ms),
-            format!("F/T {:.2}", self.frames_per_tick),
+            // `DebugEntryVersion`'s priority line, `"Minecraft " + version +
+            // " (" + launched + "/" + brand + ")"`. It is the *second* priority
+            // line added, so vanilla's shorter-column rule sends it right.
+            format!("Lodestone {}", env!("CARGO_PKG_VERSION")),
+            String::new(),
+        ];
+        // `DebugEntryTps`'s slot — `"\"%s\" server%s, %.0f tx, %.0f rx"` remote,
+        // `"Integrated server @ %.1f/%.1f ms…"` in singleplayer. We have neither
+        // a smoothed server tick time nor packet-rate counters, so this carries
+        // the session status ("local world", "connecting…").
+        //
+        // Skipped when empty because vanilla's entry adds nothing at all with no
+        // connection — pushing the blank instead would put two spacers in a row,
+        // which draws as a double gap rather than as an absent line.
+        if !self.status.is_empty() {
+            out.push(self.status.clone());
+        }
+        out.extend([
+            // `LevelExtractor.sectionStatistics`, `"C: %d/%d %sD: %d, %s"` —
+            // rendered sections over total, then the view distance and the
+            // dispatcher's queue. Ours is drawn-over-graph-nodes (the occlusion
+            // graph is the closest thing here to vanilla's `ViewArea.size()`),
+            // plus the two counters vanilla has no field for.
             format!(
-                "CHUNKS {} SECTIONS {} QUADS {}",
-                self.chunk_count, self.section_count, self.quads
+                "C: {}/{} sections, {} columns, {} quads",
+                self.section_count, self.occlusion_graph_sections, self.chunk_count, self.quads
             ),
+            // `LevelExtractor.entityStatistics`, `"E: " + rendered + "/" + total
+            // + ", SD: " + simulationDistance`. We track only the drawn count.
+            format!("E: {}", self.entities_drawn),
+            // `DebugEntryParticleRenderStats`, `"P: " + countParticles()`. The
+            // unresolved count is ours and stays on the line: a zero draw
+            // against a non-zero alive count is the "renders nothing, reports
+            // fine" state that counter exists to expose.
             format!(
-                "LIVE COLS {} DROPS {} ENTITIES {}",
-                self.live_columns, self.mesh_drops, self.entities_drawn
-            ),
-            format!(
-                "PARTICLES {}/{} UNRESOLVED {}",
+                "P: {}/{}, {} unresolved",
                 self.particles_drawn, self.particles_alive, self.particles_unresolved
             ),
-            // The occlusion-cull split. `ACTIVE`/`OFF` is the load-bearing
-            // token — see `DebugStats::occlusion_active`: the other four
-            // numbers cannot distinguish an open surface from a dead graph, and
-            // every failure mode here draws *more* rather than less.
+            String::new(),
+            // No vanilla counterpart from here to the memory block: these are
+            // this engine's own instruments, in a group of their own the way
+            // `addToGroup` would give them one.
+            //
+            // `F/T` is fixed-timestep health (vanilla runs 20 ticks/s, so at
+            // 50 fps this settles near 0.4). `Live cols`/`drops` is the
+            // silent-mesh-drop detector. `Occl`'s `active`/`off` is the
+            // load-bearing token — see `DebugStats::occlusion_active`: the other
+            // four numbers cannot tell an open surface from a dead graph,
+            // because every failure mode of that cull draws *more*.
+            format!("F/T: {:.2}", self.frames_per_tick),
             format!(
-                "OCCL {} NODES {} CULL {} SHADOW {} WALKS {}",
+                "Live cols: {}, drops: {}",
+                self.live_columns, self.mesh_drops
+            ),
+            format!(
+                "Occl: {}, nodes: {}, cull: {}, shadow: {}, walks: {}",
+                if self.occlusion_active { "active" } else { "off" },
                 self.occlusion_graph_sections,
                 self.sections_culled_occlusion,
                 self.sections_occlusion_shadow,
-                if self.occlusion_active { "ACTIVE" } else { "OFF" },
                 self.occlusion_walks
             ),
-            // `MESH VRAM live/reserved`: the first is the spans handed out to
+            String::new(),
+            // Vanilla's `memory` group is `DebugEntryMemory`'s three JVM heap
+            // lines (`Mem:`, `Allocation rate:`, `Allocated:`) plus
+            // `DebugEntryDetailedMemory`'s heap/non-heap pair. All five are JVM
+            // facts and none has an analogue here, so the group is rebuilt from
+            // the three real numbers this process can measure. `Mem:` keeps
+            // vanilla's prefix but drops its `%2d%%` — that percentage is
+            // `used / maxMemory` and there is no `-Xmx` to divide by.
+            format!("Mem: {} MiB (RSS)", self.rss_bytes / (1024 * 1024)),
+            format!("World: {} KiB", self.world_bytes / 1024),
+            // `Mesh VRAM live/reserved`: the first is the spans handed out to
             // resident sections, the second the arena blocks the driver is
-            // holding. Both are residency figures — a camera rotation must leave
-            // this whole line unchanged, which is what distinguishes real
-            // load/unload churn from the cull-derived estimate this used to print.
+            // holding. Both are residency figures measured off the real
+            // `wgpu::Buffer` sizes — a camera rotation must leave this line
+            // unchanged, which is what distinguishes real load/unload churn from
+            // the cull-derived estimate this used to print. KiB rather than
+            // vanilla's MiB on purpose: the live figure's sawtooth is the signal
+            // and MiB granularity flattens it.
             format!(
-                "MESH VRAM {}/{} KB WORLD {} KB RSS {} MB",
+                "Mesh VRAM: {}/{} KiB",
                 self.vram_bytes / 1024,
-                self.vram_reserved_bytes / 1024,
-                self.world_bytes / 1024,
-                self.rss_bytes / (1024 * 1024)
+                self.vram_reserved_bytes / 1024
             ),
-        ];
+        ]);
         if !self.adapter.is_empty() {
-            // A blank spacer, then the fixed adapter block — the same
-            // separated-group shape `DebugScreenOverlay` uses for its own named
-            // groups. Empty lines are skipped by the draw, which is what makes
-            // the spacer a gap rather than an empty plate.
+            // Vanilla's `system` group — `DebugEntrySystemSpecs` — is `Java:`,
+            // `CPU:`, `Display:`, the device name and the backend/driver pair.
+            // The first is dropped as a JVM fact; the rest of this block is the
+            // adapter, its backend and its reported limits, which are true of
+            // this client and are what the group is *for*. Empty lines are
+            // skipped by the draw, which is what makes the spacer a gap rather
+            // than an empty plate.
             out.push(String::new());
             out.extend(self.adapter.iter().cloned());
         }
@@ -1029,8 +1211,8 @@ pub struct HudFrame<'a> {
     /// known" versus "known empty".
     pub recipe_stats: Option<(usize, usize)>,
     /// `(distance_to_border, warning_distance, warning_strength)` for the
-    /// folded world border (issue #436), appended to the debug overlay as one
-    /// extra line when `Some`.
+    /// folded world border, appended to the debug overlay as one extra line
+    /// when `Some`.
     ///
     /// `None` until the server has actually sent a border packet
     /// (`WorldBorder::initialized`), so an unbounded default border omits the
@@ -1046,15 +1228,15 @@ pub struct HudFrame<'a> {
     /// client" signal `recipe_stats` plays for the corpus loader, and the
     /// strength it prints is the *exact* value that overlay will consume.
     pub border_debug: Option<(f64, f64, f32)>,
-    /// The player's spawn point (issue #436), appended to the debug overlay as
-    /// one extra line when the server has reported one.
+    /// The player's spawn point, appended to the debug overlay as one extra line
+    /// when the server has reported one.
     ///
     /// `None` when `SpawnPoint::is_reported()` is false, which is the honest
     /// distinction the compass needs too — see
     /// [`Sim::spawn_point`](crate::sim::Sim::spawn_point).
     pub spawn_debug: Option<lodestone_model::BlockPos>,
     /// `(map count, the lowest-numbered map's explored fraction)` from
-    /// `SessionMaps` (issue #184), for the F3 overlay.
+    /// `SessionMaps`, for the F3 overlay.
     ///
     /// **This is the fold's only reader today, and it is deliberately a
     /// diagnostic rather than the map's own picture.** `MAP_ITEM_DATA` decodes
@@ -1657,9 +1839,10 @@ impl HudGeometry {
         let glyph_h = font::GLYPH_H as f32;
         let line_h = hud_line_h();
 
-        // The F3 overlay, in vanilla's **two columns** (issue #197): player and
-        // world on the left, engine internals on the right, each line sitting on
-        // its own translucent fill.
+        // The F3 overlay, in vanilla's **two columns**: player and world on the
+        // left, engine internals on the right, each line sitting on its own
+        // translucent plate. `DebugStats::left_lines` records why each block of
+        // lines sits in the column it does.
         //
         // The right column is right-aligned at `w - margin - text_width(line)`,
         // which is vanilla's `guiWidth() - 2 - font.width(line)`
@@ -1675,28 +1858,48 @@ impl HudGeometry {
         // so a ×2 on the text made it twice vanilla's size relative to
         // everything around it. `DebugScreenOverlay` draws at scale 1 with
         // `MARGIN_LEFT == MARGIN_RIGHT == MARGIN_TOP == 2` and a line height of
-        // `9` (`DebugScreenOverlay.java:50-52`, `:278`).
+        // `9` — see [`DEBUG_MARGIN`] and [`DEBUG_LINE_H`].
         let debug_scale = 1.0;
         let debug_margin = DEBUG_MARGIN;
         let debug_line_h = DEBUG_LINE_H;
         if frame.show_debug {
             let mut left = frame.stats.left_lines();
             let mut right = frame.stats.right_lines();
-            // The three conditional diagnostics are engine-side, so they join
-            // the right column.
+            // The four conditional diagnostics live on the frame rather than on
+            // `DebugStats`, so they cannot be part of either column function.
+            // Each opens with a spacer so it reads as its own `addToGroup` block
+            // instead of running on from the group above, and each is worded in
+            // the overlay's `Key: value` style rather than the `k=v` shorthand
+            // they used to carry — the whole point of this pass is that one
+            // screen does not mix two conventions.
+            let mut left_group_open = false;
+            let mut right_group_open = false;
+            let open = |lines: &mut Vec<String>, opened: &mut bool| {
+                if !*opened {
+                    lines.push(String::new());
+                    *opened = true;
+                }
+            };
             if let Some((recipes, tags)) = frame.recipe_stats {
-                right.push(format!("recipes={recipes} tags={tags}"));
+                open(&mut right, &mut right_group_open);
+                right.push(format!("Recipes: {recipes}, tags: {tags}"));
             }
             if let Some((dist, warn_at, strength)) = frame.border_debug {
+                open(&mut right, &mut right_group_open);
                 right.push(format!(
-                    "border dist={dist:.1} warn_at={warn_at:.1} warning={strength:.2}"
+                    "Border: {dist:.1} away, warns at {warn_at:.1} ({strength:.2})"
+                ));
+            }
+            if let Some((count, explored)) = frame.map_debug {
+                open(&mut right, &mut right_group_open);
+                right.push(format!(
+                    "Maps: {count}, {:.0}% explored",
+                    explored * 100.0
                 ));
             }
             if let Some(spawn) = frame.spawn_debug {
-                left.push(format!("spawn {} {} {}", spawn.x, spawn.y, spawn.z));
-            }
-            if let Some((count, explored)) = frame.map_debug {
-                right.push(format!("maps={count} explored={:.0}%", explored * 100.0));
+                open(&mut left, &mut left_group_open);
+                left.push(format!("Spawn: {} {} {}", spawn.x, spawn.y, spawn.z));
             }
             // Vanilla fills a plate behind every non-empty line *before* drawing
             // any text (`extractLines` does two passes for exactly this reason),
@@ -4734,31 +4937,37 @@ mod tests {
         assert_eq!(s.facing(), "east (+X)");
     }
 
-    /// Issue #411: `ServerDifficulty` reaches a real, tested ECS fold
-    /// (`lodestone-client`'s `apply_routes_difficulty_changed_through_the_real_path`)
-    /// but the F3 overlay drew nothing for it. This pins the exact text so a
+    /// `ServerDifficulty` reaches a real, tested ECS fold (`lodestone-client`'s
+    /// `apply_routes_difficulty_changed_through_the_real_path`) but the F3
+    /// overlay once drew nothing for it. This pins the exact text so a
     /// regression back to "no line at all" or a swapped lock state is visible
     /// in a diff, not just "some line changed somewhere".
+    ///
+    /// **Re-derived** when the overlay was reformatted against vanilla's own
+    /// strings: the prefix was `DIFFICULTY` and the names were shouted, and both
+    /// are now vanilla's lowercase serialized keys (`Difficulty`'s
+    /// `PEACEFUL(0, "peaceful")` …). Every assertion below changed for that
+    /// reason and for no other — the *shape* (a line always present, `-` before
+    /// the first report, a lock suffix, all four names) is unchanged.
     #[test]
     fn debug_overlay_shows_difficulty_and_lock_state() {
         // Found by content, not position: `lines()` is a growing list of
-        // independent facts (`DIFFICULTY` sits between the VRAM/RSS line and
-        // the status line, not at a fixed index), so pinning an index here
-        // would make this test brittle to an unrelated line being added or
-        // reordered, which is exactly the kind of accidental coupling
-        // `CLAUDE.md` warns a gate should not have.
+        // independent facts, so pinning an index here would make this test
+        // brittle to an unrelated line being added or reordered, which is
+        // exactly the kind of accidental coupling `CLAUDE.md` warns a gate
+        // should not have.
         fn difficulty_line(stats: &DebugStats) -> String {
             stats
                 .lines()
                 .into_iter()
-                .find(|l| l.starts_with("DIFFICULTY"))
-                .expect("the F3 overlay must always carry a DIFFICULTY line")
+                .find(|l| l.starts_with("Difficulty:"))
+                .expect("the F3 overlay must always carry a Difficulty line")
         }
 
         let no_report = DebugStats::default();
         assert_eq!(
             difficulty_line(&no_report),
-            "DIFFICULTY -",
+            "Difficulty: -",
             "before the server's first report, the line must say so plainly rather \
              than defaulting to a difficulty the server never sent"
         );
@@ -4767,28 +4976,274 @@ mod tests {
             difficulty: Some((lodestone_model::Difficulty::Easy, false)),
             ..Default::default()
         };
-        assert_eq!(difficulty_line(&unlocked), "DIFFICULTY EASY");
+        assert_eq!(difficulty_line(&unlocked), "Difficulty: easy");
 
         let locked = DebugStats {
             difficulty: Some((lodestone_model::Difficulty::Hard, true)),
             ..Default::default()
         };
-        assert_eq!(difficulty_line(&locked), "DIFFICULTY HARD (LOCKED)");
+        assert_eq!(difficulty_line(&locked), "Difficulty: hard (locked)");
 
         // Every variant name, so a mis-mapped match arm (e.g. Peaceful reading
         // as Easy) cannot hide behind only testing one value.
         for (d, name) in [
-            (lodestone_model::Difficulty::Peaceful, "PEACEFUL"),
-            (lodestone_model::Difficulty::Easy, "EASY"),
-            (lodestone_model::Difficulty::Normal, "NORMAL"),
-            (lodestone_model::Difficulty::Hard, "HARD"),
+            (lodestone_model::Difficulty::Peaceful, "peaceful"),
+            (lodestone_model::Difficulty::Easy, "easy"),
+            (lodestone_model::Difficulty::Normal, "normal"),
+            (lodestone_model::Difficulty::Hard, "hard"),
         ] {
             let stats = DebugStats {
                 difficulty: Some((d, false)),
                 ..Default::default()
             };
-            assert_eq!(difficulty_line(&stats), format!("DIFFICULTY {name}"));
+            assert_eq!(difficulty_line(&stats), format!("Difficulty: {name}"));
         }
+    }
+
+    /// The F3 overlay's plate, ink and pitch, against the literals in
+    /// `DebugScreenOverlay`.
+    ///
+    /// # Where the expected values come from
+    ///
+    /// `extractLines` is four numbers: `int height = 9`, the two margins spent as
+    /// `left = alignLeft ? 2 : guiWidth() - 2 - width` and `top = 2 + height * i`,
+    /// `graphics.fill(…, -1873784752)` and `graphics.text(…, -2039584, false)`.
+    /// The two colours below are those **signed Java `int`s, transcribed as
+    /// written and unpacked here** rather than restated as four floats — a
+    /// channel swap or a dropped alpha then fails, which is the failure a
+    /// hand-copied `[0x50/255.0, …]` array cannot see because it *is* the
+    /// hypothesis.
+    #[test]
+    fn debug_overlay_plate_and_ink_match_vanillas_fill_literals() {
+        /// `DebugScreenOverlay.extractLines`' `graphics.fill(…, -1873784752)`.
+        const VANILLA_PLATE_ARGB: i32 = -1_873_784_752;
+        /// Its `graphics.text(…, -2039584, false)`.
+        const VANILLA_INK_ARGB: i32 = -2_039_584;
+
+        fn unpack_argb(argb: i32) -> [f32; 4] {
+            let bits = argb as u32;
+            let channel = |shift: u32| ((bits >> shift) & 0xFF) as f32 / 255.0;
+            [channel(16), channel(8), channel(0), channel(24)]
+        }
+
+        // Collected, not asserted in place: a colour that is wrong in three
+        // channels should report three channels, not the first one.
+        let mut mismatches: Vec<String> = Vec::new();
+        for (label, expected, actual) in [
+            ("plate", unpack_argb(VANILLA_PLATE_ARGB), DEBUG_LINE_BG),
+            ("ink", unpack_argb(VANILLA_INK_ARGB), DEBUG_LINE_INK),
+        ] {
+            for (channel, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+                if (e - a).abs() > f32::EPSILON {
+                    mismatches.push(format!(
+                        "{label} channel {channel}: expected {e}, got {a}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "F3 overlay colours diverged from DebugScreenOverlay's own literals: {mismatches:?}"
+        );
+
+        // The plate must be opaque enough to read over snow and translucent
+        // enough to see terrain through, which is the whole reason it is
+        // `0x90` and not `0xFF` or `0x40`. Stated as the byte so a future
+        // "make it darker" cannot pass by rounding.
+        assert!(
+            (DEBUG_LINE_BG[3] - 0x90 as f32 / 255.0).abs() < f32::EPSILON,
+            "the plate alpha is vanilla's 0x90, not {}",
+            DEBUG_LINE_BG[3]
+        );
+
+        assert_eq!(
+            DEBUG_LINE_H, 9.0,
+            "vanilla's `int height = 9` is both the line pitch and the plate height"
+        );
+        assert_eq!(DEBUG_MARGIN, 2.0, "MARGIN_LEFT/RIGHT/TOP are all 2");
+        // The mistake this pair exists to prevent: reusing the HUD's own pitch,
+        // which is `(GLYPH_H + 2) * HUD_TEXT_SCALE` and twice vanilla's.
+        assert!(
+            DEBUG_LINE_H < hud_line_h(),
+            "the overlay draws at vanilla's metrics, not the HUD's ({} vs {})",
+            DEBUG_LINE_H,
+            hud_line_h()
+        );
+    }
+
+    /// Every ported line of the F3 overlay, character for character, against the
+    /// format strings in `DebugEntryPosition`, `DebugEntrySectionPosition`,
+    /// `DebugEntryLight` and `DebugEntryLookingAt.BlockStateInfo`.
+    ///
+    /// # Why this position
+    ///
+    /// `[-0.5, 70.25, 88.75]`. Each component is doing work, and an origin-ish
+    /// position would have measured nothing:
+    ///
+    /// | component | what it discriminates |
+    /// |---|---|
+    /// | `x = -0.5` | **floor vs truncate.** `Entity.blockPosition()` is `Mth.floor`, so this is block `-1` in chunk `-1`; an `as i64` cast gives block `0` in chunk `0`. `0 0 0` cannot tell those apart, and the truncating version shipped. |
+    /// | `x` negative | the region hint's arithmetic shift and mask (`-1 & 31 == 31`, `-1 >> 5 == -1`) and the `%02d` section-relative pad (`-1 & 15 == 15`) |
+    /// | fractional `y` and `z` | vanilla's asymmetric `%.3f / %.5f / %.3f` — a uniform `%.2f`, or space separators, differ visibly |
+    /// | `y = 70.25` | section Y is `70 >> 4 == 4`, not the block Y the `Chunk:` line used to print |
+    /// | `yaw = 405` | `Mth.wrapDegrees` — prints `45.0`, not `405.0` |
+    ///
+    /// Each expectation is paired with the value the **superseded** formatting
+    /// produced, and the gate fails if the two ever coincide: an input where
+    /// both hypotheses agree is not a test.
+    #[test]
+    fn debug_overlay_ported_lines_match_vanillas_format_strings() {
+        let stats = DebugStats {
+            position: [-0.5, 70.25, 88.75],
+            yaw: 405.0,
+            pitch: 12.34,
+            light: Some((4, 11)),
+            target: Some([-1, 70, 87]),
+            ..Default::default()
+        };
+        let lines = stats.lines();
+
+        // (what it is, vanilla's format applied by hand, what the old format
+        // produced for the same input). The third column is the wrong
+        // hypothesis, present so the gate can prove the input separates them.
+        let cases = [
+            (
+                "XYZ",
+                "XYZ: -0.500 / 70.25000 / 88.750",
+                "XYZ -0.50 70.25 88.75",
+            ),
+            // No old counterpart existed for `Block:`; the truncating cast is
+            // the wrong hypothesis instead.
+            ("Block", "Block: -1 70 88", "Block: 0 70 88"),
+            (
+                "Chunk",
+                "Chunk: -1 4 5 [31 5 in r.-1.0.mca]",
+                "CHUNK 0 70 5",
+            ),
+            (
+                "Facing",
+                "Facing: west (Towards negative X) (45.0 / 12.3)",
+                "FACING west (-X) (405.0/12.3)",
+            ),
+            (
+                "Section-relative",
+                "Section-relative: 15 06 08",
+                "Section-relative: -1 6 8",
+            ),
+            (
+                "Client Light",
+                "Client Light: 11 (4 sky, 11 block)",
+                "LIGHT 11 (4 SKY, 11 BLOCK)",
+            ),
+            (
+                "Targeted Block",
+                "Targeted Block: -1, 70, 87",
+                "TARGET -1 70 87",
+            ),
+        ];
+
+        let mut failures: Vec<String> = Vec::new();
+        for (label, expected, superseded) in cases {
+            if expected == superseded {
+                failures.push(format!(
+                    "{label}: the chosen input cannot separate the two \
+                     hypotheses — both read {expected:?}"
+                ));
+                continue;
+            }
+            if !lines.iter().any(|l| l == expected) {
+                let got = lines
+                    .iter()
+                    .find(|l| {
+                        l.split(&[':', ' '][..]).next() == expected.split(&[':', ' '][..]).next()
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| "<no line with that prefix>".to_string());
+                failures.push(format!("{label}: expected {expected:?}, got {got:?}"));
+            }
+            if lines.iter().any(|l| l == superseded) {
+                failures.push(format!(
+                    "{label}: still drawing the superseded format {superseded:?}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of {} ported lines are wrong:\n  {}\nall lines: {:#?}",
+            failures.len(),
+            cases.len(),
+            failures.join("\n  "),
+            lines
+        );
+    }
+
+    /// The column structure: vanilla's own category blocks, separated by the
+    /// `""` spacers `extractRenderState` inserts, and `lines()` still the exact
+    /// concatenation of the two columns.
+    ///
+    /// The concatenation property is the reason `lines()` exists — it is what
+    /// stops a line being added to one column and silently missing from every
+    /// consumer of the flat list — so it is asserted directly rather than
+    /// assumed.
+    #[test]
+    fn debug_overlay_columns_carry_vanillas_spacers_and_concatenate() {
+        let stats = DebugStats {
+            status: "local world".into(),
+            adapter: vec!["Apple M5".into(), "Metal".into()],
+            ..Default::default()
+        };
+        let left = stats.left_lines();
+        let right = stats.right_lines();
+
+        let mut expected = left.clone();
+        expected.extend(right.clone());
+        assert_eq!(
+            stats.lines(),
+            expected,
+            "`lines()` must stay the concatenation of the two columns, or a line \
+             added to a column goes missing from every flat-list consumer"
+        );
+
+        // Vanilla's first priority line goes left and the second goes right,
+        // because `addPriorityLine` fills whichever column is shorter and both
+        // start empty. So the fps line heads the left column and the version
+        // line heads the right one — not the other way round.
+        assert!(
+            left[0].ends_with("ms)") && left[0].contains(" fps "),
+            "the fps line must head the left column, got {:?}",
+            left[0]
+        );
+        assert!(
+            right[0].starts_with("Lodestone "),
+            "the version line must head the right column, got {:?}",
+            right[0]
+        );
+
+        // A spacer between category blocks, in both columns — the visible
+        // difference between vanilla's grouped layout and one dense stack. A
+        // count with a verdict on the count, not an eyeball.
+        for (name, column) in [("left", &left), ("right", &right)] {
+            let spacers = column.iter().filter(|l| l.is_empty()).count();
+            assert!(
+                spacers >= 2,
+                "the {name} column needs at least two group spacers, found {spacers} in {column:#?}"
+            );
+            assert!(
+                !column.last().expect("a non-empty column").is_empty(),
+                "a trailing spacer draws nothing and only pads `lines()` — the \
+                 {name} column must not end with one"
+            );
+        }
+
+        // The adapter block is the `system` group: a spacer, then the lines.
+        let adapter_start = right
+            .iter()
+            .position(|l| l == "Apple M5")
+            .expect("the adapter lines must reach the right column");
+        assert_eq!(
+            right[adapter_start - 1], "",
+            "the adapter block must open with a spacer so it reads as its own group"
+        );
     }
 
     #[test]
