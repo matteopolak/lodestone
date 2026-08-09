@@ -524,10 +524,35 @@ impl StatusCache {
         // Detached: the result is delivered through the channel, and a dropped
         // receiver simply makes the send fail. Nothing joins these, so a slow
         // DNS lookup can never stall shutdown.
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || {
             let out = probe(&entry);
             let _ = tx.send((key, out));
         });
+
+        // Browser: run the probe inline and send on this thread.
+        //
+        // **This was a reachable crash, not a latent one.** `std::thread::spawn`
+        // TRAPS on wasm32 — measured, executed in a wasm VM: `RuntimeError:
+        // unreachable`, and with `panic = "abort"` that is the tab dying — and this
+        // function runs when the player opens the Multiplayer screen, via
+        // `refresh_one`/`pump`. Nothing about it was visible to any `cargo check`.
+        //
+        // Inline is correct rather than a compromise: `net_probe`'s browser arm
+        // performs **no I/O at all** (a page has no raw TCP socket, so it returns an
+        // explanatory `Err` immediately), so there is nothing to move off the frame
+        // thread. The channel round-trip is kept so `pump` remains the single place a
+        // result reaches a slot — one code path for both targets, and the `Pending`
+        // → `Failed` transition a caller observes is identical.
+        //
+        // If a browser probe ever really does I/O — an async ping over the `ws-web`
+        // relay — it belongs in `spawn_local`, and the `tx` clone above is already
+        // the right handoff for it. That is a new probe, not a change here.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let out = probe(&entry);
+            let _ = tx.send((key, out));
+        }
     }
 
     /// Moves any finished probes into their slots. Call once per frame.
