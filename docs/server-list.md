@@ -314,6 +314,15 @@ every time.
   per-server runtime texture needs its own upload path and bind group. The
   *fallback* icon is a real texture (`misc/unknown_server`, through
   `resources::MENU_TEXTURES`), because that one is a pack asset.
+
+  That split is not just an implementation note: it is the asymmetry behind a
+  reported bug. A mosaic is flat quads on the **colour** stream and a sprite is on
+  the **sprite** stream, and the menu pass used to draw every sprite before the rest
+  of the colour stream — so a selected row's opaque black interior fill landed on top
+  of the fallback icon and the thumbnail went solid black, while a server with a real
+  favicon was fine. Fixed by replaying the two streams in emission order; see *Two
+  vertex streams* in `docs/main-menu.md`. The same cause put the hover scrim over the
+  join / move arrows instead of under them.
 - **The list background is the screen's flat fill.** Vanilla tiles
   `menu_list_background.png` across the band and draws no per-row fill for an
   unselected row, so an unselected row correctly paints only its content; the band

@@ -98,20 +98,22 @@ be **skipped whole**. That is why the offset was row-quantized in the first plac
 | `text` | emitted to a scratch buffer, then cut in NDC |
 
 `Quads::with_clip` is the scoped entry point — vanilla's
-`enableScissor`/`disableScissor` (`AbstractSelectionList.java:242-249`, `:212-214`).
+`enableScissor`/`disableScissor` (`AbstractSelectionList`).
 
-A GPU scissor was rejected deliberately: the whole menu draws in **one**
-`"menu-pass"` with four `pass.draw` calls over two vertex streams, so a scissor would
-need `MenuGeometry` to record range breaks and the pass to replay them in order, and
-the ordering between the streams is already load-bearing (labels are on the colour
-stream and must land *on* their button sprite). CPU clipping costs nothing at draw
-time and — the deciding reason — **also clips text**, which nothing cheaper does:
-glyphs bottom out in `ColourStream::rect` in `hud/item_icon.rs` as one flat quad per
-horizontal ink run, so they are not addressable as sprites.
+A GPU scissor was rejected deliberately. Half of the original argument no longer
+holds and is recorded here rather than quietly dropped: it used to be that a
+scissor would need `MenuGeometry` to record range breaks and the pass to replay
+them in order, and `MenuGeometry::sprite_cuts` now does exactly that — for an
+unrelated reason (see *Two vertex streams* in `docs/main-menu.md`). The reason that
+actually decided it still stands: CPU clipping costs nothing at draw time and
+**also clips text**, which nothing cheaper does — glyphs bottom out in
+`ColourStream::rect` in `hud/item_icon.rs` as one flat quad per horizontal ink run,
+so they are not addressable as sprites. A scissor would additionally have to be
+re-armed per cut rather than per clip scope.
 
-The sprite crop generalises the horizontal-only UV crop the XP bar already uses
-(`hud.rs:1302-1312`). Cropping one axis only would **squash** a favicon instead of
-cutting it, which is worth naming because it still looks like a picture.
+The sprite crop generalises the horizontal-only UV crop the XP bar already uses.
+Cropping one axis only would **squash** a favicon instead of cutting it, which is
+worth naming because it still looks like a picture.
 
 ### The clip has a second half: the hit-test
 

@@ -281,6 +281,10 @@ pub enum PacksPlacement {
         /// The column's scroll offset, in pixels.
         scroll: f32,
     },
+    /// The centre of a column's first row slot, where that column's empty-state
+    /// line goes. **Not** a row: it has no index and does not scroll, which is
+    /// why it is its own placement rather than `Row { row: 0 }`.
+    EmptyNotice(PackList),
     /// A Selected row's move button. `up` picks which of the stacked pair.
     MoveButton {
         /// Absolute row index within the Selected column.
@@ -303,6 +307,15 @@ pub fn placement_anchor(placement: PacksPlacement, width: f32, height: f32) -> (
         ),
         PacksPlacement::ListHeader(list) => (list.x(width), list_top()),
         PacksPlacement::Row { list, row, scroll } => (list.x(width), row_y(row, scroll)),
+        // Horizontally centred on the column, vertically centred in the first row
+        // slot — both from the same [`first_entry_y`]/[`ROW_H`]/[`ROW_W`] that
+        // [`row_y`] and [`list_spec`] use, so the line is inside the band by
+        // construction rather than by a chosen offset. `LINE_H`'s half puts the
+        // 9 px text's *box* on that centre.
+        PacksPlacement::EmptyNotice(list) => (
+            list.x(width) + ROW_W * 0.5,
+            first_entry_y() + (ROW_H - super::render::LINE_H) * 0.5,
+        ),
         PacksPlacement::MoveButton { row, up, scroll } => {
             let x = selected_x(width) + ROW_W - 2.0 - MOVE_BTN;
             let y = row_y(row, scroll) + if up { 2.0 } else { 2.0 + MOVE_BTN };
@@ -367,6 +380,10 @@ pub struct PacksNav {
     cursor: usize,
     scroll_available: f32,
     scroll_selected: f32,
+    /// Which column the pointer was last over, or `None` when it was last over
+    /// the footer. **Not a row index**, deliberately: see [`Self::hover_row`] for
+    /// why hover records a column and never a row here.
+    hovered_list: Option<PackList>,
 }
 
 impl Default for PacksNav {
@@ -381,6 +398,7 @@ impl Default for PacksNav {
             cursor: 0,
             scroll_available: 0.0,
             scroll_selected: 0.0,
+            hovered_list: None,
         }
     }
 }
@@ -441,6 +459,7 @@ impl PacksNav {
             cursor: 0,
             scroll_available: 0.0,
             scroll_selected: 0.0,
+            hovered_list: None,
         }
     }
 
@@ -474,20 +493,32 @@ impl PacksNav {
         self.cursor
     }
 
-    /// The scroll offset of the column the cursor is in — the one the wheel and
-    /// the scrollbar act on.
+    /// The scroll offset of the column the wheel and the scrollbar act on —
+    /// [`Self::focused_list`]'s.
     #[must_use]
     pub fn scroll(&self) -> f32 {
-        match self.focused_list() {
-            PackList::Available => self.scroll_available,
-            PackList::Selected => self.scroll_selected,
-        }
+        self.scroll_of(self.focused_list())
     }
 
-    /// Which column the cursor is in. The footer counts as Selected, so leaving
-    /// the lists does not reset the bar to the left column.
+    /// Which column the wheel and the scrollbar act on: the one the **pointer**
+    /// is over, falling back to the cursor's when the pointer is on the footer.
+    ///
+    /// Vanilla dispatches `mouseScrolled` to the widget under the mouse, so the
+    /// column the wheel turns has never been the focused one there. It used to be
+    /// here only by accident — [`Self::hover_row`] moved the keyboard cursor, so
+    /// the two coincided — and that accident is what
+    /// [`Self::hovered_list`](Self::hover_row) replaces, so removing the focus
+    /// theft does not also make the wheel scroll a column the mouse is not over.
     #[must_use]
     pub fn focused_list(&self) -> PackList {
+        self.hovered_list.unwrap_or_else(|| self.cursor_list())
+    }
+
+    /// Which column the **cursor** is in, for keyboard scroll-into-view. The
+    /// footer counts as Selected, so leaving the lists does not reset the bar to
+    /// the left column.
+    #[must_use]
+    fn cursor_list(&self) -> PackList {
         match self.controls().get(self.cursor) {
             Some(PacksControl::Entry {
                 list: PackList::Available,
@@ -500,9 +531,33 @@ impl PacksNav {
     /// The number of rows in the focused column, for [`list_spec`].
     #[must_use]
     pub fn focused_len(&self) -> usize {
-        match self.focused_list() {
+        self.len_of(self.focused_list())
+    }
+
+    /// Row count of one named column. Split out because
+    /// [`Self::scroll_to_cursor`] asks about the *cursor's* column while the
+    /// scrollbar asks about [`Self::focused_list`]'s, and the two can now differ.
+    #[must_use]
+    fn len_of(&self, list: PackList) -> usize {
+        match list {
             PackList::Available => self.available.len(),
             PackList::Selected => self.selected.len(),
+        }
+    }
+
+    /// Scroll offset of one named column — [`Self::len_of`]'s reason.
+    #[must_use]
+    fn scroll_of(&self, list: PackList) -> f32 {
+        match list {
+            PackList::Available => self.scroll_available,
+            PackList::Selected => self.scroll_selected,
+        }
+    }
+
+    fn set_scroll_of(&mut self, list: PackList, value: f32) {
+        match list {
+            PackList::Available => self.scroll_available = value,
+            PackList::Selected => self.scroll_selected = value,
         }
     }
 
@@ -579,9 +634,41 @@ impl PacksNav {
         self.scroll_to_cursor();
     }
 
-    /// Puts the cursor on the control at index `row`.
+    /// The pointer moved onto the control at index `row`.
+    ///
+    /// **A pack row records the column and nothing else — hover is not
+    /// selection.** This used to set `self.cursor`, and on a selection list that
+    /// is a real defect rather than a nicety: the cursor is what
+    /// `render::draw::draw_pack_entry` reads as `selected`, and a selected row
+    /// fills its interior opaque black under its content, so the outline and fill
+    /// followed the mouse and the keyboard focus went with it. The multiplayer
+    /// list already had this right — `nav::MenuNav::hover_list` records nothing
+    /// for a server row, for the same reason, after a player reported the same
+    /// symptom there. Vanilla reaches `AbstractSelectionList.setSelected` only
+    /// from `setFocused` and the click paths, never from hover.
+    ///
+    /// The row's hover *visuals* need no state: `draw_pack_entry` resolves the
+    /// scrim and the select/unselect sprite by bounds-testing the logical cursor
+    /// against the row rect it is drawing, exactly as vanilla's `mouseOverIcon`
+    /// does. Which is just as well, because nothing calls this when the pointer is
+    /// over no row at all, so a stored row index would burn in.
+    ///
+    /// A **move button or a footer button** still moves the cursor, which is this
+    /// shell's convention everywhere a row is a button (the title screen, the
+    /// pause menu, the settings tree). Those have no black interior fill to drag
+    /// around, and it is what keeps the keyboard and the mouse on the same control
+    /// when you click one.
     pub fn hover_row(&mut self, row: usize) {
-        if row < self.controls().len() {
+        let Some(&control) = self.controls().get(row) else {
+            return;
+        };
+        self.hovered_list = match control {
+            PacksControl::Entry { list, .. } => Some(list),
+            // A move button sits beside the Selected column and scrolls with it.
+            PacksControl::Move { .. } => Some(PackList::Selected),
+            PacksControl::OpenPackFolder | PacksControl::Done => None,
+        };
+        if !matches!(control, PacksControl::Entry { .. }) {
             self.cursor = row;
         }
     }
@@ -704,10 +791,7 @@ impl PacksNav {
     }
 
     fn set_scroll(&mut self, value: f32) {
-        match self.focused_list() {
-            PackList::Available => self.scroll_available = value,
-            PackList::Selected => self.scroll_selected = value,
-        }
+        self.set_scroll_of(self.focused_list(), value);
     }
 
     /// Brings the cursor's row into the band — vanilla's `ensureVisible`,
@@ -724,13 +808,17 @@ impl PacksNav {
             // The footer is always visible; nothing to scroll for it.
             PacksControl::OpenPackFolder | PacksControl::Done => return,
         };
-        let Some(mut list) = list_spec(self.focused_len(), self.scroll())
+        // The **cursor's** column, not [`Self::focused_list`]'s: this is the
+        // keyboard's `ensureVisible`, and since hover no longer moves the cursor
+        // the pointer may well be over the other column.
+        let list_side = self.cursor_list();
+        let Some(mut list) = list_spec(self.len_of(list_side), self.scroll_of(list_side))
             .model(crate::config::MIN_SCALED_HEIGHT as f32)
         else {
             return;
         };
         list.scroll_to_entry(row);
-        self.set_scroll(list.scroll());
+        self.set_scroll_of(list_side, list.scroll());
     }
 }
 
@@ -896,9 +984,69 @@ pub fn frame(nav: &PacksNav) -> MenuFrame<'static> {
     MenuFrame {
         rows,
         labels,
+        list_labels: empty_notice(nav),
         selected: nav.cursor(),
         ..Default::default()
     }
+}
+
+/// The Available column's empty-state line, or no labels at all when that column
+/// has rows.
+///
+/// ## This is a deliberate divergence, not a port
+///
+/// **Vanilla's `PackSelectionScreen` has no empty state.** Its two lists render
+/// nothing when they have no children, and there is no `pack.*` translation key
+/// for one — `pack.dropInfo` ("Drag and drop files into this window to add
+/// packs") is a `StringWidget` in the header that vanilla draws *unconditionally*,
+/// and `pack.folderInfo` ("(Place pack files here)") is the Open Pack Folder
+/// button's tooltip. Vanilla gets away with it because the built-in pack always
+/// occupies Selected, so the screen never looks wholly blank; this client's
+/// owner asked for one anyway, which is the same shape as
+/// [`super::world_select`]'s recorded deviation over `CreateWorldScreen` — a
+/// changed label with the reason written down, rather than a silent port.
+///
+/// ## Two different truths, and neither is "you have no packs"
+///
+/// The condition is *the **Available** column is empty*, which happens two ways,
+/// and only one of them means the player has nothing:
+///
+/// | Available | Selected | line |
+/// |---|---|---|
+/// | empty | built-in only | there are no packs in the folder |
+/// | empty | built-in + packs | every pack found is already selected |
+///
+/// Telling the second case it has no packs would be false: it has packs, all of
+/// them on. The **Selected** column never gets a line, because the built-in row
+/// is always in it and an empty Selected column cannot happen.
+///
+/// The text goes on [`MenuFrame::list_labels`] rather than `labels` so it is
+/// clipped to the same band the rows are — see
+/// [`Origin::is_scrolling_list_row`]'s arm for it.
+fn empty_notice(nav: &PacksNav) -> Vec<MenuLabel> {
+    if !nav.available().is_empty() {
+        return Vec::new();
+    }
+    let has_own_packs = nav.selected().iter().any(|row| !row.builtin);
+    let text = if has_own_packs {
+        "Every pack you have is selected"
+    } else {
+        "No resource packs found"
+    };
+    vec![MenuLabel {
+        text: text.to_string(),
+        origin: Origin::Packs(PacksPlacement::EmptyNotice(PackList::Available)),
+        dx: 0.0,
+        dy: 0.0,
+        align: Align::Centre,
+        // Vanilla's own inactive-label grey (`-6250336`), so the line reads as
+        // absence rather than as a row you could click. Deliberately
+        // `INACTIVE_LABEL` rather than the pack description's `-8355712`: this is
+        // not a row's second line, and reusing the row colour would invite the eye
+        // to look for the row above it.
+        colour: super::widget::INACTIVE_LABEL,
+        scale: 1.0,
+    }]
 }
 
 fn slot_for(control: PacksControl, nav: &PacksNav) -> Slot {
@@ -1167,5 +1315,123 @@ mod tests {
                 list.top()
             );
         }
+    }
+
+    /// Moving the pointer across pack rows must not move the keyboard cursor.
+    ///
+    /// Pointer hover and keyboard focus are different states, and conflating them
+    /// meant sweeping the mouse stole focus — and, because the cursor is what the
+    /// draw reads as `selected`, dragged the row's opaque black interior fill with
+    /// it. A **state** assertion, not a pixel one: the composition-order gate in
+    /// `menu::render::tests` owns the fill.
+    ///
+    /// The control is the second loop: the same rows, **clicked**, do move the
+    /// cursor. Without it "hover does nothing" is equally satisfied by a screen
+    /// where nothing works.
+    #[test]
+    fn hovering_a_pack_row_does_not_move_the_cursor() {
+        let mut nav = PacksNav::rebuild(two_packs(), &[]);
+        let rows: Vec<usize> = nav
+            .controls()
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| matches!(c, PacksControl::Entry { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            rows.len() >= 3,
+            "premise: two available packs plus the built-in row give three entries, got {}",
+            rows.len()
+        );
+        let start = nav.cursor();
+        let mut bad: Vec<String> = Vec::new();
+        for &row in &rows {
+            nav.hover_row(row);
+            if nav.cursor() != start {
+                bad.push(format!(
+                    "hovering entry {row} moved the cursor from {start} to {}",
+                    nav.cursor()
+                ));
+            }
+        }
+        // The control, on a fresh nav because a click on an entry *transfers* the
+        // pack and renumbers every control after it.
+        let mut clicked = PacksNav::rebuild(two_packs(), &[]);
+        let target = rows[1];
+        clicked.click_row(target);
+        if clicked.cursor() != target {
+            bad.push(format!(
+                "the control failed: clicking entry {target} left the cursor at {}, so the hover \
+                 assertions above prove nothing",
+                clicked.cursor()
+            ));
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    /// Hover still decides which **column** the wheel and the scrollbar act on,
+    /// which is what keeps removing the focus theft from also making the wheel
+    /// scroll a column the mouse is not over. Vanilla dispatches `mouseScrolled`
+    /// to the widget under the pointer, so this is the faithful half.
+    #[test]
+    fn hover_still_aims_the_wheel_at_the_column_under_the_pointer() {
+        let mut nav = PacksNav::rebuild(two_packs(), &[]);
+        let controls = nav.controls();
+        let entry = |list, row| {
+            controls
+                .iter()
+                .position(|c| *c == PacksControl::Entry { list, row })
+                .expect("the control exists")
+        };
+        // The cursor starts on Available row 0 and stays there throughout.
+        assert_eq!(nav.focused_list(), PackList::Available, "premise");
+        nav.hover_row(entry(PackList::Selected, 0));
+        assert_eq!(
+            nav.focused_list(),
+            PackList::Selected,
+            "hovering the Selected column must aim the wheel at it"
+        );
+        assert_eq!(nav.cursor(), 0, "…without moving the cursor");
+        nav.hover_row(entry(PackList::Available, 1));
+        assert_eq!(nav.focused_list(), PackList::Available, "and back again");
+    }
+
+    /// The Available column's empty-state line: present with no packs, **absent**
+    /// with one. The pair is the whole gate — a label that always draws passes the
+    /// first assertion alone.
+    ///
+    /// The third case is the one worth being precise about: Available can be empty
+    /// because the player has nothing *or* because everything they have is already
+    /// selected, and only the first may say so. See [`empty_notice`].
+    #[test]
+    fn the_available_column_says_it_is_empty_only_when_it_is() {
+        let text = |nav: &PacksNav| {
+            frame(nav)
+                .list_labels
+                .iter()
+                .map(|l| l.text.clone())
+                .collect::<Vec<_>>()
+        };
+
+        // No packs at all — the built-in row is in Selected and is not a pack the
+        // player put there, so "none" is true.
+        assert_eq!(text(&PacksNav::default()), vec!["No resource packs found"]);
+
+        // One pack in the folder: Available is not empty, so no line at all.
+        let one = PacksNav::rebuild(vec![pack("alpha", "a folder pack")], &[]);
+        assert!(
+            text(&one).is_empty(),
+            "a non-empty Available column must draw no empty state, got {:?}",
+            text(&one)
+        );
+
+        // One pack, selected: Available *is* empty, but the player has a pack, so
+        // the line must not claim otherwise.
+        let selected = PacksNav::rebuild(
+            vec![pack("alpha", "a folder pack")],
+            &["file/alpha".to_string()],
+        );
+        assert!(selected.available().is_empty(), "premise");
+        assert_eq!(text(&selected), vec!["Every pack you have is selected"]);
     }
 }

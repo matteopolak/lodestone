@@ -16,7 +16,7 @@ use super::world_list::WORLD_LIST_ROW_W;
 use super::measure::{advance, clip};
 use super::renderer::FLOATS_PER_VERTEX;
 use super::world_list::{WORLD_LIST_DIM, WORLD_LIST_SELECTION_FILL};
-use super::server_list::{SERVER_ENTRY_BAD, SERVER_ENTRY_DIM, SERVER_ENTRY_ICON, SERVER_ENTRY_INCOMPATIBLE, SERVER_ENTRY_MOTD_INSET, SERVER_ENTRY_MOTD_LINES, SERVER_ENTRY_MOTD_Y, SERVER_ENTRY_SPACING, SERVER_ENTRY_TEXT_GAP, SERVER_ICON_DARKEN, SERVER_JOIN_SPRITES, SERVER_LIST_ROW_W, SERVER_LIST_SELECTION_FILL, SERVER_MOVE_DOWN_SPRITES, SERVER_MOVE_UP_SPRITES, SERVER_UNKNOWN_ICON};
+use super::server_list::{SERVER_ENTRY_BAD, SERVER_ENTRY_DIM, SERVER_ENTRY_ICON, SERVER_ENTRY_INCOMPATIBLE, SERVER_ENTRY_MOTD_INSET, SERVER_ENTRY_MOTD_LINES, SERVER_ENTRY_MOTD_Y, SERVER_ENTRY_SPACING, SERVER_ENTRY_TEXT_GAP, SERVER_ICON_DARKEN, SERVER_JOIN_SPRITES, SERVER_LIST_ROW_W, SERVER_LIST_SELECTION_FILL, SERVER_MOVE_DOWN_SPRITES, SERVER_MOVE_UP_SPRITES, SERVER_UNKNOWN_ICON, WORLD_UNKNOWN_ICON};
 
 /// The multiplayer list's "who's online" tooltip fill — `tooltip/background.png`'s
 /// centre pixel, `0xF0100010`: translucent near-black (16, 0, 16, 240). The sprite
@@ -60,7 +60,7 @@ pub(super) const PACK_ENTRY_DIM: [f32; 4] = [128.0 / 255.0, 128.0 / 255.0, 128.0
 /// The selected row's interior, `-16777216` — opaque black inside the 1 px
 /// outline (`AbstractSelectionList.java:363-370`), exactly as the server, account
 /// and world lists draw theirs.
-const PACK_SELECTION_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+pub(super) const PACK_SELECTION_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 /// The hovered row's icon dim, `fill(…, -1601138544)`
 /// (`TransferableSelectionList.java:156`) — `0xA0909090`, the same translucent
 /// grey the multiplayer list puts under its own hover arrows, cited here from its
@@ -107,26 +107,59 @@ pub(super) const TOOLTIP_MOUSE_OFFSET: f32 = 12.0;
 /// 1-line tooltip is 8 px tall, an `n`-line one `10n`.
 pub(super) const TOOLTIP_LINE_H: f32 = 10.0;
 
-/// Both vertex streams one menu frame produces.
+/// Both vertex streams one menu frame produces, plus the interleave that puts
+/// them back in the order they were emitted.
 ///
 /// Two streams because the buttons are **textured** (nine-slice sprites off the
 /// GUI atlas) while everything else — backdrops, row fills, text — is a flat
 /// coloured quad. They need different pipelines, so they cannot share a buffer.
 ///
-/// `backdrop_floats` is the split the caller draws the sprite stream *between*:
-/// the full-screen backdrop first, then every sprite, then the rest of the
-/// colour stream. That ordering is load-bearing — a button's label is on the
-/// colour stream, so drawing all colour before all sprites would bury every
-/// label under the button it belongs to.
+/// **[`Self::sprite_cuts`] is what makes the split invisible, and it replaced a
+/// single global ordering that was a real, reported bug.** The stream used to be
+/// drawn as backdrop → *every* sprite → the rest of the colour stream, so any
+/// flat quad emitted after the backdrop landed on top of every sprite in the
+/// frame no matter when it was emitted. A selected list row fills its interior
+/// opaque black under its content (`AbstractSelectionList.extractItem`), and the
+/// fallback icons for a server with no favicon and a pack with no `pack.png` are
+/// *sprites* — so selecting such a row painted the black fill over its icon and
+/// the thumbnail came out solid black, while a row whose icon was a real
+/// [`FaviconMosaic`] survived, because a mosaic is flat quads on the colour
+/// stream and stayed in emission order. The hover scrims had the same defect one
+/// step further: `SERVER_ICON_DARKEN` is a translucent grey rect drawn *under*
+/// the join/move sprites in vanilla, and the global ordering put it over them.
 #[derive(Debug, Clone, Default)]
 pub struct MenuGeometry {
     /// Interleaved `[x, y, r, g, b, a]` in NDC, two triangles per quad.
     pub colour: Vec<f32>,
     /// How many floats at the head of [`Self::colour`] are the full-screen
-    /// backdrop quad.
+    /// backdrop quad. Still separate from [`Self::sprite_cuts`] because the
+    /// caller *skips* it when the panorama is up, rather than reordering it.
     pub backdrop_floats: usize,
     /// Interleaved `[x, y, u, v, r, g, b, a]` in NDC + atlas UVs.
     pub sprite: Vec<f32>,
+    /// Where the sprite stream cuts into the colour stream, in emission order.
+    /// See [`SpriteCut`], and [`MenuGeometry`]'s own doc for what depends on it.
+    pub sprite_cuts: Vec<SpriteCut>,
+}
+
+/// One run of sprite quads and the point in the colour stream it was emitted at.
+///
+/// Read it as an instruction: *draw the colour stream up to `colour_floats`, then
+/// draw sprite floats `sprite_start..sprite_end`*. Consecutive sprite calls with
+/// no colour quad between them coalesce into one cut, so a frame produces a
+/// handful of these rather than one per sprite.
+///
+/// Float offsets rather than vertex counts because that is what the two `Vec<f32>`
+/// lengths are; the renderer divides by its own per-vertex stride, which differs
+/// between the two streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SpriteCut {
+    /// Colour floats emitted before this run of sprites.
+    pub colour_floats: usize,
+    /// First sprite float of the run.
+    pub sprite_start: usize,
+    /// One past the last sprite float of the run.
+    pub sprite_end: usize,
 }
 
 /// Builds the coloured-quad stream for one menu frame with no atlas and no
@@ -674,6 +707,7 @@ pub fn build(
         colour: b.verts,
         backdrop_floats,
         sprite: b.sprites,
+        sprite_cuts: b.cuts,
     }
 }
 
@@ -1229,6 +1263,25 @@ fn draw_world_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32, h
     let (cx, cy, ..) = world_list_row_content_rect(view.index, width, scroll);
     let text_x = cx + WORLD_LIST_TEXT_DX;
     let room = world_list_text_width();
+
+    // The world's thumbnail — `WorldListEntry.extractContent` blits
+    // `this.icon.textureLocation()`, and that is a `FaviconTexture`: the **same**
+    // class the server list uses, so a world with no readable `icon.png` gets the
+    // same `textures/misc/unknown_server.png` fallback a server with no favicon
+    // does (`FaviconTexture.MISSING_LOCATION`). Drawing the fallback is therefore
+    // vanilla, not a placeholder invented here.
+    //
+    // `row.favicon` is the same field a server row and a pack row carry, and it is
+    // always `None` today because nothing writes a per-world image — so the
+    // fallback is all that draws. Whenever something does (a save-time screenshot
+    // is the obvious candidate), reducing it through
+    // `render::head_mosaic` and setting this field is the entire change: nothing
+    // here, in the rect, or in the text column needs to move.
+    let (ix, iy, iw, ih) = world_list_icon_rect(view.index, width, scroll);
+    match row.favicon.as_ref() {
+        Some(icon) => b.mosaic(icon, ix, iy, iw),
+        None => b.sprite(WORLD_UNKNOWN_ICON, ix, iy, iw, ih, LABEL),
+    }
     // Name, folder + last played, game mode + version — in `MenuRow`'s own
     // `label`/`detail`/`trailing`, read off the row rather than duplicated into
     // `WorldEntryView`. Only the first is white; see `WORLD_LIST_DIM`.
@@ -1782,6 +1835,12 @@ pub(super) struct Quads<'a> {
     /// Scratch buffer for [`Quads::text`]'s clipped path, reused across calls so
     /// a clipped label does not allocate per frame.
     text_scratch: Vec<f32>,
+    /// The emission-order interleave between [`Self::verts`] and
+    /// [`Self::sprites`] — see [`SpriteCut`]. Appended to by [`Quads::sprite`]
+    /// alone, which is what makes it correct without instrumenting every colour
+    /// push: sprite quads are emitted from exactly one place, so snapshotting
+    /// `verts.len()` there records everything that came before.
+    cuts: Vec<SpriteCut>,
 }
 
 impl Quads<'_> {
@@ -1795,28 +1854,32 @@ impl Quads<'_> {
             font: None,
             clip: None,
             text_scratch: Vec::new(),
+            cuts: Vec::new(),
         }
     }
 
     /// Run `body` with everything it emits clipped to `(x, y, w, h)` — this
     /// pipeline's stand-in for vanilla's `enableScissor`/`disableScissor`
-    /// (`AbstractSelectionList.java:242-249`, `:212-214`).
+    /// (`AbstractSelectionList`).
     ///
     /// ## Why this is not `set_scissor_rect`
     ///
-    /// `set_scissor_rect` appears **nowhere** in this workspace, and adding it
-    /// here would mean restructuring the one `"menu-pass"` encoder: it draws the
-    /// entire menu in *four* `pass.draw` calls over two vertex streams, so a
-    /// GPU scissor would need `MenuGeometry` to record range breaks and the pass
-    /// to replay them in order. That is a bigger change than the lists need, and
-    /// the ordering between the two streams is already load-bearing (labels are on
-    /// the colour stream and must land *on* their button sprite).
+    /// `set_scissor_rect` appears **nowhere** in this workspace. The old argument
+    /// against it was that the one `"menu-pass"` encoder drew the whole menu in a
+    /// handful of `pass.draw` calls and a GPU scissor would need
+    /// [`MenuGeometry`] to record range breaks and the pass to replay them in
+    /// order — **and that half of the argument is now spent**, because
+    /// [`MenuGeometry::sprite_cuts`] does exactly that, for a different reason
+    /// (see its own doc). A reader comparing the two should not conclude the
+    /// scissor is now cheap.
     ///
-    /// Clipping on the CPU instead costs nothing at draw time and — the deciding
-    /// reason — **also clips text**, which a scissor split by stream would too,
-    /// but which no cheaper trick does: glyphs bottom out in `ColourStream::rect`
-    /// in `hud/item_icon.rs`, one flat quad per horizontal ink run, so they are
-    /// not addressable as sprites.
+    /// What is left is the reason that actually decided it: CPU clipping costs
+    /// nothing at draw time and **also clips text**, which a scissor split by
+    /// stream would too, but which no cheaper trick does — glyphs bottom out in
+    /// `ColourStream::rect` in `hud/item_icon.rs`, one flat quad per horizontal ink
+    /// run, so they are not addressable as sprites. A scissor would also have to be
+    /// re-armed per cut rather than per clip scope, which is strictly more
+    /// bookkeeping than the crop below.
     ///
     /// ## What it clips, and what it cannot
     ///
@@ -1827,9 +1890,9 @@ impl Quads<'_> {
     /// | [`Quads::text`] | emitted to a scratch buffer, then clipped in NDC |
     ///
     /// The sprite crop is the generalisation of the horizontal-only UV crop the
-    /// XP bar already uses (`hud.rs:1302-1312`); doing it on one axis only would
-    /// **squash** a favicon instead of cutting it, which is the failure mode worth
-    /// naming because it still looks like a picture.
+    /// XP bar already uses; doing it on one axis only would **squash** a favicon
+    /// instead of cutting it, which is the failure mode worth naming because it
+    /// still looks like a picture.
     ///
     /// Nesting replaces rather than intersects, matching vanilla — `enableScissor`
     /// takes absolute bounds and the lists never nest one.
@@ -1918,11 +1981,33 @@ impl Quads<'_> {
     /// Emit a GUI sprite scaled into `(x, y, w, h)`, honouring its `.mcmeta`
     /// scaling — nine-slice borders included, read from the pack by
     /// [`GuiAtlas::geometry`]. A no-op with no atlas or an unknown id.
+    ///
+    /// **This is the only place sprite quads are pushed**, which is what lets
+    /// [`Quads::cuts`] record the interleave from here alone: whatever is in
+    /// `self.verts` right now was emitted before this sprite, so a snapshot of its
+    /// length is the ordering. Colour quads are pushed from a dozen places
+    /// (including `hud::vanilla_font` writing glyph runs straight into `verts`),
+    /// and none of them needs to know this exists.
     fn sprite(&mut self, id: &str, x: f32, y: f32, w: f32, h: f32, c: [f32; 4]) {
         let quads: Vec<GuiSpriteQuad> = match self.atlas {
             Some(a) => a.geometry(id, x, y, w, h),
             None => return,
         };
+        let colour_floats = self.verts.len();
+        // Extend the previous cut when no colour quad has landed since it, so a
+        // button's nine-slice pieces or a row's three overlay sprites are one
+        // draw call rather than nine.
+        if self
+            .cuts
+            .last()
+            .is_none_or(|cut| cut.colour_floats != colour_floats)
+        {
+            self.cuts.push(SpriteCut {
+                colour_floats,
+                sprite_start: self.sprites.len(),
+                sprite_end: self.sprites.len(),
+            });
+        }
         for q in quads {
             // Each nine-slice piece is cropped independently, against its own
             // `dst` — the borders and the centre sample different UV spans, so a
@@ -1931,6 +2016,11 @@ impl Quads<'_> {
             if let Some(q) = self.crop_sprite_quad(q) {
                 push_sprite_quad(&mut self.sprites, self.w, self.h, q, c);
             }
+        }
+        // After the pushes, because a clipped-away or unknown sprite emits
+        // nothing and must leave an empty run the renderer skips.
+        if let Some(cut) = self.cuts.last_mut() {
+            cut.sprite_end = self.sprites.len();
         }
     }
 

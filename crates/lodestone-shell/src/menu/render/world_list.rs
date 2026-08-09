@@ -493,9 +493,21 @@ pub fn world_list_row_content_rect(
     )
 }
 
+/// The world thumbnail's rect in row `index` — the content origin,
+/// [`WORLD_LIST_ICON`] square.
+///
+/// Derived from [`world_list_row_content_rect`] rather than from the row, for the
+/// reason that function exists: `WorldListEntry` measures everything it draws from
+/// the content box.
+#[must_use]
+pub fn world_list_icon_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32, f32) {
+    let (cx, cy, ..) = world_list_row_content_rect(index, width, scroll);
+    (cx, cy, WORLD_LIST_ICON, WORLD_LIST_ICON)
+}
+
 /// `Component.literal(levelIdAndDate).withColor(-8355712)`
-/// (`WorldSelectionList.java:433`) and the same colour merged onto the info line
-/// (`:439`) — `0xFF808080`, i.e. mid grey.
+/// (`WorldSelectionList`'s `WorldListEntry`) and the same colour merged onto the
+/// info line — `0xFF808080`, i.e. mid grey.
 ///
 /// The **name** line takes no colour at all in vanilla, so it draws in
 /// [`LABEL`]'s white. That asymmetry is the whole visual hierarchy of the row and
@@ -508,16 +520,20 @@ pub(super) const WORLD_LIST_DIM: [f32; 4] =
 /// filled **black**, drawn under the row's content.
 pub(super) const WORLD_LIST_SELECTION_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
+/// `WorldListEntry.ICON_SIZE` — the square thumbnail at the row's content
+/// origin, which `WorldListEntry.extractContent` blits with
+/// `graphics.blit(…, this.icon.textureLocation(), getContentX(), getContentY(),
+/// …, 32, 32, 32, 32)`.
+pub(super) const WORLD_LIST_ICON: f32 = 32.0;
+
 /// Where a `WorldListEntry`'s three text lines start, relative to the row's
-/// content box: `getTextX() = getContentX() + 32 + 3`
-/// (`WorldSelectionList.java:568-570`).
+/// content box: `getTextX() = getContentX() + 32 + 3` (`WorldSelectionList`'s
+/// `WorldListEntry`).
 ///
-/// The 32 is `WorldListEntry.ICON_SIZE` (`:400`) — the icon column. **This client
-/// draws nothing in it** (no `icon.png` is ever written, see
-/// `crate::saves::WorldSummary`), and the column is reserved anyway, because
-/// removing it would move all three text lines and stop this being vanilla's
-/// layout.
-pub const WORLD_LIST_TEXT_DX: f32 = 32.0 + 3.0;
+/// The 32 is [`WORLD_LIST_ICON`], written as that constant rather than as a
+/// literal so the thumbnail and the text column cannot disagree about the
+/// column's width.
+pub const WORLD_LIST_TEXT_DX: f32 = WORLD_LIST_ICON + 3.0;
 
 /// The three text lines' y offsets inside a row's content box —
 /// `WorldListEntry.extractContent` (`WorldSelectionList.java:557-563`):
