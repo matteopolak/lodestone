@@ -1004,6 +1004,13 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // behaviour seed for the same reason.
     let mut blast_rng =
         crate::mob_spawn::SpawnRng::new(crate::explosion_blocks::EXPLOSION_BEHAVIOR_SEED);
+    // The blast's *loot* stream, deliberately separate from `blast_rng`: that one
+    // feeds the ray march, whose per-ray draw count `explosion_blocks` gates
+    // exactly. Sharing one stream would make the crater shape depend on how many
+    // items happened to drop.
+    let mut blast_drops_rng = crate::mob_spawn::SpawnRng::new(
+        crate::explosion_blocks::EXPLOSION_BEHAVIOR_SEED ^ 0x100D_5EED,
+    );
     let (tick_cx_range, tick_cz_range) = tick_area;
     // Issues #221/#222: the natural-spawn driver. Long-lived rather than built
     // per tick because it owns the per-column light cache — see
@@ -1146,24 +1153,48 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             // entity exposure ray-casts against the collision world for line of
             // sight rather than against the destroyed set.
             //
-            // Drops are absent by design, not omission: vanilla rolls
-            // `onExplosionHit` with the blast radius in the loot context, and
-            // without that parameter every destroyed block would drop at *full*
-            // rate instead of vanilla's `1/radius`. See `crate::loot`'s
-            // `explosion_radius` parameter for the half that closes it.
+            // Drops go through `block_drops`, which rolls each destroyed block's
+            // table with the radius in the loot context. That parameter is what
+            // makes `survives_explosion` keep `1/radius` of the crater instead of
+            // passing unconditionally — without it a creeper would drop *every*
+            // block it destroyed, which is why nothing dropped at all until the
+            // parameter existed.
+            //
+            // `mob_drops` is the wrong rule to gate this on (a blast is not a mob
+            // death); `block_drops` is the one vanilla's `destroyBlock` path
+            // consults, so it gates here too.
             let probe = world.column(
                 (detonation.centre.x.floor() as i32).div_euclid(16),
                 (detonation.centre.z.floor() as i32).div_euclid(16),
             );
             let env = crate::explosion_blocks::BlastEnv::in_column(probe.min_y, probe.height);
-            for (at, new_state) in crate::explosion_blocks::destroy_blocks(
+            let (changes, popped) = crate::block_drops::drop_explosion_loot_in_blast(
                 &*world,
                 env,
                 detonation.centre,
                 detonation.radius,
+                crate::block_drops::bundled_tables(),
                 &mut blast_rng,
-            ) {
+                &mut blast_drops_rng,
+            );
+            for (at, new_state) in changes {
                 block_tick_out.publish(at.x, at.y, at.z, new_state);
+            }
+            if world_state.block_drops() {
+                mobs.with(|sim| {
+                    for drop in popped {
+                        let count = u8::try_from(drop.stack.count).unwrap_or(u8::MAX);
+                        sim.spawn_item(
+                            drop.stack.item.clone(),
+                            drop.position,
+                            drop.velocity,
+                            lodestone_entity::ItemLifecycle::newly_dropped(
+                                count,
+                                lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE,
+                            ),
+                        );
+                    }
+                });
             }
             explosion_out.publish(detonation);
         }

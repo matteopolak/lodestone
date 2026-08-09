@@ -415,6 +415,102 @@ pub fn drop_block_loot(
     held: Option<&ItemStack>,
     rng: &mut SpawnRng,
 ) -> Vec<PoppedItem> {
+    drop_block_loot_in(tables, block_state, pos, held, None, rng)
+}
+
+/// Rolls `block_state`'s loot table for a block destroyed by an **explosion** of
+/// `radius` — vanilla's `BlockBehaviour.onExplosionHit` for a
+/// `DESTROY_WITH_DECAY` blast, which is what a creeper's is.
+///
+/// The only difference from [`drop_block_loot`] is
+/// [`LootContext::explosion_radius`], and it is the difference between a faithful
+/// blast and a duplication glitch: with the parameter absent every table's
+/// `survives_explosion` condition passes unconditionally, so a creeper would drop
+/// **every** block in its crater. With it set the condition keeps `1/radius` of
+/// them and `explosion_decay` thins multi-item stacks item by item. `crate::loot`'s
+/// own doc has the two transcribed record definitions.
+///
+/// Vanilla's `DESTROY` variant (a blast with `yield = 1.0`) exists too and passes
+/// **no** radius; nothing in this crate produces one, so it is
+/// [`drop_block_loot`] and not a third entry point.
+#[must_use]
+pub fn drop_explosion_loot(
+    tables: &LootTableSet,
+    block_state: &str,
+    pos: BlockPos,
+    radius: f32,
+    rng: &mut SpawnRng,
+) -> Vec<PoppedItem> {
+    // No tool: a blast breaks the block, not a player, so `LootContextParams.TOOL`
+    // is absent exactly as it is for a bare hand.
+    drop_block_loot_in(tables, block_state, pos, None, Some(radius), rng)
+}
+
+/// Runs a blast's block half **with drops**: computes the exploded set, rolls
+/// each destroyed block's table with the radius in the loot context, writes air,
+/// and returns the block changes alongside the items to spawn.
+///
+/// # Why this lives here and not in `crate::explosion_blocks`
+///
+/// [`crate::explosion_blocks::destroy_blocks`] writes air *before* it returns, so
+/// its caller can no longer see what was there — and the loot roll needs the old
+/// state. Rather than change that function's contract, this walks
+/// [`crate::explosion_blocks::exploded_positions`] itself and repeats its
+/// three-line air-skip guard. The blast physics stay in one place; the loot
+/// knowledge stays in this module, next to the table set it needs.
+///
+/// # Two RNG streams, on purpose
+///
+/// `blast_rng` feeds the ray march — one draw per ray, 1,352 of them — and its
+/// draw count is the specification `explosion_blocks` gates against. `drops_rng`
+/// feeds the loot tables and the `popResource` placement jitter. Sharing one
+/// stream would make the crater shape depend on how many items happened to drop,
+/// which is both wrong and untestable.
+///
+/// # The parity ceiling, stated rather than discovered later
+///
+/// Vanilla opens `interactWithBlocks` with `Util.shuffle(targetBlocks, random)` —
+/// Fisher–Yates over a list built from a `HashSet<BlockPos>`, so its input order
+/// is JVM hash-iteration order. That order is **not reproducible outside the
+/// JVM** at any level of care. `exploded_positions` returns a sorted set instead,
+/// so the *sequence* of drops here will not match a real server's. The **count**
+/// and the **multiset** do, and those are what a gate should assert.
+pub fn drop_explosion_loot_in_blast<S: crate::chunk::ChunkSource>(
+    world: &S,
+    env: crate::explosion_blocks::BlastEnv,
+    centre: Vec3,
+    radius: f32,
+    tables: &LootTableSet,
+    blast_rng: &mut SpawnRng,
+    drops_rng: &mut SpawnRng,
+) -> (Vec<(BlockPos, String)>, Vec<PoppedItem>) {
+    let mut changes = Vec::new();
+    let mut popped = Vec::new();
+    for pos in crate::explosion_blocks::exploded_positions(world, env, centre, radius, blast_rng) {
+        let state = world.block_state(pos.x, pos.y, pos.z);
+        if crate::random_tick::is_air_variant(&state) {
+            continue;
+        }
+        // Rolled **before** the write, because the table is keyed off the state
+        // that is about to be destroyed.
+        popped.extend(drop_explosion_loot(tables, &state, pos, radius, drops_rng));
+        world.set_block(pos.x, pos.y, pos.z, crate::chunk::AIR);
+        changes.push((pos, crate::chunk::AIR.to_owned()));
+    }
+    (changes, popped)
+}
+
+/// The shared body of [`drop_block_loot`] and [`drop_explosion_loot`] — one
+/// implementation so the two cannot drift in their placement draws or their
+/// zero-count filtering.
+fn drop_block_loot_in(
+    tables: &LootTableSet,
+    block_state: &str,
+    pos: BlockPos,
+    held: Option<&ItemStack>,
+    explosion_radius: Option<f32>,
+    rng: &mut SpawnRng,
+) -> Vec<PoppedItem> {
     let Some(table_id) = block_loot_table_id(block_state) else {
         return Vec::new();
     };
@@ -424,6 +520,7 @@ pub fn drop_block_loot(
     let context = LootContext {
         luck: 0.0,
         tool: held.map(LootTool::from_held_item),
+        explosion_radius,
     };
     table
         .roll(&context, rng)
@@ -668,6 +765,7 @@ mod tests {
         let context = LootContext {
             luck: 0.0,
             tool: Some(tool),
+            explosion_radius: None,
         };
         table
             .roll(&context, rng)
