@@ -2523,6 +2523,12 @@ impl ServerProtocol for V770ServerProtocol {
                             },
                             3 => ServerBound::ItemDropped { whole_stack: true },
                             4 => ServerBound::ItemDropped { whole_stack: false },
+                            // Issue #260: the bow's release. This ordinal used to
+                            // fall through to `Ignored`, which is why a player
+                            // could draw a bow (the client animates locally) and
+                            // never fire anything — the packet that ends the draw
+                            // reached no server-side model at all.
+                            5 => ServerBound::ReleaseUseItem,
                             _ => ServerBound::Ignored,
                         }
                     }
@@ -2540,6 +2546,26 @@ impl ServerProtocol for V770ServerProtocol {
                             z: use_item.cursor_z,
                         },
                         sequence: use_item.sequence,
+                    },
+                    None => ServerBound::Ignored,
+                }
+            }
+            // Issue #260: right-click-in-air, the trigger for every player-side
+            // projectile launch. The yaw/pitch this packet carries is the reason
+            // a throw has a direction at all — this crate tracks no per-connection
+            // rotation, and the last `PlayerRotated` is not necessarily the facing
+            // at the instant of the throw.
+            State::Play if packet_id == play::serverbound::USE_ITEM => {
+                match decode_full::<UseItem>(payload) {
+                    Some(u) => ServerBound::UseItem {
+                        // The wire field is a VarInt; anything outside `0..=1` is
+                        // malformed and reads as the main hand rather than dropping
+                        // the packet, matching this module's established
+                        // "malformed input degrades the effect, not the connection"
+                        // convention (`face_from_ordinal`).
+                        hand: u8::try_from(u.hand).unwrap_or(0),
+                        yaw: u.yaw,
+                        pitch: u.pitch,
                     },
                     None => ServerBound::Ignored,
                 }
@@ -4501,10 +4527,71 @@ mod block_edit_tests {
                 "ordinal {ordinal}"
             );
         }
-        // RELEASE_USE_ITEM, SWAP_ITEM_WITH_OFFHAND, STAB: no server-side model.
-        for ordinal in 5..=7 {
+        // 5 is RELEASE_USE_ITEM, and it lifts now: it is the packet that fires a
+        // drawn bow, so leaving it `Ignored` meant a player could draw and never
+        // shoot. This assertion used to be part of the `5..=7` sweep below, which
+        // is the shape CLAUDE.md warns about — a new subsystem silently breaking a
+        // test that asserted its absence.
+        assert_eq!(
+            proto.decode(State::Play, play::serverbound::PLAYER_ACTION, &body(5)),
+            ServerBound::ReleaseUseItem,
+        );
+        // SWAP_ITEM_WITH_OFFHAND and STAB: still no server-side model.
+        for ordinal in 6..=7 {
             let decoded = proto.decode(State::Play, play::serverbound::PLAYER_ACTION, &body(ordinal));
             assert_eq!(decoded, ServerBound::Ignored, "ordinal {ordinal}");
+        }
+        // Past the enum: still ignored, so the arm above is a specific lift rather
+        // than a catch-all that swallowed the tail.
+        for ordinal in [8, 99, -1] {
+            let decoded = proto.decode(State::Play, play::serverbound::PLAYER_ACTION, &body(ordinal));
+            assert_eq!(decoded, ServerBound::Ignored, "ordinal {ordinal}");
+        }
+    }
+
+    /// `USE_ITEM` lifts with its hand and the facing it carries — the launch
+    /// direction for every player-thrown projectile.
+    ///
+    /// The yaw/pitch are what make a throw aimable without this crate tracking
+    /// rotation per connection, so a decode that dropped them would leave every
+    /// snowball flying due south. Asserted by value, and with a non-zero,
+    /// non-symmetric pair so a transposed yaw/pitch read is caught too.
+    #[test]
+    fn decode_use_item_lifts_hand_and_facing() {
+        let proto = V770ServerProtocol;
+        let body = encode(&UseItem {
+            hand: 1,
+            sequence: 7,
+            yaw: 137.5,
+            pitch: -22.25,
+        });
+        assert_eq!(
+            proto.decode(State::Play, play::serverbound::USE_ITEM, &body),
+            ServerBound::UseItem {
+                hand: 1,
+                yaw: 137.5,
+                pitch: -22.25,
+            },
+        );
+        // A hand ordinal outside `0..=1` is carried through rather than dropping
+        // the packet; the *consumer* treats anything but `1` as the main hand
+        // (`apply_use_item`'s own branch), which is where the degradation belongs
+        // because only it knows what a hand means. A **negative** ordinal cannot
+        // survive the `u8` conversion and lands on `0`, which is the main hand too —
+        // asserted so the two malformed shapes are known to agree.
+        for wire in [42, -1] {
+            let odd = encode(&UseItem {
+                hand: wire,
+                sequence: 0,
+                yaw: 0.0,
+                pitch: 0.0,
+            });
+            let ServerBound::UseItem { hand, .. } =
+                proto.decode(State::Play, play::serverbound::USE_ITEM, &odd)
+            else {
+                panic!("a malformed hand must not drop the packet");
+            };
+            assert_ne!(hand, 1, "wire {wire} must not read as the off hand");
         }
     }
 

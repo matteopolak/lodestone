@@ -31,6 +31,8 @@
 //!   [`ItemEntityRegistry`](item_entity::ItemEntityRegistry), the per-tick
 //!   driver a server owns to advance despawn/merge across many of them.
 //! * [`damage`] — the damage-reduction pipeline and invulnerability-frame gate.
+//! * [`equipment`] — what an equipped item contributes to combat attributes, the
+//!   feed [`damage`]'s pipeline never had.
 //! * [`explosion`] — ray-sampled blast exposure, damage and knockback power.
 
 pub mod ai;
@@ -38,6 +40,7 @@ pub mod attribute;
 pub mod brain;
 pub mod damage;
 pub mod entity;
+pub mod equipment;
 pub mod explosion;
 pub mod interpolation;
 pub mod item_entity;
@@ -56,6 +59,9 @@ pub use damage::{
     DamageFlags, DamageOutcome, Defenses, HurtCooldown, HurtDecision, apply_reductions,
 };
 pub use entity::{EntityKind, EntityState, EntityTracker};
+pub use equipment::{
+    EquipmentSlot, ItemModifier, PlayerCombatStats, apply_equipment, player_combat_stats,
+};
 pub use explosion::{Aabb, OpenAir, RayView, entity_damage, knockback_power, seen_percent};
 pub use interpolation::Interpolated;
 pub use item_entity::{ItemEntityRegistry, ItemLifecycle, ItemMotion, TrackedItem, try_merge};

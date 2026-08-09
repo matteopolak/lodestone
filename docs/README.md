@@ -133,8 +133,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   Today: chests (single, double left, double right; every material; the lid
   animation), skull/head geometry (five of vanilla's seven types), the bell body/rim
   (see [Bell](#bell)), the shulker box (see [Shulker box](#shulker-box)),
-  standing/wall/hanging sign text, the banner with its pattern layers, and the
-  lectern's book (see [Lectern](#lectern)).
+  standing/wall/hanging sign text, the banner with its pattern layers, the lectern's
+  book (see [Lectern](#lectern)), the enchanting table's floating book (see
+  [Enchanting table](#enchanting-table)) and the food on a campfire (see
+  [Campfire](#campfire), which is the one type here that draws no cuboid rig at all).
 - [The block-entity scan is a cold-column term, but not a distance one](./block-entity-tick-distance.md) —
   The measured resolution of the block-entity lead in [issue
   #503](https://github.com/matteopolak/lodestone/issues/503): whether
@@ -489,6 +491,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   production by [`MobSim`](../crates/lodestone-server/src/mobs.rs) — see "Production
   wiring" below; this doc's earlier revision described them as unwired, which is no
   longer true and is corrected here rather than left to mislead the next reader.
+- [Equipment combat stats: the feed the damage pipeline never had](./equipment-combat-stats.md) —
+  What an equipped item contributes to a living entity's combat attributes — armour
+  points, armour toughness, knockback resistance, weapon attack damage — and the
+  wiring that makes a player's held sword and worn armour reach the damage pipeline.
+  The reduction formulas were live-verified against a real vanilla 26.2 server long
+  before anything populated a `Defenses`: armour reduced a number that came from a
+  per-species base attribute and never from a helmet, and every player attack dealt a
+  flat bare-hand `1.0`.
 - [Event routing — making a mis-routed `ClientEvent` a compile error](./event-routing.md) —
   `lodestone_model::event::route` is a single **exhaustive** table saying which of the
   client's event routers claim each `ClientEvent` variant. It exists so that adding a
@@ -999,6 +1009,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   **fit-gated state machine**, not by a pose→dimensions lookup. It lives in
   [`crates/lodestone-physics/src/pose.rs`](../crates/lodestone-physics/src/pose.rs)
   and runs from the end of `lodestone_physics::tick`.
+- [Projectile impact and the player's own launch](./projectile-impact.md) — The half
+  of the projectile system that made arrows matter: hit detection against terrain and
+  mobs, the per-projectile damage arithmetic, and the serverbound path by which a
+  **player** launches a bow shot, a snowball, an egg or an ender pearl. Before this,
+  every projectile in the game came from a mob goal, flew through anything in its way,
+  and hurt nothing.
 - [Projectile renderers (arrow, spectral arrow, trident)](./projectile-renderers.md) —
   The three entity types vanilla draws with `ArrowRenderer` and
   `ThrownTridentRenderer`: `minecraft:arrow`, `minecraft:spectral_arrow` and

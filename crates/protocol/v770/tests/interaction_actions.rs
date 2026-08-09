@@ -515,8 +515,7 @@ fn the_drop_ordinals_decode_to_item_dropped_with_the_stack_flag_the_right_way_ro
     }
 
     // The control: the ordinals around them are unchanged, so the arm above is a
-    // narrowing of `_ => Ignored` and not a replacement of it. 2 must still be a
-    // block break, and 5 (RELEASE_USE_ITEM) must still be ignored — a decode that
+    // narrowing of `_ => Ignored` and not a replacement of it. A decode that
     // answered `ItemDropped` for everything would pass the loop above.
     let stop_destroy = proto.decode(
         lodestone_core::State::Play,
@@ -527,13 +526,31 @@ fn the_drop_ordinals_decode_to_item_dropped_with_the_stack_flag_the_right_way_ro
         matches!(stop_destroy, ServerBound::BlockAction { .. }),
         "ordinal 2 is still STOP_DESTROY_BLOCK, got {stop_destroy:?}"
     );
+    // Ordinal 5, RELEASE_USE_ITEM, **now lifts.** This control asserted `Ignored`
+    // until the bow gained a server-side model; it is the exact failure mode
+    // CLAUDE.md names — a new subsystem breaking a gate written against its
+    // absence — so the assertion is inverted rather than deleted, which keeps the
+    // control's real job (proving the drop arm is a narrowing, not a catch-all).
     let release_use = proto.decode(
         lodestone_core::State::Play,
         play::serverbound::PLAYER_ACTION,
         &body(5),
     );
     assert!(
-        matches!(release_use, ServerBound::Ignored),
-        "ordinal 5 has no server-side model yet and must still be Ignored, got {release_use:?}"
+        matches!(release_use, ServerBound::ReleaseUseItem),
+        "ordinal 5 is the bow's release and must lift, got {release_use:?}"
     );
+    // 6 and 7 still have no model, which is what keeps the narrowing claim above
+    // honest now that 5 has moved.
+    for ordinal in [6, 7] {
+        let decoded = proto.decode(
+            lodestone_core::State::Play,
+            play::serverbound::PLAYER_ACTION,
+            &body(ordinal),
+        );
+        assert!(
+            matches!(decoded, ServerBound::Ignored),
+            "ordinal {ordinal} has no server-side model yet, got {decoded:?}"
+        );
+    }
 }

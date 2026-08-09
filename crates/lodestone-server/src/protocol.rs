@@ -609,6 +609,38 @@ pub enum ServerBound {
         /// Target entity id.
         entity_id: i32,
     },
+    /// The player began using the item in `hand` in mid-air
+    /// (`ServerboundUseItemPacket`).
+    ///
+    /// This is the *start* of a use, not a completed action, and the difference
+    /// matters: an instant throwable (snowball, egg, ender pearl) is released by
+    /// vanilla's `use` the moment the packet arrives, while a bow starts a draw
+    /// whose length the **server** counts and which ends with a separate
+    /// [`ReleaseUseItem`](Self::ReleaseUseItem). One packet, two behaviours,
+    /// decided by what is in the hand — see `crate::server`'s `apply_use_item`.
+    ///
+    /// `ServerboundUseItemPacket` also carries the client's yaw/pitch, which is
+    /// what makes a launch direction available without this crate tracking
+    /// rotation for every connection: a throw needs the facing *at the instant of
+    /// the throw*, and the last `PlayerRotated` packet is not necessarily that.
+    UseItem {
+        /// `0` main hand, `1` off hand.
+        hand: u8,
+        /// Yaw in degrees, as the client reported it with the use.
+        yaw: f32,
+        /// Pitch in degrees.
+        pitch: f32,
+    },
+    /// The player let go of a right-click they had been holding
+    /// (`ServerboundPlayerActionPacket`'s `RELEASE_USE_ITEM` ordinal, `5`).
+    ///
+    /// Vanilla's bow fires from here, not from the `USE_ITEM` that started the
+    /// draw, and the arrow's power comes from how long the two were apart —
+    /// `BowItem.getPowerForTime`. That interval is counted in **server ticks**, so
+    /// the consumer reads `MobSim::tick_count` rather than a wall clock: this crate
+    /// links into a wasm32 bundle where `Instant::now()` compiles and then panics
+    /// at runtime with no log line.
+    ReleaseUseItem,
     /// The client's movement-input flags for the current tick
     /// (`ServerboundPlayerInputPacket`, issue #12). Decoded for exactly one
     /// reason: `sprint` is half of vanilla's melee knockback-bonus gate
