@@ -4,9 +4,9 @@
 
 The XP level curve, the orb denomination ladder and a player's experience state.
 `crates/lodestone-server/src/experience.rs` holds all three as pure arithmetic;
-`ServerProtocol::encode_set_experience` puts the result on the wire. The one
-production producer today is furnace smelting, paid out when the player closes the
-menu.
+`ServerProtocol::encode_set_experience` puts the result on the wire, and
+`crates/lodestone-server/src/player_data.rs` saves and restores it. The one production
+*source* today is furnace smelting, paid out when the player closes the menu.
 
 ## How it works
 
@@ -101,8 +101,34 @@ resends. The equivalent here is: send once at join, and send after every mutatio
 * **Spending XP** (enchanting): `PlayerExperience::take_levels`, which zeroes progress
   and total on underflow — clamping only the level leaves a full bar at level 0.
 * **Persistence**: `XpLevel` / `XpP` / `XpTotal`, vanilla's own names, via
-  `PlayerExperience::restored`. **`PlayerData` does not read or write them yet**, so
-  XP resets on rejoin.
+  `PlayerExperience::restored`. `PlayerData::experience` models all three, and
+  `serve_play` seeds the live value from the saved file exactly as it does `vitals` and
+  `inventory`.
+
+### Persistence had to be one change, not two
+
+The bug this replaced is worth keeping because the *file* was never wrong. `PlayerData`
+did not model the three `Xp*` fields, so they rode through `PlayerData::preserved` —
+read at join, written back verbatim on every save, and never looked at. XP therefore
+survived the file and not the session: earn 31 levels, quit, rejoin at zero, and the
+`.dat` still says 31.
+
+The trap in fixing it is that **modelling the fields without reading them back is
+strictly worse than the bug**. A writer that emits our own `XpLevel` while the live
+value is `default()` overwrites the file's real XP with this session's zeros on the
+first periodic save — silent, permanent loss instead of a recoverable display bug. So
+`PlayerData::capture` takes the live `PlayerExperience` and `serve_play` restores from
+the file in the same change; `persist_player`'s own parameter comment says so at the
+call site.
+
+The gates are `a_rejoining_player_is_sent_the_experience_they_earned` (v770's
+`server_join_experience.rs`, end to end: file → session → wire) with
+`control_a_saved_player_with_no_experience_still_joins_at_zero` as the arm that must
+disagree, and the player-file round trip in `lodestone-server`'s
+`entity_persistence_round_trip.rs`. All three use level **31** / total **1557** /
+bar **50/121** — three distinct non-trivial numbers, because `XpLevel` and `XpTotal`
+are adjacent `Int`s in NBT and adjacent VarInts on the wire, and a transposition of
+two same-typed fields is legal everywhere except on the bar.
 
 ### Gotchas
 

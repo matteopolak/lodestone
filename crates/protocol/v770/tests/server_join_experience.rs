@@ -62,9 +62,33 @@ mod common;
 use common::unique_username;
 
 /// A fresh player's experience: `Player`'s `experienceProgress`/`experienceLevel`/
-/// `totalExperience` all start at zero, and nothing in this crate restores them from
-/// disk yet.
+/// `totalExperience` all start at zero.
+///
+/// A player file *without* XP now also produces this, which is what makes it the
+/// control arm for [`a_rejoining_player_is_sent_the_experience_they_earned`] rather
+/// than only the fresh-join expectation.
 const FRESH: (f32, i32, i32) = (0.0, 0, 0);
+
+/// The seeded rejoin state: 1557 lifetime points.
+///
+/// Derived from `Player.getXpNeededForNextLevel`, not from a run and not from a
+/// memorable round number — the running sum of the curve is 1507 at level 31, so 1557
+/// leaves 50 points against level 31's own cost of `112 + 1*9 = 121`. Every one of the
+/// three numbers is different and none is 0 or 1, which is what makes a transposition
+/// of the two adjacent VarInts (or of the two adjacent `Int` NBT fields) visible: a
+/// level/total swap reads back as level 1557.
+const REJOIN_TOTAL: i32 = 1_557;
+const REJOIN_LEVEL: i32 = 31;
+const REJOIN_PROGRESS: f32 = 50.0 / 121.0;
+
+/// How far the restored bar may sit from the exact ratio.
+///
+/// `give_points` reaches level 31 through 31 carry re-expressions, each a multiply and a
+/// divide in `f32`, so the landed value is `0.41322213` against `50/121 =
+/// 0.41322314` — a drift of about `1e-6` that is arithmetic, not a bug. `1e-5` is loose
+/// enough to absorb it and still an order of magnitude tighter than the nearest wrong
+/// answer: the level-30 hypothesis would put the bar at `50/112 = 0.446`.
+const PROGRESS_TOLERANCE: f32 = 1e-5;
 
 /// Flat ground at y=63.
 ///
@@ -282,4 +306,125 @@ async fn a_creative_join_sends_the_experience_bar_too() {
          check is in the client's HUD, not in ServerPlayer.doTick"
     );
     assert_eq!(sent[0], FRESH, "same fresh-player values as survival");
+}
+
+/// Opens a persistent world, seeds one player file, joins as that uuid, and returns
+/// every `set_experience` the join carried.
+///
+/// One helper for both arms below so the *only* difference between them is the
+/// experience written into the file — a second copy of the fixture could differ
+/// somewhere else and the control would prove nothing.
+async fn join_with_saved_experience(
+    scratch: &str,
+    experience: lodestone_server::experience::PlayerExperience,
+) -> Vec<(f32, i32, i32)> {
+    let dir = tempdir(scratch);
+    let (_server, client_io, world) = IntegratedServer::open_persistent_with_mobs(
+        V770ServerProtocol,
+        &dir,
+        FlatWorld,
+        -64,
+        384,
+        (0..=0, 0..=0),
+        (0, 0),
+        0,
+        0,
+        Duration::from_secs(3600),
+    )
+    .expect("open persistent world");
+
+    let store = world
+        .world_registries()
+        .expect("a persistent source answers Some")
+        .player_data
+        .expect("a persistent world exposes its player store");
+
+    let uuid = Uuid::new_v4();
+    store
+        .write(
+            uuid,
+            &lodestone_server::player_data::PlayerData {
+                pos: lodestone_model::Vec3::new(0.5, 64.0, 0.5),
+                experience,
+                ..Default::default()
+            },
+        )
+        .expect("seed the player file");
+
+    let mut client = Connection::new(client_io);
+    let joined = join(&mut client, &unique_username(), uuid).await;
+    experiences(&joined)
+}
+
+/// **XP survives a rejoin.** The bar a returning player is sent is the one their file
+/// carries, not zeros.
+///
+/// # The defect
+///
+/// `PlayerExperience::restored` had only test callers: a rejoining player's live XP was
+/// `default()` while the `.dat` faithfully kept `XpP`/`XpLevel`/`XpTotal` through
+/// `PlayerData::preserved` and wrote them back on every save. So XP survived the *file*
+/// and not the *session* — earn 31 levels, quit, come back at zero, and the file still
+/// says 31.
+///
+/// # Why the numbers discriminate
+///
+/// See [`REJOIN_TOTAL`]. The three values are distinct, so this fails loudly on a
+/// level/total transposition in either the NBT schema or the packet — the two places
+/// this data crosses a boundary between fields of the same type.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rejoining_player_is_sent_the_experience_they_earned() {
+    let mut experience = lodestone_server::experience::PlayerExperience::default();
+    experience.give_points(REJOIN_TOTAL);
+    assert_eq!(
+        (experience.level(), experience.total()),
+        (REJOIN_LEVEL, REJOIN_TOTAL),
+        "the fixture itself must be level 31 before the join is asked about it"
+    );
+
+    let sent = join_with_saved_experience("rejoin", experience).await;
+    assert_eq!(sent.len(), 1, "a rejoin carries exactly one set_experience too");
+    let (progress, level, total) = sent[0];
+    assert_eq!(
+        level, REJOIN_LEVEL,
+        "the restored level did not reach the wire; 0 means nothing reads the file's \
+         XpLevel, and 1557 would be a level/total transposition"
+    );
+    assert_eq!(
+        total, REJOIN_TOTAL,
+        "the restored lifetime total did not reach the wire; 31 would be the same \
+         transposition seen from the other side"
+    );
+    assert!(
+        (progress - REJOIN_PROGRESS).abs() < PROGRESS_TOLERANCE,
+        "the restored bar arrived as {progress}, not 50/121 — level 31 costs 121 points"
+    );
+}
+
+/// **The control, and it fires.** The same fixture with a zero-XP file produces zeros.
+///
+/// Without this arm the gate above is satisfied by anything that happens to answer 31 —
+/// a hardcoded seed, a default that drifted, a value read from the wrong player. Run it
+/// and watch it disagree with the arm above at every one of the three fields.
+///
+/// (A file whose `Xp*` fields are *absent* entirely — what the pre-fix writer produced —
+/// decodes to the same zeros through `PlayerData::from_nbt`'s per-field fallback, so
+/// this is the same arm reached the cheaper way.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn control_a_saved_player_with_no_experience_still_joins_at_zero() {
+    let sent = join_with_saved_experience(
+        "rejoin-control",
+        lodestone_server::experience::PlayerExperience::default(),
+    )
+    .await;
+    assert_eq!(sent.len(), 1, "the control must reach Play the same way");
+    assert_eq!(
+        sent[0], FRESH,
+        "a saved player who earned nothing must still be sent zeros — if this arm \
+         reports 31 the restore is reading something other than the file"
+    );
+    assert_ne!(
+        sent[0].1, REJOIN_LEVEL,
+        "the two arms must disagree, or neither measures the restore"
+    );
 }

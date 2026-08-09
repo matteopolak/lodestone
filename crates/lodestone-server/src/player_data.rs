@@ -34,6 +34,16 @@
 //! | `Inventory` | `List<Compound>` | `{Slot: Byte, id: String, count: Int}` |
 //! | `playerGameType` | `Int` | camelCase, and *not* `GameType` |
 //! | `SelectedItemSlot` | `Int` | the hotbar index |
+//! | `XpLevel` | `Int` | the level, **not** the lifetime total |
+//! | `XpP` | `Float` | the bar fraction, `0.0..1.0` |
+//! | `XpTotal` | `Int` | the lifetime total |
+//!
+//! The three `Xp*` fields are three independent numbers and two of them are
+//! adjacent `Int`s, so a transposition of `XpLevel` and `XpTotal` reads back as a
+//! legal file with a wildly wrong level — the NBT twin of the wire transposition
+//! [`crate::experience`] warns about. `XpSeed` is vanilla's enchanting-table roll
+//! seed and is deliberately *not* modelled: it is carried through
+//! [`preserved`](PlayerData::preserved) untouched.
 //!
 //! Note `count` is lowercase and an `Int`: that is 26.2's item form, not the
 //! pre-1.20.5 `Count: Byte`. The same shape [`crate::chunk_nbt`] already writes
@@ -44,7 +54,7 @@
 //! [`PlayerData`] keeps every root field it does not understand in
 //! [`PlayerData::preserved`] and writes it back untouched. This is the single
 //! most important property in the module and it is not an optimisation: this
-//! server models no hunger, no experience, no ender chest, no advancement tree
+//! server models no hunger, no ender chest, no advancement tree
 //! inside the `.dat`, and no `Brain`. A writer that emitted only what it
 //! understands would **delete** all of that from a real player's file on the
 //! first save — the same class of defect as re-saving a world and erasing its
@@ -99,6 +109,9 @@ const MODELLED_FIELDS: &[&str] = &[
     "playerGameType",
     "SelectedItemSlot",
     "Inventory",
+    "XpLevel",
+    "XpP",
+    "XpTotal",
 ];
 
 /// A vanilla-shaped player save, as this server models it.
@@ -131,6 +144,18 @@ pub struct PlayerData {
     pub selected_slot: u8,
     /// The native-order inventory slots, exactly [`PLAYER_NATIVE_SIZE`] long.
     pub inventory: Vec<Option<ItemStack>>,
+    /// The level, bar and lifetime total — vanilla's `XpLevel` / `XpP` /
+    /// `XpTotal`.
+    ///
+    /// Held as the live [`crate::experience::PlayerExperience`] rather than three
+    /// loose numbers so the clamping in
+    /// [`PlayerExperience::restored`](crate::experience::PlayerExperience::restored)
+    /// happens once, at decode, instead of once per caller. Before this was
+    /// modelled the three fields rode through [`preserved`](Self::preserved), so a
+    /// player's XP survived the *file* and not the *session*: it was written back
+    /// verbatim on every save and never read into the running player, who joined at
+    /// zero.
+    pub experience: crate::experience::PlayerExperience,
     /// Every root field this module does not model, verbatim, written back
     /// unchanged. See the module doc — this is what stops a save deleting the
     /// player's experience, hunger and ender chest.
@@ -152,6 +177,7 @@ impl Default for PlayerData {
             game_mode: None,
             selected_slot: 0,
             inventory: vec![None; PLAYER_NATIVE_SIZE],
+            experience: crate::experience::PlayerExperience::default(),
             preserved: Vec::new(),
         }
     }
@@ -186,6 +212,7 @@ impl PlayerData {
         air_supply: i32,
         game_mode: GameMode,
         inventory: &PlayerInventory,
+        experience: crate::experience::PlayerExperience,
         preserved: Vec<(String, Nbt)>,
     ) -> Self {
         Self {
@@ -193,6 +220,7 @@ impl PlayerData {
             rotation,
             health,
             air_supply,
+            experience,
             game_mode: Some(game_mode),
             selected_slot: inventory.selected_hotbar_slot(),
             inventory: (0..PLAYER_NATIVE_SIZE)
@@ -262,6 +290,13 @@ impl PlayerData {
                 Nbt::Int(i32::from(self.selected_slot)),
             ),
             ("Inventory".to_owned(), inventory_to_nbt(&self.inventory)),
+            // Written in vanilla's own declaration order, and the *types* are the
+            // part worth checking rather than the order: `XpLevel` and `XpTotal`
+            // are both `Int` and `XpP` is a `Float`, so a level written into
+            // `XpTotal` produces a file every parser accepts.
+            ("XpLevel".to_owned(), Nbt::Int(self.experience.level())),
+            ("XpP".to_owned(), Nbt::Float(self.experience.progress())),
+            ("XpTotal".to_owned(), Nbt::Int(self.experience.total())),
         ];
         if let Some(mode) = self.game_mode {
             fields.push(("playerGameType".to_owned(), Nbt::Int(game_type_value(mode))));
@@ -314,6 +349,18 @@ impl PlayerData {
                 .and_then(|s| u8::try_from(s).ok())
                 .unwrap_or(0),
             inventory: inventory_from_nbt(field(nbt, "Inventory")),
+            // Each field falls back to its own zero rather than the triple falling
+            // back together: a file with `XpLevel` and no `XpP` is a partial file,
+            // and rejecting the level because the bar is missing loses more than it
+            // protects. `restored` then clamps the result.
+            experience: crate::experience::PlayerExperience::restored(
+                int_field(nbt, "XpLevel").unwrap_or(0),
+                match field(nbt, "XpP") {
+                    Some(Nbt::Float(p)) => *p,
+                    _ => 0.0,
+                },
+                int_field(nbt, "XpTotal").unwrap_or(0),
+            ),
             preserved: Vec::new(),
         };
         if let Nbt::Compound(fields) = nbt {
