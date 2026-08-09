@@ -96,6 +96,18 @@ pub struct ItemComponents {
     /// in any inventory used to truncate decoding of the rest of the packet.
     /// Without it the renderer can only draw the lowest-numbered known map.
     pub map_id: Option<i32>,
+    /// `minecraft:pot_decorations`: the four sherds facing out of a
+    /// `minecraft:decorated_pot` stack.
+    ///
+    /// `None` for every other item and for a pot crafted from four plain bricks
+    /// (which carries no component at all). Decoded for the same reason as
+    /// [`trim`](Self::trim) and [`map_id`](Self::map_id) rather than for the
+    /// picture's sake: the clientbound component patch cannot skip an unknown
+    /// component, and an advancement whose icon is `minecraft:decorated_pot`
+    /// therefore truncated the whole `update_advancements` packet — which is a
+    /// **join-blocking** failure, not a cosmetic one, because that packet arrives
+    /// during the initial world load.
+    pub pot_decorations: Option<PotDecorations>,
     /// What this stack's component *patch* said about `minecraft:tool`.
     ///
     /// Almost always [`ToolPatch::Inherited`] — see that type's docs; a plain
@@ -158,6 +170,34 @@ pub struct ItemComponents {
     /// the item's prototype value, which is the best available answer, but is not
     /// guaranteed to be the effective one.
     pub has_unmodeled: bool,
+}
+
+/// The four sherds of a `minecraft:decorated_pot` — vanilla's `PotDecorations`
+/// record (`PotDecorations`, four `Optional<Item>` fields in the order `back`,
+/// `left`, `right`, `front`).
+///
+/// # `None` means a plain brick face, not "unknown"
+///
+/// Vanilla's own `PotDecorations::getItem` maps `Items.BRICK` to
+/// `Optional.empty()` on the way in and `ordered()` maps empty back to
+/// `Items.BRICK` on the way out, so a brick and a blank face are the same state
+/// by construction. This type mirrors that: a `None` side is an undecorated
+/// side, and it is what a pot crafted from four plain bricks decodes to.
+///
+/// The wire list is `ByteBufCodecs.list(4)`, so a shorter list is legal and its
+/// missing tail is `None` — that is `getItem`'s `i >= sherds.size()` arm. In
+/// practice a vanilla server always writes exactly four, because `ordered()`
+/// builds a four-element list unconditionally.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PotDecorations {
+    /// The sherd on the pot's back face, or `None` for a plain brick.
+    pub back: Option<ResourceKey>,
+    /// The sherd on the pot's left face, or `None` for a plain brick.
+    pub left: Option<ResourceKey>,
+    /// The sherd on the pot's right face, or `None` for a plain brick.
+    pub right: Option<ResourceKey>,
+    /// The sherd on the pot's front face, or `None` for a plain brick.
+    pub front: Option<ResourceKey>,
 }
 
 /// A smithing-table armour trim — vanilla's `ArmorTrim` record

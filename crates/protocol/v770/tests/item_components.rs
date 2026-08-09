@@ -340,6 +340,287 @@ fn replays_the_captured_plain_pickaxe_fixture() {
     );
 }
 
+/// `minecraft:pot_decorations` decodes its four sherds into the right four faces.
+///
+/// Wire shape (26.2 `PotDecorations.STREAM_CODEC` =
+/// `ByteBufCodecs.registry(Registries.ITEM).apply(ByteBufCodecs.list(4))`): a
+/// VarInt element count then that many **bare** item registry ids. The record's
+/// field order is `back`, `left`, `right`, `front`.
+///
+/// # Why four *distinct* sherds
+///
+/// Four adjacent same-typed VarInt fields transpose byte-perfectly through any
+/// codec, so four identical ids — or even four in a symmetric arrangement —
+/// would pass under any permutation of the four faces. Each face gets a
+/// different sherd, and each assertion names the face, so a transposition fails
+/// and says which pair swapped.
+#[test]
+fn decodes_pot_decorations_into_the_right_four_faces() {
+    let mut patch = Writer::default();
+    patch.var_i32(1); // one added component
+    patch.var_i32(0); // none removed
+    patch.var_i32(component_id("minecraft:pot_decorations"));
+    patch.var_i32(4); // ByteBufCodecs.list(4) element count
+    for sherd in [
+        "minecraft:angler_pottery_sherd",  // back
+        "minecraft:blade_pottery_sherd",   // left
+        "minecraft:howl_pottery_sherd",    // right
+        "minecraft:snort_pottery_sherd",   // front
+    ] {
+        // `ByteBufCodecs.registry` is `idMapper`: the bare id, no `+1` and no
+        // `0` sentinel. `minecraft:trim`'s holders two arms over *are* offset,
+        // which is exactly the confusion this spells out.
+        patch.var_i32(item_id(sherd).expect("known sherd item"));
+    }
+
+    let payload = set_slot_with_patch("minecraft:decorated_pot", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert!(
+        !item.components.has_unmodeled,
+        "minecraft:pot_decorations is modeled now, so nothing may be flagged partial"
+    );
+    let pot = item
+        .components
+        .pot_decorations
+        .as_ref()
+        .expect("a decorated pot's sherds");
+    // Collected rather than asserted one-at-a-time: an `assert_eq!` per face
+    // aborts at the first mismatch, so a transposition would only ever report
+    // one half of the swap.
+    let got = [
+        pot.back.as_ref().map(ToString::to_string),
+        pot.left.as_ref().map(ToString::to_string),
+        pot.right.as_ref().map(ToString::to_string),
+        pot.front.as_ref().map(ToString::to_string),
+    ];
+    let want = [
+        Some("minecraft:angler_pottery_sherd".to_owned()),
+        Some("minecraft:blade_pottery_sherd".to_owned()),
+        Some("minecraft:howl_pottery_sherd".to_owned()),
+        Some("minecraft:snort_pottery_sherd".to_owned()),
+    ];
+    let mismatches: Vec<String> = ["back", "left", "right", "front"]
+        .iter()
+        .zip(got.iter().zip(want.iter()))
+        .filter(|(_, (g, w))| g != w)
+        .map(|(face, (g, w))| format!("{face}: got {g:?}, want {w:?}"))
+        .collect();
+    assert!(
+        mismatches.is_empty(),
+        "pot_decorations faces decoded wrong: {mismatches:?}"
+    );
+}
+
+/// `minecraft:brick` on a face means an *undecorated* face, and a short list's
+/// missing tail means the same.
+///
+/// Both are `PotDecorations::getItem`: `item == Items.BRICK ?
+/// Optional.empty() : Optional.of(item)`, and `i >= sherds.size()` for the tail.
+/// A vanilla server always writes four elements (`ordered()` builds a
+/// four-element list unconditionally), so the short form is the case only a
+/// hand-built payload reaches — which is why it is pinned here rather than left
+/// to a capture.
+///
+/// The discriminating part is that the *decorated* face still lands in the right
+/// slot in both arms: a decoder that mapped brick to `Some` would put a sherd in
+/// `left` here, and one that ignored the count would read past the payload.
+#[test]
+fn a_brick_face_and_a_short_list_both_decode_as_undecorated() {
+    // Arm 1: an explicit four-element list whose back and right faces are bricks.
+    let mut patch = Writer::default();
+    patch.var_i32(1);
+    patch.var_i32(0);
+    patch.var_i32(component_id("minecraft:pot_decorations"));
+    patch.var_i32(4);
+    for sherd in [
+        "minecraft:brick",                // back  -> None
+        "minecraft:prize_pottery_sherd",  // left
+        "minecraft:brick",                // right -> None
+        "minecraft:skull_pottery_sherd",  // front
+    ] {
+        patch.var_i32(item_id(sherd).expect("known item"));
+    }
+    let payload = set_slot_with_patch("minecraft:decorated_pot", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+    let pot = item.components.pot_decorations.expect("sherds");
+    assert!(!item.components.has_unmodeled);
+    assert_eq!(pot.back, None, "a brick back face is an undecorated one");
+    assert_eq!(
+        pot.left.as_ref().map(ToString::to_string),
+        Some("minecraft:prize_pottery_sherd".to_owned())
+    );
+    assert_eq!(pot.right, None, "a brick right face is an undecorated one");
+    assert_eq!(
+        pot.front.as_ref().map(ToString::to_string),
+        Some("minecraft:skull_pottery_sherd".to_owned())
+    );
+
+    // Arm 2: a two-element list. `back` and `left` are read; `right` and `front`
+    // are the absent tail.
+    let mut short = Writer::default();
+    short.var_i32(1);
+    short.var_i32(0);
+    short.var_i32(component_id("minecraft:pot_decorations"));
+    short.var_i32(2);
+    short.var_i32(item_id("minecraft:brick").expect("known item"));
+    short.var_i32(item_id("minecraft:flow_pottery_sherd").expect("known item"));
+    let payload = set_slot_with_patch("minecraft:decorated_pot", 1, short.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+    let pot = item.components.pot_decorations.expect("sherds");
+    assert!(
+        !item.components.has_unmodeled,
+        "a short list is legal under list(4) and must not stop the patch"
+    );
+    assert_eq!(pot.back, None);
+    assert_eq!(
+        pot.left.as_ref().map(ToString::to_string),
+        Some("minecraft:flow_pottery_sherd".to_owned()),
+        "the second element is `left`, not the first present one"
+    );
+    assert_eq!(pot.right, None, "past the declared count");
+    assert_eq!(pot.front, None, "past the declared count");
+}
+
+/// The join-blocking failure this component was modeled for, end to end: an
+/// `update_advancements` packet whose icon is a `minecraft:decorated_pot`
+/// carrying `minecraft:pot_decorations` decodes, rather than truncating the
+/// packet from the icon onward.
+///
+/// The advancement in question is real — vanilla ships
+/// `adventure/craft_decorated_pot_using_only_sherds` with exactly this icon — so
+/// any server that has sent an advancement tree hits this. The icon is an
+/// `ItemStackTemplate`, whose fields are item-then-count (the reverse of
+/// `ItemStack.OPTIONAL_STREAM_CODEC`) and which turns an incomplete patch into a
+/// **fatal** decode error rather than a partial stack, so before this component
+/// was modeled the whole packet was dropped.
+///
+/// The control is [`an_advancement_icon_with_an_unmodeled_component_still_fails`]
+/// below: byte-identical construction with a genuinely unmodeled component in
+/// the icon, which must still fail. Without it, this test would pass against a
+/// decoder that had simply stopped raising the error.
+#[test]
+fn an_advancement_icon_may_be_a_decorated_pot() {
+    let payload = advancement_with_icon_patch(&pot_decorations_patch());
+    let directives = handle(play::clientbound::UPDATE_ADVANCEMENTS, &payload);
+    let ClientEvent::AdvancementsUpdated { added, .. } = expect_single_emit(&directives) else {
+        panic!("expected an AdvancementsUpdated emit, got {directives:?}");
+    };
+    assert_eq!(added.len(), 1);
+    let display = added[0]
+        .display
+        .as_ref()
+        .expect("the advancement carries display info");
+    assert_eq!(display.icon.item.to_string(), "minecraft:decorated_pot");
+    let pot = display
+        .icon
+        .components
+        .pot_decorations
+        .as_ref()
+        .expect("the icon's sherds");
+    assert_eq!(
+        pot.front.as_ref().map(ToString::to_string),
+        Some("minecraft:snort_pottery_sherd".to_owned()),
+        "the icon's fourth sherd, decoded through the template path"
+    );
+}
+
+/// The control for [`an_advancement_icon_may_be_a_decorated_pot`]: the same
+/// packet with an icon carrying a component this build still does not model must
+/// still be a fatal decode error, because an `ItemStackTemplate` cannot degrade
+/// to a partial stack — everything after it in the packet is unreadable.
+///
+/// This is what proves the test above is measuring the new component arm rather
+/// than a decoder that stopped caring.
+#[test]
+fn an_advancement_icon_with_an_unmodeled_component_still_fails() {
+    let mut patch = Writer::default();
+    patch.var_i32(1);
+    patch.var_i32(0);
+    patch.var_i32(component_id("minecraft:custom_data"));
+    write_network_nbt(
+        &mut patch,
+        &Nbt::Compound(vec![("x".to_owned(), Nbt::Int(1))]),
+    )
+    .unwrap();
+
+    let payload = advancement_with_icon_patch(patch.as_slice());
+    let error = V770Adapter::new()
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::UPDATE_ADVANCEMENTS,
+            &payload,
+        )
+        .expect_err("an unmodeled icon component must still be fatal for the packet");
+    let text = error.to_string();
+    assert!(
+        text.contains("unmodeled item component"),
+        "expected the advancement-icon cliff, got {text}"
+    );
+}
+
+/// The `minecraft:pot_decorations` patch bytes shared by the advancement tests:
+/// four distinct sherds, `front` last.
+fn pot_decorations_patch() -> Vec<u8> {
+    let mut patch = Writer::default();
+    patch.var_i32(1);
+    patch.var_i32(0);
+    patch.var_i32(component_id("minecraft:pot_decorations"));
+    patch.var_i32(4);
+    for sherd in [
+        "minecraft:angler_pottery_sherd",
+        "minecraft:blade_pottery_sherd",
+        "minecraft:howl_pottery_sherd",
+        "minecraft:snort_pottery_sherd",
+    ] {
+        patch.var_i32(item_id(sherd).expect("known sherd item"));
+    }
+    patch.into_vec()
+}
+
+/// Builds an `update_advancements` payload carrying one advancement whose
+/// display icon is a `minecraft:decorated_pot` with `patch` as its component
+/// patch.
+///
+/// `DisplayInfo`'s wire order is title, description, icon, frame ordinal, then a
+/// **raw big-endian `int`** flag word (`writeInt`, not a byte), then the
+/// background identifier only when bit 0 is set, then x and y as floats — see
+/// the adapter's own note on `serializeToNetwork` for why that differs from the
+/// datapack schema.
+fn advancement_with_icon_patch(patch: &[u8]) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.bool(false); // reset
+    w.var_i32(1); // one added advancement
+    w.string("minecraft:adventure/craft_decorated_pot_using_only_sherds");
+    w.bool(false); // no parent
+    w.bool(true); // has display info
+    write_network_nbt(&mut w, &Nbt::String("Careful Restoration".to_owned())).unwrap();
+    write_network_nbt(&mut w, &Nbt::String("Make a Decorated Pot".to_owned())).unwrap();
+    // The icon is an `ItemStackTemplate`: item id first, then count.
+    w.var_i32(item_id("minecraft:decorated_pot").expect("known item"));
+    w.var_i32(1);
+    w.bytes(patch);
+    w.var_i32(0); // frame ordinal: task
+    w.i32(0); // flag word: no background, no toast, not hidden
+    w.f32(1.5); // x
+    w.f32(2.5); // y
+    w.var_i32(0); // no requirement groups
+    w.bool(false); // sends_telemetry_event
+    w.var_i32(0); // no removed advancements
+    w.var_i32(0); // no progress entries
+    w.bool(true); // showAdvancements
+    w.into_vec()
+}
+
+/// Unwraps a directive batch that must be exactly one [`Directive::Emit`].
+fn expect_single_emit(directives: &[Directive]) -> &ClientEvent {
+    match directives {
+        [Directive::Emit(event)] => event,
+        other => panic!("expected a single emit, got {other:?}"),
+    }
+}
+
 /// Modeled components decoded *before* an unmodeled one are retained.
 #[test]
 fn retains_modeled_components_before_an_unmodeled_one() {
