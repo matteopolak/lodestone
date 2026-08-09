@@ -77,13 +77,15 @@
 //! `UNDERGROUND_ORES` step names `minecraft:ore_gold_extra`, badlands' bonus
 //! gold vein, which no substitute biome's list contains).
 //!
-//! **Still not composed:** structures (unbuilt anywhere in this repo,
-//! `#136`). Vegetation/tree features WERE still-not-composed when this line
-//! was first written, but issue #406 built and composed them
-//! (`Self::vegetation_stage`) and issue #427 gave that stage the real 3×3
-//! `blockStateWriteRadius(1)` driver every other decoration stage already
-//! had — this sentence just never got updated, which is itself the thing
-//! CLAUDE.md's §2 keeps warning stale claims in this file are prone to.
+//! **Everything listed above is composed.** This paragraph twice carried a
+//! "still not composed" list that had gone stale — first vegetation/tree
+//! features, then structures, each already built and composed by the time a
+//! reader trusted the sentence. Structures now enter through this generator's
+//! `structure_starts` and `structure_refs` stages (see [`structures`]) and
+//! adapt terrain through the beardifier. **Do not restore a not-yet list
+//! here**; the live record of what does not build is
+//! `OverworldGenerator::structure_ledger`, read at runtime, and that is the
+//! thing CLAUDE.md's §2 keeps warning stale claims in this file are prone to.
 //! `docs/worldgen-parity.md` measures the composed subset
 //! (shape + real aquifer + biome + surface + carvers + ores + vegetation)
 //! against a real
