@@ -297,6 +297,21 @@ rather than restating a constant. (§12.41)
 uniform-but-wrong frame from a localised blob. Ask *where*, not *what*, and **make failure output print a
 bounding box** — that diagnosed two premise-false controls in one step.
 
+**A throughput measurement structurally cannot see a latency defect, and the symptom will send you to the
+wrong instrument.** Measured while diagnosing a keep-alive timeout: the server kicked its own client because
+crossing a chunk boundary awaited generation *and* encode of a whole 33-column strip (361 on a jump) inside
+**one** `select!` arm, so nothing was read or written for the duration. **`spawn_blocking` had already moved
+the work off the core thread — offloading does not shorten a suspension point.** Per-column cost was ≈14.8 ms
+and entirely healthy; **the defect was the number of columns per suspension point**, and streaming the strip
+changed throughput not at all. So when the report is "it's slow" or "it disconnects", ask **how much work sits
+inside one unserviced window** before optimising the work itself, and prefer *shipping an instrument* (a stall
+watch that names the arm) over taking a wall-clock figure on a busy machine — a duration gathered while other
+agents build gets attributed to the wrong cause. Two further traps in the same incident, neither guessable
+from the aggregate: tokio's default `MissedTickBehavior::Burst` fires missed ticks **back to back with no
+delay**, so a stall spanning two intervals writes a challenge and finds it unanswered in the same instant
+(zero grace — use `Delay`), and a timeout denominated in **wall clock** rather than *serviced* time measures
+something vanilla does not, whose reads happen on a thread that never blocks on worldgen. (§12.165)
+
 **A shell pipeline will destroy the evidence you are about to reason from.** `| head` read as absence;
 `| grep | tail` reported exit 0 because that is `tail`'s status, one command from a commit on a red tree;
 `| tail` with no `-f` buffers until EOF, so a healthy build looked hung and was killed; and **zsh does not
