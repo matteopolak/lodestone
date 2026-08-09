@@ -109,6 +109,29 @@ pub(super) struct EntityRenderer {
     pub(super) flame_pipeline: wgpu::RenderPipeline,
     pub(super) flame_gpu_models: HashMap<String, GpuEntityModel>,
     pub(super) flame_texture: Option<wgpu::BindGroup>,
+    /// The experience-orb billboard: a fifth pipeline
+    /// ([`EntityPipeline::orb_pipeline`], alpha-blended with a `0.1` cutout)
+    /// drawn through the **base** pipeline's own camera bind group, one mesh
+    /// holding all eleven sprite cells as eleven *parts*, and one texture bind
+    /// group for `entity/experience/experience_orb.png`.
+    ///
+    /// # Eleven parts of one mesh, not eleven meshes
+    ///
+    /// `ExperienceOrb.getIcon()` buckets an orb's value into one of eleven
+    /// 16×16 cells, and the cell is baked into the quad's **UVs** — so the
+    /// geometry differs per cell and cannot be one instanced quad. Making them
+    /// eleven `PartRange`s of a single 44-vertex buffer means the whole orb pass
+    /// is one vertex/index binding and one instance buffer per cell actually on
+    /// screen, which is the same shape the block-entity pass already draws
+    /// per-part instances with. The part **index is the icon index**; see
+    /// `RenderState::prepare_orbs`.
+    ///
+    /// `orb_texture` is `None` without a vanilla pack, and orbs then draw
+    /// nothing — the same asymmetry [`Self::flame_texture`]/[`Self::wool_texture`]
+    /// document. A synthetic green square would read as a rendering bug.
+    pub(super) orb_pipeline: wgpu::RenderPipeline,
+    pub(super) orb_gpu_model: Option<GpuEntityModel>,
+    pub(super) orb_texture: Option<wgpu::BindGroup>,
     /// Remote players' fetched skins: one texture bind group per **texture
     /// URL**, filled in at runtime by
     /// [`RenderState::install_pending_player_skins`](super::RenderState::install_pending_player_skins).
@@ -245,6 +268,37 @@ impl EntityRenderer {
             pipeline.texture_bind_group(device, &view, &sampler)
         });
 
+        // The experience-orb billboard. One mesh, eleven parts — see
+        // `Self::orb_pipeline`'s doc for why the sprite cell is geometry rather
+        // than an instance attribute.
+        let orb_pipeline = pipeline.orb_pipeline(device, color_format);
+        let orb_gpu_model = {
+            let mut vertices = Vec::new();
+            let mut indices = Vec::new();
+            let mut parts = Vec::new();
+            for icon in 0..lodestone_render::EXPERIENCE_ORB_ICON_COUNT {
+                let (cell_vertices, cell_indices) = lodestone_render::experience_orb_mesh(icon);
+                let vertex_start = u32::try_from(vertices.len()).unwrap_or(0);
+                let index_start = u32::try_from(indices.len()).unwrap_or(0);
+                // The draw binds no `base_vertex`, so each cell's indices are
+                // rebased onto its own slice of the shared vertex buffer here.
+                indices.extend(cell_indices.iter().map(|i| i + vertex_start));
+                let vertex_count = u32::try_from(cell_vertices.len()).unwrap_or(0);
+                vertices.extend(cell_vertices);
+                parts.push(lodestone_render::PartRange {
+                    index_start,
+                    index_count: u32::try_from(indices.len()).unwrap_or(0) - index_start,
+                    vertex_start,
+                    vertex_count,
+                });
+            }
+            GpuEntityModel::upload_parts(device, &vertices, &indices, parts)
+        };
+        let orb_texture = load_experience_orb_texture().map(|img| {
+            let view = entity_texture_from_image(device, queue, &img);
+            pipeline.texture_bind_group(device, &view, &sampler)
+        });
+
         // A persistent group-0 uniform, rewritten every frame before the pass.
         // Sized for camera **plus fog**: the entity shader reads both out of one
         // binding, so a buffer sized for the camera alone would leave the fog
@@ -304,6 +358,9 @@ impl EntityRenderer {
             flame_pipeline,
             flame_gpu_models,
             flame_texture,
+            orb_pipeline,
+            orb_gpu_model,
+            orb_texture,
             // Nothing until a skin is fetched; see `player_skins`' doc for why a
             // miss falls back rather than failing.
             player_skins: HashMap::new(),
@@ -511,6 +568,33 @@ fn load_flame_textures() -> Option<lodestone_assets::Image> {
         Ok(img) => Some(img),
         Err(e) => {
             tracing::warn!(target: "assets", "load combined flame texture: {e}");
+            None
+        }
+    }
+}
+
+/// Decode the experience-orb sprite sheet from the vanilla `client.jar`, or
+/// `None` if no pack is found — the orb equivalent of
+/// [`load_sheep_wool_texture`], reaching the jar the same way through
+/// [`crate::resources::vanilla_manager`].
+///
+/// One sheet holding all eleven cells, so there is nothing to combine the way the
+/// flame's two strips need: [`lodestone_render::EXPERIENCE_ORB_TEXTURE`] is the
+/// single path `ExperienceOrbRenderer` binds.
+fn load_experience_orb_texture() -> Option<lodestone_assets::Image> {
+    use lodestone_assets::Image;
+
+    // `crate::resources::vanilla_manager` — see `load_humanoid_armour_textures`.
+    let manager = crate::resources::vanilla_manager()?;
+    let path = lodestone_render::EXPERIENCE_ORB_TEXTURE;
+    let Some(png) = manager.read(path) else {
+        tracing::warn!(target: "assets", "missing experience orb sheet {path}");
+        return None;
+    };
+    match Image::decode_png(&png) {
+        Ok(img) => Some(img),
+        Err(e) => {
+            tracing::warn!(target: "assets", "decode {path}: {e}");
             None
         }
     }

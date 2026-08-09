@@ -2203,6 +2203,218 @@ pub fn thrown_item_mesh(
 }
 
 // ---------------------------------------------------------------------------
+// Experience orbs
+// ---------------------------------------------------------------------------
+//
+// `ExperienceOrbRenderer`, which is one camera-facing quad and nothing else. It
+// is **not** an [`entity_models`] rig and never will be, exactly as a dropped
+// item is not: `model_for_type("experience_orb")` and
+// `entity_texture_candidates("experience_orb")` are both deliberately empty and
+// stay that way (see `unknown_entity_type_has_no_model`). The corpus holds cuboid
+// part hierarchies; this is a sprite, and it draws through the same
+// billboard-with-its-own-sheet shape the mob-fire layer uses.
+
+/// Where the orb sheet lives in the vanilla jar.
+///
+/// A **standalone 64×64 sheet**, not a slice of the stitched block atlas — which
+/// is why the orb pass binds its own group-1 texture rather than riding the model
+/// pipeline. `textures/entity/experience/experience_orb.png`, from
+/// `ExperienceOrbRenderer.EXPERIENCE_ORB_LOCATION`.
+pub const EXPERIENCE_ORB_TEXTURE: &str =
+    "assets/minecraft/textures/entity/experience/experience_orb.png";
+
+/// How many distinct sprite cells [`experience_orb_icon`] can return, i.e. the
+/// number of baked orb quads a renderer needs.
+pub const EXPERIENCE_ORB_ICON_COUNT: u32 = 11;
+
+/// The 16-pixel sprite cell edge inside the 64-pixel sheet, so four cells per row.
+const ORB_CELL: f32 = 16.0;
+/// The sheet edge both cell axes are normalised against.
+const ORB_SHEET: f32 = 64.0;
+/// Cells per row — `icon % 4` picks the column, `icon / 4` the row.
+const ORB_CELLS_PER_ROW: u32 = 4;
+
+/// Vanilla's `ExperienceOrb.getIcon()` — which of the eleven sprite cells an orb
+/// worth `value` draws.
+///
+/// # It is a bucketed ladder, not a linear map, and the buckets are the *orb
+/// denominations*
+///
+/// The thresholds are `2477, 1237, 617, 307, 149, 73, 37, 17, 7, 3` — the same
+/// irregular, roughly-doubling ladder `ExperienceOrb.award` splits a payout over,
+/// read top-down with `>=`. So the cell is constant *across* a bucket: an orb worth
+/// 7, one worth 8 and one worth 16 all draw cell 2, and 17 is the first value that
+/// draws cell 3. Any gate that observes only one value, or two values inside one
+/// bucket, cannot tell this function from a linear `value / 250` — the pairs that
+/// discriminate are the ones straddling a threshold.
+///
+/// Values below 3 (including `0`, which is what an orb whose `DATA_VALUE` never
+/// reached us reads as) draw cell 0. A negative value cannot occur on the wire but
+/// falls into the same arm rather than panicking or wrapping.
+#[must_use]
+pub fn experience_orb_icon(value: i32) -> u32 {
+    // Written as the same descending `>=` ladder vanilla uses rather than as a
+    // `match` on ranges: a range table has to restate every threshold twice
+    // (as one arm's end and the next arm's start) and an off-by-one there is
+    // invisible except at exactly the boundary value.
+    if value >= 2477 {
+        10
+    } else if value >= 1237 {
+        9
+    } else if value >= 617 {
+        8
+    } else if value >= 307 {
+        7
+    } else if value >= 149 {
+        6
+    } else if value >= 73 {
+        5
+    } else if value >= 37 {
+        4
+    } else if value >= 17 {
+        3
+    } else if value >= 7 {
+        2
+    } else if value >= 3 {
+        1
+    } else {
+        0
+    }
+}
+
+/// The four `(u, v)` corners of one orb sprite cell, in the bottom-left,
+/// bottom-right, top-right, top-left order [`experience_orb_mesh`] winds.
+///
+/// `ExperienceOrbRenderer.submit`'s own arithmetic: `u0 = (icon % 4 * 16) / 64`,
+/// `v0 = (icon / 4 * 16) / 64`, each `+16` for the far edge — and note vanilla
+/// pairs the quad's **bottom** vertices with `v1` (the cell's larger v) and its top
+/// with `v0`, so the sprite is not flipped. Getting that pair the other way round
+/// draws an upside-down orb, which is invisible on a radially symmetric cell and
+/// visible on the higher-value ones.
+fn experience_orb_cell_uvs(icon: u32) -> [[f32; 2]; 4] {
+    let column = (icon % ORB_CELLS_PER_ROW) as f32;
+    let row = (icon / ORB_CELLS_PER_ROW) as f32;
+    let u0 = column * ORB_CELL / ORB_SHEET;
+    let u1 = (column * ORB_CELL + ORB_CELL) / ORB_SHEET;
+    let v0 = row * ORB_CELL / ORB_SHEET;
+    let v1 = (row * ORB_CELL + ORB_CELL) / ORB_SHEET;
+    [[u0, v1], [u1, v1], [u1, v0], [u0, v0]]
+}
+
+/// One orb's quad in *local* space, for the sprite cell `icon`, ready to be posed
+/// by [`experience_orb_matrix`].
+///
+/// The corners are vanilla's literally: `x ∈ [-0.5, 0.5]`, `y ∈ [-0.25, 0.75]`,
+/// `z = 0`. The y range is **not** centred on zero — vanilla's four `vertex` calls
+/// are `(-0.5, -0.25)`, `(0.5, -0.25)`, `(0.5, 0.75)`, `(-0.5, 0.75)` — so the
+/// quad sits three-quarters above its own origin and, after the `0.3` scale and the
+/// `+0.1` lift in [`experience_orb_matrix`], spans `y ∈ [0.025, 0.325]` above the
+/// orb's feet. Centring it would sink half the sprite into the floor.
+///
+/// The vertex `light`/`tint`/`anim` lanes are inert defaults exactly as
+/// [`crate::entity_pipeline::flame_mesh`]'s are: the orb pass carries its light and
+/// its colour **per instance**, because both change per orb and per tick.
+#[must_use]
+pub fn experience_orb_mesh(icon: u32) -> (Vec<ModelVertex>, Vec<u32>) {
+    const CORNERS: [[f32; 2]; 4] = [[-0.5, -0.25], [0.5, -0.25], [0.5, 0.75], [-0.5, 0.75]];
+    let uvs = experience_orb_cell_uvs(icon);
+    let vertices = CORNERS
+        .iter()
+        .zip(uvs)
+        .map(|([x, y], uv)| ModelVertex {
+            position: [*x, *y, 0.0],
+            uv,
+            ao: 1.0,
+            light: 0,
+            tint: 255,
+            anim: 0,
+            _pad: 0,
+            tint_rgb_override: [0, 0, 0, 0],
+        })
+        .collect();
+    // The same two-triangle winding every other baked quad in this crate uses.
+    (vertices, vec![0, 1, 2, 0, 2, 3])
+}
+
+/// The world placement for one orb, matching `ExperienceOrbRenderer.submit`'s
+/// pose-stack order:
+///
+/// ```text
+/// T(feet) · T(0, 0.1, 0) · camera_orientation · S(0.3)
+/// ```
+///
+/// `orientation` is [`camera_orientation`]`(camera.view_matrix())` — the same one
+/// matrix every orb this frame shares, since a billboard's rotation depends only
+/// on the camera. The `0.1` lift is applied in **world** space, before the
+/// orientation, so it is straight up whatever way the camera is looking; folding it
+/// into the local quad instead would tilt it with the view.
+///
+/// Determinant is positive (a translation, a rotation and a positive uniform
+/// scale), so this composes to terrain's winding — and `EntityPipeline` is
+/// `cull_mode: None` regardless, so a sign error here would show as wrong depth
+/// order rather than as a vanished quad.
+#[must_use]
+pub fn experience_orb_matrix(feet: Vec3, orientation: Mat4) -> Mat4 {
+    /// `poseStack.scale(0.3F, 0.3F, 0.3F)`.
+    const ORB_SCALE: f32 = 0.3;
+    /// `poseStack.translate(0.0F, 0.1F, 0.0F)`.
+    const ORB_LIFT: f32 = 0.1;
+    Mat4::from_translation(feet + Vec3::new(0.0, ORB_LIFT, 0.0))
+        * orientation
+        * Mat4::from_scale(Vec3::splat(ORB_SCALE))
+}
+
+/// Vanilla's pulsing orb colour, as the gamma-space `[r, g, b]` bytes an
+/// `InstanceTint` carries.
+///
+/// `ExperienceOrbRenderer.submit`, verbatim, with `rr = ageInTicks / 2`:
+///
+/// ```text
+/// r = (sin(rr) + 1) * 0.5 * 255
+/// g = 255
+/// b = (sin(rr + 4π/3) + 1) * 0.1 * 255
+/// ```
+///
+/// The two amplitudes differ — `0.5` for red, `0.1` for blue — and the phase
+/// offset is `4π/3`, not `2π/3`, so the orb cycles green→yellow→green rather than
+/// through a full hue wheel. Green is pinned at full and never modulates.
+///
+/// These are **gamma-space** bytes multiplied into a gamma-encoded texel, which is
+/// where `entity.wgsl` applies an `InstanceTint`; vanilla is not colour-managed and
+/// converting them to linear first would pull the whole cycle toward white.
+#[must_use]
+pub fn experience_orb_tint(age_ticks: f32) -> [u8; 3] {
+    let phase = age_ticks / 2.0;
+    let channel = |value: f32| -> u8 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped into 0..=255 first, and vanilla truncates too"
+        )]
+        {
+            (value.clamp(0.0, 255.0)) as u8
+        }
+    };
+    let red = (phase.sin() + 1.0) * 0.5 * 255.0;
+    let blue = ((phase + std::f32::consts::PI * 4.0 / 3.0).sin() + 1.0) * 0.1 * 255.0;
+    [channel(red), 255, channel(blue)]
+}
+
+/// An orb's packed light, from the sample at its own position.
+///
+/// `ExperienceOrbRenderer.getBlockLightLevel` is
+/// `clamp(super.getBlockLightLevel(..) + 7, 0, 15)` — a **+7 boost to the block
+/// nibble only**, which is what keeps an orb readable on a cave floor. The sky
+/// nibble is passed through untouched; boosting both would make an orb in a lit
+/// room brighter than the room.
+#[must_use]
+pub fn experience_orb_light(packed: u8) -> u8 {
+    let sky = packed & 0xF0;
+    let block = ((packed & 0x0F) + 7).min(15);
+    sky | block
+}
+
+// ---------------------------------------------------------------------------
 // Held items, and the first-person arm
 // ---------------------------------------------------------------------------
 //
@@ -3297,6 +3509,17 @@ mod tests {
         // than deleted, so the gap closing is visible in the diff of the test that
         // recorded it — and so a corpus edit that silently dropped the rig fails
         // here rather than only in an `#[ignore]`d pixel gate.
+        //
+        // **`experience_orb` is a different case from the other two, and it is
+        // *not* a pinned absence waiting to be inverted.** An orb now draws — see
+        // `experience_orb_mesh`/`experience_orb_matrix` above — as a camera-facing
+        // sprite, which is not a cuboid part hierarchy and so is not a corpus
+        // entry. Adding one would make `EntityModelSet::resolve` hand the mob pass
+        // a rig for an entity that has none, which is a worse failure than the
+        // nothing that used to draw. The precedent is `ITEM_ENTITY_TYPE_PATH`: a
+        // dropped item reaches the render path and is deliberately absent here for
+        // exactly the same reason. So this assertion is load-bearing *after* the
+        // orb landed, not before it.
         assert!(model_for_type("experience_orb").is_none());
         assert!(model_for_type("tnt").is_none());
         assert!(model_for_type("").is_none());
@@ -3575,8 +3798,209 @@ mod tests {
         // that stops a typo in the corpus from silently drawing a mob under some
         // other mob's skin. `arrow`'s own sheet is asserted positively in
         // `projectiles_resolve_to_their_own_rigs_and_sheets`.
+        // `experience_orb` stays empty **after** the orb started drawing, and that
+        // is not an oversight: this function answers "which sheet does a *corpus
+        // rig* wear", and the orb has no rig. Its sheet is
+        // [`EXPERIENCE_ORB_TEXTURE`], bound by the orb pass's own group 1 the same
+        // way the mob-fire strip is — neither goes through this table.
         assert!(entity_texture_candidates("experience_orb").is_empty());
         assert!(entity_texture_candidates("").is_empty());
+    }
+
+    /// The orb sprite cell is a **bucketed** lookup, and the only inputs that can
+    /// observe that are ones straddling a threshold.
+    ///
+    /// The wrong hypothesis this discriminates against is a *linear* map from value
+    /// to cell — the shape a reader would reach for, and the shape a single-value
+    /// gate cannot rule out. Both hypotheses are evaluated at every input below and
+    /// the test fails if they ever agree there, so the inputs cannot silently stop
+    /// discriminating.
+    #[test]
+    fn orb_icon_is_bucketed_and_constant_inside_a_bucket() {
+        // The linear reading someone would write instead: eleven cells spread
+        // evenly over the top denomination.
+        let linear = |value: i32| -> u32 {
+            ((value.max(0) as u32) * (EXPERIENCE_ORB_ICON_COUNT - 1) / 2477)
+                .min(EXPERIENCE_ORB_ICON_COUNT - 1)
+        };
+        // `(value, expected cell, must discriminate)`. Every pair is either side of
+        // a threshold, so a version that shifted one boundary by one fails.
+        //
+        // The three `false` rows are the ladder's **endpoints**, where the two
+        // hypotheses provably agree and no choice of input can separate them: any
+        // monotone map from value to cell sends the bottom of the range to cell 0
+        // and the top to cell 10. They are kept as correctness assertions (a
+        // transcription that dropped the `>= 2477` arm still fails) and excluded
+        // from the discrimination requirement rather than quietly satisfying it —
+        // which is what the coincidence check below exists to force.
+        let cases: [(i32, u32, bool); 14] = [
+            (0, 0, false),
+            (2, 0, false),
+            (3, 1, true),
+            (6, 1, true),
+            (7, 2, true),
+            (16, 2, true),
+            (17, 3, true),
+            (36, 3, true),
+            (37, 4, true),
+            (73, 5, true),
+            (149, 6, true),
+            (307, 7, true),
+            (617, 8, true),
+            (2477, 10, false),
+        ];
+        let mut mismatches = Vec::new();
+        let mut coincidences = Vec::new();
+        for (value, expected, discriminating) in cases {
+            let got = experience_orb_icon(value);
+            if got != expected {
+                mismatches.push(format!("value {value}: expected cell {expected}, got {got}"));
+            }
+            // The corollary that makes this a test rather than a re-run of the
+            // code: an input where the bucketed and the linear answer coincide
+            // measures nothing.
+            if discriminating && linear(value) == expected {
+                coincidences.push(format!(
+                    "value {value} cannot discriminate — the linear hypothesis also says {expected}"
+                ));
+            }
+        }
+        // And the reciprocal, so the eleven `true` rows cannot all quietly become
+        // endpoint-like if someone rewrites `linear`: at least ten of them must
+        // really separate the two hypotheses.
+        let separating = cases
+            .iter()
+            .filter(|(value, expected, discriminating)| *discriminating && linear(*value) != *expected)
+            .count();
+        assert!(
+            separating >= 10,
+            "only {separating} inputs separate the bucketed and linear hypotheses"
+        );
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+        assert!(coincidences.is_empty(), "{coincidences:#?}");
+        // And the property a per-value table could satisfy while still being
+        // linear: the cell must be *constant* across a whole bucket. 7..=16 is ten
+        // consecutive values that all draw cell 2.
+        let inside: Vec<u32> = (7..=16).map(experience_orb_icon).collect();
+        assert_eq!(inside, vec![2; 10], "cell 2's bucket is not flat: {inside:?}");
+    }
+
+    /// Two cells of the sheet must address two *different* 16-pixel squares of the
+    /// 64-pixel sheet, and the row must advance every four cells.
+    ///
+    /// The failure this rules out is the one a "does it draw?" check cannot see: a
+    /// mesh that always samples cell 0 draws a perfectly plausible orb for every
+    /// value in the game.
+    #[test]
+    fn orb_cells_tile_the_sheet_by_row_and_column() {
+        // Cell 0 is the top-left 16×16 square: u and v both 0..0.25.
+        assert_eq!(
+            experience_orb_cell_uvs(0),
+            [[0.0, 0.25], [0.25, 0.25], [0.25, 0.0], [0.0, 0.0]]
+        );
+        // Cell 3 is the last column of row 0 — same v, u shifted three cells.
+        assert_eq!(experience_orb_cell_uvs(3)[0], [0.75, 0.25]);
+        // Cell 4 wraps to row 1: u back to 0, v advanced one cell.
+        assert_eq!(experience_orb_cell_uvs(4)[0], [0.0, 0.5]);
+        // Cell 10 is row 2, column 2 — the highest cell `experience_orb_icon` returns.
+        assert_eq!(experience_orb_cell_uvs(10)[0], [0.5, 0.75]);
+        // Every cell must fit inside the sheet, or the sampler clamps and two
+        // different values draw the same edge texels.
+        for icon in 0..EXPERIENCE_ORB_ICON_COUNT {
+            for [u, v] in experience_orb_cell_uvs(icon) {
+                assert!((0.0..=1.0).contains(&u), "cell {icon} u {u} off-sheet");
+                assert!((0.0..=1.0).contains(&v), "cell {icon} v {v} off-sheet");
+            }
+        }
+    }
+
+    /// The orb quad sits **above** its own origin, and its vertical span is
+    /// vanilla's after the scale and the lift.
+    ///
+    /// Predicted from the record's own constants rather than eyeballed: local
+    /// `y ∈ [-0.25, 0.75]`, scaled by `0.3` and lifted `0.1`, is
+    /// `[0.025, 0.325]`. The wrong hypothesis — a quad centred on its origin, which
+    /// is what "billboard" suggests — would span `[-0.05, 0.25]` and bury the
+    /// bottom sixth of every orb in the floor.
+    #[test]
+    fn orb_quad_sits_above_the_ground_after_the_scale_and_lift() {
+        let feet = Vec3::new(4.0, 65.0, -9.0);
+        // Identity orientation: a camera looking down -Z with no roll, which is
+        // what `camera_orientation` returns for the default view. The vertical
+        // extent is then the local one, scaled and lifted.
+        let pose = experience_orb_matrix(feet, Mat4::IDENTITY);
+        let bottom = pose.transform_point3(Vec3::new(0.0, -0.25, 0.0));
+        let top = pose.transform_point3(Vec3::new(0.0, 0.75, 0.0));
+        assert!(
+            (bottom.y - (65.0 + 0.025)).abs() < 1.0e-5,
+            "bottom at {}, expected {}",
+            bottom.y,
+            65.0 + 0.025
+        );
+        assert!(
+            (top.y - (65.0 + 0.325)).abs() < 1.0e-5,
+            "top at {}, expected {}",
+            top.y,
+            65.0 + 0.325
+        );
+        // The centred hypothesis, evaluated at this input and required to differ.
+        assert!(
+            (bottom.y - (65.0 - 0.05)).abs() > 1.0e-3,
+            "a centred quad would also pass this"
+        );
+        // The orb is a fifth of a block wide at 0.3 scale: `x ∈ [-0.15, 0.15]`.
+        let left = pose.transform_point3(Vec3::new(-0.5, 0.0, 0.0));
+        assert!((left.x - (4.0 - 0.15)).abs() < 1.0e-5, "left at {}", left.x);
+    }
+
+    /// The `+7` block-light boost touches the block nibble only.
+    ///
+    /// A version that boosted the packed byte as a whole (`packed + 7`) agrees with
+    /// this one on any byte whose block nibble is below 9 — so the discriminating
+    /// input is a **saturating** one, where the correct answer clamps the nibble at
+    /// 15 and the wrong one carries into the sky nibble.
+    #[test]
+    fn orb_light_boosts_only_the_block_nibble() {
+        // Pitch black: block 0 -> 7, sky untouched.
+        assert_eq!(experience_orb_light(0x00), 0x07);
+        // Sky 15, block 0: the boost must not touch the sky nibble.
+        assert_eq!(experience_orb_light(0xF0), 0xF7);
+        // The discriminating case. Block 10 saturates at 15; a whole-byte `+7`
+        // would give 0x51 — a *lower* sky level and a block level of 1.
+        assert_eq!(experience_orb_light(0x4A), 0x4F);
+        assert_ne!(experience_orb_light(0x4A), 0x4A_u8.wrapping_add(7));
+    }
+
+    /// Vanilla's orb colour pins green at full and modulates red far harder than
+    /// blue. The wrong hypothesis is a symmetric hue cycle (equal amplitudes),
+    /// which is what a transcription that dropped the `0.1` would produce.
+    #[test]
+    fn orb_tint_pins_green_and_modulates_red_ten_times_harder_than_blue() {
+        // Sweep a whole `phase` period — `age/2`, so 4π ticks.
+        let mut greens = Vec::new();
+        let mut reds = Vec::new();
+        let mut blues = Vec::new();
+        for tick in 0..64 {
+            let [r, g, b] = experience_orb_tint(tick as f32 / 4.0);
+            greens.push(g);
+            reds.push(r);
+            blues.push(b);
+        }
+        assert!(greens.iter().all(|g| *g == 255), "green must never modulate");
+        let red_span = reds.iter().max().copied().unwrap_or(0) - reds.iter().min().copied().unwrap_or(0);
+        let blue_span =
+            blues.iter().max().copied().unwrap_or(0) - blues.iter().min().copied().unwrap_or(0);
+        // `0.5` vs `0.1` amplitude over the same `sin` range: 255 vs 51.
+        assert!(red_span > 240, "red span {red_span}, expected the full 0.5 swing");
+        assert!(
+            (40..=60).contains(&blue_span),
+            "blue span {blue_span}, expected ~51 from the 0.1 amplitude"
+        );
+        // The symmetric-amplitude hypothesis, evaluated here and required to fail.
+        assert!(
+            blue_span * 4 < red_span,
+            "equal amplitudes would pass every assertion above"
+        );
     }
 
     /// The other half of the drowned defect: even with its own mesh, a drowned

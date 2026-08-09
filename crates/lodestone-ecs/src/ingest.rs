@@ -49,9 +49,9 @@ use lodestone_physics::Vec3d;
 
 use crate::entity::{
     Attributes, AttackSwing, Baby, CreeperSwellDir, CustomName, CustomNameVisible, DisplayItem,
-    EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, FallingBlockState, HeadYaw, Health,
-    HurtTime, MinecraftEntityId, MobState, OnGround, Passengers, Pose, Position, Rotation, Variant,
-    Vehicle, Velocity,
+    EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, ExperienceOrbValue,
+    FallingBlockState, HeadYaw, Health, HurtTime, MinecraftEntityId, MobState, OnGround, Passengers,
+    Pose, Position, Rotation, Variant, Vehicle, Velocity,
 };
 use crate::player::{LocalPlayer, PhysicsState};
 use crate::schedules::{GameTick, NetIngest};
@@ -789,6 +789,22 @@ pub fn apply_entity_metadata(
         // `CreeperSwellDir` via `lodestone_client::state::entity_view`.
         if let Some(dir) = metadata.creeper_swell_dir {
             entity.insert(CreeperSwellDir(dir));
+        }
+        // An experience orb's XP value (`ExperienceOrb.DATA_VALUE`). This arm is
+        // the reason an orb draws at all: the server has streamed the field since
+        // the orb entity landed, and with no fold here it reached
+        // `EntityMetadataUpdate` and stopped — a decoded field with no component,
+        // which is the metadata-shaped version of an island.
+        //
+        // **`apply_entity_metadata`, not a session fold.** An orb's value is
+        // per-*entity* state (there can be a hundred on the ground, each worth a
+        // different amount), so it belongs in this system beside `Health`/`Baby`;
+        // `crate::session` carries the *local player's* own scalars, and the XP
+        // bar's level/progress — which is the local-player half of the same
+        // feature — really does go there, off `set_experience` rather than off
+        // metadata. Putting this one in `session` would compile and never run.
+        if let Some(value) = metadata.experience_orb_value {
+            entity.insert(ExperienceOrbValue(value));
         }
         // The *mob* flags byte (issue #379) — a different byte at a different
         // index from the living-entity one [`apply_entity_item_use`] folds, and

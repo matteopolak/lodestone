@@ -390,6 +390,20 @@ pub struct Baby(pub bool);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CreeperSwellDir(pub i32);
 
+/// An experience orb's XP value — `ExperienceOrb.DATA_VALUE`
+/// ([`lodestone_model::event::EntityMetadataUpdate::experience_orb_value`]).
+/// **Absent** until the first report, like [`CreeperSwellDir`], and absent
+/// forever for every entity that is not an orb, because the protocol adapter
+/// withholds the field for those (index 8's `INT` means something else on a
+/// primed TNT, a fishing hook, a vehicle and a display entity).
+///
+/// The value's only consumer is the sprite: `ExperienceOrb.getIcon()` buckets it
+/// into one of eleven cells of `experience_orb.png`. An orb whose value has never
+/// been reported therefore draws cell 0, which is what vanilla's own accessor
+/// default of `0` produces — not "draw nothing".
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExperienceOrbValue(pub i32);
+
 /// The entity's cosmetic variant (sheep colour, villager profession, …).
 ///
 /// **Absent** means the server sent no variant override, and a consumer should

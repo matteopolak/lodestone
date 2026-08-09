@@ -490,6 +490,22 @@ struct FlameBatch {
     count: u32,
 }
 
+/// One sprite cell's uploaded orb-instance buffer for a frame — the
+/// experience-orb counterpart to [`FlameBatch`].
+///
+/// The batch key is the **sprite cell**, not the entity type: every orb in the
+/// world is the same entity type, and what differs between two of them is which
+/// of the eleven 16×16 cells of `experience_orb.png` their value buckets into (see
+/// `lodestone_render::experience_orb_icon`). The cell is baked into the quad's
+/// UVs, so it is a `PartRange` of `EntityRenderer::orb_gpu_model` — and `icon` is
+/// that part's index.
+struct OrbBatch {
+    /// Which sprite cell, i.e. which part of the shared orb mesh.
+    icon: u32,
+    buffer: wgpu::Buffer,
+    count: u32,
+}
+
 /// One model type's uploaded per-part instance buffers for a frame. `parts[p]`
 /// holds one matrix per visible instance of part `p`; a `None` slot is a part
 /// with no geometry (nothing to draw).

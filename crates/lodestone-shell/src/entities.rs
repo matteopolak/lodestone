@@ -140,8 +140,8 @@ use glam::Vec3;
 use lodestone_assets::ResourceLocation;
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::entity::{
-    AttackSwing, EntityFlags, EntityIndex, FallingBlockState, HurtTime, ItemUse, MinecraftEntityId,
-    MobState, Pose,
+    AttackSwing, EntityFlags, EntityIndex, ExperienceOrbValue, FallingBlockState, HurtTime, ItemUse,
+    MinecraftEntityId, MobState, Pose,
 };
 use lodestone_ecs::player::{
     CollisionSource, LocalPlayer, PhysicsState, PlayerCollision, Profile,
@@ -573,6 +573,15 @@ fn sheep_wool(type_path: &str, variant: Option<&EntityVariant>) -> Option<SheepW
 /// path and draws them through the model pipeline instead.
 pub const ITEM_ENTITY_TYPE_PATH: &str = "item";
 
+/// The entity-type path an **experience orb** reports (`minecraft:experience_orb`).
+///
+/// Like [`ITEM_ENTITY_TYPE_PATH`], it has no
+/// [`entity_models`](lodestone_render::EntityModelSet) entry and never will:
+/// `ExperienceOrbRenderer` is one camera-facing quad, not a cuboid part rig, so
+/// `EntityModelSet::resolve` skips it and `RenderState::prepare_orbs` picks it out
+/// by type path and draws it through the orb billboard pipeline instead.
+pub const EXPERIENCE_ORB_TYPE_PATH: &str = "experience_orb";
+
 /// A single entity ready to draw this frame: its model type and interpolated
 /// transform inputs. The renderer turns this into an
 /// [`EntityInstance`](lodestone_render::EntityInstance).
@@ -779,6 +788,22 @@ pub struct EntityDraw {
     /// puts the arm UVs a texel out; the wide sheet on the slim rig leaves a gap
     /// at the shoulder. Neither reads as a model bug.
     pub player_skin: Option<crate::remote_skins::RemoteSkin>,
+    /// An experience orb's XP value (`ExperienceOrb.DATA_VALUE`), bridged off the
+    /// ingest entity's [`ExperienceOrbValue`] component — `None` for every entity
+    /// that is not an orb, which is the switch the orb pass keys on.
+    ///
+    /// Its only consumer is `lodestone_render::experience_orb_icon`, which buckets
+    /// it into one of eleven sprite cells. `Some(0)` and `None` therefore draw the
+    /// same cell, and that is correct rather than sloppy: vanilla's accessor
+    /// default *is* `0`, so an orb whose value never reached us looks exactly like
+    /// an orb genuinely worth nothing. What must not happen is the two collapsing
+    /// the other way — `None` reading as "not an orb" for a real orb, which draws
+    /// nothing at all.
+    ///
+    /// **Not the orb's `count`.** Vanilla keeps `value` (what one absorption pays,
+    /// synced) and `count` (how many absorptions the entity holds after merging,
+    /// server-only) as two different numbers, and only the first is on the wire.
+    pub experience_orb_value: Option<i32>,
 }
 
 impl EntityDraw {
@@ -1309,8 +1334,11 @@ pub fn extract_pickup_draws(
             equipment_dye: Vec::new(),
             equipment_trim: Vec::new(),
             wool: None,
-            // A pickup animation is always a dropped item, never a falling block.
+            // A pickup animation is always a dropped item, never a falling block
+            // and never an experience orb — the XP an orb pays goes straight to
+            // the bar, so there is no flight animation for one to reuse.
             block_state: None,
+            experience_orb_value: None,
             feet,
             yaw: 0.0,
             head_yaw: 0.0,
@@ -1719,6 +1747,18 @@ pub fn extract_entity_draws(
     // one VarInt into a drawn block — see `EntityDraw::block_state`, and note it is
     // the *only* thing a client is ever told about which block is falling.
     falling_blocks: Query<&FallingBlockState>,
+    // `ExperienceOrbValue` lives on the ingest entity too
+    // (`lodestone_ecs::ingest::apply_entity_metadata` inserts it from index 8's
+    // `INT`, gated on the adapter having established the entity is an orb),
+    // bridged the same way `FallingBlockState` and `EntityFlags` above are — and
+    // for the same structural reason: the component is on the *ingest* entity, not
+    // on the render track this query's tuple is drawn from.
+    //
+    // Bridged rather than folded through `EntityFacts` into a fourteenth render
+    // component, which is the route `RenderWool` takes. Both work; this one adds
+    // nothing to `spawn_track`/`update_track` and nothing to the tuple above,
+    // which is already at fourteen.
+    orb_values: Query<&ExperienceOrbValue>,
     tracks: Query<(
         &MinecraftEntityId,
         &RenderKind,
@@ -1838,6 +1878,21 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| falling_blocks.get(entity).ok())
             .map(|state| state.0);
+        // An experience orb's XP value, bridged off the ingest entity like
+        // `block_state` above. `None` for every entity that is not an orb — the
+        // adapter withholds index 8's `INT` for those — which is the switch
+        // `prepare_orbs` keys on. An orb whose value has not arrived yet is still
+        // drawn, at sprite cell 0; see `EntityDraw::experience_orb_value`.
+        let experience_orb_value = if kind.0 == EXPERIENCE_ORB_TYPE_PATH {
+            Some(
+                index
+                    .get(id.0)
+                    .and_then(|entity| orb_values.get(entity).ok())
+                    .map_or(0, |value| value.0),
+            )
+        } else {
+            None
+        };
         out.0.push(EntityDraw {
             id: id.0,
             type_path: kind.0.clone(),
@@ -1871,6 +1926,7 @@ pub fn extract_entity_draws(
             creeper_swelling,
             on_fire,
             player_skin: player_skin.0.clone(),
+            experience_orb_value,
         });
     }
 }
@@ -2852,6 +2908,7 @@ mod tests {
         equipment: Vec<(EquipmentSlot, Option<ResourceLocation>)>,
         variant: Option<EntityVariant>,
         creeper_swell_dir: Option<i32>,
+        experience_orb_value: Option<i32>,
     }
 
     impl IngestSnap {
@@ -2907,6 +2964,9 @@ mod tests {
             }
             if let Some(dir) = self.creeper_swell_dir {
                 e.insert(CreeperSwellDir(dir));
+            }
+            if let Some(value) = self.experience_orb_value {
+                e.insert(ExperienceOrbValue(value));
             }
         }
     }
@@ -3395,6 +3455,8 @@ mod tests {
                 creeper_swelling: 0.0,
                 on_fire: false,
                 player_skin: skin,
+                // A player, not an experience orb.
+                experience_orb_value: None,
             }
         }
 
@@ -3639,6 +3701,7 @@ mod tests {
             equipment: Vec::new(),
             variant: None,
             creeper_swell_dir: None,
+            experience_orb_value: None,
         }
     }
 
@@ -3648,6 +3711,70 @@ mod tests {
             creeper_swell_dir: swell_dir,
             ..snap(id, Vec3::ZERO, 0.0)
         }
+    }
+
+    fn orb_snap(id: i32, value: Option<i32>) -> IngestSnap {
+        IngestSnap {
+            type_path: EXPERIENCE_ORB_TYPE_PATH.into(),
+            experience_orb_value: value,
+            ..snap(id, Vec3::ZERO, 0.0)
+        }
+    }
+
+    /// [`extract_entity_draws`] must carry an orb's `ExperienceOrbValue` through to
+    /// [`EntityDraw::experience_orb_value`], because that field is the **only**
+    /// switch `RenderState::prepare_orbs` has: `None` means "not an orb" and draws
+    /// nothing at all.
+    ///
+    /// Three separate claims, and the middle one is the one a "does the field
+    /// arrive?" test would miss:
+    ///
+    /// * an orb with a reported value carries **that** value, not a placeholder;
+    /// * an orb with **no** reported value still carries `Some(0)` — vanilla's own
+    ///   accessor default — so it draws sprite cell 0 rather than vanishing. A
+    ///   `.map()` straight off the component would give `None` here and the orb
+    ///   would be invisible for exactly as long as the server withheld the field;
+    /// * a **pig** carries `None`, which is the negative control. Without it a
+    ///   version that unconditionally wrote `Some(0)` would pass the first two and
+    ///   turn every mob in the world into an orb sprite.
+    #[test]
+    fn an_orbs_value_reaches_the_draw_and_nothing_else_claims_to_be_an_orb() {
+        let mut interp = EntityInterpolator::new();
+        (orb_snap(1, Some(617))).apply(interp.world_mut());
+        (orb_snap(2, None)).apply(interp.world_mut());
+        (snap(3, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(0.0);
+        let draws = interp.draws();
+        let value_of = |id: i32| -> Option<i32> {
+            draws
+                .iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("no draw for entity {id}"))
+                .experience_orb_value
+        };
+        // Collected rather than asserted in place, so one wrong arm does not hide
+        // the other two.
+        let mut wrong = Vec::new();
+        if value_of(1) != Some(617) {
+            wrong.push(format!("a reported orb value became {:?}", value_of(1)));
+        }
+        if value_of(2) != Some(0) {
+            wrong.push(format!(
+                "an unreported orb value became {:?}, not the vanilla default Some(0)",
+                value_of(2)
+            ));
+        }
+        if value_of(3).is_some() {
+            wrong.push(format!("a pig reported an orb value of {:?}", value_of(3)));
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        // And the value has to be one that picks a *different* sprite cell from the
+        // default, or this gate would pass against a version that discarded it.
+        assert_ne!(
+            lodestone_render::experience_orb_icon(617),
+            lodestone_render::experience_orb_icon(0),
+            "617 and 0 must bucket differently for the assertion above to mean anything"
+        );
     }
 
     /// The render-side half of issue #10's fix: [`extract_entity_draws`] must
@@ -4386,6 +4513,7 @@ mod tests {
             equipment: Vec::new(),
             variant: None,
             creeper_swell_dir: None,
+            experience_orb_value: None,
         }
     }
 

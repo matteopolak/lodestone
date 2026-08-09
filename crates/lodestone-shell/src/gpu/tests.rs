@@ -447,6 +447,8 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
         on_fire: false,
         // Not a player, so no skin can apply.
         player_skin: None,
+        // Not an experience orb either.
+        experience_orb_value: None,
     };
 
     let instance = models
