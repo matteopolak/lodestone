@@ -60,14 +60,13 @@
 //!   contribute no glyphs, so those codepoints render as the missing-glyph box.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use lodestone_assets::font::{
     FontLoader, FontOptions, GlyphRaster, MISSING_ADVANCE, RasterFont, metrics as font_metrics,
 };
-use lodestone_assets::{ResourceLocation, ResourceManager, ResourceSource, ZipSource};
+use lodestone_assets::{ResourceLocation, ResourceManager};
 use lodestone_model::text::{TextColor, TextSpan};
 
 use super::item_icon::ColourStream;
@@ -694,55 +693,28 @@ fn build_obfuscation_pool(raster: &RasterFont) -> HashMap<u32, Vec<char>> {
     pool
 }
 
-/// Open `client.jar` from a discovered vanilla pack root as a [`ResourceManager`].
+/// The one vanilla `client.jar` [`ResourceManager`], from
+/// [`crate::resources::vanilla_manager`].
 ///
-/// This mirrors [`crate::resources`]'s pack discovery rather than calling it,
-/// because `resources::vanilla_manager` is `#[cfg(test)]` — it exists only for
-/// unit tests inside the lib, and production code cannot reach it. Dropping that
-/// attribute and calling it here is the right end state; it is a one-line change
-/// in a file this module does not own. Until then the discovery rule is
-/// duplicated *exactly*: `LODESTONE_ASSETS` if set and complete, else the
-/// highest-sorting `.cache/mc/<version>` under any ancestor of the working
-/// directory that holds both `client.jar` and `generated/reports/blocks.json`.
+/// **This used to be a hand-copied duplicate of that function** — its own pack
+/// discovery (`LODESTONE_ASSETS`, else the highest-sorting `.cache/mc/<version>`
+/// holding both `client.jar` and `generated/reports/blocks.json`), its own
+/// `std::fs::read` of the jar, and a doc comment explaining that the duplication
+/// existed only because `resources::vanilla_manager` was `#[cfg(test)]` and asking for
+/// that attribute to be dropped. It is no longer `#[cfg(test)]`, and that comment had
+/// gone stale: `resources`' own doc now invites exactly this collapse.
+///
+/// Deleting the copy is what makes the font work in a browser, and it is worth being
+/// precise about why, because it is not a tidy-up: the browser's jar arrives as
+/// `fetch`ed bytes through `crate::platform::assets`, and `vanilla_manager` is the
+/// single place that knows it. A duplicate that reads a path instead would have
+/// produced a title screen with a **readable-looking layout and no glyphs** — every
+/// caller here falls back to a fixed-width stand-in when this returns `None`, which is
+/// exactly the shape of failure that reports success while the screen is wrong.
 fn jar_manager() -> Option<ResourceManager> {
-    let jar = pack_root()?.join("client.jar");
-    let bytes = std::fs::read(&jar)
-        .map_err(|e| tracing::warn!(target: "assets", "read {}: {e}", jar.display()))
-        .ok()?;
-    let zip = ZipSource::from_bytes(bytes)
-        .map_err(|e| tracing::warn!(target: "assets", "open {}: {e}", jar.display()))
-        .ok()?;
-    Some(ResourceManager::new(vec![
-        Box::new(zip) as Box<dyn ResourceSource>,
-    ]))
+    crate::resources::vanilla_manager()
 }
 
-fn pack_root() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("LODESTONE_ASSETS") {
-        let p = PathBuf::from(dir);
-        return is_pack_root(&p).then_some(p);
-    }
-    let cwd = std::env::current_dir().ok()?;
-    for base in cwd.ancestors() {
-        let cache = base.join(".cache/mc");
-        let mut entries: Vec<PathBuf> = match std::fs::read_dir(&cache) {
-            Ok(rd) => rd
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| is_pack_root(p))
-                .collect(),
-            Err(_) => continue,
-        };
-        entries.sort();
-        if let Some(root) = entries.pop() {
-            return Some(root);
-        }
-    }
-    None
-}
-
-fn is_pack_root(dir: &Path) -> bool {
-    dir.join("client.jar").is_file() && dir.join("generated/reports/blocks.json").is_file()
-}
 
 /// Vanilla's shadow colour: `ARGB.scaleRGB(color, 0.25F)` — a **gamma-space**
 /// quarter of each channel with alpha preserved.

@@ -355,62 +355,32 @@ impl EntityRenderer {
 /// sheet decoded, and armour then simply does not draw. There is no synthetic
 /// fallback on purpose — see [`EntityRenderer::armour_textures`].
 ///
-/// # This duplicates `resources.rs`'s pack discovery, and should not have to
+/// # The jar comes from `resources::vanilla_manager`
 ///
-/// `resources::asset_root`/`open_client_jar` are private and
-/// `resources::vanilla_manager` is `#[cfg(test)]`, so production code in another
-/// module cannot reach any of them; `crate::hud::vanilla_font::jar_manager`
-/// already carries an identical copy for exactly this reason and says so. The
-/// right end state is one `pub(crate) fn vanilla_manager()` in `resources.rs`
-/// with all three callers going through it — a one-line attribute change in a
-/// file this pass does not own. Until then the discovery rule is duplicated
-/// *exactly*: `LODESTONE_ASSETS` if set and complete, else the highest-sorting
-/// `.cache/mc/<version>` under any ancestor of the working directory holding
-/// both `client.jar` and `generated/reports/blocks.json`.
+/// This function used to carry its own copy of `resources.rs`'s pack discovery,
+/// alongside two more in this file and a fourth in `hud::vanilla_font`, each with a
+/// comment saying the right end state was one `pub(crate) fn vanilla_manager()` that
+/// everyone called. That happened: all four are gone.
+///
+/// It is worth knowing why the collapse was not merely tidiness. `vanilla_manager` is
+/// the single place that knows the **browser's jar arrives as `fetch`ed bytes** through
+/// `crate::platform::assets` rather than as a path, so a surviving copy would have read
+/// a path that cannot exist, found nothing, and drawn armourless players in a browser —
+/// while every log line still reported success.
 pub(super) fn load_humanoid_armour_textures()
 -> HashMap<(&'static str, ArmourLayerType), lodestone_assets::Image> {
     use lodestone_assets::equipment::{ARMOUR_ASSETS, armour_texture_path};
-    use lodestone_assets::{Image, ResourceManager, ResourceSource, ZipSource};
-    use std::path::{Path, PathBuf};
+    use lodestone_assets::Image;
 
-    fn is_pack_root(dir: &Path) -> bool {
-        dir.join("client.jar").is_file() && dir.join("generated/reports/blocks.json").is_file()
-    }
-    fn pack_root() -> Option<PathBuf> {
-        if let Some(dir) = std::env::var_os("LODESTONE_ASSETS") {
-            let p = PathBuf::from(dir);
-            return is_pack_root(&p).then_some(p);
-        }
-        let cwd = std::env::current_dir().ok()?;
-        for base in cwd.ancestors() {
-            let mut entries: Vec<PathBuf> = match std::fs::read_dir(base.join(".cache/mc")) {
-                Ok(rd) => rd
-                    .filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| is_pack_root(p))
-                    .collect(),
-                Err(_) => continue,
-            };
-            entries.sort();
-            if let Some(root) = entries.pop() {
-                return Some(root);
-            }
-        }
-        None
-    }
-
+    // `crate::resources::vanilla_manager`, not a fourth hand-rolled copy of the pack
+    // discovery. See that function: it is the only place that knows the browser's jar
+    // arrives as `fetch`ed bytes rather than a path, so a copy here would silently
+    // draw armourless players in a browser while reporting success.
     let mut out = HashMap::new();
-    let Some(jar) = pack_root().map(|root| root.join("client.jar")) else {
+    let Some(manager) = crate::resources::vanilla_manager() else {
+        tracing::warn!(target: "assets", "no vanilla pack for humanoid armour textures");
         return out;
     };
-    let Ok(bytes) = std::fs::read(&jar) else {
-        tracing::warn!(target: "assets", "read {}", jar.display());
-        return out;
-    };
-    let Ok(zip) = ZipSource::from_bytes(bytes) else {
-        tracing::warn!(target: "assets", "open {}", jar.display());
-        return out;
-    };
-    let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
 
     for asset in ARMOUR_ASSETS {
         for layer_type in [ArmourLayerType::Humanoid, ArmourLayerType::HumanoidLeggings] {
@@ -499,51 +469,19 @@ pub(super) fn load_trim_sprites() -> HashMap<lodestone_assets::ResourceLocation,
 
 /// Decode the sheep wool layer's own sheet (`entity/sheep/sheep_wool.png`)
 /// from the vanilla `client.jar`, or `None` if no pack is found — the wool
-/// equivalent of [`load_humanoid_armour_textures`], with the same duplicated
-/// pack-discovery rationale documented there (`resources::vanilla_manager` is
-/// `#[cfg(test)]`-only, so production code in this module cannot reach it).
+/// equivalent of [`load_humanoid_armour_textures`], and reaching the jar the same way
+/// it does — through [`crate::resources::vanilla_manager`], for the reason documented
+/// there.
 ///
 /// Confirmed 64×32 and exactly greyscale against the real jar by
 /// `lodestone-assets/tests/real_jar.rs::sheep_wool_texture_decodes_from_the_real_jar`
 /// — that is why [`sheep_wool_tint`] can paint this sheet with a flat gamma-
 /// space multiply rather than needing a per-colour texture.
 fn load_sheep_wool_texture() -> Option<lodestone_assets::Image> {
-    use lodestone_assets::{Image, ResourceManager, ResourceSource, ZipSource};
-    use std::path::{Path, PathBuf};
+    use lodestone_assets::Image;
 
-    fn is_pack_root(dir: &Path) -> bool {
-        dir.join("client.jar").is_file() && dir.join("generated/reports/blocks.json").is_file()
-    }
-    fn pack_root() -> Option<PathBuf> {
-        if let Some(dir) = std::env::var_os("LODESTONE_ASSETS") {
-            let p = PathBuf::from(dir);
-            return is_pack_root(&p).then_some(p);
-        }
-        let cwd = std::env::current_dir().ok()?;
-        for base in cwd.ancestors() {
-            let mut entries: Vec<PathBuf> = match std::fs::read_dir(base.join(".cache/mc")) {
-                Ok(rd) => rd
-                    .filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| is_pack_root(p))
-                    .collect(),
-                Err(_) => continue,
-            };
-            entries.sort();
-            if let Some(root) = entries.pop() {
-                return Some(root);
-            }
-        }
-        None
-    }
-
-    let jar = pack_root()?.join("client.jar");
-    let bytes = std::fs::read(&jar)
-        .inspect_err(|_| tracing::warn!(target: "assets", "read {}", jar.display()))
-        .ok()?;
-    let zip = ZipSource::from_bytes(bytes)
-        .inspect_err(|_| tracing::warn!(target: "assets", "open {}", jar.display()))
-        .ok()?;
-    let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
+    // `crate::resources::vanilla_manager` — see `load_humanoid_armour_textures`.
+    let manager = crate::resources::vanilla_manager()?;
     const PATH: &str = "assets/minecraft/textures/entity/sheep/sheep_wool.png";
     let Some(png) = manager.read(PATH) else {
         tracing::warn!(target: "assets", "missing sheep wool sheet {PATH}");
@@ -561,50 +499,14 @@ fn load_sheep_wool_texture() -> Option<lodestone_assets::Image> {
 /// Decode and combine the mob-fire billboard's two sprites
 /// (`textures/block/fire_0.png`/`fire_1.png`) from the vanilla `client.jar`,
 /// or `None` if no pack is found — the flame equivalent of
-/// [`load_sheep_wool_texture`], with the same duplicated pack-discovery
-/// rationale documented there (`resources::vanilla_manager` is
-/// `#[cfg(test)]`-only, so production code in this module cannot reach it).
+/// [`load_sheep_wool_texture`], reaching the jar the same way through
+/// [`crate::resources::vanilla_manager`].
 ///
 /// Delegates the actual decode/reorder/combine to
-/// [`lodestone_assets::entity_flame::load_combined_flame_texture`] — this
-/// function's only job is finding the jar, exactly like its two siblings.
+/// [`lodestone_assets::entity_flame::load_combined_flame_texture`].
 fn load_flame_textures() -> Option<lodestone_assets::Image> {
-    use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
-    use std::path::{Path, PathBuf};
-
-    fn is_pack_root(dir: &Path) -> bool {
-        dir.join("client.jar").is_file() && dir.join("generated/reports/blocks.json").is_file()
-    }
-    fn pack_root() -> Option<PathBuf> {
-        if let Some(dir) = std::env::var_os("LODESTONE_ASSETS") {
-            let p = PathBuf::from(dir);
-            return is_pack_root(&p).then_some(p);
-        }
-        let cwd = std::env::current_dir().ok()?;
-        for base in cwd.ancestors() {
-            let mut entries: Vec<PathBuf> = match std::fs::read_dir(base.join(".cache/mc")) {
-                Ok(rd) => rd
-                    .filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| is_pack_root(p))
-                    .collect(),
-                Err(_) => continue,
-            };
-            entries.sort();
-            if let Some(root) = entries.pop() {
-                return Some(root);
-            }
-        }
-        None
-    }
-
-    let jar = pack_root()?.join("client.jar");
-    let bytes = std::fs::read(&jar)
-        .inspect_err(|_| tracing::warn!(target: "assets", "read {}", jar.display()))
-        .ok()?;
-    let zip = ZipSource::from_bytes(bytes)
-        .inspect_err(|_| tracing::warn!(target: "assets", "open {}", jar.display()))
-        .ok()?;
-    let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
+    // `crate::resources::vanilla_manager` — see `load_humanoid_armour_textures`.
+    let manager = crate::resources::vanilla_manager()?;
     match lodestone_assets::entity_flame::load_combined_flame_texture(&manager) {
         Ok(img) => Some(img),
         Err(e) => {
