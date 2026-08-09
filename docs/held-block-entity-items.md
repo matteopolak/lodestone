@@ -31,8 +31,12 @@ items/<id>.json  ─►  ItemModel tree  ─►  resolve(ctx)
   ask **both**, baked first.
 * **`special_item_rig`** (`lodestone-render/src/block_entity.rs`) is the single owner
   of `kind` + item path → (rig, sheet), shared by every surface.
-* **`FirstPersonHand::Special`** (`lodestone-shell/src/gpu/first_person.rs`) is the
-  consumer that exists today.
+* **`BlockEntityModelSet::resolve_special_item`** is the single owner of
+  `(kind, item path, placement) → BlockEntityInstance` — the rig lookup, the sheet,
+  the rest-pose part transforms and the cull AABB, so the three world surfaces differ
+  only in the placement they pass.
+* **`FirstPersonHand::Special`** (`lodestone-shell/src/gpu/first_person.rs`) and the
+  three `*_special_item` methods in `gpu/entity_passes.rs` are the consumers.
 
 ### The bug was three `None`s in a row, not one
 
@@ -114,23 +118,63 @@ twice, that is the defect: it is how the inventory slot and the hand come to dis
 
 ### Adding a surface
 
-The remaining 3-D surfaces are **not** wired, and each is a consumer of a finished
-seam rather than new machinery:
+All five of vanilla's surfaces are now wired:
 
-| surface | where | what it needs |
+| surface | where | pose |
 |---|---|---|
-| first-person hand | `gpu/first_person.rs` | **done** |
-| inventory / hotbar slot | `hud/item_icon.rs` | **done** (it was the only one that ever worked) |
-| dropped stack in the world | `gpu/entity_passes.rs` | a `BlockEntityInstance` per drop, appended in `prepare_block_entities` |
-| another entity's hand | `gpu/entity_passes.rs` | the same, posed by `thirdperson_righthand` off the held-item matrix |
-| item frame | `gpu/entity_passes.rs` | the same, posed by `fixed` |
+| first-person hand | `gpu/first_person.rs`'s `prepare_special_hand` | `first_person_item_matrix` |
+| inventory / hotbar slot | `hud/item_icon.rs`'s `SpecialIcons` | `gui_item_pose` |
+| dropped stack in the world | `entity_passes.rs`'s `dropped_special_item` | `dropped_item_matrix` + `special_item_hover_lift` |
+| another entity's hand | `entity_passes.rs`'s `held_special_item` | `held_item_matrix` off the holder's arm |
+| item frame | `entity_passes.rs`'s `framed_special_item` | `framed_item_matrix` |
 
-All three remaining rows are the same shape: resolve `resolve_special`, call
-`special_item_rig`, compose the surface's own display transform into a placement
-matrix, and push a `BlockEntityInstance` — which the existing `(model, texture)`
-batcher already groups and draws. They land in `prepare_block_entities` because that
-is where the world-space batch list is assembled; nothing new is needed in
-`lodestone-render`.
+The three world surfaces share one shape, and the shared part is a function rather
+than a convention: `ItemVariants::resolve_special` finds the form, `special_item_rig`
+maps `kind` + item path to `(rig, sheet)`, and
+**`BlockEntityModelSet::resolve_special_item`** turns a placement matrix into a
+`BlockEntityInstance`. Each surface contributes only its own placement. They batch by
+`(model, sheet)` alongside the *placed* block entities and coalesce with them for
+free — a dropped chest and a placed chest are the same mesh and the same sheet, so
+one draw covers both.
+
+`prepare_block_entities` therefore takes the `entities` slice now. Its
+seven-source emptiness condition **grew an eighth term**: without it, a chest lying
+on the floor of a room with no chests, skulls, bells, shulkers, banners, lecterns or
+enchanting tables in it would hit the early return and draw nothing — the same
+island the seven existing terms each record.
+
+### Poses: the three numbers that are not what they look like
+
+* **The hover lift comes from the rig's AABB, not from quads.** `item_hover_lift`
+  measures a `BakedQuad` list; a rig has none, so `special_item_hover_lift` takes
+  `BlockEntityMesh::local_min`/`local_max` and transforms **all eight corners**.
+  Transforming `local_min` alone agrees exactly whenever the display transform has no
+  rotation, which is true of every `ground` transform in the game — so the shortcut
+  looks correct and is only wrong for the case that would ever expose it.
+* **`display_matrix` centres the model, and the lift is not `0.0625`.** Its trailing
+  `translate(-0.5, -0.5, -0.5)` is `ItemTransform.apply`'s, taken even by
+  `NO_TRANSFORM`. A rig whose bottom sits at local `y = 0` poses at `y = -0.5`, so a
+  drop's lift is `0.5 + 0.0625`. This is also why a gate that probes the pose at
+  `Vec3::ZERO` measures a *corner*: the point that maps to the pose origin is
+  `Vec3::splat(0.5)`.
+* **A framed item gets `0.5` from the frame *and* whatever `display.fixed` says.**
+  Vanilla scales `0.5` and then applies the fixed transform, which is itself `0.5`
+  for a chest and `1.0` for a skull. Copying `prepare_framed_maps`' `FRAMED_MAP_SCALE`
+  of `1.0` is the trap — a map has its own full-block branch, and a chest at `1.0`
+  would be twice the size of the frame around it.
+
+### What the world surfaces deliberately do not do
+
+* **A dropped stack draws one copy, not up to five.** Vanilla's
+  `submitMultipleFromCount` picks between a 3-axis jitter and a `z` fan using the
+  *posed model's own depth*, which is the quad-list measurement a rig cannot supply —
+  and the wrong branch would fan a chest along `z` like a sprite.
+* **An item frame's eight-step `rotation` is undecoded**, so every framed item hangs
+  upright, and a **glow** frame's `getBlockLightLevel` floor of `5` is not applied.
+* **An ordinary item in an item frame still draws nothing.** Only a filled map does
+  (`prepare_framed_maps`) and now the special items. So a framed chest draws and a
+  framed sword does not — a real gap, in a different path (the baked one), stated
+  here because this is the doc a reader of the frame surface will find.
 
 ### Gotcha — a presence assertion cannot see this bug
 
@@ -143,6 +187,11 @@ shulker box is nearly a cube, so a chest's lid and lock are the better subject.
 ## Configuration
 
 None. No new constants, no options, no feature gates.
+
+`RenderStats::special_item_drops_drawn`, `..._hands_drawn` and `..._frames_drawn` are
+**three** counters rather than one total, because the three surfaces failed
+independently: each was its own island, and a single number would have read
+"special items are drawing" while two of the three still drew nothing.
 
 `RenderStats::first_person_item_drawn` is `true` for a held special item as well as a
 held baked one: the question it answers is "is the hand holding something visible",

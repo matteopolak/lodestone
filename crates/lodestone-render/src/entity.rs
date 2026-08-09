@@ -2203,6 +2203,103 @@ pub fn thrown_item_mesh(
 }
 
 // ---------------------------------------------------------------------------
+// `minecraft:special` items on the 3-D world surfaces
+// ---------------------------------------------------------------------------
+//
+// A chest, shulker box or skull has no item model and no block model — every
+// triangle comes from a block-entity rig, resolved once by
+// [`crate::special_item_rig`]. The *poses* are the ordinary item poses; only the
+// geometry source differs. So the two helpers here are the pieces that
+// [`dropped_item_matrix`]/[`held_item_matrix`] need and that a rig cannot supply
+// the way a quad list can:
+//
+// * a hover lift measured from the rig's own AABB rather than from quads;
+// * an item-frame pose, which no baked-item path needed because a framed item
+//   drew nothing at all before.
+//
+// Everything else is shared with the baked path *by calling the same function*,
+// which is the point: a chest and a pickaxe must bob, spin and hang on identical
+// arcs. See `docs/held-block-entity-items.md`.
+
+/// Vanilla's `minOffsetY` for a **rig** rather than a quad list: the lift that
+/// puts the posed rig's lowest point [`ITEM_MIN_HOVER_HEIGHT`] above the drop's
+/// own position.
+///
+/// `local_min`/`local_max` are a `BlockEntityMesh`'s rest-pose AABB, and `ground`
+/// the item's own `display.ground`. All eight corners are transformed, not just
+/// `local_min`: `display_matrix` can rotate, and under a rotation the lowest
+/// point of the posed box is not the image of the lowest point of the original
+/// one. Transforming `local_min` alone is the plausible wrong version — it agrees
+/// exactly whenever the transform has no rotation, which is true of most `ground`
+/// transforms and false of the ones that matter.
+#[must_use]
+pub fn special_item_hover_lift(local_min: Vec3, local_max: Vec3, ground: &DisplayTransform) -> f32 {
+    let pose = display_matrix(ground);
+    let mut min_y = f32::INFINITY;
+    for i in 0..8u8 {
+        let corner = Vec3::new(
+            if i & 1 == 0 { local_min.x } else { local_max.x },
+            if i & 2 == 0 { local_min.y } else { local_max.y },
+            if i & 4 == 0 { local_min.z } else { local_max.z },
+        );
+        min_y = min_y.min(pose.transform_point3(corner).y);
+    }
+    if min_y.is_finite() {
+        -min_y + ITEM_MIN_HOVER_HEIGHT
+    } else {
+        ITEM_MIN_HOVER_HEIGHT
+    }
+}
+
+/// The world placement for an item hanging in an item frame, in the same
+/// `(feet, yaw, pitch)` terms the shell already has for a `HangingEntity`:
+///
+/// ```text
+/// T(feet) · Ry(yaw) · Rx(-pitch) · T(0, 0, lift) · S(0.5) · display_matrix(fixed)
+/// ```
+///
+/// # What this is and is not
+///
+/// `ItemFrameRenderer.submit` builds its pose from the frame's `Direction` plus a
+/// `rotation` in `0..8`, and neither is on the wire in a form this client decodes:
+/// a hanging entity reports a yaw and a pitch, which is what `HangingEntity`
+/// derives its direction *from*. So this takes the same two angles the framed-map
+/// path already takes and reproduces the parts of vanilla's chain that those
+/// angles determine:
+///
+/// | vanilla step | here |
+/// |---|---|
+/// | `translate(direction.step * 0.46875)` | the `lift` along the frame's own local `+z` |
+/// | `Rx(xRot) · Ry(yRot)` from the direction | `Ry(yaw) · Rx(-pitch)` |
+/// | `translate(0, 0, 0.4375)` | folded into `lift` |
+/// | `Rz(rotation * 45°)` | **not modelled** — the eight-step in-frame rotation is undecoded, so every framed item hangs upright |
+/// | `scale(0.5)` | `S(0.5)` |
+///
+/// `FRAMED_ITEM_SCALE` is vanilla's `0.5` exactly, and it is the one number here
+/// that a reader is likely to assume is `1.0` from the framed *map* path — a map
+/// is drawn a full block across by its own separate branch, and copying that
+/// would draw a chest twice the size of the frame around it.
+#[must_use]
+pub fn framed_item_matrix(
+    feet: Vec3,
+    yaw_deg: f32,
+    pitch_deg: f32,
+    fixed: &DisplayTransform,
+) -> Mat4 {
+    /// `poseStack.scale(0.5F, 0.5F, 0.5F)` in `ItemFrameRenderer.submit`'s item branch.
+    const FRAMED_ITEM_SCALE: f32 = 0.5;
+    /// `0.46875` (the step off the wall) plus `0.4375` (the step in front of the
+    /// frame's own model), the two `translate`s that survive here.
+    const FRAMED_ITEM_LIFT: f32 = 0.46875 + 0.4375;
+    Mat4::from_translation(feet)
+        * Mat4::from_rotation_y(yaw_deg.to_radians())
+        * Mat4::from_rotation_x(-pitch_deg.to_radians())
+        * Mat4::from_translation(Vec3::new(0.0, 0.0, FRAMED_ITEM_LIFT))
+        * Mat4::from_scale(Vec3::splat(FRAMED_ITEM_SCALE))
+        * display_matrix(fixed)
+}
+
+// ---------------------------------------------------------------------------
 // Experience orbs
 // ---------------------------------------------------------------------------
 //
@@ -3805,6 +3902,145 @@ mod tests {
         // way the mob-fire strip is — neither goes through this table.
         assert!(entity_texture_candidates("experience_orb").is_empty());
         assert!(entity_texture_candidates("").is_empty());
+    }
+
+    /// [`special_item_hover_lift`] must measure **all eight corners** of the rig's
+    /// box through the display transform, not just `local_min`.
+    ///
+    /// The wrong hypothesis — transform `local_min` alone — agrees exactly whenever
+    /// the transform has no rotation, which is true of most `ground` transforms. So
+    /// the discriminating input is a transform that *does* rotate: a 90° turn about
+    /// `x` sends the box's lowest posed point to the image of a **different**
+    /// corner, and the two answers then differ by the box's own depth.
+    ///
+    /// Both hypotheses are computed here from the same box, and the test fails if
+    /// they coincide at the chosen input.
+    #[test]
+    fn the_hover_lift_measures_the_whole_box_not_just_its_lowest_corner() {
+        use lodestone_assets::DisplayTransform;
+        // A tall, shallow box, so a rotation about `x` visibly changes which corner
+        // is lowest: y spans 0.75 and z spans 0.25.
+        let local_min = Vec3::new(-0.5, 0.0, -0.125);
+        let local_max = Vec3::new(0.5, 0.75, 0.125);
+
+        // No rotation, so the two hypotheses must agree. The expected value is
+        // **not** `ITEM_MIN_HOVER_HEIGHT` alone, and that is the whole reason to
+        // state it: `display_matrix` ends with vanilla's own
+        // `translate(-0.5, -0.5, -0.5)` (`ItemTransform.apply`, taken even by
+        // `NO_TRANSFORM`), which centres a `[0,1]³` model. A box whose bottom is at
+        // local `y = 0` therefore poses at `y = -0.5`, and the lift is
+        // `0.5 + ITEM_MIN_HOVER_HEIGHT`. Predicting the round `0.0625` here is the
+        // mistake, and it fails in the direction that looks like a code bug.
+        let flat = DisplayTransform::default();
+        let lift = special_item_hover_lift(local_min, local_max, &flat);
+        let expected = 0.5 + ITEM_MIN_HOVER_HEIGHT;
+        assert!(
+            (lift - expected).abs() < 1.0e-5,
+            "an unrotated box whose bottom is at local y=0 poses at y=-0.5 through \
+             the display centring, so the lift is {expected}; got {lift}"
+        );
+
+        // A 90° turn about `x`. `DisplayTransform`'s rotation is in degrees.
+        let turned = DisplayTransform {
+            rotation: [90.0, 0.0, 0.0],
+            ..DisplayTransform::default()
+        };
+        let got = special_item_hover_lift(local_min, local_max, &turned);
+        // The wrong hypothesis, evaluated at this input: `local_min` alone.
+        let naive = -display_matrix(&turned).transform_point3(local_min).y + ITEM_MIN_HOVER_HEIGHT;
+        assert!(
+            (got - naive).abs() > 1.0e-3,
+            "at this input the whole-box lift ({got}) and the lowest-corner lift \
+             ({naive}) coincide, so this test measures nothing"
+        );
+        // And the answer is the real one: the lowest posed corner must land exactly
+        // `ITEM_MIN_HOVER_HEIGHT` above zero once the lift is applied.
+        let pose = display_matrix(&turned);
+        let mut lowest = f32::INFINITY;
+        for i in 0..8u8 {
+            let corner = Vec3::new(
+                if i & 1 == 0 { local_min.x } else { local_max.x },
+                if i & 2 == 0 { local_min.y } else { local_max.y },
+                if i & 4 == 0 { local_min.z } else { local_max.z },
+            );
+            lowest = lowest.min(pose.transform_point3(corner).y);
+        }
+        assert!(
+            (lowest + got - ITEM_MIN_HOVER_HEIGHT).abs() < 1.0e-5,
+            "lifted bottom lands at {}, expected {ITEM_MIN_HOVER_HEIGHT}",
+            lowest + got
+        );
+    }
+
+    /// A framed item stands off the wall along the **frame's own facing** and is
+    /// drawn at vanilla's `0.5`, not the framed *map*'s full block.
+    ///
+    /// The scale is the discriminating claim: `prepare_framed_maps` draws its
+    /// picture at `1.0`, and copying that number is the plausible mistake — it
+    /// draws, it faces the right way, and it is twice the size of the frame around
+    /// it. Predicted from the record (`poseStack.scale(0.5F, ...)`), and the wrong
+    /// value is named rather than described.
+    #[test]
+    fn a_framed_item_lifts_along_its_facing_and_is_drawn_half_size() {
+        use lodestone_assets::DisplayTransform;
+        let identity = DisplayTransform::default();
+        let feet = Vec3::new(4.0, 65.0, -9.0);
+        // A block-entity rig lives in the block's own `[0,1]³` corner-origin space
+        // (see `block_entity_placement_matrix`'s pivot of `(0.5, 0, 0.5)`), and
+        // `display_matrix`'s trailing `translate(-0.5, -0.5, -0.5)` centres exactly
+        // that space. So the point that maps to the pose origin is the rig's
+        // **centre**, not its corner — probing `Vec3::ZERO` measures a corner and
+        // reports a spurious offset along every axis the rotation touches.
+        let centre_of = |m: Mat4| m.transform_point3(Vec3::splat(0.5));
+
+        // Yaw 0 is south (`+z`) in vanilla, so a frame at yaw 0 lifts toward `+z`.
+        // Lifting the other way buries the item in the block behind it, which reads
+        // as "the item does not draw" — the same failure `framed_map_pose`'s own
+        // gate exists for.
+        let pose = framed_item_matrix(feet, 0.0, 0.0, &identity);
+        let centre = centre_of(pose);
+        assert!(
+            centre.z > -9.0,
+            "a south-facing frame must lift toward +z, got z={}",
+            centre.z
+        );
+        let north = centre_of(framed_item_matrix(feet, 180.0, 0.0, &identity));
+        assert!(north.z < -9.0, "a north-facing frame lifts toward -z");
+
+        // The scale: the rig's full `[0,1]` width must come out half a block.
+        let left = pose.transform_point3(Vec3::new(0.0, 0.5, 0.5));
+        let right = pose.transform_point3(Vec3::new(1.0, 0.5, 0.5));
+        let width = (right - left).length();
+        assert!(
+            (width - 0.5).abs() < 1.0e-5,
+            "a unit-wide rig must draw 0.5 blocks wide, got {width}"
+        );
+        assert!(
+            (width - 1.0).abs() > 0.1,
+            "the framed-map scale of 1.0 would also pass the facing assertions above"
+        );
+
+        // A floor-mounted frame (pitch 90) lifts along `+y` instead of along `z`,
+        // which is what the pitch term is for — dropping it would leave a ceiling
+        // and a floor frame indistinguishable.
+        let floor = centre_of(framed_item_matrix(feet, 0.0, 90.0, &identity));
+        assert!(
+            floor.y > 65.0,
+            "a frame pitched 90 must lift along +y off the floor, got y={}",
+            floor.y
+        );
+        assert!(
+            (floor.z - (-9.0)).abs() < 1.0e-4,
+            "a pitched frame must not also lift along z, got z={}",
+            floor.z
+        );
+        // And the control on the pitch term itself: a wall frame and a floor frame
+        // must not land in the same place.
+        assert!(
+            (floor - centre).length() > 0.5,
+            "pitch 0 and pitch 90 gave nearly the same pose ({centre} vs {floor}) — \
+             the pitch term is not being read"
+        );
     }
 
     /// The orb sprite cell is a **bucketed** lookup, and the only inputs that can

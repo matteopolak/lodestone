@@ -361,8 +361,12 @@ impl RenderState {
         // chest is a *block*, gathered from the world's block-entity records by
         // the installed source — but uploaded here for the same reason as
         // everything above: buffers cannot be created mid-pass.
+        // The `entities` slice is passed in for the three `minecraft:special` item
+        // surfaces (a dropped chest, a chest in a mob's hand, a chest in an item
+        // frame): those are entities, but they draw through the block-entity rig,
+        // so they belong to this pass and not `prepare_item_geometry`'s.
         let (block_entity_batches, banner_layer_batches) =
-            self.prepare_block_entities(device, queue, camera, &mut stats);
+            self.prepare_block_entities(device, queue, camera, entities, &mut stats);
 
         // Dropped items *and* items in mobs' hands, meshed and uploaded before
         // the pass for the same reason as everything else here (no buffer

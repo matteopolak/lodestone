@@ -25,17 +25,20 @@
 //! render pass opens.
 use std::collections::HashMap;
 
+use lodestone_assets::DisplaySlot;
 use lodestone_assets::entity_models::sheep_wool_tint;
 use lodestone_assets::equipment::ArmourSlot;
+use lodestone_model::event::EquipmentSlot;
 use lodestone_render::{
-    Camera, CameraUniform, EntityCameraUniform, InstanceTint,
-    entity::{armour_layer_tint_with_dye, armour_layers},
+    Camera, CameraUniform, EntityCameraUniform, InstanceTint, ItemStateContext,
+    entity::{Arm, armour_layer_tint_with_dye, armour_layers, ground_transform, hand_transform},
     plan_block_entities, plan_entities, upload_instances_tinted,
 };
 
 use crate::entities::EntityDraw;
 
 use super::block_entities::{BannerLayerDrawBatch, BlockEntityDrawBatch};
+use super::terrain::ModelRenderer;
 use super::{
     ArmourAccum, ArmourDrawBatch, ArmourPartAccum, ArmourTextureKey, EntityDrawBatch, FlameBatch,
     OrbBatch, RenderState, RenderStats, WoolPartAccum, humanoid_armour_slot,
@@ -1023,11 +1026,247 @@ impl RenderState {
     /// rather than being read through [`Self::entity_light`] here: the gather
     /// already holds the world open to find the chest at all, and sampling there
     /// costs one lock instead of one per chest.
+    /// Every `minecraft:special` item on a **3-D world surface** this frame, as
+    /// block-entity instances ready to join `prepare_block_entities`' batch list.
+    ///
+    /// Three surfaces, all consumers of a finished seam rather than new machinery:
+    ///
+    /// | surface | item comes from | display context | pose |
+    /// |---|---|---|---|
+    /// | dropped stack | `EntityDraw::item` | `Ground` | `dropped_item_matrix` — the same bob and spin a pickaxe gets |
+    /// | another entity's hand | `EntityDraw::equipment` | `thirdperson_{left,right}hand` | `held_item_matrix` off the holder's own arm |
+    /// | item frame | `EntityDraw::item` | `Fixed` | `framed_item_matrix` |
+    ///
+    /// # One resolver, not three
+    ///
+    /// `resolve_special` finds the form, `special_item_rig` maps `kind` + item path
+    /// to `(rig, sheet)`, and `BlockEntityModelSet::resolve_special_item` builds the
+    /// instance. Nothing here knows that a chest is `chest_single` or that a
+    /// trapped chest differs only by sheet — that is deliberately the one place
+    /// that knows, shared with the first-person hand and the inventory slot. If you
+    /// find yourself matching on an item id in this function, that is the defect.
+    ///
+    /// # The baked path is tried first, by construction
+    ///
+    /// This runs *alongside* `prepare_item_geometry`, not instead of it, and the two
+    /// are disjoint because `ItemVariants::resolve` and `resolve_special` are: an
+    /// item with bakeable geometry resolves in the first and answers `None` in the
+    /// second. No 26.2 item has both, so nothing is double-drawn; a resource pack
+    /// that made one would draw it twice rather than not at all, which is the
+    /// failure that is at least visible.
+    ///
+    /// # Item frames are the surface with a real shortfall
+    ///
+    /// Only the *special* items are covered. An ordinary item in an item frame still
+    /// draws nothing (only a filled map does, through `prepare_framed_maps`), and the
+    /// in-frame `rotation` is undecoded so every framed item hangs upright — see
+    /// `framed_item_matrix`. So a chest in a frame now draws and a sword in a frame
+    /// still does not, which is stated rather than hidden.
+    fn special_item_instances(
+        &self,
+        camera: &Camera,
+        entities: &[EntityDraw],
+        stats: &mut RenderStats,
+    ) -> Vec<lodestone_render::BlockEntityInstance> {
+        // No baked item pipeline means no item definitions to resolve a special
+        // form out of, so there is nothing to draw — the same fail-open every
+        // sheet-less path here takes.
+        let Some(model) = self.model.as_ref() else {
+            return Vec::new();
+        };
+        let frustum = camera.frustum();
+        let mut out = Vec::new();
+
+        for draw in entities {
+            // Cull on the entity before any pose work, with two blocks of slack —
+            // covers a tall holder plus the item's own reach, exactly as
+            // `merge_held_items` does for the baked case.
+            if !frustum.intersects_aabb(
+                draw.feet - glam::Vec3::new(1.0, 0.5, 1.0),
+                draw.feet + glam::Vec3::new(1.0, 2.5, 1.0),
+            ) {
+                continue;
+            }
+            let light = entity_light(&self.entity_light, draw);
+
+            if draw.type_path == crate::entities::ITEM_ENTITY_TYPE_PATH {
+                if let Some(instance) = self.dropped_special_item(model, draw, light) {
+                    out.push(instance);
+                    stats.special_item_drops_drawn += 1;
+                }
+                // A dropped item carries no equipment; skip the hand scan.
+                continue;
+            }
+            if super::maps::ITEM_FRAME_TYPES.contains(&draw.type_path.as_str()) {
+                if let Some(instance) = self.framed_special_item(model, draw, light) {
+                    out.push(instance);
+                    stats.special_item_frames_drawn += 1;
+                }
+                continue;
+            }
+            for (slot, id) in &draw.equipment {
+                // `Mob.getMainArm()` is `RIGHT` for every mob, so main hand is the
+                // right arm and off hand the left — the same mapping
+                // `merge_held_items` applies, and the only two slots that hold an
+                // *item model*. Armour goes through `prepare_armour`.
+                let arm = match slot {
+                    EquipmentSlot::MainHand => Arm::Right,
+                    EquipmentSlot::OffHand => Arm::Left,
+                    _ => continue,
+                };
+                if let Some(instance) = self.held_special_item(model, draw, arm, id, light) {
+                    out.push(instance);
+                    stats.special_item_hands_drawn += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// A dropped `minecraft:special` stack, posed by the **same** bob-and-spin
+    /// chain the baked path uses.
+    ///
+    /// `dropped_item_matrix`, not a lookalike: a dropped chest and a dropped
+    /// pickaxe have to rise and turn together or the difference reads as a bug in
+    /// whichever one you are not looking at. The one input a rig cannot supply the
+    /// way a quad list can is the hover lift, which comes from the rig's own AABB
+    /// through `special_item_hover_lift`.
+    ///
+    /// **No stack multiplication.** Vanilla's `submitMultipleFromCount` draws up to
+    /// five jittered copies of a stack, and the baked path does; a stack of chests
+    /// draws as one chest here. That is a bounded shortfall rather than an
+    /// oversight: the copies need the posed model's own `z` depth to pick between
+    /// the jitter and the fan, which is the quad-list measurement this path does not
+    /// have — and a wrong branch there would fan a chest along `z` like a sprite.
+    fn dropped_special_item(
+        &self,
+        model: &ModelRenderer,
+        draw: &EntityDraw,
+        light: u8,
+    ) -> Option<lodestone_render::BlockEntityInstance> {
+        let item = draw.item.as_ref()?;
+        // `DisplaySlot::Ground` — `ItemEntityRenderer.extractRenderState` resolves a
+        // drop in `ItemDisplayContext.GROUND`, and the transform below is read from
+        // the same slot so the variant and the pose cannot disagree.
+        let ctx = ItemStateContext::new(DisplaySlot::Ground);
+        let form = model.items.get(item)?.resolve_special(&ctx)?;
+        let (rig, _) = lodestone_render::special_item_rig(&form.kind, item.path())?;
+        let mesh = self.block_entities.models.get(rig)?;
+        // `ground_transform` prefers the model's **declared** `ground`, and all four
+        // ported `kind`s declare one (`item/template_chest`,
+        // `item/template_shulker_box` and `item/template_skull` all carry a `ground`
+        // slot), so the `GuiLight` fallback is unreachable for anything that resolves
+        // today. `Side` is still the right value to pass: these are block-shaped
+        // rigs, and the fallback for the block family is `BLOCK_ITEM_GROUND`'s
+        // quarter scale — `Front`'s half scale would draw a datapack chest that
+        // omitted the slot at twice the size.
+        let ground = ground_transform(&form.display, lodestone_assets::GuiLight::Side);
+        let lift = lodestone_render::special_item_hover_lift(mesh.local_min, mesh.local_max, &ground);
+        let placement = lodestone_render::entity::dropped_item_matrix(
+            draw.feet,
+            draw.anim.age_ticks,
+            lodestone_render::entity::item_bob_offset(draw.id),
+            &ground,
+            lift,
+        );
+        self.block_entities
+            .models
+            .resolve_special_item(&form.kind, item.path(), placement, light)
+    }
+
+    /// A `minecraft:special` item in another entity's hand, posed off that
+    /// entity's own arm.
+    ///
+    /// The arm matrix comes from the *same* `EntityModelSet::resolve` and the same
+    /// `AnimInput` `prepare_entities` draws the holder with, so a held chest can
+    /// never hang off a pose the player is not seeing. `hand_transform` first, with
+    /// the structural `part_transforms` fallback, is the pair `merge_held_items`
+    /// already established — five corpus models shift the item's pivot relative to
+    /// the arm and that shift must not move the arm's visible mesh.
+    ///
+    /// A rig with no arm (a creeper handed a chest by a plugin) resolves nothing and
+    /// draws nothing, which is vanilla's behaviour too: `ItemInHandLayer` is only
+    /// attached to renderers whose model implements `ArmedModel`.
+    fn held_special_item(
+        &self,
+        model: &ModelRenderer,
+        draw: &EntityDraw,
+        arm: Arm,
+        item: &lodestone_assets::ResourceLocation,
+        light: u8,
+    ) -> Option<lodestone_render::BlockEntityInstance> {
+        // `arm.display_slot(false)` — the third-person hand slot, and the *same*
+        // expression `hand_transform` below reads its transform from.
+        let ctx = ItemStateContext::new(arm.display_slot(false));
+        let form = model.items.get(item)?.resolve_special(&ctx)?;
+        let instance = self.entities.models.resolve(
+            draw.model_type_path(),
+            draw.feet,
+            draw.yaw,
+            draw.scale,
+            &draw.anim,
+        )?;
+        let wearer = self.entities.models.get(instance.model)?;
+        let arm_transform = instance.hand_transform(arm).or_else(|| {
+            let part = wearer.skeleton.index_of(arm.part_name())?;
+            instance.part_transforms.get(part).copied()
+        })?;
+        // `net::entity_snapshot` maps `baby` onto a 0.5 uniform scale, the only baby
+        // signal that reaches this layer — the same test `merge_held_items` uses.
+        let baby = draw.scale < 1.0;
+        let transform = hand_transform(&form.display, arm, false);
+        let placement =
+            lodestone_render::entity::held_item_matrix(arm_transform, arm, baby, &transform);
+        self.block_entities
+            .models
+            .resolve_special_item(&form.kind, item.path(), placement, light)
+    }
+
+    /// A `minecraft:special` item hanging in an item frame.
+    ///
+    /// `DisplaySlot::Fixed`, which is `ItemFrameRenderer.extractRenderState`'s
+    /// `ItemDisplayContext.FIXED` — the same context the campfire path uses and the
+    /// single easiest thing to get wrong here, because every *other* world item
+    /// surface is `Ground`. Reusing `Ground` poses a framed chest on its edge.
+    ///
+    /// A **glow** item frame's `getBlockLightLevel` floor of 5 is not applied: the
+    /// wire distinguishes the two entity types, but the light source here is the
+    /// shared eye probe and giving one type a floor belongs with the frame's own
+    /// renderer rather than in this one branch. A framed chest in a glow frame is
+    /// therefore as dark as the wall behind it.
+    fn framed_special_item(
+        &self,
+        model: &ModelRenderer,
+        draw: &EntityDraw,
+        light: u8,
+    ) -> Option<lodestone_render::BlockEntityInstance> {
+        let item = draw.item.as_ref()?;
+        let ctx = ItemStateContext::new(DisplaySlot::Fixed);
+        let form = model.items.get(item)?.resolve_special(&ctx)?;
+        let placement = lodestone_render::framed_item_matrix(
+            draw.feet,
+            draw.yaw,
+            draw.pitch,
+            &form.display.get(DisplaySlot::Fixed),
+        );
+        self.block_entities
+            .models
+            .resolve_special_item(&form.kind, item.path(), placement, light)
+    }
+
+    /// # The `entities` slice is here for the `minecraft:special` items
+    ///
+    /// Three of the five surfaces vanilla draws a chest/shulker/skull *item* on
+    /// are ordinary entities — a dropped stack, an item in another entity's hand,
+    /// and an item frame — and all three draw through the block-entity rig, so
+    /// they join this pass rather than `prepare_item_geometry`'s baked-quad one.
+    /// See [`Self::special_item_instances`].
     pub(super) fn prepare_block_entities(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         camera: &Camera,
+        entities: &[EntityDraw],
         stats: &mut RenderStats,
     ) -> (Vec<BlockEntityDrawBatch>, Vec<BannerLayerDrawBatch>) {
         // Always reported, even on an empty frame: this is what separates "no
@@ -1057,6 +1296,13 @@ impl RenderState {
         // all (it draws item models through `prepare_item_geometry`), so adding
         // it here would make this condition read as satisfied while this pass
         // still had nothing to draw.
+        //
+        // The special-item instances **must** join this condition too, and for
+        // exactly the reason the comment above gives: a chest lying on the floor of
+        // an otherwise empty room is the eighth instance of the same shape. They
+        // are resolved before the early return rather than after it, because a
+        // `Vec` this pass has not built yet cannot be tested for emptiness.
+        let specials = self.special_item_instances(camera, entities, stats);
         if chests.is_empty()
             && skulls.is_empty()
             && bells.is_empty()
@@ -1064,6 +1310,7 @@ impl RenderState {
             && banners.is_empty()
             && lecterns.is_empty()
             && enchanting_tables.is_empty()
+            && specials.is_empty()
         {
             return (Vec::new(), Vec::new());
         }
@@ -1086,10 +1333,16 @@ impl RenderState {
             ),
         );
 
-        let mut instances: Vec<_> = chests
-            .iter()
-            .filter_map(|spawn| self.block_entities.models.resolve_chest(spawn))
-            .collect();
+        // The `minecraft:special` items first, so the list is never empty when only
+        // they are on screen. They batch by `(model, sheet)` alongside the placed
+        // blocks and coalesce with them for free: a held chest and a placed chest
+        // are the same mesh and the same sheet, so one batch draws both.
+        let mut instances: Vec<_> = specials;
+        instances.extend(
+            chests
+                .iter()
+                .filter_map(|spawn| self.block_entities.models.resolve_chest(spawn)),
+        );
         // Appended into the same list rather than planned separately: a chest and
         // a skull batch independently inside one `plan_block_entities` call, so
         // frustum culling and the batch split are shared for free.

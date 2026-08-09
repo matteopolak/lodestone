@@ -165,7 +165,8 @@ pub use entity::{
     EntityModelSet, EntitySpawn, MODEL_FEET_OFFSET, PartRange, SheepWoolModelSet, WoolMesh,
     armour_layer_tint, armour_layers, entity_model_matrix, entity_texture_candidates,
     experience_orb_icon, experience_orb_light, experience_orb_matrix, experience_orb_mesh,
-    experience_orb_tint, mob_draws_bow_when_aggressive, model_for_type, plan_entities,
+    experience_orb_tint, framed_item_matrix, mob_draws_bow_when_aggressive, model_for_type,
+    plan_entities, special_item_hover_lift,
 };
 pub use entity_anim::{AnimFamily, AnimInput, ArmPose, Skeleton};
 pub use entity_pipeline::{
