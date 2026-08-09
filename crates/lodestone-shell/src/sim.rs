@@ -579,6 +579,16 @@ pub struct Sim {
     /// read from disk here — `Sim` owns no `Options`, and the menu is the only
     /// thing that can change it.
     view_bobbing: bool,
+    /// Vanilla's Damage Tilt accessibility option
+    /// ([`crate::config::Options::damage_tilt_strength`]), pushed down the same way
+    /// as [`Self::view_bobbing`] by [`Self::set_damage_tilt_strength`].
+    ///
+    /// Seeded to vanilla's `1.0` rather than `0.0` so a caller that forgets the
+    /// setter gets the vanilla behaviour — the same convention `view_bobbing`'s
+    /// build-time default follows, and the reason matters here: `0.0` is a *valid*
+    /// user choice that disables the effect, so a zero default would be
+    /// indistinguishable from the accessibility option being on.
+    damage_tilt_strength: f32,
     /// Vanilla's `invertMouseX`/`invertMouseY` options
     /// ([`crate::config::Options::invert_mouse_x`]/`invert_mouse_y`, issue
     /// #203), pushed down the same way as [`Self::view_bobbing`] — see

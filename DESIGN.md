@@ -8119,6 +8119,75 @@ per-frame source install freezes every book in the world and there is nothing mi
 has three per-tick rates in one function (`open` `±0.1`, `tRot` `+0.02`, `flipA`'s `90%` smoothing), so
 the per-frame-advance trap `chest_lids` records has three victims here instead of one.
 
+**12.163 A feature held for years on a blocker that was real, correctly diagnosed, and solved the wrong
+way round — plus a prescription that was already stale when it was read.** The camera's damage tilt
+(`GameRenderer.bobHurt`) was fully ported: the `sin(t⁴π)` easing, the `Ry(−hurtDir) · Rz · Ry(+hurtDir)`
+sandwich, the accessibility option, the ten-tick countdown, all unit-tested. It reached **zero pixels**,
+because `Sim::render_camera` passed a hard-coded `0.0` strength and the shell's `NetUpdate` router had no
+arm for the packet that starts it. Two islands, one at each end of a complete middle.
+
+The recorded blocker was accurate about the *obstruction*: `bobbed_camera` folds the bob into a `Camera`,
+`Camera` is `position`/`yaw`/`pitch`, and `bobHurt` is almost entirely a **roll**, so a 14-degree tilt had
+nowhere to go and smearing it into pitch would have been worse than dropping it. The prescription that
+followed — *"`Camera` needs a `roll` field; there are 48 struct literals across ~40 files; nothing about it
+is hard, it is purely broad"* — was wrong twice over. The count was understated (**117** exhaustive
+`Camera { .. }` literals across **54** files, measured with a brace-matching script rather than a grep for
+`Camera {`, which over-counts by 53 `..`-suffixed ones and under-counts nothing). And the whole change was
+unnecessary: **vanilla does not carry the bob in its camera either.** `renderLevel` does
+`projectionMatrix.mul(bobStack.last().pose())` — an eye-space post-multiply between the projection and the
+view. One new method, `Camera::view_projection_eye_space`, and **zero literals changed**.
+
+The transferable rule: **when a prescription says a change is "purely broad, nothing about it is hard",
+read that as evidence a narrower seam exists and has not been looked for.** A wide mechanical change is
+what you write down when you have stopped asking how the reference implementation does it. And this repo
+already had the seam's twin in the same file — `view_projection_warped`, the nausea/portal spin, which
+injects at exactly the same point for exactly the same reason.
+
+Four more findings from the wiring:
+
+- **A stale blocker that had already been fixed.** The hand's tilt was held by a constant whose doc named
+  `Sim::bob_frame` returning `BobFrame::default()` whole-cloth when View Bobbing is off — which would have
+  muted the damage tilt for anyone who turned bobbing off, and vanilla does not. True when written; by the
+  time it was read `bob_frame` zeroed only the walk terms. The doc that recorded the split as "not
+  reproduced" had *also* been corrected once already, from "is reproduced" (wrong) to "is not" (right at
+  the time) — and then stayed at "not" through the fix. **A line that has been corrected once is not
+  thereby current.**
+- **`ingest` and the shell stream are both consumers of the same event, and neither subsumes the other.**
+  `EntityHurtAnimation` was routed `INGEST`-only, folded into a per-entity `HurtTime` for the red overlay —
+  and ingest **discards the yaw**, which is the whole direction half of the tilt. Per-entity state to
+  `ingest`, local-player scalars to the shell's own `NetUpdate` stream with a `server_entity_id()` filter,
+  exactly like `EffectApplied`. "The event is already handled" is not the same claim as "the value you need
+  is already handled".
+- **Every pass that writes its own group 0 must read the same composed matrix.** The entity pass, the
+  block-entity pass and the world glint each build a view-projection; a pass that skipped the tilt would
+  slide against the terrain around it while the camera leaned, which is more visible than no tilt at all.
+  Hence one `world_view_projection` method rather than four call sites composing the same product.
+- **`min(deathTime, 20)` caps the death roll at `3.64°`, and the expression looks like it should not.**
+  `40 − 8000/(min(deathTime, 20) + 200)` reads like a dramatic spin toward 40 degrees. It is not, and
+  "fixing" it by dropping the clamp would produce one. The death roll also sits **before** `bobHurt`'s
+  `hurt < 0` early return, so it applies for the whole death screen and not just during a hurt flash —
+  fold it in after the return and the camera un-rolls half a second after you die.
+
+Three sign/premise errors the gates caught, all of them the *test's* fault:
+
+| gate | first result | cause |
+|---|---|---|
+| eye-space roll reaches clip space with the right sign | `−0.0605` where `+0.24` was predicted | the probe point was **behind** the camera (`yaw 0` faces world `+Z`, not eye `−Z`), so the perspective divide by a negative `w` flipped the sign; the gate measured the divide, not the roll |
+| a zero strength leaves only the death roll | exact-equality failure on `1.86e-9` | `Ry(−40°) · I · Ry(+40°)` does not cancel exactly in f32; the bound is still discriminating by seven orders of magnitude, since a surviving tilt would be `4.8e-2` |
+| the enchanting-table yaw is radians | `14°` for a genuine quarter turn | probed local `+X`, which the `80°` `Rz` tilt stands almost vertical; a Y rotation barely moves a near-vertical axis (see §12.162) |
+
+The last two rows are the same lesson from opposite ends: **a sign or magnitude gate is only as good as the
+probe you feed it**, and the probe has to be chosen against the transform's own geometry rather than picked
+for readability. All three failed *on correct implementations*, which is the expensive direction.
+
+The neuters were watched, three of them: dropping the `Ry` sandwich reddens the direction gate with
+`up went to Vec3(0.047651507, 0.998864, 0.0)` — a bare `Rz` leaves eye-up's `z` at exactly zero for every
+direction, so the gate cannot be satisfied by "the transform changed"; replacing `sin(t⁴π)` with `sin(tπ)`
+reddens the magnitude gate at `−14` against the predicted `−2.7313` (a factor of five, at `t = 0.5`, where
+the two hypotheses are farthest apart — `t = 0` and `t = 1` are both `sin 0`/`sin π` under **either**
+reading and would have measured nothing); and holding the strength back at `0.0` reddens the end-to-end
+matrix gate with `up moved to Vec3(0.0, 1.0, 0.0)`, which is precisely the shape the shipped defect had.
+
 **12.162 Mineshafts: a test that predicted from the wrong start, a ledger row whose gap had closed, and
 an accessor that was doing the wrong job for its callers.** Issue #514's S7 — `minecraft:mineshaft` and
 `minecraft:mineshaft_mesa`, the first structures in this engine whose pieces are generated **before**

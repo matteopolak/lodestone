@@ -183,8 +183,14 @@ impl RenderState {
             screen_effects.portal_intensity,
             screen_effects.nausea_intensity,
         );
+        // `P · bobHurt · warp · V`, in vanilla's own order: `renderLevel` does
+        // `projectionMatrix.mul(bobStack)` **first** and applies the spin after,
+        // so the bob sits to the left of the warp. Reversing them would put the
+        // spin's skew on the unbobbed axis — subtly wrong rather than obviously.
         let view_proj = camera
-            .view_projection_warped(warp_intensity, warp_angle_degrees)
+            .view_projection_eye_space(
+                self.eye_bob() * lodestone_render::nausea_portal_warp(warp_intensity, warp_angle_degrees),
+            )
             .to_cols_array_2d();
 
         // This frame's fog **and** its `sky_darken` lane, hoisted above both
@@ -371,7 +377,7 @@ impl RenderState {
         // same clip positions the base draw produces, which is what depth-`EQUAL`
         // requires.
         if item_glint_mesh.is_some() {
-            self.write_world_glint_uniform(queue, camera.view_projection().to_cols_array_2d());
+            self.write_world_glint_uniform(queue, self.world_view_projection(camera).to_cols_array_2d());
         }
 
         // The first-person arm. Skipped whenever a third-person body drew this

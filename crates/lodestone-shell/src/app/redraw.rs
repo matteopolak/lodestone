@@ -67,6 +67,12 @@ impl WindowApp {
         // toggle for the same reason the present-mode sync was: `MenuNav` owns the
         // `Options` and is pure, and `Sim` owns none.
         self.sim.set_view_bobbing(self.nav.view_bobbing());
+        // The other half of vanilla's bob split, pushed down beside it and never
+        // instead of it: View Bobbing gates the walk bob, Damage Tilt scales the
+        // hurt tilt, and `renderLevel` applies the second whether or not the first
+        // is on. Pushed every frame for `set_view_bobbing`'s reason.
+        self.sim
+            .set_damage_tilt_strength(self.nav.damage_tilt_strength());
 
         // A menu screen owns the whole frame — its pass clears, so there is no
         // world render behind it and none of the HUD state below is built.
@@ -332,6 +338,25 @@ impl WindowApp {
         if let Some(f) = self.sim.enchanting_table_source() {
             render.set_enchanting_table_source(f);
         }
+
+        // `GameRenderer.bobHurt` — the damage tilt and the death roll, as an
+        // eye-space matrix multiplied into every world view-projection.
+        //
+        // This is the hop that had been missing, and the reason it was missing is
+        // worth keeping: the maths and the option were ported and tested long
+        // before this line existed, but `bobbed_camera` cannot carry roll, so
+        // `Sim::render_camera` had nowhere to put a 14-degree tilt and passed a
+        // hard `0.0`. Vanilla does not fold it into camera fields either — it does
+        // `projectionMatrix.mul(bobStack)`, which is exactly this.
+        //
+        // A value rather than a closure, and installed every frame: the tilt
+        // decays over ten ticks with a partial-tick term, so a one-shot install
+        // would freeze the camera at whatever angle it was first handed.
+        render.set_eye_bob_transform(self.sim.damage_tilt_eye_transform());
+        // The hand applies `bobHurt` a *second* time, independently — vanilla's
+        // `renderItemInHand` does the same — and it takes the strength rather than
+        // the matrix because it composes both bob halves itself.
+        render.set_damage_tilt_strength(self.sim.damage_tilt_strength());
 
         // Filled maps (issue #184). This is the hop that turns the `SessionMaps`
         // fold from an F3 readout into the picture itself — the palette, the

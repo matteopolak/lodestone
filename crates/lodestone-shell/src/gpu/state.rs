@@ -308,6 +308,12 @@ impl RenderState {
             campfire_source: CampfireSource::default(),
             // Likewise `set_enchanting_table_source`.
             enchanting_table_source: EnchantingTableSource::default(),
+            // Identity until `app::redraw` installs this frame's `bobHurt`; see
+            // `set_eye_bob_transform`.
+            eye_bob: glam::Mat4::IDENTITY,
+            // Vanilla's own default — see the field's doc for why `0.0` would be
+            // the wrong "nothing installed yet" value.
+            damage_tilt_strength: 1.0,
             sign_text,
             // No signs until the shell installs a world source; see
             // `set_sign_source`.
@@ -1059,6 +1065,57 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::EnchantingTableSpawn> + Send + Sync + 'static,
     ) {
         self.enchanting_table_source = EnchantingTableSource(Some(Box::new(f)));
+    }
+
+    /// Install this frame's `bobHurt` eye-space transform — the damage tilt and
+    /// the death roll (`crate::camera_rig::BobFrame::hurt_transform`).
+    ///
+    /// A value, not a closure, unlike the sources above: it is one small matrix
+    /// the caller already has, and there is nothing to gather. Still **per
+    /// frame**, and for the sharpest reason in this module: the tilt decays over
+    /// ten ticks with a partial-tick term, so a one-shot install freezes the
+    /// camera at whatever angle it was first handed — including, if that happened
+    /// to be mid-flash, permanently.
+    ///
+    /// Pass `Mat4::IDENTITY` to disable, which is exactly what an unhurt frame
+    /// produces anyway. Callers that never install anything get the identity and
+    /// therefore bit-identical matrices to before this existed.
+    pub fn set_eye_bob_transform(&mut self, eye_bob: glam::Mat4) {
+        self.eye_bob = eye_bob;
+    }
+
+    /// Push vanilla's Damage Tilt accessibility option down for the
+    /// **first-person hand** pass, which applies `bobHurt` a second time.
+    ///
+    /// The world's copy needs no equivalent: it arrives already multiplied out in
+    /// [`set_eye_bob_transform`](Self::set_eye_bob_transform)'s matrix. Clamped, so
+    /// a caller cannot ask for a tilt vanilla could not produce.
+    pub fn set_damage_tilt_strength(&mut self, strength: f32) {
+        self.damage_tilt_strength = strength.clamp(0.0, 1.0);
+    }
+
+    /// This frame's world view-projection: `P · bobHurt · V`.
+    ///
+    /// **Every world-space uniform this state writes must go through here**, not
+    /// through `Camera::view_projection` — the entity pass, the block-entity pass
+    /// and the world glint each write their own group 0, and a pass that skipped
+    /// the tilt would slide against the terrain around it while the camera leaned.
+    /// That is a far more visible defect than no tilt at all, and it is the reason
+    /// this is a method rather than four call sites composing the product.
+    ///
+    /// `render_inner` composes the nausea/portal spin on top of this, in vanilla's
+    /// order (`P · bob · warp · V`), which is why that one site calls
+    /// `Camera::view_projection_eye_space` directly instead.
+    #[must_use]
+    pub(super) fn world_view_projection(&self, camera: &Camera) -> glam::Mat4 {
+        camera.view_projection_eye_space(self.eye_bob)
+    }
+
+    /// This frame's installed `bobHurt` transform — for `render_inner`, which
+    /// needs to compose the spinning warp onto it.
+    #[must_use]
+    pub(super) fn eye_bob(&self) -> glam::Mat4 {
+        self.eye_bob
     }
 
     /// Install the source for this frame's filled-map pictures (issue #184).

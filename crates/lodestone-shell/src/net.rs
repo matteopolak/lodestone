@@ -800,6 +800,28 @@ pub enum NetUpdate {
         /// Whether the effect shows a HUD icon at all.
         show_icon: bool,
     },
+    /// An entity played its hurt animation (`hurt_animation`), carrying the yaw
+    /// the damage came from.
+    ///
+    /// Carries `entity_id` **unfiltered**, like [`NetUpdate::EffectApplied`] and
+    /// for the same reason: the packet applies to any entity, and the sim decides
+    /// whether it is the locally-tracked player before starting the camera tilt.
+    ///
+    /// # Why the shell needs this at all when `ingest` already handles it
+    ///
+    /// `lodestone_ecs::ingest` folds the same event into a per-entity `HurtTime`
+    /// component, which drives the **red overlay** on the mob that was hit. That is
+    /// a different consumer of a different thing: the camera tilt is a
+    /// *local-player scalar* living in `Sim`'s `ViewBob`, and — decisively — ingest
+    /// discards the `yaw`, which is the entire direction half of `bobHurt`.
+    HurtAnimation {
+        /// Entity that was hurt.
+        entity_id: i32,
+        /// `hurtDir`: the yaw the damage came from, in degrees, computed by the
+        /// server as `atan2(damage) - playerYaw`, so a hit from straight ahead
+        /// is `0`.
+        yaw: f32,
+    },
     /// A mob effect was removed from an entity (`remove_mob_effect`).
     EffectRemoved {
         /// Entity the effect was removed from.
@@ -2531,6 +2553,13 @@ fn forward(
             ambient,
             show_icon,
         },
+        // Forwarded unfiltered, like the effect arms above: `net_apply` compares
+        // against `server_entity_id()`. The filtering deliberately does **not**
+        // happen here, so this router keeps its one-job shape and a reader can see
+        // that the event is routed at all.
+        ClientEvent::EntityHurtAnimation { entity_id, yaw } => {
+            NetUpdate::HurtAnimation { entity_id, yaw }
+        }
         ClientEvent::MobEffectRemoved { entity_id, effect } => NetUpdate::EffectRemoved {
             entity_id,
             effect: effect.path().to_string(),

@@ -1351,6 +1351,18 @@ impl MenuNav {
         self.options.view_bobbing
     }
 
+    /// Vanilla's **Damage Tilt** accessibility option — see
+    /// [`crate::config::Options::damage_tilt_strength`]. Read once per presented
+    /// frame by `app.rs` and handed to `Sim::set_damage_tilt_strength`, exactly
+    /// like [`MenuNav::view_bobbing`], because the two are the halves of one
+    /// vanilla split: View Bobbing gates the walk bob and this scales the damage
+    /// tilt, and `GameRenderer.renderLevel` applies the second whether or not the
+    /// first is on.
+    #[must_use]
+    pub fn damage_tilt_strength(&self) -> f32 {
+        self.options.damage_tilt_strength
+    }
+
     /// Vanilla's `key.sneak` hold/toggle option (issue #202) — see
     /// [`crate::config::Options::toggle_sneak`]. Read every tick and handed to
     /// `InputState::set_toggle_modes`.

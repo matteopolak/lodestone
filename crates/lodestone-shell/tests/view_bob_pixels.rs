@@ -452,6 +452,7 @@ fn the_bob_moves_the_world_by_the_predicted_number_of_pixels() {
         bob: 0.1,
         hurt: -1.0,
         hurt_dir_degrees: 0.0,
+        death_time: 0.0,
     };
     let dip_frame = frame(
         &ctx,
@@ -492,6 +493,7 @@ fn the_bob_moves_the_world_by_the_predicted_number_of_pixels() {
         bob: 0.1,
         hurt: -1.0,
         hurt_dir_degrees: 0.0,
+        death_time: 0.0,
     };
     let sway_frame = frame(
         &ctx,
@@ -640,6 +642,7 @@ fn the_arm_does_not_move_when_no_hand_bob_source_is_installed() {
         bob: 0.1,
         hurt: -1.0,
         hurt_dir_degrees: 0.0,
+        death_time: 0.0,
     };
     // The world camera *is* bobbed — only the hand source is left unset — so
     // this isolates exactly the one flag under test.
@@ -697,6 +700,7 @@ fn the_arm_moves_when_a_hand_bob_source_is_installed() {
         bob: 0.1,
         hurt: -1.0,
         hurt_dir_degrees: 0.0,
+        death_time: 0.0,
     };
     let bobbed = frame(
         &f.ctx,

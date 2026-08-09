@@ -4,10 +4,26 @@ Issue #58. The camera's response to walking (`bobView`), to being hit (`bobHurt`
 and the held item's smoothed lag behind the mouse (`xBob`/`yBob`). Walking used to
 feel dead because the camera never moved with the stride.
 
-**Status: `bobView` reaches pixels for both the world camera and the first-person
-hand. `bobHurt` is implemented for both and deliberately unwired for both —
-for two *different* reasons. `xBob`/`yBob` are not started.** The reason for
-each is below — none of them is an oversight.
+**Status: `bobView` and `bobHurt` both reach pixels, for both the world camera and
+the first-person hand, including the death roll and the wire-fed hurt direction.
+`xBob`/`yBob` are not started.**
+
+The damage tilt was the long-standing hold, and what it was held on is worth
+keeping straight because the record here was wrong about it twice. It was **not**
+an unverified formula (the easing, the direction sandwich and the accessibility
+option were all ported and unit-tested years of sessions before they drew a pixel)
+and it was **not** a missing packet decode (`ClientboundHurtAnimationPacket`'s yaw
+has been on `ClientEvent::EntityHurtAnimation` all along). It was a **seam**:
+`bobbed_camera` folds the bob into a `Camera`, `Camera` is `position`/`yaw`/`pitch`,
+and `bobHurt` is almost entirely a *roll* — so there was nowhere for a 14-degree
+tilt to go, and `render_camera` passed a hard `0.0` rather than smear it into pitch.
+
+The fix is not the workspace-wide `Camera` change this document used to prescribe.
+Vanilla does not put the bob in its camera either: `renderLevel` does
+`projectionMatrix.mul(bobStack.last().pose())`, an **eye-space** post-multiply.
+`Camera::view_projection_eye_space` is that seam, `RenderState::set_eye_bob_transform`
+installs the matrix once per frame, and `RenderState::world_view_projection` is what
+every world-space uniform reads. Zero `Camera` literals changed.
 
 > **The hand has its own copy of this transform, independent of the world's.**
 > Vanilla applies `bobHurt`/`bobView` to `renderItemInHand` a **second time**
@@ -134,13 +150,19 @@ gives the same basis). So every constant transcribes with **no sign flip**. The
 `[0,1]`-versus-reversed-Z depth difference `CLAUDE.md` warns about lives entirely
 inside the projection matrix, which sits to the *left* of the bob in `P · B · V`.
 
-## The one blocker, and what it costs — **the world camera only**
+## The `Camera` fold, what it drops, and the seam that made that stop mattering
 
-`Camera` has `position`, `yaw` and `pitch`, and `view_matrix` hardcodes `Vec3::Y`
-as up — **three degrees of freedom where a bob matrix has four.** `bobbed_camera`
-recovers position and forward mechanically from `B · V` (no sign is chosen by
-hand, deliberately: `CLAUDE.md` records shipping an inside-out block because a
-polarity was asserted rather than derived) and therefore **drops roll**.
+`Camera` has `position`, `yaw` and `pitch` — **two angles where a bob matrix has
+three.** `bobbed_camera` recovers position and forward mechanically from `B · V`
+(no sign is chosen by hand, deliberately: `CLAUDE.md` records shipping an
+inside-out block because a polarity was asserted rather than derived) and
+therefore **drops roll**.
+
+*(This paragraph used to say `view_matrix` hardcodes `Vec3::Y` as up and called the
+mismatch "three degrees of freedom where a bob matrix has four". Both were wrong:
+the basis has derived `up` since `d17c731c`, and the counts are two-against-three.
+The conclusion — that the fold cannot carry roll — is unchanged, which is exactly
+why the wrong reasoning survived so long.)*
 
 | bob term | magnitude | carried? |
 |---|---|---|
@@ -151,77 +173,79 @@ polarity was asserted rather than derived) and therefore **drops roll**.
 
 So the walk bob is worth landing without roll (0.3° is below noticing, and the
 number is pinned by `the_dropped_roll_is_the_only_disagreement_and_it_is_small_for_the_walk_bob`)
-and the damage tilt is not: a frontal hit is *pure* roll, so wiring `bobHurt`
+and the damage tilt is not: a frontal hit is *pure* roll, so pushing `bobHurt`
 through this fold would produce a visibly wrong tilt rather than a slightly
-imprecise one. `Sim::render_camera` therefore passes `damage_tilt_strength = 0.0`.
+imprecise one. `Sim::render_camera` therefore **still** passes
+`damage_tilt_strength = 0.0` — and that is now a **routing** fact, not a hold.
+
+The hurt half takes the other route instead:
+`Sim::damage_tilt_eye_transform` → `RenderState::set_eye_bob_transform` →
+`Camera::view_projection_eye_space`, i.e. `P · bobHurt · V`. Both halves are live;
+what this fold still drops is `bobView`'s own `0.3°` roll and nothing else.
+
+**Every world-space uniform must read `RenderState::world_view_projection`.** The
+entity pass, the block-entity pass and the world glint each write their own group 0,
+and a pass that skipped the tilt would slide against the terrain around it while the
+camera leaned — a far more visible defect than no tilt at all. That is why it is a
+method rather than four call sites composing the same product. `render_inner` is the
+one site that composes further, adding the nausea/portal spin **to the right of**
+the bob, matching `renderLevel`'s own order.
 
 **This table does not apply to the hand.** `gpu/first_person.rs`'s
 `hand_view_proj` multiplies `BobFrame::eye_transform`'s matrix straight into
 `hand_projection`, with no `Camera` decomposition step at all, so it carries
-**every** term exactly — roll included. The hand's `bobHurt` is unwired for an
-entirely different, much smaller reason: see
-[`HAND_HURT_TILT_STRENGTH`'s own doc](../crates/lodestone-shell/src/gpu/first_person.rs)
-and the note below on `Sim::bob_frame`'s all-or-nothing gating.
+**every** term exactly — roll included. The hand is therefore driven by the real
+`Options::damage_tilt_strength`, pushed down through
+`RenderState::set_damage_tilt_strength`, and it applies `bobHurt` a *second* time
+independently of the world's copy exactly as vanilla's `renderItemInHand` does.
 
 ## How to change it
 
-### To land the world's `bobHurt` (and the walk bob's last 0.3°)
+### The damage tilt — landed, and the two prescriptions this section used to carry
 
-`Camera` needs to carry roll. Either a `roll: f32` field, or a `Mat4` eye-space
-hook consulted by `view_projection`. **Both are workspace-wide changes**: there are
-48 full `Camera { .. }` struct literals across ~40 files, six of them in
-`lodestone-shell/src/gpu.rs`'s test module and one in
-`lodestone-render/src/entity.rs`. Nothing about the change is hard; it is purely
-broad, which is why #58 stopped short of it rather than doing it under contention.
+Both were wrong, and both are kept as corrections rather than deleted.
 
-Once `Camera` can roll, `BobFrame::eye_transform` is already the whole answer — it
-is a literal transcription of `bobHurt` *then* `bobView` in vanilla's own pose-stack
-order, tested against `P · B · V`. Drive `ViewBob::hurt(yaw)` from the local
-player's `EntityHurtAnimation` (the yaw is already decoded and on the event; see
-`lodestone-model/src/event.rs`) and `HurtTime` (already ingested and ticking), and
-pass the real `damage_tilt_strength` instead of `0.0`.
+**"`Camera` needs to carry roll, and that is a workspace-wide change."** The count
+was understated (117 exhaustive `Camera { .. }` literals across 54 files, not 48
+across ~40) and the premise was unnecessary. Vanilla does not carry the bob in its
+camera; it post-multiplies the projection in eye space. So does this now, through
+`Camera::view_projection_eye_space` — **zero literals changed**. When a prescription
+is "purely broad, nothing about it is hard", that is worth reading as a hint that a
+narrower seam exists.
 
-### To land the hand's `bobHurt`
+**"The hand is blocked on `Sim::bob_frame`'s all-or-nothing gating."** True when
+written and already fixed by the time it was read: `bob_frame` had stopped returning
+`BobFrame::default()` whole-cloth and now zeroes only `walk_phase`/`bob`, passing the
+hurt half through — which is vanilla's split. The constant it named,
+`HAND_HURT_TILT_STRENGTH`, is gone; `NO_DAMAGE_TILT` survives in its place as the
+gates' zero anchor and carries the record.
 
-Unlike the world, this needs **no `Camera` change at all** — `hand_view_proj`
-already carries the full matrix, roll included (see the table above). What
-blocks it is `Sim::bob_frame()` (`sim/camera.rs:320-325`):
+What the wiring is, end to end:
 
-```rust
-pub fn bob_frame(&self) -> crate::camera_rig::BobFrame {
-    if !self.view_bobbing {
-        return crate::camera_rig::BobFrame::default();
-    }
-    self.view_bob.frame(self.clock().interp_alpha)
-}
-```
+| hop | where |
+|---|---|
+| wire yaw → shell stream | `net.rs`'s `forward` → `NetUpdate::HurtAnimation` |
+| filtered to the local player | `net_apply`'s arm, against `server_entity_id()` |
+| countdown + direction | `Sim::on_local_player_hurt` → `ViewBob::hurt` |
+| death counter | `ViewBob::tick`'s `dead` flag |
+| interpolated frame | `Sim::bob_frame` |
+| the matrix | `BobFrame::hurt_transform` |
+| installed per frame | `RenderState::set_eye_bob_transform` |
+| into every world uniform | `RenderState::world_view_projection` |
+| the hand's second copy | `RenderState::set_damage_tilt_strength` → `hand_view_proj` |
 
-This zeroes `hurt`/`hurt_dir_degrees` along with the walk terms when View
-Bobbing is off. Vanilla's own `bobHurt` is unconditional
-(`GameRenderer.java:534-536` calls it outside the `bobView` check) — this
-function's `false` branch should keep `hurt`/`hurt_dir_degrees` live and zero
-only the walk terms:
+The **ingest** path is a different consumer of the same event and neither subsumes
+the other: `lodestone_ecs::ingest` folds `EntityHurtAnimation` into a per-entity
+`HurtTime` for the red overlay, and it **discards the yaw** — which is the entire
+direction half of the tilt. Per-entity state goes to `ingest`; this is a
+local-player scalar on the shell's own stream, like `EffectApplied`.
 
-```rust
-pub fn bob_frame(&self) -> crate::camera_rig::BobFrame {
-    let frame = self.view_bob.frame(self.clock().interp_alpha);
-    if self.view_bobbing {
-        frame
-    } else {
-        crate::camera_rig::BobFrame {
-            walk_phase: 0.0,
-            bob: 0.0,
-            ..frame
-        }
-    }
-}
-```
-
-Once that lands, flip
-[`HAND_HURT_TILT_STRENGTH`](../crates/lodestone-shell/src/gpu/first_person.rs)
-from `0.0` to `1.0` (or wire `Options::damage_tilt_strength` through once it
-exists) — `hand_view_proj_can_carry_the_hurt_tilt_once_a_nonzero_strength_is_supplied`
-already proves the transform is correct at that value.
+**Outstanding, and it is not a code gap:** `lodestone_model::event::route` still
+lists `EntityHurtAnimation` as `INGEST` only. `forward`'s consistency `debug_assert`
+is one-directional (`must_forward ⇒ has an arm`), so the wiring works and nothing
+fails — but the routing table is now understating the event's consumers, and that
+table is the thing a reader consults to answer "does anything consume event X". It
+needs `Route { ingest: true, shell: true, ..NOWHERE }`.
 
 ### To land `xBob`/`yBob`
 
@@ -238,17 +262,22 @@ Add the `x_bob`/`y_bob` pair (same current/previous shape,
 
 ### Divergences deliberately not modelled
 
-* **Roll, for the world camera only** — with the 2.52 px measurement. The hand
-  carries it exactly (see above).
-* **The hand's `bobHurt`** — mechanism proven, held at `HAND_HURT_TILT_STRENGTH
-  = 0.0` pending the `Sim::bob_frame` fix above.
+* **`bobView`'s roll, for the world camera only** — with the 2.52 px measurement.
+  The hand carries it exactly (see above), and `bobHurt`'s roll now reaches the
+  world through the eye-space seam rather than through this fold.
+* **The nearest-*remote*-player case is not modelled** for the hurt direction: the
+  yaw comes off the wire, so this one is exact — the gap is the enchanting table's,
+  not the camera's.
 * **Third person still bobs, and that is correct for 26.2.** #58's body says
   vanilla disables bobbing in third person. Re-read against
   `.cache/mc/26.2/client-src`: `renderLevel` (`:534-536`) has no camera-type check
   and `bobView` itself only tests `isPlayer`. Older versions did suppress it; 26.2
   does not.
-* **`damageTiltStrength` has no UI.** Vanilla puts it on the Accessibility screen.
-  Pointless to surface while the tilt itself is unwired for the world.
+* **`damageTiltStrength` has a config key and a settings-screen row, but the row
+  does not yet write the key.** `Options::damage_tilt_strength` is real, persisted,
+  clamped to `0.0..=1.0` and pushed down every frame; the Accessibility slider still
+  renders from `UNIT_DOUBLE_DEFAULTS`' frozen `1.0` like its neighbours. So the
+  option is settable by editing `options.json` and not yet by dragging the slider.
 
 ## Configuration
 
@@ -293,16 +322,19 @@ degrading a shipped option to off is a silent feature loss. Only written when
 turned off, so an untouched install has no key.
 
 **Vanilla gates only `bobView` on this flag — `bobHurt` is applied
-unconditionally (`GameRenderer.java:534-536`). That split is *not* currently
-reproduced** (this line used to claim it was; found false while wiring the
-hand's copy of the transform). `Sim::bob_frame()` returns
-`BobFrame::default()` whole-cloth when the option is off, which would silently
-mute the damage tilt too, the moment anything reads `hurt` with a nonzero
-strength. It is invisible today because nothing does yet — the world passes
-`damage_tilt_strength = 0.0` unconditionally, and the hand holds
-`HAND_HURT_TILT_STRENGTH` at `0.0` for exactly this reason. See
-[To land the hand's `bobHurt`](#to-land-the-hands-bobhurt) for the one-function
-fix, needed before either constant can safely move off `0.0`.
+unconditionally, and that split *is* reproduced now.** This paragraph has been
+wrong in both directions and both readings are kept, because the second is the more
+instructive: it first claimed the split was reproduced when it was not, was corrected
+to say it was not, and then **stayed** at "not" after the fix landed. `Sim::bob_frame`
+zeroes only `walk_phase`/`bob` and passes `hurt`/`hurt_dir_degrees`/`death_time`
+through untouched; `local_player_hurt_reaches_the_bob_frame_and_survives_view_bobbing_off`
+asserts exactly that. A player who turns View Bobbing off still gets the damage tilt,
+which is what vanilla does.
+
+The damage tilt has its own separate switch — `Options::damage_tilt_strength`, the
+accessibility option — and `0.0` there really does disable it
+(`a_zero_damage_tilt_strength_disables_the_tilt_but_not_the_death_roll`). It does
+**not** disable the death roll, which vanilla applies unscaled.
 
 ## Gotchas when testing this
 

@@ -430,6 +430,8 @@ impl Sim {
             chest_lids: crate::block_entities::ChestLids::new(),
             bell_shakes: crate::block_entities::BellShakes::new(),
             enchanting_table_books: crate::block_entities::EnchantingTableBooks::new(),
+            // Vanilla's default, not `0.0` — see the field's doc.
+            damage_tilt_strength: 1.0,
             pickups: lodestone_game::mining::PickupFeed::new(),
         };
         sim.refresh_mesh_policy();

@@ -446,6 +446,21 @@ impl Sim {
                         });
                     }
                 }
+                // The camera's damage tilt (`GameRenderer.bobHurt`). Filtered to
+                // the local player here rather than in `net.rs`'s router, matching
+                // the effect arms below: the router forwards every entity's hurt
+                // animation and this is where "is that me" is decided.
+                //
+                // The *other* consumer of the same wire event is
+                // `lodestone_ecs::ingest`'s `HurtTime` component, which reddens the
+                // mob that was hit. Both are live and neither subsumes the other —
+                // ingest drops the `yaw`, which is the whole direction half of the
+                // tilt, and a `HurtTime` on a remote mob must not tilt our camera.
+                NetUpdate::HurtAnimation { entity_id, yaw } => {
+                    if self.server_entity_id() == Some(entity_id) {
+                        self.on_local_player_hurt(yaw);
+                    }
+                }
                 NetUpdate::EffectRemoved { entity_id, effect } => {
                     if self.server_entity_id() == Some(entity_id) {
                         let local = self.local;

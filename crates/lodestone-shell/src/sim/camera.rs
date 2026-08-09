@@ -323,6 +323,52 @@ impl Sim {
         self.view_bobbing = on;
     }
 
+    /// Push vanilla's **Damage Tilt** accessibility option down from the menu
+    /// layer, exactly as [`Self::set_view_bobbing`] does for View Bobbing.
+    ///
+    /// The two are the halves of one vanilla split and must be pushed together:
+    /// `GameRenderer.renderLevel` applies `bobHurt` *outside* the `bobView` check,
+    /// so turning View Bobbing off must not take the damage tilt with it.
+    ///
+    /// Clamped here as well as on load, because this is the value a matrix is
+    /// built from and a stray negative would roll the camera the wrong way.
+    pub fn set_damage_tilt_strength(&mut self, strength: f32) {
+        self.damage_tilt_strength = strength.clamp(0.0, 1.0);
+    }
+
+    /// The Damage Tilt strength this frame — for the two consumers that build a
+    /// matrix from it, [`Self::damage_tilt_eye_transform`] and the first-person
+    /// hand pass.
+    #[must_use]
+    pub fn damage_tilt_strength(&self) -> f32 {
+        self.damage_tilt_strength
+    }
+
+    /// This frame's `bobHurt` as an **eye-space** matrix — the damage tilt swung
+    /// onto the direction the hit came from, plus the death roll.
+    ///
+    /// # This is the hop that was missing, and why it is not a `Camera`
+    ///
+    /// `bobHurt` is almost entirely a **roll**, and [`bobbed_camera`] cannot carry
+    /// one: `Camera` is `position`/`yaw`/`pitch`, two angles, so a decomposed
+    /// orientation has two degrees of freedom where the bob matrix has three. That
+    /// — not an unverified formula, and not a missing packet decode — is why
+    /// `render_camera` passed a hard `0.0` for so long. The maths was ported and
+    /// tested the whole time; there was no seam it could reach the matrix through.
+    ///
+    /// `RenderState::set_eye_bob_transform` is that seam, and it is vanilla's own
+    /// `projectionMatrix.mul(bobStack.last().pose())` — the bob multiplied into the
+    /// world view-projection in eye space rather than folded into camera fields.
+    /// `Self::camera` is deliberately untouched by it, so the block-targeting ray
+    /// and the audio listener still do not bob.
+    ///
+    /// Returns the identity when the player has not been hit recently, which is
+    /// almost every frame.
+    #[must_use]
+    pub fn damage_tilt_eye_transform(&self) -> glam::Mat4 {
+        self.bob_frame().hurt_transform(self.damage_tilt_strength)
+    }
+
     /// The interpolated walk bob this frame, or a frame with the walk terms
     /// zeroed when the option is off. Exposed so a gate can assert the *input*
     /// to the camera fold separately from the fold itself.
@@ -350,14 +396,13 @@ impl Sim {
         }
     }
 
-    /// The local player was hurt: start the damage tilt
-    /// (`Player.animateHurt`, `Player.java:1959-1962`, which records
-    /// `hurtDir = yaw` after `LivingEntity.animateHurt` resets the ten-tick
-    /// countdown). The wire `yaw` is `ClientboundHurtAnimationPacket.yaw`,
-    /// already decoded onto `ClientEvent::EntityHurtAnimation`; the server
-    /// computes it as `atan2(damage) - playerYaw`
-    /// (`ServerPlayer.indicateDamage`, `ServerPlayer.java:2133`), so a hit
-    /// from straight ahead is `0` — the pure-roll case.
+    /// The local player was hurt: start the damage tilt (`Player.animateHurt`,
+    /// which records `hurtDir = yaw` after `LivingEntity.animateHurt` resets the
+    /// ten-tick countdown). The wire `yaw` is
+    /// `ClientboundHurtAnimationPacket.yaw`, already decoded onto
+    /// `ClientEvent::EntityHurtAnimation`; the server computes it as
+    /// `atan2(damage) - playerYaw` (`ServerPlayer.indicateDamage`), so a hit from
+    /// straight ahead is `0` — the pure-roll case.
     ///
     /// The camera-side half of the `bobHurt` wiring: `ViewBob` owns the
     /// countdown and direction here, and the ECS `HurtTime` component
@@ -388,24 +433,21 @@ impl Sim {
         let eye = bobbed_camera(
             self.camera(aspect),
             self.bob_frame(),
-            // `bobHurt` is deliberately **not** driven from here yet. It is almost
-            // entirely a roll, and `bobbed_camera` cannot carry roll — `Camera`
-            // has `position`/`yaw`/`pitch`, two angles, and the rotation it builds
-            // has a zero `Rz` term — so wiring it would produce a visibly wrong
-            // tilt rather than a slightly imprecise one. (This said `view_matrix`
-            // hardcodes `Vec3::Y` as up, true until `d17c731c`; the basis now
-            // derives `up` from the rotation, which fixed a 180° roll at pitch
-            // ±90 without adding a roll degree of freedom.)
-            // Verified against the jar: the server
-            // sends `hurtDir = atan2(damage) - playerYaw`
-            // (`ServerPlayer.java:2133`), so a hit from straight ahead is `0`
-            // and `bobHurt`'s tilt is *pure* roll — exactly the component this
-            // fold drops, leaving the most common hit with no visible response
-            // at all. `ViewBob::hurt` / `BobFrame::hurt_roll_degrees` /
-            // [`Self::on_local_player_hurt`] are implemented and tested against
-            // vanilla; the last hops are `Camera` roll support (workspace-wide)
-            // and the net-apply feed of the local player's `EntityHurtAnimation`
-            // into that hook. See `docs/view-bobbing.md`.
+            // **Still `0.0` here, and that is now a routing decision rather than
+            // a hold.** `bobHurt` is almost entirely a roll, and this fold cannot
+            // carry one — `Camera` has `position`/`yaw`/`pitch`, two angles,
+            // against the bob matrix's three degrees of freedom. Passing a real
+            // strength here would not tilt the camera; it would smear the roll
+            // into yaw and pitch, which is worse than dropping it.
+            //
+            // So the hurt half takes the *other* route, the one vanilla itself
+            // uses: `Self::damage_tilt_eye_transform` hands it to
+            // `RenderState::set_eye_bob_transform`, which multiplies it into the
+            // world view-projection in eye space — `projectionMatrix.mul(bobStack)`.
+            // This fold keeps `bobView` only, whose own roll term is under `0.3°`.
+            //
+            // Both halves are therefore live; nothing about the damage tilt is
+            // held off any more. See `docs/view-bobbing.md`.
             0.0,
         );
         // `is_first_person`, not "is it the back view": vanilla's own predicate
