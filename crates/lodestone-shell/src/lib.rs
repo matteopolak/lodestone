@@ -47,13 +47,18 @@ pub mod offline_identity;
 pub mod overlay;
 pub mod particles;
 pub mod raycast;
+/// Other players' skins: the `textures` profile property off the tab list,
+/// through vanilla's host allow list, to a per-player texture in the world
+/// entity pass. See `docs/player-skins.md`.
+pub mod remote_skins;
 pub mod resources;
 pub mod saves;
 pub mod scoreboard;
 pub mod screenshot;
 pub mod sim;
 /// Fetching the signed-in account's own skin and getting it onto the inventory
-/// avatar in the same session (issue #62). See `docs/player-skins.md`.
+/// avatar in the same session. See `docs/player-skins.md`, and
+/// [`remote_skins`] for the other-players half.
 pub mod skin_fetch;
 pub mod tablist;
 pub mod worldgen;

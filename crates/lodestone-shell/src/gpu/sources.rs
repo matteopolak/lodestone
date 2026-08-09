@@ -260,9 +260,16 @@ impl ThirdPersonBodyState {
             creeper_swelling: 0.0,
             // The local player's own body cannot report `on_fire` either, for
             // the same reason `hurt` above cannot: no ingest entity, hence no
-            // `EntityFlags` to read (issue #434). `false` by construction, not
-            // by omission.
+            // `EntityFlags` to read. `false` by construction, not by omission.
             on_fire: false,
+            // **The rig is already chosen** — `type_path` above is
+            // `player_model_name(self.slim)` — so this field would be redundant
+            // for the rig and is only ever the *sheet*. `None` therefore means
+            // "our own third-person body still draws the pack's default sheet",
+            // which is the gap `docs/player-skins.md` records: our own fetched
+            // skin reaches the inventory avatar, not this body. `ThirdPersonBodyState`
+            // is where the URL would have to be plumbed.
+            player_skin: None,
         }
     }
 }

@@ -413,6 +413,18 @@ struct EntityDrawBatch {
     model: &'static str,
     count: u32,
     parts: Vec<Option<wgpu::Buffer>>,
+    /// The fetched-skin texture URL every instance in this batch shares, or
+    /// `None` for the model's own default sheet.
+    ///
+    /// Texture identity used to *be* `model`, which collapsed every player in the
+    /// world into one `player_wide` batch sharing one bind group — the blocker
+    /// that stopped remote skins reaching a pixel. This is the same shape
+    /// [`ArmourTextureKey`] already gives armour: the sheet is chosen at the draw,
+    /// and the batch key is what guarantees one texture per batch.
+    ///
+    /// `Some(url)` with no bind group installed yet resolves to the default sheet
+    /// too, so the fallback covers "in flight" and "no skin declared" alike.
+    skin: Option<String>,
 }
 
 /// One `(armour slot, texture)` group's uploaded instance buffers for a frame.
