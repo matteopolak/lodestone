@@ -694,6 +694,7 @@ impl WindowApp {
         self.sim.stats.section_count = stats.sections_drawn;
         self.sim.stats.quads = stats.total_quads;
         self.sim.stats.vram_bytes = stats.vram_bytes;
+        self.sim.stats.vram_reserved_bytes = stats.vram_reserved_bytes;
         self.sim.stats.entities_drawn = stats.entities_drawn;
         self.sim.stats.particles_alive = particle_frame.alive;
         self.sim.stats.particles_drawn = stats.particles_drawn;
