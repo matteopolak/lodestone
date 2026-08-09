@@ -43,14 +43,24 @@
 //! | `random_chance` | `nextFloat() < chance` | `LootItemRandomChanceCondition` |
 //! | `random_chance_with_enchanted_bonus` | uses `unenchanted_chance` (no attacker → level 0) | `…Condition.java:41-45` |
 //! | `killed_by_player` | `false` (no `LAST_DAMAGE_PLAYER` param) | `…Condition.java:26-28` |
-//! | `survives_explosion` | `true` (no `EXPLOSION_RADIUS` param) | `ExplosionCondition.java:27-36` |
+//! | `survives_explosion` | `true` (no `EXPLOSION_RADIUS` param) | `ExplosionCondition.test` |
 //! | `match_tool` / `entity_properties` / `block_state_property` | `false` (no tool/entity/state) | `MatchTool`, `…EntityProperty…`, `…BlockStateProperty…` |
 //! | `table_bonus` | `chances[0]` (fortune level 0) | `BonusLevelTableCondition.java:37-42` |
 //! | `set_count` | uniform/constant/binomial rolled | `SetItemCountFunction` |
 //! | `enchanted_count_increase` | no-op (no attacker → level 0) | `…Function.java:74-89` |
 //! | `apply_bonus` | no-op (no tool) | `ApplyBonusCount.java:63-72` |
-//! | `explosion_decay` | no-op (no `EXPLOSION_RADIUS`) | `ApplyExplosionDecay.java:25-41` |
+//! | `explosion_decay` | no-op (no `EXPLOSION_RADIUS`) | `ApplyExplosionDecay.run` |
 //! | `furnace_smelt` | smelted via [`crate::furnace::recipe_for`] | `SmeltItemFunction` |
+//!
+//! ## The explosion context
+//!
+//! [`LootContext::explosion_radius`] is the one parameter whose *absence* is
+//! dangerous rather than merely incomplete. With it unset, `survives_explosion`
+//! returns `true` with no draw and `explosion_decay` is a no-op, so a blast
+//! rolling an empty context drops **every** destroyed block at full rate — the
+//! reason `crate::explosion_blocks` deliberately dropped nothing until this
+//! existed. Set it and both become real: one draw per stack for the condition,
+//! one draw **per item** for the decay function.
 //!
 //! A feature this module does not recognise is **parsed but marked
 //! unsupported** (see [`LootTable::unsupported_features`]) rather than aborting
@@ -132,6 +142,22 @@ pub struct LootContext {
     /// `uniform_bonus_count` draws `nextInt(1)` and `binomial_with_bonus_count`
     /// draws `extra` times, both to no effect. See [`BonusFormula`].
     pub tool: Option<LootTool>,
+    /// `LootContextParams.EXPLOSION_RADIUS` — the blast radius, when this roll is
+    /// a block destroyed by an explosion rather than mined. `None` is vanilla's
+    /// absent parameter, which every mined block and every mob death is.
+    ///
+    /// **Its presence changes both the draw count and the outcome**, and in the
+    /// unsafe direction if it is left out: `survives_explosion` returns `true`
+    /// unconditionally with no draw when it is absent, so a blast rolling against
+    /// an empty context drops **every** destroyed block at full rate instead of
+    /// vanilla's `1/radius`. That is why `crate::explosion_blocks` dropped nothing
+    /// at all until this parameter existed — nothing is a wrong answer, but
+    /// everything is a much wronger one.
+    ///
+    /// A `f32`, not a bool: the probability is `1.0 / radius`, so a creeper's
+    /// `3.0` keeps one block in three and a larger blast keeps proportionally
+    /// fewer.
+    pub explosion_radius: Option<f32>,
 }
 
 /// The tool a roll happens with — `LootContextParams.TOOL`, reduced to the three
@@ -1037,13 +1063,54 @@ impl LootFunction {
                     stack.item = item.clone();
                 }
             }
-            Self::EnchantedCountIncrease { conditions } | Self::ExplosionDecay { conditions } => {
+            Self::EnchantedCountIncrease { conditions } => {
                 let _ = conditions;
-                // `EnchantedCountIncrease` reads `ATTACKING_ENTITY`'s weapon and
-                // `ExplosionDecay` reads `EXPLOSION_RADIUS`; neither is ever set
-                // for a block break, and both return the stack untouched and
-                // draw nothing when their parameter is absent. Wiring either
-                // means giving the context that parameter, not changing this.
+                // `EnchantedCountIncrease` reads `ATTACKING_ENTITY`'s weapon,
+                // which is never set for a block break; it returns the stack
+                // untouched and draws nothing when the parameter is absent.
+                // Wiring it means giving the context that parameter, not
+                // changing this.
+            }
+            Self::ExplosionDecay { conditions } => {
+                if !conditions.iter().all(|c| c.test(context, rng)) {
+                    return;
+                }
+                // `ApplyExplosionDecay.run`, transcribed:
+                //
+                // ```java
+                // Float explosionRadius = context.getOptionalParameter(EXPLOSION_RADIUS);
+                // if (explosionRadius != null) {
+                //     float probability = 1.0F / explosionRadius;
+                //     int currentCount = itemStack.getCount();
+                //     int resultCount = 0;
+                //     for (int i = 0; i < currentCount; i++) {
+                //         if (random.nextFloat() <= probability) { resultCount++; }
+                //     }
+                //     itemStack.setCount(resultCount);
+                // }
+                // ```
+                //
+                // **One draw per item in the stack**, not one per stack — that is
+                // the whole difference between this and `survives_explosion`, and
+                // it is why the two exist side by side: a single-item drop is
+                // gated by the condition, a multi-item drop (a fortune-boosted
+                // ore, a clutch of seeds) is *thinned* item by item here.
+                //
+                // `setCount(0)` is reachable and left as `count = 0`, not turned
+                // into an absent stack: vanilla's caller drops empty stacks when
+                // it collects them, and doing it here would hide the difference
+                // between "rolled nothing" and "never rolled".
+                let Some(radius) = context.explosion_radius else {
+                    return;
+                };
+                let probability = 1.0 / radius;
+                let mut kept = 0u32;
+                for _ in 0..stack.count {
+                    if rng.next_f32() <= probability {
+                        kept += 1;
+                    }
+                }
+                stack.count = kept;
             }
             Self::ApplyBonus {
                 enchantment,
@@ -1334,7 +1401,26 @@ impl LootCondition {
             | Self::BlockStateProperty
             | Self::DamageSourceProperties
             | Self::LocationCheck => false,
-            Self::SurvivesExplosion => true,
+            // `ExplosionCondition.test`, transcribed:
+            //
+            // ```java
+            // Float explosionRadius = context.getOptionalParameter(EXPLOSION_RADIUS);
+            // if (explosionRadius != null) {
+            //     float probability = 1.0F / explosionRadius;
+            //     return random.nextFloat() <= probability;
+            // } else { return true; }
+            // ```
+            //
+            // Two things a paraphrase gets wrong. The comparison is `<=`, not
+            // `<` — irrelevant for a continuous draw but not for a reader
+            // checking the port. And the absent-parameter branch draws
+            // **nothing**, so this condition's draw count is 1 for a blast and 0
+            // for a mined block; a version that always drew would shift every
+            // later roll in a mining stream.
+            Self::SurvivesExplosion => match context.explosion_radius {
+                None => true,
+                Some(radius) => rng.next_f32() <= 1.0 / radius,
+            },
             // `MatchTool.test`: `tool != null && (predicate.isEmpty() ||
             // predicate.get().test(tool))`. Consumes no RNG either way, so
             // adding a tool cannot shift the stream through this condition.
@@ -2159,6 +2245,7 @@ mod tests {
                 LootTool::new("minecraft:diamond_pickaxe".parse().unwrap())
                     .with_enchantment(enchantment.parse().unwrap(), level),
             ),
+            explosion_radius: None,
         }
     }
 
@@ -2166,6 +2253,7 @@ mod tests {
         LootContext {
             luck: 0.0,
             tool: Some(LootTool::new("minecraft:diamond_pickaxe".parse().unwrap())),
+            explosion_radius: None,
         }
     }
 
@@ -2321,6 +2409,7 @@ mod tests {
             let ctx = LootContext {
                 luck: 0.0,
                 tool: Some(LootTool::new(item.parse().unwrap())),
+                explosion_radius: None,
             };
             let mut rng = SpawnRng::new(3);
             t.roll(&ctx, &mut rng)[0].item.to_string()
@@ -2488,6 +2577,152 @@ mod tests {
         fn push_table_owned(mut self, table: LootTable) -> Self {
             self.tables.push(table);
             self
+        }
+    }
+    // ---------------------------------------------------------------------
+    // `LootContextParams.EXPLOSION_RADIUS`. The parameter whose *absence* was
+    // the defect: with it unset, `survives_explosion` passes unconditionally, so
+    // a blast rolling an empty context drops every block it destroyed.
+    // ---------------------------------------------------------------------
+
+    /// One item, gated only by `survives_explosion` — the shape every ordinary
+    /// block table has.
+    const SURVIVES: &str = r#"{
+      "type": "minecraft:block",
+      "pools": [{
+        "rolls": 1.0,
+        "conditions": [{"condition": "minecraft:survives_explosion"}],
+        "entries": [{"type": "minecraft:item", "name": "minecraft:cobblestone"}]
+      }]
+    }"#;
+
+    /// **The magnitude gate**, and the whole point of the parameter. Two
+    /// hypotheses, both computed from vanilla's own constants rather than from a
+    /// prior run of this code:
+    ///
+    /// | hypothesis | expected survivors of 30,000 rolls |
+    /// |---|---|
+    /// | radius absent (the pre-fix behaviour) | **30,000** — the condition returns `true` with no draw |
+    /// | radius `3.0` (a creeper's) | `1/3` of them, i.e. **10,000** |
+    ///
+    /// The two differ by 3×, so a direction-only assertion ("fewer blocks
+    /// dropped") would be satisfied by any wrong probability. Both arms are
+    /// asserted, the absent one **exactly** because it involves no randomness at
+    /// all, and the present one inside a 1.5% band.
+    #[test]
+    fn survives_explosion_keeps_one_in_radius_and_all_of_them_with_no_radius() {
+        const ROLLS: usize = 30_000;
+        let t = table("minecraft:blocks/stone", SURVIVES);
+        assert!(t.unsupported_features().is_empty());
+
+        let survivors = |radius: Option<f32>, seed: u64| {
+            let mut rng = SpawnRng::new(seed);
+            let ctx = LootContext {
+                luck: 0.0,
+                tool: None,
+                explosion_radius: radius,
+            };
+            (0..ROLLS).filter(|_| !t.roll(&ctx, &mut rng).is_empty()).count()
+        };
+
+        // The control, and it is exact rather than statistical: with the
+        // parameter absent the condition never draws, so *every* roll survives.
+        // This is the number a blast produced before the parameter existed.
+        assert_eq!(
+            survivors(None, 7),
+            ROLLS,
+            "with no EXPLOSION_RADIUS the condition must pass unconditionally"
+        );
+
+        // A creeper's radius. 1/3 of 30,000 is 10,000.
+        let creeper = survivors(Some(3.0), 7);
+        let expected = ROLLS / 3;
+        let band = ROLLS / 66; // ~1.5% of the roll count
+        assert!(
+            creeper.abs_diff(expected) < band,
+            "expected about {expected} survivors at radius 3.0, got {creeper} \
+             (the no-radius hypothesis is {ROLLS})"
+        );
+
+        // A larger blast keeps proportionally fewer, which is what makes this a
+        // function of the radius rather than a constant: 1/6 of 30,000 is 5,000.
+        let big = survivors(Some(6.0), 7);
+        let big_expected = ROLLS / 6;
+        assert!(
+            big.abs_diff(big_expected) < band,
+            "expected about {big_expected} survivors at radius 6.0, got {big}"
+        );
+    }
+
+    /// `ApplyExplosionDecay` thins a stack **item by item**, which is the whole
+    /// difference between it and `survives_explosion` — one draw per item, not
+    /// one per stack.
+    ///
+    /// A 9-item stack at radius `3.0` therefore averages `9/3 = 3` items, and the
+    /// distribution must actually span (a per-stack implementation would yield
+    /// only 0 or 9). Both properties are asserted: the mean lands on 3, and at
+    /// least one roll produced a count that is neither.
+    #[test]
+    fn explosion_decay_thins_a_stack_item_by_item() {
+        const ROLLS: usize = 4_000;
+        let t = table(
+            "minecraft:blocks/test",
+            r#"{
+              "type": "minecraft:block",
+              "pools": [{
+                "rolls": 1.0,
+                "entries": [{
+                  "type": "minecraft:item",
+                  "name": "minecraft:wheat_seeds",
+                  "functions": [
+                    {"function": "minecraft:set_count", "count": 9.0},
+                    {"function": "minecraft:explosion_decay"}
+                  ]
+                }]
+              }]
+            }"#,
+        );
+        assert!(t.unsupported_features().is_empty());
+
+        let mut rng = SpawnRng::new(11);
+        let ctx = LootContext {
+            luck: 0.0,
+            tool: None,
+            explosion_radius: Some(3.0),
+        };
+        let mut total = 0u64;
+        let mut intermediate = 0usize;
+        for _ in 0..ROLLS {
+            let out = t.roll(&ctx, &mut rng);
+            let count = out.first().map_or(0, |s| s.count);
+            total += u64::from(count);
+            if count != 0 && count != 9 {
+                intermediate += 1;
+            }
+        }
+        let mean = total as f64 / ROLLS as f64;
+        assert!(
+            (mean - 3.0).abs() < 0.15,
+            "9 items at 1/3 each averages 3.0, got {mean}"
+        );
+        assert!(
+            intermediate > ROLLS / 2,
+            "a per-item implementation must produce counts between 0 and 9; only \
+             {intermediate} of {ROLLS} were, which is what a per-*stack* thinning \
+             would look like"
+        );
+
+        // The control: with no radius the function is a no-op and every roll is
+        // the full 9. Without this, a decay that always returned 0 or always
+        // returned the input would be indistinguishable from a working one.
+        let bare = LootContext::default();
+        let mut rng = SpawnRng::new(11);
+        for _ in 0..64 {
+            assert_eq!(
+                t.roll(&bare, &mut rng).first().map_or(0, |s| s.count),
+                9,
+                "with no EXPLOSION_RADIUS explosion_decay must not touch the stack"
+            );
         }
     }
 }
