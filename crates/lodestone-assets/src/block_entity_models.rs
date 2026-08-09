@@ -186,6 +186,16 @@ pub const BLOCK_ENTITY_MODELS: &[BlockEntityModelEntry] = &[
         texture: "entity/enchantment/enchanting_table_book",
         build: book_model,
     },
+    BlockEntityModelEntry {
+        name: "banner_wall_body",
+        texture: "entity/banner/banner_base",
+        build: banner_wall_body_model,
+    },
+    BlockEntityModelEntry {
+        name: "banner_wall_flag",
+        texture: "entity/banner/banner_base",
+        build: banner_wall_flag_model,
+    },
 ];
 
 /// Looks a model entry up by its stable name.
@@ -488,6 +498,71 @@ pub fn banner_flag_model() -> EntityModelDef {
     let root = PartDef::new(PartPose::ZERO).with_child(
         "flag",
         PartDef::new(flag).with_cube(CubeDef::new([-10.0, 0.0, -2.0], [20.0, 40.0, 1.0], [0.0, 0.0])),
+    );
+    EntityModelDef {
+        texture_width: BANNER_SHEET.0,
+        texture_height: BANNER_SHEET.1,
+        root,
+    }
+}
+
+/// A **wall** banner's cross-bar — `BannerModel.createBodyLayer(false)`:
+///
+/// ```text
+/// bar  texOffs(0, 42)  addBox(-10, -20.5, 9.5,  20, 2, 2)  pose ZERO
+/// ```
+///
+/// **No `pole`.** `createBodyLayer` adds the pole only under `if (standing)`, and
+/// this is the branch that skips it — a wall banner hangs off a block face, so a
+/// standing banner's 42-texel post would be a pole floating in mid-air. That is
+/// exactly what happens if the two are conflated, and it is why the gather
+/// declined wall banners outright until this mesh existed.
+///
+/// The `bar` box is not the standing one moved: **both of its `y` and `z` origins
+/// differ** (`-20.5, 9.5` against `-44, -1`), from the same ternary pair in
+/// `createBodyLayer`. Only the texel offsets and extents are shared, so this is a
+/// second entry rather than a placement variant.
+#[must_use]
+pub fn banner_wall_body_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO).with_child(
+        "bar",
+        PartDef::new(PartPose::ZERO).with_cube(CubeDef::new(
+            [-10.0, -20.5, 9.5],
+            [20.0, 2.0, 2.0],
+            [0.0, 42.0],
+        )),
+    );
+    EntityModelDef {
+        texture_width: BANNER_SHEET.0,
+        texture_height: BANNER_SHEET.1,
+        root,
+    }
+}
+
+/// A **wall** banner's cloth — `BannerFlagModel.createFlagLayer(false)`:
+///
+/// ```text
+/// flag  texOffs(0, 0)  addBox(-10, 0, -2,  20, 40, 1)  pose offset(0, -20.5, 10.5)
+/// ```
+///
+/// The **cube is byte-identical** to [`banner_flag_model`]'s; only the part's rest
+/// pose differs (`(0, -20.5, 10.5)` against `(0, -44, 0)`). So this is one mesh
+/// that could in principle have been one mesh with a pose override — and it is not,
+/// for the reason [`banner_flag_model`]'s doc already gives: the flag's `x_rot`
+/// sway is *itself* a pose override, and stacking a second, static override on the
+/// same part is how the two silently start fighting over one field.
+///
+/// `BannerFlagModel.setupAnim` poses `flag.xRot` identically for both kinds — the
+/// sway is not attachment-dependent.
+#[must_use]
+pub fn banner_wall_flag_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO).with_child(
+        "flag",
+        PartDef::new(PartPose::offset(0.0, -20.5, 10.5)).with_cube(CubeDef::new(
+            [-10.0, 0.0, -2.0],
+            [20.0, 40.0, 1.0],
+            [0.0, 0.0],
+        )),
     );
     EntityModelDef {
         texture_width: BANNER_SHEET.0,

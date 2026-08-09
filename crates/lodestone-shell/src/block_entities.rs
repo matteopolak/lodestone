@@ -108,7 +108,8 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 use lodestone_render::{
-    BannerSpawn, BellShakeDirection, BellSpawn, ChestHalf, ChestMaterial, ChestSpawn, LecternSpawn,
+    BannerAttachment, BannerSpawn, BellShakeDirection, BellSpawn, ChestHalf, ChestMaterial,
+    ChestSpawn, LecternSpawn,
     SHULKER_COLOURS, ShulkerFacing, ShulkerSpawn, SignKind, SignOrientation, SignSpawn,
     SkullOrientation, SkullSpawn, SkullType, horizontal_facing_clockwise_yaw,
     horizontal_facing_yaw,
@@ -1087,25 +1088,49 @@ pub fn sign_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<SignSpawn> {
 /// draws every banner white, which is the natural mistake because shulker boxes
 /// are spelled the same way and skulls are not.
 ///
-/// Wall banners (`*_wall_banner`) return `None` deliberately: their body layer is
-/// `createBodyLayer(false)`, a different mesh the asset corpus does not build, so
-/// drawing one with the standing rig would hang a full pole in mid-air.
+/// **Both** forms resolve now. `*_wall_banner` used to return `None` because the
+/// asset corpus had no `createBodyLayer(false)` mesh and the standing rig would
+/// have hung a full 42-texel pole in mid-air off the block face; both wall meshes
+/// exist since `banner_wall_body_model`/`banner_wall_flag_model` landed.
+///
+/// The suffix order is load-bearing: `_wall_banner` has to be tried **before**
+/// `_banner`, because `"red_wall_banner"` ends in `_banner` too and would
+/// otherwise strip to `"red_wall"`, which is not a dye name — so every wall
+/// banner in the world would silently draw nothing rather than draw wrong.
 #[must_use]
-fn standing_banner_colour(state_id: u32) -> Option<DyeColor> {
+fn banner_colour(state_id: u32) -> Option<(DyeColor, bool)> {
     let name = lodestone_data::block_states::block_name(state_id)?;
     let path = name.strip_prefix("minecraft:").unwrap_or(name);
-    DyeColor::from_name(path.strip_suffix("_banner")?)
+    if let Some(dye) = path.strip_suffix("_wall_banner") {
+        return Some((DyeColor::from_name(dye)?, true));
+    }
+    Some((DyeColor::from_name(path.strip_suffix("_banner")?)?, false))
 }
 
-/// A banner's `rotation` state property, `0..16`. Vanilla's `RotationSegment`,
-/// not a four-way `facing` — see `banner_ground_placement_matrix`.
+/// How a banner is attached, read off the property its own block actually has.
+///
+/// A standing banner has `rotation` (`RotationSegment`, `0..16`, `22.5` degrees a
+/// step) and a wall banner has `facing` (four horizontals, `90` degrees a step) —
+/// **neither has the other's**, so this is a fork on which block it is rather than
+/// a property lookup that tries both. Reading `rotation` off a wall banner finds
+/// nothing and draws no banner; reading `facing` off a standing one does the same.
 #[must_use]
-fn banner_rotation_segment(state_id: u32) -> Option<u8> {
+fn banner_attachment(state_id: u32, is_wall: bool) -> Option<BannerAttachment> {
     let props = lodestone_data::block_states::properties(state_id)?;
-    props
+    if is_wall {
+        let value = props
+            .iter()
+            .find(|(name, _)| *name == "facing")
+            .map(|(_, value)| *value)?;
+        return Some(BannerAttachment::Wall {
+            facing_yaw_deg: horizontal_facing_yaw(value)?,
+        });
+    }
+    let rotation_segment = props
         .iter()
         .find(|(name, _)| *name == "rotation")
-        .and_then(|(_, value)| value.parse::<u8>().ok())
+        .and_then(|(_, value)| value.parse::<u8>().ok())?;
+    Some(BannerAttachment::Ground { rotation_segment })
 }
 
 /// The block entity's stored pattern stack, parsed out of its NBT.
@@ -1192,8 +1217,8 @@ fn banner_candidates(
     candidates
 }
 
-/// One candidate resolved into a [`BannerSpawn`], or `None` when the state is not
-/// a standing banner.
+/// One candidate resolved into a [`BannerSpawn`], standing or wall, or `None` when
+/// the state is not a banner at all.
 #[must_use]
 fn banner_spawn(
     block: [i32; 3],
@@ -1202,10 +1227,13 @@ fn banner_spawn(
     phase: f32,
     light: u8,
 ) -> Option<BannerSpawn> {
+    // One read decides both the dye and which form this is, so the colour and the
+    // attachment can never disagree about whether it is a wall banner.
+    let (base_color, is_wall) = banner_colour(state_id)?;
     Some(BannerSpawn {
         pos: block,
-        rotation_segment: banner_rotation_segment(state_id)?,
-        base_color: standing_banner_colour(state_id)?,
+        attachment: banner_attachment(state_id, is_wall)?,
+        base_color,
         patterns,
         phase,
         light,
@@ -2021,6 +2049,70 @@ mod shulker_tests {
         assert!(
             lectern_spawn([0, 0, 0], state_named("minecraft:bell"), 0).is_none(),
             "a bell is not a lectern"
+        );
+    }
+
+    /// **The suffix-order trap, and the two angle conventions.**
+    ///
+    /// `"red_wall_banner"` ends in `_banner`, so a colour parse that tries
+    /// `_banner` first strips it to `"red_wall"` — not a dye name — and **every
+    /// wall banner in the world silently draws nothing**. The gate drives all
+    /// sixteen dyes through both block families, so the ordering cannot regress
+    /// for one colour and pass for the rest.
+    ///
+    /// It also pins that the two forms take their angle from *different*
+    /// properties, since neither block has the other's: a standing banner has
+    /// `rotation` and a wall banner has `facing`.
+    #[test]
+    fn every_dye_resolves_for_both_banner_families_and_takes_its_own_angle() {
+        use lodestone_render::BannerAttachment;
+
+        let mut ground = 0_usize;
+        let mut wall = 0_usize;
+        let mut segments = std::collections::HashSet::new();
+        let mut facings = std::collections::HashSet::new();
+        for id in 0..lodestone_data::block_states::STATE_COUNT {
+            let Some(name) = lodestone_data::block_states::block_name(id) else {
+                continue;
+            };
+            if !name.ends_with("_banner") {
+                continue;
+            }
+            let is_wall_block = name.ends_with("_wall_banner");
+            let (_, is_wall) = banner_colour(id)
+                .unwrap_or_else(|| panic!("{name} must resolve a dye colour and a form"));
+            assert_eq!(is_wall, is_wall_block, "{name}");
+
+            let attachment = banner_attachment(id, is_wall)
+                .unwrap_or_else(|| panic!("{name} must resolve an attachment"));
+            match attachment {
+                BannerAttachment::Ground { rotation_segment } => {
+                    assert!(!is_wall_block, "{name} resolved as standing");
+                    segments.insert(rotation_segment);
+                    ground += 1;
+                }
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "the four facing yaws are exact multiples of 90"
+                )]
+                BannerAttachment::Wall { facing_yaw_deg } => {
+                    assert!(is_wall_block, "{name} resolved as wall");
+                    facings.insert(facing_yaw_deg as i32);
+                    wall += 1;
+                }
+            }
+        }
+        // 16 dyes x 16 rotations, and 16 dyes x 4 facings.
+        assert_eq!(ground, 256, "sixteen dyes across sixteen rotation segments");
+        assert_eq!(wall, 64, "sixteen dyes across four facings");
+        assert_eq!(segments.len(), 16, "every rotation segment, saw {segments:?}");
+        assert_eq!(facings.len(), 4, "every facing, saw {facings:?}");
+
+        // The control that makes the ordering assertion mean something: the
+        // wrong-order parse really does fail on a wall banner.
+        assert!(
+            DyeColor::from_name("red_wall").is_none(),
+            "stripping `_banner` first leaves `red_wall`, which must not parse"
         );
     }
 
