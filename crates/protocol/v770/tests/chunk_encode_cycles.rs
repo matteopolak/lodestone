@@ -370,11 +370,20 @@ fn summarise(samples: &mut [u64]) -> (u64, f64) {
 #[test]
 #[ignore = "measurement: real worldgen, then instructions retired for both encode paths"]
 fn encode_cost_per_column_instructions_retired() {
-    assert_eq!(
-        size_of::<RusageInfoV4>(),
-        RUSAGE_INFO_V4_SIZE,
-        "rusage_info_v4 transcription is the wrong size, so ri_instructions is the wrong field"
-    );
+    // The transcription-size control is a statement about Darwin's
+    // `rusage_info_v4`, so there is nothing to assert where that struct's constants
+    // are configured out. No vacuous green is created by its absence: the very
+    // next thing this test does is read the counter, and `instructions_retired`'s
+    // non-Darwin arm panics, so the test cannot pass on a non-Darwin host either
+    // way. It is `#[ignore]`d, so it does not run there at all.
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(
+            size_of::<RusageInfoV4>(),
+            RUSAGE_INFO_V4_SIZE,
+            "rusage_info_v4 transcription is the wrong size, so ri_instructions is the wrong field"
+        );
+    }
 
     let shape = ChunkShape::overworld_1_21();
     // Generation happens before any counter is read, so none of it lands in a

@@ -475,11 +475,39 @@ numbers as a baseline going forward.
 | `check-default (ubuntu-latest)` | proven — this job has passed on every run since it landed |
 | `check-default (macos-latest)` | **inferred, not yet proven by a runner.** `just check` was run on the dev machine (Apple Silicon, the pinned nightly) after the `#[cfg]` gates landed: real exit code **0**, read from a file rather than from a pipeline. Same OS and architecture as the runner, but not the same machine — a runner-image difference (missing SDK, different Xcode) would not have shown up |
 | `check-default (windows-latest)` | **unproven.** There is no Windows host here, and nothing about this leg has ever executed. The specific risks: `just` shells out to `sh`, which should come from Git for Windows on the runner's PATH but has not been observed doing so; `sccache` with MSVC; and `MAX_PATH` on a deep `target/` |
-| the non-Darwin `#[cfg]` arm | **proven only once the Linux legs run.** `cargo check` on Linux type-checks it and the Linux `test` job links it — that is the discriminating check for the arm this host cannot compile. It could not be verified locally: cross-checking to `x86_64-unknown-linux-gnu` from macOS fails in `aws-lc-sys`'s build script for want of a cross C toolchain, which would have produced a red for a reason unrelated to the gate |
+| the non-Darwin `#[cfg]` arm | **proven locally, both directions** — see "Checking the other arm without a Linux host" below. Also confirmed by the Linux legs, which type-check it, and by the Linux `test` job, which links it |
 
 **Read the first run rather than assuming this table.** A matrix that certifies
-platforms nobody has built is worse than no matrix, and the macOS and Windows
-rows above are exactly that until a run replaces them.
+platforms nobody has built is worse than no matrix, and the Windows row above is
+exactly that until a run replaces it.
+
+### Checking the other arm without a Linux host
+
+A `#[cfg]` gate is only tested if **both** arms compile, and the arm this machine
+cannot select is the one that breaks. Cross-compiling is not the way to check it
+here: `cargo check --target x86_64-unknown-linux-gnu` from macOS dies in
+`aws-lc-sys`'s build script for want of a cross C toolchain, which is a red for a
+reason unrelated to the gate.
+
+What works, costs nothing, and needs no new target is to **temporarily invert the
+predicate**. Replace `target_os = "macos"` with `target_os = "linux"` across the
+gated files and run `just check` on this Mac: the host now selects the
+`not(...)` arm, whose token stream is identical to the non-Darwin arm the runners
+compile. Follow `CLAUDE.md`'s neuter protocol — back the files up to the
+scratchpad with an `md5` manifest first, keep the window inside a single shell
+invocation, and restore by `cp` with an `md5` check plus a count of residual
+flipped predicates, never with `git checkout`.
+
+**This was not a formality: it caught two real breaks the first CI run had not
+yet reached.** Both were the same shape — a `RUSAGE_INFO_V4_SIZE` reference
+*outside* the region gated with the constant, in
+`lodestone-worldgen/benches/generation.rs`'s `assert_instruction_counter_is_real`
+and inline in `chunk_encode_cycles.rs`'s
+`encode_cost_per_column_instructions_retired` — because those two files keep the
+size assertion somewhere other than inside the reader, unlike the other three.
+The generic lesson: when gating a constant, grep for **every** use of it, not just
+the function you were editing; the compiler only tells you about the arm it is
+currently building.
 
 The workflow YAML is statically validated (`actionlint`, zero findings,
 including its embedded `shellcheck` pass over every `run:` block, re-checked
