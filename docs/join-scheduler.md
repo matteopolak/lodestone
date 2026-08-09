@@ -11,6 +11,13 @@ Code: [`crates/lodestone-server/src/join_scheduler.rs`](../crates/lodestone-serv
 driven from `server.rs`'s `ConfigurationFinished` arm. The wire *order* still comes from
 `join_view_rings` in the same file.
 
+**It is no longer only a join scheduler, despite the name.** `ColumnPipeline::enqueue` lets a
+live pipeline take columns it was not built with, and `send_view_update` uses that to feed it the
+newly-visible strip a walking player reveals — so a move is streamed by this machinery rather than
+generated in one fan-out on the connection task. Everything below applies unchanged to those
+columns; [`server-view-streaming.md`](server-view-streaming.md) is why the steady-state path
+needed it and what else had to change for the pipeline to survive being empty.
+
 ## Why the barrier existed, and why it could go
 
 The join loop used to walk the Chebyshev rings and, for each ring, spawn every one of its

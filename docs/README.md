@@ -1295,6 +1295,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   to be spawned side-by-side, and adds the accounting #285 asked for: ticks-run,
   most-recent and rolling-average tick duration (MSPT), a derived TPS figure, and an
   overrun counter for when the loop falls behind schedule.
+- [Steady-state view streaming and the connection-loop stall watchdog](./server-view-streaming.md) —
+  The server-side path that sends a walking player their newly-visible chunk columns,
+  and the watchdog that measures how long `serve_play`'s `select!` loop goes without
+  servicing the socket. Together they close the second half of the *"chunk gen is too
+  slow, and if I move around I eventually get Timed Out"* report: the join burst was
+  fixed by [`join-scheduler.md`](join-scheduler.md), the **move** kept the identical
+  defect, and the visible symptom of it was a keep-alive disconnect the server issued
+  to itself.
 - [Server-owned sounds, particles and level events](./server-world-effects.md) — The
   path by which the integrated server tells a client "play this here". Before it, the
   `ServerProtocol` trait had **no sound encoder and no particle encoder** — so the

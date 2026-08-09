@@ -379,6 +379,42 @@ impl ColumnQueue {
         true
     }
 
+    /// Adds columns the caller did not know about when the queue was built —
+    /// the newly-visible strip a player walking across a chunk boundary reveals.
+    ///
+    /// They join the **back** of the pop order, so nothing already queued is
+    /// displaced by arrival alone; under a
+    /// [`Priority`](QueueOrder::Priority) order the subsequent re-key is what
+    /// decides where they actually land, which is the point — a column the player
+    /// just walked towards should out-rank one behind them regardless of which was
+    /// enqueued first.
+    ///
+    /// Under [`AsGiven`](QueueOrder::AsGiven) there is no re-key, so "back of the
+    /// pop order" is the whole behaviour and the gates that assert a fixed sequence
+    /// see appended columns strictly after the originals.
+    pub(crate) fn extend(&mut self, coords: Vec<(i32, i32)>) {
+        if coords.is_empty() {
+            return;
+        }
+        let mut index = self
+            .pending
+            .iter()
+            .map(|&(_, i)| i)
+            .max()
+            .map_or(0, |max| max.saturating_add(1));
+        let mut appended: Vec<((i32, i32), u32)> = Vec::with_capacity(coords.len());
+        for coord in coords {
+            appended.push((coord, index));
+            index = index.saturating_add(1);
+        }
+        // `pending` is stored worst-first and `pop` takes the last element, so
+        // "behind everything already queued" is the *front* of the vector, and the
+        // appended run itself has to be reversed to keep its own given order.
+        appended.reverse();
+        self.pending.splice(0..0, appended);
+        self.sort();
+    }
+
     /// The next column to generate, or `None` when the queue is empty.
     pub(crate) fn pop(&mut self) -> Option<(i32, i32)> {
         self.pending.pop().map(|(coord, _)| coord)
@@ -623,6 +659,38 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
         self.queue.reprioritise(centre, facing)
     }
 
+    /// Adds columns this pipeline was not built with, so it keeps streaming past
+    /// the view it started as.
+    ///
+    /// # Why a join pipeline is the right home for a *move*
+    ///
+    /// `crate::server`'s `ViewTracker` used to generate and encode the whole
+    /// newly-visible strip in one `await` on the connection task: `2r + 1` columns,
+    /// 33 at `view_radius = 16`, produced before a single one reached the wire.
+    /// Offloading that to the blocking pool moved the *work* but not the *latency* —
+    /// the connection task still had one suspension point covering all 33, so for its
+    /// whole duration the connection read nothing and wrote nothing. A join used to
+    /// have exactly that shape and does not any more; a move had it and kept it.
+    ///
+    /// Enqueueing into the live pipeline instead makes the two paths one path, which
+    /// buys three things beyond the latency: the strip is generated with the same
+    /// primed window rather than as one fan-out-and-join, it is re-keyed by
+    /// [`reprioritise`](Self::reprioritise) as the player keeps moving, and there is
+    /// no second ordering rule to drift.
+    ///
+    /// `total` grows, so [`remaining`](Self::remaining) becomes non-zero again and
+    /// the `select!` branch gated on it re-enables. `primed` is deliberately left
+    /// alone: the one-column priming exists for time-to-first-chunk at join, and a
+    /// pipeline that has already emitted anything should top up to the full window
+    /// immediately.
+    pub(crate) fn enqueue(&mut self, coords: Vec<(i32, i32)>) {
+        if coords.is_empty() {
+            return;
+        }
+        self.total += coords.len();
+        self.queue.extend(coords);
+    }
+
     /// The window this pipeline was built with.
     #[must_use]
     pub fn window(&self) -> usize {
@@ -747,12 +815,42 @@ pub(crate) enum JoinChunkStream<S> {
 impl<S: ChunkSource + 'static> JoinChunkStream<S> {
     /// The deferred half of a [`SourceRef::Shared`] join: whatever the inline
     /// burst left in `pipeline`.
+    /// **A pipeline with nothing left is still `Windowed`, not `Drained`.** It has
+    /// to be: `Drained` carries no source, no window and no encoder, so a stream
+    /// that collapsed into it could never be re-fed, and
+    /// [`enqueue`](Self::enqueue) is what makes the steady-state view share this
+    /// machinery. `is_done` already reports emptiness from
+    /// [`remaining`](Self::remaining), so the `select!` branch is disabled either
+    /// way and nothing spins.
     #[must_use]
     pub(crate) fn windowed(pipeline: ColumnPipeline<S>) -> Self {
-        if pipeline.remaining() == 0 {
-            Self::Drained
-        } else {
-            Self::Windowed(pipeline)
+        Self::Windowed(pipeline)
+    }
+
+    /// Whether [`enqueue`](Self::enqueue) would take columns.
+    ///
+    /// **Asked before handing anything over, never discovered afterwards.** The
+    /// caller's fallback needs those coordinates, and a refusal that had already
+    /// consumed them would leave nothing to fall back with — a hole in the world
+    /// with a clean test suite, this crate's dominant defect shape.
+    ///
+    /// `false` on both other arms:
+    ///
+    /// * [`Ringed`](Self::Ringed) is the [`SourceRef::Borrowed`] arm — no `'static`
+    ///   source, so nothing to spawn and no window to overlap. Protocol tests only.
+    /// * [`Drained`](Self::Drained) is a stream nothing is polling. Only the
+    ///   `Ringed` arm ever resolves to it; a `Windowed` one stays `Windowed`
+    ///   precisely so that it can be re-fed (see [`windowed`](Self::windowed)).
+    #[must_use]
+    pub(crate) fn accepts_enqueue(&self) -> bool {
+        matches!(self, Self::Windowed(_))
+    }
+
+    /// Hands `coords` to the streaming pipeline. A no-op on the two arms
+    /// [`accepts_enqueue`](Self::accepts_enqueue) reports `false` for — ask first.
+    pub(crate) fn enqueue(&mut self, coords: Vec<(i32, i32)>) {
+        if let Self::Windowed(pipeline) = self {
+            pipeline.enqueue(coords);
         }
     }
 
@@ -828,13 +926,10 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
     ) -> Option<((i32, i32), ColumnPayload)> {
         match self {
             Self::Drained => None,
-            Self::Windowed(pipeline) => {
-                let next = pipeline.next().await;
-                if next.is_none() {
-                    *self = Self::Drained;
-                }
-                next
-            }
+            // **Not collapsed to `Drained` on exhaustion** — see
+            // [`windowed`](Self::windowed). The pipeline has to survive so a later
+            // [`enqueue`](Self::enqueue) can refill it.
+            Self::Windowed(pipeline) => pipeline.next().await,
             Self::Ringed {
                 rings,
                 ready,

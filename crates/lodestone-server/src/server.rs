@@ -610,10 +610,20 @@ struct ViewUpdate {
     /// `ChunkTrackingView::difference`, which is not gated by
     /// `PlayerChunkSender` at all (only new chunk *sends* are).
     immediate: Vec<ServerDirective>,
-    /// The `begin_chunk_batch`/`encode_chunk`*/`end_chunk_batch` sequence for
-    /// any newly-visible columns, if any — empty when nothing new entered the
-    /// view. Subject to the one-unacknowledged-batch gate.
-    batch: Vec<ServerDirective>,
+    /// The newly-visible columns, in wire order — empty when nothing new entered
+    /// the view.
+    ///
+    /// **Coordinates, not directives, and that is the fix rather than a
+    /// refactor.** This used to be a finished
+    /// `begin_chunk_batch`/`encode_chunk`*/`end_chunk_batch` sequence, which meant
+    /// [`ViewTracker::recenter`] had to `await` the generation *and* the encode of
+    /// every column in the strip before returning: one suspension point covering
+    /// `2r + 1` columns, 33 at `view_radius = 16`, during which the connection
+    /// task read nothing and wrote nothing. Handing back the coordinates makes
+    /// both update paths synchronous and lets [`send_view_update`] feed them to
+    /// the same streaming pipeline the join uses, one column per pass of the
+    /// `select!` loop.
+    added: Vec<(i32, i32)>,
 }
 
 impl ViewTracker {
@@ -653,23 +663,16 @@ impl ViewTracker {
         next
     }
 
-    /// The `begin_chunk_batch`/`encode_chunk`*/`end_chunk_batch` sequence for
-    /// every column in `next` this tracker has not already sent — empty if
-    /// there is nothing new. Shared by [`recenter`](Self::recenter) and
+    /// Every column in `next` this tracker has not already sent, in wire order —
+    /// empty if there is nothing new. Shared by [`recenter`](Self::recenter) and
     /// [`set_view_radius`](Self::set_view_radius) so both diff against
     /// `self.loaded` identically.
-    async fn build_batch<P, S>(
+    fn added_columns(
         &self,
-        proto: &P,
-        source: SourceRef<'_, S>,
         next: &HashSet<(i32, i32)>,
         centre: (i32, i32),
         facing: Option<f32>,
-    ) -> Vec<ServerDirective>
-    where
-        P: ServerProtocol,
-        S: ChunkSource + 'static,
-    {
+    ) -> Vec<(i32, i32)> {
         // Sorted rather than left in `HashSet::difference`'s hash-iteration
         // order: that order already varies run-to-run (`RandomState` reseeds
         // per process), and generating in parallel below means the set of
@@ -691,43 +694,7 @@ impl ViewTracker {
         added.sort_unstable_by_key(|&coord| {
             crate::join_scheduler::view_order_key(centre, facing, coord)
         });
-        if added.is_empty() {
-            return Vec::new();
-        }
-        let mut batch = vec![proto.begin_chunk_batch()];
-        // The steady-state half of the owner's latency report: this runs on every
-        // chunk boundary the player walks across, over a strip of `2r + 1`
-        // columns — 33 at `view_radius = 16`, ≈80 ms of encode at the measured
-        // 2.4 ms per column, on the task that owes them a reply. So the encode
-        // moves into the same blocking closure as the generation whenever the
-        // protocol offers a `ChunkEncoder`; see `crate::protocol::ChunkEncoder`
-        // and `generate_and_encode_columns_offloaded`. Only the `Shared` arm can
-        // offload (a borrowed source is not `'static`), which is the same fork
-        // `SourceRef` already encodes, so the fallback below is the unchanged
-        // path rather than a degenerate one — and both emit the same bytes in the
-        // same order.
-        let offloaded = match source {
-            SourceRef::Shared(src) => {
-                crate::chunk::generate_and_encode_columns_offloaded(
-                    Arc::clone(src),
-                    added.clone(),
-                    proto.chunk_encoder(),
-                )
-                .await
-            }
-            SourceRef::Borrowed(_) => None,
-        };
-        match offloaded {
-            Some(frames) => batch.extend(frames),
-            None => {
-                let columns = source.generate(added.clone()).await;
-                for (&(x, z), column) in added.iter().zip(columns.iter()) {
-                    batch.push(proto.encode_chunk(x, z, column));
-                }
-            }
-        }
-        batch.push(proto.end_chunk_batch(added.len() as i32));
-        batch
+        added
     }
 
     /// Recomputes the view for a new player chunk position `(cx, cz)` at the
@@ -747,19 +714,17 @@ impl ViewTracker {
     /// batch.
     ///
     /// `facing` is the player's yaw in degrees where the connection has reported
-    /// one, and only orders the batch (see [`build_batch`](Self::build_batch)) —
-    /// never *which* columns are in it, which is the square alone.
-    async fn recenter<P, S>(
-        &mut self,
-        proto: &P,
-        source: SourceRef<'_, S>,
-        cx: i32,
-        cz: i32,
-        facing: Option<f32>,
-    ) -> ViewUpdate
+    /// one, and only orders the added columns (see
+    /// [`added_columns`](Self::added_columns)) — never *which* columns they are,
+    /// which is the square alone.
+    ///
+    /// **Synchronous.** It computes a set difference and encodes forgets; nothing
+    /// here generates terrain, which is what lets a chunk-boundary crossing return
+    /// to the `select!` loop immediately instead of parking it for the length of a
+    /// 33-column strip. [`send_view_update`] is where the columns become bytes.
+    fn recenter<P>(&mut self, proto: &P, cx: i32, cz: i32, facing: Option<f32>) -> ViewUpdate
     where
         P: ServerProtocol,
-        S: ChunkSource + 'static,
     {
         if (cx, cz) == self.center {
             return ViewUpdate::default();
@@ -771,13 +736,11 @@ impl ViewTracker {
         for &(x, z) in self.loaded.difference(&next) {
             immediate.push(proto.encode_forget_chunk(x, z));
         }
-        let batch = self
-            .build_batch(proto, source, &next, (cx, cz), facing)
-            .await;
+        let added = self.added_columns(&next, (cx, cz), facing);
 
         self.center = (cx, cz);
         self.loaded = next;
-        ViewUpdate { immediate, batch }
+        ViewUpdate { immediate, added }
     }
 
     /// Resizes the tracked view around the *current* center without the
@@ -789,7 +752,7 @@ impl ViewTracker {
     /// the guard here is `radius` itself already matching, so a settings
     /// packet that does not actually change the distance is correctly a
     /// no-op.
-    async fn set_view_radius<P, S>(
+    fn set_view_radius<P, S>(
         &mut self,
         proto: &P,
         source: SourceRef<'_, S>,
@@ -820,9 +783,9 @@ impl ViewTracker {
         // mid-session over-subscribed the cache — and because `join_view_rings`
         // streams outward, the LRU victim is the **innermost** ring, i.e. the
         // ground under the player's feet at ~909 ms a column to regenerate. Doing
-        // it first means `build_batch` below never evicts a column it is about to
-        // need. A no-op for every source that retains nothing per view; see
-        // `ChunkSource::set_retention_radius`.
+        // it first means the columns reported below are never evicted before they
+        // are generated. A no-op for every source that retains nothing per view;
+        // see `ChunkSource::set_retention_radius`.
         source.get().set_retention_radius(radius);
 
         let next = Self::window(self.center, radius);
@@ -832,13 +795,11 @@ impl ViewTracker {
         }
         // Centred on the tracker's own centre, which by definition did not move
         // here — a render-distance change is the one view update with no new pose.
-        let batch = self
-            .build_batch(proto, source, &next, self.center, facing)
-            .await;
+        let added = self.added_columns(&next, self.center, facing);
 
         self.radius = radius;
         self.loaded = next;
-        ViewUpdate { immediate, batch }
+        ViewUpdate { immediate, added }
     }
 }
 
@@ -967,40 +928,95 @@ const JOIN_PRESTREAM_RADIUS: i32 = 1;
 /// client's own rate estimate.
 const JOIN_STREAM_BATCH_COLUMNS: usize = 16;
 
-/// Applies one [`ViewUpdate`]: the non-batch directives immediately, and the
-/// chunk-batch portion (if any) either right away or queued behind
-/// `awaiting_chunk_batch_ack` — the flow-control gate issue #270's
-/// `ServerBound::ChunkBatchAcknowledged` closes. Vanilla's `PlayerChunkSender`
-/// keeps at most one batch in flight; before this, `crate::server` started a
-/// fresh batch on every `recenter` regardless of whether the client had
-/// acknowledged the last one at all (the issue's own "never reads this reply"
-/// gap). Shared by both [`ViewTracker::recenter`] and
-/// [`ViewTracker::set_view_radius`] call sites in [`dispatch_play_packet`] so
-/// the two update paths cannot drift into different flow-control behaviour.
-async fn send_view_update<T: Transport>(
+/// Applies one [`ViewUpdate`]: the cache-center and forget directives right away,
+/// then the newly-visible columns.
+///
+/// # The two ways the columns get sent, and why the first is the point
+///
+/// **Preferred: hand them to `stream`.** `serve_play` already drains a
+/// [`JoinChunkStream`](crate::join_scheduler::JoinChunkStream) from a `select!`
+/// branch one column at a time, so enqueueing there means a chunk-boundary crossing
+/// costs the connection task one set difference and returns — the strip is generated
+/// on the blocking pool with a primed window, re-keyed as the player keeps moving,
+/// and interleaved with every read and write this connection owes. The old shape
+/// awaited the whole strip inside `ViewTracker::recenter`: one suspension point over
+/// `2r + 1` columns during which nothing was read and nothing was written, including
+/// the client's keep-alive reply. That is the steady-state half of the owner's
+/// latency report, and it is the half the join fix did not cover.
+///
+/// **Fallback: build the batch here.** `stream` refuses on its `Ringed` arm (a
+/// borrowed, non-`'static` source — protocol tests) and when the caller has no
+/// stream at all (`wasm32`, whose loop has no `select!` to drain one from). Those
+/// take the unchanged path: generate, encode, and send under
+/// `awaiting_chunk_batch_ack`, the one-batch-in-flight gate
+/// `ServerBound::ChunkBatchAcknowledged` closes — vanilla's `PlayerChunkSender`
+/// shape.
+///
+/// The streamed path is deliberately **not** subject to that gate, because the join
+/// stream it shares is not: batches there are paced by `JOIN_STREAM_BATCH_COLUMNS`
+/// and the client's own `chunk_batch_received` rate estimate. Routing a move through
+/// the gate *and* the stream would need two flow-control regimes over one ordered
+/// queue, which is how the two paths drift.
+async fn send_view_update<T, P, S>(
     conn: &mut Connection<T>,
+    proto: &P,
+    source: SourceRef<'_, S>,
+    stream: Option<&mut crate::join_scheduler::JoinChunkStream<S>>,
     state: &mut State,
     update: ViewUpdate,
     awaiting_chunk_batch_ack: &mut bool,
     pending_chunk_batches: &mut VecDeque<Vec<ServerDirective>>,
-) -> Result<(), ServerError> {
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + 'static,
+{
     for directive in update.immediate {
         apply(conn, state, directive).await?;
     }
-    if update.batch.is_empty() {
+    if update.added.is_empty() {
         return Ok(());
     }
+    // Asked, not attempted: a stream that refused *after* taking the coordinates
+    // would leave the fallback below with nothing to send. See
+    // `JoinChunkStream::accepts_enqueue`.
+    if let Some(stream) = stream.filter(|stream| stream.accepts_enqueue()) {
+        stream.enqueue(update.added);
+        return Ok(());
+    }
+    let mut batch = vec![proto.begin_chunk_batch()];
+    let count = update.added.len() as i32;
+    // Only the `Shared` arm can offload (a borrowed source is not `'static`), which
+    // is the same fork `SourceRef` already encodes; both arms emit the same bytes in
+    // the same order.
+    let offloaded = match source {
+        SourceRef::Shared(src) => {
+            crate::chunk::generate_and_encode_columns_offloaded(
+                Arc::clone(src),
+                update.added.clone(),
+                proto.chunk_encoder(),
+            )
+            .await
+        }
+        SourceRef::Borrowed(_) => None,
+    };
+    match offloaded {
+        Some(frames) => batch.extend(frames),
+        None => {
+            let columns = source.generate(update.added.clone()).await;
+            for (&(x, z), column) in update.added.iter().zip(columns.iter()) {
+                batch.push(proto.encode_chunk(x, z, column));
+            }
+        }
+    }
+    batch.push(proto.end_chunk_batch(count));
     if *awaiting_chunk_batch_ack {
-        tracing::info!(
-            "server: chunk batch queued ({} directives), awaiting ack — {} pending total",
-            update.batch.len(), pending_chunk_batches.len() + 1,
-        );
-        pending_chunk_batches.push_back(update.batch);
+        pending_chunk_batches.push_back(batch);
         return Ok(());
     }
-    tracing::info!("server: sending chunk batch ({} directives)", update.batch.len());
     *awaiting_chunk_batch_ack = true;
-    for directive in update.batch {
+    for directive in batch {
         apply(conn, state, directive).await?;
     }
     Ok(())
@@ -6158,6 +6174,19 @@ async fn dispatch_play_packet<T, P, S>(
     sprinting: &mut bool,
     awaiting_chunk_batch_ack: &mut bool,
     pending_chunk_batches: &mut VecDeque<Vec<ServerDirective>>,
+    // The connection's live column stream, where the caller has one to lend. A
+    // chunk-boundary crossing enqueues its newly-visible strip here instead of
+    // generating it inline, so the view update costs this function a set difference
+    // rather than a `2r + 1`-column `await` — see [`send_view_update`], which owns
+    // the decision and the fallback.
+    //
+    // `Option` because the two callers genuinely differ rather than for
+    // convenience: only the native `serve_play` has a `select!` branch draining
+    // this stream. The `wasm32` loop drains its join inline and then never looks at
+    // it again, so lending it one would enqueue columns nothing sends — an island,
+    // with a green test suite and a hole in the world. It passes `None` and takes
+    // the inline path, which is that target's existing documented shape.
+    mut join_stream: Option<&mut crate::join_scheduler::JoinChunkStream<S>>,
     // Issues #48/#464. One parameter rather than two (a dispatch and an
     // identity) because this function already takes 24; see
     // [`CommandSession`]'s own doc comment.
@@ -6363,25 +6392,26 @@ where
             // `SectionPos.blockToSectionCoord` (an arithmetic right shift).
             let cx = (x / 16.0).floor() as i32;
             let cz = (z / 16.0).floor() as i32;
-            let update = view
-                .recenter(
-                    proto,
-                    source,
-                    cx,
-                    cz,
-                    // The pose that arrived with this very packet where it carried
-                    // one, so the newly-visible strip is ordered towards what the
-                    // player is looking at rather than by `cx` then `cz`.
-                    player_rot.map(|rotation| rotation.yaw),
-                )
-                .await;
-            // Every recenter: log, so we can see if the server detects boundary crosses
-            tracing::info!(
-                "recenter: center=({cx},{cz}) batch_size={} immediate_forgets={}",
-                update.batch.len(),
-                update.immediate.len(),
+            let update = view.recenter(
+                proto,
+                cx,
+                cz,
+                // The pose that arrived with this very packet where it carried
+                // one, so the newly-visible strip is ordered towards what the
+                // player is looking at rather than by `cx` then `cz`.
+                player_rot.map(|rotation| rotation.yaw),
             );
-            send_view_update(conn, state, update, awaiting_chunk_batch_ack, pending_chunk_batches).await?;
+            send_view_update(
+                conn,
+                proto,
+                source,
+                join_stream.as_deref_mut(),
+                state,
+                update,
+                awaiting_chunk_batch_ack,
+                pending_chunk_batches,
+            )
+            .await?;
 
             if let Some(raw) =
                 fall.on_player_moved(fall_sample(source.get(), x, y, z, on_ground))
@@ -6759,21 +6789,27 @@ where
             // The ceiling now lives on the `ViewTracker` as its own field and
             // `set_view_radius` applies it — see `ViewTracker::max_radius` for
             // the per-path policy and why the two roles had to be separated.
-            let update = view
-                .set_view_radius(
-                    proto,
-                    source,
-                    i32::from(view_distance),
-                    player_rot.map(|rotation| rotation.yaw),
-                )
-                .await;
-            send_view_update(conn, state, update, awaiting_chunk_batch_ack, pending_chunk_batches).await?;
+            let update = view.set_view_radius(
+                proto,
+                source,
+                i32::from(view_distance),
+                player_rot.map(|rotation| rotation.yaw),
+            );
+            send_view_update(
+                conn,
+                proto,
+                source,
+                join_stream.as_deref_mut(),
+                state,
+                update,
+                awaiting_chunk_batch_ack,
+                pending_chunk_batches,
+            )
+            .await?;
         }
         ServerBound::ChunkBatchAcknowledged { .. } => {
             *awaiting_chunk_batch_ack = false;
-            tracing::info!("server: chunk batch acked, {} pending batches", pending_chunk_batches.len());
             if let Some(next) = pending_chunk_batches.pop_front() {
-                tracing::info!("server: draining pending chunk batch ({} directives)", next.len());
                 *awaiting_chunk_batch_ack = true;
                 for directive in next {
                     apply(conn, state, directive).await?;
@@ -6955,6 +6991,129 @@ where
 #[cfg(not(target_arch = "wasm32"))]
 fn ticks_since(start: tokio::time::Instant) -> i64 {
     (start.elapsed().as_millis() / MILLIS_PER_TICK) as i64
+}
+
+/// A pass through [`serve_play`]'s `select!` shorter than this is not a stall —
+/// one server tick. Passes at or above it are summed into
+/// [`LoopStallWatch::unserviced`] and the worst one is remembered.
+#[cfg(not(target_arch = "wasm32"))]
+const STALL_FLOOR: Duration = Duration::from_millis(MILLIS_PER_TICK as u64);
+
+/// A stall at or above this is logged the moment it is observed, naming the arm.
+///
+/// Four times the tick, so an ordinary busy pass is silent and a
+/// hundreds-of-milliseconds one is not. There is no threshold at which a stall
+/// stops mattering, which is why the *worst* one is reported unconditionally on
+/// the timeout path regardless of this.
+#[cfg(not(target_arch = "wasm32"))]
+const STALL_REPORT: Duration = Duration::from_millis(200);
+
+/// How long one pass through [`serve_play`]'s `select!` took, and which arm took
+/// it.
+///
+/// # Why the connection loop needs a watchdog at all
+///
+/// `select!` services exactly one arm per pass, so for the whole duration of that
+/// arm this connection reads nothing and writes nothing — the socket is unserviced
+/// even though the task is alive and the runtime is healthy. Every arm here awaits
+/// something: the longest is `dispatch_play_packet`, which for a
+/// `PlayerMoved` that crosses a chunk boundary awaits
+/// `ViewTracker::build_batch` over a strip of `2r + 1` columns before returning
+/// anything at all.
+///
+/// That matters twice over, and the second is why this is a type rather than a
+/// `tracing::warn!`:
+///
+/// * **Diagnosis.** A latency symptom needs the *maximum*, not the mean, and it
+///   needs to name *where*. An average over a session cannot see a single
+///   multi-second gap, and a duration with no site attached gets attributed to
+///   whatever the reader already suspected.
+/// * **Correctness of the keep-alive timeout.** Vanilla's `keepConnectionAlive`
+///   runs on the server tick while its reads happen on a Netty IO thread that
+///   never blocks on world generation, so "15 seconds elapsed" and "15 seconds in
+///   which the client could have been heard" are the same number there. Here they
+///   are not. Denominating the timeout in wall clock therefore lets this server
+///   kick a perfectly healthy client for a reply it never gave itself the chance
+///   to read — the kick arrives as `disconnect.timeout`, which reads on the client
+///   as the *client's* fault. [`unserviced`](Self::unserviced) is what makes the
+///   deadline mean the same thing vanilla's does.
+#[cfg(not(target_arch = "wasm32"))]
+struct LoopStallWatch {
+    /// When the arm body currently running started. `None` between passes.
+    ///
+    /// **Set at the top of the arm body, not at the bottom of the previous one.**
+    /// The interval between two passes is mostly time parked in `select!` waiting
+    /// for a timer or a packet — the loop is *idle* there, not stalled, and the
+    /// socket is being serviced by definition. Timing pass-to-pass measured
+    /// exactly that idle wait: under a `start_paused` runtime, where the clock
+    /// jumps straight to the next timer deadline whenever nothing is runnable, it
+    /// reported the whole keep-alive interval as a stall and suppressed the
+    /// timeout the test was gating. Only the arm body can starve the connection,
+    /// so only the arm body is measured.
+    arm_start: Option<tokio::time::Instant>,
+    /// The longest arm body observed, and the arm that owned it. `""` until one
+    /// exceeds [`STALL_FLOOR`].
+    worst: Duration,
+    worst_arm: &'static str,
+    /// Time this loop spent unable to service the socket, summed over every arm
+    /// body past [`STALL_FLOOR`]. Reset by
+    /// [`clear_unserviced`](Self::clear_unserviced) when a fresh keep-alive
+    /// challenge is written, so it always answers "how much of *this* challenge's
+    /// window did we eat".
+    unserviced: Duration,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl LoopStallWatch {
+    fn new() -> Self {
+        Self {
+            arm_start: None,
+            worst: Duration::ZERO,
+            worst_arm: "",
+            unserviced: Duration::ZERO,
+        }
+    }
+
+    /// Opens a pass. Called as the first statement of every `select!` arm body.
+    fn enter(&mut self) {
+        self.arm_start = Some(tokio::time::Instant::now());
+    }
+
+    /// Closes the pass that `arm` serviced. A no-op without a matching
+    /// [`enter`](Self::enter), so an arm that returns early simply is not measured
+    /// rather than being charged someone else's time.
+    fn pass(&mut self, arm: &'static str) {
+        let Some(start) = self.arm_start.take() else {
+            return;
+        };
+        let took = start.elapsed();
+        if took < STALL_FLOOR {
+            return;
+        }
+        self.unserviced += took;
+        if took > self.worst {
+            self.worst = took;
+            self.worst_arm = arm;
+        }
+        if took >= STALL_REPORT {
+            tracing::warn!(
+                target: "lodestone_server::stall",
+                arm,
+                millis = took.as_millis() as u64,
+                "connection loop serviced nothing for one pass",
+            );
+        }
+    }
+
+    fn clear_unserviced(&mut self) {
+        self.unserviced = Duration::ZERO;
+    }
+
+    /// The worst pass, for a log line on the way out. `None` before any pass has
+    /// exceeded [`STALL_FLOOR`].
+    fn worst(&self) -> Option<(&'static str, Duration)> {
+        (!self.worst_arm.is_empty()).then_some((self.worst_arm, self.worst))
+    }
 }
 
 /// Serves a connection that has just reached [`State::Play`] until the client
@@ -7197,6 +7356,21 @@ where
         tokio::time::Instant::now() + KEEP_ALIVE_INTERVAL,
         KEEP_ALIVE_INTERVAL,
     );
+    // **`Delay`, not tokio's default `Burst`, and this is the difference between a
+    // stall and a disconnect.** `Burst` makes up for missed ticks by firing them
+    // back to back with no delay in between, so a pass that overran two intervals
+    // resolves `tick()` twice in immediate succession: the first fires and finds no
+    // challenge pending, writes one, and the second fires *in the same instant* and
+    // finds it unanswered. The client is given literally zero time to reply and is
+    // kicked with `disconnect.timeout` for a stall that was entirely ours. `Delay`
+    // collapses the backlog into one tick and restarts the period from it, which is
+    // what "check the client every 15 seconds" was always supposed to mean.
+    keep_alive_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // When the outstanding challenge was written. The timeout is measured from
+    // here plus `LoopStallWatch::unserviced` rather than from the interval's own
+    // cadence — see that type's doc comment.
+    let mut keep_alive_sent_at = tokio::time::Instant::now();
+    let mut watch = LoopStallWatch::new();
     // `interval_at`, not the bare `interval` constructor: `Interval::tick`'s
     // *first* call resolves immediately for an interval built with
     // `tokio::time::interval`, which would otherwise fire a redundant
@@ -7247,6 +7421,7 @@ where
             // comments); a column dropped mid-generation here would be a hole in
             // the world that no test in this crate would notice.
             chunk = join_stream.next(source), if !join_stream.is_done() => {
+                watch.enter();
                 if let Some(((cx, cz), payload)) = chunk {
                     if !join_batch_open {
                         apply(conn, &mut state, proto.begin_chunk_batch()).await?;
@@ -7265,8 +7440,10 @@ where
                         join_batch_open = false;
                     }
                 }
+                watch.pass("join_stream");
             }
             packet = conn.read_packet() => {
+                watch.enter();
                 let Some((packet_id, payload)) = packet? else {
                     // Issue #302: the disconnect save. Vanilla's own
                     // `PlayerList.remove` writes the player file here, and this is
@@ -7309,6 +7486,13 @@ where
                     &mut sprinting,
                     &mut awaiting_chunk_batch_ack,
                     &mut pending_chunk_batches,
+                    // The live stream this loop's own `select!` branch drains, lent
+                    // for the length of the call so a chunk-boundary crossing can
+                    // enqueue into it rather than generate inline. Safe to reborrow
+                    // here: `select!` drops every branch future before running the
+                    // handler, which is the same property the `reprioritise` call
+                    // further down this arm already relies on.
+                    Some(&mut join_stream),
                     &commands,
                     &mut advancements,
                     player_uuid,
@@ -7467,9 +7651,43 @@ where
                 ) {
                     apply(conn, &mut state, directive).await?;
                 }
+                // The arm that owns the view update, and therefore the longest pass
+                // this loop has. A `PlayerMoved` that crosses a chunk boundary
+                // awaits a whole strip of columns inside `dispatch_play_packet`.
+                watch.pass("read_packet");
             }
 
             _ = keep_alive_tick.tick() => {
+                watch.enter();
+                // **Forgive an unanswered challenge only when this loop had no
+                // serviced time at all to hear the answer in.** A reply needs
+                // milliseconds of serviced time to be read, so the only honest
+                // excuse is a stall that swallowed the *whole* window — hence the
+                // comparison against a full interval rather than against any stall
+                // at all. Without this the server kicks a client that answered
+                // promptly, because the reply sat unread in the receive buffer while
+                // an arm body was awaiting terrain; `disconnect.timeout` then reads
+                // on the client as the client's own fault. See `LoopStallWatch`.
+                //
+                // Bounded, which a wall-clock deadline extension would not be: the
+                // excuse has to be re-earned in full inside every window, since
+                // `clear_unserviced` zeroes the accounting each time a challenge is
+                // written. With no stall the behaviour is identical to having no
+                // clause here, which is why the timeout gates are untouched.
+                if pending_keep_alive.is_some() && watch.unserviced >= KEEP_ALIVE_INTERVAL {
+                    tracing::warn!(
+                        target: "lodestone_server::stall",
+                        unserviced_millis = watch.unserviced.as_millis() as u64,
+                        waited_millis = keep_alive_sent_at.elapsed().as_millis() as u64,
+                        worst_arm = watch.worst().map(|(arm, _)| arm).unwrap_or(""),
+                        worst_millis = watch.worst().map(|(_, d)| d.as_millis() as u64).unwrap_or(0),
+                        "keep-alive unanswered, but this loop ate the whole window — not kicking",
+                    );
+                    keep_alive_sent_at = tokio::time::Instant::now();
+                    watch.clear_unserviced();
+                    watch.pass("keep_alive_tick");
+                    continue;
+                }
                 if pending_keep_alive.is_some() {
                     // Issue #279: tell the client *why* before hanging up.
                     // Vanilla sends `Component.translatable("disconnect.timeout")`
@@ -7486,16 +7704,34 @@ where
                     // call: `apply` takes `&mut state` and `encode_disconnect`
                     // reads it, which the borrow checker rejects as an argument
                     // expression.
+                    // **Who initiated the disconnect, in the log, at the moment it
+                    // happens.** "Timed out" is the *server's* verdict, and this is
+                    // the only producer of it in the workspace; a reader who sees the
+                    // string on a client has no way to tell it from a client-side
+                    // give-up without this line. The stall figures come with it
+                    // because they are what distinguishes a client that stopped
+                    // answering from a server that stopped listening.
+                    tracing::warn!(
+                        target: "lodestone_server::stall",
+                        waited_millis = keep_alive_sent_at.elapsed().as_millis() as u64,
+                        worst_arm = watch.worst().map(|(arm, _)| arm).unwrap_or(""),
+                        worst_millis = watch.worst().map(|(_, d)| d.as_millis() as u64).unwrap_or(0),
+                        "server is disconnecting this client for an unanswered keep-alive",
+                    );
                     let directive = proto.encode_disconnect(state, &timeout_reason());
                     let _ = apply(conn, &mut state, directive).await;
                     return Err(ServerError::KeepAliveTimeout);
                 }
                 next_keep_alive_id += 1;
                 pending_keep_alive = Some(next_keep_alive_id);
+                keep_alive_sent_at = tokio::time::Instant::now();
+                watch.clear_unserviced();
                 apply(conn, &mut state, proto.encode_keep_alive(next_keep_alive_id)).await?;
+                watch.pass("keep_alive_tick");
             }
 
             _ = time_sync_tick.tick() => {
+                watch.enter();
                 // **Issue #323's fix, and it is one line's worth of value.** This
                 // used to send `ticks_since(play_start)` — wall-clock elapsed since
                 // *this connection* joined — with `None` for the day clock. Every
@@ -7515,9 +7751,11 @@ where
                     proto.encode_set_time(time.game_time, Some(time.day_time)),
                 )
                 .await?;
+                watch.pass("time_sync_tick");
             }
 
             _ = vitals_tick.tick() => {
+                watch.enter();
                 // Issue #302: the periodic player save, on a counter rather than a
                 // clock. `PLAYER_SAVE_EVERY_VITALS_TICKS` of these 50 ms ticks, so
                 // no `Instant::now()` is involved — this crate links into a wasm32
@@ -7805,9 +8043,11 @@ where
                         .await?;
                     }
                 }
+                watch.pass("vitals_tick");
             }
 
             _ = container_sync_tick.tick() => {
+                watch.enter();
                 // The piece with no inbound packet driving it at all: the
                 // server's unified tick loop (`crate::tick::run_tick_loop`,
                 // issue #284) mutates the registry independently of any
@@ -7974,6 +8214,7 @@ where
                     )
                     .await?;
                 }
+                watch.pass("container_sync_tick");
             }
         }
     }
@@ -8204,6 +8445,10 @@ where
             &mut sprinting,
             &mut awaiting_chunk_batch_ack,
             &mut pending_chunk_batches,
+            // `None`: this target has no `select!` branch draining the stream, so a
+            // column enqueued into it would never be sent. See the parameter's own
+            // comment on `dispatch_play_packet`.
+            None,
             &commands,
             &mut advancements,
             player_uuid,

@@ -32,10 +32,26 @@ Two producers were encoding on the connection task, and both moved:
   it now hands back a `ColumnPayload`, and with an encoder attached the worker
   does `source.column(cx, cz)` *and* `encoder.encode_chunk(...)` before the
   column is dropped. The connection task receives finished frame bytes.
-- **`ViewTracker::build_batch`**, which runs on every chunk boundary the player
-  walks across — a strip of `2r + 1` columns, 33 at `view_radius = 16`. It calls
-  `generate_and_encode_columns_offloaded`, which folds the encode into the same
-  `spawn_blocking` as `generate_columns_parallel`.
+- **the walk path**, which runs on every chunk boundary the player crosses — a
+  strip of `2r + 1` columns, 33 at `view_radius = 16`. This was
+  `ViewTracker::build_batch` calling `generate_and_encode_columns_offloaded`;
+  it is now `send_view_update` enqueueing into the join pipeline, so the strip
+  encodes on the same per-column workers the join uses. See
+  [`server-view-streaming.md`](server-view-streaming.md) for why offloading the
+  work was not enough on its own, and
+  `generate_and_encode_columns_offloaded` for the fallback the borrowed-source
+  and `wasm32` paths still take.
+
+**The encode inside that fallback used to be serial**, which is worth recording
+because it looked like it had been parallelised. `generate_columns_parallel`
+fanned generation out over scoped threads, the closure joined them all, and
+*then* walked the joined `Vec` calling `encode_chunk` one column at a time on a
+single thread — ≈80 ms for a 33-column strip no matter how many cores generated
+it, which is the whole cost the offload existed to remove, relocated rather than
+removed. `chunk::map_columns_parallel` now applies the encode inside the worker
+that generated the column, and `generate_columns_parallel` is a thin wrapper over
+it with an identity transform. Peak memory fell with it: one column per worker
+instead of the whole strip held live purely to iterate afterwards.
 
 `ColumnPayload::Column` is the fallback arm, and it is the pre-existing path
 rather than a degenerate one: `chunk_encoder()` defaults to `None`, so every

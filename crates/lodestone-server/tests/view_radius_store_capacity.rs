@@ -388,10 +388,21 @@ async fn drive_slider<T: Transport>(
     // The slider goes down, then back up.
     set_view_distance(client, SHRUNK_RADIUS).await;
     // A shrink adds nothing, so it emits no batch at all — there is nothing to
-    // drain and nothing to ack. `set_view_radius`'s `build_batch` returns an empty
-    // `Vec` when the difference is empty.
+    // drain and nothing to ack. `ViewTracker::added_columns` returns an empty `Vec`
+    // when the difference is empty.
     set_view_distance(client, view_radius).await;
-    let regrow_columns = drain_one_batch(client).await;
+    // **`drain_join_view`, not `drain_one_batch`, and the change is the subject's
+    // own behaviour rather than a harness preference.** A re-grow's columns now go
+    // through the same streaming pipeline the join uses — `send_view_update`
+    // enqueues them and `serve_play`'s `select!` drains them a column at a time —
+    // so they arrive as a run of `JOIN_STREAM_BATCH_COLUMNS`-sized batches instead
+    // of one batch holding all 728. Reading a single batch here counted 16 and
+    // failed the precondition; the columns were not missing, only paced.
+    let regrow_columns = drain_join_view(
+        client,
+        view_columns(view_radius) - view_columns(SHRUNK_RADIUS),
+    )
+    .await;
 
     (join_columns, regrow_columns)
 }
@@ -835,10 +846,15 @@ async fn join_then_raise_then_probe(join_radius: i32, raised_radius: i32) -> Obs
     let join_columns = drain_join_view(&mut client, view_columns(join_radius)).await;
     ack_batch(&mut client).await;
 
-    // The raise. Everything from ring `join_radius + 1` outward is new, so this
-    // emits a batch of its own that has to be drained and acked.
+    // The raise. Everything from ring `join_radius + 1` outward is new, and it now
+    // streams as a run of `JOIN_STREAM_BATCH_COLUMNS`-sized batches rather than one
+    // batch holding the lot — see `drive_slider`'s own note on the same change.
     set_view_distance(&mut client, raised_radius).await;
-    let raised_columns = drain_one_batch(&mut client).await;
+    let raised_columns = drain_join_view(
+        &mut client,
+        view_columns(raised_radius) - view_columns(join_radius),
+    )
+    .await;
     ack_batch(&mut client).await;
     assert_eq!(
         join_columns + raised_columns,
@@ -850,7 +866,8 @@ async fn join_then_raise_then_probe(join_radius: i32, raised_radius: i32) -> Obs
     // The probe: down to 0, back up to the raised radius.
     set_view_distance(&mut client, 0).await;
     set_view_distance(&mut client, raised_radius).await;
-    let regrow_columns = drain_one_batch(&mut client).await;
+    let regrow_columns =
+        drain_join_view(&mut client, view_columns(raised_radius) - view_columns(0)).await;
 
     drop(client);
     server.shutdown().await;
