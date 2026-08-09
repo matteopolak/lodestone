@@ -381,6 +381,23 @@ rather than restating a constant. (§12.41)
 uniform-but-wrong frame from a localised blob. Ask *where*, not *what*, and **make failure output print a
 bounding box** — that diagnosed two premise-false controls in one step.
 
+**Validate the instrument before optimising the system — a wrong counter does not merely mislead about
+magnitude, it can invert the conclusion.** Measured: `vram_bytes` was computed from `stats.total_quads`, which
+is accumulated **inside the terrain draw loops, after the cull** — a per-frame *drawn* quantity wearing a
+*residency* label. Turning the camera 180° from the same eye moved the reported figure 26% (1,853,568 →
+1,365,552 B) while true residency was byte-identical at 5,777,856. It was also pricing every live-vanilla quad
+at the packed path's 72 B against a real `ModelVertex` quad's 152 B, so it under-reported ~2.1× **on top of**
+the cull factor: real mesh VRAM at RD 8 is ~67 MB live where that line printed under 32 MB.
+
+The conclusion drawn from it — *"we barely use any VRAM, so retain more"* — was therefore backwards twice: the
+arena **already** retains everything (a pooled suballocator whose blocks are never released), and usage was
+double what was shown. The prescribed fix would also have been actively harmful: there is no client-side
+view-radius eviction to add hysteresis to, so retaining past the server's unload signal would have broken the
+invariant behind *"never collide with terrain you cannot see"*. **So when a reported number looks wrong, the
+number is a hypothesis too.** The cheapest discriminator is usually an input that cannot physically affect the
+quantity — a pure camera rotation cannot change residency, so any movement in a residency counter under
+rotation alone localises the bug to the accounting before you read a line of the subsystem.
+
 **A throughput measurement structurally cannot see a latency defect, and the symptom will send you to the
 wrong instrument.** Measured while diagnosing a keep-alive timeout: the server kicked its own client because
 crossing a chunk boundary awaited generation *and* encode of a whole 33-column strip (361 on a jump) inside
