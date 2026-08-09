@@ -54,15 +54,31 @@ would measure the same thing three times:
 
 **Cost, because it is a real constraint on a repo with this much churn.** GitHub
 bills private-repo runner minutes with a per-OS multiplier: **Linux 1x, Windows
-2x, macOS 10x**. So the matrix's marginal cost is not "3x one job" — with a
-`check` leg at roughly 2–4 minutes, it is about `1x + 2x2 + 10x4 ≈ 45`
-Linux-equivalent minutes per run against the single Linux leg's ~2. macOS is the
-expensive leg by an order of magnitude and also the **least** informative one,
-because the dev machine is an Apple Silicon Mac and every local `just health` run
-already proves that platform. It is in the matrix because the request was
-explicitly "mac, linux, windows, and wasm", not because it carries its weight —
-if runner spend ever needs cutting, **drop the macOS leg first**, not the Windows
-one.
+2x, macOS 10x**. The matrix's cost is therefore not "3x one job". Using the
+measured wall times from run `31337815809` (see "Verification status"):
+
+| leg | wall | multiplier | billed-equivalent |
+|---|---|---|---|
+| `ubuntu-latest` | 98s | 1x | 98s |
+| `macos-latest` | 100s | 10x | 1,000s |
+| `windows-latest` | 531s | 2x | 1,062s |
+| **total** | | | **~2,160s ≈ 36 min** |
+
+against the ~1.6 minutes the single Linux leg used to cost — roughly a **22x**
+increase for this job, on a workflow that runs on every push to `main` and every
+PR.
+
+Two things follow, and the second is not what you would guess:
+
+- **macOS is the least informative leg per unit cost.** The dev machine is an
+  Apple Silicon Mac, so every local `just health` already proves that platform;
+  the leg exists because the request named it, not because it earns its 10x. If
+  runner spend needs cutting, drop it first.
+- **Windows is now the most expensive leg in absolute billed terms** (1,062s vs
+  macOS' 1,000s), purely because it runs without `sccache`. It is also the *only*
+  leg that has ever found something — a Windows-only defect on its first run — so
+  it is the one to keep. If its cost becomes a problem, the fix is to get a
+  compiler cache working there, not to drop the leg.
 
 No extra trigger gating was needed for this, and the obvious idea to add some
 would have been a no-op: the `on:` block is already `push: branches: [main]` plus
@@ -470,12 +486,30 @@ numbers as a baseline going forward.
 
 ### The three-OS matrix
 
-| leg | status |
-|---|---|
-| `check-default (ubuntu-latest)` | proven — this job has passed on every run since it landed |
-| `check-default (macos-latest)` | **inferred, not yet proven by a runner.** `just check` was run on the dev machine (Apple Silicon, the pinned nightly) after the `#[cfg]` gates landed: real exit code **0**, read from a file rather than from a pipeline. Same OS and architecture as the runner, but not the same machine — a runner-image difference (missing SDK, different Xcode) would not have shown up |
-| `check-default (windows-latest)` | **ran, and found a real Windows-only defect — in `sccache`, not in our code.** The pre-run guesses were half right: `just` and its `sh` resolved fine, `extractions/setup-just` worked, and the `apt-get` step correctly skipped, but `sccache` could not spawn `rustc` (below). `RUSTC_WRAPPER` is now empty on this leg; **whether that makes it green is not yet proven** — read the next run |
-| the non-Darwin `#[cfg]` arm | **proven locally, both directions** — see "Checking the other arm without a Linux host" below. Also confirmed by the Linux legs, which type-check it, and by the Linux `test` job, which links it |
+**All three legs are green on a real runner**, as of run `31337815809`. Measured
+wall times from that run, which are also the cost basis below:
+
+| leg | status | wall |
+|---|---|---|
+| `check-default (ubuntu-latest)` | ✅ pass | 98s |
+| `check-default (macos-latest)` | ✅ pass | 100s |
+| `check-default (windows-latest)` | ✅ pass | 531s |
+| the non-Darwin `#[cfg]` arm | ✅ proven **both directions** — locally by inverting the predicate (below), and on the runners by the Linux legs type-checking it and the Linux `test` job linking it | — |
+
+It took three runs to get there, and each red was informative rather than noise:
+
+1. **Run `31336089874`** — macOS green, Linux red. The gate's non-Darwin arm did
+   not compile: two files keep the transcription-size assertion outside the
+   reader, so `RUSAGE_INFO_V4_SIZE` was still referenced from ungated code
+   (`E0425`). `check-all` and `wasm` went red with it, from the same cause.
+2. **Run `31336570162`** — Linux, macOS and `check-all` green; Windows red on
+   `sccache` failing to spawn `rustc` (`os error 206`), which is an upstream
+   limitation and not our code.
+3. **Run `31337815809`** — all three green with `RUSTC_WRAPPER` empty on Windows.
+
+Windows is **5.4x slower than the other two legs** and that is expected, not a
+new problem: it is the one leg with no compiler cache, for the reason in the
+`sccache` section above.
 
 **Read the first run rather than assuming this table.** A matrix that certifies
 platforms nobody has built is worse than no matrix, and the Windows row above is
