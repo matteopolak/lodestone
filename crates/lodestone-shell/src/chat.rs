@@ -105,7 +105,12 @@
 //!   dispatcher computes the identical merged suggestion set vanilla's
 //!   client would have shown, this project's `command_suggestion` round
 //!   trip included. Filed as a named follow-up rather than built now — see
-//!   `docs/commands.md`.
+//!   `docs/commands.md`. **This applies to argument nodes inside a command
+//!   only.** The *non*-command case — Tab in an ordinary chat line — is
+//!   answered locally, exactly as vanilla does; see [`ChatInput::tab`] and
+//!   [`ChatInput::set_online_players`]. The names arrive as a plain
+//!   `Vec<String>` the caller refreshes, so this module still holds no client
+//!   handle.
 //! - At most one argument child per node is tried, with no backtracking
 //!   across several — real vanilla command trees essentially never branch
 //!   into more than one argument type at the same position, so this has no
@@ -152,6 +157,95 @@ use lodestone_model::command_tree::{
     ArgumentParser, CommandSuggestionEntry, CommandTree, NodeKind, StringKind,
 };
 
+/// Vanilla's cap on the recent-chat store — `new ArrayListDeque<>(100)` plus the
+/// `size() >= 100 → removeFirst()` guard in `ChatComponent.addRecentChat`.
+pub const RECENT_CHAT_MAX: usize = 100;
+
+/// The lines the player has **sent**, oldest first, for the Up/Down arrows.
+///
+/// Vanilla's `ChatComponent.recentChat`. The thing to notice is that it does
+/// **not** live on the chat screen: the deque belongs to the persistent HUD
+/// component and the screen only holds a *cursor* into it
+/// (`ChatScreen.historyPos`), so reopening chat still walks everything sent
+/// earlier in the session.
+///
+/// Here it is a field of [`ChatInput`], which is the equivalent placement rather
+/// than a shortcut: `ChatInput` is owned by the app for the whole process
+/// lifetime and survives every chat open, close and cancel — only its `buf` is
+/// screen-scoped. What matters is that the store outlives the screen, and it
+/// does. The cursor into it is [`ChatInput::history_pos`], reset on open exactly
+/// as `ChatScreen.init` resets `historyPos`.
+///
+/// Three behaviours transcribed from `addRecentChat`, each of which a plausible
+/// implementation gets wrong:
+///
+/// * newest is **last**, so Up walks *backwards* from one past the end;
+/// * a line equal to the current **last** entry is not stored at all —
+///   consecutive duplicates collapse, but a line repeated with something else in
+///   between is stored twice (`!message.equals(peekLast())`, not a set);
+/// * the cap is [`RECENT_CHAT_MAX`] and the *oldest* is dropped.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatHistory {
+    entries: Vec<String>,
+}
+
+impl ChatHistory {
+    /// An empty store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a line the player just sent — `ChatComponent.addRecentChat`.
+    ///
+    /// The line is **normalised first**, because vanilla records the normalised
+    /// form and not the keystrokes: `ChatScreen.handleChatInput` runs
+    /// `normalizeChatMessage` (`StringUtil.trimChatMessage(normalizeSpace(msg.trim()))`)
+    /// and only then `if (!msg.isEmpty())` guards the store. `normalizeSpace`
+    /// collapses every internal whitespace run to one space, so recalling
+    /// `"hello    world"` really does give back `"hello world"` — and, less
+    /// obviously, it is what makes the consecutive-duplicate check below fire for
+    /// two sends that differed only in spacing.
+    pub fn record(&mut self, line: &str) {
+        let line = normalize_space(line);
+        if line.is_empty() {
+            return;
+        }
+        if self.entries.last().is_some_and(|last| *last == line) {
+            return;
+        }
+        if self.entries.len() >= RECENT_CHAT_MAX {
+            self.entries.remove(0);
+        }
+        self.entries.push(line);
+    }
+
+    /// The stored lines, oldest first.
+    #[must_use]
+    pub fn entries(&self) -> &[String] {
+        &self.entries
+    }
+
+    /// How many lines are stored — the value `historyPos` starts at, and the
+    /// upper clamp `moveInHistory` uses.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether nothing has been sent yet.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// `StringUtils.normalizeSpace` — trim, then collapse every internal whitespace
+/// run to a single space.
+fn normalize_space(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// The line currently being typed. Kept separate from the log so opening the
 /// chat box, editing, and cancelling never touch the received history.
 #[derive(Debug, Clone, Default)]
@@ -160,6 +254,24 @@ pub struct ChatInput {
     /// Tab-completion state for **this** line — see [`ChatCompletion`] for why
     /// it lives inside the input rather than beside it.
     completion: ChatCompletion,
+    /// The player names Tab completes against when the line is **not** a
+    /// command, refreshed by the caller from the live tab list — see
+    /// [`Self::set_online_players`].
+    online_players: Vec<String>,
+    /// The cursor into [`ChatHistory`], in `0..=history.len()`.
+    ///
+    /// `history.len()` — one past the last entry — is vanilla's "live buffer"
+    /// slot, the value `ChatScreen.init` assigns. Walking off that slot stashes
+    /// the part-typed line in [`Self::history_buffer`]; walking back onto it
+    /// restores it. Reset by [`Self::take`], which is what the chat-open path
+    /// calls, so this reproduces `init`'s assignment without needing a hook of
+    /// its own.
+    history_pos: usize,
+    /// The part-typed line stashed when the arrows first leave the live slot —
+    /// `ChatScreen.historyBuffer`.
+    history_buffer: String,
+    /// Everything the player has sent this session — see [`ChatHistory`].
+    history: ChatHistory,
 }
 
 impl ChatInput {
@@ -216,10 +328,100 @@ impl ChatInput {
     }
 
     /// Clear and return the typed line, ready to compose into an action.
+    ///
+    /// Also rewinds the history cursor, which is how `ChatScreen.init`'s
+    /// `historyPos = getRecentChat().size()` is reproduced without a separate
+    /// open hook: every path that opens the chat box clears the buffer through
+    /// here first. [`Self::history_up`] resolves the cursor against the store it
+    /// is handed, so "one past the end" needs no length stored on this side.
     #[must_use]
     pub fn take(&mut self) -> String {
         self.completion.reset();
+        self.history_pos = usize::MAX;
+        self.history_buffer.clear();
         std::mem::take(&mut self.buf)
+    }
+
+    /// The player names Tab offers when the line is not a command.
+    ///
+    /// Vanilla recomputes this on every keystroke through
+    /// `ClientSuggestionProvider.getCustomTabSuggestions`; the caller refreshes
+    /// it from the live tab list instead, which keeps this module free of a
+    /// client handle exactly as its own header requires. Pass **every** entry,
+    /// listed or not: vanilla's provider reads `getOnlinePlayers()`, not
+    /// `getListedOnlinePlayers()`, so a player hidden from the tab overlay is
+    /// still completable.
+    pub fn set_online_players(&mut self, names: Vec<String>) {
+        self.online_players = names;
+    }
+
+    /// Record a line the player just sent, so the arrows can recall it —
+    /// `ChatComponent.addRecentChat`, called from
+    /// `ChatScreen.handleChatInput(msg, addToRecent = true)`.
+    ///
+    /// **Call this before [`Self::take`]**, which is what actually clears the
+    /// line: `take` is on the cancel path too, and a cancelled line is not part
+    /// of the history.
+    pub fn record_sent(&mut self, line: &str) {
+        self.history.record(line);
+    }
+
+    /// The lines sent this session — for a draw, and for a test to assert the
+    /// exact store rather than "something was remembered".
+    #[must_use]
+    pub fn history(&self) -> &ChatHistory {
+        &self.history
+    }
+
+    /// Up in the chat box — `ChatScreen.moveInHistory(-1)`.
+    ///
+    /// Returns whether the line changed, so the caller can tell a consumed key
+    /// from one that should fall through.
+    pub fn history_up(&mut self) -> bool {
+        self.move_in_history(-1)
+    }
+
+    /// Down in the chat box — `ChatScreen.moveInHistory(1)`.
+    pub fn history_down(&mut self) -> bool {
+        self.move_in_history(1)
+    }
+
+    /// `ChatScreen.moveInHistory`, transcribed.
+    ///
+    /// The three edge behaviours, all of which are easy to invent differently:
+    ///
+    /// * the cursor **clamps** at both ends rather than wrapping — Up at the
+    ///   oldest entry and Down at the live slot both do nothing, and vanilla
+    ///   detects that as `newPos == historyPos` and returns without touching the
+    ///   line;
+    /// * the part-typed line is **preserved**: leaving the live slot stashes it,
+    ///   coming back restores it, so a half-written message survives a look
+    ///   through the history;
+    /// * moving onto a stored entry cancels any suggestion list
+    ///   (`setAllowSuggestions(false)`), because the recalled line is not one the
+    ///   player is mid-way through typing.
+    fn move_in_history(&mut self, dir: i32) -> bool {
+        let max = self.history.len();
+        // `usize::MAX` is this side's spelling of "at the live slot", set by
+        // `take` before the length of the store is known here.
+        let pos = self.history_pos.min(max);
+        let new_pos = (pos as i64 + i64::from(dir)).clamp(0, max as i64) as usize;
+        if new_pos == pos {
+            return false;
+        }
+        if new_pos == max {
+            self.history_pos = max;
+            self.buf.clone_from(&self.history_buffer);
+        } else {
+            if pos == max {
+                self.history_buffer = self.buf.clone();
+            }
+            let recalled = self.history.entries()[new_pos].clone();
+            self.buf = recalled;
+            self.completion.reset();
+            self.history_pos = new_pos;
+        }
+        true
     }
 }
 
@@ -836,6 +1038,93 @@ impl SuggestionRequests {
     }
 }
 
+/// Byte offset of the word the cursor is in — `CommandSuggestions.getLastWordIndex`,
+/// whose body walks `WHITESPACE_PATTERN` (`(\s+)`) and keeps the **end** of the
+/// last match.
+///
+/// So it is the offset just past the final whitespace run, or `0` when there is
+/// none. Note this is the end of the *last* run and not the position of the last
+/// space: `"hi   Ste"` gives the index of `S`, three past the first space, which
+/// is why a `rfind(' ') + 1` transcription is only accidentally right on
+/// single-spaced input.
+fn last_word_index(text: &str) -> usize {
+    let mut result = 0;
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // ASCII whitespace is the whole of what `\s` matches for chat input, and
+        // a multi-byte char never contains an ASCII byte, so a byte walk is safe.
+        if bytes[i].is_ascii_whitespace() {
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            result = j;
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    result
+}
+
+/// The characters `SharedSuggestionProvider.MATCH_SPLITTER` treats as word
+/// boundaries inside a candidate — `CharMatcher.anyOf("._/")`.
+const MATCH_SPLITTER: [char; 3] = ['.', '_', '/'];
+
+/// `SharedSuggestionProvider.matchesSubStr`: does `input` start with `pattern`,
+/// at offset `0` or immediately after any [`MATCH_SPLITTER`] character?
+///
+/// **Not a plain `starts_with`, and not a plain `contains` either.** It is
+/// "prefix of some splitter-delimited segment", which for player names means
+/// `Notch_The_Second` is matched by `the` as well as by `notch` — but *not* by
+/// `otch`. Both callers pass already-lower-cased strings; the folding is the
+/// caller's job in vanilla too.
+fn matches_sub_str(pattern: &str, input: &str) -> bool {
+    let mut index = 0;
+    loop {
+        if input[index..].starts_with(pattern) {
+            return true;
+        }
+        match input[index..].find(MATCH_SPLITTER) {
+            Some(off) => index += off + 1,
+            None => return false,
+        }
+    }
+}
+
+/// The player-name candidates for a partly-typed word, in vanilla's own order.
+///
+/// Two orderings compose, and both come from vanilla:
+///
+/// 1. brigadier's `Suggestions.create` sorts the built list with
+///    `compareToIgnoreCase`;
+/// 2. `CommandSuggestions.sortSuggestions` then moves every candidate that
+///    literally **starts with** the lower-cased partial word ahead of the ones
+///    that only matched through a splitter, preserving (1) within each group.
+///
+/// So `Ste` offers `Steve` before `My_Steve`, and both before nothing else.
+fn player_name_candidates(names: &[String], partial: &str) -> Vec<Candidate> {
+    let needle = partial.to_lowercase();
+    let mut matched: Vec<&String> = names
+        .iter()
+        .filter(|name| matches_sub_str(&needle, &name.to_lowercase()))
+        .collect();
+    matched.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    matched.dedup();
+    let (prefix, rest): (Vec<&String>, Vec<&String>) = matched
+        .into_iter()
+        .partition(|name| name.to_lowercase().starts_with(&needle));
+    prefix
+        .into_iter()
+        .chain(rest)
+        .map(|name| Candidate {
+            text: name.clone(),
+            tooltip: None,
+        })
+        .collect()
+}
+
 /// The suggestion list currently spliced into the input line, and where it
 /// came from.
 ///
@@ -972,6 +1261,22 @@ impl ChatInput {
             return None;
         }
         self.completion.active = None;
+        // Vanilla forks here, and the fork is on the *line*, not the key:
+        // `CommandSuggestions.updateCommandInfo` computes `isCommand =
+        // commandsOnly || startsWithSlash`, and an ordinary chat line takes the
+        // `else if (!command.isBlank())` branch, which suggests online player
+        // names with no server round trip at all. So this path needs no command
+        // tree and works against any server — including one that has sent us no
+        // `minecraft:commands`.
+        if !self.buf.starts_with('/') {
+            if self.buf.trim().is_empty() {
+                return None;
+            }
+            let start = last_word_index(&self.buf);
+            let candidates = player_name_candidates(&self.online_players, &self.buf[start..]);
+            self.completion.begin(start, &mut self.buf, candidates);
+            return None;
+        }
         let tree = tree?;
         match complete(tree, &self.buf) {
             Completion::Local { start, candidates } => {
@@ -1130,6 +1435,251 @@ mod tests {
     }
 
     /// Command-tree tab completion and syntax highlighting (issue #46).
+    // -- Up/Down chat history (`ChatScreen.moveInHistory`) --------------
+
+    /// A chat box seeded with `sent`, already "reopened" — i.e. through `take`,
+    /// which is what rewinds the cursor to the live slot.
+    fn with_history(sent: &[&str]) -> ChatInput {
+        let mut input = ChatInput::new();
+        for line in sent {
+            input.record_sent(line);
+        }
+        let _ = input.take();
+        input
+    }
+
+    /// Up from the live slot recalls the **newest** line, not the oldest.
+    ///
+    /// The inversion this pins is the whole reason `recentChat` is a deque with
+    /// `addLast`: `moveInHistory(-1)` steps from `size()` to `size() - 1`, so the
+    /// first Up must land on the last thing sent. A store that pushed newest-first
+    /// would answer `"first"` here and look perfectly reasonable doing it.
+    #[test]
+    fn the_first_up_recalls_the_most_recent_line() {
+        let mut input = with_history(&["first", "second", "third"]);
+        assert!(input.history_up());
+        assert_eq!(input.as_str(), "third");
+        assert!(input.history_up());
+        assert_eq!(input.as_str(), "second");
+        assert!(input.history_up());
+        assert_eq!(input.as_str(), "first");
+    }
+
+    /// Both ends **clamp**; neither wraps.
+    ///
+    /// `newPos = Mth.clamp(historyPos + dir, 0, max)` followed by
+    /// `if (newPos != this.historyPos)`, so an arrow at the end is a no-op on the
+    /// line — and the caller still consumes the key, which is why
+    /// `handle_chat_history_key` ignores this return value.
+    #[test]
+    fn the_history_cursor_clamps_at_both_ends_rather_than_wrapping() {
+        let mut input = with_history(&["only"]);
+        assert!(input.history_up());
+        assert_eq!(input.as_str(), "only");
+        // Already at index 0: another Up changes nothing and reports so.
+        assert!(!input.history_up());
+        assert_eq!(input.as_str(), "only");
+        // Back to the live slot, then Down again — also a no-op, not a wrap
+        // round to "only".
+        assert!(input.history_down());
+        assert_eq!(input.as_str(), "");
+        assert!(!input.history_down());
+        assert_eq!(input.as_str(), "");
+    }
+
+    /// The part-typed line survives a look through the history.
+    ///
+    /// `historyBuffer` is stashed on the way out of the live slot and restored on
+    /// the way back in. Without it, glancing at an earlier message would silently
+    /// destroy whatever the player was in the middle of writing.
+    #[test]
+    fn a_part_typed_line_is_stashed_and_restored() {
+        let mut input = with_history(&["/gamemode creative"]);
+        input.push_str("half a thought");
+        assert!(input.history_up());
+        assert_eq!(input.as_str(), "/gamemode creative");
+        assert!(input.history_down());
+        assert_eq!(input.as_str(), "half a thought");
+    }
+
+    /// **Consecutive** duplicates collapse; a repeat with something in between
+    /// does not.
+    ///
+    /// `if (!message.equals(this.recentChat.peekLast()))` compares against the
+    /// last entry only — it is not a set, and reading it as one would lose the
+    /// second `"hi"` below.
+    #[test]
+    fn only_consecutive_duplicates_collapse() {
+        let mut input = ChatInput::new();
+        input.record_sent("hi");
+        input.record_sent("hi");
+        assert_eq!(input.history().entries(), ["hi"]);
+        input.record_sent("there");
+        input.record_sent("hi");
+        assert_eq!(input.history().entries(), ["hi", "there", "hi"]);
+    }
+
+    /// The store normalises before comparing, so two sends differing only in
+    /// spacing are the same entry — `normalizeSpace(msg.trim())`.
+    #[test]
+    fn the_store_normalises_whitespace_before_recording() {
+        let mut input = ChatInput::new();
+        input.record_sent("  hello    world  ");
+        assert_eq!(input.history().entries(), ["hello world"]);
+        // Same normalised form, so the duplicate check fires.
+        input.record_sent("hello world");
+        assert_eq!(input.history().entries().len(), 1);
+        // Whitespace-only never enters at all (`if (!msg.isEmpty())`).
+        input.record_sent("   ");
+        assert_eq!(input.history().entries().len(), 1);
+    }
+
+    /// The cap drops the **oldest**, and the predicted contents are exact.
+    ///
+    /// `RECENT_CHAT_MAX + 1` distinct lines named `m0..=m100` go in; the store
+    /// must hold `RECENT_CHAT_MAX` of them, `m1` first and `m100` last. A cap that
+    /// dropped the newest instead — or an off-by-one that kept 101 — is
+    /// separable from this, which a length-only assertion would not be.
+    #[test]
+    fn the_store_caps_at_a_hundred_and_drops_the_oldest() {
+        let mut input = ChatInput::new();
+        for i in 0..=RECENT_CHAT_MAX {
+            input.record_sent(&format!("m{i}"));
+        }
+        let entries = input.history().entries();
+        assert_eq!(entries.len(), RECENT_CHAT_MAX);
+        assert_eq!(entries[0], "m1");
+        assert_eq!(entries[RECENT_CHAT_MAX - 1], format!("m{RECENT_CHAT_MAX}"));
+    }
+
+    /// Reopening the chat box rewinds the cursor to the live slot, so the next Up
+    /// starts from the newest line again rather than continuing where the last
+    /// session left off — `ChatScreen.init`'s `historyPos = getRecentChat().size()`.
+    #[test]
+    fn reopening_the_box_rewinds_the_history_cursor() {
+        let mut input = with_history(&["a", "b"]);
+        assert!(input.history_up());
+        assert!(input.history_up());
+        assert_eq!(input.as_str(), "a");
+        // Send/cancel, i.e. the box closes and reopens.
+        let _ = input.take();
+        assert!(input.history_up());
+        assert_eq!(input.as_str(), "b");
+    }
+
+    // -- Tab-completing player names in ordinary chat -------------------
+
+    /// `getLastWordIndex` keeps the **end** of the final whitespace run.
+    #[test]
+    fn the_last_word_index_lands_past_a_whitespace_run() {
+        assert_eq!(last_word_index(""), 0);
+        assert_eq!(last_word_index("Ste"), 0);
+        assert_eq!(last_word_index("hi Ste"), 3);
+        // Three spaces: the index is past all of them, not past the first.
+        assert_eq!(last_word_index("hi   Ste"), 5);
+        // A trailing run leaves the cursor at end-of-string, so the partial word
+        // is empty and every name matches.
+        assert_eq!(last_word_index("hi "), 3);
+    }
+
+    /// `matchesSubStr` is "prefix of a splitter-delimited segment" — **not**
+    /// `contains`.
+    ///
+    /// `Another` contains `the` and must still be rejected; `Notch_The_Second`
+    /// matches because `the` begins a segment after `_`. Those two inputs are
+    /// chosen because they are the pair on which `contains` and the real rule
+    /// disagree; a test that only offered `Steve` for `Ste` passes under either.
+    #[test]
+    fn a_name_matches_only_at_a_splitter_boundary() {
+        let names = vec!["Another".to_owned(), "Notch_The_Second".to_owned()];
+        let candidates = player_name_candidates(&names, "the");
+        let got: Vec<&str> = candidates.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(got, ["Notch_The_Second"]);
+        // And the mid-segment substring really is rejected, so the rule above is
+        // not vacuously satisfied by everything matching.
+        assert!(player_name_candidates(&names, "otch").is_empty());
+    }
+
+    /// Prefix matches come first, alphabetically within each group.
+    ///
+    /// Two orderings compose (brigadier's case-insensitive sort, then
+    /// `sortSuggestions`'s partition), and the expected list below is the only one
+    /// consistent with both: `My_Steve` matched through the `_` so it sorts
+    /// *first* alphabetically and still lands *last*.
+    #[test]
+    fn candidates_put_prefix_matches_ahead_of_splitter_matches() {
+        let names = vec![
+            "My_Steve".to_owned(),
+            "steven".to_owned(),
+            "Steve".to_owned(),
+            "Alex".to_owned(),
+        ];
+        let candidates = player_name_candidates(&names, "ste");
+        let got: Vec<&str> = candidates.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(got, ["Steve", "steven", "My_Steve"]);
+    }
+
+    /// Tab in an ordinary chat line completes the **last word only**, leaving
+    /// everything before it untouched, and needs no command tree.
+    #[test]
+    fn tab_completes_a_player_name_in_a_plain_chat_line() {
+        let mut input = ChatInput::new();
+        input.set_online_players(vec!["Steve".to_owned(), "Alex".to_owned()]);
+        input.push_str("hey Ste");
+        // `None`: no tree, and none needed — this is the local branch.
+        assert!(input.tab(None).is_none());
+        assert_eq!(input.as_str(), "hey Ste".replace("Ste", "Steve"));
+        assert_eq!(
+            input.completion_candidates().iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            ["Steve"]
+        );
+    }
+
+    /// A second Tab on an unedited completed line cycles rather than recomputing —
+    /// the same `SuggestionsList.cycle` behaviour the command path already has.
+    #[test]
+    fn a_second_tab_cycles_through_matching_names() {
+        let mut input = ChatInput::new();
+        input.set_online_players(vec!["Steve".to_owned(), "steven".to_owned()]);
+        input.push_str("Ste");
+        assert!(input.tab(None).is_none());
+        assert_eq!(input.as_str(), "Steve");
+        assert!(input.tab(None).is_none());
+        assert_eq!(input.as_str(), "steven");
+        // …and wraps.
+        assert!(input.tab(None).is_none());
+        assert_eq!(input.as_str(), "Steve");
+    }
+
+    /// An empty (or whitespace-only) line offers nothing, matching vanilla's
+    /// `else if (!command.isBlank())` guard — the `else` arm sets
+    /// `pendingSuggestions = null`, so Tab on an empty box does not dump the whole
+    /// roster into the line.
+    #[test]
+    fn tab_on_a_blank_line_offers_nothing() {
+        let mut input = ChatInput::new();
+        input.set_online_players(vec!["Steve".to_owned()]);
+        assert!(input.tab(None).is_none());
+        assert_eq!(input.as_str(), "");
+        input.push_str("   ");
+        assert!(input.tab(None).is_none());
+        assert_eq!(input.as_str(), "   ");
+    }
+
+    /// A **command** line still takes the command path: with no tree it offers
+    /// nothing, and it must never fall back to player names — a `/` line whose
+    /// last word happened to prefix a player's name would otherwise be rewritten
+    /// into a name where the tree meant an argument.
+    #[test]
+    fn a_command_line_never_falls_back_to_player_names() {
+        let mut input = ChatInput::new();
+        input.set_online_players(vec!["Steve".to_owned()]);
+        input.push_str("/msg Ste");
+        assert!(input.tab(None).is_none());
+        assert_eq!(input.as_str(), "/msg Ste");
+        assert!(input.completion_candidates().is_empty());
+    }
+
     mod command_ux {
         use lodestone_model::{ResourceKey, command_tree::RawCommandNode};
 
