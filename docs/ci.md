@@ -474,12 +474,40 @@ numbers as a baseline going forward.
 |---|---|
 | `check-default (ubuntu-latest)` | proven — this job has passed on every run since it landed |
 | `check-default (macos-latest)` | **inferred, not yet proven by a runner.** `just check` was run on the dev machine (Apple Silicon, the pinned nightly) after the `#[cfg]` gates landed: real exit code **0**, read from a file rather than from a pipeline. Same OS and architecture as the runner, but not the same machine — a runner-image difference (missing SDK, different Xcode) would not have shown up |
-| `check-default (windows-latest)` | **unproven.** There is no Windows host here, and nothing about this leg has ever executed. The specific risks: `just` shells out to `sh`, which should come from Git for Windows on the runner's PATH but has not been observed doing so; `sccache` with MSVC; and `MAX_PATH` on a deep `target/` |
+| `check-default (windows-latest)` | **ran, and found a real Windows-only defect — in `sccache`, not in our code.** The pre-run guesses were half right: `just` and its `sh` resolved fine, `extractions/setup-just` worked, and the `apt-get` step correctly skipped, but `sccache` could not spawn `rustc` (below). `RUSTC_WRAPPER` is now empty on this leg; **whether that makes it green is not yet proven** — read the next run |
 | the non-Darwin `#[cfg]` arm | **proven locally, both directions** — see "Checking the other arm without a Linux host" below. Also confirmed by the Linux legs, which type-check it, and by the Linux `test` job, which links it |
 
 **Read the first run rather than assuming this table.** A matrix that certifies
 platforms nobody has built is worse than no matrix, and the Windows row above is
 exactly that until a run replaces it.
+
+### `sccache` cannot wrap `rustc` on Windows here
+
+The Windows leg's first run failed with `sccache: error: failed to spawn Command
+{…}` and **`os error 206`** — `ERROR_FILENAME_EXCED_RANGE`, "The filename or
+extension is too long". The command in question is the `lodestone-shell` `rustc`
+invocation, which carries several hundred
+`-L dependency=D:\a\lodestone\lodestone\target\debug\build\…\out` flags and
+exceeds Windows' 32,767-character command-line limit. Cargo can spawn that
+command; `sccache` re-spawning it cannot.
+
+So the Windows leg sets `RUSTC_WRAPPER: ""` — the escape hatch this file already
+documented — and skips `sccache-action` entirely. Two things make that work and
+are worth keeping:
+
+- An environment variable beats a config file in Cargo's precedence, which
+  matters because the **committed** `.cargo/config.toml` has an unconditional
+  `build.rustc-wrapper = "/opt/homebrew/bin/sccache"` — a path that exists on no
+  runner at all. The empty env var disables the wrapper rather than leaving cargo
+  pointed at a missing binary.
+- The per-leg value comes from a `matrix.include` entry, **not** from
+  `${{ matrix.os == 'windows-latest' && '' || 'sccache' }}`. That expression looks
+  right and is a trap: an empty string is falsy in a GitHub expression, so the
+  `&&` yields it, the `||` then fires anyway, and all three legs get `sccache`.
+
+The cost is that the Windows leg builds without a compiler cache. Given it is the
+2x runner and not the 10x one, that was the cheaper trade than debugging an
+upstream limitation.
 
 ### Checking the other arm without a Linux host
 

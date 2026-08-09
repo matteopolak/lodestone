@@ -122,7 +122,34 @@ jobs:
       # "green job that ran nothing" shape this file tries to avoid.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Spelled out with `include` rather than as a bare `os:` list because the
+        # Windows leg needs `rustc_wrapper` empty, and the tempting one-liner
+        # `${{ matrix.os == 'windows-latest' && '' || 'sccache' }}` is a TRAP: an
+        # empty string is falsy in a GitHub expression, so the `&&` yields it, the
+        # `||` then fires anyway and every leg gets `sccache`. A matrix value
+        # cannot be misread that way.
+        include:
+          - os: ubuntu-latest
+            rustc_wrapper: sccache
+          - os: macos-latest
+            rustc_wrapper: sccache
+          # sccache is DISABLED on Windows, and this is a measured limitation
+          # rather than a preference. `sccache` re-spawns `rustc` itself, and the
+          # `lodestone-shell` invocation carries several hundred
+          # `-L dependency=D:\a\lodestone\lodestone\target\debug\build\…` flags —
+          # past Windows' 32,767-character command-line limit. The leg failed with
+          # `sccache: error: failed to spawn Command {…}` / `os error 206`
+          # (ERROR_FILENAME_EXCED_RANGE, "The filename or extension is too long")
+          # while every other leg passed. Cargo can spawn that command; sccache
+          # in front of it cannot. `RUSTC_WRAPPER: ""` is the escape hatch
+          # docs/ci.md already documents for exactly this case, and an env var
+          # beats the committed `.cargo/config.toml` `build.rustc-wrapper` line in
+          # cargo's config precedence — which matters here, because that line
+          # hardcodes a Homebrew path that does not exist on any runner.
+          - os: windows-latest
+            rustc_wrapper: ""
+    env:
+      RUSTC_WRAPPER: ${{ matrix.rustc_wrapper }}
     steps:
       - uses: actions/checkout@v4
       # Linux only. macOS reaches CoreAudio and Windows reaches WASAPI through
@@ -140,7 +167,10 @@ jobs:
           # Per-OS key: the three legs build materially different `target/`s and
           # would otherwise thrash one cache entry between them.
           shared-key: check-default-${{ matrix.os }}
+      # Skipped on the Windows leg, where the wrapper is disabled above — there is
+      # no point installing a binary and a cache server nothing will invoke.
       - uses: mozilla-actions/sccache-action@v0.0.11
+        if: matrix.rustc_wrapper != ''
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
         with:
@@ -158,6 +188,8 @@ jobs:
           set -eu
           rustc --version
           cargo --version
+          # Empty on the Windows leg by design — see the matrix comment.
+          echo "RUSTC_WRAPPER=${RUSTC_WRAPPER:-<unset>}"
       # `shell: bash` on all three legs so the command is literally identical
       # everywhere. Only Windows is affected (bash is already the default on the
       # other two), where the default would be pwsh; `just` itself shells out to
