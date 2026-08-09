@@ -34,11 +34,15 @@
 //!   (`scripts/live-oracles/creative.sh`, Apple `container`, **not** Docker) —
 //!   never a hand-written expectation.
 //!
-//! # Nothing sends this yet
+//! # This gate is about the projection's *shape*, not about the wire
 //!
-//! No protocol family in this workspace has a `COMMANDS` **encode** arm; that is a
-//! later unit. So this gate proves the projection is right, and tab completion
-//! against the server's own commands does not work end to end.
+//! `V770ServerProtocol::encode_commands` now exists and `server.rs` sends the tree
+//! at join, so tab completion against the server's own commands does work end to
+//! end. That is gated separately, in `command_tree_encode.rs`, which re-encodes
+//! this same fixture and requires byte identity with it. Keep the two apart: this
+//! one asks "does our declared tree agree with vanilla's per command", that one
+//! asks "do our bytes agree with vanilla's bytes", and a single test doing both
+//! would fail for either reason with one message.
 
 use std::path::PathBuf;
 

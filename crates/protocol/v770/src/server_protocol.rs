@@ -53,6 +53,13 @@
 mod chunk_encode_identity;
 
 use lodestone_core::{Ctx, Decode, Encode, Nbt, NbtTag, Reader, Writer, write_network_nbt};
+// The command tree's *encode* side. `CommandTree` is aliased because this module
+// already deals in `lodestone_world`/`lodestone_server` column types with short
+// names and an unqualified `CommandTree` here would read as a server-side
+// Brigadier tree, which is a different type in a different crate.
+use lodestone_model::command_tree::{
+    ArgumentParser, CommandTree as WireCommandTree, NodeKind, RawCommandNode, StringKind,
+};
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, GameMode, ItemStack, ResourceKey, Rotation,
     SoundCategory, Text, TextContent, Vec3, Vec3f,
@@ -1273,6 +1280,278 @@ fn encode_set_time_body(game_time: i64, day_time: Option<i64>) -> Vec<u8> {
             w.var_i32(0);
         }
     }
+    w.into_vec()
+}
+
+/// The `minecraft:command_argument_type` registry id of one parser, plus that
+/// parser's own network payload, written to `w`.
+///
+/// # Where the ids come from
+///
+/// `.cache/mc/26.2/generated/reports/registries.json`'s
+/// `minecraft:command_argument_type` block, whose `protocol_id`s are `0..=56` in
+/// exactly this order. Mojang's generator, not a community table and not this
+/// crate's own decoder — which matters, because writing the encoder from
+/// `V770Adapter`'s `read_argument_parser` alone would inherit any mistake that
+/// already had. The two agree; that agreement is now evidence rather than an
+/// assumption.
+///
+/// # Payloads, each from its own `ArgumentTypeInfo::serializeToNetwork`
+///
+/// | parsers | payload |
+/// |---|---|
+/// | the four Brigadier numerics | `ArgumentUtils.createNumberFlags` byte (bit 0 min, bit 1 max) then only the **present** bounds |
+/// | `brigadier:string` | `writeEnum`, i.e. a VarInt `StringType` ordinal |
+/// | `minecraft:entity` | one flags byte, bit 0 `single`, bit 1 `playersOnly` |
+/// | `minecraft:score_holder` | one flags byte, bit 0 `multiple` |
+/// | `minecraft:time` | a bare big-endian `int` minimum — **no** flags byte |
+/// | the five `resource*` | `writeResourceKey` → `writeIdentifier`, one VarInt-length UTF-8 string |
+/// | everything else | nothing at all (`SingletonArgumentInfo::serializeToNetwork` is empty) |
+///
+/// A bound is *absent* exactly when it equals its type's sentinel — vanilla's own
+/// test is `template.min != Integer.MIN_VALUE` and, for the floating types,
+/// `!= -Float.MAX_VALUE` / `Float.MAX_VALUE`. So the flags byte is derived here
+/// from the same comparison rather than from a separate "has bound" field, which
+/// is what keeps it in step with the decoder's mirror-image reconstruction.
+fn write_argument_parser(w: &mut Writer, parser: &ArgumentParser) {
+    /// `ArgumentUtils.NUMBER_FLAG_MIN`.
+    const HAS_MIN: u8 = 1;
+    /// `ArgumentUtils.NUMBER_FLAG_MAX`.
+    const HAS_MAX: u8 = 2;
+
+    match parser {
+        ArgumentParser::Bool => w.var_i32(0),
+        ArgumentParser::Float { min, max } => {
+            w.var_i32(1);
+            let has_min = *min != -f32::MAX;
+            let has_max = *max != f32::MAX;
+            w.u8(u8::from(has_min) * HAS_MIN | u8::from(has_max) * HAS_MAX);
+            if has_min {
+                w.f32(*min);
+            }
+            if has_max {
+                w.f32(*max);
+            }
+        }
+        ArgumentParser::Double { min, max } => {
+            w.var_i32(2);
+            let has_min = *min != -f64::MAX;
+            let has_max = *max != f64::MAX;
+            w.u8(u8::from(has_min) * HAS_MIN | u8::from(has_max) * HAS_MAX);
+            if has_min {
+                w.f64(*min);
+            }
+            if has_max {
+                w.f64(*max);
+            }
+        }
+        ArgumentParser::Integer { min, max } => {
+            w.var_i32(3);
+            let has_min = *min != i32::MIN;
+            let has_max = *max != i32::MAX;
+            w.u8(u8::from(has_min) * HAS_MIN | u8::from(has_max) * HAS_MAX);
+            if has_min {
+                w.i32(*min);
+            }
+            if has_max {
+                w.i32(*max);
+            }
+        }
+        ArgumentParser::Long { min, max } => {
+            w.var_i32(4);
+            let has_min = *min != i64::MIN;
+            let has_max = *max != i64::MAX;
+            w.u8(u8::from(has_min) * HAS_MIN | u8::from(has_max) * HAS_MAX);
+            if has_min {
+                w.i64(*min);
+            }
+            if has_max {
+                w.i64(*max);
+            }
+        }
+        ArgumentParser::String(kind) => {
+            w.var_i32(5);
+            w.var_i32(match kind {
+                StringKind::SingleWord => 0,
+                StringKind::QuotablePhrase => 1,
+                StringKind::GreedyPhrase => 2,
+            });
+        }
+        ArgumentParser::Entity { single, players_only } => {
+            w.var_i32(6);
+            w.u8(u8::from(*single) | u8::from(*players_only) << 1);
+        }
+        ArgumentParser::GameProfile => w.var_i32(7),
+        ArgumentParser::BlockPos => w.var_i32(8),
+        ArgumentParser::ColumnPos => w.var_i32(9),
+        ArgumentParser::Vec3 => w.var_i32(10),
+        ArgumentParser::Vec2 => w.var_i32(11),
+        ArgumentParser::BlockState => w.var_i32(12),
+        ArgumentParser::BlockPredicate => w.var_i32(13),
+        ArgumentParser::ItemStack => w.var_i32(14),
+        ArgumentParser::ItemPredicate => w.var_i32(15),
+        ArgumentParser::TeamColor => w.var_i32(16),
+        ArgumentParser::HexColor => w.var_i32(17),
+        ArgumentParser::Component => w.var_i32(18),
+        ArgumentParser::Style => w.var_i32(19),
+        ArgumentParser::Message => w.var_i32(20),
+        ArgumentParser::NbtCompoundTag => w.var_i32(21),
+        ArgumentParser::NbtTag => w.var_i32(22),
+        ArgumentParser::NbtPath => w.var_i32(23),
+        ArgumentParser::Objective => w.var_i32(24),
+        ArgumentParser::ObjectiveCriteria => w.var_i32(25),
+        ArgumentParser::Operation => w.var_i32(26),
+        ArgumentParser::Particle => w.var_i32(27),
+        ArgumentParser::Angle => w.var_i32(28),
+        ArgumentParser::Rotation => w.var_i32(29),
+        ArgumentParser::ScoreboardSlot => w.var_i32(30),
+        ArgumentParser::ScoreHolder { multiple } => {
+            w.var_i32(31);
+            w.u8(u8::from(*multiple));
+        }
+        ArgumentParser::Swizzle => w.var_i32(32),
+        ArgumentParser::Team => w.var_i32(33),
+        ArgumentParser::ItemSlot => w.var_i32(34),
+        ArgumentParser::ItemSlots => w.var_i32(35),
+        ArgumentParser::ResourceLocation => w.var_i32(36),
+        ArgumentParser::Function => w.var_i32(37),
+        ArgumentParser::EntityAnchor => w.var_i32(38),
+        ArgumentParser::IntRange => w.var_i32(39),
+        ArgumentParser::FloatRange => w.var_i32(40),
+        ArgumentParser::Dimension => w.var_i32(41),
+        ArgumentParser::GameMode => w.var_i32(42),
+        ArgumentParser::Time { min } => {
+            w.var_i32(43);
+            w.i32(*min);
+        }
+        ArgumentParser::ResourceOrTag { registry } => {
+            w.var_i32(44);
+            w.string(&registry.to_string());
+        }
+        ArgumentParser::ResourceOrTagKey { registry } => {
+            w.var_i32(45);
+            w.string(&registry.to_string());
+        }
+        ArgumentParser::Resource { registry } => {
+            w.var_i32(46);
+            w.string(&registry.to_string());
+        }
+        ArgumentParser::ResourceKeyArg { registry } => {
+            w.var_i32(47);
+            w.string(&registry.to_string());
+        }
+        ArgumentParser::ResourceSelector { registry } => {
+            w.var_i32(48);
+            w.string(&registry.to_string());
+        }
+        ArgumentParser::TemplateMirror => w.var_i32(49),
+        ArgumentParser::TemplateRotation => w.var_i32(50),
+        ArgumentParser::Heightmap => w.var_i32(51),
+        ArgumentParser::LootTable => w.var_i32(52),
+        ArgumentParser::LootPredicate => w.var_i32(53),
+        ArgumentParser::LootModifier => w.var_i32(54),
+        ArgumentParser::Dialog => w.var_i32(55),
+        ArgumentParser::Uuid => w.var_i32(56),
+        // A parser id this build does not model. Nothing but the raw id can be
+        // written — the payload was never decoded, so there is none to reproduce —
+        // and that is exactly what our own decoder assumes for an unknown id, so
+        // the two ends stay aligned. Unreachable from a decode (an unmodeled id
+        // becomes `NodeKind::Unrecognized`, handled by the node writer) and
+        // unreachable from `lodestone-server`'s projection, which only ever names
+        // parsers its own `McArg`s declare.
+        ArgumentParser::Unknown(id) => w.var_i32(*id),
+    }
+}
+
+/// Writes one `ClientboundCommandsPacket.Entry`: `Entry::write`'s exact order —
+/// the flags byte, the child-index array (`writeVarIntArray`, so a VarInt count
+/// then VarInt elements), the redirect index **only** when `FLAG_REDIRECT` is
+/// set, then the type-dependent stub.
+///
+/// The stub order for an argument is `writeUtf(name)`, the parser id, the parser
+/// payload, and only then the custom-suggestions identifier — the suggestions id
+/// comes **after** the payload, which is the one field order here that cannot be
+/// guessed from field names and which `ArgumentNodeStub::write` fixes.
+///
+/// A [`NodeKind::Unrecognized`] node is written as a **root-type** entry, keeping
+/// its children, redirect and executable bit. That is not a fallback invented
+/// here: it is what a client already does with such a node, since
+/// `ClientboundCommandsPacket.read` returns a null stub and `NodeResolver.resolve`
+/// builds a bare `RootCommandNode` for it. Re-encoding it as an argument is
+/// impossible anyway — a node that failed to decode carries neither a name nor a
+/// payload.
+fn write_command_node(w: &mut Writer, node: &RawCommandNode) {
+    /// `TYPE_ROOT`, and the type of an unrecognised node's degraded form.
+    const TYPE_ROOT: u8 = 0;
+    /// `TYPE_LITERAL`.
+    const TYPE_LITERAL: u8 = 1;
+    /// `TYPE_ARGUMENT`.
+    const TYPE_ARGUMENT: u8 = 2;
+    /// `FLAG_EXECUTABLE`.
+    const EXECUTABLE: u8 = 4;
+    /// `FLAG_REDIRECT`.
+    const REDIRECT: u8 = 8;
+    /// `FLAG_CUSTOM_SUGGESTIONS`.
+    const CUSTOM_SUGGESTIONS: u8 = 16;
+    /// `FLAG_RESTRICTED`.
+    const RESTRICTED: u8 = 32;
+
+    let mut flags = match &node.kind {
+        NodeKind::Root | NodeKind::Unrecognized { .. } => TYPE_ROOT,
+        NodeKind::Literal { .. } => TYPE_LITERAL,
+        NodeKind::Argument { .. } => TYPE_ARGUMENT,
+    };
+    if node.executable {
+        flags |= EXECUTABLE;
+    }
+    if node.redirect.is_some() {
+        flags |= REDIRECT;
+    }
+    if node.restricted {
+        flags |= RESTRICTED;
+    }
+    if let NodeKind::Argument { suggestions: Some(_), .. } = &node.kind {
+        flags |= CUSTOM_SUGGESTIONS;
+    }
+    w.u8(flags);
+
+    // `writeVarIntArray`: count then elements. The cast is checked against the
+    // node count by the caller, which is the only place that knows it.
+    w.var_i32(node.children.len() as i32);
+    for &child in &node.children {
+        w.var_i32(child as i32);
+    }
+    if let Some(redirect) = node.redirect {
+        w.var_i32(redirect as i32);
+    }
+    match &node.kind {
+        NodeKind::Root | NodeKind::Unrecognized { .. } => {}
+        NodeKind::Literal { name } => w.string(name),
+        NodeKind::Argument { name, parser, suggestions } => {
+            w.string(name);
+            write_argument_parser(w, parser);
+            if let Some(provider) = suggestions {
+                w.string(&provider.to_string());
+            }
+        }
+    }
+}
+
+/// Encodes a whole `minecraft:commands` payload (clientbound id 16).
+///
+/// `ClientboundCommandsPacket::write` is `writeCollection(entries, …)` then
+/// `writeVarInt(rootIndex)` — the node list **first**, the root index last, which
+/// is the mirror of `V770Adapter`'s `decode_command_tree` and the ordering a
+/// round-trip cannot catch you getting wrong if both ends agree wrongly. Read
+/// against the vanilla record, not against the decoder.
+fn encode_commands_body(tree: &WireCommandTree) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(tree.len() as i32);
+    for index in 0..tree.len() {
+        let node = tree.node(index).expect("index < len is always in range");
+        write_command_node(&mut w, node);
+    }
+    w.var_i32(tree.root() as i32);
     w.into_vec()
 }
 
@@ -3658,6 +3937,13 @@ impl ServerProtocol for V770ServerProtocol {
         ServerDirective::Send {
             packet_id: play::clientbound::TAKE_ITEM_ENTITY,
             payload: w.into_vec(),
+        }
+    }
+
+    fn encode_commands(&self, tree: &WireCommandTree) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::COMMANDS,
+            payload: encode_commands_body(tree),
         }
     }
 

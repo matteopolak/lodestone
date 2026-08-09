@@ -33,7 +33,7 @@
 //! |---|---|
 //! | execution | [`ServerCommands::run`] → `parse_filtered` → the executor table |
 //! | suggestion | [`ServerCommands::suggest`] → `suggest_filtered` |
-//! | the wire | [`ServerCommands::wire_tree`] → [`wire::project`] |
+//! | the wire | [`ServerCommands::wire_tree_for`] → [`wire::project_filtered`] |
 //!
 //! [`Registrar::arg`] installs a node's parser **and** records its wire identity
 //! in the same call, from one [`lodestone_command_mc::McArg`] value, so the
@@ -41,10 +41,14 @@
 //! guards against is specific: a client that autocompletes something the server
 //! then rejects.
 //!
-//! **Nothing sends the wire tree yet.** No protocol family in this workspace has a
-//! `COMMANDS` (id 16) *encode* arm — that is a later unit. The projection exists
-//! and is gated against a real 26.2 server's captured tree; autocomplete against
-//! the server's own commands does not work end to end.
+//! **The wire tree is sent at join.** `crate::server`'s Play handoff calls
+//! [`ServerCommands::wire_tree_for`] with the connection's resolved permission
+//! level and hands the result to
+//! [`ServerProtocol::encode_commands`](crate::ServerProtocol::encode_commands),
+//! at vanilla's own position in the sequence — `PlayerList.placeNewPlayer` sends
+//! it from `sendPlayerPermissionLevel`, after the abilities packet and before
+//! `sendLevelInfo`. A protocol family with no `encode_commands` override sends
+//! nothing, so the legacy families degrade silently rather than breaking.
 //!
 //! # The execution model
 //!
@@ -245,6 +249,23 @@ impl ServerCommands {
     #[must_use]
     pub fn wire_tree(&self) -> WireCommandTree {
         wire::project(&self.inner.tree, &self.inner.wire)
+            .expect("a Registrar-built tree always projects to a consistent index graph")
+    }
+
+    /// The projection a player at permission `level` is allowed to see — what the
+    /// join sequence actually sends.
+    ///
+    /// Not [`Self::wire_tree`] with a filter bolted on afterwards: pruning has to
+    /// happen *during* the walk, because dropping a node renumbers every index
+    /// after it. See [`wire::project_filtered`] for the two vanilla behaviours it
+    /// reproduces and why a denied node takes its subtree with it.
+    ///
+    /// # Panics
+    ///
+    /// Never, for a [`Registrar`]-built tree — same terms as [`Self::wire_tree`].
+    #[must_use]
+    pub fn wire_tree_for(&self, level: u8) -> WireCommandTree {
+        wire::project_filtered(&self.inner.tree, &self.inner.wire, &level_filter(level))
             .expect("a Registrar-built tree always projects to a consistent index graph")
     }
 
