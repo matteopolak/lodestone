@@ -77,6 +77,28 @@ its net HUD line); joining any real server does not. Its `*args` carries the
 `web/README.md` defaults so the bare recipe is useful, which is why it is the
 only recipe here with a default argument.
 
+**`run-wasm` starts the relay itself**, so the browser you get can actually join
+something rather than only render; `LODESTONE_NO_RELAY=1` serves the page alone.
+That is why its body lives in `scripts/run-wasm.sh` rather than inline: two
+long-lived servers in one command need a trap, so the relay cannot outlive the
+run and hold its port for the next one. `LODESTONE_RELAY_ARGS` carries
+`relay_defaults` into the script, keeping one definition of the endpoints shared
+with `run-relay`; the script also reads `LODESTONE_TARGET_DIR`/`LODESTONE_JOBS`
+itself and converts them to **flags**, so the one cargo command it runs honours a
+private target dir instead of silently bypassing it.
+
+**Measured gotcha, and the reason that script is shaped the way it is:** a
+`trap … EXIT INT TERM` does **not** fire while bash is blocked on a foreground
+child, because a caught signal is deferred until the current foreground command
+finishes — and `trunk serve` never finishes. The first version ran trunk in the
+foreground and a `SIGTERM` to the script left **both** trunk and the relay alive,
+still holding the port. Ctrl-C in a terminal happened to work, because `SIGINT`
+goes to the whole foreground process *group* and reached the children directly —
+which is precisely why this survives casual testing and why the port-already-bound
+pre-flight check exists at all. Trunk therefore runs in the **background** with
+the script blocking in `wait`, which bash interrupts to run the handler. Do not
+simplify that back into a foreground call.
+
 Both new recipes carry a `[doc("…")]` attribute. Without one, `just --list`
 shows the **last comment line** before a recipe, which for anything carrying real
 rationale is a mid-sentence fragment — `wasm-check` listed as `original).` and
