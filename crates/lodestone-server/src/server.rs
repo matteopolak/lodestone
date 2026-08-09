@@ -2343,6 +2343,53 @@ where
                 )
                 .await?;
 
+                // The Brigadier command tree. **Nothing sent this before, so the
+                // client had no autocomplete and no command highlighting at all** —
+                // `lodestone-shell`'s chat box, its `CommandTreeCell` and the whole
+                // suggestion UX were complete and starved of input.
+                //
+                // Position taken from `PlayerList.placeNewPlayer`, which calls
+                // `sendPlayerPermissionLevel` — the method that sends the tree —
+                // after the abilities packet and before `sendLevelInfo`. So it goes
+                // here: after abilities above, before the clock sync below, and
+                // before any chunk goes out. Appending it after chunk streaming
+                // would have been easier (the `CommandSession` that owns the tree
+                // is built down there) and it is the wrong place.
+                //
+                // The tree is pruned to this connection's own permission level, as
+                // vanilla's `Commands.sendCommands` prunes with
+                // `fillUsableCommands`: a level-0 player is not sent `/gamemode`'s
+                // node, which is what stops the client suggesting a command the
+                // server will refuse.
+                //
+                // `login_uuid` cannot be `None` here: reaching Play requires
+                // `ConfigurationFinished`, which requires `LoginAcknowledged`, which
+                // requires the `LoginStart` arm that sets it. The `unwrap_or_default`
+                // is a total fallback rather than a panic because a nil uuid resolves
+                // to no player and therefore no permissions — failing closed, not
+                // open. On `wasm32` there is no `AccessHandle` in this signature at
+                // all (the whole ops/whitelist/ban feature is native-only), and the
+                // browser build is the single-player owner's own world, so level 4 is
+                // the honest answer there rather than 0 — which would lock the owner
+                // out of `/gamemode` in their own game, and now would also delete its
+                // node from the tree they are sent.
+                //
+                // All three bindings are consumed again by the `CommandSession`
+                // further down; see its own comment for why reuse rather than a
+                // second construction.
+                let player_uuid = login_uuid.unwrap_or_default();
+                #[cfg(not(target_arch = "wasm32"))]
+                let permission_level = access.command_permission_level(player_uuid);
+                #[cfg(target_arch = "wasm32")]
+                let permission_level = 4;
+                let builtins = crate::commands::ServerCommands::new();
+                apply(
+                    conn,
+                    &mut state,
+                    proto.encode_commands(&builtins.wire_tree_for(permission_level)),
+                )
+                .await?;
+
                 // Full clock sync at join, mirroring vanilla's
                 // `ServerClockManager::createFullSyncPacket`, sent by
                 // `PlayerList.sendLevelInfo` before chunk streaming starts
@@ -2633,37 +2680,24 @@ where
                 // streamed, and the ceiling a later `ClientInformationChanged`
                 // may raise this connection to. See `ViewTracker::max_radius`.
                 let view = ViewTracker::new((spawn_cx, spawn_cz), view_radius, max_view_radius);
-                // Issues #48/#464. Built here, at the Play handoff, because
-                // this is the first point where both halves of a caller's
-                // identity are known and settled: `login_uuid` is the uuid
-                // `login_success` echoed to this client, and `username` is the
-                // name that survived `is_valid_player_name`. Nothing the
-                // player later *sends* can change either, which is exactly the
-                // property the seam needs — see the `ServerBound::ChatCommand`
-                // arm in `dispatch_play_packet`.
+                // Issues #48/#464. `player_uuid`, `permission_level` and
+                // `builtins` are the bindings the `COMMANDS` send above already
+                // derived, reused rather than recomputed — the tree the client was
+                // sent and the tree this session dispatches against **must** be the
+                // same one, and two constructions are two chances for them to
+                // differ. That is the failure mode the whole `WireDescriptor`
+                // arrangement exists to prevent, and rebuilding here would reopen
+                // it one level up.
                 //
-                // `login_uuid` cannot be `None` here: reaching Play requires
-                // `ConfigurationFinished`, which requires `LoginAcknowledged`,
-                // which requires the `LoginStart` arm that sets it. The
-                // `unwrap_or_default` is a total fallback rather than a panic
-                // because a nil uuid resolves to no player and therefore no
-                // permissions — failing closed, not open.
-                let player_uuid = login_uuid.unwrap_or_default();
-                // The permission level, resolved **once** and from this
-                // connection's own authenticated uuid — never from anything in a
-                // command's text, which is the same property `CommandCaller`
-                // exists for. On `wasm32` there is no `AccessHandle` in this
-                // signature at all (the whole ops/whitelist/ban feature is
-                // native-only), and the browser build is the single-player
-                // owner's own world, so level 4 is the honest answer there rather
-                // than 0 — which would lock the owner out of `/gamemode` in their
-                // own game.
-                #[cfg(not(target_arch = "wasm32"))]
-                let permission_level = access.command_permission_level(player_uuid);
-                #[cfg(target_arch = "wasm32")]
-                let permission_level = 4;
+                // Their derivation is above, at the send, and stated there: the uuid
+                // is the one `login_success` echoed to this client, the level comes
+                // from that authenticated uuid and never from a command's text, and
+                // `username` is the name that survived `is_valid_player_name`.
+                // Nothing the player later *sends* can change either, which is
+                // exactly the property the seam needs — see the
+                // `ServerBound::ChatCommand` arm in `dispatch_play_packet`.
                 let commands = CommandSession {
-                    builtins: crate::commands::ServerCommands::new(),
+                    builtins,
                     dispatch: commands.clone(),
                     caller: CommandCaller::new(player_uuid, username.clone()),
                     permission_level,

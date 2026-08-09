@@ -4,11 +4,24 @@
 //! # What this is and what it is not
 //!
 //! This produces the *content* of `minecraft:commands` (clientbound, id 16) in
-//! version-free vocabulary. It does **not** encode any bytes and nothing sends
-//! it yet: the encoder is a later unit, and no protocol family in this workspace
-//! has a `COMMANDS` encode arm today. So tab completion against the server's real
-//! tree does not work end to end — what works now is that the projection exists
-//! and is gated, per command, against a real vanilla server's captured tree.
+//! version-free vocabulary. It encodes no bytes itself — that is
+//! `ServerProtocol::encode_commands`, whose `v770` implementation turns this
+//! shape into the real packet, and `crate::server`'s join sequence is what sends
+//! it. So [`project_filtered`] is the *content* half of a wire that now runs end
+//! to end, gated per command against a real vanilla server's captured tree.
+//!
+//! # Two projections, and why the filtered one is what production sends
+//!
+//! [`project`] transmits the whole tree; [`project_filtered`] prunes it the way
+//! vanilla's `Commands.sendCommands` does. Vanilla never sends a player a node
+//! they cannot use: `sendCommands` builds a *copy* through
+//! `Commands.fillUsableCommands`, whose recursion into a child's children sits
+//! **inside** the `child.canUse(source)` branch, so a denied node takes its whole
+//! subtree with it. The unfiltered [`project`] remains because the parity gate
+//! wants to compare our declared shape against vanilla's captured one without a
+//! permission level in the middle, and because `ServerCommands::wire_tree` is its
+//! caller — but the join path uses the filtered one, and a level-0 player really
+//! is sent a tree with no `/gamemode` in it at all.
 //!
 //! # Why the projection is not the source of truth for a node's identity
 //!
@@ -29,7 +42,7 @@
 
 use std::collections::HashMap;
 
-use lodestone_command::{CommandTree as ServerTree, NodeId};
+use lodestone_command::{CommandTree as ServerTree, NodeId, PermissionFilter};
 use lodestone_model::command_tree::{
     CommandTree as WireTree, CommandTreeError, NodeKind, RawCommandNode,
 };
@@ -57,19 +70,8 @@ pub fn project(
     loop {
         let id = NodeId::from_index(index);
         let Some(node) = tree.try_get(id) else { break };
-        let kind = match node.name() {
-            None => NodeKind::Root,
-            Some(name) => match wire.get(&id) {
-                Some(descriptor) => NodeKind::Argument {
-                    name: name.to_string(),
-                    parser: descriptor.parser.clone(),
-                    suggestions: descriptor.suggestions.clone(),
-                },
-                None => NodeKind::Literal { name: name.to_string() },
-            },
-        };
         nodes.push(RawCommandNode {
-            kind,
+            kind: node_kind(node, wire.get(&id)),
             executable: node.is_executable(),
             restricted: node.permission().is_some(),
             redirect: node.redirect().map(|target| target.index() as usize),
@@ -78,4 +80,129 @@ pub fn project(
         index += 1;
     }
     WireTree::new(nodes, tree.root().index() as usize)
+}
+
+/// One node's transmitted kind. Shared by both projections so a node cannot be
+/// described one way when the whole tree goes out and another way when a
+/// permission level prunes it.
+///
+/// The three-way split is the wire's own: an unnamed node is the root, a named
+/// node with a [`WireDescriptor`] is an argument, and a named node without one is
+/// a literal. `wire` holds a descriptor for exactly the argument nodes
+/// ([`super::Registrar::arg`] is the only writer), so the absence of one *is* the
+/// literal test.
+fn node_kind(node: &lodestone_command::Node, descriptor: Option<&WireDescriptor>) -> NodeKind {
+    match node.name() {
+        None => NodeKind::Root,
+        Some(name) => match descriptor {
+            Some(descriptor) => NodeKind::Argument {
+                name: name.to_string(),
+                parser: descriptor.parser.clone(),
+                suggestions: descriptor.suggestions.clone(),
+            },
+            None => NodeKind::Literal { name: name.to_string() },
+        },
+    }
+}
+
+/// Project `tree` into the wire shape a *particular* subject may see, pruning
+/// every node whose permission `filter` rejects along with its whole subtree.
+///
+/// This is what the join sequence sends. Two vanilla behaviours are reproduced
+/// and they are separate steps:
+///
+/// * **Which nodes survive** is `Commands.fillUsableCommands`. The recursion into
+///   a child's own children sits inside the `child.canUse(source)` branch, so a
+///   permitted node under a denied parent is never reached and never sent. That
+///   is why the filter is applied to a node's *permission* only and never to the
+///   subtree beneath it — the pruning is structural.
+/// * **What index each survivor gets** is
+///   `ClientboundCommandsPacket.enumerateNodes`: a breadth-first walk from the
+///   root that enqueues a node's children and then its redirect target, assigning
+///   ids in visit order. The root therefore lands at 0.
+///
+/// Indices are *not* the arena's own here, which is the whole difference from
+/// [`project`]: dropping a node has to renumber everything after it, and a
+/// child/redirect index that still pointed into the arena would silently name a
+/// different node. Every index emitted below is looked up in the same
+/// enumeration map, never derived from a `NodeId`.
+///
+/// A redirect whose target did not survive is dropped rather than left dangling,
+/// matching `fillUsableCommands`' own `converted.get(...)` returning null for an
+/// unconverted target.
+///
+/// # Errors
+///
+/// [`CommandTreeError`], on the same terms as [`project`] — impossible for a
+/// [`super::Registrar`]-built tree, propagated so a future builder that can
+/// produce an inconsistent graph fails here rather than on a client.
+pub fn project_filtered(
+    tree: &ServerTree,
+    wire: &HashMap<NodeId, WireDescriptor>,
+    filter: &dyn PermissionFilter,
+) -> Result<WireTree, CommandTreeError> {
+    let root = tree.root();
+
+    // Phase 1: `Commands.fillUsableCommands`. A node is visible when it is the
+    // root, or when its own permission passes *and* its parent is visible.
+    let mut visible: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    visible.insert(root);
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        let Some(node) = tree.try_get(id) else { continue };
+        for &child in node.children() {
+            let allowed = tree.try_get(child).is_some_and(|child| match child.permission() {
+                None => true,
+                Some(permission) => filter.allows(permission),
+            });
+            if allowed && visible.insert(child) {
+                pending.push(child);
+            }
+        }
+    }
+
+    // Phase 2: `ClientboundCommandsPacket.enumerateNodes`, over the survivors.
+    let mut index_of: HashMap<NodeId, usize> = HashMap::new();
+    let mut order: Vec<NodeId> = Vec::new();
+    let mut queue: std::collections::VecDeque<NodeId> = std::collections::VecDeque::new();
+    queue.push_back(root);
+    while let Some(id) = queue.pop_front() {
+        if index_of.contains_key(&id) {
+            continue;
+        }
+        index_of.insert(id, order.len());
+        order.push(id);
+        // Every id enqueued below is `visible`, and phase 1 only inserts ids that
+        // resolved, so this cannot miss.
+        let Some(node) = tree.try_get(id) else { continue };
+        for &child in node.children() {
+            if visible.contains(&child) {
+                queue.push_back(child);
+            }
+        }
+        if let Some(target) = node.redirect() {
+            if visible.contains(&target) {
+                queue.push_back(target);
+            }
+        }
+    }
+
+    let nodes = order
+        .iter()
+        .map(|&id| {
+            let node = tree.get(id);
+            RawCommandNode {
+                kind: node_kind(node, wire.get(&id)),
+                executable: node.is_executable(),
+                restricted: node.permission().is_some(),
+                redirect: node.redirect().and_then(|target| index_of.get(&target).copied()),
+                children: node
+                    .children()
+                    .iter()
+                    .filter_map(|child| index_of.get(child).copied())
+                    .collect(),
+            }
+        })
+        .collect();
+    WireTree::new(nodes, index_of[&root])
 }

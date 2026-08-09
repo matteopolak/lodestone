@@ -202,16 +202,53 @@ everybody.
 #### One tree, three consumers
 
 Execution (`parse_filtered` → executor table), suggestion (`suggest_filtered`) and
-the wire projection (`ServerCommands::wire_tree`) all read one `CommandTree`.
+the wire projection (`ServerCommands::wire_tree_for`) all read one `CommandTree`.
 `Registrar::arg` records the node's `ArgumentParser` **in the same call that
 installs its parser**, from one `McArg` value, so there is no second place a
 node's wire identity could be stated differently. The failure that guards against
 is specific: a client that autocompletes something the server then rejects.
 
-**Nothing sends the projection yet.** No protocol family here has a `COMMANDS`
-(id 16) *encode* arm. Tab completion against the server's own commands does not
-work end to end; what works is that the projection is gated, per command, against
-a real vanilla server's own tree.
+#### Sending it: `COMMANDS` (clientbound id 16)
+
+The projection now reaches a client. `ServerProtocol::encode_commands` takes the
+version-free tree and `V770ServerProtocol` writes
+`ClientboundCommandsPacket`'s own layout: `writeCollection(entries)` — flags byte,
+`writeVarIntArray(children)`, the redirect index only under `FLAG_REDIRECT`, then
+the type-dependent stub — followed by the root index. For an argument the stub is
+`writeUtf(name)`, the `minecraft:command_argument_type` registry id, that parser's
+`serializeToNetwork` payload, and **then** the custom-suggestions identifier; the
+suggestions id coming last is the one field order no field name hints at.
+
+All 57 registry ids are encoded — there is no stub or fallback for a parser we
+declare. `ArgumentParser::Unknown(id)` writes the bare id with no payload, which
+is unreachable from a decode (an unmodeled id becomes `NodeKind::Unrecognized`)
+and unreachable from this crate's projection.
+
+**The tree is per-player.** `wire_tree_for(level)` prunes exactly as
+`Commands.sendCommands` → `Commands.fillUsableCommands` does: the recursion into a
+child's children sits *inside* the `canUse` branch, so a denied node takes its
+whole subtree with it, and every surviving child/redirect index is renumbered
+against the pruned list. A level-0 player is sent a bare root today, because all
+four built-ins are `Commands.LEVEL_GAMEMASTERS`.
+
+**Where it goes in the join sequence.** `PlayerList.placeNewPlayer` reaches
+`sendPlayerPermissionLevel` — which is what calls `sendCommands` — after the
+abilities packet and before `sendLevelInfo`. `server.rs` sends it in that
+position: after `encode_player_abilities`, before the join clock sync, and before
+any chunk. The connection's permission level and its `ServerCommands` are built
+there and reused by the `CommandSession` further down, rather than constructed
+twice, so the tree the client is sent and the tree the session dispatches against
+are the same object.
+
+**Evidence: vanilla's own 30,248 bytes, re-encoded byte-identically.**
+`crates/protocol/v770/tests/command_tree_encode.rs` decodes
+`fixtures/command_tree_creative.hex` and encodes it again, requiring byte
+equality with the capture. That covers 2,017 nodes, 55 of the 57 parser ids, 126
+custom-suggestion ids, 85 restricted nodes and 74 redirects — none of which our
+own four commands contain, and none of which we authored. Its control fires:
+writing the suggestions id before the parser payload instead of after makes it
+fail (measured). `brigadier:long` and `minecraft:angle` are the two ids no
+vanilla command uses, so they carry their own id-and-payload-length assertions.
 
 #### The commands, and how they are gated
 
@@ -275,10 +312,26 @@ lives in the plugin API.**
 * **`CHAT_COMMAND_SIGNED` is deliberately not decoded.** Its body carries a
   timestamp, salt, per-argument signatures and a last-seen acknowledgement
   block, none of which we have a session key to verify. A client only sends the
-  signed form for arguments the server declared signable in a `COMMANDS` tree we
-  do not yet send, so in practice every command from a real client arrives
-  unsigned. If a `COMMANDS` encoder ever lands, this becomes reachable and must
-  be handled.
+  signed form for arguments the server declared **signable**, and a `COMMANDS`
+  tree does not by itself declare anything signable — that is
+  `chat_session_update` plus the server reporting `enforcesSecureProfile`, neither
+  of which we do. So every command from a real client still arrives unsigned even
+  now that the tree is sent. Revisit if secure chat ever lands, not because of
+  this encoder.
+* **The serverbound suggestion request is a second, still-unreached island.**
+  `minecraft:command_suggestion` (serverbound id 15) decodes to
+  `ServerBound::Ignored` and nothing answers it, and `encode_command_suggestions`
+  does not exist. It is currently *unreachable* rather than merely unimplemented:
+  a client only asks when a node carries a custom suggestions provider, and this
+  server's tree declares **zero** — every `McArg::suggestion_provider` returns
+  `None`. Measured against the vanilla capture, that is right for
+  `minecraft:entity` (118 of them, all with no provider) and wrong for the parsers
+  vanilla does mark `minecraft:ask_server`: `resource_location` (58),
+  `score_holder` (27), `function` (5), `game_profile` (5), `brigadier:string` (9),
+  `objective` (2), `resource` (2), `time` (2), `brigadier:float` (1). Declaring a
+  provider on one of ours is what would make the request path reachable, and it
+  must land together with the answer — a provider with no responder is a client
+  waiting on a reply that never comes.
 * **`ServerProtocol::encode_system_chat` defaults to emitting nothing**, like
   every other optional encoder. Its failure mode is silent rather than loud: the
   command still *runs*, the player just never learns what happened. A family that

@@ -9,6 +9,7 @@
 //! encoders/decoders (plan §3).
 
 use lodestone_core::State;
+use lodestone_model::command_tree::CommandTree;
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, GameMode, ItemStack, ResourceKey, Rotation,
     SoundCategory, Text, Vec3, Vec3f,
@@ -745,9 +746,13 @@ pub enum ServerBound {
     ///
     /// Only the *unsigned* `chat_command` produces this. `chat_command_signed`
     /// carries a signature block this crate has no session key to verify and
-    /// stays [`Ignored`](Self::Ignored); a client only sends the signed form
-    /// for commands whose arguments the server declared signable, which
-    /// requires a `COMMANDS` tree we do not yet send.
+    /// stays [`Ignored`](Self::Ignored); a client only sends the signed form for
+    /// commands whose arguments the server declared **signable**, and this server
+    /// declares none — it never handles `chat_session_update`, holds no player
+    /// public keys, and reports `enforcesSecureChat = false`. Sending a `COMMANDS`
+    /// tree (which [`encode_commands`](ServerProtocol::encode_commands) now does)
+    /// does not change that: the tree carries no signability, so every command
+    /// from a real client still arrives unsigned.
     ChatCommand {
         /// Command text without the leading `/`.
         command: String,
@@ -1297,6 +1302,30 @@ pub trait ServerProtocol: Send + Sync {
         amount: i32,
     ) -> ServerDirective {
         let _ = (item_entity_id, collector_entity_id, amount);
+        ServerDirective::None
+    }
+
+    /// Encodes the Brigadier command tree (vanilla `ClientboundCommandsPacket`,
+    /// wire id `commands`) — the packet that makes tab completion and command
+    /// syntax highlighting possible at all.
+    ///
+    /// `tree` is already the **per-player** projection: pruned to what this
+    /// connection's permission level may see, with every child and redirect index
+    /// renumbered against the pruned node list
+    /// (`crate::commands::wire::project_filtered`). An implementation writes the
+    /// nodes out and must not re-derive an index, because the only thing that
+    /// makes a flat index graph self-consistent is that one walk assigned all of
+    /// it.
+    ///
+    /// # The default is silence, and that is the right default
+    ///
+    /// A protocol family with no override sends nothing, and the client simply
+    /// has no tree — which is exactly the state every family was in before this
+    /// existed. The failure mode of the alternative (a required method) would be
+    /// a legacy family forced to grow an encoder for a packet whose id it may
+    /// number differently.
+    fn encode_commands(&self, tree: &CommandTree) -> ServerDirective {
+        let _ = tree;
         ServerDirective::None
     }
 
@@ -2092,6 +2121,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         amount: i32,
     ) -> ServerDirective {
         (**self).encode_take_item_entity(item_entity_id, collector_entity_id, amount)
+    }
+
+    fn encode_commands(&self, tree: &CommandTree) -> ServerDirective {
+        (**self).encode_commands(tree)
     }
 
     fn encode_set_entity_data(&self, entity_id: i32, fields: &[MetadataField]) -> ServerDirective {
