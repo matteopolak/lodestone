@@ -559,6 +559,20 @@ actually resolve to, and is it the one production uses?"** — a test double *co
 most dangerous kind. Also ask: **does any server-side counter accumulate past this gate's lifetime?** and
 **does the input actually contain the structure the code under test exists to handle?** (§12.43)
 
+**The sharpest form of that reciprocal: a gate that uses an *unimplemented* thing as its negative stand-in
+goes vacuous the moment someone implements it.** Measured — modelling `minecraft:custom_data` and
+`minecraft:repair_cost` silently voided **six** gates at once: three used `custom_data` as their "an
+unmodeled component halts the decode" stand-in, and three more had a **captured server fixture** whose
+bytes happened to carry `repair_cost`. All six went red, which is the *only* reason it was noticed; had
+they been written to skip rather than fail, the whole set would have gone quietly green and stayed that
+way. So when a test's premise is "feature X does not exist", that premise has an expiry date nothing
+tracks. Two things make it survivable: **name the stand-in once** in a shared constant so implementing
+something breaks one line rather than six, **pick one that is genuinely expensive** to implement (so the
+expiry is far off), and give it **a control that fails by name** when the stand-in stops standing in.
+Note the second half is unreadable from the test source — a captured fixture's bytes are opaque, so
+"which of my fixtures contain a thing I might implement next?" is a question only a grep of the capture
+can answer.
+
 That last question is the whole of the third *world* instance, and it is worth reading as a template because
 the test source is exemplary. `water_seam_convergence.rs` fills **two whole columns** with water, so every
 rim cell's neighbour is another full column and the corner-height helper's own `edge_a >= 1.0` arm returned
