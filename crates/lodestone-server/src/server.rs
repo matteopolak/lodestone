@@ -3106,6 +3106,9 @@ async fn apply_block_action<T, P, S>(
     // no hardness clock and no drops, whatever the block or the tool.
     creative: bool,
     action: BlockActionKind,
+    // Issue #338's `minecraft:mined` counter — see `destroy_block`'s own parameter
+    // comment for why it is awarded there rather than here.
+    advancements: &mut AdvancementManager,
     pos: BlockPos,
 ) -> Result<(), ServerError>
 where
@@ -3146,6 +3149,7 @@ where
                     breaker,
                     !creative && world.block_drops(),
                     pos,
+                    advancements,
                 )
                 .await?;
             } else {
@@ -3207,6 +3211,7 @@ where
                 breaker,
                 !creative && world.block_drops(),
                 pos,
+                advancements,
             )
             .await?;
         }
@@ -3244,6 +3249,13 @@ async fn destroy_block<T, P, S>(
     // rolls no loot at all (which also means it consumes no RNG draws).
     drop_loot: bool,
     pos: BlockPos,
+    // The statistics store, for the `minecraft:mined` counter. Keyed by the block
+    // that was broken, and incremented on **every** break including a creative
+    // one — vanilla's `ServerPlayerGameMode.destroyBlock` calls
+    // `awardStat(Stats.BLOCK_MINED)` before the `isCreative()` fork that decides
+    // whether anything drops, so gating this on `drop_loot` would silently stop
+    // counting in creative.
+    advancements: &mut AdvancementManager,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -3258,6 +3270,18 @@ where
     // `getBlockState(pos)`, calls `dropResources` with it, and only
     // then `setBlock(pos, AIR)`).
     let broken = source.block_state(pos.x, pos.y, pos.z);
+    // The base name, not the state string: `minecraft:mined` is keyed by *block*,
+    // so `minecraft:oak_log[axis=y]` and `minecraft:oak_log` must be one counter
+    // rather than two. Every other per-block table in this crate strips the suffix
+    // the same way.
+    advancements.award_stat(
+        breaker,
+        crate::advancements::StatKey::new(
+            crate::advancements::StatType::Mined,
+            broken.split('[').next().unwrap_or(&broken),
+        ),
+        1,
+    );
     if let Some(effect) = crate::effects::block_destroyed(pos, &broken) {
         block_ticks.publish_effect_except(breaker, effect);
     }
@@ -3453,16 +3477,41 @@ where
 /// A partial pickup therefore credits what fitted and puts the remainder back as
 /// the item's new count — the entity stays, visibly, rather than the surplus
 /// vanishing.
+/// # Statistics and advancements
+///
+/// This is also vanilla's `minecraft:inventory_changed` seam, so it is where
+/// [`AdvancementManager::on_inventory_changed`] and the `minecraft:picked_up`
+/// counter are driven from. Both are credited **per item actually banked**, not
+/// per entity seen: a pickup that only partly fitted credits what fitted, and one
+/// that fitted nothing credits nothing — the same `written`/`leftover` split the
+/// slot updates already key off.
 fn collect_nearby_items(
     mobs: &MobHandle,
     inventory: &mut PlayerInventory,
     player_feet: Vec3,
+    advancements: &mut AdvancementManager,
+    player_uuid: uuid::Uuid,
+    // The world clock in milliseconds — `game_time * 50`. Vanilla stamps a
+    // criterion with a real `Instant`; this crate must not call
+    // `std::time::Instant::now()` anywhere in `lodestone-server`, because the crate
+    // links into a wasm32 bundle where that compiles and then panics at runtime
+    // under `panic = "abort"` with no log line. A tick-derived value is monotonic,
+    // wasm-safe, and means "ms of world time", which is a more useful stamp for a
+    // save file than wall clock anyway.
+    obtained_millis: i64,
 ) -> Vec<usize> {
     let mut changed: Vec<usize> = Vec::new();
     mobs.with(|sim| {
         for (id, item, count) in sim.items_within_pickup_range(player_feet) {
             let stack = ItemStack::new(item, u32::from(count));
+            let picked_up_key = crate::advancements::StatKey::new(
+                crate::advancements::StatType::PickedUp,
+                stack.item.to_string(),
+            );
+            let item_id = stack.item.to_string();
+            let offered = stack.count;
             let (written, leftover) = inventory.add(stack);
+            let banked = offered.saturating_sub(leftover.as_ref().map_or(0, |left| left.count));
             match leftover {
                 None => {
                     // Fully banked, so the entity goes. `remove_item` returning
@@ -3485,6 +3534,20 @@ fn collect_nearby_items(
                         sim.set_item_count(id, left);
                     }
                 }
+            }
+            // How much actually landed in the inventory. `leftover` is what did
+            // not, so the banked amount is the difference — credited rather than
+            // the offered count, so a full inventory credits nothing.
+            if banked > 0 {
+                advancements.award_stat(
+                    player_uuid,
+                    picked_up_key,
+                    i32::try_from(banked).unwrap_or(i32::MAX),
+                );
+                // Vanilla's `inventory_changed` trigger. Fires once per pickup
+                // regardless of stack size, because a criterion is satisfied by
+                // *having* the item, not by how many.
+                advancements.on_inventory_changed(player_uuid, &item_id, obtained_millis);
             }
             for slot in written {
                 if !changed.contains(&slot) {
@@ -3597,6 +3660,12 @@ async fn apply_own_effect<T, P>(
     players: Option<&PlayerRegistry>,
     player_uuid: uuid::Uuid,
     effect: crate::commands::Effect,
+    // Issue #338. `/give` is a `minecraft:inventory_changed` producer, so this arm
+    // grants criteria exactly as a floor pickup does — see the `GiveItems` arm.
+    advancements: &mut AdvancementManager,
+    // For the world-clock timestamp the grant is stamped with, which must be
+    // tick-derived rather than `Instant::now()` (this crate links into wasm32).
+    world: &crate::world_state::WorldStateHandle,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -3621,7 +3690,20 @@ where
         }
         crate::commands::Effect::GiveItems(stacks) => {
             for stack in stacks {
+                // The second `minecraft:inventory_changed` producer, and the one a
+                // player can reach deliberately: `/give @s crafting_table` must grant
+                // `story/root` exactly as picking one off the floor does. Vanilla's
+                // criterion is about *having* the item, not about how it arrived,
+                // which is precisely why the trigger lives at the inventory seam.
+                let given_id = stack.item.to_string();
                 let (written, leftover) = inventory.add(stack);
+                if leftover.is_none() || !written.is_empty() {
+                    advancements.on_inventory_changed(
+                        player_uuid,
+                        &given_id,
+                        world.time().game_time.saturating_mul(50),
+                    );
+                }
                 for native in written {
                     // Window `0`, `state_id` `0` — matching every other
                     // server-initiated slot write in this file.
@@ -5602,6 +5684,13 @@ async fn publish_health<T, P>(
     player_entity_id: i32,
     username: &str,
     cause: crate::vitals::DeathCause,
+    // The statistics store, for the `minecraft:deaths` custom counter. This is the
+    // right site rather than each damage source: the function's own guards already
+    // make crossing zero happen exactly once per life (see the doc comment above),
+    // which is precisely the property a death *count* needs. Awarding it at each
+    // `apply_*` call site would double-count a tick that both drowned and fell.
+    advancements: &mut AdvancementManager,
+    player_uuid: uuid::Uuid,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -5609,6 +5698,14 @@ where
 {
     apply(conn, state, proto.encode_set_health(vitals.health())).await?;
     if vitals.health() <= 0.0 {
+        advancements.award_stat(
+            player_uuid,
+            crate::advancements::StatKey::new(
+                crate::advancements::StatType::Custom,
+                "minecraft:deaths",
+            ),
+            1,
+        );
         let message = cause.death_message(username);
         apply(
             conn,
@@ -5655,6 +5752,11 @@ async fn fall_status_sample<T, P, S>(
     // *tracker* still samples, so the fall is still tracked; only the hit is
     // skipped, which is `Player.isInvulnerableTo`'s own placement.
     invulnerable: bool,
+    // Issue #338's `minecraft:deaths` counter, threaded only to reach
+    // `publish_health` — see its own parameter comment for why the count belongs
+    // there and not at each damage source.
+    advancements: &mut AdvancementManager,
+    player_uuid: uuid::Uuid,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -5676,6 +5778,8 @@ where
             player_entity_id,
             username,
             crate::vitals::DeathCause::Fall,
+            advancements,
+            player_uuid,
         )
         .await?;
     }
@@ -5901,6 +6005,8 @@ where
                     player_entity_id,
                     username,
                     crate::vitals::DeathCause::Fall,
+                    advancements,
+                    player_uuid,
                 )
                 .await?;
             }
@@ -5931,6 +6037,8 @@ where
                 username,
                 on_ground,
                 Abilities::for_mode(*game_mode).invulnerable,
+                advancements,
+                player_uuid,
             )
             .await?;
         }
@@ -5952,6 +6060,8 @@ where
                 username,
                 on_ground,
                 Abilities::for_mode(*game_mode).invulnerable,
+                advancements,
+                player_uuid,
             )
             .await?;
         }
@@ -6007,6 +6117,7 @@ where
                 player_uuid,
                 matches!(*game_mode, GameMode::Creative),
                 action,
+                advancements,
                 pos,
             )
             .await?;
@@ -6279,6 +6390,8 @@ where
                                 players,
                                 player_uuid,
                                 directed.effect,
+                                advancements,
+                                world,
                             )
                             .await?;
                         } else if let Some(registry) = players {
@@ -6824,7 +6937,14 @@ where
                 // pass — so the item vanishes from the world and appears in the
                 // hotbar together rather than a packet apart.
                 if let Some((x, y, z)) = player_pos {
-                    for native in collect_nearby_items(mobs, &mut inventory, Vec3::new(x, y, z)) {
+                    for native in collect_nearby_items(
+                        mobs,
+                        &mut inventory,
+                        Vec3::new(x, y, z),
+                        &mut advancements,
+                        player_uuid,
+                        world.time().game_time.saturating_mul(50),
+                    ) {
                         // Window `0`, menu slot for this native index. `state_id`
                         // `0` matches every other server-initiated slot write in
                         // this file (`apply_container_clicked` applies a click's
@@ -6977,6 +7097,7 @@ where
                             player_uuid,
                             !matches!(game_mode, GameMode::Creative) && world.block_drops(),
                             dig.pos,
+                            &mut advancements,
                         )
                         .await?;
                     }
@@ -7013,6 +7134,8 @@ where
                                 player_entity_id,
                                 &username,
                                 crate::vitals::DeathCause::OutsideBorder,
+                                &mut advancements,
+                                player_uuid,
                             )
                             .await?;
                         }
@@ -7041,6 +7164,8 @@ where
                             player_entity_id,
                             &username,
                             crate::vitals::DeathCause::Drown,
+                            &mut advancements,
+                            player_uuid,
                         )
                         .await?;
                     }
@@ -7187,6 +7312,8 @@ where
                             Some(registry),
                             player_uuid,
                             effect,
+                            &mut advancements,
+                            world,
                         )
                         .await?;
                     }
@@ -7498,7 +7625,14 @@ where
         // packet-driven with no timer, so unlike `vitals`/`sync_open_container`
         // this target loses nothing. See the native loop's comment.
         if let Some((x, y, z)) = player_pos {
-            for native in collect_nearby_items(mobs, &mut inventory, Vec3::new(x, y, z)) {
+            for native in collect_nearby_items(
+                mobs,
+                &mut inventory,
+                Vec3::new(x, y, z),
+                &mut advancements,
+                player_uuid,
+                world.time().game_time.saturating_mul(50),
+            ) {
                 if let Some(menu_slot) = window_zero_menu_slot(native) {
                     apply(
                         conn,
