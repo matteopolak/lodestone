@@ -610,6 +610,12 @@ struct ViewUpdate {
     /// `ChunkTrackingView::difference`, which is not gated by
     /// `PlayerChunkSender` at all (only new chunk *sends* are).
     immediate: Vec<ServerDirective>,
+    /// The columns that left the view — the same set `immediate`'s
+    /// `encode_forget_chunk` directives name, kept as coordinates as well so
+    /// [`send_view_update`] can withdraw any of them still queued in the column
+    /// stream. See [`crate::join_scheduler::ColumnPipeline::cancel`] for why an owed
+    /// column can outlive its own forget.
+    forgotten: HashSet<(i32, i32)>,
     /// The newly-visible columns, in wire order — empty when nothing new entered
     /// the view.
     ///
@@ -733,14 +739,19 @@ impl ViewTracker {
         let next = Self::window((cx, cz), self.radius);
 
         let mut immediate = vec![proto.encode_chunk_cache_center(cx, cz)];
-        for &(x, z) in self.loaded.difference(&next) {
+        let forgotten: HashSet<(i32, i32)> = self.loaded.difference(&next).copied().collect();
+        for &(x, z) in &forgotten {
             immediate.push(proto.encode_forget_chunk(x, z));
         }
         let added = self.added_columns(&next, (cx, cz), facing);
 
         self.center = (cx, cz);
         self.loaded = next;
-        ViewUpdate { immediate, added }
+        ViewUpdate {
+            immediate,
+            forgotten,
+            added,
+        }
     }
 
     /// Resizes the tracked view around the *current* center without the
@@ -790,7 +801,8 @@ impl ViewTracker {
 
         let next = Self::window(self.center, radius);
         let mut immediate = Vec::new();
-        for &(x, z) in self.loaded.difference(&next) {
+        let forgotten: HashSet<(i32, i32)> = self.loaded.difference(&next).copied().collect();
+        for &(x, z) in &forgotten {
             immediate.push(proto.encode_forget_chunk(x, z));
         }
         // Centred on the tracker's own centre, which by definition did not move
@@ -799,7 +811,11 @@ impl ViewTracker {
 
         self.radius = radius;
         self.loaded = next;
-        ViewUpdate { immediate, added }
+        ViewUpdate {
+            immediate,
+            forgotten,
+            added,
+        }
     }
 }
 
@@ -975,14 +991,19 @@ where
     for directive in update.immediate {
         apply(conn, state, directive).await?;
     }
-    if update.added.is_empty() {
-        return Ok(());
-    }
     // Asked, not attempted: a stream that refused *after* taking the coordinates
     // would leave the fallback below with nothing to send. See
     // `JoinChunkStream::accepts_enqueue`.
-    if let Some(stream) = stream.filter(|stream| stream.accepts_enqueue()) {
+    let stream = stream.filter(|stream| stream.accepts_enqueue());
+    if let Some(stream) = stream {
+        // Withdraw before enqueueing, and unconditionally — a shrink forgets columns
+        // and adds none, and those still owed must be dropped just the same. See
+        // `ColumnPipeline::cancel`.
+        stream.cancel(&update.forgotten);
         stream.enqueue(update.added);
+        return Ok(());
+    }
+    if update.added.is_empty() {
         return Ok(());
     }
     let mut batch = vec![proto.begin_chunk_batch()];

@@ -217,6 +217,37 @@ async fn real_client_view_follows_player_across_chunk_boundaries() {
             "old view still holds ({cx}, {cz}) after the jump"
         );
     }
+    // **This wait is new, and it is a premise correction rather than a relaxation
+    // — say so out loud, because reading the assertions below could never reveal
+    // it.** The forget above used to be evidence that the new columns had already
+    // arrived, because the server sent a view update atomically: cache-center,
+    // forgets, and the whole newly-visible strip in one pass of its own loop. It
+    // does not any more. Forgets are still immediate, but the strip is enqueued on
+    // the server's column pipeline and paced out afterwards
+    // (`lodestone_server`'s `send_view_update`), so waiting on `!is_chunk_loaded(0,
+    // 0)` and then asserting on chunk `(9, -1)` reads the wire mid-strip.
+    //
+    // Nothing this gate actually measures is weakened: every column of the new
+    // window must still be loaded, none of the old one may be, and the total must
+    // still be exactly 9 — the three claims below, unchanged. What is removed is an
+    // implicit claim that a forget and a send are atomic, which was never the
+    // property under test and is not one vanilla offers either
+    // (`PlayerChunkSender` paces its own sends).
+    //
+    // **Established rather than assumed**, because a gate relaxed to accommodate a
+    // change is how a real defect ships looking green. The discriminator between
+    // "paced" and "dropped" is this wait plus the count: it resolves `Ok`, and
+    // `loaded_chunk_count()` is 9 on the nose, so no column is lost, duplicated or
+    // left over. Had a column genuinely been dropped this would time out.
+    handle
+        .wait_for(Duration::from_secs(30), move |h| {
+            square(10, 0, view_radius)
+                .into_iter()
+                .all(|(cx, cz)| h.is_chunk_loaded(ChunkPos::new(cx, cz)))
+        })
+        .await
+        .expect("the new 3x3 view never arrived after the jump");
+
     for (cx, cz) in square(10, 0, view_radius) {
         assert!(
             handle.is_chunk_loaded(ChunkPos::new(cx, cz)),

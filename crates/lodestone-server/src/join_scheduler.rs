@@ -415,6 +415,19 @@ impl ColumnQueue {
         self.sort();
     }
 
+    /// Drops every still-pending column in `dropped`, returning how many went.
+    ///
+    /// The order of what survives is untouched — this is a filter, not a re-key —
+    /// so a cancellation cannot reshuffle the wire.
+    pub(crate) fn cancel(&mut self, dropped: &std::collections::HashSet<(i32, i32)>) -> usize {
+        if dropped.is_empty() {
+            return 0;
+        }
+        let before = self.pending.len();
+        self.pending.retain(|&(coord, _)| !dropped.contains(&coord));
+        before - self.pending.len()
+    }
+
     /// The next column to generate, or `None` when the queue is empty.
     pub(crate) fn pop(&mut self) -> Option<(i32, i32)> {
         self.pending.pop().map(|(coord, _)| coord)
@@ -691,6 +704,37 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
         self.queue.extend(coords);
     }
 
+    /// Withdraws still-pending columns the client has been told to forget,
+    /// returning how many were withdrawn.
+    ///
+    /// # Why this is needed, and why it is not new
+    ///
+    /// `ViewTracker` records a column as `loaded` the moment it decides to send it,
+    /// so its `loaded` set means *owed* rather than *delivered* — which is what lets
+    /// the join seed the whole square up front. A player who steps across a boundary
+    /// and straight back therefore forgets a column that is still sitting in this
+    /// queue, and without this it would be sent afterwards: the client loads a column
+    /// outside its own view and never forgets it again, and the next step re-adds the
+    /// same coordinate so it goes out twice. Vanilla's `PlayerChunkSender` drops
+    /// pending sends for exactly this reason.
+    ///
+    /// The bug predates the steady-state path — the join stream has always been able
+    /// to outlive a forget — and fixing it here fixes both.
+    ///
+    /// **In-flight columns are not cancelled.** They have already been spawned, there
+    /// are at most [`window`](Self::window) of them, and reaching into the pool to
+    /// abandon a `JoinHandle` would lose the column for a player who walks back into
+    /// it. So the guarantee is "a forgotten column is not *newly started*", not "no
+    /// forgotten column is ever sent".
+    pub(crate) fn cancel(&mut self, dropped: &std::collections::HashSet<(i32, i32)>) -> usize {
+        let removed = self.queue.cancel(dropped);
+        // `remaining()` is `total - emitted`, and the `select!` branch is gated on
+        // it: leaving `total` alone would keep the branch enabled with nothing to
+        // hand back, and `next` would spin returning `None`.
+        self.total -= removed;
+        removed
+    }
+
     /// The window this pipeline was built with.
     #[must_use]
     pub fn window(&self) -> usize {
@@ -851,6 +895,19 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
     pub(crate) fn enqueue(&mut self, coords: Vec<(i32, i32)>) {
         if let Self::Windowed(pipeline) = self {
             pipeline.enqueue(coords);
+        }
+    }
+
+    /// Withdraws still-pending columns the client has been told to forget — see
+    /// [`ColumnPipeline::cancel`], which owns the reasoning and the in-flight caveat.
+    ///
+    /// A no-op on the [`Ringed`](Self::Ringed) arm, whose unit of work is a whole
+    /// ring: withdrawing one column would split a batch that arm exists to keep
+    /// intact, and it serves the `&S`-shaped tests where nothing moves.
+    pub(crate) fn cancel(&mut self, dropped: &std::collections::HashSet<(i32, i32)>) -> usize {
+        match self {
+            Self::Windowed(pipeline) => pipeline.cancel(dropped),
+            Self::Drained | Self::Ringed { .. } => 0,
         }
     }
 
@@ -1048,6 +1105,71 @@ mod tests {
         let coords = ring_walk(4);
         let queue = ColumnQueue::prioritised(coords.clone(), (0, 0), None);
         assert_eq!(drain(queue), coords);
+    }
+
+    /// A column enqueued after the queue was built joins the **back** of the pop
+    /// order and is then re-keyed with everything else — so a strip the player just
+    /// walked towards out-ranks one behind them regardless of arrival order.
+    ///
+    /// Two arms because the two `QueueOrder`s answer differently and only one of
+    /// them is production: under `AsGiven` there is no re-key, so "back of the pop
+    /// order" is the whole behaviour and the fixed-sequence gates above stay valid.
+    #[test]
+    fn an_enqueued_column_is_ordered_by_priority_not_by_arrival() {
+        // `AsGiven`: strictly appended.
+        let mut plain = ColumnQueue::as_given(vec![(0, 0), (1, 0)]);
+        plain.extend(vec![(2, 0), (3, 0)]);
+        assert_eq!(drain(plain), vec![(0, 0), (1, 0), (2, 0), (3, 0)]);
+
+        // `Priority`: the late arrival is nearer the centre than what was already
+        // queued, so it must come out first. Under an append-only queue it would be
+        // last, which is the ordering this discriminates against.
+        let mut prioritised = ColumnQueue::prioritised(vec![(5, 0), (6, 0)], (0, 0), None);
+        prioritised.extend(vec![(1, 0)]);
+        assert_eq!(
+            drain(prioritised),
+            vec![(1, 0), (5, 0), (6, 0)],
+            "a column enqueued late but close must be re-keyed ahead of far columns \
+             already pending, or a player walking into new terrain waits on the strip \
+             they walked away from"
+        );
+    }
+
+    /// Cancelling withdraws exactly the named pending columns, leaves the order of
+    /// the survivors alone, and — the part that would wedge the play loop — keeps
+    /// `remaining()` consistent.
+    ///
+    /// `serve_play`'s `select!` branch is gated on `is_done()`, i.e. on
+    /// `remaining()`. A cancel that removed entries from the queue without
+    /// decrementing `total` would leave the branch enabled over an empty queue, and
+    /// `next` would spin returning `None` forever — a busy loop, not a wrong answer,
+    /// which is why the count is asserted here and not left to a wire gate.
+    #[test]
+    fn cancelling_withdraws_the_named_columns_and_keeps_remaining_consistent() {
+        let coords = vec![(0, 0), (1, 0), (2, 0), (3, 0)];
+        // Nothing is generated here — this is queue arithmetic — so the source only
+        // has to exist.
+        let source = Arc::new(SkewedSource {
+            coords: coords.clone(),
+            delays: vec![Duration::ZERO; coords.len()],
+            completed: Arc::new(AtomicUsize::new(0)),
+        });
+        let mut pipeline = ColumnPipeline::with_window(source, coords, 2);
+        assert_eq!(pipeline.remaining(), 4);
+
+        let dropped: std::collections::HashSet<(i32, i32)> =
+            [(1, 0), (2, 0)].into_iter().collect();
+        assert_eq!(pipeline.cancel(&dropped), 2);
+        assert_eq!(
+            pipeline.remaining(),
+            2,
+            "remaining() gates serve_play's select! branch: a stale count spins the loop"
+        );
+
+        // Cancelling something that was never queued is free and moves nothing.
+        let absent: std::collections::HashSet<(i32, i32)> = [(9, 9)].into_iter().collect();
+        assert_eq!(pipeline.cancel(&absent), 0);
+        assert_eq!(pipeline.remaining(), 2);
     }
 
     /// **Distance is the primary key**, so no amount of looking one way can
