@@ -945,6 +945,21 @@ pub struct NetClient {
 /// architecture and the reason `IntegratedServer` exposes an in-memory duplex
 /// (see its module docs), and it is why this is an enum threaded into one `run`
 /// rather than a second net thread with its own loop.
+/// An authenticated Microsoft/Minecraft session, on targets that can obtain one.
+///
+/// **Uninhabited on wasm32 — `Infallible`, not a stub type.** Two independent
+/// reasons, and either alone would be enough: `lodestone_client::Session` is
+/// `cfg(not(wasm32))` because deriving one needs the native-only `lodestone-auth`
+/// chain, and `Origin::Remote`'s TCP dial does not exist in a browser either. Making
+/// the *type* uninhabited rather than gating the `auth` field means `Option<_>` is
+/// statically always `None`, so all five sites that construct, debug-print or
+/// destructure it compile unchanged on both targets, and the two that need a real
+/// `Session` are the only ones that carry a `cfg`.
+#[cfg(not(target_arch = "wasm32"))]
+type OnlineSession = lodestone_client::Session;
+#[cfg(target_arch = "wasm32")]
+type OnlineSession = std::convert::Infallible;
+
 enum Origin {
     /// Dial a real server over TCP. `auth` is `Some` for an online-mode join.
     Remote {
@@ -953,7 +968,8 @@ enum Origin {
         /// Port to dial.
         port: u16,
         /// An authenticated Microsoft/Minecraft session, for online mode.
-        auth: Option<lodestone_client::Session>,
+        /// Always `None` in a browser — see [`OnlineSession`].
+        auth: Option<OnlineSession>,
     },
     /// Host `lodestone-server`'s integrated server in **this thread's runtime**
     /// and speak to it over an in-memory duplex — singleplayer (issue #287).
@@ -1183,6 +1199,10 @@ impl NetClient {
     /// shell makes is an offline one. Wiring a real "sign in and connect" action
     /// to it is issue #66's remaining half; until then the account switcher can
     /// hold a signed-in Microsoft account that no join ever uses.
+    /// Native-only: it takes a real [`lodestone_client::Session`], which only the
+    /// native `lodestone-auth` chain can produce. A browser join is offline-identity
+    /// only, and goes through the relay rather than this path.
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn connect_online(
         host: String,
@@ -2132,11 +2152,18 @@ fn run(
         // requirement, and it is now met where it belongs, at `connect_as`. See
         // `crate::offline_identity` for why both halves had to change and which
         // server derives which.
+        // `OnlineSession` is uninhabited on wasm32, so the `Some` arm cannot be
+        // entered there — but it still has to type-check, and `Infallible` has no
+        // `profile` field. `match session {}` is the honest spelling of "this branch
+        // does not exist" and needs no stand-in profile.
         let profile = match &auth {
+            #[cfg(not(target_arch = "wasm32"))]
             Some(session) => LoginProfile {
                 username: session.profile.name.clone(),
                 uuid: session.profile.id,
             },
+            #[cfg(target_arch = "wasm32")]
+            Some(session) => match *session {},
             None => offline.login_profile(),
         };
         // Published immediately, not after login: issue #189's roster refresh
@@ -2166,8 +2193,16 @@ fn run(
             // keep-alive keeps a healthy session clear of it — see [`READ_TIMEOUT`].
             .read_timeout(Some(READ_TIMEOUT))
             .respawn_policy(RespawnPolicy::Manual);
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(session) = auth {
             builder = builder.online_session(session);
+        }
+        // `OnlineSession` is uninhabited here, so this branch cannot be entered and
+        // `match session {}` says so to the compiler rather than to a reader.
+        // `ClientBuilder::online_session` does not exist on wasm32 either.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(session) = auth {
+            match session {}
         }
         if let Some((world, entity)) = session {
             builder = builder.ecs(world, entity);
@@ -2178,13 +2213,36 @@ fn run(
         // is why singleplayer cannot produce a "connect:" error.
         let (handle, mut events) = match integrated_io {
             Some(client_io) => builder.connect_with(client_io),
-            None => match builder.connect().await {
-                Ok(pair) => pair,
-                Err(e) => {
-                    let _ = tx.send(NetUpdate::Error(format!("connect: {e}")));
+            None => {
+                // Browser: `ClientBuilder::connect` is `cfg(not(wasm32))` because it
+                // opens a `TcpStream`, which a page cannot do at any layer. This is
+                // not a missing feature so much as the wrong entry point: a browser
+                // multiplayer join goes over `lodestone-net`'s `ws-web` transport
+                // through the relay, which lands on `connect_with` above — the same
+                // arm singleplayer's in-memory duplex uses. Reported rather than
+                // silently dropped, because a join that produces no session and no
+                // message is the hardest kind of failure to diagnose.
+                #[cfg(target_arch = "wasm32")]
+                {
+                    drop(builder);
+                    let _ = tx.send(NetUpdate::Error(
+                        "connect: a browser cannot open a TCP socket. A multiplayer \
+                         join must go through the WebSocket relay (lodestone-net's \
+                         ws-web transport), which reaches connect_with rather than \
+                         connect."
+                            .to_owned(),
+                    ));
                     return;
                 }
-            },
+                #[cfg(not(target_arch = "wasm32"))]
+                match builder.connect().await {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        let _ = tx.send(NetUpdate::Error(format!("connect: {e}")));
+                        return;
+                    }
+                }
+            }
         };
 
         // Publish the handle so the render/mesh thread can read the client-owned

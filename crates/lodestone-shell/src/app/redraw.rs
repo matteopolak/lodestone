@@ -477,7 +477,10 @@ impl WindowApp {
         // `Sim::background_music`. It is not the biome id: the biome only chooses
         // the record, and `BackgroundMusic::select` makes the pick.
         let background = self.sim.background_music();
-        let now = std::time::Instant::now();
+        // The portable clock. `std::time::Instant::now()` traps on wasm32; on native
+        // this is the identical type, because `web_time` re-exports `std::time`
+        // there. See `crate::platform`.
+        let now = crate::platform::Instant::now();
         self.sim.tick_music(
             now,
             &crate::audio::music::world_situation(

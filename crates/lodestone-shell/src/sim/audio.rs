@@ -186,7 +186,7 @@ impl Sim {
     /// is **`instabuild && mayfly`**, not a gamemode check.
     pub(crate) fn tick_music(
         &mut self,
-        now: std::time::Instant,
+        now: crate::platform::Instant,
         situation: &lodestone_sound::music::MusicSituation<'_>,
     ) {
         self.write(|w| {
@@ -220,7 +220,7 @@ impl Sim {
     /// owns the `WeatherTracker`, not `Sim`.
     pub(crate) fn tick_ambience(
         &mut self,
-        now: std::time::Instant,
+        now: crate::platform::Instant,
         weather: Option<&lodestone_render::WeatherState>,
     ) {
         let player = self.player();

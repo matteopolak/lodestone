@@ -153,6 +153,21 @@ winit = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
 
+# The portable clock behind `crate::platform::Instant`/`epoch_duration`.
+#
+# **Unconditional, not wasm-only, and that is deliberate.** `web-time`'s non-wasm
+# arm is literally `pub use std::time::*`, so on native this is the same
+# `std::time::Instant` it always was — same type, not a newtype — and the native
+# build is unchanged. Declaring it for both targets is what lets a signature like
+# `Sim::tick_music(now: Instant)` be written once instead of behind a `cfg`.
+#
+# **Already in this graph either way** — `winit 0.30.13` depends on it — so it costs
+# the browser bundle nothing. Picking it over a hand-rolled `performance.now()`
+# newtype was not a convenience: winit's wasm arm types `ControlFlow::WaitUntil` as
+# `web_time::Instant`, so `app::pacing` does not type-check against any other clock
+# type. See `crate::platform`.
+web-time = "1"
+
 # Logging, errors, ids. `tokio` and the file-writing/OS-probing crates are in the
 # target sections below.
 tracing = { workspace = true }
@@ -231,14 +246,7 @@ web-sys = { version = "0.3", features = [
     "Performance",
     "Storage",
 ] }
-# The portable clock behind `crate::platform::Instant`/`epoch_duration`.
-#
-# **Already in this graph** — `winit 0.30.13` depends on it — so this edge costs
-# the bundle nothing, and picking it over a hand-rolled `performance.now()`
-# newtype is not a convenience: winit's wasm arm types
-# `ControlFlow::WaitUntil` as `web_time::Instant`, so `app::pacing` does not
-# type-check against any other clock type. See `crate::platform`.
-web-time = "1"
+
 
 [dev-dependencies]
 # Same pin as every other bench site in the workspace. `default-features = false`
