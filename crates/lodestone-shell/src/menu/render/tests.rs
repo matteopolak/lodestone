@@ -373,8 +373,8 @@ fn the_server_list_shows_the_motd_players_and_latency_from_a_status() {
     }));
     let entries = nav.list().entries().to_vec();
     statuses.refresh(&entries);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while statuses.pump() == 0 && std::time::Instant::now() < deadline {
+    let deadline = crate::platform::Instant::now() + std::time::Duration::from_secs(5);
+    while statuses.pump() == 0 && crate::platform::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 
@@ -449,8 +449,8 @@ fn every_row_state_resolves_to_its_own_status_sprite() {
         "and blanks the status column"
     );
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while statuses.pump() == 0 && std::time::Instant::now() < deadline {
+    let deadline = crate::platform::Instant::now() + std::time::Duration::from_secs(5);
+    while statuses.pump() == 0 && crate::platform::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     let slow = frame_for(&ui, &nav, &statuses, &mut fav).unwrap().rows[0]
@@ -472,8 +472,8 @@ fn every_row_state_resolves_to_its_own_status_sprite() {
         })
     }));
     old.refresh(&entries);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while old.pump() == 0 && std::time::Instant::now() < deadline {
+    let deadline = crate::platform::Instant::now() + std::time::Duration::from_secs(5);
+    while old.pump() == 0 && crate::platform::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     let view = frame_for(&ui, &nav, &old, &mut fav).unwrap().rows[0]
@@ -506,8 +506,8 @@ fn a_failed_ping_shows_its_reason_in_the_error_colour() {
     }));
     let entries = nav.list().entries().to_vec();
     statuses.refresh(&entries);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while statuses.pump() == 0 && std::time::Instant::now() < deadline {
+    let deadline = crate::platform::Instant::now() + std::time::Duration::from_secs(5);
+    while statuses.pump() == 0 && crate::platform::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 
@@ -899,8 +899,8 @@ fn ok_statuses(
     }));
     let entries = nav.list().entries().to_vec();
     statuses.refresh(&entries);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while statuses.pump() == 0 && std::time::Instant::now() < deadline {
+    let deadline = crate::platform::Instant::now() + std::time::Duration::from_secs(5);
+    while statuses.pump() == 0 && crate::platform::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert_eq!(statuses.len(), entries.len(), "every entry must drain");
@@ -1260,8 +1260,8 @@ fn the_status_sprite_and_the_disabled_footer_sample_the_sprites_they_should() {
     }));
     let entries = nav.list().entries().to_vec();
     statuses.refresh(&entries);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while statuses.pump() == 0 && std::time::Instant::now() < deadline {
+    let deadline = crate::platform::Instant::now() + std::time::Duration::from_secs(5);
+    while statuses.pump() == 0 && crate::platform::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     let f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();

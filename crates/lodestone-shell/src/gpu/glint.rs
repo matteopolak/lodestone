@@ -160,9 +160,10 @@ impl GlintPass {
 /// the same origin `crate::app::recipe_toast_now_ms` uses for the recipe toast.
 #[must_use]
 pub(super) fn glint_now_ms() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64() * 1000.0)
+    // `crate::platform::epoch_duration`, not `SystemTime::now()`, which traps on
+    // wasm32. This runs per glint draw, so a browser would die on the first
+    // enchanted item on screen.
+    crate::platform::epoch_duration().as_secs_f64() * 1000.0
 }
 
 /// The shared `GlintUniform` value for a glint draw under `view_proj`, at the
