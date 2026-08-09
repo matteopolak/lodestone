@@ -308,9 +308,20 @@ impl EntityInstanceRaw {
 /// One camera-yaw-billboarded column of quads, stacked from the entity's feet
 /// upward, shrinking and receding as it rises:
 ///
-/// * `s = width * 1.4` (`:32`) is the whole billboard's scale — width and
-///   height below are in *scaled* local units, not world blocks, until
-///   [`flame_quads`] multiplies through by `s` at the end.
+/// * `s = width * 1.4` (`:32`) is the whole billboard's scale. **It is not
+///   folded into the geometry here.** Every position [`flame_quads`] emits is
+///   in vanilla's *pre-scale* local units, exactly as they are written in
+///   `prepare` before `pose.scale(s, s, s)` runs, and the caller applies `s` as
+///   a uniform scale in the instance matrix — [`flame_instance_matrix`] is the
+///   one place that happens.
+///
+///   That split is deliberate and it is what makes one baked mesh per entity
+///   *type* correct: the mesh's shape depends only on the ratio
+///   `h = height / s`, which is invariant under a uniform hitbox scale, so a
+///   baby and an adult of the same type share this geometry and differ only in
+///   `s`. An earlier version of this doc claimed the scale was multiplied
+///   through "at the end" and it never was, which left every flame `1/s` times
+///   too large — worst on a wide mob, where `s` is furthest from `1`.
 /// * `h = height / s` (`:36`) is how many scaled units tall the stack has to
 ///   fill; the loop below runs once per `0.45`-unit slice of it (`:60`),
 ///   which is [`FLAME_QUAD_HEIGHT`]'s value.
@@ -338,9 +349,14 @@ impl EntityInstanceRaw {
 /// adds at draw time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FlameVertex {
-    /// Position in the flame's own local space: `+Y` up from the entity's
-    /// feet, `+Z` the yaw-billboard's forward axis. **Already scaled** by `s`
-    /// — see [`flame_quads`]'s doc.
+    /// Position in the flame's own local space: `+Y` up from the entity's feet,
+    /// `+Z` the direction the stack leans *toward the camera*.
+    ///
+    /// **Not** scaled by `s` — see [`flame_quads`]'s doc for why the scale
+    /// belongs to [`flame_instance_matrix`] instead. `+Z` being toward the
+    /// camera is what makes the sign of the billboard rotation load-bearing:
+    /// the whole stack steps forward in `z` and insets laterally as it rises, so
+    /// it is *not* symmetric under a sign flip.
     pub position: [f32; 3],
     /// `[u, v_local]`, **not** a complete UV pair on its own:
     ///
@@ -471,6 +487,81 @@ pub fn flame_quads(width: f32, height: f32) -> Vec<FlameQuad> {
         ss += 1;
     }
     quads
+}
+
+/// The camera-yaw billboard a flame is rotated by — vanilla's
+/// `Mth.rotationAroundAxis(Mth.Y_AXIS, camera.orientation, …)`
+/// (`EntityRenderDispatcher.java:164`), reduced to a matrix.
+///
+/// # The sign is not free, and reasoning it away is how it shipped wrong
+///
+/// `rotationAroundAxis` is a swing/twist decomposition: it keeps `(0, q.y, 0,
+/// q.w)` and normalises, which for `Camera.setRotation`'s
+/// `rotationYXZ(PI - yaw, -pitch, 0)` is exactly `Ry(PI - yaw)` — the pitch term
+/// contributes nothing after the projection, so this takes a yaw and not a whole
+/// camera. Hence the `PI -` here: **not** `Ry(yaw)`, and **not** `Ry(-yaw)`
+/// either. The two differ by a further half turn.
+///
+/// An earlier version of this pass used `Ry(yaw)` and argued the sign could not
+/// matter because entity draws are double-sided (`cull_mode: None`), so a flat
+/// billboard reads the same face-on either way. **The flame is not a flat
+/// billboard** — [`flame_quads`] emits a stack that both steps forward in `z`
+/// and insets laterally as it rises, and a stack with depth and lateral
+/// asymmetry is not sign-symmetric. With the sign wrong the flame counter-rotates
+/// as you orbit instead of following, so it looks right from one side and
+/// displaced from the other. That is a depth-order symptom, which is exactly what
+/// `cull_mode: None` turns a bad transform into.
+///
+/// The derivable invariant, and what [`flame_instance_matrix`]'s gate asserts:
+/// the local `+Z` this rotation maps must point **toward** the camera, i.e.
+/// against [`crate::Camera::forward`]. Derive it from a real camera; do not
+/// assert a polarity.
+#[must_use]
+pub fn flame_billboard_rotation(camera_yaw_deg: f32) -> glam::Mat4 {
+    glam::Mat4::from_rotation_y(core::f32::consts::PI - camera_yaw_deg.to_radians())
+}
+
+/// The uniform scale a flame is drawn at — vanilla's
+/// `s = state.boundingBoxWidth * 1.4` (`FlameFeatureRenderer.java:32`).
+///
+/// `bb_width` is the entity's **own** hitbox width, not its type's: vanilla reads
+/// `EntityRenderState.boundingBoxWidth`, which is `Entity.getBbWidth()` after
+/// `getDimensions().scale(getAgeScale())`, so a baby's is half its type's. That
+/// is the whole of the baby-flame fix — see [`flame_instance_matrix`].
+#[must_use]
+pub fn flame_scale(bb_width: f32) -> f32 {
+    bb_width * FLAME_SCALE_FACTOR
+}
+
+/// The model→world matrix for one flame instance:
+/// `translate(feet) · scale(s) · billboard`, matching
+/// `FlameFeatureRenderer.prepare`'s own `pose.scale(s, s, s)` then
+/// `pose.rotate(rotation)` order.
+///
+/// `bb_width` is the entity's own hitbox width (see [`flame_scale`]). The
+/// per-quad push-back `0.3 - (int)h * 0.02` is already inside the baked
+/// geometry, so vanilla's third step (`pose.translate(0, 0, …)`) has no
+/// counterpart here.
+///
+/// # Why the size is per **instance** and the mesh is per **type**
+///
+/// Two things vary with an entity's hitbox in vanilla: the uniform scale `s`, and
+/// the number of stacked quads, which comes from `h = height / s`. Under a
+/// *uniform* box scale — which is what an age scale is — `h` is invariant:
+/// halving both width and height leaves `height / (width · 1.4)` unchanged. So a
+/// baby and an adult of one type share a layer count and differ only in `s`.
+///
+/// That is why this is a per-instance scale rather than a per-entity mesh, and
+/// why one mesh per entity type is still correct. The layer count genuinely does
+/// vary — but across **aspect ratios**, not across ages: a spider (wide and low)
+/// gets far fewer quads than a zombie, and both keep their count when they are
+/// babies. A "babies get fewer layers" rule would be a second, wrong change on
+/// top of this one.
+#[must_use]
+pub fn flame_instance_matrix(feet: glam::Vec3, camera_yaw_deg: f32, bb_width: f32) -> glam::Mat4 {
+    glam::Mat4::from_translation(feet)
+        * glam::Mat4::from_scale(glam::Vec3::splat(flame_scale(bb_width)))
+        * flame_billboard_rotation(camera_yaw_deg)
 }
 
 /// [`flame_quads`], baked into a [`ModelVertex`]/index pair a
@@ -1929,6 +2020,148 @@ mod tests {
             (first_half_width * s - 0.98).abs() < 1e-3,
             "spider's first quad world half-width must be 0.98 blocks, got {}",
             first_half_width * s
+        );
+    }
+
+    /// **The billboard sign, derived from a real [`Camera`] rather than
+    /// asserted as a polarity, at eight azimuths.**
+    ///
+    /// The invariant: the flame's stack leans along its local `+Z`, so after the
+    /// billboard that direction must point **toward** the camera — every quad
+    /// must land strictly nearer the eye than the mob's own centre line, from
+    /// every direction you can orbit to.
+    ///
+    /// Both wrong hypotheses are computed in the same run and required to fail
+    /// somewhere, which is the part that matters: a **sign flip alone**
+    /// (`Ry(-yaw)`) is invisible at yaw `0` and `180`, so a gate that only looked
+    /// from one side — or from the two obvious opposed sides — passes with it. It
+    /// takes an off-axis azimuth to separate them.
+    #[test]
+    fn the_flames_lean_is_toward_the_camera_from_every_azimuth() {
+        use crate::Camera;
+        use glam::{Mat4, Vec3};
+
+        // The most-forward local point of the stack: the first quad's own z,
+        // read off the geometry rather than restated from `0.3`.
+        let quads = flame_quads(0.6, 1.95);
+        let lean_z = quads[0].vertices[0].position[2];
+        assert!(
+            lean_z > 0.0,
+            "the premise of this gate is that the stack leans along +Z; it is {lean_z}"
+        );
+
+        // How much nearer the eye a leaning point should be, in world blocks.
+        let expect_nearer = lean_z * flame_scale(0.6);
+
+        let feet = Vec3::new(4.0, 65.0, -7.0);
+        let mut sign_flip_failed = false;
+        let mut half_turn_failed = false;
+        for step in 0..8 {
+            let yaw = 45.0 * step as f32;
+            // A real camera looking at the mob from `yaw`, placed by its own
+            // `forward` so nothing about the placement restates the rotation
+            // under test.
+            let mut camera = Camera {
+                yaw,
+                pitch: 0.0,
+                ..Camera::default()
+            };
+            camera.position = feet - camera.forward() * 6.0;
+
+            let apply = |m: Mat4| {
+                let world = m.transform_point3(Vec3::new(0.0, 0.0, lean_z));
+                let centre = m.transform_point3(Vec3::ZERO);
+                // Positive means the leaning point is nearer the eye.
+                camera.position.distance(centre) - camera.position.distance(world)
+            };
+
+            let correct = apply(flame_instance_matrix(feet, yaw, 0.6));
+            assert!(
+                (correct - expect_nearer).abs() < 1e-3,
+                "yaw {yaw}: the lean must put the stack {expect_nearer} blocks \
+                 nearer the eye, measured {correct}"
+            );
+
+            // Hypothesis A: the sign flipped. Invisible at yaw 0 and 180.
+            let flipped = apply(
+                Mat4::from_translation(feet)
+                    * Mat4::from_scale(Vec3::splat(flame_scale(0.6)))
+                    * Mat4::from_rotation_y(-yaw.to_radians()),
+            );
+            if flipped < 0.0 {
+                sign_flip_failed = true;
+            }
+            // Hypothesis B: the half turn dropped — what shipped.
+            let no_half_turn = apply(
+                Mat4::from_translation(feet)
+                    * Mat4::from_scale(Vec3::splat(flame_scale(0.6)))
+                    * Mat4::from_rotation_y(yaw.to_radians()),
+            );
+            if no_half_turn < 0.0 {
+                half_turn_failed = true;
+            }
+        }
+        assert!(
+            sign_flip_failed,
+            "the sign-flip hypothesis must lean away from the eye at some \
+             azimuth, or this gate cannot see a sign error"
+        );
+        assert!(
+            half_turn_failed,
+            "the dropped-half-turn hypothesis must lean away from the eye at \
+             some azimuth"
+        );
+    }
+
+    /// **The flame's size is per entity, and an age scale changes the scale but
+    /// not the layer count.**
+    ///
+    /// Both numbers are predicted from vanilla's constants rather than asserted
+    /// as "smaller": an adult zombie's `s` is `0.6 × 1.4 = 0.84`, a baby's box is
+    /// `getDimensions().scale(0.5)` so its `s` is exactly `0.42`.
+    ///
+    /// The layer-count half is the counter-intuitive one and it is the reason
+    /// this is not a "babies get fewer quads" change. The count comes from
+    /// `h = height / s = height / (width × 1.4)`, which is **invariant** under a
+    /// uniform box scale — so vanilla itself gives a baby zombie the same six
+    /// quads at half the size. The spider arm is the control proving the count is
+    /// not simply constant: it varies with **aspect ratio**, which an age scale
+    /// does not touch.
+    #[test]
+    fn an_age_scale_halves_the_flames_scale_and_leaves_its_layer_count_alone() {
+        // Zombie: base 0.6 x 1.95.
+        let adult_w = 0.6f32;
+        let baby_w = adult_w * 0.5;
+        assert!((flame_scale(adult_w) - 0.84).abs() < 1e-6);
+        assert!((flame_scale(baby_w) - 0.42).abs() < 1e-6);
+        assert!(
+            flame_scale(baby_w) < flame_scale(adult_w),
+            "a baby's flame must be strictly smaller"
+        );
+
+        let adult = flame_quads(adult_w, 1.95);
+        let baby = flame_quads(baby_w, 1.95 * 0.5);
+        assert_eq!(adult.len(), 6);
+        assert_eq!(
+            baby.len(),
+            adult.len(),
+            "a uniform box scale leaves h = height / (width * 1.4) unchanged, so \
+             vanilla gives a baby the same layer count at half the scale"
+        );
+
+        // The control: the count really does vary, just not with age. A spider is
+        // wide and low, so its h is far smaller than a zombie's.
+        assert_eq!(flame_quads(1.4, 0.9).len(), 2);
+        assert_eq!(flame_quads(1.4 * 0.5, 0.9 * 0.5).len(), 2);
+
+        // And the whole point of the per-instance scale: the same mesh at two
+        // different scales really does produce two different world sizes.
+        let adult_top = adult.last().unwrap().vertices[2].position[1] * flame_scale(adult_w);
+        let baby_top = baby.last().unwrap().vertices[2].position[1] * flame_scale(baby_w);
+        assert!(
+            (adult_top - 2.0 * baby_top).abs() < 1e-3,
+            "the baby's flame must be exactly half as tall in world blocks: \
+             {adult_top} vs {baby_top}"
         );
     }
 

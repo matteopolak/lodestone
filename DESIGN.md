@@ -7855,3 +7855,77 @@ The artefact: the flat-table arm first measured **0.0 instructions per call**, b
 loop-invariant and LLVM lifted the whole lookup out. A per-call cost of zero is not a result, and the
 only reason it was caught is that the prediction written down beforehand said "a small minority", not
 "free". **Vary a microbenchmark's input, and disbelieve a measurement that agrees with you too well.**
+
+**12.160 A code comment that argued a bug was impossible, and it was the whole bug.** Three units,
+one shape: the record was right and the *reasoning about the record* was wrong.
+
+**The flame billboard.** `prepare_flame`'s own doc said the camera-yaw rotation's sign "is not
+pixel-matched against vanilla's own convention", and gave a reason: entity draws are double-sided
+(`cull_mode: None`), so a flat billboard reads identically face-on for either sign — "only which
+horizontal axis the flame's thin edge points down would flip, never its visibility". Every clause of
+that is true of a flat billboard and the flame is not one. `FlameFeatureRenderer.prepare` emits a
+**stack** that steps forward in `z` (`-0.03` per quad, over a `0.3` pose-level push) *and* insets
+laterally (`×0.9`), and a stack with depth and lateral asymmetry is not sign-symmetric. The shipped
+`Ry(yaw)` should have been `Ry(PI - yaw)`, from `Camera.setRotation`'s `rotationYXZ(PI - yaw, …)`
+projected onto Y. The player's report — *"tied to one side of a mob, so if i go to the other side its
+in the wrong spot"* — is the exact signature of a billboard rotating the wrong way, and
+`cull_mode: None` is what converts it into a depth-order symptom instead of a missing face, which is
+the rule `CLAUDE.md` already states and the comment argued past.
+
+Two measurements from the gate that are worth more than the fix. **The off-axis azimuths are
+load-bearing**: `Ry(yaw)` reddens at yaw `0`, but a **pure sign flip** `Ry(-yaw)` is bit-identical to
+correct at yaw `0` *and* `180`, and reddens first at yaw `45` — so a two-opposed-azimuth gate, the
+obvious cross-arm shape, still passes with it. And the invariant has to be **derived from a real
+`Camera`** (the local `+Z` must point against `Camera::forward`) rather than asserted as a polarity, or
+it is just the implementation restated.
+
+**The flame's scale was missing outright, and a doc claimed otherwise.** `flame_quads`' doc said the
+uniform scale `s = width * 1.4` was "multiplied through by `s` at the end". It never was — `s` was
+computed only to derive the loop bound `h = height / s`, and nothing applied vanilla's
+`pose.scale(s, s, s)`, so every flame was `1/s` times too large, worst on a wide mob. What made this
+invisible is that **the existing geometry tests were correct and complete**: they multiply by `s` by
+hand to convert local units to world blocks, so they pin the geometry exactly while saying nothing
+about whether anyone else ever does that multiply. A test that reproduces the caller's missing step
+inside itself cannot see the caller.
+
+**And the arithmetic that says the obvious size fix is wrong.** The brief for the baby-mob half said a
+baby's flame must be "both smaller *and* shorter in layer count, since matching only the scale would
+still be wrong". The layer count comes from `h = height / (width × 1.4)`, which is **invariant under a
+uniform box scale** — and an age scale is uniform (`getDimensions().scale(getAgeScale())` scales both
+axes). So vanilla itself gives a baby zombie the *same* six quads at half the size, and a
+"babies get fewer layers" rule would have been a second, wrong change layered on the first. The layer
+count does vary, across **aspect ratios** rather than ages: a spider gets 2 quads to a zombie's 6, and
+both keep their count as babies. Predicting *both* numbers from vanilla's constants is what separated
+the two hypotheses; "assert it is smaller" would have accepted either.
+
+**The lectern's dead arithmetic, same species.** `LecternRenderer.BOOK_STATE` is
+`BookModel.State.forAnimation(0.0, 0.1, 0.9, 1.2)`, and `forAnimation` computes
+`openness = (sin(progress * 0.02) * 0.1 + 1.25) * openness`. It *reads* as an animation and is a
+compile-time constant `1.5`, because the `sin` term is exactly zero at `progress == 0`. Porting a live
+clock for it would make every lectern book in the world breathe. The control that makes the constant
+meaningful is a **non-zero** progress fed to the same formula: without it the test cannot distinguish
+"this call site is constant" from "this formula is inert".
+
+Two smaller ones from the lectern, both of which draw something plausible when wrong: the `* 2` in
+`flip_page{1,2}.yRot = openness - openness * 2 * pageFlip` puts the two pages on **opposite** sides of
+the spine (`+1.2`/`-1.2`), and dropping it gives `1.35`/`0.15` — both positive, same side, and every
+sign-only or "did the pose change" assertion still passes. And `setupAnim` assigns `leftPages.x =
+sin(openness)` as an **absolute** pivot, overwriting the rest pose's `0`; four of six posed parts move
+their pivot as well as rotating, which no other block-entity rig in the corpus does.
+
+**The remote-skin blocker was named correctly and its proposed fix was not.** `EntityBatch` really did
+key a texture by the `&'static str` model name, so texture identity *was* model identity and every
+player collapsed into one `player_wide` batch. The recorded fix — a composite key plus interning, so a
+runtime name could still be `&'static str` — solves a problem that does not exist: an
+`EntityDrawBatch` lives for one frame, so an owned `String` there has nothing to intern and nothing to
+leak. What must outlive the frame is the **bind group**, and a `HashMap<String, BindGroup>` keyed by
+texture URL is the whole of it. **Ask what actually needs the lifetime before widening a key to
+satisfy one.**
+
+One more from that unit, which is a *design* consequence rather than a correction: a slim player's rig
+selection must **not** be spelled by rewriting `EntityDraw::type_path` to `"player_slim"`, even though
+`canonical_model_name` resolves that literal and the render crate's own doc suggests passing it
+through. `type_path` is also what `gpu/nametag.rs` hands to `entity_dimensions::base_dimensions`, and
+`"player_slim"` is not an entity-type registry path — it misses, falls back to a default height, and
+puts every slim player's nametag in the wrong place. A field read by five consumers cannot be
+repurposed for one of them; `EntityDraw::model_type_path()` is an accessor for that reason.
