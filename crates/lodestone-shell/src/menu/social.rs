@@ -103,7 +103,7 @@ impl SocialEntry {
 /// `app.rs`'s `drive_ui_from_session` calls this every frame while connected
 /// to feed [`SocialNav::refresh`] via `MenuNav::refresh_social` — see the
 /// module docs' "Wired since" note. Free-standing and pure so it is testable
-/// without a live session, the same shape [`super::tablist::player_rows`]
+/// without a live session, the same shape [`crate::tablist::tab_list_view`]
 /// already is for the HUD overlay.
 #[must_use]
 pub fn entries_from_tablist(tab_list: &TabList, exclude: Option<Uuid>) -> Vec<SocialEntry> {
