@@ -189,7 +189,14 @@ pub fn build(
     let mut b = Quads::new(width, height);
     b.atlas = atlas;
     b.font = font;
-    let backdrop = if frame.overlay { OVERLAY_BG } else { BG };
+    // `Panorama` answers `false` here and takes `BG`: that quad is the
+    // no-panorama fallback, and when the panorama really draws the renderer
+    // skips these vertices altogether (see `MenuGeometry::backdrop_floats`).
+    let backdrop = if frame.backdrop.is_translucent() {
+        OVERLAY_BG
+    } else {
+        BG
+    };
     b.rect(0.0, 0.0, width, height, backdrop);
     let backdrop_floats = b.verts.len();
 

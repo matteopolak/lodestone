@@ -367,14 +367,20 @@ impl MenuRenderer {
         load: wgpu::LoadOp<wgpu::Color>,
     ) {
         self.ensure_gui(device, queue);
-        // The panorama is vanilla's out-of-world background: `extractBackground`
-        // draws it whenever `minecraft.level == null`, which for this renderer is
-        // exactly `!frame.overlay` (the one overlay frame is the pause menu, drawn
-        // over a live world). See `docs/menu-panorama.md`.
+        // The panorama is vanilla's out-of-world background, and which screens get
+        // it is now the frame's own declaration (`MenuBackdrop`) rather than a
+        // reading of `!frame.overlay`. That inference was wrong for two screens:
+        // the connect and level-loading screens want the panorama *and* a
+        // translucent wash, and the old boolean could only offer one or the other.
+        // `LevelLoadingScreen.extractBackground` is the record — its `OTHER` arm
+        // calls `extractPanorama` with no `level == null` gate at all. See
+        // `docs/menu-panorama.md`.
         // `frame.logo` is set for the title screen and nothing else, which is the
-        // one screen whose `extractBackground` override is empty.
+        // one screen whose `extractBackground` override is empty — so it is the one
+        // screen with no wash, which is why the distinction lives here and not in
+        // `MenuBackdrop`.
         let panorama_dim = panorama::dim_for_screen(frame.logo);
-        if !frame.overlay {
+        if frame.backdrop.wants_panorama() {
             self.ensure_panorama(device, queue);
             if let Some(pano) = self.panorama.as_mut() {
                 // Vanilla's **Panorama Scroll Speed** accessibility option. Applied
@@ -398,7 +404,13 @@ impl MenuRenderer {
                 pano.prepare(queue, width, height, panorama_dim);
             }
         }
-        let panorama_drawn = !frame.overlay && self.panorama.is_some();
+        // A boolean is still the right shape here, and the sprite/colour replay
+        // ordering below does not want the panorama as one of its cuts: there is
+        // exactly one panorama, it is always the very first thing in the pass
+        // (before the menu pipeline is even bound), and it covers every pixel. The
+        // `sprite_cuts` interleave exists because the *menu's* two streams can
+        // alternate; the panorama cannot alternate with anything.
+        let panorama_drawn = frame.backdrop.wants_panorama() && self.panorama.is_some();
         let (logical_w, logical_h) = logical_canvas(frame.gui_scale, width, height);
         let geo = build(
             frame,

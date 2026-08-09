@@ -158,6 +158,23 @@ empty body** (`TitleScreen.java:330`) and draws the panorama itself from
 cubemap. That fork is `panorama::dim_for_screen`, keyed on `MenuFrame::logo`,
 which `frame_for` sets for `Screen::MainMenu` and nothing else.
 
+**Which screens get the panorama at all is a separate question, and it used to be
+answered wrongly.** It is now `MenuFrame::backdrop` (`MenuBackdrop`), a three-way
+declaration; it was `overlay: bool`, and that single flag both picked the
+translucent backdrop colour *and* suppressed the panorama — so a screen wanting a
+wash **over** the sky could not say so. The loading screen wanted exactly that and
+came out as a flat fill with a translucent quad on it. `LevelLoadingScreen`'s
+`OTHER` arm is the record that settles it: it calls `extractPanorama` with no
+`minecraft.level == null` gate, so even a live level is covered. `MenuBackdrop::Dim`
+is now the only value that suppresses the panorama, and only the pause, death and
+command-block screens ask for it. See `loading-screen.md`.
+
+The panorama stays a **boolean** in `MenuRenderer::draw` rather than joining the
+`sprite_cuts` emission-order replay: there is exactly one of it, it is always the
+first thing in the pass (before the menu pipeline is bound), and it covers every
+pixel. `sprite_cuts` exists because the menu's *own* two vertex streams alternate;
+the panorama has nothing to alternate with.
+
 ### Why the dim is a uniform and not a quad
 
 Compositing black at α = 64/255 with standard alpha blending is
