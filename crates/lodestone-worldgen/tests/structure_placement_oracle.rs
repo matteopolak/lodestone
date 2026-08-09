@@ -9,25 +9,25 @@
 //!
 //! # What is gated, and what is deliberately not
 //!
-//! Four bundled structure sets are **closed** under the generators that exist
-//! today: `shipwrecks`, `ocean_ruins`, `buried_treasures`, `ocean_monuments`.
-//! Every structure they can place has a decidable start (biome-valid implies
-//! start-valid for all four), so for those four the placement answer is exactly
-//! vanilla's and both directions are checkable:
+//! Five bundled structure sets are **closed** under the generators that exist
+//! today: `shipwrecks`, `ocean_ruins`, `buried_treasures`, `ocean_monuments` and —
+//! as of S7 — `mineshafts`. Every structure they can place has a decidable start
+//! (biome-valid implies start-valid for all five), so for those the placement answer
+//! is exactly vanilla's and both directions are checkable:
 //!
-//! * **Positive** — every one of the fixture's 31 closed-set starts is produced
+//! * **Positive** — every one of the fixture's 77 closed-set starts is produced
 //!   by this engine at exactly that chunk.
 //! * **Negative** — over a 64×64 chunk window that the oracle world has generated
 //!   essentially completely (4,080 of 4,096 chunks), this engine produces *no*
 //!   closed-set start the oracle does not have. Without this half the positive
 //!   test is satisfied by an engine that starts a shipwreck in every chunk.
 //!
-//! The other 71 fixture starts (mineshaft, ruined portals, jigsaw structures) are
-//! **not** gated: their sets are open — a structure whose piece generator has not
-//! landed cannot have its start validity decided, so this engine's answer for
-//! those sets is a superset by construction. `StructureRegistry::unsupported`
-//! names every one, and this file asserts that ledger is non-empty rather than
-//! letting an accidentally-empty implementation look complete.
+//! The remaining fixture starts (ruined portals, jigsaw structures) are **not**
+//! gated: their sets are open — a structure whose piece generator has not landed
+//! cannot have its start validity decided, so this engine's answer for those sets
+//! is a superset by construction. `StructureRegistry::unsupported` names every one,
+//! and this file asserts that ledger is non-empty rather than letting an
+//! accidentally-empty implementation look complete.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -41,7 +41,13 @@ const SEED: i64 = -195_764_831;
 
 const FIXTURE: &str = include_str!("support/structure_starts_survival.txt");
 
-/// The four structure sets every structure of which this engine can decide.
+/// The structure sets every structure of which this engine can decide.
+///
+/// `mineshafts` joined the list with S7. It is closed for the same reason the other
+/// four are: `MineshaftStructure.findGenerationPoint` returns `Optional.of(...)`
+/// unconditionally, so biome-valid implies start-valid and this engine's answer for
+/// the set is exactly vanilla's — in **both** directions, which is what makes the
+/// 46 oracle mineshaft starts a usable expected value rather than a superset.
 const CLOSED_SET_STRUCTURES: &[&str] = &[
     "minecraft:shipwreck",
     "minecraft:shipwreck_beached",
@@ -49,6 +55,8 @@ const CLOSED_SET_STRUCTURES: &[&str] = &[
     "minecraft:ocean_ruin_warm",
     "minecraft:buried_treasure",
     "minecraft:monument",
+    "minecraft:mineshaft",
+    "minecraft:mineshaft_mesa",
 ];
 
 /// The negative sweep's window: `x in -32..32`, `z in -48..16`. Chosen because
@@ -187,7 +195,6 @@ fn the_unsupported_ledger_names_what_is_not_implemented() {
     let ledger = generator.structure_ledger();
     assert!(!ledger.is_empty(), "structure data loaded but nothing is named unsupported");
     for expected in [
-        "minecraft:mineshaft",
         "minecraft:ruined_portal",
         "minecraft:village_plains",
         "minecraft:trial_chambers",
@@ -237,8 +244,8 @@ fn closed_set_starts_match_the_vanilla_survival_world() {
     // actually contain the structures this test is about, or it measures nothing.
     assert_eq!(
         expected.len(),
-        31,
-        "the oracle census for the four closed sets is 31 starts; got {}",
+        77,
+        "the oracle census for the five closed sets is 77 starts (31 + mineshaft's 46); got {}",
         expected.len()
     );
 
@@ -304,7 +311,8 @@ fn no_extra_closed_set_starts_over_the_oracle_window() {
         .count();
     // Precondition again: a window with no closed-set start in it would make the
     // "no extras" assertion true for an engine that places nothing.
-    assert_eq!(expected_in_window, 12, "window census changed");
+    // 12 before S7 plus mineshaft's 6 inside the window.
+    assert_eq!(expected_in_window, 18, "window census changed");
 
     assert!(
         extra.is_empty(),

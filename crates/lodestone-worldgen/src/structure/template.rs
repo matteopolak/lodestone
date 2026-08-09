@@ -258,6 +258,11 @@ impl BlockState {
                 out.properties.insert("orientation".into(), rotated);
             }
         }
+        if let Some(shape) = out.properties.get("shape") {
+            if let Some(rotated) = rotate_rail_shape(shape, turns) {
+                out.properties.insert("shape".into(), rotated.into());
+            }
+        }
         rotate_directional_flags(&mut out, turns);
         out
     }
@@ -328,6 +333,11 @@ impl BlockState {
                 }
             }
         }
+        if let Some(shape) = out.properties.get("shape") {
+            if let Some(flipped) = mirror_rail_shape(shape, mirror) {
+                out.properties.insert("shape".into(), flipped.into());
+            }
+        }
         if let Some(facing) = out.properties.get("facing") {
             if let Some(flipped) = flip(facing) {
                 out.properties.insert("facing".into(), flipped.into());
@@ -352,6 +362,83 @@ impl BlockState {
     #[must_use]
     pub fn is_waterloggable_and_dry(&self) -> bool {
         self.properties.get("waterlogged").map(String::as_str) == Some("false")
+    }
+}
+
+/// `BaseRailBlock.rotate(RailShape, Rotation)`, transcribed.
+///
+/// Keyed on the `shape` **value** rather than on the presence of neighbouring
+/// properties, because `shape` is spelled by two unrelated block families here: a
+/// stair's is one of `straight`/`inner_*`/`outer_*` and a rail's is one of the ten
+/// below, and the two sets are disjoint. Returning `None` for anything unrecognised
+/// is therefore what leaves the stair branch — and every other `shape` — alone.
+///
+/// Written out rather than derived from "rotate the two connected directions and
+/// re-canonicalise": the derivation needs a canonical-name pass of its own, and a
+/// table lifted from the source cannot disagree with it.
+fn rotate_rail_shape(shape: &str, turns: u32) -> Option<&'static str> {
+    let table: [(&str, [&'static str; 3]); 10] = [
+        // shape -> [cw90, cw180, ccw90]
+        ("north_south", ["east_west", "north_south", "east_west"]),
+        ("east_west", ["north_south", "east_west", "north_south"]),
+        (
+            "ascending_east",
+            ["ascending_south", "ascending_west", "ascending_north"],
+        ),
+        (
+            "ascending_west",
+            ["ascending_north", "ascending_east", "ascending_south"],
+        ),
+        (
+            "ascending_north",
+            ["ascending_east", "ascending_south", "ascending_west"],
+        ),
+        (
+            "ascending_south",
+            ["ascending_west", "ascending_north", "ascending_east"],
+        ),
+        ("south_east", ["south_west", "north_west", "north_east"]),
+        ("south_west", ["north_west", "north_east", "south_east"]),
+        ("north_west", ["north_east", "south_east", "south_west"]),
+        ("north_east", ["south_east", "south_west", "north_west"]),
+    ];
+    let row = table.iter().find(|(name, _)| *name == shape)?.1;
+    match turns % 4 {
+        1 => Some(row[0]),
+        2 => Some(row[1]),
+        3 => Some(row[2]),
+        _ => None,
+    }
+}
+
+/// `BaseRailBlock.mirror(RailShape, Mirror)`, transcribed.
+///
+/// Note the asymmetry, which is vanilla's: `LEFT_RIGHT` leaves `ascending_east` and
+/// `ascending_west` alone and `FRONT_BACK` leaves `ascending_north`/`ascending_south`
+/// alone, while both swap the four diagonals — the same shape of asymmetry the stair
+/// branch above carries, and for the same reason (the mirror axis must actually move
+/// the shape's own axis).
+fn mirror_rail_shape(shape: &str, mirror: Mirror) -> Option<&'static str> {
+    match mirror {
+        Mirror::LeftRight => match shape {
+            "ascending_north" => Some("ascending_south"),
+            "ascending_south" => Some("ascending_north"),
+            "south_east" => Some("north_east"),
+            "south_west" => Some("north_west"),
+            "north_west" => Some("south_west"),
+            "north_east" => Some("south_east"),
+            _ => None,
+        },
+        Mirror::FrontBack => match shape {
+            "ascending_east" => Some("ascending_west"),
+            "ascending_west" => Some("ascending_east"),
+            "south_east" => Some("south_west"),
+            "south_west" => Some("south_east"),
+            "north_west" => Some("north_east"),
+            "north_east" => Some("north_west"),
+            _ => None,
+        },
+        Mirror::None => None,
     }
 }
 

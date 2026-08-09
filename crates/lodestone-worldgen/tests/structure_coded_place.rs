@@ -278,6 +278,12 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
         "minecraft:swamp_hut",
         "minecraft:desert_pyramid",
         "minecraft:jungle_pyramid",
+        // S7: both mineshaft structures place blocks now, so both come **off** the
+        // ledger. The `mineshaft:` deviation rows below are what replaces them —
+        // a structure moving from "absent" to "present with named deviations" is the
+        // transition this pair of loops exists to make visible.
+        "minecraft:mineshaft",
+        "minecraft:mineshaft_mesa",
     ] {
         assert!(
             !ledger.contains_key(id),
@@ -286,7 +292,6 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
         );
     }
     for id in [
-        "minecraft:mineshaft",
         "minecraft:stronghold",
         "minecraft:monument",
         "minecraft:ruined_portal",
@@ -303,9 +308,19 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
         "coded:decoration_random",
         "coded:buried_treasure_chest",
         "dimension:nether_structures",
+        "mineshaft:post_process_scope",
+        "mineshaft:pre_surface_world_reads",
     ] {
         assert!(ledger.contains_key(key), "{key} is not on the ledger");
     }
+    // The row whose gap **closed**: a rail `shape` is remapped now, by both
+    // `rotate` and `mirror`, because a mineshaft corridor is the first thing in this
+    // engine to place a rail under a real transform. A ledger that still carried it
+    // would be pointing at the wrong remainder.
+    assert!(
+        !ledger.contains_key("template:mirrored_shape"),
+        "rail shape is remapped now; the row must be gone"
+    );
     // `bastion_remnant` is **supported** (its pools load, it assembles) and, since
     // `NetherGenerator` gained a structure stage, it also *places blocks* — 15,405
     // bastion-only blocks at chunk (8, 7) against 0 in the structure-free control,
@@ -592,4 +607,125 @@ fn a_coded_piece_is_identical_across_generators() {
     for (l, r) in left.iter().zip(right.iter()) {
         assert_eq!((l.pos, &l.state), (r.pos, &r.state));
     }
+}
+
+/// A chunk of a **vanilla-authored** mineshaft start gains mineshaft blocks, and the
+/// structure-free world over identical data gains none.
+///
+/// Unlike every other structure in this file, the chunk is not a searched-for
+/// placement cell: `(10, 24)` is one of the 46 `minecraft:mineshaft` starts read out
+/// of `.cache/mc/survival`'s own `structures.starts` NBT, listed in
+/// `tests/support/structure_starts_survival.txt` and gated chunk-for-chunk by
+/// `structure_placement_oracle.rs`. So the *position* is an outside expectation too,
+/// not only the seed.
+///
+/// # Scope, and why it is one chunk rather than the whole start
+///
+/// A mineshaft's box reaches ~160 blocks in each direction, so counting over it
+/// would generate ~100 chunks per arm. The origin chunk is enough: the prediction
+/// below is the pieces' own blocks **clipped to that chunk's x/z**, collapsed
+/// last-write-wins in exactly the order `structure_place_stage` writes them.
+///
+/// Clipping by block rather than by piece box is not a shortcut past production's
+/// own filter: `structure_place_stage` keeps a piece on `intersects_xz`, and every
+/// block a mineshaft piece writes — including `fillPillarDownOrChainUp`'s vertical
+/// columns, which reach *below* the box — shares its box's x/z footprint. The two
+/// filters therefore select the same set, and this one does not re-derive the grid.
+#[test]
+fn a_vanilla_mineshaft_chunk_gains_mineshaft_blocks_a_structureless_chunk_does_not() {
+    /// One of the oracle world's own 46 mineshaft start chunks.
+    const MINESHAFT_CHUNK: (i32, i32) = (10, 24);
+
+    let settings = settings();
+    let with = generator(&ServerAssets::new(), &settings);
+    let without = generator(&NoStructures(ServerAssets::new()), &settings);
+    let start = start_at(&with, MINESHAFT_CHUNK, "minecraft:mineshaft");
+    assert!(
+        start.pieces.len() > 1,
+        "a mineshaft is a tree of pieces, got {}",
+        start.pieces.len()
+    );
+
+    // Nothing else in this generator produces any of these: no surface rule, no
+    // carver, no ore and no feature. `oak_planks` and `oak_log` are deliberately
+    // left out — a village could supply planks and a tree supplies logs, and the
+    // point of the set is that a non-zero control means a leak rather than terrain.
+    let mineshaft_blocks: HashSet<&str> = [
+        "minecraft:cobweb",
+        "minecraft:rail",
+        "minecraft:oak_fence",
+        "minecraft:wall_torch",
+        "minecraft:iron_chain",
+        "minecraft:spawner",
+    ]
+    .into_iter()
+    .collect();
+
+    let (bx, bz) = (MINESHAFT_CHUNK.0 * 16, MINESHAFT_CHUNK.1 * 16);
+    // **Every** start whose pieces this chunk writes, in production's own order, not
+    // just the one that starts here. The oracle world has a second mineshaft at
+    // (13, 26) — three chunks away, and a mineshaft is 160 blocks wide, so its
+    // corridors reach in. The first version of this gate predicted 59 against a true
+    // 97 for exactly that reason, and the fix is to ask production for the set
+    // rather than to re-derive the 17x17 reach here.
+    let placed_here = with.structure_starts_placed_in(MINESHAFT_CHUNK.0, MINESHAFT_CHUNK.1);
+    assert!(
+        placed_here.iter().filter(|s| s.structure == "minecraft:mineshaft").count() >= 2,
+        "the point of this chunk is that two vanilla mineshafts overlap it"
+    );
+    let mut final_state: std::collections::HashMap<[i32; 3], String> =
+        std::collections::HashMap::new();
+    for reached in &placed_here {
+        for piece in &reached.pieces {
+            let Some(blocks) = piece.blocks.as_ref() else {
+                continue;
+            };
+            for block in blocks.iter() {
+                if block.pos[0] < bx || block.pos[0] > bx + 15 {
+                    continue;
+                }
+                if block.pos[2] < bz || block.pos[2] > bz + 15 {
+                    continue;
+                }
+                final_state.insert(block.pos, block.state.clone());
+            }
+        }
+    }
+    let expected = final_state
+        .values()
+        .filter(|state| {
+            let name = state.split_once('[').map_or(state.as_str(), |(n, _)| n);
+            mineshaft_blocks.contains(name)
+        })
+        .count();
+    assert!(
+        expected > 0,
+        "the start's own pieces carry no signature block inside its origin chunk, \
+         so this gate would pass vacuously"
+    );
+
+    let count = |generator: &OverworldGenerator| {
+        let column = generator.column(MINESHAFT_CHUNK.0, MINESHAFT_CHUNK.1);
+        let mut n = 0usize;
+        for lx in 0..16 {
+            for lz in 0..16 {
+                for y in column.min_y()..(column.min_y() + column.height()) {
+                    let state = column.block_state(lx, y, lz);
+                    let name = state.split_once('[').map_or(state, |(n, _)| n);
+                    if mineshaft_blocks.contains(name) {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    };
+    let placed = count(&with);
+    let control = count(&without);
+    assert_eq!(control, 0, "the structureless control holds {control}");
+    assert_eq!(
+        placed, expected,
+        "the world holds {placed} of the pieces' {expected} signature blocks in \
+         chunk {MINESHAFT_CHUNK:?}"
+    );
 }
