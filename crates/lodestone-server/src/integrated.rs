@@ -195,7 +195,7 @@ pub fn demo_mob_count(requested: usize) -> usize {
 /// place the shutdown-race wrapper is written. Native only, like the tick loop
 /// itself and every caller of this function.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_tick_task<F>(shutdown: &Arc<Notify>, fut: F) -> Task
+fn spawn_tick_task<F>(shutdown: &Arc<ShutdownSignal>, fut: F) -> Task
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
@@ -208,6 +208,88 @@ where
     })
 }
 
+/// The shutdown signal, **sticky** — a bare [`Notify`] is not, and that cost a
+/// 25-minute hang.
+///
+/// # The lost wakeup
+///
+/// Every background task here is `select!`ed against this signal, and
+/// [`IntegratedServer::shutdown`] *joins* several of them: the connection task,
+/// the tick task, the query listener, LAN discovery. Joining is only safe if the
+/// signal is guaranteed to arrive.
+///
+/// `Notify::notify_waiters` **stores no permit**. It wakes the tasks registered as
+/// waiters at that instant and nothing else, and a `notified()` future does not
+/// register until it is first polled. So a `shutdown()` that runs before a
+/// just-spawned task has been polled once loses the notification outright: the
+/// `select!`'s signal arm never completes, the other arm is a serve loop that
+/// never returns on its own, and `join().await` waits forever.
+///
+/// That is a race on task scheduling, so it is invisible on an idle machine and
+/// reproducible on a loaded one — which is exactly the reported behaviour:
+/// `tests/level_dat_round_trip.rs` passes in 0.8 s alone (measured, twice) and hung
+/// for ~25 minutes in a contended workspace run, taking the shared cargo lock with
+/// it. Its `_client` end stays alive for the whole test, so the connection task
+/// has no other way to finish.
+///
+/// # Why this is not fixable on the notifying side
+///
+/// There is nothing `shutdown()` can do about it: the defect is that the waiter
+/// was not yet listening. Re-notifying in a loop would be a race against a race,
+/// and a timeout on the join would convert a hang into a silent data-loss window —
+/// the final flush is ordered *after* those joins precisely so nothing can mark a
+/// chunk dirty afterwards.
+///
+/// So the state has to be sticky, and the two orderings below are what make it
+/// impossible to lose: the waiter **registers before it checks the flag**, and the
+/// trigger **sets the flag before it notifies**. Whichever order the two tasks
+/// interleave in, at least one of the two observations fires.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default)]
+struct ShutdownSignal {
+    notify: Arc<Notify>,
+    fired: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ShutdownSignal {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Fire the signal. Idempotent, and safe to call from `Drop`.
+    fn trigger(&self) {
+        // Flag first, notify second — see the type's doc comment. Reversing these
+        // two lines restores the lost wakeup.
+        self.fired
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    /// Resolves once [`Self::trigger`] has been called, **including when it was
+    /// called before this future existed**.
+    async fn notified(&self) {
+        let fut = self.notify.notified();
+        let mut fut = std::pin::pin!(fut);
+        // `enable()` registers this waiter *now*, without awaiting. Doing it
+        // before the load below is the half of the fix that lives on this side:
+        // a `trigger` that runs after this line cannot miss us, and one that ran
+        // before it is caught by the load.
+        fut.as_mut().enable();
+        if self.fired.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        fut.await;
+    }
+
+    /// The raw [`Notify`], for `crate::rcon`'s listener — which is *aborted* rather
+    /// than joined on shutdown, so a lost wakeup there costs nothing and does not
+    /// justify widening this type across another module.
+    fn notify_handle(&self) -> Arc<Notify> {
+        Arc::clone(&self.notify)
+    }
+}
+
 /// A running integrated server that owns its serving task(s).
 ///
 /// Dropping the handle signals shutdown and aborts the task, so a server can
@@ -217,7 +299,7 @@ where
 pub struct IntegratedServer {
     #[cfg(not(target_arch = "wasm32"))]
     local_addr: Option<std::net::SocketAddr>,
-    shutdown: Arc<Notify>,
+    shutdown: Arc<ShutdownSignal>,
     task: Task,
     /// The unified world-tick task (issue #284: mob sim + block entities, one
     /// loop), present only when this handle was built by
@@ -442,7 +524,7 @@ impl IntegratedServer {
         E: EntitySource + 'static,
     {
         let (client_end, server_end) = memory_pair();
-        let shutdown = Arc::new(Notify::new());
+        let shutdown = ShutdownSignal::new();
         let signal = shutdown.clone();
         // Issue #293: shared rather than moved in by value, so chunk
         // generation can be handed to `spawn_blocking` instead of blocking
@@ -656,7 +738,7 @@ impl IntegratedServer {
         S: ChunkSource + 'static,
     {
         let (client_end, server_end) = memory_pair();
-        let shutdown = Arc::new(Notify::new());
+        let shutdown = ShutdownSignal::new();
         let live_mobs = LiveMobSource::default();
         // Issues #307/#308: shared with the tick task the same way
         // `block_entities` is, above — see [`BlockTickFeed`]'s own doc
@@ -1392,7 +1474,7 @@ impl IntegratedServer {
         // `chunk_store::integrated_capacity_for_view_radius` carries the argument
         // and the price list for the other side of the fork.
         let source = Arc::new(ChunkStore::for_view_radius(source, view_radius));
-        let shutdown = Arc::new(Notify::new());
+        let shutdown = ShutdownSignal::new();
         let signal = shutdown.clone();
         // Shared across every accepted connection (like `protocol`/`source`
         // above) rather than one per connection, so two LAN players placing
@@ -1812,7 +1894,7 @@ impl IntegratedServer {
         // change nothing anyone reads. Substituting rather than asserting means a
         // host cannot get it wrong.
         let config = crate::rcon::RconConfig { world: self.world_state.clone(), ..config };
-        let (task, addr) = crate::rcon::spawn_listener(self.shutdown.clone(), config)?;
+        let (task, addr) = crate::rcon::spawn_listener(self.shutdown.notify_handle(), config)?;
         self.rcon_task = Some(task);
         Ok(addr)
     }
@@ -1867,7 +1949,7 @@ impl IntegratedServer {
 
     /// Signals the serving task to stop without awaiting it. Idempotent.
     pub fn trigger_shutdown(&self) {
-        self.shutdown.notify_waiters();
+        self.shutdown.trigger();
     }
 
     /// Signals shutdown and awaits the serving task to completion.
@@ -1875,7 +1957,7 @@ impl IntegratedServer {
     /// Prefer this over dropping when you want to be sure the task has wound
     /// down (e.g. before rebinding the same port).
     pub async fn shutdown(mut self) {
-        self.shutdown.notify_waiters();
+        self.shutdown.trigger();
         // Await the task(s) without moving the fields (the handle also has a
         // `Drop` impl). Natively this joins the tokio task; on wasm the task
         // is not joinable, so this returns once the `Notify` has been fired
@@ -1979,7 +2061,7 @@ impl Drop for IntegratedServer {
     fn drop(&mut self) {
         // Never leak a serving task past the handle: signal, then abort in
         // case a task is parked somewhere the signal cannot reach.
-        self.shutdown.notify_waiters();
+        self.shutdown.trigger();
         self.task.abort();
         if let Some(tick_task) = &self.tick_task {
             tick_task.abort();
@@ -2013,7 +2095,7 @@ impl Drop for IntegratedServer {
 /// datagram nobody is listening for must never hold up the loop, and a dropped
 /// ping is re-sent 1.5 s later by construction.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_lan_discovery(shutdown: &Arc<Notify>, discovery: &LanDiscovery, port: u16) -> Option<Task> {
+fn spawn_lan_discovery(shutdown: &Arc<ShutdownSignal>, discovery: &LanDiscovery, port: u16) -> Option<Task> {
     let socket = match std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)) {
         Ok(socket) => socket,
         Err(err) => {
