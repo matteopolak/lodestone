@@ -535,6 +535,79 @@ mod tests {
         assert_eq!(broke.total(), 0);
     }
 
+    /// **The outside oracle: real player files written by a real 26.2 server.**
+    ///
+    /// Every other test in this module compares this transcription against the
+    /// decompiled record definition — two readings of the same source. This one
+    /// compares it against *output*: the `XpLevel`/`XpP`/`XpTotal` triples a vanilla
+    /// server actually wrote for players who earned XP by playing, read out of
+    /// `.cache/mc/survival/world/players/data` with a foreign parser (Python `gzip` +
+    /// `struct.unpack`, sharing no code with this repo) exactly as
+    /// `crate::player_data`'s own field names were.
+    ///
+    /// 247 files, 12 with non-zero XP; the six below are the ones with distinct
+    /// totals. Committed as a table rather than read at test time so the gate does not
+    /// depend on a `.cache` directory that is not repo state.
+    ///
+    /// | file | `XpTotal` | `XpLevel` | `XpP` |
+    /// |---|---|---|---|
+    /// | `206dff15…` | 3 | 0 | 0.4285714626312256 |
+    /// | `1e071071…` | 5 | 0 | 0.7142857313156128 |
+    /// | `42b0b1f9…` | 7 | 1 | 0.0 |
+    /// | `48cc6aa7…` | 9 | 1 | 0.2222222089767456 |
+    /// | `0962d3e1…` | 15 | 1 | 0.888888955116272 |
+    /// | `142b2dd8…` | 24 | 2 | 0.7272728681564331 |
+    ///
+    /// **What these discriminate**, since they are all in the low regime and so say
+    /// nothing about the 15/30 seams: they pin the **carry re-expression**. A total of
+    /// 15 awarded in one call is `15/7 = 2.142…` progress; leaving the overflow as a
+    /// bare `progress - 1.0` gives `1.142…`, another carry, and level **2** with the
+    /// bar at 0.142 — vanilla says level 1 with the bar at 8/9. Every row past 7
+    /// separates those two hypotheses, and the seams are pinned by
+    /// [`the_level_curve_switches_regime_at_fifteen_and_thirty_inclusive`] instead.
+    ///
+    /// Mismatches are collected rather than asserted inside the loop: an `assert!` in
+    /// a `for` proves one row and leaves the rest as an argument.
+    #[test]
+    fn every_vanilla_written_xp_triple_replays_through_the_curve() {
+        /// `(XpTotal, XpLevel, XpP)`, straight off the files above.
+        const VANILLA: [(i32, i32, f32); 6] = [
+            (3, 0, 0.428_571_46),
+            (5, 0, 0.714_285_73),
+            (7, 1, 0.0),
+            (9, 1, 0.222_222_21),
+            (15, 1, 0.888_888_96),
+            (24, 2, 0.727_272_87),
+        ];
+
+        let mut mismatches: Vec<String> = Vec::new();
+        for (total, level, progress) in VANILLA {
+            let mut xp = PlayerExperience::default();
+            xp.give_points(total);
+            if xp.level() != level || (xp.progress() - progress).abs() > 1e-6 {
+                mismatches.push(format!(
+                    "total {total}: vanilla wrote (level {level}, bar {progress}), we \
+                     produced (level {}, bar {})",
+                    xp.level(),
+                    xp.progress()
+                ));
+            }
+            if xp.total() != total {
+                mismatches.push(format!(
+                    "total {total}: the lifetime total came back as {}",
+                    xp.total()
+                ));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{} of {} vanilla-written triples disagree:\n{}",
+            mismatches.len(),
+            VANILLA.len(),
+            mismatches.join("\n")
+        );
+    }
+
     /// `restored` clamps, and in particular a `progress` of exactly `1.0` off disk is
     /// **not** a legal resting value: it is the state the carry loop exists to
     /// resolve, so keeping it would level the player up on their next award of zero.

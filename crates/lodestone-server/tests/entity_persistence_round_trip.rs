@@ -357,6 +357,7 @@ async fn a_fresh_world_has_no_entities_so_the_gate_above_cannot_pass_vacuously()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn player_inventory_and_position_survive_a_disconnect() {
     use lodestone_model::{GameMode, ItemStack, Rotation};
+    use lodestone_server::experience::PlayerExperience;
     use lodestone_server::player_data::{PlayerData, PlayerDataStore};
 
     let dir = tempdir("player");
@@ -413,6 +414,14 @@ async fn player_inventory_and_position_survive_a_disconnect() {
     assert!(inventory.set_selected_hotbar_slot(4), "slot 4 is in range");
 
     let pos = Vec3::new(-412.31, 79.0, 88.5);
+    // 1557 points is level 31 with the bar at 50/121 — see
+    // `lodestone_server::experience`'s own regime table. A level and a total that
+    // are both non-zero and *different* is the point: `XpLevel` and `XpTotal` are
+    // adjacent `Int`s, so a transposition writes a legal file that reads back as
+    // level 1557.
+    let mut experience = PlayerExperience::default();
+    experience.give_points(1_557);
+    assert_eq!(experience.level(), 31, "the seeded XP is level 31");
     let saved = PlayerData::capture(
         pos,
         Rotation::new(136.5, -12.25),
@@ -420,6 +429,7 @@ async fn player_inventory_and_position_survive_a_disconnect() {
         140,
         GameMode::Creative,
         &inventory,
+        experience,
         Vec::new(),
     );
     store.write(uuid, &saved).expect("write player data");
@@ -448,6 +458,24 @@ async fn player_inventory_and_position_survive_a_disconnect() {
     assert_eq!(
         read.selected_slot, 4,
         "the selected hotbar slot did not survive"
+    );
+    assert_eq!(
+        read.experience.level(),
+        31,
+        "the XP level did not survive — 0 means the `Xp*` fields are unmodelled again"
+    );
+    assert_eq!(
+        read.experience.total(),
+        1_557,
+        "the lifetime total did not survive; 31 here would be a level/total transposition"
+    );
+    assert!(
+        // `1e-5`, not `1e-6`: reaching level 31 costs 31 `f32` carry re-expressions and
+        // lands on 0.41322213 against 50/121 = 0.41322314. The nearest wrong answer
+        // (level 30's cost of 112, giving 0.446) is far outside this.
+        (read.experience.progress() - 50.0 / 121.0).abs() < 1e-5,
+        "the bar came back at {}, not 50/121 — level 31 costs 121 points",
+        read.experience.progress()
     );
 
     let back = read.to_inventory();

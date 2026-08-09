@@ -1185,6 +1185,11 @@ fn persist_player(
     vitals: &PlayerVitals,
     game_mode: GameMode,
     inventory: &PlayerInventory,
+    // The live level/bar/total. Saved *and* restored, which has to be one change:
+    // modelling the three `Xp*` fields without reading them back would write this
+    // session's zeroes over the file's real XP on the first save, which is strictly
+    // worse than the bug it replaces.
+    experience: &crate::experience::PlayerExperience,
     preserved: &[(String, lodestone_core::Nbt)],
 ) {
     let Some(store) = store else {
@@ -1198,6 +1203,7 @@ fn persist_player(
         vitals.air_supply(),
         game_mode,
         inventory,
+        *experience,
         preserved.to_vec(),
     );
     if let Err(err) = store.write(uuid, &data) {
@@ -7660,7 +7666,16 @@ where
     // `COMPOSTER_BEHAVIOR_SEED` and `dispatch_play_packet`'s parameter comment.
     let mut composter_rng = SpawnRng::new(COMPOSTER_BEHAVIOR_SEED);
     let mut bone_meal_rng = SpawnRng::new(BONE_MEAL_BEHAVIOR_SEED);
-    let mut experience = crate::experience::PlayerExperience::default();
+    // Restored from the player file, exactly as `vitals` and `inventory` above are.
+    // This was `PlayerExperience::default()` unconditionally while the `.dat`
+    // faithfully kept `XpLevel`/`XpP`/`XpTotal` through `PlayerData::preserved` — so
+    // XP survived the *file* and not the *session*, and the next save wrote the same
+    // untouched bytes back while the player played on at level 0. The fix is this
+    // read plus modelling the three fields in `crate::player_data`; either half alone
+    // is a regression (see `persist_player`'s own parameter comment).
+    let mut experience = saved_player
+        .as_ref()
+        .map_or_else(crate::experience::PlayerExperience::default, |data| data.experience);
     let mut effects = crate::mob_effects::ActiveEffects::new();
     let mut burn = crate::burning::BurnState::new();
     // The `nextInt(1, 3)` ramp draw `BaseFireBlock.fireIgnite` makes on a player's
@@ -7830,6 +7845,7 @@ where
                         &vitals,
                         game_mode,
                         &inventory,
+                        &experience,
                         &preserved_player_fields,
                     );
                     return Ok(ServeSummary { username, chunks_sent, inventory });
@@ -8173,6 +8189,7 @@ where
                         &vitals,
                         game_mode,
                         &inventory,
+                        &experience,
                         &preserved_player_fields,
                     );
                 }

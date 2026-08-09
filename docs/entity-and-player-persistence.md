@@ -67,9 +67,14 @@ Both `SavedEntity` and `PlayerData` keep every field they do not understand and
 write it back verbatim (`SavedEntity::extra`, `PlayerData::preserved`). This is the
 most important property in either type. A real vanilla mob carries ~30 fields this
 server does not model — `Brain`, `attributes`, `memories`, `PersistenceRequired` —
-and a player file carries hunger, experience, the ender chest and the recipe book,
-none of which this server simulates. A writer that emitted only what it understands
+and a player file carries hunger, the ender chest and the recipe book, none of which
+this server simulates. A writer that emitted only what it understands
 would **delete all of it** on the first save.
+
+The reciprocal is the trap that shows up when a field graduates from preserved to
+modelled: emitting our own copy while nothing *reads* it back turns a display bug into
+data loss, because the first save writes this session's default over the file's real
+value. `PlayerData::experience` is the worked example.
 
 ### How stale entity records are cleared, and why by UUID
 
@@ -221,9 +226,12 @@ Named here rather than left to be rediscovered as a missing mob:
   the registry holds no owner, no pickup state and no damage, so writing one would
   persist an object we could not faithfully restore. Vanilla does save them.
 
-- **Hunger, experience and the ender chest are not *modelled*** — this server
-  simulates none of them. They are **preserved** verbatim in a real player file, so
-  nothing is lost; they simply do not change.
+- **Hunger and the ender chest are not *modelled*** — this server simulates neither.
+  They are **preserved** verbatim in a real player file, so nothing is lost; they
+  simply do not change. **Experience no longer belongs on this list**: `XpLevel` /
+  `XpP` / `XpTotal` are modelled by `PlayerData::experience` and restored into the live
+  session (`docs/experience.md` has the reason the save and the restore had to land
+  together). `XpSeed`, the enchanting-roll seed, is still preserved.
 
 - **Only the overworld.** `EntityStorage::new` roots at
   `dimensions/minecraft/overworld/entities`, matching `RegionChunkSource`'s own
