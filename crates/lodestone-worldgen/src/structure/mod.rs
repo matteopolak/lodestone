@@ -119,7 +119,9 @@ pub mod template;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource, WorldgenRandom};
+use lodestone_worldgen_core::rng::{
+    LegacyRandomSource, PositionalRandomFactory, RandomSource, WorldgenRandom,
+};
 use serde_json::Value;
 
 use crate::aquifer::BlockKind;
@@ -728,6 +730,25 @@ const OCEAN_RUIN_MOSSY: [&[&str]; 2] = [
     ],
 ];
 
+/// `NetherFossilPieces.FOSSILS`, in declaration order — which is the order the
+/// single `nextInt(14)` indexes, so it must not be sorted.
+const NETHER_FOSSILS: &[&str] = &[
+    "minecraft:nether_fossils/fossil_1",
+    "minecraft:nether_fossils/fossil_2",
+    "minecraft:nether_fossils/fossil_3",
+    "minecraft:nether_fossils/fossil_4",
+    "minecraft:nether_fossils/fossil_5",
+    "minecraft:nether_fossils/fossil_6",
+    "minecraft:nether_fossils/fossil_7",
+    "minecraft:nether_fossils/fossil_8",
+    "minecraft:nether_fossils/fossil_9",
+    "minecraft:nether_fossils/fossil_10",
+    "minecraft:nether_fossils/fossil_11",
+    "minecraft:nether_fossils/fossil_12",
+    "minecraft:nether_fossils/fossil_13",
+    "minecraft:nether_fossils/fossil_14",
+];
+
 /// `IglooPieces`' three templates, with their `PIVOTS` and `OFFSETS`.
 const IGLOO_PARTS: [(&str, [i32; 3], [i32; 3]); 3] = [
     ("minecraft:igloo/top", [3, 5, 5], [0, 0, 0]),
@@ -802,6 +823,17 @@ pub enum StructureKind {
     /// a piston puzzle. Same `SinglePieceStructure` footprint refusal as
     /// [`Self::DesertPyramid`], with a 12x15 footprint instead of 21x21.
     JunglePyramid,
+    /// `minecraft:nether_fossil` — one of 14 bone templates, dropped onto the first
+    /// solid surface below a sampled height, plus a coin-flip dried ghast.
+    ///
+    /// The cheapest structure in the corpus by a wide margin (178 Java lines) and the
+    /// only remaining `beard_thin` one, so it is the first structure whose own
+    /// terrain flattening this engine can observe outside a jigsaw.
+    NetherFossil {
+        /// The `height` field — `uniform` between `absolute: 32` and `below_top: 2`
+        /// in the bundled document. One draw.
+        height: jigsaw::HeightProvider,
+    },
     /// `minecraft:mineshaft` and `minecraft:mineshaft_mesa` — the first kind whose
     /// pieces are generated **before** the biome filter, because its own generation
     /// point is `moveBelowSeaLevel`'s answer and that is a function of the finished
@@ -833,6 +865,13 @@ enum Stub {
     Plain([i32; 3]),
     /// A jigsaw centre piece and its live RNG stream.
     Jigsaw(Box<JigsawStub<StructureRandom>>),
+    /// A position and a **half-used** random, for a kind whose
+    /// `findGenerationPoint` draws before the biome check and whose piece consumer
+    /// captures the same stream.
+    ///
+    /// Jigsaw's own variant is separate because it also carries a placed centre
+    /// piece; this one is the plain case, and `nether_fossil` is its first user.
+    Continued([i32; 3], Box<StructureRandom>),
     /// **The whole finished piece list**, plus the position it implies.
     ///
     /// Vanilla's `Either.right(builder)` arm: a mineshaft's stub *is* its builder,
@@ -847,7 +886,9 @@ impl Stub {
     /// The point `Structure.isValidBiome` samples.
     fn position(&self) -> [i32; 3] {
         match self {
-            Self::Plain(position) | Self::Eager(position, _) => *position,
+            Self::Plain(position)
+            | Self::Eager(position, _)
+            | Self::Continued(position, _) => *position,
             Self::Jigsaw(stub) => stub.position,
         }
     }
@@ -871,6 +912,14 @@ impl StructureKind {
             "minecraft:swamp_hut" => Self::SwampHut,
             "minecraft:desert_pyramid" => Self::DesertPyramid,
             "minecraft:jungle_temple" => Self::JunglePyramid,
+            "minecraft:nether_fossil" => match jigsaw::HeightProvider::parse(&value["height"]) {
+                Some(height) => Self::NetherFossil { height },
+                // A `height` shape nobody bundles would silently place every fossil
+                // at y=0, so it is refused and named instead.
+                None => Self::Unsupported(
+                    "minecraft:nether_fossil — unsupported `height` provider".to_string(),
+                ),
+            },
             "minecraft:mineshaft" => Self::Mineshaft {
                 wood: match value["mineshaft_type"].as_str() {
                     Some("mesa") => mineshaft::Wood::Mesa,
@@ -925,6 +974,7 @@ impl StructureKind {
                     .collect()
             }
             Self::Igloo => IGLOO_PARTS.iter().map(|(id, _, _)| *id).collect(),
+            Self::NetherFossil { .. } => NETHER_FOSSILS.to_vec(),
             // A jigsaw structure's templates are named by its *pools*, and there
             // are hundreds of them — `PoolStore::load` pulls each one in as it
             // parses the element that names it, so there is no static list here.
@@ -969,6 +1019,33 @@ impl StructureKind {
                 structure_random(seed, cx, cz),
             )
             .map(|stub| Stub::Jigsaw(Box::new(stub)));
+        }
+        if let Self::NetherFossil { height } = self {
+            // `NetherFossilStructure.findGenerationPoint`: two `nextInt(16)`s, the
+            // `height` sample, then a **draw-free** downward walk. The random then
+            // travels on, because `addPieces` captures it.
+            let mut random = structure_random(seed, cx, cz);
+            let x = cx * 16 + random.next_int_bounded(16);
+            let z = cz * 16 + random.next_int_bounded(16);
+            let mut y = height.sample(&mut random, ctx.min_y(), ctx.dimension_height());
+            let sea_level = ctx.sea_level();
+            // The walk reads `column.getBlock(y)` for air and `getBlock(--y)` for
+            // "soul sand, **or** face-sturdy". Pre-surface those two are one test:
+            // soul sand is a *surface-rule* product, so every solid block here is
+            // `BlockKind::Stone` and every `Stone` is face-sturdy. The disjunction is
+            // therefore exactly satisfied by the shape — the one place in this engine
+            // where the four-way kind loses nothing.
+            while y > sea_level {
+                let current_is_air = ctx.block_kind_at(x, y, z) == BlockKind::Air;
+                y -= 1;
+                if current_is_air && ctx.block_kind_at(x, y, z) == BlockKind::Stone {
+                    break;
+                }
+            }
+            if y <= sea_level {
+                return None;
+            }
+            return Some(Stub::Continued([x, y, z], Box::new(random)));
         }
         if let Self::Mineshaft { wood, blocking } = self {
             // The other kind whose generation point costs RNG, and the only one
@@ -1052,7 +1129,7 @@ impl StructureKind {
                 Some([middle_x, y, middle_z])
             }
             // Handled by `find_stub` before this function is reached.
-            Self::Jigsaw(_) | Self::Mineshaft { .. } => None,
+            Self::Jigsaw(_) | Self::Mineshaft { .. } | Self::NetherFossil { .. } => None,
             Self::Unsupported(_) => {
                 // No generator, so no honest generation point — and therefore no
                 // honest biome-check Y either. Sea level is used deliberately
@@ -1116,6 +1193,21 @@ impl StructureKind {
         // future eager kind silently returning `None`.
         if let Stub::Eager(_, pieces) = stub {
             return Some(pieces);
+        }
+        if let Self::NetherFossil { .. } = self {
+            // Taken by value for the same reason jigsaw's is: `addPieces` continues
+            // the stream `findGenerationPoint` left half-used, and a copy would
+            // restart it and pick a different fossil.
+            let Stub::Continued(position, mut random) = stub else {
+                return None;
+            };
+            return Some(nether_fossil_pieces(
+                position,
+                seed,
+                ctx,
+                templates,
+                &mut *random,
+            ));
         }
         match self {
             Self::Shipwreck { beached } => {
@@ -1190,7 +1282,7 @@ impl StructureKind {
             // templates, so it is S5's and not S2's.
             Self::OceanMonument { .. } | Self::Unsupported(_) => None,
             // Handled above, before the match, because they consume `stub`.
-            Self::Jigsaw(_) | Self::Mineshaft { .. } => None,
+            Self::Jigsaw(_) | Self::Mineshaft { .. } | Self::NetherFossil { .. } => None,
         }
     }
 
@@ -1202,7 +1294,10 @@ impl StructureKind {
             // Every template-driven kind adds at least one piece, so biome-valid
             // implies start-valid — but an empty list means a template failed to
             // load, which is `Unknown` (named on the ledger), not `Invalid`.
-            Self::Shipwreck { .. } | Self::OceanRuin { .. } | Self::Igloo => match pieces {
+            Self::Shipwreck { .. }
+            | Self::OceanRuin { .. }
+            | Self::Igloo
+            | Self::NetherFossil { .. } => match pieces {
                 Some(p) if !p.is_empty() => Validity::Valid,
                 _ => Validity::Unknown,
             },
@@ -1314,6 +1409,83 @@ fn shipwreck_pieces<R: RandomSource>(
     };
     let position = [base_x, y, base_z];
     vec![template_piece("minecraft:shipwreck", name, template, position, settings)]
+}
+
+/// `NetherFossilPieces.addPieces` plus `NetherFossilPiece.placeDriedGhast`.
+///
+/// # Two draws, then a fork
+///
+/// `Rotation.getRandom` **then** `Util.getRandom(FOSSILS, random)` — the rotation is
+/// a local assigned before the constructor call, so it is drawn first even though it
+/// is the last argument. Swapping them picks a different fossil at every seed.
+///
+/// The dried ghast draws from a **positional fork of the world seed** at the fossil
+/// box centre, not from the structure's stream, so it costs the stream nothing and is
+/// a pure function of `(seed, box)`.
+///
+/// # Why the ghast is a coded block on a template piece
+///
+/// Vanilla's air test runs against the world *after* the template placed, and it is
+/// the one read this engine cannot make at start time. It does not have to:
+/// `structure_place_stage` writes `blocks` **before** `placement`, so the ghast is
+/// laid down and then overwritten wherever the template has a block of its own —
+/// which is exactly the set of positions vanilla's `isAir()` would have rejected.
+/// What is left to test here is the *terrain* being air, which
+/// [`StartContext::block_kind_at`] answers.
+fn nether_fossil_pieces<R: RandomSource>(
+    position: [i32; 3],
+    seed: i64,
+    ctx: &dyn StartContext,
+    templates: &TemplateStore,
+    random: &mut R,
+) -> Vec<StructurePiece> {
+    let rotation = Rotation::random(random);
+    let name = pick(NETHER_FOSSILS, random);
+    let Some(template) = templates.get(name) else {
+        return Vec::new();
+    };
+    let settings = PlaceSettings {
+        rotation,
+        mirror: Mirror::None,
+        // `TemplateStructurePiece`'s settings set no pivot, so it is `BlockPos.ZERO`.
+        pivot: [0, 0, 0],
+        processors: vec![Processor::structure_and_air()],
+        waterlogging: true,
+    };
+    let mut piece = template_piece("minecraft:nefos", name, template, position, settings);
+    let box_ = piece.bounding_box;
+    // `RandomSource.createThreadLocalInstance(level.getSeed()).forkPositional().at(
+    //  fossilBB.getCenter())`, and `getCenter` is `min + (max - min + 1) / 2`.
+    let centre = [
+        box_.min[0] + (box_.max[0] - box_.min[0] + 1) / 2,
+        box_.min[1] + (box_.max[1] - box_.min[1] + 1) / 2,
+        box_.min[2] + (box_.max[2] - box_.min[2] + 1) / 2,
+    ];
+    let mut ghast = LegacyRandomSource::new(seed)
+        .fork_positional()
+        .at(centre[0], centre[1], centre[2]);
+    if ghast.next_float() < 0.5 {
+        let x = box_.min[0] + ghast.next_int_bounded(box_.max[0] - box_.min[0] + 1);
+        let y = box_.min[1];
+        let z = box_.min[2] + ghast.next_int_bounded(box_.max[2] - box_.min[2] + 1);
+        // The `nextInt`s are spent whether or not the position turns out to be air,
+        // so the terrain test comes after them.
+        if ctx.block_kind_at(x, y, z) == BlockKind::Air {
+            // `DRIED_GHAST.defaultBlockState().rotate(Rotation.getRandom(positional))`
+            // — a *third* draw from the same fork, and it is the block's own rotation
+            // rather than the piece's.
+            let facing_rotation = Rotation::random(&mut ghast);
+            let state = template::BlockState::parse(
+                "minecraft:dried_ghast[facing=north,hydration=0,waterlogged=false]",
+            )
+            .rotate(facing_rotation);
+            piece.blocks = Some(Arc::new(vec![CodedBlock {
+                pos: [x, y, z],
+                state: state.canonical(),
+            }]));
+        }
+    }
+    vec![piece]
 }
 
 /// `OceanRuinStructure.generatePieces` → `OceanRuinPieces.addPieces`.
@@ -2121,10 +2293,12 @@ impl StructureRegistry {
                 "dimension:nether_structures".into(),
                 "`NetherGenerator` composes a structure stage now, so \
                  `bastion_remnant` assembles **and places blocks** in a generated \
-                 Nether column. Two gaps remain. (1) `fortress`, `nether_fossil` and \
-                 `ruined_portal_nether` have no piece generator — each has its own row \
-                 here — so at their placement cells the Nether gets an advisory start \
-                 with `pieces_complete: false` and zero blocks, which is also what \
+                 Nether column, and so does `nether_fossil` — the only structure \
+                 whose `beard_thin` terrain flattening is now observable outside a \
+                 jigsaw. Two gaps remain. (1) `fortress` and `ruined_portal_nether` \
+                 have no piece generator — each has its own row here — so at their \
+                 placement cells the Nether gets an advisory start with \
+                 `pieces_complete: false` and zero blocks, which is also what \
                  stops the weighted `nether_complexes` walk from handing every \
                  fortress cell to a bastion. (2) Nothing *serves* the dimension: \
                  `lodestone-server`'s `EmbeddedResolver` hardcodes the Overworld \

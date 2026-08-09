@@ -324,6 +324,207 @@ const BASTION_ONLY: &[&str] = &[
     "minecraft:gold_block",
 ];
 
+/// Names no Nether terrain stage can produce, for the fossil arm.
+///
+/// `bone_block` is the only block a `nether_fossils/fossil_*` template contains, and
+/// `dried_ghast` is the coin-flip extra. Both are checked against the Nether's own
+/// `surface_rule` by `the_discriminating_blocks_are_not_terrain`, the same way
+/// [`BASTION_ONLY`] is — and unlike `basalt`, neither is a `SurfaceRuleData.nether()`
+/// product, which is what makes this list two names rather than a narrowing exercise.
+const FOSSIL_ONLY: &[&str] = &["minecraft:bone_block", "minecraft:dried_ghast"];
+
+/// The nearest `nether_fossil` placement cell that really starts one, **measured** by
+/// [`find_the_nearest_fossil`].
+///
+/// `nether_fossils` is `random_spread` with `spacing 2`, so cells are dense — but
+/// `findGenerationPoint` can still return `Optional.empty()` for any of them, because
+/// the downward walk gives up at sea level. So "a placement cell" and "a fossil" are
+/// different questions here for a reason that has nothing to do with biomes.
+///
+/// **Measured: ring 1, the 9th candidate cell** — box `[39, 88, 37]..[42, 91, 41]`,
+/// template `nether_fossils/fossil_1`. Far nearer than the Overworld's coded
+/// structures (a desert pyramid needs 234 cells at the same seed), and the reason is
+/// again data: the fossil's biome tag covers `soul_sand_valley`, which this Nether has
+/// plenty of.
+const FOSSIL_CHUNK: (i32, i32) = (2, 2);
+
+/// The nearest fossil whose dried ghast **survives into the world** — ring 3, cell 32,
+/// box `[-86, 83, 97]..[-80, 89, 102]`, template `fossil_14`.
+///
+/// A separate constant because the ghast is a coin flip on a *positional fork of the
+/// world seed*, so the nearest fossil need not have one — [`FOSSIL_CHUNK`] does not,
+/// which is what makes the pair a two-sided gate on the fork rather than a one-sided
+/// "a ghast appears somewhere".
+///
+/// **And "on the piece" is not "in the world".** The nearest ghast-*bearing* fossil is
+/// at (−4, 2), and its ghast is overwritten by the template's own bone block: the place
+/// stage writes `blocks` before `placement`, which is how vanilla's post-template
+/// `isAir()` rejection is expressed as an ordering rather than as a read this engine
+/// cannot make at start time. Measuring the piece instead of the world would have
+/// gated the wrong thing and passed.
+const FOSSIL_GHAST_CHUNK: (i32, i32) = (-6, 6);
+
+/// The search that produced [`FOSSIL_CHUNK`], over placement cells and through
+/// production's own `potential_structure_chunk`.
+#[test]
+#[ignore = "column sampling; run to re-measure a stale constant"]
+fn find_the_nearest_fossil() {
+    let resolver = NetherAssets::new();
+    let settings = settings();
+    let generator = NetherGenerator::new(SEED, &settings, &resolver);
+    let registry = lodestone_worldgen::structure::StructureRegistry::new(SEED, &resolver);
+    let set = registry
+        .sets()
+        .iter()
+        .find(|s| s.id == "minecraft:nether_fossils")
+        .expect("nether_fossils is bundled");
+    let mut cells = 0usize;
+    let mut first: Option<(i32, i32)> = None;
+    let mut ghast_bearing: Option<(i32, i32)> = None;
+    'rings: for ring in 0..60i32 {
+        for gx in -ring..=ring {
+            for gz in -ring..=ring {
+                if gx.abs() != ring && gz.abs() != ring {
+                    continue;
+                }
+                let Some((cx, cz)) = set.placement.potential_structure_chunk(SEED, gx * 2, gz * 2)
+                else {
+                    continue;
+                };
+                cells += 1;
+                let starts = generator.structure_starts(cx, cz);
+                if let Some(start) =
+                    starts.iter().find(|s| s.structure == "minecraft:nether_fossil")
+                {
+                    let ghast = start.pieces[0].blocks.as_ref().map_or(0, |b| b.len());
+                    println!(
+                        "nether_fossil at ({cx}, {cz}) after {cells} cells, ring {ring}, box {:?}, \
+                         template {:?}, dried ghast blocks {ghast}",
+                        start.bounding_box,
+                        start.pieces[0].template,
+                    );
+                    if first.is_none() {
+                        first = Some((cx, cz));
+                    }
+                    // The dried ghast is a coin flip on a positional fork, so the
+                    // first fossil found need not carry one. Keep walking until one
+                    // does, because that is the arm that gates the fork.
+                    //
+                    // And a ghast on the piece is not a ghast in the world: the
+                    // place stage writes `blocks` **before** the template, so a
+                    // ghast the template covers is overwritten — which is exactly
+                    // vanilla's `isAir()` rejection expressed as an ordering. So the
+                    // search asks the world, not the piece.
+                    if ghast > 0 && ghast_bearing.is_none() {
+                        let names: HashSet<&str> =
+                            ["minecraft:dried_ghast"].into_iter().collect();
+                        let in_world = count_blocks(&generator, start.bounding_box, &names);
+                        println!("  in world: {in_world}");
+                        if in_world == 1 {
+                            ghast_bearing = Some((cx, cz));
+                        }
+                    }
+                    if first.is_some() && ghast_bearing.is_some() {
+                        break 'rings;
+                    }
+                }
+            }
+        }
+    }
+    println!("first = {first:?}, first with a dried ghast = {ghast_bearing:?}");
+}
+
+/// **`nether_fossil` places blocks in a generated Nether column**, and the same data
+/// with no structure sets places none of them.
+///
+/// The same shape as the bastion arm, on the structure that was the cheapest in the
+/// corpus and still reached zero blocks until the Nether pipeline gained a structure
+/// stage — a reminder that "small" and "reachable" are different axes.
+#[test]
+fn nether_fossil_places_its_own_blocks_in_a_nether_column() {
+    let settings = settings();
+    let with = NetherGenerator::new(SEED, &settings, &NetherAssets::new());
+    let without = NetherGenerator::new(SEED, &settings, &NoStructures(NetherAssets::new()));
+    let start = with
+        .structure_starts(FOSSIL_CHUNK.0, FOSSIL_CHUNK.1)
+        .into_iter()
+        .find(|s| s.structure == "minecraft:nether_fossil")
+        .unwrap_or_else(|| {
+            panic!(
+                "no nether_fossil start at {FOSSIL_CHUNK:?} — the measured constant is \
+                 stale, re-run find_the_nearest_fossil"
+            )
+        });
+    assert!(start.pieces_complete, "the fossil reports no pieces");
+    let piece = &start.pieces[0];
+    assert!(
+        piece.placement.is_some(),
+        "a fossil is a template piece and must carry a placement"
+    );
+    // The walk gives up at sea level, so a start at or below it should not exist.
+    // The expectation comes from the settings document rather than from the
+    // generator, so it is the data's number and not a re-read of the code's.
+    let sea_level = settings["sea_level"].as_i64().expect("sea_level") as i32;
+    assert!(
+        start.bounding_box.min[1] > sea_level,
+        "fossil box min Y {} is not above the Nether sea level {sea_level}",
+        start.bounding_box.min[1]
+    );
+
+    let names: HashSet<&str> = FOSSIL_ONLY.iter().copied().collect();
+    let placed = count_blocks(&with, start.bounding_box, &names);
+    let control = count_blocks(&without, start.bounding_box, &names);
+    assert_eq!(control, 0, "the structureless control holds {control}");
+    assert!(
+        placed > 0,
+        "the fossil placed {placed} of its own blocks at {FOSSIL_CHUNK:?}"
+    );
+    // This fossil's coin flip came up tails, which is half of what makes the ghast
+    // arm below a real test of the positional fork rather than of a constant.
+    assert!(
+        start.pieces[0].blocks.is_none(),
+        "the measured fossil at {FOSSIL_CHUNK:?} carries no dried ghast; if that \
+         changed, FOSSIL_GHAST_CHUNK's contrast is gone"
+    );
+}
+
+/// The dried ghast: a coin flip on a **positional fork of the world seed**, so it
+/// costs the structure's own stream nothing and is a pure function of `(seed, box)`.
+///
+/// Paired with the assertion above that [`FOSSIL_CHUNK`]'s fossil has none: one arm
+/// alone is satisfied both by a correct fork and by a constant `true`.
+#[test]
+fn a_fossils_dried_ghast_comes_from_a_positional_fork() {
+    let settings = settings();
+    let with = NetherGenerator::new(SEED, &settings, &NetherAssets::new());
+    let without = NetherGenerator::new(SEED, &settings, &NoStructures(NetherAssets::new()));
+    let start = with
+        .structure_starts(FOSSIL_GHAST_CHUNK.0, FOSSIL_GHAST_CHUNK.1)
+        .into_iter()
+        .find(|s| s.structure == "minecraft:nether_fossil")
+        .unwrap_or_else(|| {
+            panic!("no nether_fossil at {FOSSIL_GHAST_CHUNK:?} — the constant is stale")
+        });
+    let blocks = start.pieces[0]
+        .blocks
+        .as_ref()
+        .expect("this fossil's coin flip came up heads and must carry a ghast");
+    assert_eq!(blocks.len(), 1, "exactly one dried ghast per fossil");
+    assert!(
+        blocks[0].state.starts_with("minecraft:dried_ghast["),
+        "unexpected coded block: {}",
+        blocks[0].state
+    );
+    // `y = fossilBB.minY()` — the box floor, not its centre and not the surface.
+    assert_eq!(blocks[0].pos[1], start.bounding_box.min[1]);
+
+    let names: HashSet<&str> = ["minecraft:dried_ghast"].into_iter().collect();
+    let placed = count_blocks(&with, start.bounding_box, &names);
+    let control = count_blocks(&without, start.bounding_box, &names);
+    assert_eq!(control, 0, "the structureless control holds {control}");
+    assert_eq!(placed, 1, "the world holds {placed} dried ghasts, expected 1");
+}
+
 fn bastion_start(
     generator: &NetherGenerator,
 ) -> std::sync::Arc<lodestone_worldgen::structure::StructureStart> {
@@ -390,7 +591,7 @@ fn the_discriminating_blocks_are_not_terrain() {
     let default_block = settings["default_block"]["Name"].as_str().unwrap();
     let default_fluid = settings["default_fluid"]["Name"].as_str().unwrap();
     let carver = serde_json::to_string(&assets.try_read("configured_carver", "nether_cave")).unwrap();
-    for name in BASTION_ONLY {
+    for name in BASTION_ONLY.iter().chain(FOSSIL_ONLY.iter()) {
         assert!(
             !surface.contains(name),
             "{name} is a nether surface-rule product and cannot discriminate"
@@ -507,13 +708,18 @@ fn the_nether_ledger_names_the_remaining_gaps_and_not_the_closed_one() {
         "bastion_remnant assembles and now places: {:?}",
         ledger.get("minecraft:bastion_remnant")
     );
-    for id in [
-        "minecraft:fortress",
-        "minecraft:nether_fossil",
-        "minecraft:ruined_portal_nether",
-    ] {
+    for id in ["minecraft:fortress", "minecraft:ruined_portal_nether"] {
         assert!(ledger.contains_key(id), "{id} has no piece generator and must be ledgered");
     }
+    // S7: `nether_fossil` places 14 possible bone templates and a coin-flip dried
+    // ghast, so it comes **off** the ledger. Asserted as an absence for the same
+    // reason the bastion row above is: a registry that quietly demoted it for an
+    // unloadable template would satisfy every "the ledger names its gaps" claim.
+    assert!(
+        !ledger.contains_key("minecraft:nether_fossil"),
+        "nether_fossil places blocks now: {:?}",
+        ledger.get("minecraft:nether_fossil")
+    );
     // The dimension row must no longer claim there is no structure stage.
     let row = ledger
         .get("dimension:nether_structures")
@@ -566,22 +772,54 @@ fn structure_bearing_columns_are_byte_identical_regardless_of_order() {
     }
 }
 
-/// The beard branch, asserted rather than inferred.
+/// The beard branch, asserted rather than inferred — and **inverted by S7**.
 ///
-/// `nether_fossil` is the Nether's **only** adaptation-bearing structure and has no
-/// piece generator, so the beardifier is empty for every chunk today and the fill
-/// takes its no-beard path — which is why the biome and bedrock parity in
-/// `nether_gen.rs` is unchanged by construction. When a `nether_fossil` generator
-/// lands this test is what says the seam is live.
+/// This test used to say the beardifier was empty for every Nether chunk, because
+/// `nether_fossil` is the dimension's only adaptation-bearing structure and had no
+/// piece generator. Its own comment said that if a generator landed, this test was
+/// the record and should be updated deliberately. It landed, so here is that update:
+/// the seam is **live**, and the assertion is now that a chunk in reach of a real
+/// fossil has a non-empty beard while a chunk far from any fossil does not.
+///
+/// The negative arm is load-bearing in a way the old test's four chunks were not:
+/// `nether_fossils` is `spacing 2`, so a chunk with *no* fossil within the
+/// beardifier's 12-block reach is genuinely hard to find, and a version of this test
+/// with only the positive arm would be satisfied by a beardifier that returned every
+/// start in the world.
 #[test]
-fn the_beardifier_is_empty_because_no_nether_structure_bears_adaptation_yet() {
+fn the_nether_beard_is_live_at_a_fossil_and_empty_away_from_one() {
     let settings = settings();
     let generator = NetherGenerator::new(SEED, &settings, &NetherAssets::new());
-    for (cx, cz) in [BASTION_CHUNK, (0, 0), (-13, -14), (5, -7)] {
-        assert!(
-            generator.beardifier(cx, cz).is_empty(),
-            "({cx},{cz}) has a non-empty beard; if a nether_fossil generator landed, \
-             this test is the record that it did and should be updated deliberately"
-        );
+    let start = generator
+        .structure_starts(FOSSIL_CHUNK.0, FOSSIL_CHUNK.1)
+        .into_iter()
+        .find(|s| s.structure == "minecraft:nether_fossil")
+        .expect("the measured fossil constant is stale");
+    assert_eq!(
+        start.terrain_adaptation,
+        lodestone_worldgen::structure::TerrainAdjustment::BeardThin,
+        "the fossil document says beard_thin; if it no longer does, this whole test \
+         is measuring the wrong thing"
+    );
+    // The chunk the fossil's own box sits in.
+    let (fx, fz) = (start.bounding_box.min[0] >> 4, start.bounding_box.min[2] >> 4);
+    assert!(
+        !generator.beardifier(fx, fz).is_empty(),
+        "({fx},{fz}) holds a beard_thin fossil box and its beard is empty"
+    );
+    // The control: a chunk chosen because the engine reports no adaptation-bearing
+    // start in reach of it, found by asking rather than by guessing — a hardcoded
+    // "far away" chunk in a spacing-2 grid is as likely as not to have one.
+    let mut empty_chunk = None;
+    for cx in 200..320 {
+        if generator.beardifier(cx, 200).is_empty() {
+            empty_chunk = Some((cx, 200));
+            break;
+        }
     }
+    let (ex, ez) = empty_chunk.expect(
+        "no chunk in a 120-chunk sweep has an empty beard, so the negative arm cannot \
+         be built and the positive arm proves nothing",
+    );
+    assert!(generator.beardifier(ex, ez).is_empty());
 }

@@ -342,7 +342,10 @@ impl VerticalAnchor {
 }
 
 impl HeightProvider {
-    fn parse(value: &Value) -> Option<Self> {
+    /// Parses the `height` / `start_height` field. `None` for a shape no bundled
+    /// structure uses, which the caller turns into a ledger row rather than a guess.
+    #[must_use]
+    pub fn parse(value: &Value) -> Option<Self> {
         match value["type"].as_str() {
             None | Some("minecraft:constant") => {
                 let anchor = VerticalAnchor::parse(value)
@@ -357,7 +360,9 @@ impl HeightProvider {
         }
     }
 
-    fn sample<R: RandomSource>(self, random: &mut R, min_y: i32, height: i32) -> i32 {
+    /// One sample. **`Constant` draws nothing and `Uniform` draws exactly once**,
+    /// which is part of the stream specification for every caller.
+    pub fn sample<R: RandomSource>(self, random: &mut R, min_y: i32, height: i32) -> i32 {
         match self {
             Self::Constant(anchor) => anchor.resolve(min_y, height),
             Self::Uniform(min, max) => {
