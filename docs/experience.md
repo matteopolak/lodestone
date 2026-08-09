@@ -52,9 +52,9 @@ it zeroes progress and total rather than borrowing, so XP cannot go negative.
 underflow and never recomputes it, so a player who has enchanted has a `total` that no
 longer matches their level.
 
-### The one wired producer
+### Furnace smelting, the first source that was wired
 
-Furnace smelting. `Furnace::take_recipes_used` banks `(recipe_key, count)` per cook
+`Furnace::take_recipes_used` banks `(recipe_key, count)` per cook
 and had **no caller**; `experience_for_recipes` now drains it in `server.rs`'s
 `ContainerClosed` arm, which is vanilla's own
 `awardUsedRecipesAndPopExperience` trigger. The recipe key is
@@ -65,13 +65,14 @@ rather than a failure.
 
 ### Who sends the packet, and why the join send is separate
 
-Two producers, and for a while there was only one — which is why **the XP bar never
+Three producers, and for a while there was only one — which is why **the XP bar never
 appeared at all**, in survival as much as creative:
 
 | producer | when |
 |---|---|
 | `crate::server::join_experience` | once, at the top of both `serve_play` variants |
 | the `ServerBound::ContainerClosed` arm of `dispatch_play_packet` | after a furnace pays out banked smelting XP |
+| the orb absorption in both `serve_play` loops' movement arm | after `collect_nearby_orbs` banks an orb |
 
 The furnace arm was the only one for a while. The encoder existed in both the
 `ServerProtocol` trait and `V770ServerProtocol`, the client decoded `SET_EXPERIENCE`
@@ -147,21 +148,100 @@ two same-typed fields is legal everywhere except on the bar.
   carry loop exists to resolve, so keeping it would level the player up on their next
   award of nothing.
 
+## The orb entity
+
+`MobSim` owns live orbs beside its items, projectiles and falling blocks
+(`MobSim::orbs`). `award_experience` is `ExperienceOrb.awardWithDirection`: it splits an
+amount over the denomination ladder, tries to merge each denomination into an existing
+orb, and spawns what did not merge. `tick_orbs` is `ExperienceOrb.tick`, transcribed in
+that method's own order — gravity, merge scan, player pull, move, drag, landing bounce,
+age — because two of those orderings are load-bearing (the pull *before* the move, and
+the bounce reading the **pre-move** fall speed).
+
+### `value` and `count` are different numbers
+
+`value` is `DATA_VALUE`, the points **one** absorption pays out and the only field on the
+wire. `count` is how many absorptions the entity holds: a merge adds the absorbed orb's
+count, `playerTouch` decrements it, and the entity goes at zero. Reading `count` as "the
+points this orb is worth" pays out once and silently loses the rest of a merged pile,
+with the entity still vanishing at exactly the right moment.
+
+### The merge rule is keyed on the network entity id, and 40 is the number
+
+`(orb.getId() - id) % 40 == 0 && orb.getValue() == value`. Only orbs whose ids are
+congruent mod 40 may merge, so **consecutively spawned orbs never merge with each
+other** — the first candidate for id `n` is id `n + 40`. That is why a big award is a
+handful of orbs rather than one pile, and why a merge gate needs **more than 40 orbs** to
+observe anything at all: `control_ten_orbs_below_the_congruence_stride_do_not_merge`
+exists to pin the other side of it. The conservation assertion is
+`MobSim::orb_points_outstanding`, which is `sum(value * count)` — an entity count alone
+cannot see a merge that lost a count.
+
+`scanForMerges` inflates isotropically (`inflate(0.5)`), unlike item merging's
+`inflate(0.5, 0.0, 0.5)`. Two orbs a block apart vertically do merge; two items never do.
+
+### Wired XP sources
+
+| source | vanilla trigger | notes |
+|---|---|---|
+| mob death | `LivingEntity.dropExperience` | requires a player hit within 100 ticks **and** `!isBaby()` |
+| ore mining | `Block.spawnAfterBreak` → `tryDropExperience` | at the cell **centre**, gated on the `blockDrops` rule |
+| furnace smelting | `awardUsedRecipesAndPopExperience` | still a **direct** award to the bar, not orbs — see below |
+
+Two traps in that table, both of which cost time to establish:
+
+- **The player-kill guard is the whole feature.** `dropExperience` reads
+  `lastHurtByPlayerMemoryTime > 0`, so a mob that starves, drowns, burns, falls or is
+  killed by another mob drops **nothing**. Awarding on every death turns any mob grinder
+  into an XP farm, and a gate with only the player-kill arm cannot tell the two apart —
+  `only_a_player_killed_mob_drops_experience` runs both.
+- **Six ores pop no XP at all.** Iron, gold and copper ore (and all three deepslate
+  variants) *are* `DropExperienceBlock`s registered with `ConstantInt.of(0)`, because
+  they drop raw ore. "It is a `DropExperienceBlock`, so it drops experience" is wrong for
+  six blocks. Also note the tool check: vanilla's `hasCorrectToolForDrops` guards
+  `dropResources`, not `spawnAfterBreak`, so breaking coal ore bare-handed yields **no
+  coal and the XP anyway**.
+
+An animal's reward is `1 + nextInt(3)` — a **roll**, from `Animal`'s own
+`getBaseExperienceReward` override, not the `xpReward` field every monster uses. A table
+of flat numbers is wrong for every passive mob. `mob_experience_reward` carries the whole
+table with each entry's source class.
+
+### Absorption
+
+`collect_nearby_orbs` in `server.rs` runs on the same movement cadence the item pickup
+does and takes **at most one orb per call**, gated on the player's own `takeXpDelay` of 2
+ticks. Vanilla's limit is on the *player*, not the orb — an orb has no pickup delay of
+its own, so it is absorbable on the tick it spawns. Draining every overlapping orb at
+once would bank the same total and look completely different: the client plays one pickup
+sound and one absorption animation per `TAKE_ITEM_ENTITY`.
+
 ## What is not here, and what it needs
 
-**The orb entity.** `ExperienceOrb` is a real entity with a value, an age, a pickup
-radius, an absorption animation, and a merge rule keyed on the *entity id*
-(`(orb.getId() - id) % 40 == 0 && orb.getValue() == value`, plus a `nextInt(40)`
-draw), which is not reproducible without one. `MobSim` has no orb variant and streams
-no orb metadata. `orb_denominations` returns the values a spawner would use, and is
-exact to the integer without an entity existing.
+**Client-side orb rendering.** The server spawns, ticks, merges and streams orbs with
+`ExperienceOrb.DATA_VALUE` at metadata index 8, which is everything a *vanilla* client
+needs. Our own client has no orb sprite: `lodestone_render::entity`'s own tests assert
+`model_for_type("experience_orb").is_none()` and
+`entity_texture_candidates("experience_orb").is_empty()`, so an orb entity arrives,
+interpolates and can be absorbed — the absorption being visible, since the bar moves —
+while drawing **zero pixels** on this client. That is the island shape CLAUDE.md's first
+rule names, disclosed rather than discovered later. What it needs is a billboarded quad
+pass with the `experience_orb.png` sprite sheet, frame selected by
+`ExperienceOrb.getIcon`'s bucketed lookup (**not** a linear map of value to frame) plus
+`ExperienceOrbRenderer`'s bob.
 
-The consequence: XP from smelting goes **straight to the player's bar** rather than
-popping an orb they walk into. That is the difference between "no XP exists" and "XP
-exists without a flying orb"; the second is the honest subset.
+**Furnace XP still bypasses the orbs.** `experience_for_recipes` awards points directly
+on container close where vanilla's `awardUsedRecipesAndPopExperience` pops orbs at the
+player. The total is right and the orbs are missing; moving it is a one-line change to
+that arm plus a rewrite of the gate that asserts the direct award.
 
-**Mob-death XP** needs the same entity plus a mob-death drain out of `MobSim`, which
-does not exist (`take_detonations` and `take_grazes` are the pattern it would follow).
+**Breeding, fishing, trading and bottles o' enchanting** are unwired. All four are
+`ExperienceOrb.award` calls in vanilla, so they now need only their own trigger —
+`MobSim::award_experience` is the call.
+
+**Orbs are not persisted.** They live in `MobSim` and are not in
+`MobSim::saved_entities`, so a restart loses whatever was on the ground. Vanilla saves
+them (`Health`/`Age`/`Value`/`Count`).
 
 ## Dependencies
 

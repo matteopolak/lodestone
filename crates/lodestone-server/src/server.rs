@@ -3504,6 +3504,34 @@ where
             }
         });
     }
+    // `Block.spawnAfterBreak` → `tryDropExperience` → `popExperience`: an ore pops
+    // experience orbs at the **centre** of the broken cell, not at the jittered
+    // positions its item drops used.
+    //
+    // Gated on `drop_loot` for the same reason the loot above is: `popExperience`'s own
+    // guard is `level.getGameRules().get(GameRules.BLOCK_DROPS)`, the same rule. It is
+    // deliberately **not** gated on `drops_are_allowed` — vanilla's tool check guards
+    // `dropResources`, while `spawnAfterBreak` is called by `destroyBlock` either way,
+    // so breaking coal ore with a bare hand yields no coal and still yields the XP.
+    // That asymmetry looks like a bug until you read which method each guard is on.
+    //
+    // Silk touch would zero this through `processBlockExperience`; no enchantment
+    // exists in this crate, so nothing to apply.
+    if drop_loot {
+        let points = crate::experience::block_break_points(&broken, |bound| {
+            drops_rng.next_int(bound)
+        });
+        if points > 0 {
+            let centre = Vec3::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            );
+            mobs.with(|sim| {
+                sim.award_experience(centre, Vec3::new(0.0, 0.0, 0.0), points);
+            });
+        }
+    }
     block_entities.with(|reg| {
         reg.remove(pos);
     });
@@ -3809,6 +3837,61 @@ fn collect_nearby_items(
         }
     });
     Pickups { changed, takes }
+}
+
+/// Vanilla `Player.takeXpDelay`, the value `ExperienceOrb.playerTouch` resets it to.
+///
+/// Two ticks, so a player standing in a pile absorbs one orb every other tick rather
+/// than all of them at once. It is what makes a big drop *sound* and *look* like a
+/// stream of orbs instead of a single silent jump on the bar, and it is the only thing
+/// limiting the absorption rate — an orb has no pickup delay of its own.
+const TAKE_XP_DELAY_TICKS: i32 = 2;
+
+/// One orb absorption, for the caller to announce.
+#[derive(Debug, Clone, Copy)]
+struct AbsorbedOrb {
+    orb_entity_id: i32,
+    /// Points paid out by this absorption — one orb's `value`, not the whole pile's.
+    points: i32,
+}
+
+/// Absorbs at most one nearby experience orb into `experience` — the pickup half of
+/// `ExperienceOrb.playerTouch`.
+///
+/// # Why at most one
+///
+/// `playerTouch` refuses outright while the **player's** `takeXpDelay` is non-zero and
+/// resets it to 2 on every absorption, so vanilla can only ever take one orb per two
+/// ticks no matter how many are overlapping. Draining every overlapping orb in one pass
+/// would bank the same total, which is exactly why it is worth stating: the difference is
+/// invisible in the final number and obvious on screen, because the client plays one
+/// pickup sound per `TAKE_ITEM_ENTITY` and animates one orb per absorption.
+///
+/// `delay` is the caller's own copy of `takeXpDelay`, decremented here once per call —
+/// this runs on the same movement-driven cadence the item pickup does.
+///
+/// Returns the absorption to announce, if one happened. The points are already in
+/// `experience`; the caller owes the wire a `set_experience`.
+fn collect_nearby_orbs(
+    mobs: &MobHandle,
+    player_feet: Vec3,
+    experience: &mut crate::experience::PlayerExperience,
+    delay: &mut i32,
+) -> Option<AbsorbedOrb> {
+    if *delay > 0 {
+        *delay -= 1;
+        return None;
+    }
+    mobs.with(|sim| {
+        let (orb_entity_id, _) = sim.orbs_within_pickup_range(player_feet).into_iter().next()?;
+        let points = sim.take_orb(orb_entity_id)?;
+        *delay = TAKE_XP_DELAY_TICKS;
+        experience.give_points(points);
+        Some(AbsorbedOrb {
+            orb_entity_id,
+            points,
+        })
+    })
 }
 
 /// Vanilla's `Direction.fromYRot` (`Direction.java:291-293`) restricted to the
@@ -7676,6 +7759,9 @@ where
     let mut experience = saved_player
         .as_ref()
         .map_or_else(crate::experience::PlayerExperience::default, |data| data.experience);
+    // Vanilla's `Player.takeXpDelay`. Starts at `0`, so the first orb a player walks
+    // into is absorbed immediately — see `collect_nearby_orbs`.
+    let mut take_xp_delay: i32 = 0;
     let mut effects = crate::mob_effects::ActiveEffects::new();
     let mut burn = crate::burning::BurnState::new();
     // The `nextInt(1, 3)` ramp draw `BaseFireBlock.fireIgnite` makes on a player's
@@ -8039,6 +8125,46 @@ where
                             )
                             .await?;
                         }
+                    }
+                    // Experience orbs, on the same movement cadence and for the same
+                    // reason: the `stream_pass` below carries the `REMOVE_ENTITIES` for
+                    // an orb that was fully absorbed, so it vanishes and the bar moves
+                    // together rather than a pass apart.
+                    //
+                    // `TAKE_ITEM_ENTITY` with amount `1` is vanilla's own
+                    // `player.take(this, 1)` — the same packet an item pickup uses, and
+                    // what drives the client's absorption animation and pickup sound.
+                    // Sent *before* the removal for the item path's reason.
+                    if let Some(absorbed) = collect_nearby_orbs(
+                        mobs,
+                        Vec3::new(x, y, z),
+                        &mut experience,
+                        &mut take_xp_delay,
+                    ) {
+                        apply(
+                            conn,
+                            &mut state,
+                            proto.encode_take_item_entity(
+                                absorbed.orb_entity_id,
+                                player_entity_id,
+                                1,
+                            ),
+                        )
+                        .await?;
+                        // The mutation-then-send rule `join_experience`'s doc states: a
+                        // `give_points` with no `set_experience` behind it is the exact
+                        // shape that made the XP bar invisible in the first place.
+                        debug_assert!(absorbed.points > 0, "an absorbed orb pays out points");
+                        apply(
+                            conn,
+                            &mut state,
+                            proto.encode_set_experience(
+                                experience.progress(),
+                                experience.level(),
+                                experience.total(),
+                            ),
+                        )
+                        .await?;
                     }
                 }
                 // Issue #262: the same republish for facing. A separate
@@ -8820,7 +8946,10 @@ where
     // wired identically on this target.
     let mut composter_rng = SpawnRng::new(COMPOSTER_BEHAVIOR_SEED);
     let mut bone_meal_rng = SpawnRng::new(BONE_MEAL_BEHAVIOR_SEED);
+    // `default()`, unlike the native loop's restore: there is no `PlayerDataStore` on
+    // `wasm32` (no filesystem), so there is no saved player to read XP out of.
     let mut experience = crate::experience::PlayerExperience::default();
+    let mut take_xp_delay: i32 = 0;
     let mut effects = crate::mob_effects::ActiveEffects::new();
     let mut burn = crate::burning::BurnState::new();
     // The `nextInt(1, 3)` ramp draw `BaseFireBlock.fireIgnite` makes on a player's
@@ -9006,6 +9135,30 @@ where
                     )
                     .await?;
                 }
+            }
+            // Orb absorption, identical to the native loop. Wired here too rather than
+            // left as a native-only feature: this sweep is packet-driven with no timer,
+            // so `wasm32` loses nothing, and a browser player who could see orbs and not
+            // absorb them would be the worse failure.
+            if let Some(absorbed) =
+                collect_nearby_orbs(mobs, Vec3::new(x, y, z), &mut experience, &mut take_xp_delay)
+            {
+                apply(
+                    conn,
+                    &mut state,
+                    proto.encode_take_item_entity(absorbed.orb_entity_id, player_entity_id, 1),
+                )
+                .await?;
+                apply(
+                    conn,
+                    &mut state,
+                    proto.encode_set_experience(
+                        experience.progress(),
+                        experience.level(),
+                        experience.total(),
+                    ),
+                )
+                .await?;
             }
         }
         // Issue #262, identical to the native loop — see its own comment.

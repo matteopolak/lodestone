@@ -983,6 +983,85 @@ struct Anger {
 /// those two hypotheses explicitly rather than asserting a grudge merely ends.
 const ANGER_TICKS: (u64, u64) = (400, 780);
 
+/// `LivingEntity.PLAYER_HURT_EXPERIENCE_TIME` — how long after a player's hit a mob's
+/// death still counts as a player kill, in ticks.
+const PLAYER_HURT_EXPERIENCE_TIME: u64 = 100;
+
+/// `LivingEntity.getExperienceReward`'s base value for one species —
+/// `Mob.getBaseExperienceReward`, which returns the per-class `xpReward` field.
+///
+/// # Where each number comes from
+///
+/// The `xpReward` assignment in the species' own class, read out of the 26.2
+/// decompile. Class defaults do the rest, and there are only two that matter:
+/// `Monster`'s constructor sets `5`, and `Animal.getBaseExperienceReward` overrides the
+/// field entirely with `1 + random.nextInt(3)` — so **an animal's reward is a roll of
+/// 1..=3, not a constant**, and a table of flat numbers would be wrong for every
+/// passive mob.
+///
+/// | value | species | source class |
+/// |---|---|---|
+/// | `0` | `creaking`, `snow_golem`, `iron_golem` | never assign `xpReward`, so it keeps `Mob`'s `0` |
+/// | `1..=3` | every `Animal` | `Animal.getBaseExperienceReward` |
+/// | `3` | `vex`, `endermite` | own assignment |
+/// | `5` | every other `Monster` | `Monster`'s constructor |
+/// | `10` | `blaze`, `guardian`, `elder_guardian`, `evoker`, `breeze` | own assignment (`elder_guardian` inherits `Guardian`'s) |
+/// | `20` | `ravager`, `piglin_brute` | own assignment |
+/// | `50` | `wither` | own assignment |
+///
+/// # What is deliberately not modelled
+///
+/// * **The equipment bonus.** `Mob.getBaseExperienceReward` adds `1 + nextInt(3)` per
+///   droppable equipped item. Nothing in this sim equips a mob, so the sum is always
+///   over an empty set.
+/// * **`Zombie`'s baby ×2.5.** It is real and it is unreachable: `dropExperience`
+///   requires `shouldDropExperience()`, which is `!isBaby()`, so no baby ever reaches
+///   the multiplier on death. Modelling it would be modelling dead code.
+/// * **`Slime`/`MagmaCube`, whose reward is their size.** This sim has no slime size,
+///   and neither species is in the roster.
+///
+/// # The fallback, stated rather than silent
+///
+/// A species in neither table gets `0`. For an unlisted *monster* that is
+/// conservative-but-wrong (it should be 5) and for an unlisted *animal* it is likewise
+/// low; both under-award rather than over-award, and both are fixed by adding the name
+/// here. The lists cover every species `lodestone_entity::ai::roster` registers, which
+/// is what this sim can spawn.
+fn mob_experience_reward(entity_type: &ResourceKey, rng: &mut SpawnRng) -> i32 {
+    match entity_type.path() {
+        // `Mob`'s untouched `xpReward` — these classes never assign it.
+        "creaking" | "snow_golem" | "iron_golem" => 0,
+        "vex" | "endermite" => 3,
+        "blaze" | "guardian" | "elder_guardian" | "evoker" | "breeze" => 10,
+        "ravager" | "piglin_brute" => 20,
+        "wither" => 50,
+        // `Animal.getBaseExperienceReward` and `AgeableWaterCreature`'s identical
+        // override: a roll, not a constant.
+        "bee" | "camel" | "cat" | "chicken" | "cow" | "donkey" | "fox" | "goat" | "horse"
+        | "llama" | "mooshroom" | "mule" | "ocelot" | "panda" | "pig" | "polar_bear"
+        | "rabbit" | "sheep" | "sniffer" | "squid" | "strider" | "turtle" | "wolf" => {
+            1 + rng.next_int(3)
+        }
+        // `Monster`'s constructor. Asked *after* the overrides above so a species with
+        // its own assignment is not flattened to the class default.
+        path if is_hostile_species(&hostile_probe(path)) => 5,
+        _ => 0,
+    }
+}
+
+/// Wraps a bare species path back into a [`ResourceKey`] so
+/// [`mob_experience_reward`] can consult [`is_hostile_species`], which takes one.
+///
+/// A parse rather than a second copy of that function's species list, for the reason
+/// that list's own doc gives: a duplicated hostility table is one more thing to go
+/// stale. An unparseable path answers "not hostile", which lands on the documented
+/// `0` fallback.
+fn hostile_probe(path: &str) -> ResourceKey {
+    format!("minecraft:{path}")
+        .parse()
+        .unwrap_or_else(|_| item_entity_type())
+}
+
 /// One draw from [`ANGER_TICKS`], matching vanilla's
 /// `UniformInt.sample` / `Mth.randomBetweenInclusive`: `lo + nextInt(hi - lo + 1)`.
 ///
@@ -1041,6 +1120,19 @@ pub struct SimMob<'w> {
     /// query: the seam has no shared clock, so the host resolves expiry and
     /// only `Option<Vec3>` crosses. See that method's own doc comment.
     anger: Option<Anger>,
+    /// The [`MobSim::tick_count`] at which this mob stops counting as
+    /// player-killed — vanilla's `LivingEntity.lastHurtByPlayerMemoryTime`,
+    /// expressed as an absolute deadline for [`Anger`]'s reason.
+    ///
+    /// **This is the gate on XP dropping at all.** `dropExperience` requires
+    /// `lastHurtByPlayerMemoryTime > 0`, so a mob that starves, drowns, burns, falls
+    /// or is killed by another mob drops **no** experience — only a kill a player had
+    /// a hand in within [`PLAYER_HURT_EXPERIENCE_TIME`] ticks does. Awarding
+    /// unconditionally would turn any mob farm into an XP farm and is the plausible
+    /// simplification to avoid.
+    ///
+    /// `None` for a mob no player has ever hit.
+    hurt_by_player_until: Option<u64>,
     /// Raw melee damage this mob's own attacks deal (`ATTACK_DAMAGE`
     /// attribute), applied to whatever [`attack_target_id`](SimMob::attack_target_id)
     /// names when a `MeleeAttackGoal` connects.
@@ -1620,6 +1712,41 @@ struct ItemState {
     motion: ItemMotion,
 }
 
+/// One live `ExperienceOrb`.
+///
+/// # `value` and `count` are different numbers and both are player-visible
+///
+/// `value` is `DATA_VALUE`: the points **one** absorption pays out, and the only
+/// field on the wire. `count` is `ExperienceOrb.count`, how many orbs this single
+/// entity stands for — `merge` adds the absorbed orb's count and `playerTouch`
+/// decrements it, discarding the entity at zero. So a merged orb is one entity, one
+/// texture frame, and several separate absorptions of `value` points each.
+///
+/// Reading `count` as "the points this orb is worth" is the plausible wrong model: it
+/// makes a merged pile pay out `value` once instead of `count` times, so a big drop
+/// silently loses most of its XP while every orb still looks right on screen.
+///
+/// # Why `ItemMotion` carries the position and *not* the tick
+///
+/// [`ItemMotion`] is used purely as the position/velocity/`on_ground` triple, because
+/// [`settle_entity`] already resolves that triple against real block shapes.
+/// [`ItemMotion::tick`] is **not** called for an orb: an item's gravity is 0.04 and
+/// its landing bounce is `velocity.y *= -0.5`, while `ExperienceOrb.getDefaultGravity`
+/// is `0.03` and its bounce is `-fallSpeed * 0.4` off the *pre-move* fall speed. See
+/// [`MobSim::tick_orbs`], which transcribes `ExperienceOrb.tick` in its own order.
+#[derive(Debug, Clone)]
+struct OrbState {
+    uuid: Uuid,
+    /// `ExperienceOrb.DATA_VALUE` — points per absorption.
+    value: i32,
+    /// `ExperienceOrb.count` — absorptions remaining before the entity is discarded.
+    count: i32,
+    /// `ExperienceOrb.age`, in ticks. Discarded at [`ORB_LIFETIME`], and reset to `0`
+    /// by a merge so a pile does not expire on its oldest member's clock.
+    age: i32,
+    motion: ItemMotion,
+}
+
 /// Wire identity plus motion for one live `FallingBlockEntity` — the
 /// falling-block analogue of [`ItemState`].
 ///
@@ -1761,6 +1888,18 @@ pub struct MobSim<'w> {
     projectile_meta: HashMap<i32, ProjectileMeta>,
     items: ItemEntityRegistry,
     item_state: HashMap<i32, ItemState>,
+    /// Live `ExperienceOrb`s, keyed by network entity id.
+    ///
+    /// A plain map for [`falling_blocks`](Self::falling_blocks)' reason rather than a
+    /// registry in `lodestone-entity`: an orb's lifecycle is an age counter and a
+    /// merge rule, and **the merge rule is keyed on the network entity id**
+    /// (`(orb.getId() - id) % 40 == 0`), which a version-free registry that does not
+    /// own ids structurally cannot express.
+    orbs: HashMap<i32, OrbState>,
+    /// The `nextInt(40)` draw `ExperienceOrb.tryMergeToExisting` makes per spawned
+    /// denomination, on its own stream so awarding XP cannot shift which roll a mob
+    /// spawn or a block drop sees.
+    orb_rng: SpawnRng,
     /// Live `FallingBlockEntity`s, keyed by network entity id — the falling
     /// sand/gravel a `crate::gravity_tick::TICK_GRAVITY` scheduled tick created.
     ///
@@ -1858,6 +1997,8 @@ impl<'w> MobSim<'w> {
             projectile_meta: HashMap::new(),
             items: ItemEntityRegistry::new(),
             item_state: HashMap::new(),
+            orbs: HashMap::new(),
+            orb_rng: SpawnRng::new(ORB_BEHAVIOR_SEED),
             falling_blocks: HashMap::new(),
             next_id: 1,
             tick_count: 0,
@@ -1997,6 +2138,7 @@ impl<'w> MobSim<'w> {
             health: max_health,
             defenses,
             anger: None,
+            hurt_by_player_until: None,
             attack_damage,
             hurt_cooldown: HurtCooldown::default(),
             attack_target_id: None,
@@ -2458,6 +2600,12 @@ impl<'w> MobSim<'w> {
             self.items.remove(id);
         }
         self.merge_neighbouring_items();
+        // Experience orbs, on the same live-terrain oracle the items above use and for
+        // the same reason: an orb settled against the sim's static `ChunkWorld`
+        // snapshot would fall through any block the player has placed and rest on any
+        // block they have mined. `tick_orbs` reads `tick_count` for its merge phase, so
+        // it runs before the increment below.
+        self.tick_orbs(&view);
 
         self.tick_count += 1;
     }
@@ -2925,6 +3073,11 @@ impl<'w> MobSim<'w> {
                 end_time,
                 target: attacker_pos,
             });
+            // `LivingEntity.setLastHurtByPlayer`: this is the *player* attack path, so
+            // the kill counts as a player kill for the next 100 ticks. Vanilla's
+            // `dropExperience` reads exactly this, which is why a mob killed by
+            // anything else drops no XP — see `hurt_by_player_until`.
+            mob.hurt_by_player_until = Some(now + PLAYER_HURT_EXPERIENCE_TIME);
             if knockback_power > 0.0 && mob.health() > 0.0 {
                 let target_pos = mob.position();
                 let dx = target_pos.x - attacker_pos.x;
@@ -3491,19 +3644,59 @@ impl<'w> MobSim<'w> {
     /// on a player kill do not appear. That is honest rather than approximated —
     /// the context has no attacker field to fill (see [`crate::loot`]).
     fn reap_dead(&mut self) {
-        let dead: Vec<(ResourceKey, Vec3)> = self
+        let now = self.tick_count;
+        // `drops_experience` is `LivingEntity.dropExperience`'s own guard, read here
+        // while the mob still exists: a player's hit within the last
+        // `PLAYER_HURT_EXPERIENCE_TIME` ticks, and not a baby
+        // (`shouldDropExperience()` is `!isBaby()`).
+        let dead: Vec<(ResourceKey, Vec3, bool)> = self
             .mobs
             .iter()
             .filter(|m| m.health <= 0.0)
-            .map(|m| (m.entity_type.clone(), m.position()))
+            .map(|m| {
+                let by_player = m.hurt_by_player_until.is_some_and(|until| now < until);
+                (
+                    m.entity_type.clone(),
+                    m.position(),
+                    by_player && !m.is_baby(),
+                )
+            })
             .collect();
         if dead.is_empty() {
             return;
         }
         self.mobs.retain(|m| m.health > 0.0);
-        for (entity_type, position) in dead {
+        for (entity_type, position, drops_experience) in dead {
             self.drop_death_loot(&entity_type, position);
+            // Vanilla's `die` calls `dropAllDeathLoot` then `dropExperience`, in that
+            // order, so the orbs land after the items.
+            if drops_experience {
+                self.drop_death_experience(&entity_type, position);
+            }
         }
+    }
+
+    /// `LivingEntity.dropExperience`: pops this species' reward as orbs at `position`.
+    ///
+    /// The caller has already applied vanilla's two eligibility tests (see
+    /// [`reap_dead`](Self::reap_dead)); this applies the third,
+    /// `level.getGameRules().get(GameRules.MOB_DROPS)`, which is the same rule
+    /// [`drop_death_loot`](Self::drop_death_loot) honours — so `/gamerule mobDrops
+    /// false` suppresses XP as well as items, exactly as vanilla does.
+    ///
+    /// The reward roll rides [`orb_rng`](Self::orb_rng) rather than a position-seeded
+    /// stream: unlike a loot roll, an animal's `1 + nextInt(3)` has no reason to be
+    /// reproducible from the death site, and putting it on the orb stream keeps every
+    /// orb-related draw in one sequence.
+    fn drop_death_experience(&mut self, entity_type: &ResourceKey, position: Vec3) {
+        if !self.mob_drops {
+            return;
+        }
+        let reward = mob_experience_reward(entity_type, &mut self.orb_rng);
+        if reward <= 0 {
+            return;
+        }
+        self.award_experience(position, Vec3::new(0.0, 0.0, 0.0), reward);
     }
 
     /// Rolls `entity_type`'s death loot table and spawns the result at
@@ -3713,6 +3906,352 @@ impl<'w> MobSim<'w> {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // `ExperienceOrb`
+    // -----------------------------------------------------------------------
+
+    /// `ExperienceOrb.awardWithDirection`: turns `amount` points into orbs at
+    /// `position`, merging into an existing orb where vanilla would.
+    ///
+    /// Returns the ids of the orbs actually *spawned* — shorter than
+    /// [`crate::experience::orb_denominations`]'s list whenever a denomination merged
+    /// into an existing orb instead, which is the observable difference between this
+    /// and a bare spawn loop.
+    ///
+    /// The split itself is [`crate::experience::orb_denominations`]: greedy
+    /// change-making over an irregular ladder, so 100 is `73 + 17 + 7 + 3` and not one
+    /// orb of 100. That module owns the ladder; this owns the entity.
+    ///
+    /// `rough_direction` is `awardWithDirection`'s bias — vanilla offsets the spawn
+    /// along it and flips the random impulse to agree with it. `Vec3::ZERO` is
+    /// `ExperienceOrb.award`, which is what every vanilla caller except a few block
+    /// drops uses.
+    pub fn award_experience(
+        &mut self,
+        position: Vec3,
+        rough_direction: Vec3,
+        amount: i32,
+    ) -> Vec<i32> {
+        let mut spawned = Vec::new();
+        for value in crate::experience::orb_denominations(amount) {
+            if self.try_merge_to_existing(position, value) {
+                continue;
+            }
+            spawned.push(self.spawn_orb(value, position, rough_direction));
+        }
+        spawned
+    }
+
+    /// `ExperienceOrb.tryMergeToExisting`: hands `value` to an orb already sitting at
+    /// `position` rather than spawning a new one, if the `nextInt(40)` draw picks a
+    /// congruence class one of them is in.
+    ///
+    /// The draw is made **whether or not a candidate exists**, matching vanilla's own
+    /// order (`level.getRandom().nextInt(40)` precedes the entity query), so the roll
+    /// stream does not depend on how many orbs happen to be nearby.
+    fn try_merge_to_existing(&mut self, position: Vec3, value: i32) -> bool {
+        let id = self.orb_rng.next_int(ORB_GROUPS_PER_AREA);
+        let mut candidates: Vec<i32> = self
+            .orbs
+            .iter()
+            .filter(|(orb_id, orb)| {
+                orb.value == value
+                    && (**orb_id - id) % ORB_GROUPS_PER_AREA == 0
+                    && within_box(orb.motion.position, position, ORB_SPAWN_MERGE_REACH)
+            })
+            .map(|(&orb_id, _)| orb_id)
+            .collect();
+        // Vanilla takes `orbs.get(0)` out of a level query whose order is its own
+        // entity-section iteration; the lowest id is the deterministic stand-in, for
+        // `merge_neighbouring_items`' reason.
+        candidates.sort_unstable();
+        let Some(&target) = candidates.first() else {
+            return false;
+        };
+        let Some(orb) = self.orbs.get_mut(&target) else {
+            return false;
+        };
+        orb.count += 1;
+        orb.age = 0;
+        true
+    }
+
+    /// Registers one orb worth `value` points at `position`.
+    ///
+    /// The spawn impulse is `ExperienceOrb`'s own constructor: a random
+    /// `(±0.2, +0.4, ±0.2)`-ish kick, flipped to agree with `rough_direction` when that
+    /// is non-zero, and the position offset half a bounding box along it. Returns the
+    /// assigned entity id.
+    pub fn spawn_orb(&mut self, value: i32, position: Vec3, rough_direction: Vec3) -> i32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut impulse = Vec3::new(
+            (self.orb_rng.next_f64() * 0.2 - 0.1) * 2.0,
+            self.orb_rng.next_f64() * 0.2 * 2.0,
+            (self.orb_rng.next_f64() * 0.2 - 0.1) * 2.0,
+        );
+        let mut spawn_at = position;
+        let bias_len_sqr = rough_direction.x * rough_direction.x
+            + rough_direction.y * rough_direction.y
+            + rough_direction.z * rough_direction.z;
+        if bias_len_sqr > 0.0 {
+            let dot = rough_direction.x * impulse.x
+                + rough_direction.y * impulse.y
+                + rough_direction.z * impulse.z;
+            if dot < 0.0 {
+                impulse = Vec3::new(-impulse.x, -impulse.y, -impulse.z);
+            }
+            // `getBoundingBox().getSize()` is the box's average edge length, which for
+            // the orb's cube is just its width; the offset is half of it.
+            let len = bias_len_sqr.sqrt();
+            let scale = f64::from(ORB_DIMENSIONS.width) * 0.5 / len;
+            spawn_at = Vec3::new(
+                position.x + rough_direction.x * scale,
+                position.y + rough_direction.y * scale,
+                position.z + rough_direction.z * scale,
+            );
+        }
+        self.orbs.insert(
+            id,
+            OrbState {
+                uuid: Uuid::new_v4(),
+                value,
+                count: 1,
+                age: 0,
+                motion: ItemMotion::new(spawn_at, impulse),
+            },
+        );
+        id
+    }
+
+    /// One tick of every live orb — `ExperienceOrb.tick`, in its order.
+    ///
+    /// The order is the part worth transcribing rather than reconstructing:
+    ///
+    /// 1. gravity, unless the orb is already inside a collision box;
+    /// 2. `scanForMerges`, on `tickCount % 20 == 1`;
+    /// 3. `followNearbyPlayer`, which *adds* to the velocity;
+    /// 4. capture `fallSpeed`, then move;
+    /// 5. drag — `0.98`, times the ground friction when resting;
+    /// 6. the landing bounce, from the **captured** `fallSpeed`;
+    /// 7. age, and discard at [`ORB_LIFETIME`].
+    ///
+    /// Step 3 before step 4 is what makes an orb visibly home in on a player rather
+    /// than lag a tick behind them, and step 6 reading the captured speed rather than
+    /// the post-drag one is why the bounce height does not decay differently from
+    /// vanilla's.
+    fn tick_orbs(&mut self, view: &dyn CollisionView) {
+        let scanning = self.tick_count % ORB_MERGE_SCAN_PERIOD == 1;
+        // The follow target per orb, resolved under a shared borrow of `players`
+        // before the mutable pass — `feed_perception`'s two-pass shape.
+        let follow: Vec<(i32, Option<Vec3>)> = self
+            .orbs
+            .iter()
+            .map(|(&id, orb)| (id, self.nearest_follow_target(orb.motion.position)))
+            .collect();
+        let min_y = f64::from(self.world.min_y);
+        let mut expired: Vec<i32> = Vec::new();
+        for (id, target) in follow {
+            let Some(orb) = self.orbs.get_mut(&id) else {
+                continue;
+            };
+            let before = orb.motion.position;
+            orb.motion.velocity.y -= ORB_GRAVITY;
+            if let Some(target) = target {
+                // `followNearbyPlayer`'s pull: toward the player's *half eye height*,
+                // scaled by `(1 - dist/8)^2 * 0.1`. Squaring the falloff is what makes
+                // the pull negligible at the edge of the range and sharp up close; a
+                // linear falloff yanks orbs from 8 blocks away.
+                let delta = Vec3::new(
+                    target.x - orb.motion.position.x,
+                    target.y - orb.motion.position.y,
+                    target.z - orb.motion.position.z,
+                );
+                let dist = (delta.x * delta.x + delta.y * delta.y + delta.z * delta.z).sqrt();
+                if dist > f64::EPSILON {
+                    let power = 1.0 - dist / ORB_MAX_FOLLOW_DIST;
+                    let pull = power * power * ORB_FOLLOW_PULL;
+                    orb.motion.velocity.x += delta.x / dist * pull;
+                    orb.motion.velocity.y += delta.y / dist * pull;
+                    orb.motion.velocity.z += delta.z / dist * pull;
+                }
+            }
+            let fall_speed = orb.motion.velocity.y;
+            orb.motion.position = Vec3::new(
+                before.x + orb.motion.velocity.x,
+                before.y + orb.motion.velocity.y,
+                before.z + orb.motion.velocity.z,
+            );
+            settle_entity(view, ORB_DIMENSIONS, &mut orb.motion, before);
+            let mut drag = ORB_AIR_DRAG;
+            if orb.motion.on_ground {
+                drag *= orb.motion.block_friction;
+            }
+            orb.motion.velocity.x *= drag;
+            orb.motion.velocity.y *= drag;
+            orb.motion.velocity.z *= drag;
+            if orb.motion.on_ground && fall_speed < -ORB_GRAVITY {
+                orb.motion.velocity.y = -fall_speed * ORB_LANDING_BOUNCE;
+            }
+            orb.age += 1;
+            if orb.age >= ORB_LIFETIME
+                || orb.motion.position.y < min_y - VOID_DESPAWN_DEPTH
+            {
+                expired.push(id);
+            }
+        }
+        for id in expired {
+            self.orbs.remove(&id);
+        }
+        if scanning {
+            self.scan_for_orb_merges();
+        }
+    }
+
+    /// `Level.getNearestPlayer(this, 8.0)`, filtered as `followNearbyPlayer` filters
+    /// it, returning the point the pull aims at.
+    ///
+    /// Vanilla aims at `player.getY() + player.getEyeHeight() / 2.0`, i.e. the player's
+    /// *waist*, not their feet and not their eyes. Aiming at the feet makes orbs skim
+    /// the floor and get stuck on a block edge; aiming at the eyes makes them arc over
+    /// the player's head.
+    fn nearest_follow_target(&self, orb: Vec3) -> Option<Vec3> {
+        let range_sqr = ORB_MAX_FOLLOW_DIST * ORB_MAX_FOLLOW_DIST;
+        let mut best: Option<(f64, Vec3)> = None;
+        for player in &self.players {
+            let d = dist_sqr(player.position, orb);
+            if d > range_sqr {
+                continue;
+            }
+            if best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((
+                    d,
+                    Vec3::new(
+                        player.position.x,
+                        player.position.y + PLAYER_EYE_HEIGHT / 2.0,
+                        player.position.z,
+                    ),
+                ));
+            }
+        }
+        best.map(|(_, target)| target)
+    }
+
+    /// `ExperienceOrb.scanForMerges`: orbs of equal value whose ids are congruent mod
+    /// [`ORB_GROUPS_PER_AREA`] and which have drifted within [`ORB_MERGE_REACH`] become
+    /// one entity.
+    ///
+    /// `merge` takes the **minimum** of the two ages, not the absorbing orb's own — so
+    /// a fresh orb absorbed into an old one resets the pile's despawn clock. Keeping
+    /// the older age would make a continuously-fed pile vanish mid-feed.
+    fn scan_for_orb_merges(&mut self) {
+        let mut ids: Vec<i32> = self.orbs.keys().copied().collect();
+        ids.sort_unstable();
+        for i in 0..ids.len() {
+            let to_id = ids[i];
+            for j in (i + 1)..ids.len() {
+                let from_id = ids[j];
+                let (Some(to), Some(from)) = (self.orbs.get(&to_id), self.orbs.get(&from_id))
+                else {
+                    continue;
+                };
+                if to.value != from.value
+                    || (from_id - to_id) % ORB_GROUPS_PER_AREA != 0
+                    || !within_box(to.motion.position, from.motion.position, ORB_MERGE_REACH)
+                {
+                    continue;
+                }
+                let (count, age) = (from.count, from.age.min(to.age));
+                self.orbs.remove(&from_id);
+                if let Some(to) = self.orbs.get_mut(&to_id) {
+                    to.count += count;
+                    to.age = age;
+                }
+            }
+        }
+    }
+
+    /// Every orb a player standing at `player_feet` may absorb right now, as
+    /// `(entity id, value)` and lowest id first.
+    ///
+    /// The range test is [`crate::block_drops::is_within_pickup_range`], the same
+    /// inflated-AABB intersection `Player.aiStep` uses for items — an orb has no
+    /// pickup delay of its own (`ExperienceOrb` defines none), so unlike an item it
+    /// *is* absorbable on the tick it spawns. What limits the rate is the **player's**
+    /// `takeXpDelay`, which lives on the connection, not here.
+    ///
+    /// Read-only: the caller absorbs with [`take_orb`](Self::take_orb).
+    #[must_use]
+    pub fn orbs_within_pickup_range(&self, player_feet: Vec3) -> Vec<(i32, i32)> {
+        let mut collectable: Vec<(i32, i32)> = self
+            .orbs
+            .iter()
+            .filter(|(_, orb)| {
+                crate::block_drops::is_within_pickup_range(player_feet, orb.motion.position)
+            })
+            .map(|(&id, orb)| (id, orb.value))
+            .collect();
+        collectable.sort_by_key(|&(id, _)| id);
+        collectable
+    }
+
+    /// `ExperienceOrb.playerTouch`'s absorption: pays out **one** `value` and drops the
+    /// orb's count by one, discarding the entity at zero.
+    ///
+    /// Returns the points awarded, or `None` if no orb is tracked under `id`. A merged
+    /// orb therefore takes `count` calls to consume, which is the behaviour
+    /// [`OrbState`]'s own doc warns is easy to collapse into a single payout.
+    pub fn take_orb(&mut self, id: i32) -> Option<i32> {
+        let orb = self.orbs.get_mut(&id)?;
+        let value = orb.value;
+        orb.count -= 1;
+        if orb.count <= 0 {
+            self.orbs.remove(&id);
+        }
+        Some(value)
+    }
+
+    /// The number of live orb *entities* — not the number of absorptions they hold.
+    #[must_use]
+    pub fn orb_count(&self) -> usize {
+        self.orbs.len()
+    }
+
+    /// The total points every live orb would pay out if all of them were absorbed:
+    /// `sum(value * count)`.
+    ///
+    /// The figure a conservation gate asserts on, and the reason it exists as an
+    /// accessor: merging must move points between entities without creating or
+    /// destroying any, and `orb_count()` alone cannot see a merge that lost a count.
+    #[must_use]
+    pub fn orb_points_outstanding(&self) -> i32 {
+        self.orbs
+            .values()
+            .map(|orb| orb.value.saturating_mul(orb.count))
+            .sum()
+    }
+
+    /// One orb's `(value, count, age)`, for a gate that needs to see the merge state
+    /// rather than infer it.
+    #[must_use]
+    pub fn orb_state(&self, id: i32) -> Option<(i32, i32, i32)> {
+        self.orbs.get(&id).map(|orb| (orb.value, orb.count, orb.age))
+    }
+
+    /// One orb's current position.
+    #[must_use]
+    pub fn orb_position(&self, id: i32) -> Option<Vec3> {
+        self.orbs.get(&id).map(|orb| orb.motion.position)
+    }
+
+    /// Every live orb id, ascending.
+    #[must_use]
+    pub fn orb_ids(&self) -> Vec<i32> {
+        let mut ids: Vec<i32> = self.orbs.keys().copied().collect();
+        ids.sort_unstable();
+        ids
     }
 
     // -----------------------------------------------------------------------
@@ -3989,6 +4528,40 @@ impl<'w> MobSim<'w> {
                 object_data: 0,
             });
         }
+        // `ExperienceOrb`. Iterated in **sorted** id order, like the falling blocks
+        // below and unlike the two loops above: an orb's whole visible behaviour is a
+        // multi-tick drift toward the player, so a `HashMap` order would reshuffle
+        // which of two orbs `EntityStreamer::sync` updates first every tick.
+        let mut orb_ids: Vec<i32> = self.orbs.keys().copied().collect();
+        orb_ids.sort_unstable();
+        for id in orb_ids {
+            let Some(orb) = self.orbs.get(&id) else {
+                continue;
+            };
+            out.push(EntitySnapshot {
+                id,
+                uuid: orb.uuid,
+                entity_type: orb_entity_type(),
+                position: orb.motion.position,
+                // `ExperienceOrb`'s constructor sets a random `yRot`, which nothing
+                // reads: `ExperienceOrbRenderer` billboards the sprite at the camera.
+                // Sending a rotation would be sending a value with no consumer.
+                rotation: Rotation::new(0.0, 0.0),
+                head_yaw: 0.0,
+                velocity: orb.motion.velocity,
+                // **The field that decides which of the eleven sprite frames draws.**
+                // `ExperienceOrb.getIcon` buckets `getValue()` — not `count`, and not
+                // linearly — so an orb whose value never reaches the client draws frame
+                // 0 (the smallest) whatever it is worth. `defineSynchedData` registers
+                // `DATA_VALUE` and nothing else, so metadata is the only channel;
+                // there is no object data on `getAddEntityPacket` to carry it.
+                //
+                // `count` is deliberately *not* sent: vanilla does not synchronise it,
+                // and a client that knew it would still draw one sprite.
+                metadata: vec![MetadataField::ExperienceOrbValue { value: orb.value }],
+                object_data: 0,
+            });
+        }
         // `FallingBlockEntity`. The **only** producer of a non-zero
         // `object_data` in this crate: `getAddEntityPacket` passes
         // `Block.getId(this.getBlockState())`, and that field is the sole channel
@@ -4179,10 +4752,27 @@ impl CollisionView for ItemCollision<'_> {
 /// answer and the sim asks — see [`MobSim::tick_with_terrain`]. `tick` keeps the
 /// snapshot as its oracle so hermetic callers are unchanged.
 fn settle_item(view: &dyn CollisionView, motion: &mut ItemMotion, before: Vec3) {
-    // The movement `ItemMotion::tick` just applied by translating outright. It is
-    // recovered rather than recomputed so this cannot drift from that function's own
-    // arithmetic (gravity, then translate, then drag, then the landing bounce) —
-    // which lives in `lodestone-entity` and is unchanged by this.
+    settle_entity(view, ITEM_DIMENSIONS, motion, before);
+}
+
+/// [`settle_item`] with the hitbox as a parameter, so an experience orb
+/// (`0.5 × 0.5`) resolves against the same swept collision an item (`0.25 × 0.25`)
+/// does.
+///
+/// Split out rather than copied: the *geometry* differs between the two entities and
+/// nothing else does, and a second copy of the restitution rules is how one of them
+/// ends up with the pre-swept-collision point test again. `motion` is the
+/// position/velocity/`on_ground` triple only — the caller has already applied whatever
+/// per-entity gravity and drag its own `tick` uses.
+fn settle_entity(
+    view: &dyn CollisionView,
+    dimensions: EntityDimensions,
+    motion: &mut ItemMotion,
+    before: Vec3,
+) {
+    // The movement the caller's own tick just applied by translating outright. It is
+    // recovered rather than recomputed so this cannot drift from that arithmetic
+    // (gravity, then translate, then drag, then the landing bounce).
     let attempted = Vec3d::new(
         motion.position.x - before.x,
         motion.position.y - before.y,
@@ -4196,8 +4786,8 @@ fn settle_item(view: &dyn CollisionView, motion: &mut ItemMotion, before: Vec3) 
     // a crate outside this one; keeping the order fixed here means the only thing
     // this commit alters is the **geometry**, which is what makes the existing
     // settling gates still meaningful rather than merely still green.
-    let bb = ITEM_DIMENSIONS.bounding_box(Vec3d::new(before.x, before.y, before.z));
-    let resolved = collide(view, attempted, bb, motion.on_ground, ITEM_DIMENSIONS.step_height);
+    let bb = dimensions.bounding_box(Vec3d::new(before.x, before.y, before.z));
+    let resolved = collide(view, attempted, bb, motion.on_ground, dimensions.step_height);
 
     motion.position = Vec3::new(
         before.x + resolved.x,
@@ -4251,6 +4841,100 @@ fn item_entity_type() -> ResourceKey {
         .parse()
         .expect("`minecraft:item` is a valid resource key")
 }
+
+// ---------------------------------------------------------------------------
+// `ExperienceOrb` — every constant below is transcribed from that class
+// ---------------------------------------------------------------------------
+
+/// `ExperienceOrb.LIFETIME`: ticks before an orb discards itself. Five minutes, the
+/// same figure `ItemLifecycle` uses, and reset to `0` by a merge.
+const ORB_LIFETIME: i32 = 6000;
+
+/// `ExperienceOrb.ENTITY_SCAN_PERIOD`, and the phase matters: vanilla scans when
+/// `tickCount % 20 == 1`, not `== 0`, so an orb spawned this tick does not scan on its
+/// own first tick.
+const ORB_MERGE_SCAN_PERIOD: u64 = 20;
+
+/// `ExperienceOrb.MAX_FOLLOW_DIST`. Doubles as the divisor in
+/// `followNearbyPlayer`'s falloff, so it is one constant and not two.
+const ORB_MAX_FOLLOW_DIST: f64 = 8.0;
+
+/// `ExperienceOrb.ORB_GROUPS_PER_AREA`, the modulus of the merge rule
+/// `(orb.getId() - id) % 40 == 0`.
+///
+/// **This is the whole reason a big award is a handful of orbs rather than one pile.**
+/// Only orbs whose network ids are congruent mod 40 may merge, so consecutive spawns
+/// (ids `n`, `n+1`, …) cannot merge with each other at all — the first candidate for id
+/// `n` is id `n + 40`. A gate that spawns ten orbs and expects a merge is measuring
+/// nothing; it needs more than 40.
+const ORB_GROUPS_PER_AREA: i32 = 40;
+
+/// `ExperienceOrb.getDefaultGravity` — `0.03`, **not** the item entity's `0.04`.
+const ORB_GRAVITY: f64 = 0.03;
+
+/// `ExperienceOrb.getAirDrag`. Applied to all three components, unlike
+/// `ItemMotion::tick`'s split drag.
+const ORB_AIR_DRAG: f64 = 0.98;
+
+/// The landing bounce: `setDeltaMovement(x, -fallSpeed * 0.4, z)` where `fallSpeed` is
+/// the y velocity captured **before** the move. An item's is `velocity.y *= -0.5`
+/// applied after drag, so the two are not interchangeable.
+const ORB_LANDING_BOUNCE: f64 = 0.4;
+
+/// The strength `followNearbyPlayer` scales its normalised pull by.
+const ORB_FOLLOW_PULL: f64 = 0.1;
+
+/// `EntityType.EXPERIENCE_ORB`'s hitbox, `0.5 × 0.5`, with no auto-step for
+/// [`ITEM_DIMENSIONS`]' reason: `ExperienceOrb` extends `Entity` directly and never
+/// overrides `maxUpStep()`.
+const ORB_DIMENSIONS: EntityDimensions = EntityDimensions::new(0.5, 0.5, 0.0);
+
+/// Reach of `scanForMerges`' search, per axis: `getBoundingBox().inflate(0.5)` against
+/// another orb's own box, so `0.25 + 0.5 + 0.25`.
+///
+/// **Isotropic**, unlike [`ITEM_MERGE_REACH_XZ`]/[`ITEM_MERGE_REACH_Y`]: `inflate(0.5)`
+/// with one argument inflates y too, where `ItemEntity`'s three-argument
+/// `inflate(0.5, 0.0, 0.5)` deliberately does not. Two orbs a block apart vertically
+/// *do* merge; two items never do.
+const ORB_MERGE_REACH: f64 = 0.25 + 0.5 + 0.25;
+
+/// Reach of `tryMergeToExisting`' search, per axis: `AABB.ofSize(pos, 1, 1, 1)` is a
+/// unit cube centred on the spawn point (half-extent `0.5`) against the candidate's own
+/// box, so `0.5 + 0.25`.
+const ORB_SPAWN_MERGE_REACH: f64 = 0.5 + 0.25;
+
+/// Seed for [`MobSim::orb_rng`], in the same shape as
+/// [`crate::block_drops::BLOCK_DROPS_BEHAVIOR_SEED`] and its siblings: an arbitrary
+/// fixed constant, so a replay of the same awards produces the same merges.
+const ORB_BEHAVIOR_SEED: u64 = 0x584f_5242_5f53_4545;
+
+/// The entity-type key every experience orb streams as.
+///
+/// Named rather than numeric for [`item_entity_type`]'s reason, which that function's
+/// doc records with the measured consequence: `entity_type_id(name).unwrap_or(0)` on
+/// the encode side silently turns a wrong key into `minecraft:acacia_boat`.
+fn orb_entity_type() -> ResourceKey {
+    "minecraft:experience_orb"
+        .parse()
+        .expect("`minecraft:experience_orb` is a valid resource key")
+}
+
+/// Whether `a` and `b` are within `reach` on **every** axis — an AABB-overlap test
+/// stated as a per-axis comparison rather than a radius.
+///
+/// The distinction is the one `merge_neighbouring_items` records: vanilla's merge
+/// searches are box intersections, and a Euclidean radius accepts a diagonal pair the
+/// box rejects.
+fn within_box(a: Vec3, b: Vec3, reach: f64) -> bool {
+    (a.x - b.x).abs() < reach && (a.y - b.y).abs() < reach && (a.z - b.z).abs() < reach
+}
+
+/// Vanilla `Player.getEyeHeight()` for a standing player — `EntityDimensions`'
+/// `eyeHeight` for `EntityType.PLAYER`, `1.62`.
+///
+/// Used only for `followNearbyPlayer`'s aim point, which is *half* this above the
+/// player's feet.
+const PLAYER_EYE_HEIGHT: f64 = 1.62;
 
 /// Squared horizontal+vertical distance between two positions (vanilla
 /// `distanceToSqr`).
@@ -5982,6 +6666,397 @@ mod falling_block_tests {
         assert!(
             !sim.snapshots().iter().any(|s| s.id == id),
             "a landed falling block must stop being streamed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod experience_orb_tests {
+    use super::*;
+
+    /// Flat stone floor at y=0 across one column, so an orb has something to land on.
+    fn flat_world() -> ChunkWorld {
+        let mut world = ChunkWorld::new(-64, 384);
+        for z in 0..16 {
+            for x in 0..16 {
+                world.set_block(x, 0, z, "minecraft:stone");
+            }
+        }
+        world
+    }
+
+    /// A point above the floor, well inside the column the world covers.
+    fn above_floor() -> Vec3 {
+        Vec3::new(8.0, 1.0, 8.0)
+    }
+
+    /// **The denomination ladder reaches real entities.**
+    ///
+    /// `crate::experience::orb_denominations` is already gated to the integer, and this
+    /// is the join: an award of 100 becomes **four** orbs worth `73, 17, 7, 3` — not one
+    /// orb of 100, and not `73 + 17 + 7 + 1 + 1 + 1`. Orb count is what a player sees.
+    ///
+    /// The ids are consecutive, which is why none of these four can merge with each
+    /// other: the merge rule is congruence mod 40. That is asserted here rather than
+    /// left implicit, because a spawner that *did* merge them would report a plausible
+    /// smaller count.
+    #[test]
+    fn an_award_of_100_spawns_the_four_orbs_the_ladder_predicts() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let spawned = sim.award_experience(above_floor(), Vec3::new(0.0, 0.0, 0.0), 100);
+        assert_eq!(spawned.len(), 4, "100 points is four orbs, not one");
+        let mut values: Vec<i32> = spawned
+            .iter()
+            .map(|&id| sim.orb_state(id).expect("spawned orb is tracked").0)
+            .collect();
+        assert_eq!(values, vec![73, 17, 7, 3], "largest first, and the tail is 3");
+        values.sort_unstable();
+        assert_eq!(values.iter().sum::<i32>(), 100, "the split must conserve the award");
+        assert_eq!(sim.orb_points_outstanding(), 100);
+        assert_eq!(sim.orb_count(), 4);
+    }
+
+    /// **Merging, at a count above the threshold — and the threshold is the point.**
+    ///
+    /// `scanForMerges` only merges orbs whose network ids are congruent mod
+    /// [`ORB_GROUPS_PER_AREA`] (40). Spawning ten orbs and expecting a merge measures
+    /// nothing at all: ids `n..n+9` share no congruence class, so the correct answer is
+    /// zero merges. This spawns **41** orbs of equal value at one point, which is the
+    /// smallest count that guarantees a congruent pair (`n` and `n + 40`).
+    ///
+    /// Two assertions, and the second is the one a wrong merge passes:
+    ///
+    /// * the entity count **falls**, so a merge happened;
+    /// * `orb_points_outstanding` is **unchanged**, so the merge moved absorptions
+    ///   between entities rather than destroying them. A `merge` that overwrote the
+    ///   target's count instead of adding to it satisfies the first and fails this.
+    #[test]
+    fn forty_one_equal_orbs_merge_and_conserve_every_point() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        // `spawn_orb` directly, not `award_experience`: the award path would split a
+        // total into *different* denominations, and only equal-valued orbs may merge.
+        // 41 is the count, 3 is a real ladder denomination.
+        const ORBS: usize = 41;
+        const VALUE: i32 = 3;
+        for _ in 0..ORBS {
+            sim.spawn_orb(VALUE, above_floor(), Vec3::new(0.0, 0.0, 0.0));
+        }
+        let before_points = sim.orb_points_outstanding();
+        assert_eq!(before_points, VALUE * ORBS as i32);
+        assert_eq!(sim.orb_count(), ORBS, "no merge has been scanned for yet");
+
+        // The scan runs on `tick_count % 20 == 1`, so 21 ticks reaches it twice.
+        for _ in 0..21 {
+            sim.tick();
+        }
+
+        assert!(
+            sim.orb_count() < ORBS,
+            "41 equal-valued orbs at one point must produce at least one merge; still \
+             {} entities. If this reads 41 the congruence class arithmetic is wrong",
+            sim.orb_count()
+        );
+        assert_eq!(
+            sim.orb_points_outstanding(),
+            before_points,
+            "a merge must move absorptions between entities, never destroy them"
+        );
+    }
+
+    /// **The control for the merge gate: below the threshold, nothing merges.**
+    ///
+    /// Ten equal orbs at the same point, ticked past the same scan, must stay ten
+    /// entities. Without this arm the gate above is satisfied by a merge rule that
+    /// ignores the id congruence entirely and merges everything it touches — which
+    /// would collapse a vanilla 41-orb pile into one orb and look tidier on screen.
+    #[test]
+    fn control_ten_orbs_below_the_congruence_stride_do_not_merge() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        for _ in 0..10 {
+            sim.spawn_orb(3, above_floor(), Vec3::new(0.0, 0.0, 0.0));
+        }
+        for _ in 0..21 {
+            sim.tick();
+        }
+        assert_eq!(
+            sim.orb_count(),
+            10,
+            "ids n..n+9 share no congruence class mod 40, so none of these may merge"
+        );
+    }
+
+    /// A merged orb takes **`count` absorptions** to consume, each paying `value`.
+    ///
+    /// This is [`OrbState`]'s documented trap made a gate: reading `count` as "the
+    /// points this orb is worth" pays out once and loses the rest, with the entity
+    /// still disappearing at the right moment.
+    #[test]
+    fn absorbing_a_merged_orb_pays_out_once_per_count() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim.spawn_orb(7, above_floor(), Vec3::new(0.0, 0.0, 0.0));
+        // Two more merges into it, reaching a count of 3 — done through the public
+        // spawn-time merge so the state is one a real award could produce.
+        sim.orbs.get_mut(&id).expect("just spawned").count = 3;
+        assert_eq!(sim.orb_points_outstanding(), 21, "3 absorptions of 7");
+
+        let mut paid = Vec::new();
+        for _ in 0..3 {
+            paid.push(sim.take_orb(id).expect("the orb is still there"));
+        }
+        assert_eq!(paid, vec![7, 7, 7], "each absorption pays one value, not the pile");
+        assert_eq!(sim.orb_count(), 0, "the entity goes when its count reaches zero");
+        assert_eq!(
+            sim.take_orb(id),
+            None,
+            "and a fourth absorption finds nothing rather than paying again"
+        );
+    }
+
+    /// **Orbs are pulled toward a nearby player**, and the control is the same orb with
+    /// no player in the sim.
+    ///
+    /// Measured as horizontal displacement toward the player over ten ticks, because
+    /// vertical motion is dominated by gravity and the landing bounce in both arms —
+    /// a "did it move" assertion would pass on gravity alone.
+    #[test]
+    fn an_orb_drifts_toward_a_nearby_player_and_not_without_one() {
+        let start = Vec3::new(8.0, 1.0, 8.0);
+        let player = Vec3::new(11.0, 1.0, 8.0);
+
+        let world = flat_world();
+        let mut followed = MobSim::new(&world);
+        followed.set_players(vec![PlayerPerception {
+            position: player,
+            held_item: None,
+        }]);
+        let followed_id = followed.spawn_orb(1, start, Vec3::new(0.0, 0.0, 0.0));
+
+        let mut alone = MobSim::new(&world);
+        let alone_id = alone.spawn_orb(1, start, Vec3::new(0.0, 0.0, 0.0));
+
+        for _ in 0..10 {
+            followed.tick();
+            alone.tick();
+        }
+
+        let followed_x = followed.orb_position(followed_id).expect("still alive").x;
+        let alone_x = alone.orb_position(alone_id).expect("still alive").x;
+        assert!(
+            followed_x > alone_x + 0.1,
+            "the followed orb must have closed on the player: followed x={followed_x}, \
+             control x={alone_x}. Equal values mean nothing reads the player list"
+        );
+        assert!(
+            followed_x < player.x,
+            "and must not overshoot the player in ten ticks: x={followed_x}"
+        );
+    }
+
+    /// An orb outside the 8-block follow range is not pulled at all — the other side of
+    /// the same rule, and the one a missing range check passes.
+    ///
+    /// # Why this compares two sims rather than a displacement threshold
+    ///
+    /// The first version of this gate asserted the orb moves less than half a block and
+    /// **failed at -0.50**: `spawn_orb` applies `ExperienceOrb`'s own random spawn
+    /// impulse, so an orb with no player anywhere near it still drifts half a block
+    /// before drag kills the kick. The premise "an unpulled orb barely moves" is simply
+    /// false, and it failed in the direction that reads as a code bug.
+    ///
+    /// Both sims are freshly constructed, so `orb_rng` is at the same point in the same
+    /// seeded stream and both orbs receive the **identical** impulse. That makes the
+    /// comparison exact rather than approximate: any pull at all shows up as a
+    /// difference, and there is no threshold to tune.
+    #[test]
+    fn control_an_orb_beyond_the_follow_range_is_not_pulled() {
+        let start = Vec3::new(8.0, 1.0, 8.0);
+        let world = flat_world();
+
+        let mut watched = MobSim::new(&world);
+        watched.set_players(vec![PlayerPerception {
+            // 9 blocks away: outside `ORB_MAX_FOLLOW_DIST`, and only just, so a range
+            // check comparing a squared distance against an unsquared bound would pull
+            // this orb and fail here.
+            position: Vec3::new(start.x + 9.0, start.y, start.z),
+            held_item: None,
+        }]);
+        let watched_id = watched.spawn_orb(1, start, Vec3::new(0.0, 0.0, 0.0));
+
+        let mut alone = MobSim::new(&world);
+        let alone_id = alone.spawn_orb(1, start, Vec3::new(0.0, 0.0, 0.0));
+
+        for _ in 0..10 {
+            watched.tick();
+            alone.tick();
+        }
+
+        let watched_pos = watched.orb_position(watched_id).expect("still alive");
+        let alone_pos = alone.orb_position(alone_id).expect("still alive");
+        assert_eq!(
+            (watched_pos.x, watched_pos.y, watched_pos.z),
+            (alone_pos.x, alone_pos.y, alone_pos.z),
+            "an orb 9 blocks from a player must follow exactly the same path as one with \
+             no player at all"
+        );
+    }
+
+    /// **A player kill drops experience; every other death does not.**
+    ///
+    /// The three arms share one fixture and differ only in how the mob dies, because the
+    /// claim is about `LivingEntity.dropExperience`'s `lastHurtByPlayerMemoryTime > 0`
+    /// guard and nothing else:
+    ///
+    /// | arm | orbs |
+    /// |---|---|
+    /// | killed through `MobSim::attack` (the player path) | some |
+    /// | killed by `damage_self` (no player involved) | **none** |
+    ///
+    /// The second arm is the one that matters: awarding on every death turns any mob
+    /// grinder into an XP farm, and a gate with only the first arm cannot tell the two
+    /// implementations apart.
+    #[test]
+    fn only_a_player_killed_mob_drops_experience() {
+        let world = flat_world();
+
+        let mut by_player = MobSim::new(&world);
+        let id = by_player
+            .spawn_species(
+                "minecraft:zombie".parse().expect("valid key"),
+                above_floor(),
+            )
+            .id();
+        by_player.attack(id, Vec3::new(6.0, 1.0, 8.0), 1_000.0, DamageFlags::default(), 0.0);
+        assert_eq!(by_player.len(), 0, "1000 damage kills a zombie");
+        assert!(
+            by_player.orb_points_outstanding() > 0,
+            "a player kill must pop experience; got no orbs at all"
+        );
+        // `Monster`'s own `xpReward` is 5, and the ladder splits 5 into `3 + 1 + 1`.
+        assert_eq!(
+            by_player.orb_points_outstanding(),
+            5,
+            "a zombie is worth exactly Monster's xpReward of 5"
+        );
+        assert_eq!(
+            by_player.orb_count(),
+            3,
+            "5 points is three orbs — 3 + 1 + 1 over the denomination ladder"
+        );
+
+        let mut alone = MobSim::new(&world);
+        let alone_id = alone
+            .spawn_species(
+                "minecraft:zombie".parse().expect("valid key"),
+                above_floor(),
+            )
+            .id();
+        alone
+            .get_mut(alone_id)
+            .expect("just spawned")
+            .damage_self(1_000.0);
+        alone.tick();
+        assert_eq!(alone.len(), 0, "the self-damaged zombie died too");
+        assert_eq!(
+            alone.orb_points_outstanding(),
+            0,
+            "a death no player caused must drop no experience — this is the arm that \
+             separates a faithful port from an XP farm"
+        );
+    }
+
+    /// A **baby** drops nothing, however it died — `shouldDropExperience()` is
+    /// `!isBaby()`.
+    ///
+    /// Worth its own arm because the obvious implementation (award whenever a player
+    /// killed it) passes every assertion above and fails this one.
+    #[test]
+    fn control_a_player_killed_baby_drops_no_experience() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), above_floor())
+            .set_age(lodestone_entity::ai::navigating_mob::BABY_START_AGE)
+            .id();
+        assert!(sim.get(id).expect("spawned").is_baby(), "the fixture is a baby");
+        sim.attack(id, Vec3::new(6.0, 1.0, 8.0), 1_000.0, DamageFlags::default(), 0.0);
+        assert_eq!(sim.len(), 0, "the calf died");
+        assert_eq!(
+            sim.orb_points_outstanding(),
+            0,
+            "a baby drops no experience — vanilla's shouldDropExperience is !isBaby()"
+        );
+    }
+
+    /// An animal's reward is a **roll of 1..=3**, not a constant — `Animal`'s own
+    /// `getBaseExperienceReward` override.
+    ///
+    /// Asserted as a range over repeated kills plus the requirement that **more than one
+    /// distinct total appears**, which is what separates the roll from a flat 2. A
+    /// single kill cannot make that distinction, and a range check alone is satisfied by
+    /// any constant inside it.
+    #[test]
+    fn an_animal_rolls_its_reward_rather_than_paying_a_constant() {
+        let world = flat_world();
+        let mut seen: Vec<i32> = Vec::new();
+        let mut out_of_range: Vec<i32> = Vec::new();
+        // One sim across all kills so the orb RNG stream advances, exactly as it would
+        // over a real session.
+        let mut sim = MobSim::new(&world);
+        for _ in 0..24 {
+            let id = sim
+                .spawn_species("minecraft:cow".parse().expect("valid key"), above_floor())
+                .id();
+            let before = sim.orb_points_outstanding();
+            sim.attack(id, Vec3::new(6.0, 1.0, 8.0), 1_000.0, DamageFlags::default(), 0.0);
+            let reward = sim.orb_points_outstanding() - before;
+            if !(1..=3).contains(&reward) {
+                out_of_range.push(reward);
+            }
+            seen.push(reward);
+        }
+        assert!(
+            out_of_range.is_empty(),
+            "every cow must be worth 1..=3 points; these were not: {out_of_range:?}"
+        );
+        seen.sort_unstable();
+        seen.dedup();
+        assert!(
+            seen.len() > 1,
+            "24 cows produced only the reward {seen:?} — Animal's reward is a roll of \
+             1 + nextInt(3), and a constant would look exactly like this"
+        );
+    }
+
+    /// An orb streams as `minecraft:experience_orb` carrying its **value** as metadata.
+    ///
+    /// Both halves have a recorded failure mode in this crate: an entity type that is
+    /// not a real registry key resolves to network id `0` and arrives as
+    /// `minecraft:acacia_boat` with nothing logged, and a client with no value draws the
+    /// smallest of the eleven sprite frames whatever the orb is worth.
+    #[test]
+    fn an_orb_streams_as_an_experience_orb_carrying_its_value() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim.spawn_orb(617, above_floor(), Vec3::new(0.0, 0.0, 0.0));
+        let snapshot = sim
+            .snapshots()
+            .into_iter()
+            .find(|s| s.id == id)
+            .expect("a live orb must be streamed");
+        assert_eq!(snapshot.entity_type.to_string(), "minecraft:experience_orb");
+        assert_eq!(
+            snapshot.metadata,
+            vec![MetadataField::ExperienceOrbValue { value: 617 }],
+            "the value is the only field, and without it the sprite frame is wrong"
+        );
+        assert_eq!(
+            snapshot.object_data, 0,
+            "`ExperienceOrb` does not override getAddEntityPacket, so there is no \
+             object data to send"
         );
     }
 }
