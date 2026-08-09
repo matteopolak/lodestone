@@ -91,6 +91,15 @@ All four *checks* are required, and each catches a class the others structurally
   sites, including the chat-caret blink, which runs every frame. **Reaching exit 0 for wasm32 is when you
   start looking, not when you stop.** `docs/browser-shell-port.md` carries the census and the open work.
 
+  **And a confinement guard only covers the crate it names — the browser reaches about fifteen.** Measured:
+  wasm32 was exit 0, all three `lodestone-shell` guard rules PASSed, and the tab still died on *"time not
+  implemented on this platform"* three crates down — `Sim::build → Particles::new → ParticleEngine::new →
+  from_entropy → SystemTime::now`, in `lodestone-particle`, which is not in the guard's list at all. **Every
+  crate the browser links wants the clock rules**; a green guard means "the crates I remembered to name are
+  clean". Same shape as the docs-index gate scanning three directories and not the fourth. Also refined by
+  execution: `thread::spawn`/`sleep` trap, but **`Builder::spawn` and `available_parallelism` return `Err`** —
+  so those two are degradation-class, and two of the four sites previously assumed fatal never were.
+
 Smaller facts, each of which has cost someone an hour:
 
 - **The binary is `lodestone`, not `lodestone-shell`** — the `[[bin]]` name differs from the crate.
