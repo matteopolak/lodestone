@@ -112,21 +112,25 @@ fn air_row_rect(width: u32, height: u32, scale: f32) -> (u32, u32, u32, u32) {
     // itself centred on the canvas.
     let hw = 182.0;
     let hx = (lw - hw) / 2.0;
-    // `sprite_vitals` stacks upward from `cluster_top`, which **moves** with what
-    // is present: it starts at `b.h - margin` and is pulled up to the hotbar's
-    // top only `if frame.hotbar`, then to the XP bar's top only `if frame.xp`.
-    // This fixture sets neither, so `cluster_top` stays at `lh - margin`.
+    // **Now one call, not a re-derivation.** `sprite_vitals` used to stack upward
+    // from a `cluster_top` that moved with the hotbar and the XP bar, so this
+    // fixture had to reproduce that stack — and getting it wrong is how the first
+    // version of this gate reported 0 px for a row that was drawing perfectly,
+    // ~20 logical pixels below the rect being measured.
     //
-    // Getting this wrong is how the first version of this gate reported 0 px for
-    // a row that was drawing perfectly, ~20 logical pixels below the rect being
-    // measured: the hardcoded `lh - 39.0` silently assumed the with-hotbar stack.
-    // Derived here instead, from the same three constants, so enabling the hotbar
-    // in this fixture later cannot desync the rect from the draw.
-    let margin = 6.0;
-    let icon = 9.0;
-    let cluster_top = lh - margin;
-    let row_y = cluster_top - icon - 4.0;
-    let air_y = row_y - icon - 1.0;
+    // `hud::vitals_line_base` is now the single expression the draw itself calls
+    // (vanilla's `Hud.extractPlayerHealth`'s `yLineBase == guiHeight - 39`, which
+    // takes no branch at all), so this rect cannot desync from it — including if
+    // the hotbar or an XP bar is enabled in this fixture later, which is exactly
+    // what used to break it.
+    //
+    // The air row is one [`VITALS_ROW_PITCH`] above that. **Not two**: the second
+    // `yLineAir -= 10` in `extractPlayerHealth` is cancelled by
+    // `getAirBubbleYLine`'s `rowOffset == -1` for an unmounted player — see the
+    // table in `sprite_vitals`' air block, which was written after this gate's
+    // arithmetic was checked against it.
+    let row_y = lodestone::hud::vitals_line_base(lh);
+    let air_y = row_y - 10.0;
     let row_w = BUBBLE_COUNT as f32 * (BUBBLE_SIZE + 1.0);
     let x0 = ((hx + hw - row_w - 2.0) * scale).max(0.0) as u32;
     let y0 = ((air_y - 2.0) * scale).max(0.0) as u32;

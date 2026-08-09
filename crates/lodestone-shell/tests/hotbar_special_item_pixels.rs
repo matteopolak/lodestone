@@ -125,7 +125,10 @@ fn cell_rect(i: u32) -> [u32; 4] {
     let cx = W as f32 * 0.5;
     let cell = 22.0f32;
     let hx = cx - 9.0 * cell * 0.5;
-    let hy = H as f32 - 6.0 - cell;
+    // `hud::HOTBAR_MARGIN`, not a restated `6.0`: this gate went red when the
+    // hotbar was moved flush with the bottom of the screen to match vanilla's own
+    // `guiHeight - 22` blit, and a local copy of the number is why.
+    let hy = H as f32 - lodestone::hud::HOTBAR_MARGIN - cell;
     let x = hx + 3.0 + i as f32 * cell;
     let y = hy + 3.0;
     [x as u32, y as u32, 16, 16]
