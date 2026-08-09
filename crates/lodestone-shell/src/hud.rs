@@ -99,101 +99,217 @@ pub(crate) const DEBUG_LINE_BG: [f32; 4] = [
 pub(crate) const DEBUG_LINE_INK: [f32; 4] =
     [0xE0 as f32 / 255.0, 0xE0 as f32 / 255.0, 0xE0 as f32 / 255.0, 1.0];
 
-/// The Tab player-list overlay's panel geometry.
+/// The Tab player-list overlay's line pitch — vanilla's literal `9`
+/// (`PlayerTabOverlay.extractRenderState`, which advances `yo` by `9` per row and
+/// fills each slot `8` tall inside it).
+///
+/// **Not [`hud_line_h`], and not at [`HUD_TEXT_SCALE`].** The tab overlay is a
+/// vanilla *screen-space* draw in the already-`gui_scale`-divided logical canvas,
+/// exactly like the F3 overlay above, so it uses vanilla's own metrics at scale
+/// `1.0`. Drawing it at the HUD's 2× pitch is what "the text is way too big"
+/// means, one screen over.
+pub(crate) const TAB_LINE_H: f32 = 9.0;
+
+/// The tab overlay's text scale — vanilla metrics, so `1.0`. See [`TAB_LINE_H`].
+pub(crate) const TAB_TEXT_SCALE: f32 = 1.0;
+
+/// `PlayerTabOverlay.MAX_ROWS_PER_COL`.
+pub(crate) const TAB_MAX_ROWS_PER_COL: usize = 20;
+
+/// Horizontal gap between two columns — the literal `5` in
+/// `xo = xxo + col * slotWidth + col * 5`.
+const TAB_COL_GAP: f32 = 5.0;
+
+/// The 9 px a row reserves for its 8×8 player face, plus the 1 px vanilla leaves
+/// between the face and the name (`xo += 9` after the face blit).
+const TAB_HEAD_W: f32 = 9.0;
+
+/// The per-row slack in vanilla's slot-width estimate — the literal `13` in
+/// `cols * ((showHead ? 9 : 0) + maxNameWidth + widthForScore + 13)`. It is what
+/// leaves room for the 10 px ping icon plus a pixel either side.
+const TAB_ROW_SLACK: f32 = 13.0;
+
+/// The margin vanilla keeps clear either side — the `screenWidth - 50` cap on
+/// both the slot-width estimate and the header/footer wrap width.
+const TAB_SCREEN_INSET: f32 = 50.0;
+
+/// The overlay's top edge — `yyo = 10`.
+const TAB_TOP: f32 = 10.0;
+
+/// The ping icon's drawn size and its offset from the slot's right edge —
+/// `blitSprite(sprite, xo + slotWidth - 11, yo, 10, 8)`.
+const TAB_PING_W: f32 = 10.0;
+/// See [`TAB_PING_W`].
+const TAB_PING_H: f32 = 8.0;
+/// See [`TAB_PING_W`].
+const TAB_PING_INSET: f32 = 11.0;
+
+/// The plate behind the header, the rows and the footer — vanilla's
+/// `Integer.MIN_VALUE`, i.e. `0x80000000`: black at alpha `128`.
+const TAB_PLATE: [f32; 4] = [0.0, 0.0, 0.0, 0x80 as f32 / 255.0];
+
+/// The per-row fill — `options.getBackgroundColor(553648127)`, i.e. `0x20FFFFFF`:
+/// **white** at alpha `32`, not another black wash. Getting this wrong is what
+/// makes the rows read as one flat block instead of a striped list.
+const TAB_ROW_FILL: [f32; 4] = [1.0, 1.0, 1.0, 0x20 as f32 / 255.0];
+
+/// A row's ink. Opaque white, or `0x90FFFFFF` for a spectator
+/// (`-1862270977`).
+const TAB_INK: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+/// See [`TAB_INK`].
+const TAB_INK_SPECTATOR: [f32; 4] = [1.0, 1.0, 1.0, 0x90 as f32 / 255.0];
+
+/// The Tab player-list overlay's geometry, transcribed from
+/// `PlayerTabOverlay.extractRenderState`.
 ///
 /// **Exists so the draw and its gate share one expression rather than two that
 /// agree today.** A pixel gate that recomputed `y` from its own copy of this
-/// arithmetic would keep passing after the panel moved — a control whose
-/// premise is false in the safe-looking direction. `build_inner` constructs one
-/// of these and draws from it; the gate constructs one from the same inputs and
-/// measures against it.
+/// arithmetic would keep passing after the panel moved — a control whose premise
+/// is false in the safe-looking direction. `build_inner` constructs one of these
+/// and draws from it; a gate constructs one from the same inputs and measures
+/// against it.
+///
+/// Every division below is vanilla's **integer** division, floored here for that
+/// reason: `slot_w` in particular is `min(...) / cols`, and letting it stay
+/// fractional would put column 1 half a pixel off vanilla at most widths.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TabPanel {
-    /// Left edge, in logical canvas pixels.
+    /// Number of columns the rows are split into.
+    pub cols: usize,
+    /// Rows **per column** — vanilla's `rows`, which is also the stride the
+    /// `col = i / rows` / `row = i % rows` pair indexes with.
+    pub rows: usize,
+    /// One column's width.
+    pub slot_w: f32,
+    /// Left edge of column 0 — vanilla's `xxo`.
     pub x: f32,
-    /// Top edge.
-    pub y: f32,
-    /// Panel width.
-    pub w: f32,
-    /// Panel height.
-    pub h: f32,
-    /// Vertical pitch between lines.
-    pub line_h: f32,
-    /// Inset from the panel edge to its content.
-    pub margin: f32,
-    /// How many footer lines the panel was sized for.
+    /// Top of the **rows** block, after any header — vanilla's `yyo` at the point
+    /// the row loop starts.
+    pub rows_top: f32,
+    /// Top of the header block, or `rows_top` when there is no header.
+    pub header_top: f32,
+    /// Top of the footer block. Only meaningful when there is a footer.
+    pub footer_top: f32,
+    /// The widest thing on screen — vanilla's `maxLineWidth`, which is the row
+    /// block's own width *widened* by any header or footer line that overflows
+    /// it. Every plate spans this, centred on the screen.
+    pub max_line_width: f32,
+    /// The screen (logical canvas) width the layout was built for.
+    pub screen_w: f32,
+    /// How many header lines were laid out.
+    pub header_len: usize,
+    /// How many footer lines were laid out.
     pub footer_len: usize,
 }
 
 impl TabPanel {
-    /// Lay the panel out for a canvas and a content census.
+    /// Lay the overlay out for a logical canvas and a content census.
     ///
-    /// `widest_banner` is the widest header/footer line in pixels, measured
-    /// with the same font the draw uses; it only ever *widens* the panel, so
-    /// passing `0.0` reproduces the pre-banner geometry exactly — which is why
-    /// the existing no-banner pixel gate is unaffected by this type existing.
+    /// `max_name_width` and `widest_banner` must be measured with the **same**
+    /// font and scale the draw uses; they are the only inputs vanilla takes from
+    /// its font, and passing a differently-measured pair is how a layout and its
+    /// draw silently disagree.
     pub fn new(
-        canvas_w: f32,
-        canvas_h: f32,
+        screen_w: f32,
+        slots: usize,
+        show_head: bool,
+        max_name_width: f32,
         header_len: usize,
-        rows: usize,
         footer_len: usize,
         widest_banner: f32,
     ) -> Self {
-        let line_h = hud_line_h();
-        let margin = HUD_MARGIN;
-        // Counted before `y`, or the panel stops being centred about its own
-        // content the moment a server sends a banner. The `+ 1` is the
-        // "PLAYERS (n)" caption; `rows.max(1)` keeps an empty list's panel from
-        // collapsing, which is the pre-existing behaviour.
-        let lines = header_len + 1 + rows.max(1) + footer_len;
-        let h = lines as f32 * line_h + margin * 2.0;
-        let w = (canvas_w * 0.5)
-            .max(if widest_banner > 0.0 {
-                widest_banner + margin * 2.0
-            } else {
-                0.0
-            })
-            .min((canvas_w - margin * 2.0).max(0.0));
+        // `for (cols = 1; rows > 20; rows = (slots + cols - 1) / cols) { cols++; }`
+        //
+        // Read the loop in Java's own order — condition, body, *then* update —
+        // or the arithmetic comes out one column wrong: `cols` is incremented
+        // **before** `rows` is recomputed. 20 slots stay in one column of 20; 21
+        // become two columns of 11 (not 20 + 1); 41 become three of 14.
+        let mut cols = 1usize;
+        let mut rows = slots;
+        while rows > TAB_MAX_ROWS_PER_COL {
+            cols += 1;
+            rows = slots.div_ceil(cols);
+        }
+        let head_w = if show_head { TAB_HEAD_W } else { 0.0 };
+        // `widthForScore` is 0: the tab list's score column needs a scoreboard
+        // display objective, which this overlay is not given.
+        let estimate = cols as f32 * (head_w + max_name_width + TAB_ROW_SLACK);
+        let slot_w = (estimate.min(screen_w - TAB_SCREEN_INSET) / cols as f32).floor();
+        let block_w = slot_w * cols as f32 + (cols as f32 - 1.0) * TAB_COL_GAP;
+        let x = (screen_w * 0.5).floor() - (block_w * 0.5).floor();
+        let max_line_width = block_w.max(widest_banner);
+        // The header block occupies `header_len * 9`, then vanilla's bare `yyo++`
+        // — one pixel of air between the header plate and the row plate.
+        let header_top = TAB_TOP;
+        let rows_top = if header_len > 0 {
+            TAB_TOP + header_len as f32 * TAB_LINE_H + 1.0
+        } else {
+            TAB_TOP
+        };
+        // `yyo += rows * 9 + 1` before the footer plate.
+        let footer_top = rows_top + rows as f32 * TAB_LINE_H + 1.0;
         Self {
-            x: (canvas_w * 0.5).floor() - w * 0.5,
-            y: (canvas_h - h) * 0.5,
-            w,
-            h,
-            line_h,
-            margin,
+            cols,
+            rows,
+            slot_w,
+            x,
+            rows_top,
+            header_top,
+            footer_top,
+            max_line_width,
+            screen_w,
+            header_len,
             footer_len,
         }
     }
 
-    /// Baseline of header line `i`, counting down from the panel's top inset.
-    pub fn header_y(&self, i: usize) -> f32 {
-        self.y + self.margin + i as f32 * self.line_h
+    /// Left edge of a plate — `screenWidth / 2 - maxLineWidth / 2 - 1`.
+    pub fn plate_x(&self) -> f32 {
+        (self.screen_w * 0.5).floor() - (self.max_line_width * 0.5).floor() - 1.0
     }
 
-    /// Baseline of footer line `i`, anchored off the panel's **bottom**.
+    /// A plate's width. Vanilla's `fill` runs to
+    /// `screenWidth / 2 + maxLineWidth / 2 + 1`, so this is that minus
+    /// [`plate_x`](Self::plate_x).
+    pub fn plate_w(&self) -> f32 {
+        (self.screen_w * 0.5).floor() + (self.max_line_width * 0.5).floor() + 1.0 - self.plate_x()
+    }
+
+    /// Top-left of row `i`'s slot, in column-major order — vanilla's
+    /// `col = i / rows`, `row = i % rows`.
     ///
-    /// Deliberately not `header_y(header_len + 1 + rows + i)`: the panel is
-    /// sized for `rows.max(1)` while the row loop advances by `rows`, so an
-    /// empty player list would pull the footer up into the gap.
+    /// Column-major is the whole reason `rows` is a field: a row-major reading
+    /// (`col = i % cols`) produces a list that reads across instead of down, and
+    /// on a single-column list the two are indistinguishable — which is why the
+    /// gate for this has to use more than 20 players.
+    pub fn slot_origin(&self, i: usize) -> [f32; 2] {
+        let col = i / self.rows.max(1);
+        let row = i % self.rows.max(1);
+        [
+            self.x + col as f32 * (self.slot_w + TAB_COL_GAP),
+            self.rows_top + row as f32 * TAB_LINE_H,
+        ]
+    }
+
+    /// Baseline of header line `i`.
+    pub fn header_y(&self, i: usize) -> f32 {
+        self.header_top + i as f32 * TAB_LINE_H
+    }
+
+    /// Baseline of footer line `i`.
     pub fn footer_y(&self, i: usize) -> f32 {
-        self.y + self.h - self.margin - (self.footer_len - i) as f32 * self.line_h
+        self.footer_top + i as f32 * TAB_LINE_H
     }
 
-    /// x for a line of width `text_w` centred in the panel — the header and
-    /// footer alignment, as vanilla does it.
+    /// x for a line of width `text_w` centred on the screen — vanilla centres
+    /// the header and footer on `screenWidth`, **not** on the row block.
     pub fn centred_x(&self, text_w: f32) -> f32 {
-        self.x + (self.w - text_w) * 0.5
+        (self.screen_w * 0.5).floor() - (text_w * 0.5).floor()
     }
 
-    /// x for the left-aligned caption and player rows.
-    pub fn left_x(&self) -> f32 {
-        self.x + self.margin
-    }
-
-    /// Horizontal centre of the panel, for a gate asking *where* a line sits.
+    /// Horizontal centre of the overlay, for a gate asking *where* a line sits.
     pub fn centre_x(&self) -> f32 {
-        self.x + self.w * 0.5
+        (self.screen_w * 0.5).floor()
     }
 }
 
@@ -688,20 +804,17 @@ pub struct HudFrame<'a> {
     /// frame-to-frame state) wraps from scratch, which is correct, just not
     /// free; the running app always supplies one.
     pub chat_wrap: Option<&'a ChatWrapCache>,
-    /// Formatted player-list rows, `Some` only while the tab overlay is held.
-    pub players: Option<&'a [String]>,
-    /// The server's tab-list header, one entry per line, drawn centred **above**
-    /// the player rows. Empty when the server sent none — see
-    /// [`crate::tablist::banner_lines`] for why this is a possibly-empty slice
-    /// rather than an `Option`, and [`crate::sim::Sim::tab_banner`] for what it
-    /// closes.
+    /// The player list to draw, `Some` only while the tab overlay is held.
     ///
-    /// Read only when [`Self::players`] is `Some`: there is no panel to hang a
-    /// header on otherwise.
-    pub tab_header: &'a [String],
-    /// The server's tab-list footer, drawn centred **below** the player rows.
-    /// Same shape and same gating as [`Self::tab_header`].
-    pub tab_footer: &'a [String],
+    /// **This used to be `Option<&[String]>`** — a flat list of pre-formatted
+    /// `"NAME  30ms"` rows — and that was the defect, not the plumbing:
+    /// `PLAYER_INFO_UPDATE` was decoded, folded, and reaching pixels the whole
+    /// time, so `cargo xtask connectedness` reported the wire green before and
+    /// after. What the flattening threw away was the game mode, the styled
+    /// display name and the latency *band*, and what it invented was a
+    /// `"PLAYERS (n)"` caption vanilla has no equivalent of. Carry
+    /// [`crate::tablist::TabListView`] and let the draw do vanilla's layout.
+    pub players: Option<&'a crate::tablist::TabListView>,
     /// The scoreboard sidebar to draw on the right edge, `Some` when displayed.
     pub sidebar: Option<&'a Sidebar>,
     /// Active boss bars, drawn stacked at the top-centre in render order.
@@ -887,8 +1000,6 @@ impl<'a> HudFrame<'a> {
             chat_options: ChatDisplayOptions::default(),
             chat_wrap: None,
             players: None,
-            tab_header: &[],
-            tab_footer: &[],
             sidebar: None,
             boss_bars: &[],
             can_hurt_player: true,
@@ -1752,45 +1863,110 @@ impl HudGeometry {
             }
         }
 
-        // Tab player-list overlay: a centred panel of rows while Tab is held,
-        // with the server's header above and footer below (issue #436's island
-        // sweep). Vanilla centres both about the panel and stacks them outside
-        // the rows (`PlayerTabOverlay.render`); the "PLAYERS (n)" caption is
-        // this client's own affordance and stays between them.
+        // The Tab player-list overlay — `PlayerTabOverlay.extractRenderState`,
+        // ported rather than approximated.
+        //
+        // Read as vanilla's own draw order, because this GUI path has no depth
+        // compare and submission order is the only z there is: the header plate
+        // and its lines, the row plate, then per row a translucent slot fill, the
+        // name, and the ping bars, then the footer plate and its lines.
+        //
+        // Everything here is at `TAB_TEXT_SCALE`/`TAB_LINE_H` — vanilla's own
+        // metrics in the logical canvas — and *not* the HUD's 2× pitch that the
+        // rest of `build_inner` uses. See `TAB_LINE_H`.
         if let Some(players) = frame.players {
-            let header = frame.tab_header;
-            let footer = frame.tab_footer;
-            // Measured with the same font the draw uses. `text_width`'s own doc
-            // says every centring site must go through it, and this is the
-            // input that decides whether the panel has to widen at all.
-            let widest_banner = header
+            let tab_scale = TAB_TEXT_SCALE;
+            // The two font measurements vanilla takes, through the same
+            // `spans_width`/`text_width` the draw uses. `max_name_width` sizes
+            // the column; the banner width only ever *widens* the plates.
+            let max_name_width = players
+                .rows
                 .iter()
-                .chain(footer.iter())
-                .map(|l| b.text_width(l, scale))
+                .map(|row| b.spans_width(&row.name, tab_scale))
                 .fold(0.0f32, f32::max);
-            let panel = TabPanel::new(b.w, b.h, header.len(), players.len(), footer.len(), widest_banner);
-            b.rect_px(panel.x, panel.y, panel.w, panel.h, [0.0, 0.0, 0.0, 0.7]);
-
-            for (i, line) in header.iter().enumerate() {
-                let x = panel.centred_x(b.text_width(line, scale));
-                b.text(line, x, panel.header_y(i), scale, [1.0, 1.0, 1.0, 1.0]);
-            }
-            // The caption and the rows continue straight on from the header, so
-            // they index the same ladder rather than a second one.
-            b.text(
-                &format!("PLAYERS ({})", players.len()),
-                panel.left_x(),
-                panel.header_y(header.len()),
-                scale,
-                [1.0, 1.0, 0.6, 1.0],
+            let widest_banner = players
+                .header
+                .iter()
+                .chain(players.footer.iter())
+                .map(|l| b.text_width(l, tab_scale))
+                .fold(0.0f32, f32::max);
+            let panel = TabPanel::new(
+                b.w,
+                players.len(),
+                players.show_head,
+                max_name_width,
+                players.header.len(),
+                players.footer.len(),
+                widest_banner,
             );
-            for (i, row) in players.iter().enumerate() {
-                let y = panel.header_y(header.len() + 1 + i);
-                b.text(row, panel.left_x(), y, scale, [0.9, 0.95, 1.0, 1.0]);
+            let plate_x = panel.plate_x();
+            let plate_w = panel.plate_w();
+
+            // The header plate spans `yyo - 1 ..= yyo + n * 9`, so it is one
+            // pixel taller than the lines it holds. Drawn only when the server
+            // actually sent a header: a vanilla server sends none unless
+            // something sets one, and fabricating one to fill the space is what
+            // this overlay must not do.
+            if !players.header.is_empty() {
+                b.rect_px(
+                    plate_x,
+                    panel.header_top - 1.0,
+                    plate_w,
+                    players.header.len() as f32 * TAB_LINE_H + 1.0,
+                    TAB_PLATE,
+                );
+                for (i, line) in players.header.iter().enumerate() {
+                    let x = panel.centred_x(b.text_width(line, tab_scale));
+                    b.text(line, x, panel.header_y(i), tab_scale, TAB_INK);
+                }
             }
-            for (i, line) in footer.iter().enumerate() {
-                let x = panel.centred_x(b.text_width(line, scale));
-                b.text(line, x, panel.footer_y(i), scale, [1.0, 1.0, 1.0, 1.0]);
+
+            // The row plate is drawn unconditionally, sized to `rows` — the rows
+            // *per column*, not the player count, so a two-column list gets one
+            // plate half as tall as a naive `slots * 9` would make it.
+            b.rect_px(
+                plate_x,
+                panel.rows_top - 1.0,
+                plate_w,
+                panel.rows as f32 * TAB_LINE_H + 1.0,
+                TAB_PLATE,
+            );
+
+            for (i, row) in players.rows.iter().enumerate() {
+                let [sx, sy] = panel.slot_origin(i);
+                // `fill(xo, yo, xo + slotWidth, yo + 8, background)` — 8 tall
+                // inside a 9 px pitch, which is what leaves the 1 px gap between
+                // rows that makes the list read as a list.
+                b.rect_px(sx, sy, panel.slot_w, TAB_LINE_H - 1.0, TAB_ROW_FILL);
+                let name_x = if players.show_head { sx + TAB_HEAD_W } else { sx };
+                let ink = if row.spectator { TAB_INK_SPECTATOR } else { TAB_INK };
+                b.text_spans(&row.name, name_x, sy, tab_scale, [ink[0], ink[1], ink[2]], ink[3]);
+                // The signal bars, right-aligned inside the slot. Vanilla's
+                // `extractPingIcon` subtracts the head offset back off `xo`, so
+                // the icon is measured from the **slot's** left edge and does not
+                // move when a head is drawn.
+                b.sprite(
+                    row.ping_sprite,
+                    sx + panel.slot_w - TAB_PING_INSET,
+                    sy,
+                    TAB_PING_W,
+                    TAB_PING_H,
+                    TAB_INK,
+                );
+            }
+
+            if !players.footer.is_empty() {
+                b.rect_px(
+                    plate_x,
+                    panel.footer_top - 1.0,
+                    plate_w,
+                    players.footer.len() as f32 * TAB_LINE_H + 1.0,
+                    TAB_PLATE,
+                );
+                for (i, line) in players.footer.iter().enumerate() {
+                    let x = panel.centred_x(b.text_width(line, tab_scale));
+                    b.text(line, x, panel.footer_y(i), tab_scale, TAB_INK);
+                }
             }
         }
 
@@ -4615,17 +4791,160 @@ mod tests {
         );
     }
 
+    /// A view of `n` players called `P0..P{n-1}`, all survival, all full bars.
+    fn tab_view(n: usize) -> crate::tablist::TabListView {
+        crate::tablist::TabListView {
+            rows: (0..n)
+                .map(|i| crate::tablist::TabListRow {
+                    name: crate::overlay::plain_spans(format!("P{i}")),
+                    ping_sprite: "icon/ping_5",
+                    spectator: false,
+                })
+                .collect(),
+            header: Vec::new(),
+            footer: Vec::new(),
+            show_head: false,
+        }
+    }
+
     #[test]
     fn tab_overlay_lists_players() {
         let stats = DebugStats::default();
-        let names = vec!["Alice  12ms".to_string(), "Bob  30ms".to_string()];
+        let view = tab_view(2);
         let frame = HudFrame {
-            players: Some(&names),
+            players: Some(&view),
             ..HudFrame::new(&stats)
         };
         let with = HudGeometry::build(&frame, 640, 480).vertex_count();
         let without = HudGeometry::build(&HudFrame::new(&stats), 640, 480).vertex_count();
-        assert!(with > without, "the tab panel + names add geometry");
+        assert!(with > without, "the tab overlay's plate + names add geometry");
+    }
+
+    /// **The column split, at the threshold.**
+    ///
+    /// `for (cols = 1; rows > 20; rows = (slots + cols - 1) / cols) { cols++; }`
+    /// has to be read in Java's own order — condition, body, then update — so
+    /// `cols` is bumped *before* `rows` is recomputed.
+    ///
+    /// The discriminating input is **21**, and the number that discriminates is
+    /// `rows`, not `cols`. A plausible misreading — "columns of 20, so
+    /// `cols = ceil(slots / 20)` and `rows = 20`" — agrees about `cols` at every
+    /// input tried here and answers `20` where the truth is `11`. That is the
+    /// difference between an overlay 11 rows tall and one 20 rows tall with nine
+    /// empty rows of plate hanging below it, so `cols` alone is not a test.
+    #[test]
+    fn the_column_split_matches_vanillas_own_loop_at_the_threshold() {
+        let panel = |slots: usize| TabPanel::new(640.0, slots, false, 40.0, 0, 0, 0.0);
+        // One player: one column of one. Not one column of 20.
+        assert_eq!((panel(1).cols, panel(1).rows), (1, 1));
+        // MAX_ROWS_PER_COL exactly: still one column, because the guard is
+        // `rows > 20` and not `rows >= 20`.
+        assert_eq!(
+            (panel(TAB_MAX_ROWS_PER_COL).cols, panel(TAB_MAX_ROWS_PER_COL).rows),
+            (1, TAB_MAX_ROWS_PER_COL)
+        );
+        // One more, and it splits into two columns of **11** — ceil(21 / 2).
+        assert_eq!((panel(21).cols, panel(21).rows), (2, 11));
+        // 41 needs three passes of the loop: 41 → 21 → 14.
+        assert_eq!((panel(41).cols, panel(41).rows), (3, 14));
+        // And vanilla's own cap, which is 80 rather than a round 100: four
+        // columns of 20.
+        let full = panel(crate::tablist::MAX_TAB_ROWS);
+        assert_eq!((full.cols, full.rows), (4, 20));
+    }
+
+    /// Slots fill **column-major** — `col = i / rows`, `row = i % rows`.
+    ///
+    /// Twenty-one players, so `rows == 11`: index 10 is the bottom of column 0
+    /// and index 11 is the *top* of column 1. A row-major reading
+    /// (`col = i % cols`) would put index 1 there instead, and on any list of 20
+    /// or fewer the two readings are indistinguishable — which is why this gate
+    /// has to cross the split.
+    #[test]
+    fn slots_fill_column_major_so_the_list_reads_downwards() {
+        let panel = TabPanel::new(640.0, 21, false, 40.0, 0, 0, 0.0);
+        assert_eq!(panel.rows, 11);
+        let [x0, y0] = panel.slot_origin(0);
+        let [x10, y10] = panel.slot_origin(10);
+        let [x11, y11] = panel.slot_origin(11);
+        // Column 0 runs the full 11 rows down.
+        assert_eq!(x10, x0);
+        assert_eq!(y10, y0 + 10.0 * TAB_LINE_H);
+        // Index 11 starts column 1, back at the top.
+        assert_eq!(y11, y0);
+        assert_eq!(x11, x0 + panel.slot_w + 5.0);
+    }
+
+    /// The header pushes the rows down by `header_len * 9 + 1` — the bare `yyo++`
+    /// after the header loop is a real pixel of air and is easy to drop.
+    ///
+    /// With no header the rows start at vanilla's `yyo = 10` unchanged, which is
+    /// the control: a layout that always added the gap would fail here.
+    #[test]
+    fn a_header_offsets_the_rows_by_its_own_height_plus_one() {
+        let bare = TabPanel::new(640.0, 3, false, 40.0, 0, 0, 0.0);
+        assert_eq!(bare.rows_top, 10.0);
+        let with_header = TabPanel::new(640.0, 3, false, 40.0, 2, 0, 0.0);
+        assert_eq!(with_header.rows_top, 10.0 + 2.0 * TAB_LINE_H + 1.0);
+        // `yyo += rows * 9 + 1` before the footer plate, counted from wherever the
+        // rows actually began.
+        assert_eq!(
+            with_header.footer_top,
+            with_header.rows_top + 3.0 * TAB_LINE_H + 1.0
+        );
+    }
+
+    /// A header or footer wider than the row block **widens the plates**, and a
+    /// narrow one does not shrink them — vanilla's `maxLineWidth` starts at the
+    /// block width and only ever takes a `max`.
+    #[test]
+    fn a_wide_banner_widens_the_plate_and_a_narrow_one_leaves_it_alone() {
+        let bare = TabPanel::new(640.0, 3, false, 40.0, 0, 0, 0.0);
+        let narrow = TabPanel::new(640.0, 3, false, 40.0, 1, 0, 4.0);
+        assert_eq!(narrow.max_line_width, bare.max_line_width);
+        let wide = TabPanel::new(640.0, 3, false, 40.0, 1, 0, bare.max_line_width + 60.0);
+        assert_eq!(wide.max_line_width, bare.max_line_width + 60.0);
+        // …and the plate really does grow with it, rather than the width being
+        // computed and dropped.
+        assert!(wide.plate_w() > bare.plate_w());
+    }
+
+    /// Nothing is drawn for a header or footer the server did not send.
+    ///
+    /// Byte-identical geometry, not merely "less": vanilla only measures and only
+    /// fills when the component is non-null, so an absent banner must not leave a
+    /// plate, a gap, or a single vertex behind. A vanilla server sends neither
+    /// unless something sets one, so this is the *common* case and not an edge.
+    #[test]
+    fn an_absent_header_and_footer_draw_nothing_at_all() {
+        let stats = DebugStats::default();
+        let build = |view: &crate::tablist::TabListView| {
+            HudGeometry::build(
+                &HudFrame {
+                    players: Some(view),
+                    ..HudFrame::new(&stats)
+                },
+                640,
+                480,
+            )
+            .verts
+        };
+        let bare = tab_view(3);
+        let mut banner = tab_view(3);
+        banner.header = vec!["Welcome".to_string()];
+        banner.footer = vec!["Bye".to_string()];
+        let with = build(&banner);
+        let without = build(&bare);
+        assert!(
+            with.len() > without.len(),
+            "control: a supplied banner must add geometry — {} floats against {}",
+            with.len(),
+            without.len()
+        );
+        // The real assertion: the no-banner frame is the same frame it always
+        // was, to the float.
+        let again = build(&tab_view(3));
+        assert_eq!(without, again);
     }
 
     #[test]

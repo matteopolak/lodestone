@@ -1,28 +1,156 @@
 //! Tab-list display projection.
 //!
+//! ## What it is
+//!
 //! The authoritative fold lives in [`lodestone_game::tablist::TabList`]. This
-//! module only lowers that state into the flat text rows the shell HUD already
-//! draws while Tab is held.
+//! module lowers that state into a [`TabListView`] — the shape `hud.rs` draws
+//! while Tab is held, laid out to vanilla's `PlayerTabOverlay`.
+//!
+//! ## How it works
+//!
+//! [`tab_list_view`] does three things the fold deliberately does not:
+//!
+//! * resolves each entry's `display_name` (or its plain profile name) into
+//!   **styled spans**, so a server that colours a name gets a coloured row;
+//! * applies vanilla's `limit(80)` — `PlayerTabOverlay.getPlayerInfos` caps the
+//!   overlay at 80 entries, after sorting, and a 200-player server therefore
+//!   shows the first 80 in comparator order rather than 200 rows off the bottom
+//!   of the screen;
+//! * turns the raw latency into the sprite id of one of vanilla's five discrete
+//!   signal-bar icons ([`ping_sprite`]).
+//!
+//! ## How to change it, and the gotchas
+//!
+//! **The header and footer render only when the server sent them.** A vanilla
+//! server sends neither unless a plugin or a datapack sets one, which is why
+//! vanilla's own tab list shows neither; [`banner_lines`] returns an empty `Vec`
+//! for absent, empty and whitespace-only banners, and the draw skips the whole
+//! plate rather than drawing an empty gap. Do not synthesise either to fill
+//! space.
+//!
+//! **This client draws no player head, and that is vanilla's own behaviour on
+//! every server we can host.** `PlayerTabOverlay.extractRenderState` gates the
+//! 8×8 face on `showHead = this.minecraft.getConnection().onlineMode()`, which
+//! comes from the LOGIN packet's `onlineMode` field. Our own server writes
+//! `false` there (`v770`'s `server_protocol`), so vanilla joined to it would
+//! draw no head either, and the layout below — which reserves the 9 px only when
+//! [`TabListView::show_head`] is set — is exactly vanilla's no-head layout.
+//! Turning heads on needs two things this module cannot supply: the client-side
+//! decode of that `onlineMode` field, and a texture path in the HUD pass (the
+//! HUD has a colour pipeline and a single GUI-atlas sprite pipeline; a per-player
+//! skin needs a third).
+//!
+//! ## Dependencies
+//!
+//! [`lodestone_game::tablist`] for the state, `lodestone_game::text` for
+//! `translate` resolution, and the `gui/sprites/icon/ping_*` sprites out of the
+//! GUI atlas for the bars.
 
 use lodestone_game::tablist::TabList;
+use lodestone_model::text::TextSpan;
 
-/// Formats the listed players in vanilla display order as HUD rows, resolving
-/// any `translate` components in a player's display name against `translate`.
+/// Vanilla's cap on how many rows the overlay shows —
+/// `PlayerTabOverlay.getPlayerInfos`'s `.limit(80L)`, applied **after** the
+/// comparator so which 80 you see is well defined.
+pub const MAX_TAB_ROWS: usize = 80;
+
+/// One row of the tab overlay.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TabListRow {
+    /// The name to draw, as styled spans — `PlayerTabOverlay.getNameForDisplay`,
+    /// which prefers `getTabListDisplayName()` and falls back to the plain
+    /// profile name.
+    pub name: Vec<TextSpan>,
+    /// The GUI-atlas sprite id for this row's signal bars — see [`ping_sprite`].
+    pub ping_sprite: &'static str,
+    /// Whether this player is a spectator. Vanilla draws a spectator's name in
+    /// `0x90FFFFFF` rather than opaque white (`extractRenderState`'s
+    /// `info.getGameMode() == GameType.SPECTATOR ? -1862270977 : -1`) *and*
+    /// italicises it in `decorateName`; only the alpha is modelled here, because
+    /// this font has no italic variant and a fabricated slant would be worse
+    /// than the dimming alone.
+    pub spectator: bool,
+}
+
+/// Everything the tab overlay draws for one frame.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TabListView {
+    /// The rows, already sorted and capped at [`MAX_TAB_ROWS`].
+    pub rows: Vec<TabListRow>,
+    /// The server's header, one entry per line. Empty when it sent none.
+    pub header: Vec<String>,
+    /// The server's footer, same shape and same rule.
+    pub footer: Vec<String>,
+    /// Whether each row reserves 9 px for an 8×8 player face — vanilla's
+    /// `showHead = connection.onlineMode()`. Always `false` here; see the module
+    /// doc for what it would take to turn on, and why an offline-mode server
+    /// makes `false` the *correct* answer rather than a placeholder.
+    pub show_head: bool,
+}
+
+impl TabListView {
+    /// How many rows there are — the `slots` count vanilla's column split works
+    /// from.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Whether there is nothing to draw.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+/// The signal-bar sprite for a latency in milliseconds —
+/// `PlayerTabOverlay.extractPingIcon`, transcribed.
+///
+/// The bands are **not** evenly spaced and the strongest is the widest: anything
+/// under 150 ms gets all five bars, and it takes a full second to fall to one.
+/// A negative latency (the "not reported yet" value the wire uses) is
+/// `ping_unknown`, which is the crossed-out icon and not zero bars.
 #[must_use]
-pub fn player_rows(tab_list: &TabList, translate: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
-    tab_list
+pub fn ping_sprite(latency: i32) -> &'static str {
+    if latency < 0 {
+        "icon/ping_unknown"
+    } else if latency < 150 {
+        "icon/ping_5"
+    } else if latency < 300 {
+        "icon/ping_4"
+    } else if latency < 600 {
+        "icon/ping_3"
+    } else if latency < 1000 {
+        "icon/ping_2"
+    } else {
+        "icon/ping_1"
+    }
+}
+
+/// Lowers the folded tab list into the view the HUD draws.
+#[must_use]
+pub fn tab_list_view(
+    tab_list: &TabList,
+    translate: &dyn Fn(&str) -> Option<String>,
+) -> TabListView {
+    let rows = tab_list
         .ordered()
         .into_iter()
-        .map(|entry| {
-            let name =
-                lodestone_game::text::resolve(&entry.effective_name(), translate).to_plain_string();
-            if entry.latency >= 0 {
-                format!("{name}  {}ms", entry.latency)
-            } else {
-                format!("{name}  --")
-            }
+        .take(MAX_TAB_ROWS)
+        .map(|entry| TabListRow {
+            name: lodestone_game::text::resolve(&entry.effective_name(), translate).to_spans(),
+            ping_sprite: ping_sprite(entry.latency),
+            spectator: entry.game_mode == lodestone_model::GameMode::Spectator,
         })
-        .collect()
+        .collect();
+    TabListView {
+        rows,
+        header: banner_lines(tab_list.header.as_ref(), translate),
+        footer: banner_lines(tab_list.footer.as_ref(), translate),
+        // See the module doc: vanilla's own gate is `onlineMode()`, which our
+        // server reports as `false` and our client does not yet decode.
+        show_head: false,
+    }
 }
 
 /// Lowers a tab-list header or footer into the centred lines the HUD draws
@@ -75,6 +203,14 @@ mod tests {
         None
     }
 
+    /// Plain names of the rows, in draw order.
+    fn names(view: &TabListView) -> Vec<String> {
+        view.rows
+            .iter()
+            .map(|row| crate::overlay::spans_text(&row.name))
+            .collect()
+    }
+
     #[test]
     fn rows_use_game_tablist_order_and_display_names() {
         let mut tabs = TabList::new();
@@ -83,9 +219,28 @@ mod tests {
         tabs.insert(bob);
         tabs.insert(entry(1, "Alice", 12, GameMode::Survival));
 
+        let view = tab_list_view(&tabs, &no_tr);
+        // Alice first because Bob is a spectator, and spectators sort last —
+        // `PLAYER_COMPARATOR`'s second key. Alphabetically Alice would come first
+        // anyway, so the *spectator flag* is the discriminating assertion here.
+        assert_eq!(names(&view), vec!["Alice AFK".replace(" AFK", ""), "Bob AFK".to_string()]);
+        assert_eq!(view.rows[0].spectator, false);
+        assert_eq!(view.rows[1].spectator, true);
+    }
+
+    /// The spectator key really does outrank the name, which the test above cannot
+    /// show because its alphabetical order happens to agree.
+    ///
+    /// `Aaa` is a spectator and `Zzz` is not, so a name-only comparator answers
+    /// `[Aaa, Zzz]` and the real one answers `[Zzz, Aaa]`.
+    #[test]
+    fn a_spectator_sorts_after_a_later_name() {
+        let mut tabs = TabList::new();
+        tabs.insert(entry(1, "Aaa", 10, GameMode::Spectator));
+        tabs.insert(entry(2, "Zzz", 10, GameMode::Survival));
         assert_eq!(
-            player_rows(&tabs, &no_tr),
-            vec!["Alice  12ms".to_string(), "Bob AFK  30ms".to_string()]
+            names(&tab_list_view(&tabs, &no_tr)),
+            vec!["Zzz".to_string(), "Aaa".to_string()]
         );
     }
 
@@ -97,12 +252,66 @@ mod tests {
         tabs.insert(e);
 
         let tr = |key: &str| (key == "entity.minecraft.spider").then(|| "Spider".to_string());
-        assert_eq!(player_rows(&tabs, &tr), vec!["Spider  20ms".to_string()]);
+        assert_eq!(names(&tab_list_view(&tabs, &tr)), vec!["Spider".to_string()]);
         // Negative control: no table leaks the raw key.
         assert_eq!(
-            player_rows(&tabs, &no_tr),
-            vec!["entity.minecraft.spider  20ms".to_string()]
+            names(&tab_list_view(&tabs, &no_tr)),
+            vec!["entity.minecraft.spider".to_string()]
         );
+    }
+
+    /// The ping bands, **at their boundaries**.
+    ///
+    /// `extractPingIcon`'s ladder is `< 150 / < 300 / < 600 / < 1000`, so every
+    /// threshold is exclusive and the strongest band is by far the widest. Testing
+    /// only the midpoints (say 100 / 200 / 400) would pass under a `<=` reading
+    /// too, so each pair below straddles one boundary.
+    #[test]
+    fn the_ping_bands_are_vanillas_own_exclusive_thresholds() {
+        assert_eq!(ping_sprite(-1), "icon/ping_unknown");
+        assert_eq!(ping_sprite(0), "icon/ping_5");
+        assert_eq!(ping_sprite(149), "icon/ping_5");
+        assert_eq!(ping_sprite(150), "icon/ping_4");
+        assert_eq!(ping_sprite(299), "icon/ping_4");
+        assert_eq!(ping_sprite(300), "icon/ping_3");
+        assert_eq!(ping_sprite(599), "icon/ping_3");
+        assert_eq!(ping_sprite(600), "icon/ping_2");
+        assert_eq!(ping_sprite(999), "icon/ping_2");
+        assert_eq!(ping_sprite(1000), "icon/ping_1");
+    }
+
+    /// The overlay is capped at [`MAX_TAB_ROWS`], **after** sorting.
+    ///
+    /// 100 players go in named `p000..p099`; 80 come out, and they are the
+    /// alphabetically first 80 rather than an arbitrary 80 — which is what
+    /// `.sorted().limit(80)` means and what a `.limit(80).sorted()` reading would
+    /// get wrong (a `HashMap` iteration order would make the last row anything at
+    /// all).
+    #[test]
+    fn the_view_caps_at_vanillas_eighty_rows_after_sorting() {
+        let mut tabs = TabList::new();
+        for i in 0..100u128 {
+            tabs.insert(entry(i + 1, &format!("p{i:03}"), 10, GameMode::Survival));
+        }
+        let view = tab_list_view(&tabs, &no_tr);
+        assert_eq!(view.len(), MAX_TAB_ROWS);
+        let names = names(&view);
+        assert_eq!(names[0], "p000");
+        assert_eq!(names[MAX_TAB_ROWS - 1], "p079");
+    }
+
+    /// An unlisted player is in the state and not in the overlay — vanilla's
+    /// `getListedOnlinePlayers()`. Tab-completion reads the *unfiltered* set, which
+    /// is why the two must not share one projection.
+    #[test]
+    fn an_unlisted_player_is_folded_but_not_drawn() {
+        let mut tabs = TabList::new();
+        let mut hidden = entry(1, "Ghost", 10, GameMode::Survival);
+        hidden.listed = false;
+        tabs.insert(hidden);
+        tabs.insert(entry(2, "Seen", 10, GameMode::Survival));
+        assert_eq!(tabs.len(), 2, "both entries stay in the fold");
+        assert_eq!(names(&tab_list_view(&tabs, &no_tr)), vec!["Seen".to_string()]);
     }
 
     #[test]
@@ -151,18 +360,30 @@ mod tests {
         );
     }
 
-    /// **Measures by location, not by frame average.** The header and footer
-    /// are *centred* while the caption and player rows are *left-aligned*, so
-    /// the discriminating question is not "did more pixels light up" (which a
-    /// header drawn in the wrong place would also satisfy) but "where is the
-    /// horizontal centre of mass of the text on this scanline band".
+    /// **Measures by location, not by frame average**, and the location it
+    /// measures is *vertical*.
     ///
-    /// Every band and the panel rect come from [`crate::hud::TabPanel`] — the
-    /// same value the draw lays out from — so this cannot drift into passing
-    /// against a panel that has moved.
+    /// The horizontal question this gate used to ask — "is the header centred
+    /// rather than left-aligned?" — is no longer answerable, and that is a fact
+    /// about vanilla rather than a weakening. A single column is only as wide as
+    /// its own content and is itself centred on the screen
+    /// (`xxo = screenWidth / 2 - blockWidth / 2`), so a centred banner and a
+    /// left-aligned row land within a few pixels of each other. The old gate got
+    /// its discrimination from the `"PLAYERS (n)"` caption, which was this
+    /// client's own invention and is gone.
+    ///
+    /// What *is* separable, and is what the layout actually has to get right: the
+    /// header occupies the band **above** the rows, the footer the band **below**
+    /// them, and both bands are blank when the server sent no banner. Every band
+    /// comes from [`crate::hud::TabPanel`] — the same value the draw lays out from
+    /// — so this cannot drift into passing against an overlay that has moved.
+    ///
+    /// The blank-band arm is the control: it is the executed proof that the
+    /// detector would have fired, and it is also the common case, since a vanilla
+    /// server sends neither banner unless something sets one.
     #[test]
     #[ignore = "requires a GPU adapter"]
-    fn the_header_draws_centred_above_the_rows_and_the_footer_centred_below() {
+    fn the_header_draws_above_the_rows_and_the_footer_below_them() {
         use crate::hud::{DebugStats, HudFrame, HudRenderer, TabPanel};
         use lodestone_render::{HeadlessTarget, RenderTarget};
 
@@ -180,167 +401,133 @@ mod tests {
         let mut tabs = TabList::new();
         tabs.insert(entry(1, "Alice", 12, GameMode::Survival));
         tabs.insert(entry(2, "Bob", 30, GameMode::Survival));
-        let rows = player_rows(&tabs, &no_tr);
-        let header = vec!["HEADER".to_string()];
-        let footer = vec!["FOOTER".to_string()];
+        let bare = tab_list_view(&tabs, &no_tr);
+        // **Three** lines each, not one, and the reason is a control that failed:
+        // with a one-line header the header band is `y = 10..19`, which is exactly
+        // where the *rows* sit in the no-banner frame (`yyo = 10`), so the
+        // no-banner arm measured 228 lit pixels of player name and read them as a
+        // fabricated header. Asking "what else already paints here" is the whole
+        // check. Three lines push the row block to `10 + 27 + 1 = 38`, clear of
+        // everything the bare frame draws, which ends at `10 + 2 * 9 = 28`.
+        tabs.header = Some(Text::literal("H1\nH2\nH3"));
+        tabs.footer = Some(Text::literal("F1\nF2\nF3"));
+        let banner = tab_list_view(&tabs, &no_tr);
+        assert_eq!(banner.header.len(), 3, "the fixture must supply three header lines");
+        assert_eq!(banner.footer.len(), 3, "the fixture must supply three footer lines");
 
-        let mut render = |hdr: &[String], ftr: &[String]| -> Vec<u8> {
+        let mut render = |view: &TabListView| -> Vec<u8> {
             let frame = target.acquire().expect("headless acquire");
             clear(device, queue, frame.view());
             let hud_frame = HudFrame {
                 show_debug: false,
                 crosshair: false,
-                players: Some(&rows),
-                tab_header: hdr,
-                tab_footer: ftr,
+                players: Some(view),
                 ..HudFrame::new(&stats)
             };
             hud.render(device, queue, frame.view(), &hud_frame, w, h);
             target.read_texels(device, queue)
         };
 
-        let with_banner = render(&header, &footer);
-        let without = render(&[], &[]);
+        let with_banner = render(&banner);
+        let without = render(&bare);
 
-        // The canvas the HUD actually lays out into is the *logical* one, not
-        // the framebuffer — reading `b.w`/`b.h`'s source rather than assuming
-        // 640x480 is the difference between a gate and a coincidence.
-        let (cw, ch) =
+        // The canvas the HUD actually lays out into is the *logical* one, not the
+        // framebuffer — reading `b.w`'s source rather than assuming 640x480 is the
+        // difference between a gate and a coincidence.
+        let (cw, logical_h) =
             crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, w, h);
-        let sx = f64::from(w) / f64::from(cw as u32).max(1.0);
-        let sy = f64::from(h) / f64::from(ch as u32).max(1.0);
-        let banner_w = 0.0f32; // "HEADER"/"FOOTER" are far narrower than cw/2.
-        let panel = TabPanel::new(cw, ch, header.len(), rows.len(), footer.len(), banner_w);
-        let bare = TabPanel::new(cw, ch, 0, rows.len(), 0, 0.0);
+        let sy = f64::from(h) / f64::from(logical_h).max(1.0);
 
-        // Centre of mass of lit pixels on one logical scanline band, in
-        // framebuffer x. `None` when the band is blank.
-        let band_centre = |px: &[u8], y0: f32, y1: f32| -> Option<(f64, u32, u32)> {
-            let (mut sum, mut n) = (0f64, 0u64);
-            let (mut lo, mut hi) = (u32::MAX, 0u32);
+        // Both layouts, from the same constructor the draw calls. `max_name_width`
+        // and the banner width are only needed for *horizontal* geometry, which
+        // this gate does not measure, so the bands below are unaffected by passing
+        // a nominal width — the y ladder is a pure function of the line counts.
+        let panel_b = TabPanel::new(cw, banner.len(), false, 40.0, 3, 3, 40.0);
+        let panel_n = TabPanel::new(cw, bare.len(), false, 40.0, 0, 0, 0.0);
+
+        // Count text-bright pixels in a logical scanline band, across the whole
+        // width. The overlay's own backdrop is the 0x80 black plate over the grey
+        // 128 clear, then a 0x20 white row fill on top — at most ~90 per channel,
+        // so a 200 threshold is text and nothing else.
+        let band_bright = |px: &[u8], y0: f32, y1: f32| -> usize {
             let y_start = (f64::from(y0) * sy).round().max(0.0) as u32;
             let y_end = ((f64::from(y1) * sy).round() as u32).min(h);
-            // Scan only *inside* the panel. Outside it the clear colour is grey
-            // 128, and a threshold that had to exclude that as well would also
-            // have to exclude the caption, whose blue channel is 153 — the
-            // first version of this gate did exactly that and read the caption
-            // band as blank. Against the panel's own ~38-per-channel backdrop
-            // the separation is unambiguous.
-            let x_start = (f64::from(panel.x) * sx).round().max(0.0) as u32;
-            let x_end = ((f64::from(panel.x + panel.w) * sx).round() as u32).min(w);
+            let mut n = 0usize;
             for y in y_start..y_end {
-                for x in x_start..x_end {
+                for x in 0..w {
                     let i = ((y * w + x) * 4) as usize;
-                    if px[i] > 120 && px[i + 1] > 120 && px[i + 2] > 120 {
-                        sum += f64::from(x);
+                    if px[i] > 200 && px[i + 1] > 200 && px[i + 2] > 200 {
                         n += 1;
-                        lo = lo.min(x);
-                        hi = hi.max(x);
                     }
                 }
             }
-            (n > 0).then(|| (sum / n as f64, lo, hi))
+            n
         };
 
-        let panel_centre_fb = f64::from(panel.centre_x()) * sx;
-        let left_fb = f64::from(panel.left_x()) * sx;
-
-        let hdr = band_centre(&with_banner, panel.header_y(0), panel.header_y(1))
-            .unwrap_or_else(|| {
-                panic!(
-                    "no header text lit in band y=[{}, {}] (logical); panel={panel:?} — \
-                     this is the island: the field is folded and nothing draws it",
-                    panel.header_y(0),
-                    panel.header_y(1)
-                )
-            });
-        let ftr = band_centre(
-            &with_banner,
-            panel.footer_y(0),
-            panel.footer_y(0) + panel.line_h,
-        )
-        .unwrap_or_else(|| {
-            panic!(
-                "no footer text lit in band y=[{}, {}] (logical); panel={panel:?}",
-                panel.footer_y(0),
-                panel.footer_y(0) + panel.line_h
-            )
-        });
-        // The caption band, for the left-aligned rival hypothesis.
-        let cap = band_centre(&with_banner, panel.header_y(1), panel.header_y(2))
-            .expect("the PLAYERS caption must be lit");
-
+        let hdr_band = (panel_b.header_y(0), panel_b.header_y(1));
+        let ftr_band = (panel_b.footer_y(0), panel_b.footer_y(1));
+        let hdr_lit = band_bright(&with_banner, hdr_band.0, hdr_band.1);
+        let ftr_lit = band_bright(&with_banner, ftr_band.0, ftr_band.1);
         eprintln!(
-            "header centre={:.1} bbox=({}, {})\nfooter centre={:.1} bbox=({}, {})\n\
-             caption centre={:.1} bbox=({}, {})\npanel centre={panel_centre_fb:.1} left={left_fb:.1}",
-            hdr.0, hdr.1, hdr.2, ftr.0, ftr.1, ftr.2, cap.0, cap.1, cap.2
+            "header band y={hdr_band:?} lit={hdr_lit}; footer band y={ftr_band:?} lit={ftr_lit}"
         );
 
-        // **Two hypotheses, no magic tolerance.** An earlier version of this
-        // asserted only "the centre of mass is within one line height of the
-        // panel centre", and the control below failed it: the *left-aligned*
-        // caption cleared that too (35.5 against a 36.0 tolerance), because
-        // "PLAYERS (2)" is wide enough that its own centre drifts most of the
-        // way to the panel's. A one-sided distance cannot tell centred from
-        // merely-long. So compute both rivals and require the measurement to
-        // land decisively on one:
+        assert!(
+            hdr_lit > 0,
+            "no header text lit in the band the layout puts it in, y={hdr_band:?}: \
+             the field is folded and nothing draws it"
+        );
+        assert!(
+            ftr_lit > 0,
+            "no footer text lit in the band the layout puts it in, y={ftr_band:?}"
+        );
+
+        // The header really is *above* the rows: it pushes the row block down by its
+        // own height plus vanilla's bare `yyo++`.
+        assert_eq!(
+            panel_b.rows_top,
+            panel_n.rows_top + 3.0 * crate::hud::TAB_LINE_H + 1.0,
+            "a three-line header must push the rows down 27 + 1 logical pixels"
+        );
+        // …and the footer below them.
+        assert!(panel_b.footer_top > panel_b.rows_top);
+
+        // **The control, in pixels, on bands the bare frame provably cannot reach.**
         //
-        //   d_centred = |bbox centre - panel centre|   (the centred hypothesis)
-        //   d_left    = |bbox left   - panel inset |   (the left-aligned rival)
+        // The banner frame's first *row* sits at `rows_top = 38` and its footer at
+        // `57`; the bare frame's whole overlay ends at `rows_top + rows * 9 = 28`.
+        // So both bands must be dark in the bare frame — which is the executed
+        // proof that "lit > 0" above is not satisfied by an overlay that paints
+        // text everywhere, *and* the proof in pixels that the header really shifted
+        // the rows rather than the layout merely claiming so.
         //
-        // Centred text has d_centred << d_left; left-aligned text the reverse.
-        let verdict = |(_, lo, hi): (f64, u32, u32)| -> (f64, f64) {
-            let centre = (f64::from(lo) + f64::from(hi)) * 0.5;
-            ((centre - panel_centre_fb).abs(), (f64::from(lo) - left_fb).abs())
-        };
-        let (h_centred, h_left) = verdict(hdr);
-        let (f_centred, f_left) = verdict(ftr);
-        let (c_centred, c_left) = verdict(cap);
+        // An earlier version of this control used the header's own band and was
+        // premise-false: at one header line that band is where the bare frame's
+        // rows are.
+        let row_band = (panel_b.rows_top, panel_b.rows_top + crate::hud::TAB_LINE_H);
+        let bare_in_row_band = band_bright(&without, row_band.0, row_band.1);
+        let bare_in_ftr_band = band_bright(&without, ftr_band.0, ftr_band.1);
         eprintln!(
-            "d_centred/d_left — header {h_centred:.1}/{h_left:.1}, \
-             footer {f_centred:.1}/{f_left:.1}, caption {c_centred:.1}/{c_left:.1}"
+            "no-banner frame: shifted-row band y={row_band:?} lit={bare_in_row_band}, \
+             footer band lit={bare_in_ftr_band}"
         );
-
-        assert!(
-            h_centred * 4.0 < h_left,
-            "the header must be CENTRED, not left-aligned: d_centred={h_centred:.1} \
-             is not decisively below d_left={h_left:.1}; bbox=({}, {})",
-            hdr.1,
-            hdr.2
+        assert_eq!(
+            bare_in_row_band, 0,
+            "with no header the rows must still be at yyo = 10, so the band the \
+             banner frame's first row occupies has to be blank here"
         );
-        assert!(
-            f_centred * 4.0 < f_left,
-            "the footer must be CENTRED: d_centred={f_centred:.1} vs d_left={f_left:.1}; \
-             bbox=({}, {})",
-            ftr.1,
-            ftr.2
+        assert_eq!(
+            bare_in_ftr_band, 0,
+            "with no footer the footer band must be blank — a fabricated banner is \
+             exactly what this overlay must not draw"
         );
-        // The control, measured on the same frame rather than asserted from a
-        // constant: the caption really is drawn left-aligned, so it must land
-        // on the *other* hypothesis. If it did not, the predicate above would
-        // be satisfied by any text at all.
+        // …and the banner frame really does light the shifted row band, so the two
+        // assertions above are measuring a difference rather than two empty rects.
+        let banner_in_row_band = band_bright(&with_banner, row_band.0, row_band.1);
         assert!(
-            c_left * 4.0 < c_centred,
-            "the left-aligned caption must land on the left hypothesis \
-             (d_left={c_left:.1}, d_centred={c_centred:.1}), or this gate does not \
-             discriminate alignment"
-        );
-
-        // And the header really is *above* the rows and the footer *below*:
-        // the bare panel is shorter, so its own top band holds the caption, and
-        // the banner frame's top band holds text the bare frame does not.
-        assert!(
-            panel.header_y(0) < bare.header_y(0),
-            "adding a header must grow the panel upward, not leave it in place"
-        );
-        let bare_top = band_centre(&without, bare.header_y(0), bare.header_y(1))
-            .expect("the bare frame's top band is the caption");
-        let (bt_centred, bt_left) = verdict(bare_top);
-        assert!(
-            bt_left * 4.0 < bt_centred,
-            "with no header the panel's top band is the left-aligned caption \
-             (d_left={bt_left:.1}, d_centred={bt_centred:.1}) — if this read as centred, \
-             the gate above would pass with the feature deleted"
+            banner_in_row_band > 0,
+            "the banner frame's first row must be lit at y={row_band:?}, or the \
+             control above proves nothing"
         );
     }
 
@@ -364,9 +551,13 @@ mod tests {
         let mut tabs = TabList::new();
         tabs.insert(entry(1, "Alice", 12, GameMode::Survival));
         tabs.insert(entry(2, "Bob", 30, GameMode::Survival));
-        let rows = player_rows(&tabs, &no_tr);
+        let view = tab_list_view(&tabs, &no_tr);
 
-        let mut render = |players: Option<&[String]>| -> usize {
+        // The overlay is anchored at the **top** of the screen (`yyo = 10`), not
+        // vertically centred, so the sampled rect starts at the top edge. A rect
+        // centred on the canvas — which is what this gate used to sample — would
+        // now measure empty space and read as a regression.
+        let mut render = |players: Option<&TabListView>| -> usize {
             let frame = target.acquire().expect("headless acquire");
             clear(device, queue, frame.view());
             let hud_frame = HudFrame {
@@ -377,15 +568,15 @@ mod tests {
             };
             hud.render(device, queue, frame.view(), &hud_frame, w, h);
             let pixels = target.read_texels(device, queue);
-            count_changed(&pixels, w, h, w / 4, h / 4, w / 2, h / 2)
+            count_changed(&pixels, w, h, w / 4, 0, w / 2, h / 4)
         };
 
         let blank = render(None);
-        let populated = render(Some(&rows));
+        let populated = render(Some(&view));
         assert_eq!(blank, 0, "empty tab overlay region must be untouched");
         assert!(
-            populated > 1_000,
-            "tab rows must paint panel/text pixels in the overlay rect, got {populated}"
+            populated > 500,
+            "tab rows must paint plate/text pixels in the overlay rect, got {populated}"
         );
     }
 

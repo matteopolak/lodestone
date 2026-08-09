@@ -721,18 +721,9 @@ impl WindowApp {
             .iter()
             .map(|(line, age)| (line.as_str(), *age))
             .collect();
-        let player_rows: Vec<String> = if self.tab_held {
-            self.sim.player_rows()
-        } else {
-            Vec::new()
-        };
-        // Read on the same condition as the rows, and for the same reason: both
-        // are a world clone, and neither is drawn unless the overlay is up.
-        let (tab_header, tab_footer) = if self.tab_held {
-            self.sim.tab_banner()
-        } else {
-            (Vec::new(), Vec::new())
-        };
+        // Rows, header and footer together — the whole `PlayerTabOverlay` frame.
+        // Read only while the overlay is up, because it is a world clone.
+        let tab_view = self.tab_held.then(|| self.sim.tab_list_view());
         let health = self.sim.health();
         let food = self.sim.food();
         // Vanilla's `canHurtPlayer()` — the single gate `extractPlayerHealth` sits
@@ -796,9 +787,7 @@ impl WindowApp {
             background_opacity: chat_opts.chat_background_opacity,
             colors: chat_opts.chat_colors,
         };
-        hud_frame.players = self.tab_held.then_some(player_rows.as_slice());
-        hud_frame.tab_header = tab_header.as_slice();
-        hud_frame.tab_footer = tab_footer.as_slice();
+        hud_frame.players = tab_view.as_ref();
         hud_frame.sidebar = sidebar.as_ref();
         hud_frame.boss_bars = &boss_bars;
         hud_frame.can_hurt_player = can_hurt_player;

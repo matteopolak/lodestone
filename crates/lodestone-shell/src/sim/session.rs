@@ -592,53 +592,40 @@ impl Sim {
         })
     }
 
-    /// The current tab-list, formatted as `NAME  <latency>ms` rows sorted by
-    /// vanilla display order. Empty until the server sends player-list data.
+    /// The tab overlay's whole frame — rows in vanilla display order, capped at
+    /// `PlayerTabOverlay`'s 80, plus the server's header and footer. Empty until
+    /// the server sends player-list data.
+    ///
+    /// One method rather than the `player_rows` + `tab_banner` pair it replaces:
+    /// those returned pre-flattened `"NAME  30ms"` strings and a `(header,
+    /// footer)` tuple, which cost the draw the game mode, the styled display name
+    /// and the latency band — a fully-connected wire carrying a lossy value, so
+    /// `cargo xtask connectedness` was green throughout. The whole projection now
+    /// lives in [`crate::tablist::tab_list_view`], and this is its one reader
+    /// into the world.
     ///
     /// # Read straight off the component since §4.1(c)
     ///
-    /// This and the three accessors below used to go out through `NetClient` into
+    /// This and the accessors below used to go out through `NetClient` into
     /// the *client's* `World`, because the net thread's fold lived there and a
     /// component in one `World` is unreachable from another. There is one `World`
     /// now and [`Self::local`] is the entity the fold writes, so the round trip is
     /// gone. Still exactly one fold — `lodestone_ecs::session`'s `NetIngest`
     /// systems — and still one copy of it; what changed is only who reads it.
-    #[must_use]
-    pub fn player_rows(&self) -> Vec<String> {
-        let list = self.read(|w| {
-            w.get::<lodestone_ecs::SessionTabList>(self.local)
-                .map(|list| list.0.clone())
-                .unwrap_or_default()
-        });
-        crate::tablist::player_rows(&list, self.translator().as_ref())
-    }
-
-    /// The tab list's header and footer, as the centred lines the HUD draws
-    /// above and below the player rows (`(header, footer)`).
     ///
-    /// `SessionTabList.0.header`/`.footer` were folded and unit-tested as of
-    /// `753c840` with **zero readers anywhere in the shell** — the declared
-    /// island #436 named. They were not *entirely* unread: `lodestone_game`'s
-    /// own `HudSnapshot` reads them, which is why the fold's comment claiming
-    /// they were "read downstream by `hud.rs`'s snapshot" survived review. But
-    /// the shell builds its own `HudFrame` and never constructs a
-    /// `HudSnapshot`, so the two fields terminated in a read model only tests
-    /// exercise. This method is the shell-side reader that closes it.
-    ///
-    /// Separate from [`Self::player_rows`] rather than folded into it because
-    /// that method has its own gates and a wider set of callers; the second
-    /// world read costs one clone and only while Tab is held.
+    /// `SessionTabList.0.header`/`.footer` reach pixels through here. They were
+    /// folded and unit-tested with **zero readers anywhere in the shell** for a
+    /// while, and not *entirely* unread — `lodestone_game`'s own `HudSnapshot`
+    /// reads them, which is why the fold's comment claiming they were "read
+    /// downstream by `hud.rs`'s snapshot" survived review. But the shell builds
+    /// its own `HudFrame` and never constructs a `HudSnapshot`.
     #[must_use]
-    pub fn tab_banner(&self) -> (Vec<String>, Vec<String>) {
+    pub fn tab_list_view(&self) -> crate::tablist::TabListView {
         let list = self.tab_list();
-        let translate = self.translator();
-        (
-            crate::tablist::banner_lines(list.header.as_ref(), translate.as_ref()),
-            crate::tablist::banner_lines(list.footer.as_ref(), translate.as_ref()),
-        )
+        crate::tablist::tab_list_view(&list, self.translator().as_ref())
     }
 
-    /// The same folded tab list [`Self::player_rows`] formats, unformatted —
+    /// The same folded tab list [`Self::tab_list_view`] projects, unprojected —
     /// issue #189's Social Interactions roster needs the raw entries
     /// (`crate::menu::social::entries_from_tablist`), not pre-rendered strings.
     #[must_use]
