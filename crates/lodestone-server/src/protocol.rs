@@ -112,6 +112,31 @@ pub struct EntitySnapshot {
     /// comment for why resending the full set is the simpler and cheap
     /// choice here.
     pub metadata: Vec<MetadataField>,
+    /// The `ADD_ENTITY` **Object Data** field — vanilla's own name for the
+    /// trailing VarInt on the spawn packet, whose meaning is decided entirely by
+    /// the entity type.
+    ///
+    /// `0` for everything that does not override
+    /// `Entity.getAddEntityPacket`/`ClientboundAddEntityPacket`'s data argument,
+    /// which is every entity kind this server spawns except one:
+    /// `FallingBlockEntity.getAddEntityPacket` passes
+    /// `Block.getId(this.getBlockState())`.
+    ///
+    /// This is a **spawn-only** field and deliberately not part of the update
+    /// path: vanilla sends it once, in `ADD_ENTITY`, and has no packet that
+    /// revises it. It is still compared by this struct's `PartialEq`, so a value
+    /// that somehow changed mid-life would produce a redundant position update
+    /// rather than silently disagreeing with what the client holds.
+    ///
+    /// # Why the block state cannot ride `metadata` instead
+    ///
+    /// `FallingBlockEntity.defineSynchedData` registers `DATA_START_POS` and
+    /// nothing else — the imitated block state is **never** in a `SET_ENTITY_DATA`
+    /// packet. So a client that is not told this field has no other source, and
+    /// draws whatever state id `0` resolves to. That is the same failure shape as
+    /// a dropped item with no reported stack: every wire green, the wrong value
+    /// travelling it.
+    pub object_data: i32,
 }
 
 /// One connected player as the tab list carries them (issue #438) — the
@@ -2471,6 +2496,7 @@ mod tests {
             head_yaw: 0.0,
             velocity: Vec3::new(0.0, 0.0, 0.0),
             metadata: Vec::new(),
+            object_data: 0,
         }
     }
 

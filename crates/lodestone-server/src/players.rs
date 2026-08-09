@@ -480,6 +480,9 @@ impl PlayerRegistry {
                     // claimants is not guessable from the previous
                     // collision's guard.
                     metadata: Vec::new(),
+                    // `Player` does not override `getAddEntityPacket`, so the
+                    // Object Data field is `0`.
+                    object_data: 0,
                 })
                 .collect(),
         }

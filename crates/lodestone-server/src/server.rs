@@ -9011,6 +9011,7 @@ mod tests {
             head_yaw: 0.0,
             velocity: Vec3::new(0.0, 0.0, 0.0),
             metadata: Vec::new(),
+            object_data: 0,
         }
     }
 
