@@ -61,8 +61,55 @@ with an accessor and no reader is the island this module exists to stop creating
 | `mob_griefing` | `run_tick_loop`'s graze drain |
 | `block_drops` | `server.rs`'s block-break arm, vanilla's own gate site inside `Block.dropResources` |
 | `mob_drops` | `MobSim::reap_dead`, via `set_mob_drops` (the sim is version-free and holds no world handle, so the loop hands it the flag) |
-| **difficulty** | `run_tick_loop`: **Peaceful discards every hostile mob**, vanilla's `Mob.checkDespawn`. Difficulty's first real reader ever |
+| **difficulty** | four readers now — see [what difficulty changes](#what-difficulty-changes) below |
 | `spawn_mobs` | `run_tick_loop`'s natural-spawn cycle (issues #221/#222 — the getter had waited for a pass to gate; see [`natural-mob-spawning.md`](./natural-mob-spawning.md)) |
+
+### What difficulty changes
+
+The "stored and read by nothing" report is closed. Four production readers, in the
+order a player notices them:
+
+| behaviour | where | vanilla |
+|---|---|---|
+| **Peaceful evicts forbidden mobs** | `MobSim::remove_monsters`, from `run_tick_loop` | `Mob.checkDespawn`'s `difficulty == PEACEFUL && !getType().isAllowedInPeaceful()` |
+| **Peaceful never proposes them** | `NaturalSpawner::set_difficulty`, checked in its cluster loop | `SpawnPlacements.checkSpawnRules`' first statement |
+| **The starvation floor** | `food.rs`'s `starvation_allowed`, fed the real difficulty from `serve_play`'s hunger tick | `FoodData.tick`'s `health > 10 \|\| HARD \|\| (health > 1 && NORMAL)` |
+| **Fire spread odds** | `FireEnv::overworld_in`, from `run_tick_loop`'s fire arm | `FireBlock.tick`'s `difficulty.getId() * 7` term |
+
+Two things about the first two rows, because getting either wrong is silent:
+
+* **The predicate is the per-type `notInPeaceful` flag, never `MobCategory ==
+  MONSTER`.** `mob_spawn::allowed_in_peaceful` carries the 38 registrations from the
+  pinned decompile. Seven `MONSTER` types are **not** in it — `piglin`, `shulker`,
+  `ender_dragon`, `zombie_horse`, `zombie_nautilus`, `camel_husk`, `sulfur_cube` —
+  and vanilla keeps all seven on Peaceful. The old code answered from a 22-name
+  hostility list built for the *category* question, so a slime, magma cube,
+  silverfish, phantom, vex, ravager, hoglin or warden survived Peaceful. Slimes
+  really do spawn here, because the spawner models slime chunks.
+* **Evicting is not a substitute for refusing.** The tick loop evicts *before* the
+  spawn cycle, so a monster proposed on Peaceful lived one tick — long enough for
+  the loop to publish its snapshot and the connection to send `ADD_ENTITY`, with
+  `REMOVE_ENTITIES` the pass after. Monsters blinked. Vanilla refuses in both
+  places and so do we.
+
+Two parts of difficulty scaling are **not** modelled, and both are blocked rather
+than forgotten:
+
+* **Damage scaling.** Vanilla's mechanism is on the *receiving* side —
+  `Player.hurtServer` scales the amount when `source.scalesWithDifficulty()`
+  (Peaceful 0, Easy `min(d/2 + 1, d)`, Hard `d * 3/2`) — and `scalesWithDifficulty`
+  is `false` for a `when_caused_by_living_non_player` type with no causing entity.
+  Every player-damage path this crate has today (`fall`, `outside_border`, `drown`,
+  `starve`, effect damage) is exactly that case, so implementing the scaling would
+  change nothing until mob-on-player melee or blast damage to the player exists.
+  The `scaling` column is already in `lodestone_data::damage_types`, so it is a
+  table lookup once there is a hit to scale.
+* **Regional difficulty** (`DifficultyInstance`). The formula is small and its
+  inputs (world `game_time`, chunk inhabited time, moon phase) are all reachable
+  from here, but its only vanilla consumers are `Mob.finalizeSpawn`'s geared/enchanted
+  equipment, zombie reinforcements and mob potion effects — none of which are
+  modelled — so building it now would be a computed number with no reader. Left
+  deliberately; chunk inhabited time is not tracked either.
 
 `keep_inventory` has an accessor and **no** reader, and that is recorded rather
 than hidden: there is no death-drop path to keep an inventory through. Adding an

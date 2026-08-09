@@ -42,6 +42,41 @@ no player is loaded (vanilla spawns nothing without one):
 `spawnable_chunks` is the tick area's own chunk count, so the caps scale with the area this loop
 really simulates (49 columns → 11 monsters, 1 creature) rather than claiming vanilla's 289.
 
+**This chain is verified end-to-end, not only per-part.**
+`crates/lodestone-server/tests/natural_spawn_reaches_the_wire.rs` starts a real `IntegratedServer`
+with **zero seeded mobs**, joins a connection through the duplex, moves the player (the only thing
+that ever calls `MobSim::set_players`, so the cycle is skipped without it), and asserts an
+`ADD_ENTITY` is encoded for a species the bundled plains list names — measured: one
+`minecraft:sheep` in about a second. `tests/natural_spawn.rs` cannot see that, because it drives
+`run_spawn_cycle` and `NaturalSpawner` directly and asserts on `MobSim::iter`; everything between
+the tick loop and the packet is invisible to it. The negative control turns `spawn_mobs` off through
+the same path and must observe **zero** spawn packets, so a spawn from any other producer cannot
+read as a pass.
+
+### Peaceful
+
+Two independent gates, both keyed on the per-type `notInPeaceful` flag
+(`mob_spawn::allowed_in_peaceful`, 38 registrations from the pinned decompile) and **never** on
+`MobCategory == MONSTER` — vanilla keeps seven monsters on Peaceful (`piglin`, `shulker`,
+`ender_dragon`, `zombie_horse`, `zombie_nautilus`, `camel_husk`, `sulfur_cube`):
+
+| gate | where | vanilla |
+|---|---|---|
+| refuse the candidate | `NaturalSpawner`'s cluster loop, via `set_difficulty` | `SpawnPlacements.checkSpawnRules`' first statement |
+| evict what is alive | `MobSim::remove_monsters`, from `run_tick_loop` | `Mob.checkDespawn` |
+
+Neither is redundant. The eviction runs *before* the spawn cycle, so with only that half a monster
+proposed on Peaceful lived one tick — long enough for the loop to publish its snapshot and the
+connection to send `ADD_ENTITY`, then `REMOVE_ENTITIES` on the next pass. Monsters blinked in and
+out on Peaceful. And the eviction used to consult `mobs.rs`'s 22-name `is_hostile_species` list,
+which exists for the *category* question, so a slime, magma cube, silverfish, phantom, vex, ravager,
+hoglin or warden survived Peaceful entirely — and slimes do spawn here, because this module models
+slime chunks.
+
+The refusal is placed **before** the rule's own predicate, matching vanilla: `checkSpawnRules` tests
+peaceful first, and the predicate draws from the RNG (light brightness, the per-species chance), so
+the order decides the stream.
+
 ### The cluster loop, and why it returns a group
 
 `SpawnCandidateSource::cluster` returns a `Vec`, not an `Option`. **The RNG draw order and count is

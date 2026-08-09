@@ -181,6 +181,92 @@ impl MobCategory {
     }
 }
 
+/// The entity types vanilla registers with `EntityType.Builder::notInPeaceful`,
+/// by registry path — the **38** types that may not exist on `Peaceful`.
+///
+/// # Why this is a list and not `category == Monster`
+///
+/// Because the category is not the same question, and the difference is
+/// asymmetric in the direction that matters. Every one of these 38 is
+/// `MobCategory.MONSTER`, but **seven MONSTER types are not here**:
+/// `piglin`, `shulker`, `ender_dragon`, `zombie_horse`, `zombie_nautilus`,
+/// `camel_husk` and `sulfur_cube`. Vanilla's own gates are keyed on the flag,
+/// never on the category — `Mob.checkDespawn`'s
+/// `difficulty == PEACEFUL && !getType().isAllowedInPeaceful()`,
+/// `SpawnPlacements.checkSpawnRules`' identical first guard, and
+/// `EntityType.canSpawn`'s `isAllowedInPeaceful() || difficulty != PEACEFUL` —
+/// so answering from the category would despawn a shulker the moment a player
+/// switched to Peaceful, and vanilla keeps it.
+///
+/// # Provenance
+///
+/// Extracted from the pinned 26.2 decompile by splitting
+/// `net.minecraft.world.entity.EntityTypes` on its `EntityTypeIds.` registrations
+/// and keeping every block containing `notInPeaceful()`: 38 hits, all
+/// `MobCategory.MONSTER`, zero of them ambiguous. `notInPeaceful` has exactly one
+/// other occurrence in the whole tree — the builder method's own definition — so
+/// the registration list is the complete set.
+///
+/// # How to change it
+///
+/// When the pinned version moves, re-run that extraction rather than editing
+/// names here; `peaceful_forbids_exactly_the_notinpeaceful_registrations` below
+/// pins the count and the seven MONSTER exceptions so a hand edit that drops one
+/// fails loudly.
+static NOT_ALLOWED_IN_PEACEFUL: [&str; 38] = [
+    "blaze",
+    "bogged",
+    "breeze",
+    "cave_spider",
+    "creaking",
+    "creeper",
+    "drowned",
+    "elder_guardian",
+    "enderman",
+    "endermite",
+    "evoker",
+    "ghast",
+    "giant",
+    "guardian",
+    "hoglin",
+    "husk",
+    "illusioner",
+    "magma_cube",
+    "parched",
+    "phantom",
+    "piglin_brute",
+    "pillager",
+    "ravager",
+    "silverfish",
+    "skeleton",
+    "slime",
+    "spider",
+    "stray",
+    "vex",
+    "vindicator",
+    "warden",
+    "witch",
+    "wither",
+    "wither_skeleton",
+    "zoglin",
+    "zombie",
+    "zombie_villager",
+    "zombified_piglin",
+];
+
+/// `EntityType.isAllowedInPeaceful` — whether an entity of this registry path may
+/// exist while the world difficulty is `Peaceful`.
+///
+/// `path` is the namespace-less path (`"zombie"`, not `"minecraft:zombie"`).
+/// Anything not in [`NOT_ALLOWED_IN_PEACEFUL`] answers `true`, which is vanilla's
+/// own default (`EntityType.Builder`'s field starts at `true` and only
+/// `notInPeaceful()` clears it), so an unmodelled or misspelled species is kept
+/// rather than silently deleted.
+#[must_use]
+pub fn allowed_in_peaceful(path: &str) -> bool {
+    !NOT_ALLOWED_IN_PEACEFUL.contains(&path)
+}
+
 /// Per-cycle mob-cap accounting: how many spawnable chunks are in range and how
 /// many mobs of each category are currently alive.
 ///
@@ -663,5 +749,53 @@ mod tests {
         let adapter = CensusStub::with(&[(151, 0.6, 1.95)]);
         let attrs = AttributeMap::new();
         assert!(resolve_mob_shape(&adapter, 9999, &attrs).is_none());
+    }
+
+    /// The peaceful table, and the assertion that matters is the **discriminating
+    /// pair**: a species that is `MobCategory.MONSTER` *and* allowed in peaceful.
+    /// Without those seven rows, a table that simply answered "is it a monster"
+    /// would pass every other line here.
+    #[test]
+    fn peaceful_forbids_exactly_the_notinpeaceful_registrations() {
+        assert_eq!(
+            NOT_ALLOWED_IN_PEACEFUL.len(),
+            38,
+            "the 26.2 decompile has 38 notInPeaceful registrations"
+        );
+        // Sorted, so a hand-added name lands where the extraction would have put
+        // it and a duplicate is visible.
+        let mut sorted = NOT_ALLOWED_IN_PEACEFUL;
+        sorted.sort_unstable();
+        assert_eq!(sorted, NOT_ALLOWED_IN_PEACEFUL, "the table must stay sorted");
+
+        for forbidden in ["zombie", "slime", "magma_cube", "phantom", "warden", "wither"] {
+            assert!(
+                !allowed_in_peaceful(forbidden),
+                "{forbidden} carries notInPeaceful() and must be forbidden on Peaceful"
+            );
+        }
+        // **The discriminating rows.** All seven are `MobCategory.MONSTER` and none
+        // calls `notInPeaceful()`, so vanilla keeps them on Peaceful. A
+        // category-derived answer gets every one of these backwards.
+        for kept in [
+            "piglin",
+            "shulker",
+            "ender_dragon",
+            "zombie_horse",
+            "zombie_nautilus",
+            "camel_husk",
+            "sulfur_cube",
+        ] {
+            assert!(
+                allowed_in_peaceful(kept),
+                "{kept} is MobCategory.MONSTER but has no notInPeaceful(), so Peaceful \
+                 must keep it — answering from the category is what this row exists to \
+                 catch"
+            );
+        }
+        // A passive animal and an unmodelled name both answer `true`, which is the
+        // builder's own default.
+        assert!(allowed_in_peaceful("sheep"));
+        assert!(allowed_in_peaceful("not_a_real_species"));
     }
 }
