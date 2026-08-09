@@ -1667,13 +1667,15 @@ mod tests {
     /// The **placement/hand-use path** carries the commits too, with the delay
     /// intact — the path a player's own right-click reaches.
     ///
-    /// The trigger is a redstone torch, not a lever, and that is a finding rather
-    /// than a convenience: `redstone::is_signal_source` is
-    /// `torch || diode || observer`, and `weak_signal`/`direct_signal` have no arm
-    /// for a `powered=true` lever, button or pressure plate at all. So those three
-    /// emit **no signal** in this crate and cannot drive a piston — a pre-existing
-    /// gap in the redstone model, not in the move. A gate written around a lever
-    /// here reads as "the piston is broken".
+    /// The trigger is a redstone torch. When this gate was written that was a
+    /// *finding* rather than a convenience — `redstone::is_signal_source` was
+    /// `torch || diode || observer` and `weak_signal`/`direct_signal` had no arm
+    /// for a `powered=true` lever, button or pressure plate, so a lever-driven
+    /// version of this gate scheduled **zero** commits and read as "the piston is
+    /// broken". `crate::redstone` models those families now, and
+    /// `the_placement_path_carries_the_commits_when_a_lever_is_the_trigger` below
+    /// is the same rig with a lever, kept as a separate test so the torch arm here
+    /// stays a fixed reference.
     ///
     /// `crate::server::propagate_placement` runs `react_at_placement` at
     /// `current_tick = 0` and hands the drained batch to the tick loop to *rebase*,
@@ -1750,6 +1752,61 @@ mod tests {
                 column.block_state(x, 5, 4)
             );
         }
+    }
+
+    /// **A lever drives the piston.** Byte-identical rig to the torch gate above,
+    /// with `minecraft:redstone_torch[lit=true]` swapped for
+    /// `minecraft:lever[...,powered=true]` and nothing else changed.
+    ///
+    /// This is the gate whose absence was the whole reported defect: it scheduled
+    /// **zero** commits while the torch version scheduled three, because the
+    /// redstone query layer had no arm for a powered lever. Both arms are kept
+    /// because they are not redundant — the torch reaches the piston through
+    /// `getSignal`'s "every direction except UP" override and the lever through the
+    /// base `ownSignal` with no override at all, so a regression in either one is
+    /// invisible to the other.
+    ///
+    /// The negative arm is in the same test rather than a separate one: an
+    /// `powered=false` lever on the same rig must schedule zero commits, and
+    /// before this landed *both* arms measured zero, which is exactly why nothing
+    /// was red.
+    #[test]
+    fn the_placement_path_carries_the_commits_when_a_lever_is_the_trigger() {
+        use crate::chunk::ChunkColumn;
+        use crate::scheduled_tick::ScheduledTickQueue;
+
+        fn commits_for(lever_state: &str) -> usize {
+            let mut column = ChunkColumn::new(0, 16);
+            column.set_block(4, 5, 4, "minecraft:piston[extended=false,facing=east]");
+            column.set_block(5, 5, 4, "minecraft:stone");
+            column.set_block(6, 5, 4, "minecraft:dirt");
+            column.set_block(4, 5, 5, lever_state);
+
+            let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+            let _ = crate::random_tick::react_at_placement(&mut column, 0, 0, 4, 5, 5, &mut queue, 0);
+            queue
+                .drain_due(u64::MAX, usize::MAX)
+                .iter()
+                .filter(|pending| is_finish_kind(&pending.kind))
+                .count()
+        }
+
+        let on = commits_for("minecraft:lever[face=floor,facing=north,powered=true]");
+        let off = commits_for("minecraft:lever[face=floor,facing=north,powered=false]");
+
+        // Three, exactly as the torch arm: destinations (6,5,4) and (7,5,4) plus
+        // the arm (5,5,4). Predicted, not merely "more than zero" — a count of one
+        // or two would mean the push resolved a different set of cells.
+        assert_eq!(
+            on, 3,
+            "a powered lever must schedule one commit per moving cell, the same three the \
+             torch rig schedules; got {on}"
+        );
+        assert_eq!(
+            off, 0,
+            "an UNPOWERED lever must schedule nothing; got {off} — something other than the \
+             lever's own `powered` property is driving the piston"
+        );
     }
 
     /// [`finish_kind`] round-trips, including a moved state carrying every

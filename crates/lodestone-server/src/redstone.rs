@@ -1,10 +1,9 @@
-//! Redstone signal computation (issue #314's parent scope, shared by every
-//! sub-issue: dust/torches #314, repeaters/comparators #315, observers #317)
-//! — the "how much signal touches this position, and from which side" query
-//! layer every redstone component reads from before deciding what to do.
+//! Redstone signal computation — the "how much signal touches this position,
+//! and from which side" query layer every redstone component reads from before
+//! deciding what to do.
 //! This module has **no notify/cascade logic of its own** — that lives in
 //! `crate::random_tick`'s reaction dispatch, which calls
-//! `crate::neighbor_update::NeighborPropagator` (issue #308) exactly the way
+//! `crate::neighbor_update::NeighborPropagator` exactly the way
 //! `crate::gravity_tick` already does. This module is pure queries plus a
 //! handful of per-family state-string helpers.
 //!
@@ -17,20 +16,18 @@
 //! - [`weak_signal`] ~ `BlockState.getSignal` (each block's own override —
 //!   see the per-family jar citations inline below).
 //! - [`direct_signal`] ~ `BlockState.getDirectSignal`.
-//! - [`direct_signal_to`] ~ `SignalGetter.getDirectSignalTo`
-//!   (`SignalGetter.java:17-46`).
-//! - [`signal_at`] ~ `SignalGetter.getSignal` (`:65-69`): a redstone
-//!   *conductor* additionally carries whatever direct/strong signal touches
-//!   any of its six faces (`getDirectSignalTo`), which is how a lever on the
-//!   side of a stone block can power a wire sitting on top of that same
-//!   block — this crate models it for torches, since torches are the one
-//!   source #314 asks for.
-//! - [`best_neighbor_signal`] ~ `SignalGetter.getBestNeighborSignal`
-//!   (`:90-105`).
-//! - [`control_input_signal`] ~ `SignalGetter.getControlInputSignal`
-//!   (`:48-59`) — repeaters/comparators' own side-input read (#315).
+//! - [`direct_signal_to`] ~ `SignalGetter.getDirectSignalTo`.
+//! - [`signal_at`] ~ `SignalGetter.getSignal`: a redstone *conductor*
+//!   additionally carries whatever direct/strong signal touches any of its six
+//!   faces (`getDirectSignalTo`), which is how a lever on the side of a stone
+//!   block powers a wire sitting on top of that same block. That circuit is
+//!   gated by `a_lever_on_the_side_of_a_conductor_powers_a_wire_on_top_of_it`,
+//!   and it is the case that separates the weak path from the strong one.
+//! - [`best_neighbor_signal`] ~ `SignalGetter.getBestNeighborSignal`.
+//! - [`control_input_signal`] ~ `SignalGetter.getControlInputSignal` —
+//!   repeaters'/comparators' own side-input read.
 //!
-//! `SignalGetter.DIRECTIONS` (`:11`, `Direction.values()`) is iterated by
+//! `SignalGetter.DIRECTIONS` (`Direction.values()`) is iterated by
 //! [`best_neighbor_signal`]/[`direct_signal_to`], but **only ever through a
 //! commutative `max`** — unlike [`crate::neighbor_update::UPDATE_ORDER`],
 //! where the fan-out order is itself the observable behaviour, no query
@@ -46,11 +43,14 @@
 //! comment already names this gap for `isFree`/`canBeReplaced`), so
 //! [`is_redstone_conductor`] cannot check `BlockState.isRedstoneConductor`'s
 //! real definition (a full-cube collision shape). The honest reduction used
-//! here: **anything that is not air/fluid and not itself a redstone
-//! component is a conductor** — every ordinary solid block (stone, dirt,
-//! log, ...) is a conductor, exactly as in vanilla, and the only place this
-//! reduction could disagree with vanilla is a non-full-cube solid block
-//! (e.g. a slab or stair) that vanilla does *not* treat as a conductor. This
+//! here: **anything that is not air/fluid and not one of the modelled
+//! non-full-cube redstone blocks is a conductor** — every ordinary solid block
+//! (stone, dirt, log, ...) is a conductor, exactly as in vanilla, and the only
+//! place this reduction could disagree with vanilla is a non-full-cube solid
+//! block (e.g. a slab or stair) that vanilla does *not* treat as a conductor.
+//! [`is_redstone_component`] is that exclusion list, and its doc comment
+//! carries the reason `minecraft:target` and `minecraft:redstone_block` are
+//! signal sources that stay *on* the conductor side of it. This
 //! crate's worldgen has no such partial blocks in the positions redstone
 //! would touch today (`crate::chunk`'s own module doc), so the reduction is
 //! unexercised in the direction it could be wrong, the same "reduction, not
@@ -59,16 +59,57 @@
 //!
 //! # What sources exist today
 //!
-//! Only **lit redstone torches** (standing and wall) are power *sources* in
-//! this landing — the literal scope #314 asks for ("what counts as a power
-//! source versus a conductor"). Levers, buttons, daylight sensors, and
-//! `minecraft:redstone_block` are not modeled: none of them exist anywhere
-//! else in this crate yet (no placement, no item, no block-state constant),
-//! so adding source recognition for them now would be exactly the kind of
-//! correct-in-isolation code with no producer this repo's own "islands" rule
-//! warns against. Repeaters/comparators (#315, when `powered`) and observers
-//! (#317, when `powered`) become sources too — see `crate::redstone_diode`/
-//! `crate::redstone_observer`.
+//! **Relaying** families: lit redstone torches (standing and wall), repeaters
+//! and comparators when `powered`, and observers when `powered` — see
+//! `crate::redstone_diode`/`crate::redstone_observer`.
+//!
+//! **Input** families, the ones a player reaches for first, are
+//! [`is_input_source`]'s nine. They emit these values, and the differences
+//! between the rows are the point:
+//!
+//! | family | signal while active | strong power reaches |
+//! |---|---|---|
+//! | lever, button | 15 | the surface it is attached to (`getConnectedDirection`) |
+//! | pressure plate | 15 | the block below it |
+//! | weighted pressure plate | its own `power`, `0..=15` | the block below it |
+//! | tripwire hook | 15 | the wall it faces |
+//! | detector rail | 15 | the block below it |
+//! | target | its own `power`, `0..=15` | nothing |
+//! | daylight detector | its own `power`, `0..=15` | nothing |
+//! | redstone block | 15 | nothing (but see [`control_input_signal`]) |
+//!
+//! **Collapsing any of those to a boolean 15 is a defect**, and so is assuming
+//! a family with no `getDirectSignal` override sends strong power. Every value
+//! above comes from the named block class's own `ownSignal`/`getDirectSignal`
+//! in the jar, cited at each arm of [`own_signal`]/[`direct_signal`].
+//!
+//! # The half of each input family that is *not* modelled here
+//!
+//! This module answers "how much signal does this state emit". It does not
+//! *produce* the states: something else has to write the `powered`/`power`
+//! property, and that producer exists for only some of the nine.
+//!
+//! * **lever, button** — `crate::hand_use` flips `powered` from a right-click,
+//!   and `crate::server`'s use-item-on path fans the change out to neighbours,
+//!   so these two work end to end.
+//! * **pressure plate, weighted pressure plate, detector rail** — need an
+//!   entity-AABB-versus-block census (`BasePressurePlateBlock.getSignalStrength`
+//!   counts entities inside `TOUCH_AABB`), which this crate has no collision
+//!   system for. The read below is correct and its producer is missing, so
+//!   these stay at their default `0` until something writes the property.
+//! * **tripwire hook** — needs `minecraft:tripwire` string state and the
+//!   two-hook span search in `TripWireHookBlock.calculateState`.
+//! * **target** — needs projectile-hit dispatch plus the decay tick.
+//! * **daylight detector** — needs a sky-light read at the detector's own
+//!   position.
+//! * **redstone block** — needs nothing; it is a constant and works as soon as
+//!   one is placed.
+//!
+//! Wiring the read first is deliberate rather than an island: the read is what
+//! every one of those producers would otherwise have to be written against, and
+//! it was measurably the blocking half — a piston gate driven by a `powered`
+//! lever scheduled zero commits while the identical gate driven by a redstone
+//! torch passed.
 
 use crate::neighbor_update::{Direction, ALL_DIRECTIONS};
 use lodestone_model::BlockPos;
@@ -79,8 +120,14 @@ pub const WALL_TORCH: &str = "minecraft:redstone_wall_torch";
 pub const REPEATER: &str = "minecraft:repeater";
 pub const COMPARATOR: &str = "minecraft:comparator";
 pub const OBSERVER: &str = "minecraft:observer";
+pub const LEVER: &str = "minecraft:lever";
+pub const TRIPWIRE_HOOK: &str = "minecraft:tripwire_hook";
+pub const DETECTOR_RAIL: &str = "minecraft:detector_rail";
+pub const TARGET: &str = "minecraft:target";
+pub const DAYLIGHT_DETECTOR: &str = "minecraft:daylight_detector";
+pub const REDSTONE_BLOCK: &str = "minecraft:redstone_block";
 
-/// Scheduled-tick `kind` strings (issue #308's `ScheduledTickQueue<T>` is
+/// Scheduled-tick `kind` strings (`ScheduledTickQueue<T>` is
 /// keyed by `T = String` in this crate — see `scheduled_tick.rs`'s own doc
 /// comment for why a canonical name, not a `Block`/`Fluid` registry object,
 /// is the faithful key here). One constant per block family that schedules a
@@ -195,13 +242,166 @@ pub fn is_hopper(state: &str) -> bool {
     base_name(state) == "minecraft:hopper"
 }
 
+/// `minecraft:lever`.
+///
+/// `crate::hand_use` carries its own copy of this predicate for the *interaction*
+/// half (which `powered` property a right-click cycles); this one is the
+/// *query* half. They are deliberately independent — `hand_use` already depends
+/// on this module, so the reverse edge would be a cycle.
+#[must_use]
+pub fn is_lever(state: &str) -> bool {
+    base_name(state) == LEVER
+}
+
+/// Any of the fourteen button blocks — `stone`, `polished_blackstone` and the
+/// twelve wooden species. Matched by suffix rather than by an enumerated table
+/// for the same reason `is_weighted_pressure_plate` is not: a new wood species
+/// adds a button and would otherwise silently emit no signal.
+#[must_use]
+pub fn is_button(state: &str) -> bool {
+    base_name(state)
+        .strip_suffix("_button")
+        .is_some_and(|rest| rest.len() > "minecraft:".len() && rest.starts_with("minecraft:"))
+}
+
+/// The two `WeightedPressurePlateBlock` registrations, which carry an analog
+/// `POWER` rather than a boolean `POWERED`.
+///
+/// Checked **before** [`is_pressure_plate`], because both of these also end in
+/// `_pressure_plate` and reading `powered` off one would always find nothing and
+/// report `0`.
+#[must_use]
+pub fn is_weighted_pressure_plate(state: &str) -> bool {
+    matches!(
+        base_name(state),
+        "minecraft:light_weighted_pressure_plate" | "minecraft:heavy_weighted_pressure_plate"
+    )
+}
+
+/// A boolean (`PressurePlateBlock`) pressure plate — every `*_pressure_plate`
+/// that is not one of the two weighted ones.
+#[must_use]
+pub fn is_pressure_plate(state: &str) -> bool {
+    !is_weighted_pressure_plate(state)
+        && base_name(state)
+            .strip_suffix("_pressure_plate")
+            .is_some_and(|rest| rest.len() > "minecraft:".len() && rest.starts_with("minecraft:"))
+}
+
+#[must_use]
+pub fn is_tripwire_hook(state: &str) -> bool {
+    base_name(state) == TRIPWIRE_HOOK
+}
+#[must_use]
+pub fn is_detector_rail(state: &str) -> bool {
+    base_name(state) == DETECTOR_RAIL
+}
+#[must_use]
+pub fn is_target(state: &str) -> bool {
+    base_name(state) == TARGET
+}
+#[must_use]
+pub fn is_daylight_detector(state: &str) -> bool {
+    base_name(state) == DAYLIGHT_DETECTOR
+}
+#[must_use]
+pub fn is_redstone_block(state: &str) -> bool {
+    base_name(state) == REDSTONE_BLOCK
+}
+
+/// The `POWERED` property shared by lever, button, boolean pressure plate,
+/// tripwire hook and detector rail. `false` for a state that does not name it,
+/// matching every one of those families' `registerDefaultState(... POWERED,
+/// false)`.
+#[must_use]
+pub fn powered_property(state: &str) -> bool {
+    get_bool_property(state, "powered").unwrap_or(false)
+}
+
+/// The analog `POWER` property (`BlockStateProperties.POWER`, `0..=15`) carried
+/// by a weighted pressure plate, a target and a daylight detector — the same
+/// property dust uses, on blocks that are not dust.
+#[must_use]
+pub fn analog_power(state: &str) -> u8 {
+    get_u32_property(state, "power").unwrap_or(0).min(15) as u8
+}
+
+/// `FaceAttachedHorizontalDirectionalBlock.getConnectedDirection` — the
+/// direction a lever or button *points*, i.e. away from the surface it is
+/// attached to: `Down` for a ceiling mount, `Up` for a floor mount, and the
+/// block's own `FACING` for a wall mount.
+///
+/// This is the one direction in which such a block sends **strong** power, and
+/// (because the same expression is `getOpposite`d by `canSurvive`) the block
+/// receiving it is exactly the one the lever is stuck to. Defaults to the wall
+/// reading for a state naming no `face`, matching `AttachFace.WALL` being the
+/// default in both registrations.
+#[must_use]
+pub fn attached_connected_direction(state: &str) -> Direction {
+    match get_str_property(state, "face") {
+        Some("ceiling") => Direction::Down,
+        Some("floor") => Direction::Up,
+        _ => get_str_property(state, "facing").map(direction_from_str).unwrap_or(Direction::North),
+    }
+}
+
+/// `TripWireHookBlock.FACING` — the direction the hook points away from its
+/// wall, and the one direction it strongly powers.
+#[must_use]
+pub fn tripwire_hook_facing(state: &str) -> Direction {
+    get_str_property(state, "facing").map(direction_from_str).unwrap_or(Direction::North)
+}
+
+/// `BasePressurePlateBlock.getSignalForState` for both plate families:
+/// `PressurePlateBlock` reads its boolean `POWERED` as 15-or-0, while
+/// `WeightedPressurePlateBlock` reads its analog `POWER` directly.
+///
+/// **The two are not interchangeable.** A weighted plate's value comes from
+/// `getSignalStrength`, `ceil(min(maxWeight, count) / maxWeight * 15)` with
+/// `maxWeight` 15 for light and **150** for heavy — so one entity on a heavy
+/// plate is `1`, not `15`, and ten entities are still `1`. Collapsing either
+/// family to a boolean is the shape of defect this whole module was added to
+/// fix. Computing that value needs an entity census this crate cannot run from
+/// here (see this module's own doc comment on which halves are modelled); what
+/// is read here is whatever the property already holds.
+#[must_use]
+pub fn pressure_plate_signal(state: &str) -> u8 {
+    if is_weighted_pressure_plate(state) {
+        analog_power(state)
+    } else if powered_property(state) {
+        15
+    } else {
+        0
+    }
+}
+
+/// The primary redstone *input* devices — every family whose whole job is to
+/// turn a player or a world condition into a signal, as opposed to relaying one.
+///
+/// Grouped because they share a property no relaying family has: none of them
+/// overrides `getSignal`, so each emits its own signal in **all six**
+/// directions weakly (see [`weak_signal`]), and each restricts only its
+/// *strong* output.
+#[must_use]
+pub fn is_input_source(state: &str) -> bool {
+    is_lever(state)
+        || is_button(state)
+        || is_pressure_plate(state)
+        || is_weighted_pressure_plate(state)
+        || is_tripwire_hook(state)
+        || is_detector_rail(state)
+        || is_target(state)
+        || is_daylight_detector(state)
+        || is_redstone_block(state)
+}
+
 /// A hopper's `ENABLED` block-state property — `true` (transferring) when the
-/// hopper is **not** redstone-powered (issue #321).
+/// hopper is **not** redstone-powered.
 ///
 /// Defaults to `true` for a state that does not name it, matching vanilla's
-/// `registerDefaultState(... ENABLED, true)` (`HopperBlock.java:55`) and giving
-/// a bare `minecraft:hopper` (which is what placement writes today — see #475)
-/// the correct unlocked initial value.
+/// `HopperBlock`'s own `registerDefaultState(... ENABLED, true)` and giving
+/// a bare `minecraft:hopper` (which is what placement writes today) the
+/// correct unlocked initial value.
 #[must_use]
 pub fn hopper_enabled(state: &str) -> bool {
     get_bool_property(state, "enabled").unwrap_or(true)
@@ -215,8 +415,7 @@ pub fn hopper_enabled(state: &str) -> bool {
 /// `minecraft:hopper`, so a state that keeps its whole property set intact still
 /// matches `v770::resolve_state_id`'s exact tier and is delivered precisely. A
 /// rebuild that dropped `facing` would fall to the subset tier and hand the
-/// client a hopper pointing somewhere else — the same class of defect as
-/// `8f2d912` and #476. Property *order* does not matter, because that resolver
+/// client a hopper pointing somewhere else. Property *order* does not matter, because that resolver
 /// sorts before comparing.
 #[must_use]
 pub(crate) fn with_property(state: &str, key: &str, value: &str) -> String {
@@ -240,7 +439,7 @@ pub(crate) fn with_property(state: &str, key: &str, value: &str) -> String {
     format!("{name}[{}]", parts.join(","))
 }
 
-/// `DiodeBlock.isDiode` (`DiodeBlock.java:196-198`).
+/// `DiodeBlock.isDiode`.
 #[must_use]
 pub fn is_diode(state: &str) -> bool {
     is_repeater(state) || is_comparator(state)
@@ -249,10 +448,34 @@ pub fn is_diode(state: &str) -> bool {
 pub fn is_observer(state: &str) -> bool {
     base_name(state) == OBSERVER
 }
-/// Any block this crate models signal-carrying behaviour for.
+/// The blocks this crate models signal-carrying behaviour for that are **not
+/// full cubes**, and so are not redstone conductors.
+///
+/// The full-cube qualifier is the whole content of this predicate, because
+/// [`is_redstone_conductor`] is its only caller and vanilla's
+/// `isRedstoneConductor` default is `isCollisionShapeFullBlock`. Wire, torches,
+/// diodes, observers, levers, buttons, plates, tripwire hooks, detector rails
+/// and daylight detectors all fail that test in the jar.
+///
+/// [`is_target`] and [`is_redstone_block`] are deliberately **absent** even
+/// though both are signal sources: both register with a plain full collision
+/// cube, so vanilla treats them as conductors and so must we. Listing them here
+/// would stop a `minecraft:redstone_block` relaying strong power through
+/// [`signal_at`]'s conductor wrap, which is how a block of redstone under a
+/// wire-topped stone block works at all.
 #[must_use]
 pub fn is_redstone_component(state: &str) -> bool {
-    is_wire(state) || is_torch(state) || is_diode(state) || is_observer(state)
+    is_wire(state)
+        || is_torch(state)
+        || is_diode(state)
+        || is_observer(state)
+        || is_lever(state)
+        || is_button(state)
+        || is_pressure_plate(state)
+        || is_weighted_pressure_plate(state)
+        || is_tripwire_hook(state)
+        || is_detector_rail(state)
+        || is_daylight_detector(state)
 }
 
 /// The reduced conductor predicate — see this module's own doc comment for
@@ -374,24 +597,49 @@ pub fn own_signal(state: &str) -> u8 {
         } else {
             0
         }
+    } else if is_lever(state) || is_button(state) || is_tripwire_hook(state) || is_detector_rail(state) {
+        // `LeverBlock.ownSignal` / `ButtonBlock.ownSignal` /
+        // `TripWireHookBlock.ownSignal` / `DetectorRailBlock.ownSignal` — all
+        // four are `POWERED ? 15 : 0`.
+        if powered_property(state) {
+            15
+        } else {
+            0
+        }
+    } else if is_pressure_plate(state) || is_weighted_pressure_plate(state) {
+        // `BasePressurePlateBlock.ownSignal` delegates to `getSignalForState`.
+        pressure_plate_signal(state)
+    } else if is_target(state) || is_daylight_detector(state) {
+        // `TargetBlock.ownSignal` / `DaylightDetectorBlock.ownSignal` — both
+        // read their own analog `POWER`, so neither is a flat 15. A target
+        // decays back to `0` on a scheduled tick after a projectile hit and a
+        // daylight detector tracks sky light, and both of those producers are
+        // separate from this read.
+        analog_power(state)
+    } else if is_redstone_block(state) {
+        // `PoweredBlock.ownSignal` — the unconditional constant source.
+        15
     } else {
         0
     }
 }
 
 /// `true` for anything `BlockState.isSignalSource()` reports true for among
-/// the families this crate models: torches always
-/// (`RedstoneTorchBlock.isSignalSource`, `:104-106`, unconditional — a torch
-/// is a source whether lit or not, the *value* just happens to be `0`
-/// unlit), diodes always (`DiodeBlock.isSignalSource`, `:137-139`), observers
-/// always (`ObserverBlock.isSignalSource`, `:95-97`). Dust is deliberately
-/// excluded here: `RedStoneWireBlock.isSignalSource` returns its own
-/// `shouldSignal` flag, which the general query path always sees as `true`
-/// — `getControlInputSignal` special-cases wire before ever reaching this
-/// check (`SignalGetter.java:54-55`), so wire never needs this predicate.
+/// the families this crate models. Every one of them returns an unconditional
+/// `true` in the jar — a source is a source whether or not it is currently
+/// emitting, and the *value* is what goes to zero: `RedstoneTorchBlock`,
+/// `DiodeBlock`, `ObserverBlock`, `LeverBlock`, `ButtonBlock`,
+/// `BasePressurePlateBlock` (both plate families), `TripWireHookBlock`,
+/// `DetectorRailBlock`, `TargetBlock`, `DaylightDetectorBlock` and
+/// `PoweredBlock`.
+///
+/// Dust is deliberately excluded here: `RedStoneWireBlock.isSignalSource`
+/// returns its own `shouldSignal` flag, which the general query path always
+/// sees as `true` — `SignalGetter.getControlInputSignal` special-cases wire
+/// before ever reaching this check, so wire never needs this predicate.
 #[must_use]
 pub fn is_signal_source(state: &str) -> bool {
-    is_torch(state) || is_diode(state) || is_observer(state)
+    is_torch(state) || is_diode(state) || is_observer(state) || is_input_source(state)
 }
 
 /// `BlockState.getSignal`'s per-block override — the *weak* signal a `state`
@@ -449,6 +697,18 @@ pub fn weak_signal(state: &str, direction: Direction, ignore_wire: bool) -> u8 {
         } else {
             0
         }
+    } else if is_input_source(state) {
+        // **None of the nine input families overrides `getSignal`.** They stop
+        // at `ownSignal`, so `BlockBehaviour.getSignal`'s own body —
+        // `return this.ownSignal(state, level, pos)` — applies, and the value is
+        // the same in all six directions.
+        //
+        // That is worth stating rather than assuming, because every *relaying*
+        // family above excludes at least one direction and the obvious guess is
+        // that these do too. A lever really does weakly power a wire directly
+        // above it, and the direction-restricted half of a lever lives entirely
+        // in [`direct_signal`].
+        own_signal(state)
     } else {
         0
     }
@@ -493,7 +753,49 @@ pub fn direct_signal(state: &str, direction: Direction, ignore_wire: bool) -> u8
         // DiodeBlock.getDirectSignal (`:147-149`) / ObserverBlock.getDirectSignal
         // (`:105-107`): both delegate straight to `getSignal`.
         weak_signal(state, direction, false)
+    } else if is_lever(state) || is_button(state) {
+        // `LeverBlock.getDirectSignal` / `ButtonBlock.getDirectSignal`:
+        // `POWERED && getConnectedDirection(state) == direction ? 15 : 0`.
+        //
+        // This is the arm that makes a lever on the *side* of a block power a
+        // wire on *top* of that block, via `getDirectSignalTo`'s six-face scan.
+        // With only the weak path wired, that circuit reads zero — the wire's
+        // own neighbour is the stone, whose weak signal is 0.
+        if powered_property(state) && attached_connected_direction(state) == direction {
+            15
+        } else {
+            0
+        }
+    } else if is_pressure_plate(state) || is_weighted_pressure_plate(state) {
+        // `BasePressurePlateBlock.getDirectSignal`: `direction == UP` only, i.e.
+        // only the block a plate is standing on receives strong power from it.
+        if direction == Direction::Up {
+            pressure_plate_signal(state)
+        } else {
+            0
+        }
+    } else if is_tripwire_hook(state) {
+        // `TripWireHookBlock.getDirectSignal`: its own `FACING` only.
+        if powered_property(state) && tripwire_hook_facing(state) == direction {
+            15
+        } else {
+            0
+        }
+    } else if is_detector_rail(state) {
+        // `DetectorRailBlock.getDirectSignal`: `direction == UP` only.
+        if powered_property(state) && direction == Direction::Up {
+            15
+        } else {
+            0
+        }
     } else {
+        // `TargetBlock`, `DaylightDetectorBlock` and `PoweredBlock` override
+        // neither `getSignal` nor `getDirectSignal`, so they keep
+        // `BlockBehaviour.getDirectSignal`'s `return 0` and send **no** strong
+        // power at all. A block of redstone reaches a wire across a conductor
+        // only through `SignalGetter.getControlInputSignal`'s own
+        // `is(Blocks.REDSTONE_BLOCK)` special case — see
+        // [`control_input_signal`].
         0
     }
 }
@@ -562,10 +864,16 @@ where
     best
 }
 
-/// `SignalGetter.getControlInputSignal` (`:48-59`) — a repeater/comparator's
-/// own side-input read (issue #315). `minecraft:redstone_block` (vanilla's
-/// unconditional-`15` branch, `:52-53`) is not modeled: this crate has no
-/// such block anywhere (see this module's own doc comment on sources).
+/// `SignalGetter.getControlInputSignal` — a repeater/comparator's own
+/// side-input read.
+///
+/// **The `minecraft:redstone_block` arm is load-bearing and not a shortcut.**
+/// `PoweredBlock` overrides no `getDirectSignal`, so the generic
+/// `isSignalSource() ? getDirectSignal(...) : 0` tail below returns `0` for a
+/// block of redstone in every direction. Without vanilla's own explicit
+/// `is(Blocks.REDSTONE_BLOCK) -> 15` branch — placed *before* the wire check —
+/// a block of redstone beside a comparator supplies no side input at all, which
+/// looks like a comparator bug rather than a missing table row.
 #[must_use]
 pub fn control_input_signal<F>(lookup: &F, pos: BlockPos, direction: Direction, only_diodes: bool) -> u8
 where
@@ -578,6 +886,8 @@ where
         } else {
             0
         }
+    } else if is_redstone_block(&state) {
+        15
     } else if is_wire(&state) {
         wire_power(&state)
     } else if is_signal_source(&state) {
@@ -604,17 +914,16 @@ where
         .max(control_input_signal(lookup, ccw.relative(pos), ccw, side_input_diodes_only))
 }
 
-/// `DiodeBlock.getInputSignal` (`:113-123`), reduced: vanilla additionally
+/// `DiodeBlock.getInputSignal`, reduced: vanilla additionally
 /// reads a two-away block's analog output signal (a hopper/chest's fill
 /// level via `BlockState.getAnalogOutputSignal`) and an item frame's
-/// rotation when the immediate target is a redstone conductor
-/// (`:104-115`) — this crate has no block-entity/analog-output query
-/// reachable from this module (see `crate::redstone_diode`'s own doc
-/// comment for the full citation of this exact trap, called out by name in
-/// issue #315's own brief). What *is* implemented is the base case every
+/// rotation when the immediate target is a redstone conductor — this crate
+/// has no block-entity/analog-output query reachable from this module (see
+/// `crate::redstone_diode`'s own doc comment for the full citation of this
+/// exact trap). What *is* implemented is the base case every
 /// circuit not touching a container needs: the direct signal facing into the
 /// diode, maxed with an immediately-adjacent wire's own power (vanilla's own
-/// belt-and-suspenders read, `:121-122`, since `getSignal` for a wire in a
+/// belt-and-suspenders read, since `getSignal` for a wire in a
 /// horizontal direction already returns the same value).
 #[must_use]
 pub fn input_signal<F>(lookup: &F, pos: BlockPos, facing: Direction) -> u8
@@ -900,5 +1209,527 @@ mod tests {
         let torch_pos = dir.relative(origin);
         assert_eq!(control_input_signal(&world(&[(torch_pos, torch)]), torch_pos, dir, true), 0);
         assert_eq!(control_input_signal(&world(&[(torch_pos, torch)]), torch_pos, dir, false), 15);
+    }
+
+    // -----------------------------------------------------------------------
+    // The primary input devices
+    //
+    // Every expectation below is the value a named block class's own
+    // `ownSignal`/`getDirectSignal` returns in the 26.2 decompile, hand-expanded
+    // from the record rather than from any behaviour of this crate. The tables
+    // are written so that a wrong-but-plausible implementation lands on a
+    // different number, not merely on a different sign: see
+    // `every_input_source_emits_its_own_exact_value_and_not_a_boolean_15` for the
+    // two hypotheses each row is built to separate.
+    // -----------------------------------------------------------------------
+
+    /// The six directions, in `ALL_DIRECTIONS` order, for the "same in every
+    /// direction" sweeps below.
+    const EVERY_DIRECTION: [Direction; 6] = [
+        Direction::Down,
+        Direction::Up,
+        Direction::North,
+        Direction::South,
+        Direction::West,
+        Direction::East,
+    ];
+
+    /// `(state, its own signal)` for every input family, in both an emitting and
+    /// a silent configuration.
+    ///
+    /// **The analog rows are the discriminating inputs.** A weighted plate at
+    /// `power=3`, a target at `power=7` and a daylight detector at `power=11` all
+    /// answer `15` under the wrong hypothesis that an active source is a boolean
+    /// — which is exactly the shape this whole module landing corrects — and `0`
+    /// under the wrong hypothesis that the family is unmodelled. Picking
+    /// `power=15` for any of them would make the row pass under the boolean
+    /// hypothesis too, so no row does.
+    fn input_source_own_signal_table() -> Vec<(&'static str, u8)> {
+        vec![
+            // LeverBlock.ownSignal / ButtonBlock.ownSignal: POWERED ? 15 : 0.
+            ("minecraft:lever[face=wall,facing=north,powered=true]", 15),
+            ("minecraft:lever[face=wall,facing=north,powered=false]", 0),
+            ("minecraft:stone_button[face=wall,facing=east,powered=true]", 15),
+            ("minecraft:oak_button[face=floor,facing=east,powered=true]", 15),
+            ("minecraft:stone_button[face=wall,facing=east,powered=false]", 0),
+            // PressurePlateBlock.getSignalForState: POWERED ? 15 : 0.
+            ("minecraft:stone_pressure_plate[powered=true]", 15),
+            ("minecraft:oak_pressure_plate[powered=false]", 0),
+            // WeightedPressurePlateBlock.getSignalForState: the analog POWER.
+            ("minecraft:light_weighted_pressure_plate[power=4]", 4),
+            ("minecraft:heavy_weighted_pressure_plate[power=3]", 3),
+            ("minecraft:heavy_weighted_pressure_plate[power=0]", 0),
+            // TripWireHookBlock.ownSignal / DetectorRailBlock.ownSignal.
+            ("minecraft:tripwire_hook[facing=west,attached=true,powered=true]", 15),
+            ("minecraft:tripwire_hook[facing=west,attached=true,powered=false]", 0),
+            ("minecraft:detector_rail[shape=north_south,powered=true]", 15),
+            ("minecraft:detector_rail[shape=north_south,powered=false]", 0),
+            // TargetBlock.ownSignal / DaylightDetectorBlock.ownSignal: analog.
+            ("minecraft:target[power=7]", 7),
+            ("minecraft:target[power=0]", 0),
+            ("minecraft:daylight_detector[inverted=false,power=11]", 11),
+            ("minecraft:daylight_detector[inverted=true,power=0]", 0),
+            // PoweredBlock.ownSignal: the unconditional constant.
+            ("minecraft:redstone_block", 15),
+        ]
+    }
+
+    /// Every input family's own signal is the value its jar class computes, and
+    /// specifically **not** a boolean 15.
+    ///
+    /// Mismatches are collected rather than asserted inside the loop: an
+    /// `assert_eq!` in the body reports the first bad row and leaves the other
+    /// nineteen as arguments, so a neuter would demonstrate one family instead of
+    /// all of them.
+    #[test]
+    fn every_input_source_emits_its_own_exact_value_and_not_a_boolean_15() {
+        let mut wrong: Vec<String> = Vec::new();
+        for (state, expected) in input_source_own_signal_table() {
+            let got = own_signal(state);
+            if got != expected {
+                wrong.push(format!("{state} -> own_signal {got}, expected {expected}"));
+            }
+            // Every one of them is also a signal *source* in the jar,
+            // unconditionally — including the silent configurations, whose value
+            // is 0 while the predicate stays true.
+            if !is_signal_source(state) {
+                wrong.push(format!("{state} -> is_signal_source false, expected true"));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} of {} input-source readings disagree with the jar's own record:\n  {}",
+            wrong.len(),
+            input_source_own_signal_table().len(),
+            wrong.join("\n  ")
+        );
+
+        // The wrong hypothesis, evaluated: a boolean collapse would answer 15
+        // for every active row. Three rows are analog and non-15, so the table
+        // above is known to separate the two models rather than merely to agree
+        // with one.
+        let analog_rows: Vec<(&str, u8)> = input_source_own_signal_table()
+            .into_iter()
+            .filter(|(_, v)| *v != 0 && *v != 15)
+            .collect();
+        assert_eq!(
+            analog_rows.len(),
+            4,
+            "the table must carry rows whose correct value is neither 0 nor 15, or a \
+             boolean-collapse implementation passes it; got {analog_rows:?}"
+        );
+    }
+
+    /// **None of the nine input families overrides `getSignal`**, so each emits
+    /// its own signal weakly in all six directions.
+    ///
+    /// The wrong hypothesis this separates is the one a reader of this module
+    /// would most naturally reach for: every *relaying* family above excludes at
+    /// least one direction (a standing torch excludes `Up`, a diode emits only
+    /// along its `FACING`), so copying that shape would give `0` in at least one
+    /// direction here. A lever really does weakly power a wire directly above it.
+    #[test]
+    fn an_input_sources_weak_signal_is_identical_in_all_six_directions() {
+        let table = input_source_own_signal_table();
+        let mut wrong: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        for (state, expected) in &table {
+            for direction in EVERY_DIRECTION {
+                checked += 1;
+                let got = weak_signal(state, direction, false);
+                if got != *expected {
+                    wrong.push(format!("{state} toward {direction:?} -> {got}, expected {expected}"));
+                }
+            }
+        }
+        // Derived from the table rather than restated as a literal: the count is
+        // 19 rows today and every row is a family/configuration someone may add
+        // to, so a hardcoded product would fail on the next addition for no
+        // reason a reader could act on. The floor is what keeps it non-vacuous.
+        assert_eq!(
+            checked,
+            table.len() * EVERY_DIRECTION.len(),
+            "the sweep must cover every family in every direction"
+        );
+        assert!(table.len() >= 15, "the table shrank to {} rows", table.len());
+        assert!(
+            wrong.is_empty(),
+            "{} of {checked} weak-signal readings are direction-dependent, but no input \
+             family overrides `getSignal`:\n  {}",
+            wrong.len(),
+            wrong.join("\n  ")
+        );
+    }
+
+    /// `(state, the one direction that carries strong power, its value)`.
+    ///
+    /// Strong power is where the families differ from each other and from their
+    /// own weak output, so this is the table that a "weak path only"
+    /// implementation cannot satisfy. `attached_connected_direction` is what
+    /// makes the three lever rows differ: a floor lever powers the block below
+    /// it, a ceiling lever the block above, and a wall lever the wall.
+    fn input_source_direct_signal_table() -> Vec<(&'static str, Direction, u8)> {
+        vec![
+            // LeverBlock.getDirectSignal: getConnectedDirection(state) only.
+            ("minecraft:lever[face=wall,facing=north,powered=true]", Direction::North, 15),
+            ("minecraft:lever[face=wall,facing=east,powered=true]", Direction::East, 15),
+            ("minecraft:lever[face=floor,facing=north,powered=true]", Direction::Up, 15),
+            ("minecraft:lever[face=ceiling,facing=north,powered=true]", Direction::Down, 15),
+            ("minecraft:stone_button[face=wall,facing=south,powered=true]", Direction::South, 15),
+            ("minecraft:oak_button[face=floor,facing=west,powered=true]", Direction::Up, 15),
+            // BasePressurePlateBlock.getDirectSignal: UP only.
+            ("minecraft:stone_pressure_plate[powered=true]", Direction::Up, 15),
+            ("minecraft:heavy_weighted_pressure_plate[power=3]", Direction::Up, 3),
+            // TripWireHookBlock.getDirectSignal: its own FACING only.
+            ("minecraft:tripwire_hook[facing=west,attached=true,powered=true]", Direction::West, 15),
+            // DetectorRailBlock.getDirectSignal: UP only.
+            ("minecraft:detector_rail[shape=north_south,powered=true]", Direction::Up, 15),
+        ]
+    }
+
+    /// Strong power leaves each input family in **exactly one** direction, and
+    /// the value there is the family's own — with `heavy_weighted_pressure_plate`
+    /// carrying `3` rather than `15`, so the analog path is exercised on the
+    /// strong side too and not only on the weak one.
+    #[test]
+    fn strong_power_from_an_input_source_leaves_in_exactly_one_direction() {
+        let mut wrong: Vec<String> = Vec::new();
+        for (state, carrying, value) in input_source_direct_signal_table() {
+            let got = direct_signal(state, carrying, false);
+            if got != value {
+                wrong.push(format!("{state} toward {carrying:?} -> {got}, expected {value}"));
+            }
+            for direction in EVERY_DIRECTION.into_iter().filter(|d| *d != carrying) {
+                let silent = direct_signal(state, direction, false);
+                if silent != 0 {
+                    wrong.push(format!(
+                        "{state} toward {direction:?} -> {silent}, expected 0 (only {carrying:?} \
+                         carries strong power)"
+                    ));
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} strong-power reading(s) disagree with the jar:\n  {}",
+            wrong.len(),
+            wrong.join("\n  ")
+        );
+    }
+
+    /// An unpowered lever, button, hook or rail sends **no** strong power even in
+    /// the direction that would otherwise carry it — the `POWERED &&` half of
+    /// each `getDirectSignal`, which a version reading only the direction would
+    /// drop.
+    #[test]
+    fn an_inactive_input_source_sends_no_strong_power_in_its_own_direction() {
+        let mut wrong: Vec<String> = Vec::new();
+        for (state, carrying) in [
+            ("minecraft:lever[face=wall,facing=north,powered=false]", Direction::North),
+            ("minecraft:lever[face=floor,facing=north,powered=false]", Direction::Up),
+            ("minecraft:stone_button[face=wall,facing=south,powered=false]", Direction::South),
+            ("minecraft:stone_pressure_plate[powered=false]", Direction::Up),
+            ("minecraft:heavy_weighted_pressure_plate[power=0]", Direction::Up),
+            ("minecraft:tripwire_hook[facing=west,attached=false,powered=false]", Direction::West),
+            ("minecraft:detector_rail[shape=north_south,powered=false]", Direction::Up),
+        ] {
+            let got = direct_signal(state, carrying, false);
+            if got != 0 {
+                wrong.push(format!("{state} toward {carrying:?} -> {got}, expected 0"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n  "));
+    }
+
+    /// **`target`, `daylight_detector` and `redstone_block` send no strong power
+    /// at all**, in any direction, while still emitting weakly.
+    ///
+    /// None of the three overrides `getDirectSignal`, so each keeps
+    /// `BlockBehaviour.getDirectSignal`'s `return 0`. This is the row that would
+    /// be got wrong by assuming "a source with signal 15 must strongly power
+    /// something", and getting it wrong is invisible until a specific
+    /// through-a-conductor contraption fails.
+    #[test]
+    fn the_three_full_cube_and_flat_sources_send_no_strong_power_in_any_direction() {
+        let mut wrong: Vec<String> = Vec::new();
+        for (state, weak) in [
+            ("minecraft:target[power=7]", 7u8),
+            ("minecraft:daylight_detector[inverted=false,power=11]", 11),
+            ("minecraft:redstone_block", 15),
+        ] {
+            // The premise: each one really is emitting, so a zero below is a
+            // statement about the strong path and not about a silent block.
+            if own_signal(state) != weak {
+                wrong.push(format!("premise failed: {state} own_signal {} != {weak}", own_signal(state)));
+            }
+            for direction in EVERY_DIRECTION {
+                let got = direct_signal(state, direction, false);
+                if got != 0 {
+                    wrong.push(format!("{state} toward {direction:?} -> {got}, expected 0"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n  "));
+    }
+
+    /// **The weak/strong discriminator: a lever on the *side* of a stone block
+    /// powers a wire sitting on *top* of that block.**
+    ///
+    /// This is the circuit `signal_at`'s conductor wrap exists for, and it is the
+    /// one case a weak-only implementation cannot satisfy — the wire's own
+    /// neighbour is the stone, whose weak signal is `0`. The value has to arrive
+    /// through `getDirectSignalTo`'s six-face scan, so the assertion below names
+    /// both halves separately rather than only the composite.
+    #[test]
+    fn a_lever_on_the_side_of_a_conductor_powers_a_wire_on_top_of_it() {
+        let stone_pos = pos(0, 1, 0);
+        let wire_pos = pos(0, 2, 0);
+        // The lever is north of the stone. A wall lever attaches to
+        // `pos.relative(getConnectedDirection().getOpposite())`, so a lever at
+        // `stone.north()` stuck to the stone has `facing=north` — not `south`.
+        let lever_pos = Direction::North.relative(stone_pos);
+        let w = world(&[
+            (stone_pos, "minecraft:stone"),
+            (wire_pos, "minecraft:redstone_wire[power=0]"),
+            (lever_pos, "minecraft:lever[face=wall,facing=north,powered=true]"),
+        ]);
+
+        // The weak half alone gives nothing: the stone is not a source.
+        assert_eq!(
+            weak_signal("minecraft:stone", Direction::Down, false),
+            0,
+            "premise: a stone block has no weak signal of its own, so anything the wire \
+             reads must have come through the strong path"
+        );
+        // The strong half is what supplies it.
+        assert_eq!(
+            direct_signal_to(&w, stone_pos, false),
+            15,
+            "the lever's `getDirectSignal` must reach the stone through the six-face scan"
+        );
+        // And composed: the wire above reads the stone by travelling Down.
+        assert_eq!(signal_at(&w, stone_pos, Direction::Down, false), 15);
+        assert_eq!(
+            best_neighbor_signal(&w, wire_pos, true),
+            15,
+            "the wire's own recompute must see 15"
+        );
+
+        // **Control, and it must fail the same assertion.** The identical rig
+        // with the lever facing EAST strongly powers a different block, so the
+        // stone gets nothing and the wire reads exactly 0 — not merely "less".
+        let elsewhere = world(&[
+            (stone_pos, "minecraft:stone"),
+            (wire_pos, "minecraft:redstone_wire[power=0]"),
+            (lever_pos, "minecraft:lever[face=wall,facing=east,powered=true]"),
+        ]);
+        assert_eq!(
+            direct_signal_to(&elsewhere, stone_pos, false),
+            0,
+            "an east-facing lever must not strongly power the block to its south"
+        );
+        assert_eq!(best_neighbor_signal(&elsewhere, wire_pos, true), 0);
+
+        // Second control: the same north-facing lever, unpowered.
+        let off = world(&[
+            (stone_pos, "minecraft:stone"),
+            (wire_pos, "minecraft:redstone_wire[power=0]"),
+            (lever_pos, "minecraft:lever[face=wall,facing=north,powered=false]"),
+        ]);
+        assert_eq!(best_neighbor_signal(&off, wire_pos, true), 0);
+    }
+
+    /// A pressure plate strongly powers the block **below** it, so a wire beside
+    /// that block reads 15 — the plate's own analogue of the lever case above,
+    /// and the direction (`Up` from the querier's view) most easily got backwards.
+    #[test]
+    fn a_pressure_plate_strongly_powers_the_block_it_stands_on() {
+        let stone_pos = pos(0, 0, 0);
+        let plate_pos = Direction::Up.relative(stone_pos);
+        let w = world(&[
+            (stone_pos, "minecraft:stone"),
+            (plate_pos, "minecraft:stone_pressure_plate[powered=true]"),
+        ]);
+        assert_eq!(direct_signal_to(&w, stone_pos, false), 15);
+        // A wire east of the stone reads the stone by travelling East.
+        assert_eq!(signal_at(&w, stone_pos, Direction::East, false), 15);
+
+        // The weighted plate's analog value survives the same path — 3, not 15,
+        // which a boolean strong path would give.
+        let weighted = world(&[
+            (stone_pos, "minecraft:stone"),
+            (plate_pos, "minecraft:heavy_weighted_pressure_plate[power=3]"),
+        ]);
+        assert_eq!(direct_signal_to(&weighted, stone_pos, false), 3);
+
+        // Control: unpressed plate, same geometry, exactly zero.
+        let off = world(&[
+            (stone_pos, "minecraft:stone"),
+            (plate_pos, "minecraft:stone_pressure_plate[powered=false]"),
+        ]);
+        assert_eq!(direct_signal_to(&off, stone_pos, false), 0);
+    }
+
+    /// A block of redstone reaches a comparator's side input only through
+    /// `getControlInputSignal`'s own `is(Blocks.REDSTONE_BLOCK)` branch.
+    ///
+    /// The generic `isSignalSource() ? getDirectSignal(...) : 0` tail cannot do
+    /// it, because `PoweredBlock` overrides no `getDirectSignal` — so this gate
+    /// asserts the direct signal is `0` *and* the control input is `15`, which
+    /// together pin the value to that one branch rather than to the tail.
+    #[test]
+    fn a_redstone_block_supplies_a_side_input_only_through_the_explicit_branch() {
+        let origin = pos(0, 0, 0);
+        let dir = Direction::East;
+        let block_pos = dir.relative(origin);
+        let w = world(&[(block_pos, "minecraft:redstone_block")]);
+
+        assert_eq!(
+            direct_signal("minecraft:redstone_block", dir, false),
+            0,
+            "premise: a block of redstone has no direct signal, so the 15 below cannot have \
+             come from the generic signal-source tail"
+        );
+        assert_eq!(control_input_signal(&w, block_pos, dir, false), 15);
+        // `only_diodes` (a repeater's lock read) must still reject it: a block of
+        // redstone is not a diode, and only a diode's output can lock a repeater.
+        assert_eq!(control_input_signal(&w, block_pos, dir, true), 0);
+
+        // And the comparator side-input path end to end: clockwise(East) = South.
+        let south = Direction::South.relative(origin);
+        let side = world(&[(south, "minecraft:redstone_block")]);
+        assert_eq!(alternate_signal(&side, origin, Direction::East, false), 15);
+        assert_eq!(alternate_signal(&side, origin, Direction::East, true), 0);
+    }
+
+    /// The conductor split across the new families: the non-full-cube ones are
+    /// excluded, and `target`/`redstone_block` — both full cubes in the jar, and
+    /// both signal sources — stay conductors.
+    ///
+    /// Getting `redstone_block` wrong here is not cosmetic: a non-conductor does
+    /// not get `signal_at`'s `getDirectSignalTo` wrap, so a block of redstone
+    /// under a wire-topped stone block would stop working.
+    #[test]
+    fn the_conductor_split_follows_the_full_cube_shape_not_the_source_predicate() {
+        let mut wrong: Vec<String> = Vec::new();
+        for (state, want_conductor) in [
+            ("minecraft:lever[face=wall,facing=north,powered=true]", false),
+            ("minecraft:stone_button[face=wall,facing=east,powered=true]", false),
+            ("minecraft:oak_button[face=floor,facing=east,powered=false]", false),
+            ("minecraft:stone_pressure_plate[powered=true]", false),
+            ("minecraft:light_weighted_pressure_plate[power=4]", false),
+            ("minecraft:heavy_weighted_pressure_plate[power=0]", false),
+            ("minecraft:tripwire_hook[facing=west,attached=true,powered=true]", false),
+            ("minecraft:detector_rail[shape=north_south,powered=true]", false),
+            ("minecraft:daylight_detector[inverted=false,power=11]", false),
+            // Full collision cubes in `Blocks`, so conductors — and both are
+            // signal sources, which is the coincidence this row exists to break.
+            ("minecraft:target[power=7]", true),
+            ("minecraft:redstone_block", true),
+            ("minecraft:stone", true),
+        ] {
+            if is_redstone_conductor(state) != want_conductor {
+                wrong.push(format!(
+                    "{state} -> is_redstone_conductor {}, expected {want_conductor}",
+                    is_redstone_conductor(state)
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n  "));
+    }
+
+    /// The two weighted plates must not be read as boolean plates, and vice
+    /// versa — both families end in `_pressure_plate`, so a suffix test alone
+    /// puts a weighted plate on the `powered` path where it would always read 0.
+    #[test]
+    fn the_weighted_plates_are_split_out_from_the_boolean_ones() {
+        for weighted in [
+            "minecraft:light_weighted_pressure_plate[power=4]",
+            "minecraft:heavy_weighted_pressure_plate[power=3]",
+        ] {
+            assert!(is_weighted_pressure_plate(weighted), "{weighted}");
+            assert!(!is_pressure_plate(weighted), "{weighted} must not take the boolean path");
+        }
+        for boolean in [
+            "minecraft:stone_pressure_plate[powered=true]",
+            "minecraft:oak_pressure_plate[powered=true]",
+            "minecraft:polished_blackstone_pressure_plate[powered=true]",
+        ] {
+            assert!(is_pressure_plate(boolean), "{boolean}");
+            assert!(!is_weighted_pressure_plate(boolean), "{boolean}");
+        }
+        // A weighted plate read through the boolean path would answer 0 at
+        // power=3, which is the failure this split prevents.
+        assert_eq!(pressure_plate_signal("minecraft:heavy_weighted_pressure_plate[power=3]"), 3);
+        assert!(!powered_property("minecraft:heavy_weighted_pressure_plate[power=3]"));
+    }
+
+    /// `attached_connected_direction` for each `AttachFace`, plus the wall
+    /// default for a state naming no `face`.
+    #[test]
+    fn the_attached_connected_direction_follows_the_attach_face() {
+        assert_eq!(
+            attached_connected_direction("minecraft:lever[face=floor,facing=north,powered=false]"),
+            Direction::Up
+        );
+        assert_eq!(
+            attached_connected_direction("minecraft:lever[face=ceiling,facing=north,powered=false]"),
+            Direction::Down
+        );
+        assert_eq!(
+            attached_connected_direction("minecraft:lever[face=wall,facing=south,powered=false]"),
+            Direction::South
+        );
+        // No `face` at all falls back to the wall reading, matching
+        // `AttachFace.WALL` being the registered default.
+        assert_eq!(
+            attached_connected_direction("minecraft:lever[facing=west]"),
+            Direction::West
+        );
+    }
+
+    /// The name predicates must not be so loose that an unrelated block becomes
+    /// a power source — the two suffix matches (`_button`, `_pressure_plate`) are
+    /// the risk, so this is their negative control.
+    ///
+    /// The rail and tripwire rows are the ones worth having: `powered_rail` and
+    /// `activator_rail` both carry a `powered` property and are *not* signal
+    /// sources in the jar (they consume power rather than produce it), and
+    /// `minecraft:tripwire` is a different block from `minecraft:tripwire_hook`
+    /// with the same prefix.
+    #[test]
+    fn nothing_unrelated_is_mistaken_for_an_input_source() {
+        let mut wrong: Vec<String> = Vec::new();
+        for state in [
+            "minecraft:stone",
+            "minecraft:air",
+            "minecraft:water[level=0]",
+            "minecraft:oak_planks",
+            "minecraft:rail[shape=north_south]",
+            "minecraft:powered_rail[shape=north_south,powered=true]",
+            "minecraft:activator_rail[shape=north_south,powered=true]",
+            "minecraft:tripwire[attached=true,powered=true]",
+            "minecraft:chest[facing=north]",
+        ] {
+            if is_input_source(state) {
+                wrong.push(format!("{state} is_input_source true, expected false"));
+            }
+            if own_signal(state) != 0 {
+                wrong.push(format!("{state} own_signal {}, expected 0", own_signal(state)));
+            }
+        }
+        // Wire and torches are excluded from `is_input_source` but *do* emit,
+        // so they belong to the predicate half of this control and not to the
+        // "emits nothing" half. Asserting `own_signal == 0` for them would be
+        // wrong about the code, which is how this row was first written.
+        for relaying in ["minecraft:redstone_wire[power=15]", "minecraft:redstone_torch[lit=true]"] {
+            if is_input_source(relaying) {
+                wrong.push(format!("{relaying} is_input_source true, expected false"));
+            }
+            if own_signal(relaying) != 15 {
+                wrong.push(format!("{relaying} own_signal {}, expected 15", own_signal(relaying)));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n  "));
     }
 }

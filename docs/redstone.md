@@ -1,4 +1,4 @@
-# Redstone: dust, torches, repeaters, comparators, observers
+# Redstone: dust, torches, repeaters, comparators, observers, and the input devices
 
 Issues [#314](https://github.com/matteopolak/lodestone/issues/314) (parent:
 dust/torch signal propagation), [#315](https://github.com/matteopolak/lodestone/issues/315)
@@ -43,11 +43,54 @@ gravity blocks:
 This crate has no collision-shape system, so a "redstone conductor" is
 approximated as **anything that is not air/fluid and not a redstone
 component itself** — every ordinary solid block qualifies, matching vanilla
-for every block this crate's worldgen actually places. Only **lit redstone
-torches** are power sources for #314 — no levers, buttons, or
-`redstone_block`, since none of those exist anywhere else in this crate yet
-(placement, items, or otherwise). Repeaters/comparators (when `POWERED`) and
-observers (when `POWERED`) become sources too, for #315/#317.
+for every block this crate's worldgen actually places. `is_redstone_component`
+is that exclusion list, and it is specifically the set of modelled blocks that
+are **not full cubes**: `minecraft:target` and `minecraft:redstone_block` are
+signal sources that stay on the *conductor* side of it, because both register a
+full collision cube in the jar. Getting `redstone_block` onto the wrong side
+would stop it powering a wire across a conductor at all.
+
+**Relaying** sources: lit redstone torches, repeaters/comparators when
+`POWERED`, observers when `POWERED`.
+
+**Input** sources — the primary devices a player reaches for — are
+`redstone::is_input_source`'s nine, and they do **not** all emit 15:
+
+| family | signal while active | strong power reaches |
+|---|---|---|
+| lever, button | 15 | the surface it is attached to (`getConnectedDirection`) |
+| pressure plate | 15 | the block below it |
+| weighted pressure plate | its own `power`, `0..=15` | the block below it |
+| tripwire hook | 15 | the wall it faces |
+| detector rail | 15 | the block below it |
+| target | its own `power`, `0..=15` | nothing |
+| daylight detector | its own `power`, `0..=15` | nothing |
+| redstone block | 15 | nothing, but see below |
+
+Two facts about that table are load-bearing and neither is guessable:
+
+* **None of the nine overrides `getSignal`.** They stop at `ownSignal`, so each
+  emits weakly in **all six directions** — unlike every relaying family, each of
+  which excludes at least one. A lever really does weakly power a wire directly
+  above it. Copying the torch's "every direction except UP" shape is the wrong
+  guess here.
+* **`target`, `daylight_detector` and `redstone_block` send no strong power at
+  all**, because none overrides `getDirectSignal` either. A block of redstone
+  reaches a comparator's side input only through
+  `SignalGetter.getControlInputSignal`'s explicit `is(Blocks.REDSTONE_BLOCK)`
+  branch, which sits *before* the wire check. Without that one arm a block of
+  redstone supplies no side input and the comparator looks broken.
+
+**The read is wired; several producers are not.** Something has to write the
+`powered`/`power` property, and only some families have that half. `hand_use`
+flips a lever and a button from a right-click and `server`'s use-item-on path
+fans it out, so those two work end to end; `redstone_block` needs nothing.
+Pressure plates, weighted plates and detector rails need an entity-AABB census
+this crate has no collision system for; a tripwire hook needs `minecraft:tripwire`
+state plus the two-hook span search; a target needs projectile-hit dispatch and
+its decay tick; a daylight detector needs a sky-light read. Those five sit at
+their default `0` — correct reads with missing producers, listed in
+`redstone.rs`'s own module doc.
 
 ### Direction convention
 
@@ -216,10 +259,21 @@ T-junction, a repeater-locked latch) is the strongest remaining step.
   `ComparatorBlock.getInputSignal`'s analog-output/item-frame branch (issue
   #315's own "hopper fill level" trap) is not implemented — every comparator
   test in this landing reads only redstone-native inputs.
-- **Adding a new power source** (a lever, a button, `redstone_block`): extend
+- **Adding a new power source**: extend
   `redstone::own_signal`/`weak_signal`/`direct_signal`/`is_signal_source`
   with the new predicate, following the same per-block-class dispatch every
-  existing family uses.
+  existing family uses — and **read the block class's own `getSignal` and
+  `getDirectSignal` rather than copying a neighbouring family's**. The two are
+  independent: `weak_signal` and `direct_signal` were separately neutered as
+  controls, and removing only the lever's `direct_signal` arm left **nine of ten**
+  redstone gates green, failing solely
+  `redstone::tests::a_lever_on_the_side_of_a_conductor_powers_a_wire_on_top_of_it`.
+  A weak-only implementation therefore looks almost entirely correct.
+- **A new source silently invalidates every gate whose premise was "this family
+  is inert".** `redstone_oracle_gate`'s dust runs all used a torch, which was the
+  one source the old model got right, so the whole file shared a blind spot;
+  `piston.rs` carried a doc comment stating levers emit no signal. Grep for the
+  family name before assuming a green suite means anything.
 - **The second-layer fan-out has landed — do not re-narrow it.** See "How it
   works" above for the shape. Gated by
   `redstone_oracle_gate::the_second_layer_fan_out_reaches_a_side_torch_and_inverts_it`,
@@ -320,8 +374,9 @@ knowing from here:
 * **`has_extend_signal` is not `best_neighbor_signal`.** A piston's `getNeighborSignal` excludes the
   push direction and additionally reads `pos.above()` — quasi-connectivity. Reaching for the general
   best-neighbour query there is the mistake.
-* **`minecraft:redstone_block` is not a signal source in this module**, noticed while writing the
-  piston gates. It is a gap here, not there.
+* **`minecraft:redstone_block` is a signal source now**, along with the other eight input devices;
+  `piston::tests::the_placement_path_carries_the_commits_when_a_lever_is_the_trigger` is the gate
+  that a lever drives a piston, which it could not do before.
 
 See [`redstone-pistons.md`](./redstone-pistons.md) for what is and is not modelled.
 
