@@ -28,8 +28,11 @@
 //! - for the four edge neighbours: a [`FlowNeighbor`] (own height, whether the
 //!   block blocks motion, and the fluid height of the cell *below* it) so
 //!   [`flow_horizontal`] can reproduce vanilla's `FlowingFluid.getFlow`;
-//! - per-face occlusion flags (a face touching a neighbouring full/opaque cell is
-//!   culled);
+//! - per-face occlusion flags, from **two independent** questions: a face
+//!   touching a neighbouring full/opaque cell is culled
+//!   (`isFaceOccludedByNeighbor`), **and** a face is culled when the block in the
+//!   fluid's *own* cell already covers it (`isFaceOccludedBySelf` — see
+//!   [`SelfOcclusion`]). Waterlogged geometry lives entirely in the second one;
 //! - the biome water colour, resolved via the [`crate::tint`] seam (lava is
 //!   untinted).
 //!
@@ -42,6 +45,21 @@
 //! end. Fluid tint comes from the fluid model's tint source (water =
 //! `getAverageWaterColor`, lava untinted), resolved via the [`crate::tint`]
 //! seam; per-face colour is left to the mesher/renderer.
+//!
+//! ## A family of bugs: self-cell questions answered from neighbours
+//!
+//! Two of the defects fixed here were the *same mistake* — a `FluidRenderer` test
+//! about the fluid's **own** cell that we were answering from its neighbours:
+//!
+//! | vanilla test | what we did instead | symptom |
+//! |---|---|---|
+//! | `tesselate`'s `if (heightSelf >= 1.0F)` corner short-circuit | averaged the neighbours ([`corner_heights`]) | a falling column with a repeating horizontal gap |
+//! | `isFaceOccludedBySelf` ([`SelfOcclusion`]) | only `isFaceOccludedByNeighbor` | waterlogged stairs z-fighting on their solid side |
+//!
+//! Both read as complete because the neighbour-facing sibling *exists* and is
+//! correct, so nothing looks missing. **When a fluid defect is local to one cell,
+//! check whether the vanilla predicate takes `pos`/`blockState` and no neighbour
+//! before reaching for the neighbourhood** — expect a third instance.
 //!
 //! `bake_fluid` itself now owns vanilla's `~0.001` anti-z-fight insets, the
 //! optional back faces (`FluidRenderer.addFace`'s reversed copy) and the
@@ -377,6 +395,163 @@ pub fn full_footprint_y_range(boxes: &[lodestone_model::BlockAabb]) -> Option<(f
         Some((only.min[1], only.max[1]))
     } else {
         None
+    }
+}
+
+/// Whether the union of `boxes` completely covers the unit square of the cell
+/// face pointing `face`.
+///
+/// This is vanilla `Shapes.blockOccludes` specialised to the *one* call
+/// `FluidRenderer.isFaceOccludedBySelf` makes — and that specialisation is what
+/// makes an exact answer cheap. `isFaceOccludedBySelf(state, dir)` is
+/// `isFaceOccludedByState(dir.getOpposite(), 1.0F, state)`, so the tested shape
+/// is the **whole** unit cube (`Shapes.box(0,0,0, 1,1,1)`, height `1.0`, never
+/// the fluid's real surface height) and the occluder is
+/// `state.getFaceOcclusionShape(dir)`. With a full-cube probe, `blockOccludes`'s
+/// slice comparison degenerates to "is the occluder's boundary layer the entire
+/// face" — a pure 2-D coverage question with no fluid height in it at all.
+///
+/// Contrast [`full_footprint_y_range`], which serves the *neighbour*-facing
+/// sibling `isFaceOccludedByNeighbor`: there the probe height is the fluid's own
+/// corner height, so the answer really does depend on how deep the fluid is, and
+/// the reduction has to carry a `y` range. The self call needs no scoping to a
+/// single box, so this one is exact for any axis-aligned union — stairs and walls
+/// included.
+///
+/// `boxes` must come from the **outline** shape
+/// (`lodestone_data::outline_shapes::outline_boxes`), for the reason
+/// [`full_footprint_y_range`] records: vanilla's `getOcclusionShape` is
+/// `state.getShape(...)`.
+///
+/// # How the coverage test works
+///
+/// Only boxes touching the boundary plane contribute — vanilla slices the
+/// occlusion shape at that layer (`VoxelShape.getFaceShape`) before comparing.
+/// Their projections onto the two free axes are axis-aligned rectangles, so the
+/// union covers `[0,1]²` iff it covers every strip between consecutive
+/// `a`-breakpoints. Each strip is then a 1-D interval cover, answered greedily.
+/// Both loops advance strictly, so both terminate, and neither allocates: this
+/// runs inside the per-cell fluid loop.
+#[must_use]
+pub fn face_fully_covered(boxes: &[lodestone_model::BlockAabb], face: Direction) -> bool {
+    const EPS: f32 = 1e-4;
+    let (axis, at_max) = match face {
+        Direction::Down => (1usize, false),
+        Direction::Up => (1, true),
+        Direction::North => (2, false),
+        Direction::South => (2, true),
+        Direction::West => (0, false),
+        Direction::East => (0, true),
+    };
+    let (a, b) = match axis {
+        0 => (1usize, 2usize),
+        1 => (0usize, 2usize),
+        _ => (0usize, 1usize),
+    };
+    let on_plane = |bx: &lodestone_model::BlockAabb| {
+        if at_max {
+            bx.max[axis] >= 1.0 - EPS
+        } else {
+            bx.min[axis] <= EPS
+        }
+    };
+    if !boxes.iter().any(on_plane) {
+        return false;
+    }
+
+    let mut a0 = 0.0f32;
+    while a0 < 1.0 - EPS {
+        // The next `a`-breakpoint strictly past `a0`, clamped to the cell edge.
+        let mut a1 = 1.0f32;
+        for bx in boxes.iter().filter(|bx| on_plane(bx)) {
+            for c in [bx.min[a], bx.max[a]] {
+                if c > a0 + EPS && c < a1 {
+                    a1 = c;
+                }
+            }
+        }
+        let mid_a = 0.5 * (a0 + a1);
+        // Greedy 1-D cover of `b` over the strip at `mid_a`.
+        let mut b0 = 0.0f32;
+        loop {
+            if b0 >= 1.0 - EPS {
+                break;
+            }
+            let mut reach = b0;
+            for bx in boxes.iter().filter(|bx| on_plane(bx)) {
+                let spans_a = bx.min[a] <= mid_a && bx.max[a] >= mid_a;
+                if spans_a && bx.min[b] <= b0 + EPS && bx.max[b] > reach {
+                    reach = bx.max[b];
+                }
+            }
+            if reach <= b0 + EPS {
+                return false;
+            }
+            b0 = reach;
+        }
+        a0 = a1;
+    }
+    true
+}
+
+/// Which of a fluid cell's faces the block **sharing that cell** already
+/// occludes — vanilla `FluidRenderer.isFaceOccludedBySelf`, the half of
+/// `shouldRenderFace` that is not about neighbours at all.
+///
+/// For a waterlogged stair the stair and the water occupy one cell, so the
+/// water's face on the stair's solid side lands **coplanar** with the stair's own
+/// face and the two z-fight. Vanilla does not inset the water; it declines to
+/// emit the face.
+///
+/// # There is no `up`, and that is vanilla, not an omission
+///
+/// `FluidRenderer.tesselate` computes `renderUp` as bare
+/// `!isNeighborSameFluid(self, above)` — it is the only one of the six faces that
+/// does **not** go through `shouldRenderFace`, so the self test never reaches it.
+/// A waterlogged top slab therefore still draws its water surface *inside* the
+/// slab. Adding `up` here would be a divergence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SelfOcclusion {
+    /// The bottom face.
+    pub down: bool,
+    /// The `-Z` side.
+    pub north: bool,
+    /// The `+Z` side.
+    pub south: bool,
+    /// The `+X` side.
+    pub east: bool,
+    /// The `-X` side.
+    pub west: bool,
+}
+
+impl SelfOcclusion {
+    /// Whether every face is un-occluded — the answer for an empty shape, and
+    /// what a view that does not model self-occlusion returns.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// [`SelfOcclusion`] for a block whose outline shape is `boxes`, via
+/// [`face_fully_covered`] on the five faces vanilla's `shouldRenderFace` covers.
+///
+/// The caller is responsible for the `canOcclude` half of vanilla's
+/// `occlusionShape = canOcclude ? getOcclusionShape(state) : Shapes.empty()`:
+/// pass an empty slice (or skip the call) for a block that does not occlude, or
+/// every waterlogged leaves block — full-cube outline, `noOcclusion()` in vanilla
+/// — would cull its own water away entirely.
+#[must_use]
+pub fn self_occlusion(boxes: &[lodestone_model::BlockAabb]) -> SelfOcclusion {
+    if boxes.is_empty() {
+        return SelfOcclusion::default();
+    }
+    SelfOcclusion {
+        down: face_fully_covered(boxes, Direction::Down),
+        north: face_fully_covered(boxes, Direction::North),
+        south: face_fully_covered(boxes, Direction::South),
+        east: face_fully_covered(boxes, Direction::East),
+        west: face_fully_covered(boxes, Direction::West),
     }
 }
 

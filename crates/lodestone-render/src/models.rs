@@ -106,7 +106,7 @@
 
 use glam::{Mat4, Vec3};
 use lodestone_assets::fluid::{
-    FaceSet, FlowNeighbor, FluidGeometry, SideOverlay, bake_fluid, corner_heights,
+    FaceSet, FlowNeighbor, FluidGeometry, SelfOcclusion, SideOverlay, bake_fluid, corner_heights,
     flow_horizontal, neighbor_height,
 };
 use lodestone_assets::{BakedQuad, Direction, GuiLight};
@@ -1122,6 +1122,34 @@ pub trait FluidSectionView {
         None
     }
 
+    /// Which of the fluid cell's own faces the block **sharing that cell**
+    /// already covers — vanilla `FluidRenderer.isFaceOccludedBySelf`, the other
+    /// half of `shouldRenderFace`.
+    ///
+    /// This asks about `(x, y, z)` *itself*, never a neighbour, which is exactly
+    /// why it needs its own method: every other query on this trait is about the
+    /// neighbourhood, and answering this one from the neighbourhood is the bug it
+    /// exists to fix. A waterlogged stair shares one cell with its water, so the
+    /// water's face on the stair's solid side is coplanar with the stair's own
+    /// face and the two z-fight; vanilla culls the face rather than insetting the
+    /// water.
+    ///
+    /// Consulted once per fluid cell (not per neighbour), so it is a live call on
+    /// the view rather than a [`FluidGrid`] field. Defaults to all-`false`, which
+    /// reproduces the pre-fix behaviour exactly — the same compatibility shape
+    /// [`overlay_at`](Self::overlay_at) and
+    /// [`partial_occluder_y_range_at`](Self::partial_occluder_y_range_at) use.
+    ///
+    /// An implementation should hand
+    /// [`lodestone_assets::fluid::self_occlusion`] the state's **outline** boxes,
+    /// and must apply vanilla's `canOcclude` gate itself: see that function's
+    /// doc for why a waterlogged leaves block otherwise culls all of its own
+    /// water away.
+    fn self_occlusion_at(&self, x: i32, y: i32, z: i32) -> SelfOcclusion {
+        let _ = (x, y, z);
+        SelfOcclusion::default()
+    }
+
     /// [`fluid_at`](Self::fluid_at), [`occludes_at`](Self::occludes_at) and
     /// [`overlay_at`](Self::overlay_at) for one cell, **in a single call** —
     /// the fill primitive for [`crate::fluid_grid::FluidGrid`].
@@ -1254,6 +1282,11 @@ fn should_render_backward_up_face_in(
 /// — which is why water under a solid block still draws its surface into the
 /// `1/9`-block gap.
 ///
+/// Every face except **up** additionally goes through `shouldRenderFace`'s *self*
+/// half, [`FluidSectionView::self_occlusion_at`]: the block sharing the fluid's
+/// own cell. That is what stops a waterlogged stair's water emitting a face
+/// coplanar with the stair's own solid side.
+///
 /// A **side** face additionally checks [`FluidSectionView::partial_occluder_y_range_at`]
 /// against `max` of the two corners on that edge — `dirt_path`/`farmland` banks
 /// and other full-footprint, height-reduced neighbours now cull the way vanilla's
@@ -1366,13 +1399,27 @@ pub fn mesh_fluids<V: FluidSectionView + ?Sized>(view: &V) -> FluidMeshes {
                                 min_y <= 1e-4 && max_y + 1e-4 >= face_height
                             })
                 };
+                // `shouldRenderFace`'s *self* half: the block sharing this cell.
+                // Note vanilla applies it to `down` and the four sides but **not**
+                // to `up` — `renderUp` is bare `!isNeighborSameFluid`, the one
+                // face that skips `shouldRenderFace` entirely. See
+                // `SelfOcclusion`.
+                let self_occ = view.self_occlusion_at(xi, yi, zi);
                 let faces = FaceSet {
                     up: !same(0, 1, 0) && !up_occluded,
-                    down: emit(0, -1, 0),
-                    north: !same(0, 0, -1) && !side_occluded(0, -1, corners[0].max(corners[1])),
-                    south: !same(0, 0, 1) && !side_occluded(0, 1, corners[2].max(corners[3])),
-                    east: !same(1, 0, 0) && !side_occluded(1, 0, corners[1].max(corners[2])),
-                    west: !same(-1, 0, 0) && !side_occluded(-1, 0, corners[0].max(corners[3])),
+                    down: emit(0, -1, 0) && !self_occ.down,
+                    north: !same(0, 0, -1)
+                        && !self_occ.north
+                        && !side_occluded(0, -1, corners[0].max(corners[1])),
+                    south: !same(0, 0, 1)
+                        && !self_occ.south
+                        && !side_occluded(0, 1, corners[2].max(corners[3])),
+                    east: !same(1, 0, 0)
+                        && !self_occ.east
+                        && !side_occluded(1, 0, corners[1].max(corners[2])),
+                    west: !same(-1, 0, 0)
+                        && !self_occ.west
+                        && !side_occluded(-1, 0, corners[0].max(corners[3])),
                 };
 
                 let tint_index = match kind {

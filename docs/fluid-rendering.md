@@ -155,6 +155,25 @@ predicate:
 
 where `shouldRenderFace = !isNeighborSameFluid(self, neighbourFluid) && !isFaceOccludedBySelf(ownState, dir)`.
 
+**Read that second conjunct again: it is about the fluid's own cell, not a
+neighbour.** It is the reason `up` is listed separately above — `renderUp` is bare
+`!isNeighborSameFluid`, the one face that never goes through `shouldRenderFace`, so
+a waterlogged top slab still draws its surface inside the slab. And it is the reason
+`FluidRenderer` has *two* occlusion helpers around one shared body:
+
+```java
+isFaceOccludedByNeighbor(dir, height, neighbourState)  // isFaceOccludedByState(dir, height, neighbourState)
+isFaceOccludedBySelf(state, dir)                       // isFaceOccludedByState(dir.getOpposite(), 1.0F, state)
+```
+
+Two differences, both load-bearing. The self call passes `dir.getOpposite()`, which
+inside `isFaceOccludedByState` un-inverts to `state.getFaceOcclusionShape(dir)` —
+the block's own face on the side the fluid face points. And it passes height
+**`1.0F`**, never the fluid's real surface height, so the self test has no fluid
+height in it at all and collapses to a pure "is the block's own face on this side
+the whole square". `lodestone_assets::fluid::face_fully_covered` is exactly that
+question, and `SelfOcclusion` is the five-face answer.
+
 `isFaceOccludedByState` is the interesting one:
 
 ```java
@@ -282,6 +301,19 @@ jar's** `grass_block`, not on a hand-written view.
   never in `bake_fluid`. Start at `occludes_at` for the *neighbour*, then at the
   `emit` closure in `mesh_fluids`. Print the neighbour's `StateModel.face_occludes`
   before theorising.
+- **…but if the cell is *waterlogged*, ask about the cell itself before any
+  neighbour.** `self_occlusion_at` / `SelfOcclusion` is the only query on
+  `FluidSectionView` that is about `(x, y, z)` and not its neighbourhood, so
+  the reflex to reach for the neighbourhood is wrong here — and reaching for it
+  anyway is how this rule went missing for as long as it did.
+- **Gotcha: self-cell questions answered from neighbours are a *family*, and two
+  instances are already fixed.** `tesselate`'s `if (heightSelf >= 1.0F)` corner
+  short-circuit (a falling column rendered `10/12` tall, see `corner_heights`) and
+  `isFaceOccludedBySelf` (waterlogged stairs z-fighting) were the same mistake in
+  two places. Both survived review because the *neighbour*-facing sibling exists and
+  is correct, so nothing reads as missing. When a fluid defect is local to one cell,
+  check whether the vanilla predicate takes only `pos`/`blockState` before building a
+  neighbourhood for it. Expect a third.
 - **…but if the stray face appears only along *chunk boundaries*, it is not a
   culling bug at all** → the neighbourhood the mesher was handed was incomplete,
   so `occludes_at`/`fluid_at` answered for air that had simply not arrived. That
@@ -338,6 +370,76 @@ this doc used to call "still open" — now has a scoped fix for the single-box,
 full-footprint case (`dirt_path`, `farmland`, slabs, snow layers); the general
 multi-box case (stairs, fences, walls) remains unmodelled and is now the
 documented boundary of this feature rather than an open TODO.
+
+**A sixth divergence was found afterwards, and issue #18's five did not include
+it: `isFaceOccludedBySelf` was never implemented at all.** Reported twice by the
+owner as "waterlogged blocks have z-fighting between the water and the regular
+block texture", and — the diagnostic half — "the sides that should not show the
+water at all (eg the back side of a stair)". Closed below. Two things about how it
+hid are worth more than the fix:
+
+- **This doc already stated the rule.** "Which face is emitted" has carried
+  `shouldRenderFace = !isNeighborSameFluid(…) && !isFaceOccludedBySelf(…)`
+  verbatim the whole time, and `mesh_fluids` implemented only the first conjunct.
+  A doc that transcribes vanilla correctly is not evidence the code does; the
+  transcription was the *plan*, and nothing checked it against the implementation.
+- **Every other occlusion query on the trait is about a neighbour**, so the
+  reviewer's and the implementer's reflex — "which neighbour is wrong?" — cannot
+  reach it. `crates/lodestone-assets/src/fluid.rs`'s own module docs described the
+  face flags as "a face touching a **neighbouring** full/opaque cell", with zero
+  mentions of the same cell anywhere in the tree.
+
+- **Closed — `isFaceOccludedBySelf`, the block sharing the fluid's cell.** A
+  waterlogged stair occupies one cell with its water, so the water's face on the
+  stair's solid side landed **coplanar** with the stair's own face — 1 mm apart
+  after `bake_fluid`'s `0.001` inset, which is the distance that reads as
+  z-fighting at range rather than as a hidden face. The reported fix ("inset the
+  water a bit more") is not vanilla's: vanilla does not emit the face.
+
+  - `lodestone_assets::fluid::face_fully_covered(&[BlockAabb], Direction)` — the
+    2-D coverage predicate, and **exact for any axis-aligned union**, not scoped
+    the way `full_footprint_y_range` is. It can afford to be: the self call fixes
+    the probe height at `1.0F`, so there is no height to compare and
+    `Shapes.blockOccludes` degenerates to "is the occluder's boundary layer the
+    whole square". A stair's solid side is two boxes stacked, which is precisely
+    what the single-box reduction next door has to decline — so *stairs remain
+    unmodelled for the neighbour test and are modelled for the self test*, and
+    those two sentences are not in conflict.
+  - `lodestone_assets::fluid::self_occlusion(&[BlockAabb]) -> SelfOcclusion` —
+    five faces, **no `up`**, because vanilla's `renderUp` skips
+    `shouldRenderFace`. Adding `up` would be the divergence.
+  - `FluidSectionView::self_occlusion_at(x, y, z)` (default all-`false`, the same
+    compatibility shape as `overlay_at`), AND-ed into `down`/`north`/`south`/
+    `east`/`west` in `mesh_fluids`.
+  - **Live**: `SnapshotFluidView::self_occlusion_at` in
+    `crates/lodestone-shell/src/mesher.rs`, reading
+    `lodestone_data::outline_shapes::outline_boxes`.
+
+  **One approximation, and it is `canOcclude`.** Vanilla builds the shape this test
+  reads as `canOcclude ? getOcclusionShape(state) : Shapes.empty()`, and
+  `canOcclude` has no getter, is absent from `blocks.json`, and has no table in
+  `lodestone-data`. `BlockModels::layer(id) == RenderLayer::Solid` stands in for it.
+  The case that makes the gate load-bearing is **waterlogged leaves**: a full-cube
+  outline shape that vanilla marks `noOcclusion()`, so without the layer gate all
+  five faces self-cull and a waterlogged leaves block loses its water entirely.
+  Measured: leaves classify `Cutout`, and their outline shape does report all five
+  faces covered — so the gate is what spares them, and
+  `fluid_self_occlusion.rs` asserts both halves of that rather than describing
+  either. If a future block turns up with opaque textures and `noOcclusion()`, this
+  is the approximation that breaks, and the fix is a real `canOcclude` census.
+
+  **No golden scene moved, and that is a finding.**
+  `fluid_mesh_identity_gate.rs` re-ran byte-identical across all 13 scenes, for
+  **two independent** reasons: its `SceneView` does not override
+  `self_occlusion_at`, and the corpus's only waterlogged block —
+  `stone_slab[type=bottom,waterlogged=true]` in the `waterlogged` scene — sits
+  interleaved with water sources on every side, so `same`/`occludes` already cull
+  every face the self test would. That is why the `waterlogged` scene's digest is
+  **byte-identical to `surface`'s** (`vh=f2c83892c97cf83d`): the corpus contains a
+  waterlogged block in a configuration indistinguishable from plain water. Adding
+  the override to `SceneView` would still move nothing today but would let the
+  golden see a future regression here; a fixture with a waterlogged block *beside
+  air* is what the corpus actually lacks.
 
 - **Closed — the up face is no longer culled by a solid block above.**
   `mesh_fluids`'s `up_occluded` now matches `isFaceOccludedByState`'s
@@ -581,3 +683,48 @@ Jar-backed, `#[ignore]`d:
   controls.
 - `crates/lodestone-render/tests/fluid_gate.rs` — the GPU translucency gate (the
   sea floor showing through water), unrelated to face selection.
+- `crates/lodestone-shell/tests/fluid_self_occlusion.rs` — `isFaceOccludedBySelf`
+  on the **live** path (`mesh_snapshot_fluids`, not `mesh_simple`), measuring
+  **per face** rather than a total, because a matching count with the wrong faces
+  surviving is a different bug. Eight fixtures, each a single block alone in air:
+
+  | fixture | up | down | N | S | E | W | total |
+  |---|---|---|---|---|---|---|---|
+  | `minecraft:water[level=0]` | 2 | 1 | 2 | 2 | 2 | 2 | 11 |
+  | `oak_stairs[facing=north,half=bottom]` | 2 | 0 | **0** | 2 | 2 | 2 | 8 |
+  | `oak_stairs[facing=south,half=bottom]` | 2 | 0 | 2 | **0** | 2 | 2 | 8 |
+  | `oak_stairs[facing=north,half=top]` | 2 | 1 | **0** | 2 | 2 | 2 | 9 |
+  | `stone_slab[type=bottom]` | 2 | **0** | 2 | 2 | 2 | 2 | 10 |
+  | `oak_fence` (no connections) | 2 | 1 | 2 | 2 | 2 | 2 | 11 |
+  | `oak_leaves` | 2 | 1 | 2 | 2 | 2 | 2 | 11 |
+  | `oak_stairs[waterlogged=false]` | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+  Every row but the last two is waterlogged. **The plain-water row is the
+  no-self-occlusion hypothesis, executed rather than asserted** — a source alone in
+  air has the same corner heights as the waterlogged stair, so its 11 quads are
+  exactly what the stair emitted before the fix. Confirmed by neutering
+  `self_occlusion_at` and re-running: all five waterlogged rows collapse to
+  precisely `down=1 east=2 north=2 south=2 up=2 west=2`, the coplanar `north` face
+  included, while all three controls keep passing.
+
+  **`down` is 1, not 2, and predicting the symmetric 2 is how this gate failed its
+  first run.** Every face carries `FluidRenderer.addFace`'s reversed copy except the
+  bottom, which `tesselate` passes `addBackFace = false` for. An open water cell is
+  11 quads.
+
+  The controls: the **fence post** touches no side boundary, so both hypotheses
+  agree — a gate built on a fence would be blind (the *world* species, made to
+  fire); **leaves** must keep all five faces despite a full-cube outline, and the
+  test asserts both that their outline *would* cull all five and that their layer
+  is not `Solid`, so "leaves are fine" cannot pass vacuously; the **dry stair**
+  proves the water comes from the waterlogging. Mismatches are collected and
+  reported together — an `assert!` inside the loop would abort on the first
+  fixture and leave the rest as arguments.
+
+  Hermetic siblings in the same file (no jar): `face_coverage_is_exact_for_a_two_box_union`
+  builds `StairBlock.SHAPE_STRAIGHT`'s two boxes by hand and checks the single box
+  alone answers "not covered" on the north face, so the union really is what is
+  under test; `self_occlusion_has_no_up_face_because_vanilla_does_not_test_one`
+  pins the missing `up` against a future tidy-up, and shows
+  `face_fully_covered` *does* answer for `Up` so the absence is a modelling
+  decision rather than the predicate failing.
