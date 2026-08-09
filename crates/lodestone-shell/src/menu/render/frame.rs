@@ -509,6 +509,21 @@ pub struct MenuFrame<'a> {
     /// [`MenuRenderer::render`] so that call site (owned by `app.rs`) does not
     /// need to change. See [`logical_canvas`].
     pub gui_scale: u32,
+    /// The user's `panoramaSpeed` option, `0.0..=1.0` — see
+    /// [`crate::config::Options::panorama_speed`]. Stamped onto every screen's
+    /// frame by [`frame_for`] for [`Self::gui_scale`]'s reason, and read by
+    /// [`MenuRenderer`]'s panorama block, which hands it to
+    /// `super::panorama::PanoramaRenderer::set_speed` before advancing the spin.
+    ///
+    /// **An `Option` rather than a bare `f32`, and that is load-bearing rather
+    /// than defensive.** `MenuFrame` derives `Default`, so a bare `f32` would be
+    /// `0.0` on any frame built by hand — and `0.0` is a *legitimate* setting
+    /// here, a deliberately stationary panorama. An unstamped hermetic frame would
+    /// therefore freeze the sky and look exactly like the option working
+    /// correctly. `None` means "nothing said", and the renderer leaves its own
+    /// speed alone; the same reason [`Self::cursor`] is an `Option` instead of
+    /// defaulting to `(0, 0)`.
+    pub panorama_speed: Option<f32>,
     /// Whether this frame is drawn **over** an already-rendered scene rather
     /// than replacing it — [`Screen::Paused`](super::Screen::Paused)'s pause
     /// menu, via [`pause_frame`] and

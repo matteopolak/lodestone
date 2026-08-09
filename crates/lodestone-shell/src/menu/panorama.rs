@@ -124,9 +124,15 @@ pub const Z_FAR: f32 = 10.0;
 pub const TILT_DEGREES: f32 = 10.0;
 /// Degrees of yaw per tick at speed 1.0 — `Panorama.java:27`'s `delta * 0.1F`.
 pub const SPIN_DEGREES_PER_TICK: f32 = 0.1;
-/// `panoramaSpeed`'s default (`Options.java:313-320`). The option itself is not
-/// wired into this repo's settings screen yet; [`PanoramaRenderer::set_speed`] is
-/// the seam for when it is.
+/// `panoramaSpeed`'s default — vanilla's `Options::panoramaSpeed` field, a
+/// `UnitDouble` constructed with `1.0`.
+///
+/// This is the seed [`PanoramaRenderer::new`] starts at, **not** the value the
+/// title screen runs at: the option is live now, and
+/// `MenuRenderer::render_inner` pushes it through
+/// [`PanoramaRenderer::set_speed`] on every frame. This doc used to end *"The
+/// option itself is not wired into this repo's settings screen yet"* — true when
+/// written, and the reason `set_speed` sat there with zero callers.
 pub const DEFAULT_SPIN_SPEED: f32 = 1.0;
 /// Ticks per real second, for turning `Instant` deltas into vanilla's
 /// `getRealtimeDeltaTicks()`.
@@ -741,6 +747,13 @@ impl PanoramaRenderer {
 
     /// Override `panoramaSpeed` (1.0 is vanilla's default; 0.0 holds the spin,
     /// which is what `Panorama.holdSpin` achieves).
+    ///
+    /// Called from `MenuRenderer::render_inner` immediately before
+    /// [`Self::advance`], off `MenuFrame::panorama_speed` — every frame rather than
+    /// once at attach, because the option is editable while the panorama is on
+    /// screen (the settings tree draws over it). **Zero callers until then**, which
+    /// is why the title screen used to spin at [`DEFAULT_SPIN_SPEED`] whatever the
+    /// player set.
     pub fn set_speed(&mut self, speed: f32) {
         self.speed = speed;
     }

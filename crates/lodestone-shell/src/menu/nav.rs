@@ -1343,6 +1343,15 @@ impl MenuNav {
         self.options.gui_scale
     }
 
+    /// Vanilla's **Panorama Scroll Speed** option — see
+    /// [`crate::config::Options::panorama_speed`]. Read by
+    /// `render::frame_for`, which stamps it onto every frame beside
+    /// [`Self::gui_scale`]; `MenuRenderer`'s panorama block is the consumer.
+    #[must_use]
+    pub fn panorama_speed(&self) -> f32 {
+        self.options.panorama_speed
+    }
+
     /// Vanilla's **View Bobbing** option — see
     /// [`crate::config::Options::view_bobbing`]. Read once per presented frame
     /// by `app.rs` and handed to `Sim::set_view_bobbing`.
@@ -3504,31 +3513,31 @@ impl MenuNav {
             // `hud_frame.chat_options` from `self.nav.options()` every frame —
             // so no threading is needed beyond the mutation here.
             SettingsOutcome::Cycle(LiveOption::ChatScale) => {
-                self.step_chat_option(|o| &mut o.chat_scale, 1);
+                self.step_unit_double_option(|o| &mut o.chat_scale, 1);
                 MenuAction::None
             }
             SettingsOutcome::Cycle(LiveOption::ChatWidth) => {
-                self.step_chat_option(|o| &mut o.chat_width, 1);
+                self.step_unit_double_option(|o| &mut o.chat_width, 1);
                 MenuAction::None
             }
             SettingsOutcome::Cycle(LiveOption::ChatHeightFocused) => {
-                self.step_chat_option(|o| &mut o.chat_height_focused, 1);
+                self.step_unit_double_option(|o| &mut o.chat_height_focused, 1);
                 MenuAction::None
             }
             SettingsOutcome::Cycle(LiveOption::ChatHeightUnfocused) => {
-                self.step_chat_option(|o| &mut o.chat_height_unfocused, 1);
+                self.step_unit_double_option(|o| &mut o.chat_height_unfocused, 1);
                 MenuAction::None
             }
             SettingsOutcome::Cycle(LiveOption::ChatLineSpacing) => {
-                self.step_chat_option(|o| &mut o.chat_line_spacing, 1);
+                self.step_unit_double_option(|o| &mut o.chat_line_spacing, 1);
                 MenuAction::None
             }
             SettingsOutcome::Cycle(LiveOption::ChatOpacity) => {
-                self.step_chat_option(|o| &mut o.chat_opacity, 1);
+                self.step_unit_double_option(|o| &mut o.chat_opacity, 1);
                 MenuAction::None
             }
             SettingsOutcome::Cycle(LiveOption::TextBackgroundOpacity) => {
-                self.step_chat_option(|o| &mut o.chat_background_opacity, 1);
+                self.step_unit_double_option(|o| &mut o.chat_background_opacity, 1);
                 MenuAction::None
             }
             SettingsOutcome::Cycle(LiveOption::ChatColors) => {
@@ -3544,11 +3553,24 @@ impl MenuNav {
             // documented departure for `sensitivity` — see
             // `Config::resolve_persisted`.
             SettingsOutcome::Cycle(LiveOption::Sensitivity) => {
-                self.step_chat_option(|o| &mut o.sensitivity, 1);
+                self.step_unit_double_option(|o| &mut o.sensitivity, 1);
                 MenuAction::None
             }
             SettingsOutcome::Cycle(LiveOption::RenderDistance) => {
                 self.step_render_distance(1);
+                MenuAction::None
+            }
+            // The two Accessibility-page sliders whose consumers were already
+            // live. Neither needs threading beyond the mutation here:
+            // `app/redraw.rs` already reads `MenuNav::damage_tilt_strength` every
+            // frame, and `render::frame_for` stamps
+            // `MenuFrame::panorama_speed` onto every frame beside `gui_scale`.
+            SettingsOutcome::Cycle(LiveOption::DamageTiltStrength) => {
+                self.step_unit_double_option(|o| &mut o.damage_tilt_strength, 1);
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::PanoramaSpeed) => {
+                self.step_unit_double_option(|o| &mut o.panorama_speed, 1);
                 MenuAction::None
             }
         }
@@ -3628,15 +3650,20 @@ impl MenuNav {
         false
     }
 
-    /// Steps one `UnitDouble`-backed chat option and persists it eagerly.
+    /// Steps one `UnitDouble`-backed option and persists it eagerly.
     ///
-    /// Takes a field selector rather than being written out eight times: every
-    /// one of these options has an identical `[0, 1]` domain and an identical
-    /// wrap, so the only thing that varies is which field is being moved. The
+    /// Takes a field selector rather than being written out once per option:
+    /// every one of these has an identical `[0, 1]` domain and an identical wrap,
+    /// so the only thing that varies is which field is being moved. The
     /// per-option *semantics* (the pixel and percent mappings, the OFF caption)
     /// live in `menu::options::live_value`, where the vanilla stringifier they
     /// come from is cited.
-    fn step_chat_option(
+    ///
+    /// **Was `step_chat_option`**, and the rename is the point rather than
+    /// tidying: it now carries the Damage Tilt and Panorama Scroll Speed rows on
+    /// the Accessibility page too, and a name claiming otherwise is how the next
+    /// reader concludes there is no generic stepper and writes a second one.
+    fn step_unit_double_option(
         &mut self,
         field: impl FnOnce(&mut Options) -> &mut f32,
         delta: i32,
@@ -5332,6 +5359,238 @@ mod tests {
         // the list above cannot make this vacuously green.
         assert!(
             !src.contains("chat_opts.chat_nonexistent_field"),
+            "the detector must not match a field that is not there"
+        );
+    }
+
+    /// **Damage Tilt is a working control, and the tilt it produces is
+    /// predicted.**
+    ///
+    /// This option was the chat batch's exact inverse and worse: the field was
+    /// persisted *and* `app/redraw.rs` already fed
+    /// `MenuNav::damage_tilt_strength` to `RenderState::set_damage_tilt_strength`
+    /// every frame, so the whole camera-tilt consumer was honoured — and the row
+    /// drew from `UNIT_DOUBLE_DEFAULTS`' frozen `1.0`, so the only way to reach it
+    /// was to hand-edit `options.json`. Links 1 and 5 present, 2–4 missing.
+    ///
+    /// **The expected values come from vanilla's formula, evaluated outside
+    /// `BobFrame`.** `GameRenderer.bobHurt` is
+    /// `-sin((hurt/duration)^4 * PI) * 14 * strength`, so at `hurt == 5` of a
+    /// 10-tick window the shaped term is `sin(0.5^4 * PI) = sin(PI/16)` and the
+    /// tilt is `-14 * sin(PI/16) * strength`. That is recomputed here from
+    /// `HURT_DURATION_TICKS` and the literal 14, not read back out of
+    /// `hurt_roll_degrees`.
+    ///
+    /// **`0.0` is the discriminating input, not a round number.** Clicking 1.0
+    /// wraps to 0.0 (`step_unit_double`'s documented wrap), and the accessibility
+    /// contract is that `0.0` genuinely *disables* the tilt rather than shrinking
+    /// it — so this asserts exactly zero, which a "scale it down a bit"
+    /// implementation fails. The second click lands on 0.1, where the correct
+    /// hypothesis (`-14 sin(PI/16) * 0.1`) and the wrong one (the frozen table
+    /// default `1.0`) differ by a factor of ten.
+    #[test]
+    fn the_damage_tilt_row_moves_the_option_and_the_tilt_it_produces() {
+        use crate::camera_rig::{BobFrame, HURT_DURATION_TICKS};
+
+        // Vanilla's magnitude, computed here rather than asked of the subject.
+        let expected_tilt = |strength: f32| -> f32 {
+            let t = 5.0 / HURT_DURATION_TICKS;
+            -(t * t * t * t * std::f32::consts::PI).sin() * 14.0 * strength
+        };
+        let measured = |strength: f32| -> f32 {
+            BobFrame {
+                walk_phase: 0.0,
+                bob: 0.0,
+                hurt: 5.0,
+                hurt_dir_degrees: 0.0,
+                death_time: 0.0,
+            }
+            .hurt_roll_degrees(strength)
+        };
+
+        let (mut nav, path) = self::nav("settings-damage-tilt");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        open_settings_page(
+            &mut nav,
+            &mut ui,
+            crate::menu::options::SettingsPage::Accessibility,
+        );
+        let row = settings_row(&mut nav, &mut ui, is_option("damageTiltStrength"));
+
+        assert_eq!(
+            nav.damage_tilt_strength(),
+            1.0,
+            "premise: vanilla's default is a full-strength tilt"
+        );
+        assert!(
+            (measured(1.0) - expected_tilt(1.0)).abs() < 1e-5,
+            "premise: the consumer must already match vanilla's formula at the \
+             default — expected {}, got {}",
+            expected_tilt(1.0),
+            measured(1.0)
+        );
+        assert!(
+            measured(1.0).abs() > 2.0,
+            "premise: the default tilt must be large enough that zero is \
+             distinguishable from it; it is {} degrees",
+            measured(1.0)
+        );
+
+        // Click 1: 1.0 steps past the top and wraps to 0.0 — the accessibility
+        // value, which must switch the tilt off completely.
+        assert_eq!(nav.click(&mut ui, row), MenuAction::None);
+        assert_eq!(nav.damage_tilt_strength(), 0.0, "1.0 + 0.1 wraps to 0.0");
+        assert_eq!(
+            measured(0.0), 0.0,
+            "a strength of 0.0 must produce exactly no tilt, not a small one — \
+             that is the accessibility contract"
+        );
+
+        // Click 2: 0.1. The correct and the frozen-default hypotheses differ by
+        // 10x here, so this is a magnitude assertion rather than a direction one.
+        assert_eq!(nav.click(&mut ui, row), MenuAction::None);
+        let got = nav.damage_tilt_strength();
+        assert!((got - 0.1).abs() < 1e-6, "expected 0.1, got {got}");
+        assert!(
+            (measured(0.1) - expected_tilt(0.1)).abs() < 1e-5,
+            "expected {} degrees, the consumer produced {}",
+            expected_tilt(0.1),
+            measured(0.1)
+        );
+        assert!(
+            (measured(0.1) - expected_tilt(1.0)).abs() > 1.0,
+            "the wrong hypothesis (the frozen table default 1.0) must be far from \
+             the measurement, or this passes either way"
+        );
+
+        // The label is vanilla's `percentValueOrOffLabel`, not the plain percent
+        // its neighbours use, so OFF at zero and a percentage above it. The two
+        // stringifiers differ **only** at zero, which is why that value is pinned.
+        assert_eq!(
+            crate::menu::options::live_value(
+                crate::menu::options::LiveOption::DamageTiltStrength,
+                nav.options()
+            ),
+            "10%"
+        );
+        let mut off = *nav.options();
+        off.damage_tilt_strength = 0.0;
+        assert_eq!(
+            crate::menu::options::live_value(
+                crate::menu::options::LiveOption::DamageTiltStrength,
+                &off
+            ),
+            "OFF",
+            "percentValueOrOffLabel prints OFF at zero; the plain percent \
+             transcription its neighbours use would print 0%"
+        );
+
+        // Persisted eagerly, through a real file, like every other row here.
+        let options_path = path.parent().unwrap().join("options.json");
+        let saved = std::fs::read_to_string(&options_path).expect("options.json must exist");
+        assert!(
+            saved.contains("damage_tilt_strength"),
+            "the value must reach disk on the click, not at exit: {saved}"
+        );
+        assert_eq!(nav.options_save_error(), None);
+    }
+
+    /// **Panorama Scroll Speed is a working control, and the value reaches the
+    /// renderer.**
+    ///
+    /// The island here pointed the other way from Damage Tilt's:
+    /// `panorama::PanoramaRenderer::set_speed` existed, was unit-tested, and had
+    /// **zero callers**, so the title screen always span at `DEFAULT_SPIN_SPEED`
+    /// whatever the option said.
+    ///
+    /// Two links are checked, because they fail independently:
+    ///
+    /// 1. `frame_for` stamps `MenuFrame::panorama_speed` from the live option, on
+    ///    **every** screen — the panorama is drawn behind every non-overlay
+    ///    screen, not only the title screen.
+    /// 2. `render/renderer.rs` still hands that field to `set_speed`. That call
+    ///    lives inside a `wgpu`-owning method a unit test cannot run, so it is
+    ///    checked by reading the source — `app_rs_still_threads_every_chat_option_
+    ///    into_the_hud_frame`'s mechanism, for the same reason.
+    ///
+    /// The rate arithmetic itself is `panorama`'s own
+    /// `the_spin_rate_is_two_degrees_per_second_at_vanillas_default_speed`; this
+    /// gate is about the value getting there.
+    #[test]
+    fn the_panorama_speed_row_reaches_the_frame_and_the_renderer() {
+        let (mut nav, _path) = self::nav("settings-panorama-speed");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        open_settings_page(
+            &mut nav,
+            &mut ui,
+            crate::menu::options::SettingsPage::Accessibility,
+        );
+        let row = settings_row(&mut nav, &mut ui, is_option("panoramaSpeed"));
+
+        assert_eq!(
+            nav.panorama_speed(),
+            1.0,
+            "premise: vanilla's default is full speed"
+        );
+
+        // Click 1 wraps 1.0 to 0.0 — a deliberately stationary panorama, which is
+        // the whole point of the option and the value the frame's `Option` wrapper
+        // exists to keep distinguishable from "nothing stamped this".
+        assert_eq!(nav.click(&mut ui, row), MenuAction::None);
+        assert_eq!(nav.panorama_speed(), 0.0);
+
+        let statuses = crate::menu::status::StatusCache::with_probe(
+            crate::menu::status::unavailable_probe(),
+        );
+        let mut favicons = crate::menu::render::FaviconCache::new();
+        let frame = crate::menu::render::frame_for(&ui, &nav, &statuses, &mut favicons)
+            .expect("the settings screen owns its frame");
+        assert_eq!(
+            frame.panorama_speed,
+            Some(0.0),
+            "frame_for must stamp the live value — `Some(0.0)`, not `None`, or the \
+             renderer would keep its own default and the option would do nothing"
+        );
+        drop(frame);
+
+        // And a second value, so this is not passing because the stamp is a
+        // constant that happens to match.
+        assert_eq!(nav.click(&mut ui, row), MenuAction::None);
+        assert!((nav.panorama_speed() - 0.1).abs() < 1e-6);
+        let mut favicons = crate::menu::render::FaviconCache::new();
+        let frame = crate::menu::render::frame_for(&ui, &nav, &statuses, &mut favicons)
+            .expect("the settings screen owns its frame");
+        assert!(
+            frame.panorama_speed.is_some_and(|s| (s - 0.1).abs() < 1e-6),
+            "the stamp must track the option, got {:?}",
+            frame.panorama_speed
+        );
+        drop(frame);
+
+        assert_eq!(
+            crate::menu::options::live_value(
+                crate::menu::options::LiveOption::PanoramaSpeed,
+                nav.options()
+            ),
+            "10%",
+            "the plain percentValueLabel — unlike Damage Tilt beside it, zero here \
+             prints 0% rather than OFF, because a still panorama is a value and \
+             not an off state"
+        );
+
+        // Link 2, the one no unit test can execute.
+        let src = include_str!("render/renderer.rs");
+        assert!(
+            src.contains("frame.panorama_speed") && src.contains("set_speed"),
+            "render/renderer.rs no longer hands `frame.panorama_speed` to \
+             `PanoramaRenderer::set_speed` — the row is an island again, and \
+             nothing else in this crate can see that"
+        );
+        // The control: the detector must be able to report an absence.
+        assert!(
+            !src.contains("frame.panorama_nonexistent_field"),
             "the detector must not match a field that is not there"
         );
     }

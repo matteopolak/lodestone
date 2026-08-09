@@ -377,6 +377,23 @@ impl MenuRenderer {
         if !frame.overlay {
             self.ensure_panorama(device, queue);
             if let Some(pano) = self.panorama.as_mut() {
+                // Vanilla's **Panorama Scroll Speed** accessibility option. Applied
+                // here, immediately before `advance`, rather than once at attach
+                // time: the option is editable while the panorama is on screen (the
+                // settings tree is itself a non-overlay screen, so it is drawn over
+                // this very panorama), and a speed pushed only at attach would take
+                // effect on the next launch.
+                //
+                // `set_speed` had **zero callers** before this — an island in the
+                // "built, tested, reaches no pixels" direction — so the title screen
+                // always span at `DEFAULT_SPIN_SPEED` whatever the option said.
+                //
+                // `None` leaves the renderer's own speed untouched; see
+                // `MenuFrame::panorama_speed` on why an unstamped frame must not read
+                // as a stationary one.
+                if let Some(speed) = frame.panorama_speed {
+                    pano.set_speed(speed);
+                }
                 pano.advance(std::time::Instant::now());
                 pano.prepare(queue, width, height, panorama_dim);
             }
