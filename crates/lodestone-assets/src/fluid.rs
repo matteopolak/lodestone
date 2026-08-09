@@ -177,6 +177,78 @@ fn add_weighted_height(sum: &mut f32, weight: &mut f32, height: f32) {
     }
 }
 
+/// All four top-corner heights, in `[NW, NE, SE, SW]` order — the whole of
+/// vanilla `FluidRenderer.tesselate`'s corner branch, **including the
+/// short-circuit that [`corner_height`] alone does not carry**.
+///
+/// # Why this exists rather than four `corner_height` calls
+///
+/// `tesselate` does not average unconditionally. It first asks whether the
+/// fluid's *own* rendered height is already full, and if so sets every corner to
+/// `1.0` without consulting a single neighbour:
+///
+/// ```text
+/// float heightSelf = this.getHeight(level, type, pos, blockState, fluidState);
+/// if (heightSelf >= 1.0F) {
+///    heightNorthEast = heightNorthWest = heightSouthEast = heightSouthWest = 1.0F;
+/// } else {
+///    ... calculateAverageHeight for each corner ...
+/// }
+/// ```
+///
+/// `heightSelf` reaches `1.0` exactly when the same fluid sits directly above
+/// (`FlowingFluid.getHeight`'s `hasSameAbove` short-circuit) — never from its own
+/// amount, because `WaterFluid.Source.getAmount` is **8**, so even a source's
+/// `getOwnHeight` is `8/9`.
+///
+/// # What averaging instead of short-circuiting looked like
+///
+/// A vertically falling column of water in open air. Every cell has water above,
+/// so `height_self` is `1.0` and vanilla draws all four corners at `1.0` — a
+/// seamless column. Averaging instead pulls each corner down against the air
+/// beside it: `corner_height(1.0, 0.0, 0.0, 0.0)` weights the full self cell ten
+/// times and each air edge once, giving `10 / 12 = 0.8333`. Every block in the
+/// column was rendered a sixth of a block short, so the column had a repeating
+/// horizontal gap in it.
+///
+/// It presented as *triangular* wedges rather than clean bands because the
+/// shortfall is not uniform once anything solid is adjacent: a solid neighbour
+/// contributes `-1.0` and is dropped from the average entirely, so that corner
+/// comes out `10 / 11 = 0.909` while the corner facing open air stays `0.8333`.
+/// Two different corner heights on one quad is a sloped surface, and the
+/// triangulation makes the slope read as a wedge.
+///
+/// Arguments are [`neighbor_height`] values: the four axis neighbours in
+/// Minecraft's convention (north = `-Z`, south = `+Z`, east = `+X`, west = `-X`)
+/// and the four corner diagonals.
+#[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one argument per cell vanilla's own corner branch consults; \
+              grouping them would only move the unpacking to the caller"
+)]
+pub fn corner_heights(
+    height_self: f32,
+    north: f32,
+    south: f32,
+    east: f32,
+    west: f32,
+    diag_nw: f32,
+    diag_ne: f32,
+    diag_se: f32,
+    diag_sw: f32,
+) -> [f32; 4] {
+    if height_self >= 1.0 {
+        return [1.0; 4];
+    }
+    [
+        corner_height(height_self, west, north, diag_nw),
+        corner_height(height_self, east, north, diag_ne),
+        corner_height(height_self, east, south, diag_se),
+        corner_height(height_self, west, south, diag_sw),
+    ]
+}
+
 /// One edge neighbour, as the mesher must describe it for flow computation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FlowNeighbor {
