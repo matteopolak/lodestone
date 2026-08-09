@@ -228,7 +228,12 @@ impl OfflineIdentity {
     /// nothing in the suite reads or writes the developer's real file.
     #[must_use]
     pub fn load_from(path: &Path) -> Self {
-        std::fs::read_to_string(path).map_or_else(|_| Self::default(), |t| Self::from_json(&t))
+        // `crate::platform::store`, not `std::fs`: in a browser this file cannot be
+        // read or written, so the player could never rename themselves and the name
+        // would silently revert to `DEFAULT_USERNAME` on every reload. The browser arm
+        // is `localStorage`. See that module.
+        crate::platform::store::read_text(path)
+            .map_or_else(|_| Self::default(), |t| Self::from_json(&t))
     }
 
     /// Parses `text`, degrading to the default rather than failing: a top level
@@ -327,12 +332,10 @@ impl OfflineIdentity {
     /// The underlying I/O error if the directory cannot be created or the file
     /// cannot be written.
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
+        // `crate::platform::store` — see `crate::config::Options::save_to`.
         let text =
             serde_json::to_string_pretty(&self.to_json()).unwrap_or_else(|_| "{}".to_owned());
-        std::fs::write(path, text)
+        crate::platform::store::write_text(path, &text)
     }
 }
 

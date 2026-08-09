@@ -100,6 +100,132 @@ pub fn epoch_duration() -> std::time::Duration {
         .unwrap_or_default()
 }
 
+/// Small-document persistence: `options.json` and its two siblings.
+///
+/// # What it is
+///
+/// The shell persists three small JSON documents — `Options` (44 live option rows /
+/// 66 live cells, including eleven sound volumes, `fov`, both glint knobs and
+/// `cloudStatus`), `HiddenPlayers` and `SelectedPacks` — each through the same
+/// `load_from(&Path)` / `save_to(&Path)` shape. This module is the one place those
+/// six methods touch storage.
+///
+/// # Why it is not left to degrade
+///
+/// `std::fs` does not crash in a browser, it returns `Err(Unsupported)` (measured).
+/// For most of the shell that is honest absence and perfectly acceptable — "no
+/// saves", "no resource packs". **For options it is not.** Every read would miss and
+/// every write would fail, so a browser player would set four dozen working controls
+/// and lose all of them on reload, with no error anywhere. Silent, total, and
+/// indistinguishable from "the settings screen is broken". That is a defect, not a
+/// degradation, which is why this seam exists and the `saves.rs` one does not.
+///
+/// # How it works
+///
+/// `localStorage` is the natural fit and the reason is structural rather than
+/// convenient: it is **synchronous** and **string-keyed**, which is exactly the shape
+/// `load_from`/`save_to` already have. IndexedDB would be the wrong choice — it is
+/// async, so it could not sit behind these signatures without making every caller
+/// async too. Capacity is ~5 MB per origin against three documents measured in
+/// hundreds of bytes.
+///
+/// The key is the **full path string**, prefixed. That keeps the seam a pure
+/// substitution: callers still pass the `Path` they always did, tests still pass
+/// their own temp paths, and two documents with the same basename in different
+/// directories still cannot collide. It is stable across reloads because
+/// `lodestone_auth::paths::data_dir` derives the same default every time on wasm
+/// (every `var_os` yields `None` there, so it takes the no-`HOME` branch).
+///
+/// # How to change it
+///
+/// Keep [`read_text`] returning `io::Result` rather than `Option`. "Absent" and
+/// "storage refused" are different: `localStorage` genuinely throws in a Safari
+/// private window and when a quota is exceeded, and a caller that collapses both to
+/// `None` turns a *refusal* into a silent reset to defaults — the same defect in a
+/// smaller box.
+#[cfg(target_arch = "wasm32")]
+pub mod store {
+    use std::io::{Error, ErrorKind};
+    use std::path::Path;
+
+    /// Prefix on every key, so the shell's documents are identifiable in devtools
+    /// and cannot collide with anything else on the origin.
+    const KEY_PREFIX: &str = "lodestone:";
+
+    fn key_for(path: &Path) -> String {
+        format!("{KEY_PREFIX}{}", path.display())
+    }
+
+    fn storage() -> Result<web_sys::Storage, Error> {
+        web_sys::window()
+            .ok_or_else(|| Error::new(ErrorKind::Unsupported, "no window: not a browser page"))?
+            .local_storage()
+            .map_err(|e| {
+                // Thrown rather than returned-null in a Safari private window and
+                // where the origin is opaque.
+                Error::other(format!("localStorage unavailable: {e:?}"))
+            })?
+            .ok_or_else(|| Error::new(ErrorKind::Unsupported, "localStorage is disabled"))
+    }
+
+    /// Read a document, or `Err(NotFound)` when it has never been written.
+    ///
+    /// # Errors
+    /// `NotFound` when the key is absent; `Unsupported` when there is no
+    /// `localStorage` at all; otherwise the storage error.
+    pub fn read_text(path: &Path) -> Result<String, Error> {
+        let key = key_for(path);
+        storage()?
+            .get_item(&key)
+            .map_err(|e| Error::other(format!("localStorage read {key}: {e:?}")))?
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("no stored {key}")))
+    }
+
+    /// Write a document, replacing any previous value.
+    ///
+    /// # Errors
+    /// `Unsupported` with no `localStorage`; otherwise the storage error, which in
+    /// practice is a quota failure and is worth surfacing rather than swallowing.
+    pub fn write_text(path: &Path, text: &str) -> Result<(), Error> {
+        let key = key_for(path);
+        storage()?
+            .set_item(&key, text)
+            .map_err(|e| Error::other(format!("localStorage write {key}: {e:?}")))
+    }
+}
+
+/// Small-document persistence. Native: plain `std::fs`, unchanged.
+///
+/// See the browser arm's docs for why this seam exists at all. On this target it is a
+/// direct forward, so native behaviour — including the `create_dir_all` before a
+/// write, which a browser has no analogue for and does not need — is exactly what it
+/// was.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod store {
+    use std::io::Error;
+    use std::path::Path;
+
+    /// Read a document.
+    ///
+    /// # Errors
+    /// The underlying I/O error, including `NotFound` when it does not exist.
+    pub fn read_text(path: &Path) -> Result<String, Error> {
+        std::fs::read_to_string(path)
+    }
+
+    /// Write a document, creating its parent directory first.
+    ///
+    /// # Errors
+    /// The underlying I/O error if the directory cannot be created or the file
+    /// cannot be written.
+    pub fn write_text(path: &Path, text: &str) -> Result<(), Error> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, text)
+    }
+}
+
 /// The browser's asset byte source.
 ///
 /// # What it is

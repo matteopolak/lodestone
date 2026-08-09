@@ -1152,16 +1152,32 @@ fn recipe_entry_id(path: &str, kind: &str) -> Option<lodestone_model::Identifier
 /// loaders that need a jar-backed manager of their own —
 /// `gpu::entities::load_trim_sprites` is the first.
 ///
-/// **This was `#[cfg(test)]` and that is why three copies of its pack-discovery
-/// rule exist** in `gpu::entities::load_humanoid_armour_textures`,
-/// `gpu::entities::load_sheep_wool_texture` and `hud::vanilla_font::jar_manager`,
-/// each with a comment asking for exactly this attribute change. Point new callers
-/// here; the three copies are safe to collapse into it whenever someone is already
-/// editing those functions.
+/// **This was `#[cfg(test)]`, and four copies of its pack-discovery rule grew while it
+/// was** — in `gpu::entities`' three jar loaders and `hud::vanilla_font::jar_manager`,
+/// each with a comment asking for exactly that attribute change. All four now call
+/// this function and the copies are deleted.
+///
+/// Keep it that way, and the reason is stronger than de-duplication: this is the only
+/// place that knows a **browser** session's jar arrives as `fetch`ed bytes through
+/// [`crate::platform::assets`] rather than from a path. A new hand-rolled copy would
+/// find no pack in a browser and return `None`, and every caller here treats `None` as
+/// "draw the fallback" — so the failure would be a title screen with no glyphs, or
+/// armourless players, with nothing in the log to say why.
 pub(crate) fn vanilla_manager() -> Option<ResourceManager> {
-    let root = asset_root()?;
-    let jar = root.join("client.jar");
-    let bytes = std::fs::read(&jar).ok()?;
+    // Browser: the jar bytes were `fetch`ed and installed by `web/` before the app
+    // started. This is the choke point every `load_*` helper in this module reaches —
+    // fonts, the GUI atlas, the panorama, entity textures, the item and particle
+    // atlases, the recipe corpus — so routing it here is what makes the browser draw
+    // a readable title screen rather than an untextured one. Only the byte
+    // acquisition differs; `ZipSource::from_bytes` below is shared.
+    #[cfg(target_arch = "wasm32")]
+    let bytes = crate::platform::assets::bundle()?.client_jar.clone();
+    #[cfg(not(target_arch = "wasm32"))]
+    let bytes = {
+        let root = asset_root()?;
+        let jar = root.join("client.jar");
+        std::fs::read(&jar).ok()?
+    };
     let zip = ZipSource::from_bytes(bytes).ok()?;
     Some(ResourceManager::new(vec![
         Box::new(zip) as Box<dyn ResourceSource>

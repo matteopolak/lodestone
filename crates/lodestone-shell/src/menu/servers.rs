@@ -248,7 +248,10 @@ impl ServerList {
     /// into the game.
     #[must_use]
     pub fn load_from(path: &Path) -> Self {
-        std::fs::read_to_string(path).map_or_else(|_| Self::new(), |t| Self::from_json(&t))
+        // `crate::platform::store` — see `crate::config::Options::save_to`. Without
+        // it a browser player's server list is empty on every reload.
+        crate::platform::store::read_text(path)
+            .map_or_else(|_| Self::new(), |t| Self::from_json(&t))
     }
 
     /// Writes to `path`, creating parent directories as needed.
@@ -258,10 +261,8 @@ impl ServerList {
     /// Returns the underlying I/O error if the directory cannot be created or
     /// the file cannot be written.
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, self.to_json())
+        // `crate::platform::store` — see `crate::config::Options::save_to`.
+        crate::platform::store::write_text(path, &self.to_json())
     }
 }
 

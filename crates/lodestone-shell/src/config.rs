@@ -590,7 +590,12 @@ impl Options {
     /// touches the developer's real settings file).
     #[must_use]
     pub fn load_from(path: &Path) -> Self {
-        std::fs::read_to_string(path).map_or_else(|_| Self::default(), |t| Self::from_json(&t))
+        // See `Self::save_to` on why this is `crate::platform::store` rather than
+        // `std::fs`. Missing *and* refused both fall back to the default here, which
+        // is this method's documented contract — the distinction between the two is
+        // preserved where it can be acted on, in `save_to`'s `Result`.
+        crate::platform::store::read_text(path)
+            .map_or_else(|_| Self::default(), |t| Self::from_json(&t))
     }
 
     fn from_json(text: &str) -> Self {
@@ -827,9 +832,10 @@ impl Options {
     /// Returns the underlying I/O error if the directory cannot be created or
     /// the file cannot be written.
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
+        // `crate::platform::store`, not `std::fs`: a browser has no filesystem, so
+        // every read would miss and every write would fail, and the player would lose
+        // all 44 live option rows on reload with no error anywhere. The browser arm is
+        // `localStorage`, keyed by this same path. See that module.
         let mut obj = serde_json::Map::new();
         obj.insert("gui_scale".into(), self.gui_scale.into());
         // Written only when something was actually rebound, so an untouched
@@ -970,7 +976,7 @@ impl Options {
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
             .unwrap_or_else(|_| "{}".to_string());
-        std::fs::write(path, text)
+        crate::platform::store::write_text(path, &text)
     }
 }
 
@@ -1013,7 +1019,8 @@ impl HiddenPlayers {
     /// As [`Self::load`], from an explicit path (for tests).
     #[must_use]
     pub fn load_from(path: &Path) -> Self {
-        let Ok(text) = std::fs::read_to_string(path) else {
+        // `crate::platform::store` — see `crate::config::Options::save_to`.
+        let Ok(text) = crate::platform::store::read_text(path) else {
             return Self::default();
         };
         let Ok(serde_json::Value::Array(items)) = serde_json::from_str(&text) else {
@@ -1055,9 +1062,7 @@ impl HiddenPlayers {
     /// Returns the underlying I/O error if the directory cannot be created or
     /// the file cannot be written.
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
+        // `crate::platform::store` — see `crate::config::Options::save_to`.
         let items: Vec<serde_json::Value> = self
             .ids
             .iter()
@@ -1065,7 +1070,7 @@ impl HiddenPlayers {
             .collect();
         let text = serde_json::to_string_pretty(&serde_json::Value::Array(items))
             .unwrap_or_else(|_| "[]".to_string());
-        std::fs::write(path, text)
+        crate::platform::store::write_text(path, &text)
     }
 }
 
@@ -1107,7 +1112,8 @@ impl SelectedPacks {
     /// As [`Self::load`], from an explicit path (for tests).
     #[must_use]
     pub fn load_from(path: &Path) -> Self {
-        let Ok(text) = std::fs::read_to_string(path) else {
+        // `crate::platform::store` — see `crate::config::Options::save_to`.
+        let Ok(text) = crate::platform::store::read_text(path) else {
             return Self::default();
         };
         let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&text)
@@ -1160,9 +1166,7 @@ impl SelectedPacks {
     /// Returns the underlying I/O error if the directory cannot be created or
     /// the file cannot be written.
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
+        // `crate::platform::store` — see `crate::config::Options::save_to`.
         let items: Vec<serde_json::Value> = self
             .ids
             .iter()
@@ -1170,7 +1174,7 @@ impl SelectedPacks {
             .collect();
         let text = serde_json::to_string_pretty(&serde_json::Value::Array(items))
             .unwrap_or_else(|_| "[]".to_string());
-        std::fs::write(path, text)
+        crate::platform::store::write_text(path, &text)
     }
 }
 
