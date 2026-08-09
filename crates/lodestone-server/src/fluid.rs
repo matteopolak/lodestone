@@ -96,6 +96,16 @@
 //!   point.
 //! * **Bubble columns** (`LiquidBlock.tick`, `shouldBubbleColumnOccupy`) are not
 //!   modelled at all — this crate has no `BubbleColumnBlock`.
+//! * **A waterlogged block does not originate a spread here.**
+//!   [`run_scheduled_tick`] returns early unless the block is
+//!   `minecraft:water`/`minecraft:lava`, so a waterlogged slab is a source for
+//!   *reading* ([`fluid_state_of`], and so for every neighbour's
+//!   [`new_liquid`]) but never runs [`spread`] itself. Vanilla does: `FlowingFluid.tick`
+//!   takes a position rather than a `LiquidBlock`, `SimpleWaterloggedBlock.placeLiquid`
+//!   schedules a tick at the container's own position, and 50 waterloggable block
+//!   classes schedule `Fluids.WATER` there from `updateShape`. The consequence is
+//!   water reaching *fewer* cells than vanilla past a waterlogged block, never
+//!   more — chosen so the error is inert rather than a flood.
 //!
 //! # How to change it
 //!
@@ -182,6 +192,44 @@ impl FluidKind {
     }
 }
 
+/// One entry of vanilla's **fluid registry** — the distinction [`FluidKind`]
+/// deliberately collapses. `minecraft:water` and `minecraft:flowing_water` are
+/// two different `Fluid` *instances* (`WaterFluid.getSource`/`getFlowing`), and
+/// `Fluid.isSame` is what treats them as one family.
+///
+/// It exists for exactly one predicate, and that predicate is load-bearing:
+/// `SimpleWaterloggedBlock.canPlaceLiquid` is `type == Fluids.WATER`, an
+/// instance comparison, so **no flowing state can ever waterlog a container**.
+/// Passing a `FluidKind` there instead loses the distinction and waterlogs on
+/// every flow — and because [`fluid_state_of`] correctly reports a
+/// `waterlogged=true` block as a *source*, each newly waterlogged block then
+/// feeds its neighbours at `amount = 8`. The level never decrements, so the
+/// spread has no bound at all: the reach stops being `8 / getDropOff` cells and
+/// becomes the size of the waterloggable terrain, at one block write and one
+/// scheduled tick per cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FluidType {
+    /// Which family — `Fluid.isSame`'s equivalence class.
+    pub kind: FluidKind,
+    /// `true` for `minecraft:water`/`minecraft:lava`, `false` for
+    /// `minecraft:flowing_water`/`minecraft:flowing_lava`.
+    pub source: bool,
+}
+
+impl FluidType {
+    /// `WaterFluid.getSource` / `LavaFluid.getSource`.
+    #[must_use]
+    pub const fn source(kind: FluidKind) -> FluidType {
+        FluidType { kind, source: true }
+    }
+
+    /// `WaterFluid.getFlowing` / `LavaFluid.getFlowing`.
+    #[must_use]
+    pub const fn flowing(kind: FluidKind) -> FluidType {
+        FluidType { kind, source: false }
+    }
+}
+
 /// One cell's fluid state — `net.minecraft.world.level.material.FluidState`
 /// reduced to the two properties that decide spreading.
 ///
@@ -211,6 +259,22 @@ impl FluidState {
     #[must_use]
     pub fn is_source(self) -> bool {
         self.amount == 8 && !self.falling
+    }
+
+    /// `FluidState.getType` — which fluid-registry instance this state belongs
+    /// to, source or flowing.
+    ///
+    /// Derived from [`is_source`](Self::is_source), so `getFlowing(8, true)`
+    /// answers *flowing* despite `amount == 8`. That is the whole point:
+    /// [`can_hold_specific_fluid`] compares this against
+    /// `FluidType::source(Water)`, so a falling column must not read as a source
+    /// there either.
+    #[must_use]
+    pub fn fluid_type(self) -> FluidType {
+        FluidType {
+            kind: self.kind,
+            source: self.is_source(),
+        }
     }
 
     /// `FluidState.isFull` — `amount == 8`, falling included
@@ -555,20 +619,31 @@ fn can_hold_any_fluid(state: &str) -> bool {
         || name.ends_with("_wall_sign"))
 }
 
-/// `FlowingFluid.canHoldSpecificFluid` (`FlowingFluid.java:427-429`) →
-/// `LiquidBlockContainer.canPlaceLiquid`, whose one 26.2 implementation
-/// (`SimpleWaterloggedBlock`) accepts **water only, and only when not already
-/// waterlogged**.
-fn can_hold_specific_fluid(state: &str, kind: FluidKind) -> bool {
+/// `FlowingFluid.canHoldSpecificFluid` → `LiquidBlockContainer.canPlaceLiquid`,
+/// whose one 26.2 implementation is `SimpleWaterloggedBlock` and whose entire
+/// body is `type == Fluids.WATER`.
+///
+/// **That is an instance comparison against the *source*, not a family test**,
+/// and it is the only thing in the whole family stopping flowing water from
+/// waterlogging every slab, fence and stair it reaches — see [`FluidType`].
+/// `Fluid.isSame` would answer `true` for the flowing twin; `==` does not.
+///
+/// Vanilla's `canPlaceLiquid` deliberately says nothing about the block being
+/// waterlogged *already*; that clause lives in `placeLiquid`, and so lives in
+/// [`spread_to`] here. Putting it in this predicate instead is inert (an
+/// already-waterlogged block reads as a source, so `canMaybePassThrough`
+/// excludes it first) but it misplaces the rule, and the rule that matters is
+/// the one above.
+fn can_hold_specific_fluid(state: &str, fluid: FluidType) -> bool {
     if !is_waterloggable(state) {
         return true;
     }
-    kind == FluidKind::Water && property_of(state, "waterlogged") != Some("true")
+    fluid == FluidType::source(FluidKind::Water)
 }
 
 /// `FlowingFluid.canHoldFluid` (`FlowingFluid.java:423-425`).
-fn can_hold_fluid(state: &str, kind: FluidKind) -> bool {
-    can_hold_any_fluid(state) && can_hold_specific_fluid(state, kind)
+fn can_hold_fluid(state: &str, fluid: FluidType) -> bool {
+    can_hold_any_fluid(state) && can_hold_specific_fluid(state, fluid)
 }
 
 /// `FluidState.canBeReplacedWith` — whether the fluid **already** at a cell
@@ -746,6 +821,11 @@ fn can_maybe_pass_through(
 /// `FlowingFluid.canPassThrough` (`FlowingFluid.java:318-328`) — the
 /// [`can_maybe_pass_through`] test plus the fluid-specific holdability the
 /// slope search needs.
+///
+/// The fluid it asks about is **always the flowing instance**: `getSlopeDistance`
+/// is the only caller and it passes `this.getFlowing()`. The slope search is
+/// asking whether a *flow* could continue through the cell, so it must not route
+/// through a container that a flow cannot enter.
 fn can_pass_through(
     kind: FluidKind,
     direction: Direction,
@@ -753,7 +833,7 @@ fn can_pass_through(
     target_state: &str,
 ) -> bool {
     can_maybe_pass_through(kind, direction, source_state, target_state)
-        && can_hold_specific_fluid(target_state, kind)
+        && can_hold_specific_fluid(target_state, FluidType::flowing(kind))
 }
 
 // ---------------------------------------------------------------------------
@@ -820,7 +900,10 @@ fn is_water_hole(top_state: &str, bottom_state: &str, kind: FluidKind) -> bool {
     if !can_pass_through_wall(Direction::Down, top_state, bottom_state) {
         return false;
     }
-    is_same_fluid(bottom_state, kind) || can_hold_fluid(bottom_state, kind)
+    // `canHoldFluid(level, bottomPos, bottomState, this.getFlowing())` — the
+    // flowing instance, so a dry slab underneath is **not** a hole even though
+    // it is waterloggable.
+    is_same_fluid(bottom_state, kind) || can_hold_fluid(bottom_state, FluidType::flowing(kind))
 }
 
 /// `FlowingFluid.getNewLiquid` (`FlowingFluid.java:157-193`) — what the fluid at
@@ -974,7 +1057,11 @@ fn spread_targets<S: ChunkSource>(
         let Some(new_fluid) = new_liquid(world, env, test_pos, &test_state, kind) else {
             continue;
         };
-        if !can_hold_specific_fluid(&test_state, new_fluid.kind) {
+        // `canHoldSpecificFluid(level, testPos, testState, newFluid.getType())`
+        // — the *new liquid's own* instance, which is what makes a waterloggable
+        // neighbour a candidate only when this cell's `getNewLiquid` answered
+        // with a source.
+        if !can_hold_specific_fluid(&test_state, new_fluid.fluid_type()) {
             continue;
         }
         let context = context.get_or_insert_with(|| SpreadContext::new(pos, kind, env));
@@ -1017,8 +1104,13 @@ fn spread_targets<S: ChunkSource>(
 ///
 /// Two behaviours worth naming:
 ///
-/// * a `LiquidBlockContainer` target is **waterlogged** rather than replaced, so
-///   water flowing into a slab leaves the slab there;
+/// * a `LiquidBlockContainer` target is **waterlogged rather than replaced**, and
+///   only ever for a water **source** — `SimpleWaterloggedBlock.placeLiquid`'s
+///   own guard is `!waterlogged && fluidState.is(Fluids.WATER)`, where
+///   `TypedInstance.is` is instance identity, so a flowing state fails it. Note
+///   both branches `return`: vanilla's `spreadTo` never falls through to
+///   `setBlock` for a container, so a slab is never overwritten by water and a
+///   refused `placeLiquid` writes **nothing at all**;
 /// * lava spreading **down** into water becomes `minecraft:stone`. That is the
 ///   only stone-generation path in the family; the obsidian/cobblestone one is
 ///   [`quench_lava`], from a different callback.
@@ -1040,8 +1132,12 @@ fn spread_to<S: ChunkSource>(
         return;
     }
     if is_waterloggable(target_state) {
-        let waterlogged = crate::redstone::with_property(target_state, "waterlogged", "true");
-        write_block(world, env, pos, &waterlogged, changes);
+        if fluid.fluid_type() == FluidType::source(FluidKind::Water)
+            && property_of(target_state, "waterlogged") != Some("true")
+        {
+            let waterlogged = crate::redstone::with_property(target_state, "waterlogged", "true");
+            write_block(world, env, pos, &waterlogged, changes);
+        }
         return;
     }
     write_block(world, env, pos, &fluid.block_state(), changes);
@@ -1117,7 +1213,7 @@ fn spread<S: ChunkSource>(
                 &below_above_state,
                 new_below.kind,
                 Direction::Down,
-            ) && can_hold_specific_fluid(&below_state, new_below.kind)
+            ) && can_hold_specific_fluid(&below_state, new_below.fluid_type())
             {
                 spread_to(
                     world,
@@ -1231,9 +1327,20 @@ pub fn run_scheduled_tick<S: ChunkSource>(
     let Some(fluid) = fluid_state_of(&state) else {
         return;
     };
-    // A waterlogged slab is a water source for *reading* purposes but is not a
-    // fluid block, so it never ticks — vanilla schedules fluid ticks on
-    // `LiquidBlock` positions only.
+    // A waterlogged block reads as a water source and is skipped here, so it
+    // never *originates* a spread. **That is a deliberate reduction and not
+    // vanilla** — see this module's "named gaps". `FlowingFluid.tick` takes a
+    // position, not a `LiquidBlock`, and 26.2 really does schedule ticks at a
+    // container's own position from two places: `SimpleWaterloggedBlock.placeLiquid`
+    // ends with `level.scheduleTick(pos, fluidState.getType(), …)`, and 50
+    // waterloggable block classes (`SlabBlock.updateShape`, `StairBlock`,
+    // `WallBlock`, …) schedule `Fluids.WATER` at their own position while
+    // `WATERLOGGED`. So vanilla spreads *out of* a waterlogged slab as a source
+    // and we do not.
+    //
+    // Left as-is because the error direction is inert: water reaches fewer cells
+    // than vanilla, never more, and removing this line without a gate on the
+    // spread it unlocks would trade a measured behaviour for an unmeasured one.
     if !matches!(base_name(&state), "minecraft:water" | "minecraft:lava") {
         return;
     }
@@ -2138,5 +2245,278 @@ mod tests {
         assert!(changes.is_empty(), "no fluid, no writes: {changes:?}");
         assert!(queue.is_empty(), "no fluid, nothing rescheduled");
         assert_eq!(rig.block_state(0, FLOOR_Y, 0), "minecraft:stone");
+    }
+
+    // -----------------------------------------------------------------------
+    // Waterlogging: `SimpleWaterloggedBlock` accepts the *source* fluid only
+    // -----------------------------------------------------------------------
+
+    const SLAB_DRY: &str = "minecraft:oak_slab[type=bottom,waterlogged=false]";
+    const SLAB_WET: &str = "minecraft:oak_slab[type=bottom,waterlogged=true]";
+
+    /// One cell, described the way a failing waterlog gate wants to read: the
+    /// block name plus either its `waterlogged` value or its fluid level.
+    ///
+    /// Not a state-string comparison, deliberately — the property order a
+    /// `ChunkColumn` reads back is not this module's to promise, and a mismatch
+    /// message has to say *what went wrong* rather than print two long strings.
+    fn describe(state: &str) -> String {
+        if let Some(waterlogged) = property_of(state, "waterlogged") {
+            return format!("{} waterlogged={waterlogged}", base_name(state));
+        }
+        match fluid_state_of(state) {
+            Some(fluid) => format!("{} level {}", base_name(state), fluid.legacy_level()),
+            None => base_name(state).to_owned(),
+        }
+    }
+
+    /// A one-cell-wide east–west trench through the flat rig, walled at
+    /// `y` on both `z` sides and capped at both ends.
+    ///
+    /// The confinement is what makes the reach gate below a *prediction* rather
+    /// than a shape: in the open, four directions tie on
+    /// [`slope_distance`] and the flow is a 2D disc whose footprint nobody can
+    /// state from `getDropOff` alone. Walls at `y` only, never at `y + 1` — a
+    /// roofed cell would make the flow `falling`, which spreads at 7 regardless
+    /// of its own amount and would mask exactly the arithmetic under test.
+    fn trench(rig: &Rig, y: i32, from_x: i32, to_x: i32) {
+        for x in (from_x - 1)..=(to_x + 1) {
+            rig.set_block(x, y, 1, "minecraft:stone");
+            rig.set_block(x, y, -1, "minecraft:stone");
+        }
+        rig.set_block(from_x - 1, y, 0, "minecraft:stone");
+        rig.set_block(to_x + 1, y, 0, "minecraft:stone");
+    }
+
+    /// Settles the fluid queue from `seeds` and returns every **distinct**
+    /// position written, sorted.
+    ///
+    /// The footprint is the counter the cascade needs: a flood is visible as a
+    /// set of positions whose size can be predicted from `getDropOff`, where
+    /// "the water went too far" is a judgement about a screenshot.
+    fn settle_footprint(rig: &Rig, seeds: &[BlockPos], max_ticks: u64) -> Vec<(i32, i32, i32)> {
+        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        for seed in seeds {
+            for pending in ticks_after_edit(*seed) {
+                queue.schedule(pending.pos, pending.kind, pending.trigger_tick, pending.priority);
+            }
+        }
+        let mut written: Vec<(i32, i32, i32)> = Vec::new();
+        let mut changes = Vec::new();
+        for tick in 1..=max_ticks {
+            let due = queue.drain_due(tick, usize::MAX);
+            if due.is_empty() && queue.is_empty() {
+                break;
+            }
+            for entry in due {
+                let pos = BlockPos::new(entry.pos.0, entry.pos.1, entry.pos.2);
+                changes.clear();
+                run_scheduled_tick(rig, FluidEnv::OVERWORLD, pos, &mut queue, tick, &mut changes);
+                written.extend(changes.iter().map(|(pos, _)| (pos.x, pos.y, pos.z)));
+            }
+        }
+        written.sort_unstable();
+        written.dedup();
+        written
+    }
+
+    /// **The headline waterlog gate.** A *flowing* water state reaching a
+    /// waterloggable block must leave it dry, and must therefore stop there.
+    ///
+    /// The rule is one instance comparison in vanilla and it is easy to read past:
+    /// `SimpleWaterloggedBlock.canPlaceLiquid` is `type == Fluids.WATER`, and a
+    /// flowing state's `getType()` is `Fluids.FLOWING_WATER` — a **different**
+    /// `Fluid` instance (`WaterFluid.getFlowing`/`getSource`). So
+    /// `FlowingFluid.canHoldSpecificFluid` is false for every flowing state, the
+    /// direction never enters `getSpread`'s map, and `placeLiquid`'s own
+    /// `fluidState.is(Fluids.WATER)` refuses it a second time.
+    ///
+    /// **A source arm cannot see this**: vanilla waterlogs a container when the
+    /// new liquid *is* a source, so both hypotheses agree there — see
+    /// [`a_source_spreading_into_a_container_still_waterlogs_it`], which is the
+    /// same rig with the discriminating input removed.
+    ///
+    /// Both hypotheses are computed from outside constants. The slab sits four
+    /// cells east of the source, so with `getDropOff() == 1` the flow arrives
+    /// there at `amount = 5` and the two answers differ at `x = 3` and `x = 4`:
+    ///
+    /// | | `x = 3` | `x = 4` | footprint |
+    /// |---|---|---|---|
+    /// | correct | `level = 3` (`amount = 5`) | slab dry | 10 cells |
+    /// | waterlogs on flow | `level = 1` (`amount = 7`) | slab **wet** | 11 cells |
+    ///
+    /// `x = 3` is the discriminating cell and it is worth saying why, because the
+    /// reasoning is the reverse of what the symptom suggests: the waterlogged slab
+    /// reads as a *source*, so `getNewLiquid` at `x = 3` sees `amount = 8` beside
+    /// it and **refills** `x = 3` from `5` to `7`. The relay runs *backwards* into
+    /// the flow it came from, not only outward.
+    ///
+    /// Measured, and it corrects the obvious guess: `x >= 5` stays **air under
+    /// both hypotheses** in this rig, so those cells are not discriminating. The
+    /// relay needs a cell that already holds fluid, because
+    /// [`run_scheduled_tick`]'s notify loop schedules a neighbour only when it
+    /// does — east of the slab is air, which is never scheduled and so never
+    /// evaluates its own `getNewLiquid`. In open terrain, where the flow wraps
+    /// around the container and arrives on its far side as real water, that limit
+    /// does not apply and the refill continues outward; the trench isolates the
+    /// arithmetic instead.
+    ///
+    /// The west half is unobstructed in both, and pins the reach at the seven
+    /// cells `getDropOff` predicts — so a failure that shortened *every* flow
+    /// could not pass by shortening the east one.
+    #[test]
+    fn flowing_water_must_not_waterlog_a_container() {
+        let rig = Rig::flat();
+        let y = FLOOR_Y + 1;
+        trench(&rig, y, -10, 20);
+        rig.set_block(4, y, 0, SLAB_DRY);
+        let source = BlockPos::new(0, y, 0);
+        rig.set_block(source.x, source.y, source.z, "minecraft:water[level=0]");
+
+        let footprint = settle_footprint(&rig, &[source], 600);
+
+        // Expected cells, built from `getDropOff() == 1` and the instance
+        // comparison above rather than from this module's output.
+        let mut expected: Vec<(i32, String)> = vec![(0, "minecraft:water level 0".to_owned())];
+        for d in 1..=3 {
+            expected.push((d, format!("minecraft:water level {d}")));
+        }
+        expected.push((4, "minecraft:oak_slab waterlogged=false".to_owned()));
+        for x in 5..=13 {
+            expected.push((x, "minecraft:air".to_owned()));
+        }
+        for d in 1..=7 {
+            expected.push((-d, format!("minecraft:water level {d}")));
+        }
+        for x in -10..=-8 {
+            expected.push((x, "minecraft:air".to_owned()));
+        }
+
+        // Both arms go into one collection, and the single assertion comes after.
+        // An `assert!` between them would abort on the cell mismatch and leave
+        // the footprint an argument rather than an observation — so the neuter
+        // could only ever demonstrate one of the two.
+        let mut mismatches: Vec<String> = Vec::new();
+        for (x, want) in &expected {
+            let got = describe(&rig.block_state(*x, y, 0));
+            if &got != want {
+                mismatches.push(format!("x = {x}: expected {want}, found {got}"));
+            }
+        }
+
+        // The footprint, as a count with a verdict depending on the count: three
+        // cells east plus seven west, and the slab is never written at all.
+        // Waterlogging on flow writes the slab too, for 11.
+        let expected_footprint: Vec<(i32, i32, i32)> = (-7..=3)
+            .filter(|x| *x != 0)
+            .map(|x| (x, y, 0))
+            .collect();
+        if footprint != expected_footprint {
+            mismatches.push(format!(
+                "footprint: expected {} cells (x = -7..=-1 and 1..=3), found {} — {footprint:?}",
+                expected_footprint.len(),
+                footprint.len()
+            ));
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "a flowing state waterlogged the container. Under that hypothesis the \
+             slab reads waterlogged=true and, because a waterlogged block reads as a \
+             source, x = 3 refills from level 3 to level 1 and the footprint grows to \
+             11; under vanilla's `type == Fluids.WATER` the flow stops dry at x = 3. \
+             Mismatches:\n  {}",
+            mismatches.join("\n  ")
+        );
+    }
+
+    /// The other half of the same rule, and the arm that stops the fix
+    /// over-correcting into "waterlogging never happens".
+    ///
+    /// Vanilla really does waterlog a container from the spread path — what
+    /// decides it is `getNewLiquid`'s answer **at the target**, not what the flow
+    /// started as. Two adjacent sources over a solid floor make the cell between
+    /// them a source (`getNewLiquid`'s first rule), that source *is*
+    /// `Fluids.WATER`, and `placeLiquid` accepts it.
+    ///
+    /// Both hypotheses agree here — which is the point. This input cannot see the
+    /// bug, and is exactly why it shipped.
+    #[test]
+    fn a_source_spreading_into_a_container_still_waterlogs_it() {
+        let rig = Rig::flat();
+        let y = FLOOR_Y + 1;
+        trench(&rig, y, 0, 2);
+        rig.set_block(1, y, 0, SLAB_DRY);
+        rig.set_block(0, y, 0, "minecraft:water[level=0]");
+        rig.set_block(2, y, 0, "minecraft:water[level=0]");
+
+        settle_footprint(&rig, &[BlockPos::new(0, y, 0), BlockPos::new(2, y, 0)], 400);
+
+        assert_eq!(
+            describe(&rig.block_state(1, y, 0)),
+            "minecraft:oak_slab waterlogged=true",
+            "a container whose own `getNewLiquid` is a source must still be \
+             waterlogged — the slab is still a slab, never replaced by water"
+        );
+        // And the block survives: `spreadTo` must not fall through to `setBlock`
+        // for a container, in either branch.
+        assert_eq!(base_name(&rig.block_state(1, y, 0)), "minecraft:oak_slab");
+    }
+
+    /// A waterlogged block must keep reading as a water **source** for its
+    /// neighbours' `getNewLiquid` — `SimpleWaterloggedBlock`'s own
+    /// `getFluidState` is `Fluids.WATER.getSource(false)`.
+    ///
+    /// This is the arm a fix that removed waterlogging from
+    /// [`fluid_state_of`] would fail. A thin flowing cell beside a waterlogged
+    /// slab must be *refilled* to `amount = 8 - dropOff = 7`, not decay: the
+    /// discriminating input is `level = 6` (`amount = 2`), which is neither the
+    /// refilled value nor air, so a detector that did nothing at all is visible.
+    #[test]
+    fn a_waterlogged_block_still_reads_as_a_source_for_its_neighbours() {
+        let rig = Rig::flat();
+        let y = FLOOR_Y + 1;
+        trench(&rig, y, 0, 2);
+        rig.set_block(0, y, 0, SLAB_WET);
+        rig.set_block(1, y, 0, "minecraft:water[level=6]");
+
+        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let mut changes = Vec::new();
+        run_scheduled_tick(
+            &rig,
+            FluidEnv::OVERWORLD,
+            BlockPos::new(1, y, 0),
+            &mut queue,
+            1,
+            &mut changes,
+        );
+
+        assert_eq!(
+            describe(&rig.block_state(1, y, 0)),
+            "minecraft:water level 1",
+            "the waterlogged slab is amount 8 for `getNewLiquid`, so its \
+             neighbour refills to amount 7 (level 1) rather than staying at \
+             level 6 or draining"
+        );
+        // The slab itself originates nothing. This pins **our documented
+        // reduction, not vanilla** — see the "named gaps" in this module's doc:
+        // vanilla would run `spread` from this position as a source. The arm is
+        // here so the reduction is a measured fact with a name rather than an
+        // accident, and so that removing the early return fails a test instead of
+        // silently changing how far water goes.
+        let mut slab_changes = Vec::new();
+        run_scheduled_tick(
+            &rig,
+            FluidEnv::OVERWORLD,
+            BlockPos::new(0, y, 0),
+            &mut queue,
+            2,
+            &mut slab_changes,
+        );
+        assert!(
+            slab_changes.is_empty(),
+            "a waterlogged block is not a fluid block and must not spread: {slab_changes:?}"
+        );
+        assert_eq!(describe(&rig.block_state(0, y, 0)), "minecraft:oak_slab waterlogged=true");
     }
 }

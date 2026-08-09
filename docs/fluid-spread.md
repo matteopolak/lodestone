@@ -128,6 +128,41 @@ Do not "fix" that by loosening the predicate. It currently fails toward *not*
 spreading; a loosened version fails toward water leaking through walls, which is
 unrecoverable in a saved world.
 
+**`FluidKind` is the *family*; waterlogging needs the *instance*. Collapsing the
+two floods the world.** Vanilla's fluid registry holds `minecraft:water` and
+`minecraft:flowing_water` as two distinct `Fluid` objects
+(`WaterFluid.getSource`/`getFlowing`), and `Fluid.isSame` is what treats them as
+one. Almost everything here only cares about the family, which is why `FluidKind`
+exists — but `SimpleWaterloggedBlock.canPlaceLiquid` is `type == Fluids.WATER`, an
+**instance** comparison against the source, and `placeLiquid` repeats it as
+`fluidState.is(Fluids.WATER)` (`TypedInstance.is` is `typeHolder().value() ==
+rawType`, i.e. identity). That one comparison is the entire reason flowing water
+cannot waterlog anything. `FluidType` exists to carry it.
+
+What "vanilla never waterlogs on spread" gets wrong: `FlowingFluid.spreadTo` really
+does call `placeLiquid` on a `LiquidBlockContainer`. What decides the outcome is
+**`getNewLiquid`'s answer at the target**, not what the flow started as — so a
+source *does* waterlog a slab when the target cell's own `getNewLiquid` returns a
+source (two adjacent sources over a solid floor), and a lone source four cells
+away does not, because the target's answer there is `getFlowing(5, false)`.
+
+Measured with the guard removed, one 3×3-chunk rig, a scattered ~9% slab field and
+one water source — the fixed and broken arms differ only in that predicate:
+
+| | fluid ticks | block writes | distinct cells | wet slabs | settles at |
+|---|---|---|---|---|---|
+| instance comparison | 173 | 96 | 96 | 0 | tick 32 |
+| family comparison | 21,689 | 10,286 | 9,398 | 173 | tick 547 |
+
+125× the fluid ticks and 107× the writes, and the flood is bounded only by the
+rig: every one of ~176 slabs waterlogged, and `fluid_state_of` reads
+`waterlogged=true` as a **source**, so each one re-fed its neighbours at `amount =
+8`. **The level decrement is the only bound horizontal spread has** — `getDropOff`
+and `getSlopeFindDistance` are it — and a waterlogged relay defeats it, which is
+why the symptom is a flood *and* a stall rather than two bugs. Note the relay also
+runs backwards: a slab four cells out refills the `amount = 5` cell that fed it
+back to `7`, so the reach grows on the source's side too.
+
 **A source spreads sideways even when it has somewhere to fall.** `spread`'s
 fall-through is `if (fluidState.isSource() || !isWaterHole(...))`, so once the
 column below a source is established the down branch is refused (water never
@@ -152,8 +187,22 @@ Each is chosen so the error direction is inert rather than plausible-looking:
   scheduled-tick delay later.
 - **Bubble columns** are not modelled — there is no `BubbleColumnBlock` here.
 - **Waterlogging is one-directional.** `spread_to` waterlogs a
-  `SimpleWaterloggedBlock` target instead of replacing it, and `fluid_state_of`
-  reads `waterlogged=true` back as a water source; nothing *un*-waterlogs.
+  `SimpleWaterloggedBlock` target instead of replacing it — for a water **source**
+  only, per the instance comparison above — and `fluid_state_of` reads
+  `waterlogged=true` back as a water source; nothing *un*-waterlogs. Vanilla's
+  `BucketPickup.pickupBlock` is the only un-waterlogging path and there is no
+  bucket here.
+- **A waterlogged block does not *originate* a spread.** `run_scheduled_tick`
+  returns early unless the block is `minecraft:water`/`minecraft:lava`, so a
+  waterlogged slab is a source for every *neighbour's* `getNewLiquid` but never
+  runs `spread` itself. Vanilla does: `FlowingFluid.tick` takes a position rather
+  than a `LiquidBlock`, `placeLiquid` ends with `level.scheduleTick(pos,
+  fluidState.getType(), …)`, and **50 waterloggable block classes**
+  (`SlabBlock.updateShape`, `StairBlock`, `WallBlock`, …) schedule `Fluids.WATER`
+  at their own position while `WATERLOGGED`. Error direction: water reaches fewer
+  cells than vanilla past a waterlogged block, never more.
+  `a_waterlogged_block_still_reads_as_a_source_for_its_neighbours` pins both halves
+  so removing the early return fails a test rather than silently changing reach.
 - **Nothing places a fluid by hand.** There is no bucket item behaviour in this
   crate, so a player's route to a new source is `/setblock` or breaking into an
   existing body of water.
