@@ -637,6 +637,18 @@ world-species limit to assert, not to discover later). `chunk_nbt_vanilla_oracle
 reading it. The End has no block oracle anywhere, so End work gates on record definitions plus arithmetic
 until someone generates one.
 
+**That world's `players/data` is a second, separate oracle in the same tree, and it is easy to miss.** 247
+vanilla-written player files, **12 with non-zero XP**, each carrying a real `(XpTotal, XpLevel, XpP)` triple —
+vanilla's own answer to "what level and bar does this total give". It settled the XP curve's carry
+re-expression where no *total* could: `total_points_for_level` is identical under both the inclusive and the
+exclusive reading of every level seam (315 at 15, 352 at 16, 1395 at 30, 1507 at 31), so the corollary about
+picking a discriminating input **had no discriminating input to pick** — only real triples separate the
+hypotheses, and total 15 (level 1, bar 8/9, where a bare `progress - 1.0` gives level 2) is the one that does.
+Read with a `gzip`+`struct` parser sharing no code with the repo, then **committed as a table with
+provenance**, so the gate does not depend on `.cache` being present. It also confirmed NBT types the record
+alone had not stated: `XpLevel` Int, `XpP` Float, `XpTotal` Int, plus an unmodelled `XpSeed` Int. Expect other
+player-scoped facts (hunger, air, inventory shape, ender chest) to be answerable the same way.
+
 **26.2 no longer stores the world seed in `level.dat`** — it is in
 `world/data/minecraft/world_gen_settings.dat`. Reading `level.dat` and finding no seed is not evidence the
 world lacks one.
