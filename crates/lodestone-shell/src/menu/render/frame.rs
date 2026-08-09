@@ -497,6 +497,81 @@ pub struct ServerEntryView {
     pub scroll: f32,
 }
 
+/// What sits behind a screen's widgets — vanilla's three out-of-world/in-world
+/// backdrop shapes, as three states rather than as one boolean.
+///
+/// # Why this is not a `bool`
+///
+/// It was `MenuFrame::overlay: bool`, and that single flag did **two** jobs: it
+/// picked the translucent backdrop colour over the opaque one in
+/// [`super::draw::build`], *and* it was the only thing suppressing the panorama
+/// in `MenuRenderer`'s own `draw`. Any screen wanting a **wash over the panorama** —
+/// which is what vanilla's connect and level-loading screens are — could not be
+/// expressed: asking for the wash turned the panorama off, so the loading screen
+/// rendered as a flat fill with a translucent quad on it and no sky at all.
+///
+/// # The three states, read off the 26.2 record rather than guessed
+///
+/// `Screen.extractBackground` is the base implementation, and out of world it is
+/// panorama (gated on `minecraft.level == null`) → blur → `menu_background.png`:
+///
+/// | this enum | vanilla | screens |
+/// |---|---|---|
+/// | [`Self::Panorama`] | the base `extractBackground` | every out-of-world screen, **including** `ConnectScreen` (no override) and `LevelLoadingScreen`'s `OTHER` reason, whose override calls `extractPanorama` with **no** `level == null` gate |
+/// | [`Self::Dim`] | `extractTransparentBackground` / `inworld_menu_background.png` | the pause, death and command-block screens, drawn over a live world |
+/// | [`Self::Opaque`] | nothing in vanilla | our fallback when no panorama textures are loaded, e.g. a jar-less or headless run |
+///
+/// `TitleScreen` is the one screen that wears no wash: its `extractBackground`
+/// override is empty and it draws the cubemap itself. That distinction is *not*
+/// in this enum — it travels as `MenuFrame::logo` through
+/// [`super::panorama::dim_for_screen`], because the wash is applied inside the
+/// panorama's own shader rather than as a quad. Do not add a fourth variant for
+/// it.
+///
+/// # The wash is not the backdrop quad
+///
+/// Worth stating because it is the natural wrong assumption: under
+/// [`Self::Panorama`] the full-screen colour quad is **skipped entirely** (see
+/// `MenuGeometry::backdrop_floats`), and the 25 %-black
+/// `menu_background.png` wash arrives as the panorama shader's own `dim`
+/// uniform. So "wash over panorama" needs no quad, and reinstating one would
+/// double the darkening.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MenuBackdrop {
+    /// The panorama, wearing `menu_background.png`'s wash unless this is the
+    /// title screen. Falls back to [`Self::Opaque`]'s flat fill when no panorama
+    /// is loaded. The default, because it is what every out-of-world screen
+    /// wants.
+    #[default]
+    Panorama,
+    /// A flat opaque fill and nothing else. Only reached as the no-panorama
+    /// fallback; no screen asks for it by name.
+    Opaque,
+    /// A translucent wash over whatever is already on the target — for a frame
+    /// drawn with [`MenuRenderer::render_overlay`] over a live, still-rendering
+    /// world. Suppresses the panorama, which would cover the world it exists to
+    /// leave visible.
+    Dim,
+}
+
+impl MenuBackdrop {
+    /// Whether [`MenuRenderer`] should prepare and draw the panorama behind this
+    /// frame.
+    #[must_use]
+    pub const fn wants_panorama(self) -> bool {
+        matches!(self, Self::Panorama)
+    }
+
+    /// Whether the full-screen colour quad should be translucent rather than
+    /// opaque. [`Self::Panorama`] answers `false`: its quad is the no-panorama
+    /// fallback and must be opaque, and when the panorama *is* up the quad is
+    /// skipped and this answer is never used.
+    #[must_use]
+    pub const fn is_translucent(self) -> bool {
+        matches!(self, Self::Dim)
+    }
+}
+
 /// Everything one menu screen draws.
 #[derive(Debug, Clone, Default)]
 pub struct MenuFrame<'a> {
@@ -553,14 +628,9 @@ pub struct MenuFrame<'a> {
     /// speed alone; the same reason [`Self::cursor`] is an `Option` instead of
     /// defaulting to `(0, 0)`.
     pub panorama_speed: Option<f32>,
-    /// Whether this frame is drawn **over** an already-rendered scene rather
-    /// than replacing it — [`Screen::Paused`](super::Screen::Paused)'s pause
-    /// menu, via [`pause_frame`] and
-    /// [`MenuRenderer::render_overlay`]. Changes only how [`geometry`] paints
-    /// the full-screen backdrop (translucent instead of opaque, so the world
-    /// stays visible behind the buttons); every other screen leaves this
-    /// `false` via `..Default::default()`.
-    pub overlay: bool,
+    /// What sits behind this screen's widgets. See [`MenuBackdrop`] — the three
+    /// states this used to try to express with one `overlay: bool`.
+    pub backdrop: MenuBackdrop,
     /// This frame reproduces one of **vanilla's own** screens: its rows carry
     /// [`MenuRow::slot`]s, its buttons draw as `widget/button*` nine-slice
     /// sprites, and the row-stack's centred title/subtitle/footer block is

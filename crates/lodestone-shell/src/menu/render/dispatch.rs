@@ -565,9 +565,10 @@ pub fn frame_for<'a>(
         f.gui_scale = nav.gui_scale();
         // Stamped for `gui_scale`'s reason, and it has to be stamped here rather
         // than read out of `nav` inside `title_frame`'s arm: `MenuRenderer` draws
-        // the panorama behind **every** non-overlay screen (dimmed by
-        // `panorama::dim_for_screen` off the title screen), so the multiplayer and
-        // settings screens sit on it too and would each need their own copy.
+        // the panorama behind **every** `MenuBackdrop::Panorama` screen (dimmed by
+        // `panorama::dim_for_screen` off the title screen), which is every screen
+        // here that is not drawn over a live world — so the multiplayer, settings
+        // and loading screens sit on it too and would each need their own copy.
         // One stamp, one reader.
         f.panorama_speed = Some(nav.panorama_speed());
         // Stamped for the same reason and in the same place as `gui_scale`: a screen

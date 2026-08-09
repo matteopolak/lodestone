@@ -101,7 +101,8 @@ pub use dispatch::frame_for;
 pub use draw::{MenuGeometry, SpriteCut, build, geometry};
 pub use favicon::{FaviconMosaic, default_head_icon, favicon_mosaic, head_mosaic};
 pub use frame::{
-    AccountEntryView, Align, Arrow, FaviconCache, MenuFrame, MenuLabel, MenuNotice, MenuProgress,
+    AccountEntryView, Align, Arrow, FaviconCache, MenuBackdrop, MenuFrame, MenuLabel, MenuNotice,
+    MenuProgress,
     MenuRow, PROGRESS_BAR_BG, PROGRESS_BAR_FG, PROGRESS_BAR_H, PROGRESS_BAR_W, PackEntryView,
     ServerEntryView, WorldEntryView, notice_rect, owns_frame,
 };
@@ -295,7 +296,7 @@ const ICON_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 /// Background colour of a menu screen (the vanilla dirt backdrop's dark tone).
 const BG: [f32; 4] = [0.10, 0.10, 0.12, 1.0];
-/// Full-screen backdrop for an [`MenuFrame::overlay`] frame — translucent, so
+/// Full-screen backdrop for a [`MenuBackdrop::Dim`] frame — translucent, so
 /// the world it is drawn over (still ticking, still rendering) stays visible
 /// through it, unlike [`BG`]'s opaque fill for a screen that owns the whole
 /// frame. Alpha is well short of 1.0 for exactly this reason; a test asserts

@@ -1602,7 +1602,7 @@ fn frame_with(rows: Vec<MenuRow>, selected: usize) -> MenuFrame<'static> {
         footer: vec![],
         message: None,
         gui_scale: 0,
-        overlay: false,
+        backdrop: MenuBackdrop::Panorama,
         ..Default::default()
     }
 }
@@ -2850,7 +2850,12 @@ fn pause_frame_builds_vanillas_ten_widgets_in_order_and_tracks_the_highlight() {
     nav.hover(&ui, PAUSE_BUTTONS.len() - 1);
 
     let f = pause_frame(&nav);
-    assert!(f.overlay, "the pause menu must draw as an overlay");
+    assert_eq!(
+        f.backdrop,
+        MenuBackdrop::Dim,
+        "the pause menu must dim the live world it is drawn over, not replace it \
+         with the panorama"
+    );
     assert!(f.vanilla, "and it must be laid out from vanilla's arithmetic");
     // Ten since issue #535 put vanilla's singleplayer Open to LAN button beside
     // Options. Read from the button table rather than restated, so the two cannot
@@ -3071,7 +3076,11 @@ fn death_frame_builds_vanillas_two_widgets_in_order_and_tracks_the_highlight() {
     nav.hover(&ui, 1);
 
     let f = death_frame(&nav, ui.death_message());
-    assert!(f.overlay, "the death screen must draw as an overlay");
+    assert_eq!(
+        f.backdrop,
+        MenuBackdrop::Dim,
+        "the death screen must dim the live world it is drawn over"
+    );
     assert!(f.vanilla, "and be laid out from vanilla's arithmetic");
     assert_eq!(f.rows.len(), 2, "vanilla's death screen has two widgets");
     assert_eq!(f.rows[0].label, DeathButton::Respawn.label());
@@ -6787,4 +6796,106 @@ fn the_error_screen_titles_a_failure_differently_from_a_disconnect() {
 /// aborting on the first.
 fn missing_titles_empty(wrong: &[String]) -> bool {
     wrong.is_empty()
+}
+
+/// The loading screen declares the panorama backdrop, the three in-world screens
+/// declare the dim one, and the two decisions the old `overlay: bool` fused are
+/// now independent.
+///
+/// # What this can and cannot see
+///
+/// It can see the **declaration** and the **backdrop quad's colour**, which is
+/// exactly the coupling that produced the bug: one flag chose the quad colour
+/// *and* suppressed the panorama, so no screen could ask for a wash over the sky.
+/// With the two separated, `Panorama` keeps the *opaque* quad — its
+/// no-panorama fallback — while `Dim` keeps the translucent one.
+///
+/// It **cannot** see whether the panorama reaches a pixel. `build` is pure and
+/// emits the backdrop quad unconditionally; the decision to skip those vertices
+/// and draw the cubemap instead lives in `MenuRenderer::draw`, which needs a GPU.
+/// So this is the declaration half only, and
+/// `menu_panorama_pixels::the_loading_screen_draws_the_panorama_under_the_menu_background_wash`
+/// is the half that measures pixels. Do not read a green run here as evidence the
+/// sky draws.
+#[test]
+fn the_loading_screen_asks_for_the_panorama_and_the_in_world_screens_do_not() {
+    let mut wrong: Vec<String> = Vec::new();
+
+    let loading = loading_frame("Joining world...");
+    if loading.backdrop != MenuBackdrop::Panorama {
+        wrong.push(format!("loading_frame: {:?}", loading.backdrop));
+    }
+    let bar = loading_frame_with_progress(
+        "Loading terrain",
+        crate::menu::loading::TerrainProgress {
+            loaded: 3,
+            expected: 9,
+        },
+    );
+    if bar.backdrop != MenuBackdrop::Panorama {
+        wrong.push(format!("loading_frame_with_progress: {:?}", bar.backdrop));
+    }
+
+    let mut nav = test_nav("backdrop-decl");
+    let mut ui = UiState::new();
+    ui.enter_dev_world();
+    ui.pause();
+    nav.hover(&ui, 0);
+    if pause_frame(&nav).backdrop != MenuBackdrop::Dim {
+        wrong.push(format!("pause_frame: {:?}", pause_frame(&nav).backdrop));
+    }
+    if death_frame(&nav, None).backdrop != MenuBackdrop::Dim {
+        wrong.push(format!("death_frame: {:?}", death_frame(&nav, None).backdrop));
+    }
+
+    // The two questions the old boolean answered with one bit, now independent.
+    if MenuBackdrop::Panorama.is_translucent() {
+        wrong.push(
+            "MenuBackdrop::Panorama must keep the OPAQUE quad: that quad is the              no-panorama fallback, and a translucent one over a Clear pass is the              flat-fill the loading screen used to draw"
+                .to_owned(),
+        );
+    }
+    if !MenuBackdrop::Panorama.wants_panorama() {
+        wrong.push("Panorama must want the panorama".to_owned());
+    }
+    if MenuBackdrop::Dim.wants_panorama() {
+        wrong.push(
+            "Dim must NOT want the panorama — it exists to leave a live world              visible, which a cubemap covering every pixel would not"
+                .to_owned(),
+        );
+    }
+    if !MenuBackdrop::Dim.is_translucent() {
+        wrong.push("Dim must be translucent".to_owned());
+    }
+
+    // And the quad's colour follows the enum, read straight out of the first
+    // vertex rather than through a vertex-sampling coverage helper — a probe that
+    // counts vertices inside a rect is blind to a quad that *encloses* it, which
+    // is precisely the shape of a full-screen backdrop.
+    let colour_of = |frame: &MenuFrame<'_>| -> [f32; 4] {
+        let geo = build(frame, None, None, 480.0, 320.0);
+        [geo.colour[2], geo.colour[3], geo.colour[4], geo.colour[5]]
+    };
+    let loading_bg = colour_of(&loading);
+    let pause_bg = colour_of(&pause_frame(&nav));
+    if (loading_bg[3] - 1.0).abs() > 1e-6 {
+        wrong.push(format!(
+            "the loading screen's fallback quad must be opaque, alpha was {}",
+            loading_bg[3]
+        ));
+    }
+    if pause_bg[3] >= 1.0 {
+        wrong.push(format!(
+            "the pause screen's quad must be translucent, alpha was {}",
+            pause_bg[3]
+        ));
+    }
+    if loading_bg == pause_bg {
+        wrong.push(
+            "both screens emit the same backdrop colour, so the enum is not              reaching the draw at all"
+                .to_owned(),
+        );
+    }
+
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }

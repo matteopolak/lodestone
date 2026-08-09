@@ -25,6 +25,53 @@ The predicate is `menu::loading::is_level_ready`, vanilla's
 `LevelLoadTracker.WaitingForPlayerChunk.isReady` — so the screen clears when the
 ground the player is standing on arrives, never because a bar filled.
 
+### The backdrop: the panorama under the wash, not a flat fill
+
+Both frames take `MenuBackdrop::Panorama` (the default), and that replaced a
+`overlay: true` in which **one flag did two jobs**: it selected the translucent
+backdrop colour in `menu::render::draw::build`, *and* it was the only thing
+suppressing the panorama in `MenuRenderer::draw`. Asking for a wash therefore
+turned the sky off, and the screen rendered as a flat clear with a translucent
+quad on it. Reported as looking wrong; it was.
+
+No vanilla path produces a flat fill. Read off the 26.2 decompile rather than
+inferred:
+
+- `ConnectScreen` overrides no background at all, so it takes the base
+  `Screen.extractBackground`: panorama (its `minecraft.level == null` gate holds
+  while connecting) → blur → `menu_background.png`.
+- `LevelLoadingScreen.extractBackground`'s `OTHER` arm — the ordinary loading
+  reason — calls `extractPanorama` with **no** `level == null` gate, so the
+  panorama covers even a live level. Its other two arms are the nether-portal
+  sprite and the end-portal shader, which this client does not have; they are
+  their own piece of work, not this frame's.
+
+Three consequences worth knowing before changing this:
+
+- **The wash is not the backdrop quad.** Under `Panorama` the full-screen colour
+  quad is skipped entirely (`MenuGeometry::backdrop_floats`) and the 25 %-black
+  wash arrives as the panorama shader's own `dim` uniform, from
+  `panorama::dim_for_screen` keyed on `MenuFrame::logo`. Reinstating a quad would
+  double the darkening. See `menu-panorama.md`.
+- **The post-login `render_overlay` call's `Load` op is now merely harmless.** The
+  panorama covers every pixel of the world it draws over — exactly as vanilla's
+  does. The world still meshes and uploads behind it, which is the property the
+  paragraph above cares about; only its *visibility* changed.
+- **`MenuBackdrop::Opaque` is the fallback, not a screen's choice.** With no
+  panorama textures loaded (a jar-less or headless run) `Panorama` degrades to the
+  same opaque quad, which is why `Panorama::is_translucent()` is `false`.
+
+A unit test can only see the *declaration* and the quad's colour
+(`the_loading_screen_asks_for_the_panorama_and_the_in_world_screens_do_not`):
+`build` is pure and emits the quad unconditionally, so whether the cubemap reaches
+a pixel is decided in `MenuRenderer::draw` and needs a GPU. That half is
+`menu_panorama_pixels::the_loading_screen_draws_the_panorama_under_the_menu_background_wash`,
+which predicts the washed byte three ways — 224 for the correct linear-space
+multiply, 255 for no wash, 191 for a gamma-space one — and shoots the **title**
+frame through the same band as a cross arm, because one washed frame and one
+unwashed frame measured together is what distinguishes "the wash reaches the right
+screens" from "everything went dark".
+
 ### The dismissal condition, in full
 
 Four observations, gathered by `Sim::terrain_loading` and decided by

@@ -47,7 +47,10 @@
 
 use lodestone::menu::nav::{MainButton, MenuNav};
 use lodestone::menu::panorama::{self, PanoramaFaces};
-use lodestone::menu::render::{FaviconCache, MenuRenderer, frame_for, title_slot};
+use lodestone::menu::render::{
+    Align, FaviconCache, MenuBackdrop, MenuRenderer, frame_for, loading_frame, logical_canvas,
+    text_px, title_slot,
+};
 use lodestone::menu::status::{StatusCache, unavailable_probe};
 use lodestone::menu::{Screen, UiState};
 use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget};
@@ -336,7 +339,11 @@ fn the_title_screen_draws_the_cubemap_panorama_with_vanillas_face_order() {
     let frame = frame_for(&ui, &nav, &statuses, &mut favicons).expect("the title screen draws");
     assert!(frame.logo, "the title screen frame is the one with `logo` set, \
              which is what suppresses the menu-background wash");
-    assert!(!frame.overlay, "the title screen owns its frame");
+    assert_eq!(
+        frame.backdrop,
+        MenuBackdrop::Panorama,
+        "the title screen owns its frame and asks for the panorama"
+    );
 
     let mut shoot = |menu: &mut MenuRenderer| -> Vec<u8> {
         let acquired = target.acquire().expect("headless acquire");
@@ -386,6 +393,304 @@ fn the_title_screen_draws_the_cubemap_panorama_with_vanillas_face_order() {
         "the control shows some face colour: {}",
         describe(&counts, other)
     );
+}
+
+/// sRGB decode, for predicting the wash. The standard transfer function, written
+/// out rather than taken from any of our own code.
+fn srgb_to_linear(byte: u8) -> f32 {
+    let x = f32::from(byte) / 255.0;
+    if x <= 0.040_45 {
+        x / 12.92
+    } else {
+        ((x + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// sRGB encode, the inverse of [`srgb_to_linear`], back to a `0..=255` scale.
+fn linear_to_srgb(x: f32) -> f32 {
+    let y = if x <= 0.003_130_8 {
+        x * 12.92
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    };
+    y * 255.0
+}
+
+/// The washed value of one channel byte, predicted from **outside** this repo's
+/// render path: the panorama samples an `Rgba8UnormSrgb` cubemap (so the shader
+/// sees linear), multiplies by `1 - MENU_BACKGROUND_DIM`, and writes to an
+/// `Rgba8UnormSrgb` target (so the encode happens on the way out).
+///
+/// `MENU_BACKGROUND_DIM` is `64/255`, measured out of 26.2's `client.jar`:
+/// `menu_background.png` is 16×16 and every pixel is grey 0, alpha 64.
+fn washed(byte: u8) -> f32 {
+    linear_to_srgb(srgb_to_linear(byte) * (1.0 - panorama::MENU_BACKGROUND_DIM))
+}
+
+/// Tolerance for the wash prediction, per channel. Wider than [`TOL`] because
+/// this value is the result of a decode → multiply → encode round trip rather
+/// than a passthrough, and still narrow enough that the three hypotheses in
+/// [`the_loading_screen_draws_the_panorama_under_the_menu_background_wash`] —
+/// 224, 255 and 191 — cannot be confused for each other.
+const WASH_TOL: f32 = 5.0;
+
+/// Count pixels in `rect` matching each of `candidates`, plus the bounding box of
+/// the first candidate's matches.
+///
+/// Counting is what this needs rather than a mean: the probe band is not
+/// uniformly one cubemap face (the existing title gate only asserts the expected
+/// face is *dominant* there), so averaging would mix +Z with its neighbour and
+/// land between every hypothesis.
+fn count_candidates(
+    texels: &[u8],
+    rect: (u32, u32, u32, u32),
+    candidates: &[[f32; 3]],
+) -> (Vec<u32>, (u32, u32, u32, u32)) {
+    let (x0, y0, x1, y1) = rect;
+    let mut counts = vec![0u32; candidates.len()];
+    let (mut bx0, mut by0, mut bx1, mut by1) = (u32::MAX, u32::MAX, 0, 0);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let i = ((y * W + x) * 4) as usize;
+            let px = [
+                f32::from(texels[i]),
+                f32::from(texels[i + 1]),
+                f32::from(texels[i + 2]),
+            ];
+            for (slot, want) in candidates.iter().enumerate() {
+                if (0..3).all(|c| (px[c] - want[c]).abs() <= WASH_TOL) {
+                    counts[slot] += 1;
+                    if slot == 0 {
+                        bx0 = bx0.min(x);
+                        by0 = by0.min(y);
+                        bx1 = bx1.max(x);
+                        by1 = by1.max(y);
+                    }
+                }
+            }
+        }
+    }
+    (counts, (bx0, by0, bx1, by1))
+}
+
+/// Fail if `band` overlaps the loading screen's one centred label, which would
+/// make the survey a measurement of glyphs.
+///
+/// Derived from the same expression the draw uses — `Origin::anchor` then the
+/// `Align` shift, with the width from `text_px` — rather than from a restated
+/// constant, for the reason [`assert_band_is_background`] gives.
+fn assert_band_is_clear_of_loading_label(
+    band: (u32, u32, u32, u32),
+    label: &lodestone::menu::render::MenuLabel,
+) {
+    let (ax, ay) = label.origin.anchor(W as f32, H as f32);
+    let tw = text_px(&label.text, label.scale);
+    let x = match label.align {
+        Align::Left => ax + label.dx,
+        Align::Centre => (ax + label.dx - tw * 0.5).floor(),
+        Align::Right => ax + label.dx - tw,
+    };
+    let y = ay + label.dy;
+    // One line of vanilla's font at scale 1.0 is 9 logical px tall.
+    let (lx0, ly0, lx1, ly1) = (x, y, x + tw, y + 9.0 * label.scale);
+    let (bx0, by0, bx1, by1) = band;
+    let (fx0, fy0, fx1, fy1) = (bx0 as f32, by0 as f32, bx1 as f32, by1 as f32);
+    let overlaps = lx0 < fx1 && fx0 < lx1 && ly0 < fy1 && fy0 < ly1;
+    assert!(
+        !overlaps,
+        "the probe band {band:?} overlaps the loading label at \
+         ({lx0}, {ly0})..({lx1}, {ly1}) — re-derive the band rather than loosening \
+         the assertion"
+    );
+}
+
+/// The loading screen draws the panorama **and** `menu_background.png`'s wash over
+/// it, where it used to draw a flat fill and no sky at all.
+///
+/// # The defect this replaces
+///
+/// `loading_frame` set `overlay: true`, and that one flag did two jobs: it chose
+/// the translucent backdrop colour in `build`, *and* it was the only thing
+/// suppressing the panorama in `MenuRenderer::draw`. So asking for a wash turned
+/// the sky off, and the screen came out as a flat clear with a translucent quad on
+/// it. No vanilla path produces that: `ConnectScreen` overrides no background and
+/// takes the base `Screen.extractBackground` (panorama → blur → wash), and
+/// `LevelLoadingScreen.extractBackground`'s `OTHER` arm calls `extractPanorama`
+/// with no `minecraft.level == null` gate at all.
+///
+/// # Three hypotheses, and why the wrong two are the interesting ones
+///
+/// "Not a flat fill" would be satisfied by any change, so this predicts the
+/// **value** of a washed pixel and requires the measurement to land on one of
+/// three answers, all computed from outside constants:
+///
+/// | hypothesis | +Z face's 255 channels read | means |
+/// |---|---|---|
+/// | wash applied in **linear** space | **224** | correct — the shader multiplies a decoded texel and the sRGB target re-encodes |
+/// | no wash at all | 255 | `dim_for_screen` treated the loading screen as the title screen |
+/// | wash applied in **gamma** space | 191 | the multiply moved out of the shader onto a byte |
+///
+/// They are 30+ apart, so [`WASH_TOL`] cannot confuse them.
+///
+/// # The cross arm is what makes the wash claim mean something
+///
+/// The same band, the same synthetic cubemap and the same renderer are also shot
+/// with the **title** frame, which must read the **raw** 255. One frame washed and
+/// one frame not, measured together, is what distinguishes "the wash is applied to
+/// the right screens" from "everything is dark".
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn the_loading_screen_draws_the_panorama_under_the_menu_background_wash() {
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let mut menu = MenuRenderer::new(device, format);
+
+    menu.attach_panorama(device, queue, &synthetic_cubemap());
+    assert!(
+        menu.panorama_attached(),
+        "the synthetic cubemap must be bound or every measurement below is of the \
+         flat backdrop"
+    );
+
+    // The band is resolved against physical pixels, so this gate needs the auto
+    // gui scale at 480×320 to be 1. A precondition with a verdict, not a skip.
+    let (logical_w, logical_h) = logical_canvas(0, W, H);
+    assert!(
+        (logical_w - W as f32).abs() < 0.5 && (logical_h - H as f32).abs() < 0.5,
+        "logical canvas is {logical_w}×{logical_h} against a {W}×{H} target, so the \
+         band below is in the wrong coordinate space"
+    );
+
+    let loading = loading_frame("Joining world...");
+    assert_eq!(
+        loading.backdrop,
+        MenuBackdrop::Panorama,
+        "the loading screen must ask for the panorama; this is the whole fix"
+    );
+    assert!(
+        !loading.logo,
+        "and it must not be the title screen, which is the one screen \
+         `dim_for_screen` gives no wash"
+    );
+
+    let band = straight_ahead_band();
+    assert_band_is_background(band);
+    assert_band_is_clear_of_loading_label(band, &loading.labels[0]);
+    let total: u32 = (band.2 - band.0) * (band.3 - band.1);
+
+    // Slot 0 is the correct hypothesis, so `count_candidates` reports *its*
+    // bounding box — the "where", not just the "how much".
+    let raw = FACE_COLOURS[LAYER_PLUS_Z];
+    let hypotheses: [[f32; 3]; 3] = [
+        [washed(raw[0]), washed(raw[1]), washed(raw[2])],
+        [f32::from(raw[0]), f32::from(raw[1]), f32::from(raw[2])],
+        [
+            f32::from(raw[0]) * (1.0 - panorama::MENU_BACKGROUND_DIM),
+            f32::from(raw[1]) * (1.0 - panorama::MENU_BACKGROUND_DIM),
+            f32::from(raw[2]) * (1.0 - panorama::MENU_BACKGROUND_DIM),
+        ],
+    ];
+
+    let mut shoot = |menu: &mut MenuRenderer, frame: &_| -> Vec<u8> {
+        let acquired = target.acquire().expect("headless acquire");
+        menu.render(device, queue, acquired.view(), frame, W, H);
+        target.read_texels(device, queue)
+    };
+
+    eprintln!("=== loading screen wash gate ===");
+    eprintln!("band {band:?} ({total} px), +Z face is {raw:?}");
+    eprintln!(
+        "hypotheses: washed-linear {:?}, unwashed {:?}, washed-gamma {:?}",
+        hypotheses[0], hypotheses[1], hypotheses[2]
+    );
+
+    let mut mismatches: Vec<String> = Vec::new();
+
+    // ---- the loading screen: panorama present, wash applied ------------------
+    let shot = shoot(&mut menu, &loading);
+    let (counts, bbox) = count_candidates(&shot, band, &hypotheses);
+    eprintln!(
+        "loading: washed-linear={} unwashed={} washed-gamma={} (washed bbox {bbox:?})",
+        counts[0], counts[1], counts[2]
+    );
+    if counts[0] <= total / 4 {
+        mismatches.push(format!(
+            "loading: only {} of {total} px match the washed +Z face (bbox {bbox:?}); \
+             unwashed={} washed-gamma={}. Zero across all three means the panorama is \
+             not drawing at all, which is the flat-fill regression",
+            counts[0], counts[1], counts[2]
+        ));
+    }
+    if counts[1] != 0 {
+        mismatches.push(format!(
+            "loading: {} px are the *unwashed* face, so `dim_for_screen` gave this \
+             screen the title screen's zero dim",
+            counts[1]
+        ));
+    }
+    if counts[2] != 0 {
+        mismatches.push(format!(
+            "loading: {} px match a gamma-space multiply, so the wash moved out of \
+             the shader",
+            counts[2]
+        ));
+    }
+
+    // ---- the cross arm: the title screen is *not* washed --------------------
+    let nav = MenuNav::with_path(std::env::temp_dir().join(format!(
+        "lodestone-loading-wash-{}/servers.json",
+        std::process::id()
+    )));
+    let statuses = StatusCache::with_probe(unavailable_probe());
+    let mut favicons = FaviconCache::new();
+    let ui = UiState::new();
+    let title = frame_for(&ui, &nav, &statuses, &mut favicons).expect("the title screen draws");
+    assert!(title.logo, "the cross arm must be the title screen");
+    let title_shot = shoot(&mut menu, &title);
+    let (t_counts, t_bbox) = count_candidates(&title_shot, band, &hypotheses);
+    eprintln!(
+        "title:   washed-linear={} unwashed={} washed-gamma={} (washed bbox {t_bbox:?})",
+        t_counts[0], t_counts[1], t_counts[2]
+    );
+    if t_counts[1] <= total / 4 {
+        mismatches.push(format!(
+            "title: only {} of {total} px are the unwashed +Z face — the title screen \
+             is the one screen with no wash, so if this arm is dark the wash is being \
+             applied to everything and the loading arm above proves nothing",
+            t_counts[1]
+        ));
+    }
+    if t_counts[0] != 0 {
+        mismatches.push(format!(
+            "title: {} px are washed, at {t_bbox:?}",
+            t_counts[0]
+        ));
+    }
+
+    // ---- the control: detach, and the loading band must show no face -------
+    menu.detach_panorama();
+    assert!(!menu.panorama_attached(), "the control must actually detach");
+    let control = shoot(&mut menu, &loading);
+    let (c_counts, c_bbox) = count_candidates(&control, band, &hypotheses);
+    eprintln!(
+        "control: washed-linear={} unwashed={} washed-gamma={} (bbox {c_bbox:?})",
+        c_counts[0], c_counts[1], c_counts[2]
+    );
+    if c_counts.iter().sum::<u32>() != 0 {
+        mismatches.push(format!(
+            "control: with the panorama detached the band still matches a face \
+             hypothesis ({c_counts:?} at {c_bbox:?}) — the detector is measuring \
+             something other than the panorama, so nothing above is evidence"
+        ));
+    }
+
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
 /// The loaded cubemap is vanilla's **real** art out of the asset-object store,

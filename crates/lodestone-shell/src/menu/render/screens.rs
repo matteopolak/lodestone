@@ -53,7 +53,7 @@ pub fn pause_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
             .collect(),
         selected: nav.pause_index(),
         gui_scale: nav.gui_scale(),
-        overlay: true,
+        backdrop: MenuBackdrop::Dim,
         vanilla: true,
         // `PauseScreen.init` adds a `StringWidget` with the screen title at
         // y=40 when the pause menu is showing (`PauseScreen.java:87-88`); the
@@ -176,7 +176,7 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
             .collect(),
         selected: nav.death_index(),
         gui_scale: nav.gui_scale(),
-        overlay: true,
+        backdrop: MenuBackdrop::Dim,
         vanilla: true,
         labels,
         ..Default::default()
@@ -405,23 +405,24 @@ pub fn command_block_frame(
         rows,
         selected: usize::MAX,
         hovered: state.hovered,
-        overlay: true,
+        backdrop: MenuBackdrop::Dim,
         vanilla: true,
         labels,
         ..Default::default()
     }
 }
 
-/// Builds the loading screen's frame (issue #449): a flat dark backdrop with
-/// one centred line of text — the current `ConnectPhase`'s own vanilla string
+/// Builds the loading screen's frame (issue #449): the panorama under
+/// `menu_background.png`'s wash, with one centred line of text — the current
+/// `ConnectPhase`'s own vanilla string
 /// (`connect.connecting`/`connect.joining`) while the handshake and
 /// configuration phase runs, `multiplayer.downloadingTerrain` while the
 /// player's own chunk streams in after login.
 ///
-/// This is the bar-less variant: a dark background with the text and no vanilla
-/// `LevelLoadingScreen` chrome. See [`loading_frame_with_progress`] for the one
-/// that also draws a bar, and `crate::menu::loading` for why the connect phases
-/// deliberately have no progress to show.
+/// This is the bar-less variant: no vanilla `LevelLoadingScreen` chrome. See
+/// [`loading_frame_with_progress`] for the one that also draws a bar, and
+/// `crate::menu::loading` for why the connect phases deliberately have no
+/// progress to show.
 ///
 /// Same shape as [`error_frame`]: a `vanilla` frame whose only geometry is the
 /// backdrop and one [`MenuLabel`]. Unlike every other `vanilla` frame it
@@ -430,20 +431,33 @@ pub fn command_block_frame(
 /// [`super::Screen::Connecting`]'s doc and [`super::nav::MenuNav::key`]'s
 /// catch-all arm, which routes only Escape, and Escape is a no-op there).
 ///
-/// `overlay` is always `true`, for both callers, and that one flag serves both:
-/// - The `Connecting` screen is routed through [`frame_for`]'s `Clear` pass
-///   (`MenuRenderer::render`), where `overlay` is what suppresses the panorama —
-///   the "flat dark" the issue asks for, rather than the main-menu background
-///   behind the text.
-/// - The post-login terrain state is drawn by `app::redraw` with
-///   [`MenuRenderer::render_overlay`] over the still-rendering world, where
-///   `overlay` gives the translucent dim that keeps the streaming chunks
-///   visible behind the text instead of a hard opaque panel.
+/// # The backdrop, and what it used to be
+///
+/// Both callers take the **default** [`MenuBackdrop::Panorama`], and that is a
+/// fix rather than a simplification. This used to set `overlay: true`, and that
+/// one flag did two jobs — it chose the translucent backdrop colour *and* it was
+/// the only thing suppressing the panorama — so the screen came out as a flat
+/// clear with a translucent quad over it and no sky at all. No vanilla path
+/// produces a flat fill:
+///
+/// - `ConnectScreen` overrides no background at all, so it takes the base
+///   `Screen.extractBackground`: panorama (its `minecraft.level == null` gate is
+///   satisfied while connecting), blur, then the wash.
+/// - `LevelLoadingScreen.extractBackground`'s `OTHER` arm — the ordinary
+///   loading reason — calls `extractPanorama` with **no** `level == null` gate,
+///   so the panorama covers even a live level. Its other two arms are the nether
+///   and end portal animations, which we do not have and which are a separate
+///   piece of work, not this frame's.
+///
+/// Both callers therefore want the same thing, which is why neither names a
+/// backdrop. The post-login caller still goes through
+/// [`MenuRenderer::render_overlay`], and its `Load` op is now merely harmless:
+/// the panorama covers every pixel of the world it draws over, exactly as
+/// vanilla's does.
 #[must_use]
 pub fn loading_frame(text: &str) -> MenuFrame<'static> {
     MenuFrame {
         vanilla: true,
-        overlay: true,
         labels: vec![MenuLabel {
             text: text.to_string(),
             origin: Origin::Centre,
@@ -491,7 +505,7 @@ pub fn loading_frame_with_progress(
 ) -> MenuFrame<'static> {
     MenuFrame {
         vanilla: true,
-        overlay: true,
+        // Default `MenuBackdrop::Panorama`, as [`loading_frame`] explains.
         labels: vec![
             MenuLabel {
                 text: text.to_string(),
