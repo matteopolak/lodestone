@@ -200,6 +200,86 @@ pub fn orb_denominations(amount: i32) -> Vec<i32> {
     out
 }
 
+/// The `[min, max]` points a broken block pops, or `None` for a block that pops none —
+/// vanilla's `DropExperienceBlock`'s `xpRange` field, plus the two classes that pass
+/// their own range at the call site.
+///
+/// # Where the numbers come from
+///
+/// The `Blocks.java` registrations themselves, read as record definitions:
+/// `new DropExperienceBlock(UniformInt.of(3, 7), p)` for diamond ore and so on. The
+/// deepslate variant of every ore is registered with the same range as the stone one,
+/// which is why they appear in the same arms.
+///
+/// | range | blocks | registration |
+/// |---|---|---|
+/// | none | iron, gold, copper ore (and deepslate) | `ConstantInt.of(0)` |
+/// | `0..=1` | nether gold ore | `UniformInt.of(0, 1)` |
+/// | `0..=2` | coal ore, deepslate coal ore | `UniformInt.of(0, 2)` |
+/// | `1..=5` | redstone ore, deepslate redstone ore | `RedStoneOreBlock` passes `UniformInt.of(1, 5)` |
+/// | `2..=5` | lapis ore, nether quartz ore (and deepslate lapis) | `UniformInt.of(2, 5)` |
+/// | `3..=7` | diamond ore, emerald ore (and deepslate) | `UniformInt.of(3, 7)` |
+/// | `15..=43` | spawner | `SpawnerBlock` rolls `15 + nextInt(15) + nextInt(15)` |
+///
+/// **The zero-XP ores are the trap.** Iron, gold and copper ore *are*
+/// `DropExperienceBlock`s — they take the class and pass a constant `0`, because they
+/// drop raw ore rather than a finished resource. "It is a DropExperienceBlock, so it
+/// drops experience" is the wrong inference, and the number of blocks it is wrong for
+/// is six.
+///
+/// The spawner is not a uniform range at all: two independent `nextInt(15)` draws sum
+/// to a **triangular** distribution over `15..=43`, so a single `next_int(29) + 15`
+/// would produce the right bounds with the wrong shape. [`block_break_points`] draws it
+/// as two.
+#[must_use]
+pub fn block_break_experience_range(block_name: &str) -> Option<(i32, i32)> {
+    let name = block_name
+        .split_once('[')
+        .map_or(block_name, |(name, _)| name)
+        .trim();
+    let path = name.split_once(':').map_or(name, |(_, path)| path);
+    match path {
+        "coal_ore" | "deepslate_coal_ore" => Some((0, 2)),
+        "nether_gold_ore" => Some((0, 1)),
+        "redstone_ore" | "deepslate_redstone_ore" => Some((1, 5)),
+        "lapis_ore" | "deepslate_lapis_ore" | "nether_quartz_ore" => Some((2, 5)),
+        "diamond_ore" | "deepslate_diamond_ore" | "emerald_ore" | "deepslate_emerald_ore" => {
+            Some((3, 7))
+        }
+        "spawner" => Some((SPAWNER_XP_BASE, SPAWNER_XP_BASE + 2 * (SPAWNER_XP_DRAW_BOUND - 1))),
+        _ => None,
+    }
+}
+
+/// `SpawnerBlock.spawnAfterBreak`'s constant term.
+const SPAWNER_XP_BASE: i32 = 15;
+
+/// The bound of each of the spawner's **two** `nextInt` draws.
+const SPAWNER_XP_DRAW_BOUND: i32 = 15;
+
+/// One roll of a broken block's experience, in vanilla's own draw shape.
+///
+/// `UniformInt.sample` is `min + nextInt(max - min + 1)`; dropping the `+ 1` makes the
+/// top of every range unreachable, which no "does mining an ore give XP" assertion could
+/// see. The spawner is the exception and takes two draws — see
+/// [`block_break_experience_range`].
+///
+/// `next_int` is passed as a closure rather than an RNG type so this stays free of
+/// `crate::mob_spawn`, keeping this module's "pure arithmetic, no dependencies"
+/// property.
+#[must_use]
+pub fn block_break_points(block_name: &str, mut next_int: impl FnMut(i32) -> i32) -> i32 {
+    let Some((min, max)) = block_break_experience_range(block_name) else {
+        return 0;
+    };
+    if min == SPAWNER_XP_BASE && max > SPAWNER_XP_BASE {
+        return SPAWNER_XP_BASE
+            + next_int(SPAWNER_XP_DRAW_BOUND)
+            + next_int(SPAWNER_XP_DRAW_BOUND);
+    }
+    min + next_int(max - min + 1)
+}
+
 /// One player's experience — vanilla's three fields, which are genuinely three
 /// pieces of state rather than one derived from another.
 ///
@@ -533,6 +613,141 @@ mod tests {
         assert_eq!(broke.level(), 0);
         assert_eq!(broke.progress(), 0.0);
         assert_eq!(broke.total(), 0);
+    }
+
+    /// **The six ores that pop no experience**, which is the arm a "it is a
+    /// `DropExperienceBlock`, so it drops experience" reading gets wrong.
+    ///
+    /// Iron, gold and copper ore — and all three deepslate variants — are registered as
+    /// `DropExperienceBlock` with `ConstantInt.of(0)`, because they drop raw ore rather
+    /// than a finished resource. Asserting only the ores that *do* pay would leave six
+    /// blocks silently rewarding XP forever, and nothing about a coal-ore test would
+    /// notice.
+    #[test]
+    fn the_raw_ores_pop_no_experience_despite_being_experience_blocks() {
+        let mut wrong: Vec<&str> = Vec::new();
+        for ore in [
+            "minecraft:iron_ore",
+            "minecraft:deepslate_iron_ore",
+            "minecraft:gold_ore",
+            "minecraft:deepslate_gold_ore",
+            "minecraft:copper_ore",
+            "minecraft:deepslate_copper_ore",
+            // Not an ore at all, and the commonest block in the game: a fallback that
+            // returned a range for an unknown name would show up here first.
+            "minecraft:stone",
+            "minecraft:dirt",
+        ] {
+            if block_break_experience_range(ore).is_some() {
+                wrong.push(ore);
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "these blocks must pop no experience: {wrong:?}"
+        );
+    }
+
+    /// Every paying ore's exact `[min, max]`, and the deepslate variant matching its
+    /// stone twin.
+    ///
+    /// Stated as a table so a failure names the block, and asserted as an exact pair
+    /// rather than "is Some" — the plausible wrong answers are all *other ranges*
+    /// (redstone as `1..=4` from a missing inclusive bound, lapis as `2..=4`), not an
+    /// absent one.
+    #[test]
+    fn each_paying_ore_declares_the_range_its_registration_does() {
+        const EXPECTED: &[(&str, (i32, i32))] = &[
+            ("minecraft:coal_ore", (0, 2)),
+            ("minecraft:deepslate_coal_ore", (0, 2)),
+            ("minecraft:nether_gold_ore", (0, 1)),
+            ("minecraft:redstone_ore", (1, 5)),
+            ("minecraft:deepslate_redstone_ore", (1, 5)),
+            ("minecraft:lapis_ore", (2, 5)),
+            ("minecraft:deepslate_lapis_ore", (2, 5)),
+            ("minecraft:nether_quartz_ore", (2, 5)),
+            ("minecraft:diamond_ore", (3, 7)),
+            ("minecraft:deepslate_diamond_ore", (3, 7)),
+            ("minecraft:emerald_ore", (3, 7)),
+            ("minecraft:deepslate_emerald_ore", (3, 7)),
+            ("minecraft:spawner", (15, 43)),
+        ];
+        let mut mismatches: Vec<String> = Vec::new();
+        for &(block, expected) in EXPECTED {
+            let actual = block_break_experience_range(block);
+            if actual != Some(expected) {
+                mismatches.push(format!("{block}: expected {expected:?}, got {actual:?}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+
+        // A state string with properties resolves the same as a bare name — `lit=true`
+        // is what a redstone ore looks like the instant a player breaks it.
+        assert_eq!(
+            block_break_experience_range("minecraft:redstone_ore[lit=true]"),
+            Some((1, 5))
+        );
+    }
+
+    /// **The inclusive upper bound of a `UniformInt`, which is the off-by-one no
+    /// "mining gives XP" assertion can see.**
+    ///
+    /// `UniformInt.sample` is `min + nextInt(max - min + 1)`. Dropping the `+ 1` makes
+    /// the top of every range unreachable — diamond ore would pay 3..=6 instead of
+    /// 3..=7, a difference nobody notices by eye. Both hypotheses are driven here from
+    /// outside constants: a stub `next_int` returning `bound - 1` (its largest legal
+    /// value) must produce **max**, and one returning `0` must produce **min**.
+    ///
+    /// The spawner is the same assertion against a **two-draw** roll: `15 + nextInt(15)
+    /// + nextInt(15)`, so the extremes are 15 and 43. A single `15 + next_int(29)` gives
+    /// those same two bounds with a uniform distribution instead of a triangular one,
+    /// which is why the draw *count* is asserted rather than just the range.
+    #[test]
+    fn a_uniform_roll_can_reach_both_ends_of_its_range() {
+        let mut mismatches: Vec<String> = Vec::new();
+        for (block, (min, max)) in [
+            ("minecraft:coal_ore", (0, 2)),
+            ("minecraft:redstone_ore", (1, 5)),
+            ("minecraft:diamond_ore", (3, 7)),
+            ("minecraft:nether_gold_ore", (0, 1)),
+        ] {
+            let lowest = block_break_points(block, |_| 0);
+            let highest = block_break_points(block, |bound| bound - 1);
+            if lowest != min {
+                mismatches.push(format!("{block}: a zero draw gave {lowest}, not {min}"));
+            }
+            if highest != max {
+                mismatches.push(format!(
+                    "{block}: the largest draw gave {highest}, not {max} — a missing \
+                     inclusive `+ 1` looks exactly like this"
+                ));
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+
+        // The spawner: two draws, so the roll asks for `nextInt(15)` twice.
+        let mut draws = 0;
+        let lowest = block_break_points("minecraft:spawner", |bound| {
+            draws += 1;
+            assert_eq!(bound, 15, "each spawner draw is nextInt(15)");
+            0
+        });
+        assert_eq!(lowest, 15);
+        assert_eq!(draws, 2, "the spawner rolls two draws, not one");
+        let highest = block_break_points("minecraft:spawner", |bound| bound - 1);
+        assert_eq!(highest, 43, "15 + 14 + 14");
+
+        // And a block with no range consumes no draws at all, so breaking stone cannot
+        // shift the next ore's roll.
+        let mut stone_draws = 0;
+        assert_eq!(
+            block_break_points("minecraft:stone", |_| {
+                stone_draws += 1;
+                0
+            }),
+            0
+        );
+        assert_eq!(stone_draws, 0, "a block with no experience must not draw");
     }
 
     /// **The outside oracle: real player files written by a real 26.2 server.**

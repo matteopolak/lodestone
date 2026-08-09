@@ -228,6 +228,20 @@ const METADATA_SER_BOOLEAN: i32 = 8;
 const METADATA_IDX_ITEM_ENTITY_ITEM: u8 = 8;
 const METADATA_SER_ITEM_STACK: i32 = 7;
 
+/// `ExperienceOrb.DATA_VALUE`'s metadata index — **also 8**, with the `INT` serializer
+/// [`METADATA_SER_INT`] already names.
+///
+/// Read off the same dump line-for-line as [`METADATA_IDX_ITEM_ENTITY_ITEM`]
+/// (`tests/support/entity_data_index_jvm.txt`: `8 ExperienceOrb.DATA_VALUE 1 INT`), and
+/// deliberately a *separate constant* with the same value rather than a reuse of that
+/// one: they are two different fields that happen to collide, and a single shared
+/// constant would make a future change to either silently move the other.
+///
+/// The producer-side guard is identical and is the only thing that separates them:
+/// [`MobSim::snapshots`](lodestone_server::MobSim) builds
+/// [`MetadataField::ExperienceOrbValue`] in its orb loop alone.
+const METADATA_IDX_EXPERIENCE_ORB_VALUE: u8 = 8;
+
 /// The overworld world-clock's registry holder id
 /// (`WorldClocks::bootstrap` registers `minecraft:overworld` first,
 /// `minecraft:the_end` second — see `packets::time::ClockUpdate::holder_id`'s
@@ -4087,6 +4101,20 @@ impl ServerProtocol for V770ServerProtocol {
                     // capture: `tests/fixtures/item_entity_metadata_diamond.hex`.
                     let stack = ItemStack::new(item.clone(), u32::from(*count));
                     write_optional_item_stack(&mut w, Some(&stack));
+                }
+                MetadataField::ExperienceOrbValue { value } => {
+                    // Index 8 again, and the *serializer* is what distinguishes this
+                    // from the arm above: `ExperienceOrb.DATA_VALUE` is an `INT` where
+                    // `ItemEntity.DATA_ITEM` is an `ITEM_STACK`. Both numbers come off
+                    // the `EntityDataIndexOracle` dump in the tree
+                    // (`tests/support/entity_data_index_jvm.txt`: `8
+                    // ExperienceOrb.DATA_VALUE 1 INT`) rather than being hand-counted,
+                    // and the producer guard is the same as `Item`'s: only
+                    // `MobSim::snapshots`' orb loop builds this variant, so every one
+                    // that arrives here belongs to a `minecraft:experience_orb`.
+                    w.u8(METADATA_IDX_EXPERIENCE_ORB_VALUE);
+                    w.var_i32(METADATA_SER_INT);
+                    w.var_i32(*value);
                 }
             }
         }

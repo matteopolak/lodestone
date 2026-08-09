@@ -256,6 +256,25 @@ pub enum MetadataField {
         /// nothing — the same as sending no field at all.
         count: u8,
     },
+    /// `ExperienceOrb.DATA_VALUE` — the points **one** absorption of this orb pays
+    /// out, and the whole of what a client is told about an orb.
+    ///
+    /// It is what selects the sprite: `ExperienceOrb.getIcon` buckets the value into
+    /// eleven frames at the same thresholds as the denomination ladder, so an orb whose
+    /// value never arrives draws frame 0 — the smallest — however much it is worth. The
+    /// orb's `count` (how many absorptions it holds after merging) is deliberately not
+    /// here, because vanilla does not synchronise it and one entity draws one sprite
+    /// whatever its count.
+    ///
+    /// **Index 8, shared with [`Item`](Self::Item) under a different serializer.**
+    /// `DATA_VALUE` is an `INT` and `ItemEntity.DATA_ITEM` an `ITEM_STACK` at the same
+    /// index; the encoder can tell them apart only because the field list is built per
+    /// entity kind by [`crate::mobs::MobSim::snapshots`], whose orb loop iterates the
+    /// orb map. Never push this variant for anything but an experience orb.
+    ExperienceOrbValue {
+        /// Points per absorption, vanilla's `getValue()`.
+        value: i32,
+    },
 }
 
 /// Which worldgen data bundle a [`ServerProtocol`]'s hosting needs (issue
