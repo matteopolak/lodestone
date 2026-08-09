@@ -310,7 +310,25 @@ the flaw is a property of what it was pointed at:
 
 *magnitude* is the one that reads as rigorous: **predict the value, do not merely assert the sign of the
 change** — compute *both* the correct and the suspected-wrong hypothesis from outside constants and require
-the measurement to land on one. *world* is the one you cannot read: both instances were verified against
+the measurement to land on one.
+
+Two corollaries, both paid for (§12.160):
+
+- **An input where both hypotheses coincide is not a test.** The XP curve yields 37 at level 15 under *both*
+  the inclusive and the exclusive reading of its threshold, so a gate at 15 passes either way; the
+  discriminating levels are 16 and 31. Before writing the assertion, evaluate the wrong hypothesis at your
+  chosen input and **pick an input where the two answers differ** — otherwise you have measured that the
+  code runs.
+- **Do not predict the plausible round number.** Four gates in one unit failed on first run for this alone —
+  "200 blocks" was really 241, "regeneration fills the bar" was 15.5, "regeneration repeats" happens once.
+  Re-derive the arithmetic in a separate script rather than reaching for the figure that sounds right; a
+  round number is a guess wearing a prediction's clothes, and it fails in the direction that looks like a
+  code bug.
+
+And the reciprocal of *world*: **a new subsystem silently breaks every test that assumed its absence.** A
+drowning-cadence gate began failing when hunger landed, because a hurt well-fed player now regenerates and
+the next health packet is a *heal*. When you add a system, grep for gates whose premise was "this does not
+exist yet". *world* is the one you cannot read: both instances were verified against
 the one scene, or the one `ServerProtocol`, **that structurally cannot exercise the change**. So the audit
 question is not "is this test integration-level?" but **"which implementation does this test's transport
 actually resolve to, and is it the one production uses?"** — a test double *complete enough to pass* is the
