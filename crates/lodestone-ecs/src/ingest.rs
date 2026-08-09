@@ -49,9 +49,9 @@ use lodestone_physics::Vec3d;
 
 use crate::entity::{
     Attributes, AttackSwing, Baby, CreeperSwellDir, CustomName, CustomNameVisible, DisplayItem,
-    EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, HeadYaw, Health, HurtTime,
-    MinecraftEntityId, MobState, OnGround, Passengers, Pose, Position, Rotation, Variant, Vehicle,
-    Velocity,
+    EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, FallingBlockState, HeadYaw, Health,
+    HurtTime, MinecraftEntityId, MobState, OnGround, Passengers, Pose, Position, Rotation, Variant,
+    Vehicle, Velocity,
 };
 use crate::player::{LocalPlayer, PhysicsState};
 use crate::schedules::{GameTick, NetIngest};
@@ -438,6 +438,42 @@ pub fn apply_entity_hurt_animation(
         };
         if let Some(entity) = index.get(*entity_id) {
             commands.entity(entity).insert(HurtTime(HURT_DURATION_TICKS));
+        }
+    }
+}
+
+/// `IngestSet::Apply`: `ClientEvent::FallingBlockState` → [`FallingBlockState`].
+///
+/// The one thing a client is ever told about which block a `minecraft:falling_block`
+/// is imitating. `FallingBlockEntity.defineSynchedData` registers `DATA_START_POS`
+/// and nothing else, so the state arrives only in the spawn packet's Object Data
+/// field and only once — see that event's own doc.
+///
+/// Id-addressed through [`EntityIndex`] like every other system in this set, so it
+/// relies on the same `.chain()` sync point that lets a packet in the *same* batch
+/// as the entity's `AddEntity` still resolve it. The adapter emits the two in that
+/// order, so this always finds the entity.
+///
+/// A `None` from `index.get` is silently skipped rather than logged, matching
+/// [`apply_entity_hurt_animation`]: an event for an entity we never spawned is a
+/// packet for something out of view, not an error.
+pub fn apply_falling_block_state(
+    batch: Res<IngestBatch>,
+    index: Res<EntityIndex>,
+    mut commands: Commands,
+) {
+    for event in batch.events() {
+        let ClientEvent::FallingBlockState {
+            entity_id,
+            block_state_id,
+        } = event
+        else {
+            continue;
+        };
+        if let Some(entity) = index.get(*entity_id) {
+            commands
+                .entity(entity)
+                .insert(FallingBlockState(*block_state_id));
         }
     }
 }
@@ -1068,6 +1104,11 @@ impl Plugin for IngestPlugin {
                 apply_entity_damaged,
                 apply_entity_hurt_animation,
                 apply_entity_animation,
+                // The falling block's imitated state. Id-addressed, so it depends on
+                // the same `.chain()` sync point after `apply_entity_spawn` that
+                // `apply_entity_passengers` below spells out — the adapter emits
+                // `FallingBlockState` in the same batch as the entity's `AddEntity`.
+                apply_falling_block_state,
                 // Ordered after `apply_entity_spawn` by the same `.chain()` sync
                 // point the id-addressed systems above rely on, which is what lets
                 // a `SET_PASSENGERS` in the *same* batch as the vehicle's
@@ -1879,6 +1920,60 @@ mod tests {
         );
     }
 
+    /// A falling block's imitated block state reaches its component, and is
+    /// **absent** until the spawn packet reports it.
+    ///
+    /// The absence half is the load-bearing one: state id `0` is a real state
+    /// (`minecraft:air`), so a default-`0` component could not be told apart from
+    /// "a falling block made of air" and the renderer would have no switch. The
+    /// second half feeds the spawn and the state in **one batch**, which is how
+    /// they really arrive — one `ADD_ENTITY` emits both — so it exercises the
+    /// `.chain()` sync point rather than a two-batch sequence that would pass even
+    /// if this system ran before `apply_entity_spawn`.
+    #[test]
+    fn a_falling_blocks_object_data_becomes_its_block_state_component() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(1, "minecraft:falling_block"));
+        assert!(
+            entity_for(&world, 1).get::<FallingBlockState>().is_none(),
+            "absent until the spawn packet's Object Data field is folded — absence \
+             is the switch a renderer keys on, not a sentinel 0"
+        );
+
+        feed(
+            &mut world,
+            ClientEvent::FallingBlockState {
+                entity_id: 1,
+                block_state_id: 1234,
+            },
+        );
+        assert_eq!(
+            entity_for(&world, 1).get::<FallingBlockState>().map(|s| s.0),
+            Some(1234),
+            "the state id must reach the component, or every falling block draws \
+             whatever state id 0 resolves to"
+        );
+
+        // In the same batch as the spawn, which is how it really arrives: the
+        // adapter emits `EntitySpawned` then `FallingBlockState` from one
+        // `ADD_ENTITY`. This is what the `.chain()` sync point after
+        // `apply_entity_spawn` buys, and without it the id would not resolve.
+        let mut world = ingest_world();
+        world
+            .resource_mut::<IngestQueue>()
+            .push(spawn_event(2, "minecraft:falling_block"));
+        world.resource_mut::<IngestQueue>().push(ClientEvent::FallingBlockState {
+            entity_id: 2,
+            block_state_id: 77,
+        });
+        world.run_schedule(NetIngest);
+        assert_eq!(
+            entity_for(&world, 2).get::<FallingBlockState>().map(|s| s.0),
+            Some(77),
+            "a spawn and its Object Data in one batch must both land"
+        );
+    }
+
     /// Both hurt reports reset the same countdown to the same value —
     /// `LivingEntity.handleDamageEvent` and `LivingEntity.animateHurt` write
     /// the identical pair of fields in vanilla.
@@ -2591,6 +2686,17 @@ mod tests {
         assert!(handles_event(&ClientEvent::EntityPassengersChanged {
             vehicle_id: 1,
             passenger_ids: vec![2],
+        }));
+        // `FallingBlockState` is per-entity state and therefore **`ingest`, not
+        // `session`** — the fork CLAUDE.md records as having cost work twice, and
+        // getting it wrong here compiles, tests green through a direct
+        // `apply_falling_block_state` call, and never runs in production. Its cost
+        // if it did: a falling block draws whatever block state id `0` resolves to,
+        // silently, since the spawn packet's Object Data field is the only channel
+        // the state ever travels on.
+        assert!(handles_event(&ClientEvent::FallingBlockState {
+            entity_id: 1,
+            block_state_id: 7,
         }));
         // And **both** routers claim it, which is the part that is easy to get
         // wrong: this side folds the per-entity `Passengers`/`Vehicle` pair,

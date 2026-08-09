@@ -123,6 +123,7 @@ fn camera() -> Camera {
 fn base_draw(id: i32, type_path: &str, feet: glam::Vec3, scale: f32) -> EntityDraw {
     EntityDraw {
         hurt: false,
+        block_state: None,
         id,
         type_path: type_path.to_owned(),
         item: None,

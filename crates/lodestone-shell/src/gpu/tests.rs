@@ -436,6 +436,7 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
             ..AnimInput::REST
         },
         wool: None,
+        block_state: None,
         count: 1,
         foil: false,
         name_tag: None,

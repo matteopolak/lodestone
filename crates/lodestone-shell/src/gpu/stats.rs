@@ -198,6 +198,18 @@ pub struct RenderStats {
     /// `item_drops_drawn`). Before this counter existed a sky full of snowballs
     /// and an empty sky produced byte-identical stats.
     pub projectiles_drawn: usize,
+    /// **Moving block models** drawn this frame — falling sand/gravel today, and
+    /// piston heads when that producer lands (`gpu/moving_blocks.rs`).
+    ///
+    /// Its own counter for the reason [`projectiles_drawn`](Self::projectiles_drawn)
+    /// has one, and one more: a moving block is the only thing on screen that is
+    /// *block* geometry at a non-block position, so it reaches neither
+    /// `entities_drawn` (no cuboid rig) nor `sections_drawn` (not in a chunk mesh).
+    /// Without this counter a falling block that drew nothing and one that drew
+    /// correctly produce byte-identical stats — which is exactly the island shape
+    /// this crate has paid for nine times, and the block state travelling on one
+    /// unvalidated VarInt makes a silent zero here the likely failure.
+    pub moving_blocks_drawn: usize,
     /// Whether the item in the local player's first-person hand was drawn this
     /// frame *instead of* the bare arm.
     ///

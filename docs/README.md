@@ -533,6 +533,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `server.rs` reports the result — including the `player_combat_kill` packet that
   actually raises the client's death screen, and the `respawn` packet that closes it
   again.
+- [Falling blocks](./falling-blocks.md) — Sand, red sand and gravel become a real,
+  broadcast `FallingBlockEntity` when their support disappears — a temporary
+  block-shaped entity that free-falls with vanilla's own physics and becomes a block
+  again where it lands. It spans the server (decision, entity, physics), the wire (the
+  `ADD_ENTITY` Object Data field) and the client (a reusable moving-block-model render
+  seam).
 - [Filled map item rendering (issue #184) — the wire and the fold are landed, the renderer is not](./filled-map-item.md) —
   Issue #184 asks for the filled map item's own visual: the generated per-map pixel
   texture, player/marker icons, and the border frame, whether held, in an item frame,
@@ -879,6 +885,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   column and exposes it on `GeneratedColumn`; `ChunkColumn` now carries it across the
   generator/server seam and `encode_column_body` packs it into the chunk packet, so a
   client receives a real map instead of an empty one.
+- [Moving block models](./moving-block-models.md) — The render path for a block's
+  own geometry drawn somewhere other than its own cell — vanilla's
+  `SubmitNodeCollector.submitMovingBlock`. It is a **seam with more than one intended
+  producer**, not a falling-block feature: falling sand and gravel use it today, and
+  `PistonHeadRenderer` needs exactly the same machinery.
 - [The multi-protocol seam: constructing an adapter for the protocol it negotiated](./multi-protocol-seam.md) —
   The change that lets one `crates/protocol/vNNN` crate serve several protocol
   revisions instead of exactly one. Unit U2 of epic #343's dispatch plan

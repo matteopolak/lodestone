@@ -6,6 +6,13 @@
 //! crack pass needs — each state's quads and the ten `destroy_stage_N` sprite
 //! rects — so a target `(state_id, stage, position)` becomes a [`CrackMesh`]
 //! without holding the whole model set (and its atlas image) alive.
+//!
+//! The per-state quad snapshot is now also the general **"block geometry after
+//! `BlockModels` is dropped"** seam — see [`CrackResolver::state_quads`], which
+//! the moving-block-model path (falling blocks, and piston heads when they land)
+//! reads for exactly the reason the crack pass does. The type keeps its name
+//! because the crack pass is still its only *owner*; a reader looking for block
+//! geometry at draw time should look here.
 
 use lodestone_assets::BakedQuad;
 
@@ -44,6 +51,25 @@ impl CrackResolver {
             }
         }
         Self::new(quads, stage_rects)
+    }
+
+    /// One block state's baked quads, in block-local `0.0..=1.0` space — the
+    /// snapshot this type already holds, exposed for callers that want the block's
+    /// *own* geometry rather than a crack overlay over it.
+    ///
+    /// Empty for air, for a state id past the table, and for any block whose model
+    /// bakes no faces. Callers should treat empty as "draw nothing", never as an
+    /// error: `RenderShape.INVISIBLE` blocks legitimately have no quads, and
+    /// `FallingBlockRenderer.submit` guards on exactly that
+    /// (`blockState.getRenderShape() == RenderShape.MODEL`).
+    ///
+    /// Unlike [`mesh_for`](Self::mesh_for) this keeps the quads' **own** UVs, tint
+    /// index, shade flag and animation slot — the crack path replaces the UVs with
+    /// a `destroy_stage` rect, which is why it cannot be reused for drawing the
+    /// block itself.
+    #[must_use]
+    pub fn state_quads(&self, state_id: u32) -> &[BakedQuad] {
+        self.quads.get(state_id as usize).map_or(&[], Vec::as_slice)
     }
 
     /// Build crack geometry for `state_id` at destroy `stage`, translated to the

@@ -773,6 +773,7 @@ mod tests {
             scale: 1.0,
             anim: lodestone_render::AnimInput::REST,
             wool: None,
+            block_state: None,
             count: 1,
             foil: false,
             name_tag: Some(crate::entities::NameTag {
@@ -840,6 +841,7 @@ mod tests {
             scale: 1.0,
             anim: lodestone_render::AnimInput::REST,
             wool: None,
+            block_state: None,
             count: 1,
             foil: false,
             name_tag: Some(crate::entities::NameTag {
@@ -929,6 +931,7 @@ mod tests {
             scale: 1.0,
             anim: lodestone_render::AnimInput::REST,
             wool: None,
+            block_state: None,
             count: 1,
             foil: false,
             name_tag: Some(crate::entities::NameTag {

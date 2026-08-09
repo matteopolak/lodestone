@@ -1199,6 +1199,7 @@ mod tests {
             equipment_dye: Vec::new(),
             equipment_trim: Vec::new(),
             wool: None,
+            block_state: None,
             count: 1,
             foil: false,
             feet: glam::Vec3::new(0.5, feet_y, 0.5),

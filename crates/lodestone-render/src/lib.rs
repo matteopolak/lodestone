@@ -210,6 +210,7 @@ pub use fluid_grid::{FluidGrid, FluidNeighborCell, PackedCell};
 pub use models::{
     FluidMeshes, FluidSectionView, GUI_ITEM_LIGHT, ModelMesh, ModelSectionView, ModelVertex,
     face_of_direction, is_full_cube, is_packed_cube, mesh_fluids, mesh_item_quads, mesh_models,
+    mesh_moving_block_quads,
 };
 pub use scene::{CullStats, FramePlan, WorldScene, section_of};
 pub use screen_effects::{

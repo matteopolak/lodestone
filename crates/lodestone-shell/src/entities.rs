@@ -140,7 +140,8 @@ use glam::Vec3;
 use lodestone_assets::ResourceLocation;
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::entity::{
-    AttackSwing, EntityFlags, EntityIndex, HurtTime, ItemUse, MinecraftEntityId, MobState, Pose,
+    AttackSwing, EntityFlags, EntityIndex, FallingBlockState, HurtTime, ItemUse, MinecraftEntityId,
+    MobState, Pose,
 };
 use lodestone_ecs::player::{
     CollisionSource, LocalPlayer, PhysicsState, PlayerCollision, Profile,
@@ -665,6 +666,22 @@ pub struct EntityDraw {
     /// `head_yaw_deg` is **relative to the body**, matching vanilla's
     /// `netHeadYaw`.
     pub anim: AnimInput,
+    /// The block state this entity is imitating, when it is a
+    /// `minecraft:falling_block` and its spawn packet has been decoded — the
+    /// global block-state id, which is the key
+    /// [`CrackResolver::state_quads`](lodestone_render::CrackResolver::state_quads)
+    /// is indexed by.
+    ///
+    /// `None` for every other entity type, and the switch the moving-block-model
+    /// pass keys on (`gpu/moving_blocks.rs`). Absence is deliberate rather than a
+    /// sentinel `0`: state id `0` is a real state (`minecraft:air`), so a caller
+    /// could not tell "not a falling block" from "a falling block made of air".
+    ///
+    /// Bridged off the *ingest* entity through [`EntityIndex`] in
+    /// [`extract_entity_draws`], like [`Self::hurt`] and [`Self::item_use`], not
+    /// folded through `EntityFacts` — see [`Self::hurt`] for why that hop is
+    /// avoided.
+    pub block_state: Option<u32>,
     /// This entity's resolved nametag (issue #100), narrowed from
     /// [`RenderNameTag`]. `None` draws nothing — the common case for every
     /// entity with no visible custom name.
@@ -1292,6 +1309,8 @@ pub fn extract_pickup_draws(
             equipment_dye: Vec::new(),
             equipment_trim: Vec::new(),
             wool: None,
+            // A pickup animation is always a dropped item, never a falling block.
+            block_state: None,
             feet,
             yaw: 0.0,
             head_yaw: 0.0,
@@ -1694,6 +1713,12 @@ pub fn extract_entity_draws(
     // questions, two fields; a shift-key-down player whose standing box does not
     // fit is `SWIMMING`, not `CROUCHING`.
     poses: Query<&Pose>,
+    // `FallingBlockState` lives on the ingest entity too
+    // (`apply_falling_block_state` inserts it from the spawn packet's Object Data
+    // field through the same `EntityIndex`), bridged the same way. It is what turns
+    // one VarInt into a drawn block — see `EntityDraw::block_state`, and note it is
+    // the *only* thing a client is ever told about which block is falling.
+    falling_blocks: Query<&FallingBlockState>,
     tracks: Query<(
         &MinecraftEntityId,
         &RenderKind,
@@ -1803,6 +1828,16 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| flags.get(entity).ok())
             .is_some_and(|flags| flags.0 & 0x01 != 0);
+        // The imitated block state of a falling block. Bridged off the ingest
+        // entity through `index` exactly as `on_fire` above and `hurt` below are,
+        // because `lodestone_ecs::ingest::apply_falling_block_state` inserts the
+        // component *there* and not on the render entity this query is drawn from.
+        // `None` for every entity that is not a falling block, which is the switch
+        // the moving-block pass keys on.
+        let block_state = index
+            .get(id.0)
+            .and_then(|entity| falling_blocks.get(entity).ok())
+            .map(|state| state.0);
         out.0.push(EntityDraw {
             id: id.0,
             type_path: kind.0.clone(),
@@ -1813,6 +1848,7 @@ pub fn extract_entity_draws(
             equipment_dye: equipment_dye.0.clone(),
             equipment_trim: equipment_trim.0.clone(),
             wool: wool.0,
+            block_state,
             feet: render_feet(from, to, clock),
             yaw: render_yaw(from, to, clock),
             head_yaw: render_head_yaw(from, to, clock),
@@ -3344,6 +3380,7 @@ mod tests {
                 equipment_dye: Vec::new(),
                 equipment_trim: Vec::new(),
                 wool: None,
+                block_state: None,
                 count: 1,
                 foil: false,
                 feet: Vec3::ZERO,
