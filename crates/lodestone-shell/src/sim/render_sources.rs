@@ -269,6 +269,27 @@ impl Sim {
         })
     }
 
+    /// This frame's moving pistons, for
+    /// [`RenderState::set_moving_piston_source`](crate::gpu::RenderState::set_moving_piston_source).
+    ///
+    /// Captures the progress tracker **and** the partial tick, like `bell_source`
+    /// and `enchanting_table_source`. The staleness penalty is the harshest of the
+    /// four: a whole push lasts two ticks, and a frozen `progress` of 0 draws the
+    /// head a full cell back *inside* the piston base rather than merely still.
+    #[must_use]
+    pub fn moving_piston_source(
+        &self,
+    ) -> Option<
+        impl Fn(glam::Vec3) -> Vec<lodestone_render::MovingPistonSpawn> + Send + Sync + 'static,
+    > {
+        let handle = self.net.as_ref()?.shared_handle();
+        let moves = self.moving_pistons.clone();
+        let partial_tick = self.clock().interp_alpha;
+        Some(move |eye: glam::Vec3| {
+            crate::block_entities::moving_piston_spawns(&handle, &moves, eye, partial_tick)
+        })
+    }
+
     /// This frame's campfire cooking items, for
     /// [`RenderState::set_campfire_source`](crate::gpu::RenderState::set_campfire_source).
     ///

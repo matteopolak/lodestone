@@ -516,6 +516,14 @@ impl Sim {
                     &handle, player, 8.0,
                 );
                 self.enchanting_table_books.tick(&tables, player);
+                // Moving pistons, on the same fixed 20 Hz. This one *must* be a tick
+                // and not a frame: vanilla's ramp is `progress += 0.5` per tick and
+                // the whole push is two ticks, so a per-frame advance at 60 fps would
+                // finish it in a single frame and the animation would not exist at
+                // all. The gather is unbounded by view distance on purpose — see
+                // `block_entities::moving_piston_seeds`.
+                let pistons = crate::block_entities::moving_piston_seeds(&handle);
+                self.moving_pistons.tick(&pistons);
             }
             // The HUD status effects and the title/action-bar overlays used to be
             // aged by three hand-written `tick(1)` calls right here. They are now
