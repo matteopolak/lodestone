@@ -28,7 +28,7 @@
 //!
 //! # Why the expected value originates outside the code under test
 //!
-//! `Driver::dispatch` does exactly this, in this order (`driver.rs:713-714`):
+//! `Driver::dispatch` does exactly this, in this order:
 //!
 //! ```text
 //! self.read_model.apply(&event);   // -> push_to_game_event_bus -> the plugin
@@ -73,17 +73,23 @@ use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 /// sets").
 const PROTOCOL: i32 = 776;
 
-/// How many events to demand from the oracle before asserting.
+/// Upper bound on events read from the oracle — a **cap**, not a target.
 ///
-/// **Not an arbitrary number.** Measured against this exact server: the first
-/// four events are Configuration-phase registry data (`DimensionTypeChanged`,
-/// `BiomeVisuals`, `BiomeClimates`, `BiomeRegistryNames`), and `Login` /
-/// `TeleportPlayer` / `ChunkLoaded` / `HealthChanged` / `Chat` follow. Fourteen
-/// is chosen to land well past the Play transition, so this file cannot quietly
-/// degrade into proving only that a handshake happened. [`reached_play`] asserts
-/// that property directly rather than trusting the count, because a count is
-/// exactly the kind of constant that stays green while its meaning rots.
-const ORACLE_EVENTS: usize = 14;
+/// This used to be a fixed count of 14, chosen to land well past the Play
+/// transition, with a note observing that "a count is exactly the kind of
+/// constant that stays green while its meaning rots". It rotted in the other
+/// direction: two legitimate additions to the join sequence — the clientbound
+/// `COMMANDS` tree and the window-0 inventory snapshot — pushed `ChunkLoaded`
+/// past the fourteenth event, and [`reached_play`] failed on a correct session.
+///
+/// So the stopping condition is now the **premise itself**: read until the
+/// session has demonstrably reached Play with a chunk in hand, and stop there.
+/// That is strictly better than a larger number, because the next packet added
+/// to the join sequence moves the count again and no constant can be chosen
+/// ahead of it. The cap exists only so a session that reaches Play and never
+/// sends a chunk fails on a bounded read with a clear message, rather than
+/// waiting out [`DEADLINE`].
+const ORACLE_EVENT_CAP: usize = 64;
 
 /// Generous, because it is a *liveness* bound and not the thing under test: a
 /// debug-build login handshake with registry data on a loaded machine is not
@@ -168,9 +174,10 @@ fn compose(logger: Option<EventLoggerPlugin>) -> (lodestone_ecs::EcsHandle, Enti
     (ecs, session)
 }
 
-/// Drive a real session and return the first [`ORACLE_EVENTS`] events the
-/// **`EventStream`** yielded, having run one `GameTick` immediately after each
-/// one so the bus is drained while that event is guaranteed still live.
+/// Drive a real session and return every event the **`EventStream`** yielded up
+/// to and including the one that satisfied [`play_reached`], having run one
+/// `GameTick` immediately after each so the bus is drained while that event is
+/// guaranteed still live.
 ///
 /// Returns the oracle sequence. The caller asserts the plugin's log against it.
 async fn run_session(ecs: &lodestone_ecs::EcsHandle, session: Entity) -> Vec<ClientEvent> {
@@ -189,25 +196,42 @@ async fn run_session(ecs: &lodestone_ecs::EcsHandle, session: Entity) -> Vec<Cli
 
     let mut oracle = Vec::new();
     let deadline = tokio::time::Instant::now() + DEADLINE;
-    while oracle.len() < ORACLE_EVENTS {
+    // Read until the premise holds, not until a counter does — see
+    // `ORACLE_EVENT_CAP`. `reached_play` below is the real stopping condition,
+    // and it is re-asserted after the loop so hitting the cap fails loudly
+    // rather than silently proving less.
+    while !play_reached(&oracle) && oracle.len() < ORACLE_EVENT_CAP {
         let event = tokio::time::timeout_at(deadline, events.recv())
             .await
             .unwrap_or_else(|_| {
                 panic!(
-                    "the real session yielded only {} of {ORACLE_EVENTS} events within {DEADLINE:?} \
-                     — the oracle itself never ran, so nothing below would have been proven",
+                    "the real session yielded only {} events within {DEADLINE:?} and never reached \
+                     Play with a chunk — the oracle itself never ran, so nothing below would have \
+                     been proven.\n{oracle:#?}",
                     oracle.len()
                 )
             })
-            .expect("the session ended before it produced enough events");
+            .expect("the session ended before it reached Play with a chunk");
 
-        // `apply` already ran for this event (driver.rs:713), so it is on the
-        // bus right now. Drain before aging can touch it.
+        // `apply` already ran for this event in `Driver::dispatch`, so it is on
+        // the bus right now. Drain before aging can touch it.
         ecs.write().run_schedule(GameTick);
         oracle.push(event);
     }
     reached_play(&oracle);
     oracle
+}
+
+/// [`reached_play`]'s condition as a predicate, for use as a loop bound.
+///
+/// Deliberately the *same* two checks, so the stopping condition and the
+/// asserted premise cannot drift apart — the failure mode a separate hand-kept
+/// count had.
+fn play_reached(oracle: &[ClientEvent]) -> bool {
+    oracle.iter().any(|e| matches!(e, ClientEvent::Login { .. }))
+        && oracle
+            .iter()
+            .any(|e| matches!(e, ClientEvent::ChunkLoaded { .. }))
 }
 
 /// The oracle's own premise, asserted rather than assumed: this really was a
@@ -252,10 +276,10 @@ async fn a_registered_logger_observes_a_real_session_through_the_public_plugin_a
     let oracle = run_session(&ecs, session).await;
     let observed = log.events();
 
-    assert_eq!(
-        oracle.len(),
-        ORACLE_EVENTS,
-        "non-vacuity: the oracle must have produced the events it was asked for"
+    assert!(
+        !oracle.is_empty() && play_reached(&oracle),
+        "non-vacuity: the oracle must have reached Play with a chunk, or the comparison below \
+         proves nothing.\n{oracle:#?}"
     );
     assert!(
         observed.starts_with(&oracle),
@@ -288,11 +312,10 @@ async fn an_unregistered_logger_observes_nothing_from_the_same_real_session() {
 
     let oracle = run_session(&ecs, session).await;
 
-    assert_eq!(
-        oracle.len(),
-        ORACLE_EVENTS,
+    assert!(
+        !oracle.is_empty() && play_reached(&oracle),
         "the control's premise: the same real events really did flow this time too — \
-         without this the empty log below would prove only that nothing happened"
+         without this the empty log below would prove only that nothing happened.\n{oracle:#?}"
     );
     assert!(
         log.events().is_empty(),
