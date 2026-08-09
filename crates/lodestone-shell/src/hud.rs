@@ -706,6 +706,32 @@ pub struct HudFrame<'a> {
     pub sidebar: Option<&'a Sidebar>,
     /// Active boss bars, drawn stacked at the top-centre in render order.
     pub boss_bars: &'a [BossBarView],
+    /// Whether this player can be hurt at all — vanilla's
+    /// `MultiPlayerGameMode.canHurtPlayer()`, which is `localPlayerMode.isSurvival()`
+    /// and therefore `SURVIVAL || ADVENTURE`. Creative **and spectator** are both
+    /// false, which is why this is not a `GameMode::Creative` test: naming the mode
+    /// would leave a spectator with a heart row vanilla never draws.
+    ///
+    /// `Hud.extractHotbarAndDecorations` calls `extractPlayerHealth` only under this
+    /// predicate, and that one call draws the *whole* left/right column — the armour
+    /// bar, the hearts, the hunger row and the air bubbles. So one flag gates all
+    /// four here too (this HUD draws no armour bar yet; when it grows one it belongs
+    /// inside the same gate).
+    ///
+    /// It also stands in for vanilla's `hasExperience()`, which gates the XP bar and
+    /// the level number through `nextContextualInfoState`: in 26.2 both methods have
+    /// the identical body (`localPlayerMode.isSurvival()`), so one boolean carries
+    /// both. **Split this into two fields if they ever diverge upstream** — the
+    /// questions are genuinely different even where today's answers are not.
+    ///
+    /// Finally it supplies the signal `held_item`'s 14 px shift needed
+    /// (`extractSelectedItemName`'s `y += 14` when `!canHurtPlayer()`), because with
+    /// no vitals row below it the label drops into the space they vacated.
+    ///
+    /// Defaults to `true`, so every caller that predates this field — and every
+    /// hermetic test that sets `health`/`food`/`xp` directly — draws exactly as it
+    /// did before.
+    pub can_hurt_player: bool,
     /// Current player health in `0..=20`, `Some` only on a live survival server.
     pub health: Option<f32>,
     /// Current food level in `0..=20`, `Some` only on a live survival server.
@@ -767,11 +793,10 @@ pub struct HudFrame<'a> {
     /// this from whatever owns that timer each frame rather than from a
     /// decoded packet.
     ///
-    /// **Known gap**: vanilla shifts this label down 14px when
-    /// `!canHurtPlayer()` (creative/spectator, no health/hunger row to clear)
-    /// — see the draw site in [`HudGeometry::build_inner`]. No game-mode
-    /// signal reaches [`HudFrame`] yet, so only the survival position draws;
-    /// creative/spectator gets the survival Y for now.
+    /// Vanilla shifts this label down 14 px when `!canHurtPlayer()`
+    /// (creative/spectator have no health/hunger row for it to clear); the signal is
+    /// [`Self::can_hurt_player`] and the draw site is in
+    /// [`HudGeometry::build_inner`].
     pub held_item: Option<(String, f32)>,
     /// `(recipes, tags)` loaded into the local recipe corpus (see
     /// `crate::resources::load_recipe_book`), appended to the debug overlay as
@@ -866,6 +891,7 @@ impl<'a> HudFrame<'a> {
             tab_footer: &[],
             sidebar: None,
             boss_bars: &[],
+            can_hurt_player: true,
             health: None,
             food: None,
             saturation: None,
@@ -884,6 +910,26 @@ impl<'a> HudFrame<'a> {
             recipe_toast: None,
             advancement_toast: None,
         }
+    }
+}
+
+/// Vanilla's `MultiPlayerGameMode.canHurtPlayer()`, the predicate
+/// [`HudFrame::can_hurt_player`] carries.
+///
+/// Its body is `localPlayerMode.isSurvival()`, and `GameType.isSurvival()` is
+/// `this == SURVIVAL || this == ADVENTURE` — so **both** creative and spectator are
+/// false. Naming a mode instead (`mode == Creative`) is the tempting wrong version:
+/// it agrees on three of the four values and leaves a spectator with a heart row
+/// vanilla never draws.
+///
+/// `None` — no live connection, or a login whose game mode has not arrived — reads
+/// as `true`, matching the pre-connect HUD and [`HudFrame::new`]'s own default.
+#[must_use]
+pub fn can_hurt_player(mode: Option<lodestone_model::GameMode>) -> bool {
+    use lodestone_model::GameMode;
+    match mode {
+        Some(GameMode::Creative | GameMode::Spectator) => false,
+        Some(GameMode::Survival | GameMode::Adventure) | None => true,
     }
 }
 
@@ -1509,7 +1555,13 @@ impl HudGeometry {
             // with the level number centred above it (vanilla green). Drawn only
             // once the server has sent experience (`frame.xp`); off a live server
             // this is `None` and nothing draws, keeping the gauge honest.
-            let vitals_base = if let Some((level, progress)) = frame.xp {
+            // The same two gates the sprite path applies, for the same reasons — see
+            // [`HudFrame::can_hurt_player`]. Kept in both branches rather than in the
+            // caller: `bars_y` is a layout anchor the rest of the HUD reads, and the
+            // two branches compute it differently.
+            let vitals_base = if let Some((level, progress)) =
+                frame.xp.filter(|_| frame.can_hurt_player)
+            {
                 let bar_w = 9.0 * 22.0;
                 let bx = cx - bar_w * 0.5;
                 let bar_h = 4.0;
@@ -1543,7 +1595,7 @@ impl HudGeometry {
             // moment any of its two units is present (a deliberate simplification —
             // no half-pip art yet).
             let bars_y = vitals_base - pip - 4.0;
-            if let Some(hp) = frame.health {
+            if frame.can_hurt_player && let Some(hp) = frame.health {
                 b.pips(
                     hp,
                     cx - row_w - 8.0,
@@ -1553,7 +1605,7 @@ impl HudGeometry {
                     [0.86, 0.15, 0.16, 1.0],
                 );
             }
-            if let Some(food) = frame.food {
+            if frame.can_hurt_player && let Some(food) = frame.food {
                 b.pips(
                     food as f32,
                     cx + 8.0,
@@ -1601,12 +1653,10 @@ impl HudGeometry {
         if let Some((name, alpha)) = frame.held_item.as_ref().filter(|(_, a)| *a > 0.0) {
             let tw = b.legacy_width(name, 1.0);
             let x = (b.w - tw) * 0.5;
-            // `Hud.java:634,636`: `y = guiHeight - 59`, `+14` when
-            // `!canHurtPlayer()` (creative/spectator hide the health/hunger
-            // row). No game-mode signal reaches this frame yet — see
-            // [`HudFrame::held_item`]'s doc for the gap — so only the
-            // survival position is modelled.
-            let y = b.h - 59.0;
+            // `extractSelectedItemName`: `y = guiHeight - 59`, then `y += 14` when
+            // `!canHurtPlayer()`, because creative and spectator have no
+            // health/hunger row for the label to clear.
+            let y = b.h - 59.0 + if frame.can_hurt_player { 0.0 } else { 14.0 };
             b.text_legacy(name, x, y, 1.0, [1.0, 1.0, 1.0], *alpha);
         }
 
@@ -2083,8 +2133,20 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     // follows too.
     let bar_w = 182.0;
     let bar_h = 5.0;
-    if let Some((level, progress)) = frame.xp {
-        let by = hy - bar_h - 2.0;
+    // The bar's own top, resolved before the draw gate: `cluster_top` moves up for
+    // the XP bar whether or not that bar is actually *drawn*. `cluster_top` is what
+    // the action bar hangs off here, and vanilla's action bar sits at a constant
+    // `guiHeight - 68` in every game mode (`extractOverlayMessage` takes no game-mode
+    // branch at all), so letting the creative gate below move it would introduce a
+    // divergence rather than remove one.
+    let xp_top = frame.xp.map(|_| hy - bar_h - 2.0);
+    if let Some(by) = xp_top {
+        cluster_top = by;
+    }
+    // `nextContextualInfoState` reaches `ContextualInfo.EXPERIENCE` only when
+    // `gameMode.hasExperience()`, so creative and spectator draw neither the bar nor
+    // the level number — see [`HudFrame::can_hurt_player`].
+    if let (true, Some((level, progress)), Some(by)) = (frame.can_hurt_player, frame.xp, xp_top) {
         b.sprite("hud/experience_bar_background", hx, by, bar_w, bar_h, white);
         let p = progress.clamp(0.0, 1.0);
         if p > 0.0 {
@@ -2154,16 +2216,19 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
             b.text_plain(&s, tx, ty - 1.0, 1.0, black);
             b.text_plain(&s, tx, ty, 1.0, green);
         }
-        cluster_top = by;
     }
 
     // Hearts (health) left, hunger right, one row above the cluster. Each icon
     // is 9x9 native, stepped 8px (vanilla spacing); a container/empty backing is
     // drawn first, then a full or half overlay per two points.
+    // All three rows sit behind vanilla's single `canHurtPlayer()` gate on
+    // `extractPlayerHealth` — hearts, hunger and the bubble row are drawn by that one
+    // call, so creative and spectator show none of them. See
+    // [`HudFrame::can_hurt_player`].
     let icon = 9.0;
     let step = 8.0;
     let row_y = cluster_top - icon - 4.0;
-    if let Some(hp) = frame.health {
+    if frame.can_hurt_player && let Some(hp) = frame.health {
         let hp = hp.max(0.0);
         let current = hp.ceil() as i32;
         // The container background flashes to the "_blinking" sprite variant
@@ -2209,7 +2274,7 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
             }
         }
     }
-    if let Some(food) = frame.food {
+    if frame.can_hurt_player && let Some(food) = frame.food {
         let food_f = food.max(0) as f32;
         // Hunger-empty wobble (`Hud.java:977-979`): `frame.saturation` is
         // `None` off a build that has not wired it through yet (see
@@ -2235,7 +2300,7 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     // plus a 1px gap above the health/hunger line, not on top of it. Anchored
     // at the same right edge (`hx + hw`) the hunger row uses, matching
     // vanilla's shared `xRight`.
-    if let Some((air, max_air, eye_in_water)) = frame.air {
+    if frame.can_hurt_player && let Some((air, max_air, eye_in_water)) = frame.air {
         let air_row_y = row_y - icon - 1.0;
         // `wobble` is vanilla's `tickCount % 2 == 0` (a 0/1px jitter vanilla
         // applies to a fully-empty row's last bubble) — no per-frame tick
@@ -4401,6 +4466,115 @@ mod tests {
         assert_ne!(
             empty.verts, full.verts,
             "full vs empty must recolour the pips, not just redraw them"
+        );
+    }
+
+    /// The discriminating input for the two readings of "hide the hearts in
+    /// creative": `GameType.isSurvival()` is `SURVIVAL || ADVENTURE`, so **spectator**
+    /// is the value where the mode-naming hypothesis (`mode == Creative`) and the real
+    /// predicate disagree. Adventure is the second such value in the other direction.
+    #[test]
+    fn can_hurt_player_is_isSurvival_and_not_a_creative_test() {
+        use lodestone_model::GameMode;
+        assert!(can_hurt_player(Some(GameMode::Survival)));
+        // `isSurvival()` returns true for ADVENTURE too — an adventure-mode player is
+        // hurtable and keeps the whole column.
+        assert!(can_hurt_player(Some(GameMode::Adventure)));
+        assert!(!can_hurt_player(Some(GameMode::Creative)));
+        // The one that separates the hypotheses.
+        assert!(!can_hurt_player(Some(GameMode::Spectator)));
+        // Pre-connect / pre-login: the survival layout, matching `HudFrame::new`.
+        assert!(can_hurt_player(None));
+    }
+
+    /// Vanilla's gate is `canHurtPlayer()` — `SURVIVAL || ADVENTURE` — and one call
+    /// to `extractPlayerHealth` behind it draws hearts, hunger and the bubble row,
+    /// while `hasExperience()` (the same body) gates the XP bar.
+    ///
+    /// The counts here are predicted, not observed: on the procedural branch (no GUI
+    /// atlas attached) `Builder::pips` emits exactly ten quads per row at six
+    /// vertices each, which `health_pips_scale_with_value` above independently pins at
+    /// `10 * 6`. So a survival frame carrying both rows is `2 * 10 * 6` and a creative
+    /// frame is `0`. The wrong hypothesis — "gate on `GameMode::Creative`" — would
+    /// leave the spectator arm at 120, so the spectator case below is the one that
+    /// separates the two readings; a creative-only test passes under either.
+    #[test]
+    fn creative_and_spectator_hide_the_whole_vitals_column() {
+        let stats = DebugStats::default();
+        // `HudFrame` is not `Copy` (it carries owned strings), so each arm builds its
+        // own rather than cloning one.
+        let build = |can_hurt: bool, vitals: bool, hotbar: Option<usize>| {
+            let mut frame = HudFrame::new(&stats);
+            frame.crosshair = false;
+            frame.show_debug = false;
+            frame.can_hurt_player = can_hurt;
+            frame.xp = Some((7, 0.5));
+            frame.hotbar = hotbar;
+            if vitals {
+                frame.health = Some(20.0);
+                frame.food = Some(20);
+            }
+            HudGeometry::build(&frame, 640, 480).vertex_count()
+        };
+
+        // Survival / adventure: two pip rows on top of whatever the XP bar itself
+        // costs — asserted by *subtracting* an XP-only frame rather than by predicting
+        // the bar's own vertex budget, which is not what this test is about.
+        assert_eq!(
+            build(true, true, None) - build(true, false, None),
+            2 * 10 * 6,
+            "ten health pips and ten hunger pips, six vertices each"
+        );
+
+        // `can_hurt_player == false` must take the XP bar and its level number with
+        // it, not just the two pip rows — so the whole cluster is gone, not merely
+        // shortened. With no hotbar, zero is the honest total.
+        assert_eq!(
+            build(false, true, None),
+            0,
+            "no hearts, no hunger, no XP bar when the player cannot be hurt"
+        );
+
+        // The control: a `0` above would also be what a frame drawing nothing at all
+        // reports, so prove the hotbar — which vanilla draws in every game mode, and
+        // which this gate must not touch — still lands.
+        assert!(
+            build(false, true, Some(0)) > 0,
+            "the hotbar is not behind canHurtPlayer(); vanilla draws it in creative"
+        );
+    }
+
+    /// `extractSelectedItemName` places the held-item label at `guiHeight - 59`, then
+    /// `y += 14` when `!canHurtPlayer()`. Predicted as an exact delta rather than
+    /// "it moved": at 480 px tall with GUI scale forced to 1 the logical canvas is the
+    /// physical one, so the two y values are `421` and `435`.
+    #[test]
+    fn the_held_item_label_drops_exactly_fourteen_pixels_in_creative() {
+        let stats = DebugStats::default();
+        let lowest_y = |can_hurt: bool| {
+            let mut frame = HudFrame::new(&stats);
+            frame.crosshair = false;
+            frame.show_debug = false;
+            frame.can_hurt_player = can_hurt;
+            frame.held_item = Some(("Diamond Sword".to_string(), 1.0));
+            HudGeometry::build(&frame, 640, 480)
+                .verts
+                .chunks(FLOATS_PER_VERTEX)
+                .map(|v| v[1])
+                .fold(f32::NEG_INFINITY, f32::max)
+        };
+        let survival = lowest_y(true);
+        let creative = lowest_y(false);
+        // `verts` are clip space, y **up**, so a label lower on screen has the smaller
+        // value. The expected delta is derived from the same `logical_canvas` the draw
+        // lays out in rather than from a hardcoded scale: 14 logical px over a canvas
+        // `h` tall spans `2 * 14 / h` of the `-1..=1` range.
+        let (_, canvas_h) =
+            crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, 640, 480);
+        let expected = 2.0 * 14.0 / canvas_h;
+        assert!(
+            (survival - creative - expected).abs() < 1e-4,
+            "expected a 14px drop ({expected} in clip space), got {survival} -> {creative}"
         );
     }
 
