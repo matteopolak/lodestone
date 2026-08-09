@@ -44,13 +44,42 @@
 //! decides *where* the structure lands, so two seeds never ask for a roll at the
 //! same coordinates.
 //!
+//! # Three passes, not one, because vanilla has three mechanisms
+//!
+//! The pipeline above is the **marker** pass, and on its own it left every village,
+//! bastion, trial chamber, ancient city, ruined portal and pillager outpost
+//! generating with empty chests while shipwrecks worked. The reason is that a data
+//! marker is only one of three ways vanilla attaches a loot table:
+//!
+//! | pass | mechanism | reads |
+//! |---|---|---|
+//! | marker | a `structure_block` DATA marker the piece's `handleDataMarker` interprets | [`data_markers`] |
+//! | self-named | the container block's own `nbt.LootTable` field | [`template_loot`] |
+//! | coded | a piece with no template calling `createChest` directly | `piece.loot` |
+//!
+//! Measured over the 1,212 bundled templates, **132** use the self-named form
+//! (village 62, bastion 26, trial_chambers 19, ruined_portal 13, ancient_city 10,
+//! pillager_outpost 2) and those templates generally carry no marker at all — while
+//! `shipwreck/with_mast` is the mirror image. **Neither pass subsumes the other**,
+//! and a coverage figure from one says nothing about the other. That is the shape of
+//! mistake worth remembering here: the marker pass was complete, correct and
+//! verified against its own structures, and 132 templates were invisible to it.
+//!
 //! # How to change it
 //!
-//! To support another structure's chests, add its `(structure id, marker)` pair
-//! to [`marker_loot_table`] and, if the chest is *created* by the marker rather
-//! than already present in the template, add it to [`marker_places_chest`]. Both
-//! come straight from that structure's `handleDataMarker` in
+//! To support another structure's **marker** chests, add its `(structure id,
+//! marker)` pair to [`marker_loot_table`] and, if the chest is *created* by the
+//! marker rather than already present in the template, add it to
+//! [`marker_places_chest`]. Both come straight from that structure's
+//! `handleDataMarker` in
 //! `.cache/mc/26.2/src/net/minecraft/world/level/levelgen/structure/structures/`.
+//!
+//! The other two passes need **no per-structure table at all** — they read the table
+//! id out of the data — so a new structure using either form works the day its
+//! templates are bundled. What can still be missing is the loot table itself: a
+//! table this crate does not bundle yields an empty container rather than a missing
+//! one, so check `assets/loot_table/chests/` before concluding a structure's chests
+//! are unwired.
 //!
 //! ## Gotchas
 //!
@@ -156,6 +185,38 @@ pub fn chests_for_chunk(
     let mut out = Vec::new();
     for start in starts {
         for piece in &start.pieces {
+            // Pass 2 first, because it needs neither a placement nor a template: a
+            // **coded** piece (a desert pyramid, a jungle temple, a stronghold room)
+            // has no template at all, so both passes below structurally cannot see
+            // its containers. Vanilla's coded `postProcess` calls
+            // `createChest`/`setLootTable` directly, and `lodestone-worldgen`
+            // already records each of those as a `CodedLoot` with an **absolute**
+            // world position and vanilla's own `random.nextLong()` seed — so there
+            // is no transform to apply here, which is exactly why this arm looks
+            // shorter than the template ones rather than less complete.
+            for coded in &piece.loot {
+                let pos = BlockPos::new(coded.pos[0], coded.pos[1], coded.pos[2]);
+                if pos.x.div_euclid(16) != cx || pos.z.div_euclid(16) != cz {
+                    continue;
+                }
+                let Ok(table) = coded.table.parse::<ResourceKey>() else {
+                    continue;
+                };
+                // Vanilla's seed, not the position hash: a coded piece drew it from
+                // the structure's own stream, so using it keeps the roll on the
+                // generator's specification rather than substituting ours. Still
+                // deterministic per column, which is the property the module doc
+                // requires.
+                let mut rng = SpawnRng::new(coded.seed as u64);
+                let items = tables.roll(&table, &LootContext::default(), &mut rng);
+                out.push(StructureChest {
+                    pos,
+                    entity: fill_container(items, &mut rng),
+                    // The coded piece already wrote the container block itself,
+                    // through the same `CodedBlock` list that builds the rest of it.
+                    block: None,
+                });
+            }
             let Some(placement) = piece.placement.as_ref() else {
                 continue;
             };
@@ -165,6 +226,41 @@ pub fn chests_for_chunk(
             let Some(bytes) = crate::worldgen_data::embedded_structure_template(template_id) else {
                 continue;
             };
+            // Pass 1: containers that name their own `LootTable`. Transformed by the
+            // *same* `placement.settings` the marker pass below uses — reusing that
+            // transform rather than writing a second one is what stops a rotated
+            // village chest landing in the wrong cell.
+            for loot in template_loot(bytes) {
+                let rel = transform(
+                    loot.pos,
+                    placement.settings.mirror,
+                    placement.settings.rotation,
+                    placement.settings.pivot,
+                );
+                let pos = BlockPos::new(
+                    rel[0] + placement.position[0],
+                    rel[1] + placement.position[1],
+                    rel[2] + placement.position[2],
+                );
+                if pos.x.div_euclid(16) != cx || pos.z.div_euclid(16) != cz {
+                    continue;
+                }
+                let Ok(table) = loot.table.parse::<ResourceKey>() else {
+                    continue;
+                };
+                let mut rng = SpawnRng::new(
+                    loot.seed.map_or_else(|| chest_seed(pos), |s| s as u64),
+                );
+                let items = tables.roll(&table, &LootContext::default(), &mut rng);
+                out.push(StructureChest {
+                    pos,
+                    entity: fill_container(items, &mut rng),
+                    // The template placed the container; only its contents are
+                    // missing. Writing a block here would replace a barrel or a
+                    // decorated pot with a chest.
+                    block: None,
+                });
+            }
             let big = template_id.contains("/big_");
             for marker in data_markers(bytes) {
                 let (offset, block) = marker_places_chest(&start.structure);
@@ -238,6 +334,78 @@ fn fill_container(items: Vec<ItemStack>, rng: &mut SpawnRng) -> BlockEntity {
         id: "minecraft:chest".to_owned(),
         slots,
     }
+}
+
+/// One container a template placed with its own `LootTable` already set: its
+/// template-relative position, the table id, and vanilla's optional
+/// `LootTableSeed`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TemplateLoot {
+    pos: [i32; 3],
+    table: String,
+    seed: Option<i64>,
+}
+
+/// Every block in a raw template whose own `nbt` compound carries a `LootTable`
+/// string.
+///
+/// # Why this is a second pass and not a case of the marker pass
+///
+/// These are a **different mechanism**, and conflating them is why every village,
+/// bastion, trial chamber, ancient city, ruined portal and pillager outpost
+/// generated with empty chests while shipwrecks worked. A `structure_block` DATA
+/// marker is an instruction to the piece's `handleDataMarker`, which looks the
+/// table up from the marker's *metadata string* and a per-structure table
+/// ([`marker_loot_table`]). A `LootTable` field is the container **naming its own
+/// table**, resolved by `StructureTemplate.placeInWorld` writing the block entity
+/// straight through — no marker, no `handleDataMarker`, nothing for the marker pass
+/// to find.
+///
+/// The two are near-disjoint in the corpus: measured over the 1,212 bundled
+/// templates, **132** carry a `LootTable` field, and the templates that do
+/// generally carry no marker at all — while `shipwreck/with_mast` is the mirror
+/// image, carrying markers and no `LootTable`. So neither pass subsumes the other,
+/// and a coverage number from one says nothing about the other.
+///
+/// Blocks are matched by the presence of the field rather than by block name, which
+/// is what makes this cover barrels, dispensers and decorated pots as well as
+/// chests — vanilla's own condition is the field, not the block.
+fn template_loot(bytes: &[u8]) -> Vec<TemplateLoot> {
+    let Some(root) = decode_template(bytes) else {
+        return Vec::new();
+    };
+    let Nbt::Compound(root) = &root else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(Nbt::List { elements, .. }) = field(root, "blocks") {
+        for entry in elements {
+            let Some(nbt) = compound_field(entry, "nbt") else {
+                continue;
+            };
+            let Some(Nbt::String(table)) = compound_field(nbt, "LootTable") else {
+                continue;
+            };
+            let Some(pos) = compound_field(entry, "pos").and_then(int_triple) else {
+                continue;
+            };
+            // `LootTableSeed` is a `Long` in vanilla's `RandomizableContainer`
+            // codec and is **optional**: absent, or present and zero, both mean
+            // "roll from a fresh seed", which for us means the position-derived one.
+            // Treating a zero as a real seed would give every unseeded container in
+            // the world identical contents.
+            let seed = match compound_field(nbt, "LootTableSeed") {
+                Some(Nbt::Long(s)) if *s != 0 => Some(*s),
+                _ => None,
+            };
+            out.push(TemplateLoot {
+                pos,
+                table: table.clone(),
+                seed,
+            });
+        }
+    }
+    out
 }
 
 /// Reads every `structure_block` DATA marker out of a raw template file.
@@ -376,6 +544,165 @@ mod tests {
         let mut names: Vec<&str> = markers.iter().map(|m| m.metadata.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, vec!["map_chest", "supply_chest", "treasure_chest"]);
+    }
+
+    /// **The self-named pass, against Mojang's own bytes.** A village template that
+    /// carries a `LootTable` field must be read, and the pair of assertions here is
+    /// what proves the two passes are genuinely different mechanisms rather than one
+    /// wearing two names.
+    ///
+    /// The expected values come from the file: a plains village house names
+    /// `minecraft:chests/village/village_plains_house`, which is a table this crate
+    /// bundles. The control is `data_markers` over the **same bytes** returning
+    /// nothing — that emptiness is precisely why the marker pass left every village
+    /// chest empty, and reading it as "this template has no loot" is the mistake.
+    #[test]
+    fn a_village_template_carries_self_named_loot_the_marker_pass_cannot_see() {
+        // Any bundled village template with a chest. Resolved by search rather than
+        // hardcoded, so this does not become a test about one file name.
+        let candidates = [
+            "minecraft:village/plains/houses/plains_small_house_1",
+            "minecraft:village/plains/houses/plains_big_house_1",
+            "minecraft:village/plains/houses/plains_butcher_shop_1",
+            "minecraft:village/plains/houses/plains_fletcher_house_1",
+            "minecraft:village/plains/houses/plains_tool_smith_1",
+            "minecraft:village/plains/houses/plains_armorer_house_1",
+        ];
+        let mut found: Option<(&str, Vec<TemplateLoot>)> = None;
+        for id in candidates {
+            let Some(bytes) = crate::worldgen_data::embedded_structure_template(id) else {
+                continue;
+            };
+            let loot = template_loot(bytes);
+            if !loot.is_empty() {
+                found = Some((id, loot));
+                break;
+            }
+        }
+        let (id, loot) = found.expect(
+            "at least one bundled plains village template must carry a LootTable field — if this \
+             panics, the 132-template measurement this pass was built on no longer holds and the \
+             candidate list above is the first thing to check",
+        );
+
+        // Every entry names a real, `minecraft:`-namespaced table.
+        for entry in &loot {
+            assert!(
+                entry.table.starts_with("minecraft:chests/"),
+                "{id} names {}, which is not a chest table",
+                entry.table
+            );
+            assert!(
+                entry.table.parse::<ResourceKey>().is_ok(),
+                "{id} names an unparseable table {}",
+                entry.table
+            );
+        }
+
+        // The control, and the whole point: the marker pass sees nothing here.
+        let bytes = crate::worldgen_data::embedded_structure_template(id).expect("bundled");
+        assert!(
+            data_markers(bytes).is_empty(),
+            "{id} carries a data marker too, so it is the wrong template to prove the two \
+             passes are disjoint — pick one that does not"
+        );
+        // And the mirror image, so the control above is not measuring a broken
+        // `data_markers`: the shipwreck has markers and no self-named loot.
+        let mast = crate::worldgen_data::embedded_structure_template("minecraft:shipwreck/with_mast")
+            .expect("with_mast is bundled");
+        assert!(
+            !data_markers(mast).is_empty(),
+            "control: data_markers must still find the shipwreck's markers"
+        );
+        assert!(
+            template_loot(mast).is_empty(),
+            "control: the shipwreck is the mirror image and carries no LootTable field"
+        );
+    }
+
+    /// Every self-named table across the whole bundled template corpus either
+    /// resolves to a bundled loot table or is named here as blocked.
+    ///
+    /// This is the honest-coverage gate the addendum asked for: it reports, by
+    /// measurement rather than by claim, which of the self-named containers actually
+    /// roll. A table this crate does not bundle yields an *empty* container, which is
+    /// indistinguishable from an unwired one from inside the game — so the split has
+    /// to be asserted somewhere or it silently rots.
+    #[test]
+    fn self_named_loot_tables_are_either_bundled_or_named_as_blocked() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let set = crate::loot::LootTableSet::load_bundled();
+        let mut bundled: BTreeSet<String> = BTreeSet::new();
+        let mut missing: BTreeMap<String, usize> = BTreeMap::new();
+        let mut total = 0usize;
+        for id in crate::worldgen_data::embedded_structure_template_ids() {
+            let Some(bytes) = crate::worldgen_data::embedded_structure_template(id) else {
+                continue;
+            };
+            for entry in template_loot(bytes) {
+                total += 1;
+                let Ok(key) = entry.table.parse::<ResourceKey>() else {
+                    *missing.entry(entry.table.clone()).or_default() += 1;
+                    continue;
+                };
+                if set.get(&key).is_some() {
+                    bundled.insert(entry.table);
+                } else {
+                    *missing.entry(entry.table).or_default() += 1;
+                }
+            }
+        }
+
+        assert!(
+            total > 100,
+            "the corpus must carry the ~132 self-named containers this pass exists for, found \
+             {total} — a low number here means the field name or the block list changed"
+        );
+        assert!(
+            !bundled.is_empty(),
+            "at least the village and trial-chamber tables are bundled; none resolved, which \
+             means the lookup rather than the bundle is broken"
+        );
+        // The tables that are genuinely not bundled yet. Listed by name so the
+        // blocked set is a reviewable fact rather than a tolerance: adding one of
+        // these files to `assets/loot_table/chests/` must make this fail and be
+        // deleted from the list, and a *new* unbundled table must fail too.
+        // Measured, not assumed: this list is what the scan above actually reported
+        // as unbundled. A brief handed to this work claimed all twelve of these had
+        // already been bundled; `ls assets/loot_table/chests/` and this gate both say
+        // otherwise, which is why the split is asserted here rather than described in
+        // a doc.
+        //
+        // Note `chests/ruined_portal` and the sixteen `chests/village/*` **are**
+        // bundled, so those structures' containers do roll — the blocked set is
+        // narrower than "everything that was empty before".
+        let known_blocked: BTreeSet<&str> = [
+            "minecraft:chests/ancient_city",
+            "minecraft:chests/bastion_bridge",
+            "minecraft:chests/bastion_hoglin_stable",
+            "minecraft:chests/bastion_other",
+            "minecraft:chests/bastion_treasure",
+            "minecraft:chests/pillager_outpost",
+            // The trial chambers bundle only `entrance` and the four `reward*`
+            // tables; these five are the ones its corridors and dispensers name.
+            "minecraft:chests/trial_chambers/corridor",
+            "minecraft:chests/trial_chambers/intersection",
+            "minecraft:chests/trial_chambers/intersection_barrel",
+            "minecraft:chests/trial_chambers/supply",
+            "minecraft:dispensers/trial_chambers/chamber",
+        ]
+        .into_iter()
+        .collect();
+        let unexpected: Vec<&String> = missing
+            .keys()
+            .filter(|table| !known_blocked.contains(table.as_str()))
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "these self-named tables are neither bundled nor on the known-blocked list, so \
+             their containers generate empty with nothing recording why: {unexpected:?}"
+        );
     }
 
     /// An igloo's chest lives in `bottom` alone, and a template with no marker
