@@ -1382,6 +1382,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   sprint-swimming didn't work even though the client believed it was sprinting the
   whole time. Landed in `13a1d3a` ("kelp is breakable again, and swimming actually
   swims").
+- [The Tab player-list overlay](./tab-list.md) — The list of online players the game
+  shows while Tab is held, ported from vanilla's `PlayerTabOverlay`: a translucent
+  plate, one striped row per player carrying that player's display name and a
+  five-band ping icon, split into columns past twenty players, with the server's
+  header above and footer below when it sent them.
 - [The task runner (`just`)](./task-runner.md) — A [`Justfile`](../Justfile) at the
   repo root, run with `casey/just` (installed at `/opt/homebrew/bin/just`, 1.58.0+).
   It gives every health check, `xtask` invocation, and `LODESTONE_REGEN` regeneration
