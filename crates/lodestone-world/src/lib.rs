@@ -83,6 +83,7 @@ mod heightmap;
 mod light;
 mod lighting;
 mod packed;
+pub mod relight;
 mod section;
 mod sign_text;
 mod world;
@@ -98,10 +99,12 @@ pub use lighting::{
     light_exercises_propagation,
 };
 pub use packed::PackedArray;
+pub use relight::Relit;
 pub use section::ChunkSection;
 pub use sign_text::{SignDyeColor, SignSide, SignText};
 pub use world::{
-    BiomePatch, BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk, World, WorldSink,
+    BiomePatch, BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk,
+    PENDING_RELIGHT_CAP, World, WorldSink,
 };
 
 /// Errors produced when decoding world structures from untrusted wire data.
