@@ -87,12 +87,20 @@ pub struct WorldTime {
 }
 
 /// The world's scalars, behind [`WorldStateHandle`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// **`PartialEq` but not `Eq`**, since the world spawn carries `f64`/`f32`
+/// coordinates. Nothing here needs total equality; the derive existed only for
+/// test convenience.
+#[derive(Debug, Clone, PartialEq)]
 pub struct WorldState {
     rules: GameRules,
     difficulty: Difficulty,
     difficulty_locked: bool,
     time: WorldTime,
+    /// The world spawn point, once something has resolved one. `None` means "not
+    /// yet searched", which is what a brand-new world is — see
+    /// [`WorldStateHandle::world_spawn`] for why the distinction matters.
+    spawn: Option<crate::world_spawn::WorldSpawn>,
 }
 
 impl Default for WorldState {
@@ -103,6 +111,7 @@ impl Default for WorldState {
             difficulty: Difficulty::Normal,
             difficulty_locked: false,
             time: WorldTime::default(),
+            spawn: None,
         }
     }
 }
@@ -262,6 +271,45 @@ impl WorldStateHandle {
         self.with(|state| state.difficulty != Difficulty::Peaceful)
     }
 
+    /// The world spawn point, or `None` if nothing has resolved one for this world
+    /// yet.
+    ///
+    /// # Why this is stored on the world rather than derived per join
+    ///
+    /// `crate::world_spawn::find_initial_spawn` is a 121-iteration spiral over
+    /// generated columns — vanilla's `MinecraftServer.setInitialSpawn`, which runs
+    /// **once, at world creation**, and writes its answer to `level.dat`. This
+    /// crate ran it in every connection's `ConfigurationFinished` arm instead, and
+    /// read the persisted value back nowhere, so every join re-paid for the search
+    /// and a `/setworldspawn` could never stick.
+    ///
+    /// So `None` is meaningful: it is "no search has happened", and the first join
+    /// to a fresh world resolves it and calls
+    /// [`set_world_spawn`](Self::set_world_spawn). Every later join and every later
+    /// session reads it back through [`load_level_data`](Self::load_level_data).
+    #[must_use]
+    pub(crate) fn world_spawn(&self) -> Option<crate::world_spawn::WorldSpawn> {
+        self.with(|state| state.spawn)
+    }
+
+    /// Records the world spawn — the first join's spiral result, or a
+    /// `/setworldspawn`. Persisted on the next autosave through
+    /// [`level_data_fields`](Self::level_data_fields).
+    pub(crate) fn set_world_spawn(&self, spawn: crate::world_spawn::WorldSpawn) {
+        self.with(|state| state.spawn = Some(spawn));
+    }
+
+    /// Forgets the world spawn, so the next join searches for one.
+    ///
+    /// The one caller is world *creation*: `LevelDat::for_new_world` writes a
+    /// placeholder `spawn` compound (it has to write something, and it has no
+    /// terrain to consult), and loading that placeholder back would suppress the
+    /// spiral search forever. Clearing it after the load is what keeps a fresh
+    /// world's first join the thing that actually finds the spawn.
+    pub(crate) fn clear_world_spawn(&self) {
+        self.with(|state| state.spawn = None);
+    }
+
     /// The fields this world contributes to `level.dat`'s `Data` compound, using
     /// vanilla's own names so a real 26.2 server can read the world back.
     ///
@@ -270,7 +318,7 @@ impl WorldStateHandle {
     #[must_use]
     pub fn level_data_fields(&self) -> Vec<(String, Nbt)> {
         self.with(|state| {
-            vec![
+            let mut fields = vec![
                 (
                     "GameRules".to_owned(),
                     // Strings, even for an integer rule — see the module doc.
@@ -298,7 +346,38 @@ impl WorldStateHandle {
                         ),
                     ]),
                 ),
-            ]
+            ];
+            // `spawn` is contributed only when there *is* one: a world whose spawn
+            // has not been resolved yet must not overwrite the placeholder
+            // `LevelDat::for_new_world` wrote with a zeroed compound, which is a
+            // file that reads back as a real spawn at the origin.
+            //
+            // **The field is `spawn`, a nested compound — not the flat
+            // `SpawnX`/`SpawnY`/`SpawnZ` ints.** Those are pre-1.21; 26.2 nests
+            // them, and `lodestone_anvil::level_dat::Spawn` is the measured shape.
+            // Writing the old names produces a world vanilla opens at the origin.
+            if let Some(spawn) = state.spawn {
+                fields.push((
+                    "spawn".to_owned(),
+                    Nbt::Compound(vec![
+                        (
+                            "pos".to_owned(),
+                            Nbt::IntArray(vec![
+                                spawn.pos.x.floor() as i32,
+                                spawn.pos.y.floor() as i32,
+                                spawn.pos.z.floor() as i32,
+                            ]),
+                        ),
+                        ("pitch".to_owned(), Nbt::Float(spawn.pitch)),
+                        (
+                            "dimension".to_owned(),
+                            Nbt::String("minecraft:overworld".to_owned()),
+                        ),
+                        ("yaw".to_owned(), Nbt::Float(spawn.yaw)),
+                    ]),
+                ));
+            }
+            fields
         })
     }
 
@@ -327,6 +406,29 @@ impl WorldStateHandle {
             }
             if let Some(Nbt::Long(day)) = field("DayTime") {
                 state.time.day_time = *day;
+            }
+            // The nested 26.2 `spawn` compound. Read leniently: a world written by
+            // a build before this field existed simply leaves `spawn` at `None` and
+            // the next join searches, which is the correct degradation.
+            if let Some(Nbt::Compound(spawn)) = field("spawn") {
+                let sub = |name: &str| spawn.iter().find(|(key, _)| key == name).map(|(_, v)| v);
+                if let Some(Nbt::IntArray(pos)) = sub("pos") {
+                    if let [x, y, z] = pos[..] {
+                        let angle = |name: &str| match sub(name) {
+                            Some(Nbt::Float(value)) => *value,
+                            _ => 0.0,
+                        };
+                        state.spawn = Some(crate::world_spawn::WorldSpawn {
+                            pos: lodestone_model::Vec3::new(
+                                f64::from(x),
+                                f64::from(y),
+                                f64::from(z),
+                            ),
+                            yaw: angle("yaw"),
+                            pitch: angle("pitch"),
+                        });
+                    }
+                }
             }
             if let Some(Nbt::Compound(settings)) = field("difficulty_settings") {
                 for (key, value) in settings {
@@ -513,6 +615,70 @@ mod tests {
                 "random_tick_speed".to_owned(),
                 Nbt::String("9".to_owned())
             )]
+        );
+    }
+    /// The world spawn round-trips through the **nested** 26.2 `spawn` compound,
+    /// and its `None` state survives — which is the property the join path reads.
+    ///
+    /// Three separate claims, because getting any one wrong is silent:
+    ///
+    /// * A fresh world's spawn is `None`, and `level_data_fields` contributes **no**
+    ///   `spawn` field at all. A zeroed compound would read back as a real spawn at
+    ///   the origin, which is the worst possible answer for an ocean world.
+    /// * A resolved spawn is written under `spawn` as `pos`/`yaw`/`pitch` — the
+    ///   nested shape `lodestone_anvil::level_dat::Spawn` measured, not the
+    ///   pre-1.21 flat `SpawnX`/`SpawnY`/`SpawnZ` ints.
+    /// * Loading it back yields the same coordinates, so the spiral search does not
+    ///   re-run on the next session.
+    #[test]
+    fn the_world_spawn_round_trips_and_absence_writes_no_field() {
+        let saved = WorldStateHandle::new();
+        assert_eq!(saved.world_spawn(), None, "a fresh world has not searched yet");
+        assert!(
+            !saved
+                .level_data_fields()
+                .iter()
+                .any(|(name, _)| name == "spawn"),
+            "an unresolved spawn must contribute no field, or the file reads back as \
+             a real spawn at (0, 0, 0)"
+        );
+
+        saved.set_world_spawn(crate::world_spawn::WorldSpawn {
+            pos: lodestone_model::Vec3::new(136.0, 71.0, -24.0),
+            yaw: 0.0,
+            pitch: 0.0,
+        });
+        let fields = saved.level_data_fields();
+        let (_, spawn) = fields
+            .iter()
+            .find(|(name, _)| name == "spawn")
+            .expect("a resolved spawn contributes the field");
+        let Nbt::Compound(entries) = spawn else {
+            panic!("spawn must be a compound, not {spawn:?}");
+        };
+        assert_eq!(
+            entries.iter().find(|(k, _)| k == "pos").map(|(_, v)| v),
+            Some(&Nbt::IntArray(vec![136, 71, -24])),
+            "26.2 nests the position as an IntArray under `spawn`"
+        );
+
+        let loaded = WorldStateHandle::new();
+        loaded.load_level_data(&Nbt::Compound(fields));
+        let restored = loaded.world_spawn().expect("the spawn loads back");
+        assert_eq!(restored.pos, lodestone_model::Vec3::new(136.0, 71.0, -24.0));
+
+        // The control: a `Data` compound with no `spawn` field must leave the
+        // loading world at `None` rather than at some default, or a world written by
+        // an older build would silently spawn everyone at the origin.
+        let older = WorldStateHandle::new();
+        older.load_level_data(&Nbt::Compound(vec![(
+            "Time".to_owned(),
+            Nbt::Long(5),
+        )]));
+        assert_eq!(
+            older.world_spawn(),
+            None,
+            "no spawn field must stay unresolved, so the next join searches"
         );
     }
 }

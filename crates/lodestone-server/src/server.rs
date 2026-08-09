@@ -2192,7 +2192,26 @@ where
                 // normal terrain is unchanged; the change is that an invalid
                 // origin now moves the spawn to the nearest valid chunk
                 // instead of stranding the player.
-                let spawn = find_initial_spawn(source.get());
+                // **Read the world's own spawn first.** The spiral is
+                // `MinecraftServer.setInitialSpawn`, which vanilla runs **once, at
+                // world creation**, and persists to `level.dat`. Running it per
+                // connection re-paid a 121-column search on every join and meant
+                // the persisted value was written and never read — so a world could
+                // not remember where its spawn was, and nothing a future
+                // `/setworldspawn` wrote could stick.
+                //
+                // `None` here means "no search has happened for this world yet",
+                // which is exactly a fresh world; the first join resolves it and the
+                // next autosave writes it. See
+                // `WorldStateHandle::world_spawn`.
+                let spawn = match world.world_spawn() {
+                    Some(stored) => stored,
+                    None => {
+                        let found = find_initial_spawn(source.get());
+                        world.set_world_spawn(found);
+                        found
+                    }
+                };
 
                 // Issue #302: this player's own saved state, if this world has
                 // any. Reached through `ChunkSource::world_registries` rather
@@ -4832,6 +4851,15 @@ where
 ///
 /// # `action == 0`, `PERFORM_RESPAWN`
 ///
+/// **The respawn position is the player's bed when they have a usable one**, and
+/// the world spawn otherwise — vanilla's
+/// `ServerPlayer.findRespawnPositionAndUseSpawnBlock`, resolved through
+/// [`crate::world_spawn::resolve_bed_respawn`]. The bed block is **re-read at
+/// death time** rather than trusted from when the point was set, so a bed that has
+/// since been broken (or walled in) falls back to the world spawn instead of
+/// returning the player inside whatever replaced it. That is vanilla's
+/// `Optional.empty()` arm, which it answers with `NO_RESPAWN_BLOCK_AVAILABLE`.
+///
 /// Vanilla's full respawn (`PlayerList::respawn`) rebuilds the player entity,
 /// re-teleports it to its spawn point, and resets per-player state this
 /// crate does not track at all (dimension, XP, permissions, `wonGame`). What
@@ -4859,7 +4887,7 @@ where
 /// a rule that was never explicitly set is simply absent from the reply
 /// rather than reported at a registry default.
 #[allow(clippy::too_many_arguments)]
-async fn apply_client_command<T, P>(
+async fn apply_client_command<T, P, S>(
     conn: &mut Connection<T>,
     proto: &P,
     state: &mut State,
@@ -4875,12 +4903,16 @@ async fn apply_client_command<T, P>(
     // would respawn wherever the corpse was, which for a fall death is at the
     // bottom of whatever killed them.
     //
-    // The **world** spawn, not the per-player bed point: `RespawnPoint` is
-    // tracked but resolving a death against it needs the placement teleport and
-    // ticket search that `crate::world_spawn`'s module doc scopes to P2. Using
-    // the world spawn is the honest subset, and it is what a player with no bed
-    // gets in vanilla too.
+    // The **fallback**, used when this player has no bed point or their bed is no
+    // longer usable — which is also exactly what a player with no bed gets in
+    // vanilla.
     world_spawn: Vec3,
+    // This player's bed point, if they have set one. Resolved against `source`
+    // rather than used directly: see this function's own doc comment for why the
+    // bed block is re-read at death time.
+    respawn: Option<RespawnPoint>,
+    // Read-only, and only for the bed re-validation above.
+    source: &S,
     world: &crate::world_state::WorldStateHandle,
     advancements: &mut AdvancementManager,
     player_uuid: uuid::Uuid,
@@ -4889,15 +4921,22 @@ async fn apply_client_command<T, P>(
 where
     T: Transport,
     P: ServerProtocol,
+    S: ChunkSource,
 {
     match action {
         0 if vitals.health() <= 0.0 => {
             vitals.respawn();
+            // The bed first, the world spawn as the fallback. `resolve_bed_respawn`
+            // answers `None` for a broken or walled-in bed, which is the case this
+            // whole indirection exists for.
+            let target = respawn
+                .and_then(|point| crate::world_spawn::resolve_bed_respawn(source, point))
+                .unwrap_or(world_spawn);
             // Order matters and mirrors `PlayerList::respawn`: the respawn record
             // and the placement teleport first, then the vitals the client's HUD
             // reads. Sending health *before* the respawn packet would refill the
             // hearts while the death screen was still up.
-            for directive in proto.encode_respawn(world_spawn) {
+            for directive in proto.encode_respawn(target) {
                 apply(conn, state, directive).await?;
             }
             apply(conn, state, proto.encode_set_health(vitals.health())).await?;
@@ -6118,6 +6157,8 @@ where
                 vitals,
                 fall,
                 world_spawn,
+                *respawn,
+                source.get(),
                 world,
                 advancements,
                 player_uuid,
