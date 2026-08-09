@@ -353,6 +353,20 @@ fn reference_kernel(iters: u64) -> u64 {
 /// The locality control that separates `ri_instructions` from `ri_cycles` — the
 /// third arm — lives in `client_chunk_cycles.rs`, which is the same struct read
 /// the same way. It is not duplicated here.
+/// Non-Darwin arm. Both controls above are statements *about* Darwin's
+/// `rusage_info_v4` and the counter it carries, so there is no instrument here to
+/// validate. It panics rather than returning `()`: a control that quietly does
+/// nothing is worse than no control, since its entire purpose is to stand between
+/// this bench and a plausible-looking wrong number.
+#[cfg(not(target_os = "macos"))]
+fn assert_instruction_counter_is_real() {
+    unimplemented!(
+        "the struct-size and 4x-scaling controls validate a Darwin rusage_info_v4 \
+         transcription and the instruction counter it feeds; neither exists on this target"
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn assert_instruction_counter_is_real() {
     assert_eq!(
         std::mem::size_of::<RusageInfoV4>(),
