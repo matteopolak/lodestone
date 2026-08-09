@@ -138,13 +138,43 @@ impl<T: Transport> Connection<T> {
     ///
     /// Returns `Ok(None)` on a clean EOF at a frame boundary.
     pub async fn read_packet(&mut self) -> Result<Option<(i32, Vec<u8>)>> {
-        let Some(body) = self.read_packet_raw().await? else {
-            return Ok(None);
-        };
-        let mut reader = Reader::new(&body);
-        let packet_id = reader.var_i32()?;
-        let fields = reader.remaining_bytes().to_vec();
-        Ok(Some((packet_id, fields)))
+        loop {
+            let Some(body) = self.read_packet_raw().await? else {
+                return Ok(None);
+            };
+            // An **empty** frame body is skipped, not an error.
+            //
+            // In compression mode a one-byte frame of `0x00` declares
+            // "uncompressed, zero bytes of packet data" — no packet id at all.
+            // Reading an id out of it raises `UnexpectedEof`, which surfaces as
+            // `NetError::Codec` and so as a **fatal transport error**: the client
+            // driver fails open on an adapter decode error but never on a
+            // transport one. That is a whole session lost to one junk frame.
+            //
+            // Vanilla tolerates it, and worth knowing *how*, because there is no
+            // explicit guard to point at: `Varint21FrameDecoder` rejects only a
+            // zero *length*, `CompressionDecoder` turns `uncompressedLength == 0`
+            // into `in.readBytes(in.readableBytes())` — an empty buffer — and
+            // `PacketDecoder` has no empty check. It never needs one, because
+            // netty's `ByteToMessageDecoder` only calls `decode` while the buffer
+            // `isReadable()`, so an empty one is silently dropped before
+            // `PacketDecoder` ever sees it. The tolerance is a property of the
+            // pipeline, not of the packet code — which is exactly why reading the
+            // packet classes alone suggests vanilla would die here too.
+            //
+            // Measured against a live Velocity proxy (protocol 776, compression
+            // threshold 256): it emits exactly this frame, and it is what ended
+            // sessions with `protocol codec error: unexpected end of input` right
+            // after the lobby inventory arrived. The item-component warnings in
+            // that log were a coincidence of timing, not the cause.
+            if body.is_empty() {
+                continue;
+            }
+            let mut reader = Reader::new(&body);
+            let packet_id = reader.var_i32()?;
+            let fields = reader.remaining_bytes().to_vec();
+            return Ok(Some((packet_id, fields)));
+        }
     }
 
     /// Flushes and cleanly half-closes the write side (graceful disconnect).
@@ -261,6 +291,43 @@ mod tests {
         let (id, fields) = server.read_packet().await.unwrap().unwrap();
         assert_eq!(id, 0x00);
         assert_eq!(fields, vec![1, 2, 3]);
+    }
+
+    /// A one-byte `0x00` frame in compression mode carries **no packet data at
+    /// all**, and it must be skipped rather than ending the connection.
+    ///
+    /// This is a measured frame, not a hypothetical: a live Velocity proxy at
+    /// protocol 776 with threshold 256 emits it, and reading a packet id out of
+    /// it raised `NetError::Codec(UnexpectedEof)` — a *transport* error, which
+    /// the client driver treats as fatal (it fails open only on adapter decode
+    /// errors). Whole sessions were lost to it.
+    ///
+    /// The trailing real packet is the load-bearing part: without it the test
+    /// could pass on a `read_packet` that simply returned `Ok(None)` and hung up,
+    /// which is the same session loss wearing a clean exit. The pairwise-distinct
+    /// id and body prove the *next* frame is delivered intact, i.e. the empty one
+    /// was skipped rather than resynchronised past.
+    #[tokio::test]
+    async fn an_empty_compressed_frame_is_skipped_not_fatal() {
+        let (a, b) = memory_pair();
+        let mut client = Connection::new(a);
+        let mut server = Connection::new(b);
+        client.set_compression(256);
+        server.set_compression(256);
+
+        // Hand-built, because no encoder here will produce it: frame length 1,
+        // then the single `0x00` uncompressed-length VarInt and nothing else.
+        client.transport.write_all(&[0x01, 0x00]).await.unwrap();
+        client.transport.flush().await.unwrap();
+        client.write_packet(0x26, &[0x11, 0x04]).await.unwrap();
+
+        let (id, fields) = server
+            .read_packet()
+            .await
+            .expect("an empty frame must not be a transport error")
+            .expect("nor a clean end of stream: that loses the session just as surely");
+        assert_eq!(id, 0x26, "the frame after the empty one is delivered");
+        assert_eq!(fields, vec![0x11, 0x04]);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

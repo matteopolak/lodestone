@@ -1260,20 +1260,37 @@ fn decode_command_suggestions(payload: &[u8]) -> Result<CommandSuggestionsRespon
 }
 
 /// Outcome of decoding one clientbound item stack.
-pub(crate) struct DecodedStack {
-    /// The decoded stack, or `None` for the empty stack.
-    pub(crate) stack: Option<ItemStack>,
-    /// `false` when an unmodeled component halted decoding partway through the
-    /// stack's `DataComponentPatch`, leaving the reader positioned mid-patch.
+///
+/// # Why this is an enum and not a `{ stack, complete }` struct
+///
+/// It used to be a struct with a `complete: bool`, and a caller
+/// (`decode_merchant_offers`) wrote `read_item_stack(reader)?.stack` — dropping
+/// the flag and reading the *next* offer out of a reader parked mid-payload.
+/// Every field after that decoded as a plausible-but-wrong value. A `bool`
+/// beside the thing you actually want is an affordance to ignore it; an enum
+/// has none, because there is no way to reach the stack without naming which
+/// case you are in. **Do not reintroduce an accessor that returns the stack
+/// without the verdict** (no `fn stack(self) -> Option<ItemStack>`), or the
+/// affordance comes straight back.
+///
+/// The patch codec length-prefixes neither the patch nor its individual
+/// components (26.2 `DataComponentPatch.STREAM_CODEC`, the undelimited variant
+/// clientbound stacks use), so an unrecognised component cannot be skipped in
+/// place — hence a partial outcome at all. See [`read_item_stack`].
+#[must_use]
+pub(crate) enum DecodedStack {
+    /// The stack was consumed exactly; the reader sits immediately after it and
+    /// reading on is safe. Inner `None` is the empty stack.
+    Complete(Option<ItemStack>),
+    /// An unmodeled component halted decoding partway through the stack's
+    /// `DataComponentPatch`. The modeled fields that were decoded are valid, but
+    /// **the rest of this packet is gone**: emit what is here and stop.
     ///
-    /// The patch codec length-prefixes neither the patch nor its individual
-    /// components (26.2 `DataComponentPatch.STREAM_CODEC`, the trusted variant
-    /// clientbound stacks use), so an unrecognised component cannot be skipped
-    /// in place. When this is `false`, the modeled fields that were decoded are
-    /// still valid, but the remainder of the packet is unreadable and callers
-    /// must stop reading further items and skip the trailing-bytes check rather
-    /// than raising a fatal decode error.
-    pub(crate) complete: bool,
+    /// The reader has been drained to its end by [`read_component_patch`], so a
+    /// caller that ignores this and reads on gets a clean `UnexpectedEof` — a
+    /// dropped packet, which the client driver survives — instead of silently
+    /// consuming payload bytes as ids and lengths.
+    Partial(Option<ItemStack>),
 }
 
 /// Decodes a clientbound optional item stack.
@@ -1300,10 +1317,7 @@ pub(crate) struct DecodedStack {
 pub(crate) fn read_item_stack(reader: &mut Reader<'_>) -> Result<DecodedStack, AdapterError> {
     let count = reader.var_i32().map_err(dec_err)?;
     if count <= 0 {
-        return Ok(DecodedStack {
-            stack: None,
-            complete: true,
-        });
+        return Ok(DecodedStack::Complete(None));
     }
     let item_id = reader.var_i32().map_err(dec_err)?;
     let name = item_name(item_id)
@@ -1311,13 +1325,15 @@ pub(crate) fn read_item_stack(reader: &mut Reader<'_>) -> Result<DecodedStack, A
     let count = u32::try_from(count)
         .map_err(|_| AdapterError::Decode(format!("invalid item count {count}")))?;
     let (components, complete) = read_component_patch(reader, name)?;
-    Ok(DecodedStack {
-        stack: Some(ItemStack {
-            item: parse_key(name, "item")?,
-            count,
-            components,
-        }),
-        complete,
+    let stack = Some(ItemStack {
+        item: parse_key(name, "item")?,
+        count,
+        components,
+    });
+    Ok(if complete {
+        DecodedStack::Complete(stack)
+    } else {
+        DecodedStack::Partial(stack)
     })
 }
 
@@ -1590,6 +1606,131 @@ fn read_component_patch(
                     AdapterError::Decode(format!("negative item max_damage {max}"))
                 })?);
             }
+
+            // ---------------------------------------------------------------
+            // Consumed-for-alignment components.
+            //
+            // Everything from here to the `other` arm is decoded for exactly one
+            // reason: an unmodeled component ends the packet. Nothing below is
+            // *used* by this client (only `custom_data` is even kept), and that
+            // is the point — the value is worthless and consuming the right
+            // number of bytes is worth a whole packet. Each arm cites the vanilla
+            // stream codec it mirrors; get a width wrong here and the failure is
+            // silent misalignment rather than an honest bail-out, so no arm is
+            // added without reading its codec in the jar.
+            // ---------------------------------------------------------------
+
+            // **The derived-NBT family.** These components are registered with
+            // `persistent(codec)` and **no** `networkSynchronized(...)`, so
+            // `DataComponentType.Builder.build` falls back to
+            // `ByteBufCodecs.fromCodecWithRegistries(codec)` — which writes the
+            // value as a single `FriendlyByteBuf.writeNbt` tag (root tag id then
+            // payload, no name, no length prefix). One rule covers all seven, and
+            // it is *not* the same codec as `CustomData.STREAM_CODEC`, which is
+            // `@Deprecated` and used by `bucket_entity_data` rather than by
+            // `custom_data`. Reading either as a bare compound would be wrong for
+            // `recipes` (a list tag) and for the `Unit`-valued one (an empty
+            // compound from `MapCodec.unitCodec`).
+            //
+            // `custom_data` is the one worth singling out: it is component id 0,
+            // it is what every Bukkit/Paper plugin stamps on a GUI item, and while
+            // it was unmodeled a lobby hotbar truncated whatever packet carried
+            // it. Its bytes are kept verbatim rather than interpreted — see
+            // [`ItemComponents::custom_data`].
+            Some("minecraft:custom_data") => {
+                components.custom_data = Some(read_network_nbt_bytes(reader)?);
+            }
+            Some(
+                "minecraft:intangible_projectile"
+                | "minecraft:map_decorations"
+                | "minecraft:debug_stick_state"
+                | "minecraft:recipes"
+                | "minecraft:lock"
+                | "minecraft:container_loot",
+            ) => {
+                read_network_nbt(reader).map_err(dec_err)?;
+            }
+
+            // `Unit.STREAM_CODEC` is `StreamCodec.unit(INSTANCE)`: **zero bytes**.
+            // The component's presence in the patch is the whole value.
+            Some(
+                "minecraft:unbreakable" | "minecraft:creative_slot_lock" | "minecraft:glider",
+            ) => {}
+
+            // A bare VarInt. `rarity`, `dye`, `base_color` and `map_post_processing`
+            // are `ByteBufCodecs.idMapper`, which is `VarInt.read` with no `+1` and
+            // no `0` sentinel; the rest are `ByteBufCodecs.VAR_INT` directly, or a
+            // one-field `StreamCodec.composite` over it (`enchantable`,
+            // `ominous_bottle_amplifier`).
+            Some(
+                "minecraft:rarity"
+                | "minecraft:repair_cost"
+                | "minecraft:additional_trade_cost"
+                | "minecraft:ominous_bottle_amplifier"
+                | "minecraft:enchantable"
+                | "minecraft:dye"
+                | "minecraft:base_color"
+                | "minecraft:map_post_processing",
+            ) => {
+                reader.var_i32().map_err(dec_err)?;
+            }
+
+            // Fixed-width scalars, **not** VarInts. `MapItemColor.STREAM_CODEC` is
+            // `ByteBufCodecs.INT` (the same trap `minecraft:dyed_color` documents
+            // above), and the two floats are `ByteBufCodecs.FLOAT`.
+            Some("minecraft:map_color") => {
+                reader.i32().map_err(dec_err)?;
+            }
+            Some("minecraft:minimum_attack_charge" | "minecraft:potion_duration_scale") => {
+                reader.f32().map_err(dec_err)?;
+            }
+            Some("minecraft:enchantment_glint_override") => {
+                reader.bool().map_err(dec_err)?;
+            }
+
+            // `Identifier.STREAM_CODEC` is `ByteBufCodecs.STRING_UTF8.map(...)`:
+            // one length-prefixed string, capped at 32767.
+            Some(
+                "minecraft:item_model" | "minecraft:tooltip_style" | "minecraft:note_block_sound",
+            ) => {
+                reader.string(32767).map_err(dec_err)?;
+            }
+
+            // `ComponentSerialization.STREAM_CODEC` — the same network-NBT chat
+            // component `minecraft:custom_name` uses. `item_name` is the *item's*
+            // name rather than a rename, so it is consumed and not surfaced;
+            // nothing here prefers it over `custom_name`.
+            Some("minecraft:item_name") => {
+                read_network_nbt(reader).map_err(dec_err)?;
+            }
+
+            // `ItemLore.STREAM_CODEC` is `ComponentSerialization.STREAM_CODEC
+            // .apply(ByteBufCodecs.list(256))`: a VarInt count then that many
+            // network-NBT components. 256 is the codec's own cap.
+            Some("minecraft:lore") => {
+                let lines = read_count(reader, "lore line")?;
+                if lines > 256 {
+                    return Err(AdapterError::Decode(format!(
+                        "lore declares {lines} lines; ByteBufCodecs.list(256) permits at most 256"
+                    )));
+                }
+                for _ in 0..lines {
+                    read_network_nbt(reader).map_err(dec_err)?;
+                }
+            }
+
+            // `stored_enchantments` shares `ItemEnchantments.STREAM_CODEC` with
+            // `minecraft:enchantments`, so it reuses that reader — but it is an
+            // enchanted *book*'s payload, not the stack's own effects, so it is
+            // deliberately not merged into `components.enchantments`.
+            Some("minecraft:stored_enchantments") => {
+                read_enchantments(reader)?;
+            }
+
+            Some("minecraft:custom_model_data") => read_custom_model_data(reader)?,
+            Some("minecraft:tooltip_display") => read_tooltip_display(reader)?,
+            Some("minecraft:attribute_modifiers") => read_attribute_modifiers(reader)?,
+
             other => {
                 // An unmodeled component: its payload is not length-prefixed, so
                 // it and everything after it in this packet are unreadable. Keep
@@ -1626,6 +1767,16 @@ fn read_component_patch(
                     "unmodeled item data component; delivering a partial stack and \
                      skipping the rest of the packet",
                 );
+                // Park the reader at the end of the payload. Every caller is
+                // *supposed* to stop on the `false` below, but one did not, and
+                // the bytes it then read as item ids and list lengths were the
+                // interior of this component's payload — plausible-but-wrong
+                // values, or an over-read blamed on framing. Draining makes the
+                // contract self-enforcing: the worst a caller that reads on can
+                // now do is raise `UnexpectedEof`, i.e. drop the packet, which
+                // is the outcome the design already promises. It also makes a
+                // trailing-bytes assertion pass instead of firing spuriously.
+                let _ = reader.bytes(reader.remaining());
                 return Ok((components, false));
             }
         }
@@ -1656,6 +1807,114 @@ fn read_component_patch(
     }
 
     Ok((components, true))
+}
+
+/// Reads one network-NBT tag and returns the exact bytes it occupied.
+///
+/// Used for `minecraft:custom_data`, whose value this client deliberately does
+/// not interpret: the bytes are re-emittable and float-free as far as `Eq` is
+/// concerned, where a parsed `Nbt` would not be. The span is derived from the
+/// reader's own cursor movement rather than re-serialised, so it is byte-exact
+/// even for shapes our writer would normalise.
+fn read_network_nbt_bytes(reader: &mut Reader<'_>) -> Result<Vec<u8>, AdapterError> {
+    let before = reader.remaining_bytes();
+    read_network_nbt(reader).map_err(dec_err)?;
+    let consumed = before.len() - reader.remaining();
+    Ok(before[..consumed].to_vec())
+}
+
+/// Consumes a `minecraft:custom_model_data` payload
+/// (`CustomModelData.STREAM_CODEC`).
+///
+/// Four independent VarInt-counted lists, in order: floats, flags (bools),
+/// strings, colours. **The colours are `ByteBufCodecs.INT`** — fixed-width
+/// big-endian, not VarInts — which is the one width in this component that a
+/// VarInt-by-default reader gets wrong, and getting it wrong misaligns the whole
+/// rest of the packet instead of merely losing a colour.
+fn read_custom_model_data(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
+    let floats = read_count(reader, "custom_model_data float")?;
+    for _ in 0..floats {
+        reader.f32().map_err(dec_err)?;
+    }
+    let flags = read_count(reader, "custom_model_data flag")?;
+    for _ in 0..flags {
+        reader.bool().map_err(dec_err)?;
+    }
+    let strings = read_count(reader, "custom_model_data string")?;
+    for _ in 0..strings {
+        reader.string(32767).map_err(dec_err)?;
+    }
+    let colors = read_count(reader, "custom_model_data color")?;
+    for _ in 0..colors {
+        reader.i32().map_err(dec_err)?;
+    }
+    Ok(())
+}
+
+/// Consumes a `minecraft:tooltip_display` payload (`TooltipDisplay.STREAM_CODEC`).
+///
+/// A bool `hideTooltip`, then a VarInt-counted collection of
+/// `DataComponentType.STREAM_CODEC` — which is `ByteBufCodecs.registry`, i.e. a
+/// bare data-component-type registry id per entry with no offset.
+///
+/// This component replaced 1.21.4's `minecraft:hide_tooltip` and
+/// `hide_additional_tooltip`, and it is what a plugin sets to hide an item's
+/// attribute lines — so it turns up on essentially every custom GUI item.
+fn read_tooltip_display(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
+    reader.bool().map_err(dec_err)?;
+    let hidden = read_count(reader, "tooltip_display hidden component")?;
+    for _ in 0..hidden {
+        reader.var_i32().map_err(dec_err)?;
+    }
+    Ok(())
+}
+
+/// Consumes a `minecraft:attribute_modifiers` payload
+/// (`ItemAttributeModifiers.STREAM_CODEC`).
+///
+/// A VarInt-counted list of `Entry`, each of which is, in wire order:
+///
+/// * the attribute as `Attribute.STREAM_CODEC` = `ByteBufCodecs.holderRegistry`,
+///   a **bare** VarInt registry id — `holderRegistry` is `registry(…,
+///   Registry::asHolderIdMap)`, so unlike `ByteBufCodecs.holder` there is no `+1`
+///   and no inline-holder `0` sentinel;
+/// * the modifier as `AttributeModifier.STREAM_CODEC` — an `Identifier` string, a
+///   **`ByteBufCodecs.DOUBLE`** (fixed-width f64, not a float), then the operation
+///   as an idMapper VarInt;
+/// * the slot group as `EquipmentSlotGroup.STREAM_CODEC`, an idMapper VarInt;
+/// * the display as `Display.STREAM_CODEC`, a VarInt `Display.Type` id dispatching
+///   to a payload: `default` (0) and `hidden` (1) are `StreamCodec.unit`, i.e.
+///   **zero bytes**, and `override` (2) carries one network-NBT chat component.
+///
+/// The `display` field is the trap: it is new enough that a transcription from an
+/// older `ItemAttributeModifiers` (which ended after the slot group, with a
+/// trailing `showInTooltip` bool in 1.21.4 and earlier) reads one byte where two
+/// of the three variants read one and the third reads a whole NBT blob.
+fn read_attribute_modifiers(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
+    let entries = read_count(reader, "attribute modifier")?;
+    for _ in 0..entries {
+        reader.var_i32().map_err(dec_err)?; // Holder<Attribute>, bare id
+        reader.string(32767).map_err(dec_err)?; // AttributeModifier::id
+        reader.f64().map_err(dec_err)?; // amount
+        reader.var_i32().map_err(dec_err)?; // Operation
+        reader.var_i32().map_err(dec_err)?; // EquipmentSlotGroup
+        let display = reader.var_i32().map_err(dec_err)?;
+        match display {
+            // `default` and `hidden` are `StreamCodec.unit`: no payload.
+            0 | 1 => {}
+            // `override` carries the replacement text.
+            2 => {
+                read_network_nbt(reader).map_err(dec_err)?;
+            }
+            other => {
+                return Err(AdapterError::Decode(format!(
+                    "attribute modifier display type {other} is outside \
+                     ItemAttributeModifiers.Display.Type's 0..=2"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Decodes a `minecraft:tool` component (26.2 `Tool.STREAM_CODEC`).
@@ -1783,11 +2042,18 @@ fn read_enchantments(reader: &mut Reader<'_>) -> Result<Vec<ItemEnchantment>, Ad
 fn read_trailing_item_stack(
     reader: &mut Reader<'_>,
 ) -> Result<Option<ItemStack>, AdapterError> {
-    let decoded = read_item_stack(reader)?;
-    if decoded.complete {
-        reader.ensure_empty().map_err(dec_err)?;
+    match read_item_stack(reader)? {
+        DecodedStack::Complete(stack) => {
+            reader.ensure_empty().map_err(dec_err)?;
+            Ok(stack)
+        }
+        // The misparse detector is skipped deliberately: there are unread bytes
+        // by construction. (They are also already drained, so `ensure_empty`
+        // would pass — running it anyway would make this arm look load-bearing
+        // when it is not, and would silently start failing if the drain ever
+        // went away.)
+        DecodedStack::Partial(stack) => Ok(stack),
     }
-    Ok(decoded.stack)
 }
 
 /// Resolves an [`ItemStack`]'s canonical item key to protocol 776's numeric
@@ -3867,20 +4133,26 @@ impl V770Adapter {
             let mut items = Vec::with_capacity(len);
             let mut complete = true;
             for _ in 0..len {
-                let decoded = read_item_stack(&mut reader)?;
-                items.push(decoded.stack);
-                if !decoded.complete {
-                    // An unmodeled component desynced the stream; the remaining
-                    // list entries and carried item are unreadable. Deliver what
+                match read_item_stack(&mut reader)? {
+                    DecodedStack::Complete(stack) => items.push(stack),
+                    // An unmodeled component ended the patch; the remaining list
+                    // entries and the carried item are unreadable. Deliver what
                     // decoded and drop the rest of the packet.
-                    complete = false;
-                    break;
+                    DecodedStack::Partial(stack) => {
+                        items.push(stack);
+                        complete = false;
+                        break;
+                    }
                 }
             }
             let carried_item = if complete {
-                let decoded = read_item_stack(&mut reader)?;
-                complete = decoded.complete;
-                decoded.stack
+                match read_item_stack(&mut reader)? {
+                    DecodedStack::Complete(stack) => stack,
+                    DecodedStack::Partial(stack) => {
+                        complete = false;
+                        stack
+                    }
+                }
             } else {
                 None
             };
@@ -3942,12 +4214,13 @@ impl V770Adapter {
                     AdapterError::Decode(format!("unknown equipment slot ordinal {ordinal}"))
                 })?;
                 let decoded = read_item_stack(&mut reader)?;
-                equipment.push(EntityEquipment {
-                    slot,
-                    item: decoded.stack,
-                });
-                if !decoded.complete {
-                    // An unmodeled component desynced the stream; further list
+                let (item, partial) = match decoded {
+                    DecodedStack::Complete(stack) => (stack, false),
+                    DecodedStack::Partial(stack) => (stack, true),
+                };
+                equipment.push(EntityEquipment { slot, item });
+                if partial {
+                    // An unmodeled component ended the patch; further list
                     // entries are unreadable. Deliver what decoded and stop.
                     complete = false;
                     break;
@@ -6088,7 +6361,21 @@ fn decode_merchant_offers(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
         let Some(cost_a) = read_item_cost(&mut reader)? else {
             return Ok(Vec::new());
         };
-        let result = read_item_stack(&mut reader)?.stack;
+        // **This was the bug.** It read `.stack` off the old struct and dropped
+        // the completeness flag, so an offer whose result carried an unmodeled
+        // component left the reader parked mid-payload and the loop went on to
+        // read this offer's remaining eight fields — and then the *next* offer —
+        // out of that component's interior. On a plugin server stamping
+        // `minecraft:custom_data` on every trade result, that is one warning per
+        // offer followed by an over-read blamed on framing. An offer list has no
+        // per-entry length prefix and the trailing `villagerLevel`/`villagerXp`
+        // scalars sit past it, so there is nothing to resynchronise to: the only
+        // correct move is to abandon the packet, exactly as a non-empty
+        // `DataComponentExactPredicate` does two lines up.
+        let result = match read_item_stack(&mut reader)? {
+            DecodedStack::Complete(stack) => stack,
+            DecodedStack::Partial(_) => return Ok(Vec::new()),
+        };
         let cost_b = if reader.bool().map_err(dec_err)? {
             match read_item_cost(&mut reader)? {
                 Some(cost) => Some(cost),

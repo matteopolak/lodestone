@@ -23,6 +23,7 @@
 //!    resuming into it, because resuming would produce plausible garbage.
 
 use lodestone_core::{Reader, Writer};
+use lodestone_data::data_component_types::component_type_name;
 use lodestone_model::{
     ClientEvent, ConnectionState, Directive, EntityMetadataUpdate, ItemStack, Reported,
     VersionAdapter,
@@ -45,6 +46,57 @@ fn fixture_bytes(text: &str) -> Vec<u8> {
         .flat_map(str::split_whitespace)
         .map(|tok| u8::from_str_radix(tok, 16).expect("fixture hex byte"))
         .collect()
+}
+
+/// The component the capture actually carries. It was unmodeled when the bytes
+/// were captured and is decoded now (`ByteBufCodecs.VAR_INT`), which is why
+/// [`with_unmodeled_component`] exists.
+const CAPTURED_COMPONENT: &str = "minecraft:repair_cost";
+
+/// A component this build still does not decode. `ResolvableProfile.STREAM_CODEC`
+/// is `either(GAME_PROFILE, Partial)` composed with `PlayerSkin.Patch.STREAM_CODEC`,
+/// so it is genuinely expensive rather than merely unfinished — a deliberately
+/// durable choice, since a cheap one gets modeled and voids this gate.
+const UNMODELED_COMPONENT: &str = "minecraft:profile";
+
+fn component_id(name: &str) -> i32 {
+    (0..)
+        .find(|&id| component_type_name(id) == Some(name))
+        .expect("known component type")
+}
+
+/// Rewrites the capture's single component-type id to one this build does not
+/// model, leaving every other byte and every offset untouched.
+///
+/// # Why the capture is spliced rather than replaced
+///
+/// The captured component (`minecraft:repair_cost`) was unmodeled when these
+/// bytes were taken and is modeled now, so the three abandonment gates below
+/// silently stopped exercising abandonment at all — the *world* species of
+/// vacuous test, where the source stays exemplary and the input stops containing
+/// the structure under test. All three failed the moment the arm landed, which is
+/// the only reason it was noticed.
+///
+/// What those gates need from the capture is the **item-stack framing** — count,
+/// registry id, patch counts, the terminator — and that is still entirely the
+/// server's. Only the one type-id byte is ours. The swap asserts both ids are
+/// single-byte VarInts, so no offset moves and the fixture's byte-by-byte
+/// annotation stays true.
+fn with_unmodeled_component(payload: &[u8]) -> Vec<u8> {
+    let captured = component_id(CAPTURED_COMPONENT);
+    let replacement = component_id(UNMODELED_COMPONENT);
+    assert!(
+        (0..0x80).contains(&captured) && (0..0x80).contains(&replacement),
+        "both ids must be one-byte VarInts ({captured}, {replacement}) or this \
+         splice would shift every following offset"
+    );
+    let mut out = payload.to_vec();
+    let at = out
+        .iter()
+        .position(|&b| i32::from(b) == captured)
+        .expect("the capture must carry the component type id this splices");
+    out[at] = u8::try_from(replacement).expect("one-byte VarInt");
+    out
 }
 
 /// Splits a captured `set_entity_data` payload into its entity id and the raw
@@ -125,13 +177,44 @@ fn a_plain_drop_consumes_its_whole_payload() {
         .expect("a complete decode leaves zero trailing bytes");
 }
 
-/// The fail-open gate. The server's own bytes for a drop carrying
-/// `minecraft:repair_cost` — a component this build does not model — still yield
-/// the item's identity. The key and count are read *before* any component is, so
-/// an unrecognised component costs detail and never the answer to "what is it".
+/// The captured `minecraft:repair_cost` drop now decodes **completely**, and its
+/// expected value comes from outside our encoder: these are the server's own
+/// bytes for `{"minecraft:repair_cost":7}`, so consuming exactly one VarInt is
+/// what makes the terminator land where the capture says it does.
+///
+/// The two other hypotheses this rules out are the ones a wrong width would
+/// produce: consume nothing and `0x07` reads as a metadata index (a misparse), or
+/// consume too much and the `0xff` terminator is eaten (an unterminated list).
+#[test]
+fn the_captured_repair_cost_drop_now_decodes_whole() {
+    let payload = fixture_bytes(UNMODELED_FIXTURE);
+    let (_, list) = split_payload(&payload);
+    let mut reader = Reader::new(list);
+    let decoded = read_entity_metadata(&mut reader, TrackedEntity::default()).expect("decode");
+
+    assert!(
+        decoded.complete,
+        "{CAPTURED_COMPONENT} is a bare VarInt and is decoded now, so the \
+         server's bytes must consume exactly"
+    );
+    reader
+        .ensure_empty()
+        .expect("consuming exactly one VarInt leaves the terminator as the last byte");
+    let stack = stack(&replay(&payload));
+    assert_eq!(stack.item.to_string(), "minecraft:diamond_pickaxe");
+    assert!(
+        !stack.components.has_unmodeled,
+        "nothing in the capture is unmodeled any more"
+    );
+}
+
+/// The fail-open gate. A drop whose stack carries a component this build does not
+/// model still yields the item's identity. The key and count are read *before*
+/// any component is, so an unrecognised component costs detail and never the
+/// answer to "what is it".
 #[test]
 fn an_unmodeled_component_still_yields_the_item() {
-    let payload = fixture_bytes(UNMODELED_FIXTURE);
+    let payload = with_unmodeled_component(&fixture_bytes(UNMODELED_FIXTURE));
     let metadata = replay(&payload);
     let stack = stack(&metadata);
 
@@ -144,15 +227,19 @@ fn an_unmodeled_component_still_yields_the_item() {
 }
 
 /// The same bytes, one level down: the decode reports `complete == false` and
-/// leaves the reader parked inside the unmodeled component's payload.
+/// the reader is left with nothing to read.
 ///
-/// The two unread bytes are `07 ff` — the `repair_cost` value and the list
+/// The two bytes behind the abandonment point are `07 ff` — a value and the list
 /// terminator. Resuming there would read `0x07` as a metadata index and then try
-/// `0xff` as a serializer VarInt, which is exactly the plausible-looking
-/// misparse the abandonment exists to prevent.
+/// `0xff` as a serializer VarInt, which is exactly the plausible-looking misparse
+/// the abandonment exists to prevent — so the decoder **drains** the reader on
+/// its way out rather than merely reporting `false`. That is what makes the
+/// contract self-enforcing: a caller that ignores the flag can now only raise
+/// `UnexpectedEof` (a dropped packet the session survives), never consume those
+/// two bytes as a field.
 #[test]
 fn an_unmodeled_component_parks_the_reader_mid_payload() {
-    let payload = fixture_bytes(UNMODELED_FIXTURE);
+    let payload = with_unmodeled_component(&fixture_bytes(UNMODELED_FIXTURE));
     let (_, list) = split_payload(&payload);
     let mut reader = Reader::new(list);
     let decoded = read_entity_metadata(&mut reader, TrackedEntity::default()).expect("must not be an error");
@@ -167,8 +254,20 @@ fn an_unmodeled_component_parks_the_reader_mid_payload() {
     );
     assert_eq!(
         reader.remaining_bytes(),
-        &[0x07, 0xff],
-        "the reader must stop exactly at the unmodeled component's payload"
+        &[] as &[u8],
+        "the abandoning decoder drains the reader, so no byte behind the \
+         abandonment point is reachable by a caller that reads on"
+    );
+    // The control for the drain: those two bytes really were there to be
+    // misread. Without this, an empty remainder would be indistinguishable from
+    // a fixture that simply ended at the component id.
+    let captured = fixture_bytes(UNMODELED_FIXTURE);
+    let complete_run = split_payload(&captured).1.len();
+    assert_eq!(
+        list.len(),
+        complete_run,
+        "the spliced and captured lists must be the same length, or the splice \
+         moved an offset"
     );
 }
 
@@ -182,7 +281,7 @@ fn an_unmodeled_component_parks_the_reader_mid_payload() {
 /// item-stack wire, which is supplied entirely by the fixture.
 #[test]
 fn fields_after_a_partial_stack_are_abandoned_not_misread() {
-    let payload = fixture_bytes(UNMODELED_FIXTURE);
+    let payload = with_unmodeled_component(&fixture_bytes(UNMODELED_FIXTURE));
     let (_, list) = split_payload(&payload);
 
     // Everything up to (not including) the unmodeled component's payload and the
@@ -215,10 +314,17 @@ fn fields_after_a_partial_stack_are_abandoned_not_misread() {
         "a field behind a partially-consumed stack must be abandoned — decoding \
          on would misalign and raise a plausible-looking wrong value"
     );
-    assert!(
-        reader.remaining() > 0,
-        "the abandoned tail is left unread, which is why the caller must skip \
-         its trailing-bytes assertion"
+    // The abandoned tail is not merely skipped, it is *unreachable*: the decoder
+    // drains the reader on its way out, so a caller that ignores the flag and
+    // reads on gets `UnexpectedEof` — one dropped packet — rather than this
+    // well-formed-looking health field. The assertion above is the control for
+    // this one: a real 12.5 was appended and did not arrive, so there genuinely
+    // was a tail to make unreachable.
+    assert_eq!(
+        reader.remaining(),
+        0,
+        "the abandoning decoder drains the reader; a non-zero remainder means \
+         the drain went away and a caller ignoring `complete` can misread again"
     );
 }
 

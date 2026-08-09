@@ -767,6 +767,9 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
                 }
                 _ => None,
             },
+            // Same story as `pot_decorations` above: this crate's component map
+            // has no slot for an opaque NBT blob, so there is nothing to carry.
+            custom_data: None,
             // See the doc above: not lossy, out of scope.
             has_unmodeled: false,
         };
@@ -1133,6 +1136,10 @@ mod tests {
                 max_stack_size: Some(1),
                 max_damage: Some(1561),
                 equippable: Some(lodestone_model::EquipmentSlot::Head),
+                // Not round-tripped by design, same reason as `pot_decorations`
+                // above: this crate's `ComponentValue` has no opaque-blob slot, so
+                // the conversion sets `None` either way.
+                custom_data: None,
                 has_unmodeled: false,
             },
         };

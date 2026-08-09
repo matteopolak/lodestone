@@ -558,9 +558,15 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
         SER_ITEM_STACK => {
             let decoded = crate::adapter::read_item_stack(reader)
                 .map_err(|err| Error::Custom(err.to_string()))?;
-            Value::Item {
-                stack: decoded.stack,
-                complete: decoded.complete,
+            match decoded {
+                crate::adapter::DecodedStack::Complete(stack) => Value::Item {
+                    stack,
+                    complete: true,
+                },
+                crate::adapter::DecodedStack::Partial(stack) => Value::Item {
+                    stack,
+                    complete: false,
+                },
             }
         }
         // Genuinely complex, self-describing payloads mobs never emit. Rejected
