@@ -128,9 +128,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   elements, so before this work they were a hole in the world. Bell is the partial
   case: its block model has real geometry for the attachment frame, but the swinging
   body/rim comes from `BellRenderer` alone, same as chest and skull in kind, just not
-  in degree. Today: chests (single, double left, double right; every material; the lid
-  animation), skull/head geometry (five of vanilla's seven types), and the bell
-  body/rim (see [Bell](#bell)).
+  in degree. The lectern is the far end of that spectrum: its shelf, base and posts
+  are *all* real block models, and only the open book on top comes from a renderer.
+  Today: chests (single, double left, double right; every material; the lid
+  animation), skull/head geometry (five of vanilla's seven types), the bell body/rim
+  (see [Bell](#bell)), the shulker box (see [Shulker box](#shulker-box)),
+  standing/wall/hanging sign text, the banner with its pattern layers, and the
+  lectern's book (see [Lectern](#lectern)).
 - [The block-entity scan is a cold-column term, but not a distance one](./block-entity-tick-distance.md) —
   The measured resolution of the block-entity lead in [issue
   #503](https://github.com/matteopolak/lodestone/issues/503): whether
