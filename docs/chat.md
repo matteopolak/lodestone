@@ -33,6 +33,76 @@ boolean; the caller computes it from wall-clock time (see `app.rs`'s
 module owning a clock, matching how every other transient render flag reaches
 `HudFrame`.
 
+### Up/Down: the sent-line history
+
+`ChatHistory` is vanilla's `ChatComponent.recentChat` — the deque of lines the
+player has **sent**, oldest first, capped at `RECENT_CHAT_MAX` (100) with the
+oldest dropped. It is a field of `ChatInput` rather than of the screen, which is
+the equivalent of vanilla's placement: the deque belongs to the persistent HUD
+component and the *screen* holds only a cursor into it
+(`ChatScreen.historyPos`/`historyBuffer`), so reopening chat still walks
+everything sent earlier in the session. `ChatInput` is app-lifetime for exactly
+that reason — only its `buf` is screen-scoped.
+
+`ChatInput::history_up`/`history_down` are `ChatScreen.moveInHistory(∓1)`.
+The three behaviours worth knowing before changing anything here:
+
+- The cursor lives in `0..=history.len()`, and `len()` — one past the last entry
+  — is the **live slot**. `ChatInput::take` rewinds to it, which is how
+  `ChatScreen.init`'s `historyPos = getRecentChat().size()` is reproduced without
+  a separate open hook: every path that opens the box clears `buf` through `take`.
+- Both ends **clamp**, they do not wrap. Vanilla's `Mth.clamp` then
+  `if (newPos != historyPos)` means an arrow at either end leaves the line alone —
+  but the key is still consumed, so it must not fall through and be typed.
+- The part-typed line is stashed in `historyBuffer` on the way out of the live
+  slot and restored on the way back, so glancing at an earlier message does not
+  destroy a half-written one.
+
+Recording happens in `WindowApp::handle_chat_history_key`'s Enter arm, reading the
+line *before* `handle_chat_key` consumes it with `take`. That split is
+load-bearing: `take` is on the Escape path too, and a cancelled line is not
+history — vanilla only records under
+`handleChatInput(msg, addToRecent = true)`, which Escape never reaches. The line
+is normalised first (`normalizeSpace(msg.trim())`), so `"hello    world"` is
+recalled as `"hello world"`; consecutive duplicates collapse
+(`!msg.equals(peekLast())` — the **last** entry only, not a set).
+
+### Tab: completing player names
+
+Tab forks on the *line*, not the key. `CommandSuggestions.updateCommandInfo`
+computes `isCommand = commandsOnly || startsWithSlash`; an ordinary chat line
+takes the `else if (!command.isBlank())` branch and is answered **locally** from
+`ClientSuggestionProvider.getCustomTabSuggestions()`, with no server round trip.
+So this works on any server, including one that has sent us no
+`minecraft:commands`.
+
+`ChatInput::set_online_players` is how the names get in — a plain `Vec<String>`
+the caller refreshes per keystroke from `Sim::tab_list`, which keeps `chat.rs`
+free of a client handle as its own header requires. Pass **every** entry, listed
+or not: vanilla's provider reads `getOnlinePlayers()`, not
+`getListedOnlinePlayers()`, so a player hidden from the tab overlay is still
+completable.
+
+Two rules that are easy to get wrong:
+
+- The replaced span starts at `last_word_index`, which is
+  `CommandSuggestions.getLastWordIndex`: the offset just past the **last**
+  whitespace *run*, not the position of the last space.
+- Matching is `SharedSuggestionProvider.matchesSubStr`, which is "prefix of a
+  segment delimited by `._/`" — **not** `contains`. `Notch_The_Second` matches
+  `the`; `Another` does not, despite containing it. Ordering then composes
+  brigadier's case-insensitive sort with `sortSuggestions`'s partition, which
+  moves literal prefix matches ahead of splitter matches.
+
+**Tab is shared with the in-world player-list overlay and the two must not steal
+each other.** They cannot: `app::input::resolve_key` short-circuits on
+`gate.chat_open` and returns `KeyOutcome::Chat` for every key, so the overlay's
+`KeyOutcome::PlayerList` is only ever reached with the chat box shut — vanilla's
+own context fork, arrived at through the gate rather than through a binding.
+`handle_chat_history_key` deliberately does **not** consume Tab; it only refreshes
+the name list and lets the existing Tab arm run, so there is one Tab
+implementation rather than two that can drift.
+
 ### Word wrap
 
 `hud.rs`'s `wrap_legacy_with` (a free function; `Builder::wrap_legacy` binds it

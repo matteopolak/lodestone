@@ -867,7 +867,7 @@ impl ApplicationHandler for WindowApp {
                         }
                     }
                     Some(KeyOutcome::Chat) => {
-                        if pressed {
+                        if pressed && !self.handle_chat_history_key(&event) {
                             self.handle_chat_key(&event);
                         }
                     }
@@ -1084,6 +1084,82 @@ impl ApplicationHandler for WindowApp {
         // `BACKGROUND_POLL` slices so a backgrounded window stops burning a core
         // yet still wakes far more often than the 20 Hz tick needs.
         event_loop.set_control_flow(self.pacer.control_flow(Instant::now()));
+    }
+}
+
+/// The two chat-box keys `handle_chat_key` does not own: the history arrows, and
+/// the refresh that makes Tab complete player names.
+///
+/// # Why this intercepts rather than living inside `handle_chat_key`
+///
+/// Vanilla splits the same way. `ChatScreen.keyPressed` offers the event to
+/// `CommandSuggestions` **first** and only then reaches its own `switch` on
+/// `264`/`265`, so the arrows are a distinct layer above ordinary text entry.
+/// Here that layer is the routing site: `handle_chat_key` is the text-entry and
+/// submit path, and these keys are handled before it sees them.
+impl WindowApp {
+    /// Returns `true` when the key was consumed, so the caller must **not** fall
+    /// through to `handle_chat_key`.
+    ///
+    /// Three keys are touched and only one is consumed:
+    ///
+    /// * `ArrowUp`/`ArrowDown` — `ChatScreen.moveInHistory(∓1)`. Consumed, and
+    ///   consumed even when the line does not change: vanilla's `switch` arm
+    ///   `return true`s regardless of what `moveInHistory` decided, so an arrow
+    ///   at either end of the list must not fall through and be typed.
+    /// * `Tab` — **not** consumed. It only refreshes the name list the chat
+    ///   input completes against, then lets the existing Tab arm run, so there
+    ///   is exactly one Tab implementation rather than two that can drift. The
+    ///   refresh happens per keystroke rather than at open time because a player
+    ///   can join while the chat box is up, and vanilla recomputes
+    ///   `getCustomTabSuggestions()` on every keystroke for the same reason.
+    ///
+    /// Note the Tab key reaches chat at all only because `input::resolve_key`
+    /// short-circuits on `gate.chat_open` before any gameplay binding —
+    /// `handle_chat_key`'s own doc records that. It is what keeps completion and
+    /// the in-world player-list overlay, which share the physical key, from
+    /// stealing each other: the overlay is `KeyOutcome::PlayerList`, reached only
+    /// when the chat box is shut.
+    pub(super) fn handle_chat_history_key(&mut self, event: &winit::event::KeyEvent) -> bool {
+        let PhysicalKey::Code(code) = event.physical_key else {
+            return false;
+        };
+        match code {
+            KeyCode::ArrowUp => {
+                self.chat_input.history_up();
+                true
+            }
+            KeyCode::ArrowDown => {
+                self.chat_input.history_down();
+                true
+            }
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                // Record before falling through, because `handle_chat_key`'s
+                // Enter arm *consumes* the line with `ChatInput::take`. Reading
+                // it here rather than teaching `take` to record is the whole
+                // point: `take` is on the **Escape** path too, and a cancelled
+                // line is not part of the history — vanilla only records under
+                // `handleChatInput(msg, addToRecent = true)`, which Escape never
+                // reaches.
+                let line = self.chat_input.as_str().to_owned();
+                self.chat_input.record_sent(&line);
+                false
+            }
+            KeyCode::Tab => {
+                // `getOnlinePlayers()`, not `getListedOnlinePlayers()`: vanilla's
+                // suggestion provider offers every entry, including a player the
+                // server has hidden from the tab overlay.
+                self.chat_input.set_online_players(
+                    self.sim
+                        .tab_list()
+                        .iter()
+                        .map(|entry| entry.profile.name.clone())
+                        .collect(),
+                );
+                false
+            }
+            _ => false,
+        }
     }
 }
 
