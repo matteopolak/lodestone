@@ -86,6 +86,43 @@ pub const MIN_SCALED_HEIGHT: u32 = 240;
 /// doing anything unsafe or even visible.
 pub const MAX_MANUAL_GUI_SCALE: u32 = 8;
 
+/// Vanilla's `fov` bounds and default (`Options.java:806,808`:
+/// `IntRange(30, 110)`, default `70`).
+///
+/// **An `IntRange`, not a `UnitDouble`** — the trap this triple exists to close.
+/// The `Codec.DOUBLE.xmap` sitting between those two lines is a *persistence*
+/// codec on the 7-argument `OptionInstance` overload, not a `ValueSet::xmap`, so
+/// it touches neither the stored int nor the slider; reading it as one puts the
+/// value at `70 * 40 + 70`. The same pair is in
+/// `menu::options::INT_RANGE_SLIDERS` under the `"fov"` accessor, which is where
+/// the slider handle comes from.
+pub const MIN_FOV: u32 = 30;
+/// See [`MIN_FOV`].
+pub const MAX_FOV: u32 = 110;
+/// See [`MIN_FOV`] — vanilla's shipped "Normal" FOV, and the same number
+/// `camera_rig::FOV_Y_DEGREES` used to pin the camera to unconditionally.
+pub const DEFAULT_FOV: u32 = 70;
+
+/// Vanilla's eleven `SoundSource` names, in `SoundSource` declaration order —
+/// the strings `SoundSource.getName()` returns.
+///
+/// Three different things are keyed off this one list, which is why it is a
+/// constant rather than three literals: the `options.soundSource.<name>`
+/// captions the settings tree renders, the `sound_volume_<name>` keys in
+/// `options.json`, and the index into [`Options::sound_volumes`].
+///
+/// **Indexed by `lodestone_model::event::SoundCategory::ordinal`**, which is the
+/// same bridge `lodestone_sound`'s own `map_category` crosses to reach a mixer
+/// bus — so the persisted key, the caption and the bus cannot drift apart
+/// without the ordinal itself changing. Note `Records`/`Blocks`/`Players` are
+/// *plural* in the enums and **singular** on the wire and in the file; that
+/// asymmetry is vanilla's, and it is the reason this list exists at all instead
+/// of a lowercased `Debug` impl.
+pub const SOUND_CATEGORY_NAMES: [&str; 11] = [
+    "master", "music", "record", "weather", "block", "hostile", "neutral", "player", "ambient",
+    "voice", "ui",
+];
+
 /// Vanilla's `mouseWheelSensitivity` slider bounds (issue #203):
 /// `logMouse(-200)` and `logMouse(100)`, i.e. `10^(-200/100)` and
 /// `10^(100/100)` (`Options.java:480-482`, `:1195-1196`).
@@ -392,6 +429,42 @@ pub struct Options {
     ///
     /// Default `false`, matching vanilla's boot value.
     pub advanced_item_tooltips: bool,
+    /// Vanilla's eleven `soundSource.*` sliders (`Options.java`'s
+    /// `createSoundSliderOptionInstance`, a `UnitDouble` defaulting to `1.0` for
+    /// every bus), indexed by
+    /// `lodestone_model::event::SoundCategory::ordinal` — see
+    /// [`SOUND_CATEGORY_NAMES`] for the order and the file keys.
+    ///
+    /// One array rather than eleven named fields because the consumer is itself
+    /// an array: `lodestone_audio::CategoryVolumes` stores `[f32; 11]` on the
+    /// same ordinal, so a per-field struct would only add eleven places for the
+    /// two orders to disagree. It also keeps [`Options`] `Copy`.
+    ///
+    /// Pushed to the mixer every frame by `Sim::set_sound_volumes`; the final
+    /// gain a sound is played at is **not** this number — it is
+    /// `CategoryVolumes::gain`, which is `sourceVolume * masterVolume` for every
+    /// bus except `Master` itself (vanilla's `getFinalSoundSourceVolume`
+    /// asymmetry: master is not squared).
+    pub sound_volumes: [f32; 11],
+    /// Vanilla's **FOV** option (`Options.java:806,808`), the vertical field of
+    /// view in **degrees** — an `IntRange(30, 110)` defaulting to `70`, not a
+    /// `UnitDouble`. See [`MIN_FOV`].
+    ///
+    /// Reaches `lodestone_render::Camera::fov_y_degrees` through
+    /// `Sim::set_fov_y_degrees` → `camera_rig::build_camera`, which pinned it to
+    /// the module constant `camera_rig::FOV_Y_DEGREES` before this field existed.
+    /// Pushed per frame, because vanilla applies this one immediately (unlike
+    /// [`Self::render_distance`], whose `applyValueImmediately` is `false`).
+    ///
+    /// It composes with, and is never overwritten by, the spyglass zoom:
+    /// `camera_rig::apply_spyglass_fov` multiplies whatever this produced by
+    /// `0.1`, so scoping at FOV 30 is a 3° view and at 110 an 11° one — vanilla's
+    /// own behaviour, since its modifier is a multiplier on `options.fov` too.
+    ///
+    /// Clamped on load and again at the setter: a hand-edited `0` would build a
+    /// degenerate projection matrix, which blanks the frame rather than looking
+    /// wrong.
+    pub fov: u32,
 }
 
 impl Default for Options {
@@ -424,6 +497,8 @@ impl Default for Options {
             sensitivity: DEFAULT_SENSITIVITY,
             render_distance: DEFAULT_RENDER_DISTANCE,
             advanced_item_tooltips: false,
+            sound_volumes: [1.0; 11],
+            fov: DEFAULT_FOV,
         }
     }
 }
@@ -589,6 +664,27 @@ impl Options {
             .get("advanced_item_tooltips")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
+        // The eleven sound sliders, through the same `unit` rule as the chat
+        // ones: every bus is a `UnitDouble` defaulting to `1.0`, so an absent,
+        // non-finite or out-of-range value degrades to full volume rather than
+        // to silence. Silence is the wrong degradation here for the reason
+        // `chat_colors` documents in reverse — a mangled file must not leave a
+        // player wondering why the game has no sound.
+        let mut sound_volumes = [1.0f32; 11];
+        for (slot, name) in sound_volumes.iter_mut().zip(SOUND_CATEGORY_NAMES) {
+            *slot = unit(&format!("sound_volume_{name}"), 1.0);
+        }
+        // Rejected rather than clamped to a neighbour, the same rule
+        // `render_distance` follows and for the same reason: landing on the
+        // default tells a reader the value was refused, where a clamp to 30 would
+        // look like a legitimate choice nobody made. A `0` here would build a
+        // degenerate projection and blank the frame.
+        let fov = obj
+            .get("fov")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| (MIN_FOV..=MAX_FOV).contains(v))
+            .unwrap_or(DEFAULT_FOV);
         Self {
             gui_scale,
             keybinds,
@@ -617,6 +713,8 @@ impl Options {
             sensitivity,
             render_distance,
             advanced_item_tooltips,
+            sound_volumes,
+            fov,
         }
     }
 
@@ -699,6 +797,20 @@ impl Options {
                 (self.mouse_wheel_sensitivity as f64).into(),
             );
         }
+        // The eleven sound sliders. Written per-bus and only when the bus is not
+        // at vanilla's `1.0`, so an untouched install has no `sound_volume_*` key
+        // at all — the same rule every other option here follows, and the reason
+        // it matters more for this group than for any other: eleven keys is over
+        // a third of the file.
+        //
+        // A direct insert rather than `put_unit` below, because the key is
+        // composed at runtime and that closure takes a `&'static str`.
+        for (index, name) in SOUND_CATEGORY_NAMES.iter().enumerate() {
+            let value = self.sound_volumes[index];
+            if (value - 1.0).abs() > f32::EPSILON {
+                obj.insert(format!("sound_volume_{name}"), f64::from(value).into());
+            }
+        }
         let default = Self::default();
         let mut put_unit = |key: &'static str, value: f32, default: f32| {
             if (value - default).abs() > f32::EPSILON {
@@ -746,6 +858,9 @@ impl Options {
                 "advanced_item_tooltips".into(),
                 self.advanced_item_tooltips.into(),
             );
+        }
+        if self.fov != default.fov {
+            obj.insert("fov".into(), self.fov.into());
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
             .unwrap_or_else(|_| "{}".to_string());
@@ -1587,6 +1702,110 @@ mod tests {
                 1.0,
                 "mouse_wheel_sensitivity: {bad} must degrade to 1.0"
             );
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // -- the eleven `soundSource.*` sliders -----------------------------------
+
+    /// Each bus round-trips through its **own** key, and an untouched install
+    /// writes none of the eleven.
+    ///
+    /// Every value below is distinct and none is `1.0`, which is what makes this
+    /// a test rather than a smoke check: eleven copies of one number would pass
+    /// with any two keys transposed, and the default `1.0` would pass with the
+    /// whole group unread. The per-bus expectation is looked up by
+    /// `SOUND_CATEGORY_NAMES`' own index, so a reordering of the array is a
+    /// failure here instead of a silent remap.
+    #[test]
+    fn sound_volumes_round_trip_per_bus_and_stay_out_of_an_untouched_file() {
+        let path = temp_options_path("sound-volumes");
+        Options::default().save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("sound_volume"),
+            "an untouched install must write none of the eleven keys: {text}"
+        );
+        assert_eq!(Options::load_from(&path).sound_volumes, [1.0; 11]);
+
+        let values = [0.5, 0.4, 0.3, 0.2, 0.1, 0.9, 0.8, 0.7, 0.6, 0.35, 0.0];
+        let custom = Options {
+            sound_volumes: values,
+            ..Options::default()
+        };
+        custom.save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for (index, name) in SOUND_CATEGORY_NAMES.iter().enumerate() {
+            let key = format!("sound_volume_{name}");
+            assert!(text.contains(&key), "{key} missing from {text}");
+            let back = Options::from_json(&format!("{{\"{key}\": {}}}", values[index]));
+            let mut expected = [1.0f32; 11];
+            expected[index] = values[index];
+            assert_eq!(
+                back.sound_volumes, expected,
+                "{key} must set only bus {index}"
+            );
+        }
+        assert_eq!(Options::load_from(&path).sound_volumes, values);
+
+        // Out of range, non-numeric and null all degrade to **full volume**, not
+        // to silence: a mangled file must not leave a player hunting a bug in the
+        // audio engine.
+        for bad in ["-0.5", "1.5", "\"loud\"", "null"] {
+            let json = format!("{{\"sound_volume_master\": {bad}}}");
+            assert_eq!(
+                Options::from_json(&json).sound_volumes[0], 1.0,
+                "sound_volume_master: {bad} must degrade to 1.0"
+            );
+        }
+        // The detector works: an in-range 0.0 really does come through, so the
+        // clause above is rejecting bad values rather than rejecting everything.
+        assert_eq!(
+            Options::from_json("{\"sound_volume_master\": 0.0}").sound_volumes[0],
+            0.0
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // -- `fov` --------------------------------------------------------------
+
+    /// `fov` round-trips, stays out of an untouched file, and rejects rather than
+    /// clamps a value outside vanilla's `IntRange(30, 110)`.
+    ///
+    /// Rejecting to the **default** rather than to a nearer endpoint is the same
+    /// choice `render_distance` makes, and for the same reason: landing on 70 tells
+    /// a reader the file was refused, where landing on 30 looks like a setting
+    /// somebody chose. (`camera_rig::build_camera` clamps to the endpoints
+    /// instead, because by then the value has a live producer that has already
+    /// been range-checked.)
+    #[test]
+    fn fov_round_trips_and_an_out_of_range_value_degrades_to_the_default() {
+        let path = temp_options_path("fov");
+        assert_eq!(Options::default().fov, DEFAULT_FOV);
+        Options::default().save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("fov"), "the default writes no key: {text}");
+
+        let custom = Options {
+            fov: 95,
+            ..Options::default()
+        };
+        custom.save_to(&path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("fov"));
+        assert_eq!(Options::load_from(&path).fov, 95);
+
+        for bad in ["0", "29", "111", "999", "-30", "\"wide\"", "null"] {
+            let json = format!("{{\"fov\": {bad}}}");
+            assert_eq!(
+                Options::from_json(&json).fov,
+                DEFAULT_FOV,
+                "{bad} must be rejected, not clamped to a neighbour"
+            );
+        }
+        // The detector works: both endpoints come through.
+        for good in [MIN_FOV, 70, MAX_FOV] {
+            let json = format!("{{\"fov\": {good}}}");
+            assert_eq!(Options::from_json(&json).fov, good);
         }
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

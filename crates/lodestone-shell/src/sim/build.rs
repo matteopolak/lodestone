@@ -432,6 +432,9 @@ impl Sim {
             enchanting_table_books: crate::block_entities::EnchantingTableBooks::new(),
             // Vanilla's default, not `0.0` — see the field's doc.
             damage_tilt_strength: 1.0,
+            // Vanilla's own `70`, so a `Sim` nobody pushes an FOV into builds the
+            // same projection `build_camera` used to hardcode.
+            fov_y_degrees: crate::camera_rig::FOV_Y_DEGREES,
             pickups: lodestone_game::mining::PickupFeed::new(),
         };
         sim.refresh_mesh_policy();

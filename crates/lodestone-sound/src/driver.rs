@@ -325,7 +325,7 @@ impl SoundDriver {
 /// ordinal. The two enums share vanilla's `SoundSource` order exactly (the
 /// names differ only in pluralisation), so the ordinal is the safe bridge — a
 /// name match would be fragile. Both have 11 buses ending in `Ui`.
-fn map_category(category: ModelCategory) -> AudioCategory {
+pub(crate) fn map_category(category: ModelCategory) -> AudioCategory {
     AudioCategory::ALL[category.ordinal() as usize]
 }
 

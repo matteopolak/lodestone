@@ -65,6 +65,36 @@ impl Sim {
         });
     }
 
+    /// Push vanilla's eleven `soundSource.*` volume sliders down from the menu
+    /// layer onto the mixer's buses, exactly as
+    /// [`Sim::set_view_bobbing`](crate::sim::Sim::set_view_bobbing) does for View
+    /// Bobbing — polled once per presented frame rather than fired on the drag,
+    /// because `MenuNav` owns the [`Options`](crate::config::Options) and `Sim`
+    /// owns none.
+    ///
+    /// # This was never a missing subsystem
+    ///
+    /// The mixer has had per-bus volumes since it existed
+    /// (`lodestone_audio::CategoryVolumes`, with `getFinalSoundSourceVolume`'s
+    /// master asymmetry already transcribed and gated). What was missing was
+    /// only this call: the eleven sliders drew from
+    /// `menu::options::UNIT_DOUBLE_DEFAULTS`' frozen `1.0` and reached nothing,
+    /// so `CategoryVolumes::set_user` had exactly one caller in the whole
+    /// workspace and it was a unit test. Nothing here computes a gain — see
+    /// [`sound_volumes`] for the pure half and `CategoryVolumes::gain` for the
+    /// arithmetic.
+    ///
+    /// A no-op when audio is disabled (no asset store, no output device), which
+    /// is the ordinary state on a headless machine.
+    pub fn set_sound_volumes(&mut self, options: &crate::config::Options) {
+        let volumes = sound_volumes(options);
+        self.audio_mut(|audio| {
+            if let Some(audio) = audio {
+                audio.set_category_volumes(&volumes);
+            }
+        });
+    }
+
     /// This frame's sound-subtitle caption rows (issue #198), already translated
     /// against the loaded language table.
     ///
@@ -574,6 +604,50 @@ impl Sim {
     }
 }
 
+/// The eleven `soundSource.*` slider values paired with the bus each one drives,
+/// in vanilla's `SoundSource` declaration order.
+///
+/// # Why this is a free function and not inlined into the setter
+///
+/// [`Sim::set_sound_volumes`] cannot be observed on a machine with no audio
+/// device: `Sim::audio_mut` yields `None` there, so a gate that drove the push
+/// and read the mixer back would pass whether or not the option reached anything
+/// — the *world* species of vacuous test, where the flaw is in what the test was
+/// pointed at rather than in the assertion. Splitting the mapping out makes the
+/// part that can be wrong (which config slot feeds which bus) assertable with no
+/// device at all.
+///
+/// The pairing is by **ordinal**, not by position in the array literal, for the
+/// same reason `lodestone_sound`'s `map_category` uses one: the two enums and
+/// [`crate::config::SOUND_CATEGORY_NAMES`] all agree on `SoundSource`'s order, so
+/// the ordinal is the single bridge rather than three parallel lists.
+///
+/// Clamped here as well as on load, because a hand-edited `options.json` reaches
+/// this and `CategoryVolumes::set_user`'s own clamp would silently absorb it —
+/// clamping at both ends keeps "the file was wrong" from looking like "the slider
+/// does nothing".
+#[must_use]
+pub(crate) fn sound_volumes(
+    options: &crate::config::Options,
+) -> [(lodestone_model::event::SoundCategory, f32); 11] {
+    use lodestone_model::event::SoundCategory;
+    let mut out = [(SoundCategory::Master, 0.0f32); 11];
+    for (slot, category) in out.iter_mut().zip(SoundCategory::ALL) {
+        let value = options.sound_volumes[category.ordinal() as usize];
+        // `f32::clamp` propagates NaN rather than rejecting it, and
+        // `CategoryVolumes::set_user`'s own clamp does too — so a NaN would reach
+        // the mixer and silence that bus. `Options::from_json` already filters
+        // one out, but a programmatically-built `Options` can still carry it.
+        let value = if value.is_finite() {
+            value.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        *slot = (category, value);
+    }
+    out
+}
+
 /// The pure formula behind [`Sim::block_sound_seed`], parameterised over the
 /// tick count instead of reading [`crate::sim::Sim::clock`] directly.
 ///
@@ -591,4 +665,95 @@ pub(crate) fn block_sound_seed(block: [i32; 3], ticks: u64) -> i64 {
     x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     (x ^ (x >> 31)) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use lodestone_model::event::SoundCategory;
+
+    /// The eleven sliders reach the eleven buses, each one carrying **its own**
+    /// value.
+    ///
+    /// # Why the values are eleven distinct non-defaults
+    ///
+    /// Every bus boots at `1.0`, so at `Options::default()` the correct mapping
+    /// and the frozen-default hypothesis agree on all eleven entries — a gate
+    /// there would measure only that the function runs. Distinct values make a
+    /// *swap* visible too: eleven copies of `0.4` would pass with `hostile` and
+    /// `neutral` transposed, which is the mistake an eleven-arm hand-written
+    /// match actually makes.
+    ///
+    /// The expected numbers are not this function's output; they are read off the
+    /// literal assignment below, keyed by name, and the ordinal each name maps to
+    /// comes from `SoundCategory::ordinal` rather than from the array's position.
+    #[test]
+    fn each_sound_slider_lands_on_its_own_bus_at_its_own_value() {
+        let mut options = crate::config::Options::default();
+        // Keyed by `SOUND_CATEGORY_NAMES` order: master, music, record, weather,
+        // block, hostile, neutral, player, ambient, voice, ui. `ui` is `0.0` on
+        // purpose — a bus a player has genuinely muted must be distinguishable
+        // from the default, and `0.0` is the value a "did it reach anything?"
+        // gate is most likely to confuse with "nothing was pushed".
+        options.sound_volumes = [0.5, 0.4, 0.3, 0.2, 0.1, 0.9, 0.8, 0.7, 0.6, 0.35, 0.0];
+
+        let pairs = super::sound_volumes(&options);
+        let expected = [
+            (SoundCategory::Master, 0.5),
+            (SoundCategory::Music, 0.4),
+            (SoundCategory::Record, 0.3),
+            (SoundCategory::Weather, 0.2),
+            (SoundCategory::Block, 0.1),
+            (SoundCategory::Hostile, 0.9),
+            (SoundCategory::Neutral, 0.8),
+            (SoundCategory::Player, 0.7),
+            (SoundCategory::Ambient, 0.6),
+            (SoundCategory::Voice, 0.35),
+            (SoundCategory::Ui, 0.0),
+        ];
+        assert_eq!(pairs.len(), expected.len());
+        for (index, ((got_cat, got), (want_cat, want))) in
+            pairs.iter().zip(expected).enumerate()
+        {
+            assert_eq!(*got_cat, want_cat, "bus at index {index}");
+            assert!(
+                (got - want).abs() < 1e-6,
+                "{want_cat:?}: pushed {got}, expected {want} — the frozen-default \
+                 hypothesis would have pushed 1.0"
+            );
+            assert!(
+                (got - 1.0).abs() > 1e-6,
+                "{want_cat:?}: the chosen input must differ from the frozen \
+                 default, or this row measures nothing"
+            );
+        }
+    }
+
+    /// The mapping's premise: every bus really does boot at `1.0`, so the gate
+    /// above had to move all eleven to say anything. Also the clamp — a
+    /// hand-edited file must not be able to push a value the mixer would have to
+    /// absorb silently, and a NaN must not silence a bus.
+    #[test]
+    fn defaults_are_full_volume_and_a_corrupt_value_is_pulled_back_onto_the_track() {
+        let default = crate::config::Options::default();
+        for (category, volume) in super::sound_volumes(&default) {
+            assert!(
+                (volume - 1.0).abs() < 1e-6,
+                "{category:?} must boot at full volume, got {volume}"
+            );
+        }
+
+        let mut corrupt = crate::config::Options::default();
+        corrupt.sound_volumes[SoundCategory::Block.ordinal() as usize] = 7.5;
+        corrupt.sound_volumes[SoundCategory::Music.ordinal() as usize] = -3.0;
+        corrupt.sound_volumes[SoundCategory::Ui.ordinal() as usize] = f32::NAN;
+        let pushed = super::sound_volumes(&corrupt);
+        let of = |c: SoundCategory| pushed[c.ordinal() as usize].1;
+        assert_eq!(of(SoundCategory::Block), 1.0, "7.5 clamps to the maximum");
+        assert_eq!(of(SoundCategory::Music), 0.0, "-3.0 clamps to the minimum");
+        assert_eq!(
+            of(SoundCategory::Ui),
+            1.0,
+            "NaN degrades to full volume, never to silence"
+        );
+    }
 }

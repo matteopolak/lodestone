@@ -247,6 +247,40 @@ impl AudioEngine {
         f(&mut self.lock_mixer())
     }
 
+    /// Pushes the eleven `soundSource.*` slider values onto their mixer buses —
+    /// vanilla's `Options.soundSourceVolumes`, the write side of
+    /// `getFinalSoundSourceVolume`.
+    ///
+    /// # Why the whole set, under one lock
+    ///
+    /// Every pair is applied inside a single [`Self::with_mixer`], because that
+    /// lock is the realtime one the audio callback also takes: a caller pushing
+    /// eleven sliders one at a time would take and drop it eleven times per
+    /// frame for a total of eleven `f32` stores. The set is also the natural
+    /// unit — vanilla's final gain for a non-master bus is
+    /// `sourceVolume * masterVolume`, so master and the bus it scales must never
+    /// be observable half-applied by a render block between two pushes.
+    ///
+    /// Takes [`lodestone_model::event::SoundCategory`] rather than the mixer's
+    /// own bus enum so callers need no dependency on `lodestone-audio`; the
+    /// ordinal bridge is the same `map_category` every play path uses.
+    pub fn set_category_volumes(&self, volumes: &[(ModelCategory, f32)]) {
+        self.with_mixer(|mixer| {
+            let buses = mixer.volumes_mut();
+            for (category, volume) in volumes {
+                buses.set_user(crate::driver::map_category(*category), *volume);
+            }
+        });
+    }
+
+    /// The slider value currently on `category`'s bus — the read-back side of
+    /// [`Self::set_category_volumes`], so a caller (or a gate) can observe what
+    /// actually landed rather than what it sent.
+    #[must_use]
+    pub fn category_volume(&self, category: ModelCategory) -> f32 {
+        self.with_mixer(|mixer| mixer.volumes().user(crate::driver::map_category(category)))
+    }
+
     /// Pauses the output device without tearing it down.
     pub fn pause(&self) -> Result<(), AudioError> {
         self.sink.pause()

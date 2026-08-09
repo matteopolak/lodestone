@@ -275,7 +275,35 @@ impl Sim {
             self.eye_height_smoother.lerp(self.clock().interp_alpha),
             aspect,
             self.config.render_distance,
+            // Vanilla's FOV option, not the module constant `build_camera` used
+            // to write itself — see [`Self::set_fov_y_degrees`].
+            self.fov_y_degrees,
         )
+    }
+
+    /// Push vanilla's **FOV** option ([`crate::config::Options::fov`]) down from
+    /// the menu layer in degrees, exactly as [`Self::set_view_bobbing`] does for
+    /// View Bobbing, and polled per frame for the same reason.
+    ///
+    /// Per frame rather than at launch because vanilla applies this one
+    /// immediately: its `IntRange(30, 110)` takes the default
+    /// `applyValueImmediately`, unlike `renderDistance`'s explicit `false`. So the
+    /// FOV slider must move the view while the settings page is still open, which
+    /// is why this is a `Sim` field and not a `Config::resolve_persisted` fold like
+    /// `render_distance`.
+    ///
+    /// Clamping lives in [`build_camera`], which is the one place that can see
+    /// every producer — the setter storing a raw value keeps this from being a
+    /// second, drifting copy of vanilla's range.
+    pub fn set_fov_y_degrees(&mut self, degrees: f32) {
+        self.fov_y_degrees = degrees;
+    }
+
+    /// The FOV in degrees this frame, before the spyglass zoom. Exposed so a gate
+    /// can assert the pushed value separately from the projection it produces.
+    #[must_use]
+    pub fn fov_y_degrees(&self) -> f32 {
+        self.fov_y_degrees
     }
 
     /// Advances the camera mode one step (vanilla's `F5`, i.e.
