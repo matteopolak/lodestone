@@ -265,6 +265,14 @@ The machine:
   **Never reach for `git clean` to reclaim space** — it deletes untracked files, which here means other
   agents' new crates, docs and oracle dumps, in no commit and no reflog. And **do not purge `target/` while
   another agent is mid-compile** — it happened twice in one session and cost an agent its workspace test run.
+  **Its signature is worth memorising: a flood of `E0463 can't find crate` affecting every crate uniformly**
+  (247 of them in one run) means rlibs were deleted underneath a live build, not that anything is broken. It
+  looks exactly like a compile break, and **a compile break defeats `--no-fail-fast`**, so the whole suite
+  reports nothing; the re-run is green. A second independent measurement put `target/debug/build` at **69 GB
+  across 11,272 hash directories all created in one day**, 27 GB under one crate in 1,614 of them — test
+  binaries living in build-script `out/` dirs that cargo never collects. Whether that is aggravated by a
+  worktree ever pointing `CARGO_TARGET_DIR` at the shared `target/` (the poisoning this file warns about
+  elsewhere) is unestablished and worth checking before anyone optimises further.
 - **Docker is fair game to stop and prune when no live gate needs it**; the oracles are not repo state and
   `scripts/live-oracles/{creative,survival,terrain}.sh` recreates them. Quitting Docker Desktop reclaims
   the VM reservation, the largest single win; restart it before any `#[ignore]`d live-oracle gate. Prune
