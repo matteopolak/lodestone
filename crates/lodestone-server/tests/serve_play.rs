@@ -2504,6 +2504,157 @@ async fn a_play_packet_is_serviced_before_the_last_join_chunk() {
     server.shutdown().await;
 }
 
+/// **The same instrument, pointed at a *move* instead of a join — the half the
+/// join fix did not cover.**
+///
+/// [`a_play_packet_is_serviced_before_the_last_join_chunk`] above proves the join
+/// burst no longer stands in front of the play loop. It says nothing about the
+/// steady state, and the steady state had the identical defect for a different
+/// reason: `ViewTracker::recenter` used to `await` the generation *and* encode of
+/// every newly-visible column inside `dispatch_play_packet`, so one movement packet
+/// occupied the connection task for the whole strip. **That is a `world`-species
+/// blind spot in the join gate rather than a missing assertion in it** — the gate is
+/// exemplary and simply cannot reach a code path that only runs after the join has
+/// drained.
+///
+/// # The counter, and why this jump
+///
+/// The subject is a jump far enough that the new window shares nothing with the old,
+/// so the added set is a whole `(2r + 1)²` square — the same 361 columns the join
+/// sends, which is what makes the two hypotheses as far apart as they can be:
+///
+/// | hypothesis | chunks of the strip that precede the reply |
+/// |---|---|
+/// | the move generates the strip inline (the defect) | **361** — the loop cannot read the next packet until the last column is encoded |
+/// | the strip is enqueued and streamed (the fix) | a handful — the socket read and the column stream interleave |
+///
+/// The bound is 40, matching the join gate's, and it is nowhere near 361. A
+/// one-axis step would not do: its added set is 19 columns, close enough to the
+/// bound that a passing run would not distinguish the two orderings.
+///
+/// Ordering is `select!`'s random choice between a ready column and a ready packet,
+/// which is the property that stops either starving the other — so this asserts a
+/// *bound*, and separately asserts the strip still arrives whole, because a "fix"
+/// that dropped the newly-visible columns would otherwise sail through.
+#[tokio::test]
+async fn a_play_packet_is_serviced_before_the_last_chunk_of_a_move() {
+    let view_radius = 9;
+    let square_columns = ((2 * view_radius + 1) * (2 * view_radius + 1)) as usize;
+    let generated = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let server = lodestone_server::IntegratedServer::bind(
+        "127.0.0.1:0",
+        ProbeProto {
+            generated: std::sync::Arc::clone(&generated),
+        },
+        CountingAirSource {
+            generated: std::sync::Arc::clone(&generated),
+        },
+        view_radius,
+    )
+    .await
+    .expect("bind loopback");
+    let addr = server.local_addr().expect("a bound server has an address");
+
+    let mut client = Connection::new(
+        tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client connects"),
+    );
+    client.write_packet(HANDSHAKE, &[2]).await.expect("hs");
+    let mut w = Writer::default();
+    w.string("Strider");
+    client
+        .write_packet(LOGIN_START, w.as_slice())
+        .await
+        .expect("login start");
+    client.read_packet().await.unwrap().unwrap(); // LOGIN_SUCCESS
+    client
+        .write_packet(LOGIN_ACKNOWLEDGED, &[])
+        .await
+        .expect("login ack");
+    client
+        .write_packet(FINISH_CONFIGURATION, &[])
+        .await
+        .expect("finish configuration");
+
+    let (id, _) = client.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, SET_TIME_S2C);
+
+    // The join first: this gate is about what happens *after* it, so the strip
+    // counted below cannot be contaminated by columns the join still owed.
+    let (join_observed, _) = collect_join_chunks(&mut client, square_columns).await;
+    assert_eq!(
+        join_observed.len(),
+        square_columns,
+        "precondition: the join view must be fully drained before the move, or the \
+         count below mixes join columns into the strip"
+    );
+    let mut ack = Writer::default();
+    ack.f32(10.0);
+    client
+        .write_packet(CHUNK_BATCH_RECEIVED_C2S, ack.as_slice())
+        .await
+        .expect("ack the join");
+
+    // The jump — chunk (60, 60), whose radius-9 window shares no column with the
+    // one centred on the spawn chunk — followed immediately by an interaction whose
+    // reply is observable. Written back to back, before a single byte of the reply
+    // or the strip is read, so the server sees both in its buffer at once and the
+    // ordering it produces is the thing under test.
+    let mut moved = Writer::default();
+    moved.f64(60.0 * 16.0 + 8.0);
+    moved.f64(64.0);
+    moved.f64(60.0 * 16.0 + 8.0);
+    client
+        .write_packet(PLAYER_MOVED_C2S, moved.as_slice())
+        .await
+        .expect("send move");
+    client
+        .write_packet(CHANGE_DIFFICULTY_C2S, &[3])
+        .await
+        .expect("difficulty change");
+
+    let mut chunks_before_reply = None;
+    let mut strip: Vec<(i32, i32)> = Vec::with_capacity(square_columns);
+    while strip.len() < square_columns {
+        let (id, payload) = client
+            .read_packet()
+            .await
+            .expect("read")
+            .expect("the server must not close mid-strip");
+        if id == CHUNK {
+            let mut r = Reader::new(&payload);
+            strip.push((r.var_i32().unwrap(), r.var_i32().unwrap()));
+        } else if id == CHANGE_DIFFICULTY_S2C && chunks_before_reply.is_none() {
+            chunks_before_reply = Some(strip.len());
+        }
+    }
+
+    let at = chunks_before_reply.expect(
+        "the difficulty change was never answered: the move consumed the connection task \
+         for the whole strip, or the packet was dropped",
+    );
+    assert!(
+        at < 40,
+        "the play packet sent behind a chunk-boundary crossing was answered only after \
+         {at} of {square_columns} newly-visible columns. Under the defect this is exactly \
+         {square_columns}: `ViewTracker::recenter` awaited the whole strip inside \
+         `dispatch_play_packet`, so the loop could not read the next packet at all"
+    );
+
+    let sent: HashSet<(i32, i32)> = strip.into_iter().collect();
+    assert_eq!(
+        sent,
+        square(60, 60, view_radius),
+        "streaming the strip must not change *which* columns the client receives: \
+         exactly the new window, once each"
+    );
+
+    drop(client);
+    server.shutdown().await;
+}
+
 /// Issue #324 / `docs/plans/world-state.md` W1, gate (c)'s serve half:
 /// `serve_play`'s `container_sync_tick` arm must actually drain the
 /// [`WeatherFeed`] and turn each transition into an `encode_game_event`

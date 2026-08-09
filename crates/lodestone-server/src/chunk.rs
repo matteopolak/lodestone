@@ -1046,8 +1046,49 @@ pub(crate) fn generate_columns_parallel<S: ChunkSource>(
     source: &S,
     coords: &[(i32, i32)],
 ) -> Vec<ChunkColumn> {
+    map_columns_parallel(source, coords, |_, column| column)
+}
+
+/// [`generate_columns_parallel`] with a per-column transform applied **inside the
+/// worker that generated it**, so whatever `f` costs is parallelised on the same
+/// fan-out and the intermediate [`ChunkColumn`] is dropped without ever reaching
+/// the caller.
+///
+/// This exists because folding the protocol encode into the same blocking closure
+/// as the generation (`generate_and_encode_columns_offloaded`) originally left the
+/// encode **serial**: the closure fanned generation out over scoped threads, joined
+/// them all, and only then walked the joined `Vec` calling `encode_chunk` one column
+/// at a time on a single thread. At the ≈2.4 ms per column
+/// `crate::protocol::ChunkEncoder` carries, a 33-column strip therefore paid ≈80 ms
+/// of *unavoidably* single-threaded work no matter how many cores generated it —
+/// which is the whole cost the offload was supposed to remove, still present, just
+/// relocated off the connection task.
+///
+/// Two consequences beyond the wall clock, both properties of doing it here rather
+/// than after the join:
+///
+/// * peak memory is one column per worker instead of `coords.len()` columns. A
+///   composed column is not small, and the old shape held the entire strip live at
+///   once purely to iterate it afterwards.
+/// * `f` runs on the worker thread, so it must be `Sync` and its output `Send`.
+///   `ChunkEncoder` already requires both (`Send + Sync + 'static`), which is why
+///   no call site has to change shape.
+///
+/// Order is still **`coords` order**, not completion order — the same guarantee
+/// [`generate_columns_parallel`] documents, and for the same reason: the wire byte
+/// sequence must not depend on which thread finished first.
+#[must_use]
+fn map_columns_parallel<S, T, F>(source: &S, coords: &[(i32, i32)], f: F) -> Vec<T>
+where
+    S: ChunkSource,
+    T: Send,
+    F: Fn((i32, i32), ChunkColumn) -> T + Sync,
+{
     if coords.len() <= 1 {
-        return coords.iter().map(|&(cx, cz)| source.column(cx, cz)).collect();
+        return coords
+            .iter()
+            .map(|&(cx, cz)| f((cx, cz), source.column(cx, cz)))
+            .collect();
     }
 
     let workers = std::thread::available_parallelism()
@@ -1060,10 +1101,11 @@ pub(crate) fn generate_columns_parallel<S: ChunkSource>(
         let handles: Vec<_> = coords
             .chunks(batch)
             .map(|slice| {
+                let f = &f;
                 scope.spawn(move || {
                     slice
                         .iter()
-                        .map(|&(cx, cz)| source.column(cx, cz))
+                        .map(|&(cx, cz)| f((cx, cz), source.column(cx, cz)))
                         .collect::<Vec<_>>()
                 })
             })
@@ -1177,12 +1219,15 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
     encoder: Option<Arc<dyn crate::protocol::ChunkEncoder>>,
 ) -> Option<Vec<crate::protocol::ServerDirective>> {
     let encoder = encoder?;
+    // `map_columns_parallel`, not `generate_columns_parallel` followed by an
+    // encode loop: the encode runs on the worker that generated the column, so a
+    // 33-column strip's ≈80 ms of encode is fanned out rather than paid serially
+    // after the join. See that function's own doc for the two properties this
+    // buys.
     let encode = move || {
-        generate_columns_parallel(&*source, &coords)
-            .iter()
-            .zip(&coords)
-            .map(|(column, &(cx, cz))| encoder.encode_chunk(cx, cz, column))
-            .collect::<Vec<_>>()
+        map_columns_parallel(&*source, &coords, |(cx, cz), column| {
+            encoder.encode_chunk(cx, cz, &column)
+        })
     };
     #[cfg(target_arch = "wasm32")]
     {
