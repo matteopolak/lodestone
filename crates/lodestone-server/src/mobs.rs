@@ -2061,7 +2061,27 @@ impl<'w> MobSim<'w> {
     /// another mob never needs two simultaneous mutable borrows into the same
     /// `Vec`. A mob whose health reaches `0.0` is removed at the end of the
     /// tick that killed it (vanilla's immediate death removal).
+    /// One tick, settling dropped items against this sim's own terrain snapshot.
+    ///
+    /// **Production should call [`tick_with_terrain`](Self::tick_with_terrain)
+    /// instead**, and the difference is a real gameplay bug rather than a
+    /// preference: the snapshot only covers the 7×7 `mob_area` columns taken when
+    /// the world opened, so items dropped anywhere else fall straight through the
+    /// ground. See [`settle_item`]. This entry point stays for hermetic callers,
+    /// whose fixture world *is* the whole world they care about.
     pub fn tick(&mut self) {
+        let world = self.world;
+        self.tick_with_terrain(&|x, y, z| world.is_solid(x, y, z));
+    }
+
+    /// One tick, settling dropped items against a caller-supplied solidity
+    /// oracle — the live world, when the caller has one.
+    ///
+    /// Only the item-settling pass consults `is_solid`; everything else still
+    /// reads the snapshot, because mob pathfinding genuinely wants a view that
+    /// does not change underneath a search in progress. Items are the opposite
+    /// case: an item has to land on the block that is there *this* tick.
+    pub fn tick_with_terrain(&mut self, is_solid: &dyn Fn(i32, i32, i32) -> bool) {
         // Issue #441 (plan unit A2): feed every mob's perception inputs before
         // its goals run. Without this pass `NavigatingMob` reports the trait
         // defaults for `nearest_player`/`temptation`/`avoid_threat`/
@@ -2336,7 +2356,7 @@ impl<'w> MobSim<'w> {
         let mut fell_out_of_the_world: Vec<i32> = Vec::new();
         for (&id, state) in &mut self.item_state {
             state.motion.tick();
-            settle_item(world, &mut state.motion);
+            settle_item(is_solid, &mut state.motion);
             if state.motion.position.y < f64::from(world.min_y) - VOID_DESPAWN_DEPTH {
                 fell_out_of_the_world.push(id);
             }
@@ -3782,13 +3802,32 @@ const ITEM_SUPPORT_EPSILON: f64 = 1.0e-7;
 /// ice exactly as it does on stone. Vanilla reads
 /// `getBlockPosBelowThatAffectsMyMovement().getBlock().getFriction()`; wiring that
 /// needs a per-block friction census this crate does not carry.
-fn settle_item(world: &ChunkWorld, motion: &mut ItemMotion) {
+/// Settles one item against a solidity oracle.
+///
+/// # Why this takes a closure and not the sim's own `ChunkWorld`
+///
+/// It used to read [`ChunkWorld::is_solid`] directly, and that is why dropped
+/// items phased through the ground everywhere except a small square around
+/// spawn. The sim's `ChunkWorld` is a **static snapshot** of `mob_area` — 7×7
+/// columns, taken once by `MobHandle::reseed` when the world opens (see that
+/// method's own doc, which names widening it as a deliberate scope cut). Outside
+/// those columns `is_solid` is `false` for *every* cell, because the column is
+/// simply absent, so an item fell forever and was discarded at `min_y - 64`.
+/// Inside them it answered from unedited worldgen terrain, so a block the player
+/// had placed did not stop an item and one they had mined still did.
+///
+/// A snapshot cannot be the oracle for this: settling has to see the world as it
+/// is *now*, at whatever coordinates the player is actually standing. The tick
+/// loop is the one place that holds the live `ChunkSource`, so it supplies the
+/// answer and the sim asks — see [`MobSim::tick_with_terrain`]. `tick` keeps the
+/// snapshot as its oracle so hermetic callers are unchanged.
+fn settle_item(is_solid: &dyn Fn(i32, i32, i32) -> bool, motion: &mut ItemMotion) {
     let bx = motion.position.x.floor() as i32;
     let bz = motion.position.z.floor() as i32;
 
     // Sunk into a solid cell this tick: lift the bottom face onto its top.
     let by = motion.position.y.floor() as i32;
-    if world.is_solid(bx, by, bz) {
+    if is_solid(bx, by, bz) {
         motion.position.y = f64::from(by + 1);
         if motion.velocity.y < 0.0 {
             // `Entity.move`'s collision resolution zeroes the delta component it
@@ -3800,7 +3839,7 @@ fn settle_item(world: &ChunkWorld, motion: &mut ItemMotion) {
     }
 
     let supporting_y = (motion.position.y - ITEM_SUPPORT_EPSILON).floor() as i32;
-    motion.on_ground = world.is_solid(bx, supporting_y, bz);
+    motion.on_ground = is_solid(bx, supporting_y, bz);
 }
 
 /// Horizontal reach of `mergeWithNeighbours`' search: the item's own half-width

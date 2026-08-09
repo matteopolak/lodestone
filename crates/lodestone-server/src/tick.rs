@@ -1079,7 +1079,36 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // a static full-size default — but this is where a resize's lerp
         // advances once a caller exists to start one.
         border.tick();
-        mobs.with(MobSim::tick);
+        // **Dropped items settle against the live world, not the sim's snapshot.**
+        //
+        // `MobSim::tick` would use `MobSim`'s own `ChunkWorld`, which is a static
+        // 7×7-column snapshot of `mob_area` taken once when the world opened
+        // (`MobHandle::reseed`). Everywhere outside those columns its `is_solid`
+        // answers `false` for every cell — the column is absent, not empty — so a
+        // dropped item accelerated downward forever, phased through the terrain,
+        // and was discarded at `min_y - 64`. Inside them it answered from
+        // *unedited worldgen*, so a block the player had placed did not stop an
+        // item and one they had mined still did.
+        //
+        // This loop is the only place holding the live `ChunkSource`, which is why
+        // the oracle is supplied from here rather than fixed inside the sim. Same
+        // structural reason the graze and detonation drains below live here:
+        // `MobSim` holds its world immutably and cannot see an edit.
+        //
+        // `is_solid` is `ChunkColumn::is_solid`'s predicate — neither air nor a
+        // fluid — re-derived from the source's block state so an item lands on a
+        // slab or a chest and falls through water, exactly as the snapshot arm
+        // did. `block_state` reads through the resident `ChunkStore` column, so
+        // the cells an item is falling through are the ones already streamed to
+        // the player standing there.
+        {
+            let world = Arc::clone(&world);
+            mobs.with(|sim| {
+                sim.tick_with_terrain(&|x, y, z| {
+                    !crate::chunk::is_air_or_fluid(&world.block_state(x, y, z))
+                });
+            });
+        }
         // Issue #328's first real enforcement: **Peaceful removes monsters.**
         // Vanilla does it in `Mob.checkDespawn`, which discards any
         // `MobCategory.MONSTER` entity when

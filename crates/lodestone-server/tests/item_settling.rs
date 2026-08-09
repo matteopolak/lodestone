@@ -368,3 +368,160 @@ fn an_item_thrown_sideways_still_comes_to_rest_on_the_floor() {
         position.x
     );
 }
+
+// --- The live-terrain oracle -------------------------------------------------
+//
+// Every gate above builds a `ChunkWorld` fixture and drives `MobSim::tick`, whose
+// oracle is that same fixture. They are all green, and they were green while
+// dropped items phased through the ground in the actual game — the *world* species
+// of vacuous test in CLAUDE.md, where the flaw is in the input data and cannot be
+// found by reading the test. Their fixture world **is** the whole world they care
+// about, so they structurally cannot exercise the thing that was broken.
+//
+// What was broken: `MobSim`'s `ChunkWorld` is a static snapshot of `mob_area` —
+// 7×7 columns, taken once by `MobHandle::reseed` when the world opens. Outside
+// those columns `ChunkWorld::is_solid` answers `false` for every cell, because the
+// column is absent rather than empty. So an item dropped anywhere else accelerated
+// downward forever and was discarded at `min_y - 64`.
+//
+// The gates below therefore drop an item at coordinates **outside any snapshot**,
+// which is the discriminating input: the two hypotheses ("settle against the live
+// world" and "settle against the snapshot") differ there by the entire fall, not
+// by a tolerance. At a coordinate the snapshot *does* cover they agree, so a gate
+// placed there would measure only that the code runs.
+
+/// A chunk far outside any plausible `mob_area` around the origin.
+const FAR_CHUNK: (i32, i32) = (100, 100);
+
+/// Block coordinates inside [`FAR_CHUNK`], at the centre of a cell.
+const FAR_X: f64 = 100.0 * 16.0 + 2.5;
+const FAR_Z: f64 = 100.0 * 16.0 + 2.5;
+
+/// The live world, as the tick loop sees it: one floored column at
+/// [`FAR_CHUNK`], reachable only through the solidity closure and **not** present
+/// in the sim's snapshot.
+fn far_floor() -> ChunkWorld {
+    let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
+    for x in 0..16 {
+        for z in 0..16 {
+            for y in MIN_Y..=FLOOR_TOP_Y {
+                column.set_block(x, y, z, "minecraft:stone");
+            }
+        }
+    }
+    ChunkWorld::from_columns([(FAR_CHUNK, column)])
+}
+
+/// The fixtures really are what the two gates below assume: the live world has a
+/// floor at the far coordinate and the sim's snapshot has nothing there.
+///
+/// Without this the pair could both be measuring an empty world.
+#[test]
+fn the_far_fixtures_disagree_exactly_where_the_gates_need_them_to() {
+    let live = far_floor();
+    let snapshot = ChunkWorld::new(MIN_Y, HEIGHT);
+    let (bx, bz) = (FAR_X.floor() as i32, FAR_Z.floor() as i32);
+    assert!(
+        live.is_solid(bx, FLOOR_TOP_Y, bz),
+        "the LIVE world must have a floor at the far coordinate"
+    );
+    assert!(
+        !live.is_solid(bx, FLOOR_TOP_Y + 1, bz),
+        "and free space above it, or nothing could rest there"
+    );
+    assert!(
+        !snapshot.is_solid(bx, FLOOR_TOP_Y, bz),
+        "the SNAPSHOT must have nothing there — that absence is the bug the \
+         headline gate below reproduces"
+    );
+}
+
+/// **The headline.** An item dropped outside the sim's snapshot settles on the
+/// live world's floor, at exactly one block above it.
+///
+/// The expected value comes from the terrain, not from our integrator: the floor's
+/// top block is at `FLOOR_TOP_Y`, a resting item's bottom face sits on a block
+/// boundary, so it must rest at exactly `FLOOR_TOP_Y + 1`. The drop is 20 blocks,
+/// so the wrong hypothesis does not merely land low — it never lands at all and
+/// the item is gone. Those two answers cannot be confused by a tolerance.
+#[test]
+fn an_item_outside_the_snapshot_settles_on_the_live_world() {
+    let live = far_floor();
+    let snapshot = ChunkWorld::new(MIN_Y, HEIGHT);
+    let mut sim = MobSim::new(&snapshot);
+    let id = sim.spawn_item(
+        diamond(),
+        Vec3::new(FAR_X, f64::from(FLOOR_TOP_Y) + 20.0, FAR_Z),
+        Vec3::new(0.0, 0.0, 0.0),
+        mergable_stack(1),
+    );
+
+    for _ in 0..200 {
+        sim.tick_with_terrain(&|x, y, z| live.is_solid(x, y, z));
+    }
+
+    let resting = f64::from(FLOOR_TOP_Y + 1);
+    let position = sim.item_position(id).expect(
+        "the item must still exist: settling against the live world is what stops \
+         it falling past min_y - 64 and being discarded",
+    );
+    assert!(
+        (position.y - resting).abs() < 1.0e-9,
+        "the item must rest at exactly {resting}, one block above the live floor \
+         at {FLOOR_TOP_Y}; it is at {}",
+        position.y
+    );
+
+    // Still there 200 ticks later: settled, not passing through.
+    for _ in 0..200 {
+        sim.tick_with_terrain(&|x, y, z| live.is_solid(x, y, z));
+    }
+    assert!(
+        sim.item_position(id)
+            .is_some_and(|p| (p.y - resting).abs() < 1.0e-9),
+        "and it must still be resting there, not sinking at {ITEM_GRAVITY} per tick"
+    );
+}
+
+/// **The control that proves the gate above measures the fix.** The identical
+/// drop, driven through [`MobSim::tick`] — whose oracle is the snapshot — must
+/// phase straight through and be discarded.
+///
+/// This is the bug as the player met it, pinned as a test. Without this arm the
+/// headline gate is satisfied by any implementation that settles items at all,
+/// including the broken one, because nothing would establish that the snapshot
+/// arm behaves differently at this coordinate.
+#[test]
+fn the_same_drop_through_the_snapshot_oracle_still_falls_out_of_the_world() {
+    let snapshot = ChunkWorld::new(MIN_Y, HEIGHT);
+    let mut sim = MobSim::new(&snapshot);
+    let id = sim.spawn_item(
+        diamond(),
+        Vec3::new(FAR_X, f64::from(FLOOR_TOP_Y) + 20.0, FAR_Z),
+        Vec3::new(0.0, 0.0, 0.0),
+        mergable_stack(1),
+    );
+
+    for _ in 0..100 {
+        sim.tick();
+    }
+    let mid = sim
+        .item_position(id)
+        .expect("100 ticks is not enough to leave the world");
+    assert!(
+        mid.y < f64::from(FLOOR_TOP_Y),
+        "with the snapshot as its oracle the item must already be below the floor \
+         height {FLOOR_TOP_Y}; it is at {}",
+        mid.y
+    );
+
+    for _ in 0..2000 {
+        sim.tick();
+    }
+    assert_eq!(
+        sim.item_position(id),
+        None,
+        "and it must eventually fall past min_y - 64 and be discarded — this is \
+         exactly what the player saw, and what the live-terrain oracle fixes"
+    );
+}
