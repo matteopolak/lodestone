@@ -1547,12 +1547,20 @@ pub(crate) async fn serve_connection_with_mob_events_and_commands_shared<T, P, S
     // Issues #327/#328/#323: the world's shared scalars, the *same* handle
     // `run_tick_loop` ticks. See `serve_connection_inner`'s parameter comment.
     world: &crate::world_state::WorldStateHandle,
-    // Issue #336. The host's ops/whitelist/ban lists, shared by every accepted
-    // connection, plus this connection's own remote address for the IP ban list.
-    // Parameters here and nowhere else for the same reason the three above are:
+    // The host's ops/whitelist/ban lists, shared by every accepted connection,
+    // plus this connection's own remote address for the IP ban list. Parameters
+    // here and nowhere else for the same reason the three above are:
     // `open_to_lan` is the one caller that can carry a configured one.
-    access: &crate::access::AccessHandle,
-    peer_ip: Option<std::net::IpAddr>,
+    //
+    // Target-gated to match `serve_connection_inner`'s own two, which they are
+    // forwarded straight into. This function is NOT gated — browser
+    // singleplayer reaches the server through it — so leaving the parameters
+    // ungated named a `cfg(not(wasm32))` module from ungated code and broke the
+    // wasm build outright. `open_to_lan`, the only caller that passes a real
+    // one, is native-only anyway: remote players and an on-disk ban list are
+    // both things a browser world does not have.
+    #[cfg(not(target_arch = "wasm32"))] access: &crate::access::AccessHandle,
+    #[cfg(not(target_arch = "wasm32"))] peer_ip: Option<std::net::IpAddr>,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1583,14 +1591,16 @@ where
         resource_packs,
         plugin_channels,
         world,
+        #[cfg(not(target_arch = "wasm32"))]
         access,
+        #[cfg(not(target_arch = "wasm32"))]
         peer_ip,
     )
     .await
 }
 
 /// Like [`serve_connection`], but also forwards every change published on
-/// `block_ticks` (issues #307/#308: the world tick loop's random ticks) to
+/// `block_ticks` (the world tick loop's random ticks) to
 /// this connection, through the same `container_sync_tick` timer arm inside
 /// [`serve_play`] that already forwards block-entity registry changes with
 /// no packet driving them — see that arm's own doc comment.

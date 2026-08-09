@@ -1934,6 +1934,16 @@ name = "lodestone-command"
 version = "0.1.0"
 
 [[package]]
+name = "lodestone-command-mc"
+version = "0.1.0"
+dependencies = [
+ "lodestone-command",
+ "lodestone-data",
+ "lodestone-model",
+ "uuid",
+]
+
+[[package]]
 name = "lodestone-controller"
 version = "0.1.0"
 dependencies = [
@@ -1990,6 +2000,7 @@ name = "lodestone-game"
 version = "0.1.0"
 dependencies = [
  "lodestone-model",
+ "serde_json",
  "uuid",
 ]
 
@@ -2068,14 +2079,18 @@ version = "0.1.0"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
+ "flate2",
  "lodestone-anvil",
  "lodestone-command",
+ "lodestone-command-mc",
  "lodestone-core",
  "lodestone-data",
  "lodestone-entity",
+ "lodestone-game",
  "lodestone-model",
  "lodestone-net",
  "lodestone-physics",
+ "lodestone-world",
  "lodestone-worldgen",
  "serde_json",
  "thiserror",
@@ -2089,6 +2104,7 @@ dependencies = [
 name = "lodestone-v770"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.2.17",
  "lodestone-core",
  "lodestone-data",
  "lodestone-game",
@@ -2147,6 +2163,8 @@ dependencies = [
 name = "lodestone-worldgen"
 version = "0.1.0"
 dependencies = [
+ "flate2",
+ "lodestone-core",
  "lodestone-worldgen-core",
  "serde_json",
 ]

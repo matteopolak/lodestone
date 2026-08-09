@@ -453,86 +453,21 @@ struct WorldState {
     stats: PersistenceStats,
 }
 
-/// The world's two scheduled-tick queues, plus the game tick their
-/// `trigger_tick`s are measured against — shared, so the save path can read
-/// them.
+/// The shared scheduled-tick queues, re-exported so every call site that
+/// spells `crate::region_source::ScheduledTickHandle` keeps working.
 ///
-/// # Why this type exists rather than the queues being locals
-///
-/// `tick::run_tick_loop` owned both queues as local `let mut` bindings, which
-/// made them unreachable from anywhere else: the only non-destructive way to
-/// see a queue's contents is [`crate::ScheduledTickQueue::iter`], and no
-/// reference to the queue escaped the function. So `chunk_nbt` wrote an empty
-/// `block_ticks` list for every chunk and a pending redstone or fluid tick was
-/// lost on quit (issue #468).
-///
-/// # The game tick lives here, and that is deliberate
-///
-/// Saving a tick means writing `delay = trigger_tick - game_time_at_save`, so
-/// the save path needs the same counter the queues were scheduled against.
-/// Taking it from a second source is issue #323's scar exactly — `SET_TIME`
-/// decoded, darkened the sky, and carried wall-clock elapsed-since-join while
-/// `tick.rs`'s real counter never reached the encoder, with every link in the
-/// wire green. So the tick loop stores its own `game_tick` here, one relaxed
-/// atomic store per tick, and the save path reads that.
-#[derive(Debug, Clone, Default)]
-pub struct ScheduledTickHandle {
-    queues: Arc<Mutex<ScheduledTickQueues>>,
-    game_tick: Arc<AtomicU64>,
-}
+/// The type itself lives in [`crate::scheduled_tick`] and is portable — see its
+/// own doc for why. What stays here is the half that speaks the Anvil save
+/// format: the `impl` block below, which is where `chunk_nbt::SavedTick` is
+/// read and written.
+pub use crate::scheduled_tick::{ScheduledTickHandle, ScheduledTickQueues};
 
-/// The pair of queues [`ScheduledTickHandle`] guards, mirroring
-/// `ServerLevel.blockTicks`/`fluidTicks` (`ServerLevel.java:209-210`).
-#[derive(Debug, Default)]
-pub struct ScheduledTickQueues {
-    /// `ServerLevel.blockTicks`.
-    pub block: crate::scheduled_tick::ScheduledTickQueue<String>,
-    /// `ServerLevel.fluidTicks`.
-    pub fluid: crate::scheduled_tick::ScheduledTickQueue<String>,
-}
-
+/// The Anvil-save half of [`ScheduledTickHandle`], in the module that owns the
+/// save format rather than in the module that owns the type. An inherent `impl`
+/// may live in any module of the crate, and these three methods are the only
+/// ones that name [`chunk_nbt::SavedTick`] — so this is the boundary that keeps
+/// the handle itself free of `std::fs`.
 impl ScheduledTickHandle {
-    /// A handle onto a fresh, empty pair of queues.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Runs `f` against both locked queues, returning its result.
-    ///
-    /// Both at once, and **synchronously**, for two reasons. Handing over both
-    /// lets `tick::run_tick_loop` wrap its existing scheduled-tick section in
-    /// one closure with every use site textually unchanged, so the wiring diff
-    /// is a wrapper rather than a rewrite of code the redstone work is actively
-    /// editing. And a closure cannot contain an `.await`, so the compiler — not
-    /// a reviewer — guarantees the guard is never held across a suspension
-    /// point, which would make the tick task non-`Send`.
-    ///
-    /// Same shape as [`crate::BlockEntityHandle::with`], and a poisoned lock is
-    /// a bug rather than a recoverable condition, for the same reason.
-    pub fn with<R>(&self, f: impl FnOnce(&mut ScheduledTickQueues) -> R) -> R {
-        let mut guard = self.queues.lock().expect("scheduled tick lock poisoned");
-        f(&mut guard)
-    }
-
-    /// Records the tick the queues' `trigger_tick`s are relative to.
-    ///
-    /// Called once per tick by `tick::run_tick_loop`. A single relaxed atomic
-    /// store — the cost on the tick thread is a count of one, no I/O and no
-    /// encoding, which is the property `docs/world-open-latency.md` exists to
-    /// protect.
-    pub fn set_game_tick(&self, tick: u64) {
-        self.game_tick.store(tick, Ordering::Relaxed);
-    }
-
-    /// The last tick recorded by [`set_game_tick`](Self::set_game_tick), or `0`
-    /// if the loop has not run — which is correct for a world that is saved
-    /// before its first tick.
-    #[must_use]
-    pub fn game_tick(&self) -> u64 {
-        self.game_tick.load(Ordering::Relaxed)
-    }
-
     /// Every pending tick in chunk `(cx, cz)`, as [`chunk_nbt::SavedTick`]s
     /// with delays relative to [`game_tick`](Self::game_tick).
     ///

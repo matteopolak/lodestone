@@ -985,8 +985,13 @@ pub struct WorldRegistries {
     /// Every container, sign and furnace a player has placed or mutated.
     pub block_entities: crate::block_entities::BlockEntityHandle,
     /// Pending scheduled and fluid ticks.
-    pub scheduled: crate::region_source::ScheduledTickHandle,
-    /// Where per-player `.dat` files live for this world (issue #302).
+    ///
+    /// Named through [`crate::scheduled_tick`], not through `region_source`,
+    /// because this struct is **not** target-gated and `region_source` is: the
+    /// handle is portable (two `Arc`s and an atomic), only the Anvil store
+    /// behind it is native. `region_source` re-exports the same type.
+    pub scheduled: crate::scheduled_tick::ScheduledTickHandle,
+    /// Where per-player `.dat` files live for this world.
     ///
     /// **This is how the player store reaches a connection**, and the routing is
     /// deliberate: `crate::server`'s join path already threads a `ChunkSource`
@@ -995,10 +1000,23 @@ pub struct WorldRegistries {
     /// the accessor a persistent source already answers costs no new parameter
     /// and, more usefully, makes it *structurally* impossible for a persistent
     /// world to be served by a connection that cannot see its player files —
-    /// which is exactly the island shape #468 was for block entities.
+    /// the same island shape the block-entity registry had.
     ///
     /// Unlike its two siblings this is an `Option`, because a world can have a
     /// region directory and still fail to create `players/data`.
+    ///
+    /// # Native only, unlike the two fields above
+    ///
+    /// Gated rather than given a wasm stand-in, because the capability itself is
+    /// native: [`crate::player_data::PlayerDataStore`] *is* a `std::fs` schema
+    /// over gzipped NBT, and the only thing that ever answers `Some` here is
+    /// [`RegionChunkSource`](crate::region_source::RegionChunkSource), which is
+    /// native-only too. A browser world has no `players/data` to point a
+    /// stand-in at, and every reader in `crate::server` (`player_store`,
+    /// `persist_player`, and the join arm's `saved_player`) is already gated to
+    /// match — so on wasm this is not a lost feature but a capability that has
+    /// no backing store to lose.
+    #[cfg(not(target_arch = "wasm32"))]
     pub player_data: Option<crate::player_data::PlayerDataStore>,
 }
 
