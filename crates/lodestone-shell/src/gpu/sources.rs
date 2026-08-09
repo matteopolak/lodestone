@@ -671,3 +671,38 @@ impl std::fmt::Debug for BannerSource {
             .finish()
     }
 }
+
+/// Where this frame's campfire cooking items come from (issue #23).
+///
+/// **The odd one out of this family**: every other block-entity source above
+/// feeds `prepare_block_entities` and the entity pipeline, and this one feeds
+/// [`RenderState::prepare_item_geometry`](crate::gpu::RenderState) and the
+/// *model* pipeline, because `CampfireRenderer` draws item models rather than a
+/// cuboid rig. Adding it to `prepare_block_entities`' emptiness condition would
+/// be wrong for exactly that reason — it has no `BlockEntityBatch` to contribute.
+#[derive(Default)]
+pub struct CampfireSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<
+        Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::CampfireItemSpawn> + Send + Sync>,
+    >,
+);
+
+impl CampfireSource {
+    /// This frame's campfire cooking items, or none when unset.
+    #[must_use]
+    pub(super) fn campfire_items(
+        &self,
+        eye: glam::Vec3,
+    ) -> Vec<lodestone_render::CampfireItemSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for CampfireSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("CampfireSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}

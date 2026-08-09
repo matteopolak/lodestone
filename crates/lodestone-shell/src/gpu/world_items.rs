@@ -18,8 +18,8 @@ use lodestone_assets::DisplaySlot;
 use lodestone_render::{
     Camera, ENTITY_FULLBRIGHT, GpuModelMesh, ItemStateContext, ModelMesh,
     entity::{
-        Arm, FLAT_ITEM_DEPTH_THRESHOLD, camera_orientation, dropped_item_mesh, ground_transform,
-        hand_transform, held_item_mesh, item_bob_offset, item_cluster_jitter,
+        Arm, FLAT_ITEM_DEPTH_THRESHOLD, camera_orientation, campfire_item_mesh, dropped_item_mesh,
+        ground_transform, hand_transform, held_item_mesh, item_bob_offset, item_cluster_jitter,
         posed_item_z_extent, rendered_amount, thrown_item_for, thrown_item_mesh,
     },
 };
@@ -172,6 +172,12 @@ impl RenderState {
                 stats.item_drops_drawn += 1;
             }
         }
+        // Campfire cooking items. Merged into the same buffer as the drops for
+        // the same reason they share one: the placement is folded into the
+        // vertices, so there is nothing to batch on. This is *not* in
+        // `prepare_block_entities` — a campfire's renderer owns no cuboid mesh at
+        // all, only four item poses.
+        self.merge_campfire_items(model, camera, &frustum, &mut combined, stats);
         let Some(mesh) = GpuModelMesh::upload(device, &combined) else {
             return (None, None);
         };
@@ -180,6 +186,69 @@ impl RenderState {
         // the same shared view_proj+fog buffer every section uses, written once
         // per frame at the top of `render_inner` — not a buffer of their own.
         (mesh.into(), GpuModelMesh::upload(device, &foil))
+    }
+
+    /// Merge every campfire's cooking items into `combined` — vanilla's
+    /// `CampfireRenderer`, which is the whole of that renderer.
+    ///
+    /// # Why this lives in the item pass and not with the other block entities
+    ///
+    /// `CampfireRenderer` bakes no layer, binds no sheet and has no model field:
+    /// its `submit` is four `ItemStackRenderState.submit` calls at four poses. The
+    /// fire, the logs and the smoke a player sees are the *block* model, drawn by
+    /// the terrain mesher with no help from here — so an unset
+    /// [`CampfireSource`](super::CampfireSource) leaves a complete campfire
+    /// cooking nothing, not a hole. Routing this through the entity pipeline would
+    /// need a texture stem that does not exist.
+    ///
+    /// # `DisplaySlot::Fixed`, not `Ground`
+    ///
+    /// `extractRenderState` calls
+    /// `updateForTopItem(.., ItemDisplayContext.FIXED, ..)` — the item-frame
+    /// context. Reusing the drop path's `Ground` would pose a steak on its edge,
+    /// and it is the single easiest thing to get wrong here because every other
+    /// world item on this path *is* `Ground`.
+    ///
+    /// No glint arm: a campfire cooks food, and `ItemStackRenderState`'s foil is
+    /// not derivable from the `Items` NBT we read (which carries no `components`
+    /// parse). An enchanted item on a campfire therefore draws without its
+    /// shimmer rather than with a wrong one.
+    fn merge_campfire_items(
+        &self,
+        model: &ModelRenderer,
+        camera: &Camera,
+        frustum: &lodestone_render::Frustum,
+        combined: &mut ModelMesh,
+        stats: &mut RenderStats,
+    ) {
+        let ctx = ItemStateContext::new(DisplaySlot::Fixed);
+        for spawn in self.campfire_source.campfire_items(camera.position) {
+            // The whole block, not the item's own quarter: one test per campfire
+            // slot is cheaper than deriving a 0.375-wide box, and a campfire on
+            // the frustum edge showing three of its four items would be worse
+            // than drawing all four.
+            let min = glam::Vec3::new(
+                spawn.pos[0] as f32,
+                spawn.pos[1] as f32,
+                spawn.pos[2] as f32,
+            );
+            if !frustum.intersects_aabb(min, min + glam::Vec3::ONE) {
+                continue;
+            }
+            let Some(geometry) = model.items.get(&spawn.item).and_then(|v| v.resolve(&ctx)) else {
+                continue;
+            };
+            combined.merge(&campfire_item_mesh(
+                &geometry.quads,
+                geometry.gui_light,
+                &geometry.display.get(DisplaySlot::Fixed),
+                spawn.pos,
+                spawn.facing_yaw_deg,
+                spawn.slot,
+                spawn.light,
+            ));
+            stats.campfire_items_drawn += 1;
+        }
     }
 
     /// Merge one thrown item projectile into `combined` as a camera-facing

@@ -56,15 +56,18 @@ wrong in both directions:
 So the honest count is: **3 of 26 registrations landed** (chest/ender chest/trapped chest all through
 `ChestRenderer`), **5 more landed and wired end to end** (skull; sign text for **both** sign
 registrations — `SIGN` and `HANGING_SIGN` — geometry excepted since a sign's board is a real block
-model; the bell body/rim; and the shulker box — see [Shulker box](#shulker-box)), plus the banner and
-the lectern, so **10 of 26** — wall banners share the `BANNER` registration with standing ones. The
-rest are still absent. Picking the next few should read this list,
+model; the bell body/rim; and the shulker box — see [Shulker box](#shulker-box)), plus the banner, the
+lectern and the campfire, so **11 of 26** — wall banners share the `BANNER` registration with standing
+ones. The rest are still absent. Picking the next few should read this list,
 not the original issue body.
 
 **The registration list had two entries this document's "what is not built" section never mentioned
 either way: `LECTERN` (`LecternRenderer`, the open book on a lectern) and `CONDUIT` (`ConduitRenderer`,
 the shell/eye rig)** — a *silent* gap, which is worse than a recorded one. The lectern has since
-landed (see [Lectern](#lectern)); the conduit has not.
+landed (see [Lectern](#lectern)); the conduit has not. **Re-derived from
+`BlockEntityRenderers.java`'s own `register` calls rather than from this paragraph**, because the
+ledger has been wrong twice: `CONDUIT` really is registered, at the call between `SHULKER_BOX` and
+`BELL`, so it is in scope and simply unbuilt — not a phantom.
 
 **One claim in that same paragraph was wrong and is worth keeping as a correction**: it said porting
 `BookModel` "covers two registrations", because `LecternRenderer` and `EnchantTableRenderer` bake the
@@ -1019,6 +1022,112 @@ for a missing block — the symptom is a lectern that never holds a book. `app/r
 All six steps of the checklist below are done. One model, one sheet, so every lectern in the world
 coalesces into one batch regardless of facing — the facing rides the per-instance placement matrix.
 
+## Campfire
+
+The food cooking on a campfire — and **nothing else**. This is the type that breaks the pattern every
+other section above shares, in three ways at once, so read this before assuming it is another
+`resolve_*` arm.
+
+### `CampfireRenderer` owns no mesh, no layer and no sheet
+
+Its whole `submit` is a loop over four `ItemStackRenderState`s at four poses. There is no
+`createBodyLayer`, no `bakeLayer` call, no `SpriteId` and no model field on the class. The fire, the
+logs and the smoke a player sees are the **block model**, which the terrain mesher already draws — so
+the intuition "campfire needs the fire texture, and vanilla is not colour-managed, so mind the gamma
+space" is a plausible-sounding inference about the wrong subsystem. There is no fire texture on this
+path.
+
+Two consequences worth stating because each is a step this port does *not* have:
+
+- no `campfire_model()` builder and no entry in `BLOCK_ENTITY_MODELS`;
+- no texture stem, so `block_entity_texture_stems()` is unchanged and the expected-sheet-count
+  assertion in the pixel gates stays where it was.
+
+### It draws through the *model* pipeline, not `EntityPipeline`
+
+A cooking item is an **item model** — the same baked quads a hotbar slot uses — so it belongs with
+dropped items, thrown projectiles and items in mobs' hands in
+[`dropped-items.md`](./dropped-items.md)'s pass (`gpu/world_items.rs`), not with the cuboid rigs here.
+The gather
+is `block_entities::campfire_spawns` (this module, beside the other five) but the consumer is
+`RenderState::prepare_item_geometry`, and the placement is folded into the vertices rather than
+carried as a per-instance matrix.
+
+That is why `CampfireSource` must **not** join `prepare_block_entities`' emptiness condition the way
+every source before it did: it has no `BlockEntityBatch` to contribute, and adding it there would make
+the condition read as satisfied while nothing drew.
+
+It is also why a campfire item is textured from the *block atlas* — a cooking potato and a potato lying
+on the ground are the same pixels, which is the correct answer and comes for free from reusing this
+pass.
+
+### The pose, and where the display transform goes
+
+`CampfireRenderer.submit`, term for term
+(`lodestone_render::campfire_item_matrix`):
+
+```text
+T(pos) · T(0.5, 0.44921875, 0.5) · Ry(-slotYRot) · Rx(90°) · T(-0.3125, -0.3125, 0) · S(0.375)
+```
+
+then the item's own `display.fixed` on the **right**, because
+`ItemStackRenderState.LayerRenderState.submit` calls `applyTransform` *after* the renderer's own
+pushes. `campfire_item_mesh` is that composition; composing the display transform on the left instead
+mirrors all four items into the wrong corners while still looking like four items on a campfire.
+
+| term | value | why it is not the obvious number |
+|---|---|---|
+| lift | `0.44921875` (`115/256`) | **not** `0.4375` (`7/16`, the block model's own top face) — the extra `1/256` is what keeps a flat food sprite off the log it lies on |
+| yaw | `-Direction.from2DDataValue((slot + facing.get2DDataValue()) % 4).toYRot()` | the slot is an **offset from the facing**, not a world corner |
+| `Rx` | `90°` | what makes a sprite lie *on* the fire rather than stand up out of it |
+| scale | `0.375` (`CampfireRenderer.SIZE`) | — |
+
+`get2DDataValue()` is `toYRot()/90` — `Direction.toYRot()` is literally `(data2d & 3) * 90` — so
+`horizontal_facing_yaw` covers both and there is no second table to keep in sync.
+
+Predicted rather than measured-after-the-fact: with `facing = south` the four slot origins are
+`(0.1875, 0.44921875, 0.1875)`, `(0.8125, ·, 0.1875)`, `(0.8125, ·, 0.8125)`, `(0.1875, ·, 0.8125)` —
+the four corners, clockwise from above. `the_four_campfire_slots_land_in_four_distinct_corners` asserts
+exactly those, because a "four items somewhere on the campfire" assertion accepts all four stacked in
+one corner, which is what dropping the facing term produces. The neuter was watched: multiplying
+`facing_2d` by zero reddens `the_facing_offsets_which_corner_each_slot_uses` with
+`facing 90: slot 0 at Vec3(0.1875, 70.44922, 0.1875) but slot 1 of a south campfire is at
+Vec3(0.8125, 70.44922, 0.1875)`.
+
+### `Items` carries an explicit `Slot`, and the list index is not it
+
+`ContainerHelper.saveAllItems` writes `ItemStackWithSlot.CODEC`:
+`{Slot: <unsigned byte>, id: <item id>, count: <int>}`, and it **omits empty slots**. So a campfire
+holding one steak in its third slot writes a *one*-element list with `Slot: 2`. Reading the list index
+instead of the field agrees with the truth on a full campfire and cooks the food in the wrong corner on
+a partial one — the bug hides behind the case you are most likely to build a fixture for.
+
+`Slot` is an `Nbt::Byte`, not an int (`ExtraCodecs.UNSIGNED_BYTE`), and a missing `Slot` defaults to
+`0` rather than dropping the item (`optionalAlwaysPresentFieldOf(.., "Slot", 0)`). `count` is not read:
+a campfire slot holds one item and the renderer draws one copy regardless.
+
+The client really does receive this — `CampfireBlockEntity.getUpdateTag` calls the same
+`saveAllItems` — so no new packet work was needed. `soul_campfire` counts too: identical block entity,
+identical registration, and the flame colour it differs by lives in the block model.
+
+### No animation, and `CookingTimes` drives nothing
+
+`CampfireRenderer` has no clock term at all. The flicker is the block model's animated texture, and
+the NBT's `CookingTimes`/`CookingTotalTimes` are server book-keeping the client renderer never reads.
+So `campfire_source` captures no partial tick — the only source in the family whose per-frame
+re-install is purely `skull_source`'s disconnect-safety reason and nothing more.
+
+### Status
+
+Wired end to end: geometry (`campfire_item_matrix`, `campfire_item_mesh`), gather
+(`campfire_spawns`), source (`CampfireSource` + `set_campfire_source`), consumer
+(`merge_campfire_items` inside `prepare_item_geometry`) and the per-frame install in `app::redraw`.
+`RenderStats::campfire_items_drawn` is the outside view, and it has its own field for a reason
+specific to this type: a campfire contributes to **neither** `block_entities_drawn` nor
+`item_drops_drawn`, so without it a broken gather is invisible in both.
+
+Nothing is open within campfire scope.
+
 ## How to change it
 
 ### Adding a block-entity type
@@ -1030,6 +1139,12 @@ coalesces into one batch regardless of facing — the facing rides the per-insta
 
 You do **not** need a new pipeline. Everything draws through `EntityPipeline`, and the draw loop is
 already generic over `(model, texture)`.
+
+**First check whether the renderer has a mesh at all.** Steps 1–3 assume a cuboid rig, and
+[Campfire](#campfire) is the counter-example: its renderer draws *item models*, so it has no builder,
+no stem and no `resolve_*`, and its consumer is `prepare_item_geometry` rather than
+`prepare_block_entities`. Read the vanilla class for a `bakeLayer` call before writing step 1 —
+`PistonHeadRenderer` (which draws whole **block** models) is a second renderer of that shape.
 
 ### Gotchas, each of which has a test holding it
 
@@ -1304,12 +1419,15 @@ Against the real 26-entry registration list (see above), not the issue's origina
   `docs/banner-shield-patterns.md` and [Wall banners](#wall-banners) below. Still open within banner
   scope: the **shield** form of the same compositing function (`shield_pattern_layers` still has no
   consumer — a shield is an item model in the hand, not a block entity, so it is a different pass).
+- **Campfire — landed**, both campfire blocks, including the per-frame install (see
+  [Campfire](#campfire) above). Nothing is open within campfire scope: the renderer draws only the
+  cooking items and has no animation at all.
 - The enchanting-table book (a full animation state machine —
   `open`/`flip`/`rot`/`time`, all client-simulated, none of it on the wire, closer in scope to the
   chest lid than to a static model; **the mesh it needs is already built and baked** — `book_model`,
   shared with the lectern — so what is left is purely the state machine and a `resolve_*` that feeds
   a live `openness`/`page_flip` into `book_part_poses`), mob spawner (draws a miniature spinning entity inside the cage —
-  reuses full entity rendering, not a simple cuboid rig), piston head, campfire, brushable block,
+  reuses full entity rendering, not a simple cuboid rig), piston head, brushable block,
   decorated pot (`decorated_pot` atlas; its sides need **up to four independently textured sprites
   per instance** from NBT `sherds`, which the current `(model, texture)` single-texture-per-instance
   batch key cannot express as one instance — it would need decomposing into a plain base plus up to

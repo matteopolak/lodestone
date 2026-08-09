@@ -1225,6 +1225,73 @@ pub fn lectern_book_placement_matrix(pos: [i32; 3], facing_yaw_deg: f32) -> Mat4
         * Mat4::from_translation(Vec3::new(0.0, -0.125, 0.0))
 }
 
+/// How many cooking slots a campfire has — `CampfireBlockEntity`'s
+/// `NonNullList.withSize(4, ItemStack.EMPTY)`.
+pub const CAMPFIRE_SLOTS: usize = 4;
+
+/// `CampfireRenderer.SIZE`: the uniform scale each cooking item is drawn at.
+pub const CAMPFIRE_ITEM_SCALE: f32 = 0.375;
+
+/// `CampfireRenderer.submit`'s lift: `0.44921875` blocks, i.e. `115/256`.
+///
+/// Not `0.4375` (`7/16`, the campfire block model's own top face) — the extra
+/// `1/256` is what keeps a flat food sprite from z-fighting the log it lies on.
+pub const CAMPFIRE_ITEM_LIFT: f32 = 0.449_218_75;
+
+/// The world placement transform for the item cooking in a campfire's `slot`,
+/// ported from `CampfireRenderer.submit` term for term:
+///
+/// ```text
+/// T(pos) · T(0.5, 0.44921875, 0.5) · Ry(-slotYRot) · Rx(90°)
+///        · T(-0.3125, -0.3125, 0) · S(0.375)
+/// ```
+///
+/// Compose it with the item's own `display.fixed`
+/// ([`display_matrix`](crate::display_matrix)) on the **right** — vanilla applies
+/// the `ItemTransform` inside `ItemStackRenderState.LayerRenderState.submit`,
+/// after everything above is on the pose stack. [`crate::entity::campfire_item_mesh`]
+/// is that composition; prefer it to hand-multiplying here.
+///
+/// # A campfire is the only block entity here whose renderer draws no mesh of
+/// its own
+///
+/// `CampfireRenderer` has no model, no layer and no sheet: the fire, the logs and
+/// the smoke are all part of the **block** model, and the whole renderer is this
+/// pose repeated over four item stacks. So there is no `campfire_model()` builder
+/// and no texture stem to preload — reading "campfire needs a fire texture" off
+/// the block's appearance is the wrong inference, and it is the one this port
+/// nearly made.
+///
+/// # `slot` is an offset from the block's facing, not an absolute corner
+///
+/// Vanilla's `Direction.from2DDataValue((slot + facing.get2DDataValue()) % 4)`
+/// means slot 0 always sits in the corner the campfire *faces away* toward, and
+/// the four march clockwise from there. Ignoring the facing term puts every
+/// campfire's first item in the same world corner, which looks right until two
+/// campfires face different ways.
+///
+/// `facing_yaw_deg` is [`horizontal_facing_yaw`]'s convention (south `0`), and
+/// `get2DDataValue()` is exactly that divided by `90` — `toYRot()` is
+/// `(data2d & 3) * 90` in `Direction` itself, so the two are one expression and
+/// there is no second table to keep in sync.
+#[must_use]
+pub fn campfire_item_matrix(pos: [i32; 3], facing_yaw_deg: f32, slot: usize) -> Mat4 {
+    // `(slot + facing.get2DDataValue()) % 4`, then back through `toYRot()`.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the four horizontal facing yaws are exact non-negative multiples of 90"
+    )]
+    let facing_2d = (facing_yaw_deg / 90.0) as usize;
+    let slot_yaw = ((slot + facing_2d) % 4) as f32 * 90.0;
+    let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
+    Mat4::from_translation(origin + Vec3::new(0.5, CAMPFIRE_ITEM_LIFT, 0.5))
+        * Mat4::from_rotation_y(-slot_yaw.to_radians())
+        * Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2)
+        * Mat4::from_translation(Vec3::new(-0.3125, -0.3125, 0.0))
+        * Mat4::from_scale(Vec3::splat(CAMPFIRE_ITEM_SCALE))
+}
+
 /// Every sheet stem across every block-entity family — what the shell's
 /// texture loader preloads. Union of [`chest_texture_stems`],
 /// [`skull_texture_stems`], [`bell_texture_stems`],
@@ -1863,6 +1930,36 @@ impl BannerSpawn {
     }
 }
 
+/// One item cooking in one campfire slot.
+///
+/// **The only `*Spawn` here that [`BlockEntityModelSet`] does not resolve**, and
+/// deliberately so: a campfire's renderer draws item *models*, not a cuboid part
+/// rig, so this feeds the model pipeline through
+/// [`crate::entity::campfire_item_mesh`] the way a dropped item does — see
+/// [`campfire_item_matrix`]'s doc for why there is no mesh and no sheet on this
+/// path at all. Sending it through `resolve_*` would need a texture stem that
+/// does not exist.
+///
+/// One per **occupied** slot, so a campfire holding two steaks yields two of
+/// these and an empty campfire yields none — matching
+/// `CampfireRenderer.submit`'s `if (!itemState.isEmpty())`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CampfireItemSpawn {
+    /// Block position of the campfire.
+    pub pos: [i32; 3],
+    /// The campfire block's `facing`, in [`horizontal_facing_yaw`]'s convention.
+    pub facing_yaw_deg: f32,
+    /// Which of the four cooking slots (`0..CAMPFIRE_SLOTS`) this item is in.
+    /// Vanilla offsets it by the facing, so this is *not* a world corner —
+    /// see [`campfire_item_matrix`].
+    pub slot: usize,
+    /// The item id whose baked geometry to draw, from the block entity's NBT
+    /// `Items` list.
+    pub item: ResourceLocation,
+    /// Packed sky/block light at the campfire.
+    pub light: u8,
+}
+
 /// One resolved block entity, ready to batch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockEntityInstance {
@@ -2065,6 +2162,93 @@ mod tests {
 
     fn set() -> BlockEntityModelSet {
         BlockEntityModelSet::load()
+    }
+
+    /// The four cooking slots land in four **distinct** corners of the campfire's
+    /// own block, clockwise seen from above, every one lifted onto its top face.
+    ///
+    /// Predicted from the pose stack, not read off the implementation: the
+    /// pre-yaw offset is `Rx(90°) · (-0.3125, -0.3125, 0) = (-0.3125, 0, -0.3125)`,
+    /// so a south-facing campfire's slot 0 sits at `(0.1875, 0.44921875, 0.1875)`
+    /// and each further slot turns that a quarter turn about the block centre. A
+    /// "four items somewhere on the campfire" assertion would accept all four
+    /// stacked in one corner, which is what dropping the yaw term produces.
+    #[test]
+    fn the_four_campfire_slots_land_in_four_distinct_corners() {
+        const POS: [i32; 3] = [10, 64, -3];
+        let base = Vec3::new(POS[0] as f32, POS[1] as f32, POS[2] as f32);
+        let expected = [
+            Vec3::new(0.1875, CAMPFIRE_ITEM_LIFT, 0.1875),
+            Vec3::new(0.8125, CAMPFIRE_ITEM_LIFT, 0.1875),
+            Vec3::new(0.8125, CAMPFIRE_ITEM_LIFT, 0.8125),
+            Vec3::new(0.1875, CAMPFIRE_ITEM_LIFT, 0.8125),
+        ];
+        for slot in 0..CAMPFIRE_SLOTS {
+            let origin = campfire_item_matrix(POS, 0.0, slot).transform_point3(Vec3::ZERO);
+            let want = base + expected[slot];
+            assert!(
+                origin.distance(want) < 1e-5,
+                "slot {slot} pose origin {origin:?}, expected {want:?}"
+            );
+        }
+    }
+
+    /// `(slot + facing.get2DDataValue()) % 4`: turning the campfire a quarter turn
+    /// moves slot 0 to where slot 1 was, so a campfire facing west puts its first
+    /// item where a south-facing one puts its second.
+    ///
+    /// The control is built in: dropping the facing term makes every arm of this
+    /// loop compare a point against **itself at slot 0**, i.e. it would require
+    /// all four facings to agree, which they must not.
+    #[test]
+    fn the_facing_offsets_which_corner_each_slot_uses() {
+        const POS: [i32; 3] = [0, 70, 0];
+        let mut seen = Vec::new();
+        for facing_2d in 0..CAMPFIRE_SLOTS {
+            let turned = campfire_item_matrix(POS, facing_2d as f32 * 90.0, 0)
+                .transform_point3(Vec3::ZERO);
+            let offset_slot =
+                campfire_item_matrix(POS, 0.0, facing_2d).transform_point3(Vec3::ZERO);
+            assert!(
+                turned.distance(offset_slot) < 1e-5,
+                "facing {}: slot 0 at {turned:?} but slot {facing_2d} of a south \
+                 campfire is at {offset_slot:?}",
+                facing_2d as f32 * 90.0
+            );
+            seen.push(turned);
+        }
+        for (i, a) in seen.iter().enumerate() {
+            for b in &seen[i + 1..] {
+                assert!(a.distance(*b) > 0.5, "two facings share a corner: {a:?}");
+            }
+        }
+    }
+
+    /// `Axis.XP.rotationDegrees(90)` is what makes a food sprite lie *on* the
+    /// campfire instead of standing up out of it, and a missing `Rx` leaves the
+    /// item vertical while every corner assertion above still passes.
+    ///
+    /// Asserted as two independent facts about the basis, plus the scale, so a
+    /// rotation about the wrong axis fails one of them: the sprite's normal
+    /// (`+Z`) becomes vertical, and its width axis (`+X`) stays horizontal.
+    #[test]
+    fn a_cooking_item_lies_flat_at_three_eighths_scale() {
+        let m = campfire_item_matrix([0, 0, 0], 0.0, 0);
+        let normal = m.transform_vector3(Vec3::Z);
+        let across = m.transform_vector3(Vec3::X);
+        assert!(
+            normal.normalize().y.abs() > 0.999,
+            "sprite normal {normal:?} is not vertical — the item is standing up"
+        );
+        assert!(
+            across.normalize().y.abs() < 1e-5,
+            "width axis {across:?} is not horizontal"
+        );
+        assert!(
+            (across.length() - CAMPFIRE_ITEM_SCALE).abs() < 1e-6,
+            "scale is {}, expected {CAMPFIRE_ITEM_SCALE}",
+            across.length()
+        );
     }
 
     #[test]
