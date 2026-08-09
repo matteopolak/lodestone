@@ -196,17 +196,19 @@ fn player_sample(v: &serde_json::Value) -> Option<PlayerSample> {
 /// table this crate has no business owning, and a raw key on screen is more
 /// honest than an empty MOTD.
 ///
-/// `to_spans_expanding_legacy` is the load-bearing choice. A great many real
+/// `to_spans`' legacy-code expansion is the load-bearing part. A great many real
 /// MOTDs are legacy `§`-coded strings, including ones wrapped in modern JSON, so
 /// a parse that only understood component `color` keys would still show the
 /// codes as literal glyphs. The two functions this replaced did the opposite:
-/// one ignored `color` entirely, the other deleted every `§` pair.
+/// one ignored `color` entirely, the other deleted every `§` pair. This used to
+/// name `to_spans_expanding_legacy`, back when a plain `to_spans` did *not*
+/// expand and this was the only surface in the tree that had noticed.
 fn component_spans(v: &serde_json::Value) -> Vec<lodestone_model::text::TextSpan> {
     // `Text::from_json` parses source text, and what we hold is already a parsed
     // `Value`, so re-serialise. Round-tripping one small JSON value per ping is
     // not a cost worth a second component parser to avoid — a second parser is
     // exactly what this module's doc warns about, and what it had.
-    lodestone_model::Text::from_json(&v.to_string()).to_spans_expanding_legacy()
+    lodestone_model::Text::from_json(&v.to_string()).to_spans()
 }
 
 /// Decodes a `favicon` field into PNG bytes.

@@ -841,22 +841,50 @@ impl ColourStream<'_> {
     }
 
     /// Emit a string starting at pixel `(x, y)` (top-left of the first glyph).
+    ///
+    /// A legacy `§`+code pair is **consumed and drawn as nothing**, matching what
+    /// `VanillaFont::draw` does with the same string. This font has no styled
+    /// glyph variants and no per-run colour, so the code's *effect* is dropped —
+    /// but the two characters must not become two glyphs, or a jar-less run shows
+    /// `§7` where the real font shows grey text. Skipping is the whole of the
+    /// difference between "colour unavailable" and "codes on screen".
     pub(crate) fn text(&mut self, s: &str, x: f32, y: f32, scale: f32, c: [f32; 4]) {
         let advance = (font::GLYPH_W as f32 + 1.0) * scale;
         let mut cursor = x;
-        for ch in s.chars() {
+        let mut chars = s.chars();
+        while let Some(ch) = chars.next() {
+            if ch == lodestone_model::text::LEGACY_PREFIX {
+                // Both characters, or just the dangling `§` — vanilla's
+                // `iterateFormatted` emits neither.
+                if chars.next().is_none() {
+                    break;
+                }
+                continue;
+            }
             self.glyph(ch, cursor, y, scale, c);
             cursor += advance;
         }
     }
 }
 
-/// Width in pixels of `s` at `scale` in the shell's fixed-width bitmap font.
+/// Width in pixels of `s` at `scale` in the shell's fixed-width bitmap font,
+/// legacy `§`+code pairs counted as zero-width to match [`ColourStream::text`].
 /// Only correct when no vanilla font is attached — every layout site goes
 /// through `Builder::text_width`, which picks this or the proportional
 /// measure to match whichever font `Builder::text` will actually draw with.
 pub(crate) fn text_w(s: &str, scale: f32) -> f32 {
-    s.chars().count() as f32 * (font::GLYPH_W as f32 + 1.0) * scale
+    let mut visible = 0usize;
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch == lodestone_model::text::LEGACY_PREFIX {
+            if chars.next().is_none() {
+                break;
+            }
+            continue;
+        }
+        visible += 1;
+    }
+    visible as f32 * (font::GLYPH_W as f32 + 1.0) * scale
 }
 
 /// The colour attachment every GUI overlay pass uses: load what was already
