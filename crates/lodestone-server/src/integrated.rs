@@ -244,14 +244,25 @@ where
 /// impossible to lose: the waiter **registers before it checks the flag**, and the
 /// trigger **sets the flag before it notifies**. Whichever order the two tasks
 /// interleave in, at least one of the two observations fires.
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// # Not gated to native, deliberately
+///
+/// This first landed behind `#[cfg(not(target_arch = "wasm32"))]` — copied from
+/// [`spawn_tick_task`] above, which really is native-only — while its field and
+/// three constructor calls stayed unconditional, so the crate compiled natively and
+/// not for `wasm32`. Spreading the gate to match would have been the wrong repair:
+/// nothing in this type is native-only (`Notify` comes from tokio's `sync` feature,
+/// which the wasm target's own dependency entry enables, and `AtomicBool` is core),
+/// and the browser build genuinely runs [`IntegratedServer`] — in-process
+/// singleplayer over a `DuplexStream` is the whole point of that entry. A shutdown
+/// signal that did not exist there would leave the browser no way to stop its own
+/// server. Only [`Self::notify_handle`] is gated, because its one consumer is.
 #[derive(Debug, Default)]
 struct ShutdownSignal {
     notify: Arc<Notify>,
     fired: std::sync::atomic::AtomicBool,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl ShutdownSignal {
     fn new() -> Arc<Self> {
         Arc::new(Self::default())
@@ -285,6 +296,11 @@ impl ShutdownSignal {
     /// The raw [`Notify`], for `crate::rcon`'s listener — which is *aborted* rather
     /// than joined on shutdown, so a lost wakeup there costs nothing and does not
     /// justify widening this type across another module.
+    ///
+    /// The one member of this type that is genuinely native-only, because rcon is:
+    /// a browser has no TCP listener to bind. This is where the gate belongs, and
+    /// the whole of it.
+    #[cfg(not(target_arch = "wasm32"))]
     fn notify_handle(&self) -> Arc<Notify> {
         Arc::clone(&self.notify)
     }
