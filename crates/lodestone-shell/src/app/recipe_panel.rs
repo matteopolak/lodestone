@@ -220,6 +220,12 @@ pub(super) fn recipe_panel_contents(
 /// swatches — the same degradation every other icon in this shell uses, and what
 /// lets a headless gate exercise this at all.
 ///
+/// `tooltip` carries the cursor and the advanced-tooltips flag for the hover
+/// tooltip vanilla draws over the recipe button under the pointer — see
+/// [`crate::container::RecipeTooltipContext`]. It reaches pixels only on the
+/// `items`-present path, because the atlas-less variant has no font to draw text
+/// with.
+///
 /// Free rather than a method for the same borrow reason as
 /// [`recipe_toast_view`].
 #[allow(clippy::too_many_arguments)]
@@ -233,6 +239,7 @@ pub(super) fn recipe_panel_geometry(
     font: Option<&crate::hud::VanillaFont>,
     w: u32,
     h: u32,
+    tooltip: crate::container::RecipeTooltipContext,
 ) -> Option<crate::container::RecipeBookPanelGeometry> {
     let book_type = recipe_book_type_for(menu)?;
     let (tab_categories, total_pages, results) = match book {
@@ -287,6 +294,7 @@ pub(super) fn recipe_panel_geometry(
             items,
             models,
             font,
+            tooltip,
         ),
         None => crate::container::recipe_book_panel_geometry(
             &layout,

@@ -3796,3 +3796,151 @@ fn the_avatars_cursor_is_divided_down_to_the_logical_canvas() {
         lodestone_render::gui_entity::GuiEntityLook::FORWARD
     );
 }
+
+// ---------------------------------------------------------------------------
+// The recipe button's hover tooltip (`RecipeBookPage.extractTooltip`)
+// ---------------------------------------------------------------------------
+
+/// The tooltip must resolve **per recipe cell**, not "the pointer is somewhere
+/// on the panel".
+///
+/// Three arms, and the two equalities are the load-bearing ones:
+///
+/// * cursor on cell `0`, which *has* a result stack — must emit extra colour
+///   floats;
+/// * cursor on cell `1`, which is inside the grid but has **no** result stack
+///   (this page carries exactly one) — must be byte-identical to no cursor at
+///   all. A tooltip keyed on the grid rect rather than on `page_results.get(i)`
+///   fails here, and only here;
+/// * cursor on the **search box**, a widget of the panel that is not a recipe —
+///   likewise byte-identical.
+///
+/// The exact float *delta* for the hovered arm is deliberately not predicted:
+/// it is a function of the glyph advances of the item's own display name in
+/// whichever font pack is installed, so a number here would be a guess wearing
+/// a prediction's clothes. What is predicted is that the other two arms move
+/// nothing whatsoever.
+///
+/// Skips without the real jar font, for the same reason
+/// [`hover_blocked_suppresses_the_tooltip_too`] does: `emit_tooltip_for_stack`
+/// measures its box against a `VanillaFont` and draws nothing without one, so a
+/// jar-less run has no tooltip to resolve.
+#[test]
+fn the_recipe_tooltip_resolves_only_over_a_cell_that_holds_a_result() {
+    let Some(font) = VanillaFont::shared() else {
+        return; // jar-less: nothing measures, nothing draws
+    };
+    let menu = Menu::crafting(3, 3);
+    let layout = recipe_book_panel_layout(&menu, VIEW.0, VIEW.1, 4, false, true);
+    let stack = ItemStack::new(
+        lodestone_model::Identifier::new("minecraft", "torch").unwrap(),
+        4,
+    );
+    let results = [&stack];
+    // `RecipeTooltipContext::cursor` is physical viewport pixels while the
+    // layout is logical, so the centre has to go back through the *same* scale
+    // the geometry derives — never a restated constant.
+    let scale = crate::config::calculate_gui_scale(crate::config::AUTO_GUI_SCALE, VIEW.0, VIEW.1)
+        .max(1) as f32;
+    let centre = |r: Rect| Some([(r.x + r.w * 0.5) * scale, (r.y + r.h * 0.5) * scale]);
+    let build = |tooltip: RecipeTooltipContext| {
+        super::recipe_book::recipe_book_panel_geometry_inner(
+            &layout,
+            true,
+            Some(0),
+            &results,
+            crate::config::AUTO_GUI_SCALE,
+            VIEW.0,
+            VIEW.1,
+            &IconAssets {
+                items: None,
+                models: None,
+            },
+            Some(&font),
+            tooltip,
+        )
+    };
+
+    let none = build(RecipeTooltipContext::default());
+    let hovered = build(RecipeTooltipContext {
+        cursor: centre(layout.recipes[0]),
+        advanced: false,
+    });
+    let empty_cell = build(RecipeTooltipContext {
+        cursor: centre(layout.recipes[1]),
+        advanced: false,
+    });
+    let search_box = build(RecipeTooltipContext {
+        cursor: centre(layout.search_box),
+        advanced: false,
+    });
+
+    assert!(
+        hovered.verts.len() > none.verts.len(),
+        "hovering a populated recipe cell must emit tooltip geometry — {} \
+         colour floats against the no-cursor {}",
+        hovered.verts.len(),
+        none.verts.len()
+    );
+    assert_eq!(
+        empty_cell.verts, none.verts,
+        "a recipe cell with no result stack must emit no tooltip at all"
+    );
+    assert_eq!(
+        search_box.verts, none.verts,
+        "the search box is not a recipe button and must emit no tooltip"
+    );
+    // Everything the tooltip adds lands in the *tail* of the colour stream, so
+    // the chrome split — and therefore what the caller draws in its first pass —
+    // is untouched.
+    assert_eq!(hovered.chrome_vertex_count, none.chrome_vertex_count);
+    assert_eq!(hovered.sprites, none.sprites);
+}
+
+/// F3+H reaches the recipe tooltip too: the advanced flag is forwarded to the
+/// same line builder the container's slot tooltip uses, so it adds vanilla's
+/// extra id line rather than being accepted and dropped.
+#[test]
+fn advanced_tooltips_add_lines_to_the_recipe_tooltip() {
+    let Some(font) = VanillaFont::shared() else {
+        return; // jar-less: see the gate above
+    };
+    let menu = Menu::crafting(3, 3);
+    let layout = recipe_book_panel_layout(&menu, VIEW.0, VIEW.1, 4, false, true);
+    let stack = ItemStack::new(
+        lodestone_model::Identifier::new("minecraft", "torch").unwrap(),
+        4,
+    );
+    let results = [&stack];
+    let scale = crate::config::calculate_gui_scale(crate::config::AUTO_GUI_SCALE, VIEW.0, VIEW.1)
+        .max(1) as f32;
+    let cursor = Some([
+        (layout.recipes[0].x + layout.recipes[0].w * 0.5) * scale,
+        (layout.recipes[0].y + layout.recipes[0].h * 0.5) * scale,
+    ]);
+    let build = |advanced: bool| {
+        super::recipe_book::recipe_book_panel_geometry_inner(
+            &layout,
+            true,
+            Some(0),
+            &results,
+            crate::config::AUTO_GUI_SCALE,
+            VIEW.0,
+            VIEW.1,
+            &IconAssets {
+                items: None,
+                models: None,
+            },
+            Some(&font),
+            RecipeTooltipContext { cursor, advanced },
+        )
+    };
+    let plain = build(false);
+    let advanced = build(true);
+    assert!(
+        advanced.verts.len() > plain.verts.len(),
+        "advanced tooltips must add at least the id line: {} vs {}",
+        advanced.verts.len(),
+        plain.verts.len()
+    );
+}

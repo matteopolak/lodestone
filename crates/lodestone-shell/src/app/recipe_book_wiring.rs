@@ -47,6 +47,17 @@ fn torch_book() -> RecipeBook {
     book
 }
 
+/// No pointer, so no hover tooltip — the context every geometry gate below
+/// wants, because their premise is the panel's own chrome and icons and a
+/// tooltip would add colour vertices none of them predicted.
+///
+/// The tooltip itself is gated in `container::tests` against a real font; these
+/// gates all pass `items: None`, which means `font: None`, which means the
+/// tooltip could not draw even with a cursor.
+fn no_tooltip() -> crate::container::RecipeTooltipContext {
+    crate::container::RecipeTooltipContext::default()
+}
+
 // -- click-to-fill ---------------------------------------------------
 
 /// The dispatch loop's **resulting slot contents**, not merely that clicks
@@ -346,6 +357,7 @@ fn every_panel_vertex_lands_inside_the_ndc_clip_range() {
         None,
         W,
         H,
+        no_tooltip(),
     )
     .expect("a crafting table has a recipe book");
 
@@ -381,6 +393,7 @@ fn panel_vertices_stay_on_canvas_at_the_min_x_clamp() {
         None,
         420,
         400,
+        no_tooltip(),
     )
     .expect("recipe book");
     for (i, v) in geo.verts.chunks_exact(6).enumerate() {
@@ -411,7 +424,7 @@ fn an_open_panel_covers_its_own_screen_rect() {
         lodestone_model::RecipeBookType::Crafting,
     );
     let rect = panel_rect_ndc(&panel, &menu, tabs, pages);
-    let geo = recipe_panel_geometry(Some(&book), &panel, &menu, 1, None, None, None, W, H)
+    let geo = recipe_panel_geometry(Some(&book), &panel, &menu, 1, None, None, None, W, H, no_tooltip())
         .expect("recipe book");
 
     let res = 128;
@@ -465,7 +478,7 @@ fn a_closed_panel_fails_the_coverage_assertion() {
     // reach. See `book_only_rect_ndc` for why the un-narrowed rect made this
     // control's premise false.
     let rect = book_only_rect_ndc(&open, &menu, tabs, pages);
-    let geo = recipe_panel_geometry(Some(&book), &closed, &menu, 1, None, None, None, W, H)
+    let geo = recipe_panel_geometry(Some(&book), &closed, &menu, 1, None, None, None, W, H, no_tooltip())
         .expect("recipe book");
 
     let (covered, bbox) = coverage(&geo.verts, rect, 128);
@@ -492,7 +505,7 @@ fn a_menu_without_a_recipe_book_draws_no_panel() {
         "a chest has no recipe book"
     );
     assert!(
-        recipe_panel_geometry(None, &open_panel(), &chest, 1, None, None, None, W, H).is_none(),
+        recipe_panel_geometry(None, &open_panel(), &chest, 1, None, None, None, W, H, no_tooltip()).is_none(),
         "and therefore emits no geometry"
     );
 }
@@ -587,7 +600,7 @@ fn the_filter_button_swaps_its_art_between_all_and_craftable() {
         let (tabs, pages, _) =
             recipe_panel_contents(Some(&book), &panel, &menu, lodestone_model::RecipeBookType::Crafting);
         let layout = recipe_panel_layout(&panel, &menu, 1, W, H, tabs, pages, &[]);
-        let geo = recipe_panel_geometry(Some(&book), &panel, &menu, 1, None, None, None, W, H)
+        let geo = recipe_panel_geometry(Some(&book), &panel, &menu, 1, None, None, None, W, H, no_tooltip())
             .expect("recipe book");
         let want = layout.filter_button;
         geo.sprites
@@ -692,7 +705,7 @@ fn a_filtered_empty_page_still_paginates_and_draws() {
         recipe_panel_contents(Some(&book), &panel, &menu, lodestone_model::RecipeBookType::Crafting);
     assert_eq!(pages, 1, "an empty filtered set is page 0 of 1, never 0 of 0");
     assert!(ids.is_empty(), "nothing is craftable here");
-    let geo = recipe_panel_geometry(Some(&book), &panel, &menu, 1, None, None, None, W, H)
+    let geo = recipe_panel_geometry(Some(&book), &panel, &menu, 1, None, None, None, W, H, no_tooltip())
         .expect("the panel must still be built with an empty filtered page");
     assert!(
         geo.chrome_vertex_count > 0,
