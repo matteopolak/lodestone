@@ -2940,8 +2940,20 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::EntityAttributesUpdated { .. }
         | ClientEvent::EntityEquipmentUpdated { .. }
         | ClientEvent::EntityDamaged { .. }
-        | ClientEvent::EntityHurtAnimation { .. }
         | ClientEvent::EntityAnimation { .. } => INGEST,
+        // Both halves, and neither supersedes the other: `ingest` turns this into
+        // the per-entity `HurtTime` countdown and destructures with `..`,
+        // **discarding the yaw**, while the shell's own `forward` reads that yaw to
+        // aim the damage camera tilt. Listing it as `INGEST` alone was not a
+        // functional gap — `forward`'s `debug_assert` is one-directional, so the
+        // wiring worked — but this table is what a reader consults to answer "does
+        // anything consume event X", and understating a consumer here is exactly the
+        // authoritative-looking-and-quietly-wrong record this repo pays for most.
+        ClientEvent::EntityHurtAnimation { .. } => Route {
+            ingest: true,
+            shell: true,
+            ..Route::NOWHERE
+        },
         // Riding is genuinely both halves — the component pair one side, the local
         // player's own `Riding` scalar the other.
         ClientEvent::EntityPassengersChanged { .. } => Route {
