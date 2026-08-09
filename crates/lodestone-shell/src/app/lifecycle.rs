@@ -120,6 +120,42 @@ impl ApplicationHandler for WindowApp {
             // Advancements (#167) tracks the cursor for its hover *and* its
             // viewport pan. Its own arm before the menu one below, which would
             // otherwise try to hover a menu row on a screen that has none.
+            // The command-suggestion dropdown's pointer half — vanilla's
+            // `CommandSuggestions.mouseClicked`/`mouseScrolled` plus the
+            // `mouseMoved` hover inside `SuggestionsList.extractRenderState`.
+            //
+            // Its own three arms rather than a branch inside the menu ones
+            // because `Screen::Chat` is not `routes_menu_input`: the chat box
+            // draws over a live world with the pointer released, so none of the
+            // menu row machinery applies. They come first for the same reason
+            // `handle_chat_key` gives the popup first refusal on keys.
+            WindowEvent::CursorMoved { position, .. } if self.ui.is_chat_open() => {
+                self.cursor = (position.x as f32, position.y as f32);
+                // Hover **only when the pointer actually moved**, which is what
+                // this arm firing already means (`mouseMoved` in vanilla is
+                // `lastMouse != (mouseX, mouseY)`). Without that gate the row
+                // under a stationary pointer would fight the arrow keys for the
+                // selection every frame.
+                if let Some(row) = self.suggestion_row_under_cursor() {
+                    self.chat_input.suggestion_hover(row);
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } if self.ui.is_chat_open() => {
+                if state == ElementState::Pressed
+                    && button == MouseButton::Left
+                    && let Some(row) = self.suggestion_row_under_cursor()
+                {
+                    self.chat_input.suggestion_click(row);
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } if self.ui.is_chat_open() => {
+                // `mouseScrolled` requires the pointer to be inside the rect —
+                // resolving a row is a stricter version of the same test, and the
+                // one place both come from.
+                if self.suggestion_row_under_cursor().is_some() {
+                    self.chat_input.suggestion_scroll(wheel_notches(delta) as i32);
+                }
+            }
             WindowEvent::CursorMoved { position, .. } if self.ui.is_advancements() => {
                 self.cursor = (position.x as f32, position.y as f32);
                 if let Some((w, h)) = self.target.as_ref().map(RenderTarget::size) {
@@ -1200,12 +1236,22 @@ impl WindowApp {
             return false;
         };
         match code {
+            // The suggestion popup gets first refusal on both arrows —
+            // `SuggestionsList.keyPressed`'s `isUp`/`isDown` arms run before
+            // `ChatScreen`'s own `264`/`265` switch, so while the dropdown is up
+            // the arrows browse it and the history is unreachable. Both return
+            // `true` either way, so the key is consumed regardless of which
+            // layer answered it.
             KeyCode::ArrowUp => {
-                self.chat_input.history_up();
+                if !self.chat_input.suggestion_up() {
+                    self.chat_input.history_up();
+                }
                 true
             }
             KeyCode::ArrowDown => {
-                self.chat_input.history_down();
+                if !self.chat_input.suggestion_down() {
+                    self.chat_input.history_down();
+                }
                 true
             }
             KeyCode::Enter | KeyCode::NumpadEnter => {

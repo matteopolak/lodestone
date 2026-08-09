@@ -808,6 +808,14 @@ pub struct HudFrame<'a> {
     /// (see [`HudFrame::new`]) so every pre-existing test keeps drawing a
     /// caret without having to know about blinking.
     pub chat_caret_visible: bool,
+    /// The grey preview of the highlighted suggestion, drawn straight after the
+    /// caret — vanilla's `EditBox.suggestion`, set by
+    /// `SuggestionsList.select`. `None` whenever there is no popup, or the
+    /// highlighted candidate is not an extension of what is typed.
+    pub chat_suggestion_ghost: Option<&'a str>,
+    /// The command-suggestion dropdown, `Some` only while it is up. See
+    /// [`SuggestionPopup`] and [`draw_command_suggestions`].
+    pub chat_suggestions: Option<SuggestionPopup<'a>>,
     /// The persisted Chat Settings values that shape the scrollback/input
     /// draw — see [`ChatDisplayOptions`]. Defaults to vanilla's own defaults
     /// (see [`HudFrame::new`]), so a caller that never sets this renders
@@ -1029,6 +1037,8 @@ impl<'a> HudFrame<'a> {
             sound_subtitles: &[],
             chat_input: None,
             chat_caret_visible: true,
+            chat_suggestion_ghost: None,
+            chat_suggestions: None,
             chat_options: ChatDisplayOptions::default(),
             chat_wrap: None,
             players: None,
@@ -1217,6 +1227,200 @@ pub fn chat_width_px(pct: f32) -> f32 {
 #[must_use]
 pub fn chat_height_px(pct: f32) -> f32 {
     (pct * 160.0 + 20.0).floor()
+}
+
+/// The scale factor every chat draw — scrollback, input line, suggestion popup
+/// — multiplies its geometry by: this HUD's own fixed legibility factor times
+/// the `chatScale` option, vanilla's `pose.scale(scale, scale)` layering.
+///
+/// A free function rather than a local `let` because
+/// [`suggestion_layout`] is called from outside [`HudGeometry::build_inner`]
+/// (the pointer hit-test) and the two must resolve the same number.
+#[must_use]
+pub fn chat_pose_scale(opts: ChatDisplayOptions) -> f32 {
+    HUD_TEXT_SCALE * opts.scale.max(0.0)
+}
+
+/// The top of the chat input line's glyph row, in logical-canvas pixels —
+/// vanilla's `EditBox` at `this.height - 12`.
+///
+/// Shared by the input draw and [`suggestion_layout`] for the reason that whole
+/// function exists: the popup is placed *relative to this line*, so a second
+/// spelling of it would let the two drift apart by exactly the amount nobody
+/// notices in a screenshot.
+#[must_use]
+pub fn chat_input_top(canvas_h: f32, pose_scale: f32) -> f32 {
+    canvas_h - HUD_MARGIN - font::GLYPH_H as f32 * pose_scale
+}
+
+/// Vanilla's `CommandSuggestions.LINE_HEIGHT` is `12`, decomposed: the 9px font
+/// draws at `rect.getY() + 2 + 12 * i`, so the row is 2px of lead, the glyph,
+/// and 1px of trail. Ours keeps the padding and substitutes this HUD's own glyph
+/// height, rather than restating `12` against a 7px font.
+const SUGGESTION_ROW_PAD_TOP: f32 = 2.0;
+/// See [`SUGGESTION_ROW_PAD_TOP`] — `12 - 2 - 9`.
+const SUGGESTION_ROW_PAD_BOTTOM: f32 = 1.0;
+/// The gap between the popup's bottom edge and the input line —
+/// `SuggestionsList`'s `y - 3 - rows * 12` when `anchorToBottom` is set, which
+/// `ChatScreen.init` does.
+const SUGGESTION_LIST_GAP: f32 = 3.0;
+/// The 1px left inset the row text draws at (`rect.getX() + 1`), which is also
+/// why the rect is `maxWidth + 1` wide and starts one pixel left of the anchor
+/// (`listX = x - 1` for an unbordered `EditBox`, and `ChatScreen` sets
+/// `setBordered(false)`).
+const SUGGESTION_TEXT_INSET: f32 = 1.0;
+
+/// `CommandSuggestions.fillColor` as `ChatScreen.init` passes it:
+/// `-805306368` == `0xD0000000`.
+const SUGGESTION_FILL: [f32; 4] = [0.0, 0.0, 0.0, 208.0 / 255.0];
+/// The highlighted row's text colour — `-256` == `0xFFFFFF00`.
+const SUGGESTION_TEXT_SELECTED: [f32; 4] = [1.0, 1.0, 0.0, 1.0];
+/// Every other row's text colour — `-5592406` == `0xFFAAAAAA`.
+const SUGGESTION_TEXT_UNSELECTED: [f32; 4] = [170.0 / 255.0, 170.0 / 255.0, 170.0 / 255.0, 1.0];
+/// `EditBox.extractRenderState`'s ghost-suffix colour — `-8355712` ==
+/// `0xFF808080`, drawn at `cursorX - 1`.
+const SUGGESTION_GHOST: [f32; 4] = [0.5019608, 0.5019608, 0.5019608, 1.0];
+
+/// Pixel width of `s` at `scale`, in whichever font is attached — the real
+/// vanilla proportional advances when there is one, the fixed 5×7 debug advance
+/// otherwise.
+///
+/// Free-standing rather than a `Builder` method so the pointer hit-test can
+/// measure identically to the draw ([`HudRenderer::suggestion_layout`]);
+/// `Builder::text_width` is a thin wrapper over it, which is what makes that
+/// identity structural rather than two copies of one `match`.
+fn measure_text(font: Option<&VanillaFont>, s: &str, scale: f32) -> f32 {
+    match font {
+        Some(f) => f.width(s, scale),
+        None => item_icon::text_w(s, scale),
+    }
+}
+
+/// What the suggestion popup needs from `chat::SuggestionsList` to lay itself
+/// out and draw. Built by the caller each frame; `None` on [`HudFrame`] is "no
+/// popup", which is the only gate the draw has.
+#[derive(Debug, Clone, Copy)]
+pub struct SuggestionPopup<'a> {
+    /// The input line the candidates replace a tail of — needed because the
+    /// popup's x anchor is the pixel `line[..start]` ends at, vanilla's
+    /// `input.getScreenX(suggestions.getRange().getStart())`.
+    pub line: &'a str,
+    /// Byte offset into [`Self::line`] the candidate text replaces from.
+    pub start: usize,
+    /// Every candidate, in row order.
+    pub candidates: &'a [crate::chat::Candidate],
+    /// The highlighted row's index into [`Self::candidates`].
+    pub selected: usize,
+    /// The first *visible* row's index into [`Self::candidates`].
+    pub offset: usize,
+    /// The pointer, in logical-canvas pixels, when it is over the window.
+    ///
+    /// Used for the tooltip only. Hover *selection* is a state change and
+    /// belongs to the event loop, which resolves the row through
+    /// [`SuggestionLayout::row_at`] against this same layout.
+    pub cursor: Option<(f32, f32)>,
+}
+
+/// The popup's resolved rect — vanilla's `SuggestionsList.rect`, plus the row
+/// pitch a hit-test needs.
+///
+/// Vanilla computes this **once**, in `showSuggestions`, and every later mouse
+/// event tests the stored value. Here it is recomputed from the same expression
+/// the draw uses, which is strictly closer to the pixels: a resize between the
+/// show and the click cannot leave the hit-test aiming at a stale rect.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SuggestionLayout {
+    /// Left edge.
+    pub x: f32,
+    /// Top edge.
+    pub y: f32,
+    /// Width, including the 1px text inset.
+    pub w: f32,
+    /// Height — `rows * row_h`.
+    pub h: f32,
+    /// One row's pitch, vanilla's `LINE_HEIGHT` at this frame's chat scale.
+    pub row_h: f32,
+    /// How many rows are visible — `min(candidates, SUGGESTION_LINE_LIMIT)`.
+    pub rows: usize,
+}
+
+impl SuggestionLayout {
+    /// Whether `(x, y)` is inside the rect — `Rect2i.contains`.
+    #[must_use]
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+
+    /// The candidate index under `(x, y)`, or `None` outside the rect —
+    /// `SuggestionsList.mouseClicked`'s `(y - rect.getY()) / 12 + offset`,
+    /// guarded by that method's own `line < suggestionList.size()`.
+    ///
+    /// `offset` is the caller's, not stored here, because the layout is rebuilt
+    /// every frame while the window position is list state.
+    ///
+    /// **One named narrowing.** Vanilla's *hover* test is one pixel stricter
+    /// than its *click* test on every edge (`mouseX > rect.getX()` versus
+    /// `Rect2i.contains`'s `>=`), so in vanilla the outermost pixel ring
+    /// click-selects but does not hover-select. Both go through this method
+    /// here; the difference is one pixel of hover on a row you can still click.
+    #[must_use]
+    pub fn row_at(&self, x: f32, y: f32, offset: usize, candidates: usize) -> Option<usize> {
+        if !self.contains(x, y) || self.row_h <= 0.0 {
+            return None;
+        }
+        let row = ((y - self.y) / self.row_h).floor().max(0.0) as usize + offset;
+        (row < candidates).then_some(row)
+    }
+}
+
+/// Lay the popup out — `CommandSuggestions.showSuggestions` plus
+/// `SuggestionsList`'s constructor, against this HUD's own chat geometry.
+///
+/// `text_width` measures at the frame's chat pose scale, i.e. it is exactly what
+/// the draw will use to place glyphs; passing anything else is how a rect ends
+/// up describing a box the text does not fit.
+///
+/// `canvas_w`/`canvas_h` are logical-canvas pixels — the
+/// `crate::menu::render::logical_canvas` space vanilla calls
+/// `guiScaledWidth`/`guiScaledHeight`.
+#[must_use]
+pub fn suggestion_layout(
+    canvas_w: f32,
+    canvas_h: f32,
+    pose_scale: f32,
+    popup: &SuggestionPopup<'_>,
+    text_width: impl Fn(&str) -> f32,
+) -> SuggestionLayout {
+    let rows = popup.candidates.len().min(crate::chat::SUGGESTION_LINE_LIMIT);
+    let max_w = popup
+        .candidates
+        .iter()
+        .map(|c| text_width(&c.text))
+        .fold(0.0_f32, f32::max);
+    let row_h = (SUGGESTION_ROW_PAD_TOP + font::GLYPH_H as f32 + SUGGESTION_ROW_PAD_BOTTOM)
+        * pose_scale;
+    // `input.getScreenX(range.getStart())` — the pixel the replaced span starts
+    // at, measured through the *same* metrics the line was drawn with. The
+    // `min(start, len)` is defensive against a server-supplied `start`; the
+    // char-boundary case cannot reach here because `ChatCompletion::show`
+    // rejects it.
+    let head_end = popup.start.min(popup.line.len());
+    let anchor = HUD_MARGIN + text_width(popup.line.get(..head_end).unwrap_or(""));
+    // Vanilla clamps to `0 ..= getScreenX(0) + innerWidth - maxWidth`, and for
+    // the chat box that collapses to `screenWidth - maxWidth`: the input is at
+    // x=4 with `innerWidth == width - 4`. So this is "do not run off the right
+    // edge", not a chat-box-width clamp — the popup is a `Screen` widget and is
+    // not bound by the `chatWidth` option.
+    let x = anchor.clamp(0.0, (canvas_w - max_w).max(0.0)) - SUGGESTION_TEXT_INSET * pose_scale;
+    let bottom = chat_input_top(canvas_h, pose_scale) - SUGGESTION_LIST_GAP * pose_scale;
+    SuggestionLayout {
+        x,
+        y: bottom - rows as f32 * row_h,
+        w: max_w + SUGGESTION_TEXT_INSET * pose_scale,
+        h: rows as f32 * row_h,
+        row_h,
+        rows,
+    }
 }
 
 /// Builds the HUD vertex stream (positions in NDC, RGBA per vertex) for a given
@@ -1498,7 +1702,10 @@ impl HudGeometry {
         // never fully transparent even at `chatOpacity == 0.0`.
         let chat_text_opacity = opts.text_opacity.clamp(0.0, 1.0).mul_add(0.9, 0.1);
         let chat_bg_opacity = opts.background_opacity.clamp(0.0, 1.0);
-        let input_y = b.h - margin - glyph_h * chat_pose_scale;
+        // Through [`chat_input_top`], not a second `b.h - margin - …`, because
+        // `suggestion_layout` places the dropdown relative to this row and is
+        // called from outside this function too (the pointer hit-test).
+        let input_y = chat_input_top(b.h, chat_pose_scale);
         if let Some(input) = frame.chat_input {
             // A translucent strip so text stays legible over bright terrain.
             // Vanilla's real `EditBox` has no equivalent knob of its own; this
@@ -1546,6 +1753,22 @@ impl HudGeometry {
                 chat_pose_scale,
                 [1.0, 1.0, 1.0, 1.0],
             );
+            // The highlighted suggestion, previewed in grey after the caret —
+            // `EditBox.extractRenderState`'s `graphics.text(font, suggestion,
+            // cursorX - 1, textY, -8355712, …)`. Measured from the same
+            // `input`+`caret` string the draw above used, so the two cannot land
+            // on different pens; vanilla's own `- 1` nudge is scaled with
+            // everything else.
+            if let Some(ghost) = frame.chat_suggestion_ghost {
+                let pen = margin + b.text_width(&format!("{input}{caret}"), chat_pose_scale);
+                b.text(
+                    ghost,
+                    pen - chat_pose_scale,
+                    input_y,
+                    chat_pose_scale,
+                    SUGGESTION_GHOST,
+                );
+            }
         }
         // The scrollback stacks upward from here, so while the input is open this
         // must be the **top of the input strip**, not the text's own top. Using
@@ -1625,6 +1848,21 @@ impl HudGeometry {
                 );
                 row_i += 1;
             }
+        }
+
+        // The command-suggestion dropdown, last in the chat overlay because it
+        // overlaps both the input line above and the scrollback below —
+        // `ChatScreen.extractRenderState` calls `commandSuggestions
+        // .extractRenderState` after `super`, i.e. after every widget including
+        // the `EditBox`. `draw_command_suggestions`' own doc holds the table of
+        // what must still composite above it, and `SUGGESTION_LAYERS` the order
+        // inside it.
+        if let Some(popup) = frame.chat_suggestions.as_ref() {
+            let layout =
+                suggestion_layout(b.w, b.h, chat_pose_scale, popup, |s| {
+                    b.text_width(s, chat_pose_scale)
+                });
+            draw_command_suggestions(&mut b, popup, layout, chat_pose_scale, &SUGGESTION_LAYERS);
         }
 
         // Crosshair: a white plus at the centre.
@@ -2667,6 +2905,165 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     row_y
 }
 
+/// One composite layer of the suggestion popup, in the order
+/// [`SUGGESTION_LAYERS`] lists them.
+///
+/// Split out because the popup has to sit *over* the chat scrollback and *under*
+/// its own tooltip, and a bare call sequence records neither: the ordering is
+/// data here, so a reader can see it and a future layer can be inserted at a
+/// named position instead of by moving a statement. This is the popup's own
+/// order and nothing wider — see [`draw_command_suggestions`]'s doc for what
+/// must composite above the whole widget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuggestionLayer {
+    /// The per-row translucent fills — `graphics.fill(..., fillColor)`.
+    RowFills,
+    /// The 1px dotted edges that appear only when the list is scrollable.
+    ScrollHints,
+    /// The candidate texts, highlighted row in yellow.
+    RowTexts,
+    /// The hovered candidate's `Message`, when it has one.
+    Tooltip,
+}
+
+/// The popup's composite order, bottom-most first.
+///
+/// `RowFills` before `ScrollHints` because the hints draw a `fillColor` band in
+/// the 1px gutters *outside* the rows and then stipple white over it, so a row
+/// fill submitted afterwards would paint over the stipple where they abut.
+const SUGGESTION_LAYERS: [SuggestionLayer; 4] = [
+    SuggestionLayer::RowFills,
+    SuggestionLayer::ScrollHints,
+    SuggestionLayer::RowTexts,
+    SuggestionLayer::Tooltip,
+];
+
+/// Draw the command-suggestion dropdown — `SuggestionsList.extractRenderState`.
+///
+/// # What must composite above this, and why the call site is where it is
+///
+/// The popup is submitted **after** the chat input line and the whole
+/// scrollback, because it overlaps both. Everything that must still sit on top
+/// of it, in the order it draws:
+///
+/// | above the popup | why |
+/// |---|---|
+/// | this widget's own tooltip | [`SuggestionLayer::Tooltip`], last in [`SUGGESTION_LAYERS`] |
+/// | the F3 debug overlay | vanilla draws `DebugScreenOverlay` after every screen |
+/// | a container screen's cursor stack and item tooltip | separate pass, separate geometry type — see `container.rs` |
+///
+/// Only the first is this function's business; the other two composite in later
+/// passes and need nothing from here. **The F3 overlay is currently submitted
+/// *first* in [`HudGeometry::build_inner`] and therefore draws underneath**,
+/// which is a pre-existing divergence for the whole HUD rather than one this
+/// widget introduces — named here because this is the table a reader will check.
+fn draw_command_suggestions(
+    b: &mut Builder,
+    popup: &SuggestionPopup<'_>,
+    layout: SuggestionLayout,
+    pose_scale: f32,
+    layers: &[SuggestionLayer],
+) {
+    if layout.rows == 0 {
+        return;
+    }
+    let px = pose_scale.max(1.0);
+    let has_previous = popup.offset > 0;
+    let has_next = popup.candidates.len() > popup.offset + layout.rows;
+    for layer in layers {
+        match layer {
+            SuggestionLayer::RowFills => {
+                for i in 0..layout.rows {
+                    b.rect_px(
+                        layout.x,
+                        layout.y + layout.row_h * i as f32,
+                        layout.w,
+                        layout.row_h,
+                        SUGGESTION_FILL,
+                    );
+                }
+            }
+            // Vanilla draws a `fillColor` band in the 1px gutter above *and*
+            // below whenever the list is scrollable **either** way, then
+            // stipples white into whichever end has more rows behind it —
+            // `if (limited)` covers both bands, and the two `if`s inside it
+            // cover one each. The asymmetry is deliberate: the band alone is
+            // what makes the box look clipped rather than ended.
+            SuggestionLayer::ScrollHints if has_previous || has_next => {
+                b.rect_px(layout.x, layout.y - px, layout.w, px, SUGGESTION_FILL);
+                b.rect_px(layout.x, layout.y + layout.h, layout.w, px, SUGGESTION_FILL);
+                let white = [1.0, 1.0, 1.0, 1.0];
+                // `for (x = 0; x < width; x++) if (x % 2 == 0)` — every other
+                // pixel column, so the stipple pitch scales with the box.
+                let mut x = 0.0;
+                while x < layout.w {
+                    if has_previous {
+                        b.rect_px(layout.x + x, layout.y - px, px, px, white);
+                    }
+                    if has_next {
+                        b.rect_px(layout.x + x, layout.y + layout.h, px, px, white);
+                    }
+                    x += 2.0 * px;
+                }
+            }
+            SuggestionLayer::ScrollHints => {}
+            SuggestionLayer::RowTexts => {
+                for i in 0..layout.rows {
+                    let Some(candidate) = popup.candidates.get(popup.offset + i) else {
+                        continue;
+                    };
+                    let colour = if popup.offset + i == popup.selected {
+                        SUGGESTION_TEXT_SELECTED
+                    } else {
+                        SUGGESTION_TEXT_UNSELECTED
+                    };
+                    b.text(
+                        &candidate.text,
+                        layout.x + SUGGESTION_TEXT_INSET * pose_scale,
+                        layout.y + layout.row_h * i as f32 + SUGGESTION_ROW_PAD_TOP * pose_scale,
+                        pose_scale,
+                        colour,
+                    );
+                }
+            }
+            // `graphics.setTooltipForNextFrame(font, fromMessage(tooltip),
+            // mouseX, mouseY)`, gated on `hovered` — so it is the *pointer*
+            // that reveals a tooltip, never the keyboard selection, and it
+            // shows the **selected** row's message rather than the hovered
+            // one's (they are the same row whenever the pointer moved, which is
+            // the only way `hovered` becomes true with a stale selection).
+            //
+            // Only the placement and the text are ported. Vanilla's
+            // `TooltipRenderUtil` border gradient is not modelled; this is a
+            // flat panel, and that is a cosmetic narrowing rather than a
+            // behavioural one.
+            SuggestionLayer::Tooltip => {
+                let Some((mx, my)) = popup.cursor else {
+                    continue;
+                };
+                if !layout.contains(mx, my) {
+                    continue;
+                }
+                let Some(text) = popup
+                    .candidates
+                    .get(popup.selected)
+                    .and_then(|c| c.tooltip.as_deref())
+                else {
+                    continue;
+                };
+                let pad = 3.0 * pose_scale;
+                let tw = b.text_width(text, pose_scale);
+                let th = font::GLYPH_H as f32 * pose_scale;
+                // `renderTooltip`'s own offset from the cursor.
+                let tx = (mx + 12.0 * pose_scale).min((b.w - tw - pad * 2.0).max(0.0));
+                let ty = (my - 12.0 * pose_scale).max(0.0);
+                b.rect_px(tx, ty, tw + pad * 2.0, th + pad * 2.0, SUGGESTION_FILL);
+                b.text(text, tx + pad, ty + pad, pose_scale, [1.0, 1.0, 1.0, 1.0]);
+            }
+        }
+    }
+}
+
 /// A chat line is fully lit for most of its life, then fades over its last
 /// [`CHAT_FADE_SECS`] before disappearing at [`CHAT_VISIBLE_SECS`] — matching
 /// vanilla's "recent messages fade out when the box is closed" behaviour. Only
@@ -2968,10 +3365,7 @@ impl<'a> Builder<'a> {
     /// Pixel width of `s` at `scale` in whichever font [`Builder::text`] will
     /// draw with. Every centring and right-alignment site must use this.
     fn text_width(&self, s: &str, scale: f32) -> f32 {
-        match self.font {
-            Some(f) => f.width(s, scale),
-            None => item_icon::text_w(s, scale),
-        }
+        measure_text(self.font, s, scale)
     }
 
     /// Pixel width of a `§`-coded string at `scale`, codes counted as zero-width.
@@ -3488,6 +3882,51 @@ impl HudRenderer {
     /// claims to see vanilla advances must fail.
     pub fn detach_font(&mut self) {
         self.font = None;
+    }
+
+    /// The command-suggestion popup's rect for a frame of this size — what the
+    /// pointer is hit-tested against.
+    ///
+    /// This exists on the *renderer* rather than as a free function because the
+    /// rect depends on glyph advances, and only the renderer knows which font is
+    /// attached. It resolves the identical [`suggestion_layout`] the draw does,
+    /// through the identical [`measure_text`], so a click can never land on a
+    /// row the player is not looking at.
+    ///
+    /// `framebuffer_width`/`framebuffer_height` are **physical** pixels and
+    /// `gui_scale` the raw option (`0` = auto), matching every other hit-test
+    /// entry point here; the returned rect is in logical-canvas pixels, so
+    /// convert the cursor with [`Self::canvas_cursor`] before testing it.
+    #[must_use]
+    pub fn suggestion_layout(
+        &self,
+        framebuffer_width: u32,
+        framebuffer_height: u32,
+        gui_scale: u32,
+        opts: ChatDisplayOptions,
+        popup: &SuggestionPopup<'_>,
+    ) -> SuggestionLayout {
+        let (w, h) =
+            crate::menu::render::logical_canvas(gui_scale, framebuffer_width, framebuffer_height);
+        let pose = chat_pose_scale(opts);
+        let font = self.font.as_deref();
+        suggestion_layout(w, h, pose, popup, |s| measure_text(font, s, pose))
+    }
+
+    /// A physical-pixel cursor position in the logical-canvas pixels
+    /// [`Self::suggestion_layout`] returns its rect in — the framebuffer divided
+    /// by the effective integer GUI scale, vanilla's `guiScaled*`.
+    #[must_use]
+    pub fn canvas_cursor(
+        framebuffer_width: u32,
+        framebuffer_height: u32,
+        gui_scale: u32,
+        cursor: (f32, f32),
+    ) -> (f32, f32) {
+        let scale =
+            crate::config::calculate_gui_scale(gui_scale, framebuffer_width, framebuffer_height)
+                .max(1) as f32;
+        (cursor.0 / scale, cursor.1 / scale)
     }
 
     /// Attach the vanilla GUI sprite atlas so the survival vitals (hearts,
@@ -4318,6 +4757,173 @@ mod tests {
         // Only the crosshair (2 quads = 12 verts) should remain.
         assert!(without < with, "F3 off must drop the overlay glyphs");
         assert_eq!(without, 12, "just the crosshair survives");
+    }
+
+    /// Twelve candidates named so their widths are equal, so the layout
+    /// arithmetic below is not also measuring a proportional font.
+    fn popup_candidates(n: usize) -> Vec<crate::chat::Candidate> {
+        (0..n)
+            .map(|i| crate::chat::Candidate {
+                text: format!("cand{i:02}"),
+                tooltip: None,
+            })
+            .collect()
+    }
+
+    /// The dropdown reaches pixels, and does so **inside its own rect** — the
+    /// island check for the whole widget.
+    ///
+    /// Counting vertices alone would pass for a popup drawn off-screen or on top
+    /// of the hotbar, which is the failure this repo keeps hitting. So the
+    /// assertion is on *where*: every quad the popup adds must have its corners
+    /// inside the rect `suggestion_layout` resolved (plus the 1px scroll-hint
+    /// gutters, which are outside the rows by construction). Mismatches are
+    /// collected and asserted as a set, so one stray quad does not hide the
+    /// others.
+    ///
+    /// The negative control is the same frame with `chat_suggestions: None`, run
+    /// and compared, not described.
+    #[test]
+    fn the_suggestion_popup_draws_inside_the_rect_the_layout_resolved() {
+        let stats = DebugStats::default();
+        let candidates = popup_candidates(12);
+        let (w, h) = (640u32, 480u32);
+        let base_frame = HudFrame {
+            crosshair: false,
+            show_debug: false,
+            chat_input: Some("ca"),
+            chat_caret_visible: false,
+            ..HudFrame::new(&stats)
+        };
+        // The control: identical frame, no popup. Run, not asserted about.
+        let control = HudGeometry::build(&base_frame, w, h);
+
+        let popup = SuggestionPopup {
+            line: "ca",
+            start: 0,
+            candidates: &candidates,
+            selected: 0,
+            offset: 0,
+            cursor: None,
+        };
+        let with = HudGeometry::build(
+            &HudFrame {
+                chat_suggestions: Some(popup),
+                ..base_frame
+            },
+            w,
+            h,
+        );
+        assert!(
+            with.vertex_count() > control.vertex_count(),
+            "the popup must add geometry — {} vs {}",
+            with.vertex_count(),
+            control.vertex_count()
+        );
+
+        // Re-derive the rect from the same function the draw called, with the
+        // same measure: no font attached here, so `item_icon::text_w`.
+        let (cw, ch) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, w, h);
+        let pose = chat_pose_scale(ChatDisplayOptions::default());
+        let layout = suggestion_layout(cw, ch, pose, &popup, |s| measure_text(None, s, pose));
+        assert_eq!(
+            layout.rows,
+            crate::chat::SUGGESTION_LINE_LIMIT,
+            "12 candidates must be windowed to 10 rows — otherwise the cap is untested"
+        );
+
+        // Every vertex the popup added, in canvas pixels. `verts` is NDC over the
+        // logical canvas, so undo that rather than restating a pixel formula.
+        let px = |x: f32| (x + 1.0) * 0.5 * cw;
+        let py = |y: f32| (1.0 - y) * 0.5 * ch;
+        let gutter = pose.max(1.0);
+        let mut outside = Vec::new();
+        for chunk in with.verts[control.verts.len()..].chunks(FLOATS_PER_VERTEX) {
+            let (x, y) = (px(chunk[0]), py(chunk[1]));
+            let inside_x = x >= layout.x - 0.5 && x <= layout.x + layout.w + 0.5;
+            let inside_y =
+                y >= layout.y - gutter - 0.5 && y <= layout.y + layout.h + gutter + 0.5;
+            if !(inside_x && inside_y) {
+                outside.push((x, y));
+            }
+        }
+        assert!(
+            outside.is_empty(),
+            "{} of the popup's own vertices landed outside its rect \
+             (x {}..{}, y {}..{}): {:?}",
+            outside.len(),
+            layout.x,
+            layout.x + layout.w,
+            layout.y - gutter,
+            layout.y + layout.h + gutter,
+            &outside[..outside.len().min(8)]
+        );
+
+        // And the rect really is above the input line rather than over it — the
+        // `anchorToBottom` placement, which a sign error would invert.
+        assert!(
+            layout.y + layout.h <= chat_input_top(ch, pose),
+            "the popup's bottom ({}) must sit at or above the input line's top ({})",
+            layout.y + layout.h,
+            chat_input_top(ch, pose)
+        );
+    }
+
+    /// `row_at` maps a pointer to the candidate the player is looking at.
+    ///
+    /// The inputs are chosen so the two plausible readings disagree: with
+    /// `offset == 2` a hit on the **first visible row** must report candidate
+    /// `2`, not `0`, and the last visible row must report `11` rather than `9`.
+    /// An implementation that forgot `+ offset` agrees with the truth only at
+    /// `offset == 0`, which is why the scrolled case is the one asserted.
+    #[test]
+    fn a_pointer_resolves_to_the_candidate_under_it_including_when_scrolled() {
+        let candidates = popup_candidates(12);
+        let popup = SuggestionPopup {
+            line: "ca",
+            start: 0,
+            candidates: &candidates,
+            selected: 0,
+            offset: 2,
+            cursor: None,
+        };
+        let pose = chat_pose_scale(ChatDisplayOptions::default());
+        let layout = suggestion_layout(640.0, 480.0, pose, &popup, |s| measure_text(None, s, pose));
+        let mid_x = layout.x + layout.w * 0.5;
+
+        assert_eq!(
+            layout.row_at(mid_x, layout.y + layout.row_h * 0.5, 2, 12),
+            Some(2),
+            "the first visible row is candidate 2 once the window has scrolled"
+        );
+        assert_eq!(
+            layout.row_at(mid_x, layout.y + layout.row_h * 1.5, 2, 12),
+            Some(3)
+        );
+        assert_eq!(
+            layout.row_at(mid_x, layout.y + layout.row_h * 9.5, 2, 12),
+            Some(11),
+            "and the last visible row is the last candidate"
+        );
+        // Outside, on each of the four edges.
+        assert_eq!(layout.row_at(mid_x, layout.y - 1.0, 2, 12), None);
+        assert_eq!(
+            layout.row_at(mid_x, layout.y + layout.h + 1.0, 2, 12),
+            None
+        );
+        assert_eq!(
+            layout.row_at(layout.x - 1.0, layout.y + layout.row_h * 0.5, 2, 12),
+            None
+        );
+        assert_eq!(
+            layout.row_at(
+                layout.x + layout.w + 1.0,
+                layout.y + layout.row_h * 0.5,
+                2,
+                12
+            ),
+            None
+        );
     }
 
     #[test]

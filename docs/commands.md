@@ -161,29 +161,73 @@ its id matches the request currently pending (mirroring vanilla's
 `ClientSuggestionProvider::completeCustomSuggestions`) — a stale reply, from
 a request the input has since outgrown, is dropped rather than applied.
 
-### The keystroke path — what actually presses Tab (#471 steps 2 and 3)
+### The keystroke path — what actually presses Tab
 
-Everything above was, until #471, an island: `complete` and
-`SuggestionRequests` had **no production caller**, and
-`menu/render/screens.rs`'s `command_block_frame(state, tree)` was called only
-with `tree: None`. The chain now runs end to end:
+Everything above was once an island: `complete` and `SuggestionRequests` had
+**no production caller**, and `menu/render/screens.rs`'s
+`command_block_frame(state, tree)` was called only with `tree: None`. The chain
+now runs end to end:
 
 | link | where |
 |---|---|
-| decode | `crates/protocol/v770` → `ClientEvent::CommandTreeUpdated` / `CommandSuggestionsReceived` (#470) |
-| fold | `net::forward`'s two arms → `net::CommandTreeCell` (#471 step 1) |
-| chat box | `app::menus::handle_chat_key`'s `KeyCode::Tab` → `ChatInput::tab(tree)` |
-| round trip | `ChatInput::tab` returns the `ClientAction::CommandSuggestion`; `app::menus::pump_command_suggestions` polls the cell and calls `ChatInput::apply_suggestions` |
+| decode | `crates/protocol/v770` → `ClientEvent::CommandTreeUpdated` / `CommandSuggestionsReceived` |
+| fold | `net::forward`'s two arms → `net::CommandTreeCell` |
+| **every edit** | `app::menus::handle_chat_key` → `WindowApp::refresh_command_suggestions` → `ChatInput::update_command_info(tree)` |
+| Tab | `handle_chat_key`'s `KeyCode::Tab` → `ChatInput::tab(tree, shift)` |
+| arrows / Escape | `handle_chat_history_key`, `handle_chat_key` → `ChatInput::suggestion_up`/`_down`/`_escape` |
+| pointer | `app::lifecycle`'s three `is_chat_open` arms → `WindowApp::suggestion_row_under_cursor` → `ChatInput::suggestion_hover`/`_click`/`_scroll` |
+| round trip | either seam returns the `ClientAction::CommandSuggestion`; `app::menus::pump_command_suggestions` polls the cell and calls `ChatInput::apply_suggestions` |
+| draw | `app::redraw` fills `HudFrame::chat_suggestions` → `hud::suggestion_layout` → `hud::draw_command_suggestions` |
 | command block | `try_use` → `MenuNav::set_command_tree` → `key_command_block`'s Tab → `CommandBlockState::apply_completion` |
 
-`ChatInput::tab` **splices the chosen candidate into the line** rather than
-drawing a popup: the HUD already draws `chat_input`, so this is the shortest
-path from the server's tree to a pixel. Pressing Tab again on an unedited
-completed line cycles to the next candidate (the list and the prefix it was
-computed from are held in `ChatCompletion`, inside `ChatInput` — vanilla's
-`ChatScreen` owns its `CommandSuggestions` the same way); any other edit makes
-the "is this list still about this line?" comparison fail, so the next Tab
-recomputes. The popup list itself is a `hud.rs` draw and is **not** built yet.
+### The dropdown — `hud::draw_command_suggestions` and `chat::SuggestionsList`
+
+A port of vanilla's `CommandSuggestions.SuggestionsList`, not a design. The
+parts that are easy to get subtly wrong, all of them transcribed:
+
+- **The list appears while typing, not only on Tab.** The seam is
+  `ChatInput::update_command_info` — vanilla's `EditBox` responder
+  (`ChatScreen.onEdited` → `CommandSuggestions.updateCommandInfo`). Every edit
+  path in `handle_chat_key` must call it; a fourth edit site added without it
+  silently reverts to Tab-only and no `cargo check` can see that.
+- **A line the player has not edited shows nothing.** `allow_suggestions`
+  (vanilla's `allowSuggestions`) is false after `ChatInput::set` and after a
+  history recall, so opening chat with a seeded `/` does not dump the root
+  command list on screen.
+- **Tab does two different things.** With the popup up it commits the
+  highlighted row; with it down it *shows* the list and edits nothing (reachable
+  because `ChatScreen.init` calls `setAllowHiding(false)`). `tab_cycles` — set
+  only by a commit, cleared by an arrow — is what makes the *first* Tab commit
+  without moving and every later one cycle first. Shift reverses the cycle.
+- **The arrows browse without editing.** They move the highlight and the grey
+  ghost preview (`EditBox.setSuggestion`); the line is untouched until a commit.
+- **The window is capped at `SUGGESTION_LINE_LIMIT` (10) rows** with a separate
+  scroll `offset`. `cycle`'s two scroll branches are asymmetric on purpose:
+  wrapping from row 0 to the last row jumps `offset` straight to its ceiling.
+  The wheel moves `offset` and **not** the selection.
+- **Escape hides the popup and consumes the key**, so a second Escape is what
+  closes the box — `CommandSuggestions.keyPressed` runs before `ChatScreen`'s
+  own handling.
+- **Placement is `anchorToBottom`, always above the input line.** It is a
+  constructor flag, not a "fits above?" test: `ChatScreen` passes `true` and
+  `AbstractCommandBlockEditScreen` passes `false` (a fixed `y = 72`). There is no
+  fallback direction to implement.
+
+Deliberately left: vanilla's grey **usage box** (`extractUsage`, the
+`commandUsage` lines shown when there is no list), which needs Brigadier's
+`getSmartUsage` over a whole subtree — a second walker, not a draw. The tooltip
+panel is flat rather than `TooltipRenderUtil`'s gradient. And *dynamic*
+mid-typing suggestions are unreachable rather than unbuilt: a client only asks
+the server when a node declares a suggestion provider, and this project's server
+declares none, so against our own server the popup shows static tree suggestions
+only. Against a real vanilla server (126 provider ids in its own tree) the round
+trip runs.
+
+Geometry lives in `hud.rs`, not `chat.rs`, because it needs glyph advances —
+`chat.rs` deliberately owns no font metrics. `hud::suggestion_layout` is the one
+expression, and `HudRenderer::suggestion_layout` is how the pointer hit-test
+reaches it with the same font, so a click cannot land on a row the player is not
+looking at.
 
 Two properties are worth keeping when this changes:
 
@@ -193,7 +237,10 @@ Two properties are worth keeping when this changes:
 - **`apply_suggestions` is safe to poll every frame**: the id match consumes
   the pending request, so the second poll of the same response is stale by
   construction. That is what lets the frame loop read the cell like every other
-  `net` cell rather than needing a queue.
+  `net` cell rather than needing a queue. It **raises the dropdown and does not
+  edit the line** — vanilla's async reply ends in `showSuggestions(false)`, and a
+  reply that rewrote the line under a player still typing is exactly what the
+  popup exists to avoid.
 
 Tab reaches `handle_chat_key` at all because `input::resolve_key`
 short-circuits on `gate.chat_open` before any gameplay binding — the
