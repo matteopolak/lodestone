@@ -533,6 +533,49 @@ fn publish_openable_sound(out: &BlockTickFeed, pos: BlockPos, from: &str, to: &s
     }
 }
 
+/// Publishes the moving block entity for a cell a piston move just filled.
+///
+/// A `moving_piston` block state is `INVISIBLE` and says nothing about *which*
+/// block is travelling through it, so a client that receives only the block update
+/// has a cell it knows is animating and no geometry to animate. The record it needs
+/// is read back out of the pending commit tick at that same cell — the pending tick
+/// *is* this crate's `PistonMovingBlockEntity`; see `crate::piston::finish_kind` for
+/// why it lives there rather than in a block-entity map.
+///
+/// **The wire ordering this depends on is the drain order in `crate::server`**, not
+/// the call order here: block changes are drained before the effect lane, so the
+/// `block_update` that establishes the `moving_piston` state always precedes this
+/// record even though a caller publishes them the other way round. That matters
+/// because the client's own `sync_block_entity` creates the record the state write
+/// implies, and this then fills it in.
+///
+/// A no-op for any other state, so a caller can hand it every block change it
+/// publishes without testing first.
+fn publish_moving_piston(
+    out: &BlockTickFeed,
+    block_ticks: &crate::scheduled_tick::ScheduledTickQueue<String>,
+    x: i32,
+    y: i32,
+    z: i32,
+    state: &str,
+) {
+    if !crate::piston::is_moving_piston(state) {
+        return;
+    }
+    let Some(entity) = block_ticks
+        .iter()
+        .find(|pending| pending.pos == (x, y, z) && crate::piston::is_finish_kind(&pending.kind))
+        .and_then(|pending| crate::piston::parse_finish_kind(&pending.kind))
+    else {
+        return;
+    };
+    out.publish_effect(crate::effects::WorldEffect::BlockEntityData {
+        pos: BlockPos::new(x, y, z),
+        block_entity_type: crate::piston::PISTON_BLOCK_ENTITY.to_string(),
+        nbt: crate::block_entities::moving_piston_nbt(&entity),
+    });
+}
+
 /// How far behind wall-clock schedule the loop must fall before it gives up
 /// trying to catch up and forgives the backlog, matching vanilla's
 /// `runServer` overload check
@@ -1607,6 +1650,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     ) {
                         let (ex, ey, ez) = event.pos;
                         world.set_block(ex, ey, ez, &event.to);
+                        publish_moving_piston(&block_tick_out, &block_ticks, ex, ey, ez, &event.to);
                         block_tick_out.publish(ex, ey, ez, event.to);
                     }
                 }
@@ -1648,6 +1692,21 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 // above — a pure decision on the state, re-propagated below — so a
                 // button feeding a door closes it again when the button pops up.
                 crate::hand_use::release_button(&state)
+            } else if crate::piston::is_finish_kind(&due.kind) {
+                // The second phase of a piston move —
+                // `PistonMovingBlockEntity.tick`'s commit branch. The state to write
+                // travels in the tick's own kind, because the pending tick *is* this
+                // crate's moving block entity (see `piston::finish_kind`).
+                //
+                // Vanilla's `if (level.getBlockState(pos).is(Blocks.MOVING_PISTON))`
+                // guard is reproduced: anything else already rewrote this cell (a
+                // player broke it, a second move claimed it), and committing over
+                // that would resurrect a block from a move that no longer exists.
+                if crate::piston::is_moving_piston(&state) {
+                    crate::piston::parse_finish_kind(&due.kind).map(|entity| entity.moved_state)
+                } else {
+                    None
+                }
             } else {
                 // No other block-tick behaviour is modeled — see this
                 // function's own doc comment.
@@ -1669,6 +1728,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     let (ex, ey, ez) = event.pos;
                     publish_openable_sound(&block_tick_out, BlockPos::new(ex, ey, ez), &event.from, &event.to, game_tick);
                     world.set_block(ex, ey, ez, &event.to);
+                    publish_moving_piston(&block_tick_out, &block_ticks, ex, ey, ez, &event.to);
                     block_tick_out.publish(ex, ey, ez, event.to);
                 }
             }
@@ -1736,6 +1796,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     for event in events {
                         let (x, y, z) = event.pos;
                         world.set_block(x, y, z, &event.to);
+                        publish_moving_piston(&block_tick_out, &block_ticks, x, y, z, &event.to);
                         block_tick_out.publish(x, y, z, event.to);
                     }
                 }
@@ -1786,6 +1847,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 ) {
                     let (ex, ey, ez) = event.pos;
                     world.set_block(ex, ey, ez, &event.to);
+                    publish_moving_piston(&block_tick_out, &block_ticks, ex, ey, ez, &event.to);
                     block_tick_out.publish(ex, ey, ez, event.to);
                 }
             }

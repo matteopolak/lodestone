@@ -1592,9 +1592,17 @@ fn react_to_notification(
         // **quasi-connectivity** — see its own doc comment for why that is not a
         // bug to be fixed.
         //
-        // What this does *not* do is vanilla's two-phase `moving_piston`
-        // transition: the move is applied in one step, so a 0-tick pulse cannot
-        // work and entities in the path are not shoved. Both are named in
+        // **The move is two-phase.** `crate::piston::begin_move` splits
+        // `apply_move`'s one-step writes into the cells that empty now and the cells
+        // that hold a `moving_piston` for `PISTON_MOVE_DELAY` ticks, and each of the
+        // latter schedules its own commit carrying the state it will write
+        // (`piston::finish_kind`). `crate::tick`'s scheduled-tick drain runs that
+        // commit, so the world two ticks from now is what the one-step path used to
+        // produce immediately — and in between, a client has a `moving_piston` cell
+        // and a block entity to animate.
+        //
+        // What is still missing is interruption (a pending commit runs to
+        // completion, so no 0-tick pulse) and entity shoving. Both are named in
         // `crate::piston`'s module doc; #316 stays open on them.
         if crate::piston::is_piston(&state) {
             let facing = crate::piston::piston_facing(&state);
@@ -1636,40 +1644,65 @@ fn react_to_notification(
                     want_extended,
                     sticky,
                 );
+                let start = crate::piston::begin_move(&writes, &state, n.pos, facing, want_extended);
+
+                // Destinations first, then the cells the run vacated, then the
+                // base's own immediate write — `apply_move`'s own order, kept
+                // because it is the order that never overwrites a block still
+                // waiting to move. Each entry carries the block entity to schedule,
+                // or `None` for a plain write.
+                let mut plan: Vec<(BlockPos, String, Option<crate::piston::MovingBlockEntity>)> =
+                    Vec::with_capacity(start.moving.len() + start.cleared.len() + 1);
+                for (pos, moving_state, entity) in &start.moving {
+                    plan.push((*pos, moving_state.clone(), Some(entity.clone())));
+                }
+                for pos in &start.cleared {
+                    plan.push((*pos, "minecraft:air".to_string(), None));
+                }
+                if let Some(base_now) = &start.base_now {
+                    plan.push((n.pos, base_now.clone(), None));
+                }
+
                 let mut fan_out = Vec::new();
-                for write in writes {
-                    let wlx = write.pos.x - min_x;
-                    let wlz = write.pos.z - min_z;
+                for (pos, to, entity) in plan {
+                    let wlx = pos.x - min_x;
+                    let wlz = pos.z - min_z;
                     if !(0..16).contains(&wlx)
                         || !(0..16).contains(&wlz)
-                        || write.pos.y < column.min_y
-                        || write.pos.y >= column.min_y + column.height
+                        || pos.y < column.min_y
+                        || pos.y >= column.min_y + column.height
                     {
+                        // Out of this column, so the `moving_piston` write cannot
+                        // happen — and the commit must not be scheduled either, or a
+                        // cell that never animated would still be rewritten two ticks
+                        // late. Same border limit the module doc already records for
+                        // the whole redstone family.
                         continue;
                     }
-                    let from = column.block_state(wlx, write.pos.y, wlz).to_string();
-                    if from == write.to {
+                    // A pending commit is scheduled even when the state write is a
+                    // no-op: the write is idempotent (a cell already holding this
+                    // exact `moving_piston` state) but the commit is what actually
+                    // moves the block, so skipping it would strand the cell.
+                    if let Some(entity) = &entity {
+                        block_ticks.schedule(
+                            (pos.x, pos.y, pos.z),
+                            crate::piston::finish_kind(entity),
+                            current_tick + crate::piston::PISTON_MOVE_DELAY,
+                            TickPriority::Normal,
+                        );
+                    }
+                    let from = column.block_state(wlx, pos.y, wlz).to_string();
+                    if from == to {
                         continue;
                     }
-                    column.set_block(wlx, write.pos.y, wlz, &write.to);
+                    column.set_block(wlx, pos.y, wlz, &to);
                     events.push(RandomTickEvent {
-                        pos: (write.pos.x, write.pos.y, write.pos.z),
+                        pos: (pos.x, pos.y, pos.z),
                         from,
-                        to: write.to.clone(),
+                        to,
                     });
-                    fan_out.push(Notification { pos: write.pos, from: Direction::Down });
+                    fan_out.push(Notification { pos, from: Direction::Down });
                 }
-                let new_state = redstone::with_property(
-                    &state,
-                    "extended",
-                    if want_extended { "true" } else { "false" },
-                );
-                column.set_block(tlx, n.pos.y, tlz, &new_state);
-                events.push(RandomTickEvent {
-                    pos: (n.pos.x, n.pos.y, n.pos.z),
-                    from: state,
-                    to: new_state,
-                });
                 return fan_out;
             }
             return Vec::new();

@@ -38,21 +38,34 @@
 //! on it, and dropping it as "surely a bug" is how a port loses half the
 //! contraptions.
 //!
+//! **4. The two-phase move.** [`begin_move`] and [`finish_move`] split
+//! [`apply_move`]'s one-step writes into vanilla's `moving_piston` phase and its
+//! commit, [`PISTON_MOVE_DELAY`] ticks later. The second phase is *derived from*
+//! the one-step writes rather than recomputed, so the world two ticks after a push
+//! is byte-identical to what the one-step path produced — the property
+//! `two_phase_world_matches_the_one_step_path` asserts cell by cell.
+//!
 //! ## What is deliberately not here, and why #316 stays open
 //!
-//! **The two-phase `MovingPistonBlock` transition is not modelled.** Vanilla
-//! replaces the head cell with a `moving_piston` block entity for the duration of
-//! the animation and finishes the move on a later tick; [`apply_move`] applies the
-//! final positions in one step. Consequences, all named rather than discovered:
+//! The intermediate state now exists, so the two consequences that depended on
+//! its absence are gone: a client is sent a real `moving_piston` cell plus its
+//! block entity and animates the travel. What is still missing:
 //!
-//! * A **0-tick pulse** generator depends on the piston being retracted *during*
-//!   its own extension, which needs the intermediate `moving_piston` state to exist
-//!   and be interruptible. It cannot work here.
-//! * `TRIGGER_DROP` (block event 2, the "the head is mid-extension, drop it"
-//!   case) has no distinct behaviour, because there is never a mid-extension.
+//! * **A move is not interruptible.** Vanilla's `triggerEvent` calls `finalTick()`
+//!   on a block entity it finds mid-animation and can start a second move in the
+//!   same tick; here a pending commit runs to completion. A **0-tick pulse**
+//!   depends on exactly that interruption, so it still cannot work.
+//! * `TRIGGER_DROP` (block event 2) has no distinct behaviour: nothing routes a
+//!   piston block *event* at all, so the "head is mid-extension, drop it" case is
+//!   unreachable rather than merely unimplemented.
 //! * Entities in the push path are not shoved: that is `PistonMovingBlockEntity`'s
-//!   `moveEntities`, which needs the same intermediate state plus an entity AABB
-//!   sweep this crate has no piston-aware collision pass for.
+//!   `moveCollidedEntities`/`moveStuckEntities`, which needs an entity AABB sweep
+//!   this crate has no piston-aware collision pass for. The intermediate state it
+//!   wanted is no longer the blocker; the collision pass is.
+//! * A `moving_piston` cell has **no collision shape** here. Vanilla's
+//!   `MovingPistonBlock.getCollisionShape` delegates to the block entity's
+//!   interpolated shape, so a player rides a moving block; here the cell is empty
+//!   for two ticks and a player standing on a pushed block briefly falls through.
 //!
 //! **A push cannot cross a chunk border.** [`crate::random_tick`]'s reaction
 //! surface is column-local (`redstone::make_lookup` reads air outside its own
@@ -70,9 +83,14 @@
 //! * **Do not "simplify" [`reorder_at_collision`].** It is three sublist splices
 //!   in a specific order and the order is the behaviour.
 //! * **Do not drop the `pos.above()` loop from [`has_extend_signal`].** See above.
-//! * To model the animation, the missing piece is a `moving_piston` block entity in
-//!   [`crate::block_entities`] plus a two-stage scheduled tick, not a change here:
-//!   [`resolve`] already answers the question the second stage would ask.
+//! * **Do not compute [`finish_move`]'s writes from [`resolve`] again.** They are a
+//!   projection of [`apply_move`]'s output on purpose; recomputing them is how the
+//!   animated path and the one-step path drift apart, and the drift would be
+//!   invisible for every shape whose resolution happens to be stable.
+//! * The commit is carried in the scheduled tick's *kind* string
+//!   ([`finish_kind`]/[`parse_finish_kind`]), because the reaction surface a move
+//!   runs on holds no block-entity map. Changing the encoding means changing both
+//!   halves and the round-trip test between them.
 //!
 //! ## Dependencies
 //!
@@ -82,7 +100,12 @@
 
 use lodestone_model::BlockPos;
 
-use crate::neighbor_update::{ALL_DIRECTIONS, Direction};
+use crate::neighbor_update::ALL_DIRECTIONS;
+// Re-exported: `MovingBlockEntity` and `piston_facing` both name this type in
+// their public signatures, and `neighbor_update` itself is crate-private, so
+// without this an outside caller (the v770 server protocol, which has to encode
+// a moving piston's record) can hold one and never name its direction.
+pub use crate::neighbor_update::Direction;
 use crate::redstone;
 
 /// `minecraft:piston`.
@@ -705,6 +728,333 @@ pub fn facing_name(direction: Direction) -> &'static str {
     }
 }
 
+/// [`facing_name`]'s inverse, for reading a direction back out of a
+/// [`finish_kind`] string.
+#[must_use]
+pub fn direction_named(name: &str) -> Option<Direction> {
+    Some(match name {
+        "down" => Direction::Down,
+        "up" => Direction::Up,
+        "north" => Direction::North,
+        "south" => Direction::South,
+        "west" => Direction::West,
+        "east" => Direction::East,
+        _ => return None,
+    })
+}
+
+// --- the two-phase move ---------------------------------------------------
+
+/// `minecraft:moving_piston` — the block that holds a travelling cell for the
+/// duration of a move. Its own render shape is `INVISIBLE`; everything a client
+/// draws there comes from the block entity below.
+pub const MOVING_PISTON: &str = "minecraft:moving_piston";
+
+/// The `minecraft:block_entity_type` key `moving_piston` owns
+/// (`MovingPistonBlock.getTicker` names `BlockEntityTypes.PISTON`). **It is not
+/// `minecraft:moving_piston`** — the block and its block entity have different
+/// registry keys, and sending the block's name as the type id resolves to some
+/// other entity or to nothing.
+pub const PISTON_BLOCK_ENTITY: &str = "minecraft:piston";
+
+/// `PistonMovingBlockEntity.tick`'s `progress += 0.5F`, so a whole travel is two
+/// ticks of ramp.
+///
+/// The server does **not** stream this: `saveAdditional` writes `progressO`, the
+/// value at the *start* of the tick, and the wire carries it once. A client runs
+/// the ramp itself, which is why getting the seed and the two tick numbers below
+/// right is the whole of the server's job here.
+pub const PISTON_PROGRESS_SPEED: f32 = 0.5;
+
+/// The `progress` a freshly created moving block entity reports —
+/// `progressO`, which is `0.0` before the first tick advances it.
+pub const PISTON_INITIAL_PROGRESS: f32 = 0.0;
+
+/// How many ticks after the push tick a move commits: **two**.
+///
+/// Derived from `ServerLevel.tick`'s own ordering rather than guessed.
+/// `runBlockEvents` runs *before* `tickBlockEntities`, and
+/// `Level.addBlockEntityTicker` appends straight to the live list when the tick
+/// loop is not already inside it — so the block entity `moveBlocks` creates on
+/// tick `N` is ticked on tick `N` too. `PistonMovingBlockEntity.tick` then reads
+/// `progressO` and takes the ramp branch while it is below `1.0`:
+///
+/// | tick | `progressO` at entry | `progress` at exit | branch |
+/// |---|---|---|---|
+/// | `N` | 0.0 | 0.5 | ramp |
+/// | `N + 1` | 0.5 | 1.0 | ramp |
+/// | `N + 2` | 1.0 | 1.0 | **commit** — the block entity is removed and `movedState` is written |
+///
+/// So the entity is alive for three ticks and the world commits on `N + 2`. A
+/// delay of 1 would halve the animation; a delay of 3 would hold the cells empty
+/// for an extra tick.
+pub const PISTON_MOVE_DELAY: u64 = 2;
+
+/// The scheduled-tick kind prefix a pending commit runs under, in the same
+/// namespace as [`TICK_PISTON`] and [`redstone::TICK_REPEATER`].
+///
+/// A full kind carries the whole block entity after this prefix — see
+/// [`finish_kind`] — so a kind must be matched with [`is_finish_kind`] rather
+/// than compared for equality.
+pub const TICK_PISTON_FINISH: &str = "redstone:piston_finish";
+
+/// One in-flight `PistonMovingBlockEntity`: the four fields that decide both what
+/// a client draws and what the world commits.
+///
+/// `progress` is deliberately absent. It is always [`PISTON_INITIAL_PROGRESS`] at
+/// creation and the client owns the ramp from there, so storing it would be a
+/// second source of truth for a value nothing here ever changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MovingBlockEntity {
+    /// `blockState` — the state travelling through this cell, and exactly what
+    /// lands here when the move commits.
+    pub moved_state: String,
+    /// `facing` — the **piston's** facing, not the direction blocks travel. The
+    /// two differ on every retraction, and a client derives the travel direction
+    /// itself from `facing` plus `extending`
+    /// (`PistonMovingBlockEntity.getMovementDirection`).
+    pub direction: Direction,
+    /// `extending`. Also selects the sign of `getExtendedProgress`
+    /// (`extending ? p - 1 : 1 - p`).
+    pub extending: bool,
+    /// `source` (`isSourcePiston`) — whether this cell belongs to the piston
+    /// itself rather than to a block being carried. True for the arm cell of an
+    /// extension (which carries the head) and for the base cell of a retraction
+    /// (which carries the base, and is what makes a client draw the head coming
+    /// home).
+    pub source: bool,
+}
+
+impl MovingBlockEntity {
+    /// `Direction.get3DDataValue()` — the byte `Direction.LEGACY_ID_CODEC` stores
+    /// for `facing`.
+    ///
+    /// The order is vanilla's own enum declaration order, which is neither
+    /// alphabetical nor the horizontal-facing order every `*_facing` property
+    /// uses. It is a **byte** on the wire, not an int.
+    /// This entity's `getUpdateTag` payload — see
+    /// [`crate::block_entities::moving_piston_nbt`], which owns the port of
+    /// `saveAdditional`. Here so a caller outside this crate can reach it:
+    /// `block_entities` is crate-private and this type is not.
+    #[must_use]
+    pub fn update_tag(&self) -> lodestone_core::Nbt {
+        crate::block_entities::moving_piston_nbt(self)
+    }
+
+    #[must_use]
+    pub fn facing_3d_value(&self) -> i8 {
+        match self.direction {
+            Direction::Down => 0,
+            Direction::Up => 1,
+            Direction::North => 2,
+            Direction::South => 3,
+            Direction::West => 4,
+            Direction::East => 5,
+        }
+    }
+}
+
+/// The `moving_piston` block state for a cell.
+///
+/// `sticky` is the *piston's* stickiness and applies only to a `source` cell:
+/// `moveBlocks` writes plain `Blocks.MOVING_PISTON.defaultBlockState()` — i.e.
+/// `type=normal` — for every carried block, and sets `TYPE` from the piston only
+/// for the arm cell it creates itself. Nothing a client draws reads this
+/// property (it takes `type` from the *moved* state), so a wrong value here is
+/// invisible; it is reproduced because the block state is also what a chunk save
+/// and a neighbour query see.
+#[must_use]
+pub fn moving_piston_state(direction: Direction, sticky: bool) -> String {
+    format!(
+        "{MOVING_PISTON}[facing={},type={}]",
+        facing_name(direction),
+        if sticky { "sticky" } else { "normal" }
+    )
+}
+
+/// Whether `state` is a `moving_piston`.
+#[must_use]
+pub fn is_moving_piston(state: &str) -> bool {
+    redstone::base_name(state) == MOVING_PISTON
+}
+
+/// Serialises a [`MovingBlockEntity`] into a scheduled-tick kind.
+///
+/// **The pending commit tick *is* this crate's `PistonMovingBlockEntity`.** There
+/// is no per-position block-entity map on the path a piston move runs on
+/// (`crate::random_tick`'s reaction surface holds a `ChunkColumn` and a
+/// [`crate::scheduled_tick::ScheduledTickQueue`] and nothing else), and the queue
+/// is keyed by position with a free-form payload — so the queue entry carries the
+/// record, and "read the moving block entity at this cell" is "find the pending
+/// commit at this cell". [`parse_finish_kind`] is the other half.
+///
+/// `|` is the separator because a canonical block-state string can contain
+/// `:`, `[`, `]`, `,` and `=` but never a pipe.
+#[must_use]
+pub fn finish_kind(entity: &MovingBlockEntity) -> String {
+    format!(
+        "{TICK_PISTON_FINISH}|{}|{}|{}|{}",
+        facing_name(entity.direction),
+        entity.extending,
+        entity.source,
+        entity.moved_state
+    )
+}
+
+/// Whether `kind` is a pending piston commit. A prefix test, not an equality
+/// test, because [`finish_kind`] appends the record.
+#[must_use]
+pub fn is_finish_kind(kind: &str) -> bool {
+    kind.starts_with(TICK_PISTON_FINISH)
+}
+
+/// [`finish_kind`]'s inverse. `None` for any kind this did not write.
+///
+/// `splitn(4, '|')` rather than `split`: the moved state is the last field and
+/// must be taken whole even though it is the only one that could ever contain a
+/// separator, which it cannot.
+#[must_use]
+pub fn parse_finish_kind(kind: &str) -> Option<MovingBlockEntity> {
+    let rest = kind.strip_prefix(TICK_PISTON_FINISH)?.strip_prefix('|')?;
+    let mut parts = rest.splitn(4, '|');
+    let direction = direction_named(parts.next()?)?;
+    let extending = parse_bool(parts.next()?)?;
+    let source = parse_bool(parts.next()?)?;
+    let moved_state = parts.next()?;
+    if moved_state.is_empty() {
+        return None;
+    }
+    Some(MovingBlockEntity {
+        moved_state: moved_state.to_string(),
+        direction,
+        extending,
+        source,
+    })
+}
+
+fn parse_bool(text: &str) -> Option<bool> {
+    match text {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// The first phase of a move: what the world looks like *during* the animation.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MoveStart {
+    /// Cells that hold a `moving_piston` for [`PISTON_MOVE_DELAY`] ticks:
+    /// `(cell, the block state to write there, the block entity it carries)`.
+    ///
+    /// A caller writes the state, publishes the entity, and schedules
+    /// [`finish_kind`] at `current_tick + PISTON_MOVE_DELAY`.
+    pub moving: Vec<(BlockPos, String, MovingBlockEntity)>,
+    /// Cells that become air on the push tick — the run's vacated tail and any
+    /// destroyed block. Vanilla's `deleteAfterMove` loop uses flag 82, whose
+    /// `UPDATE_CLIENTS` bit is set, so these are visible immediately; only the
+    /// cells that receive something are deferred.
+    pub cleared: Vec<BlockPos>,
+    /// The piston base's own immediate write, when the base changes on the push
+    /// tick rather than on the commit tick.
+    ///
+    /// `Some` on extension (`setBlock(pos, extendedState, 67)` in
+    /// `PistonBaseBlock.triggerEvent`, immediate and client-visible) and `None`
+    /// on retraction, where the base cell is itself one of [`moving`](Self::moving)
+    /// — that is what animates the head coming home.
+    pub base_now: Option<String>,
+}
+
+/// Splits [`apply_move`]'s one-step writes into the two phases vanilla performs.
+///
+/// **Derived from `apply_move`'s output rather than recomputed**, which is what
+/// makes the second phase byte-identical to the one-step path by construction: a
+/// write whose target is air happens now, and every other write is deferred
+/// behind a `moving_piston` whose block entity carries that exact state.
+/// [`finish_move`] then replays them.
+///
+/// `piston_state` is the base's state *before* the move — its stickiness and its
+/// other properties are read off it, so a caller must not have rewritten the base
+/// cell yet.
+#[must_use]
+pub fn begin_move(
+    writes: &[MoveWrite],
+    piston_state: &str,
+    piston_pos: BlockPos,
+    direction: Direction,
+    extending: bool,
+) -> MoveStart {
+    let sticky = is_sticky_piston(piston_state);
+    let arm_pos = direction.relative(piston_pos);
+    let mut start = MoveStart::default();
+
+    for write in writes {
+        if redstone::base_name(&write.to) == "minecraft:air" {
+            start.cleared.push(write.pos);
+            continue;
+        }
+        // Only the arm cell of an extension is the piston's own: `moveBlocks`
+        // creates it with `isSourcePiston = true` and the head as its moved
+        // state, while every carried block gets `false`.
+        let source = extending && write.pos == arm_pos;
+        start.moving.push((
+            write.pos,
+            moving_piston_state(direction, source && sticky),
+            MovingBlockEntity {
+                moved_state: write.to.clone(),
+                direction,
+                extending,
+                source,
+            },
+        ));
+    }
+
+    if extending {
+        start.base_now = Some(redstone::with_property(piston_state, "extended", "true"));
+    } else {
+        // `PistonBaseBlock.triggerEvent`'s contract arm: the base cell itself
+        // becomes a `moving_piston` carrying the *base* block, which is the only
+        // record a client can draw a retracting head from
+        // (`PistonHeadRenderer`'s `isSourcePiston && !isExtending` arm builds the
+        // head from the base's own `facing` and stickiness).
+        start.moving.push((
+            piston_pos,
+            moving_piston_state(direction, sticky),
+            MovingBlockEntity {
+                moved_state: redstone::with_property(piston_state, "extended", "false"),
+                direction,
+                extending: false,
+                source: true,
+            },
+        ));
+    }
+
+    start
+}
+
+/// The second phase: the writes a commit performs, `PISTON_MOVE_DELAY` ticks
+/// after [`begin_move`].
+///
+/// Each cell commits *itself* from its own block entity — vanilla's
+/// `PistonMovingBlockEntity.tick` writes `entity.movedState` with no reference to
+/// the piston that started the move, which is why a caller can schedule one
+/// independent tick per cell rather than replaying the whole move.
+///
+/// Note this is the `tick` branch, **not** `finalTick`: `finalTick`'s
+/// `isSourcePiston` arm writes air, and it is reached only when a piston is
+/// interrupted mid-animation, never on normal completion. Using it here would
+/// delete the head of every extension.
+#[must_use]
+pub fn finish_move(start: &MoveStart) -> Vec<MoveWrite> {
+    start
+        .moving
+        .iter()
+        .map(|(pos, _, entity)| MoveWrite {
+            pos: *pos,
+            to: entity.moved_state.clone(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -945,5 +1295,639 @@ mod tests {
             !writes.iter().any(|w| w.pos == at(0, 0, 0)),
             "the base cell is the caller's to rewrite, not `apply_move`'s"
         );
+    }
+
+    // --- the two-phase move -----------------------------------------------
+    //
+    // The outside expectation for everything below is `PistonBaseBlock.moveBlocks`
+    // plus `PistonMovingBlockEntity.tick`, read as record definitions, and — for
+    // the byte-identity gate — the *already verified* one-step path. Comparing the
+    // animated path against behaviour that was gated before it existed is a
+    // legitimate outside expectation; comparing it against a fresh guess would not
+    // be.
+
+    /// A mutable fake world. Air is represented by **absence**, so two snapshots
+    /// compare equal exactly when every cell agrees — an explicit
+    /// `"minecraft:air"` entry beside a missing one would read as a mismatch and
+    /// make the byte-identity gate fail for a reason that is not about pistons.
+    type FakeWorld = std::collections::BTreeMap<(i32, i32, i32), String>;
+
+    fn fake(entries: &[(BlockPos, &str)]) -> FakeWorld {
+        entries
+            .iter()
+            .map(|(p, s)| ((p.x, p.y, p.z), (*s).to_string()))
+            .collect()
+    }
+
+    fn reader(w: &FakeWorld) -> impl Fn(BlockPos) -> String + '_ {
+        move |p: BlockPos| {
+            w.get(&(p.x, p.y, p.z))
+                .cloned()
+                .unwrap_or_else(|| "minecraft:air".to_string())
+        }
+    }
+
+    fn put(w: &mut FakeWorld, pos: BlockPos, state: &str) {
+        if redstone::base_name(state) == "minecraft:air" {
+            w.remove(&(pos.x, pos.y, pos.z));
+        } else {
+            w.insert((pos.x, pos.y, pos.z), state.to_string());
+        }
+    }
+
+    /// One move's `Resolution` and the one-step writes it produces, sharing the
+    /// exact gating `crate::random_tick`'s piston arm applies (a retraction always
+    /// happens; a normal piston does not pull).
+    fn plan_move(
+        w: &FakeWorld,
+        piston: BlockPos,
+        facing: Direction,
+        extending: bool,
+    ) -> Option<(String, Vec<MoveWrite>)> {
+        let piston_state = reader(w)(piston);
+        let sticky = is_sticky_piston(&piston_state);
+        let resolution = resolve(&reader(w), piston, facing, extending);
+        let resolution = match (extending, resolution) {
+            (true, None) => return None,
+            (_, Some(resolution)) => resolution,
+            (false, None) => Resolution {
+                to_push: Vec::new(),
+                to_destroy: Vec::new(),
+                push_direction: facing.opposite(),
+            },
+        };
+        let resolution = if extending || sticky {
+            resolution
+        } else {
+            Resolution { to_push: Vec::new(), ..resolution }
+        };
+        let writes = apply_move(&reader(w), &resolution, piston, facing, extending, sticky);
+        Some((piston_state, writes))
+    }
+
+    /// The world the **one-step** path leaves behind: every write applied at once,
+    /// then the base's `extended` flipped. This is the arm that was already gated
+    /// before the animation existed, and it is the expectation the two-phase path
+    /// has to land on.
+    fn one_step_world(
+        setup: &[(BlockPos, &str)],
+        piston: BlockPos,
+        facing: Direction,
+        extending: bool,
+    ) -> FakeWorld {
+        let mut w = fake(setup);
+        let (piston_state, writes) =
+            plan_move(&w, piston, facing, extending).expect("the move must resolve");
+        for write in &writes {
+            put(&mut w, write.pos, &write.to);
+        }
+        let flag = if extending { "true" } else { "false" };
+        let base = redstone::with_property(&piston_state, "extended", flag);
+        put(&mut w, piston, &base);
+        w
+    }
+
+    /// The world **during** the animation and the world after the commit.
+    fn two_phase_worlds(
+        setup: &[(BlockPos, &str)],
+        piston: BlockPos,
+        facing: Direction,
+        extending: bool,
+    ) -> (FakeWorld, FakeWorld, MoveStart) {
+        let mut w = fake(setup);
+        let (piston_state, writes) =
+            plan_move(&w, piston, facing, extending).expect("the move must resolve");
+        let start = begin_move(&writes, &piston_state, piston, facing, extending);
+        for pos in &start.cleared {
+            put(&mut w, *pos, "minecraft:air");
+        }
+        for (pos, moving_state, _) in &start.moving {
+            put(&mut w, *pos, moving_state);
+        }
+        if let Some(base_now) = &start.base_now {
+            put(&mut w, piston, base_now);
+        }
+        let mid = w.clone();
+        for write in finish_move(&start) {
+            put(&mut w, write.pos, &write.to);
+        }
+        (mid, w, start)
+    }
+
+    /// Every cell on which two worlds disagree, as
+    /// `(pos, left, right)`. **Collected rather than asserted in the loop**: an
+    /// `assert!` inside the walk would report one cell and leave the rest as
+    /// argument, and the control below needs to know *how many* disagree.
+    fn mismatches(
+        left: &FakeWorld,
+        right: &FakeWorld,
+    ) -> Vec<((i32, i32, i32), Option<String>, Option<String>)> {
+        let keys: std::collections::BTreeSet<(i32, i32, i32)> =
+            left.keys().chain(right.keys()).copied().collect();
+        keys.into_iter()
+            .filter(|k| left.get(k) != right.get(k))
+            .map(|k| (k, left.get(&k).cloned(), right.get(&k).cloned()))
+            .collect()
+    }
+
+    /// The four shapes every gate below runs, as
+    /// `(name, setup, piston, facing, extending)`.
+    ///
+    /// **A one-block push cannot separate the lifecycle from a snap**, so none of
+    /// these is one: the shortest run here is two cells, and each shape exercises
+    /// a different limb of `apply_move` (a plain run, a destroyed head, a sticky
+    /// branch, a retraction whose moving cell is the base itself).
+    ///
+    /// The last field is the number of cells the move must **defer** behind a
+    /// `moving_piston`, hand-derived from `apply_move`'s own write list per shape
+    /// (destinations, plus the arm on an extension, plus the base on a retraction).
+    /// It is stated here rather than read back off `begin_move` on purpose: a
+    /// control whose expected count comes from the code under test is satisfied by
+    /// a `begin_move` that defers nothing at all.
+    #[allow(clippy::type_complexity)]
+    fn scenarios(
+    ) -> Vec<(&'static str, Vec<(BlockPos, &'static str)>, BlockPos, Direction, bool, usize)> {
+        vec![
+            (
+                "three blocks pushed east",
+                vec![
+                    (at(0, 0, 0), "minecraft:piston[extended=false,facing=east]"),
+                    (at(1, 0, 0), "minecraft:stone"),
+                    (at(2, 0, 0), "minecraft:dirt"),
+                    (at(3, 0, 0), "minecraft:gravel"),
+                ],
+                at(0, 0, 0),
+                Direction::East,
+                true,
+                // three destinations (2,3,4) plus the arm cell (1).
+                4,
+            ),
+            (
+                "two blocks pushed into a torch that is destroyed",
+                vec![
+                    (at(0, 0, 0), "minecraft:piston[extended=false,facing=east]"),
+                    (at(1, 0, 0), "minecraft:stone"),
+                    (at(2, 0, 0), "minecraft:dirt"),
+                    (at(3, 0, 0), "minecraft:torch"),
+                ],
+                at(0, 0, 0),
+                Direction::East,
+                true,
+                // two destinations (2,3) plus the arm cell (1). Cell 3 is written
+                // twice by `apply_move` — air for the destroyed torch, then the
+                // block that lands on it — and must end up deferred, not empty.
+                3,
+            ),
+            (
+                "a sticky run dragging a perpendicular neighbour",
+                vec![
+                    (at(0, 0, 0), "minecraft:sticky_piston[extended=false,facing=east]"),
+                    (at(1, 0, 0), SLIME_BLOCK),
+                    (at(2, 0, 0), "minecraft:stone"),
+                    (at(1, 1, 0), "minecraft:dirt"),
+                ],
+                at(0, 0, 0),
+                Direction::East,
+                true,
+                // destinations (2,0,0), (3,0,0), (2,1,0) plus the arm cell (1,0,0);
+                // the dragged neighbour's own cell (1,1,0) empties immediately.
+                4,
+            ),
+            (
+                "a sticky retraction pulling two blocks home",
+                vec![
+                    (at(0, 0, 0), "minecraft:sticky_piston[extended=true,facing=east]"),
+                    (at(1, 0, 0), "minecraft:piston_head[facing=east,short=false,type=sticky]"),
+                    (at(2, 0, 0), SLIME_BLOCK),
+                    (at(3, 0, 0), "minecraft:stone"),
+                ],
+                at(0, 0, 0),
+                Direction::East,
+                false,
+                // destinations (1,0,0) and (2,0,0), plus the **base** cell (0,0,0),
+                // which is what animates on a retraction.
+                3,
+            ),
+        ]
+    }
+
+    /// **The invariant that makes the animation safe to ship**: the world
+    /// [`PISTON_MOVE_DELAY`] ticks after a push is identical, cell for cell, to the
+    /// world the one-step path produced immediately.
+    ///
+    /// The control is the *same comparison against the mid-animation world*, which
+    /// must fail — and it is not decoration. Without it this gate is satisfied by a
+    /// [`begin_move`] that simply applies everything at once and a [`finish_move`]
+    /// that writes nothing, which is precisely the bug it exists to forbid.
+    #[test]
+    fn the_two_phase_world_matches_the_one_step_path_cell_for_cell() {
+        let mut failures: Vec<String> = Vec::new();
+        for (name, setup, piston, facing, extending, deferred) in scenarios() {
+            let one = one_step_world(&setup, piston, facing, extending);
+            let (mid, two, start) = two_phase_worlds(&setup, piston, facing, extending);
+
+            let after = mismatches(&one, &two);
+            if !after.is_empty() {
+                failures.push(format!(
+                    "{name}: the committed world differs from the one-step world at \
+                     {} cell(s): {after:?}",
+                    after.len()
+                ));
+            }
+
+            // Control. Every cell that is going to receive a block must hold
+            // `moving_piston` mid-animation and *not* the final block — otherwise a
+            // client has nothing left to animate, which is the same defect shape as
+            // a correct packet sent in the wrong order. The count is predicted, not
+            // merely required to be non-zero: it is exactly the number of cells
+            // `begin_move` deferred.
+            if start.moving.len() != deferred {
+                failures.push(format!(
+                    "{name}: expected {deferred} deferred cell(s), got {}",
+                    start.moving.len()
+                ));
+            }
+            let during = mismatches(&one, &mid);
+            if during.len() != deferred {
+                failures.push(format!(
+                    "{name}: expected the mid-animation world to differ from the final \
+                     world at exactly {deferred} deferred cell(s), got {}: {during:?}",
+                    during.len()
+                ));
+            }
+            for (pos, _, mid_state) in &during {
+                let held = mid_state.as_deref().unwrap_or("(air)");
+                if !is_moving_piston(held) {
+                    failures.push(format!(
+                        "{name}: cell {pos:?} differs mid-animation but holds {held}, \
+                         not a moving_piston"
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The commit is scheduled **exactly two ticks** after the push, driven through
+    /// the real reaction surface and the real queue rather than by calling
+    /// [`begin_move`] directly.
+    ///
+    /// The two hypotheses are separated by construction: a delay of 1 puts every
+    /// commit on `PUSH + 1` and a delay of 2 puts it on `PUSH + 2`, so both of
+    /// those ticks are asserted — the first empty, the second full. A gate that
+    /// only checked "it eventually commits" passes under either.
+    ///
+    /// `PUSH` is 40 rather than 0 deliberately: at tick 0 an absolute due-tick and
+    /// a relative delay are the same number, which is the coincidence that lets a
+    /// rebasing bug through.
+    #[test]
+    fn a_push_schedules_its_commits_two_ticks_out_and_not_one() {
+        use crate::chunk::ChunkColumn;
+        use crate::scheduled_tick::ScheduledTickQueue;
+
+        const PUSH: u64 = 40;
+
+        let mut column = ChunkColumn::new(0, 16);
+        // A piston at (4,5,4) facing east with three blocks in front of it, and a
+        // lit redstone torch directly beside the base so `has_extend_signal` fires
+        // on the ordinary adjacency path rather than through quasi-connectivity.
+        column.set_block(4, 5, 4, "minecraft:piston[extended=false,facing=east]");
+        column.set_block(5, 5, 4, "minecraft:stone");
+        column.set_block(6, 5, 4, "minecraft:dirt");
+        column.set_block(7, 5, 4, "minecraft:gravel");
+        column.set_block(4, 5, 5, "minecraft:redstone_torch[lit=true]");
+
+        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let events =
+            crate::random_tick::propagate_and_react(&mut column, 0, 0, 4, 5, 5, &mut queue, PUSH);
+
+        // The push happened *now*: **four** cells hold moving_piston, not three.
+        // The arm cell is one of them — the head is a travelling block like any
+        // other, so it animates rather than appearing instantly. Predicting three
+        // (one per pushed block) is the plausible-looking wrong answer, and this
+        // gate failed on it first time.
+        let moving_now: Vec<(i32, i32, i32)> = events
+            .iter()
+            .filter(|e| is_moving_piston(&e.to))
+            .map(|e| e.pos)
+            .collect();
+        assert_eq!(
+            moving_now,
+            vec![(8, 5, 4), (7, 5, 4), (6, 5, 4), (5, 5, 4)],
+            "every destination cell including the arm must hold a moving_piston on \
+             the push tick, far end first; got {events:?}"
+        );
+        assert_eq!(
+            column.block_state(5, 5, 4),
+            "minecraft:moving_piston[facing=east,type=normal]",
+            "the arm cell holds the animating head, not the head itself, until the commit"
+        );
+        assert_eq!(
+            column.block_state(4, 5, 4),
+            "minecraft:piston[extended=true,facing=east]",
+            "the base alone flips immediately on an extension"
+        );
+
+        // Nothing is due on the push tick or the one after it. The queue is
+        // non-empty throughout, so these are absences of *piston* work rather than
+        // an empty queue reporting a vacuous pass.
+        assert!(!queue.is_empty(), "the push must have scheduled something at all");
+        let mut per_tick: Vec<(u64, usize)> = Vec::new();
+        for tick in PUSH..=PUSH + 3 {
+            let due = queue.drain_due(tick, 256);
+            let commits = due.iter().filter(|t| is_finish_kind(&t.kind)).count();
+            per_tick.push((tick, commits));
+            if tick == PUSH + PISTON_MOVE_DELAY {
+                // …and each due entry really does carry a parseable record, which is
+                // what `crate::tick`'s commit arm reads.
+                let states: Vec<String> = due
+                    .iter()
+                    .filter(|t| is_finish_kind(&t.kind))
+                    .map(|t| parse_finish_kind(&t.kind).expect("a parseable record").moved_state)
+                    .collect();
+                assert!(
+                    states.contains(&"minecraft:gravel".to_string())
+                        && states.contains(&"minecraft:dirt".to_string())
+                        && states.contains(&"minecraft:stone".to_string())
+                        && states.contains(
+                            &"minecraft:piston_head[facing=east,short=false,type=normal]"
+                                .to_string()
+                        ),
+                    "the commits must carry the four travelling states; got {states:?}"
+                );
+            }
+        }
+        assert_eq!(
+            per_tick,
+            vec![(PUSH, 0), (PUSH + 1, 0), (PUSH + 2, 4), (PUSH + 3, 0)],
+            "four cells must commit on PUSH + 2 and on no other tick"
+        );
+    }
+
+    /// The **placement/hand-use path** carries the commits too, with the delay
+    /// intact — the path a player's own right-click reaches.
+    ///
+    /// The trigger is a redstone torch, not a lever, and that is a finding rather
+    /// than a convenience: `redstone::is_signal_source` is
+    /// `torch || diode || observer`, and `weak_signal`/`direct_signal` have no arm
+    /// for a `powered=true` lever, button or pressure plate at all. So those three
+    /// emit **no signal** in this crate and cannot drive a piston — a pre-existing
+    /// gap in the redstone model, not in the move. A gate written around a lever
+    /// here reads as "the piston is broken".
+    ///
+    /// `crate::server::propagate_placement` runs `react_at_placement` at
+    /// `current_tick = 0` and hands the drained batch to the tick loop to *rebase*,
+    /// so for that hand-over to preserve two ticks the `trigger_tick` in the batch
+    /// must be the relative delay itself. Asserting the absolute due tick from the
+    /// other gate would pass here for the wrong reason.
+    ///
+    /// This is also the gate that stops `crate::server::moving_piston_records` from
+    /// being an island: it filters exactly this batch, so an empty batch would make
+    /// it return nothing forever with nothing red.
+    #[test]
+    fn the_placement_path_carries_the_commits_with_the_delay_intact() {
+        use crate::chunk::ChunkColumn;
+        use crate::scheduled_tick::ScheduledTickQueue;
+
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(4, 5, 4, "minecraft:piston[extended=false,facing=east]");
+        column.set_block(5, 5, 4, "minecraft:stone");
+        column.set_block(6, 5, 4, "minecraft:dirt");
+        column.set_block(4, 5, 5, "minecraft:redstone_torch[lit=true]");
+
+        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        // Exactly `propagate_placement`'s own two calls, in its own order.
+        let _ = crate::random_tick::react_at_placement(&mut column, 0, 0, 4, 5, 5, &mut queue, 0);
+        let batch = queue.drain_due(u64::MAX, usize::MAX);
+
+        let commits: Vec<(&(i32, i32, i32), u64, String)> = batch
+            .iter()
+            .filter(|pending| is_finish_kind(&pending.kind))
+            .map(|pending| {
+                (
+                    &pending.pos,
+                    pending.trigger_tick,
+                    parse_finish_kind(&pending.kind)
+                        .expect("a parseable record")
+                        .moved_state,
+                )
+            })
+            .collect();
+
+        // Three cells: destinations (6,5,4) and (7,5,4) plus the arm (5,5,4).
+        assert_eq!(
+            commits.len(),
+            3,
+            "the placement path must schedule one commit per moving cell; got {batch:?}"
+        );
+        let mut wrong_delay: Vec<(&(i32, i32, i32), u64)> = Vec::new();
+        for (pos, trigger_tick, _) in &commits {
+            if *trigger_tick != PISTON_MOVE_DELAY {
+                wrong_delay.push((pos, *trigger_tick));
+            }
+        }
+        assert!(
+            wrong_delay.is_empty(),
+            "every commit's trigger_tick must be the relative delay {PISTON_MOVE_DELAY}, \
+             because the tick loop rebases it; wrong: {wrong_delay:?}"
+        );
+        let mut states: Vec<&str> = commits.iter().map(|(_, _, s)| s.as_str()).collect();
+        states.sort_unstable();
+        assert_eq!(
+            states,
+            vec![
+                "minecraft:dirt",
+                "minecraft:piston_head[facing=east,short=false,type=normal]",
+                "minecraft:stone",
+            ]
+        );
+        // And the cells really are holding `moving_piston` right now, so the records
+        // above have a state to attach to.
+        for x in [5, 6, 7] {
+            assert!(
+                is_moving_piston(column.block_state(x, 5, 4)),
+                "cell ({x},5,4) holds {} rather than a moving_piston",
+                column.block_state(x, 5, 4)
+            );
+        }
+    }
+
+    /// [`finish_kind`] round-trips, including a moved state carrying every
+    /// punctuation a canonical state string can hold.
+    ///
+    /// The four fields are given **pairwise-distinguishable** values on purpose:
+    /// `extending` and `source` differ, so a transposition of the two adjacent
+    /// booleans cannot survive, and the direction is one whose name is not a prefix
+    /// of any other.
+    #[test]
+    fn a_finish_kind_round_trips_and_a_foreign_kind_does_not_parse() {
+        let entity = MovingBlockEntity {
+            moved_state: "minecraft:piston_head[facing=west,short=true,type=sticky]".to_string(),
+            direction: Direction::North,
+            extending: false,
+            source: true,
+        };
+        let kind = finish_kind(&entity);
+        assert!(is_finish_kind(&kind), "{kind} must be recognised as a commit");
+        assert_eq!(parse_finish_kind(&kind).as_ref(), Some(&entity));
+
+        // Controls: the parser must decline everything it did not write, or
+        // `crate::tick`'s commit arm would try to write a state out of a repeater's
+        // scheduled tick.
+        assert_eq!(parse_finish_kind(redstone::TICK_REPEATER), None);
+        assert_eq!(parse_finish_kind(TICK_PISTON), None);
+        assert!(!is_finish_kind(redstone::TICK_REPEATER));
+        assert_eq!(parse_finish_kind(TICK_PISTON_FINISH), None, "the prefix alone is not a record");
+        assert_eq!(
+            parse_finish_kind("redstone:piston_finish|north|false|true|"),
+            None,
+            "an empty moved state is not a record"
+        );
+        assert_eq!(
+            parse_finish_kind("redstone:piston_finish|nowhere|false|true|minecraft:stone"),
+            None,
+            "an unknown direction is not a record"
+        );
+
+        // `facing_name`/`direction_named` must be a real bijection over all six —
+        // a table missing one arm would make that direction's pistons unparseable
+        // and silently strand them mid-animation.
+        for direction in ALL_DIRECTIONS {
+            assert_eq!(direction_named(facing_name(direction)), Some(direction));
+        }
+    }
+
+    /// `source` is set for the piston's **own** cell and nothing else, and which
+    /// cell that is differs between an extension and a retraction. Getting it wrong
+    /// makes a client draw an ordinary block where a head belongs.
+    #[test]
+    fn only_the_pistons_own_cell_is_a_source() {
+        let extend = fake(&[
+            (at(0, 0, 0), "minecraft:sticky_piston[extended=false,facing=east]"),
+            (at(1, 0, 0), "minecraft:stone"),
+            (at(2, 0, 0), "minecraft:dirt"),
+        ]);
+        let (piston_state, writes) =
+            plan_move(&extend, at(0, 0, 0), Direction::East, true).expect("resolves");
+        let start = begin_move(&writes, &piston_state, at(0, 0, 0), Direction::East, true);
+        let sources: Vec<BlockPos> = start
+            .moving
+            .iter()
+            .filter(|(_, _, e)| e.source)
+            .map(|(pos, _, _)| *pos)
+            .collect();
+        assert_eq!(
+            sources,
+            vec![at(1, 0, 0)],
+            "on an extension exactly the arm cell is the source"
+        );
+        let (_, moving_state, arm) = start
+            .moving
+            .iter()
+            .find(|(pos, _, _)| *pos == at(1, 0, 0))
+            .expect("the arm cell moves");
+        assert_eq!(
+            arm.moved_state,
+            "minecraft:piston_head[facing=east,short=false,type=sticky]"
+        );
+        assert!(arm.extending);
+        assert_eq!(
+            moving_state, "minecraft:moving_piston[facing=east,type=sticky]",
+            "`moveBlocks` sets TYPE from the piston only for the cell it creates itself"
+        );
+        let carried = start
+            .moving
+            .iter()
+            .find(|(pos, _, _)| *pos == at(2, 0, 0))
+            .expect("the run's first block moves");
+        assert_eq!(
+            carried.1, "minecraft:moving_piston[facing=east,type=normal]",
+            "a carried block gets the default TYPE, not the piston's"
+        );
+        assert_eq!(
+            start.base_now.as_deref(),
+            Some("minecraft:sticky_piston[extended=true,facing=east]"),
+            "an extension flips the base immediately"
+        );
+
+        let retract = fake(&[
+            (at(0, 0, 0), "minecraft:sticky_piston[extended=true,facing=east]"),
+            (at(1, 0, 0), "minecraft:piston_head[facing=east,short=false,type=sticky]"),
+            (at(2, 0, 0), SLIME_BLOCK),
+        ]);
+        let (piston_state, writes) =
+            plan_move(&retract, at(0, 0, 0), Direction::East, false).expect("resolves");
+        let start = begin_move(&writes, &piston_state, at(0, 0, 0), Direction::East, false);
+        assert_eq!(
+            start.base_now, None,
+            "a retraction does not write the base now — the base is what animates"
+        );
+        let (pos, moving_state, base) = start
+            .moving
+            .iter()
+            .find(|(_, _, e)| e.source)
+            .expect("a retraction has a source cell");
+        assert_eq!(*pos, at(0, 0, 0), "and it is the base cell, not the arm");
+        assert_eq!(moving_state, "minecraft:moving_piston[facing=east,type=sticky]");
+        assert!(!base.extending);
+        assert_eq!(
+            base.moved_state, "minecraft:sticky_piston[extended=false,facing=east]",
+            "the base's own retracted state is what commits, and it is the record \
+             `PistonHeadRenderer` builds a homecoming head from"
+        );
+    }
+
+    /// The seed a client is given is `0.0`, and that is the value at which the two
+    /// readings of `getExtendedProgress` are **furthest apart**: `p - 1` is `-1.0`
+    /// and `1 - p` is `+1.0`, a whole cell in opposite directions. At `p = 0.5` they
+    /// agree in magnitude, which is why nothing here is gated at 0.5.
+    ///
+    /// So `extending` is the only thing that tells a client which way a block is
+    /// travelling, and it must survive into the record for both directions.
+    #[test]
+    fn the_progress_seed_is_zero_and_extending_distinguishes_the_two_directions() {
+        assert_eq!(PISTON_INITIAL_PROGRESS, 0.0);
+        assert_eq!(PISTON_PROGRESS_SPEED, 0.5);
+        // Two ticks of ramp at 0.5 lands exactly on 1.0, which is what makes the
+        // third tick's `progressO >= 1.0` commit branch fire.
+        assert_eq!(
+            PISTON_INITIAL_PROGRESS + PISTON_PROGRESS_SPEED * PISTON_MOVE_DELAY as f32,
+            1.0
+        );
+        for (extending, expected_offset) in [(true, -1.0_f32), (false, 1.0_f32)] {
+            let signed = if extending {
+                PISTON_INITIAL_PROGRESS - 1.0
+            } else {
+                1.0 - PISTON_INITIAL_PROGRESS
+            };
+            assert_eq!(
+                signed, expected_offset,
+                "at the seed the two directions differ by a whole cell"
+            );
+        }
+    }
+
+    /// `Direction.get3DDataValue()` for all six, against vanilla's own enum
+    /// declaration order. Pairwise distinct, and every value differs from what an
+    /// alphabetical or horizontal-facing ordering would produce for at least one
+    /// direction — which is the ordering a hand-count reaches for.
+    #[test]
+    fn facing_3d_values_follow_vanillas_declaration_order() {
+        let of = |direction| MovingBlockEntity {
+            moved_state: "minecraft:stone".to_string(),
+            direction,
+            extending: true,
+            source: false,
+        }
+        .facing_3d_value();
+        assert_eq!(of(Direction::Down), 0);
+        assert_eq!(of(Direction::Up), 1);
+        assert_eq!(of(Direction::North), 2);
+        assert_eq!(of(Direction::South), 3);
+        assert_eq!(of(Direction::West), 4);
+        assert_eq!(of(Direction::East), 5);
+        // The alphabetical ordering a hand-count produces is
+        // down/east/north/south/up/west, which puts EAST at 1 rather than 5.
+        assert_ne!(of(Direction::East), 1, "this is not the alphabetical ordering");
     }
 }

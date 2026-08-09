@@ -4917,8 +4917,10 @@ where
                 // redstone model is correct and unreachable from a player's hand,
                 // which is precisely the state #314/#315/#319 were left in.
                 let mut changed: Vec<(BlockPos, String)> = Vec::new();
+                let mut piston_records: Vec<(BlockPos, lodestone_core::Nbt)> = Vec::new();
                 for p in &fanout {
                     let (mut more, scheduled) = propagate_placement(source, *p);
+                    piston_records.extend(moving_piston_records(&scheduled));
                     block_ticks.request_scheduled_ticks(scheduled);
                     changed.append(&mut more);
                 }
@@ -4949,6 +4951,14 @@ where
                 for p in notify {
                     let current = source.block_state(p.x, p.y, p.z);
                     apply(conn, state, proto.encode_block_update(p.x, p.y, p.z, &current)).await?;
+                    if let Some((_, nbt)) = piston_records.iter().find(|(pos, _)| *pos == p) {
+                        let directive = proto.encode_block_entity_data(
+                            p,
+                            crate::piston::PISTON_BLOCK_ENTITY,
+                            nbt,
+                        );
+                        apply(conn, state, directive).await?;
+                    }
                 }
                 return Ok(());
             }
@@ -4985,6 +4995,9 @@ where
     // Every cell the placement's neighbour fan-out rewrote (issue #465) —
     // empty unless a placement actually happened below.
     let mut changed: Vec<(BlockPos, String)> = Vec::new();
+    // Paired with the `block_update` packets in the notify loop below — see
+    // `moving_piston_records`.
+    let mut piston_records: Vec<(BlockPos, lodestone_core::Nbt)> = Vec::new();
     if is_air_or_fluid(&target_state) || doubling_slab {
         if let Some((item, block_name)) = placed {
             if let Some((entity_block, entity)) = block_entity_for_item(item) {
@@ -5042,6 +5055,7 @@ where
             // beside a powered line stays at `power=0` forever.
             let (mut fanout, scheduled) = propagate_placement(source, target);
             changed.append(&mut fanout);
+            piston_records.extend(moving_piston_records(&scheduled));
             // Issue #465: and the delayed half, which `propagate_placement`
             // structurally cannot host — the queue those land in belongs to the
             // world tick loop. Handed over unconditionally rather than only
@@ -5082,6 +5096,11 @@ where
         let current = source.block_state(p.x, p.y, p.z);
         let directive = proto.encode_block_update(p.x, p.y, p.z, &current);
         apply(conn, state, directive).await?;
+        if let Some((_, nbt)) = piston_records.iter().find(|(pos, _)| *pos == p) {
+            let directive =
+                proto.encode_block_entity_data(p, crate::piston::PISTON_BLOCK_ENTITY, nbt);
+            apply(conn, state, directive).await?;
+        }
     }
     // Placing a torch has to light the column, and the `block_update` packets
     // above carry no light. Read back out of `source` rather than reusing the
@@ -5095,6 +5114,35 @@ where
             .await?;
     }
     Ok(())
+}
+
+/// The moving-piston records a batch of relative-delay scheduled ticks implies.
+///
+/// A `moving_piston` block update tells a client that a cell is animating and
+/// nothing at all about *which* block is travelling through it — the record that
+/// says so lives in the pending commit tick (`crate::piston::finish_kind`). The
+/// connection paths below send their own `block_update` packets rather than
+/// publishing on [`crate::BlockTickFeed`], so unlike the world tick loop (whose
+/// equivalent is `crate::tick`'s `publish_moving_piston`) they have to pair the two
+/// up themselves. Without this a piston triggered by a lever animates nothing: the
+/// client holds a `moving_piston` cell with an empty record for two ticks and then
+/// the finished block appears, which is the snap the two-phase move exists to
+/// replace.
+///
+/// The record must be sent **after** the cell's own `block_update`, so the state
+/// write has already created the record this fills in.
+fn moving_piston_records(scheduled: &[ScheduledTick<String>]) -> Vec<(BlockPos, lodestone_core::Nbt)> {
+    scheduled
+        .iter()
+        .filter(|pending| crate::piston::is_finish_kind(&pending.kind))
+        .filter_map(|pending| {
+            let entity = crate::piston::parse_finish_kind(&pending.kind)?;
+            Some((
+                BlockPos::new(pending.pos.0, pending.pos.1, pending.pos.2),
+                entity.update_tag(),
+            ))
+        })
+        .collect()
 }
 
 /// Runs the neighbour-update fan-out for a block a player just placed at
