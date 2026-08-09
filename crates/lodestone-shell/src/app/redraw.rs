@@ -726,6 +726,18 @@ impl WindowApp {
         // shell read it — this is that last hop, onto the F3 overlay's own
         // `Difficulty:` line (`hud.rs`'s `DebugStats::left_lines`).
         self.sim.stats.difficulty = self.sim.difficulty();
+        // The F3+B / F3+G state, for the overlay's own `Debug overlays:` line —
+        // vanilla's `Debug charts:` block, carrying the two toggles that exist
+        // here. Copied from the `Arc<AtomicBool>`s the world-line source closure
+        // reads (`install_debug_lines_source`), not from a shell-side mirror, so
+        // the hint and the draw cannot disagree about whether boxes are on. This
+        // write lives here rather than in `Sim::refresh_stats` because the atomics
+        // are owned by `WindowApp`, not by `Sim`.
+        {
+            use std::sync::atomic::Ordering;
+            self.sim.stats.hitboxes_shown = self.debug_hitboxes.load(Ordering::Relaxed);
+            self.sim.stats.chunk_borders_shown = self.debug_chunk_borders.load(Ordering::Relaxed);
+        }
 
         // The baked 3-D item geometry, shared by the container screen below and the
         // HUD hotbar further down. It borrows `self.sim`, so it cannot be hoisted

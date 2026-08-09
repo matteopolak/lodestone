@@ -713,10 +713,10 @@ impl Sim {
             self.stats.live_columns = self.net.as_ref().map_or(0, |n| n.loaded_chunks().len());
             self.stats.world_bytes = store.read().heap_bytes();
             self.stats.rss_bytes = process_rss_bytes();
-            // Issue #197's light readout. Inside the throttle deliberately: it
-            // is a section fetch under the client world's own lock, which is the
-            // same class of cost as the three above even though it touches one
-            // section rather than all of them. The sky policy comes from
+            // The F3 overlay's light readout. Inside the throttle deliberately:
+            // it is a section fetch under the client world's own lock, which is
+            // the same class of cost as the three above even though it touches
+            // one section rather than all of them. The sky policy comes from
             // `shared_sky_default`, never from `sky_at` directly — see
             // `net::entity_light_at`'s doc for the two bugs that produced.
             self.stats.light = self.net.as_ref().and_then(|net| {
@@ -728,6 +728,24 @@ impl Sim {
                     net.shared_sky_default().get(),
                 )?;
                 Some((packed >> 4, packed & 0x0F))
+            });
+            // The identifier half of vanilla's last `position`-group line. Also
+            // inside the throttle: it takes the ECS read lock, and a dimension
+            // changes a handful of times per session, so paying for it every
+            // frame buys nothing.
+            //
+            // Read from the local player's own `ServerDimension` component rather
+            // than from anything the shell derives, because that fold updates on
+            // `Respawned` as well as `Login` — a portal trip has to move this, and
+            // a shell-side cache set at login is exactly the stale-value shape
+            // that produced the too-bright Nether.
+            //
+            // No change-guard here, unlike `status` below: the `to_string` has
+            // already allocated by the time a comparison could skip the move, so
+            // a guard would only look like an optimisation. Once per 30 frames.
+            self.stats.dimension = self.read(|w| {
+                w.get::<lodestone_ecs::session::ServerDimension>(self.local)
+                    .and_then(|d| d.0.as_ref().map(ToString::to_string))
             });
         }
         // `clone_from` reuses the existing `String`'s buffer, and the comparison
