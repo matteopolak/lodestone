@@ -684,6 +684,18 @@ living vs **non**-living, so `entity_census::is_living` is right; index 15 is `M
 Check the dump, then pick the census column that separates the *actual* claimants; **assuming the previous
 collision's guard generalises is how the armour-stand bug would have shipped.** (§12.47)
 
+**Third instance, and this time no existing census column worked.** Index 8 has **five** `INT` claimants —
+the experience orb's value, `PrimedTnt.DATA_FUSE_ID`, `FishingHook.DATA_HOOKED_ENTITY`,
+`VehicleEntity.DATA_ID_HURT`, and a display entity's interpolation delay — and **neither `is_living` nor
+`is_mob` separates them**, because an orb is neither and neither is a primed TNT. It needed a *new* class
+(`MetadataClass::ExperienceOrb`); ungated, **a lit TNT draws an orb sprite**, its fuse read as an XP value. So
+the rule is stronger than "pick the right column": **when the claimants share no census axis, adding a class is
+the fix, and the guard's premise must itself be asserted against the committed jar dump** rather than assumed
+from the two known cases. Also worth carrying: an entity whose renderer is a **sprite** rather than a cuboid
+rig must stay **absent** from the model corpus — a `model_for_type` entry would hand the mob pass a rig for an
+entity that has none, so those "no model, no texture" assertions are load-bearing and must not be inverted
+when the entity starts drawing.
+
 **The same collision exists in NBT, keyed by field *name* rather than by index, and it silently rewrites
 the world.** `Age` is a `Short` on `minecraft:item` (ticks alive) and an **`Int`** on a mob (breeding age,
 negative for a baby); `Health` is a `Float` on a mob and a constant `Short` on an item. A round-trip that
