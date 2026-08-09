@@ -38,11 +38,17 @@
 //! 2. a lit `minecraft:redstone_torch` source feeding a 19-long dust run,
 //! 3. a `redstone_block` feeding a 6-long run on a raised platform.
 //!
-//! Reading 2 is the one reproduced here, because a lit torch is the only
-//! power *source* this crate models (`crate::redstone`'s own module doc
-//! explains why `redstone_block`, levers and buttons deliberately are not).
-//! Readings 1 and 2 produced byte-identical power profiles, which is what
-//! makes the choice of source safe.
+//! Reading 2 is the one the gates in the first half of this file reproduce.
+//! Readings 1 and 2 produced byte-identical power profiles, which is what makes
+//! the choice of source safe — and what lets the input-device gates at the end
+//! of this file assert reading 1's `redstone_block` arm against the same table.
+//!
+//! `crate::redstone` now models the primary input devices too (lever, button,
+//! pressure plates, tripwire hook, detector rail, target, daylight detector and
+//! `redstone_block`), so those arms exist below. When this file was written they
+//! did not, and every gate here used a torch for that reason; the note that a
+//! lit torch was *the only* source this crate modelled was true then and is not
+//! now.
 //!
 //! **Timing.** Two facts, both measured rather than assumed:
 //!
@@ -600,5 +606,199 @@ fn the_side_torch_is_left_alone_when_the_source_is_unlit() {
     assert!(
         redstone::torch_lit(column.block_state(TORCH_X, DUST_Y, ROW_Z)),
         "the side torch changed state with no source present"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The primary input devices, on the same rig and against the same oracle table
+//
+// `dust_attenuates_exactly_as_the_live_server_does` above proves the dust
+// evaluator against a lit torch. It cannot say anything about a lever: until the
+// `powered=true` arms landed in `crate::redstone`, `is_signal_source` was
+// `torch || diode || observer` and `weak_signal`/`direct_signal` had no arm for
+// a lever, button or pressure plate at all — so every one of them emitted
+// nothing, and a piston gate driven by a lever scheduled zero commits while the
+// identical gate driven by a torch passed.
+//
+// These arms exist because that gap was invisible to every gate in this file:
+// each one places a torch, and a torch is the single source for which the old
+// implementation was correct. Same shape as a fixture corpus that shares one
+// spawn point.
+// ---------------------------------------------------------------------------
+
+/// Lays `source` at `x = 0` and unpowered dust along `x = 1..=15`, all at
+/// `z = ROW_Z` — `lay_torch_and_dust`'s source-agnostic twin, so the input
+/// families are measured on byte-identical geometry rather than on a rig written
+/// to suit them.
+fn lay_source_and_dust(column: &mut ChunkColumn, source: &str) {
+    column.set_block(0, DUST_Y, ROW_Z, source);
+    for x in 1..16 {
+        column.set_block(x, DUST_Y, ROW_Z, &redstone_wire::set_power(0));
+    }
+}
+
+/// Drives the rig from the source position and asserts the resulting dust
+/// profile equals [`ORACLE_DUST_ATTENUATION`] at **every** coordinate.
+///
+/// Mismatches are collected and reported together: an `assert_eq!` inside the
+/// loop would name the first bad coordinate and leave the other fourteen as
+/// arguments, so a neuter would demonstrate one square rather than the shape of
+/// the whole run.
+fn assert_source_reproduces_the_oracle_profile(source: &str) {
+    let mut column = column_with_floor();
+    lay_source_and_dust(&mut column, source);
+
+    let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+    let _ = propagate_and_react(&mut column, 0, 0, 0, DUST_Y, ROW_Z, &mut block_ticks, 0);
+
+    let measured = dust_profile(&column);
+    let mut wrong: Vec<String> = Vec::new();
+    for (&(distance, oracle_power), &(x, measured_power)) in
+        ORACLE_DUST_ATTENUATION.iter().zip(measured.iter())
+    {
+        assert_eq!(distance, x, "rig misalignment: oracle distance {distance} vs column x {x}");
+        if measured_power != oracle_power {
+            wrong.push(format!(
+                "x={x} ({distance} from the source): ours {measured_power}, live 26.2 {oracle_power}"
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} of {} dust squares disagree with the live server for source {source:?}:\n  {}\nfull \
+         profile: {measured:?}",
+        wrong.len(),
+        ORACLE_DUST_ATTENUATION.len(),
+        wrong.join("\n  ")
+    );
+
+    // The two wrong hypotheses this profile separates, restated for this source:
+    // an off-by-one decay would give `15 - d`, and a decay-free relay would give
+    // a flat 15. Both are ruled out by the equality above, and naming them here
+    // is what keeps the assertion a prediction rather than a direction.
+    let flat: Vec<(i32, u8)> = (1..16).map(|d| (d, 15u8)).collect();
+    let off_by_one: Vec<(i32, u8)> = (1..16).map(|d| (d, u8::try_from(15 - d).unwrap_or(0))).collect();
+    assert_ne!(measured, flat, "source {source:?} relays undecayed, matching the FLAT hypothesis");
+    assert_ne!(measured, off_by_one, "source {source:?} matches the OFF-BY-ONE hypothesis");
+}
+
+/// **A `powered=true` lever drives the dust run to the live server's own
+/// profile**, through the production propagation entry point.
+///
+/// Distance `1` reading 15 is not enough on its own: a source read one block away
+/// cannot distinguish a decaying 15 from a flat one. The gate therefore asserts
+/// all fifteen coordinates, where the decayed value differs from both the source
+/// strength and from zero at fourteen of them.
+#[test]
+fn a_lever_drives_the_dust_run_exactly_as_the_live_server_does() {
+    assert_source_reproduces_the_oracle_profile("minecraft:lever[face=floor,facing=north,powered=true]");
+}
+
+/// **The control, and it is the arm that used to fail.** The identical rig with
+/// an unpowered lever must leave every square at 0.
+///
+/// Before the input-source arms landed, *both* of these tests measured this
+/// result — a powered lever and an unpowered one were indistinguishable, which
+/// is precisely why nothing was red.
+#[test]
+fn an_unpowered_lever_propagates_nothing() {
+    let mut column = column_with_floor();
+    lay_source_and_dust(&mut column, "minecraft:lever[face=floor,facing=north,powered=false]");
+
+    let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+    let _ = propagate_and_react(&mut column, 0, 0, 0, DUST_Y, ROW_Z, &mut block_ticks, 0);
+
+    let mut powered: Vec<(i32, u8)> = Vec::new();
+    for (x, power) in dust_profile(&column) {
+        if power != 0 {
+            powered.push((x, power));
+        }
+    }
+    assert!(
+        powered.is_empty(),
+        "an UNPOWERED lever powered {} dust square(s): {powered:?} — something other than the \
+         lever's own `powered` property is driving this run",
+        powered.len()
+    );
+}
+
+/// A pressed button drives the same run — the family that shares
+/// `LeverBlock`'s signal shape but reaches it from a scheduled release rather
+/// than a toggle, so its `powered=false` state is the one a player sees most of
+/// the time.
+#[test]
+fn a_pressed_button_drives_the_dust_run_exactly_as_the_live_server_does() {
+    assert_source_reproduces_the_oracle_profile(
+        "minecraft:stone_button[face=floor,facing=north,powered=true]",
+    );
+}
+
+/// A pressed pressure plate drives the same run.
+#[test]
+fn a_pressed_pressure_plate_drives_the_dust_run_exactly_as_the_live_server_does() {
+    assert_source_reproduces_the_oracle_profile("minecraft:stone_pressure_plate[powered=true]");
+}
+
+/// **A `minecraft:redstone_block` drives the same run — and this arm has its own
+/// live measurement rather than inheriting the torch's.**
+///
+/// Reading 1 of the oracle run described in this module's doc comment was a
+/// `redstone_block` feeding a 20-long dust run, and it produced a profile
+/// byte-identical to the lit torch's. So the expectation here comes from the
+/// live server having been pointed at this exact source, not from assuming one
+/// source behaves like another.
+#[test]
+fn a_redstone_block_drives_the_dust_run_exactly_as_the_live_server_does() {
+    assert_source_reproduces_the_oracle_profile("minecraft:redstone_block");
+}
+
+/// A **weighted** pressure plate at `power=3` drives the run from 3, not from
+/// 15 — the analog family, and the one whose value a boolean collapse would get
+/// wrong while every gate above stayed green.
+///
+/// The expected profile is the oracle table shifted: vanilla's attenuation is
+/// `source_strength - (d - 1)`, so a strength-3 source gives `[3, 2, 1, 0, ...]`.
+/// That expectation is arithmetic applied to the measured rule, not a second
+/// reading — and it is discriminating, because the flat hypothesis gives 3
+/// everywhere and the boolean hypothesis gives the full 15-long ramp.
+#[test]
+fn a_weighted_pressure_plate_drives_the_run_from_its_own_analog_power() {
+    let mut column = column_with_floor();
+    lay_source_and_dust(&mut column, "minecraft:heavy_weighted_pressure_plate[power=3]");
+
+    let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+    let _ = propagate_and_react(&mut column, 0, 0, 0, DUST_Y, ROW_Z, &mut block_ticks, 0);
+
+    let expected: Vec<(i32, u8)> = (1..16)
+        .map(|d| (d, u8::try_from((3 - (d - 1)).max(0)).unwrap_or(0)))
+        .collect();
+    let measured = dust_profile(&column);
+
+    let mut wrong: Vec<String> = Vec::new();
+    for (&(_, want), &(x, got)) in expected.iter().zip(measured.iter()) {
+        if got != want {
+            wrong.push(format!("x={x}: ours {got}, expected {want}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} square(s) disagree for a strength-3 source:\n  {}\nfull profile: {measured:?}",
+        wrong.len(),
+        wrong.join("\n  ")
+    );
+
+    // The boolean-collapse hypothesis is the full oracle ramp starting at 15.
+    // Requiring the measurement to differ from it is what makes this gate about
+    // the analog value rather than about propagation.
+    let boolean_hypothesis: Vec<(i32, u8)> = ORACLE_DUST_ATTENUATION.to_vec();
+    assert_ne!(
+        measured, boolean_hypothesis,
+        "a power=3 weighted plate drove the same profile as a strength-15 source, so its \
+         analog POWER is being read as a boolean"
+    );
+    assert_eq!(
+        measured.first().map(|(_, p)| *p),
+        Some(3),
+        "the dust adjacent to a strength-3 source must be 3"
     );
 }
