@@ -137,7 +137,15 @@ use lodestone_world::{
 // The instrument
 // ---------------------------------------------------------------------------
 
+// The FFI below is Darwin-only. `proc_pid_rusage` lives in `libSystem` and has no
+// equivalent symbol on Linux or Windows, so an ungated `extern "C"` declaration of
+// it links fine on macOS and fails the *link* — not the compile — everywhere else.
+// `cargo check` never links, which is why this was invisible to every `check` job
+// and surfaced only as `rust-lld: error: undefined symbol: proc_pid_rusage` when
+// the Linux `test` job tried to build this very binary.
+
 /// `RUSAGE_INFO_V4` from `<sys/resource.h>`.
+#[cfg(target_os = "macos")]
 const RUSAGE_INFO_V4: i32 = 4;
 
 /// `struct rusage_info_v4` from macOS `<sys/resource.h>`, transcribed
@@ -192,8 +200,10 @@ struct RusageInfoV4 {
 /// The size the transcription above must have if every field is present and
 /// correctly typed: a 16-byte UUID followed by 36 `u64`s. Derived from the field
 /// list, not measured, so a dropped or duplicated line fails loudly.
+#[cfg(target_os = "macos")]
 const RUSAGE_INFO_V4_SIZE: usize = 16 + 36 * 8;
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     /// `libproc`'s task-level resource accounting, in `libSystem` — no link flag
     /// and no privileges needed for the calling process.
@@ -214,6 +224,21 @@ impl Counters {
     /// Never returns zeros silently: a zero delta would satisfy every check
     /// below while measuring nothing (the Intel / Rosetta case), so
     /// [`assert_counters_are_real`] runs before any stage.
+    /// Non-Darwin arm. Panics rather than returning the zeros the doc comment
+    /// above warns about: the Intel/Rosetta case it names is exactly this failure
+    /// mode, and a platform with no counter at all deserves the same treatment
+    /// rather than a quieter one. Every test reaching this is `#[ignore]`d, so
+    /// nothing on Linux or Windows calls it.
+    #[cfg(not(target_os = "macos"))]
+    fn read() -> Self {
+        unimplemented!(
+            "instructions retired and cycles are read through \
+             proc_pid_rusage(RUSAGE_INFO_V4), which exists only on Darwin; this harness is \
+             a macOS-only measurement and has nothing to report on this target"
+        )
+    }
+
+    #[cfg(target_os = "macos")]
     fn read() -> Self {
         let mut info = RusageInfoV4::default();
         let rc = unsafe {
@@ -387,6 +412,21 @@ const KERNEL_SCALE: u64 = 4;
 /// The locality control replaces it precisely because its expectation comes from
 /// arithmetic — two arms take the same number of steps through the same compiled
 /// loop — and not from any belief about this core's width. (DESIGN.md §12.118.)
+/// Non-Darwin arm. The struct-size check and all three controls below are
+/// statements *about* `rusage_info_v4`, so there is nothing here to assert on a
+/// platform that has no such struct. It panics rather than returning `()` because
+/// a control that quietly does nothing is worse than no control: its whole job is
+/// to stand between this file and a plausible-looking wrong number.
+#[cfg(not(target_os = "macos"))]
+fn assert_counters_are_real() {
+    unimplemented!(
+        "the instrument controls check a Darwin rusage_info_v4 transcription and the \
+         instruction counter it feeds; neither exists on this target, so there is no \
+         instrument here to validate"
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn assert_counters_are_real() {
     assert_eq!(
         size_of::<RusageInfoV4>(),

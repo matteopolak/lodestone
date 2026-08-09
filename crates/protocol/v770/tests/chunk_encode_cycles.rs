@@ -247,7 +247,21 @@ fn cell_loop_integer_path(shape: &ChunkShape, source: &ChunkColumn) -> WorldChun
 // Instructions retired
 // ---------------------------------------------------------------------------
 
+// Darwin-only from here to `instructions_retired`. `proc_pid_rusage` lives in
+// `libSystem` and has no equivalent symbol on Linux or Windows, so an ungated
+// `extern "C"` declaration of it links fine on macOS and fails the *link* — not
+// the compile — everywhere else. `cargo check` never links, which is why this was
+// invisible to every `check` job and only surfaced as
+// `rust-lld: error: undefined symbol: proc_pid_rusage` in `cargo test`.
+//
+// Gated per-item rather than over the whole file on purpose:
+// `encode_chunk_still_returns_a_send` below is NOT `#[ignore]`d and is not a
+// measurement, so it must keep compiling and running on every platform. A
+// file-level `#![cfg(target_os = "macos")]` would have silently dropped it from
+// the Linux and Windows suites.
+
 /// `RUSAGE_INFO_V4` from `<sys/resource.h>`.
+#[cfg(target_os = "macos")]
 const RUSAGE_INFO_V4: i32 = 4;
 
 /// `struct rusage_info_v4` from macOS `<sys/resource.h>`, transcribed
@@ -300,16 +314,33 @@ struct RusageInfoV4 {
 /// The size the transcription above must have if every field is present and
 /// correctly typed: a 16-byte UUID followed by 36 `u64`s. Derived from the field
 /// list, not measured.
+#[cfg(target_os = "macos")]
 const RUSAGE_INFO_V4_SIZE: usize = 16 + 36 * 8;
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     /// `libproc`'s task-level resource accounting, in `libSystem` — no link flag
     /// and no privileges needed for the calling process.
     fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut core::ffi::c_void) -> i32;
 }
 
+/// Non-Darwin arm. Panics rather than returning a plausible zero: the only caller
+/// compares a before/after difference, and a counter stuck at 0 would report a
+/// cost of zero instructions for both encode paths — a measurement that looks
+/// like a result and is not one. Its caller is `#[ignore]`d, so nothing on Linux
+/// or Windows reaches this; `--ignored` on those targets should say so loudly.
+#[cfg(not(target_os = "macos"))]
+fn instructions_retired() -> u64 {
+    unimplemented!(
+        "instructions retired is read through proc_pid_rusage(RUSAGE_INFO_V4), which exists \
+         only on Darwin; this comparator is a macOS-only measurement and has no counter to \
+         report on this target"
+    )
+}
+
 /// Instructions retired by this **process** so far. Process-wide, not
 /// per-thread: everything measured through it here is single-threaded.
+#[cfg(target_os = "macos")]
 fn instructions_retired() -> u64 {
     let mut info = RusageInfoV4::default();
     let rc = unsafe {
