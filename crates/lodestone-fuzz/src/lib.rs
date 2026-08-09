@@ -62,26 +62,57 @@ impl WorldSink for NullSink {
     }
 }
 
-/// The four client protocol families, each behind its own workspace member
-/// per `CLAUDE.md`. `v735` speaks protocol 754 (1.16.5) — the folder name is
-/// not the protocol number, so this enum never derives a protocol from a
-/// variant name; adapters answer that themselves via `VersionAdapter::supports`.
+/// The client protocol families compiled into this build, each behind its own
+/// workspace member per `CLAUDE.md`. `v735` speaks protocol 754 (1.16.5) — the
+/// folder name is not the protocol number, so this enum never derives a protocol
+/// from a variant name; adapters answer that themselves via
+/// `VersionAdapter::supports`.
+///
+/// Every variant is behind the Cargo feature that compiles its family in. All
+/// four are on by default, so the ordinary build has all four — the gating exists
+/// so that deleting a family's folder is a matter of removing its lines from
+/// `Cargo.toml`, which is the deletability invariant `xtask check-isolation`
+/// enforces. Read the manifest's `[features]` comment before turning any of them
+/// off: a family-less build makes every sweep below vacuous, and
+/// `families_are_compiled_in` exists to catch that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
+    #[cfg(feature = "v47")]
     V47,
+    #[cfg(feature = "v340")]
     V340,
+    #[cfg(feature = "v735")]
     V735,
+    #[cfg(feature = "v770")]
     V770,
 }
 
 impl Family {
-    pub const ALL: [Family; 4] = [Family::V47, Family::V340, Family::V735, Family::V770];
+    /// Every family compiled into this build.
+    ///
+    /// A slice rather than the `[Family; 4]` it used to be: the length is now a
+    /// function of the enabled features, so a fixed-size array could not express
+    /// it. Callers iterate with `for &family in Family::ALL`.
+    pub const ALL: &'static [Family] = &[
+        #[cfg(feature = "v47")]
+        Family::V47,
+        #[cfg(feature = "v340")]
+        Family::V340,
+        #[cfg(feature = "v735")]
+        Family::V735,
+        #[cfg(feature = "v770")]
+        Family::V770,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
+            #[cfg(feature = "v47")]
             Family::V47 => "v47",
+            #[cfg(feature = "v340")]
             Family::V340 => "v340",
+            #[cfg(feature = "v735")]
             Family::V735 => "v735",
+            #[cfg(feature = "v770")]
             Family::V770 => "v770",
         }
     }
@@ -92,9 +123,13 @@ impl Family {
     /// would let one case's state bleed into the next.
     pub fn adapter(self) -> Box<dyn VersionAdapter> {
         match self {
+            #[cfg(feature = "v47")]
             Family::V47 => Box::new(lodestone_v47::V47Adapter::default()),
+            #[cfg(feature = "v340")]
             Family::V340 => Box::new(lodestone_v340::V340Adapter::default()),
+            #[cfg(feature = "v735")]
             Family::V735 => Box::new(lodestone_v735::V735Adapter::default()),
+            #[cfg(feature = "v770")]
             Family::V770 => Box::new(lodestone_v770::V770Adapter::default()),
         }
     }
@@ -117,9 +152,13 @@ impl Family {
             };
         }
         match self {
+            #[cfg(feature = "v47")]
             Family::V47 => table!(lodestone_v47),
+            #[cfg(feature = "v340")]
             Family::V340 => table!(lodestone_v340),
+            #[cfg(feature = "v735")]
             Family::V735 => table!(lodestone_v735),
+            #[cfg(feature = "v770")]
             Family::V770 => table!(lodestone_v770),
         }
     }

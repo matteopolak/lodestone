@@ -26,6 +26,10 @@
 //! every assertion below is about *refusal*: an `AdapterError::Decode`, and
 //! **zero** writes reaching the world sink.
 
+// This file drives `lodestone_v340` directly, so it exists only in a build that
+// compiles that family in. On by default; see the crate manifest's `[features]`.
+#![cfg(feature = "v340")]
+
 use std::sync::{Arc, Mutex};
 
 use lodestone_core::Nbt;

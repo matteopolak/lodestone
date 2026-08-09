@@ -25,6 +25,11 @@
 //!   (issue #282 didn't add JVM-oracle capture for the legacy families);
 //!   that gap is real and is called out in `docs/fuzz-harness.md`.
 
+// The corpus is built from `lodestone_v770`'s own packet-id tables, so this file
+// exists only in a build that compiles that family in. On by default; see the
+// crate manifest's `[features]`.
+#![cfg(feature = "v770")]
+
 use lodestone_fuzz::{Family, catch};
 use lodestone_model::ConnectionState;
 
@@ -106,7 +111,7 @@ fn weak_self_encoded_corpus() -> Vec<CorpusEntry> {
     };
 
     let mut out = Vec::new();
-    for family in Family::ALL {
+    for &family in Family::ALL {
         let adapter = family.adapter();
         let directives = match adapter.begin_login(&profile, &server) {
             Ok(d) => d,

@@ -16,3 +16,28 @@
 addresses = ["127.0.0.1"]
 port = 8080
 headers = { "Cross-Origin-Opener-Policy" = "same-origin", "Cross-Origin-Embedder-Policy" = "require-corp" }
+
+# Stage the two large game-data blobs beside the page — IF the local cache has
+# them. `index.html` carries the full reasoning; the short version is that these
+# were `data-trunk rel="copy-file"` links, which made `trunk build` a hard
+# dependency on 46 MB of gitignored files and so failed on every CI runner and on
+# every contributor's first build. A `post_build` hook can be conditional; a
+# `copy-file` link cannot.
+#
+# Three things about the shape:
+#   * `stage = "post_build"` runs after the wasm bundle is written and BEFORE the
+#     staging dir becomes `dist/`, so `$TRUNK_STAGING_DIR` is the right target and
+#     the copies survive trunk's swap. A `pre_build` hook would write into a dir
+#     that is about to be replaced.
+#   * the hook's cwd is this file's directory, so `../.cache/…` resolves exactly as
+#     the old `href` did.
+#   * absent files print a NAMED line and exit 0 — degradation, not a silent skip.
+#     A `cp` that fails for any OTHER reason (present but unreadable) still fails
+#     the hook and the build, which is correct: that is a real error.
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = [
+  "-c",
+  "for f in ../.cache/mc/26.2/client.jar ../.cache/mc/26.2/generated/reports/blocks.json; do if [ -f \"$f\" ]; then cp \"$f\" \"$TRUNK_STAGING_DIR/\"; else echo \"trunk hook: $f is absent, not staged — the page will report ASSET LOAD FAILED and draw nothing (see web/README.md)\"; fi; done",
+]

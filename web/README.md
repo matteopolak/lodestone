@@ -51,6 +51,33 @@ in release, one column is ~1 s (see below), which the singleplayer probe's 30 s
 deadline tolerates. A debug build can blow that deadline and *look* like a
 failure.
 
+### Assets: the build succeeds without them, the page does not
+
+The page needs two files served beside it — `client.jar` (37.4 MiB, the renderable
+corpus) and `blocks.json` (6.5 MiB, the block-state id table). Both are copied out
+of `.cache/mc/26.2/` by the `post_build` hook in `Trunk.toml`, which stages them
+**only if they exist**. They arrive by two different routes, which is worth knowing
+because only the first is a single command:
+
+```sh
+cargo xtask fetch-assets --version 26.2   # -> .cache/mc/26.2/client.jar
+# blocks.json is a Mojang *generated report*, not a download: it comes from the
+# vanilla server jar's own data generator, which needs a JVM.
+java -DbundlerMainClass=net.minecraft.data.Main -jar server.jar --reports
+#   -> generated/reports/blocks.json, placed under .cache/mc/26.2/
+```
+
+**`trunk build` deliberately does NOT fail when they are absent.** It prints one
+named line per unstaged file and exits 0; the page then reports `ASSET LOAD FAILED`
+and draws nothing. So a blank page with that message means "populate `.cache/`",
+not "the browser build is broken" — and the two are worth telling apart, which is
+the whole reason the failure moved out of the build.
+
+They used to be `data-trunk rel="copy-file"` links in `index.html`, i.e. a
+build-time hard dependency on 46 MB of gitignored files. That made `trunk build`
+fail outright on every CI runner and on every contributor's first build, with the
+real cause buried (see `docs/ci.md`).
+
 ### Live multiplayer transport (optional)
 
 The relay probe expects a WebSocket→TCP bridge on `ws://127.0.0.1:25580`. Start

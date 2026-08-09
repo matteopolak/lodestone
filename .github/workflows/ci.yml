@@ -182,6 +182,14 @@ jobs:
       # 'nightly-2026-08-07-…' is currently in use (overridden by
       # …/rust-toolchain.toml)"). A job that names one compiler and silently runs
       # another should at least print which one won. See docs/ci.md.
+      #
+      # INERT IS NOT THE SAME AS REMOVABLE, and the obvious cleanup breaks every
+      # job here. Do not delete the `toolchain:` input from this job or any other:
+      # dtolnay/rust-toolchain@master declares it `required: true` and, because
+      # GitHub does not enforce `required` inputs itself, its action.yml opens with
+      # `if [[ -z $toolchain ]]; then echo "'toolchain' is a required input"; exit 1`.
+      # Removing the line therefore fails at the install step rather than tidying
+      # anything. docs/ci.md lists the three real options; "leave it" is one.
       - name: Report the toolchain actually in use
         shell: bash
         run: |
