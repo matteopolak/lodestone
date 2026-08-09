@@ -320,8 +320,18 @@ the flaw is a property of what it was pointed at:
 change** — compute *both* the correct and the suspected-wrong hypothesis from outside constants and require
 the measurement to land on one.
 
-Two corollaries, both paid for (§12.160):
+Three corollaries, all paid for (§12.160):
 
+- **A ranking metric that scores an input highly can be selecting the *least* discriminating one, and the
+  score will look honest.** Choosing oracle chunks for a light survey by "most partial sky cells" put six
+  chunks at exactly **3584 = 14 × 256** — fourteen individually-*uniform* layers, i.e. **open ocean**, which
+  a purely vertical propagator gets entirely right. The discriminating criterion was **lateral** variation
+  (differs from the `+x`/`+z` neighbour), on which ocean scores 0. So the corollary below applies to your
+  *selection procedure*, not only to the input you end up with: **ask what the wrong hypothesis would score
+  on your ranking**, because a plausible metric can rank coincident inputs first. Related: derive a
+  comparison-count floor from a measurement rather than a guess — vanilla only materialises a `DataLayer`
+  where light is non-trivial (**2–7 sky and 0–10 block sections per full chunk out of 26**), so a `> 500_000`
+  cell floor was impossible against a real ceiling of 126,976.
 - **An input where both hypotheses coincide is not a test.** The XP curve yields 37 at level 15 under *both*
   the inclusive and the exclusive reading of its threshold, so a gate at 15 passes either way; the
   discriminating levels are 16 and 31. Before writing the assertion, evaluate the wrong hypothesis at your
@@ -342,6 +352,16 @@ question is not "is this test integration-level?" but **"which implementation do
 actually resolve to, and is it the one production uses?"** — a test double *complete enough to pass* is the
 most dangerous kind. Also ask: **does any server-side counter accumulate past this gate's lifetime?** and
 **does the input actually contain the structure the code under test exists to handle?** (§12.43)
+
+That last question is the whole of the third *world* instance, and it is worth reading as a template because
+the test source is exemplary. `water_seam_convergence.rs` fills **two whole columns** with water, so every
+rim cell's neighbour is another full column and the corner-height helper's own `edge_a >= 1.0` arm returned
+1.0 before the missing rule was ever reached. Nothing in the corpus had **an isolated column with air beside
+it** — the one input the bug needs. A companion lesson from the same fix: both halves (the `hasSameAbove`
+short-circuit *and* the averaging helper) were individually implemented and individually correct, and the
+defect lived in the **composition**, which had no name and therefore nothing to point a test at. When a bug
+turns out to be a seam between two correct functions, **extract the composition as a named symbol** so a gate
+has a subject.
 
 **A gate that compares two things you control cannot tell you that a third thing exists.** The docs-index
 drift gate scanned three directories and not `docs/plans/`, so six documents were invisible and nothing
