@@ -479,7 +479,7 @@ impl Sim {
                 }
                 // The tab-list and scoreboard arms are *deleted*, not moved:
                 // `lodestone_ecs::session`'s systems fold them inside the
-                // client, and `Sim::sidebar`/`player_rows` read that one copy
+                // client, and `Sim::sidebar`/`tab_list_view` read that one copy
                 // through `NetClient`. Keeping a fold here as well is precisely
                 // the two-sources-of-truth Stage 3 exists to remove.
                 NetUpdate::TitleEvent(event) => {

@@ -99,7 +99,7 @@ calls in `Sim::step`.
 
 ```
 Sim::sidebar()      → NetClient::scoreboard() → ClientHandle::scoreboard() → SessionScoreboard
-Sim::player_rows()  → NetClient::tab_list()   → ClientHandle::tab_list()   → SessionTabList
+Sim::tab_list_view() → NetClient::tab_list()  → ClientHandle::tab_list()   → SessionTabList
 Sim::boss_bars()    → NetClient::boss_bars()  → ClientHandle::boss_bars()  → SessionBossBars
 ```
 
@@ -256,7 +256,7 @@ The short version:
   components in the *client's* `World`; dropping `net` drops the only route to
   them and every reader falls back to an empty default." That was true and
   evidenced when written, and **§4.1(c) falsified it** — there is one `World`, the
-  readers are `Sim::sidebar`/`player_rows`/`boss_bars` off `Sim.local`, and
+  readers are `Sim::sidebar`/`tab_list_view`/`boss_bars` off `Sim.local`, and
   dropping `net` drops no route to anything. The previous server's sidebar
   genuinely survived a quit-to-title until `end_session` started calling
   `insert_session_components`. A note asserting that state *cannot* leak is the

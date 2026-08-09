@@ -165,7 +165,7 @@ impl Sim {
     ///   Stage 3 working rather than an omission: they are components in the
     ///   *client's* `World`, so dropping `net` above drops the only route to
     ///   them". **That went stale the moment §4.1(c) merged the two `World`s** —
-    ///   it is one `World` and one entity now, `Sim::sidebar`/`player_rows`/
+    ///   it is one `World` and one entity now, `Sim::sidebar`/`tab_list_view`/
     ///   `boss_bars` read `self.local` directly, and dropping `net` drops no route
     ///   to anything. Left as written, the previous server's sidebar and tab list
     ///   really did survive a quit-to-title. A stale-but-true-when-written note
@@ -820,7 +820,7 @@ impl Sim {
     /// empty player menu so the local inventory screen can still render.
     ///
     /// Reads the [`lodestone_ecs::SessionMenus`] component — see
-    /// [`Self::player_rows`] on why that is a direct read since §4.1(c). Note the
+    /// [`Self::tab_list_view`] on why that is a direct read since §4.1(c). Note the
     /// *write* side is still `ClientHandle::menu_click`, which predicts against
     /// this same component under its own short guard: prediction has to mutate the
     /// one copy, and a clone has nowhere for the mutation to land.

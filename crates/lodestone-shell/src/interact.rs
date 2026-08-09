@@ -33,7 +33,7 @@
 //! The §4.1(c) audit had narrowed the lock rule to "the *chunk*-backed reads take
 //! only the chunk lock", which is **correct** ([`NetHandle::block_at`] is one) and
 //! was read as clearing `ClientHandle` generally. It does not: `player_menu`,
-//! `open_menu`, `scoreboard`, `player_rows`, `boss_bars`, `health`, `player` and
+//! `open_menu`, `scoreboard`, `tab_list_view`, `boss_bars`, `health`, `player` and
 //! the rest read `SharedState.ecs`. The lesson is the one §4.1(c) itself
 //! implies — **there is one `World`, so a system should read the component, not
 //! call the client** — and [`NetHandle::get`] is private now so the shape cannot
@@ -230,7 +230,7 @@ impl NetHandle {
     /// A `GameTick` system runs inside `run_schedule(GameTick)`, which the driver
     /// runs inside [`lodestone_ecs::hold_write`] — i.e. under the `World`
     /// **write** guard. Most of [`ClientHandle`]'s read-model accessors
-    /// (`player_menu`, `open_menu`, `scoreboard`, `player_rows`, `boss_bars`,
+    /// (`player_menu`, `open_menu`, `scoreboard`, `tab_list_view`, `boss_bars`,
     /// `health`, `player`, …) take `ecs.read()` on **that same**
     /// `Arc<parking_lot::RwLock<World>>`, and `parking_lot`'s `RwLock` is not
     /// reentrant. Calling one from a system is an immediate, silent, permanent
