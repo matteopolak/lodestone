@@ -25,7 +25,24 @@
 #   smaller of the two. The gzip ceiling holds with or without wasm-opt.
 #
 # BASELINE (measured, opt-level="z" + lto=fat + strip):
-#   raw 2.69 MiB   gzip 0.84 MiB   brotli 0.60 MiB  (brotli = real wire cost)
+#   CURRENT, and the ceiling is FAILING: 5,013,669 B gzip against a 1,600,000 B
+#   ceiling — 3.13x over. That is not drift; `web/` stopped being a render spike and
+#   became a launcher for the real `lodestone-shell`, so the whole client now ships.
+#   The cause is measured and is NOT code: `.rodata` is ~76% of the shipped binary,
+#   and it is generated static tables — `lodestone-data/src/generated/` ~4.9 MB
+#   (`block_states.rs` 1.43 MB, `path_types.rs` 713 KB), `sin_table.rs` 820 KB,
+#   `flattening.rs` 369 KB. Two consequences: `opt-level`/`lto` act on the quarter
+#   that is not the problem, and **the same tables are in the native binary too**, so
+#   this is a whole-project question. The fix is moving jar-derived tables behind the
+#   runtime fetch seam `client.jar` already uses. Do NOT raise the ceiling to make
+#   this pass; the failure is the signal.
+#
+#   The paragraph below is the PRE-SHELL baseline, kept because its attribution is
+#   still the right method — and as an instance of exactly the trap it warns about:
+#   it read "882220 B gzip, 55% of the ceiling" while the truth was 5.7x that, so
+#   anyone quoting it would have called a 3.13x overage healthy. A recorded
+#   measurement is only true at its sha.
+#
 #   Re-measured 2026-08-08 (882220 B gzip, 55% of the ceiling). The previous W4
 #   figures recorded here -- raw 4.12 / gzip 1.24 / brotli 0.89 MiB -- were stale by
 #   about a third: they predate dropping the WebGL2 fallback, whose glow backend the
