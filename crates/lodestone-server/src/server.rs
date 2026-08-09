@@ -4888,6 +4888,19 @@ where
             // reason: a block placed into a flow, or beside a source, has to
             // start it re-evaluating. See `crate::fluid::ticks_after_edit`.
             block_ticks.request_scheduled_ticks(crate::fluid::ticks_after_edit(target));
+            // `FallingBlock.onPlace`: a placed sand or gravel block owes itself a
+            // gravity check two ticks out. Same shape and same call site as the
+            // fluid seeding above, and empty for every other block, so no guard.
+            //
+            // **This is what makes placing sand in mid-air fall at all.** Until
+            // now the only route to the gravity check was a neighbour update,
+            // which is exactly the owner's report — "they don't fall when I place
+            // them in the air, they only fall when I place another block beside
+            // them". `state` is the placed state rather than the item name,
+            // because `gravity_tick::is_gravity_block` matches the base of a real
+            // block state.
+            block_ticks
+                .request_scheduled_ticks(crate::gravity_tick::ticks_after_place(target, &state));
         }
     }
     // `pos`/`neighbour` first (the clicked face and the placed cell, which the

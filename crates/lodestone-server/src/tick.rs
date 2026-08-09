@@ -1509,6 +1509,29 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             }
             let state = column.block_state(lx, y, lz).to_string();
 
+            // `FallingBlock.tick`, reached from `FallingBlock.onPlace`'s scheduled
+            // tick (`crate::gravity_tick::ticks_after_place`). Handled here with a
+            // `continue` rather than through the `new_state` chain below, because
+            // it is the one arm whose reaction is **at the tick's own position**:
+            // `settle_gravity_at` is exactly `isFree(below)` plus the drop, while
+            // the chain below ends in `propagate_and_react`, which notifies the
+            // origin's six neighbours and *not* the origin. Routing gravity through
+            // that would settle the sand's neighbours and leave the sand hanging —
+            // the reported symptom, with a scheduled tick that looked correct.
+            //
+            // Before this arm existed, only a neighbour update could reach the
+            // gravity check at all, which is precisely the owner's report: sand
+            // placed in mid-air did not fall until another block was placed beside
+            // it.
+            if due.kind == crate::gravity_tick::TICK_GRAVITY {
+                for event in crate::random_tick::settle_gravity_at(&mut column, min_x, min_z, x, y, z) {
+                    let (ex, ey, ez) = event.pos;
+                    world.set_block(ex, ey, ez, &event.to);
+                    block_tick_out.publish(ex, ey, ez, event.to);
+                }
+                continue;
+            }
+
             let new_state = if due.kind == crate::redstone::TICK_TORCH {
                 let has_signal = crate::redstone_torch::has_neighbor_signal(&crate::redstone::make_lookup(&column, min_x, min_z), BlockPos::new(x, y, z), &state);
                 crate::redstone_torch::run_scheduled_tick(&state, has_signal)
