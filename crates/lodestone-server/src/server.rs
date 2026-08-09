@@ -241,19 +241,23 @@ pub const MAX_CLIENT_VIEW_RADIUS: i32 = 33;
 const MILLIS_PER_TICK: u128 = 50;
 
 /// A bare-handed player's raw melee damage — `Player.createAttributes()`'s
-/// own `.add(Attributes.ATTACK_DAMAGE, 1.0)` (`.cache/mc/26.2/src/net/
-/// minecraft/world/entity/player/Player.java:208`), **not**
-/// `LivingEntity`'s generic `RangedAttribute` default of `2.0` a player would
-/// otherwise inherit. This crate has no item/weapon-attribute model for the
-/// player (`lodestone_entity::damage`'s own module doc already names this gap
-/// for #261), so every hit uses this constant regardless of what is in the
-/// main hand — the same "no per-item census, no cooldown ticker" scope
-/// `docs/combat.md`'s attack-strength section already discloses for the
-/// client side. `Player.attack`'s `baseDamageScaleFactor()` (cooldown-scaled
-/// damage) is also not modelled here for the identical reason: no
+/// own `.add(Attributes.ATTACK_DAMAGE, 1.0)`, **not** `LivingEntity`'s generic
+/// `RangedAttribute` default of `2.0` a player would otherwise inherit.
+///
+/// **No longer what every hit deals.** [`apply_attack`] now resolves the held
+/// item through [`lodestone_entity::equipment`]'s real `ATTACK_DAMAGE` modifier
+/// fold, so a diamond sword deals `7.0` and this value is what an *empty* hand
+/// resolves to — the attribute base with no modifiers on it. It survives as a
+/// named constant because the equality "empty hand == this number" is the one
+/// thing a gate can check without restating the whole fold, and because
+/// [`lodestone_entity::equipment::PLAYER_BASE_ATTACK_DAMAGE`] is the same figure
+/// read from the same line of the jar (pinned equal by
+/// `bare_hand_damage_is_the_player_attribute_base`).
+///
+/// Still not modelled: `Player.attack`'s `baseDamageScaleFactor()`
+/// (cooldown-scaled damage) and the critical-hit bonus, because there is no
 /// server-tracked attack-strength ticker to read, so every hit is treated as
-/// full-strength (`damage.rs`'s own module doc: "no attack-cooldown timer...
-/// exists server-side").
+/// full-strength.
 const PLAYER_BARE_HAND_ATTACK_DAMAGE: f32 = 1.0;
 
 /// The melee knockback-bonus power a **sprinting** attacker's hit applies,
@@ -2669,6 +2673,8 @@ where
             | ServerBound::RecipePlaced { .. }
             | ServerBound::ContainerClosed { .. }
             | ServerBound::Attack { .. }
+            | ServerBound::UseItem { .. }
+            | ServerBound::ReleaseUseItem
             | ServerBound::PlayerInput { .. }
             | ServerBound::CreativeModeSlotSet { .. }
             | ServerBound::ClientCommand { .. }
@@ -5596,6 +5602,258 @@ fn apply_item_dropped<P: ServerProtocol>(
     ))
 }
 
+/// One in-progress bow draw: which tick it started on, and the facing the
+/// `USE_ITEM` reported.
+///
+/// The facing is captured at the *start* and used as a fallback only. Vanilla
+/// shoots along the player's facing at **release**, which `player_rot` supplies if
+/// the client has ever sent angles — so this field only matters for a connection
+/// that draws and releases without having sent a single rotation packet, where the
+/// alternative would be firing due south.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BowDraw {
+    /// The `MobSim::tick_count` the draw began on.
+    started_tick: u64,
+    /// The facing the `USE_ITEM` packet carried.
+    yaw: f32,
+    /// The pitch the `USE_ITEM` packet carried.
+    pitch: f32,
+}
+
+/// The item a `USE_ITEM` is asking to launch, and how.
+///
+/// A closed enum rather than a string match at the call site, because the two
+/// behaviours are genuinely different shapes: a throwable resolves entirely inside
+/// the `USE_ITEM` arm, and a bow resolves in a *later* packet.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LaunchIntent {
+    /// Thrown the instant the packet arrives, at
+    /// [`THROWABLE_SHOOT_POWER`](lodestone_entity::projectile::THROWABLE_SHOOT_POWER):
+    /// snowball, egg, ender pearl. The projectile entity is the item's own name.
+    InstantThrow {
+        /// The projectile entity type to spawn.
+        projectile: &'static str,
+        /// Launch speed in blocks per tick.
+        power: f64,
+        /// Vanilla's `yOffset`, non-zero only for a potion.
+        pitch_offset: f64,
+    },
+    /// Starts a draw the release packet finishes.
+    BeginDraw,
+}
+
+/// What the item in `path` does on a right-click in mid-air.
+///
+/// Only the items that actually launch something are listed. Everything else —
+/// food, blocks, a bucket — is `None`, and the `USE_ITEM` arm does nothing, which
+/// is correct rather than unimplemented for a crate with no eating or placement
+/// model on this packet.
+fn launch_intent(path: &str) -> Option<LaunchIntent> {
+    use lodestone_entity::projectile::{
+        POTION_PITCH_OFFSET, POTION_SHOOT_POWER, THROWABLE_SHOOT_POWER,
+    };
+    let throw = |projectile| {
+        Some(LaunchIntent::InstantThrow {
+            projectile,
+            power: THROWABLE_SHOOT_POWER,
+            pitch_offset: 0.0,
+        })
+    };
+    match path {
+        "snowball" => throw("snowball"),
+        "egg" => throw("egg"),
+        "ender_pearl" => throw("ender_pearl"),
+        "experience_bottle" => throw("experience_bottle"),
+        // `ThrowablePotionItem`: slower, and the only one with a pitch offset.
+        "splash_potion" => Some(LaunchIntent::InstantThrow {
+            projectile: "splash_potion",
+            power: POTION_SHOOT_POWER,
+            pitch_offset: POTION_PITCH_OFFSET,
+        }),
+        "lingering_potion" => Some(LaunchIntent::InstantThrow {
+            projectile: "lingering_potion",
+            power: POTION_SHOOT_POWER,
+            pitch_offset: POTION_PITCH_OFFSET,
+        }),
+        // A crossbow's charge/hold semantics are genuinely different (it stores a
+        // loaded projectile in a component and fires on the *next* use), and there
+        // is no charged-projectiles component model here, so it is deliberately not
+        // folded in with the bow — a shared arm would fire it like a bow, which is
+        // wrong in a way that looks right.
+        "bow" => Some(LaunchIntent::BeginDraw),
+        _ => None,
+    }
+}
+
+/// The ammunition a drawn bow consumes, and whether the inventory has any.
+///
+/// `Player.getProjectile` searches for anything matching the weapon's
+/// `ammoPredicate`; this crate models the plain arrow only, which is the ammunition
+/// a vanilla bow finds first anyway.
+const BOW_AMMUNITION: &str = "arrow";
+
+/// Applies a `USE_ITEM`: throws a throwable outright, or opens a bow draw.
+///
+/// Returns the tick the draw started on when one began, so the caller can record
+/// it. Called for its side effects otherwise.
+fn apply_use_item(
+    mobs: &MobHandle,
+    inventory: &mut PlayerInventory,
+    player_pos: Option<(f64, f64, f64)>,
+    game_mode: GameMode,
+    hand: u8,
+    yaw: f32,
+    pitch: f32,
+) -> Option<BowDraw> {
+    // No tracked position means no launch origin, and guessing the origin would
+    // put an arrow at the world origin — the same "no data yet, don't guess" gate
+    // `apply_attack` uses for knockback direction.
+    let (x, y, z) = player_pos?;
+    let native = if hand == 1 {
+        crate::inventory::OFFHAND_NATIVE
+    } else {
+        usize::from(inventory.selected_hotbar_slot())
+    };
+    let held = inventory.native(native)?.item.path().to_owned();
+    match launch_intent(&held)? {
+        LaunchIntent::BeginDraw => {
+            // The arrow check happens at *release*, not here: vanilla lets a
+            // player draw an empty bow (the animation plays) and simply declines
+            // to fire. Refusing the draw would also make the release arm unable to
+            // tell "no ammunition" from "never drew".
+            Some(BowDraw {
+                started_tick: mobs.with(|sim| sim.tick_count()),
+                yaw,
+                pitch,
+            })
+        }
+        LaunchIntent::InstantThrow {
+            projectile,
+            power,
+            pitch_offset,
+        } => {
+            if !consume_one(inventory, native, game_mode) {
+                return None;
+            }
+            let velocity = lodestone_entity::projectile::launch_velocity(
+                f64::from(yaw),
+                f64::from(pitch),
+                pitch_offset,
+                power,
+            );
+            spawn_player_projectile(mobs, projectile, Vec3::new(x, y + EYE_HEIGHT, z), velocity);
+            None
+        }
+    }
+}
+
+/// Applies a `RELEASE_USE_ITEM` that ends a bow draw: computes the charge, refuses
+/// a shot too weak or unarmed, and launches the arrow.
+///
+/// Returns `true` if an arrow was actually fired, so a caller (and a gate) can
+/// tell a released-but-declined draw from a shot.
+fn apply_release_use_item(
+    mobs: &MobHandle,
+    inventory: &mut PlayerInventory,
+    player_pos: Option<(f64, f64, f64)>,
+    player_rot: Option<Rotation>,
+    game_mode: GameMode,
+    draw: BowDraw,
+) -> bool {
+    use lodestone_entity::projectile::{BOW_ARROW_SPEED, BOW_MIN_POWER, bow_power_for_time};
+    let Some((x, y, z)) = player_pos else {
+        return false;
+    };
+    // Ticks, from the server's own 20 TPS counter — never `Instant::now()`, which
+    // compiles on wasm32 and then panics at runtime under `panic = "abort"` with no
+    // log line. `saturating_sub` because the counter is shared and a draw recorded
+    // against a sim that was later reseeded must read as a zero-length draw rather
+    // than wrapping to an enormous one.
+    let held_ticks = mobs
+        .with(|sim| sim.tick_count())
+        .saturating_sub(draw.started_tick);
+    let power = bow_power_for_time(i32::try_from(held_ticks).unwrap_or(i32::MAX));
+    if power < BOW_MIN_POWER {
+        return false;
+    }
+    // `BowItem.releaseUsing` resolves the ammunition *before* checking the power in
+    // vanilla; the order is unobservable here because neither has a side effect
+    // until both pass.
+    let Some(ammo_slot) = find_item_slot(inventory, BOW_AMMUNITION) else {
+        return false;
+    };
+    if !consume_one(inventory, ammo_slot, game_mode) {
+        return false;
+    }
+    let rotation = player_rot.unwrap_or(Rotation {
+        yaw: draw.yaw,
+        pitch: draw.pitch,
+    });
+    let velocity = lodestone_entity::projectile::launch_velocity(
+        f64::from(rotation.yaw),
+        f64::from(rotation.pitch),
+        0.0,
+        power * BOW_ARROW_SPEED,
+    );
+    spawn_player_projectile(mobs, "arrow", Vec3::new(x, y + EYE_HEIGHT, z), velocity);
+    true
+}
+
+/// Spawns one player-launched projectile into the live sim, picking the ballistic
+/// family from the projectile's own registry path.
+///
+/// `owner` is `None`: this crate's [`MobSim`] numbers mobs and projectiles in one
+/// id space that connected **players** are not part of (their ids come from the
+/// `PlayerRegistry`), so there is no mob id to exclude — and players are not
+/// impact candidates either, so a player cannot be hit by their own arrow
+/// regardless. Passing a player entity id here would silently exclude whichever
+/// *mob* happened to share that number, which is worse than passing nothing.
+fn spawn_player_projectile(mobs: &MobHandle, projectile: &str, origin: Vec3, velocity: Vec3) {
+    use lodestone_entity::projectile::Projectile;
+    let Ok(key) = lodestone_model::ResourceKey::new("minecraft", projectile) else {
+        return;
+    };
+    // The two families disagree on gravity, drag *and* step order — see
+    // `lodestone_entity::projectile`'s module doc. A trident integrates as an
+    // arrow despite being thrown.
+    let ballistic = match projectile {
+        "arrow" | "spectral_arrow" | "trident" => Projectile::arrow(origin, velocity),
+        _ => Projectile::throwable(origin, velocity),
+    };
+    mobs.with(|sim| sim.spawn_projectile_from(key.clone(), ballistic, None));
+}
+
+/// The first native slot holding `path`, if any.
+fn find_item_slot(inventory: &PlayerInventory, path: &str) -> Option<usize> {
+    (0..crate::inventory::PLAYER_NATIVE_SIZE).find(|&i| {
+        inventory
+            .native(i)
+            .is_some_and(|stack| stack.item.path() == path)
+    })
+}
+
+/// Removes one item from native slot `native`, clearing the slot when the stack
+/// empties. A creative-mode player consumes nothing but still succeeds.
+///
+/// Returns whether the launch may proceed — `false` only when the slot turned out
+/// to be empty, which a caller reads as "no ammunition".
+fn consume_one(inventory: &mut PlayerInventory, native: usize, game_mode: GameMode) -> bool {
+    let Some(stack) = inventory.native(native) else {
+        return false;
+    };
+    if game_mode == GameMode::Creative {
+        return true;
+    }
+    let mut stack = stack.clone();
+    if stack.count <= 1 {
+        inventory.set_native(native, None);
+    } else {
+        stack.count -= 1;
+        inventory.set_native(native, Some(stack));
+    }
+    true
+}
+
 /// Resolves a `minecraft:attack` request (issue #12) against the live mob
 /// simulation: runs the damage pipeline and, for a sprinting attacker, the
 /// melee knockback bonus, through [`MobSim::attack`](crate::MobSim::attack).
@@ -5626,7 +5884,13 @@ fn apply_item_dropped<P: ServerProtocol>(
 /// sprint flag — see [`SPRINT_ATTACK_KNOCKBACK_POWER`]'s own doc comment for
 /// why a non-sprinting attack's knockback power is correctly `0.0`, not a
 /// bug.
-fn apply_attack(mobs: &MobHandle, player_pos: Option<(f64, f64, f64)>, sprinting: bool, entity_id: i32) {
+fn apply_attack(
+    mobs: &MobHandle,
+    player_pos: Option<(f64, f64, f64)>,
+    sprinting: bool,
+    inventory: &PlayerInventory,
+    entity_id: i32,
+) {
     let (attacker_pos, knockback_power) = match player_pos {
         Some((x, y, z)) => (
             Vec3::new(x, y, z),
@@ -5638,11 +5902,20 @@ fn apply_attack(mobs: &MobHandle, player_pos: Option<(f64, f64, f64)>, sprinting
         ),
         None => (Vec3::new(0.0, 0.0, 0.0), 0.0),
     };
+    // The weapon feed. This used to pass `PLAYER_BARE_HAND_ATTACK_DAMAGE`
+    // unconditionally, so a diamond sword and a fist did the same 1.0 — the
+    // armour formula on the receiving end was live-verified against a real
+    // vanilla server while the number going into it could never be right.
+    // `combat_stats` resolves the held item through the real
+    // `ATTACK_DAMAGE` attribute fold, and an empty hand still lands on
+    // `PLAYER_BARE_HAND_ATTACK_DAMAGE` because that *is* the player's attribute
+    // base with no modifiers.
+    let raw_damage = inventory.combat_stats().attack_damage;
     mobs.with(|sim| {
         sim.attack(
             entity_id,
             attacker_pos,
-            PLAYER_BARE_HAND_ATTACK_DAMAGE,
+            raw_damage,
             DamageFlags::default(),
             knockback_power,
         )
@@ -5966,6 +6239,15 @@ async fn dispatch_play_packet<T, P, S>(
     // that loop's other timer-fed ones, and the only cost is that the break
     // *timing* test is skipped there (hardness and range still apply).
     game_tick: Option<u64>,
+    // Issue #260. This connection's in-progress bow draw, if any: the server tick
+    // the `USE_ITEM` arrived on, so the `RELEASE_USE_ITEM` that ends it can turn
+    // the interval into `BowItem.getPowerForTime`. `None` whenever nothing
+    // chargeable is being held down.
+    //
+    // Per-connection rather than shared, exactly like `sprinting` and
+    // `player_pos`: two players can be mid-draw at once and neither's charge is
+    // the other's.
+    bow_draw: &mut Option<BowDraw>,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -6388,12 +6670,48 @@ where
             }
         }
         ServerBound::Attack { entity_id } => {
-            apply_attack(mobs, *player_pos, *sprinting, entity_id);
+            apply_attack(mobs, *player_pos, *sprinting, inventory, entity_id);
             // `Player.attack`'s `causeFoodExhaustion(0.1F)`, charged on the swing
             // rather than on a hit that landed — vanilla charges it inside `attack`
             // after the damage call, unconditionally for a living target.
             if !Abilities::for_mode(*game_mode).invulnerable {
                 vitals.add_exhaustion(crate::food::EXHAUSTION_ATTACK);
+            }
+        }
+        // Issue #260: the player's own launch path. Before this, every projectile
+        // in the game came from a mob goal — `ClientAction`-side bow support
+        // existed in the protocol crates with no server model behind it, so a
+        // player could draw a bow and nothing was ever created.
+        ServerBound::UseItem { hand, yaw, pitch } => {
+            let began = apply_use_item(
+                mobs,
+                inventory,
+                *player_pos,
+                *game_mode,
+                hand,
+                yaw,
+                pitch,
+            );
+            // Overwritten rather than merged: a fresh `USE_ITEM` restarts the
+            // charge, and a `USE_ITEM` for something that is not chargeable ends
+            // any draw in progress (vanilla's `stopUsingItem` on a new use).
+            *bow_draw = began;
+        }
+        ServerBound::ReleaseUseItem => {
+            if let Some(draw) = bow_draw.take() {
+                let fired = apply_release_use_item(
+                    mobs,
+                    inventory,
+                    *player_pos,
+                    *player_rot,
+                    *game_mode,
+                    draw,
+                );
+                // `Player.attack`'s exhaustion is charged on a melee swing; a bow
+                // shot has no exhaustion cost in vanilla, so nothing is charged
+                // here. Recorded because its absence otherwise reads as an
+                // oversight next to the `Attack` arm two branches down.
+                let _ = fired;
             }
         }
         ServerBound::PlayerInput { sprint } => {
@@ -6801,6 +7119,9 @@ where
     // see `apply_attack`'s own doc comment for the one thing it feeds
     // (the melee knockback sprint bonus).
     let mut sprinting = false;
+    // Issue #260. This connection's in-progress bow draw — see this parameter's
+    // own comment on `dispatch_play_packet`.
+    let mut bow_draw: Option<BowDraw> = None;
     // Vanilla's `ServerPlayer::nextContainerCounter` starts at `0` and the
     // very first open bumps it to `1` before use (`ServerPlayer.java:1330,
     // 1343`) — see [`open_container_screen`]'s own `% 100 + 1` wrap.
@@ -7002,6 +7323,7 @@ where
                     // validator reads the same clock, so a dig's start and stop
                     // are priced on one monotonic counter.
                     Some(u64::try_from(ticks_since(play_start)).unwrap_or(0)),
+                    &mut bow_draw,
                     packet_id,
                     &payload,
                 )
@@ -7774,6 +8096,7 @@ where
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<PendingBreak> = None;
     let mut sprinting = false;
+    let mut bow_draw: Option<BowDraw> = None;
     // `player_pos`/`vitals` are tracked for parity with the native loop's
     // `dispatch_play_packet` calls (shared function, shared signature), but
     // `vitals` is only ever *ticked* by the native loop's timer, which
@@ -7895,6 +8218,7 @@ where
             // as `vitals` and `container_sync` above. Hardness and range still
             // validate; only the timing test is skipped.
             None,
+            &mut bow_draw,
             packet_id,
             &payload,
         )
@@ -7985,6 +8309,96 @@ mod tests {
     use crate::protocol::MetadataField;
     use lodestone_model::{Rotation, Vec3};
     use uuid::Uuid;
+
+    /// The two places `Player.createAttributes()`' `add(Attributes.ATTACK_DAMAGE,
+    /// 1.0)` is transcribed must not drift: this module's own constant, and the
+    /// attribute base [`lodestone_entity::equipment`] folds equipment onto.
+    ///
+    /// The control is that the equipment fold *can* move off the base — a diamond
+    /// sword resolves to `7.0` — so the equality below is not comparing a value
+    /// against a constant that nothing else could change.
+    #[test]
+    fn bare_hand_damage_is_the_player_attribute_base() {
+        let empty = PlayerInventory::new();
+        let bare = empty.combat_stats().attack_damage;
+        assert!(
+            (bare - PLAYER_BARE_HAND_ATTACK_DAMAGE).abs() < 1e-6,
+            "an empty hand must resolve to the documented bare-hand figure, got {bare}"
+        );
+        assert!(
+            (f64::from(PLAYER_BARE_HAND_ATTACK_DAMAGE)
+                - lodestone_entity::equipment::PLAYER_BASE_ATTACK_DAMAGE)
+                .abs()
+                < 1e-9,
+            "the two transcriptions of the same jar line disagree"
+        );
+
+        let mut armed = PlayerInventory::new();
+        armed.set_native(0, Some(ItemStack::new(item_key("diamond_sword"), 1)));
+        let with_sword = armed.combat_stats().attack_damage;
+        assert!(
+            (with_sword - 7.0).abs() < 1e-6,
+            "control: a real weapon must move the number off the base, got {with_sword}"
+        );
+    }
+
+    /// A held sword only counts from the **selected** hotbar slot. The wrong
+    /// implementation — reading native slot `0` — passes the test above and fails
+    /// this one, which is the reason this is a second case rather than an extra
+    /// assertion.
+    #[test]
+    fn only_the_selected_hotbar_slot_arms_the_player() {
+        let mut inv = PlayerInventory::new();
+        inv.set_native(3, Some(ItemStack::new(item_key("diamond_sword"), 1)));
+        assert!(
+            (inv.combat_stats().attack_damage - PLAYER_BARE_HAND_ATTACK_DAMAGE).abs() < 1e-6,
+            "a sword in an unselected slot is not in the main hand"
+        );
+        assert!(inv.set_selected_hotbar_slot(3));
+        assert!(
+            (inv.combat_stats().attack_damage - 7.0).abs() < 1e-6,
+            "selecting the slot holding it must arm the player"
+        );
+    }
+
+    /// Worn armour reaches [`PlayerVitals::apply_damage`]'s reduction, and the
+    /// value is the one a real vanilla 26.2 server produced for the same set and
+    /// the same raw hit: `10.0` of `minecraft:mob_attack` against full diamond
+    /// measures **3.0**, where an unarmoured player takes the whole `10.0`.
+    #[test]
+    fn worn_armour_reduces_an_incoming_hit_to_the_live_verified_value() {
+        let mut inv = PlayerInventory::new();
+        for (native, item) in [
+            (crate::inventory::HEAD_NATIVE, "diamond_helmet"),
+            (crate::inventory::CHEST_NATIVE, "diamond_chestplate"),
+            (crate::inventory::LEGS_NATIVE, "diamond_leggings"),
+            (crate::inventory::FEET_NATIVE, "diamond_boots"),
+        ] {
+            inv.set_native(native, Some(ItemStack::new(item_key(item), 1)));
+        }
+        let flags = lodestone_entity::DamageFlags::for_damage_type_name("mob_attack")
+            .expect("mob_attack is a real damage type");
+
+        let mut armoured = PlayerVitals::default();
+        let dealt = armoured
+            .apply_damage(10.0, &inv.combat_stats().defenses, flags)
+            .expect("the hit lands");
+        assert!((dealt - 3.0).abs() < 1e-3, "armoured hit dealt {dealt}");
+
+        let mut bare_player = PlayerVitals::default();
+        let bare_dealt = bare_player
+            .apply_damage(10.0, &PlayerInventory::new().combat_stats().defenses, flags)
+            .expect("the hit lands");
+        assert!(
+            (bare_dealt - 10.0).abs() < 1e-3,
+            "control: an unarmoured player takes the full hit, got {bare_dealt}"
+        );
+    }
+
+    /// A parsed `minecraft:` item key for the tests above.
+    fn item_key(path: &str) -> lodestone_model::ResourceKey {
+        lodestone_model::ResourceKey::new("minecraft", path).expect("a static item key parses")
+    }
 
     /// A protocol double whose entity encoders tag each directive with a
     /// distinct packet id and the entity id(s) involved, so a test can read the

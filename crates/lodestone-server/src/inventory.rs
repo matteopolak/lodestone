@@ -42,6 +42,7 @@
 //! `docs/container-cost-screens.md` already documents for the anvil/
 //! enchanting-table costs.
 
+use lodestone_entity::equipment::EquipmentSlot;
 use lodestone_model::ItemStack;
 
 use crate::crafting::CraftingState;
@@ -59,6 +60,15 @@ pub const OFFHAND_NATIVE: usize = 40;
 
 /// Number of hotbar slots (`Inventory.SELECTION_SIZE`, `Inventory.java:32`).
 pub const HOTBAR_SIZE: u8 = 9;
+
+/// Native index of the boots slot (`EQUIPMENT_SLOT_MAPPING`, see the module doc).
+pub const FEET_NATIVE: usize = 36;
+/// Native index of the leggings slot.
+pub const LEGS_NATIVE: usize = 37;
+/// Native index of the chestplate slot.
+pub const CHEST_NATIVE: usize = 38;
+/// Native index of the helmet slot.
+pub const HEAD_NATIVE: usize = 39;
 
 /// A player's server-authoritative inventory: [`PLAYER_NATIVE_SIZE`] native
 /// slots plus the selected hotbar index (vanilla's `Inventory.selected`,
@@ -151,6 +161,49 @@ impl PlayerInventory {
     #[must_use]
     pub fn selected_item(&self) -> Option<&ItemStack> {
         self.native(usize::from(self.selected_hotbar_slot))
+    }
+
+    /// Every combat-relevant equipment slot and the item in it, ready to feed
+    /// [`lodestone_entity::equipment::player_combat_stats`].
+    ///
+    /// This is the join the damage pipeline was missing: `apply_reductions` was
+    /// live-verified against a real vanilla server long before anything told it
+    /// what the player was wearing, so armour reduced a `Defenses::default()`
+    /// with zero points in it and a swing dealt a flat bare-hand `1.0`.
+    ///
+    /// The **selected** hotbar slot is what goes in the main hand, not native
+    /// slot `0` — a player holding a sword in slot 3 must not punch for `1.0`.
+    /// Empty slots are skipped rather than yielded as an empty id, so an
+    /// unarmoured player produces an empty iterator and every stat falls back to
+    /// the wearer's own base.
+    #[must_use]
+    pub fn combat_equipment(&self) -> Vec<(EquipmentSlot, &str)> {
+        // Native indices per this module's own doc comment: feet 36, legs 37,
+        // chest 38, head 39, off-hand 40, main hand = the *selected* hotbar slot.
+        let pairs = [
+            (EquipmentSlot::MainHand, usize::from(self.selected_hotbar_slot)),
+            (EquipmentSlot::OffHand, OFFHAND_NATIVE),
+            (EquipmentSlot::Head, HEAD_NATIVE),
+            (EquipmentSlot::Chest, CHEST_NATIVE),
+            (EquipmentSlot::Legs, LEGS_NATIVE),
+            (EquipmentSlot::Feet, FEET_NATIVE),
+        ];
+        pairs
+            .into_iter()
+            .filter_map(|(slot, native)| {
+                self.native(native).map(|stack| (slot, stack.item.path()))
+            })
+            .collect()
+    }
+
+    /// [`lodestone_entity::equipment::player_combat_stats`] for whatever this
+    /// inventory currently has equipped — the one call a damage or attack site
+    /// should make, so armour and weapon cannot be fed independently (and one of
+    /// them forgotten, which is what kept a flat `1.0` alive next to a verified
+    /// armour formula).
+    #[must_use]
+    pub fn combat_stats(&self) -> lodestone_entity::equipment::PlayerCombatStats {
+        lodestone_entity::equipment::player_combat_stats(self.combat_equipment())
     }
 
     /// Applies one `(menu slot, new stack)` entry from a `CONTAINER_CLICK`
