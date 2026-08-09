@@ -65,6 +65,19 @@ pub fn embedded_structure_template(id: &str) -> Option<&'static [u8]> {
         .map(|i| EMBEDDED_STRUCTURE_TEMPLATES[i].1)
 }
 
+/// Every bundled structure-template id, without the `minecraft:` prefix.
+///
+/// Exposed for whole-corpus gates: [`crate::structure_loot`]'s self-named-loot pass
+/// reads a table id out of each template's own bytes rather than from a
+/// per-structure table, so "which of those tables do we actually bundle" is only
+/// answerable by walking every template. A gate that scanned a hand-picked list
+/// instead could not see a structure whose templates were added later — the same
+/// in-scope/out-of-scope hole CLAUDE.md's drift-gate rule names.
+#[must_use]
+pub fn embedded_structure_template_ids() -> impl Iterator<Item = &'static str> {
+    EMBEDDED_STRUCTURE_TEMPLATES.iter().map(|(key, _)| *key)
+}
+
 /// The fallback biome [`OverworldGenerator`] would use if [`EmbeddedResolver`]
 /// supplied no biome-parameter table — it does (see [`EmbeddedResolver::biome_parameters`]),
 /// so real per-column biome variety (issue #405) is what this generator
