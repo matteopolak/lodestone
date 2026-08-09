@@ -1980,10 +1980,18 @@ mod tests {
              its real 0.5 top (that IS the bug), got {degraded_top}"
         );
         let real_top = live_column(Arc::clone(&atlas), slab, 4..=4).collision_top(0, 4, 0);
+        // `0.5`, not `4.5`: `CollisionView::collision_top` is **block-local** —
+        // its own doc says so and names a bottom slab's `0.5` explicitly, and
+        // `collision_top_is_uncapped_and_local` in `lodestone-physics` pins it.
+        // The `4.5` this used to assert was a world-space value, carried in from
+        // the pick-ray work on *outline* boxes, which really are world-space. The
+        // control immediately above already calls `0.5` "its real 0.5 top", so
+        // the two assertions contradicted each other four lines apart. The fence
+        // assertion earlier in this test is the other witness: it expects `1.5`
+        // for a fence at y=4, which is only local.
         assert!(
-            (real_top - 4.5).abs() < 1e-6,
-            "…and with the census it must: got {real_top}, expected 4.5 in this \
-             fixture's world space"
+            (real_top - 0.5).abs() < 1e-6,
+            "…and with the census it must: got {real_top}, expected the block-local 0.5"
         );
         let cobweb = state_id(&atlas, "minecraft:cobweb");
         let real = live_column(Arc::clone(&atlas), cobweb, 4..=4);
