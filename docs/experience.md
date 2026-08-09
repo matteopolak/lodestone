@@ -2,11 +2,12 @@
 
 ## What it is
 
-The XP level curve, the orb denomination ladder and a player's experience state.
-`crates/lodestone-server/src/experience.rs` holds all three as pure arithmetic;
-`ServerProtocol::encode_set_experience` puts the result on the wire, and
-`crates/lodestone-server/src/player_data.rs` saves and restores it. The one production
-*source* today is furnace smelting, paid out when the player closes the menu.
+The XP level curve, the orb denomination ladder, a player's experience state, and the
+`experience_orb` entity that carries points from a kill or a broken ore to the bar.
+`crates/lodestone-server/src/experience.rs` holds the arithmetic, `MobSim` owns the live
+orbs, `ServerProtocol::encode_set_experience` puts the result on the wire, and
+`crates/lodestone-server/src/player_data.rs` saves and restores it across a rejoin. The
+wired sources are mob death, ore mining and furnace smelting.
 
 ## How it works
 
