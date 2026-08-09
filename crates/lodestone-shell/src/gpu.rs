@@ -65,9 +65,10 @@ pub use occlusion::TerrainOcclusion;
 pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
 pub use sources::{
-    BannerSource, BellSource, BlockEntitySource, CampfireSource, EntityLightSource, HandSwingSource,
-    LecternSource, MainHandSource, MapSource, OutlineShapeSource, ShulkerSource, SignSource,
-    SkullSource, SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
+    BannerSource, BellSource, BlockEntitySource, CampfireSource, EnchantingTableSource,
+    EntityLightSource, HandSwingSource, LecternSource, MainHandSource, MapSource,
+    OutlineShapeSource, ShulkerSource, SignSource, SkullSource, SkyDarkenSource,
+    ThirdPersonBodySource, ThirdPersonBodyState,
 };
 pub use stats::RenderStats;
 
@@ -353,6 +354,11 @@ pub struct RenderState {
     /// mesh: the fire and the logs are block models the terrain pass already
     /// draws, so an unset source leaves a complete campfire cooking nothing.
     campfire_source: CampfireSource,
+    /// Where this frame's enchanting-table books come from. Same "unset means
+    /// draw nothing" convention as [`Self::lectern_source`], whose mesh it shares,
+    /// and the same mild degradation — an enchanting table's own block model is
+    /// complete, so an unset source leaves a table with no book floating over it.
+    enchanting_table_source: EnchantingTableSource,
     /// Where this frame's filled-map pictures come from (issue #184). Same "unset
     /// means draw nothing" convention as [`Self::skull_source`], and here the
     /// degradation is that a held `filled_map` falls back to its ordinary flat item

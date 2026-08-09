@@ -745,19 +745,28 @@ impl RenderState {
         let shulkers = self.shulker_source.shulkers(eye);
         let banners = self.banner_source.banners(eye);
         let lecterns = self.lectern_source.lecterns(eye);
-        // All six, not any subset: an early return on only `chests`/`skulls`
+        let enchanting_tables = self.enchanting_table_source.enchanting_tables(eye);
+        // All seven, not any subset: an early return on only `chests`/`skulls`
         // would make a bell in an otherwise chestless, skull-less room draw
         // nothing, which is exactly how this pass would have grown a third
         // island — a shulker box in an empty end-city room is the fourth
-        // instance of the same shape, a banner in a village the fifth, and a
-        // lectern in an otherwise bare village library the sixth. Every source
+        // instance of the same shape, a banner in a village the fifth, a
+        // lectern in an otherwise bare village library the sixth, and an
+        // enchanting table alone in a room the seventh. Every source
         // added here has to join this condition.
+        //
+        // **`CampfireSource` is the one exception, and it is not a subset
+        // oversight**: a campfire's renderer contributes no cuboid instance at
+        // all (it draws item models through `prepare_item_geometry`), so adding
+        // it here would make this condition read as satisfied while this pass
+        // still had nothing to draw.
         if chests.is_empty()
             && skulls.is_empty()
             && bells.is_empty()
             && shulkers.is_empty()
             && banners.is_empty()
             && lecterns.is_empty()
+            && enchanting_tables.is_empty()
         {
             return (Vec::new(), Vec::new());
         }
@@ -812,6 +821,18 @@ impl RenderState {
             lecterns
                 .iter()
                 .filter_map(|spawn| self.block_entities.models.resolve_lectern(spawn)),
+        );
+        // Enchanting-table books share the lectern's mesh *and* its sheet, so they
+        // coalesce into the **same** batch as the lecterns above rather than a
+        // seventh one — the only pair here that does. Everything that differs
+        // between the two (the 80-degree tilt, the hover, the live openness and the
+        // page flips) rides the per-instance matrices, which is exactly why
+        // `resolve_enchanting_table` had to stay a separate function: sharing a
+        // batch is not sharing a pose.
+        instances.extend(
+            enchanting_tables
+                .iter()
+                .filter_map(|spawn| self.block_entities.models.resolve_enchanting_table(spawn)),
         );
 
         // Banners (issue #23). `resolve_banner` returns three things at once: the

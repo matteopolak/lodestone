@@ -57,8 +57,8 @@ So the honest count is: **3 of 26 registrations landed** (chest/ender chest/trap
 `ChestRenderer`), **5 more landed and wired end to end** (skull; sign text for **both** sign
 registrations — `SIGN` and `HANGING_SIGN` — geometry excepted since a sign's board is a real block
 model; the bell body/rim; and the shulker box — see [Shulker box](#shulker-box)), plus the banner, the
-lectern and the campfire, so **11 of 26** — wall banners share the `BANNER` registration with standing
-ones. The rest are still absent. Picking the next few should read this list,
+lectern, the campfire and the enchanting table, so **12 of 26** — wall banners share the `BANNER`
+registration with standing ones. The rest are still absent. Picking the next few should read this list,
 not the original issue body.
 
 **The registration list had two entries this document's "what is not built" section never mentioned
@@ -86,8 +86,10 @@ chest and skull in kind, just not in degree. The lectern is the far end of that 
 base and posts are *all* real block models, and only the open book on top comes from a renderer.
 Today: chests (single, double left, double right; every material; the lid animation), skull/head
 geometry (five of vanilla's seven types), the bell body/rim (see [Bell](#bell)), the shulker box (see
-[Shulker box](#shulker-box)), standing/wall/hanging sign text, the banner with its pattern layers, and
-the lectern's book (see [Lectern](#lectern)).
+[Shulker box](#shulker-box)), standing/wall/hanging sign text, the banner with its pattern layers, the
+lectern's book (see [Lectern](#lectern)), the enchanting table's floating book (see
+[Enchanting table](#enchanting-table)) and the food on a campfire (see [Campfire](#campfire), which is
+the one type here that draws no cuboid rig at all).
 
 This is not a nice-to-have layer over an existing box. A 26.2 chest has **no block model at all** —
 `assets/minecraft/blockstates/chest.json` points at `block/chest`, and that file is verbatim:
@@ -1022,6 +1024,113 @@ for a missing block — the symptom is a lectern that never holds a book. `app/r
 All six steps of the checklist below are done. One model, one sheet, so every lectern in the world
 coalesces into one batch regardless of facing — the facing rides the per-instance placement matrix.
 
+## Enchanting table
+
+The book floating over an enchanting table — `EnchantTableRenderer`, sharing **every vertex** of the
+lectern's `BookModel` and nothing else. It is the only type here whose whole appearance past "there is a
+table" is client-simulated, and the only animation fold in the module that no packet starts.
+
+### One mesh, two completely different jobs
+
+The mesh, the six part names and `book_part_poses` are shared with [Lectern](#lectern). Everything that
+positions or animates them differs:
+
+| | lectern | enchanting table |
+|---|---|---|
+| tilt about Z | `67.5°` | **`80°`** |
+| lift | `1.0625`, then `-0.125` in the tilted frame | `0.75`, then a live hover |
+| yaw | `Direction.getClockWise().toYRot()`, **degrees** | `EnchantingTableBlockEntity.rot`, **radians** |
+| `openness` | compile-time `1.5` | `(sin(time * 0.02) * 0.1 + 1.25) * open` |
+| page flips | constants `(0.1, 0.9)` | `clamp(frac(flip + 0.25/0.75) * 1.6 - 0.3, 0, 1)` |
+| input | one block-state boolean | four client-simulated floats |
+
+That is why `resolve_enchanting_table` is a separate function rather than `resolve_lectern`
+parameterised by a matrix. Folding the two would silently hand an enchanting table the lectern's **dead
+`1.5`** openness — a book that never opens, on a rig that draws perfectly and passes every mesh
+assertion. The two do share a *batch*, because they share `(model, texture)`; sharing a batch is not
+sharing a pose.
+
+### `y_rot` is radians, and there is no facing to read
+
+`Axis.YP.rotation(-yRot)` takes radians where the lectern's `Axis.YP.rotationDegrees` takes degrees, and
+the value is a simulated angle that chases the nearest player. **An enchanting table has no `facing`
+property at all**, so there is nothing on its block state a facing could have come from — a port that
+looks for one finds nothing and draws no book.
+
+`the_book_yaw_is_radians_not_degrees` computes both hypotheses: `PI/2` radians is a quarter turn, and
+the same number read as degrees is `1.57°`, which on a book a few texels wide is indistinguishable from
+no rotation. It probes local **`+Z`** and not `+X`, and that is not arbitrary — the `80°` tilt about `Z`
+stands local `X` almost vertical, and a Y rotation barely moves a near-vertical axis. Measured on this
+test's first run: a genuine quarter turn moved local `+X` by **`14°`**. Picking the wrong probe axis
+fails a correct implementation.
+
+### The animation is `bookAnimationTick`, and it has three per-tick rates
+
+`crate::block_entities::EnchantingTableBooks` is a direct port of
+`EnchantingTableBlockEntity.bookAnimationTick`, ticked at the fixed 20 Hz beside `ChestLids` and
+`BellShakes`. Three of its terms are per-tick rates — `open` `±0.1`, `tRot` `+0.02`, and the `90%`
+smoothing on `flipA` — so a per-frame advance would open a book three times too fast at 60 fps. That is
+the `chest_lids` trap with three victims instead of one.
+
+Four things in the port that are not decorative:
+
+- **The chase is 40% of the *wrapped* remaining arc.** Without the wrap the book takes the long way
+  round whenever the angle crosses `±PI`, which is nearly a full backwards revolution and happens every
+  time a player walks past one particular corner. Predicted from outside arithmetic: from `rot = 3.0`
+  toward `-3.0` the raw difference is `-6.0`, wrapped it is `+0.28319`, so `rot` lands on **`3.11327`**
+  — against **`0.6`** for the unwrapped reading. The neuter was watched: dropping `wrap_radians` there
+  reddens with `rot is 0.5999999, expected 3.113274`.
+- **The partial-tick lerp of `rot` is shortest-arc too**, for the same reason, and
+  `EnchantTableRenderer.extractRenderState` does it with three `while` loops before `submit` ever runs.
+- **`do { flipT += nextInt(4) - nextInt(4) } while (old == flipT)`.** The difference of two draws is
+  zero one time in four, and the loop *must* re-roll. A plain `if` leaves a page occasionally not
+  turning when it was asked to.
+- **Both page-flip clamps.** `frac(..) * 1.6 - 0.3` ranges over `-0.3..1.3`, and an unclamped value
+  drives `openness - openness * 2 * page_flip` past the covers, turning a page inside out through the
+  spine. The `1.6`/`-0.3` pair is what makes each page spend part of its cycle pinned flat against a
+  cover, which is what vanilla's book looks like.
+
+`java.util.Random` is ported rather than depended on — neither `lodestone-shell` nor `lodestone-render`
+has an RNG crate, and it is twelve lines. Ported *exactly*, because `nextInt`'s two branches are not
+interchangeable: a power-of-two bound is a multiply-and-shift and every other bound is a **rejection
+loop**, and this animation uses `nextInt(4)` and `nextInt(40)`. The seed is a fixed constant rather than
+a clock read; what actually matters about vanilla's `RandomSource.create()` here is that it is a
+*shared static* across every table in the world, and that property is kept.
+
+### The trigger is a player standing near a block, not a packet
+
+`level.getNearestPlayer(x + 0.5, y + 0.5, z + 0.5, 3.0, false)` — a **3-D** distance from the block
+centre, so a player on the floor below a table on a shelf does not open its book. Two consequences:
+
+- **Nothing on the wire would ever reveal that this had stopped working.** Chest lids and bell shakes
+  are both started by a `BLOCK_EVENT`, so a missing packet is a candidate explanation for a frozen one.
+  Here there is no packet to blame, which is why the per-frame source install carries a stronger warning
+  than any other in the family.
+- **Only the local player.** Vanilla asks for the *nearest* player, which on a busy server can be
+  someone else. We use the local player: it is the case that matters for what this client's user sees
+  and the only position this layer has cheaply. A remote player at a visible table therefore leaves its
+  book shut — a recorded fidelity gap, and closing it means scanning tracked player entities in the
+  tick.
+
+The position gather (`enchanting_table_positions`) is radius-limited to 8 blocks rather than
+`VIEW_DISTANCE`, because it runs at 20 Hz and a table nobody is near can only ever be shut.
+`EnchantingTableBooks::tick` keeps ticking entries it already holds regardless of that list, so a table
+the player walks away from still closes properly — asserted as a duration in
+`a_book_takes_ten_ticks_to_open_and_ten_to_shut`, both directions, with a value predicted at every step.
+A settled-shut entry is then collected, safe for `ChestLids`' reason: `open == 0` folds the lids flat, so
+a shut book and an absent one are the same pixels.
+
+### Status
+
+Wired end to end: geometry (`enchanting_table_book_placement_matrix`, `..._openness`,
+`enchanting_table_page_flips`, `resolve_enchanting_table`), the animation fold
+(`EnchantingTableBooks`, ticked in `Sim::step`), gather (`enchanting_table_spawns`), source
+(`EnchantingTableSource`) and the per-frame install in `app::redraw`. It joins
+`prepare_block_entities`' seven-way emptiness condition.
+
+Open within enchanting-table scope: the nearest-*remote*-player case above. Nothing else — the four
+animated values are complete.
+
 ## Campfire
 
 The food cooking on a campfire — and **nothing else**. This is the type that breaks the pattern every
@@ -1422,11 +1531,12 @@ Against the real 26-entry registration list (see above), not the issue's origina
 - **Campfire — landed**, both campfire blocks, including the per-frame install (see
   [Campfire](#campfire) above). Nothing is open within campfire scope: the renderer draws only the
   cooking items and has no animation at all.
-- The enchanting-table book (a full animation state machine —
-  `open`/`flip`/`rot`/`time`, all client-simulated, none of it on the wire, closer in scope to the
-  chest lid than to a static model; **the mesh it needs is already built and baked** — `book_model`,
-  shared with the lectern — so what is left is purely the state machine and a `resolve_*` that feeds
-  a live `openness`/`page_flip` into `book_part_poses`), mob spawner (draws a miniature spinning entity inside the cage —
+- **Enchanting-table book — landed**, including the animation fold and the per-frame install (see
+  [Enchanting table](#enchanting-table) above). The state machine really was all that was left: the
+  mesh was already baked and shared with the lectern. Still open within its scope: the nearest-player
+  test uses the **local** player only, so a remote player standing at a visible table leaves its book
+  shut.
+- Mob spawner (draws a miniature spinning entity inside the cage —
   reuses full entity rendering, not a simple cuboid rig), piston head, brushable block,
   decorated pot (`decorated_pot` atlas; its sides need **up to four independently textured sprites
   per instance** from NBT `sherds`, which the current `(model, texture)` single-texture-per-instance

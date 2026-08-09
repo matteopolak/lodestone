@@ -429,6 +429,7 @@ impl Sim {
             first_chunk_at: None,
             chest_lids: crate::block_entities::ChestLids::new(),
             bell_shakes: crate::block_entities::BellShakes::new(),
+            enchanting_table_books: crate::block_entities::EnchantingTableBooks::new(),
             pickups: lodestone_game::mining::PickupFeed::new(),
         };
         sim.refresh_mesh_policy();

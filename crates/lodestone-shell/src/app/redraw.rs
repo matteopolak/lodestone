@@ -323,6 +323,16 @@ impl WindowApp {
             render.set_campfire_source(f);
         }
 
+        // Enchanting-table books. The per-frame install matters more here than
+        // anywhere else in this list: the closure captures a snapshot of the
+        // animation fold *and* the partial tick, and none of the book's four
+        // animated values is on the wire — so a one-shot install draws every book
+        // frozen at the tick the session joined on, with no missing packet to
+        // blame it on.
+        if let Some(f) = self.sim.enchanting_table_source() {
+            render.set_enchanting_table_source(f);
+        }
+
         // Filled maps (issue #184). This is the hop that turns the `SessionMaps`
         // fold from an F3 readout into the picture itself — the palette, the
         // per-map texture and the held/framed quads were all landed with no live

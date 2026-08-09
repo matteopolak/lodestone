@@ -248,6 +248,27 @@ impl Sim {
         Some(move |eye: glam::Vec3| crate::block_entities::lectern_spawns(&handle, eye))
     }
 
+    /// This frame's enchanting-table books, for
+    /// [`RenderState::set_enchanting_table_source`](crate::gpu::RenderState::set_enchanting_table_source).
+    ///
+    /// Captures the animation fold **and** the partial tick, like `bell_source` and
+    /// unlike `lectern_source` — the two share a mesh and share nothing else. A
+    /// stale install freezes every book, and because none of `time`/`open`/`flip`/
+    /// `rot` is on the wire there is no missing packet to misdiagnose it as.
+    #[must_use]
+    pub fn enchanting_table_source(
+        &self,
+    ) -> Option<
+        impl Fn(glam::Vec3) -> Vec<lodestone_render::EnchantingTableSpawn> + Send + Sync + 'static,
+    > {
+        let handle = self.net.as_ref()?.shared_handle();
+        let books = self.enchanting_table_books.clone();
+        let partial_tick = self.clock().interp_alpha;
+        Some(move |eye: glam::Vec3| {
+            crate::block_entities::enchanting_table_spawns(&handle, &books, eye, partial_tick)
+        })
+    }
+
     /// This frame's campfire cooking items, for
     /// [`RenderState::set_campfire_source`](crate::gpu::RenderState::set_campfire_source).
     ///
