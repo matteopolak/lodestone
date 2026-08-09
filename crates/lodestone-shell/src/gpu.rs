@@ -201,6 +201,18 @@ pub struct RenderState {
     glint_speed: f64,
     /// See [`Self::glint_speed`].
     glint_strength: f32,
+    /// Vanilla's **Clouds** option ([`crate::config::Options::cloud_status`]),
+    /// pushed down per frame by `app/redraw.rs` and stamped onto the `SkyFrame`
+    /// this renderer builds.
+    ///
+    /// `lodestone_render::SkyFrame::with_cloud_status` had **zero** production
+    /// callers before this field: the pass always built
+    /// `CloudStatus::default()`, so FAST cloud geometry existed and was pixel-gated
+    /// and no player could ever select it.
+    ///
+    /// Defaults to `CloudStatus::default()` — `Fancy`, vanilla's own — so a
+    /// renderer nobody pushes the option into draws exactly what it drew before.
+    cloud_status: lodestone_render::CloudStatus,
     pipeline: BlockPipeline,
     #[allow(dead_code)]
     atlas: GpuAtlas,

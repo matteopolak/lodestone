@@ -103,6 +103,39 @@ pub const MAX_FOV: u32 = 110;
 /// `camera_rig::FOV_Y_DEGREES` used to pin the camera to unconditionally.
 pub const DEFAULT_FOV: u32 = 70;
 
+/// Vanilla's `CloudStatus.getSerializedName` (`CloudStatus.java`) — the string
+/// `options.json` stores [`Options::cloud_status`] as.
+///
+/// A name rather than the enum's ordinal, because the file is hand-editable and a
+/// bare `1` is both unguessable and silently remapped by any future variant
+/// insertion. Vanilla serialises the same three strings in its own `options.txt`.
+#[must_use]
+pub fn cloud_status_name(status: lodestone_render::CloudStatus) -> &'static str {
+    match status {
+        lodestone_render::CloudStatus::Off => "off",
+        lodestone_render::CloudStatus::Fast => "fast",
+        lodestone_render::CloudStatus::Fancy => "fancy",
+    }
+}
+
+/// The inverse of [`cloud_status_name`]. `None` for anything else, which
+/// [`Options::from_json`] turns into vanilla's default rather than an error — the
+/// same rule every other key in that function follows.
+///
+/// Vanilla additionally accepts its **legacy** boolean spellings here
+/// (`"true"` → FANCY, `"false"` → OFF, `CloudStatus.byName`), and so does this: a
+/// player copying a value out of an old `options.txt` should not silently get
+/// FANCY where they asked for off.
+#[must_use]
+pub fn cloud_status_from_name(name: &str) -> Option<lodestone_render::CloudStatus> {
+    match name {
+        "off" | "false" => Some(lodestone_render::CloudStatus::Off),
+        "fast" => Some(lodestone_render::CloudStatus::Fast),
+        "fancy" | "true" => Some(lodestone_render::CloudStatus::Fancy),
+        _ => None,
+    }
+}
+
 /// Vanilla's eleven `SoundSource` names, in `SoundSource` declaration order —
 /// the strings `SoundSource.getName()` returns.
 ///
@@ -486,6 +519,21 @@ pub struct Options {
     /// `0.0` removes the shimmer entirely, which is what a player sensitive to it
     /// wants; there is no separate on/off toggle in vanilla either.
     pub glint_strength: f32,
+    /// Vanilla's **Clouds** option (`Options.java:189`, a `CycleButton` over
+    /// `CloudStatus`, default `FANCY`) — off, fast, or fancy.
+    ///
+    /// Persisted as the string `"off"`/`"fast"`/`"fancy"`, matching vanilla's own
+    /// `CloudStatus.getSerializedName`, rather than as the enum's ordinal: the file
+    /// is hand-editable, and a number would make the three states unguessable *and*
+    /// silently remap if a variant were ever inserted.
+    ///
+    /// Reaches `lodestone_render::SkyFrame::with_cloud_status`, which had **zero**
+    /// production callers — the sky pass always built `CloudStatus::default()`, so
+    /// FAST geometry existed, was pixel-gated, and no player could select it.
+    ///
+    /// `Off` is a variant of `lodestone_render::CloudStatus` rather than a skip in
+    /// the shell's pass; that enum's own doc records why.
+    pub cloud_status: lodestone_render::CloudStatus,
 }
 
 impl Default for Options {
@@ -522,6 +570,9 @@ impl Default for Options {
             fov: DEFAULT_FOV,
             glint_speed: lodestone_render::glint::DEFAULT_SPEED as f32,
             glint_strength: lodestone_render::glint::DEFAULT_STRENGTH,
+            // `CloudStatus::default()` is `Fancy`, vanilla's own default — named
+            // through `Default` rather than spelled out so the two cannot drift.
+            cloud_status: lodestone_render::CloudStatus::default(),
         }
     }
 }
@@ -720,6 +771,11 @@ impl Options {
             "glint_strength",
             lodestone_render::glint::DEFAULT_STRENGTH,
         );
+        let cloud_status = obj
+            .get("cloud_status")
+            .and_then(serde_json::Value::as_str)
+            .and_then(cloud_status_from_name)
+            .unwrap_or_default();
         Self {
             gui_scale,
             keybinds,
@@ -752,6 +808,7 @@ impl Options {
             fov,
             glint_speed,
             glint_strength,
+            cloud_status,
         }
     }
 
@@ -904,6 +961,12 @@ impl Options {
         }
         if self.fov != default.fov {
             obj.insert("fov".into(), self.fov.into());
+        }
+        if self.cloud_status != default.cloud_status {
+            obj.insert(
+                "cloud_status".into(),
+                cloud_status_name(self.cloud_status).into(),
+            );
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
             .unwrap_or_else(|_| "{}".to_string());
@@ -1900,6 +1963,75 @@ mod tests {
                 "glint_strength: {bad} must degrade to the default"
             );
         }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // -- `cloudStatus` -------------------------------------------------------
+
+    /// All three cloud states round-trip through their vanilla serialised names,
+    /// and an untouched install writes no key.
+    ///
+    /// # Why the name and not the ordinal
+    ///
+    /// The wrong hypothesis this gate executes is "the ordinal is good enough": the
+    /// loop below asserts each name maps to a **distinct** state, and the
+    /// `"off"`/`"false"` pair pins the one that would silently invert if the file
+    /// carried a number and a variant were ever inserted ahead of `Off`. `Off` is
+    /// first in the enum, so its ordinal is `0` — which is also what a missing or
+    /// malformed key would deserialise to under an ordinal scheme, making "clouds
+    /// off" and "no setting" indistinguishable. Under the name scheme a malformed
+    /// key is FANCY, vanilla's default.
+    #[test]
+    fn cloud_status_round_trips_through_vanillas_own_names() {
+        use lodestone_render::CloudStatus;
+        let path = temp_options_path("cloud-status");
+        assert_eq!(Options::default().cloud_status, CloudStatus::Fancy);
+        Options::default().save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("cloud_status"),
+            "the default writes no key: {text}"
+        );
+
+        for status in [CloudStatus::Off, CloudStatus::Fast, CloudStatus::Fancy] {
+            let name = cloud_status_name(status);
+            assert_eq!(
+                cloud_status_from_name(name),
+                Some(status),
+                "{name} must round-trip"
+            );
+            let opts = Options {
+                cloud_status: status,
+                ..Options::default()
+            };
+            opts.save_to(&path).unwrap();
+            assert_eq!(Options::load_from(&path).cloud_status, status);
+        }
+        // The three names really are three names, so the round trip above is not
+        // satisfied by one string mapping to everything.
+        assert_eq!(cloud_status_name(CloudStatus::Off), "off");
+        assert_eq!(cloud_status_name(CloudStatus::Fast), "fast");
+        assert_eq!(cloud_status_name(CloudStatus::Fancy), "fancy");
+
+        // Vanilla's legacy boolean spellings, from `CloudStatus.byName`. `"false"`
+        // is the discriminating one: under a naive "anything unknown is the
+        // default" read it would become FANCY, the opposite of what it says.
+        assert_eq!(cloud_status_from_name("false"), Some(CloudStatus::Off));
+        assert_eq!(cloud_status_from_name("true"), Some(CloudStatus::Fancy));
+
+        for bad in ["\"OFF\"", "\"none\"", "1", "true", "null"] {
+            let json = format!("{{\"cloud_status\": {bad}}}");
+            assert_eq!(
+                Options::from_json(&json).cloud_status,
+                CloudStatus::Fancy,
+                "{bad} must degrade to vanilla's default, not to Off"
+            );
+        }
+        // The detector works: a legal name really does come through.
+        assert_eq!(
+            Options::from_json("{\"cloud_status\": \"off\"}").cloud_status,
+            CloudStatus::Off
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

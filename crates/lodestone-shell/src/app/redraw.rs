@@ -381,6 +381,10 @@ impl WindowApp {
             (f64::from(o.glint_speed), o.glint_strength)
         };
         render.set_glint_options(glint_speed, glint_strength);
+        // Vanilla's Clouds option (off/fast/fancy). `SkyFrame::with_cloud_status`
+        // had zero production callers, so every frame drew FANCY whatever the
+        // player chose — the FAST quad path was pixel-gated and unreachable.
+        render.set_cloud_status(self.nav.options().cloud_status);
 
         // Filled maps (issue #184). This is the hop that turns the `SessionMaps`
         // fold from an F3 readout into the picture itself — the palette, the

@@ -937,19 +937,62 @@ pub fn cloud_plane_geometry(
 // `crate::cloud_mesh`'s pure face enumeration.
 // ---------------------------------------------------------------------------
 
-/// Vanilla's `CloudStatus` (`net.minecraft.client.CloudStatus`), minus `OFF` —
-/// this client has no persisted graphics options yet (`#403`'s "Making the
-/// option live"), so there is nowhere for a player to have chosen `OFF`, and
-/// [`SkyRenderer::render`](crate::sky_pipeline::SkyRenderer::render) always
-/// draws one of the other two. Vanilla's own default is `FANCY`
-/// (`Options.java:189`), which is what [`SkyFrame::new`] uses.
+/// Vanilla's `CloudStatus` (`net.minecraft.client.CloudStatus`), all three
+/// states. Vanilla's own default is `FANCY` (`Options.java:189`), which is what
+/// [`SkyFrame::new`] uses.
+///
+/// # `Off` is an enum variant rather than a skip in the caller, and that is a
+/// choice with a reason
+///
+/// This enum carried only `Fast` and `Fancy` for as long as the shell had no
+/// persisted graphics option to select a third state with — so the doc here said
+/// "there is nowhere for a player to have chosen `OFF`", which was true and is now
+/// false: `crate::config::Options::cloud_status` exists.
+///
+/// The alternative was to keep two variants and have the shell's sky pass skip the
+/// cloud draw itself. That is worse for one specific reason: the *cloud* draw is
+/// not separable from the sky pass at the shell's level —
+/// [`SkyRenderer::render`](crate::sky_pipeline::SkyRenderer::render) is one call
+/// that clears the target and draws disc, sunrise, stars, celestial bodies and
+/// clouds together, and it is also what paints the below-horizon void. A caller
+/// "skipping clouds" would have to skip the whole sky, so the skip has to live
+/// inside `render` regardless — and once it does, a third variant states it in the
+/// type instead of in a boolean that travels beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CloudStatus {
+    /// `OFF` — no cloud geometry at all. The rest of the sky is unaffected.
+    Off,
     /// A single alpha-tested quad ([`cloud_plane_geometry`]).
     Fast,
     /// Real extruded per-cell geometry ([`fancy_cloud_geometry`]).
     #[default]
     Fancy,
+}
+
+impl CloudStatus {
+    /// Whether the flat, alpha-tested FAST quad ([`cloud_plane_geometry`]) is the
+    /// geometry to build this frame.
+    ///
+    /// # Two named predicates rather than one bool, on purpose
+    ///
+    /// The same shape (and the same reason) as
+    /// `lodestone_shell::camera_rig::CameraType`'s pair: a call site that means
+    /// "build the flat quad" and asks "is it *not* fancy" ships FAST geometry for
+    /// `Off` as well, which is the one state whose whole point is drawing nothing.
+    /// The two are **not** complements — both are false for [`Self::Off`] — and a
+    /// gate that only checks they differ passes with that mistake in place.
+    #[must_use]
+    pub const fn draws_flat_quad(self) -> bool {
+        matches!(self, Self::Fast)
+    }
+
+    /// Whether the extruded per-cell FANCY mesh ([`fancy_cloud_geometry`]) is the
+    /// geometry to build this frame. See [`Self::draws_flat_quad`] for why this is
+    /// its own predicate and not the negation of that one.
+    #[must_use]
+    pub const fn draws_extruded_cells(self) -> bool {
+        matches!(self, Self::Fancy)
+    }
 }
 
 /// Vertical thickness of the FANCY cloud layer, in blocks
@@ -1674,6 +1717,36 @@ mod tests {
         let (cell_x_far, _, x_far, _) = cloud_cell_and_offset([5.0 + tex_w_blocks * 3.0, 70.0, 0.0], 0, 16, 16);
         assert_eq!(cell_x_near, cell_x_far, "three whole periods away must land on the same cell");
         assert!((x_near - x_far).abs() < 1e-3);
+    }
+
+    /// Vanilla's three cloud states select **at most one** geometry each, and
+    /// `Off` selects none.
+    ///
+    /// The wrong hypothesis this executes is the natural one: that the two
+    /// predicates are complements, i.e. that "not fancy" means "draw the flat
+    /// quad". Under that reading `Off` would draw FAST geometry — the one state
+    /// whose entire purpose is drawing nothing — and every "the two differ"
+    /// assertion would still pass. So the load-bearing rows are the two that say
+    /// `Off` answers **false to both**.
+    #[test]
+    fn each_cloud_status_selects_at_most_one_geometry_and_off_selects_none() {
+        assert!(!CloudStatus::Off.draws_flat_quad());
+        assert!(!CloudStatus::Off.draws_extruded_cells());
+        assert!(CloudStatus::Fast.draws_flat_quad());
+        assert!(!CloudStatus::Fast.draws_extruded_cells());
+        assert!(!CloudStatus::Fancy.draws_flat_quad());
+        assert!(CloudStatus::Fancy.draws_extruded_cells());
+        // Never both, for any state — the invariant `SkyRenderer::render`'s
+        // if/else-if chain relies on.
+        for status in [CloudStatus::Off, CloudStatus::Fast, CloudStatus::Fancy] {
+            assert!(
+                !(status.draws_flat_quad() && status.draws_extruded_cells()),
+                "{status:?} selects both cloud geometries"
+            );
+        }
+        // And vanilla's default is FANCY, so an install that never touches the
+        // option is unchanged by `Off` existing.
+        assert_eq!(CloudStatus::default(), CloudStatus::Fancy);
     }
 
     /// The three-way split follows `relativeTopY`/`relativeBottomY` exactly:
