@@ -300,6 +300,32 @@ submission order rather than depth order.
 fully opaque — the plausible-looking wrong version: right colour, right cell, twice as
 solid.
 
+### The two pixel gates, and the numbers they measured
+
+Both are `#[ignore]`d (GPU adapter + jar) in `gpu/pixel_gates.rs`, and both had their
+controls **run and observed failing** rather than described:
+
+| gate | subject | control |
+|---|---|---|
+| `an_experience_orb_paints_green_pixels_and_an_empty_scene_does_not` | one orb at 617: **200** green pixels in the upper half of the frame, `experience_orbs_drawn == 1` | the identical frame with no orb: **0** green pixels, `experience_orbs_drawn == 0` |
+| `orbs_in_different_buckets_draw_different_sprites_and_same_bucket_orbs_do_not` | 7 vs 617 (cells 2 and 8): **864** differing pixels | 7 vs 16 (both cell 2): **0** differing pixels — byte-identical |
+
+The second gate is what the unit test structurally cannot see: `experience_orb_icon`
+can be perfectly correct while the mesh always samples cell 0, and every orb in the
+game then draws a plausible sprite. Neutering the icon lookup in `prepare_orbs` to a
+constant `0` takes the across-bucket figure from 864 to **0** and reddens it.
+
+The first gate's control is the island-counter case. Suppressing only the draw in
+`frame.rs` — leaving `prepare_orbs` and its counter untouched — reports
+`orbs_drawn=1 green_px=0`, which is exactly the shape a "did it draw?" assertion on
+the counter alone would have called a pass.
+
+The classifier is **green-dominant and away from the sky**, not merely "different from
+the sky": green is pinned at 255 while red reaches at most half and blue a tenth, so
+`g > r && g > b` above the horizon is a signature only the orb tint produces. The rect
+is the frame's upper half, because the first-person arm draws unconditionally into the
+bottom right and would otherwise be counted as orb coverage.
+
 The draw sits after every opaque and cutout entity layer and still **before translucent
 water**, for the reason the mobs and block entities do. The dropped-item and
 moving-block draws below it are opaque, so an orb in front of an item occludes it

@@ -1412,3 +1412,266 @@ fn run_eviction_gate(evict: bool) {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Experience orbs: the sprite has to reach pixels, and the *bucket* has to
+// reach the sprite
+// ---------------------------------------------------------------------------
+
+/// One `EntityDraw` for an experience orb worth `value`, hung above the
+/// horizon so nothing else in the frame can paint over it.
+///
+/// Every field but `experience_orb_value` is held constant across the arms of
+/// the gates below — the age in particular, because the orb's pulsing tint is
+/// derived from it and a differing age would make two frames differ for a
+/// reason that has nothing to do with the sprite cell.
+#[cfg(test)]
+fn orb_draw(value: i32) -> EntityDraw {
+    EntityDraw {
+        id: 1,
+        type_path: crate::entities::EXPERIENCE_ORB_TYPE_PATH.to_owned(),
+        item: None,
+        // Above the eye and dead ahead of a yaw-0 camera, so the sprite lands in
+        // the upper middle of the frame — clear of the first-person arm, which is
+        // drawn unconditionally into the bottom right.
+        feet: glam::Vec3::new(0.0, 2.0, 2.0),
+        yaw: 0.0,
+        head_yaw: 0.0,
+        pitch: 0.0,
+        scale: 1.0,
+        anim: lodestone_render::AnimInput::REST,
+        equipment: Vec::new(),
+        equipment_dye: Vec::new(),
+        equipment_trim: Vec::new(),
+        wool: None,
+        block_state: None,
+        count: 1,
+        foil: false,
+        name_tag: None,
+        hurt: false,
+        item_use: None,
+        creeper_swelling: 0.0,
+        on_fire: false,
+        player_skin: None,
+        experience_orb_value: Some(value),
+    }
+}
+
+/// The camera the orb gates render from — small, so the readback is cheap, and
+/// pitched flat so the orb sits above the horizon line.
+#[cfg(test)]
+fn orb_camera(w: u32, h: u32) -> Camera {
+    Camera {
+        position: glam::Vec3::new(0.0, 1.4, 0.0),
+        yaw: 0.0,
+        pitch: 0.0,
+        fov_y_degrees: 60.0,
+        aspect: w as f32 / h as f32,
+        near: 0.05,
+        far: Camera::far_for_render_distance(8, 0),
+    }
+}
+
+/// The orb's own screen rect, as the **upper half** of the frame: the sprite is
+/// at world `y ≈ 2.1` seen from an eye at `1.4` with no pitch, so it is above
+/// the horizon, and the only other thing that can paint up there is the sky.
+///
+/// A rect rather than the whole frame, and the upper half rather than a tight
+/// box, because the first-person arm draws unconditionally into the bottom right
+/// and would otherwise be counted as orb coverage — the premise-false failure
+/// mode `zombie_wears_its_real_skin_not_the_flat_placeholder` records for the
+/// same harness.
+#[cfg(test)]
+fn orb_rect_pixels(pixels: &[u8], w: u32, h: u32) -> Vec<[u8; 4]> {
+    let mut out = Vec::new();
+    for (i, px) in pixels.chunks_exact(4).enumerate() {
+        let i = i as u32;
+        if i / w >= h / 2 {
+            continue;
+        }
+        out.push([px[0], px[1], px[2], px[3]]);
+    }
+    out
+}
+
+/// An experience orb must put **green** pixels on screen, and a scene with no
+/// orb in it must not.
+///
+/// This is the island detector for the whole five-hop chain: the decode, the
+/// component, the bridge and the pass are each individually green in hermetic
+/// tests while the orb reaches zero pixels, which is exactly what shipped before
+/// this landed.
+///
+/// The classifier is **green-dominant and away from the sky**, not merely
+/// "different from the sky": vanilla's orb pins green at 255 and modulates red to
+/// at most half and blue to at most a tenth, so `g > r` and `g > b` is a
+/// signature only the orb tint can produce up there. The negative control is the
+/// same frame with the orb removed and must measure ~zero — if it does not, the
+/// upper half of the frame already has something green in it and this gate is
+/// measuring that instead.
+#[test]
+#[ignore = "requires a GPU adapter and .cache/mc/26.2/client.jar"]
+fn an_experience_orb_paints_green_pixels_and_an_empty_scene_does_not() {
+    let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+        "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU (or a software adapter), don't 'skip' — a silent pass \
+         here would assert nothing",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let (w, h) = (320u32, 240u32);
+    let mut target = HeadlessTarget::new(device, w, h, format);
+    let state = RenderState::new(device, queue, format, w, h, None);
+    let camera = orb_camera(w, h);
+
+    let green_count = |pixels: &[u8]| -> usize {
+        let sky = sky_clear_bytes();
+        orb_rect_pixels(pixels, w, h)
+            .into_iter()
+            .filter(|px| {
+                let far_from_sky = (i32::from(px[0]) - i32::from(sky[0])).abs()
+                    + (i32::from(px[1]) - i32::from(sky[1])).abs()
+                    + (i32::from(px[2]) - i32::from(sky[2])).abs()
+                    > 60;
+                far_from_sky && px[1] > px[0] && px[1] > px[2]
+            })
+            .count()
+    };
+
+    // The subject: one orb worth 617, which buckets to sprite cell 8.
+    let draws = vec![orb_draw(617)];
+    let frame = target.acquire().expect("headless acquire");
+    let stats = state.render(device, queue, frame.view(), &camera, None, &draws);
+    let with_orb = target.read_texels(device, queue);
+    let painted = green_count(&with_orb);
+
+    // The control: the identical frame with nothing in it.
+    let frame = target.acquire().expect("headless acquire");
+    let empty_stats = state.render(device, queue, frame.view(), &camera, None, &[]);
+    let without_orb = target.read_texels(device, queue);
+    let background = green_count(&without_orb);
+
+    eprintln!("=== experience orb pixel gate ===");
+    eprintln!(
+        "with orb: orbs_drawn={} green_px={painted}",
+        stats.experience_orbs_drawn
+    );
+    eprintln!(
+        "control:  orbs_drawn={} green_px={background}",
+        empty_stats.experience_orbs_drawn
+    );
+
+    // Collected, so a counter that is right and a sprite that is missing are
+    // reported together rather than the first one aborting.
+    let mut wrong: Vec<String> = Vec::new();
+    if stats.experience_orbs_drawn != 1 {
+        wrong.push(format!(
+            "expected exactly one orb billboard, got {}",
+            stats.experience_orbs_drawn
+        ));
+    }
+    if empty_stats.experience_orbs_drawn != 0 {
+        wrong.push(format!(
+            "the empty control drew {} orb billboards",
+            empty_stats.experience_orbs_drawn
+        ));
+    }
+    // The control has to fire *first*: if the background is already green, the
+    // subject's count means nothing.
+    if background > 20 {
+        wrong.push(format!(
+            "control premise is false — the orb-less upper half already has \
+             {background} green pixels, so this gate would pass without an orb"
+        ));
+    }
+    // 0.3 blocks wide at 2 blocks' distance through a 60-degree vertical FOV over
+    // 240 rows is roughly 30 px across, so a real sprite covers hundreds of
+    // pixels even after its transparent corners are discarded. A floor of 100
+    // separates "the sprite drew" from "a stray antialiased edge".
+    if painted < 100 {
+        wrong.push(format!(
+            "the orb painted only {painted} green pixels; a 0.3-block sprite two \
+             blocks away should cover hundreds — the billboard is not reaching the \
+             screen even though the counter says it drew"
+        ));
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// The **bucket** has to reach the sprite: two orbs whose values fall in
+/// *different* buckets must draw different pixels, and two whose values fall in
+/// the *same* bucket must draw byte-identical ones.
+///
+/// This is the pixel-level half of
+/// `orb_icon_is_bucketed_and_constant_inside_a_bucket`, and it is what the unit
+/// test structurally cannot see: `experience_orb_icon` can be perfectly correct
+/// while the mesh always samples cell 0, in which case every orb in the game
+/// draws a plausible sprite and nothing is ever wrong-looking enough to report.
+///
+/// The same-bucket arm is the control, and it is a **stronger** one than "the
+/// frames differ": it is byte-identical or the gate is measuring frame noise
+/// rather than the cell. 7 and 16 are both cell 2; 7 and 617 are cells 2 and 8.
+/// Every other input is held fixed, the age included, so the tint cycle cannot
+/// contribute a difference of its own.
+#[test]
+#[ignore = "requires a GPU adapter and .cache/mc/26.2/client.jar"]
+fn orbs_in_different_buckets_draw_different_sprites_and_same_bucket_orbs_do_not() {
+    let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+        "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU (or a software adapter), don't 'skip' — a silent pass \
+         here would assert nothing",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let (w, h) = (320u32, 240u32);
+    let mut target = HeadlessTarget::new(device, w, h, format);
+    let state = RenderState::new(device, queue, format, w, h, None);
+    let camera = orb_camera(w, h);
+
+    let mut rect_for = |value: i32| -> Vec<[u8; 4]> {
+        let frame = target.acquire().expect("headless acquire");
+        let draws = vec![orb_draw(value)];
+        state.render(device, queue, frame.view(), &camera, None, &draws);
+        let pixels = target.read_texels(device, queue);
+        orb_rect_pixels(&pixels, w, h)
+    };
+
+    // Cell 2 twice, then cell 8. `experience_orb_icon` is re-asserted here rather
+    // than assumed, so a future change to the ladder makes this gate say what went
+    // wrong instead of failing mysteriously.
+    assert_eq!(lodestone_render::experience_orb_icon(7), 2);
+    assert_eq!(lodestone_render::experience_orb_icon(16), 2);
+    assert_eq!(lodestone_render::experience_orb_icon(617), 8);
+
+    let low = rect_for(7);
+    let same_bucket = rect_for(16);
+    let other_bucket = rect_for(617);
+
+    let differing = |a: &[[u8; 4]], b: &[[u8; 4]]| -> usize {
+        a.iter().zip(b).filter(|(x, y)| x != y).count()
+    };
+    let same = differing(&low, &same_bucket);
+    let across = differing(&low, &other_bucket);
+    eprintln!("=== orb sprite-cell gate ===");
+    eprintln!("value 7 vs 16 (both cell 2): {same} differing pixels");
+    eprintln!("value 7 vs 617 (cell 2 vs 8): {across} differing pixels");
+
+    let mut wrong: Vec<String> = Vec::new();
+    if same != 0 {
+        wrong.push(format!(
+            "two values inside one bucket drew {same} differing pixels; the cell is \
+             not the only thing the value decides, so the assertion below cannot be \
+             attributed to the bucket"
+        ));
+    }
+    if across == 0 {
+        wrong.push(
+            "two values in different buckets drew byte-identical frames — the sprite \
+             cell is not reaching the mesh, so every orb in the game draws cell 0"
+                .to_owned(),
+        );
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
