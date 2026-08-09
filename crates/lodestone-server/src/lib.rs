@@ -163,6 +163,10 @@ pub mod explosion_blocks;
 /// Public because the tick loop is not the only intended caller: any code that
 /// edits a block owes [`fluid::ticks_after_edit`] for that position.
 pub mod fluid;
+/// Hunger: exhaustion, saturation, natural regeneration and starvation
+/// (`docs/hunger.md`). Public because the exhaustion *producers* live in
+/// `crate::server` and a caller needs the constants to charge the right amount.
+pub mod food;
 mod furnace;
 /// The world's typed game-rule registry (issue #327). **Was an orphan file too**
 /// — none of its 780 lines, including `game_rule_defaults_match_the_jar`, was in

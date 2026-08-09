@@ -247,6 +247,14 @@ impl WorldStateHandle {
         self.with(|state| state.rules.keep_inventory())
     }
 
+    /// `natural_health_regeneration` — whether a fed player heals over time. Read by
+    /// `crate::server`'s hunger tick; see [`crate::game_rules::GameRules::natural_health_regeneration`]
+    /// for what it does and does *not* gate.
+    #[must_use]
+    pub fn natural_health_regeneration(&self) -> bool {
+        self.with(|state| state.rules.natural_health_regeneration())
+    }
+
     /// `block_drops` — whether breaking a block drops anything.
     #[must_use]
     pub fn block_drops(&self) -> bool {

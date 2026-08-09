@@ -329,6 +329,11 @@ pub const SPAWN_MOBS: &str = "spawn_mobs";
 /// `GameRules.KEEP_INVENTORY`.
 pub const KEEP_INVENTORY: &str = "keep_inventory";
 
+/// The `natural_health_regeneration` rule's identifier — vanilla's
+/// `naturalRegeneration`. Read by `crate::food::FoodData::tick`, which gates **both**
+/// regeneration arms on it and neither starvation nor depletion.
+pub const NATURAL_HEALTH_REGENERATION: &str = "natural_health_regeneration";
+
 /// `block_drops` — pre-26.2 `doTileDrops`. Read by `crate::server`'s block-break
 /// arm, which is where vanilla consults it too
 /// (`Block.dropResources`'s `GameRules.RULE_DOBLOCKDROPS`).
@@ -459,6 +464,17 @@ impl GameRules {
     #[must_use]
     pub fn keep_inventory(&self) -> bool {
         self.boolean(KEEP_INVENTORY)
+    }
+
+    /// `natural_health_regeneration` — whether a fed player heals over time.
+    ///
+    /// Gates the two regeneration arms of `crate::food::FoodData::tick` and
+    /// **nothing else**: with it off, hunger still depletes and a starving player
+    /// still takes damage. Reading it as a master switch for the whole hunger system
+    /// is the mistake it invites.
+    #[must_use]
+    pub fn natural_health_regeneration(&self) -> bool {
+        self.boolean(NATURAL_HEALTH_REGENERATION)
     }
 
     /// `block_drops` — whether breaking a block drops anything. Read by

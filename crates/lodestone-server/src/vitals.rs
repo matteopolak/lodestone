@@ -132,6 +132,9 @@ pub enum DeathCause {
     OutsideBorder,
     /// [`PlayerVitals::apply_damage`], the generic melee/mob entry point.
     Generic,
+    /// [`PlayerVitals::tick_food`]'s starvation arm — vanilla's `starve` damage
+    /// type.
+    Starve,
 }
 
 impl DeathCause {
@@ -155,6 +158,7 @@ impl DeathCause {
             Self::Drown => "drown",
             Self::OutsideBorder => "outsideBorder",
             Self::Generic => "generic",
+            Self::Starve => "starve",
         }
     }
 
@@ -296,6 +300,15 @@ pub struct PlayerVitals {
     /// gate, fall bypasses one entirely). A future pass unifying all three
     /// under one cooldown is out of this change's scope.
     hurt_cooldown: lodestone_entity::HurtCooldown,
+    /// Hunger — [`crate::food::FoodData`], ticked by
+    /// [`tick_food`](Self::tick_food) rather than by [`tick`](Self::tick).
+    ///
+    /// **Owned here rather than beside here**, because hunger both reads and writes
+    /// health: natural regeneration heals and starvation hurts, and every other
+    /// damage source in this type already goes through the same `health` field. A
+    /// parallel struct next to `PlayerVitals` would need its own copy of health and
+    /// the two would drift the first time anything else damaged the player.
+    food: crate::food::FoodData,
 }
 
 impl Default for PlayerVitals {
@@ -308,6 +321,7 @@ impl Default for PlayerVitals {
             air_supply: MAX_AIR_SUPPLY,
             health: MAX_HEALTH,
             hurt_cooldown: lodestone_entity::HurtCooldown::default(),
+            food: crate::food::FoodData::default(),
         }
     }
 }
@@ -567,6 +581,7 @@ impl PlayerVitals {
         *self = Self::default();
     }
 
+
     /// Rebuilds vitals from a saved player file (issue #302).
     ///
     /// Both values are **clamped to their legal ranges** rather than trusted:
@@ -591,7 +606,69 @@ impl PlayerVitals {
             air_supply: air_supply.clamp(-MAX_AIR_SUPPLY, MAX_AIR_SUPPLY),
             health: health.clamp(0.0, MAX_HEALTH),
             hurt_cooldown: lodestone_entity::HurtCooldown::default(),
+            food: crate::food::FoodData::default(),
         }
+    }
+
+    /// This player's hunger state, for the `SetHealth` packet's `food` and
+    /// `saturation` fields and for persistence.
+    #[must_use]
+    pub fn food(&self) -> crate::food::FoodData {
+        self.food
+    }
+
+    /// Replaces the hunger state — the load-from-disk path, paired with
+    /// [`crate::food::FoodData::restored`].
+    pub fn set_food(&mut self, food: crate::food::FoodData) {
+        self.food = food;
+    }
+
+    /// Charges hunger exhaustion for an action — vanilla's
+    /// `Player.causeFoodExhaustion`, whose one guard is `!abilities.invulnerable`.
+    ///
+    /// **That guard is the caller's**, because this type does not know the game
+    /// mode, and forgetting it makes a creative player starve. Every production call
+    /// site in `crate::server` passes through an `Abilities::for_mode` check for
+    /// exactly that reason.
+    ///
+    /// The amounts are [`crate::food`]'s constants. Note that walking and crouching
+    /// are genuinely **zero** there, so charging them is not a rounding difference —
+    /// it invents a depletion vanilla does not have.
+    pub fn add_exhaustion(&mut self, amount: f32) {
+        self.food.add_exhaustion(amount);
+    }
+
+    /// Advances hunger by one server tick and applies its health consequences —
+    /// `FoodData.tick` plus the `player.heal` / `hurtServer(starve)` calls it makes
+    /// on the way out.
+    ///
+    /// Separate from [`tick`](Self::tick) rather than folded into it, because the
+    /// two need different inputs: drowning needs the block at the player's eye, and
+    /// hunger needs the difficulty and a game rule. `crate::server`'s `vitals_tick`
+    /// calls both, in vanilla's own order (`baseTick`'s air block, then
+    /// `ServerPlayer.tick`'s `foodData.tick`).
+    ///
+    /// A dead player is a no-op, mirroring every other entry point here.
+    pub fn tick_food(
+        &mut self,
+        difficulty: lodestone_model::Difficulty,
+        natural_regen: bool,
+    ) -> crate::food::FoodTick {
+        if self.health <= 0.0 {
+            return crate::food::FoodTick::default();
+        }
+        let out = self.food.tick(difficulty, natural_regen, self.health, MAX_HEALTH);
+        if let Some(heal) = out.heal {
+            self.health = (self.health + heal).min(MAX_HEALTH);
+        }
+        if let Some(starve) = out.starve {
+            // `hurtServer(damageSources().starve(), 1.0F)`. `minecraft:starve` is
+            // `bypasses_armor`-tagged, so the raw subtraction and the reduction
+            // pipeline agree — the same premise `DROWN_DAMAGE` rests on, and pinned
+            // by `starve_bypasses_armor_like_drowning_does` below.
+            self.health = (self.health - starve).max(0.0);
+        }
+        out
     }
 }
 
@@ -1092,6 +1169,7 @@ mod tests {
             (DeathCause::Drown, "drown"),
             (DeathCause::OutsideBorder, "outside_border"),
             (DeathCause::Generic, "generic"),
+            (DeathCause::Starve, "starve"),
         ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../.cache/mc/26.2/src/data/minecraft/damage_type");
@@ -1129,5 +1207,152 @@ mod tests {
             }
             other => panic!("a death message must be translatable, got {other:?}"),
         }
+    }
+    // ---- hunger (`crate::food`) reaching health --------------------------
+
+    /// The premise behind subtracting the starvation hit straight from health:
+    /// `minecraft:starve` is `bypasses_armor`-tagged, so the shortcut and the full
+    /// reduction pipeline agree today. The same shape
+    /// [`the_drowning_shortcut_agrees_with_the_pipeline_for_now`] pins for drowning.
+    #[test]
+    fn starve_bypasses_armor_like_drowning_does() {
+        let flags = lodestone_entity::DamageFlags::for_damage_type(starve_damage_type_for_gate());
+        assert!(
+            flags.bypasses_armor,
+            "minecraft:starve is bypasses_armor-tagged, which is why applying the hit \
+             directly to health is currently equivalent to running the pipeline"
+        );
+        let piped = lodestone_entity::apply_reductions(
+            crate::food::STARVE_DAMAGE,
+            &lodestone_entity::Defenses::default(),
+            flags,
+        )
+        .to_health;
+        assert_eq!(piped, crate::food::STARVE_DAMAGE);
+    }
+
+    /// `minecraft:starve` from the generated table, for the premise assertion above.
+    fn starve_damage_type_for_gate() -> lodestone_data::damage_types::DamageType {
+        lodestone_data::damage_types::DamageType::from_name("minecraft:starve")
+            .expect("minecraft:starve is in the generated damage-type table")
+    }
+
+    /// Starvation reaches **health**, which is the join this type exists to make:
+    /// `FoodData::tick` only *reports* a starve, and something has to apply it.
+    ///
+    /// The prediction is exact rather than directional. On Hard, from 20 health with
+    /// an empty food bar, the hit lands every 80 ticks — so 240 ticks is exactly
+    /// three hits and health is exactly `17.0`. A model that hurt every tick would
+    /// read `0.0`; one that never applied the report would read `20.0`.
+    #[test]
+    fn starvation_reaches_health_at_exactly_one_per_eighty_ticks() {
+        let mut v = PlayerVitals::default();
+        v.set_food(crate::food::FoodData::restored(0, 0.0, 0.0, 0));
+        for _ in 0..240 {
+            v.tick_food(lodestone_model::Difficulty::Hard, true);
+        }
+        assert_eq!(
+            v.health(),
+            MAX_HEALTH - 3.0,
+            "three 80-tick starvation hits from 240 ticks"
+        );
+    }
+
+    /// Regeneration reaches health, and **runs out of food before it runs out of
+    /// health** — which is the whole reason vanilla's regeneration is not free.
+    ///
+    /// # This gate was written wrong first, and the wrong answer was the obvious one
+    ///
+    /// The first version predicted `MAX_HEALTH`: heal until full. It measured
+    /// `15.5`. A player at 10 health with a full bar and `5.0` saturation regenerates
+    /// only **5.5** health, because each heal charges exhaustion (`spent` on the fast
+    /// arm, `6.0` on the slow one), the charge spends saturation and then food, and
+    /// once food falls below `HEAL_LEVEL` regeneration switches itself off. It ends
+    /// at food 17, saturation 0, and stays there.
+    ///
+    /// So the pair below is the mechanism, not two views of it:
+    ///
+    /// | arm | result |
+    /// |---|---|
+    /// | left alone | **15.5** health, food 17 — regeneration starved itself out |
+    /// | food kept topped up (as if eating) | **20.0** — the cap, no overshoot |
+    ///
+    /// Both figures were derived arithmetically from the constants, and the second is
+    /// the control: without it, `15.5` is equally consistent with regeneration simply
+    /// being broken.
+    #[test]
+    fn regeneration_runs_out_of_food_before_it_fills_the_health_bar() {
+        let mut v = PlayerVitals::default();
+        v.apply_fall_damage(10.0);
+        assert_eq!(v.health(), MAX_HEALTH - 10.0);
+        for _ in 0..4_000 {
+            v.tick_food(lodestone_model::Difficulty::Normal, true);
+        }
+        assert!(
+            (v.health() - 15.5).abs() < 1e-3,
+            "5.0 saturation plus the drop to HEAL_LEVEL buys 5.5 health, not more; got {}",
+            v.health()
+        );
+        assert_eq!(
+            v.food().food_level(),
+            17,
+            "regeneration stops one point below HEAL_LEVEL, which is what ends it"
+        );
+
+        // The control: a player who keeps eating *does* reach the cap, and does not
+        // overshoot it. Topping up every tick stands in for food, which nothing
+        // supplies yet.
+        let mut fed = PlayerVitals::default();
+        fed.apply_fall_damage(10.0);
+        for _ in 0..4_000 {
+            let food = fed.food();
+            if food.food_level() < crate::food::MAX_FOOD
+                || food.saturation() < crate::food::START_SATURATION
+            {
+                fed.set_food(crate::food::FoodData::restored(
+                    crate::food::MAX_FOOD,
+                    crate::food::START_SATURATION,
+                    food.exhaustion(),
+                    food.tick_timer(),
+                ));
+            }
+            fed.tick_food(lodestone_model::Difficulty::Normal, true);
+        }
+        assert_eq!(
+            fed.health(),
+            MAX_HEALTH,
+            "a fed player reaches exactly the cap — no overshoot, and proof the \
+             15.5 above is hunger running out rather than regeneration being broken"
+        );
+    }
+
+    /// **Control**: a dead player's hunger does not tick, so a corpse cannot starve
+    /// further or regenerate — the same `health <= 0.0` guard every other entry point
+    /// here carries.
+    #[test]
+    fn dead_vitals_do_not_tick_hunger() {
+        let mut v = PlayerVitals::default();
+        v.apply_fall_damage(999.0);
+        assert_eq!(v.health(), 0.0);
+        v.set_food(crate::food::FoodData::restored(0, 0.0, 0.0, 0));
+        for _ in 0..240 {
+            let out = v.tick_food(lodestone_model::Difficulty::Hard, true);
+            assert!(out.is_empty(), "a dead player's hunger must not tick: {out:?}");
+        }
+        assert_eq!(v.health(), 0.0);
+    }
+
+    /// A respawn restores hunger as well as health and air — vanilla replaces
+    /// `FoodData` wholesale, so exhaustion and the tick timer go with it.
+    #[test]
+    fn respawn_restores_hunger_too() {
+        let mut v = PlayerVitals::default();
+        v.set_food(crate::food::FoodData::restored(3, 0.0, 30.0, 40));
+        v.apply_fall_damage(999.0);
+        v.respawn();
+        assert_eq!(v.food().food_level(), crate::food::MAX_FOOD);
+        assert_eq!(v.food().saturation(), crate::food::START_SATURATION);
+        assert_eq!(v.food().exhaustion(), 0.0, "exhaustion must not survive a death");
+        assert_eq!(v.food().tick_timer(), 0);
     }
 }

@@ -93,6 +93,12 @@ const CHANGE_GAME_MODE_C2S: i32 = 58;
 /// key/value string pair each.
 const SET_GAME_RULE_C2S: i32 = 59;
 
+/// A stand-in `player_input`: one byte, non-zero meaning sprinting. The real
+/// v770 packet is a bitfield of movement flags; this file tests
+/// `lodestone-server`'s own consumer logic, and the sprint bit is the only one it
+/// reads (hunger's per-block exhaustion, `crate::food`).
+const PLAYER_INPUT_C2S: i32 = 60;
+
 /// A [`ChunkSource`] that hands out an all-air column instantly — these
 /// tests are about packet scheduling, not terrain, so real worldgen would
 /// only add cost and noise.
@@ -224,6 +230,12 @@ impl ServerProtocol for FakeProtocol {
                     _ => Difficulty::Hard,
                 };
                 ServerBound::DifficultyChanged { difficulty }
+            }
+            State::Play if packet_id == PLAYER_INPUT_C2S => {
+                let mut r = Reader::new(payload);
+                ServerBound::PlayerInput {
+                    sprint: r.u8().expect("sprint flag") != 0,
+                }
             }
             State::Play if packet_id == SET_GAME_RULE_C2S => {
                 let mut r = Reader::new(payload);
@@ -415,9 +427,11 @@ impl ServerProtocol for FakeProtocol {
         }
     }
 
-    fn encode_set_health(&self, health: f32) -> ServerDirective {
+    fn encode_set_health(&self, health: f32, food: i32, saturation: f32) -> ServerDirective {
         let mut w = Writer::default();
         w.f32(health);
+        w.var_i32(food);
+        w.f32(saturation);
         ServerDirective::Send {
             packet_id: SET_HEALTH_S2C,
             payload: w.as_slice().to_vec(),
@@ -690,6 +704,16 @@ async fn send_creative_slot(client: &mut Connection<DuplexStream>, slot: i16, it
         .await
         .expect("send creative slot");
     send_game_mode(client, 0).await;
+}
+
+/// Sends the stand-in `player_input` sprint flag.
+async fn send_player_input(client: &mut Connection<DuplexStream>, sprint: bool) {
+    let mut w = Writer::default();
+    w.u8(u8::from(sprint));
+    client
+        .write_packet(PLAYER_INPUT_C2S, w.as_slice())
+        .await
+        .expect("send player input");
 }
 
 /// Sends the stand-in `set_game_rule` with one `(key, value)` entry.
@@ -1195,6 +1219,15 @@ async fn submerged_player_loses_air_and_takes_drowning_damage_on_vanilla_cadence
 
     let mut client = Connection::new(client_end);
     drive_login_and_join(&mut client, "Diver", 1).await;
+
+    // **Natural regeneration off, and this is load-bearing rather than tidying.**
+    // Once hunger landed, a hurt player with a full food bar heals on the fast
+    // regeneration arm every 10 ticks — so the very next `SetHealth` after the first
+    // drowning hit is a *heal*, not the second hit, and this gate's "the next health
+    // update is the second hit" premise stopped holding. Turning the rule off keeps
+    // the test measuring the drowning cadence rather than the race between drowning
+    // and regeneration, which `crate::food`'s own gates cover.
+    send_game_rule(&mut client, "natural_health_regeneration", "false").await;
 
     // Any position inside chunk (0, 0) with y in [0, 16) is submerged: the
     // entire `WaterSource` column is water, feet at y = 8 puts the eye
@@ -1940,8 +1973,8 @@ impl ServerProtocol for ProbeProto {
     fn encode_air_supply_update(&self, air: i32) -> ServerDirective {
         FakeProtocol.encode_air_supply_update(air)
     }
-    fn encode_set_health(&self, health: f32) -> ServerDirective {
-        FakeProtocol.encode_set_health(health)
+    fn encode_set_health(&self, health: f32, food: i32, saturation: f32) -> ServerDirective {
+        FakeProtocol.encode_set_health(health, food, saturation)
     }
     fn encode_change_difficulty(&self, difficulty: Difficulty, locked: bool) -> ServerDirective {
         FakeProtocol.encode_change_difficulty(difficulty, locked)
@@ -3878,4 +3911,157 @@ async fn control_without_an_off_task_encoder_every_column_is_encoded_on_the_conn
          `at_reply == 0` assertion in the fixed arm is vacuous"
     );
     assert_eq!(observed, expected, "the whole view must still arrive");
+}
+
+/// **The island gate for hunger** (issue #258): a sprinting player's exhaustion
+/// reaches the wire as a falling `saturation`, then a falling `food`, on the real
+/// `serve_connection` path — not just inside `crate::food`'s own unit tests, which
+/// would be entirely green with nothing calling them.
+///
+/// # The prediction, derived rather than observed
+///
+/// One 250-block sprinting step charges
+/// `EXHAUSTION_SPRINT_PER_BLOCK * round(250 * 100) * 0.01 = 0.1 * 25000 * 0.01 =
+/// 25.0` exhaustion. The tick then spends `4.0` per tick while exhaustion is
+/// **strictly** above `4.0`, taking one saturation point each time and then one food
+/// point once saturation is gone:
+///
+/// | tick | exhaustion after | saturation | food |
+/// |---|---|---|---|
+/// | 1 | 21.0 | 4.0 | 20 |
+/// | 5 | 5.0 | 0.0 | 20 |
+/// | 6 | 1.0 | 0.0 | **19** |
+/// | 7 | 1.0 — not above 4.0 | 0.0 | 19 |
+///
+/// So the final wire state is exactly `food = 19, saturation = 0.0`, and it settles
+/// there. Six drops, not seven: `1.0` is not greater than `4.0`.
+///
+/// Natural regeneration is turned off, because the player is at full health here and
+/// a regeneration arm would otherwise start competing for the same exhaustion as
+/// soon as anything hurt them — the same reason the drowning gate above turns it off.
+#[tokio::test(start_paused = true)]
+async fn a_sprinting_player_loses_saturation_then_food_on_the_wire() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
+            .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Sprinter", 1).await;
+    send_game_rule(&mut client, "natural_health_regeneration", "false").await;
+
+    // Establish a starting position, then sprint 250 blocks in z from it. The
+    // exhaustion charge needs the *previous* position, so the first move is the
+    // baseline and the second is the one that costs.
+    send_player_input(&mut client, true).await;
+    send_player_moved(&mut client, 8.0, 8.0, 8.0).await;
+    send_player_moved(&mut client, 8.0, 8.0, 258.0).await;
+
+    // Collect `(food, saturation)` from every `SetHealth` until the predicted final
+    // state arrives, bounded so a failure reports what it saw rather than hanging.
+    let mut seen: Vec<(i32, f32)> = Vec::new();
+    for _ in 0..4_000 {
+        let (id, payload) = client.read_packet().await.expect("read").expect("packet");
+        if id != SET_HEALTH_S2C {
+            continue;
+        }
+        let mut r = Reader::new(&payload);
+        let health = r.f32().expect("health");
+        let food = r.var_i32().expect("food");
+        let saturation = r.f32().expect("saturation");
+        assert_eq!(health, 20.0, "nothing here should damage the player");
+        seen.push((food, saturation));
+        if (food, saturation) == (19, 0.0) {
+            break;
+        }
+    }
+
+    assert!(
+        seen.contains(&(20, 4.0)),
+        "the first drop must cost *saturation*, not food — if the first update is \
+         (19, …) then exhaustion is decrementing food directly and hunger depletes \
+         five times too fast. Saw: {seen:?}"
+    );
+    assert_eq!(
+        seen.last().copied(),
+        Some((19, 0.0)),
+        "25.0 exhaustion is exactly six 4.0 drops: five of saturation then one of \
+         food. Saw: {seen:?}"
+    );
+    assert!(
+        !seen.contains(&(18, 0.0)),
+        "a seventh drop would mean the threshold test is `>=` rather than `>`, since \
+         1.0 exhaustion is left over. Saw: {seen:?}"
+    );
+
+    drop(client);
+    let _ = server.await.unwrap();
+}
+
+/// **The control**, and the reason the gate above is about *sprinting* rather than
+/// about "moving costs food": the identical 250-block step with the sprint flag off
+/// must cost **nothing at all**. Vanilla's walking branch is a literal `0.0F`
+/// multiply.
+///
+/// Asserted as an absence, so it needs the detector to be known-working — and it is,
+/// by construction: the gate above uses the same harness, the same source and the
+/// same read loop, and does see updates. Here a bounded read must see none.
+#[tokio::test(start_paused = true)]
+async fn the_same_step_while_walking_costs_no_hunger_at_all() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
+            .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Walker", 1).await;
+    send_game_rule(&mut client, "natural_health_regeneration", "false").await;
+
+    // No `send_player_input`, so `sprinting` stays at its `false` default.
+    send_player_moved(&mut client, 8.0, 8.0, 8.0).await;
+    send_player_moved(&mut client, 8.0, 8.0, 258.0).await;
+
+    // The window is **measured, not assumed**. This reads until the server closes the
+    // connection (it eventually does: nothing here answers a keep-alive, so the
+    // keep-alive timeout fires), and counts the packets that did arrive. A control
+    // asserting an absence is only as good as the evidence something *would* have
+    // shown up, so the packet count is asserted too — an empty stream would
+    // otherwise pass this vacuously.
+    let mut updates: Vec<(i32, f32)> = Vec::new();
+    let mut observed = 0usize;
+    for _ in 0..4_000 {
+        let Ok(Some((id, payload))) = client.read_packet().await else {
+            break;
+        };
+        observed += 1;
+        if id != SET_HEALTH_S2C {
+            continue;
+        }
+        let mut r = Reader::new(&payload);
+        let _health = r.f32().expect("health");
+        updates.push((
+            r.var_i32().expect("food"),
+            r.f32().expect("saturation"),
+        ));
+    }
+    assert!(
+        observed > 20,
+        "the window must actually span some server traffic, or this control measures \
+         nothing; saw {observed} packets"
+    );
+    assert!(
+        updates.is_empty(),
+        "walking is a 0.0F multiply in vanilla, so nothing may change: {updates:?}"
+    );
+
+    drop(client);
+    let _ = server.await.unwrap();
 }

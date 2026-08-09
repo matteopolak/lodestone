@@ -3109,6 +3109,10 @@ async fn apply_block_action<T, P, S>(
     // Issue #338's `minecraft:mined` counter — see `destroy_block`'s own parameter
     // comment for why it is awarded there rather than here.
     advancements: &mut AdvancementManager,
+    // Hunger, for the per-block mining exhaustion `destroy_block` charges. Threaded
+    // through rather than read from a wider scope so the creative guard stays at the
+    // one place that knows the game mode.
+    vitals: &mut PlayerVitals,
     pos: BlockPos,
 ) -> Result<(), ServerError>
 where
@@ -3150,6 +3154,7 @@ where
                     !creative && world.block_drops(),
                     pos,
                     advancements,
+                    (!creative).then_some(vitals),
                 )
                 .await?;
             } else {
@@ -3212,6 +3217,7 @@ where
                 !creative && world.block_drops(),
                 pos,
                 advancements,
+                (!creative).then_some(vitals),
             )
             .await?;
         }
@@ -3256,6 +3262,12 @@ async fn destroy_block<T, P, S>(
     // whether anything drops, so gating this on `drop_loot` would silently stop
     // counting in creative.
     advancements: &mut AdvancementManager,
+    // Hunger's mining cost (`FoodConstants.EXHAUSTION_MINE`, 0.005 per block).
+    // `None` for a creative break — vanilla's guard is on `causeFoodExhaustion`
+    // (`!abilities.invulnerable`), not on the break, so an invulnerable player mines
+    // for free. An `Option` rather than a bool beside the vitals, so the guard
+    // cannot be forgotten at a new call site.
+    exhaust: Option<&mut PlayerVitals>,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -3282,6 +3294,9 @@ where
         ),
         1,
     );
+    if let Some(vitals) = exhaust {
+        vitals.add_exhaustion(crate::food::EXHAUSTION_MINE);
+    }
     if let Some(effect) = crate::effects::block_destroyed(pos, &broken) {
         block_ticks.publish_effect_except(breaker, effect);
     }
@@ -5021,7 +5036,16 @@ where
             for directive in proto.encode_respawn(target) {
                 apply(conn, state, directive).await?;
             }
-            apply(conn, state, proto.encode_set_health(vitals.health())).await?;
+            apply(
+                conn,
+                state,
+                proto.encode_set_health(
+                    vitals.health(),
+                    vitals.food().food_level(),
+                    vitals.food().saturation(),
+                ),
+            )
+            .await?;
             apply(conn, state, proto.encode_air_supply_update(vitals.air_supply())).await?;
             // The teleport above is a position snap, so the next `PlayerMoved`
             // sample must not be diffed against the y the player died at — a
@@ -5696,7 +5720,16 @@ where
     T: Transport,
     P: ServerProtocol,
 {
-    apply(conn, state, proto.encode_set_health(vitals.health())).await?;
+    apply(
+        conn,
+        state,
+        proto.encode_set_health(
+            vitals.health(),
+            vitals.food().food_level(),
+            vitals.food().saturation(),
+        ),
+    )
+    .await?;
     if vitals.health() <= 0.0 {
         advancements.award_stat(
             player_uuid,
@@ -5920,6 +5953,38 @@ where
             rotation,
             on_ground,
         } => {
+            // Hunger exhaustion for the distance just travelled — vanilla's
+            // `ServerPlayer.checkMovementStatistics`, which is driven by the
+            // position delta rather than by a per-tick constant. Charged **before**
+            // `player_pos` is overwritten, because the delta needs the old value.
+            //
+            // Vanilla's expression is `0.1F * cm * 0.01F` where
+            // `cm = round(sqrt(dx² + dz²) * 100)` — an `int` — so the rounding is
+            // reproduced rather than collapsed into `0.1 * blocks`. It matters at
+            // small steps: a sub-half-centimetre move rounds to zero centimetres and
+            // costs nothing at all, which is what keeps a jittering client from
+            // accumulating exhaustion.
+            //
+            // Only the **sprinting on ground** branch is charged, and that is not a
+            // simplification: walking and crouching are literal `0.0F` multiplies in
+            // vanilla, so the other on-ground branches genuinely cost nothing. The
+            // swimming and eye-underwater branches (`0.01F`) are the real omission —
+            // they need `isSwimming`/`isEyeInFluid`, which this arm does not have,
+            // and charging sprint's constant for them would be ten times too much.
+            if let Some((px, _, pz)) = *player_pos
+                && *sprinting
+                && on_ground
+                && !Abilities::for_mode(*game_mode).invulnerable
+            {
+                let dx = x - px;
+                let dz = z - pz;
+                let cm = ((dx * dx + dz * dz).sqrt() as f32 * 100.0).round() as i32;
+                if cm > 0 {
+                    vitals.add_exhaustion(
+                        crate::food::EXHAUSTION_SPRINT_PER_BLOCK * cm as f32 * 0.01,
+                    );
+                }
+            }
             *player_pos = Some((x, y, z));
             // Issue #262: `move_player_pos_rot` carries angles and
             // `move_player_pos` does not, so this is `if let`, not an
@@ -6118,6 +6183,7 @@ where
                 matches!(*game_mode, GameMode::Creative),
                 action,
                 advancements,
+                vitals,
                 pos,
             )
             .await?;
@@ -6253,6 +6319,12 @@ where
         }
         ServerBound::Attack { entity_id } => {
             apply_attack(mobs, *player_pos, *sprinting, entity_id);
+            // `Player.attack`'s `causeFoodExhaustion(0.1F)`, charged on the swing
+            // rather than on a hit that landed — vanilla charges it inside `attack`
+            // after the damage call, unconditionally for a living target.
+            if !Abilities::for_mode(*game_mode).invulnerable {
+                vitals.add_exhaustion(crate::food::EXHAUSTION_ATTACK);
+            }
         }
         ServerBound::PlayerInput { sprint } => {
             *sprinting = sprint;
@@ -7098,6 +7170,7 @@ where
                             !matches!(game_mode, GameMode::Creative) && world.block_drops(),
                             dig.pos,
                             &mut advancements,
+                            (!matches!(game_mode, GameMode::Creative)).then_some(&mut vitals),
                         )
                         .await?;
                     }
@@ -7164,6 +7237,40 @@ where
                             player_entity_id,
                             &username,
                             crate::vitals::DeathCause::Drown,
+                            &mut advancements,
+                            player_uuid,
+                        )
+                        .await?;
+                    }
+                }
+
+                // Hunger, after the air block — vanilla's own order
+                // (`LivingEntity.baseTick`'s water-breath block, then
+                // `ServerPlayer.tick`'s `foodData.tick`). Runs whether or not a
+                // position has been reported, unlike drowning: hunger needs no
+                // terrain, only the difficulty and a game rule, and a player who
+                // has not moved since joining still starves.
+                //
+                // `!invulnerable`: vanilla's guard is on `causeFoodExhaustion`, so a
+                // creative player accumulates no exhaustion at all and their bar can
+                // never move. Skipping the whole tick is equivalent and cheaper —
+                // with no exhaustion there is nothing to spend, and the regeneration
+                // arms are moot for a player who cannot be hurt.
+                if !Abilities::for_mode(game_mode).invulnerable {
+                    let (difficulty, _) = world.difficulty();
+                    let food_out = vitals.tick_food(difficulty, world.natural_health_regeneration());
+                    // A heal or a starve moves health, and a food/saturation change
+                    // moves the HUD — either way the client needs the packet, and
+                    // `SetHealth` carries all three fields in one.
+                    if !food_out.is_empty() {
+                        publish_health(
+                            conn,
+                            &mut state,
+                            proto,
+                            &vitals,
+                            player_entity_id,
+                            &username,
+                            crate::vitals::DeathCause::Starve,
                             &mut advancements,
                             player_uuid,
                         )
