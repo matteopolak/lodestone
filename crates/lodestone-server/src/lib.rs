@@ -172,6 +172,12 @@ pub mod food;
 /// (smelting, breeding, fishing, enchanting) lives outside this module and must not
 /// grow a second curve.
 pub mod experience;
+/// The general server-side status-effect registry (`docs/status-effects.md`):
+/// duration countdown, amplifier stacking with vanilla's hidden-effect chain, and the
+/// periodic poison/wither/regeneration ticks. Public because it is the *shared store*
+/// every consumer should read — `lodestone_physics::effect` is a movement classifier
+/// over an id and an amplifier, not a place to keep effect state.
+pub mod mob_effects;
 mod furnace;
 /// The world's typed game-rule registry (issue #327). **Was an orphan file too**
 /// — none of its 780 lines, including `game_rule_defaults_match_the_jar`, was in

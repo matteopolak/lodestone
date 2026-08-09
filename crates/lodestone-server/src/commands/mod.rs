@@ -111,6 +111,9 @@
 //! version-free `ArgumentParser`), and [`crate::game_rules`].
 
 pub mod effect;
+/// `/effect give` and `/effect clear` — the producer that makes
+/// [`crate::mob_effects`] reachable from a running game.
+mod effect_command;
 mod gamemode;
 mod gamerule;
 mod give;
@@ -197,6 +200,7 @@ impl ServerCommands {
         gamerule::register(&mut registrar);
         gamemode::register(&mut registrar);
         give::register(&mut registrar);
+        effect_command::register(&mut registrar);
         Self::from_registrar(registrar)
     }
 

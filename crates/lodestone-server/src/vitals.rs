@@ -135,6 +135,17 @@ pub enum DeathCause {
     /// [`PlayerVitals::tick_food`]'s starvation arm — vanilla's `starve` damage
     /// type.
     Starve,
+    /// A status effect's periodic damage ([`PlayerVitals::apply_effect_damage`]) —
+    /// vanilla's `wither` damage type.
+    ///
+    /// **One variant for both poison and wither, and that is a real
+    /// approximation**: vanilla's poison uses `magic` and wither uses `wither`, two
+    /// different message ids. Both reduce to the same *number* here (neither is
+    /// armour-reducible in a crate with no armour model), so the divergence is only
+    /// in the death message, and collapsing them keeps `DeathCause` closed by
+    /// construction rather than adding a variant whose only difference is a string.
+    /// Split it when the message is actually rendered.
+    Wither,
 }
 
 impl DeathCause {
@@ -159,6 +170,7 @@ impl DeathCause {
             Self::OutsideBorder => "outsideBorder",
             Self::Generic => "generic",
             Self::Starve => "starve",
+            Self::Wither => "wither",
         }
     }
 
@@ -563,6 +575,36 @@ impl PlayerVitals {
         let outcome = lodestone_entity::apply_reductions(amount, defenses, flags);
         self.health = (self.health - outcome.to_health).max(0.0);
         Some(outcome.to_health)
+    }
+
+    /// Heals — vanilla's `LivingEntity.heal`, clamped at [`MAX_HEALTH`]. A dead
+    /// entity is not healed (`isAlive()` guard), which is what stops a regeneration
+    /// effect reviving a corpse.
+    pub fn heal(&mut self, amount: f32) {
+        if self.health <= 0.0 {
+            return;
+        }
+        self.health = (self.health + amount).min(MAX_HEALTH);
+    }
+
+    /// Applies a status effect's periodic damage — poison's `magic` or wither's
+    /// `wither` hit.
+    ///
+    /// **No i-frame gate**, deliberately: vanilla routes these through `hurtServer`,
+    /// but the *interval* is the effect's own (25 or 40 ticks, both longer than the
+    /// 20-tick invulnerability window at amplifier 0), so a gate would be inert at
+    /// low amplifiers and would silently swallow hits at high ones — where
+    /// `25 >> 5 == 0` makes poison fire every tick and vanilla really does land every
+    /// hit. Recorded rather than added, because adding one would change a number
+    /// `crate::mob_effects`' gates pin.
+    ///
+    /// **Poison's own `health > 1.0` guard is the caller's** — [`crate::mob_effects`]
+    /// applies it, so an amount arriving here has already been allowed.
+    pub fn apply_effect_damage(&mut self, amount: f32) {
+        if self.health <= 0.0 {
+            return;
+        }
+        self.health = (self.health - amount).max(0.0);
     }
 
     /// Resets vitals to a fresh-spawn state (full air, full health, no
@@ -1170,6 +1212,7 @@ mod tests {
             (DeathCause::OutsideBorder, "outside_border"),
             (DeathCause::Generic, "generic"),
             (DeathCause::Starve, "starve"),
+            (DeathCause::Wither, "wither"),
         ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../.cache/mc/26.2/src/data/minecraft/damage_type");
