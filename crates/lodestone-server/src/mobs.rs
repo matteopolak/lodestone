@@ -172,10 +172,18 @@ fn canonical_state_string(id: u32) -> Option<String> {
 
 /// The reverse of [`canonical_state_string`]: every block-state id's canonical
 /// string, keyed back to its id. Built once (32,366 entries) and cached for
-/// the process lifetime — `lodestone-data` exposes id → name/properties but no
-/// name → id lookup (nothing has ever needed one before this), and `ChunkColumn`
-/// stores block states as those canonical strings, not ids, so `ChunkWorld`
-/// needs this to bridge the two.
+/// the process lifetime, because `ChunkColumn` stores block states as canonical
+/// strings rather than ids while every per-state census is keyed by id, so
+/// `ChunkWorld` has to bridge the two.
+///
+/// **`lodestone-data` now has a forward index and this map should go.** This
+/// doc used to say that crate had "no name → id lookup"; that stopped being
+/// true when `lodestone_data::block_states::state_id` landed — a block-major
+/// sorted-span lookup that needs no per-process map and no 32,366 `String`
+/// allocations. It is not merely equivalent: it resolves a *partial* property
+/// set through vanilla's `defaultBlockState().setValue(…)` semantics, which
+/// this exact-string map cannot, and that difference was three shipped bugs.
+/// Do not add a fourth hand-rolled inverse anywhere — call that instead.
 fn state_id_by_name() -> &'static HashMap<String, u32> {
     static INDEX: OnceLock<HashMap<String, u32>> = OnceLock::new();
     INDEX.get_or_init(|| {
