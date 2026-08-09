@@ -506,6 +506,32 @@ pub struct DebugStats {
     /// Empty off a GPU-less run (every headless gate), which draws no lines
     /// rather than placeholders.
     pub adapter: Vec<String>,
+    /// The dimension the local player is in, as the server named it —
+    /// `minecraft:overworld`, `minecraft:the_nether`, or a data pack's own id.
+    ///
+    /// The last line of vanilla's `position` group is
+    /// `minecraft.level.dimension().identifier() + " FC: " + chunks.size()`, and
+    /// this is its identifier half. Read from the local player's
+    /// `lodestone_ecs::session::ServerDimension` component in `sim/step.rs`, so
+    /// it follows a portal trip: that fold updates on `Respawned` as well as
+    /// `Login`, which is the whole reason the too-bright-Nether bug is fixed.
+    ///
+    /// **`None` before login draws no line at all**, matching vanilla — whose
+    /// entire `position` group is absent when there is no camera entity. It is
+    /// not `-`, because unlike `Difficulty:` or `Client Light:` vanilla's line
+    /// has no prefix to hang a placeholder off.
+    pub dimension: Option<String>,
+    /// Whether the F3+B entity-hitbox overlay is on.
+    ///
+    /// Mirrors `WindowApp::debug_hitboxes`, the `Arc<AtomicBool>` the world-line
+    /// source closure actually reads. **Copied per frame rather than derived from
+    /// a local guess** — the `Debug overlays:` line exists to report the state
+    /// that decides whether boxes draw, and a second source of truth for it is
+    /// how a hint that lies gets shipped.
+    pub hitboxes_shown: bool,
+    /// Whether the F3+G chunk-border overlay is on. See
+    /// [`Self::hitboxes_shown`].
+    pub chunk_borders_shown: bool,
 }
 
 /// Display name for a [`lodestone_model::Difficulty`] — vanilla's own
@@ -524,6 +550,23 @@ fn difficulty_name(d: lodestone_model::Difficulty) -> &'static str {
         lodestone_model::Difficulty::Normal => "normal",
         lodestone_model::Difficulty::Hard => "hard",
     }
+}
+
+/// `DebugScreenOverlay.formatChart` — `formatKeybind(…) + " " + name + " " +
+/// (status ? "visible" : "hidden")`, with `formatKeybind` bracketing the chord as
+/// `"[" + modifier + "+" + key + "]"`.
+///
+/// The chord arrives as a literal (`"F3+B"`) rather than as a lookup, because
+/// unlike vanilla's these two are not `KeyMapping`s — they are hardcoded in
+/// `app/input.rs` behind the `KeyGate::debug_held` flag, so there is no
+/// `getTranslatedKeyMessage` to ask and no unbound case to handle. **If they ever
+/// become rebindable this must read the binding**, or the hint will name the old
+/// key with total confidence.
+fn format_toggle(chord: &str, name: &str, shown: bool) -> String {
+    format!(
+        "[{chord}] {name} {}",
+        if shown { "visible" } else { "hidden" }
+    )
 }
 
 /// `Mth.wrapDegrees(float)` — `angle % 360`, pulled into `[-180, 180)`.
@@ -653,7 +696,7 @@ impl DebugStats {
         // `ChunkPos.containing` / `SectionPos.blockToSectionCoord`, both `>> 4`.
         let (cx, cy, cz) = (bx >> 4, by >> 4, bz >> 4);
         let (facing, face_hint) = self.facing_parts();
-        vec![
+        let mut out = vec![
             // `DebugEntryFps`: `"%d fps T: %s%s"`, a *priority* line, and the
             // first one added — so it lands left, because `addPriorityLine`
             // fills the shorter column and both start empty.
@@ -711,7 +754,20 @@ impl DebugStats {
                 wrap_degrees(self.yaw),
                 wrap_degrees(self.pitch)
             ),
-            // `DebugEntrySectionPosition`, which joins the *position* group.
+        ];
+        // The fifth and last line `DebugEntryPosition` adds to its group is
+        // `level.dimension().identifier() + " FC: " + chunks.size()`. The
+        // identifier is real here; `FC` is `ServerLevel.getForceLoadedChunks`,
+        // which the client has no view of, so the suffix is dropped rather than
+        // printed as a `0` we did not measure. Absent rather than `-` before
+        // login: vanilla omits its whole position group when there is no camera
+        // entity, and this line has no prefix to hang a placeholder off.
+        if let Some(dimension) = &self.dimension {
+            out.push(dimension.clone());
+        }
+        out.extend([
+            // `DebugEntrySectionPosition`, which joins the *position* group and
+            // is therefore drawn after everything `DebugEntryPosition` added.
             format!("Section-relative: {:02} {:02} {:02}", bx & 15, by & 15, bz & 15),
             // `DebugEntryLookingAt.BlockStateInfo`'s first line, whose prefix is
             // the literal `"Targeted Block"` and whose separators are commas.
@@ -721,7 +777,35 @@ impl DebugStats {
                 Some([x, y, z]) => format!("Targeted Block: {x}, {y}, {z}"),
                 None => "Targeted Block: -".to_string(),
             },
-        ]
+            String::new(),
+            // Vanilla closes the left column with its chart-keybind block, gated
+            // on `isOverlayVisible()`:
+            //
+            //   Debug charts: [F3+2] Profiler hidden; [F3+1] FPS + TPS hidden;
+            //   [F3+3] Ping hidden; [F3+4] Lightmap hidden
+            //   To edit: press [F3+I]
+            //
+            // built from `formatChart` = `[mod+key] Name visible|hidden`. None of
+            // those four charts exists here, but the two world overlays that do
+            // are toggled by exactly this kind of chord and had no on-screen
+            // state at all — so this is vanilla's shape carrying our real
+            // toggles. `To edit:` is dropped: there is no entry-enable screen to
+            // point at, and a hint naming a chord that does nothing is worse than
+            // no hint.
+            //
+            // The booleans are copied per frame from the `Arc<AtomicBool>`s the
+            // draw itself reads (`WindowApp::debug_hitboxes` /
+            // `debug_chunk_borders`, flipped in `app/lifecycle.rs` and consumed
+            // by `install_debug_lines_source`'s closure), never re-derived — the
+            // line's whole job is to report the state that decides whether the
+            // boxes draw.
+            format!(
+                "Debug overlays: {}; {}",
+                format_toggle("F3+B", "Hitboxes", self.hitboxes_shown),
+                format_toggle("F3+G", "Chunk borders", self.chunk_borders_shown)
+            ),
+        ]);
+        out
     }
 
     /// The **right** column: the client's identity, then the render engine —
@@ -5087,6 +5171,8 @@ mod tests {
     /// | fractional `y` and `z` | vanilla's asymmetric `%.3f / %.5f / %.3f` — a uniform `%.2f`, or space separators, differ visibly |
     /// | `y = 70.25` | section Y is `70 >> 4 == 4`, not the block Y the `Chunk:` line used to print |
     /// | `yaw = 405` | `Mth.wrapDegrees` — prints `45.0`, not `405.0` |
+    /// | `the_nether`, not `overworld` | a hardcoded dimension default, which is what this line read before it was wired to `ServerDimension` |
+    /// | hitboxes **on**, borders **off** | the two `Debug overlays:` states are deliberately *different*. Equal booleans are the one input a transposed pair survives, and they are adjacent same-typed fields — the cheapest bug in the file |
     ///
     /// Each expectation is paired with the value the **superseded** formatting
     /// produced, and the gate fails if the two ever coincide: an input where
@@ -5099,6 +5185,9 @@ mod tests {
             pitch: 12.34,
             light: Some((4, 11)),
             target: Some([-1, 70, 87]),
+            dimension: Some("minecraft:the_nether".to_string()),
+            hitboxes_shown: true,
+            chunk_borders_shown: false,
             ..Default::default()
         };
         let lines = stats.lines();
@@ -5134,6 +5223,23 @@ mod tests {
                 "Client Light",
                 "Client Light: 11 (4 sky, 11 block)",
                 "LIGHT 11 (4 SKY, 11 BLOCK)",
+            ),
+            // The identifier half of vanilla's last `position`-group line. The
+            // wrong hypothesis is the overworld default this used to be absent
+            // for entirely — a line that reads a constant is the defect class,
+            // not the missing line.
+            (
+                "minecraft:the_nether",
+                "minecraft:the_nether",
+                "minecraft:overworld",
+            ),
+            // `formatChart`'s shape, carrying the two toggles that exist here.
+            // The wrong hypothesis is the *transposed* pair, which is why the
+            // fixture sets the two booleans differently.
+            (
+                "Debug overlays",
+                "Debug overlays: [F3+B] Hitboxes visible; [F3+G] Chunk borders hidden",
+                "Debug overlays: [F3+B] Hitboxes hidden; [F3+G] Chunk borders visible",
             ),
             (
                 "Targeted Block",
@@ -5174,6 +5280,33 @@ mod tests {
             cases.len(),
             failures.join("\n  "),
             lines
+        );
+
+        // Before login there is no dimension, and vanilla's whole `position`
+        // group is absent in that state — so the line goes rather than becoming
+        // a placeholder. The assertion above is this one's control: the same
+        // detector found the line present with `Some`, so a `false` here is
+        // absence and not a broken search.
+        let pre_login = DebugStats::default();
+        assert!(
+            !pre_login
+                .lines()
+                .iter()
+                .any(|l| l.contains("minecraft:") || l == "-"),
+            "with no dimension reported the overlay must draw no dimension line \
+             at all, got {:#?}",
+            pre_login.lines()
+        );
+
+        // And the toggle line survives the pre-login state reading `hidden` for
+        // both — the default, and the only value that could hide a wire that
+        // never runs. Asserted so the line's *presence* is not conditional on
+        // state the way the dimension's is.
+        assert!(
+            pre_login.lines().iter().any(|l| l
+                == "Debug overlays: [F3+B] Hitboxes hidden; [F3+G] Chunk borders hidden"),
+            "the Debug overlays line is unconditional, got {:#?}",
+            pre_login.lines()
         );
     }
 

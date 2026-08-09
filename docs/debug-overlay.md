@@ -77,15 +77,22 @@ XYZ: -0.500 / 70.25000 / 88.750                        P: 40/40, 0 unresolved
 Block: -1 70 88
 Chunk: -1 4 5 [31 5 in r.-1.0.mca]                     F/T: 0.40
 Facing: west (Towards negative X) (45.0 / 12.3)        Live cols: 441, drops: 0
-Section-relative: 15 06 08                             Occl: active, nodes: …
-Targeted Block: -1, 70, 87
-                                                       Mem: 512 MiB (RSS)
+minecraft:overworld                                    Occl: active, nodes: …
+Section-relative: 15 06 08
+Targeted Block: -1, 70, 87                             Mem: 512 MiB (RSS)
                                                        World: 41984 KiB
-                                                       Mesh VRAM: 65536/…
-
+Debug overlays: [F3+B] Hitboxes hidden;                Mesh VRAM: 65536/…
+                [F3+G] Chunk borders hidden
                                                        Apple M5 (Metal)
                                                        …limits…
 ```
+
+The `Debug overlays:` line is one line, wrapped here only to fit the page.
+Note where the dimension sits: **between `Facing:` and `Section-relative:`**, not
+at the end of the block. That is vanilla's group insertion order —
+`DebugEntryPosition` adds five lines and `DebugEntrySectionPosition` appends its
+one to the *same* `position` group afterwards, so the section-relative triple
+comes last of the six.
 
 ### Which vanilla line became what
 
@@ -108,7 +115,7 @@ Ported means the format string is vanilla's, character for character.
 | `player_position` | `Block: %d %d %d` | **ported** | verbatim |
 | `player_position` | `Chunk: %d %d %d [%d %d in r.%d.%d.mca]` | **ported** | verbatim |
 | `player_position` | `Facing: %s (%s) (%.1f / %.1f)` | **ported** | verbatim, with `Direction.toString()`'s lowercase name and `Mth.wrapDegrees` on both angles |
-| `player_position` | `<dimension> FC: <n>` | **dropped** | `getForceLoadedChunks` is `ServerLevel`-only, and the dimension id is not plumbed into `DebugStats` |
+| `player_position` | `<dimension> FC: <n>` | **half ported** | the identifier is real — `minecraft:the_nether`, read from the local player's `ServerDimension` component, so it follows a portal trip and not just login. The ` FC: <n>` suffix is **dropped**: `getForceLoadedChunks` is `ServerLevel`-only and printing `0` would be a number we did not measure. Absent entirely before login, as vanilla's whole position group is with no camera entity |
 | `player_section_position` | `Section-relative: %02d %02d %02d` | **ported** | verbatim |
 | `light_levels` | `Client Light: %d (%d sky, %d block)` | **ported** | verbatim. `-` when there is no data — before login, or for an unloaded section |
 | `light_levels` | `Server Light: (%d sky, %d block)` | **dropped** | behind `SharedConstants.DEBUG_SHOW_SERVER_DEBUG_VALUES`, off in a shipped build |
@@ -133,7 +140,8 @@ Ported means the format string is vanilla's, character for character.
 | `heightmap`, `chunk_generation_stats`, `chunk_source_stats`, `entity_spawn_counts`, `sound_mood`, `sound_cache`, `post_effect`, `looking_at_*_tags`, `looking_at_entity*` | — | **dropped** | none of these has a datum on this side yet; all are additions rather than parity fixes |
 | `entity_hitboxes`, `chunk_borders` | `DebugEntryNoop` — world overlays | **ported** | F3+B and F3+G, below |
 | `3d_crosshair`, `chunk_section_paths`, `chunk_section_octree`, `chunk_section_visibility`, `visualize_*` (9) | `DebugEntryNoop` — world overlays | **dropped** | not built |
-| the `Debug charts:` / `To edit:` block | keybind hints, when the overlay is visible | **dropped** | the four charts (`fps`, `tps`, `ping`, `bandwidth`, `ProfilerPieChart`), the lightmap blit and the runtime entry-enable screen do not exist here, so the hints would name chords that do nothing |
+| the `Debug charts:` block | `formatChart` = `[mod+key] Name visible|hidden`, joined with `; `, when the overlay is visible | **replaced** | `Debug overlays: [F3+B] Hitboxes visible; [F3+G] Chunk borders hidden` — vanilla's shape carrying the two toggles that *do* exist. None of vanilla's four charts does, so naming them would be a hint that lies |
+| the `To edit: press [F3+…]` line | points at the entry-enable screen | **dropped** | there is no such screen here, and a chord that does nothing is worse than no hint |
 
 Lines of ours with **no vanilla counterpart**, and why each stays:
 
@@ -145,6 +153,35 @@ Lines of ours with **no vanilla counterpart**, and why each stays:
 | `World: <n> KiB` | heap owned by loaded chunks. The single honest world-memory number: it reads the same whether the world is locally generated or client-owned |
 | `Mesh VRAM: <live>/<reserved> KiB` | see below. Vanilla has no GPU-residency line at all |
 | `Recipes:`, `Border:`, `Maps:`, `Spawn:` | conditional folds-reached-the-client diagnostics, each drawn only once its datum has actually arrived. They live on `HudFrame` rather than `DebugStats`, so `build_inner` appends them, each opening its own spacer |
+
+### Where the two live wires come from
+
+Both of these were lines that could have read a constant, which is the whole
+reason they are wired rather than formatted:
+
+- **The dimension** is `DebugStats::dimension`, filled in `sim/step.rs`'s
+  `refresh_stats` from the local player's
+  `lodestone_ecs::session::ServerDimension` component — **inside** the
+  `refreshes_world_stats` throttle, because it takes the ECS read lock. Reading
+  that component rather than caching a shell-side value at login is load-bearing:
+  the fold updates on `Respawned` as well as `Login`, which is how portal travel
+  is reported, and a login-time cache is exactly the stale-value shape that
+  produced the too-bright Nether.
+- **The two toggle states** are `hitboxes_shown` / `chunk_borders_shown`, copied
+  every frame in `app/redraw.rs` from the same `Arc<AtomicBool>`s the world-line
+  source closure reads (`WindowApp::debug_hitboxes` / `debug_chunk_borders`,
+  flipped in `app/lifecycle.rs`, consumed by `install_debug_lines_source`). The
+  write lives in `redraw.rs` rather than in `refresh_stats` because the atomics
+  are owned by `WindowApp`, not by `Sim`. One source of truth: the line's whole
+  job is to report the state that decides whether boxes draw, so a second mirror
+  is how a hint that lies gets shipped.
+
+The chord names in `format_toggle` are **literals**, and correctly so: unlike
+vanilla's these two are not `KeyMapping`s, so there is no
+`getTranslatedKeyMessage` to ask and no unbound case to handle. **If they ever
+become rebindable this must read the binding** — otherwise the hint will keep
+naming the old key with total confidence, which is the failure the whole line was
+added to prevent.
 
 ### How the column split was decided
 
@@ -315,6 +352,10 @@ Toggles are `Arc<AtomicBool>` because the source closure is
 - **An entity whose type path the census cannot resolve gets no box**, rather than
   a plausible default one. A wrong hitbox is worse than a missing one: the
   overlay's whole value is being believed.
+- **The `Debug overlays:` line must keep reading the atomics, not a mirror.** It
+  is the only on-screen report of whether F3+B and F3+G are on, so a shell-side
+  copy that drifts turns the overlay's most trustworthy property — that it is
+  believed — into the bug. Same for the chord literals; see above.
 - **Not built**: the four debug charts and the profiler pie, the lightmap blit,
   vanilla's runtime entry-enable screen and its `debug-profile.json`, and the nine
   `visualize_*` world overlays. All are additions; none is a gap in what is here.
@@ -328,12 +369,22 @@ All three are `hud.rs` unit tests, no adapter needed:
   **unpacks them in the test** rather than restating four floats, so a channel
   swap or a dropped alpha fails. Also pins the pitch, the margin, and
   `DEBUG_LINE_H < hud_line_h()`.
-- `debug_overlay_ported_lines_match_vanillas_format_strings` — every ported line,
-  character for character, at `[-0.5, 70.25, 88.75]`, yaw `405`. Each expectation
-  carries the value the superseded formatting produced for the same input, and the
-  gate **fails if the two coincide**. Mismatches are collected and asserted on the
-  collection, so a regression reports every wrong line rather than the first:
-  neutering `block_position` back to `as i64` fails 3 of 7 arms with 4 messages.
+- `debug_overlay_ported_lines_match_vanillas_format_strings` — all nine ported
+  lines, character for character, at `[-0.5, 70.25, 88.75]`, yaw `405`, in
+  `minecraft:the_nether`, with hitboxes **on** and borders **off**. Each
+  expectation carries the value the superseded or unwired version produced for the
+  same input, and the gate **fails if the two coincide**. Mismatches are collected
+  and asserted on the collection, so a regression reports every wrong line rather
+  than the first. Three controls, all run:
+  - `block_position` back to `as i64` → 3 arms, 4 messages (`Block: 0 70 88`,
+    `Chunk: 0 4 5 [0 5 …]`, `Section-relative: 00 06 08`).
+  - the dimension line hardcoded to `minecraft:overworld` and the two toggle
+    booleans transposed → 2 arms, 4 messages. **The toggles are set to different
+    values precisely so the transposition is visible** — equal booleans are the
+    one input a swapped adjacent same-typed pair survives.
+  - with the collection assert satisfied, the hardcoded dimension push also fails
+    the pre-login absence check, which is the control proving that check can fire
+    rather than merely being satisfied by a broken search.
 - `debug_overlay_columns_carry_vanillas_spacers_and_concatenate` — `lines()` is
   exactly `left_lines() ++ right_lines()`, both columns carry at least two group
   spacers, neither ends with one (a trailing spacer draws nothing and only pads
