@@ -13,6 +13,21 @@
 # scenes it moved, because the file's whole value is that a line changing is
 # surprising:
 #
+#  3. `waterlogged_stair_beside_air` added, and `SceneView` grew a real
+#     `self_occlusion_at`. **NO existing scene moved** -- the only change is one
+#     new line. Two blind spots closed at once, both of the *world* species:
+#     (a) `SceneView` never overrode `self_occlusion_at`, whose trait default
+#     reports every face un-occluded, so this whole corpus had been meshing with
+#     vanilla's `shouldRenderFace` self test switched OFF; and (b) even with it on,
+#     the scene named `waterlogged` could not exercise it, because it surrounds
+#     its slabs with water on all six sides and the neighbour rule culls
+#     everything the self test would -- which is why its digest is byte-identical
+#     to `surface`'s, and still is. What was missing was a waterlogged block beside
+#     AIR, and one whose faces are only *partially* covered by its own geometry.
+#     A straight bottom stair is that input: measured, its self-occlusion is
+#     `down: true, north: true` and the other three sides false, so exactly one of
+#     four sides is covered over the whole square. Turning the self test on moved
+#     nothing precisely because (b) held for every pre-existing scene.
 #  2. `corner_heights` -- vanilla `FluidRenderer.tesselate`'s corner branch, which
 #     forces all four corners to 1.0 when the fluid's own rendered height already
 #     is (the same fluid directly above). `mesh_fluids` was averaging instead, so a
@@ -38,6 +53,7 @@ glass_shore water[v=512 i=768 vh=3c2efd82d320ef85 ih=d44927c814175325] lava[v=0 
 path_bank water[v=2304 i=3456 vh=a8f97069093d9225 ih=4a39d86a56e5a425] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]
 lava_and_water water[v=2048 i=3072 vh=7d18a11d6293b665 ih=c1914beb7a580825] lava[v=2048 i=3072 vh=28e4a000eb61b59d ih=c1914beb7a580825]
 waterlogged water[v=2048 i=3072 vh=f2c83892c97cf83d ih=c1914beb7a580825] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]
+waterlogged_stair_beside_air water[v=2048 i=3072 vh=58606a7d94abe0d5 ih=c1914beb7a580825] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]
 dry water[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]
 puddle_low_corner water[v=4 i=6 vh=547d716dce66981d ih=65c4284031300747] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]
 puddle_high_corner water[v=4 i=6 vh=e7adcd4a3ce8571d ih=65c4284031300747] lava[v=0 i=0 vh=cbf29ce484222325 ih=cbf29ce484222325]

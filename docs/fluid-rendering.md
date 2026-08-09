@@ -306,6 +306,16 @@ jar's** `grass_block`, not on a hand-written view.
   `FluidSectionView` that is about `(x, y, z)` and not its neighbourhood, so
   the reflex to reach for the neighbourhood is wrong here — and reaching for it
   anyway is how this rule went missing for as long as it did.
+- **…but if the water is *flickering* rather than wrongly present or absent, stop
+  looking at culling entirely.** A face whose coverage by its own block is
+  *partial* — a stair front, where only the bottom half is solid — is one vanilla
+  emits too, so there is no cull to add and adding one deletes water that should be
+  visible above the step. Flicker means two coplanar surfaces whose depth
+  separation has collapsed below what `Depth32Float` can represent at that
+  distance; go to `FLUID_DEPTH_NUDGE` in `shaders/fluid.wgsl` and
+  `fluid_coplanar_depth_gate.rs`, not to `mesh_fluids`. Note also that the symptom
+  is *not* nondeterminism — the same camera renders the same frame — so a
+  repeated-draw determinism gate cannot see it; what moves is the camera.
 - **Gotcha: self-cell questions answered from neighbours are a *family*, and two
   instances are already fixed.** `tesselate`'s `if (heightSelf >= 1.0F)` corner
   short-circuit (a falling column rendered `10/12` tall, see `corner_heights`) and
@@ -477,6 +487,88 @@ hid are worth more than the fix:
   inset `0.001` off their block boundary; a side face's bottom edge — and the
   bottom face itself — sit at `y = 0.001` only when the bottom face is *also*
   drawn (`bottomOffs = renderDown ? 0.001F : 0.0F`), else flush at `y = 0`.
+- **Closed — the `0.001` inset does not survive our depth buffer, so the fluid
+  pass carries a constant window-depth nudge as well.** A *seventh* divergence,
+  and the follow-on to the self-occlusion fix above: the owner reported that
+  z-fighting persisted on "the front of a stair (only the bottom half has the
+  stair block)". That face is the case `isFaceOccludedBySelf` is **silent about
+  by construction** — it fixes its probe height at `1.0` and asks about the whole
+  square, so a partially covered side is correctly *not* culled and vanilla emits
+  the water face too. So the residual artefact was never a culling gap, and adding
+  a partial-coverage cull rule would both diverge from vanilla and delete water
+  that should be visible above the step. It is a compositing problem.
+
+  Ruled out first, because two likelier causes were not it:
+
+  - **Pass membership is already correct.** The fluid pass runs after all opaque
+    model terrain, depth-test on, depth-**write off**, alpha-blended, sorted
+    back-to-front by section centre. Vanilla's `TRANSLUCENT_TERRAIN` inherits
+    `DepthStencilState.DEFAULT`, which is `(GREATER_THAN_OR_EQUAL, true)` — so
+    vanilla's fluid pass *does* write depth and ours deliberately does not, but
+    that difference cannot produce this artefact: the contest is against an opaque
+    face already in the depth buffer either way.
+  - **The depth comparison is already correct.** `ModelPipeline`'s translucent
+    variant uses `Less` on purpose, and with the water sitting behind the block
+    face that is the arm that rejects it. `LessEqual` would be worse here, not
+    better — it resolves a tie in the water's favour.
+
+  The cause is the third one, **genuine depth precision**, and it is measurable
+  rather than a hypothesis. Vanilla spends its `0.001` inset in a reversed-Z depth
+  buffer, where relative precision barely changes with distance. Ours is `[0,1]`
+  DirectX-style `Depth32Float` (`camera.rs`, `DESIGN.md` §7), which spends nearly
+  the whole float32 mantissa within a few blocks of the near plane. Measured
+  through the real `Camera::view_projection`, 0.001 blocks is worth **210 float32
+  ULPs of depth at 2 blocks, 12 at 8, 4 at 16, 2 at 24, 1 at 32, 0 at 64, and −1
+  at 128** — the separation collapses and then inverts. Once the gap is a ULP or
+  two, which surface wins at a given pixel is decided by whatever rounding the
+  rasterizer produces for two coplanar quads of *different shapes* (the water face
+  spans the whole square, the stair's own face only its bottom half), and it
+  re-rounds when the camera moves. That is the flicker, and it is why the report
+  was "swapping rapidly" while moving.
+
+  A world-space inset cannot fix this, because the broken thing is the mapping
+  from world distance to depth. `shaders/fluid.wgsl`'s `FLUID_DEPTH_NUDGE` does:
+  `out.clip.z += FLUID_DEPTH_NUDGE * out.clip.w`, which is a constant offset in
+  *window* depth after the perspective divide, so the ULP count is bounded from
+  below across the whole depth range independent of distance. `2^-21` is exactly
+  8 ULPs at any depth in `[0.5, 1)`; positive is away from the camera under our
+  convention, the direction the inset already meant. The residual is measured and
+  bounded the other way too: relative to the surface's own distance the push is
+  0.05% at 2 blocks, 0.09% at 128 and 0.5% at 512 blocks, so water within about
+  three blocks of an opaque surface behind it *could* lose the depth test at the
+  very edge of a 32-chunk render distance. That is a deliberate trade against a
+  z-fight at 30–130 blocks, where players are.
+
+  - `crates/lodestone-render/tests/fluid_coplanar_depth_gate.rs` is the gate. Its
+    expected values come from IEEE-754 ULP spacing and the real projection, not
+    from a blend prediction — deliberately, because an exact composited byte
+    through `ALPHA_BLENDING` cannot be predicted on this backend. Both controls
+    are executed and were **observed failing** on the pre-fix code.
+  - **A repeated-draw determinism gate would have been vacuous here**, and that is
+    worth remembering: a z-fight is not frame-to-frame nondeterminism. The
+    rasterizer is deterministic, so the same scene from the same camera renders
+    byte-identically *while the artefact is present*. What changes is the camera.
+    The quantity to hold a floor under is therefore the ULP gap at every distance,
+    not the stability of one frame — and not the *sign* of the comparison either,
+    which a first draft of the gate tried: inversion is sparse in distance, so a
+    sign-flip sweep passed on the broken code.
+- **Open — the fluid pipeline both disables back-face culling and bakes back-face
+  copies, so every fluid side face blends twice.** Found while measuring the
+  above; independent of it, and deliberately not changed in the same pass because
+  it alters the colour of all water everywhere. `bake_fluid` faithfully ports
+  vanilla's `FluidRenderer.addFace(addBackFace = true)` reversed-winding copy,
+  which exists *because* vanilla's `TRANSLUCENT_TERRAIN` culls back faces (neither
+  `GENERIC_BLOCKS_SNIPPET`, `TERRAIN_SNIPPET` nor `TRANSLUCENT_TERRAIN` calls
+  `withCull(false)` — many other vanilla pipelines do, so the omission is a
+  choice). `ModelPipeline`'s translucent variant sets `cull_mode: None`, so the
+  front copy already rasterizes from both sides and the back copy is redundant
+  rather than necessary. Both then blend, making the effective alpha
+  `1 − (1 − a)²` instead of `a` — water reads more opaque than vanilla's, not
+  merely darker. The fix is to restore back-face culling on the fluid pipeline
+  (keeping the baked copies, as vanilla does), not to drop the copies; the
+  overlay side faces are already single-sided precisely because vanilla's
+  `addBackFace` is false for them, which is the tell that the copies are the
+  faithful half.
 - **Closed, and now live.** Side faces against a vanilla `HalfTransparentBlock`
   or `LeavesBlock` (glass, every stained-glass colour, tinted glass, ice, blue
   ice, frosted ice, honey, slime, all eleven leaves types — scanned from

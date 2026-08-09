@@ -132,6 +132,12 @@ struct Palette {
     glass: u32,
     dirt_path: u32,
     waterlogged_slab: u32,
+    /// `stone_brick_stairs[facing=north, half=bottom, shape=straight,
+    /// waterlogged=true]`. A straight bottom stair covers exactly **one** of its
+    /// four sides over the whole square and leaves the other three partially
+    /// covered — the case `isFaceOccludedBySelf` is silent about by
+    /// construction. See [`Scene::WaterloggedStairBesideAir`].
+    waterlogged_stair: u32,
 }
 
 /// What structure a scene exists to exercise. Named so a failure says which
@@ -179,7 +185,34 @@ enum Scene {
     LavaAndWater,
     /// Waterlogged slabs interleaved with water: a cell that is both a solid
     /// model and a fluid source.
+    ///
+    /// **Blind to the self-occlusion test on its own**, which is why the scene
+    /// below exists: it surrounds every slab with water on all six sides, so the
+    /// neighbour rule (`same`) already culls every face the self test could, and
+    /// this scene's digest is byte-identical to [`Surface`](Self::Surface)'s.
     Waterlogged,
+    /// A row of **waterlogged stairs standing in air**, with water only inside
+    /// their own cells — the input the corpus was missing twice over.
+    ///
+    /// Two properties no other scene here has:
+    ///
+    /// * The waterlogged block's faces are against **air**, not water, so
+    ///   `same` does not cull them and `isFaceOccludedBySelf` is the rule that
+    ///   actually decides. `Waterlogged` above cannot reach that code at all.
+    /// * Three of the stair's four sides are **partially** covered — one is the
+    ///   bottom half only, two are L-shaped, and just one is flush. Vanilla's
+    ///   self test fixes its probe height at `1.0` and asks whether the block's
+    ///   own boundary layer covers the *whole* square, so it correctly answers
+    ///   "not occluded" for those three and the water's faces are emitted in
+    ///   full. Vanilla emits them too; the coplanar overlap is a compositing
+    ///   problem, not a culling one, and `fluid_coplanar_depth_gate.rs` is where
+    ///   that is measured. This scene's job is to pin the *emission* so a future
+    ///   partial-coverage cull rule cannot quietly delete water vanilla draws.
+    ///
+    /// A waterlogged slab's side would not do: it is fully covered below and
+    /// fully open above, so the same output falls out of a whole-square test and
+    /// a per-height one alike.
+    WaterloggedStairBesideAir,
     /// Solid stone throughout: **zero** fluid cells, so `any_fluid()` is false
     /// and the mesher must emit nothing. The negative end of the range.
     Dry,
@@ -192,7 +225,7 @@ enum Scene {
     PuddleHighCorner,
 }
 
-const SCENES: [Scene; 13] = [
+const SCENES: [Scene; 14] = [
     Scene::WaterOnly,
     Scene::OceanFloor,
     Scene::Surface,
@@ -203,6 +236,7 @@ const SCENES: [Scene; 13] = [
     Scene::PathBank,
     Scene::LavaAndWater,
     Scene::Waterlogged,
+    Scene::WaterloggedStairBesideAir,
     Scene::Dry,
     Scene::PuddleLowCorner,
     Scene::PuddleHighCorner,
@@ -221,6 +255,7 @@ impl Scene {
             Self::PathBank => "path_bank",
             Self::LavaAndWater => "lava_and_water",
             Self::Waterlogged => "waterlogged",
+            Self::WaterloggedStairBesideAir => "waterlogged_stair_beside_air",
             Self::Dry => "dry",
             Self::PuddleLowCorner => "puddle_low_corner",
             Self::PuddleHighCorner => "puddle_high_corner",
@@ -328,6 +363,33 @@ impl Scene {
                     p.water_source
                 }
             }
+            // Waterlogged stairs standing on a stone bank in **air**, at the
+            // north edge of a pond that lies outside the section.
+            //
+            // Air around each stair is the point: every face of a waterlogged
+            // cell then faces air, `same` culls nothing, and the self test is the
+            // only rule that can. Spaced two apart in both axes so no stair is
+            // another stair's neighbour — an adjacent waterlogged cell is a
+            // same-fluid neighbour and `same` would cull the shared faces,
+            // putting the scene straight back into `Waterlogged`'s blind spot.
+            //
+            // The pond at `z < 0` is what makes the scene padding-sensitive: it
+            // culls the `z == 0` row's north faces through `same`, so the clamped
+            // control (which answers out-of-section probes as air) un-culls them
+            // and produces a different mesh. Without it this scene's geometry
+            // would not depend on its neighbourhood at all and the off-by-one
+            // padding control could not separate.
+            Self::WaterloggedStairBesideAir => {
+                if y < 0 {
+                    p.stone
+                } else if y == 0 && z < 0 {
+                    p.water_source
+                } else if y == 0 && z >= 0 && x.rem_euclid(2) == 0 && z.rem_euclid(2) == 0 {
+                    p.waterlogged_stair
+                } else {
+                    p.air
+                }
+            }
             Self::Dry => p.stone,
             Self::PuddleLowCorner => {
                 if (x, y, z) == (0, 0, 0) {
@@ -388,6 +450,32 @@ impl FluidSectionView for SceneView<'_> {
 
     fn overlay_at(&self, x: i32, y: i32, z: i32) -> bool {
         self.models.fluid_overlay(self.state(x, y, z))
+    }
+
+    /// Mirrors the shell mesher's own override, which is the implementation
+    /// production resolves to. **The trait default returns
+    /// `SelfOcclusion::default()` — every face un-occluded — so leaving it
+    /// unoverridden here meant this whole corpus meshed with vanilla's
+    /// `shouldRenderFace` self test switched off**, and no digest in the golden
+    /// could have noticed it appearing or disappearing. That is the *world*
+    /// species of vacuous test: nothing about the source reads wrong, the flaw is
+    /// which implementation the transport resolves to.
+    ///
+    /// The `Solid`-layer gate is the `canOcclude` half of vanilla's
+    /// `occlusionShape = canOcclude ? getOcclusionShape(state) : Shapes.empty()`
+    /// and is not optional: without it every waterlogged leaves block (full-cube
+    /// outline, `noOcclusion()`) would cull its own water away entirely.
+    fn self_occlusion_at(&self, x: i32, y: i32, z: i32) -> lodestone_assets::fluid::SelfOcclusion {
+        use lodestone_assets::fluid::SelfOcclusion;
+
+        let id = self.state(x, y, z);
+        if self.models.layer(id) != lodestone_render::RenderLayer::Solid {
+            return SelfOcclusion::default();
+        }
+        let Some(boxes) = lodestone_data::outline_shapes::outline_boxes(id) else {
+            return SelfOcclusion::default();
+        };
+        lodestone_assets::fluid::self_occlusion(boxes)
     }
 
     fn partial_occluder_y_range_at(&self, x: i32, y: i32, z: i32) -> Option<(f32, f32)> {
@@ -572,6 +660,69 @@ fn assert_precondition(scene: Scene, view: &SceneView<'_>, meshes: &FluidMeshes)
             assert_eq!(water, 1, "{n} must be exactly one fluid cell");
             assert!(occluding > 0, "{n} must be embedded in solid");
         }
+        Scene::WaterloggedStairBesideAir => {
+            assert!(water > 0, "{n} must contain water");
+            // The subject: a waterlogged cell whose four side neighbours are all
+            // air, so `same` culls nothing there and the self test is what
+            // decides. `Waterlogged` has none of these.
+            let mut stairs_in_air = 0usize;
+            for z in 0..16 {
+                for x in 0..16 {
+                    if view.fluid_at(x, 0, z).is_none() {
+                        continue;
+                    }
+                    let air_sides = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+                        .iter()
+                        .filter(|(dx, dz)| {
+                            view.fluid_at(x + dx, 0, z + dz).is_none()
+                                && !view.occludes_at(x + dx, 0, z + dz)
+                        })
+                        .count();
+                    if air_sides == 4 {
+                        stairs_in_air += 1;
+                    }
+                }
+            }
+            assert!(
+                stairs_in_air > 0,
+                "{n} must contain at least one waterlogged cell with air on all \
+                 four sides, or the self-occlusion test is never the deciding \
+                 rule and this scene is `waterlogged` again"
+            );
+            // And the discriminating geometry. `stairs.json` builds a straight
+            // stair from a bottom slab `[0,0,0]..[16,8,16]` and a step
+            // `[8,8,0]..[16,16,16]`, so of its four sides **exactly one** — the
+            // one the step is flush against — is covered over the whole square,
+            // and the other three are not: the opposite side is the bottom half
+            // only (Matthew's "front of a stair"), and the two remaining sides are
+            // L-shaped. The bottom face is fully covered by the slab.
+            //
+            // Asserting that 1-of-4 signature rather than naming a compass
+            // direction is deliberate twice over: it does not depend on this
+            // project's stair rotation convention, and it separates all three
+            // hypotheses — a whole-square test gives exactly 1, a detector stuck
+            // at false gives 0, and one that treats partial coverage as occluding
+            // gives 4.
+            let occ = view.self_occlusion_at(0, 0, 0);
+            let covered_sides = [occ.north, occ.south, occ.east, occ.west]
+                .iter()
+                .filter(|c| **c)
+                .count();
+            println!("  {n:<28} stair self-occlusion {occ:?}");
+            assert!(
+                occ.down,
+                "{n}: the stair's bottom face is fully covered by its own slab, so \
+                 the self test must report it occluded; got {occ:?}"
+            );
+            assert_eq!(
+                covered_sides, 1,
+                "{n}: a straight bottom stair covers exactly one of its four sides \
+                 over the whole square; {covered_sides} came back covered ({occ:?}). \
+                 0 means the self test is inert here and this scene proves nothing; \
+                 4 means a partial-coverage cull rule crept in and is deleting \
+                 water vanilla draws."
+            );
+        }
         Scene::OceanFloor | Scene::GrassShore | Scene::Waterlogged => {
             assert!(water > 0, "{n} must contain water");
             assert!(occluding > 0, "{n} must contain an occluder");
@@ -604,6 +755,16 @@ fn mesh_fluids_is_byte_identical_to_the_pre_refactor_implementation() {
             &registry,
             "minecraft:stone_slab",
             &[("type", "bottom"), ("waterlogged", "true")],
+        ),
+        waterlogged_stair: find_state(
+            &registry,
+            "minecraft:stone_brick_stairs",
+            &[
+                ("facing", "north"),
+                ("half", "bottom"),
+                ("shape", "straight"),
+                ("waterlogged", "true"),
+            ],
         ),
     };
 
@@ -695,6 +856,21 @@ fn mesh_fluids_is_byte_identical_to_the_pre_refactor_implementation() {
 # scenes it moved, because the file's whole value is that a line changing is
 # surprising:
 #
+#  3. `waterlogged_stair_beside_air` added, and `SceneView` grew a real
+#     `self_occlusion_at`. **NO existing scene moved** -- the only change is one
+#     new line. Two blind spots closed at once, both of the *world* species:
+#     (a) `SceneView` never overrode `self_occlusion_at`, whose trait default
+#     reports every face un-occluded, so this whole corpus had been meshing with
+#     vanilla's `shouldRenderFace` self test switched OFF; and (b) even with it on,
+#     the scene named `waterlogged` could not exercise it, because it surrounds
+#     its slabs with water on all six sides and the neighbour rule culls
+#     everything the self test would -- which is why its digest is byte-identical
+#     to `surface`'s, and still is. What was missing was a waterlogged block beside
+#     AIR, and one whose faces are only *partially* covered by its own geometry.
+#     A straight bottom stair is that input: measured, its self-occlusion is
+#     `down: true, north: true` and the other three sides false, so exactly one of
+#     four sides is covered over the whole square. Turning the self test on moved
+#     nothing precisely because (b) held for every pre-existing scene.
 #  2. `corner_heights` -- vanilla `FluidRenderer.tesselate`'s corner branch, which
 #     forces all four corners to 1.0 when the fluid's own rendered height already
 #     is (the same fluid directly above). `mesh_fluids` was averaging instead, so a
