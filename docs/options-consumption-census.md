@@ -60,12 +60,12 @@ non-`keybinds` field of `config::Options` has a row that reaches it.
 
 ## The census
 
-### Wired (29 option rows, 25 distinct options)
+### Wired (44 option rows, 40 distinct options)
 
-Counts, because three different ones get conflated here: **51 live *cells*** outside
-a world (50 inside — the root's Online button is the one that changes), of which
-**29 are option rows**, 9 are Done buttons and 13 are working nav buttons; those 29
-rows carry **25 distinct options**, because four are placed on two pages each. All
+Counts, because three different ones get conflated here: **66 live *cells*** outside
+a world (65 inside — the root's Online button is the one that changes), of which
+**44 are option rows**, 9 are Done buttons and 13 are working nav buttons; those 44
+rows carry **40 distinct options**, because four are placed on two pages each. All
 three numbers are asserted by `the_disabled_majority_is_the_point_and_it_is_measured`
 and `the_root_online_button_is_the_one_row_that_changes_with_in_world`, so they
 cannot drift here without a build failure — quote them from a test run, not from
@@ -91,6 +91,10 @@ this paragraph.
 | `renderDistance` | Video | slider `IntRange(2, 32)` | `12` in vanilla, **`8` here** — see `config::DEFAULT_RENDER_DISTANCE` | `sim/build.rs` world radius + `sim/camera.rs` fog, via `resolve_persisted` (#443) |
 | `damageTiltStrength` | Accessibility | slider `UnitDouble`, label `percentValueOrOffLabel` | `1.0` | `camera_rig::BobFrame::hurt_roll_degrees`, via `app/redraw.rs` → `RenderState::set_damage_tilt_strength` |
 | `panoramaSpeed` | Accessibility | slider `UnitDouble`, label `percentValueLabel` | `1.0` | `menu::panorama::PanoramaRenderer::set_speed`, via `MenuFrame::panorama_speed` |
+| 11 × `soundSource.*` | Sound | slider `UnitDouble`, label `percentValueOrOffLabel` | `1.0` each | `lodestone_audio::CategoryVolumes::set_user`, via `Sim::set_sound_volumes` |
+| `fov` | **Root** | slider `IntRange(30, 110)`, label "Normal"/"Quake Pro"/int | `70` | `camera_rig::build_camera` → the projection matrix, via `Sim::set_fov_y_degrees` |
+| `glintSpeed` / `glintStrength` | Accessibility | slider `UnitDouble`, label `percentValueOrOffLabel` | `0.5` / `0.75` | **three** sites — `RenderState::set_glint_options` (world + hand) and `IconRenderer::set_glint_options` on *both* `HudRenderer` and `ContainerRenderer` (GUI icons) |
+| `cloudStatus` | Video | cycle, 3 states, label **is** the value | `FANCY` | `SkyFrame::with_cloud_status`, via `RenderState::set_cloud_status` |
 
 **Four** options appear on **two pages each** — that is vanilla's own shape, one
 `OptionInstance` placed on two screens, so editing either row moves the other's label
@@ -109,7 +113,7 @@ consumer rather than inferred from the group it sits in:
 
 | kind | what is already true | what is missing | examples |
 |---|---|---|---|
-| **A — consumer live, no push** | the subsystem exists, is correct, and is called every frame with a **hardcoded constant** | links 1–4, plus swapping the constant for the field | ~~all 11 `soundSource.*`, `fov`, `glintSpeed`, `glintStrength`, `cloudStatus`~~ — **link 1 and link 5 landed for all fifteen on 2026-08-09; see [Kind A: links 1 and 5 are done](#kind-a-links-1-and-5-are-done-2026-08-09)** |
+| **A — consumer live, no push** | the subsystem exists, is correct, and is called every frame with a **hardcoded constant** | links 1–4, plus swapping the constant for the field | ~~all 11 `soundSource.*`, `fov`, `glintSpeed`, `glintStrength`, `cloudStatus`~~ — **all five links landed for all fifteen on 2026-08-09. Kind A is now empty.** See [Kind A is closed](#kind-a-is-closed-2026-08-09) |
 | **B — consumer is itself an island** | the code exists in `lodestone-render`, unit-tested, with **zero shell callers** | a consumer that runs, *then* the option | `screenEffectScale`, `fovEffectScale`, `darknessEffectScale` (they scale `confusion_overlay_triangles` / `portal_overlay_alpha`, which nothing draws) |
 | **C — no subsystem** | nothing | the feature | `gamma`, `narrator`, `highContrast`, `entityShadows`, `entityDistanceScaling`, `biomeBlendRadius`, `simulationDistance`, `mipmapLevels`, `rawMouseInput`, `allowCursorChanges` |
 
@@ -161,11 +165,11 @@ groupings are still the right map of *which* subsystem each row belongs to.
 
 | group | options | blocked on |
 |---|---|---|
-| **Audio** | all 11 `soundSource.*`, `soundDevice`, `directionalAudio`, `musicFrequency`, `musicToast` | **superseded — see kind A above.** The eleven volume sliders' push into `CategoryVolumes::set_user` **landed 2026-08-09**; they now need only the four `menu/**` links. `soundDevice` (device enumeration) and `musicFrequency`/`musicToast` are separate and smaller |
+| **Audio** | ~~all 11 `soundSource.*`~~, `soundDevice`, `directionalAudio`, `musicFrequency`, `musicToast` | **superseded — see kind A above.** The eleven volume sliders are **fully live since 2026-08-09**, `CategoryVolumes::set_user` through to the row. `soundDevice` (device enumeration) and `musicFrequency`/`musicToast` are separate and smaller |
 | **Window / display** | `fullscreen`, `exclusiveFullscreen`, `fullscreenResolution`, `enableVsync`, `framerateLimit`, `inactivityFpsLimit`, `preferredGraphicsBackend` | runtime window and surface reconfiguration |
-| **Renderer quality** | `graphicsPreset`, `gamma`, `mipmapLevels`, `ambientOcclusion`, `biomeBlendRadius`, `particles`, `cloudStatus`, `cloudRange`, `entityShadows`, `entityDistanceScaling`, `improvedTransparency`, `textureFiltering`, `maxAnisotropyBit`, `weatherRadius`, `chunkSectionFadeInTime`, `vignette` | each needs its own renderer knob; several are whole features |
-| **Post-process / screen effects** | `screenEffectScale`, `fovEffectScale`, `darknessEffectScale`, ~~`damageTiltStrength`~~, `glintSpeed`, `glintStrength` | `damageTiltStrength` is **live now** — its consumer had been honoured all along; the three `*EffectScale` rows are kind **B** (the effect they scale is itself an island); the two glint rows had their consumer push landed 2026-08-09 and need only the `menu/**` links |
-| **Distances** | ~~`renderDistance`~~, `simulationDistance`, `fov`, ~~`sensitivity`~~ | `renderDistance` and `sensitivity` are live; `fov` had its consumer push landed 2026-08-09 (`camera_rig::build_camera` takes the degrees now instead of pinning `FOV_Y_DEGREES`) and needs only the `menu/**` links; `simulationDistance` is kind **C** |
+| **Renderer quality** | `graphicsPreset`, `gamma`, `mipmapLevels`, `ambientOcclusion`, `biomeBlendRadius`, `particles`, ~~`cloudStatus`~~, `cloudRange`, `entityShadows`, `entityDistanceScaling`, `improvedTransparency`, `textureFiltering`, `maxAnisotropyBit`, `weatherRadius`, `chunkSectionFadeInTime`, `vignette` | `cloudStatus` is **fully live since 2026-08-09**, all three states; the rest each need their own renderer knob, and several are whole features |
+| **Post-process / screen effects** | `screenEffectScale`, `fovEffectScale`, `darknessEffectScale`, ~~`damageTiltStrength`~~, ~~`glintSpeed`~~, ~~`glintStrength`~~ | `damageTiltStrength` is **live** — its consumer had been honoured all along; the two glint rows are **fully live since 2026-08-09** at all three glint sites; the three `*EffectScale` rows are kind **B** (the effect they scale is itself an island) and are the group's whole remainder |
+| **Distances** | ~~`renderDistance`~~, `simulationDistance`, ~~`fov`~~, ~~`sensitivity`~~ | `renderDistance`, `sensitivity` and `fov` are all live — `fov` **fully since 2026-08-09** (`camera_rig::build_camera` takes the degrees instead of pinning `FOV_Y_DEGREES`, and the row is on the **root** page); `simulationDistance` is kind **C** and the group's only remainder |
 | **Chat behaviour** | `chatVisibility`, `chatLinks`, `chatLinksPrompt`, `chatDelay`, `autoSuggestions`, `hideMatchedNames`, `onlyShowSecureChat`, `saveChatDrafts`, `reducedDebugInfo` | chat *behaviour* rather than chat *appearance*; the appearance half is now wired |
 | **Narrator / high contrast** | `narrator`, `narratorHotkey`, `highContrast`, `highContrastBlockOutline` | no narrator, and high contrast is a resource pack swap |
 | **Skin & model parts** | all 7 `modelPart.*`, `mainHand` | needs the parts to reach the entity renderer *and* the serverbound client-settings packet |
@@ -221,27 +225,68 @@ was missing" column is now the record of what a kind A row costs in practice.
 |---|---|---|
 | 11 × `soundSource.*` | `sim/audio.rs` (+ `config.rs` fields) | **done** — `Sim::set_sound_volumes(&Options)`, pushed from `app/redraw.rs` beside `set_view_bobbing`. `Sim::audio_mut` never needed widening: `sim::audio` is a *descendant module* of `sim`, so it already saw the private accessor, and that module's own doc says so |
 | `fov` | `camera_rig.rs` + `sim/camera.rs` | **done** — `build_camera` takes `fov_y_degrees`, `Sim::set_fov_y_degrees` mirrors `set_view_bobbing`, pushed per frame. `INT_RANGE_SLIDERS` **already had** the `("fov", 30..=110, 70)` row, so nothing was needed there |
-| `glintSpeed`, `glintStrength` | `gpu/glint.rs`, `hud/item_icon.rs` | **done for the world and hand draws** — `RenderState::set_glint_options`, pushed from `app/redraw.rs`. **There is a third glint site**, and this row said two: the 2-D GUI icon pass. `IconRenderer::set_glint_options` exists and is read per frame, but has **no caller** — see the open item below |
+| `glintSpeed`, `glintStrength` | `gpu/glint.rs`, `hud/item_icon.rs`, **`hud.rs` + `container/renderer.rs`** | **done at all three sites** — `RenderState::set_glint_options` for the world and hand, then `HudRenderer::set_glint_options` and `ContainerRenderer::set_glint_options` for the 2-D GUI icon pass, all three pushed from `app/redraw.rs`. This row originally said two sites; the third is a separate pipeline with its own uniform, and its two owners each hold their own `IconRenderer`, so it took **two** forwards rather than one |
 | `cloudStatus` | wherever `SkyFrame` is built in `gpu/**` | **done** — `gpu/frame.rs`'s `SkyFrame` builder chain now ends in `.with_cloud_status(self.cloud_status)`, fed by `RenderState::set_cloud_status`. `CloudStatus` gained an `Off` variant rather than taking a skip in the shell; see below for why |
 
-### Kind A: links 1 and 5 are done (2026-08-09)
+### Kind A is closed (2026-08-09)
 
 Fifteen options — the eleven `soundSource.*` sliders, `fov`, `glintSpeed`,
-`glintStrength` and `cloudStatus` — now have **link 1** (a persisted
-`config::Options` field with hand-rolled serde both ways) and **link 5** (a live
-consumer reading it, pushed once per presented frame from `app/redraw.rs`).
+`glintStrength` and `cloudStatus` — now have **all five links**. Links 1 and 5
+landed first (a persisted `config::Options` field with hand-rolled serde both ways,
+and a live consumer pushed once per presented frame from `app/redraw.rs`); links
+2–4 followed in a second pass, because the agent that landed the first half was
+scoped out of `menu/**`.
 
-**Links 2–4 are still missing for all fifteen, and all three live in
-`menu/**`**: the `LiveOption` variant, the `live_value` stringifier arm, the
-`live_slider`/`live_cycle` cell, and the `MenuNav::apply_settings` arm. So every
-one of these rows still draws **greyed**, and the only way to reach the new
-behaviour today is to hand-edit `options.json`. That is exactly the shape
-`damageTiltStrength` was in before it went live — links 1 and 5 present, 2–4
-missing — and it is deliberate rather than abandoned: the agent that landed this
-half was scoped out of `menu/**`.
+**Every one of the fifteen rows now draws live**, and the last remaining link-5
+gap in the batch — the GUI icon glint, below — is closed too, so all three glint
+sites carry the player's values. Kind A is empty; what is left greyed is kinds
+**B** and **C**, and both need a subsystem rather than a wire.
 
-The persisted keys, so a hand edit works and so whoever wires the menu side does
-not have to re-derive them:
+The `menu/**` half, for the next reader:
+
+| link | where | note |
+|---|---|---|
+| 2 | `LiveOption` | five variants, not fifteen: **`SoundVolume(u8)` carries an index** rather than eleven variants, because the eleven differ in exactly one number and eleven variants would be eleven chances for a row's accessor and its array slot to disagree |
+| 3a | `live_value` | four stringifiers — `percentValueOrOffLabel` for the volumes and both glints, the FOV switch, `CloudStatus.caption()` |
+| 3b | the cell | `SOUND`'s eleven, `VIDEO`'s Clouds, `ACCESSIBILITY`'s glint pair, and the root's FOV — which lives in `controls`/`all_controls` rather than an `Entry` table, so **both** had to change |
+| 4 | `MenuNav::apply_settings` | `step_sound_volume`, `step_fov`, `step_unit_double_option` × 2, `cycle_cloud_status`; plus `set_live_slider`'s `IntRange` write for FOV, which the *drag* path needs |
+
+Four things this half measured that the first half did not know, and the first two
+are the load-bearing ones:
+
+- **`cloudStatus` is the one live option on the tree whose label is the value
+  alone.** Its stringifier is `(caption, value) -> value.caption()`, which
+  **discards the caption it is handed** — so vanilla's button reads "Fancy", never
+  "Clouds: Fancy". Every other live option goes through `genericValueLabel`,
+  `percentValueLabel` or `pixelValueLabel`, all three of which compose, and
+  `Cell::label` composed unconditionally. That needed a fork,
+  `LiveOption::value_is_the_whole_label`. Flipping the fork to the wrong variant
+  was executed as a control: `the_kind_a_labels_are_vanillas_own_strings` fails
+  with `left: "Clouds: OFF"`.
+- **`fov`'s stringifier special-cases the default**, which is the opposite of the
+  usual trap. It is `case 70 -> options.fov.min; case 110 -> options.fov.max;
+  default -> the integer`, and `en_us.json` gives `"Normal"` and `"Quake Pro"` (no
+  exclamation mark). 70 is *also* vanilla's shipped default, so a fresh install
+  reads "FOV: Normal" and a transcription that printed the integer would disagree
+  with vanilla on the one value every new player sees. Note also that **70 is an
+  input where two rival slider-fraction hypotheses coincide**: the bucket map gives
+  `40.5 / 81 = 0.5` and the naive endpoint span gives `40 / 80 = 0.5` too, so the
+  drag gate uses 90 (`60.5 / 81`, against the span's `0.75`).
+- **The eleven volume sliders' real failure mode is a transposed pair, not a
+  dropped one**, and it is invisible to a uniform test value: two rows wired to
+  each other's slot move the wrong bus while every label reads correctly. Both new
+  gates therefore use **eleven distinct** values (`(i + 1) / 16`, dyadic so the
+  `f32` comparison is exact and `(int)(v * 100)` is predictable — 6%, 12%, 18%, 25%,
+  31%, 37%, 43%, 50%, 56%, 62%, 68%), and
+  `sound_rows_index_the_category_they_name` checks each row's index against the
+  suffix of its own accessor, which is the one property no compiler sees.
+- **The Clouds cycle order is the enum's, not a chosen one.** `CloudStatus` is
+  `OFF, FAST, FANCY` and FANCY is the default, so the **first** click wraps to OFF.
+  A hand-picked order would leave the default somewhere other than where vanilla's
+  third click puts it.
+
+The persisted keys, so a hand edit still works and so nothing has to be
+re-derived:
 
 | option | `options.json` key | type | default |
 |---|---|---|---|
@@ -265,11 +310,18 @@ Six things this half measured that the table above got wrong or did not know:
   go through `gpu::glint::glint_uniform` and are done. The **2-D GUI icon** glint
   is a separate pipeline with its own uniform (`hud::item_icon::GuiGlint`), and
   its owner `IconRenderer` is held by `HudRenderer` and the container renderer —
-  so `IconRenderer::set_glint_options` needs a one-line forward in each of
-  `hud.rs` and `container/renderer.rs`, plus one call in `app/redraw.rs`. Until
-  that lands, an enchanted item shimmers at the player's speed in the world and
-  in the hand but at vanilla's default in a slot. **This is the only remaining
-  link-5 gap in kind A.**
+  so `IconRenderer::set_glint_options` needed a one-line forward in each of
+  `hud.rs` and `container/renderer.rs`, plus one call in `app/redraw.rs`.
+  **Landed 2026-08-09** — `HudRenderer::set_glint_options` and
+  `ContainerRenderer::set_glint_options` are both called from `redraw.rs` beside
+  `RenderState::set_glint_options`, and
+  `redraw_rs_still_pushes_the_glint_options_to_all_three_sites` is the source-scan
+  guard, because `redraw.rs` is the frame loop and no unit test in the crate can
+  run it. Two owners rather than one is the part worth remembering: `HudRenderer`
+  and `ContainerRenderer` each hold their **own** `IconRenderer`, so pushing to one
+  leaves the other at vanilla's default. All three sites key off the same wall
+  clock, so a partial push is visible as an out-of-phase shimmer as well as a wrong
+  rate.
 - **`IconRenderer` could no longer derive `Default`.** A derived one starts both
   glint fields at `0.0` — a stationary, fully transparent shimmer — which is the
   glint silently switched off on every screen. The impl is hand-written now, with
@@ -316,14 +368,21 @@ example; follow it rather than inventing a second shape.
 3. **`live_value` arm** transcribing vanilla's stringifier. Return only the
    *value* half — `Cell::label` composes `"caption: value"` via
    `generic_value_label`, so returning `"100%"` reproduces
-   `percentValueLabel`'s full output by construction.
+   `percentValueLabel`'s full output by construction. **Check whether your
+   stringifier actually takes its `caption` argument**: `cloudStatus`' is
+   `(caption, value) -> value.caption()` and throws it away, which needs
+   `LiveOption::value_is_the_whole_label` rather than a value-half return.
 4. **Swap the census cell** from `slider`/`cycle` to `live_slider`/`live_cycle`.
    This is the step that un-greys the row, and forgetting it is exactly the
-   island this doc exists to describe.
-5. **Arm in `MenuNav::apply_settings`** calling a `cycle_*`/`toggle_*` method
-   that mutates and then calls `persist_options()` — persistence is eager here
-   by rule, because a setting that only saves on exit is the setting a crash
-   loses.
+   island this doc exists to describe. **The root page is not an `Entry` table** —
+   `fov` lives in `controls`/`all_controls` directly, and both must change.
+5. **Arm in `MenuNav::apply_settings`** calling a `cycle_*`/`toggle_*`/`step_*`
+   method that mutates and then calls `persist_options()` — persistence is eager
+   here by rule, because a setting that only saves on exit is the setting a crash
+   loses. **For an `IntRange` option this is two writes, not one**: the click arm
+   here *and* an arm in `set_live_slider`'s `int_range` match, which is the drag
+   path. Miss the second and the row still works from the keyboard while a mouse
+   drag does nothing.
 6. **Update the census counts** in
    `the_disabled_majority_is_the_point_and_it_is_measured` and
    `the_root_online_button_is_the_one_row_that_changes_with_in_world`. They
@@ -382,9 +441,12 @@ handles the click, and `slider_fraction` already returns the live value because
   `app/redraw.rs` already does for `set_mouse_invert` — a brokered file, so it
   needs the orchestrator.
 
-  `simulationDistance` and `fov` stay inactive: neither has any consumer in this
-  shell, so wiring them would be the fabrication this bullet used to warn about.
-  `the_disabled_majority_is_the_point_and_it_is_measured` now uses
+  **`fov` no longer belongs in this bullet** — it went fully live on 2026-08-09,
+  and unlike the two above it *does* apply in the current session, because
+  `app/redraw.rs` pushes it to `Sim::set_fov_y_degrees` every frame rather than
+  folding it in at launch. `simulationDistance` stays inactive: it has no consumer
+  in this shell at all, so wiring it would be the fabrication this bullet warns
+  about. `the_disabled_majority_is_the_point_and_it_is_measured` uses
   `simulationDistance` as its inactive control, read off the real page — the old
   control constructed a synthetic `slider("renderDistance", …)` cell, which had
   `live: None` by construction and so was asserting a property of the
@@ -394,8 +456,17 @@ handles the click, and `slider_fraction` already returns the live value because
   `MenuNav::with_paths` with a temp path, as the existing tests do. This is the
   same class as the accounts-screen test that spawned `open` and launched a
   Microsoft OAuth URL in the owner's browser on every run.
-- **Sliders are clicked, not dragged.** `SettingsOutcome::Cycle` is the only
-  mutation channel, so one click steps the value and wraps. Adding real drag
+- ~~**Sliders are clicked, not dragged.**~~ **Stale — a real drag path exists**, and
+  it predates this doc: `MenuNav::drag_slider` → `set_live_slider` is vanilla's
+  `AbstractSliderButton.setValueFromMouse`, reached from the initial mouse-down and
+  every subsequent position, and it converts through the *same* tables the handle
+  draw uses (`LiveOption::unit_double_mut`, `LiveOption::int_range`). So a slider
+  has **two** mutation channels and a new `IntRange` option must add a write to
+  both — `set_live_slider`'s match is the one that is easy to miss, because the
+  click path works without it and the row then follows the cursor nowhere. The old
+  text below is kept because the *click* half is still exactly as described, and it
+  is what a keyboard Enter uses:
+  `SettingsOutcome::Cycle` steps the value and wraps. Adding real drag
   handling would change this shape for every slider at once.
 
 ## Configuration

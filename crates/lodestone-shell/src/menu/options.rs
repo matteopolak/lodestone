@@ -370,6 +370,68 @@ pub enum LiveOption {
     /// beside `gui_scale`, for the same reason that one does — a screen must not
     /// have to remember to tell the draw.
     PanoramaSpeed,
+    /// One of the eleven `soundSource.*` volume sliders →
+    /// [`crate::config::Options::sound_volumes`]`[index]`.
+    ///
+    /// **One variant with an index rather than eleven variants**, because the
+    /// eleven differ in exactly one number: the payload is the index into
+    /// [`crate::config::SOUND_CATEGORY_NAMES`], which is *also* the
+    /// `SoundSource` ordinal, the `sound_volume_<name>` file key and the mixer
+    /// bus. Eleven variants would be eleven chances for the row's accessor and
+    /// the array slot to disagree — a **transposed pair**, which is the failure
+    /// an eleven-wide array invites and which a uniform default hides
+    /// completely. `sound_rows_index_the_category_they_name` is the guard.
+    ///
+    /// An out-of-range index reads and writes nothing rather than panicking:
+    /// the tree's rows are `const`, so a bad index is a build-time authoring
+    /// mistake, and a settings screen is the wrong place to abort a session.
+    ///
+    /// Vanilla builds all eleven from one factory,
+    /// `Options::createSoundSliderOptionInstance`, whose stringifier is
+    /// `Options::percentValueOrOffLabel` and whose default is `1.0` — so a
+    /// muted bus reads **OFF**, not `0%`.
+    SoundVolume(u8),
+    /// `options.fov` → [`crate::config::Options::fov`].
+    ///
+    /// An **`IntRange(30, 110)`** defaulting to `70`, so its handle comes from
+    /// [`SliderRange`] like [`Self::RenderDistance`]'s and
+    /// [`Self::unit_double`] answers `None` for it. The `Codec.DOUBLE.xmap`
+    /// between those two lines in `Options.java` is a *persistence* codec on the
+    /// seven-argument `OptionInstance` overload, not a `ValueSet::xmap`; reading
+    /// it as one puts the value at `70 * 40 + 70`.
+    ///
+    /// Its consumer (`camera_rig::build_camera` → the projection matrix) was
+    /// pinned to the module constant `FOV_Y_DEGREES`, which *is* vanilla's `70`,
+    /// and now takes the degrees from here. [`INT_RANGE_SLIDERS`] already
+    /// carried the `("fov", 30..=110, 70)` row for the inactive handle draw, so
+    /// the live handle and the frozen one are placed by one table.
+    Fov,
+    /// `options.glintSpeed` → [`crate::config::Options::glint_speed`]. A
+    /// `UnitDouble` defaulting to `0.5`, labelled with
+    /// `Options::percentValueOrOffLabel` — so a stored `0.0` reads **OFF**, and
+    /// a frozen glint is a legitimate choice rather than the option being unset.
+    GlintSpeed,
+    /// `options.glintStrength` → [`crate::config::Options::glint_strength`]. A
+    /// `UnitDouble` defaulting to `0.75`, same `percentValueOrOffLabel`.
+    ///
+    /// The pair reaches **three** glint sites, not two — the world pass, the
+    /// first-person hand, and the 2-D GUI icon pass, which is a separate
+    /// pipeline with its own uniform (`crate::hud::item_icon::GuiGlint`) and was
+    /// the one missed. All three key off the same wall clock, so pushing the
+    /// options to only some of them puts them out of phase as well as at the
+    /// wrong rate.
+    GlintStrength,
+    /// `options.renderClouds` → [`crate::config::Options::cloud_status`].
+    ///
+    /// Three states, not a boolean: `CloudStatus` is `OFF, FAST, FANCY`
+    /// (`CloudStatus.java`) and the cycle visits them in that declaration order,
+    /// which is `CycleButton`'s own order.
+    ///
+    /// **The one live option in the tree whose label is the value alone** — see
+    /// [`Self::value_is_the_whole_label`]. Its stringifier is
+    /// `(caption, value) -> value.caption()`, which discards the caption it is
+    /// handed, so vanilla's button reads "Fancy" rather than "Clouds: Fancy".
+    CloudStatus,
 }
 
 impl LiveOption {
@@ -395,6 +457,15 @@ impl LiveOption {
             LiveOption::Sensitivity => Some(options.sensitivity),
             LiveOption::DamageTiltStrength => Some(options.damage_tilt_strength),
             LiveOption::PanoramaSpeed => Some(options.panorama_speed),
+            LiveOption::GlintSpeed => Some(options.glint_speed),
+            LiveOption::GlintStrength => Some(options.glint_strength),
+            // `get` rather than `[index]`: the index comes from a `const` row on
+            // some page, so an out-of-range one is an authoring mistake, and
+            // reading nothing is a handle that does not draw rather than a panic
+            // in the middle of a settings screen.
+            LiveOption::SoundVolume(index) => {
+                options.sound_volumes.get(index as usize).copied()
+            }
             // `RenderDistance` is an `IntRange`, **not** a `UnitDouble`: its
             // stored value is a chunk count, so returning it here would put the
             // handle at `min(8, 1) = 1.0`, pinned to the far end of the track for
@@ -413,7 +484,13 @@ impl LiveOption {
             | LiveOption::InvertMouseY
             | LiveOption::DiscreteMouseScroll
             | LiveOption::MouseWheelSensitivity
-            | LiveOption::ChatColors => None,
+            | LiveOption::ChatColors
+            // `Fov` is the second `IntRange` on this tree, for
+            // `RenderDistance`'s reason: its stored value is 30..=110 degrees,
+            // so returning it here would pin every handle to the far right.
+            | LiveOption::Fov
+            // A three-state cycle, not a slider at all.
+            | LiveOption::CloudStatus => None,
         }
     }
 
@@ -442,6 +519,9 @@ impl LiveOption {
             LiveOption::Sensitivity => Some(&mut options.sensitivity),
             LiveOption::DamageTiltStrength => Some(&mut options.damage_tilt_strength),
             LiveOption::PanoramaSpeed => Some(&mut options.panorama_speed),
+            LiveOption::GlintSpeed => Some(&mut options.glint_speed),
+            LiveOption::GlintStrength => Some(&mut options.glint_strength),
+            LiveOption::SoundVolume(index) => options.sound_volumes.get_mut(index as usize),
             LiveOption::RenderDistance
             | LiveOption::GuiScale
             | LiveOption::ViewBobbing
@@ -456,8 +536,26 @@ impl LiveOption {
             | LiveOption::InvertMouseY
             | LiveOption::DiscreteMouseScroll
             | LiveOption::MouseWheelSensitivity
-            | LiveOption::ChatColors => None,
+            | LiveOption::ChatColors
+            | LiveOption::Fov
+            | LiveOption::CloudStatus => None,
         }
+    }
+
+    /// Whether this option's vanilla stringifier **discards the caption** it is
+    /// handed, so [`Cell::label`] must not compose one in front of the value.
+    ///
+    /// True for exactly one option on the tree, and it is not a stylistic
+    /// choice: `cloudStatus`' stringifier is `(caption, value) ->
+    /// value.caption()` (the `cloudStatus` field in `Options.java`), which throws
+    /// its `caption` argument away and returns `CloudStatus.caption()` alone — so
+    /// vanilla's Clouds button reads "Fancy", never "Clouds: Fancy". Every other
+    /// live option here goes through `genericValueLabel`, `percentValueLabel` or
+    /// `pixelValueLabel`, all three of which compose, which is why
+    /// [`Cell::label`] composes by default.
+    #[must_use]
+    fn value_is_the_whole_label(self) -> bool {
+        matches!(self, LiveOption::CloudStatus)
     }
 
     /// This option's `IntRange` bounds, for the ones built on one.
@@ -470,6 +568,7 @@ impl LiveOption {
         let accessor = match self {
             LiveOption::RenderDistance => "renderDistance",
             LiveOption::SprintWindow => "sprintWindow",
+            LiveOption::Fov => "fov",
             _ => return None,
         };
         INT_RANGE_SLIDERS
@@ -577,10 +676,14 @@ impl Cell {
     /// `"%s: %s"` (`Options.java:1974-1976`) — when we hold a value for it, and
     /// its **caption alone** when we do not. See the module docs' departure (1)
     /// for why that is not an omission.
+    ///
+    /// The one exception is an option whose own vanilla stringifier discards the
+    /// caption; see [`LiveOption::value_is_the_whole_label`].
     #[must_use]
     pub fn label(self, options: &crate::config::Options) -> String {
         match self {
             Cell::Option(spec) => match spec.live {
+                Some(live) if live.value_is_the_whole_label() => live_value(live, options),
                 Some(live) => generic_value_label(spec.caption, &live_value(live, options)),
                 None => spec.caption.to_string(),
             },
@@ -663,6 +766,12 @@ impl Cell {
         // handle must track the live tick count, not the frozen default 7.
         if spec.live == Some(LiveOption::SprintWindow) {
             return Some(sprint_window_slider_fraction(options.sprint_window_ticks));
+        }
+        // And for `fov`'s `IntRange(30, 110)`. Its row sits on the **root** page
+        // rather than in a list, which changes nothing here — liveness is a
+        // property of the cell, not of where it is placed.
+        if spec.live == Some(LiveOption::Fov) {
+            return Some(fov_slider_fraction(options.fov));
         }
         // A **live** `UnitDouble` option reads its handle position from the
         // real, persisted value; only an inactive one falls through to the
@@ -1057,6 +1166,27 @@ pub fn sprint_window_slider_fraction(ticks: u8) -> f32 {
     range.to_slider_value(i32::from(ticks))
 }
 
+/// `fov`'s slider fraction from the real, persisted degree count.
+///
+/// The third of the identical trio (see [`render_distance_slider_fraction`] and
+/// [`sprint_window_slider_fraction`]) and it reads the same
+/// [`INT_RANGE_SLIDERS`] row the inactive handle used, so making the row live
+/// cannot move the handle a player was already looking at.
+#[must_use]
+pub fn fov_slider_fraction(degrees: u32) -> f32 {
+    let range = INT_RANGE_SLIDERS
+        .iter()
+        .find(|(a, _, _)| *a == "fov")
+        .map_or(
+            SliderRange {
+                min: crate::config::MIN_FOV as i32,
+                max: crate::config::MAX_FOV as i32,
+            },
+            |(_, r, _)| *r,
+        );
+    range.to_slider_value(i32::try_from(degrees).unwrap_or(range.min))
+}
+
 /// `mouseWheelSensitivity`'s slider fraction from the real, live config
 /// value — the one place this module inverts vanilla's own stringifier
 /// rather than restating a table.
@@ -1261,6 +1391,68 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         // reads `0%`. That is right rather than an oversight: zero speed is a
         // legitimate position on this slider, not the option being off.
         LiveOption::PanoramaSpeed => percent_value(options.panorama_speed),
+        // All eleven volume sliders share one stringifier, because vanilla builds
+        // all eleven from one factory: `createSoundSliderOptionInstance` passes
+        // `Options::percentValueOrOffLabel`, so a muted bus reads **OFF** and not
+        // `0%`. Same shape as `DamageTiltStrength` above, and `<= 0.0` for the
+        // same reason.
+        //
+        // An index past the array is a `0%`-free "OFF" rather than a panic — see
+        // [`LiveOption::SoundVolume`].
+        LiveOption::SoundVolume(index) => {
+            match options.sound_volumes.get(index as usize) {
+                Some(&v) if v > 0.0 => percent_value(v),
+                _ => "OFF".to_string(),
+            }
+        }
+        // `switch (value) { case 70 -> options.fov.min; case 110 ->
+        // options.fov.max; default -> value }`, each arm wrapped in
+        // `genericValueLabel`, so the caption composes as usual and only the
+        // **value half** varies. `en_us.json`: `options.fov.min` is "Normal" and
+        // `options.fov.max` is "Quake Pro" — no exclamation mark, unlike
+        // `sensitivity`'s "HYPERSPEED!!!".
+        //
+        // **The special case is at the default.** 70 is both vanilla's `case 70`
+        // and its shipped default, so a fresh install reads "FOV: Normal" — a
+        // transcription that just printed the integer would read "FOV: 70" and
+        // disagree with vanilla on the *one* value every new player sees. The two
+        // literals are vanilla's own; they are not written as
+        // `crate::config::DEFAULT_FOV`/`MAX_FOV` because the coincidence is
+        // vanilla's and not a constraint either constant is under.
+        LiveOption::Fov => match options.fov {
+            70 => "Normal".to_string(),
+            110 => "Quake Pro".to_string(),
+            degrees => degrees.to_string(),
+        },
+        // Both glint options are `percentValueOrOffLabel` too, and `0.0` is a
+        // deliberate value on each: a zero *speed* is a frozen shimmer and a zero
+        // *strength* is an invisible one, so "OFF" is the honest label rather
+        // than a stand-in for "unset".
+        LiveOption::GlintSpeed => {
+            if options.glint_speed <= 0.0 {
+                "OFF".to_string()
+            } else {
+                percent_value(options.glint_speed)
+            }
+        }
+        LiveOption::GlintStrength => {
+            if options.glint_strength <= 0.0 {
+                "OFF".to_string()
+            } else {
+                percent_value(options.glint_strength)
+            }
+        }
+        // `CloudStatus.caption()` — the enum's *own* component, keyed
+        // `options.off`/`options.clouds.fast`/`options.clouds.fancy`
+        // (`CloudStatus.java`), i.e. "OFF"/"Fast"/"Fancy" in `en_us.json`.
+        //
+        // This is the whole label, not a value half: see
+        // [`LiveOption::value_is_the_whole_label`].
+        LiveOption::CloudStatus => match options.cloud_status {
+            lodestone_render::CloudStatus::Off => "OFF".to_string(),
+            lodestone_render::CloudStatus::Fast => "Fast".to_string(),
+            lodestone_render::CloudStatus::Fancy => "Fancy".to_string(),
+        },
     }
 }
 
@@ -1431,7 +1623,9 @@ static VIDEO: &[Entry] = &[
     ),
     pair(
         cycle("ambientOcclusion", "Smooth Lighting"),
-        cycle("cloudStatus", "Clouds"),
+        // Three states, and the row's label is the value **alone** — vanilla's
+        // stringifier here discards the caption. See `LiveOption::CloudStatus`.
+        live_cycle("cloudStatus", "Clouds", LiveOption::CloudStatus),
     ),
     pair(
         cycle("particles", "Particles"),
@@ -1550,27 +1744,61 @@ static MOUSE: &[Entry] = &[
 /// The eleven volume sliders are `SoundSource.values()` in declaration order
 /// (`sounds/SoundSource.java:3-14`) with `MASTER` pulled out into the `addBig`
 /// row; their captions are `soundCategory.<name>`.
+///
+/// **All eleven are live.** Each carries its own
+/// [`LiveOption::SoundVolume`] index, and that index is the `SoundSource`
+/// ordinal — so it is simultaneously the slot in
+/// [`crate::config::Options::sound_volumes`], the `sound_volume_<name>` key in
+/// `options.json` and the mixer bus `lodestone_audio::CategoryVolumes::set_user`
+/// writes. The indices below **must** match the accessor suffixes, which is a
+/// property no compiler checks and `sound_rows_index_the_category_they_name`
+/// therefore does: a transposed pair here would move the wrong bus while every
+/// label read correctly.
 static SOUND: &[Entry] = &[
-    big(slider("soundSource.master", "Master Volume")),
+    big(live_slider(
+        "soundSource.master",
+        "Master Volume",
+        LiveOption::SoundVolume(0),
+    )),
     pair(
-        slider("soundSource.music", "Music"),
-        slider("soundSource.record", "Jukebox/Note Blocks"),
+        live_slider("soundSource.music", "Music", LiveOption::SoundVolume(1)),
+        live_slider(
+            "soundSource.record",
+            "Jukebox/Note Blocks",
+            LiveOption::SoundVolume(2),
+        ),
     ),
     pair(
-        slider("soundSource.weather", "Weather"),
-        slider("soundSource.block", "Blocks"),
+        live_slider("soundSource.weather", "Weather", LiveOption::SoundVolume(3)),
+        live_slider("soundSource.block", "Blocks", LiveOption::SoundVolume(4)),
     ),
     pair(
-        slider("soundSource.hostile", "Hostile Mobs"),
-        slider("soundSource.neutral", "Friendly Mobs"),
+        live_slider(
+            "soundSource.hostile",
+            "Hostile Mobs",
+            LiveOption::SoundVolume(5),
+        ),
+        live_slider(
+            "soundSource.neutral",
+            "Friendly Mobs",
+            LiveOption::SoundVolume(6),
+        ),
     ),
     pair(
-        slider("soundSource.player", "Players"),
-        slider("soundSource.ambient", "Ambient/Environment"),
+        live_slider("soundSource.player", "Players", LiveOption::SoundVolume(7)),
+        live_slider(
+            "soundSource.ambient",
+            "Ambient/Environment",
+            LiveOption::SoundVolume(8),
+        ),
     ),
     pair(
-        slider("soundSource.voice", "Narrator/Voice"),
-        slider("soundSource.ui", "UI"),
+        live_slider(
+            "soundSource.voice",
+            "Narrator/Voice",
+            LiveOption::SoundVolume(9),
+        ),
+        live_slider("soundSource.ui", "UI", LiveOption::SoundVolume(10)),
     ),
     big(cycle("soundDevice", "Device")),
     pair(
@@ -1687,8 +1915,8 @@ static ACCESSIBILITY: &[Entry] = &[
         ),
     ),
     pair(
-        slider("glintSpeed", "Glint Speed"),
-        slider("glintStrength", "Glint Strength"),
+        live_slider("glintSpeed", "Glint Speed", LiveOption::GlintSpeed),
+        live_slider("glintStrength", "Glint Strength", LiveOption::GlintStrength),
     ),
     pair(
         cycle("hideLightningFlash", "Hide Sky Flashes"),
@@ -2102,7 +2330,11 @@ pub fn controls(page: SettingsPage, scroll: f32, in_world: bool) -> Vec<Control>
         // 1 = the FOV slider, 2 = the Online / World Options button; the title
         // at index 0 is a `StringWidget` and not focusable.
         out.push(Control {
-            cell: slider("fov", "FOV"),
+            // Live: an `IntRange(30, 110)` reaching `Sim::set_fov_y_degrees` and
+            // the projection matrix. The only live option **not** in a page's
+            // `Entry` table, because the root carries it in its own taller header
+            // rather than in a list — see `all_controls`, which must stay in step.
+            cell: live_slider("fov", "FOV", LiveOption::Fov),
             placement: Placement::Root(1),
             width: SMALL_BUTTON_WIDTH,
         });
@@ -2181,7 +2413,12 @@ pub fn controls(page: SettingsPage, scroll: f32, in_world: bool) -> Vec<Control>
 #[must_use]
 pub fn all_controls(page: SettingsPage, in_world: bool) -> Vec<Cell> {
     if page == SettingsPage::Root {
-        let mut out = vec![slider("fov", "FOV"), online_cell(in_world)];
+        // The same live cell `controls` builds; the two must agree or the census
+        // and the draw disagree about whether the row is reachable.
+        let mut out = vec![
+            live_slider("fov", "FOV", LiveOption::Fov),
+            online_cell(in_world),
+        ];
         out.extend_from_slice(ROOT_GRID);
         out.push(done());
         return out;
@@ -3370,10 +3607,19 @@ mod tests {
         assert_eq!(
             live_options,
             vec![
+                // Root page, in its own taller header rather than a list: the FOV
+                // slider, whose consumer had been pinned to `FOV_Y_DEGREES` (which
+                // *is* vanilla's 70, so no screenshot could show the difference at
+                // the default).
+                LiveOption::Fov,
                 LiveOption::GuiScale,
                 // Video page, on the Quality & Performance grid, next to the
                 // (still inactive) Biome Blend — issue #443.
                 LiveOption::RenderDistance,
+                // Also Video, in the `(ambientOcclusion, cloudStatus)` pair: the
+                // three-state Clouds cycle, whose `SkyFrame::with_cloud_status`
+                // consumer had zero production callers.
+                LiveOption::CloudStatus,
                 LiveOption::ToggleSneak,
                 LiveOption::ToggleSprint,
                 LiveOption::ToggleAttack,
@@ -3394,7 +3640,23 @@ mod tests {
                 LiveOption::DiscreteMouseScroll,
                 LiveOption::InvertMouseX,
                 LiveOption::InvertMouseY,
-                // Sound page: Closed Captions, issue #198. Vanilla places
+                // Sound page: the eleven volume buses in `SoundSource` declaration
+                // order, MASTER first because the page pulls it into its own
+                // `addBig` row. The index *is* the ordinal — see
+                // `sound_rows_index_the_category_they_name`, which is what stops a
+                // transposed pair here reading as correct.
+                LiveOption::SoundVolume(0),
+                LiveOption::SoundVolume(1),
+                LiveOption::SoundVolume(2),
+                LiveOption::SoundVolume(3),
+                LiveOption::SoundVolume(4),
+                LiveOption::SoundVolume(5),
+                LiveOption::SoundVolume(6),
+                LiveOption::SoundVolume(7),
+                LiveOption::SoundVolume(8),
+                LiveOption::SoundVolume(9),
+                LiveOption::SoundVolume(10),
+                // Still Sound: Closed Captions, issue #198. Vanilla places
                 // `showSubtitles` on *both* the Sound and Accessibility screens,
                 // so it appears twice below, like the three chat options do.
                 LiveOption::ShowSubtitles,
@@ -3420,14 +3682,19 @@ mod tests {
                 // spin rate whose consumer (`PanoramaRenderer::set_speed`) had no
                 // caller at all. See both variants' docs.
                 LiveOption::DamageTiltStrength,
+                // The glint pair, declared immediately after Damage Tilt in
+                // `ACCESSIBILITY` and before the Panorama row.
+                LiveOption::GlintSpeed,
+                LiveOption::GlintStrength,
                 LiveOption::PanoramaSpeed,
             ],
-            "GUI Scale and Render Distance on Video; the four toggle rows and \
-             Auto-Jump/Sprint Window on Controls; look sensitivity, scroll \
-             sensitivity and both inverts on Mouse; Closed Captions on Sound; the \
-             eight chat options on Chat with three of them repeated on \
-             Accessibility; Closed Captions again, View Bobbing, Damage Tilt and \
-             Panorama Scroll Speed on Accessibility — and nothing else"
+            "FOV on the root; GUI Scale, Render Distance and Clouds on Video; the \
+             four toggle rows and Auto-Jump/Sprint Window on Controls; look \
+             sensitivity, scroll sensitivity and both inverts on Mouse; the eleven \
+             volume buses and Closed Captions on Sound; the eight chat options on \
+             Chat with three of them repeated on Accessibility; Closed Captions \
+             again, View Bobbing, Damage Tilt, both glint sliders and Panorama \
+             Scroll Speed on Accessibility — and nothing else"
         );
         // The control: an option we do not persist must report itself inactive,
         // and the detector must be able to tell the difference.
@@ -3461,17 +3728,17 @@ mod tests {
             render_distance.is_live(),
             "renderDistance is a persisted `Options` field since #443"
         );
-        // The count itself, not just the ratio's ingredients: 29 live option
-        // *rows* (25 distinct options, four of them placed twice — the three
+        // The count itself, not just the ratio's ingredients: 44 live option
+        // *rows* (40 distinct options, four of them placed twice — the three
         // Chat/Accessibility ones plus `showSubtitles` on Sound and
-        // Accessibility, so 29 - 4 == 25)
+        // Accessibility, so 44 - 4 == 40)
         // + 9 Done buttons (one per page, always live) + 13 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
         // **Telemetry**/**Resource Packs** from the root grid,
         // Accessibility -> Controls, Controls -> Mouse, Controls -> Key Binds,
         // and the root's own Online button, live outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 51, "outside a world: {live:?}");
+        assert_eq!(live.len(), 66, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -3493,11 +3760,12 @@ mod tests {
             .flat_map(|&p| all_controls(p, true))
             .filter(|c| c.is_live())
             .collect();
-        // 51, not 49: `showSubtitles` is live on **both** the pages vanilla places
-        // it on (Sound and Accessibility), and the Accessibility page gained Damage
-        // Tilt and Panorama Scroll Speed.
-        assert_eq!(outside.len(), 51);
-        assert_eq!(inside.len(), 50, "one fewer: the root's Online button");
+        // 66, not 62: `showSubtitles` is live on **both** the pages vanilla places
+        // it on (Sound and Accessibility), and three chat options are on two pages
+        // each. The kind A batch added fifteen — the eleven volume buses, the
+        // root's FOV, both glint sliders and Clouds.
+        assert_eq!(outside.len(), 66);
+        assert_eq!(inside.len(), 65, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -3773,6 +4041,207 @@ mod tests {
             LiveOption::RenderDistance,
         );
         assert_eq!(rd.label(&o), "Render Distance: 12 Chunks");
+    }
+
+    /// The eleven volume rows' labels, at **eleven distinct** values.
+    ///
+    /// Distinct rather than one value repeated, and that is the whole design of
+    /// this gate: a uniform value is satisfied by a **transposed pair** — two rows
+    /// reading each other's bus — which is precisely the failure an eleven-wide
+    /// indexed array invites. With distinct values a swap moves two labels and the
+    /// assertion names which.
+    ///
+    /// The eleven are dyadic (`n/16`), so `value * 100.0` is exact in `f32` *and*
+    /// `f64` and the truncation `percentValueLabel` performs is predictable — the
+    /// `f32`-vs-`double` divergence `the_migrated_labels_are_vanillas_own_strings`
+    /// records does not apply. The percentages are worked out from
+    /// `(int)(value * 100.0)` rather than rounded: `0.0625 -> 6`, not 6.25 and not
+    /// 7.
+    #[test]
+    fn every_volume_labels_its_own_bus_at_eleven_distinct_values() {
+        let mut o = crate::config::Options::default();
+        // (index, stored value, the percent `(int)(v * 100.0)` yields)
+        let cases: [(usize, f32, &str); 11] = [
+            (0, 0.0625, "6%"),
+            (1, 0.125, "12%"),
+            (2, 0.1875, "18%"),
+            (3, 0.25, "25%"),
+            (4, 0.3125, "31%"),
+            (5, 0.375, "37%"),
+            (6, 0.4375, "43%"),
+            (7, 0.5, "50%"),
+            (8, 0.5625, "56%"),
+            (9, 0.625, "62%"),
+            (10, 0.6875, "68%"),
+        ];
+        for (index, value, _) in cases {
+            o.sound_volumes[index] = value;
+        }
+        for (index, _, want) in cases {
+            let got = live_value(LiveOption::SoundVolume(index as u8), &o);
+            assert_eq!(
+                got,
+                want,
+                "bus {index} ({}) reads {got}, wanted {want} — a transposed pair \
+                 shows up here and nowhere else",
+                crate::config::SOUND_CATEGORY_NAMES[index]
+            );
+        }
+        // Every row composes its own caption through `genericValueLabel`, read off
+        // the **real page** rather than a synthetic cell — so this is a claim about
+        // the tree, not about `live_slider`.
+        let master = all_controls(SettingsPage::Sound, OUTSIDE_A_WORLD)
+            .into_iter()
+            .find(|c| matches!(c, Cell::Option(s) if s.accessor == "soundSource.master"))
+            .expect("the Sound page carries a Master Volume row");
+        assert_eq!(master.label(&o), "Master Volume: 6%");
+
+        // `percentValueOrOffLabel`, not the plain percent: a muted bus reads OFF.
+        // The wrong hypothesis is executed rather than described.
+        o.sound_volumes[0] = 0.0;
+        assert_eq!(live_value(LiveOption::SoundVolume(0), &o), "OFF");
+        assert_ne!(
+            live_value(LiveOption::SoundVolume(0), &o),
+            "0%",
+            "`createSoundSliderOptionInstance` passes `percentValueOrOffLabel`"
+        );
+        // And the handle follows the stored value rather than the frozen 1.0 in
+        // `UNIT_DOUBLE_DEFAULTS` — the exact lie the chat sliders told before their
+        // `slider_fraction` arm existed.
+        o.sound_volumes[3] = 0.25;
+        assert_eq!(master.slider_fraction(&o), Some(0.0), "muted master");
+        let weather = all_controls(SettingsPage::Sound, OUTSIDE_A_WORLD)
+            .into_iter()
+            .find(|c| matches!(c, Cell::Option(s) if s.accessor == "soundSource.weather"))
+            .expect("the Sound page carries a Weather row");
+        assert_eq!(weather.slider_fraction(&o), Some(0.25));
+        assert_ne!(
+            weather.slider_fraction(&o),
+            Some(1.0),
+            "must not be parked at the frozen 1.0 default"
+        );
+    }
+
+    /// `fov`, `glintSpeed`, `glintStrength` and `cloudStatus`' labels.
+    ///
+    /// **None of the four can be gated at its default**, and each for its own
+    /// reason, which is why every value below is a non-default: `FOV_Y_DEGREES` and
+    /// `glint::DEFAULT_SPEED`/`DEFAULT_STRENGTH` *are* vanilla's shipped 70/0.5/0.75,
+    /// so at the default the correct and frozen-default hypotheses are
+    /// byte-identical, and `CloudStatus::default()` is FANCY.
+    #[test]
+    fn the_kind_a_labels_are_vanillas_own_strings() {
+        let mut o = crate::config::Options::default();
+
+        // -- fov. Vanilla's stringifier cases on **70** and **110**, and 70 is
+        // also the shipped default, so a fresh install reads "Normal" and not
+        // "70". `en_us.json`: `options.fov.min` = "Normal", `options.fov.max` =
+        // "Quake Pro" (no exclamation mark).
+        o.fov = crate::config::DEFAULT_FOV;
+        assert_eq!(live_value(LiveOption::Fov, &o), "Normal");
+        assert_ne!(
+            live_value(LiveOption::Fov, &o),
+            "70",
+            "the special case sits *on* the default, so printing the integer \
+             disagrees with vanilla at the one value every new player sees"
+        );
+        o.fov = crate::config::MAX_FOV;
+        assert_eq!(live_value(LiveOption::Fov, &o), "Quake Pro");
+        assert_ne!(live_value(LiveOption::Fov, &o), "Quake Pro!");
+        // Every other degree count is the plain integer, including the minimum —
+        // vanilla names no `options.fov` string for 30.
+        o.fov = crate::config::MIN_FOV;
+        assert_eq!(live_value(LiveOption::Fov, &o), "30");
+        o.fov = 90;
+        assert_eq!(live_value(LiveOption::Fov, &o), "90");
+
+        // The root's own row, read off the page rather than rebuilt, composing
+        // through `genericValueLabel`.
+        let fov_row = all_controls(SettingsPage::Root, OUTSIDE_A_WORLD)
+            .into_iter()
+            .find(|c| matches!(c, Cell::Option(s) if s.accessor == "fov"))
+            .expect("the root page carries an FOV row");
+        assert_eq!(fov_row.label(&o), "FOV: 90");
+
+        // The handle, from the stored 90 rather than the table's frozen 70.
+        //
+        // **90, not 70, and the choice is load-bearing**: at 70 vanilla's
+        // bucket-centre map gives `(70 + 0.5 - 30) / (110 + 1 - 30) = 40.5 / 81 =
+        // 0.5` and the naive endpoint span gives `(70 - 30) / (110 - 30) = 0.5`
+        // too, so the default is an input where the two hypotheses *coincide* and
+        // a gate there measures only that the code runs. At 90 they differ.
+        o.fov = 90;
+        let want = 60.5_f32 / 81.0;
+        assert_eq!(fov_row.slider_fraction(&o), Some(want));
+        assert_ne!(
+            fov_row.slider_fraction(&o),
+            Some(0.5),
+            "must not be parked at the frozen default's fraction"
+        );
+        assert_ne!(
+            fov_row.slider_fraction(&o),
+            Some(0.75),
+            "0.75 is the naive endpoint span `(90 - 30) / (110 - 30)`"
+        );
+
+        // -- the glint pair. `percentValueOrOffLabel` on both, so zero reads OFF,
+        // and both zeroes are real choices: a frozen shimmer and an invisible one.
+        o.glint_speed = 0.25;
+        o.glint_strength = 0.375;
+        assert_eq!(live_value(LiveOption::GlintSpeed, &o), "25%");
+        assert_eq!(live_value(LiveOption::GlintStrength, &o), "37%");
+        assert_ne!(
+            live_value(LiveOption::GlintSpeed, &o),
+            "50%",
+            "50% is `glint::DEFAULT_SPEED`, i.e. the row still reading the frozen \
+             constant its consumer used to be pinned to"
+        );
+        assert_ne!(
+            live_value(LiveOption::GlintStrength, &o),
+            "75%",
+            "75% is `glint::DEFAULT_STRENGTH`, same failure"
+        );
+        o.glint_speed = 0.0;
+        o.glint_strength = 0.0;
+        assert_eq!(live_value(LiveOption::GlintSpeed, &o), "OFF");
+        assert_eq!(live_value(LiveOption::GlintStrength, &o), "OFF");
+        assert_ne!(live_value(LiveOption::GlintSpeed, &o), "0%");
+
+        // -- cloudStatus. The **whole label is the value**: vanilla's stringifier
+        // is `(caption, value) -> value.caption()`, which discards the caption it
+        // is handed. The row is read off the real page, and the composed form is
+        // executed as the wrong hypothesis rather than described.
+        let clouds = all_controls(SettingsPage::Video, OUTSIDE_A_WORLD)
+            .into_iter()
+            .find(|c| matches!(c, Cell::Option(s) if s.accessor == "cloudStatus"))
+            .expect("the Video page carries a Clouds row");
+        for (status, want) in [
+            (lodestone_render::CloudStatus::Off, "OFF"),
+            (lodestone_render::CloudStatus::Fast, "Fast"),
+            (lodestone_render::CloudStatus::Fancy, "Fancy"),
+        ] {
+            o.cloud_status = status;
+            assert_eq!(clouds.label(&o), want, "{status:?}");
+            assert_ne!(
+                clouds.label(&o),
+                format!("Clouds: {want}"),
+                "`CloudStatus.caption()` throws the caption away"
+            );
+        }
+        // The control for that fork: the *neighbouring* row on the same page does
+        // compose, so this is a property of the option and not of `Cell::label`
+        // having stopped composing altogether.
+        let render_distance = all_controls(SettingsPage::Video, OUTSIDE_A_WORLD)
+            .into_iter()
+            .find(|c| matches!(c, Cell::Option(s) if s.accessor == "renderDistance"))
+            .expect("the Video page carries a Render Distance row");
+        assert!(
+            render_distance.label(&o).starts_with("Render Distance: "),
+            "every other live row still composes its caption"
+        );
+        // And Clouds is a **cycle**, not a slider: `OptionInstance.Enum` builds a
+        // `CycleButton`. A slider track under it would be drawn but unusable.
+        assert!(!clouds.is_slider());
     }
 
     // -- issue #424: the `IntRange` slider ranges ----------------------------
@@ -4123,6 +4592,27 @@ mod tests {
         // implemented with no caller. See the variants' own docs.
         LiveOption::DamageTiltStrength,
         LiveOption::PanoramaSpeed,
+        // The kind A batch: fifteen rows whose consumers already ran every frame
+        // against a hardcoded constant. **All eleven sound indices are listed
+        // individually and that is load-bearing** — `SoundVolume` is one variant,
+        // so the exhaustiveness control below is satisfied by a single
+        // `SoundVolume(_)` arm and cannot tell that an index is missing. Only the
+        // reachability sweep, run per index, can.
+        LiveOption::SoundVolume(0),
+        LiveOption::SoundVolume(1),
+        LiveOption::SoundVolume(2),
+        LiveOption::SoundVolume(3),
+        LiveOption::SoundVolume(4),
+        LiveOption::SoundVolume(5),
+        LiveOption::SoundVolume(6),
+        LiveOption::SoundVolume(7),
+        LiveOption::SoundVolume(8),
+        LiveOption::SoundVolume(9),
+        LiveOption::SoundVolume(10),
+        LiveOption::Fov,
+        LiveOption::GlintSpeed,
+        LiveOption::GlintStrength,
+        LiveOption::CloudStatus,
     ];
 
     /// Every [`LiveOption`] must be placed on some page — the island check in
@@ -4181,10 +4671,79 @@ mod tests {
                 | LiveOption::AutoJump
                 | LiveOption::SprintWindow
                 | LiveOption::DamageTiltStrength
-                | LiveOption::PanoramaSpeed => {}
+                | LiveOption::PanoramaSpeed
+                | LiveOption::SoundVolume(_)
+                | LiveOption::Fov
+                | LiveOption::GlintSpeed
+                | LiveOption::GlintStrength
+                | LiveOption::CloudStatus => {}
             }
         }
-        assert_eq!(ALL.len(), 25, "twenty-five distinct live options");
+        // 25 before the kind A batch, plus eleven sound buses, FOV, both glint
+        // parameters and Clouds.
+        assert_eq!(ALL.len(), 40, "forty distinct live options");
+        // And the eleven indices are all of them, none repeated: `SoundVolume` is
+        // a *payload* variant, so neither the compiler nor the match above can see
+        // a missing or duplicated index, and a duplicate would silently leave one
+        // mixer bus unreachable while `ALL.len()` still read 40.
+        let mut buses: Vec<u8> = ALL
+            .iter()
+            .filter_map(|l| match l {
+                LiveOption::SoundVolume(i) => Some(*i),
+                _ => None,
+            })
+            .collect();
+        buses.sort_unstable();
+        assert_eq!(
+            buses,
+            (0..crate::config::SOUND_CATEGORY_NAMES.len() as u8).collect::<Vec<u8>>(),
+            "every `SoundSource` ordinal exactly once"
+        );
+    }
+
+    /// Each Sound-page row's [`LiveOption::SoundVolume`] index must be the
+    /// ordinal of the category its **accessor** names.
+    ///
+    /// The one thing no compiler checks about an eleven-wide indexed array, and
+    /// the failure it invites is a **transposed pair**: two rows swapped move each
+    /// other's bus while both labels read correctly and every round-trip test
+    /// still passes. The expected mapping originates outside this file — it is
+    /// [`crate::config::SOUND_CATEGORY_NAMES`], which is
+    /// `SoundSource.getName()` in `SoundSource` declaration order, the same list
+    /// the file keys and the mixer buses are derived from.
+    #[test]
+    fn sound_rows_index_the_category_they_name() {
+        let rows: Vec<(&str, u8)> = all_controls(SettingsPage::Sound, OUTSIDE_A_WORLD)
+            .into_iter()
+            .filter_map(|c| match c {
+                Cell::Option(spec) => match spec.live {
+                    Some(LiveOption::SoundVolume(i)) => Some((spec.accessor, i)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows.len(), 11, "eleven volume rows on the Sound page: {rows:?}");
+        for (accessor, index) in rows {
+            let name = accessor
+                .strip_prefix("soundSource.")
+                .expect("every volume row's accessor is `soundSource.<name>`");
+            assert_eq!(
+                crate::config::SOUND_CATEGORY_NAMES[index as usize],
+                name,
+                "{accessor} carries index {index}, which is the \
+                 `{}` bus — a transposed pair",
+                crate::config::SOUND_CATEGORY_NAMES[index as usize]
+            );
+        }
+        // The control: the mapping this asserts is not the identity on the *page*
+        // order, so it is not satisfied by "the rows happen to be in order". The
+        // page pulls MASTER out into its own `addBig` row and pairs the rest, and
+        // `record` (ordinal 2) is the **second** column of the first pair while
+        // `weather` (ordinal 3) opens the next — so an implementation that indexed
+        // by position within a pair, or by row, would disagree here.
+        assert_eq!(crate::config::SOUND_CATEGORY_NAMES[2], "record");
+        assert_eq!(crate::config::SOUND_CATEGORY_NAMES[3], "weather");
     }
 
     /// [`crate::config::step_unit_double`]'s wrap, including the two places it

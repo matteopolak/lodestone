@@ -3573,7 +3573,99 @@ impl MenuNav {
                 self.step_unit_double_option(|o| &mut o.panorama_speed, 1);
                 MenuAction::None
             }
+            // The fifteen rows whose consumers already ran every frame against a
+            // hardcoded constant: eleven mixer buses, the projection FOV, the two
+            // glint parameters and the cloud geometry. Nothing needs threading
+            // beyond the mutation here — `app/redraw.rs` reads all four of
+            // `Sim::set_sound_volumes`, `Sim::set_fov_y_degrees`,
+            // `RenderState::set_glint_options` and `RenderState::set_cloud_status`
+            // off `MenuNav::options` once per presented frame.
+            SettingsOutcome::Cycle(LiveOption::SoundVolume(index)) => {
+                self.step_sound_volume(index, 1);
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::Fov) => {
+                self.step_fov(1);
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::GlintSpeed) => {
+                self.step_unit_double_option(|o| &mut o.glint_speed, 1);
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::GlintStrength) => {
+                self.step_unit_double_option(|o| &mut o.glint_strength, 1);
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::CloudStatus) => {
+                self.cycle_cloud_status(1);
+                MenuAction::None
+            }
         }
+    }
+
+    /// Steps one of the eleven `soundSource.*` volumes and persists it eagerly.
+    ///
+    /// Goes through [`Self::step_unit_double_option`] rather than writing the
+    /// wrap out again — the eleven are `UnitDouble`s like the chat sliders, and
+    /// the only thing that varies is the array slot.
+    ///
+    /// An out-of-range index is a **no-op**, not a panic: the index arrives from
+    /// a `const` cell on the Sound page, so a bad one is an authoring mistake in
+    /// `menu::options::SOUND` and is caught by
+    /// `sound_rows_index_the_category_they_name`, not something a player can
+    /// provoke mid-session.
+    fn step_sound_volume(&mut self, index: u8, delta: i32) {
+        let slot = index as usize;
+        if slot >= self.options.sound_volumes.len() {
+            return;
+        }
+        self.step_unit_double_option(move |o| &mut o.sound_volumes[slot], delta);
+    }
+
+    /// Steps `fov` by one degree and wraps, then persists.
+    ///
+    /// **Wraps rather than saturating**, for the reason
+    /// [`Self::step_render_distance`] records at length: a keyboard Enter is a
+    /// click, and a value parked at 110 has to be able to come back down. A
+    /// *mouse* click on the track goes through [`Self::set_live_slider`] instead
+    /// and lands wherever the cursor is, so the 81-degree span is not 81 clicks
+    /// for a mouse user.
+    ///
+    /// The bounds are `config`'s [`crate::config::MIN_FOV`]/`MAX_FOV`, which are
+    /// vanilla's `IntRange(30, 110)` — the same pair
+    /// `menu::options::INT_RANGE_SLIDERS` places the handle with, so the value a
+    /// click can reach and the track it draws on cannot disagree.
+    fn step_fov(&mut self, delta: i32) {
+        use crate::config::{MAX_FOV, MIN_FOV};
+        let span = (MAX_FOV - MIN_FOV + 1) as i32;
+        let offset = self.options.fov as i32 - MIN_FOV as i32;
+        let wrapped = (offset + delta).rem_euclid(span);
+        self.options.fov = MIN_FOV + wrapped as u32;
+        self.persist_options();
+    }
+
+    /// Cycles Clouds through `CloudStatus.values()`' own declaration order — OFF,
+    /// FAST, FANCY — and wraps, then persists.
+    ///
+    /// **Three states, and the order is the enum's rather than a chosen one**,
+    /// because that is what `CycleButton` visits. A hand-picked order would put
+    /// FANCY (the default) somewhere other than where vanilla's third click
+    /// leaves it.
+    ///
+    /// A `cloud_status` that is somehow not in the list restarts at OFF rather
+    /// than sticking, which cannot happen through
+    /// [`crate::config::cloud_status_from_name`] but keeps the `position` lookup
+    /// honest about being fallible.
+    fn cycle_cloud_status(&mut self, delta: i32) {
+        use lodestone_render::CloudStatus;
+        const ORDER: [CloudStatus; 3] = [CloudStatus::Off, CloudStatus::Fast, CloudStatus::Fancy];
+        let index = ORDER
+            .iter()
+            .position(|s| *s == self.options.cloud_status)
+            .unwrap_or(0) as i32;
+        let next = (index + delta).rem_euclid(ORDER.len() as i32) as usize;
+        self.options.cloud_status = ORDER[next];
+        self.persist_options();
     }
 
     /// Steps `renderDistance` by one chunk and wraps, then persists.
@@ -3639,7 +3731,16 @@ impl MenuNav {
                 LiveOption::SprintWindow => {
                     self.options.sprint_window_ticks = value.clamp(0, 255) as u8;
                 }
-                // `int_range` only answers for the two above; a third would
+                // The clamp is `config`'s own bounds rather than `0..`: an FOV of
+                // zero is a degenerate projection matrix, and `from_slider_value`
+                // is only guaranteed in range for a fraction in `[0, 1]`.
+                LiveOption::Fov => {
+                    self.options.fov = value.clamp(
+                        crate::config::MIN_FOV as i32,
+                        crate::config::MAX_FOV as i32,
+                    ) as u32;
+                }
+                // `int_range` only answers for the three above; a fourth would
                 // have to add its own write here, and falling through to
                 // `false` is the honest result until it does.
                 _ => return false,
@@ -5494,6 +5595,314 @@ mod tests {
             "the value must reach disk on the click, not at exit: {saved}"
         );
         assert_eq!(nav.options_save_error(), None);
+    }
+
+    /// The eleven volume rows each write **their own** bus, at eleven distinct
+    /// values.
+    ///
+    /// Distinct values rather than one repeated, because the failure an
+    /// eleven-wide indexed array invites is a **transposed pair** — two rows
+    /// wired to each other's slot — and a uniform value cannot see it: every
+    /// assertion passes while two categories swap. The values are `(i + 1) / 16`,
+    /// dyadic so the `f32` comparison is exact.
+    ///
+    /// Drives the **drag** path (`AbstractSliderButton.setValueFromMouse`), which
+    /// is the one that reaches `LiveOption::unit_double_mut`'s index write with a
+    /// value of the test's choosing; the click path is exercised separately at the
+    /// end, because it goes through a different arm
+    /// (`apply_settings` → `step_sound_volume`).
+    #[test]
+    fn each_volume_row_writes_its_own_bus_and_no_other() {
+        let (mut nav, path) = self::nav("settings-sound-volumes");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        let options_path = path.parent().unwrap().join("options.json");
+
+        assert_eq!(
+            nav.options().sound_volumes,
+            [1.0; 11],
+            "premise: vanilla ships every bus at full volume"
+        );
+
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Sound);
+
+        // The eleven target values, and the eleven accessors they belong to. The
+        // accessor order is `config::SOUND_CATEGORY_NAMES`, i.e. `SoundSource`
+        // declaration order, which is the outside source for the whole mapping.
+        let mut expected = [0.0f32; 11];
+        for (index, name) in crate::config::SOUND_CATEGORY_NAMES.iter().enumerate() {
+            let accessor = format!("soundSource.{name}");
+            let row = settings_row(&mut nav, &mut ui, is_option(&accessor));
+            let value = (index as f32 + 1.0) / 16.0;
+            assert!(
+                nav.drag_slider(&ui, row, value),
+                "{accessor} must be a draggable live slider"
+            );
+            expected[index] = value;
+        }
+        assert_eq!(
+            nav.options().sound_volumes,
+            expected,
+            "each row must land on its own bus — a mismatch here is a transposed \
+             pair, which a uniform test value cannot detect"
+        );
+        // The control for that assertion: the eleven values really are distinct,
+        // so a swap would have to change the array. An `expected` full of one
+        // number would make the check above vacuous.
+        let mut distinct = expected;
+        distinct.sort_unstable_by(f32::total_cmp);
+        for pair in distinct.windows(2) {
+            assert_ne!(pair[0], pair[1], "the eleven test values must be distinct");
+        }
+
+        // Now the click path, which is a different arm. Master is at 1/16 =
+        // 0.0625, so one step of `UNIT_DOUBLE_STEP` lands on 0.1625 — not a round
+        // number, and not reachable by any wrap.
+        let master = settings_row(&mut nav, &mut ui, is_option("soundSource.master"));
+        assert_eq!(nav.click(&mut ui, master), MenuAction::None);
+        let got = nav.options().sound_volumes[0];
+        assert!(
+            (got - 0.1625).abs() < 1e-6,
+            "expected 0.0625 + 0.1 = 0.1625, got {got}"
+        );
+        assert_eq!(
+            nav.options().sound_volumes[1..],
+            expected[1..],
+            "clicking Master must not disturb the other ten buses"
+        );
+
+        // Persisted eagerly, one key per bus, under vanilla's **singular**
+        // `SoundSource.getName()` spellings.
+        let saved = std::fs::read_to_string(&options_path).expect("options.json must exist");
+        for name in crate::config::SOUND_CATEGORY_NAMES {
+            assert!(
+                saved.contains(&format!("sound_volume_{name}")),
+                "sound_volume_{name} must reach disk on the drag, not at exit: {saved}"
+            );
+        }
+        assert!(
+            !saved.contains("sound_volume_records"),
+            "the file keys are singular (`record`), not the plural enum variant \
+             names — the detector would match either, so this pins which"
+        );
+        let reloaded = crate::config::Options::load_from(&options_path);
+        assert_eq!(
+            reloaded.sound_volumes[1..],
+            expected[1..],
+            "and survive a reload in the same slots"
+        );
+        assert_eq!(nav.options_save_error(), None);
+    }
+
+    /// The root page's FOV row moves `fov`, wraps at 110, and its drag lands on
+    /// vanilla's own bucket.
+    ///
+    /// **Every input here is a non-default**, and for a specific reason:
+    /// `camera_rig::FOV_Y_DEGREES` *is* vanilla's 70, so at the default the
+    /// "reads the option" and "still pinned to the constant" hypotheses are
+    /// byte-identical and a gate there measures only that the code runs.
+    #[test]
+    fn the_root_fov_row_moves_the_option_and_wraps_at_the_maximum() {
+        use crate::config::{DEFAULT_FOV, MAX_FOV, MIN_FOV};
+
+        let (mut nav, path) = self::nav("settings-fov");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        let options_path = path.parent().unwrap().join("options.json");
+
+        assert_eq!(
+            nav.settings().page(),
+            crate::menu::options::SettingsPage::Root,
+            "premise: FOV lives on the root page's own header, not in a list"
+        );
+        assert_eq!(nav.options().fov, DEFAULT_FOV, "premise: vanilla's 70");
+
+        // One click is one degree, and it must be 71 rather than a wrap or a
+        // no-op: the row used to be inactive, so "nothing happened" is the
+        // failure this is here to exclude.
+        let row = settings_row(&mut nav, &mut ui, is_option("fov"));
+        assert_eq!(nav.click(&mut ui, row), MenuAction::None);
+        assert_eq!(nav.options().fov, 71);
+
+        // The drag path, through vanilla's bucket map. `(90 + 0.5 - 30) / (110 + 1
+        // - 30) = 60.5 / 81` is the fraction the handle draws at for 90, so
+        // handing that fraction back must return 90 — and 90 is chosen because at
+        // the default the bucket map and the naive endpoint span *coincide* (both
+        // 0.5), so a drag gate at 70 would pass under either.
+        assert!(nav.drag_slider(&ui, row, 60.5 / 81.0));
+        assert_eq!(nav.options().fov, 90);
+
+        // Both ends of the track land exactly on the bounds rather than one past.
+        assert!(nav.drag_slider(&ui, row, 0.0));
+        assert_eq!(nav.options().fov, MIN_FOV);
+        assert!(nav.drag_slider(&ui, row, 1.0));
+        assert_eq!(nav.options().fov, MAX_FOV);
+
+        // And the wrap: a keyboard Enter is the only way down from the maximum,
+        // so 110 must step to 30 rather than sticking. Vanilla saturates here
+        // because it drags; this is the documented departure every `step_*` on
+        // this tree shares.
+        assert_eq!(nav.click(&mut ui, row), MenuAction::None);
+        assert_eq!(nav.options().fov, MIN_FOV, "110 + 1 wraps to 30, not 111");
+
+        let saved = std::fs::read_to_string(&options_path).expect("options.json must exist");
+        assert!(
+            saved.contains("\"fov\""),
+            "the value must reach disk on the click: {saved}"
+        );
+        assert_eq!(crate::config::Options::load_from(&options_path).fov, MIN_FOV);
+        assert_eq!(nav.options_save_error(), None);
+    }
+
+    /// The glint pair and the Clouds cycle.
+    ///
+    /// `glint::DEFAULT_SPEED`/`DEFAULT_STRENGTH` are vanilla's shipped `0.5`/`0.75`
+    /// and `CloudStatus::default()` is FANCY, so all three rows agree with their
+    /// frozen constants at the default and every value asserted below is a
+    /// non-default.
+    #[test]
+    fn the_glint_and_cloud_rows_move_their_own_options() {
+        use lodestone_render::CloudStatus;
+
+        let (mut nav, path) = self::nav("settings-glint-clouds");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        let options_path = path.parent().unwrap().join("options.json");
+
+        assert_eq!(
+            f64::from(nav.options().glint_speed),
+            lodestone_render::glint::DEFAULT_SPEED,
+            "premise: the field boots at the constant the consumer was pinned to"
+        );
+        assert_eq!(
+            nav.options().glint_strength,
+            lodestone_render::glint::DEFAULT_STRENGTH
+        );
+
+        open_settings_page(
+            &mut nav,
+            &mut ui,
+            crate::menu::options::SettingsPage::Accessibility,
+        );
+        let speed = settings_row(&mut nav, &mut ui, is_option("glintSpeed"));
+        assert!(nav.drag_slider(&ui, speed, 0.25));
+        assert_eq!(nav.options().glint_speed, 0.25);
+        assert_eq!(
+            nav.options().glint_strength,
+            lodestone_render::glint::DEFAULT_STRENGTH,
+            "Glint Speed's row must not touch Glint Strength — they are adjacent \
+             columns of one pair, which is where a mis-indexed row lands"
+        );
+
+        let strength = settings_row(&mut nav, &mut ui, is_option("glintStrength"));
+        assert_ne!(strength, speed, "premise: two different rows");
+        assert!(nav.drag_slider(&ui, strength, 0.375));
+        assert_eq!(nav.options().glint_strength, 0.375);
+        assert_eq!(nav.options().glint_speed, 0.25, "and not back the other way");
+
+        // A zero on either is a real choice — a frozen shimmer and an invisible
+        // one — so the row must be able to reach exactly 0.0 rather than a small
+        // positive floor.
+        assert!(nav.drag_slider(&ui, speed, 0.0));
+        assert_eq!(nav.options().glint_speed, 0.0);
+
+        // -- Clouds: three states in `CloudStatus.values()` order, wrapping.
+        //
+        // Back to the root first: `open_settings_page` walks a nav button on the
+        // *current* page, and Accessibility's only one goes to Controls. Escape is
+        // `OptionsSubScreen`'s own way back, so this is the route a player takes.
+        nav.key(&mut ui, MenuKey::Escape);
+        assert_eq!(
+            nav.settings().page(),
+            crate::menu::options::SettingsPage::Root
+        );
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Video);
+        let clouds = settings_row(&mut nav, &mut ui, is_option("cloudStatus"));
+        assert_eq!(
+            nav.options().cloud_status,
+            CloudStatus::Fancy,
+            "premise: vanilla's default, and what the sky pass drew unconditionally"
+        );
+        // FANCY is *last* in the enum, so the first click wraps to OFF. That order
+        // is `CycleButton`'s, not a chosen one.
+        for want in [CloudStatus::Off, CloudStatus::Fast, CloudStatus::Fancy] {
+            assert_eq!(nav.click(&mut ui, clouds), MenuAction::None);
+            assert_eq!(nav.options().cloud_status, want);
+        }
+
+        // The discriminating property, and the reason `Off` is a variant rather
+        // than a skip in the caller: the two geometry predicates are
+        // **non-complementary**, and `Off` must answer false to *both*. The natural
+        // wrong reading — "not fancy, so draw the flat quad" — satisfies any gate
+        // that merely requires the three states to differ, and it would draw FAST
+        // clouds for a player who asked for none.
+        assert!(!CloudStatus::Off.draws_flat_quad());
+        assert!(!CloudStatus::Off.draws_extruded_cells());
+        assert!(
+            CloudStatus::Fast.draws_flat_quad(),
+            "control: the flat-quad predicate is not stuck at false"
+        );
+        assert!(
+            CloudStatus::Fancy.draws_extruded_cells(),
+            "control: nor is the extruded one"
+        );
+
+        // Persisted **by name**. The ordinal would be the trap: `Off` is ordinal
+        // 0, which is also what a missing key deserialises to under an ordinal
+        // scheme, so "clouds off" and "no setting" would be indistinguishable.
+        assert_eq!(nav.click(&mut ui, clouds), MenuAction::None);
+        assert_eq!(nav.options().cloud_status, CloudStatus::Off);
+        let saved = std::fs::read_to_string(&options_path).expect("options.json must exist");
+        assert!(
+            saved.contains("\"off\""),
+            "cloud_status must be stored as vanilla's own name, not an ordinal: \
+             {saved}"
+        );
+        let reloaded = crate::config::Options::load_from(&options_path);
+        assert_eq!(reloaded.cloud_status, CloudStatus::Off);
+        assert_eq!(reloaded.glint_speed, 0.0);
+        assert_eq!(reloaded.glint_strength, 0.375);
+        assert_eq!(nav.options_save_error(), None);
+    }
+
+    /// `app/redraw.rs` must still push the glint options to **all three** sites.
+    ///
+    /// The same instrument as
+    /// [`app_rs_still_threads_every_chat_option_into_the_hud_frame`] and for the
+    /// same reason: `redraw.rs` is the frame loop, no unit test in this crate can
+    /// run it, and the third site is a *separate pipeline with its own uniform*
+    /// — so an enchanted item can shimmer correctly in the world and in hand while
+    /// a slot draws it at vanilla's default, with every other test green. That is
+    /// exactly the state this batch found the GUI glint in: `set_glint_options`
+    /// existed on `IconRenderer`, was read once per frame, and had **no caller**.
+    ///
+    /// Asserts the **calls**, not line numbers. If the pushes legitimately move,
+    /// point this at their new home rather than deleting it.
+    #[test]
+    fn redraw_rs_still_pushes_the_glint_options_to_all_three_sites() {
+        let src = include_str!("../app/redraw.rs");
+        for site in [
+            "render.set_glint_options",
+            "hud.set_glint_options",
+            "container_renderer.set_glint_options",
+        ] {
+            assert!(
+                src.contains(site),
+                "app/redraw.rs no longer calls `{site}` — that glint site is back \
+                 to vanilla's default constant and out of phase with the others"
+            );
+        }
+        // The other three kind A pushes live in the same function, and each was an
+        // island until it landed.
+        for push in ["set_cloud_status", "set_sound_volumes", "set_fov_y_degrees"] {
+            assert!(src.contains(push), "app/redraw.rs no longer calls `{push}`");
+        }
+        // The control: the detector must be able to report an absence, so a typo
+        // in either list above cannot make this vacuously green.
+        assert!(
+            !src.contains("nonexistent_renderer.set_glint_options"),
+            "the detector must not match a call that is not there"
+        );
     }
 
     /// **Panorama Scroll Speed is a working control, and the value reaches the
