@@ -740,6 +740,12 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             dyed_color: stack.dyed_color(),
             trim: stack.trim(),
             map_id: stack.map_id(),
+            // This crate's own component map has no `pot_decorations` slot — its
+            // `ComponentValue` cannot represent four item keys — so there is
+            // nothing to carry across. A decorated pot round-tripped through here
+            // loses its sherds, the same way an unmodelled component loses its
+            // warning above.
+            pot_decorations: None,
             tool: stack.tool(),
             max_stack_size: stack
                 .components
@@ -1118,6 +1124,11 @@ mod tests {
                     pattern: "silence".to_string(),
                 }),
                 map_id: Some(1701),
+                // Not round-tripped by design: this crate's component map has no
+                // slot for four item keys, so the conversion sets `None` either
+                // way and a `Some` here would fail the round-trip assertion for
+                // the wrong reason.
+                pot_decorations: None,
                 tool: ToolPatch::Set(tool),
                 max_stack_size: Some(1),
                 max_damage: Some(1561),

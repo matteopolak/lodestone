@@ -35,7 +35,7 @@ use lodestone_model::{
     LookAnchor, MainHand, MapDecoration, MapPatch, MerchantOffer as ModelMerchantOffer,
     NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
     ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry, PlayerLookAtEntity,
-    ProfileProperty as ModelProfileProperty,
+    PotDecorations, ProfileProperty as ModelProfileProperty,
     RecipeBookEntry, RecipeBookType,
     RecipeBookTypeSettings,
     ResourceKey, ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, ServerLink,
@@ -1442,6 +1442,54 @@ fn read_armor_trim(reader: &mut Reader<'_>) -> Result<ArmorTrim, AdapterError> {
     Ok(ArmorTrim { material, pattern })
 }
 
+/// Decodes `minecraft:pot_decorations`' payload — `PotDecorations.STREAM_CODEC`,
+/// which is `ByteBufCodecs.registry(Registries.ITEM).apply(ByteBufCodecs.list(4))`.
+///
+/// So the wire is a VarInt element count (`ByteBufCodecs.readCount`, capped at 4)
+/// followed by that many **bare** item registry ids as VarInts. Two shapes it is
+/// easy to get wrong, both re-read from the jar rather than inferred:
+///
+/// * `ByteBufCodecs.registry` is `idMapper`, which writes `VarInt.write(id)` with
+///   **no `+1` and no `0` sentinel** — unlike `ByteBufCodecs.holder`, which
+///   `minecraft:trim` uses two arms above. Adding an offset here would consume the
+///   right number of bytes and report the wrong four sherds.
+/// * The list is `list(4)`, a *maximum*, not a fixed width. A vanilla server
+///   always writes four (`PotDecorations::ordered` builds a four-element list
+///   unconditionally), but a shorter list is legal on the wire and its missing
+///   tail is `Optional.empty()` — `PotDecorations::getItem`'s `i >= sherds.size()`
+///   arm.
+///
+/// `minecraft:brick` decodes to `None`, mirroring `getItem`'s
+/// `item == Items.BRICK ? Optional.empty() : Optional.of(item)`. An id outside the
+/// item registry decodes as `None` rather than failing, for the same reason
+/// [`TRIM_MATERIAL_IDS`] tolerates an unknown holder: the bytes are consumed
+/// either way, and that is the property keeping the rest of the packet readable.
+fn read_pot_decorations(reader: &mut Reader<'_>) -> Result<PotDecorations, AdapterError> {
+    let count = reader.var_i32().map_err(dec_err)?;
+    if !(0..=4).contains(&count) {
+        return Err(AdapterError::Decode(format!(
+            "pot_decorations declares {count} sherds; ByteBufCodecs.list(4) permits 0..=4"
+        )));
+    }
+    let mut sides: [Option<ResourceKey>; 4] = [None, None, None, None];
+    for side in sides.iter_mut().take(count as usize) {
+        let id = reader.var_i32().map_err(dec_err)?;
+        // A brick face and an absent face are the same state in vanilla, so both
+        // land on `None`.
+        *side = match item_name(id) {
+            Some("minecraft:brick") | None => None,
+            Some(name) => Some(parse_key(name, "pot decoration")?),
+        };
+    }
+    let [back, left, right, front] = sides;
+    Ok(PotDecorations {
+        back,
+        left,
+        right,
+        front,
+    })
+}
+
 /// Decodes an item stack's `DataComponentPatch` into the modeled component set,
 /// returning whether the patch was fully consumed.
 ///
@@ -1513,6 +1561,16 @@ fn read_component_patch(
             // here on, not merely losing which map it showed.
             Some("minecraft:map_id") => {
                 components.map_id = Some(reader.var_i32().map_err(dec_err)?);
+            }
+            // Decoded for the same reason as the trim and the map id above, and
+            // this one was found the hard way: the vanilla advancement
+            // `adventure/craft_decorated_pot_using_only_sherds` has a
+            // `minecraft:decorated_pot` icon, so a server that has sent any
+            // advancement tree at all truncates `update_advancements` here — a
+            // **join-blocking** failure, since that packet lands during the
+            // initial world load. See [`read_pot_decorations`].
+            Some("minecraft:pot_decorations") => {
+                components.pot_decorations = Some(read_pot_decorations(reader)?);
             }
             // Both of these are `ByteBufCodecs.VAR_INT` (`DataComponents.java:110-115`)
             // and both *override* the prototype value seeded above. They are
