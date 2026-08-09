@@ -146,6 +146,13 @@ pub enum DeathCause {
     /// construction rather than adding a variant whose only difference is a string.
     /// Split it when the message is actually rendered.
     Wither,
+    /// [`crate::burning`]'s burn tick and fire/lava contact damage — vanilla's
+    /// `on_fire` damage type.
+    ///
+    /// One variant for the three sources (`in_fire`, `on_fire`, `lava`) for the same
+    /// reason [`Self::Wither`] covers two: they differ only in the death message, and
+    /// the amounts are already distinguished by [`crate::burning::BurnSource`].
+    OnFire,
 }
 
 impl DeathCause {
@@ -171,6 +178,7 @@ impl DeathCause {
             Self::Generic => "generic",
             Self::Starve => "starve",
             Self::Wither => "wither",
+            Self::OnFire => "onFire",
         }
     }
 
@@ -1213,6 +1221,7 @@ mod tests {
             (DeathCause::Generic, "generic"),
             (DeathCause::Starve, "starve"),
             (DeathCause::Wither, "wither"),
+            (DeathCause::OnFire, "on_fire"),
         ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../.cache/mc/26.2/src/data/minecraft/damage_type");

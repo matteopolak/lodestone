@@ -172,6 +172,11 @@ pub mod food;
 /// (smelting, breeding, fishing, enchanting) lives outside this module and must not
 /// grow a second curve.
 pub mod experience;
+/// Entity burning: ignition, the fire-tick damage interval, lava-vs-fire duration and
+/// fire immunity (`docs/burning.md`). Fire *spread* between blocks is [`fire`]'s;
+/// this is the entity-facing half. Public because the ignition producers live in
+/// `crate::server`.
+pub mod burning;
 /// The general server-side status-effect registry (`docs/status-effects.md`):
 /// duration countdown, amplifier stacking with vanilla's hidden-effect chain, and the
 /// periodic poison/wither/regeneration ticks. Public because it is the *shared store*

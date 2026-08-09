@@ -4065,3 +4065,149 @@ async fn the_same_step_while_walking_costs_no_hunger_at_all() {
     drop(client);
     let _ = server.await.unwrap();
 }
+
+/// A world of lava, for the burning gate. Mirrors [`WaterSource`]'s shape exactly.
+struct LavaSource;
+
+impl ChunkSource for LavaSource {
+    fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+        let mut col = ChunkColumn::new(0, 16);
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 0..16 {
+                    col.set_block(x, y, z, "minecraft:lava");
+                }
+            }
+        }
+        col
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+}
+
+/// **The island gate for burning** (issue #269): a player standing in lava takes
+/// lava's damage on the real `serve_connection` path, and dies to it.
+///
+/// # The prediction, derived from the constants
+///
+/// `Entity.lavaHurt` is **`4.0` per tick**, and the burn tick's own `1.0` is suppressed
+/// by `baseTick`'s `!isInLava()` guard. So from full health the sequence on the wire is
+/// `16.0, 12.0, 8.0, 4.0, 0.0` — **five ticks to death**, and every value a multiple
+/// of 4.
+///
+/// The wrong hypotheses, both separated:
+///
+/// | hypothesis | first health value |
+/// |---|---|
+/// | lava alone (correct) | **16.0** |
+/// | lava plus the unguarded burn tick | 15.0 |
+/// | burn tick alone | 19.0 |
+///
+/// `natural_health_regeneration` is off so nothing heals between hits, which would
+/// otherwise make the sequence depend on the race rather than on the damage.
+#[tokio::test(start_paused = true)]
+async fn a_player_standing_in_lava_burns_at_four_damage_per_tick() {
+    let (client_end, server_end) = memory_pair();
+    let source = LavaSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
+            .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Diver", 1).await;
+    send_game_rule(&mut client, "natural_health_regeneration", "false").await;
+    send_player_moved(&mut client, 8.0, 8.0, 8.0).await;
+
+    let mut healths: Vec<f32> = Vec::new();
+    for _ in 0..2_000 {
+        let Ok(Some((id, payload))) = client.read_packet().await else {
+            break;
+        };
+        if id != SET_HEALTH_S2C {
+            continue;
+        }
+        let mut r = Reader::new(&payload);
+        let health = r.f32().expect("health");
+        if healths.last().copied() != Some(health) {
+            healths.push(health);
+        }
+        if health <= 0.0 {
+            break;
+        }
+    }
+
+    assert_eq!(
+        healths.first().copied(),
+        Some(16.0),
+        "lava is 4.0 per tick and the burn tick's own 1.0 is suppressed while in it — \
+         15.0 would mean the !isInLava guard is missing, 19.0 that lava's contact \
+         damage is. Saw: {healths:?}"
+    );
+    assert_eq!(
+        healths,
+        vec![16.0, 12.0, 8.0, 4.0, 0.0],
+        "five ticks of 4.0 from full health, every value a multiple of 4: {healths:?}"
+    );
+
+    drop(client);
+    let _ = server.await.unwrap();
+}
+
+/// **The control**: the identical run in an all-air world must produce no health
+/// update at all. Without it, the gate above is satisfied by anything that damages a
+/// player on a timer.
+///
+/// The window is measured by packet count for the reason the walking control gives.
+#[tokio::test(start_paused = true)]
+async fn a_player_standing_in_air_never_burns() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
+            .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Bystander", 1).await;
+    send_game_rule(&mut client, "natural_health_regeneration", "false").await;
+    send_player_moved(&mut client, 8.0, 8.0, 8.0).await;
+
+    let mut updates: Vec<f32> = Vec::new();
+    let mut observed = 0usize;
+    for _ in 0..2_000 {
+        let Ok(Some((id, payload))) = client.read_packet().await else {
+            break;
+        };
+        observed += 1;
+        if id != SET_HEALTH_S2C {
+            continue;
+        }
+        let mut r = Reader::new(&payload);
+        updates.push(r.f32().expect("health"));
+    }
+    assert!(
+        observed > 20,
+        "the window must span real traffic or this control measures nothing; saw \
+         {observed} packets"
+    );
+    assert!(
+        updates.is_empty(),
+        "an air world must not burn anyone: {updates:?}"
+    );
+
+    drop(client);
+    let _ = server.await.unwrap();
+}

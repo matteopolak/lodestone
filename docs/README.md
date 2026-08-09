@@ -188,6 +188,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   via the `--target-dir` flag, trimmed dev profiles in the root `Cargo.toml`, and a
   cleanup-on-finish policy. This doc is the record of what was measured, what was
   decided from it, and the honest limits of both.
+- [Burning](./burning.md) — Entity burning: ignition from fire and lava, the
+  fire-tick damage interval, the lava-vs-fire duration distinction, and Fire
+  Resistance immunity. `crates/lodestone-server/src/burning.rs` holds the rules as a
+  pure value type; `server.rs`'s vitals timer is both the ignition producer and the
+  burn consumer.
 - [The render camera: basis, view matrix, and the pitch-±90 singularity](./camera.md) —
   `lodestone-render`'s `Camera` — the eye position, yaw/pitch orientation and
   projection every world-space matrix in the frame is derived from, reconciled against
