@@ -242,7 +242,7 @@ pub fn drain_ready() -> Vec<(String, Image)> {
 /// is bounded by how many different skins are in view over a session. There is
 /// no runtime to plumb through the render thread this way, and nothing here has
 /// to be cancellable: the worst case is a wasted GET after a disconnect.
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
 fn spawn_fetch(url: String) {
     let for_failure = url.clone();
     let spawned = std::thread::Builder::new()
@@ -295,6 +295,36 @@ fn spawn_fetch(url: String) {
         tracing::warn!(target: "assets", "could not spawn a skin fetch: {e}");
         finish(&for_failure, FetchState::Failed);
     }
+}
+
+/// Browser build: mark the fetch failed, with a reason, and draw the default skin.
+///
+/// A **third arm on the same fork**, for the same reason the test arm is a
+/// `#[cfg]` fork rather than a `cfg!()` early return: routing that is forked is
+/// assertable, routing that early-returns is a silent skip.
+///
+/// Three things are missing here and none is a shim away. The thread and the
+/// blocking `current_thread` runtime are both fatal on wasm32 —
+/// `std::thread::spawn` traps (measured: `RuntimeError: unreachable`) — so the
+/// browser shape is `spawn_local` plus `fetch`, not this function with a different
+/// executor. And `lodestone_auth::texture::fetch_texture` carries authlib's
+/// `TextureUrlChecker` host allow list, which is applied *before* a socket opens;
+/// it is `cfg(not(wasm32))` because it is built on `reqwest`. Reimplementing the
+/// GET over `web_sys::fetch` without porting that allow list would drop the one
+/// security check in this path, so the allow list has to move first.
+///
+/// `FetchState::Failed` rather than leaving the entry `Pending`: a pending URL that
+/// nothing will ever finish can neither draw nor be retried, which is the same
+/// argument the native arm's spawn-failure branch makes.
+#[cfg(all(not(test), target_arch = "wasm32"))]
+fn spawn_fetch(url: String) {
+    tracing::warn!(
+        target: "assets",
+        "not fetching a remote player's skin in a browser: this path needs \
+         lodestone_auth's TextureUrlChecker allow list, which is native-only \
+         (reqwest-based). Players draw with the default skin."
+    );
+    finish(&url, FetchState::Failed);
 }
 
 /// Test build: record the URL instead of performing an HTTP GET.

@@ -425,6 +425,19 @@ pub fn list_worlds_in(root: &Path) -> Vec<WorldSummary> {
 /// directory with **no `level.dat`** (an interrupted create, or someone's
 /// unrelated folder), and a name that is not valid UTF-8.
 fn summarise_dir(path: &Path) -> Option<WorldSummary> {
+    // Browser: there is no `saves/` directory, so there is no world to summarise.
+    // The `!path.is_dir()` guard below would already return `None` here on its own
+    // (`is_dir()` is `false` for everything on wasm32, because the metadata call
+    // returns `Err(Unsupported)` — measured, not assumed), so this early return
+    // changes no behaviour; it exists so the `lodestone_anvil` reads further down
+    // can be gated without leaving a body that only *happens* to be unreachable.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        return None;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     if !path.is_dir() {
         return None;
     }
@@ -462,6 +475,7 @@ fn summarise_dir(path: &Path) -> Option<WorldSummary> {
         hardcore: level.hardcore(),
         readable: true,
     })
+    }
 }
 
 /// `FileUtil.sanitizeName` (`FileUtil.java:23-29`): every
@@ -659,6 +673,12 @@ pub enum SaveError {
     /// The filesystem refused.
     Io(std::io::Error),
     /// `level.dat` could not be encoded or written.
+    ///
+    /// Native-only: it names a `lodestone_anvil` error, and that crate is a
+    /// `cfg(not(wasm32))` dependency because its readers and writers are
+    /// `std::fs`-based. A browser cannot reach this variant because it cannot
+    /// reach [`create_world_in`], which refuses before writing anything.
+    #[cfg(not(target_arch = "wasm32"))]
     Anvil(lodestone_anvil::Error),
 }
 
@@ -666,6 +686,7 @@ impl std::fmt::Display for SaveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SaveError::Io(e) => write!(f, "{e}"),
+            #[cfg(not(target_arch = "wasm32"))]
             SaveError::Anvil(e) => write!(f, "{e}"),
         }
     }
@@ -709,6 +730,23 @@ pub fn create_world(name: &str, game_type: i32) -> Result<PathBuf, SaveError> {
 /// [`SaveError::Io`] if either directory cannot be created,
 /// [`SaveError::Anvil`] if `level.dat` cannot be written.
 pub fn create_world_in(root: &Path, name: &str, game_type: i32) -> Result<PathBuf, SaveError> {
+    // Browser: refuse explicitly rather than half-succeeding. `create_dir_all`
+    // below returns `Err(Unsupported)` on wasm32 (measured), so this would already
+    // fail — but it would fail as `SaveError::Io("operation not supported on this
+    // platform")`, which tells the player nothing about *why* and reads like a
+    // permissions problem. A browser singleplayer world is real, it just lives in
+    // memory: `IntegratedServer::open_in_memory` is the path, and it needs no
+    // `saves/` directory and no `level.dat`.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (root, name, game_type);
+        return Err(SaveError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "a browser has no saves directory; browser worlds are in-memory only",
+        )));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     std::fs::create_dir_all(root).map_err(SaveError::Io)?;
     let dir_name = available_dir_name(root, name);
     let dir = root.join(&dir_name);
@@ -739,6 +777,7 @@ pub fn create_world_in(root: &Path, name: &str, game_type: i32) -> Result<PathBu
     )
     .map_err(SaveError::Anvil)?;
     Ok(dir)
+    }
 }
 
 /// Why a world could not be deleted.
@@ -836,6 +875,10 @@ pub fn delete_world_in(root: &Path, dir_name: &str) -> Result<PathBuf, DeleteErr
     if !meta.is_dir() {
         return Err(DeleteError::NotAWorld(dir));
     }
+    // A directory with no `level.dat` is not a world, and must not be deleted.
+    // Native-only because the check names `lodestone_anvil`; unreachable on wasm32
+    // because `symlink_metadata` above already failed with `Unsupported`.
+    #[cfg(not(target_arch = "wasm32"))]
     if !lodestone_anvil::level_dat::path_in(&dir).is_file() {
         return Err(DeleteError::NotAWorld(dir));
     }

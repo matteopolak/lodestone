@@ -332,8 +332,31 @@ pub const STATUS_PROTOCOL: i32 = 776;
 /// when no port was pinned, so collapsing `None` into `Some(25565)` here would
 /// make every SRV-only server in the list unreachable while looking like a
 /// connection failure.
+/// # Browser (`wasm32`)
+///
+/// Returns a probe that always fails with a reason naming the actual obstacle,
+/// rather than one that silently reports nothing. Two things are missing there and
+/// **both** are structural: `lodestone_net::server_status` is `cfg`-gated off wasm
+/// because it opens a raw `TcpStream`, which a page cannot do at all; and the
+/// runtime this function builds to `block_on` is a blocking wait on the one thread
+/// the browser uses to paint. A browser server list needs the WebSocket relay
+/// (`ws-web`) and an `async` probe driven off `spawn_local`, which is a different
+/// function, not a shim over this one. `unavailable_probe`'s docs below say why the
+/// reason has to be explicit; the same argument applies here.
 #[must_use]
 pub fn net_probe(protocol: i32) -> Probe {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = protocol;
+        return Arc::new(|entry: &ServerEntry| {
+            Err(format!(
+                "cannot ping {} from a browser: a page has no raw TCP socket. \
+                 A browser server list needs an async probe over the ws-web relay.",
+                entry.host
+            ))
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     Arc::new(move |entry: &ServerEntry| {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

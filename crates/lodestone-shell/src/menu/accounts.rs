@@ -1456,7 +1456,7 @@ async fn cancellable_sleep(secs: u64, cancel: &AtomicBool) -> bool {
 /// buttons come through here too, so they are covered by the same fork — a
 /// latent copy of this bug that had not fired only because no telemetry test
 /// activates rows 0 or 1.
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
 pub(crate) fn open_in_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(url).spawn();
@@ -1464,6 +1464,22 @@ pub(crate) fn open_in_browser(url: &str) {
     let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
+/// The browser build's [`open_in_browser`]: `window.open`, in a new tab.
+///
+/// **This is the one native-only capability on this screen that a browser does
+/// better rather than worse** — "hand a URL to the platform's browser" is the
+/// platform's whole job here, so this is a real implementation, not a gate. It is
+/// only ever called from a key handler, i.e. inside a user gesture, which is what
+/// keeps a popup blocker from swallowing it. A blocked or refused open is ignored
+/// for the same reason the native arm ignores a failed `spawn`: every caller also
+/// shows the URL on screen as text.
+#[cfg(all(not(test), target_arch = "wasm32"))]
+pub(crate) fn open_in_browser(url: &str) {
+    if let Some(win) = web_sys::window() {
+        let _ = win.open_with_url_and_target(url, "_blank");
+    }
 }
 
 /// The test build's [`open_in_browser`]: records the URL instead of handing it
