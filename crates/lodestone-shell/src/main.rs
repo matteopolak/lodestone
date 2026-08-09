@@ -5,8 +5,33 @@
 //! is set** — the plan's measured verdict on this machine is that the system
 //! allocator is the right default, and a library must never dictate one anyway.
 
+//! ## The browser has a different entry point, and this file is not it
+//!
+//! Everything below is native-only. Not because it would fail to compile — it is
+//! `argv` parsing and `tracing` setup — but because **none of it means anything in a
+//! browser**: there is no command line to read (`std::env::args` yields just the
+//! program name on wasm32), no stderr for the `fmt` subscriber to reach, no file for
+//! `tracing-chrome` to write, and no `options.json` to fold in. The browser's
+//! equivalent lives in `web/`, which fetches the asset bundle, installs it through
+//! `lodestone::platform::assets`, and installs `console_log` in place of the
+//! subscriber below.
+//!
+//! The `wasm32` arm is therefore a deliberately empty `main`. It exists only because
+//! `cargo check --target wasm32-unknown-unknown` builds every target in the package,
+//! including this `[[bin]]`, and a `bin` without a `main` is an error. It is never
+//! run: `trunk` builds `web/`'s own crate, not this one. The **library** target is
+//! the whole of what a browser consumes, and it is the thing that has to stay
+//! wasm-clean.
+
+#[cfg(not(target_arch = "wasm32"))]
 use lodestone::{CliOutcome, Config, app};
 
+/// The browser build's do-nothing `main`. See this module's docs — `web/` is the
+/// real entry point, and this only satisfies the `[[bin]]` target.
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> anyhow::Result<()> {
     // Resolve --help and argument errors *before* logging, a window, a GPU, or a
     // world exist — so the binary is discoverable and `--help` never boots a game.
@@ -38,6 +63,7 @@ fn main() -> anyhow::Result<()> {
 /// Initialise `tracing` from `RUST_LOG`, defaulting to `info`.
 /// When `LODESTONE_TRACE` is set, also writes a chrome://tracing flamegraph
 /// to the named file.
+#[cfg(not(target_arch = "wasm32"))]
 fn init_logging() -> Option<tracing_chrome::FlushGuard> {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::prelude::*;

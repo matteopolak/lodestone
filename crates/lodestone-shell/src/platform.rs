@@ -54,21 +54,27 @@
 //!
 //! # How to change this
 //!
-//! Both arms are **re-exports, not wrappers**, so neither target has a newtype,
-//! an inlining question, or any behaviour change: `crate::platform::Instant` *is*
-//! `std::time::Instant` on native and *is* `web_time::Instant` in a browser. If you
-//! need something the browser arm lacks, reach for another `web_time` item — do not
+//! There is **no `cfg` fork here at all** — `web_time` already is one, and its
+//! non-wasm arm is `pub use std::time::*`, so `crate::platform::Instant` is
+//! `std::time::Instant` on native, the same type rather than a wrapper over it. If
+//! you need something this module lacks, reach for another `web_time` item — do not
 //! reach back for `std::time`, because `wasm-check.sh`'s `lodestone-shell
 //! instant-ban` rule greps for `Instant::now(` across the crate and will
 //! (correctly) fail.
 
-#[cfg(not(target_arch = "wasm32"))]
-pub use std::time::Instant;
-
-/// The browser clock, backed by `performance.now()` — specified monotonic, and
+/// A monotonic instant.
+///
+/// **Unconditional, with no `cfg` fork, and that is a property of `web_time` rather
+/// than a shortcut.** Its non-wasm arm is literally `pub use std::time::*`, so on
+/// native `crate::platform::Instant` *is* `std::time::Instant` — the same type, not
+/// a newtype over it, so native has no wrapper, no conversion and provably no
+/// behaviour change. On wasm32 it is `performance.now()`: specified monotonic, and
 /// measured from the page's time origin rather than an arbitrary boot offset.
-/// Nothing in the shell depends on the absolute value, only on differences.
-#[cfg(target_arch = "wasm32")]
+/// Nothing here depends on the absolute value, only on differences.
+///
+/// The practical consequence is worth stating because it is what made the port
+/// tractable: any crate with an `Instant` in a **public signature** can switch to
+/// `web_time::Instant` as a no-op on native, and no call site needs a `cfg`.
 pub use web_time::Instant;
 
 /// Time elapsed since the Unix epoch, i.e. wall-clock time.
@@ -81,22 +87,17 @@ pub use web_time::Instant;
 /// phase, a glint phase, a toast deadline) has anything better to do about it than
 /// carry on. Folding that into the seam means the call sites get *shorter* rather
 /// than acquiring a second error path.
+///
+/// `web_time::SystemTime` for the same reason as [`Instant`]: it is `std`'s on
+/// native and `Date.now()` in a browser. Note `Date.now()` is *not* monotonic — the
+/// user can change the system clock, and a browser may coarsen it for
+/// fingerprinting resistance. That is correct for a wall clock; use [`Instant`] for
+/// durations.
 #[must_use]
 pub fn epoch_duration() -> std::time::Duration {
-    #[cfg(not(target_arch = "wasm32"))]
-    let now = std::time::SystemTime::now();
-    // `Date.now()`, which is *not* monotonic — the user can change the system
-    // clock, and a browser may coarsen it for fingerprinting resistance. That is
-    // correct for a wall clock; use `Instant` for durations.
-    #[cfg(target_arch = "wasm32")]
-    let now = web_time::SystemTime::now();
-
-    #[cfg(not(target_arch = "wasm32"))]
-    let epoch = std::time::UNIX_EPOCH;
-    #[cfg(target_arch = "wasm32")]
-    let epoch = web_time::UNIX_EPOCH;
-
-    now.duration_since(epoch).unwrap_or_default()
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .unwrap_or_default()
 }
 
 /// The browser's asset byte source.

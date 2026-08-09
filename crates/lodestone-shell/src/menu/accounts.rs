@@ -640,21 +640,49 @@ impl AccountsNav {
     /// against live Microsoft endpoints). See [`Self::handle_key_with`] for
     /// the seam tests use instead.
     pub fn handle_key(&self, key: MenuKey) -> AccountsSignal {
-        self.handle_key_with(
-            key,
-            Box::new(|| {
-                let (tx, rx) = channel();
-                let cancel = Arc::new(AtomicBool::new(false));
-                let worker_cancel = Arc::clone(&cancel);
-                // The **loopback** flow, not the device-code one: it opens the real
-                // Microsoft login in the user's browser and needs no code typed.
-                // `run_device_code_login` is kept beside it and still compiled —
-                // it is the only option on a headless host, and it is the fallback
-                // if the browser cannot be launched.
-                std::thread::spawn(move || run_browser_login(tx, worker_cancel));
-                (rx, cancel)
-            }),
-        )
+        #[cfg(not(target_arch = "wasm32"))]
+        let spawn: Spawn = Box::new(|| {
+            let (tx, rx) = channel();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let worker_cancel = Arc::clone(&cancel);
+            // The **loopback** flow, not the device-code one: it opens the real
+            // Microsoft login in the user's browser and needs no code typed.
+            // `run_device_code_login` is kept beside it and still compiled —
+            // it is the only option on a headless host, and it is the fallback
+            // if the browser cannot be launched.
+            std::thread::spawn(move || run_browser_login(tx, worker_cancel));
+            (rx, cancel)
+        });
+
+        // Browser: there is no sign-in worker to spawn. Rather than gate the
+        // keypress — which would make "Add account" do nothing at all, the
+        // indistinguishable-from-broken outcome this screen is careful to avoid
+        // everywhere else — feed the **real** state machine a pre-failed channel.
+        // It transitions to `SignIn::Failed { message }`, which the account screen
+        // already knows how to draw, so the player gets a sentence explaining why
+        // instead of a dead button. This is the injected-`Spawn` seam being used
+        // for exactly what its doc says it is for.
+        //
+        // Three things are missing and none is a shim away: `std::thread::spawn`
+        // traps on wasm32, the flow needs a blocking `current_thread` runtime on the
+        // one thread the browser paints with, and `lodestone_auth`'s `flow` /
+        // `browser_login` / `store` modules are all `reqwest`- and keychain-based
+        // and gated at their own crate. A browser sign-in would be a
+        // `spawn_local` + `fetch` reimplementation of the whole chain, with
+        // somewhere other than an OS keychain to put the refresh token.
+        #[cfg(target_arch = "wasm32")]
+        let spawn: Spawn = Box::new(|| {
+            let (tx, rx) = channel();
+            let _ = tx.send(WorkerMsg::Failed(
+                "Microsoft sign-in is not available in the browser build: it needs \
+                 an OS keychain for the refresh token and a blocking HTTP client. \
+                 Play offline, or use the native client."
+                    .to_owned(),
+            ));
+            (rx, Arc::new(AtomicBool::new(false)))
+        });
+
+        self.handle_key_with(key, spawn)
     }
 
     /// The real state machine, parameterised over how "Add account" spawns
@@ -766,10 +794,18 @@ fn remove_highlighted(st: &mut State, path: &Path) {
     // per-frame render), so it is allowed to touch the keychain — see
     // `docs/accounts.md`'s rule this screen otherwise follows by never
     // reaching `AccountSecrets` just to draw a row.
+    // Native-only: `AccountSecrets` is the OS keychain, gated at
+    // `lodestone-auth`. A browser has no keychain and therefore no stored refresh
+    // token to delete — and no way to have acquired one, since the sign-in workers
+    // below are native-only too. Removing the `profiles.json` row (immediately
+    // after) is the whole operation there, which is correct rather than partial.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     let secrets = lodestone_auth::AccountSecrets::open();
     if let Err(e) = secrets.delete_refresh_token(id) {
         st.save_error = Some(format!("could not remove the stored credential: {e}"));
         return;
+    }
     }
     st.metadata.remove(id);
     st.save_error = st.metadata.save_to(path).err().map(|e| e.to_string());
@@ -940,6 +976,13 @@ fn handle_key_mid_flow(st: &mut State, key: MenuKey) -> AccountsSignal {
             AccountsSignal::None
         }
         MenuKey::Char('c' | 'C') => {
+            // Native-only: `copy_to_clipboard` shells out to `pbcopy`/`clip`/`xclip`.
+            // A browser has `navigator.clipboard.writeText`, but it is `async` and
+            // permission-gated, so it is a different function rather than a swap —
+            // and it is unreachable anyway, because `SignIn::Waiting` is only
+            // produced by the sign-in workers, which do not exist on wasm32. The
+            // code is still on screen for the player to copy by hand.
+            #[cfg(not(target_arch = "wasm32"))]
             if let SignIn::Waiting { user_code, .. } = &st.sign_in {
                 copy_to_clipboard(user_code);
             }
@@ -1121,6 +1164,7 @@ pub fn describe_auth_error(e: &lodestone_auth::AuthError) -> String {
 /// step failed, with no need to keep the two calls separate to distinguish
 /// them.
 #[must_use]
+#[cfg(not(target_arch = "wasm32"))]
 fn describe_finish_interactive_failure(e: &lodestone_auth::AuthError) -> String {
     use lodestone_auth::AuthError as E;
     match e {
@@ -1138,6 +1182,7 @@ fn describe_finish_interactive_failure(e: &lodestone_auth::AuthError) -> String 
 /// token; the metadata write happens back on the render thread inside
 /// [`AccountsNav::pump`], so every `profiles.json` write funnels through one
 /// place rather than racing a foreground Remove.
+#[cfg(not(target_arch = "wasm32"))]
 fn run_device_code_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
     let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(rt) => rt,
@@ -1253,6 +1298,7 @@ fn run_device_code_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
 /// `verification_uri`, with an **empty** `user_code`: there is no code in this
 /// flow, and the URL is the copy-paste fallback for when the browser cannot be
 /// launched. `render.rs` renders an empty code as "no code to show".
+#[cfg(not(target_arch = "wasm32"))]
 fn run_browser_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
     let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(rt) => rt,
@@ -1340,6 +1386,7 @@ fn run_browser_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
 /// the worker thread; the `profiles.json` write deliberately does not — it stays
 /// in [`AccountsNav::pump`] so every metadata write funnels through one place
 /// rather than racing a foreground Remove.
+#[cfg(not(target_arch = "wasm32"))]
 async fn finish_ms_token(
     tx: &Sender<WorkerMsg>,
     client: &reqwest::Client,
@@ -1398,6 +1445,7 @@ async fn finish_ms_token(
 /// Separate rather than making the existing function take millis: that one's
 /// `secs` argument comes straight from Microsoft's `interval` field, and widening
 /// it would invite passing a millisecond value where a second value is meant.
+#[cfg(not(target_arch = "wasm32"))]
 async fn cancellable_sleep_ms(millis: u64, cancel: &AtomicBool) -> bool {
     if cancel.load(Ordering::Relaxed) {
         return true;
@@ -1409,6 +1457,7 @@ async fn cancellable_sleep_ms(millis: u64, cancel: &AtomicBool) -> bool {
 /// Sleeps up to `secs` seconds, checking `cancel` every 100ms so an
 /// interactive Cancel keypress is felt quickly rather than after a whole
 /// multi-second poll interval. Returns `true` if cancelled mid-sleep.
+#[cfg(not(target_arch = "wasm32"))]
 async fn cancellable_sleep(secs: u64, cancel: &AtomicBool) -> bool {
     let mut remaining = std::time::Duration::from_secs(secs);
     let step = std::time::Duration::from_millis(100);
@@ -1521,6 +1570,7 @@ mod test_browser_opens {
 
 /// Best-effort: copies `text` to the system clipboard via the same
 /// no-new-dependency OS-command approach as [`open_in_browser`].
+#[cfg(not(target_arch = "wasm32"))]
 fn copy_to_clipboard(text: &str) {
     use std::io::Write;
     #[cfg(target_os = "macos")]

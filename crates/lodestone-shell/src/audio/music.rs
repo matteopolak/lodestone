@@ -35,7 +35,12 @@
 //! *selection and request* path — which is what `#451` specifies and gates — and
 //! the last mile stays open. See `docs/music-selection.md`.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// The portable clock: `Instant::now()` traps on wasm32. `crate::platform::Instant`
+// *is* `std::time::Instant` on native (`web_time` re-exports `std::time` there), so
+// this changes nothing off the browser. See `crate::platform`.
+use crate::platform::Instant;
 
 use lodestone_sound::JavaRandom;
 use lodestone_sound::music::{

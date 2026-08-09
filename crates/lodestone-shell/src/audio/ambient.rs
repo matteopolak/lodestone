@@ -33,7 +33,12 @@
 //! and cave ambience would essentially never fire.
 
 use std::borrow::Cow;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// The portable clock: `Instant::now()` traps on wasm32. `crate::platform::Instant`
+// *is* `std::time::Instant` on native (`web_time` re-exports `std::time` there), so
+// this changes nothing off the browser. See `crate::platform`.
+use crate::platform::Instant;
 
 use glam::{DVec3, IVec3};
 use lodestone_render::{RainAmbience, WeatherState};
