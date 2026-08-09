@@ -139,10 +139,10 @@ pub(super) fn parse_seed(raw: &str) -> i64 {
 fn random_seed() -> i64 {
     use std::hash::{BuildHasher, Hasher};
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
+    // `crate::platform::epoch_duration`, not `SystemTime::now()`: the latter
+    // compiles for wasm32 and panics when it runs, and a seed derived from the
+    // clock is one of the very first things a browser session asks for.
+    let nanos = crate::platform::epoch_duration().as_nanos();
     hasher.write_u128(nanos);
     hasher.finish() as i64
 }

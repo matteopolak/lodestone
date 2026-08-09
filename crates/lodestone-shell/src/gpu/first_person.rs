@@ -106,7 +106,7 @@ pub(super) struct HeldItemEquip {
     /// GPU gate in `tests/`, and the first frame after any pass rebuild) would then
     /// render a permanently dipped hand, which is a worse failure than a missing
     /// join flourish. First observation ⇒ fully equipped.
-    last: Option<std::time::Instant>,
+    last: Option<crate::platform::Instant>,
 }
 
 /// **Not `#[derive(Default)]`** — and the difference is a whole broken feature.
@@ -141,7 +141,7 @@ impl HeldItemEquip {
     /// frame-rate-dependence trap `Sim::step`'s note on `chest_lids.tick()`
     /// records, avoided the same way.
     pub(super) fn advance(&mut self, expected: Option<&(ResourceLocation, bool)>) {
-        let now = std::time::Instant::now();
+        let now = crate::platform::Instant::now();
         let Some(last) = self.last.replace(now) else {
             // First observation: adopt, fully equipped. See `last`'s doc.
             self.visible = expected.cloned();

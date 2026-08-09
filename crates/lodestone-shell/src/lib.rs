@@ -46,6 +46,12 @@ pub mod net;
 pub mod offline_identity;
 pub mod overlay;
 pub mod particles;
+/// The native/browser seam: a portable monotonic `Instant` and wall clock, for
+/// the `wasm32` build that `web/` consumes. `Instant::now()` and
+/// `SystemTime::now()` both compile for wasm32 and panic at runtime, so nothing
+/// outside this module may name them — see `scripts/wasm-check.sh`'s confinement
+/// guards and `docs/browser-shell-port.md`.
+pub mod platform;
 pub mod raycast;
 /// Other players' skins: the `textures` profile property off the tab list,
 /// through vanilla's host allow list, to a per-player texture in the world

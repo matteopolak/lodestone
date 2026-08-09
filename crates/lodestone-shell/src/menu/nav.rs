@@ -1178,7 +1178,7 @@ pub struct MenuNav {
     /// `Instant` fixed at construction rather than reset per click — only
     /// the *differences* `DoubleClickTracker` computes matter, so nothing
     /// needs rearming.
-    click_clock: std::time::Instant,
+    click_clock: crate::platform::Instant,
     /// The command block edit screen's widgets and toggles (issue #47), held
     /// for the same reason [`Self::form`] is: it owns a real [`EditBox`] that
     /// cannot be rebuilt per frame. `None` whenever
@@ -1298,7 +1298,7 @@ impl MenuNav {
             // in the same statement that opens the screen.
             confirm: crate::menu::confirm::ConfirmNav::default(),
             double_click: super::focus::DoubleClickTracker::new(),
-            click_clock: std::time::Instant::now(),
+            click_clock: crate::platform::Instant::now(),
             command_block: None,
             command_tree: None,
         }

@@ -90,10 +90,21 @@ mod engine;
 #[cfg(not(target_arch = "wasm32"))]
 pub use engine::AudioEngine;
 
-/// Audio types re-exported for consumers of [`AudioEngine`]. `AudioError` is the
-/// device-open failure type; `PlayHandle` identifies a live voice.
+/// The device-open failure type. Native-only, like the [`AudioEngine`] that
+/// produces it — there is no device to fail to open in a browser.
 #[cfg(not(target_arch = "wasm32"))]
-pub use lodestone_audio::{AudioError, PlayHandle};
+pub use lodestone_audio::AudioError;
+
+/// Identifies a live voice, for ramping or stopping it.
+///
+/// **Deliberately *not* `cfg`-gated, unlike [`AudioEngine`] and `AudioError`
+/// above.** It is a device-free identifier — an index handed back by the mixer,
+/// which `lodestone-audio` compiles for wasm32 unchanged — and the browser arm
+/// (`AudioWorklet` driving that same mixer) needs to name it for exactly the
+/// reasons the native engine does. Gating it forced `lodestone-shell`'s browser
+/// build to reach past this crate into `lodestone-audio` for one type, which is
+/// the coupling this module's re-exports exist to prevent.
+pub use lodestone_audio::PlayHandle;
 
 /// The RNG [`music::MusicManager::tick`] and
 /// [`ambient::AmbientAdditionsSettings::fires`] draw from.

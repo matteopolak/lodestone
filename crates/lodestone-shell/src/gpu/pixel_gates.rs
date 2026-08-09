@@ -80,7 +80,7 @@ fn world_renders_terrain_with_pixel_readback() {
         far: Camera::far_for_render_distance(8, 0),
     };
 
-    let start = std::time::Instant::now();
+    let start = crate::platform::Instant::now();
     let frame = target.acquire().expect("headless acquire");
     // Draw with a block outline enabled to exercise the outline pipeline.
     let stats = state.render(

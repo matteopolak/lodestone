@@ -87,7 +87,7 @@
 //! [`assemble`]'s test pins both the order and the flip against synthetic faces
 //! whose rows encode their own index.
 
-use std::time::Instant;
+use crate::platform::Instant;
 
 use glam::Mat4;
 use lodestone_assets::Image;
