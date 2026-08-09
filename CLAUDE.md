@@ -160,6 +160,14 @@ Editing, and reading the tree:
   test run are **two observations at two different moments**. **Before reporting a red `main`, re-run at
   the committed sha in an isolated worktree.** When *you* neuter something, keep the window short and
   restore by `cp` from a scratchpad backup **with an md5 check** — never `git checkout`.
+- **A clean log for *your* files, in a build another agent broke, is not evidence your files are clean —
+  unless you prove the compiler got that far.** rustc may stop before reaching them, so the absence of your
+  errors is indistinguishable from the absence of a chance to report them. The control that settles it, and
+  it is cheap: **introduce a deliberate type error in your own file, plus a second inside your own
+  `mod tests`, and confirm both are reported *alongside* the foreign error.** If they are, a clean log is a
+  measurement rather than a short-circuit; restore by `cp` from an md5-checked backup as above. Use this
+  instead of blocking on another agent — CLAUDE.md's rule is that only a **mid-keystroke** file is worth
+  waiting on, and this is how you keep working without waiting.
 - **The scratchpad directory is shared too**, per-*session*, with none of git's protections. **Use
   uniquely-named files**, write them with the file tools rather than shell heredocs, and **re-read
   anything you are about to reason from** — a `#[path]` harness compiles whatever is on disk right then.
@@ -296,7 +304,10 @@ word-split an unquoted `$var`**, so an audit whose whole job was to prove a comm
 returned green by measuring nothing. So:
 
 - **Let cargo write its own output to a file and check its real exit status**, then filter the file; never
-  put a buffering filter between a long build and your only view of it.
+  put a buffering filter between a long build and your only view of it. **This includes not trusting a
+  *wrapper's* summary of the run**: a task-completion notification reported **"exit code 0"** for a workspace
+  test run whose real status was **101**, and only reading cargo's own status out of the log caught it. The
+  harness around a build is one more transform that can invent a green.
 - **Write the paths out, or `set -- a b c` and use `"$@"`.**
 - **Treat an audit that prints nothing as a failure to run, never as a pass.**
 - **Do not build a control out of a shell pipeline here. Count with a program that reads the file.** A
