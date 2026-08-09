@@ -71,6 +71,8 @@ pub mod telemetry;
 pub mod widget;
 pub mod world_select;
 
+use crate::sim::SessionEnd;
+
 /// What the player chose to start from the menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionKind {
@@ -373,7 +375,15 @@ impl Screen {
 pub struct UiState {
     screen: Screen,
     kind: Option<SessionKind>,
-    error: Option<String>,
+    /// Why the session ended, and the server's own styled reason for it.
+    ///
+    /// A `SessionEnd` rather than a `String`: the reason is still a `Text`, so
+    /// `Screen::Error` can draw the server's colours, and the `kind` is what
+    /// picks the screen's title — vanilla uses `disconnect.lost` ("Connection
+    /// Lost") for a server disconnect and `connect.failed` ("Failed to connect
+    /// to the server") when we could not reach it, which are different screens
+    /// and not something to infer from the wording.
+    error: Option<SessionEnd>,
     quit_requested: bool,
     /// Where Escape (or the settings screen's own back action) returns to from
     /// [`Screen::Settings`] — [`Screen::MainMenu`] or [`Screen::Paused`],
@@ -427,8 +437,8 @@ impl UiState {
 
     /// The failure reason, populated only in [`Screen::Error`].
     #[must_use]
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
+    pub fn error(&self) -> Option<&SessionEnd> {
+        self.error.as_ref()
     }
 
     /// Whether the world is being actively played.
@@ -627,7 +637,7 @@ impl UiState {
     /// otherwise a stray disconnect signal from an abandoned connection
     /// attempt could reach in and yank the player out of the pre-session
     /// Options screen for no session they were ever in.
-    pub fn session_failed(&mut self, reason: impl Into<String>) {
+    pub fn session_failed(&mut self, end: SessionEnd) {
         let mid_session_settings =
             self.screen == Screen::Settings && self.settings_return == Screen::Paused;
         // Ignore failures once we've already left for the menu, so a trailing
@@ -665,7 +675,7 @@ impl UiState {
             )
         {
             self.death_message = None;
-            self.error = Some(reason.into());
+            self.error = Some(end);
             self.screen = Screen::Error;
         }
     }
@@ -1203,9 +1213,14 @@ mod tests {
     fn connection_refused_goes_to_error_with_reason() {
         let mut ui = UiState::new();
         ui.begin(SessionKind::Multiplayer);
-        ui.session_failed("connection refused (os error 61)");
+        ui.session_failed(SessionEnd::disconnected(
+            lodestone_model::Text::literal("connection refused (os error 61)"),
+        ));
         assert_eq!(ui.screen(), Screen::Error);
-        assert_eq!(ui.error(), Some("connection refused (os error 61)"));
+        assert_eq!(
+            ui.error().map(SessionEnd::plain).as_deref(),
+            Some("connection refused (os error 61)")
+        );
         assert!(!ui.wants_cursor_grab());
         assert!(!ui.accepts_gameplay_input());
     }
@@ -1214,9 +1229,11 @@ mod tests {
     fn server_startup_failure_goes_to_error() {
         let mut ui = UiState::new();
         ui.begin(SessionKind::Singleplayer);
-        ui.session_failed("integrated server failed to start: bind :25565 in use");
+        ui.session_failed(SessionEnd::disconnected(
+            lodestone_model::Text::literal("integrated server failed to start: bind :25565 in use"),
+        ));
         assert_eq!(ui.screen(), Screen::Error);
-        assert!(ui.error().unwrap().contains("failed to start"));
+        assert!(ui.error().unwrap().plain().contains("failed to start"));
     }
 
     #[test]
@@ -1229,9 +1246,15 @@ mod tests {
                 ui.pause();
                 assert!(ui.is_paused());
             }
-            ui.session_failed("disconnected: Server closed");
+            ui.session_failed(SessionEnd::disconnected(
+            lodestone_model::Text::literal("Server closed"),
+        ));
             assert_eq!(ui.screen(), Screen::Error, "pause_first={pause_first}");
-            assert_eq!(ui.error(), Some("disconnected: Server closed"));
+            assert_eq!(
+            ui.error().map(SessionEnd::plain).as_deref(),
+            Some("Server closed"),
+            "the reason is the server's own text; the prefix was ours and is gone"
+        );
         }
     }
 
@@ -1250,7 +1273,9 @@ mod tests {
     fn error_dismisses_back_to_menu_and_clears_state() {
         let mut ui = UiState::new();
         ui.begin(SessionKind::Multiplayer);
-        ui.session_failed("boom");
+        ui.session_failed(SessionEnd::disconnected(
+            lodestone_model::Text::literal("boom"),
+        ));
         ui.dismiss_error();
         assert_eq!(ui.screen(), Screen::MainMenu);
         assert!(ui.error().is_none());
@@ -1270,7 +1295,9 @@ mod tests {
         // Error -> MainMenu
         let mut ui = UiState::new();
         ui.begin(SessionKind::Multiplayer);
-        ui.session_failed("x");
+        ui.session_failed(SessionEnd::disconnected(
+            lodestone_model::Text::literal("x"),
+        ));
         ui.on_escape();
         assert_eq!(ui.screen(), Screen::MainMenu);
 
@@ -1293,7 +1320,9 @@ mod tests {
         // not put us back in the world.
         let mut ui = UiState::new();
         ui.begin(SessionKind::Multiplayer);
-        ui.session_failed("dropped");
+        ui.session_failed(SessionEnd::disconnected(
+            lodestone_model::Text::literal("dropped"),
+        ));
         ui.session_ready();
         assert_eq!(
             ui.screen(),
@@ -1535,7 +1564,9 @@ mod tests {
         ui.close_chat();
         ui.pause();
         check(&ui); // Paused
-        ui.session_failed("end");
+        ui.session_failed(SessionEnd::disconnected(
+            lodestone_model::Text::literal("end"),
+        ));
         check(&ui); // Error
     }
 
@@ -1708,21 +1739,29 @@ mod tests {
         ui.open_settings_from_pause();
         assert_eq!(ui.screen(), Screen::Settings);
 
-        ui.session_failed("disconnected: Server closed");
+        ui.session_failed(SessionEnd::disconnected(
+            lodestone_model::Text::literal("Server closed"),
+        ));
         assert_eq!(
             ui.screen(),
             Screen::Error,
             "a real disconnect must reach the player even while they're in \
              the pause menu's options"
         );
-        assert_eq!(ui.error(), Some("disconnected: Server closed"));
+        assert_eq!(
+            ui.error().map(SessionEnd::plain).as_deref(),
+            Some("Server closed"),
+            "the reason is the server's own text; the prefix was ours and is gone"
+        );
     }
 
     #[test]
     fn a_stray_failure_does_not_reach_settings_opened_from_the_title() {
         let mut ui = UiState::new();
         ui.open_settings();
-        ui.session_failed("connection refused (os error 61)");
+        ui.session_failed(SessionEnd::disconnected(
+            lodestone_model::Text::literal("connection refused (os error 61)"),
+        ));
         assert_eq!(
             ui.screen(),
             Screen::Settings,
@@ -1875,9 +1914,15 @@ mod tests {
         ui.die(Some("fell out of the world".to_string()));
         assert_eq!(ui.screen(), Screen::Death);
 
-        ui.session_failed("disconnected: Server closed");
+        ui.session_failed(SessionEnd::disconnected(
+            lodestone_model::Text::literal("Server closed"),
+        ));
         assert_eq!(ui.screen(), Screen::Error);
-        assert_eq!(ui.error(), Some("disconnected: Server closed"));
+        assert_eq!(
+            ui.error().map(SessionEnd::plain).as_deref(),
+            Some("Server closed"),
+            "the reason is the server's own text; the prefix was ours and is gone"
+        );
         assert!(
             ui.death_message().is_none(),
             "the stale death message must not leak onto the error screen"

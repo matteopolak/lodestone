@@ -2094,8 +2094,18 @@ fn session_phase_tracks_net_updates() {
     .unwrap();
     sim.poll_net();
     match sim.session_phase() {
-        SessionPhase::Ended(reason) => {
+        SessionPhase::Ended(end) => {
+            let reason = end.plain();
             assert!(reason.contains("Server closed"), "reason lost: {reason}");
+            assert_eq!(
+                end.kind,
+                crate::sim::SessionEndKind::Disconnected,
+                "a server-sent disconnect is not a client-side failure"
+            );
+            assert!(
+                !reason.starts_with("disconnected: "),
+                "the prefix was ours, not vanilla's, and it is gone: {reason}"
+            );
         }
         other => panic!("expected Ended, got {other:?}"),
     }
@@ -2134,7 +2144,8 @@ fn disconnect_reason_without_a_language_table_falls_back_to_the_raw_key() {
     .unwrap();
     sim.poll_net();
     match sim.session_phase() {
-        SessionPhase::Ended(reason) => {
+        SessionPhase::Ended(end) => {
+            let reason = end.plain();
             assert!(
                 reason.contains("multiplayer.disconnect.kicked"),
                 "control failed to reproduce the raw-key defect: {reason}"
@@ -2178,7 +2189,8 @@ fn disconnect_reason_is_translated_through_the_language_table() {
     .unwrap();
     sim.poll_net();
     match sim.session_phase() {
-        SessionPhase::Ended(reason) => {
+        SessionPhase::Ended(end) => {
+            let reason = end.plain();
             assert!(
                 reason.contains("Kicked by an operator"),
                 "translated English missing: {reason}"
@@ -2202,8 +2214,15 @@ fn session_phase_reports_net_error_as_ended() {
         .unwrap();
     sim.poll_net();
     match sim.session_phase() {
-        SessionPhase::Ended(reason) => {
+        SessionPhase::Ended(end) => {
+            let reason = end.plain();
             assert!(reason.contains("connection refused"), "got {reason}");
+            assert_eq!(
+                end.kind,
+                crate::sim::SessionEndKind::Failed,
+                "a net error is a client-side failure, not a server disconnect — \
+                 that distinction is what gives the screen the right title"
+            );
         }
         other => panic!("expected Ended, got {other:?}"),
     }

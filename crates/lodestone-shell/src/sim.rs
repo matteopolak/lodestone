@@ -16,7 +16,7 @@ use lodestone_client::{BlockPos, ClientAction, Hand, OpenMenuSnapshot, Rotation}
 // `Sim::client_app`, which reaches it through `lodestone_app::client_app` along
 // with `CorePlugin`, `LocalPlayerPlugin` and `SessionHudPlugin`.
 use lodestone_controller::{InputState, RawInput, apply_look_inverted};
-pub use lodestone_ecs::SessionPhase;
+pub use lodestone_ecs::{SessionEnd, SessionEndKind, SessionPhase};
 use lodestone_ecs::entity::{Attributes, EntityIndex, EntityKind, MinecraftEntityId, Position};
 use lodestone_ecs::player::{
     ActionQueue, AttackStrengthTicker, CollisionSource, Dead, Egress, MovementIntent,

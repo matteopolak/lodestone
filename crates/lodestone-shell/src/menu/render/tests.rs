@@ -243,7 +243,9 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
             }
             Screen::Error => {
                 ui.begin(SessionKind::Multiplayer);
-                ui.session_failed("connection refused");
+                ui.session_failed(crate::sim::SessionEnd::disconnected(
+            lodestone_model::Text::literal("connection refused"),
+        ));
             }
             Screen::Credits => {
                 ui.enter_dev_world();
@@ -1315,7 +1317,9 @@ fn the_error_screen_carries_the_disconnect_reason() {
     let nav = test_nav("err");
     let mut ui = UiState::new();
     ui.begin(SessionKind::Multiplayer);
-    ui.session_failed("disconnected: Server closed");
+    ui.session_failed(crate::sim::SessionEnd::disconnected(
+            lodestone_model::Text::literal("Server closed"),
+        ));
     let statuses = StatusCache::with_probe(unavailable_probe());
     let mut fav = FaviconCache::new();
     let f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
@@ -6553,4 +6557,234 @@ fn the_hover_scrim_is_painted_under_the_icon_overlay_sprites() {
          before the scrim ({l_scrim:?}). icon rect {:?}, order {legacy:?}",
         (ix, iy, iw, ih)
     );
+}
+
+// ---------------------------------------------------------------------------
+// The disconnect screen keeps the server's own colours
+// ---------------------------------------------------------------------------
+
+/// A kicked player's reason is a styled component, and both the frame and the
+/// draw must keep its colours.
+///
+/// # The input is discriminating three ways
+///
+/// The root carries `gold`, one `extra` child overrides it with `red`, and a
+/// second child specifies nothing and must therefore inherit `gold`. Three
+/// different readings of inheritance give three different answers:
+///
+/// | reading | spans |
+/// |---|---|
+/// | correct: a child inherits what it does not override | `[Red, Gold]` |
+/// | "the root's colour wins" | `[Gold, Gold]` |
+/// | "no inheritance; an unstyled child is unstyled" | `[Red, None]` |
+///
+/// One colour cannot tell those apart, which is why there are two children with
+/// different styling rather than one coloured child.
+///
+/// The root's own `text` is `""` with all the content in `extra` — the shape a
+/// real server's kick message takes, and the shape most likely to expose a
+/// root-only reader. Nothing on the disconnect path exercised a nested `extra`
+/// at all before this: the corpus covered it on the *MOTD* path
+/// (`tests/text_colour.rs`) and on the server *encode* path
+/// (`v770`'s `server_disconnect`), and the shell's own disconnect fixtures were
+/// every one of them a flat single component.
+///
+/// # Expected values
+///
+/// Transcribed from the jar's `TextColor` decimal table by hand, not read from
+/// `TextColor::rgb` — calling that would make this `decode(encode(x))`, green
+/// under any self-consistent misunderstanding. `named("gold", 16755200)` is
+/// `0xffaa00`; `named("red", 16733525)` is `0xff5555`.
+#[test]
+fn a_kick_reason_keeps_the_server_s_colours_through_frame_and_draw() {
+    use lodestone_model::{Text, TextColor};
+
+    const GOLD: u32 = 0x00ff_aa00;
+    const RED: u32 = 0x00ff_5555;
+
+    let reason = Text::from_json(
+        r#"{"text":"","color":"gold","extra":[
+            {"text":"kick","color":"red"},
+            {"text":" reason"}
+        ]}"#,
+    );
+    let mut ui = UiState::new();
+    ui.begin(crate::menu::SessionKind::Multiplayer);
+    ui.session_failed(crate::sim::SessionEnd::disconnected(reason));
+    assert_eq!(ui.screen(), Screen::Error);
+
+    let frame = frame_for(
+            &ui,
+            &MenuNav::new(),
+            &StatusCache::new(),
+            &mut FaviconCache::new(),
+        )
+        .expect("the error screen owns a frame");
+    let notice = frame.notice.as_ref().expect("the reason is a notice");
+
+    assert_eq!(
+        notice.text, "kick reason",
+        "the wording must survive, and with no prefix of ours glued on"
+    );
+    assert!(
+        !notice.text.contains("disconnected"),
+        "the `disconnected: ` prefix was ours, not vanilla's — a DisconnectedScreen \
+         puts its title in a separate widget above the reason: {}",
+        notice.text
+    );
+
+    // Collected, not asserted in a loop: an `assert_eq!` per span aborts at the
+    // first mismatch, so the "inherits" and "overrides" halves would never both
+    // be reported.
+    let got: Vec<Option<u32>> = notice
+        .spans
+        .iter()
+        .map(|s| s.style.color.as_ref().map(TextColor::rgb))
+        .collect();
+    assert_eq!(
+        got,
+        vec![Some(RED), Some(GOLD)],
+        "the overriding child must be red and the bare child must inherit the \
+         root's gold; got {got:?} for spans {:?}",
+        notice.spans
+    );
+
+    // And the draw actually uses them. `build` with no font takes
+    // `text_spans`' fixed-advance fallback, which still emits one coloured quad
+    // per glyph into the colour stream — so a red quad and a gold quad must both
+    // be present. Before this change the notice drew through `b.text` with a
+    // single `FG_BAD`, so neither colour could appear.
+    let geometry = build(&frame, None, None, V_W, V_H);
+    let has = |rgb: u32| {
+        let want = [
+            ((rgb >> 16) & 0xff) as f32 / 255.0,
+            ((rgb >> 8) & 0xff) as f32 / 255.0,
+            (rgb & 0xff) as f32 / 255.0,
+        ];
+        geometry.colour.chunks_exact(STRIDE).any(|v| {
+            (v[2] - want[0]).abs() < 1.0 / 255.0
+                && (v[3] - want[1]).abs() < 1.0 / 255.0
+                && (v[4] - want[2]).abs() < 1.0 / 255.0
+        })
+    };
+    let mut missing = Vec::new();
+    if !has(RED) {
+        missing.push("red");
+    }
+    if !has(GOLD) {
+        missing.push("gold");
+    }
+    assert!(
+        missing.is_empty(),
+        "the draw dropped these colours: {missing:?}"
+    );
+}
+
+/// The control for the test above: a reason with **no** colour must draw in
+/// `FG_BAD` and produce no gold or red quad, so the two `has(...)` assertions
+/// there are not satisfied by a draw that emits every colour, or by an atlas
+/// sprite that happens to be gold.
+///
+/// It also pins the fallback that every notice this shell authors itself relies
+/// on — an unstyled notice must not change appearance because the styled path
+/// exists.
+#[test]
+fn an_uncoloured_kick_reason_still_draws_in_the_error_colour() {
+    use lodestone_model::Text;
+
+    let mut ui = UiState::new();
+    ui.begin(crate::menu::SessionKind::Multiplayer);
+    ui.session_failed(crate::sim::SessionEnd::disconnected(Text::literal(
+        "kick reason",
+    )));
+    let frame = frame_for(
+            &ui,
+            &MenuNav::new(),
+            &StatusCache::new(),
+            &mut FaviconCache::new(),
+        )
+        .expect("the error screen owns a frame");
+    let notice = frame.notice.as_ref().expect("the reason is a notice");
+    assert!(
+        notice.spans.iter().all(|s| s.style.color.is_none()),
+        "a literal with no style must produce no colours: {:?}",
+        notice.spans
+    );
+
+    let geometry = build(&frame, None, None, V_W, V_H);
+    let gold_quads = geometry
+        .colour
+        .chunks_exact(STRIDE)
+        .filter(|v| {
+            (v[2] - 1.0).abs() < 1.0 / 255.0
+                && (v[3] - 170.0 / 255.0).abs() < 1.0 / 255.0
+                && v[4].abs() < 1.0 / 255.0
+        })
+        .count();
+    assert_eq!(
+        gold_quads, 0,
+        "an uncoloured reason must emit no gold quads — otherwise the styled \
+         test's assertions prove nothing"
+    );
+    // The error colour is what it draws instead, so the block is still visible.
+    let bad_quads = geometry
+        .colour
+        .chunks_exact(STRIDE)
+        .filter(|v| {
+            (v[2] - FG_BAD[0]).abs() < 1.0 / 255.0
+                && (v[3] - FG_BAD[1]).abs() < 1.0 / 255.0
+                && (v[4] - FG_BAD[2]).abs() < 1.0 / 255.0
+        })
+        .count();
+    assert!(
+        bad_quads > 0,
+        "an uncoloured reason must still draw, in the error colour"
+    );
+}
+
+/// A client-side failure and a server disconnect get vanilla's two different
+/// titles, from [`crate::sim::SessionEndKind`] rather than from the wording.
+///
+/// `DisconnectedScreen` takes its `title` as a constructor argument;
+/// `ClientCommonPacketListenerImpl.onDisconnect` passes `disconnect.lost`
+/// ("Connection Lost") and both `ClientHandshakePacketListenerImpl.onDisconnect`
+/// and `ConnectScreen`'s `connectFailedTitle` pass `connect.failed` ("Failed to
+/// connect to the server"). The English strings are vanilla's own `en_us.json`
+/// entries for those keys, transcribed by hand.
+#[test]
+fn the_error_screen_titles_a_failure_differently_from_a_disconnect() {
+    use lodestone_model::Text;
+
+    let title_for = |end: crate::sim::SessionEnd| {
+        let mut ui = UiState::new();
+        ui.begin(crate::menu::SessionKind::Multiplayer);
+        ui.session_failed(end);
+        let frame = frame_for(
+            &ui,
+            &MenuNav::new(),
+            &StatusCache::new(),
+            &mut FaviconCache::new(),
+        )
+            .expect("the error screen owns a frame");
+        frame.labels[0].text.clone()
+    };
+
+    let mut wrong = Vec::new();
+    let disconnected = title_for(crate::sim::SessionEnd::disconnected(Text::literal("bye")));
+    if disconnected != "Connection Lost" {
+        wrong.push(format!("disconnected: {disconnected}"));
+    }
+    let failed = title_for(crate::sim::SessionEnd::failed(Text::literal(
+        "connect: connection refused",
+    )));
+    if failed != "Failed to connect to the server" {
+        wrong.push(format!("failed: {failed}"));
+    }
+    assert!(missing_titles_empty(&wrong), "wrong titles: {wrong:?}");
+}
+
+/// Reads as an assertion helper so the check above collects both arms instead of
+/// aborting on the first.
+fn missing_titles_empty(wrong: &[String]) -> bool {
+    wrong.is_empty()
 }

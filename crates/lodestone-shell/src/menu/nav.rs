@@ -7731,7 +7731,9 @@ mod tests {
         // ends while this screen is open must not silently strand the player
         // on a roster from a server that is no longer there.
         let (_nav, mut ui) = on_social("social-disconnect");
-        ui.session_failed("connection lost");
+        ui.session_failed(crate::sim::SessionEnd::disconnected(
+            lodestone_model::Text::literal("connection lost"),
+        ));
         assert_eq!(ui.screen(), Screen::Error);
     }
 

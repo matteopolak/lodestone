@@ -257,15 +257,30 @@ pub fn build(
     if let Some(notice) = frame.notice.as_ref() {
         let (nx, ny, nw, _) = notice_rect(notice, width, height);
         let lines = wrap_bounded(&b, &notice.text, nw, notice_lines(notice, width, height));
+        // A notice carrying styled runs draws per-run, the same way the server
+        // list's MOTD does: `restyle_wrapped` maps the spans back onto the
+        // wrapped lines, so a server's kick message keeps its own colours. A
+        // notice with no spans (every one this shell authors) takes the flat
+        // `notice.colour` path unchanged.
+        let styled = (!notice.spans.is_empty()).then(|| restyle_wrapped(&notice.spans, &lines));
         for (i, line) in lines.iter().enumerate() {
             let lw = b.text_width(line, 1.0);
-            b.text(
-                line,
-                (nx + (nw - lw) * 0.5).floor(),
-                ny + LINE_H * i as f32,
-                1.0,
-                notice.colour,
-            );
+            let x = (nx + (nw - lw) * 0.5).floor();
+            let y = ny + LINE_H * i as f32;
+            match styled.as_ref().and_then(|runs| runs.get(i)) {
+                // `notice.colour`'s RGB is the base a run with no colour of its
+                // own inherits, and its alpha carries through — so an unstyled
+                // run still looks exactly as it did before.
+                Some(runs) => b.text_spans(
+                    runs,
+                    x,
+                    y,
+                    1.0,
+                    [notice.colour[0], notice.colour[1], notice.colour[2]],
+                    notice.colour[3],
+                ),
+                None => b.text(line, x, y, 1.0, notice.colour),
+            }
         }
     }
 
