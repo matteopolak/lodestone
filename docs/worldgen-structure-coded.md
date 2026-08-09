@@ -189,17 +189,25 @@ computed from outside constants and the measurement is required to land on one. 
 
 ## What is still coded and not here
 
-`mineshaft` (1,386) and `stronghold` (1,766), which both need **eager piece generation** — the same
-architectural shape, so they pair; `monument` (1,988), pieces only; `ruined_portal` (its own vertical
-placement plus `spreadNetherrack`'s 29×29 cross-chunk apron); `nether_fossil`, `fortress`, `end_city`,
-`mansion`. Each is named on `StructureRegistry::unsupported`.
+`stronghold` (1,766 lines), which needs **eager piece generation**; `monument` (1,988), pieces only;
+`ruined_portal` (its own vertical placement plus `spreadNetherrack`'s 29×29 cross-chunk apron);
+`nether_fossil`, `fortress`, `end_city`, `mansion`. Each is named on
+`StructureRegistry::unsupported`.
+
+**`mineshaft` ×2 has landed, and it is not in this file.** Eager piece generation is a different
+architecture, not a third generator on the `coded::Builder` seam, so it lives in
+`structure/mineshaft.rs` — see [`worldgen-structure-mineshaft.md`](./worldgen-structure-mineshaft.md).
+`stronghold` is the same shape and is the natural next user of `Shaft` and `View`.
 
 **`buried_treasure` is on that list too, and it did not look like it.** It produces a start and a real
 bounding box and places **zero blocks**: `BuriedTreasurePieces.postProcess` walks a cursor down until the
 block *below* it is sandstone/stone/andesite/granite/diorite, then writes up to five neighbours and one
-chest. Every one of those decisions is a `getBlockState`, and `StartContext` offers only
-`is_replaceable_at` (air-or-fluid). The blocker is one method — a `BlockKind`-at-position read — and it
-is the same one `ruined_portal` needs. Ledgered as `coded:buried_treasure_chest`.
+chest. Every one of those decisions is a `getBlockState`, and the blocker is **not** the missing accessor
+it was first recorded as: `StartContext::block_kind_at` exists now (mineshaft needed it), and it answers
+a *shape* question. The sand this walk burrows through is a surface-rule product and the
+granite/diorite/andesite are ore-blob products, both of which run after the eager start pass, so
+pre-surface every solid block is one `Stone` and the walk would terminate on its first iteration.
+Ledgered as `coded:buried_treasure_chest`.
 
 ## Dependencies
 
