@@ -3675,6 +3675,25 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
+    /// `ClientboundSetExperiencePacket`. **Wire order is progress, level, total** —
+    /// not declaration order, and not alphabetical. Hand-written against
+    /// `V770Adapter::handle_play`'s own `SET_EXPERIENCE` decoder, which is the
+    /// mirror-side specification and already carried that warning in a comment
+    /// before anything encoded the packet.
+    ///
+    /// `progress` is clamped to `0.0..=1.0`: the client multiplies it by the bar
+    /// width, so a value outside that draws past the end of the bar.
+    fn encode_set_experience(&self, progress: f32, level: i32, total: i32) -> ServerDirective {
+        let mut w = Writer::default();
+        w.f32(progress.clamp(0.0, 1.0));
+        w.var_i32(level.max(0));
+        w.var_i32(total.max(0));
+        ServerDirective::Send {
+            packet_id: play::clientbound::SET_EXPERIENCE,
+            payload: w.into_vec(),
+        }
+    }
+
     /// Issue #425: the general per-species `SET_ENTITY_DATA` encoder
     /// [`encode_air_supply_update`](Self::encode_air_supply_update)'s own doc
     /// comment says nothing on the server side had ever needed before it —

@@ -5888,6 +5888,10 @@ async fn dispatch_play_packet<T, P, S>(
     // fertilising a crop cannot shift which roll a later composter insert or
     // block drop sees.
     bone_meal_rng: &mut SpawnRng,
+    // Issue #256. This connection's experience — level, bar and lifetime total.
+    // `&mut` because closing a furnace pays out its banked smelting XP (the
+    // `ContainerClosed` arm), which is currently the only production producer.
+    experience: &mut crate::experience::PlayerExperience,
     // Issue #337. This connection's block-drop roll source — seeded once in
     // `serve_play`, advanced by every break that rolls a table (see
     // `apply_block_action`'s parameter comment). A second stream rather than
@@ -6313,6 +6317,42 @@ where
             }
             spawn_dropped_stacks(mobs, *player_pos, *player_rot, drops_rng, spilled);
             if open_container.as_ref().is_some_and(|open| open.window_id == window_id) {
+                // Furnace XP, paid out **on close** rather than per cook — vanilla's
+                // `AbstractFurnaceBlockEntity.awardUsedRecipesAndPopExperience`,
+                // which the player's `stopUsing` reaches. `Furnace::take_recipes_used`
+                // has banked the smelts since the last drain and had no caller at
+                // all; this is it.
+                //
+                // Vanilla pops orbs at the furnace and the player absorbs them.
+                // There is no orb entity here (see `crate::experience`'s module doc
+                // for what one needs), so the points go straight to the player's
+                // bar. That is the difference between "no XP exists" and "XP exists
+                // without a flying orb", and the second is the honest subset.
+                let pos = open_container.as_ref().map(|open| open.pos);
+                if let Some(pos) = pos {
+                    let used = block_entities.with(|reg| match reg.get_mut(pos) {
+                        Some(BlockEntity::Furnace(furnace)) => furnace.take_recipes_used(),
+                        _ => std::collections::HashMap::new(),
+                    });
+                    if !used.is_empty() {
+                        let points = crate::furnace::experience_for_recipes(&used, || {
+                            drops_rng.next_f32()
+                        });
+                        if points > 0 {
+                            experience.give_points(i32::try_from(points).unwrap_or(i32::MAX));
+                            apply(
+                                conn,
+                                state,
+                                proto.encode_set_experience(
+                                    experience.progress(),
+                                    experience.level(),
+                                    experience.total(),
+                                ),
+                            )
+                            .await?;
+                        }
+                    }
+                }
                 *open_container = None;
                 *container_sync = ContainerSync::default();
             }
@@ -6738,6 +6778,7 @@ where
     // `COMPOSTER_BEHAVIOR_SEED` and `dispatch_play_packet`'s parameter comment.
     let mut composter_rng = SpawnRng::new(COMPOSTER_BEHAVIOR_SEED);
     let mut bone_meal_rng = SpawnRng::new(BONE_MEAL_BEHAVIOR_SEED);
+    let mut experience = crate::experience::PlayerExperience::default();
     // Issue #337. This connection's block-drop roll stream — see
     // `block_drops::BLOCK_DROPS_BEHAVIOR_SEED` and `dispatch_play_packet`'s
     // parameter comment for why it is separate from the composter's.
@@ -6908,6 +6949,7 @@ where
                     block_ticks,
                     &mut composter_rng,
                     &mut bone_meal_rng,
+                    &mut experience,
                     &mut drops_rng,
                     client_channels,
                     plugin_channels,
@@ -7610,6 +7652,7 @@ where
     // wired identically on this target.
     let mut composter_rng = SpawnRng::new(COMPOSTER_BEHAVIOR_SEED);
     let mut bone_meal_rng = SpawnRng::new(BONE_MEAL_BEHAVIOR_SEED);
+    let mut experience = crate::experience::PlayerExperience::default();
     // Issue #337 — see the native `serve_play`'s identical binding: the
     // block-drop roll stream has no timer and no wasm32 dependency either.
     let mut drops_rng = SpawnRng::new(crate::block_drops::BLOCK_DROPS_BEHAVIOR_SEED);
@@ -7675,6 +7718,7 @@ where
             block_ticks,
             &mut composter_rng,
             &mut bone_meal_rng,
+            &mut experience,
             &mut drops_rng,
             client_channels,
             plugin_channels,

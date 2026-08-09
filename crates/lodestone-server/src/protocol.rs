@@ -1502,6 +1502,23 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes the local player's experience bar (vanilla
+    /// `ClientboundSetExperiencePacket`).
+    ///
+    /// **The client half already existed**: `V770Adapter::handle_play` decodes
+    /// `SET_EXPERIENCE` into `ClientEvent::ExperienceChanged`, complete with the
+    /// note that the wire order is *progress, level, total* rather than declaration
+    /// order. Nothing produced the packet, which is the island in the serverbound
+    /// direction — a decoder with no encoder.
+    ///
+    /// `progress` is the bar fill in `0.0..1.0`, `level` the number shown on it, and
+    /// `total` vanilla's lifetime `totalExperience`, which is **not** derivable from
+    /// the other two (see [`crate::experience::PlayerExperience`]).
+    fn encode_set_experience(&self, progress: f32, level: i32, total: i32) -> ServerDirective {
+        let _ = (progress, level, total);
+        ServerDirective::None
+    }
+
     /// Encodes a health update for the local player (vanilla's
     /// `ClientboundSetHealthPacket`, the same packet
     /// [`begin_play`](Self::begin_play) sends once at join with the
@@ -2034,6 +2051,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).encode_air_supply_update(air)
     }
 
+    fn encode_set_experience(&self, progress: f32, level: i32, total: i32) -> ServerDirective {
+        (**self).encode_set_experience(progress, level, total)
+    }
+
     fn encode_set_health(&self, health: f32, food: i32, saturation: f32) -> ServerDirective {
         (**self).encode_set_health(health, food, saturation)
     }
@@ -2243,6 +2264,10 @@ mod tests {
         }
         fn encode_air_supply_update(&self, air: i32) -> ServerDirective {
             send(air)
+        }
+        fn encode_set_experience(&self, progress: f32, level: i32, total: i32) -> ServerDirective {
+            let _ = progress;
+            send(level * 10_000 + total)
         }
         fn encode_set_health(&self, health: f32, food: i32, saturation: f32) -> ServerDirective {
             let _ = saturation;
