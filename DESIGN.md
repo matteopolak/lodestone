@@ -8399,3 +8399,91 @@ Two smaller ones:
   about the other**. This is §12's "a gate that compares two things you control cannot tell you a third
   exists" wearing structure-generation clothes: nothing was wrong with the marker pass, and six
   structure families generated with empty chests.
+
+**12.165 The server kicked the client for a keep-alive the server never gave itself time to read.**
+
+The report was two symptoms — *"chunk gen is still too slow"* and *"if I move around eventually I get
+Timed Out"* — and one cause. Five beliefs went into it and four were wrong.
+
+**Who disconnected whom was decidable without instrumenting anything, and the string was the evidence
+rather than the guess.** The exact phrase *"Timed out"* has one producer in the workspace:
+`lodestone_server::server::timeout_reason`, the `disconnect.timeout` fallback written immediately before
+`ServerError::KeepAliveTimeout`. The client's own 30-second `read_packet_timeout` surfaces as
+`Ok(None)` → *"stream closed"*, a different string entirely. So the server kicked us, and the *general*
+inference "a timeout string means a timeout somewhere" would have been useless where the *specific*
+provenance was conclusive. **Grep the string before instrumenting the mechanism.**
+
+The orchestrator's own retraction was the useful part and is worth preserving: *"a client-side
+bottleneck would tank frame rate but can't produce a timeout disconnect"* is false. A peer too busy to
+drain its socket produces a **server-side** kick. In this case the busy peer was the server itself.
+
+**The mechanism: `select!` services one arm per pass, so an arm body is a window in which the connection
+reads nothing and writes nothing.** `ViewTracker::recenter` was `async` and returned finished packet
+bytes, so a chunk boundary awaited generation *and* encode of the whole newly-visible strip — 33 columns
+at `view_radius = 16`, a full 361-column square on a jump — before yielding one directive. `spawn_blocking`
+had moved the *work* off the core thread and left **one suspension point covering all of it**. So the
+keep-alive challenge could not be written, and the reply could not be read, and `pending_keep_alive`
+stayed `Some` across the window. **Offloading to a pool is not the same as releasing the task, and the
+existing doc comment claiming the latency was fixed described only the join.**
+
+Two independent keep-alive defects, either sufficient alone:
+
+* **tokio's default `MissedTickBehavior::Burst` turns a stall into a guaranteed kick.** It makes up for
+  missed ticks by firing them back to back with *no delay in between*, so a pass that overran two
+  intervals resolves `tick()` twice in immediate succession: the first writes a challenge, the second
+  finds it unanswered in the same instant. Zero grace, by construction.
+* **the timeout was denominated in wall clock, and vanilla's is not.**
+  `keepConnectionAlive` runs on the server tick while vanilla's reads happen on a Netty IO thread that
+  never blocks on world generation, so "15 seconds elapsed" and "15 seconds in which the client could
+  have been heard" are the same number *there*. Porting the comparison without porting that property
+  ports a different rule.
+
+**The watchdog measured the wrong interval first, and only a `start_paused` test could see it.**
+`LoopStallWatch` initially timed pass-to-pass — timestamp at the bottom of each arm, difference at the
+bottom of the next. That interval is mostly time parked in `select!`, i.e. *idle*, when the socket is
+being serviced by definition. Under `#[tokio::test(start_paused = true)]` the clock jumps straight to the
+next timer deadline whenever nothing is runnable, so it reported the entire 15-second keep-alive interval
+as a stall and suppressed the very timeout `silent_client_is_disconnected_after_keep_alive_timeout`
+gates. The test hung rather than failed. Timing arm *bodies* — `enter()` first statement, `pass(arm)`
+last — is the only correct denominator. **A paused-clock test is a load-bearing control on any duration
+measured inside a `select!` loop, and it caught what three green `cargo check`s could not.**
+
+**The per-column cost was already in the record and did not need re-measuring; the *number of them per
+suspension point* was the defect.** `join_scheduler::generation_window`'s own sweep has 289 columns at
+window 10 in 4.28 s — ≈14.8 ms per column effective, 2.23× over serial — so a 33-column strip is roughly
+half a second and a 361-column jump roughly five, each as **one** unserviced gap. Streaming changes
+throughput not at all (`generate_columns_parallel` and `ColumnPipeline` put the same
+`available_parallelism` columns in flight); it changes the gap from the whole strip to one column. **This
+was a latency defect wearing a throughput symptom, and "chunk gen is too slow" was the wrong frame for
+it.** No new timing was taken: four agents were running full test suites concurrently, which is exactly
+the condition under which a duration gets attributed to the wrong cause.
+
+**One real serial bottleneck was hiding inside code that looked parallelised.**
+`generate_and_encode_columns_offloaded` fanned generation out over scoped threads, joined them **all**,
+and then walked the joined `Vec` calling `encode_chunk` one column at a time. ≈2.4 ms per column × 33 =
+≈80 ms of unavoidably single-threaded work regardless of core count — the whole cost the offload existed
+to remove, relocated rather than removed, and invisible because the function it called *was* parallel.
+`map_columns_parallel` applies the transform inside the worker that generated the column; peak memory
+falls from the whole strip to one column per worker as a side effect.
+
+Three test-premise failures, all the same species and all in the *safe*-looking direction:
+
+* five `serve_play` view gates went red for a genuine bug — `enqueue` took ownership *before* the refusal
+  on the borrowed-source arm was known, so the fallback had nothing left to send. **A predicate that
+  consumes its subject cannot be asked twice; ask `accepts_enqueue` first.**
+* three `view_radius_store_capacity` slider gates read *one* batch where a strip now arrives as a run of
+  16-column batches, and reported 16 against 728 as a **precondition** failure. Nothing was missing, only
+  paced — and the precondition is the reason that read as "harness stale" rather than as "columns lost".
+* `real_client_view_follows_player_across_chunk_boundaries` (v770) waited for the *forget* and then
+  asserted on the new view. Forgets are immediate and the strip is paced, so the forget stopped being
+  evidence that the new columns had landed. **A test that treats one packet as a proxy for another is
+  correct only while they are sent atomically.**
+
+**And a correctness bug the streaming work exposed but did not create.** `ViewTracker.loaded` means
+*owed*, not *delivered* — that is what lets the join seed the whole square up front — so a player who
+steps across a boundary and straight back forgets a column that is still queued, and it is then sent
+anyway: the client loads a column outside its view, never forgets it, and the next step re-adds the
+coordinate so it goes out twice. Vanilla's `PlayerChunkSender` drops pending sends for exactly this
+reason. The join stream has always been able to outlive a forget; nothing noticed because no gate walks
+back. `ColumnPipeline::cancel` withdraws pending columns, and `total` must come down with them — the
+`select!` branch is gated on `remaining()`, so a stale count spins the loop rather than answering wrong.
