@@ -676,9 +676,71 @@ const MODEL_WGSL: &str = include_str!("shaders/model.wgsl");
 // foliage green. Water's greyscale texture becomes blue here.
 const FLUID_WGSL: &str = include_str!("shaders/fluid.wgsl");
 
+/// The fluid pass's anti-z-fight depth nudge, in window-depth (`z / w`) units —
+/// the value `shaders/fluid.wgsl` adds to every fluid fragment's depth.
+///
+/// Restated here so a gate can measure it against the real
+/// [`Camera::view_projection`](crate::Camera::view_projection) without parsing
+/// WGSL; [`FLUID_DEPTH_NUDGE_LITERAL`] and
+/// `fluid_depth_nudge_matches_the_shader` are what stop the two drifting. The
+/// shader's own comment carries the derivation and the measurement — read that,
+/// not this.
+///
+/// `2^-21`, so it is exactly 8 float32 ULPs at any depth in `[0.5, 1)` and more
+/// below it. Positive is away from the camera under this project's `[0,1]`
+/// depth convention.
+pub const FLUID_DEPTH_NUDGE: f32 = 4.768_371_582_031_25e-7;
+
+/// The exact text of [`FLUID_DEPTH_NUDGE`] as it appears in `fluid.wgsl`. Two
+/// copies of a number in two languages is the drift this pairing exists to
+/// catch.
+const FLUID_DEPTH_NUDGE_LITERAL: &str = "4.76837158203125e-7";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Rust constant and the WGSL constant must be the same number.
+    ///
+    /// `cargo check` never compiles a shader and no pixel gate can tell a
+    /// slightly-too-small nudge from a correct one, so this string match is the
+    /// only thing tying the measured value to the one that actually ships.
+    #[test]
+    fn fluid_depth_nudge_matches_the_shader() {
+        let decl = format!("const FLUID_DEPTH_NUDGE: f32 = {FLUID_DEPTH_NUDGE_LITERAL};");
+        assert!(
+            FLUID_WGSL.contains(&decl),
+            "fluid.wgsl does not declare `{decl}` — the shader and \
+             `FLUID_DEPTH_NUDGE` have drifted apart"
+        );
+        // The literal really is this constant, so the string check above is not
+        // comparing a typo against itself.
+        assert_eq!(
+            FLUID_DEPTH_NUDGE_LITERAL.parse::<f32>().expect("a float literal"),
+            FLUID_DEPTH_NUDGE
+        );
+        // And it is the power of two the ULP guarantee depends on: exactly 8
+        // ULPs at 1.0's exponent. Computed from `f32::EPSILON` (the gap between
+        // 1.0 and its successor, i.e. 2 ULPs at the [0.5, 1) exponent) rather
+        // than restated, so a hand-edited digit cannot pass.
+        assert_eq!(FLUID_DEPTH_NUDGE, f32::EPSILON * 4.0);
+        // Control: the assertion above would reject a value that merely looks
+        // similar, so the nudge cannot be silently halved or doubled.
+        assert_ne!(FLUID_DEPTH_NUDGE, f32::EPSILON * 2.0);
+        assert_ne!(FLUID_DEPTH_NUDGE, f32::EPSILON * 8.0);
+    }
+
+    /// The nudge must push **away** from the camera, which is *positive* under
+    /// this project's `[0,1]` depth. The two pipelines that pull toward the
+    /// camera (crack, sign text) use negative biases; getting this sign
+    /// backwards would make the water win every coplanar contest instead of
+    /// losing it, and a screenshot of a blue film over a stair looks much like a
+    /// z-fight that has stopped moving.
+    #[test]
+    fn fluid_depth_nudge_pushes_away_from_the_camera() {
+        assert!(FLUID_DEPTH_NUDGE > 0.0);
+        assert!(FLUID_WGSL.contains("out.clip.z = out.clip.z + FLUID_DEPTH_NUDGE * out.clip.w;"));
+    }
 
     #[test]
     fn empty_model_mesh_uploads_to_none() {
