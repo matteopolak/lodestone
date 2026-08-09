@@ -247,6 +247,17 @@ Editing, and reading the tree:
 
 The machine:
 
+- **The disk fills, and `target/debug/incremental` is why. `CARGO_INCREMENTAL=0` is the fix; deleting it is
+  only the mop.** Measured five times in one session: `target/` reaches 100–118 GB against a volume with about
+  30 GB usable, free space hits zero, and **every `Bash` call then fails before it runs** because the harness
+  cannot write its own output file — which reads as a dead tool, not as a full disk. The cache alone was 46 GB
+  once and back to 15 GB within two hours; the driver is `cargo check --workspace --all-targets` (~80 test
+  binaries in this workspace) run by several agents. So: **prefer plain `cargo check -p <crate>` while
+  iterating and `--all-targets` once at the end**, and **set `CARGO_INCREMENTAL=0` for the wide runs** — it
+  stops the regrowth instead of racing it. Incremental output is pure cache and invalidates no artifact, so
+  `rm -rf target/debug/incremental` is always safe when no cargo/rustc is running; it is just not a policy.
+  **Never reach for `git clean` to reclaim space** — it deletes untracked files, which here means other
+  agents' new crates, docs and oracle dumps, in no commit and no reflog.
 - **Docker is fair game to stop and prune when no live gate needs it**; the oracles are not repo state and
   `scripts/live-oracles/{creative,survival,terrain}.sh` recreates them. Quitting Docker Desktop reclaims
   the VM reservation, the largest single win; restart it before any `#[ignore]`d live-oracle gate. Prune
