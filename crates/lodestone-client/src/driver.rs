@@ -168,9 +168,49 @@ impl<T: Transport> Driver<T> {
         }
     }
 
-    /// Runs the session to completion, returning why it ended.
+    /// Runs the session to completion, returning why it ended — and, when it
+    /// ended badly, **saying so on the event stream** before the stream closes.
+    ///
+    /// # Why the emit lives here and not at each failure site
+    ///
+    /// [`SessionOutcome::Failed`] is returned from a dozen places in
+    /// [`Self::run_session`] and from every `Step::Stop` [`Self::execute`] can
+    /// produce, and the *only* consumer able to read it is one that can call
+    /// [`crate::ClientHandle::join`] — which takes the handle by value, so a
+    /// shell holding an `Arc<ClientHandle>` structurally cannot. What that
+    /// consumer sees is the channel closing, which is byte-for-byte what a
+    /// clean [`SessionOutcome::ServerClosed`] looks like; the shell used to
+    /// synthesise `"stream closed"` for both and the real cause reached only
+    /// the log.
+    ///
+    /// Wrapping the whole session in one place makes that structural rather
+    /// than a habit: a failure path added later cannot forget to emit, because
+    /// there is nowhere else for it to return through. The one failure this
+    /// cannot cover is [`crate::error::ClientError::DriverPanicked`], which is
+    /// synthesised by `crate::spawn` from a join error — by then this function
+    /// has already unwound and there is no sender left.
     pub(crate) async fn run(
         mut self,
+        actions: mpsc::UnboundedReceiver<ClientAction>,
+        shutdown: oneshot::Receiver<()>,
+    ) -> SessionOutcome {
+        let outcome = self.run_session(actions, shutdown).await;
+        if let SessionOutcome::Failed(error) = &outcome {
+            // `let _`: a consumer that has already dropped its receiver is not
+            // an error, and there is nothing left to do about it either way.
+            let _ = self
+                .events
+                .send(ClientEvent::SessionFailed {
+                    reason: error.cause_chain(),
+                })
+                .await;
+        }
+        outcome
+    }
+
+    /// The session loop itself. See [`Self::run`] for why it is wrapped.
+    async fn run_session(
+        &mut self,
         mut actions: mpsc::UnboundedReceiver<ClientAction>,
         mut shutdown: oneshot::Receiver<()>,
     ) -> SessionOutcome {

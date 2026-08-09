@@ -2653,6 +2653,26 @@ fn forward(
             let _ = tx.send(NetUpdate::Disconnected(Box::new(reason)));
             return Err(());
         }
+        // The client-side twin of the arm above, and the other half of the
+        // failure Matthew reported as *"join errors dont get printed anywhere,
+        // and the client just shows disconnected: stream closed"*. The driver's
+        // `SessionOutcome::Failed(ClientError)` is unreachable to us — taking it
+        // consumes the `ClientHandle` and we hold an `Arc` — so before this
+        // event existed a mid-session transport/adapter/timeout failure reached
+        // the shell as nothing at all: the channel closed, and the `Ok(None)`
+        // arm in the loop below synthesised `"stream closed"`, which
+        // `poll_net` then labelled a *server* disconnect. `NetUpdate::Error` is
+        // the right target rather than `Disconnected`, and the difference is
+        // visible: it carries `SessionEndKind::Failed`, so the screen title
+        // becomes vanilla's `connect.failed` instead of `disconnect.lost`, and
+        // `poll_net`'s arm logs the cause.
+        //
+        // Like `Disconnect`, this ends the forward loop: the driver has already
+        // stopped and the only thing that could follow is the channel closing.
+        ClientEvent::SessionFailed { reason } => {
+            let _ = tx.send(NetUpdate::Error(reason));
+            return Err(());
+        }
         // No `HealthChanged`/`ExperienceChanged` arms: those fold into the
         // `Vitals`/`Xp` components on the net thread, and forwarding them here as
         // well would put a second writer on the shell side. See `NetUpdate`'s note

@@ -56,6 +56,39 @@ pub enum ClientError {
     Auth(#[from] lodestone_auth::AuthError),
 }
 
+impl ClientError {
+    /// This error and its `source()` chain, joined with `": "` — the text
+    /// `ClientEvent::SessionFailed` carries to the screen.
+    ///
+    /// # Why the chain is deduplicated rather than simply concatenated
+    ///
+    /// `thiserror`'s `#[from]` sets `source()` *and* the `{0}` in the
+    /// `#[error(…)]` attribute already interpolates that source's own `Display`.
+    /// So for `Transport(NetError::Codec(e))` the top-level `to_string()` is
+    /// already `"transport error: protocol codec error: <e>"`, and appending
+    /// each link of the chain on top of that would print every layer twice. A
+    /// link is therefore only appended when its text is not already present —
+    /// which keeps the *whole* chain for a variant that forgets to interpolate
+    /// its source, and prints each layer exactly once for every variant here
+    /// today. The naive concatenation is not a hypothetical: it is what
+    /// `anyhow`-style chain printing does, and `error_cause_chain_does_not_repeat_a_layer`
+    /// is the gate that separates the two.
+    #[must_use]
+    pub fn cause_chain(&self) -> String {
+        let mut out = self.to_string();
+        let mut source = std::error::Error::source(self);
+        while let Some(error) = source {
+            let text = error.to_string();
+            if !out.contains(&text) {
+                out.push_str(": ");
+                out.push_str(&text);
+            }
+            source = error.source();
+        }
+        out
+    }
+}
+
 /// Why a client session ended.
 ///
 /// A session always ends with exactly one of these. Only [`SessionOutcome::Failed`]
@@ -166,4 +199,64 @@ pub enum WaitError {
     /// The session ended before the condition became true.
     #[error("client driver ended before condition was met")]
     Closed,
+}
+
+#[cfg(test)]
+mod cause_chain_tests {
+    use super::ClientError;
+    use lodestone_net::NetError;
+
+    /// The whole point of [`ClientError::cause_chain`]: the *innermost* detail
+    /// reaches the string, because that is the half a screen saying "stream
+    /// closed" was throwing away.
+    ///
+    /// Both hypotheses are written out and the measurement must land on one.
+    /// The wrong one here is not "no chain" — `Display` alone would pass that —
+    /// it is the naive concatenation every chain-printing helper does, which
+    /// repeats a layer `thiserror` has already interpolated.
+    #[test]
+    fn error_cause_chain_does_not_repeat_a_layer() {
+        let error = ClientError::Transport(NetError::UnexpectedClose(7));
+        let chain = error.cause_chain();
+
+        // Derived from the two `#[error(…)]` attributes, not guessed: the
+        // `ClientError::Transport` arm is `"transport error: {0}"` and
+        // `NetError::UnexpectedClose`'s is
+        // `"connection closed mid-frame ({0} bytes buffered)"`.
+        let deduplicated = "transport error: connection closed mid-frame (7 bytes buffered)";
+        let repeated = format!(
+            "{deduplicated}: {}",
+            "connection closed mid-frame (7 bytes buffered)"
+        );
+        assert_ne!(
+            deduplicated, repeated,
+            "the two hypotheses must differ, or this gate measures nothing"
+        );
+        assert_eq!(chain, deduplicated, "expected the deduplicated chain");
+
+        // The half that matters to a reader of the screen: the inner error's own
+        // detail survives. `7` is a value only the innermost layer knows.
+        assert!(
+            chain.contains("7 bytes buffered"),
+            "the innermost cause must reach the text: {chain}"
+        );
+    }
+
+    /// The control for the dedupe rule: an error with *no* source is its own
+    /// `Display` and nothing is appended. Without this, an implementation that
+    /// returned `to_string()` and ignored the chain entirely would be
+    /// indistinguishable from one that walks it, since every `ClientError`
+    /// variant today interpolates its source.
+    #[test]
+    fn a_sourceless_error_is_exactly_its_own_display() {
+        assert_eq!(
+            ClientError::Timeout.cause_chain(),
+            "timed out waiting for server data"
+        );
+        assert!(
+            std::error::Error::source(&ClientError::Timeout).is_none(),
+            "detector control: this variant must genuinely have no source, or the \
+             assertion above proves nothing about the walk"
+        );
+    }
 }

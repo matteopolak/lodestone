@@ -1110,6 +1110,34 @@ pub enum ClientEvent {
         /// Disconnect reason.
         reason: Text,
     },
+    /// The session ended because of a **client-side** failure: a transport
+    /// error, a read timeout, an adapter rejection, an online-mode
+    /// authentication failure. The opposite of [`ClientEvent::Disconnect`],
+    /// which is the *server* telling us why.
+    ///
+    /// # Why this is an event and not just a return value
+    ///
+    /// The driver already returns every one of these as a
+    /// `SessionOutcome::Failed(ClientError)`, and that value is unreachable to
+    /// a consumer that only holds a shared handle: taking it consumes the
+    /// handle by value, so a shell holding an `Arc<ClientHandle>` cannot. What
+    /// such a consumer observes instead is the event stream simply *ending* —
+    /// indistinguishable from a clean close, which is why a failed join used to
+    /// reach the screen as a synthesised "stream closed" while the real cause
+    /// went only to the log. Emitting the failure means the terminal reason
+    /// travels the same channel every other session event does, and arrives
+    /// before the channel closes.
+    ///
+    /// # The payload is a plain `String`, deliberately
+    ///
+    /// Unlike [`ClientEvent::Disconnect`]'s [`Text`], nothing here came off the
+    /// wire and nothing is translatable: this is *our* error, rendered with its
+    /// full `source()` chain, and a consumer that wants a `Text` wraps it in a
+    /// literal node (which every translator is a no-op on).
+    SessionFailed {
+        /// The error and its `source()` chain, joined with `": "`.
+        reason: String,
+    },
     /// A keep-alive challenge was received.
     KeepAlive {
         /// Keep-alive id.
@@ -3077,6 +3105,16 @@ pub fn route(event: &ClientEvent) -> Route {
 
         // ---- the shell's own stream ------------------------------------------
         ClientEvent::Disconnect { .. }
+        // `SessionFailed` is `Disconnect`'s client-side twin and takes the same
+        // route, established from the consumer rather than from the shape: the
+        // only thing in the tree that ends a session is
+        // `SessionPhase::Ended`, and the only writer of that is
+        // `lodestone_shell::sim::Sim::set_phase`, called from `poll_net`'s
+        // `NetUpdate` arms. Nothing in `lodestone_ecs::session` folds a `Phase`
+        // from a `ClientEvent` at all, so a `session` route here would compile,
+        // test green, and reach no screen — and a terminal session failure is
+        // not per-entity state either, which rules out `ingest`.
+        | ClientEvent::SessionFailed { .. }
         | ClientEvent::Particles { .. }
         | ClientEvent::Sound { .. }
         | ClientEvent::EntitySound { .. }
@@ -3421,7 +3459,7 @@ mod route_tests {
         // Asserting the two counts agree turns it into evidence a reader can see,
         // and catches a variant named twice.
         assert_eq!(
-            total, 131,
+            total, 132,
             "the `ClientEvent` variant count changed. That is fine and expected — \
              update `docs/event-routing.md` and this number together, which is the \
              whole point of this gate firing."
