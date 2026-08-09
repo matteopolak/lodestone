@@ -64,9 +64,9 @@ mod native {
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
-    use std::cell::Cell;
     use std::future::Future;
-    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use tokio::sync::oneshot;
 
@@ -76,16 +76,30 @@ mod wasm {
     ///
     /// `spawn_local` returns no join handle, so completion is tracked with a
     /// shared flag and the outcome is delivered over a `oneshot`.
+    ///
+    /// **The flag is `Arc<AtomicBool>`, not the `Rc<Cell<bool>>` it reads like it
+    /// wants to be, and that is load-bearing rather than defensive.** `Rc<Cell<_>>`
+    /// is the natural choice here — this task is single-threaded by construction,
+    /// there is no second thread in a browser to race with, and the atomic buys no
+    /// safety. What it buys is `Send + Sync` on [`DriverTask`], which propagates
+    /// out through [`ClientHandle`](crate::ClientHandle) to every consumer that
+    /// stores one. `lodestone-shell` puts `Arc<ClientHandle>` inside `bevy_ecs`
+    /// `Resource`s, and `Resource` requires `Send + Sync`; with `Rc<Cell<bool>>`
+    /// here the browser build of the shell failed with **38 errors** across six
+    /// files, every one of them tracing back to this single field. Note the
+    /// `!Send`-ness that the seam genuinely needs lives in the *future*
+    /// `spawn_local` receives (the `ws-web` transport), not in this handle — so
+    /// making the handle `Send` costs the seam nothing.
     #[derive(Debug)]
     pub(crate) struct DriverTask {
         outcome: oneshot::Receiver<SessionOutcome>,
-        finished: Rc<Cell<bool>>,
+        finished: Arc<AtomicBool>,
     }
 
     impl DriverTask {
         /// Returns `true` once the driver task has finished.
         pub(crate) fn is_finished(&self) -> bool {
-            self.finished.get()
+            self.finished.load(Ordering::Acquire)
         }
 
         /// Waits for the driver task to finish and returns its outcome.
@@ -103,11 +117,11 @@ mod wasm {
         F: Future<Output = SessionOutcome> + 'static,
     {
         let (tx, rx) = oneshot::channel();
-        let finished = Rc::new(Cell::new(false));
-        let flag = Rc::clone(&finished);
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&finished);
         wasm_bindgen_futures::spawn_local(async move {
             let outcome = future.await;
-            flag.set(true);
+            flag.store(true, Ordering::Release);
             let _ = tx.send(outcome);
         });
         DriverTask {
