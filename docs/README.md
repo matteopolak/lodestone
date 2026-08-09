@@ -514,8 +514,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Experience](./experience.md) — The XP level curve, the orb denomination ladder
   and a player's experience state. `crates/lodestone-server/src/experience.rs` holds
   all three as pure arithmetic; `ServerProtocol::encode_set_experience` puts the
-  result on the wire. The one production producer today is furnace smelting, paid out
-  when the player closes the menu.
+  result on the wire, and `crates/lodestone-server/src/player_data.rs` saves and
+  restores it. The one production *source* today is furnace smelting, paid out when
+  the player closes the menu.
 - [Explosion block destruction](./explosion-blocks.md) — The half of an explosion
   that removes blocks: a port of 26.2's `ServerExplosion::calculateExplodedPositions`
   into `crates/lodestone-server/src/explosion_blocks.rs`, on real per-block blast
@@ -893,8 +894,8 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Moving block models](./moving-block-models.md) — The render path for a block's
   own geometry drawn somewhere other than its own cell — vanilla's
   `SubmitNodeCollector.submitMovingBlock`. It is a **seam with more than one intended
-  producer**, not a falling-block feature: falling sand and gravel use it today, and
-  `PistonHeadRenderer` needs exactly the same machinery.
+  producer**, not a falling-block feature: falling sand and gravel use it, and so does
+  `PistonHeadRenderer` — the piston head and the block it pushes.
 - [The multi-protocol seam: constructing an adapter for the protocol it negotiated](./multi-protocol-seam.md) —
   The change that lets one `crates/protocol/vNNN` crate serve several protocol
   revisions instead of exactly one. Unit U2 of epic #343's dispatch plan

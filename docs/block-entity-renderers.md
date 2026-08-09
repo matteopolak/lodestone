@@ -58,8 +58,10 @@ So the honest count is: **3 of 26 registrations landed** (chest/ender chest/trap
 registrations — `SIGN` and `HANGING_SIGN` — geometry excepted since a sign's board is a real block
 model; the bell body/rim; and the shulker box — see [Shulker box](#shulker-box)), plus the banner, the
 lectern, the campfire and the enchanting table, so **12 of 26** — wall banners share the `BANNER`
-registration with standing ones. The rest are still absent. Picking the next few should read this list,
-not the original issue body.
+registration with standing ones. **Piston head makes 13** (see [Piston head](#piston-head)), and it is
+the first entry landed through the *moving-block-model* seam rather than through `EntityPipeline` or
+the item path. The rest are still absent. Picking the next few should read this list, not the original
+issue body.
 
 **The registration list had two entries this document's "what is not built" section never mentioned
 either way: `LECTERN` (`LecternRenderer`, the open book on a lectern) and `CONDUIT` (`ConduitRenderer`,
@@ -1237,6 +1239,125 @@ specific to this type: a campfire contributes to **neither** `block_entities_dra
 
 Nothing is open within campfire scope.
 
+## Piston head
+
+`PistonHeadRenderer` — the piston head sliding out of a base, and the block a piston pushes or
+pulls. **The third registration here that owns no mesh**, and the only one that reaches neither the
+entity pipeline nor the item path.
+
+### The `bakeLayer` verdict, and where that lands it
+
+`PistonHeadRenderer`'s constructor is empty — no `bakeLayer`, no model field. Like
+[Campfire](#campfire) it poses existing models; unlike the campfire those are whole **block**
+models, not item models. So it draws through the moving-block-model seam falling sand already uses:
+`gpu/moving_blocks.rs`, `merge_piston_heads`. See
+[`moving-block-models.md`](./moving-block-models.md) for the seam itself.
+
+Three destinations, then, for a block-entity renderer here:
+
+| `bakeLayer`? | poses | pass |
+|---|---|---|
+| yes | its own cuboid rig | `EntityPipeline`, via `prepare_block_entities` |
+| no | item models | `ModelPipeline`, via `prepare_item_geometry` (campfire) |
+| no | block models | `ModelPipeline`, via `prepare_moving_blocks` (piston head) |
+
+### The three branches, two of which synthesise a state that is nowhere in the world
+
+`extractRenderState` is a three-way branch on the block entity's stored `movedState`, and
+`moving_piston_states` in `shell/block_entities.rs` is the port. It resolves every state through
+`lodestone_data::block_states::state_id`, whose tier-2 default-plus-overrides fallback is what makes
+a synthesised state resolve at all.
+
+1. **The moved state already is a `piston_head`** — a plain extension, because `PistonBaseBlock`
+   pushes a head state into the cell in front of it. `short` is rewritten from the progress
+   (`<= 0.5`). Vanilla's guard is `progress <= 4.0F`, which is *always* true since progress is
+   `0..=1`; it is not ported as a condition, because a condition that cannot be false reads as one
+   that can.
+2. **A retracting source piston** (`isSourcePiston && !isExtending`) — a sticky piston pulling its
+   head home. The stored state is the *base*, so a head is built from scratch: `type` from whether
+   the base is sticky, `facing` from the base's own `facing`, and `short` from the progress with the
+   **opposite** comparison to branch 1 (`>= 0.5`). The base draws too, forced to `extended=true`.
+3. **Anything else** — an ordinary pushed or pulled block, drawn as stored.
+
+Two traps here, both held by gates:
+
+- **`PistonType.DEFAULT`'s serialized name is `"normal"`, not `"default"`.** A `"default"` here
+  resolves through tier 3 to the block's bare default state — a *real* state, so nothing errors, and
+  every plain piston head would draw with the sticky sheet's facing.
+- **`progress == 0.5` cannot discriminate branch 1's rule from branch 2's**, because that is the
+  boundary both compare against. The gates use `0.25` and `0.75`.
+
+### Two requests per piston, and only one of them is offset
+
+`submit` translates the pose by `(xOff, yOff, zOff)`, submits the head, then **pops the pose** before
+submitting the base. So a retracting sticky piston draws its head sliding home *and* its base sitting
+still. Folding both into one transform makes the piston look like it is eating itself.
+
+### `getExtendedProgress` is signed, and the sign is the whole animation
+
+`piston_extended_progress` in `gpu/moving_blocks.rs`: `extending ? progress - 1.0 : 1.0 - progress`.
+Both arms reach `0.0` at full progress — which is what puts the moved block exactly on its
+destination cell — but they start from opposite ends. The plausible wrong reading is "raw progress
+along the *movement* direction", and it agrees in magnitude at `progress == 0.5`, so the gate uses
+`0.25`; `half_progress_cannot_discriminate_the_offset_rule` is the control that requires it to.
+
+Note the offset multiplies the **raw `direction`** step, not `getMovementDirection()` — the sign is
+already in the progress, and using the movement direction as well double-negates the retraction.
+
+### The clock is client-side, and its absence is worse than no animation
+
+`PistonMovingBlockEntity.getUpdateTag` is `saveCustomOnly`, so the wire *does* carry a `progress` —
+but it is `progressO`, the value at the start of the tick the block entity was created on, and it is
+sent once. Vanilla's client then runs `PistonMovingBlockEntity.tick` locally, `progress += 0.5` per
+tick, `TICKS_TO_EXTEND = 2`. `crate::block_entities::PistonMoves` is that ramp — the fourth clock in
+this module after chest lids, bell shakes and the enchanting-table book, and by far the shortest.
+
+Three things that make it different from the other three:
+
+- **An untracked position reports `None`, not `0.0`.** Every other tracker here can treat "absent"
+  as "at rest" because rest is the neutral value. Here `0.0` is the *most displaced* progress there
+  is — one whole cell back — so a made-up zero draws the head buried inside the piston base. The
+  gather falls back to the NBT's own seed instead.
+- **The discovery tick seeds, it does not advance.** Advancing on discovery starts every push at
+  `0.5` and halves an animation that is only two ticks long.
+- **Removal is driven by the world, not by a counter.** An entry is dropped when its cell stops
+  holding a `moving_piston` block entity — which is exactly when the server's `finalTick` replaces
+  the cell. A lost removal packet therefore settles at `progress == 1.0`, geometry exactly on the
+  destination cell, rather than stranding a head mid-travel.
+
+The seed gather (`moving_piston_seeds`) is deliberately **not** bounded by `VIEW_DISTANCE`, unlike
+every other gather in the module: it feeds the clock, not the draw, so a piston a player walks toward
+mid-push must already be ticking. The list is short by construction — a `moving_piston` cell exists
+for two ticks.
+
+### The light samples
+
+Vanilla computes `pos = getBlockPos().relative(getMovementDirection().getOpposite())` and samples
+light **there**, one cell back along the push, not at the block entity's own cell. That is not a
+detail: the block entity's cell is full of `moving_piston`, and the cell behind it is the air (or the
+base) the geometry is travelling out of. The base's sample is `pos.relative(getMovementDirection())`,
+which for the retracting case collapses back to the block entity's own cell.
+
+### Status
+
+Wired end to end: the offset and pose (`piston_extended_progress`, `piston_head_pose`), the state
+branch and NBT decode (`moving_piston_states`, `moving_piston_nbt`), the clock (`PistonMoves`, ticked
+from `Sim::step`), the gather (`moving_piston_spawns`), the source (`MovingPistonSource` +
+`set_moving_piston_source`), the consumer (`merge_piston_heads` inside `prepare_moving_blocks`) and
+the per-frame install in `app::redraw`. It counts into `RenderStats::moving_blocks_drawn`, shared with
+falling blocks.
+
+**Open within piston scope, and it is a server-side gap, not a render one: our own server never
+produces a `moving_piston` block entity.** `lodestone_server::piston` applies a push in one step and
+says so in its own module doc — so this producer draws against a real 26.2 server and not against
+singleplayer until the two-phase `MovingPistonBlock` transition lands there. Everything on the client
+side reads the ordinary `World::block_entities` records the chunk packet fills in, whoever sent them.
+
+Also unbuilt: vanilla's `getViewDistance()` for this renderer is **68**, not the flat 64
+`VIEW_DISTANCE` this module's other gathers use. The gather uses 64, so a piston between 64 and 68
+blocks away is culled a little early. Left as-is deliberately rather than silently: a second
+per-renderer distance constant for four blocks of a two-tick animation is not worth the second table.
+
 ## How to change it
 
 ### Adding a block-entity type
@@ -1536,8 +1657,11 @@ Against the real 26-entry registration list (see above), not the issue's origina
   mesh was already baked and shared with the lectern. Still open within its scope: the nearest-player
   test uses the **local** player only, so a remote player standing at a visible table leaves its book
   shut.
+- **Piston head — landed**, including the client-side progress clock and the per-frame install (see
+  [Piston head](#piston-head) above). Open within its scope is a *server* gap, not a render one: our
+  own server produces no `moving_piston` block entity, so it draws against a real 26.2 server only.
 - Mob spawner (draws a miniature spinning entity inside the cage —
-  reuses full entity rendering, not a simple cuboid rig), piston head, brushable block,
+  reuses full entity rendering, not a simple cuboid rig), brushable block,
   decorated pot (`decorated_pot` atlas; its sides need **up to four independently textured sprites
   per instance** from NBT `sherds`, which the current `(model, texture)` single-texture-per-instance
   batch key cannot express as one instance — it would need decomposing into a plain base plus up to

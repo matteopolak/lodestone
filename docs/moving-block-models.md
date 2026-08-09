@@ -4,8 +4,8 @@
 
 The render path for a block's own geometry drawn somewhere other than its own cell —
 vanilla's `SubmitNodeCollector.submitMovingBlock`. It is a **seam with more than one
-intended producer**, not a falling-block feature: falling sand and gravel use it today,
-and `PistonHeadRenderer` needs exactly the same machinery.
+intended producer**, not a falling-block feature: falling sand and gravel use it, and so
+does `PistonHeadRenderer` — the piston head and the block it pushes.
 
 ## How it works
 
@@ -27,6 +27,21 @@ cuboid mesh at all — they pose existing *block models*. So they cannot go thro
 `lodestone_render::EntityPipeline` however entity-shaped they look, and that is why the
 piston head was left unbuilt when the block-entity renderers landed: the machinery it
 needed is this file.
+
+**That is also the cheap discriminator for any new block-entity renderer.** Ask whether
+the vanilla constructor calls `bakeLayer`. If it does, it owns a mesh and needs a cuboid
+rig in `lodestone-assets`. If it does not, it poses existing models, and it belongs either
+here (block models) or on the item path (item models — the campfire).
+
+### The two producers differ only in where their requests come from
+
+| producer | input | source |
+|---|---|---|
+| `merge_falling_blocks` | the `&[EntityDraw]` slice `render` is already handed | a **network entity** |
+| `merge_piston_heads` | `MovingPistonSource` | a **block entity**, polled like every other in `sources.rs` |
+
+Neither touches a pipeline, a bind group or a draw call. Both end at
+`merge_moving_block`.
 
 `gpu/world_items.rs` (dropped items, held items, campfire items) is the **precedent**
 for reaching the model pipeline from outside the terrain pass, not a place to put this.
@@ -94,19 +109,30 @@ Write a `merge_*` method beside `merge_falling_blocks` and call it from
 `prepare_moving_blocks`, sharing the same `combined` buffer. There is a comment marking
 the spot. You need no pipeline, no bind group, no buffer and no draw call.
 
-For **piston heads** specifically, the three things a producer must supply map cleanly:
+`merge_piston_heads` is the worked example of a second producer, and the seam needed no
+change to accept it — the added machinery was all on the *source* side: a `sources.rs`
+struct (`MovingPistonSource`), a `gpu.rs` field, a `state.rs` setter, a
+`block_entities.rs` gather, a per-tick clock, and one call site in `app/redraw.rs`.
 
-| `MovingBlock` field | piston head |
-|---|---|
-| `state_id` | `minecraft:piston_head` (or the pushed block's own state) |
-| `transform` | a translation along the push axis, interpolated by the block entity's `progress` |
-| `light` | the world sample at the head's cell |
+### The piston head, and the two things about it worth knowing
 
-What is genuinely **not** solved for pistons: there is no `MovingPistonSource` on
-`RenderState` yet, so a producer needs a polled source (the `sources.rs` idiom —
-`BlockEntitySource`/`CampfireSource` are the pattern) to learn which pistons are moving
-and how far. That is a `sources.rs` struct, a `state.rs` field, a setter, and one call
-site in the app wiring. The *geometry* half is done.
+`PistonHeadRenderer` is fully wired. Its own detail lives in
+[`block-entity-renderers.md`](./block-entity-renderers.md); two facts belong here because
+they are about this seam rather than about pistons:
+
+* **A block entity's pose is at its cell corner, an entity's is at its centre in x/z.**
+  So `piston_head_pose` has *no* `-0.5` shift where `falling_block_pose` must have one.
+  Copying the falling-block pose slides every piston head half a cell diagonally, and it
+  reads as a model-origin quirk. `the_piston_pose_is_not_the_falling_block_pose` is the
+  gate that keeps the two apart.
+* **A retracting source piston emits two requests, and only one is offset.** Vanilla's
+  `submit` pops the translated pose before submitting the base, so the head slides and
+  the base sits still. Folding both into one transform makes a sticky piston look like it
+  is eating itself.
+
+Culling uses a **two**-cell box around the block entity's cell, not the falling-block
+producer's one-cell slack: the offset displaces geometry a full cell in either direction
+along the push axis.
 
 One thing to revisit if a producer draws a model with a random per-position offset:
 `FallingBlockRenderer` passes `entity.getStartPos()` as `randomSeedPos` so the model does
@@ -167,3 +193,8 @@ crate has paid for nine times.
 * `EntityDraw::block_state` (`lodestone-shell`'s `entities.rs`) — the falling-block
   producer's input; see [`falling-blocks.md`](./falling-blocks.md) for how it gets there.
 * `gpu/sources.rs`'s `EntityLightSource` — the world light sample.
+* `gpu/sources.rs`'s `MovingPistonSource` plus `crate::block_entities::{PistonMoves,
+  moving_piston_spawns, moving_piston_seeds}` — the piston producer's input.
+* `lodestone_data::block_states::state_id` — how the piston gather resolves the
+  *synthesised* head states `PistonHeadRenderer` builds (see
+  [`block-entity-renderers.md`](./block-entity-renderers.md)).
