@@ -106,7 +106,7 @@
 
 use glam::{Mat4, Vec3};
 use lodestone_assets::fluid::{
-    FaceSet, FlowNeighbor, FluidGeometry, SideOverlay, bake_fluid, corner_height,
+    FaceSet, FlowNeighbor, FluidGeometry, SideOverlay, bake_fluid, corner_heights,
     flow_horizontal, neighbor_height,
 };
 use lodestone_assets::{BakedQuad, Direction, GuiLight};
@@ -1234,12 +1234,26 @@ pub fn mesh_fluids<V: FluidSectionView + ?Sized>(view: &V) -> FluidMeshes {
                 let kb = cell.kind_bits();
                 let self_h = neighbor_height_in(&grid, kb, xi, yi, zi);
                 let nh = |dx: i32, dz: i32| neighbor_height_in(&grid, kb, xi + dx, yi, zi + dz);
-                let corners = [
-                    corner_height(self_h, nh(-1, 0), nh(0, -1), nh(-1, -1)), // NW
-                    corner_height(self_h, nh(1, 0), nh(0, -1), nh(1, -1)),   // NE
-                    corner_height(self_h, nh(1, 0), nh(0, 1), nh(1, 1)),     // SE
-                    corner_height(self_h, nh(-1, 0), nh(0, 1), nh(-1, 1)),   // SW
-                ];
+                // `[NW, NE, SE, SW]`. This was four bare `corner_height` calls,
+                // which is `calculateAverageHeight` without the branch above it:
+                // `FluidRenderer.tesselate` sets every corner to `1.0` when the
+                // fluid's own rendered height already is, and only averages
+                // otherwise. A falling column has the same fluid above every cell,
+                // so it takes the short-circuit in vanilla and was taking the
+                // average here — `10 / 12` against the surrounding air. See
+                // `corner_heights` for the measurement and why it looked like a
+                // triangle rather than a band.
+                let corners = corner_heights(
+                    self_h,
+                    nh(0, -1),
+                    nh(0, 1),
+                    nh(1, 0),
+                    nh(-1, 0),
+                    nh(-1, -1),
+                    nh(1, -1),
+                    nh(1, 1),
+                    nh(-1, 1),
+                );
                 let flow = flow_horizontal(
                     fc.state.own_height(),
                     flow_neighbor_in(&grid, kb, xi, yi, zi, 0, -1),

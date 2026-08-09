@@ -8,8 +8,8 @@
 //! flow-angle used to rotate the flowing texture.
 
 use lodestone_assets::fluid::{
-    FlowNeighbor, FluidState, FluidTexture, corner_height, flow_angle, flow_horizontal,
-    neighbor_height, select_texture,
+    FlowNeighbor, FluidState, FluidTexture, corner_height, corner_heights, flow_angle,
+    flow_horizontal, neighbor_height, select_texture,
 };
 
 const SOURCE: f32 = 8.0 / 9.0;
@@ -87,6 +87,122 @@ fn corner_height_weights_tall_cells_heavily() {
         (weighted - expect).abs() < 1e-6,
         "got {weighted} want {expect}"
     );
+}
+
+/// The reported bug: a vertically falling column of water rendered with a gap in
+/// it, and the four corners must all be `1.0` rather than an average against the
+/// air beside the column.
+///
+/// The two hypotheses are computed here from arithmetic and they differ by
+/// `1/6` at this input, which is the whole reason it is the input:
+///
+/// * **right** — vanilla `FluidRenderer.tesselate` sees `heightSelf >= 1.0F` (the
+///   same fluid is directly above) and sets every corner to `1.0` without looking
+///   at a neighbour. The column is seamless.
+/// * **wrong** — average anyway. `add_weighted_height` gives the full self cell
+///   weight 10 and each air edge weight 1, so `10 / 12 = 0.8333`, and every block
+///   in the column renders a sixth short.
+///
+/// Both are asserted, so the gate states what it is discriminating instead of
+/// leaving it to be inferred. A "the gap got smaller" assertion passes under a
+/// partial fix and this does not.
+#[test]
+fn a_falling_column_renders_at_full_height_and_does_not_average_against_the_air() {
+    // The falling cell: same fluid above, air on all four sides and all four
+    // diagonals. `height_self` is 1.0 by `FlowingFluid.getHeight`'s hasSameAbove.
+    let corners = corner_heights(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    assert_eq!(
+        corners,
+        [1.0; 4],
+        "a falling column takes tesselate's heightSelf >= 1.0 short-circuit"
+    );
+
+    // The wrong hypothesis, evaluated at the same input so the two are on the
+    // record as genuinely different here. This is what the call site was doing.
+    let averaged = corner_height(1.0, 0.0, 0.0, 0.0);
+    let wrong = 10.0 / 12.0;
+    assert!(
+        (averaged - wrong).abs() < 1e-6,
+        "the averaging path gives {averaged}, expected {wrong} — if these ever \
+         coincide with 1.0 this gate has stopped discriminating"
+    );
+    assert!(
+        (corners[0] - averaged).abs() > 0.16,
+        "the two hypotheses must differ at this input, or it is not a test"
+    );
+}
+
+/// Why it looked like a *triangle* rather than a horizontal band.
+///
+/// Averaging does not shortfall uniformly. A solid neighbour contributes `-1.0`
+/// and `add_weighted_height` drops it from the average entirely, so the corner
+/// facing a wall divides by 11 while the corner facing open air divides by 12 —
+/// `0.909` against `0.833`. Two different heights on one quad is a sloped
+/// surface, and triangulating a sloped quad is what reads as a wedge.
+///
+/// With the short-circuit both corners are `1.0` and the surface is flat, which is
+/// the assertion; the wrong values are computed alongside it to pin the mechanism
+/// rather than describe it.
+#[test]
+fn a_falling_column_against_a_wall_is_flat_not_sloped() {
+    // West and its two diagonals are solid (-1.0); everything else is air.
+    let corners = corner_heights(1.0, 0.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0, -1.0);
+    assert_eq!(corners, [1.0; 4], "no slope: every corner is full");
+
+    // The wedge, as it was: NW (against the wall) and NE (against air) disagreed.
+    let nw = corner_height(1.0, -1.0, 0.0, -1.0);
+    let ne = corner_height(1.0, 0.0, 0.0, 0.0);
+    assert!((nw - 10.0 / 11.0).abs() < 1e-6, "NW was {nw}");
+    assert!((ne - 10.0 / 12.0).abs() < 1e-6, "NE was {ne}");
+    assert!(
+        (nw - ne).abs() > 0.07,
+        "the two corners of one quad really did differ — that difference is the \
+         triangle the player saw"
+    );
+}
+
+/// The control, and the reason the short-circuit cannot simply be "fluids are
+/// always full".
+///
+/// A lone water **source** with air above is `heightSelf = 8/9`, because
+/// `WaterFluid.Source.getAmount` is `8` and not `9` — so it does *not* take the
+/// short-circuit, and its corners must still be pulled down by the surrounding
+/// air. If this returned `1.0` the fix would have flattened every shoreline in the
+/// game, and no falling-column assertion above would have noticed.
+#[test]
+fn a_source_with_air_above_still_averages_and_is_not_flattened() {
+    let corners = corner_heights(SOURCE, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    let expect = SOURCE * 10.0 / 12.0;
+    for (i, h) in corners.iter().enumerate() {
+        assert!(
+            (h - expect).abs() < 1e-6,
+            "corner {i} is {h}, expected {expect} — the short-circuit must key on \
+             the same-fluid-above height, never on being a fluid at all"
+        );
+    }
+    assert!(
+        corners[0] < 1.0,
+        "a source under open sky is not a full cube"
+    );
+}
+
+/// A cell whose horizontal neighbours are themselves full columns already
+/// short-circuited before this change, via `corner_height`'s own
+/// `edge_a >= 1.0` arm.
+///
+/// This is the input the pre-existing coverage was built on, and it is why nothing
+/// caught the bug: `crates/lodestone-shell/tests/water_seam_convergence.rs` fills
+/// two whole columns with water, so every cell has water above **and** water on
+/// every side, and the old averaging path returned `1.0` anyway. The flaw was in
+/// the input data, not in any assertion — `CLAUDE.md`'s *world* species, the one
+/// that cannot be found by reading the test.
+#[test]
+fn a_cell_inside_a_full_body_of_water_was_already_correct() {
+    let corners = corner_heights(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+    assert_eq!(corners, [1.0; 4]);
+    // The same answer through the averaging path alone: this is the measurement
+    // that says the old code was right here and so an ocean fixture is blind.
+    assert_eq!(corner_height(1.0, 1.0, 1.0, 1.0), 1.0);
 }
 
 #[test]

@@ -25,15 +25,58 @@ We split it in two:
 
 - `lodestone_assets::fluid` owns the **math and the UV/winding layout** —
   `own_height = amount / 9`, `render_height`, `corner_height`'s weighted average,
-  `flow_horizontal` (vanilla `FlowingFluid.getFlow`), the flow angle, and
-  `bake_fluid`, which turns a resolved `FluidGeometry` into `BakedQuad`s. It is
-  pure and knows nothing about the world.
+  `corner_heights` (all four at once, see below), `flow_horizontal` (vanilla
+  `FlowingFluid.getFlow`), the flow angle, and `bake_fluid`, which turns a resolved
+  `FluidGeometry` into `BakedQuad`s. It is pure and knows nothing about the world.
 - `mesh_fluids` owns the **neighbourhood**: it fills in the four corner heights,
   the flow vector and the `FaceSet` by querying a `FluidSectionView`
   (`fluid_at` / `occludes_at` / `light_at` / `fluid_sprites`). The live
   implementation is `SnapshotFluidView` in
   `crates/lodestone-shell/src/mesher.rs`, reading real state ids out of the
   3×3×3 section snapshot.
+
+### Call `corner_heights`, never four `corner_height`s
+
+`FluidRenderer.tesselate` does **not** average unconditionally. It computes the
+fluid's own rendered height first and short-circuits every corner to `1.0` if that
+height already is:
+
+```text
+float heightSelf = this.getHeight(level, type, pos, blockState, fluidState);
+if (heightSelf >= 1.0F) { NE = NW = SE = SW = 1.0F; } else { ...average each... }
+```
+
+`heightSelf` reaches `1.0` only through `FlowingFluid.getHeight`'s `hasSameAbove`
+— **never** from a fluid's own amount, because `WaterFluid.Source.getAmount` is
+`8`, so even a source's `getOwnHeight` is `8/9`. `corner_heights` is that whole
+branch; `corner_height` is only `calculateAverageHeight` and is not the rule on its
+own.
+
+This was the reported "water flowing straight down has a triangular gap in it" bug.
+Every cell of a falling column has water above, so vanilla draws it at full height;
+averaging instead weights the full self cell 10 and each air edge 1 for
+`10/12 = 0.8333`, a sixth of a block short on **every** block of the column. It
+read as a triangle rather than a band because `add_weighted_height` *excludes* a
+solid neighbour (`-1.0`) instead of averaging it in, so a corner facing a wall came
+out `10/11 = 0.909` against `0.833` facing air — two heights on one quad is a
+sloped surface, and triangulating a slope is the wedge.
+
+Two things about how it survived, both worth more than the fix:
+
+- **Both halves were unit-tested and both were correct.** `render_height` had the
+  `hasSameAbove` short-circuit and `corner_height` had the average; the rule that
+  composes them had no symbol, so there was nothing to point a test at. That is why
+  the fix is a named function rather than an inline conditional at the call site.
+- **No scene in the corpus could exercise it.** `water_seam_convergence.rs` fills
+  two whole columns with water, and `fluid_mesh_identity_gate.rs`'s
+  `surface`/`water_only` scenes are full slabs — everywhere in them a rim cell's
+  horizontal neighbour is either another full column (`1.0`) or a full occluder
+  (`-1.0`, excluded), and `corner_height`'s own arms already returned `1.0` for
+  both. The flaw was in the input data, not in any assertion: `CLAUDE.md`'s *world*
+  species. `crates/lodestone-render/tests/fluid_falling_column_gate.rs` is the
+  missing input — an isolated one-cell column with air beside it — and it is
+  hermetic, because the load-bearing fact is geometry rather than anything the jar
+  reports.
 
 ### The neighbourhood is resolved once, into a padded grid (issue #542)
 
@@ -298,12 +341,14 @@ documented boundary of this feature rather than an open TODO.
 
 - **Closed — the up face is no longer culled by a solid block above.**
   `mesh_fluids`'s `up_occluded` now matches `isFaceOccludedByState`'s
-  `Shapes.block()` fast path exactly: `direction != Direction.UP || height ==
-  1.0F` (`FluidRenderer.java:38`) only culls the top face when every corner
-  height is already `1.0`, which needs a same-fluid column stacked one cell
+  `Shapes.block()` fast path exactly: `isFaceOccludedByState`'s
+  `direction != Direction.UP || height == 1.0F` only culls the top face when every
+  corner height is already `1.0`, which needs a same-fluid column stacked one cell
   short of the neighbour — never true for an ordinary source surrounded by air,
-  whose corners sit at `8/9`. Water under stone now draws its surface into the
-  `1/9` gap, matching vanilla. What's *not* ported is the `else` branch below
+  whose corners sit *below* `8/9` (`(8/9 · 10) / 12 = 0.74`; the `8/9` is the
+  source's own height, not its corners after averaging). Water under stone now
+  draws its surface into the gap, matching vanilla.
+  What's *not* ported is the `else` branch below
   the fast path (a partial-shape neighbour occluding the top face) — folded
   into the partial-occluders gap below, since it needs the same voxel-shape
   machinery.
