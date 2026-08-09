@@ -314,6 +314,15 @@ impl WindowApp {
             render.set_lectern_source(f);
         }
 
+        // Campfire cooking items. Installed beside the others but consumed by a
+        // different pass: a campfire's renderer draws item models, not a cuboid
+        // rig, so this reaches `prepare_item_geometry` rather than
+        // `prepare_block_entities`. An unset source is not a hole — the fire and
+        // logs are real block models — it is a campfire that never cooks anything.
+        if let Some(f) = self.sim.campfire_source() {
+            render.set_campfire_source(f);
+        }
+
         // Filled maps (issue #184). This is the hop that turns the `SessionMaps`
         // fold from an F3 readout into the picture itself — the palette, the
         // per-map texture and the held/framed quads were all landed with no live

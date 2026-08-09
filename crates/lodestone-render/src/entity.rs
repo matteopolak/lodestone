@@ -1957,6 +1957,37 @@ pub fn dropped_item_mesh(
     mesh_item_quads_with_light(quads, pose, gui_light, light)
 }
 
+/// Mesh one campfire's cooking item into a world-space [`ModelMesh`], for the
+/// same model-pipeline draw [`dropped_item_mesh`] feeds.
+///
+/// The placement is [`campfire_item_matrix`](crate::block_entity::campfire_item_matrix)
+/// — a pure port of `CampfireRenderer.submit`'s pose stack — composed with the
+/// item's own `display.fixed` on the right, because that is where vanilla applies
+/// the `ItemTransform`: `ItemStackRenderState.LayerRenderState.submit` calls
+/// `applyTransform` *after* the renderer's own pushes. Composing it on the left
+/// instead would rotate the campfire's corner offset by the item's display
+/// rotation, which for a food sprite (`fixed` is a `180°` Y turn on most of them)
+/// mirrors all four items into the wrong corners while still looking like four
+/// items on a campfire.
+///
+/// `fixed` is `display.get(DisplaySlot::Fixed)` — vanilla resolves a campfire's
+/// stack in `ItemDisplayContext.FIXED`, the item-frame context, **not** `GROUND`.
+/// That is the one thing this does not share with the drop path.
+#[must_use]
+pub fn campfire_item_mesh(
+    quads: &[BakedQuad],
+    gui_light: GuiLight,
+    fixed: &DisplayTransform,
+    pos: [i32; 3],
+    facing_yaw_deg: f32,
+    slot: usize,
+    light: u8,
+) -> ModelMesh {
+    let pose = crate::block_entity::campfire_item_matrix(pos, facing_yaw_deg, slot)
+        * display_matrix(fixed);
+    mesh_item_quads_with_light(quads, pose, gui_light, light)
+}
+
 /// [`mesh_item_quads`] followed by the world-light override both
 /// [`dropped_item_mesh`] and [`held_item_mesh`] need: the baked geometry nails
 /// every vertex to [`GUI_ITEM_LIGHT`](crate::GUI_ITEM_LIGHT) (an inventory slot

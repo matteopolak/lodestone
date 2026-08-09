@@ -248,6 +248,23 @@ impl Sim {
         Some(move |eye: glam::Vec3| crate::block_entities::lectern_spawns(&handle, eye))
     }
 
+    /// This frame's campfire cooking items, for
+    /// [`RenderState::set_campfire_source`](crate::gpu::RenderState::set_campfire_source).
+    ///
+    /// Clock-free like [`Self::lectern_source`]: `CampfireRenderer` has no
+    /// animation of any kind, so there is nothing a partial tick could feed. The
+    /// per-frame install is [`Self::skull_source`]'s reason only — a source that
+    /// outlived a disconnect would hand out spawns from a dead world's handle.
+    #[must_use]
+    pub fn campfire_source(
+        &self,
+    ) -> Option<
+        impl Fn(glam::Vec3) -> Vec<lodestone_render::CampfireItemSpawn> + Send + Sync + 'static,
+    > {
+        let handle = self.net.as_ref()?.shared_handle();
+        Some(move |eye: glam::Vec3| crate::block_entities::campfire_spawns(&handle, eye))
+    }
+
     /// This frame's banners, for
     /// [`RenderState::set_banner_source`](crate::gpu::RenderState::set_banner_source).
     ///

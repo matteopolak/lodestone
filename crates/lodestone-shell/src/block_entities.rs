@@ -912,6 +912,182 @@ pub fn lectern_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<LecternSpawn> {
     out
 }
 
+/// The `facing` yaw of a campfire block, or `None` for any other block.
+///
+/// Both campfire blocks count: `soul_campfire` has the identical block entity,
+/// the identical four cooking slots and the identical renderer registration — the
+/// only difference is the flame's colour, which lives in the *block* model and
+/// therefore nowhere near this path.
+#[must_use]
+fn campfire_facing_yaw(state_id: u32) -> Option<f32> {
+    let name = lodestone_data::block_states::block_name(state_id)?;
+    if name != "minecraft:campfire" && name != "minecraft:soul_campfire" {
+        return None;
+    }
+    let props = lodestone_data::block_states::properties(state_id)?;
+    props
+        .iter()
+        .find(|(name, _)| *name == "facing")
+        .and_then(|(_, value)| horizontal_facing_yaw(value))
+}
+
+/// The occupied cooking slots in a campfire's NBT, as `(slot, item id)`.
+///
+/// `ContainerHelper.saveAllItems` writes an `Items` list of
+/// `ItemStackWithSlot.CODEC`, i.e. `{Slot: <unsigned byte>, id: <item id>,
+/// count: <int>}` — so the slot is an explicit field and **the list index is not
+/// the slot**. A campfire holding one steak in its third slot writes a
+/// single-element list with `Slot: 2`; reading the index instead would cook it in
+/// the wrong corner, and with a full campfire the two agree, so the bug hides
+/// until a partial one.
+///
+/// `count` is not read: `CampfireRenderer` draws one copy per slot regardless
+/// (a campfire slot holds at most one item anyway).
+///
+/// An entry whose `Slot` is out of range is dropped rather than clamped, matching
+/// `ItemStackWithSlot.isValidInContainer`.
+#[must_use]
+fn campfire_items(nbt: &lodestone_core::Nbt) -> Vec<(usize, lodestone_assets::ResourceLocation)> {
+    use lodestone_core::Nbt;
+
+    let Nbt::Compound(fields) = nbt else {
+        return Vec::new();
+    };
+    let Some(Nbt::List { elements, .. }) =
+        fields.iter().find(|(name, _)| name == "Items").map(|(_, v)| v)
+    else {
+        return Vec::new();
+    };
+    elements
+        .iter()
+        .filter_map(|entry| {
+            let Nbt::Compound(entry) = entry else {
+                return None;
+            };
+            let field = |key: &str| entry.iter().find(|(name, _)| name == key).map(|(_, v)| v);
+            // `ExtraCodecs.UNSIGNED_BYTE` — an `Nbt::Byte`, not an int.
+            let slot = match field("Slot") {
+                Some(Nbt::Byte(slot)) => usize::try_from(*slot).ok()?,
+                // Vanilla's `optionalAlwaysPresentFieldOf(.., "Slot", 0)`
+                // defaults a missing slot to zero rather than dropping the item.
+                None => 0,
+                _ => return None,
+            };
+            if slot >= lodestone_render::CAMPFIRE_SLOTS {
+                return None;
+            }
+            let Some(Nbt::String(id)) = field("id") else {
+                return None;
+            };
+            Some((slot, id.parse().ok()?))
+        })
+        .collect()
+}
+
+/// Every campfire position within [`VIEW_DISTANCE`], paired with its block state
+/// and stored item list.
+///
+/// A third NBT-reading candidate gather beside [`sign_candidates`] and
+/// [`banner_candidates`], for the same reason both of those exist:
+/// [`chest_candidates`] discards `be.nbt`, and a campfire's *entire* appearance
+/// from this renderer's point of view is in there — the fire and the logs are
+/// block-model geometry the terrain mesher already draws.
+#[must_use]
+fn campfire_candidates(
+    world: &World,
+    chunks: impl IntoIterator<Item = ChunkPos>,
+    eye: Vec3,
+) -> Vec<([i32; 3], u32, Vec<(usize, lodestone_assets::ResourceLocation)>)> {
+    let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
+    let mut candidates = Vec::new();
+    for pos in chunks {
+        let Some(chunk) = world.get(pos) else {
+            continue;
+        };
+        for be in &chunk.block_entities {
+            let x = pos.x * 16 + i32::from(be.rel_x);
+            let z = pos.z * 16 + i32::from(be.rel_z);
+            let y = i32::from(be.y);
+            let centre = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+            if centre.distance_squared(eye) > cutoff {
+                continue;
+            }
+            let state_id = chunk
+                .column
+                .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+            // The NBT parse is behind the block-name test, unlike the banner
+            // gather's: every block entity in range would otherwise walk its
+            // `Items` list, and chests and shulker boxes both have one.
+            if campfire_facing_yaw(state_id).is_none() {
+                continue;
+            }
+            candidates.push(([x, y, z], state_id, campfire_items(&be.nbt)));
+        }
+    }
+    candidates
+}
+
+/// Every campfire cooking item to draw this frame — one
+/// [`CampfireItemSpawn`](lodestone_render::CampfireItemSpawn) per **occupied**
+/// slot, so a lit but empty campfire yields none.
+///
+/// Unlike every other gather in this module this feeds the *model* pipeline
+/// rather than the entity one: `CampfireRenderer` owns no mesh and no sheet, only
+/// four item poses. See `lodestone_render::campfire_item_matrix`.
+///
+/// No clock and no partial tick — vanilla's `CampfireRenderer` has no animation
+/// at all (the flame flicker is the block model's animated texture, and the
+/// `CookingTimes` in the NBT drive nothing on the client). Installed per frame
+/// anyway, for `Sim::skull_source`'s reason.
+#[must_use]
+pub fn campfire_spawns(
+    handle: &SharedHandle,
+    eye: Vec3,
+) -> Vec<lodestone_render::CampfireItemSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+
+    let candidates = {
+        let world = store.read();
+        campfire_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
+
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+
+    let mut out = Vec::new();
+    for (block, state_id, items) in candidates {
+        let Some(facing_yaw_deg) = campfire_facing_yaw(state_id) else {
+            continue;
+        };
+        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        for (slot, item) in items {
+            out.push(lodestone_render::CampfireItemSpawn {
+                pos: block,
+                facing_yaw_deg,
+                slot,
+                item,
+                light,
+            });
+        }
+    }
+    out.sort_by_key(|s| (s.pos, s.slot));
+    out
+}
+
 /// Resolves a block's registry path into which of vanilla's two sign
 /// renderers applies — `None` for anything that is not a sign at all.
 ///

@@ -8023,3 +8023,50 @@ Two smaller ones. `min(0, x)` is not `0`: `Entity.clearFire` preserves a negativ
 zeroing it lets a fire-immune entity re-ignite a tick early. And `on_fire.json`'s `message_id` is
 **`onFire`** — camelCase in a snake_case directory, the third instance of the trap §12's `outsideBorder`
 note already records, and the existing jar-comparison gate caught it for free.
+
+**12.161 The renderer that draws nothing it is named after: a brief's own hazard list pointed at the
+wrong subsystem, and the tell was in the class declaration.** The campfire block-entity renderer was
+handed forward with the note *"vanilla is not colour-managed — tint and shade multiply in gamma space.
+Relevant to the campfire's fire texture."* That is a true rule about the wrong file.
+`CampfireRenderer` has **no** texture, no `bakeLayer` call, no `SpriteId` and no model field: its whole
+`submit` is four `ItemStackRenderState.submit` calls at four poses, and the fire, the logs and the smoke
+are the *block* model the terrain mesher already draws. Every step of this document's own
+"adding a block-entity type" recipe — model builder, texture stem, `*Spawn` plus `resolve_*` — is
+inapplicable, and following it would have produced a sheet stem for a PNG that is not on that path and
+an entry in a preload list whose count three pixel gates assert.
+
+The cheap check that separates the two shapes, and it costs one grep: **does the vanilla renderer's
+constructor call `bakeLayer`?** `CampfireRenderer`'s does not, and neither does `PistonHeadRenderer`'s
+(which draws whole *block* models through `submitMovingBlock`). Both belong in the item/model pass, not
+the entity pipeline. The `_ =>`-arm rule generalises here: a source added to
+`prepare_block_entities`' emptiness condition contributes a `BlockEntityBatch`, and a campfire has none,
+so adding it there would have made the condition read as satisfied while nothing drew.
+
+Three measured facts from the port itself:
+
+- **`0.44921875`, not `0.4375`.** The item lift is `115/256`, one `1/256` above the campfire block
+  model's own `7/16` top face — the margin that keeps a flat food sprite from z-fighting the log.
+  Rounding it to the block-model number is the kind of tidying that produces a shimmer nobody can
+  attribute.
+- **The item's `display.fixed` composes on the right, and the context is `FIXED`, not `GROUND`.**
+  `applyTransform` runs *after* the renderer's own pose-stack pushes, so display-on-the-left rotates
+  the corner offset by the item's own display rotation and mirrors all four items into the wrong
+  corners — while still looking like four items on a campfire. And every other world item on that pass
+  resolves in `GROUND`, which is exactly why `FIXED` is easy to lose.
+- **`Items` carries an explicit `Slot` and omits empty slots.** A campfire holding one steak in its
+  third slot writes a *one*-element list with `Slot: 2`. The list index agrees with the truth on a full
+  campfire and is wrong on a partial one, so the bug hides behind the fixture you would build first.
+  `Slot` is an `Nbt::Byte` (`ExtraCodecs.UNSIGNED_BYTE`), and a missing one defaults to `0` rather than
+  dropping the item.
+
+The gate that holds the pose predicts all four slot origins from the pose stack rather than asserting
+"four items are somewhere on the campfire" — that weaker claim is satisfied by all four stacked in one
+corner, which is precisely what dropping the `(slot + facing.get2DDataValue()) % 4` term produces. The
+neuter was watched: `facing_2d * 0` reddens the facing test with
+`facing 90: slot 0 at Vec3(0.1875, 70.44922, 0.1875) but slot 1 of a south campfire is at
+Vec3(0.8125, 70.44922, 0.1875)`.
+
+Also re-derived rather than trusted, because the ledger for this issue has been wrong twice: `CONDUIT`
+**is** registered, between `SHULKER_BOX` and `BELL`, so it is in scope and simply unbuilt. Count the
+`register(...)` calls in `BlockEntityRenderers.java`; do not count a doc's summary of them, including
+this one's.

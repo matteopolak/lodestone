@@ -38,7 +38,7 @@ use super::terrain::{
     anim_slots_at,
 };
 use super::{
-    BannerSource, BellSource, BlockEntityRenderer, BlockEntitySource,
+    BannerSource, BellSource, BlockEntityRenderer, BlockEntitySource, CampfireSource,
     DEFAULT_RENDER_DISTANCE_CHUNKS, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
     HandSwingSource, LecternSource, MainHandSource, MapSource, NameTagRenderer, OutlineRenderer,
@@ -304,6 +304,8 @@ impl RenderState {
             banner_source: BannerSource::default(),
             // Likewise `set_lectern_source`.
             lectern_source: LecternSource::default(),
+            // Likewise `set_campfire_source`.
+            campfire_source: CampfireSource::default(),
             sign_text,
             // No signs until the shell installs a world source; see
             // `set_sign_source`.
@@ -1022,6 +1024,25 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::LecternSpawn> + Send + Sync + 'static,
     ) {
         self.lectern_source = LecternSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's campfire cooking items.
+    ///
+    /// Clock-free like [`set_lectern_source`](Self::set_lectern_source), and for a
+    /// stronger reason: `CampfireRenderer` has no animation whatsoever — the flame
+    /// flicker belongs to the block model's animated texture, and the NBT's
+    /// `CookingTimes` drive nothing on the client.
+    ///
+    /// The one asymmetry worth knowing: this feeds
+    /// [`prepare_item_geometry`](Self::prepare_item_geometry) and the model
+    /// pipeline rather than `prepare_block_entities` and the entity pipeline, so
+    /// a campfire item is textured from the *block atlas* exactly like the same
+    /// item lying on the ground.
+    pub fn set_campfire_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::CampfireItemSpawn> + Send + Sync + 'static,
+    ) {
+        self.campfire_source = CampfireSource(Some(Box::new(f)));
     }
 
     /// Install the source for this frame's filled-map pictures (issue #184).

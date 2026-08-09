@@ -109,6 +109,15 @@ pub struct RenderStats {
     /// `entities_drawn`, and a silently-broken equipment chain would otherwise
     /// look exactly like a server that sent no equipment.
     pub held_items_drawn: usize,
+    /// Campfire cooking items drawn this frame — one per **occupied** slot, so a
+    /// campfire with two steaks on it counts 2 and a lit but empty one counts 0.
+    ///
+    /// Its own counter rather than folded into
+    /// [`item_drops_drawn`](Self::item_drops_drawn), and the reason is specific:
+    /// a campfire is the one block entity whose renderer contributes nothing to
+    /// `block_entities_drawn` either, so without this a broken campfire gather is
+    /// invisible in **both** counters at once.
+    pub campfire_items_drawn: usize,
     /// Filled-map pictures drawn this frame — the held one counts 1, plus one per
     /// item frame carrying a map (issue #184).
     ///

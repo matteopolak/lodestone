@@ -65,9 +65,9 @@ pub use occlusion::TerrainOcclusion;
 pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
 pub use sources::{
-    BannerSource, BellSource, BlockEntitySource, EntityLightSource, HandSwingSource, LecternSource,
-    MainHandSource, MapSource, OutlineShapeSource, ShulkerSource, SignSource, SkullSource,
-    SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
+    BannerSource, BellSource, BlockEntitySource, CampfireSource, EntityLightSource, HandSwingSource,
+    LecternSource, MainHandSource, MapSource, OutlineShapeSource, ShulkerSource, SignSource,
+    SkullSource, SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
 };
 pub use stats::RenderStats;
 
@@ -347,6 +347,12 @@ pub struct RenderState {
     /// block models, so an unset source leaves a complete but empty lectern
     /// rather than a hole.
     lectern_source: LecternSource,
+    /// Where this frame's campfire cooking items come from. Unlike every other
+    /// block-entity source here this is consumed by the **item** geometry pass
+    /// and not by `prepare_block_entities`, because a campfire's renderer owns no
+    /// mesh: the fire and the logs are block models the terrain pass already
+    /// draws, so an unset source leaves a complete campfire cooking nothing.
+    campfire_source: CampfireSource,
     /// Where this frame's filled-map pictures come from (issue #184). Same "unset
     /// means draw nothing" convention as [`Self::skull_source`], and here the
     /// degradation is that a held `filled_map` falls back to its ordinary flat item
