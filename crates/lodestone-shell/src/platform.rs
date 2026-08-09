@@ -98,3 +98,91 @@ pub fn epoch_duration() -> std::time::Duration {
 
     now.duration_since(epoch).unwrap_or_default()
 }
+
+/// The browser's asset byte source.
+///
+/// # What it is
+///
+/// Native resolves assets by *path*: `resources.rs` walks for a pack root and
+/// `std::fs::read`s `client.jar` and `generated/reports/blocks.json` out of it. A
+/// browser has no filesystem — measured: `std::fs::read` there returns
+/// `Err(Unsupported)`, so the native path does not crash, it just reports "no
+/// vanilla pack found" and falls back to the demo palette. That fallback is
+/// *visible* (it banners), which is why this seam is an addition rather than a
+/// rescue.
+///
+/// The important observation is that **only the byte acquisition differs**.
+/// `lodestone-assets`' `ResourceSource` is a synchronous, byte-based trait, and
+/// `ZipSource::from_bytes` builds a fully in-memory pack; `lodestone-render`'s
+/// `BlocksJsonRegistry::from_slice` is likewise ungated. So the browser crosses the
+/// filesystem wall exactly once, asynchronously, at the byte source — and every
+/// parser, atlas builder and model baker downstream runs unchanged. That is the
+/// same shape `web/`'s earlier feasibility spike proved with a trimmed pack.
+///
+/// # How it works
+///
+/// `web/` `fetch`es the bytes before it starts the app, calls [`install`] once, and
+/// `resources.rs` reads them back through [`bundle`]. It is a `OnceLock` rather than
+/// a parameter threaded through `Config` because the consumers are ~20 lazily-called
+/// `load_*` functions spread across `resources.rs`, each of which independently
+/// re-resolves the pack root today; giving them a process-wide byte source is a
+/// strictly smaller change than giving all of them a new argument, and it matches
+/// what the native side already does (`SELECTED_PACKS` is a process-wide `RwLock`
+/// for the same reason).
+///
+/// # How to change it
+///
+/// If you need a third asset blob, add a field — do **not** add a second
+/// `OnceLock`, or the "were the assets installed?" question stops having one
+/// answer. [`install`] deliberately reports whether it won the race instead of
+/// silently ignoring a second call: two different bundles installed in one session
+/// is a bug in the caller, and one that would otherwise present as "the textures
+/// are from the wrong pack".
+#[cfg(target_arch = "wasm32")]
+pub mod assets {
+    use std::sync::OnceLock;
+
+    /// The asset blobs a browser session needs, as raw bytes.
+    ///
+    /// These are the two files `resources.rs`' native `try_vanilla` reads off
+    /// disk, in the same roles: the jar is the `ResourceSource` (textures, models,
+    /// blockstates, lang), and the report is the block-state id table the atlas and
+    /// the model baker are built against.
+    #[derive(Debug)]
+    pub struct Bundle {
+        /// `client.jar` — the renderable corpus, consumed by `ZipSource::from_bytes`.
+        pub client_jar: Vec<u8>,
+        /// `generated/reports/blocks.json`, consumed by
+        /// `BlocksJsonRegistry::from_slice`.
+        pub blocks_report: Vec<u8>,
+    }
+
+    static BUNDLE: OnceLock<Bundle> = OnceLock::new();
+
+    /// Installs the session's asset bytes. Returns `Err` with the already-installed
+    /// bundle's sizes if one was installed first.
+    ///
+    /// # Errors
+    /// Returns `Err(String)` when a bundle is already installed — a caller bug,
+    /// reported rather than swallowed, because the symptom of swallowing it is a
+    /// world rendered from the wrong pack with nothing in the log.
+    pub fn install(bundle: Bundle) -> Result<(), String> {
+        let jar = bundle.client_jar.len();
+        let report = bundle.blocks_report.len();
+        BUNDLE.set(bundle).map_err(|_| {
+            let live = BUNDLE.get().expect("set failed, so one is installed");
+            format!(
+                "asset bundle already installed ({} B jar, {} B report); \
+                 refused to replace it with {jar} B / {report} B",
+                live.client_jar.len(),
+                live.blocks_report.len(),
+            )
+        })
+    }
+
+    /// The installed bytes, or `None` when `web/` has not called [`install`] yet.
+    #[must_use]
+    pub fn bundle() -> Option<&'static Bundle> {
+        BUNDLE.get()
+    }
+}

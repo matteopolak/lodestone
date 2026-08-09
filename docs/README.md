@@ -180,6 +180,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   camera-facing billboard textured from a random **quarter** of its block's
   `#particle` sprite, tinted by a per-state colour, and shaded by the light at its
   cell. Three layers own the parts:
+- [Browser shell port](./browser-shell-port.md) — The work of making `web/` run the
+  **real `lodestone-shell`** — the same menu, the same `Sim`, the same renderer the
+  native binary uses — instead of a separate feasibility-spike application with its
+  own `main`. This document is the hazard census that the port is driven from: for
+  each way the shell depends on an operating system, which files are involved, what
+  was actually *measured* about the hazard, and the chosen disposition (**gate**,
+  **replace with a seam**, or **delete the need**).
 - [Bubble columns](./bubble-columns.md) — The vertical impulse a `bubble_column`
   block applies to the player: soul sand pushes you up (an elevator), a magma block
   drags you down (a drain). Issue #199.

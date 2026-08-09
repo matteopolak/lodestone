@@ -17,8 +17,14 @@ use lodestone_assets::{
 };
 use lodestone_render::{
     BlockAtlas, BlockModels, EntityModelSet, GuiAtlas, ScreenEffectRenderer, SkyRenderer,
-    blocks_json_registry, entity_texture_candidates,
+    entity_texture_candidates,
 };
+// The *path*-taking loader is `cfg(not(wasm32))` in `lodestone-render` (it is
+// `std::fs`-based and confined to its own gated file); the bytes-taking
+// `BlocksJsonRegistry::from_slice` it wraps is not. So the browser arm below needs
+// no new render-crate API — only bytes.
+#[cfg(not(target_arch = "wasm32"))]
+use lodestone_render::blocks_json_registry;
 
 use crate::blocks::{DemoClassifier, ShellClassifier};
 
@@ -104,32 +110,55 @@ impl BlockResources {
     /// Errors are stringified with the offending path so the fallback banner
     /// names the fix.
     fn try_vanilla() -> Result<(BlockAtlas, Option<Language>), String> {
-        let root = asset_root().ok_or_else(|| {
-            "no vanilla resource pack found — set LODESTONE_ASSETS to a pack root \
-             containing client.jar + generated/reports/blocks.json (live world uses \
-             the demo palette until then)"
-                .to_string()
-        })?;
-        let jar = root.join("client.jar");
-        let report = root.join("generated/reports/blocks.json");
+        // Browser: the bytes were `fetch`ed and installed by `web/` before the app
+        // started. Only the *acquisition* differs — `ZipSource::from_bytes` and
+        // `BlocksJsonRegistry::from_slice` are the same parsers the native arm
+        // below reaches, so everything downstream of these two `let`s is shared.
+        // See `crate::platform::assets`.
+        #[cfg(target_arch = "wasm32")]
+        let (bytes, registry) = {
+            let bundle = crate::platform::assets::bundle().ok_or_else(|| {
+                "no asset bundle installed — a browser has no filesystem to scan, so \
+                 web/ must fetch client.jar + generated/reports/blocks.json and call \
+                 lodestone::platform::assets::install() before app::run (live world \
+                 uses the demo palette until then)"
+                    .to_string()
+            })?;
+            let registry =
+                lodestone_render::BlocksJsonRegistry::from_slice(&bundle.blocks_report)
+                    .map_err(|e| format!("load blocks.json bytes: {e}"))?;
+            (bundle.client_jar.clone(), registry)
+        };
 
-        let bytes = std::fs::read(&jar).map_err(|e| format!("read {}: {e}", jar.display()))?;
-        let zip =
-            ZipSource::from_bytes(bytes).map_err(|e| format!("open {}: {e}", jar.display()))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let (bytes, registry) = {
+            let root = asset_root().ok_or_else(|| {
+                "no vanilla resource pack found — set LODESTONE_ASSETS to a pack root \
+                 containing client.jar + generated/reports/blocks.json (live world uses \
+                 the demo palette until then)"
+                    .to_string()
+            })?;
+            let jar = root.join("client.jar");
+            let report = root.join("generated/reports/blocks.json");
+            let bytes = std::fs::read(&jar).map_err(|e| format!("read {}: {e}", jar.display()))?;
+            let registry = blocks_json_registry(&report)
+                .map_err(|e| format!("load {}: {e}", report.display()))?;
+            (bytes, registry)
+        };
+
+        let zip = ZipSource::from_bytes(bytes).map_err(|e| format!("open client.jar: {e}"))?;
         // The user's selected packs sit on top of the built-in jar (issue #415),
         // so a pack that ships `assets/minecraft/textures/block/**` changes the
         // world's appearance from this session on. This is the block atlas' own
         // stack, not a shared one — see `selected_pack_sources`' doc.
         let manager = build_pack_stack(Box::new(zip));
-        let registry =
-            blocks_json_registry(&report).map_err(|e| format!("load {}: {e}", report.display()))?;
         let atlas = BlockAtlas::build(&manager, &registry)
-            .map_err(|e| format!("build atlas from {}: {e}", root.display()))?;
+            .map_err(|e| format!("build atlas from the vanilla pack: {e}"))?;
         // Bake the per-state model geometry (cross-plants, slabs, stairs,
         // translucency) against the same registry and attach it, so the model
         // render path resolves state ids to real quads instead of full cubes.
         let models = BlockModels::build(&manager, &registry)
-            .map_err(|e| format!("build models from {}: {e}", root.display()))?;
+            .map_err(|e| format!("build models from the vanilla pack: {e}"))?;
         tracing::info!(
             target: "assets",
             state_count = models.state_count(),
@@ -331,6 +360,23 @@ pub fn scan_resource_packs_in(dir: &Path) -> Vec<DiscoveredPack> {
 
 /// Opens one discovered pack as a [`ResourceSource`], warning on failure.
 fn open_pack_source(path: &Path, kind: PackKind) -> Option<Box<dyn ResourceSource>> {
+    // Browser: neither variant can exist. `DirectorySource` and `ZipSource::open`
+    // are both `cfg(not(wasm32))` in `lodestone-assets` because they read paths, and
+    // there is nothing here to substitute — a user-selected pack is a *file the user
+    // picked off their disk*, and `scan_resource_packs` cannot enumerate one either
+    // (`read_dir` returns `Err(Unsupported)`), so this is unreachable rather than
+    // merely unsupported. Browser resource packs would arrive as bytes through a
+    // file input or a `fetch`, i.e. through `platform::assets`, not through here.
+    #[cfg(target_arch = "wasm32")]
+    {
+        tracing::debug!(
+            target: "assets",
+            "ignoring pack {} ({kind:?}): a browser has no pack files on disk",
+            path.display(),
+        );
+        return None;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     match kind {
         PackKind::Directory => match lodestone_assets::DirectorySource::new(path) {
             Ok(s) => Some(Box::new(s) as Box<dyn ResourceSource>),

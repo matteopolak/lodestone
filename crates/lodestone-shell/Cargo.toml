@@ -123,10 +123,15 @@ lodestone-net = { workspace = true }
 # flow and the keychain-backed store, neither of which `lodestone-client`
 # exposes (it only consumes an already-authenticated `Session`).
 #
-# **Native-only**, in the target section below, for the same reason
-# `lodestone-client` gates its own edge: the device-code flow needs a real HTTP
-# client and an OS keychain, and neither has a wasm32 story. The browser build
-# therefore has offline identity only.
+# **Unconditional, not native-only** — the first attempt at the browser build put
+# this in the `cfg(not(wasm32))` section by analogy with `lodestone-client`'s edge,
+# and that was wrong: this crate is already target-split internally and compiles
+# clean for wasm32 (verified), exposing its device-free half — `AuthError`,
+# `server_hash`, and the `metadata`/`paths` modules the account switcher's UI state
+# is built out of. Only the sign-in flow (`login`, `flow`, `store`, `texture`)
+# is gated, over there rather than here. Gating the whole crate cost 27 errors
+# across five shell files for want of two plain serde structs.
+lodestone-auth = { workspace = true }
 
 # **`lodestone-autopilot` is deliberately NOT a dependency here, and must not
 # become one — not even `optional = true` behind a feature.** It is a
@@ -193,8 +198,6 @@ pollster = { workspace = true }
 memory-stats = "1"
 # `level.dat` for the singleplayer save list — see the long note above.
 lodestone-anvil = { path = "../lodestone-anvil" }
-# Microsoft device-code sign-in and multi-account storage — see the note above.
-lodestone-auth = { workspace = true }
 # `menu/accounts.rs` builds its own short-lived `reqwest::Client` to drive the
 # device-code/refresh calls interactively from the account-switcher screen
 # (the same crate `lodestone-auth`'s own chain runs on).

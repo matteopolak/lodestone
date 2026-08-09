@@ -56,11 +56,27 @@ pub mod cache;
 pub mod flow;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod login;
-#[cfg(not(target_arch = "wasm32"))]
+/// The account roster (`profiles.json`): which accounts exist, their display
+/// names, and which one is selected.
+///
+/// **Not `cfg`-gated, unlike its neighbours here.** It is `serde` + `uuid` +
+/// `std::path` with no HTTP client, no keychain and no runtime — it was gated only
+/// because the whole native block was written as one unit. `lodestone-shell`'s
+/// account-switcher screen names [`AccountProfile`] and [`AccountsMetadata`]
+/// throughout its UI *state*, so gating the types (rather than the sign-in flow
+/// that needs a network) forced the browser build of that screen to fail with 27
+/// errors for want of two plain structs. Its `std::fs` load/save degrade to
+/// `Err(Unsupported)` on wasm32 — measured, not assumed — which surfaces as an
+/// empty roster: the correct browser answer, since there is no Microsoft sign-in
+/// there to populate one.
 pub mod metadata;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod migrate;
-#[cfg(not(target_arch = "wasm32"))]
+/// Where account, options and server-list files live.
+///
+/// Not gated, for the same reason [`metadata`] is not: `PathBuf` construction over
+/// `std::env::var_os`, which on wasm32 simply yields `None` for every variable and
+/// falls through to the same default it would on a machine with no `HOME`.
 pub mod paths;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod store;
@@ -86,7 +102,6 @@ pub use flow::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use login::{CachedSessionOutcome, finish_interactive, resolve_client_id, try_cached_session};
-#[cfg(not(target_arch = "wasm32"))]
 pub use metadata::{AccountProfile, AccountsMetadata};
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::{AccountSecrets, KeychainStore, MemoryStore, SecretStore, StorageMode};

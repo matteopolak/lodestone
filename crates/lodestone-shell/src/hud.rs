@@ -624,9 +624,29 @@ impl DebugStats {
 /// memory gauge read a flat zero on macOS — a signal that looks like evidence
 /// and isn't (§12). The [`rss_is_observable`](tests) test guards against a
 /// regression back to that.
+/// On wasm32 there is no process and no `task_info`, but there **is** a real
+/// figure with the same meaning: the module's linear memory, which is the whole of
+/// its heap and the only thing it can grow. `memory_size(0)` returns it in 64 KiB
+/// pages. That is a genuine measurement rather than a stub — which matters here
+/// specifically, because this function's whole history is that returning a flat 0
+/// made the gauge look like evidence when it was not (§12), and a browser stub
+/// would have reintroduced exactly that.
+///
+/// It is not identical to native RSS: linear memory is *reserved* address space
+/// that the engine has committed, so it never shrinks after a
+/// `memory.grow`, whereas RSS can fall. Read it as a high-water mark.
 #[must_use]
 pub fn process_rss_bytes() -> usize {
-    memory_stats::memory_stats().map_or(0, |m| m.physical_mem)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        memory_stats::memory_stats().map_or(0, |m| m.physical_mem)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        /// wasm's page size, fixed by the spec at 64 KiB.
+        const WASM_PAGE_BYTES: usize = 65536;
+        core::arch::wasm32::memory_size(0) * WASM_PAGE_BYTES
+    }
 }
 
 /// Bytes per HUD vertex: 2 position floats + 4 colour floats.

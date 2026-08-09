@@ -105,6 +105,11 @@ pub(crate) fn take_pending() -> Option<(PlayerModelType, Image)> {
 ///
 /// Best-effort: a read-only data directory costs the *cache*, not this session's
 /// avatar, because [`publish`] has already happened by then.
+/// Native-only: reached only from [`fetch_own_skin`], which is itself native-only.
+/// A browser cache would be `localStorage`/IndexedDB, not `std::fs` (whose writes
+/// return `Err(Unsupported)` there), and it has nothing to cache until the fetch
+/// path above it exists.
+#[cfg(not(target_arch = "wasm32"))]
 fn write_cache(model: PlayerModelType, png: &[u8]) {
     let dir = lodestone_auth::paths::data_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -129,6 +134,13 @@ fn write_cache(model: PlayerModelType, png: &[u8]) {
 /// declares no skin" (the common case for an account that has never set one)
 /// just as much as for a failure, and both are logged; no caller has anything
 /// different to do about them.
+/// Native-only. Both parameter types are `cfg(not(wasm32))` at their own crates:
+/// `reqwest` is not a browser dependency of this crate, and
+/// `lodestone_auth::Profile` lives in the `flow` module gated with the rest of the
+/// Microsoft sign-in. Its only callers are in `menu::accounts`' sign-in workers,
+/// which are gated for the same reason — so there is no browser call site to
+/// satisfy, and no stub is needed.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn fetch_own_skin(
     client: &reqwest::Client,
     profile: &lodestone_auth::Profile,
