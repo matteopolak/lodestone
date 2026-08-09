@@ -1303,6 +1303,32 @@ pub fn run_scheduled_tick<S: ChunkSource>(
     // reacts sooner; `run_scheduled_tick` reschedules with the correct delay from
     // then on. `ScheduledTickQueue::schedule`'s `(pos, kind)` dedup absorbs the
     // overlap between neighbourhoods.
+    // **A neighbour is only scheduled when it already holds a fluid**, and that
+    // condition is the whole difference between vanilla's flow rate and twice it.
+    //
+    // `neighborChanged` is a method **on `LiquidBlock`** — the block at the
+    // notified position — so vanilla only reaches
+    // `level.scheduleTick(pos, …, getTickDelay)` when that position is itself a
+    // liquid. An **air** cell's `neighborChanged` is `Block`'s default and
+    // schedules no fluid tick at all.
+    //
+    // Scheduling air too made a falling column advance two cells per
+    // `getTickDelay` instead of one. When a source spread down, the notify loop
+    // handed the cell *below the newly written one* — the air the flow was about
+    // to enter — a tick at the same `delay`. Both fell due in the same drain, and
+    // `DRAIN_ORDER` puts the written cell first, so it spread into the air cell
+    // and then the air cell, now liquid, spread one further inside that same
+    // pass. Every constant was right, which is why reading `tick_delay` could not
+    // find this: `FluidEnv::tick_delay` really is 5/30/10 and the queue really is
+    // drained once per game tick.
+    //
+    // The receding case the unconditional form existed for is untouched: water
+    // never replaces water horizontally, so a shrinking ramp drains only because
+    // each cell re-evaluates its own `getNewLiquid`, and every one of those cells
+    // *is* a fluid. It is exactly the air neighbours that were never vanilla's to
+    // schedule. `changed` itself stays unconditional — that is
+    // `LiquidBlock.onPlace`'s own `scheduleTick`, and on a receding write it is
+    // air, where a drain is a documented no-op rather than a runaway.
     let delay = current_tick + env.tick_delay(fluid.kind);
     let touched: Vec<BlockPos> = changes.iter().map(|(pos, _)| *pos).collect();
     for changed in touched {
@@ -1315,7 +1341,12 @@ pub fn run_scheduled_tick<S: ChunkSource>(
             Direction::West.relative(changed),
             Direction::East.relative(changed),
         ] {
-            if env.contains_y(notified.y) {
+            if !env.contains_y(notified.y) {
+                continue;
+            }
+            let holds_fluid = notified == changed
+                || fluid_state_of(&world.block_state(notified.x, notified.y, notified.z)).is_some();
+            if holds_fluid {
                 fluid_ticks.schedule(
                     (notified.x, notified.y, notified.z),
                     TICK_FLUID.to_owned(),
@@ -1475,6 +1506,124 @@ mod tests {
             }
         }
         max_ticks
+    }
+
+    /// The depth, in cells below `source`, that a falling column has reached
+    /// after exactly `ticks` game ticks — the tick loop's own fluid drain,
+    /// reduced to one queue and stepped one tick at a time.
+    ///
+    /// Counts **cells**, never elapsed time. A duration here would be attributed
+    /// to the wrong cause (CLAUDE.md), and this quantity is exactly integral:
+    /// vanilla's spread is deterministic, so there is one right answer per tick
+    /// number rather than a range.
+    fn fall_depth_after(rig: &Rig, source: BlockPos, ticks: u64) -> i32 {
+        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        for pending in ticks_after_edit(source) {
+            queue.schedule(pending.pos, pending.kind, pending.trigger_tick, pending.priority);
+        }
+        let mut changes = Vec::new();
+        for tick in 1..=ticks {
+            for entry in queue.drain_due(tick, usize::MAX) {
+                let pos = BlockPos::new(entry.pos.0, entry.pos.1, entry.pos.2);
+                changes.clear();
+                run_scheduled_tick(rig, FluidEnv::OVERWORLD, pos, &mut queue, tick, &mut changes);
+            }
+        }
+        let mut depth = 0;
+        while fluid_state_of(&rig.block_state(source.x, source.y - depth - 1, source.z)).is_some() {
+            depth += 1;
+        }
+        depth
+    }
+
+    /// **Water falls one cell per `getTickDelay`, not two.**
+    ///
+    /// # Where the expected values come from
+    ///
+    /// Arithmetic over vanilla's own constant, not over our output.
+    /// `WaterFluid.getTickDelay` is `5`. [`ticks_after_edit`] seeds the source
+    /// **and its six neighbours** at delay `1`, so tick 1 reaches depth **2**,
+    /// not 1: the source spreads into the cell below, and that cell already had a
+    /// tick due in the same pass, so it spreads once more. That is the seed
+    /// hook's own documented "one cell of flow starting four ticks early once",
+    /// independent of anything below it. Every cell after that pays a full delay:
+    /// depth at tick `T` is `2 + (T - 1) / 5`.
+    ///
+    /// The `2` was measured, not assumed — the first version of this gate
+    /// predicted `1 + (T - 1) / 5` and failed at `T = 1` reporting depth 2. It is
+    /// recorded here because the plausible round number was wrong in the
+    /// direction that looks like a code bug.
+    ///
+    /// # Why these tick numbers
+    ///
+    /// Because the two hypotheses differ there. Scheduling the **air** cell below
+    /// a freshly written one — which is what this code did before, and which
+    /// vanilla never does, since `neighborChanged` is a method on `LiquidBlock`
+    /// and air's default schedules nothing — let the front advance twice per
+    /// delay: `1 + 2 * (T - 1) / 5`. At `T = 1` both predict depth 1, so a gate
+    /// there would measure only that the code runs; from `T = 6` on they diverge
+    /// and keep diverging. Both columns are tabulated so a future reader can see
+    /// the discrimination rather than trust it:
+    ///
+    /// | tick | correct | doubled |
+    /// |---|---|---|
+    /// | 1 | 2 | 2 |
+    /// | 6 | 3 | 4 |
+    /// | 11 | 4 | 6 |
+    /// | 21 | 6 | 10 |
+    ///
+    /// The column is 40 cells tall so the floor never caps the count within the
+    /// range asserted — a capped depth would make the two hypotheses agree again
+    /// and silently turn this back into a vacuous gate.
+    #[test]
+    fn a_falling_column_advances_one_cell_per_tick_delay() {
+        const DELAY: u64 = 5;
+        let source_y = FLOOR_Y + 40;
+        // `1` is deliberately excluded: both hypotheses predict depth 2 there
+        // (the seed cell is common to both), so it would measure only that the
+        // code runs. It is asserted separately below as the seed's own premise.
+        for ticks in [6_u64, 11, 21] {
+            let rig = Rig::flat();
+            let source = BlockPos::new(0, source_y, 0);
+            rig.set_block(source.x, source.y, source.z, "minecraft:water[level=0]");
+
+            let depth = fall_depth_after(&rig, source, ticks);
+
+            let expected = 2 + i32::try_from((ticks - 1) / DELAY).expect("small");
+            let doubled = 2 + 2 * i32::try_from((ticks - 1) / DELAY).expect("small");
+            assert_eq!(
+                depth, expected,
+                "after {ticks} ticks a falling water column must be {expected} cells \
+                 deep (one per getTickDelay={DELAY}); it is {depth}. The doubled \
+                 hypothesis — scheduling the air cell below each write, so the front \
+                 advances twice per delay — predicts {doubled} here."
+            );
+            assert_ne!(
+                expected, doubled,
+                "this tick count must discriminate the two hypotheses, or it is \
+                 measuring nothing"
+            );
+            assert!(
+                source_y - depth > FLOOR_Y,
+                "premise: the floor must not have capped the fall at {ticks} ticks, \
+                 or both hypotheses agree and this asserts nothing"
+            );
+        }
+
+        // The seed's own contribution, asserted separately because the loop above
+        // deliberately skips tick 1: `ticks_after_edit` schedules the source AND
+        // its six neighbours at delay 1, so the very first pass reaches depth 2.
+        // Pinning it means a future change to the seed hook fails here rather than
+        // silently shifting every expectation above by one.
+        let rig = Rig::flat();
+        let source = BlockPos::new(0, source_y, 0);
+        rig.set_block(source.x, source.y, source.z, "minecraft:water[level=0]");
+        assert_eq!(
+            fall_depth_after(&rig, source, 1),
+            2,
+            "the seed hook schedules the source and the cell below it in the same \
+             pass, so tick 1 reaches depth 2 — the documented one-cell-early step"
+        );
     }
 
     /// Premise check for every gate below: the rig must reflect its own writes,
