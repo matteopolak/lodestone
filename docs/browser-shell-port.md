@@ -82,8 +82,23 @@ they are not in a wasm `--lib` build. Cite symbols, not lines.
 | `tokio::time::{sleep,timeout}` | `menu/accounts.rs`, `net.rs` | **gated** with the sign-in workers |
 | blocking `Runtime::new` + `block_on` | `menu/accounts.rs`, `menu/status.rs`, `net.rs`, `remote_skins.rs` | **gated**: a browser main thread cannot block |
 
-`crate::platform` is the seam module. Both arms are **re-exports, not wrappers**, so
-native has no newtype and provably no behaviour change.
+**A green wasm32 compile hid five of those `SystemTime::now()` sites, and that is the
+single most useful thing in this document.** `cargo check -p lodestone-shell
+--target wasm32-unknown-unknown` reached exit 0 while the chat-caret blink (which
+runs every frame chat is open), both glint-phase clocks, the audio seed in `Sim`
+construction and the screenshot timestamp were all still calling it. Each would have
+killed the tab. They were found by the confinement guards below, *not* by the
+compiler, on a tree that was already green — so treat "it compiles for wasm" as
+carrying no information at all about this hazard family.
+
+`crate::platform` is the seam module. It is a **re-export, not a wrapper, and with no
+`cfg` fork at all** — `web_time`'s non-wasm arm is `pub use std::time::*`, so
+`crate::platform::Instant` *is* `std::time::Instant` on native: the same type, not a
+newtype over it, and provably no behaviour change. The practical consequence is what
+made the port tractable: **any crate with an `Instant` in a public signature can
+switch to `web_time::Instant` as a no-op on native, and no call site needs a `cfg`.**
+That is how `Sim::tick_music`/`tick_ambience` and the shell's `music`/`ambient`
+`advance` came to take one clock type instead of two behind a gate.
 
 The browser clock is **`web_time`, not a hand-rolled `performance.now()` newtype**,
 and that is worth knowing before you reach for one: `winit`'s wasm arm types
@@ -218,6 +233,37 @@ table; do not invent a parallel mechanism. A rule for a crate that still calls t
 symbol in ungated code goes red for everyone, so **confine first, then add the
 guard**.
 
+`lodestone-shell` is now in the script's compile list, and has two rules:
+
+| rule | bans | allowlist |
+|---|---|---|
+| `lodestone-shell instant-confinement` | `std::time::Instant` | `platform.rs` |
+| `lodestone-shell systemtime-confinement` | `std::time::SystemTime::now` | `platform.rs` |
+
+Three things about their shape are deliberate, and each was arrived at the hard way:
+
+* **They ban the `std::time::` *paths*, not the bare `Instant::now(` spelling.** The
+  shell's 30 call sites now read `crate::platform::Instant::now()`, so a
+  `Instant::now(` pattern matches every one of them and the rule could never go
+  green. The path is what separates a trapping call from a portable one.
+* **The allowlist is `platform.rs` alone** — the strongest form, matching
+  `lodestone-audio time-confinement`'s empty one. `tests.rs` was in it briefly.
+  Removing it meant converting 19 test-only sites in `net.rs`,
+  `menu/render/tests.rs` and `sim/tests.rs`; test code cannot crash a browser, but
+  `platform::Instant` *is* `std::time::Instant` on native, so the conversion cost
+  nothing and turned "the shell never names the trapping clock" from a promise into
+  something one grep decides.
+* **The guard mechanism now skips comment lines.** Every one of these confinements
+  deserves a sentence at its call site saying *"not `SystemTime::now()`, because it
+  traps"*, and a guard that fires on its own documentation trains people to delete
+  the documentation. A hazard inside a comment cannot execute, so no rule is
+  weakened — the same reasoning that made a `"` legal inside a `.wgsl` comment.
+
+**Run the control on any rule you add.** Plant a real (non-comment) call in a
+non-allowlisted file, confirm the rule reports `FAIL` naming `file:line`, then
+restore by `cp` from an md5-checked backup. A confinement rule is an assertion of an
+absence, and it is worth exactly as much as the evidence that it would have fired.
+
 ## Configuration
 
 | knob | effect |
@@ -281,6 +327,13 @@ where noted.
   `cargo check --workspace` will never cover it. `just wasm-check` builds it through
   `trunk` — which is deliberate, because that catches a wasm-bindgen-level break
   that `rustc` alone would not.
+* **`cargo check` cannot see a doctest, so add `cargo test -p lodestone-shell --doc`
+  to your loop for this work specifically.** A target-split is the same shape of
+  change as a crate rename: it moves which dependency resolves on which target, and a
+  `///` fenced example naming the backend crate directly (`web_time`, say) rather than
+  the portable wrapper will fail on the host while all three `check` recipes stay
+  green. Prefer referring to `crate::platform` in examples — if callers should not
+  name the backend, neither should the docs.
 * **A green `wasm-check` does not prove the browser runs.** It is a compile pass
   plus greps. The only evidence that counts is the page reaching the title screen
   and then a world.
