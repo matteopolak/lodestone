@@ -843,8 +843,9 @@ pub struct HudFrame<'a> {
     /// `Hud.extractHotbarAndDecorations` calls `extractPlayerHealth` only under this
     /// predicate, and that one call draws the *whole* left/right column — the armour
     /// bar, the hearts, the hunger row and the air bubbles. So one flag gates all
-    /// four here too (this HUD draws no armour bar yet; when it grows one it belongs
-    /// inside the same gate).
+    /// four here too, and all four are now present: [`Self::armour`] joined this gate
+    /// rather than getting one of its own, which is what this field's own note asked
+    /// for while it was the missing fifth of five.
     ///
     /// It also stands in for vanilla's `hasExperience()`, which gates the XP bar and
     /// the level number through `nextContextualInfoState`: in 26.2 both methods have
@@ -862,6 +863,22 @@ pub struct HudFrame<'a> {
     pub can_hurt_player: bool,
     /// Current player health in `0..=20`, `Some` only on a live survival server.
     pub health: Option<f32>,
+    /// Armour points in `0..=20` — vanilla's `LivingEntity.getArmorValue()`, which
+    /// is `Mth.floor(getAttributeValue(Attributes.ARMOR))` and **not** a per-item
+    /// table. `Some` once the local player carries a server-fed attribute snapshot;
+    /// `None` off a live server, which draws nothing.
+    ///
+    /// `Some(0)` is a real state — a live player wearing nothing — and also draws
+    /// nothing, because `extractArmor` is wrapped in `if (armor > 0)`: vanilla shows
+    /// **no** row at all rather than ten empty icons. Both cases therefore agree, and
+    /// the `Option` exists only so a caller that has not wired the attribute through
+    /// is distinguishable from one reporting a real zero.
+    ///
+    /// The scale is 20 points = 10 icons, same as hearts, but the units are armour
+    /// points rather than half-hearts: full diamond is exactly 20 and the registry
+    /// clamps `minecraft:armor` to `0..=30`, so a value above 20 saturates the row at
+    /// ten full icons rather than drawing an eleventh.
+    pub armour: Option<i32>,
     /// Current food level in `0..=20`, `Some` only on a live survival server.
     pub food: Option<i32>,
     /// Current food saturation (the hidden reserve that drains before `food`
@@ -1019,6 +1036,7 @@ impl<'a> HudFrame<'a> {
             boss_bars: &[],
             can_hurt_player: true,
             health: None,
+            armour: None,
             food: None,
             saturation: None,
             air: None,
@@ -1056,6 +1074,61 @@ pub fn can_hurt_player(mode: Option<lodestone_model::GameMode>) -> bool {
     match mode {
         Some(GameMode::Creative | GameMode::Spectator) => false,
         Some(GameMode::Survival | GameMode::Adventure) | None => true,
+    }
+}
+
+/// Which of the three armour sprites one of the ten armour-row icons shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmourIcon {
+    /// `hud/armor_full` — two whole armour points.
+    Full,
+    /// `hud/armor_half` — the one odd point at the frontier.
+    Half,
+    /// `hud/armor_empty` — the dark backing past the frontier.
+    Empty,
+}
+
+impl ArmourIcon {
+    /// The GUI sprite id, so the draw and any gate name the sprite once.
+    #[must_use]
+    pub fn sprite_id(self) -> &'static str {
+        match self {
+            Self::Full => "hud/armor_full",
+            Self::Half => "hud/armor_half",
+            Self::Empty => "hud/armor_empty",
+        }
+    }
+}
+
+/// Vanilla's `Hud.extractArmor` icon choice for icon `i` of ten, at `armour` points.
+///
+/// Transcribed from the three sibling `if`s rather than restated as arithmetic,
+/// because the tempting restatement is wrong and the wrong version agrees with this
+/// one on every *even* input:
+///
+/// ```text
+/// if (i * 2 + 1 <  armor) FULL
+/// if (i * 2 + 1 == armor) HALF
+/// if (i * 2 + 1 >  armor) EMPTY
+/// ```
+///
+/// The frontier is the **odd** threshold `2i + 1`, so at `armour = 15` this yields 7
+/// full, 1 half, 2 empty, while the plausible `full = ceil(armour / 2)` reading — or
+/// the off-by-one `i * 2 < armour` — yields 8 full and **no half at all**. An even
+/// input cannot tell those apart, which is why the gate for this drives odd values.
+///
+/// `i` past nine and an `armour` above 20 both saturate: vanilla's loop is a fixed
+/// `0..10` and the registry clamps `minecraft:armor` to `0..=30`, so a value over 20
+/// fills the row rather than growing it.
+#[must_use]
+pub fn armour_icon(i: usize, armour: i32) -> ArmourIcon {
+    let threshold = i as i32 * 2 + 1;
+    if threshold < armour {
+        ArmourIcon::Full
+    } else if threshold == armour {
+        ArmourIcon::Half
+    } else {
+        ArmourIcon::Empty
     }
 }
 
@@ -1721,6 +1794,30 @@ impl HudGeometry {
             // moment any of its two units is present (a deliberate simplification —
             // no half-pip art yet).
             let bars_y = vitals_base - pip - 4.0;
+            // The armour row, one row above the hearts and on the same left anchor,
+            // mirroring [`sprite_vitals`]'s placement so the jar-less fallback and
+            // the real thing agree about which side and which line it is on. `pips`
+            // has no half-pip art (see the note below), so this row shows armour
+            // rounded up to the pip, exactly as the health row already does — the
+            // half-icon distinction only reaches pixels on the sprite path, and
+            // [`armour_icon`] is the one place it is decided.
+            //
+            // `bars_y` is deliberately unchanged: it is the anchor the action bar and
+            // the rest of the HUD hang off, and vanilla's own action bar sits at a
+            // constant `guiHeight - 68` regardless of how many vitals rows are up.
+            if frame.can_hurt_player
+                && let Some(armour) = frame.armour
+                && armour > 0
+            {
+                b.pips(
+                    armour as f32,
+                    cx - row_w - 8.0,
+                    bars_y - pip - 2.0,
+                    pip,
+                    gap,
+                    [0.72, 0.76, 0.82, 1.0],
+                );
+            }
             if frame.can_hurt_player && let Some(hp) = frame.health {
                 b.pips(
                     hp,
@@ -2300,6 +2397,25 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
         b.sprite("hud/hotbar", hx, hy, hw, hh, white);
         // Vanilla draws the selection at native offset (slot*20 - 1, -1) from the
         // hotbar origin; the sprite is 24x23 so it overhangs the 20px slot pitch.
+        //
+        // **The vertical asymmetry is vanilla's, and a report that the bottom edge
+        // is "cut off" is a faithful absence rather than a defect.** Both blits
+        // from `Hud.extractItemHotbar`, verbatim: the bar at
+        // `(centre - 91, guiHeight - 22, 182, 22)` and the selection at
+        // `(centre - 91 - 1 + slot * 20, guiHeight - 22 - 1, 24, 23)`. PNG headers
+        // read out of the 26.2 jar agree — `hud/hotbar` is 182x22 and
+        // `hud/hotbar_selection` is 24x23. So the bar occupies rows `H-22..H-1` and
+        // the selection `H-23..H-1`: **one pixel of overhang at the top and none at
+        // the bottom, because 23 = 22 + 1 and the offset is -1 on the top only.**
+        // There is no bottom overhang to lose, at any GUI scale, and this holds in
+        // exact integer arithmetic — so neither rasterisation rounding nor a clip
+        // rect can be blamed for it. The relationship below (`sh = 23.0` at
+        // `hy - 1.0` over an `hh = 22.0` bar at `hy`) is the same one.
+        //
+        // Note `margin` above is a *separate* real divergence: vanilla's hotbar is
+        // flush with the bottom of the screen (`guiHeight - 22`) and ours floats
+        // 6 px up. Correcting it moves the whole cluster, since `cluster_top` is
+        // derived from it — it is not this asymmetry and should not be folded in.
         let sel = sel.min(8) as f32;
         let sw = 24.0;
         let sh = 23.0;
@@ -2419,6 +2535,44 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     let icon = 9.0;
     let step = 8.0;
     let row_y = cluster_top - icon - 4.0;
+
+    // The armour row, one 10px line **above** the hearts and sharing their left
+    // anchor — `extractArmor`'s `xo = xLeft + i * 8` against the hearts' own
+    // `xLeft`, and `yLineArmor = yLineBase - (numHealthRows - 1) * healthRowHeight
+    // - 10`.
+    //
+    // `numHealthRows` is `ceil((maxHealth + absorption) / 2 / 10)`, i.e. **1** for
+    // every player with vanilla's 20 max health and no absorption, which collapses
+    // that term to zero and leaves a flat `-10`. `HudFrame` carries neither max
+    // health nor absorption (see the hearts' own critical-jitter note right below,
+    // which narrows the same way), so this is a documented narrowing rather than a
+    // silent one: a player with a raised max health would get a second heart row in
+    // vanilla and push their armour row further up, and ours will not until those
+    // two fields exist. `- icon - 1.0` is that 10, written the way the air row
+    // below already writes it so the two cannot drift apart.
+    //
+    // Drawn *before* the hearts because vanilla's `extractArmor` call precedes
+    // `extractHearts`, and left as a separate `if` rather than folded into the
+    // hearts' block because vanilla gates it on `armor > 0` alone — a player with
+    // armour and no health packet yet still has an armour row.
+    if frame.can_hurt_player
+        && let Some(armour) = frame.armour
+        && armour > 0
+    {
+        let armour_row_y = row_y - icon - 1.0;
+        for i in 0..10 {
+            let x = hx + i as f32 * step;
+            b.sprite(
+                armour_icon(i, armour).sprite_id(),
+                x,
+                armour_row_y,
+                icon,
+                icon,
+                white,
+            );
+        }
+    }
+
     if frame.can_hurt_player && let Some(hp) = frame.health {
         let hp = hp.max(0.0);
         let current = hp.ceil() as i32;
@@ -4703,6 +4857,121 @@ mod tests {
         assert!(!can_hurt_player(Some(GameMode::Spectator)));
         // Pre-connect / pre-login: the survival layout, matching `HudFrame::new`.
         assert!(can_hurt_player(None));
+    }
+
+    /// [`armour_icon`] against `Hud.extractArmor`'s three `if`s, at inputs where the
+    /// **wrong** reading gives a different answer.
+    ///
+    /// The wrong reading is the one anybody would write from the screenshot rather
+    /// than the record: `full = ceil(armour / 2)` with a half only on an odd
+    /// remainder — or equivalently the off-by-one `i * 2 < armour`. It agrees with
+    /// the real predicate on **every even input**, so a gate at 8 or 20 measures that
+    /// the code runs. The discriminating inputs are odd, and every one below is
+    /// checked against both hypotheses: at 15 the truth is 7 full + 1 half + 2 empty
+    /// and the wrong reading says 8 full + 0 half + 2 empty.
+    ///
+    /// Asserted as the full ten-icon **sequence**, not as counts, because counts
+    /// alone cannot see a half drawn at the wrong index — and mismatches are
+    /// collected rather than asserted inside the loop, so a neuter reports every arm
+    /// instead of the first.
+    #[test]
+    fn armour_icons_follow_extract_armor_at_odd_values() {
+        use ArmourIcon::{Empty, Full, Half};
+        // Hand-expanded from `if (i * 2 + 1 </==/> armor)`, one row per input.
+        // `armour = 1` is the smallest drawn row; 30 is the registry's clamp ceiling
+        // and must saturate at ten rather than grow.
+        let cases: [(i32, [ArmourIcon; 10]); 6] = [
+            (1, [Half, Empty, Empty, Empty, Empty, Empty, Empty, Empty, Empty, Empty]),
+            (7, [Full, Full, Full, Half, Empty, Empty, Empty, Empty, Empty, Empty]),
+            (15, [Full, Full, Full, Full, Full, Full, Full, Half, Empty, Empty]),
+            (19, [Full, Full, Full, Full, Full, Full, Full, Full, Full, Half]),
+            (20, [Full; 10]),
+            (30, [Full; 10]),
+        ];
+        let mut mismatches: Vec<String> = Vec::new();
+        for (armour, expected) in cases {
+            let got: Vec<ArmourIcon> = (0..10).map(|i| armour_icon(i, armour)).collect();
+            if got != expected {
+                mismatches.push(format!("armour {armour}: expected {expected:?}, got {got:?}"));
+            }
+            // The wrong hypothesis, evaluated at the same input so the test records
+            // that the two really do differ here rather than asserting they do.
+            let wrong: Vec<ArmourIcon> = (0..10)
+                .map(|i| {
+                    if (i as i32) * 2 < armour {
+                        Full
+                    } else {
+                        Empty
+                    }
+                })
+                .collect();
+            if armour % 2 == 1 && wrong == expected {
+                mismatches.push(format!(
+                    "armour {armour} is not a discriminating input: the ceil()/off-by-one \
+                     reading gives the same ten icons, so this row measures only that \
+                     the function runs"
+                ));
+            }
+        }
+        // Zero draws nothing at the call site (`armour > 0`), but the predicate itself
+        // must still be total — an all-empty row, never a panic or a stray half.
+        if (0..10).map(|i| armour_icon(i, 0)).any(|c| c != Empty) {
+            mismatches.push("armour 0 must be ten empty icons".to_string());
+        }
+        assert!(
+            mismatches.is_empty(),
+            "armour icon selection diverges from Hud.extractArmor:\n  {}",
+            mismatches.join("\n  ")
+        );
+    }
+
+    /// The armour row is gated by the **same** `canHurtPlayer()` flag as the hearts,
+    /// hunger and bubble rows — vanilla reaches all four through one
+    /// `extractPlayerHealth` call — and by vanilla's own `armor > 0`, which draws
+    /// **no** row rather than ten empty icons.
+    ///
+    /// Counts are predicted from `Builder::pips`' own shape, which
+    /// `health_pips_scale_with_value` independently pins at ten quads of six vertices:
+    /// so one armour row is `10 * 6 = 60` vertices on top of an otherwise identical
+    /// frame. The three arms that must be identical to the baseline are the ones a
+    /// direction-only assertion would miss — `Some(0)` in particular, where the
+    /// tempting "draw the empty backing anyway" reading adds 60 and vanilla adds 0.
+    #[test]
+    fn the_armour_row_costs_one_pip_row_and_only_when_worn() {
+        let stats = DebugStats::default();
+        let build = |can_hurt: bool, armour: Option<i32>| {
+            let mut frame = HudFrame::new(&stats);
+            frame.crosshair = false;
+            frame.show_debug = false;
+            frame.can_hurt_player = can_hurt;
+            frame.health = Some(20.0);
+            frame.food = Some(20);
+            frame.armour = armour;
+            HudGeometry::build(&frame, 640, 480).vertex_count()
+        };
+        let baseline = build(true, None);
+        let mut mismatches: Vec<String> = Vec::new();
+        // `None` (never wired), `Some(0)` (live, wearing nothing) and creative all
+        // draw exactly the baseline; a worn value adds one row and nothing else.
+        for (label, can_hurt, armour, expected) in [
+            ("not wired", true, None, baseline),
+            ("live, unarmoured", true, Some(0), baseline),
+            ("full diamond", true, Some(20), baseline + 60),
+            ("half icon at 15", true, Some(15), baseline + 60),
+            ("creative, armoured", false, Some(20), build(false, None)),
+        ] {
+            let got = build(can_hurt, armour);
+            if got != expected {
+                mismatches.push(format!(
+                    "{label}: expected {expected} vertices, got {got} (baseline {baseline})"
+                ));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "armour row wiring diverges:\n  {}",
+            mismatches.join("\n  ")
+        );
     }
 
     /// Vanilla's gate is `canHurtPlayer()` — `SURVIVAL || ADVENTURE` — and one call
