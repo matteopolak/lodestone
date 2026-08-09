@@ -29,7 +29,7 @@ pub use vanilla_font::VanillaFont;
 pub use item_icon::ItemIcon as HotbarSlot;
 
 use std::sync::Arc;
-use std::time::Instant;
+use crate::platform::Instant;
 
 use lodestone_render::{
     BUBBLE_SIZE, BlockModels, GpuAtlas, GuiAtlas, GuiSpriteQuad, ModelVertex, bubble_position,

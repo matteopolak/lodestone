@@ -57,14 +57,47 @@
 //! [`ClientEvent::EntitySound`]: lodestone_client::ClientEvent::EntitySound
 //! [`NetUpdate`]: crate::net::NetUpdate
 
-#![cfg(not(target_arch = "wasm32"))]
+//! ## Browser (`wasm32`) arm — and why it is an *uninhabited* type
+//!
+//! This module used to be `#![cfg(not(target_arch = "wasm32"))]` in its entirety,
+//! which made `crate::audio` vanish on wasm and took thirteen call sites in
+//! `hud.rs`, `sim.rs`, `sim/audio.rs`, `sim/build.rs`, `app/menus.rs` and
+//! `app/redraw.rs` down with it — most of them naming nothing device-backed at all,
+//! just [`subtitles::SubtitleCaption`] and the pure `music`/`ambient` selection
+//! logic. Those three submodules are ordinary arithmetic and compile fine for a
+//! browser, so they now stay.
+//!
+//! What genuinely cannot exist there is the device: [`lodestone_sound::AudioEngine`]
+//! wraps a `cpal` sink and is `cfg`-gated out of the wasm build at its own crate.
+//! So [`ShellAudio`] is a **cfg fork**, and its browser arm is an *empty enum*:
+//!
+//! ```ignore
+//! pub enum ShellAudio {}   // no variants — no value of this type can exist
+//! ```
+//!
+//! Every method is still present so the shared call sites type-check, and every
+//! body is `match *self {}` — a total match over zero variants, which compiles to
+//! nothing and is *statically* unreachable. That is deliberately **not** a stub
+//! that silently does nothing: a stub can be reached and then quietly swallow every
+//! sound in the game, which is the invisible-island failure this repo keeps paying
+//! for. Here the type system guarantees the browser cannot even *appear* to have
+//! audio — `ShellAudio::from_env()` returns `None`, the exact path native already
+//! takes when there is no asset store or no output device, and every consumer
+//! already reads `Option<ShellAudio>`.
+//!
+//! Browser audio, when someone builds it, wants an `AudioWorklet` feeding
+//! `lodestone-audio`'s mixer directly (that crate is already wasm-clean). It
+//! replaces the empty enum with a real one; nothing outside this file changes.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 use glam::Vec3;
+#[cfg(not(target_arch = "wasm32"))]
 use lodestone_assets::sound::SoundRegistry;
 use lodestone_model::event::SoundCategory;
 use lodestone_render::Camera;
+#[cfg(not(target_arch = "wasm32"))]
 use lodestone_sound::AudioEngine;
 use lodestone_sound::music::{Music, MusicStart};
 
@@ -75,10 +108,9 @@ pub(crate) mod subtitles;
 /// Wall-clock milliseconds for the caption clock — vanilla's `Util.getMillis()`,
 /// the same origin `gpu/glint.rs` and `app::recipe_toast_now_ms` use, so a caption
 /// ages against the same clock every other timed overlay does.
+#[cfg(not(target_arch = "wasm32"))]
 fn caption_now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
+    crate::platform::epoch_duration().as_millis() as u64
 }
 
 /// Environment variable naming the Minecraft asset root directly. Re-exported
@@ -92,6 +124,7 @@ pub use crate::asset_objects::ASSET_ROOT_ENV;
 /// Constructed once via [`ShellAudio::from_env`]; `None` means audio is disabled
 /// (no asset store found, load failure, or no output device) and every call site
 /// is a simple `if let Some(audio)`.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub struct ShellAudio {
     engine: AudioEngine,
@@ -107,6 +140,7 @@ pub struct ShellAudio {
     reported_failure: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ShellAudio {
     /// Brings audio up from the discovered asset store, or returns `None` with a
     /// logged reason.
@@ -404,3 +438,102 @@ impl ShellAudio {
 // control proving the strip is what made the lookup hit, and a length check this
 // copy never had.
 
+
+// ---------------------------------------------------------------------------
+// Browser (`wasm32`) arm — see this module's docs for why it is uninhabited.
+// ---------------------------------------------------------------------------
+
+/// The browser's `ShellAudio`: an **empty enum**, so no value of this type can
+/// ever exist.
+///
+/// [`Self::from_env`] returns `None`, which is the same path native takes when
+/// there is no asset store or no output device, so every `if let Some(audio)` in
+/// the shell simply never enters. The methods below exist only so those shared
+/// call sites type-check; each body is `match *self {}`, a total match over zero
+/// variants that the compiler proves unreachable and emits nothing for.
+///
+/// This is not a stub. A stub is a reachable value whose methods do nothing,
+/// which is how a subsystem comes to look wired while producing nothing — the
+/// island failure. An uninhabited type makes "browser audio silently pretends to
+/// work" a compile-time impossibility instead of a thing to remember.
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug)]
+pub enum ShellAudio {}
+
+#[cfg(target_arch = "wasm32")]
+impl ShellAudio {
+    /// Always `None`: a browser has no `cpal` device and no asset store on disk.
+    ///
+    /// Logged once at `info`, at the same level and target native uses for "no
+    /// store found", so the reason appears in the console rather than nowhere.
+    #[must_use]
+    pub fn from_env() -> Option<Self> {
+        tracing::info!(
+            target: "audio",
+            "audio disabled: no browser backend yet (lodestone-audio's mixer is wasm-clean; \
+             what is missing is an AudioWorklet sink to drive it)"
+        );
+        None
+    }
+
+    pub fn set_listener(&self, _camera: &Camera) {
+        match *self {}
+    }
+
+    pub fn set_category_volumes(&self, _volumes: &[(SoundCategory, f32)]) {
+        match *self {}
+    }
+
+    #[must_use]
+    pub fn category_volume(&self, _category: SoundCategory) -> f32 {
+        match *self {}
+    }
+
+    pub fn play_sound(
+        &mut self,
+        _name: &str,
+        _category: SoundCategory,
+        _pos: Vec3,
+        _volume: f32,
+        _pitch: f32,
+        _seed: i64,
+    ) {
+        match *self {}
+    }
+
+    pub fn subtitle_captions(&mut self, _camera: &Camera) -> Vec<subtitles::SubtitleCaption> {
+        match *self {}
+    }
+
+    pub fn start_music(&mut self, _music: &Music) -> MusicStart {
+        match *self {}
+    }
+
+    pub fn start_loop(
+        &mut self,
+        _name: &str,
+        _volume: f32,
+    ) -> Option<lodestone_sound::PlayHandle> {
+        match *self {}
+    }
+
+    pub fn set_loop_volume(&self, _handle: lodestone_sound::PlayHandle, _volume: f32) {
+        match *self {}
+    }
+
+    pub fn stop_loop(&self, _handle: lodestone_sound::PlayHandle) {
+        match *self {}
+    }
+
+    pub fn play_entity_sound(
+        &mut self,
+        _name: &str,
+        _category: SoundCategory,
+        _pos: Vec3,
+        _volume: f32,
+        _pitch: f32,
+        _seed: i64,
+    ) {
+        match *self {}
+    }
+}

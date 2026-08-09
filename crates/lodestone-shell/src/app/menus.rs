@@ -354,7 +354,7 @@ impl WindowApp {
         // `replaceCurrentMusic` set, so it interrupts rather than queues) — see
         // `MusicSituation::situational_music`.
         self.sim.tick_music(
-            std::time::Instant::now(),
+            crate::platform::Instant::now(),
             &crate::audio::music::menu_situation(),
         );
         let (Some(gpu), Some(target), Some(menu)) = (

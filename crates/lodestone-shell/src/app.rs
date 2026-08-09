@@ -30,7 +30,14 @@
 //! itself are here rather than in a submodule.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::Duration;
+
+// The portable clock, not `std::time::Instant`: this module's submodules all say
+// `use super::*`, so this one import is what gives `lifecycle`, `session`,
+// `runners`, `weather`, `menus` and `advancements_screen` a clock that works in a
+// browser as well as in a window. `std::time::Instant::now()` compiles for wasm32
+// and panics when it runs — see `crate::platform`.
+use crate::platform::Instant;
 
 use lodestone_render::{
     GpuContext, HeadlessTarget, RenderTarget, TargetError, fog::FogSettings, window::attach_window,

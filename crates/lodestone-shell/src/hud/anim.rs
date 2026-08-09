@@ -15,7 +15,7 @@
 //! …), not a clock, and `sim.rs`/`app.rs` are a different agent's files for
 //! this change. Since a vanilla tick *is* 50ms of real time whenever the
 //! client is keeping up with the server (the overwhelmingly common case),
-//! [`wall_tick`] divides a wall-clock [`std::time::Instant::elapsed`] by 50ms
+//! [`wall_tick`] divides a wall-clock [`crate::platform::Instant::elapsed`] by 50ms
 //! and uses that as a drop-in `tickCount` substitute for this HUD's own
 //! purely decorative timers — the same trade already made for the chat
 //! caret's blink (`app.rs`'s `chat_caret_visible`: wall time instead of a
@@ -40,7 +40,7 @@
 //! positions, a visual choice and not a decode-parity claim"). [`jitter`]
 //! below is a small splitmix64-style mix keyed by `(tick, salt)` instead.
 
-use std::time::Instant;
+use crate::platform::Instant;
 
 use lodestone_assets::ResourceLocation;
 

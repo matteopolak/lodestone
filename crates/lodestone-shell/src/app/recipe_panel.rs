@@ -60,9 +60,7 @@ pub(super) const RECIPE_SEARCH_MAX_LEN: usize = 50;
 /// `RecipeToastQueue::push` from the decode reaches for the same function
 /// rather than inventing a second, incompatible origin.
 pub(super) fn recipe_toast_now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
+    crate::platform::epoch_duration().as_millis() as u64
 }
 
 /// This frame's recipe-unlock toast, if one should be on screen at `now_ms`.

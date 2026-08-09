@@ -34,7 +34,7 @@ const PROGRESS_POLL: std::time::Duration = std::time::Duration::from_millis(250)
 pub(crate) struct AdvancementsFeed {
     progress: AdvancementProgress,
     toasts: AdvancementToastQueue,
-    polled_at: Option<std::time::Instant>,
+    polled_at: Option<crate::platform::Instant>,
 }
 
 impl WindowApp {
@@ -47,7 +47,7 @@ impl WindowApp {
     /// [`AdvancementProgress`] is a map of 126 `Copy` records, so the clone is
     /// cheaper than the read it saves.
     pub(super) fn advancement_progress(&mut self) -> AdvancementProgress {
-        let now = std::time::Instant::now();
+        let now = crate::platform::Instant::now();
         let stale = self
             .advancement_feed
             .polled_at

@@ -394,7 +394,7 @@ impl MenuRenderer {
                 if let Some(speed) = frame.panorama_speed {
                     pano.set_speed(speed);
                 }
-                pano.advance(std::time::Instant::now());
+                pano.advance(crate::platform::Instant::now());
                 pano.prepare(queue, width, height, panorama_dim);
             }
         }

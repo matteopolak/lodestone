@@ -102,7 +102,13 @@ lodestone-server = { path = "../lodestone-server" }
 # the first place, and a target section here would only make `saves.rs` need a
 # `cfg` fork with no second implementation behind it. Version-free either way, so
 # `cargo check -p lodestone-shell --no-default-features` is unaffected.
-lodestone-anvil = { path = "../lodestone-anvil" }
+#
+# **Superseded in part: this crate now DOES build for wasm32** (the browser build
+# in `web/` consumes the real shell), so `lodestone-anvil` moved into the
+# `cfg(not(target_arch = "wasm32"))` section below, exactly as
+# `lodestone-server` does it. `saves.rs` keeps its native body and gains a
+# browser arm that reports "no saves" honestly — a browser has no `saves/`
+# directory to enumerate.
 # The status ping behind the multiplayer server list (MOTD, player counts,
 # favicon), plus the SRV resolution vanilla performs when no port is pinned.
 # Before this edge existed, `lodestone_net::ping` / `resolve` had **no consumer
@@ -116,11 +122,11 @@ lodestone-net = { workspace = true }
 # re-export of `Session`/`AuthError` — the switcher drives the interactive
 # flow and the keychain-backed store, neither of which `lodestone-client`
 # exposes (it only consumes an already-authenticated `Session`).
-lodestone-auth = { workspace = true }
-# `menu/accounts.rs` builds its own short-lived `reqwest::Client` to drive the
-# device-code/refresh calls interactively from the account-switcher screen
-# (the same crate `lodestone-auth`'s own chain runs on).
-reqwest = { workspace = true }
+#
+# **Native-only**, in the target section below, for the same reason
+# `lodestone-client` gates its own edge: the device-code flow needs a real HTTP
+# client and an OS keychain, and neither has a wasm32 story. The browser build
+# therefore has offline identity only.
 
 # **`lodestone-autopilot` is deliberately NOT a dependency here, and must not
 # become one — not even `optional = true` behind a feature.** It is a
@@ -141,28 +147,95 @@ wgpu = { workspace = true }
 winit = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
-pollster = { workspace = true }
 
-# Async runtime for the live client, logging, errors, ids.
-tokio = { workspace = true }
+# Logging, errors, ids. `tokio` and the file-writing/OS-probing crates are in the
+# target sections below.
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-tracing-chrome = "0.7"
 crossbeam-channel = "0.5"
 anyhow = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
-# Cross-platform resident-set-size (RSS) reader for the debug overlay's memory
-# gauge. Wraps the platform syscall (task_info on macOS, /proc on Linux) so the
-# shell stays within the workspace's `deny(unsafe_code)` — the unsafe FFI lives
-# in the dependency, not here. A zero-reading gauge is worse than none (§12).
-memory-stats = "1"
 # Writes `key.screenshot`'s PNG (issue #16, `src/screenshot.rs`). **A normal
 # dependency, not a dev one** — it was `[dev-dependencies]` while its only use
 # was encoding genuine PNG streams as *input* to the favicon-mosaic tests, and
 # `docs/keybindings.md` recorded it as already shippable, which it was not. Test
 # targets see normal dependencies too, so those fixtures are unaffected.
 png = { workspace = true }
+
+# --- Native (non-wasm) target dependencies ---
+#
+# Everything here is native-only for one of three reasons: it needs an OS
+# filesystem, an OS syscall, or a blocking runtime. The split mirrors
+# `lodestone-net`, `lodestone-client` and `lodestone-server`, which each did this
+# before us; it is a build-configuration change only and native behaviour is
+# unchanged.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The full workspace feature set, including `net` and `rt-multi-thread`. This is
+# the one dependency that *blocked* the whole wasm build rather than merely
+# panicking at runtime: `net` pulls `mio`, whose `wasm32-unknown-unknown` arm is
+# a hard `compile_error!` ("This wasm target is unsupported by mio. If using
+# Tokio, disable the net feature."). Measured: 36 errors in `mio`, and nothing
+# else in the graph, before this split existed.
+tokio = { workspace = true }
+# `main.rs`'s `tracing` setup. The subscriber's `fmt` layer writes to stderr and
+# `tracing-chrome` writes a file, neither of which a browser has; the browser
+# entry point installs `console_log` instead (in `web/`).
+tracing-subscriber = { workspace = true }
+tracing-chrome = "0.7"
+# Blocks the main thread on GPU bring-up. A browser main thread cannot block —
+# `wasm-bindgen-futures::spawn_local` is the wasm arm, in `web/`.
+pollster = { workspace = true }
+# Cross-platform resident-set-size (RSS) reader for the debug overlay's memory
+# gauge. Wraps the platform syscall (task_info on macOS, /proc on Linux) so the
+# shell stays within the workspace's `deny(unsafe_code)` — the unsafe FFI lives
+# in the dependency, not here. A zero-reading gauge is worse than none (§12),
+# which is why the browser arm reports *absence* rather than a plausible 0.
+memory-stats = "1"
+# `level.dat` for the singleplayer save list — see the long note above.
+lodestone-anvil = { path = "../lodestone-anvil" }
+# Microsoft device-code sign-in and multi-account storage — see the note above.
+lodestone-auth = { workspace = true }
+# `menu/accounts.rs` builds its own short-lived `reqwest::Client` to drive the
+# device-code/refresh calls interactively from the account-switcher screen
+# (the same crate `lodestone-auth`'s own chain runs on).
+reqwest = { workspace = true }
+
+# --- wasm32 target dependencies ---
+#
+# The browser build. `tokio` takes only the features it supports on
+# `wasm32-unknown-unknown` (no `net`, no `rt-multi-thread`), exactly as
+# `lodestone-net`/`-server` do. `wasm-bindgen-futures` is the executor —
+# `spawn_local`, single-threaded and `!Send` — and `web-sys` supplies the clock
+# (`performance.now()`), the options store (`localStorage`) and the asset byte
+# source (`fetch`), i.e. the three seams that replace `Instant::now`, `options.json`
+# and `std::fs::read` respectively. See `docs/browser-shell-port.md`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1", default-features = false, features = [
+    "io-util",
+    "rt",
+    "macros",
+    "sync",
+    "time",
+] }
+wasm-bindgen = { version = "0.2" }
+wasm-bindgen-futures = { workspace = true }
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Performance",
+    "Storage",
+] }
+# The portable clock behind `crate::platform::Instant`/`epoch_duration`.
+#
+# **Already in this graph** — `winit 0.30.13` depends on it — so this edge costs
+# the bundle nothing, and picking it over a hand-rolled `performance.now()`
+# newtype is not a convenience: winit's wasm arm types
+# `ControlFlow::WaitUntil` as `web_time::Instant`, so `app::pacing` does not
+# type-check against any other clock type. See `crate::platform`.
+web-time = "1"
 
 [dev-dependencies]
 # Same pin as every other bench site in the workspace. `default-features = false`

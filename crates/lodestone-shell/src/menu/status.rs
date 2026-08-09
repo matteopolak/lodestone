@@ -378,7 +378,7 @@ pub struct StatusCache {
     rx: Receiver<(String, Result<ServerStatus, String>)>,
     probe: Probe,
     /// When this cache was built, i.e. the zero of [`Self::millis`].
-    started: std::time::Instant,
+    started: crate::platform::Instant,
 }
 
 impl std::fmt::Debug for StatusCache {
@@ -416,7 +416,7 @@ impl StatusCache {
             tx,
             rx,
             probe,
-            started: std::time::Instant::now(),
+            started: crate::platform::Instant::now(),
         }
     }
 
@@ -548,9 +548,9 @@ mod tests {
     /// Blocks until `cache.pump()` has delivered `want` results, or the deadline
     /// passes. Returns how many landed.
     fn drain(cache: &mut StatusCache, want: usize) -> usize {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = crate::platform::Instant::now() + std::time::Duration::from_secs(5);
         let mut got = 0;
-        while got < want && std::time::Instant::now() < deadline {
+        while got < want && crate::platform::Instant::now() < deadline {
             got += cache.pump();
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
