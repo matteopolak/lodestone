@@ -225,11 +225,22 @@ pub struct Options {
     /// applies `bobHurt` **unconditionally** and only `bobView` behind this flag,
     /// so a player who turns bobbing off still gets the damage tilt — that is
     /// vanilla's split, not an oversight here. The damage tilt has its own
-    /// separate accessibility option (`damageTiltStrength`, default `1.0`), which
-    /// this client does not surface yet.
+    /// separate accessibility option — [`Self::damage_tilt_strength`].
     ///
     /// Default **on**, matching vanilla. See `docs/view-bobbing.md`.
     pub view_bobbing: bool,
+    /// Vanilla's **Damage Tilt** accessibility option (`Options::damageTiltStrength`,
+    /// a `0.0..=1.0` unit double defaulting to `1.0`), which scales
+    /// `GameRenderer.bobHurt`'s tilt linearly.
+    ///
+    /// `0.0` must genuinely disable the tilt rather than merely shrink it — that is
+    /// the accessibility contract, and it is what
+    /// `crate::camera_rig::BobFrame::hurt_roll_degrees` multiplies by. It does
+    /// **not** disable the death roll, which vanilla applies unscaled.
+    ///
+    /// Clamped on load: a mangled file must not be able to produce a tilt larger
+    /// than vanilla can, and a negative value would tilt the camera the wrong way.
+    pub damage_tilt_strength: f32,
     /// Vanilla's `key.sneak` toggle option (`Options::toggleCrouch`,
     /// `Options.java:603-610`, issue #202): sneak is hold-to-activate when
     /// `false` (vanilla's own default) and press-to-toggle when `true`. Fed to
@@ -374,6 +385,7 @@ impl Default for Options {
             gui_scale: AUTO_GUI_SCALE,
             keybinds: Keybinds::new(),
             view_bobbing: true,
+            damage_tilt_strength: 1.0,
             toggle_sneak: false,
             toggle_sprint: false,
             toggle_attack: false,
@@ -440,6 +452,17 @@ impl Options {
             .get("view_bobbing")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
+        // Absent or malformed is vanilla's `1.0`, for `view_bobbing`'s reason, and
+        // **clamped** rather than merely defaulted: a hand-edited `50.0` would
+        // otherwise produce a 700-degree camera roll on every hit, and a negative
+        // value would roll it the wrong way. NaN fails the `contains` test and
+        // therefore falls back too.
+        let damage_tilt_strength = obj
+            .get("damage_tilt_strength")
+            .and_then(serde_json::Value::as_f64)
+            .map(|v| v as f32)
+            .filter(|v| (0.0..=1.0).contains(v))
+            .unwrap_or(1.0);
         // Absent or malformed is `false` for both — vanilla's own default is
         // hold mode, so a mangled file must not silently switch a player onto
         // toggle mode they never asked for.
@@ -544,6 +567,7 @@ impl Options {
             gui_scale,
             keybinds,
             view_bobbing,
+            damage_tilt_strength,
             toggle_sneak,
             toggle_sprint,
             toggle_attack,
@@ -600,6 +624,14 @@ impl Options {
         // `keybinds`: an untouched install has no key for it.
         if !self.view_bobbing {
             obj.insert("view_bobbing".into(), false.into());
+        }
+        // Written only when it is not vanilla's default, matching `view_bobbing`
+        // above: an untouched config stays free of keys nobody set.
+        if self.damage_tilt_strength != 1.0 {
+            obj.insert(
+                "damage_tilt_strength".into(),
+                f64::from(self.damage_tilt_strength).into(),
+            );
         }
         if self.toggle_sneak {
             obj.insert("toggle_sneak".into(), true.into());

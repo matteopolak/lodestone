@@ -151,6 +151,40 @@ const DEFAULT_RENDER_DISTANCE_CHUNKS: u32 = 8;
 /// Owns all GPU resources needed to render the world.
 #[derive(Debug)]
 pub struct RenderState {
+    /// This frame's `bobHurt` transform, in **eye space** — the damage tilt and
+    /// the death roll (`crate::camera_rig::BobFrame::hurt_transform`), installed
+    /// once per frame by `app::redraw` and multiplied into every world-space
+    /// view-projection this state writes.
+    ///
+    /// # Why a matrix here rather than fields on `Camera`
+    ///
+    /// `bobHurt` is almost entirely a **roll**, and `Camera` is parameterised by
+    /// `position`/`yaw`/`pitch` — two angles — so the fold in
+    /// `crate::camera_rig::bobbed_camera` structurally cannot carry it. That is
+    /// why this half of the bob was held at zero for so long: not because the
+    /// maths was unverified (it was ported and tested), but because there was no
+    /// seam it could reach the matrix through. `Camera::view_projection_eye_space`
+    /// is that seam, and it is vanilla's own
+    /// `projectionMatrix.mul(bobStack.last().pose())`.
+    ///
+    /// Identity when the player has not been hit recently, which is almost every
+    /// frame — and identity is *exactly* identity, so an unhurt frame's matrices
+    /// are bit-identical to what they were before this existed.
+    eye_bob: glam::Mat4,
+    /// Vanilla's Damage Tilt accessibility option, for the **first-person hand**
+    /// pass, which applies `bobHurt` a second time independently of the world's
+    /// copy (`GameRenderer.renderItemInHand`).
+    ///
+    /// A strength rather than a matrix, unlike [`Self::eye_bob`], because the hand
+    /// composes `bobHurt` and `bobView` together in one
+    /// `crate::camera_rig::BobFrame::eye_transform` call — and it can, since
+    /// nothing folds the hand's bob into a `Camera`.
+    ///
+    /// Defaults to vanilla's `1.0`, not `0.0`: an unhurt `BobFrame` produces a zero
+    /// tilt at *any* strength, so the default cannot affect a caller that never
+    /// installs a bob source, and a `0.0` default would be indistinguishable from
+    /// the accessibility option being switched on.
+    damage_tilt_strength: f32,
     pipeline: BlockPipeline,
     #[allow(dead_code)]
     atlas: GpuAtlas,

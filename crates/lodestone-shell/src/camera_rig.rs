@@ -487,7 +487,7 @@ pub const HURT_DURATION_TICKS: f32 = 10.0;
 /// # `hurt_time`/`hurt_dir` are not interpolated the same way
 ///
 /// They have no `previous` twin because vanilla does not keep one: `Camera.setup`
-/// (`Camera.java:135-137`) reads `hurtTime - partialTicks` and `hurtDir` raw. The
+/// reads `hurtTime - partialTicks` and `hurtDir` raw. The
 /// subtraction is what smooths the flash out, and it is also why
 /// [`BobFrame::hurt_roll_degrees`] must tolerate a *negative* `hurt` — vanilla's
 /// `bobHurt` returns early on `hurt < 0.0F`, which is the ordinary case in the
@@ -500,6 +500,14 @@ pub struct ViewBob {
     bob_o: f32,
     hurt_time: u32,
     hurt_dir_degrees: f32,
+    /// `LivingEntity.deathTime`, counted up while dead and reset to zero when
+    /// alive.
+    ///
+    /// Client-side, like `hurt_time`: nothing on the wire carries it (see
+    /// `crate::entities`' note that `deathTime` has no component on this side),
+    /// and for the *local* player we know exactly when we died, so the counter is
+    /// reconstructed here from the `dead` flag [`ViewBob::tick`] already takes.
+    death_time: u32,
 }
 
 impl ViewBob {
@@ -549,6 +557,16 @@ impl ViewBob {
         //    rule `lodestone_ecs::ingest::tick_hurt_time` applies to remote
         //    entities.
         self.hurt_time = self.hurt_time.saturating_sub(1);
+        // 5. `LivingEntity.tick`'s `deathTime++` under `isDeadOrDying`, and the
+        //    reset on respawn. Counted **up**, unlike `hurt_time`, and saturating
+        //    so a player who stays on the death screen for an hour cannot wrap it
+        //    — `death_roll_degrees` clamps at 20 ticks anyway, so anything past
+        //    that is already the same angle.
+        self.death_time = if dead {
+            self.death_time.saturating_add(1)
+        } else {
+            0
+        };
     }
 
     /// A damage report: `LivingEntity.animateHurt(yaw)` (`:1873-1876`), which
@@ -579,13 +597,18 @@ impl ViewBob {
             // `Camera.setup`: `hurtTime - cameraEntityPartialTicks`.
             hurt: self.hurt_time as f32 - alpha,
             hurt_dir_degrees: self.hurt_dir_degrees,
+            // Raw, like `hurt_dir`: vanilla's `bobHurt` reads
+            // `entityRenderState.deathTime` with no partial-tick term, and the
+            // clamp at 20 makes the last three-quarters of a second constant
+            // regardless.
+            death_time: self.death_time as f32,
         }
     }
 }
 
 /// One frame's worth of interpolated bob input — what vanilla puts on
 /// `CameraRenderState.entityRenderState` for `GameRenderer.bobView`/`bobHurt` to
-/// read (`Camera.java:135-152`).
+/// read (`Camera.setup`).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct BobFrame {
     /// `backwardsInterpolatedWalkDistance`. **Already negated** by
@@ -599,6 +622,8 @@ pub struct BobFrame {
     pub hurt: f32,
     /// `hurtDir`, in degrees.
     pub hurt_dir_degrees: f32,
+    /// `deathTime`, in ticks, `0` while alive — see [`Self::death_roll_degrees`].
+    pub death_time: f32,
 }
 
 impl BobFrame {
@@ -680,6 +705,72 @@ impl BobFrame {
         -shaped * 14.0 * damage_tilt_strength
     }
 
+    /// `GameRenderer.bobHurt`'s death roll, in degrees:
+    ///
+    /// ```java
+    /// if (isDeadOrDying) {
+    ///     duration = Math.min(deathTime, 20.0F);
+    ///     poseStack.mulPose(Axis.ZP.rotationDegrees(40.0F - 8000.0F / (duration + 200.0F)));
+    /// }
+    /// ```
+    ///
+    /// # It is not gated by the hurt-time early return
+    ///
+    /// This runs **before** `bobHurt`'s `if (hurt < 0.0F) return;`, so it applies
+    /// on every frame of the death screen and not only during the ten-tick hurt
+    /// flash. Folding it in after the return — the natural reading if you skim
+    /// the method — means the camera un-rolls half a second after you die.
+    ///
+    /// # The magnitude is small, and that is the record, not a transcription slip
+    ///
+    /// `40 − 8000/200 = 0` at `deathTime == 0` and `40 − 8000/220 = 3.6364°` at
+    /// the clamp, so the whole effect is a **`3.64°`** lean acquired over one
+    /// second. It looks like it ought to be a dramatic spin from the shape of the
+    /// expression; it is not. Do not "fix" it by dropping the `min(.., 20)` — the
+    /// clamp is what stops it creeping toward `40°` while the death screen is up.
+    ///
+    /// `death_time == 0` means alive, which is why this returns `0` there: at
+    /// vanilla's own `deathTime == 0` the expression is exactly zero, so the two
+    /// readings agree and no `is_dead` flag has to travel alongside.
+    #[must_use]
+    pub fn death_roll_degrees(&self) -> f32 {
+        if self.death_time <= 0.0 {
+            return 0.0;
+        }
+        40.0 - 8000.0 / (self.death_time.min(20.0) + 200.0)
+    }
+
+    /// `GameRenderer.bobHurt` as a matrix — the death roll, then the damage tilt
+    /// swung onto the direction the hit came from:
+    ///
+    /// ```text
+    /// Rz(death) · Ry(-hurtDir) · Rz(tilt) · Ry(+hurtDir)
+    /// ```
+    ///
+    /// # The `Ry` sandwich is the whole direction mechanism
+    ///
+    /// `Rz` alone rolls the camera the same way regardless of where the hit came
+    /// from. Conjugating it by `Ry(hurtDir)` rotates the *axis* of the roll, so a
+    /// hit from straight ahead (`hurtDir == 0`) is pure roll and a hit from the
+    /// side is pure nod. A gate that only checks "the transform changed" passes
+    /// with the sandwich missing.
+    ///
+    /// Split out of [`Self::eye_transform`] because the two halves reach pixels by
+    /// different routes: `bobView` is folded into the [`Camera`] by
+    /// [`bobbed_camera`], which structurally cannot carry roll, while this half is
+    /// multiplied into the world view-projection in eye space — vanilla's own
+    /// `projectionMatrix.mul(bobStack)`. See [`bobbed_camera`]'s table.
+    #[must_use]
+    pub fn hurt_transform(&self, damage_tilt_strength: f32) -> glam::Mat4 {
+        use glam::Mat4;
+        let d = self.hurt_dir_degrees.to_radians();
+        let tilt = self.hurt_roll_degrees(damage_tilt_strength).to_radians();
+        Mat4::from_rotation_z(self.death_roll_degrees().to_radians())
+            * Mat4::from_rotation_y(-d)
+            * Mat4::from_rotation_z(tilt)
+            * Mat4::from_rotation_y(d)
+    }
+
     /// The full eye-space bob transform: `bobHurt` then `bobView`, pushed onto
     /// one pose stack in that order (`GameRenderer.java:534-536`), which is
     /// `Hurt * View` as a matrix product.
@@ -704,12 +795,8 @@ impl BobFrame {
     #[must_use]
     pub fn eye_transform(&self, damage_tilt_strength: f32) -> glam::Mat4 {
         use glam::Mat4;
-        // bobHurt: Ry(-d) * Rz(tilt) * Ry(d) — a rotation by `tilt` about the
-        // eye-space +Z axis swung `d` degrees about +Y, so a hit from straight
-        // ahead (`d == 0`) is pure roll and a hit from the side is pure nod.
-        let d = self.hurt_dir_degrees.to_radians();
-        let tilt = self.hurt_roll_degrees(damage_tilt_strength).to_radians();
-        let hurt = Mat4::from_rotation_y(-d) * Mat4::from_rotation_z(tilt) * Mat4::from_rotation_y(d);
+        // bobHurt, including the death roll — see `hurt_transform`.
+        let hurt = self.hurt_transform(damage_tilt_strength);
         // bobView: T * Rz * Rx.
         let view = Mat4::from_translation(self.view_translation())
             * Mat4::from_rotation_z(self.view_roll_degrees().to_radians())
@@ -1183,6 +1270,224 @@ mod tests {
         assert_eq!(c.frame(0.0).hurt_roll_degrees(0.0), 0.0);
     }
 
+    /// The easing is `sin(t⁴ · π)`, and the value is **predicted** rather than
+    /// checked for a sign.
+    ///
+    /// Both hypotheses computed from outside constants at the same input, which is
+    /// the whole point: at `hurt == 5` (`t == 0.5`) the quartic reading is
+    /// `-14 · sin(0.0625π) = -2.7313°` and a plain `sin(tπ)` reading is
+    /// `-14 · sin(0.5π) = -14.0°` — a factor of five apart. `t == 0` and `t == 1`
+    /// are **not** usable samples: `sin(0)` and `sin(π)` are both zero under either
+    /// reading, so the two hypotheses coincide there and the test would measure
+    /// nothing.
+    ///
+    /// The peak is re-derived rather than remembered: `sin(t⁴π)` is maximal at
+    /// `t⁴ = 0.5`, i.e. `t = 0.5^0.25 = 0.840896`, i.e. `hurt == 8.40896`, where the
+    /// magnitude is the full `14.0`. A plain sine would peak at `hurt == 5`, which
+    /// is exactly where this test's first sample sits.
+    #[test]
+    fn the_hurt_easing_is_the_quartic_reading_and_not_the_linear_one() {
+        let mid = BobFrame {
+            hurt: 5.0,
+            ..BobFrame::default()
+        };
+        let measured = mid.hurt_roll_degrees(1.0);
+        let quartic = -14.0 * (0.5_f32.powi(4) * std::f32::consts::PI).sin();
+        let linear = -14.0 * (0.5_f32 * std::f32::consts::PI).sin();
+        assert!(
+            (measured - quartic).abs() < 1e-4,
+            "at hurt 5 the tilt is {measured}; quartic predicts {quartic}, a plain \
+             sine predicts {linear}"
+        );
+        assert!(
+            (measured - linear).abs() > 10.0,
+            "the two hypotheses must be far apart at this sample, or it proves nothing"
+        );
+
+        // The peak, at the re-derived location and magnitude.
+        let peak_hurt = 0.5_f32.powf(0.25) * HURT_DURATION_TICKS;
+        let peak = BobFrame {
+            hurt: peak_hurt,
+            ..BobFrame::default()
+        }
+        .hurt_roll_degrees(1.0);
+        assert!(
+            (peak + 14.0).abs() < 1e-3,
+            "the peak magnitude is the full 14 degrees at hurt {peak_hurt}, got {peak}"
+        );
+    }
+
+    /// The `Ry` sandwich aims the roll at the damage direction, and a hit from one
+    /// side tilts **opposite** to a hit from the other.
+    ///
+    /// Asserted on the transform, not on a flag, and with a probe that a missing
+    /// sandwich provably fails: `Ry(-d) · Rz(tilt) · Ry(d)` rotates about the axis
+    /// `(-sin d, 0, cos d)`, so at `d = 90°` the axis is `-X` and at `d = 270°` it
+    /// is `+X` — opposite nods. Eye-space up therefore acquires a `z` component of
+    /// opposite sign in the two cases.
+    ///
+    /// **Without the sandwich the transform is a bare `Rz(tilt)`, which leaves up's
+    /// `z` component at exactly zero for every direction** — so the gate reddens on
+    /// both arms rather than on one, and it cannot be satisfied by "the transform
+    /// changed".
+    #[test]
+    fn the_ry_sandwich_aims_the_tilt_at_the_direction_the_hit_came_from() {
+        let from_one_side = BobFrame {
+            hurt: 5.0,
+            hurt_dir_degrees: 90.0,
+            ..BobFrame::default()
+        }
+        .hurt_transform(1.0)
+        .transform_vector3(glam::Vec3::Y);
+        let from_the_other = BobFrame {
+            hurt: 5.0,
+            hurt_dir_degrees: 270.0,
+            ..BobFrame::default()
+        }
+        .hurt_transform(1.0)
+        .transform_vector3(glam::Vec3::Y);
+        assert!(
+            from_one_side.z.abs() > 0.01,
+            "a side-on hit must nod the camera; up went to {from_one_side:?}, which \
+             is what a bare Rz(tilt) with no Ry sandwich produces"
+        );
+        assert!(
+            from_one_side.z * from_the_other.z < 0.0,
+            "opposite directions must nod opposite ways: {} against {}",
+            from_one_side.z,
+            from_the_other.z
+        );
+        // And a hit from straight ahead is the pure-roll case, so up moves in `x`
+        // and not in `z` — the complementary half of the same mechanism.
+        let head_on = BobFrame {
+            hurt: 5.0,
+            hurt_dir_degrees: 0.0,
+            ..BobFrame::default()
+        }
+        .hurt_transform(1.0)
+        .transform_vector3(glam::Vec3::Y);
+        assert!(
+            head_on.z.abs() < 1e-6 && head_on.x.abs() > 0.01,
+            "a head-on hit is pure roll, got {head_on:?}"
+        );
+    }
+
+    /// The death roll runs **before** `bobHurt`'s `hurt < 0` return, so it applies
+    /// on every frame of the death screen and not only during a hurt flash.
+    ///
+    /// Values predicted from the expression rather than observed: `40 - 8000/201 =
+    /// 0.19900` at one tick, `40 - 8000/220 = 3.63636` at the clamp, and the clamp
+    /// holding past it. Dropping `min(.., 20)` would let this creep toward `40°`
+    /// while the death screen is up, which is why the last sample is at tick 200.
+    #[test]
+    fn the_death_roll_survives_the_hurt_time_return_and_clamps_at_twenty_ticks() {
+        let lapsed_but_dead = BobFrame {
+            // Negative: the hurt countdown has run out, so `hurt_roll_degrees` is
+            // silent and only the death roll can move the transform.
+            hurt: -1.0,
+            death_time: 20.0,
+            ..BobFrame::default()
+        };
+        assert_eq!(lapsed_but_dead.hurt_roll_degrees(1.0), 0.0);
+        let roll = lapsed_but_dead.death_roll_degrees();
+        assert!(
+            (roll - (40.0 - 8000.0 / 220.0)).abs() < 1e-4,
+            "at the clamp the roll is 3.63636 degrees, got {roll}"
+        );
+        assert_ne!(
+            lapsed_but_dead.hurt_transform(1.0).to_cols_array(),
+            glam::Mat4::IDENTITY.to_cols_array(),
+            "the death roll must reach the transform with no hurt flash running"
+        );
+        let one_tick = BobFrame {
+            death_time: 1.0,
+            ..BobFrame::default()
+        }
+        .death_roll_degrees();
+        assert!(
+            (one_tick - (40.0 - 8000.0 / 201.0)).abs() < 1e-4,
+            "at one tick the roll is 0.19900 degrees, got {one_tick}"
+        );
+        let much_later = BobFrame {
+            death_time: 200.0,
+            ..BobFrame::default()
+        }
+        .death_roll_degrees();
+        assert!(
+            (much_later - roll).abs() < 1e-4,
+            "the clamp must hold past 20 ticks: {much_later} against {roll}"
+        );
+        // Alive is exactly zero, and so is vanilla's own `deathTime == 0`.
+        assert_eq!(BobFrame::default().death_roll_degrees(), 0.0);
+    }
+
+    /// `damage_tilt_strength == 0.0` is a real **off** switch for the tilt — the
+    /// accessibility contract — and it does *not* take the death roll with it,
+    /// which vanilla applies unscaled.
+    #[test]
+    fn a_zero_damage_tilt_strength_disables_the_tilt_but_not_the_death_roll() {
+        let hurt_and_dead = BobFrame {
+            hurt: 5.0,
+            hurt_dir_degrees: 40.0,
+            death_time: 20.0,
+            ..BobFrame::default()
+        };
+        assert!(
+            hurt_and_dead.hurt_roll_degrees(1.0).abs() > 1.0,
+            "precondition: there is a tilt to switch off"
+        );
+        assert_eq!(hurt_and_dead.hurt_roll_degrees(0.0), 0.0);
+        // Off, the transform is the death roll alone.
+        //
+        // **Not bit-for-bit, and the reason is the `Ry` sandwich, not the tilt.**
+        // `Ry(-40°) · I · Ry(+40°)` does not cancel exactly in f32 — this asserted
+        // exact equality on its first run and failed on a residual of `1.86e-9` in
+        // one entry. The bound below is still discriminating by seven orders of
+        // magnitude: a tilt that survived a zero strength would be the `2.73°` this
+        // frame's `hurt` produces, i.e. `sin(2.73°) = 4.8e-2` in the same entries.
+        let max_diff = |a: glam::Mat4, b: glam::Mat4| {
+            a.to_cols_array()
+                .iter()
+                .zip(b.to_cols_array())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0_f32, f32::max)
+        };
+        let off = hurt_and_dead.hurt_transform(0.0);
+        let death_only = glam::Mat4::from_rotation_z(
+            hurt_and_dead.death_roll_degrees().to_radians(),
+        );
+        let d = max_diff(off, death_only);
+        assert!(d < 1e-6, "a zero strength must leave the death roll alone, off by {d}");
+        // And with no death either, the identity to the same bound.
+        let inert = BobFrame {
+            hurt: 5.0,
+            hurt_dir_degrees: 40.0,
+            ..BobFrame::default()
+        }
+        .hurt_transform(0.0);
+        let d = max_diff(inert, glam::Mat4::IDENTITY);
+        assert!(d < 1e-6, "a zero strength with no death must be inert, off by {d}");
+    }
+
+    /// `deathTime` counts **up** while dead and resets on respawn, unlike
+    /// `hurt_time`, which counts down.
+    ///
+    /// The reset is the half worth asserting: without it a player who died once
+    /// keeps a `3.6°` lean for the rest of the session, which reads as a broken
+    /// camera rather than as a death animation.
+    #[test]
+    fn the_death_counter_counts_up_while_dead_and_resets_on_respawn() {
+        let mut b = ViewBob::new();
+        for _ in 0..5 {
+            b.tick(0.0, 0.0, true, true, false);
+        }
+        assert_eq!(b.frame(0.0).death_time, 5.0);
+        assert!(b.frame(0.0).death_roll_degrees() > 0.0);
+        b.tick(0.0, 0.0, true, false, false);
+        assert_eq!(b.frame(0.0).death_time, 0.0);
+        assert_eq!(b.frame(0.0).death_roll_degrees(), 0.0);
+    }
+
     // --- The fold into Camera, and what it drops. --------------------------
 
     fn walking_camera() -> Camera {
@@ -1229,6 +1534,7 @@ mod tests {
             bob: 0.1,
             hurt: -1.0,
             hurt_dir_degrees: 0.0,
+            death_time: 0.0,
         };
         assert!(
             frame.view_roll_degrees().abs() < 1e-6,
@@ -1296,6 +1602,7 @@ mod tests {
             bob: 0.1,
             hurt: -1.0,
             hurt_dir_degrees: 0.0,
+            death_time: 0.0,
         };
         assert!(
             (frame.view_roll_degrees().abs() - 0.3).abs() < 1e-4,
@@ -1422,6 +1729,7 @@ mod tests {
             bob: 0.1,
             hurt: -1.0,
             hurt_dir_degrees: 0.0,
+            death_time: 0.0,
         };
         // The chest's centre in `view_bob_pixels.rs`: block [0,0,4], a chest model
         // 14/16 tall, so `(0.5, 0.4375, 4.5)` — 2.5 blocks in front of the eye.
@@ -1521,6 +1829,7 @@ mod tests {
                     bob: 0.1,
                     hurt: -1.0,
                     hurt_dir_degrees: 0.0,
+                    death_time: 0.0,
                 };
                 let bobbed = bobbed_camera(cam, frame, 0.0);
                 assert!(

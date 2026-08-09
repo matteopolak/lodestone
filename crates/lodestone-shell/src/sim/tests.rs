@@ -4584,9 +4584,10 @@ fn walking_accumulates_a_real_bob_that_only_the_render_camera_sees() {
 /// (`GameRenderer.java:534-536`), only `bobView` is gated on the option.
 ///
 /// The net-apply feed (`ClientEvent::EntityHurtAnimation` naming the local
-/// player's own id → [`Sim::on_local_player_hurt`]) is the other half and does
-/// not exist yet — that is the documented next hop (`docs/view-bobbing.md`), so
-/// this test drives the hook directly. What it pins is the *camera's* contract:
+/// player's own id → [`Sim::on_local_player_hurt`]) is live now — `net.rs`'s
+/// `forward` produces `NetUpdate::HurtAnimation` and `net_apply` filters it
+/// against `server_entity_id()`. This test still drives the hook directly, which
+/// keeps it hermetic. What it pins is the *camera's* contract:
 /// the countdown and the wire `yaw` (90° here, a side hit — a frontal hit is
 /// `hurtDir 0`, the pure-roll case, see `render_camera`) both reach the frame,
 /// and the option must not mute them.
@@ -4617,16 +4618,71 @@ fn local_player_hurt_reaches_the_bob_frame_and_survives_view_bobbing_off() {
         "the tilt must count down one tick at a time"
     );
 
-    // The world fold still holds the tilt at zero: `bobbed_camera` cannot carry
-    // roll, so `render_camera` passes `damage_tilt_strength = 0.0` until
-    // `Camera` grows roll. Asserting the hold is a tripwire — when that lands
-    // and the strength flips, this equality is exactly the assertion that must
-    // change into "the camera rolled".
+    // `render_camera` still passes a zero strength, and that is now a *routing*
+    // fact rather than a hold: `bobbed_camera` cannot carry roll, so the tilt
+    // travels the eye-space seam instead. The camera's own pitch is therefore
+    // untouched by the flash — asserted, because a future "fix" that smeared the
+    // roll into pitch would look like progress and would be wrong.
     sim.set_view_bobbing(true);
     assert_eq!(
         sim.render_camera(1.0).pitch,
         sim.camera(1.0).pitch,
-        "the world tilt is held at zero pending Camera roll support"
+        "the tilt must not be smeared into the camera's pitch"
+    );
+}
+
+/// The hop the test above used to call the missing one: a local-player damage
+/// report must reach an **actual eye-space matrix**, and the accessibility option
+/// must be able to switch it off.
+///
+/// This is the gate that catches the defect this feature spent months in: every
+/// piece — the countdown, the direction, the quartic easing, the option — was
+/// built and unit-tested, and the composed transform handed to the renderer was a
+/// hard-coded identity. Asserting on `bob_frame().hurt` cannot see that; asserting
+/// on the matrix can.
+///
+/// The magnitude is predicted rather than compared for inequality: at `hurt == 8`
+/// the tilt is `-14·sin(0.4096π) = -13.03°`, whose matrix entries carry
+/// `sin(13.03°) = 0.2255`. A tolerance of `0.01` therefore separates "the tilt
+/// arrived" from "something moved" by more than twenty times.
+#[test]
+fn a_local_player_hit_reaches_a_real_eye_space_matrix() {
+    let mut sim = Sim::new(test_config());
+    assert_eq!(
+        sim.damage_tilt_eye_transform().to_cols_array(),
+        glam::Mat4::IDENTITY.to_cols_array(),
+        "an unhurt player's transform must be exactly the identity"
+    );
+
+    sim.on_local_player_hurt(0.0);
+    // Two ticks in, `hurt` is 8, which is close to the quartic peak.
+    sim.step(1.0 / 20.0);
+    sim.step(1.0 / 20.0);
+    let frame = sim.bob_frame();
+    // Recomputed here from the jar's constants rather than read back out of the
+    // implementation: `-hurt' * 14`, where `hurt' = sin(t^4 * PI)`, `t = hurt/10`.
+    let t = frame.hurt / 10.0;
+    let expected_degrees = -14.0 * (t.powi(4) * std::f32::consts::PI).sin();
+    let m = sim.damage_tilt_eye_transform();
+    // A head-on hit is pure roll about eye +Z, so eye-space up moves in x by
+    // exactly `-sin(tilt)`.
+    let up = m.transform_vector3(glam::Vec3::Y);
+    let predicted_x = -expected_degrees.to_radians().sin();
+    assert!(
+        (up.x - predicted_x).abs() < 0.01,
+        "up moved to {up:?}; a {expected_degrees} degree roll predicts x = {predicted_x}"
+    );
+    assert!(
+        up.x.abs() > 0.2,
+        "precondition: the tilt near its peak is a fifth of a unit, not noise"
+    );
+
+    // The accessibility option is a real off switch, all the way through the sim.
+    sim.set_damage_tilt_strength(0.0);
+    let off = sim.damage_tilt_eye_transform().transform_vector3(glam::Vec3::Y);
+    assert!(
+        off.x.abs() < 1e-6,
+        "a zero Damage Tilt strength must leave the matrix inert, got {off:?}"
     );
 }
 

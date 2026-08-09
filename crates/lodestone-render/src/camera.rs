@@ -284,7 +284,38 @@ impl Camera {
     /// site to keep in sync.
     #[must_use]
     pub fn view_projection_warped(&self, intensity: f32, angle_degrees: f32) -> Mat4 {
-        (self.projection_matrix() * nausea_portal_warp(intensity, angle_degrees)) * self.view_matrix()
+        self.view_projection_eye_space(nausea_portal_warp(intensity, angle_degrees))
+    }
+
+    /// [`view_projection`](Self::view_projection) with an arbitrary **eye-space**
+    /// transform inserted between the projection and the view: `P · eye · V`.
+    ///
+    /// This is vanilla's `projectionMatrix.mul(...)` seam, and it is the *only*
+    /// way a transform with three rotational degrees of freedom can reach this
+    /// camera. [`Camera`] is parameterised by `position`/`yaw`/`pitch` — two
+    /// angles — so anything folded into the fields themselves loses its roll
+    /// component; that is not a fixable rounding error, it is the shape of the
+    /// struct. Multiplying here costs nothing and loses nothing.
+    ///
+    /// # What "eye space" buys, and why no constant flips sign
+    ///
+    /// Our eye space matches vanilla's exactly (`+X` right, `+Y` up, forward
+    /// `-Z`), so a transform transcribed from a `PoseStack` push in
+    /// `GameRenderer.renderLevel` composes here with **no** sign adjustment. The
+    /// `[0,1]`-versus-reversed-Z depth difference lives entirely inside the
+    /// projection matrix, which sits to the *left* of `eye` and therefore cannot
+    /// reach it.
+    ///
+    /// # Two callers, composed in vanilla's own order
+    ///
+    /// `renderLevel` does `projectionMatrix.mul(bobStack)` **first** and applies
+    /// the nausea/portal spin **after**, so the full product is
+    /// `P · bob · warp · V` and a caller wanting both passes
+    /// `bob * nausea_portal_warp(..)`. Reversing them puts the spin's skew on the
+    /// unbobbed axis, which is a subtle wrongness rather than an obvious one.
+    #[must_use]
+    pub fn view_projection_eye_space(&self, eye: Mat4) -> Mat4 {
+        (self.projection_matrix() * eye) * self.view_matrix()
     }
 }
 
@@ -754,6 +785,67 @@ mod tests {
         assert!(
             (transformed - axis).length() < 1e-4,
             "a vector along the warp's own rotation axis must be fixed: {transformed:?} vs {axis:?}"
+        );
+    }
+
+    /// An identity eye transform is **bit-identical** to `view_projection`, not
+    /// merely close.
+    ///
+    /// Load-bearing rather than pedantic: almost every frame has no damage tilt, so
+    /// if this were only approximately equal then every gate downstream that
+    /// asserts "nothing moved" would have acquired a tolerance it did not have
+    /// before this seam existed.
+    #[test]
+    fn an_identity_eye_transform_leaves_view_projection_bit_identical() {
+        let c = cam_looking_south();
+        assert_eq!(
+            c.view_projection().to_cols_array(),
+            c.view_projection_eye_space(Mat4::IDENTITY).to_cols_array()
+        );
+    }
+
+    /// A roll about eye-space `+Z` reaches clip space **with the right sign** — the
+    /// thing a `Camera` built from `yaw`/`pitch` structurally cannot express.
+    ///
+    /// Both hypotheses computed. A rotation by `a` about `+Z` maps eye-space up to
+    /// `(-sin a, cos a, 0)`, so at `a = -14°` (the sign `bobHurt`'s
+    /// `-hurt * 14 * strength` produces) a point directly **above** the eye must
+    /// project to positive clip `x`, and at `a = +14°` to negative. A gate that only
+    /// checked "the matrix changed" would pass with the sign inverted, and an
+    /// inverted damage tilt leans the camera *into* the hit instead of away from it.
+    #[test]
+    fn an_eye_space_roll_reaches_clip_space_with_the_signed_lean() {
+        let c = cam_looking_south();
+        // Straight up from the eye and pushed **along the direction this camera
+        // actually looks**, which is world `+Z` (`yaw == 0` faces `+Z`), not eye
+        // `-Z`. This test first used `(0, 1, -4)`, i.e. a point *behind* the eye:
+        // the perspective divide by a negative `w` flips the clip `x` sign, so the
+        // gate failed on a correct implementation and reported `-0.0605` where it
+        // predicted a positive value. A sign gate must be fed a probe that is in
+        // front of the camera or it measures the divide instead of the roll.
+        let above = Vec3::new(0.0, 1.0, 4.0);
+        let right_way = c
+            .view_projection_eye_space(Mat4::from_rotation_z((-14.0_f32).to_radians()))
+            .project_point3(above);
+        let wrong_way = c
+            .view_projection_eye_space(Mat4::from_rotation_z(14.0_f32.to_radians()))
+            .project_point3(above);
+        let unrolled = c.view_projection().project_point3(above);
+        assert!(
+            unrolled.x.abs() < 1e-6,
+            "precondition: the probe is centred before the roll, got {}",
+            unrolled.x
+        );
+        assert!(
+            right_way.x > 0.05,
+            "a negative roll must swing the point above the eye to positive clip x, \
+             got {}",
+            right_way.x
+        );
+        assert!(
+            wrong_way.x < -0.05,
+            "and the opposite sign must land on the other side, got {}",
+            wrong_way.x
         );
     }
 

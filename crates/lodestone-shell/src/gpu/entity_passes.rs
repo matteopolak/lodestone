@@ -195,7 +195,7 @@ impl RenderState {
             bytemuck::bytes_of(
                 &EntityCameraUniform {
                     camera: CameraUniform {
-                        view_proj: camera.view_projection().to_cols_array_2d(),
+                        view_proj: self.world_view_projection(camera).to_cols_array_2d(),
                         section_origin: [0.0, 0.0, 0.0, 0.0],
                     },
                     fog: self.fog_with_clock(eye),
@@ -780,7 +780,7 @@ impl RenderState {
             bytemuck::bytes_of(
                 &EntityCameraUniform {
                     camera: CameraUniform {
-                        view_proj: camera.view_projection().to_cols_array_2d(),
+                        view_proj: self.world_view_projection(camera).to_cols_array_2d(),
                         section_origin: [0.0, 0.0, 0.0, 0.0],
                     },
                     fog: self.fog_with_clock(eye),

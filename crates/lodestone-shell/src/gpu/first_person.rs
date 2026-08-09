@@ -259,29 +259,21 @@ impl HeldItemEquip {
 // The walk/hurt bob reaches the hand (issue #58 follow-up)
 // ---------------------------------------------------------------------------
 
-/// `damage_tilt_strength` for the hand's own bob transform, passed to
-/// [`BobFrame::eye_transform`]. **`0.0` — `bobHurt` deliberately held off, the
-/// same choice [`crate::sim::camera::Sim::render_camera`] makes for the world
-/// camera, but for a *different* reason.**
+/// A `damage_tilt_strength` of zero, for the gates below that isolate a single
+/// `bobView` term and need the hurt half provably inert.
 ///
-/// Unlike the world, the hand needs no lossy fold to carry the tilt:
-/// [`hand_view_proj`] multiplies the raw bob matrix straight into the hand's
-/// projection, so every term of `BobFrame::eye_transform` — including roll —
-/// would reach it exactly (see the `tests` module's
-/// `hand_view_proj_can_carry_the_hurt_tilt_once_a_nonzero_strength_is_supplied`,
-/// which proves the mechanism at `1.0` without shipping it). The blocker is
-/// upstream: [`crate::sim::camera::Sim::bob_frame`] returns
-/// [`BobFrame::default`] **whole-cloth** when `view_bobbing` is off
-/// (`sim/camera.rs:320-325`), zeroing `hurt`/`hurt_dir_degrees` along with the
-/// walk terms — but vanilla's own `bobHurt` is unconditional
-/// (`GameRenderer.java:534-536` calls it outside the `optionsRenderState.
-/// bobView` check), and `docs/view-bobbing.md`'s Configuration section already
-/// claims "that split is reproduced". It is not, once anything reads `hurt`
-/// with a nonzero strength — turning View Bobbing off would silently mute a
-/// damage tilt vanilla still shows. Driving this constant from `1.0` needs that
-/// fixed first (a few-line change to `bob_frame`, sketched in this crate's
-/// hand-off notes for whoever owns `sim/camera.rs`), not a change here.
-const HAND_HURT_TILT_STRENGTH: f32 = 0.0;
+/// **This used to be `HAND_HURT_TILT_STRENGTH`, a *production* constant holding
+/// `bobHurt` off, and its stated blocker was already stale when it was read.** The
+/// blocker was that `Sim::bob_frame` returned `BobFrame::default()` whole-cloth
+/// when View Bobbing was off, zeroing `hurt`/`hurt_dir_degrees` along with the walk
+/// terms — so a nonzero strength would have muted the damage tilt for anyone who
+/// turned View Bobbing off, which vanilla does not do (`renderLevel` calls
+/// `bobHurt` outside the `bobView` check). That was true when written and had since
+/// been fixed: `bob_frame` now zeroes **only** `walk_phase`/`bob` and passes the
+/// hurt half through untouched. The hand therefore draws the real strength, and
+/// this constant survives only as the gates' zero anchor.
+#[cfg(test)]
+const NO_DAMAGE_TILT: f32 = 0.0;
 
 /// Where this frame's walk/hurt bob comes from, for the first-person hand pass
 /// — polled once per frame like [`super::HandSwingSource`]/[`super::MainHandSource`].
@@ -290,12 +282,11 @@ const HAND_HURT_TILT_STRENGTH: f32 = 0.0;
 ///
 /// `camera: &Camera`, passed into [`RenderState::prepare_first_person_hand`],
 /// is already [`crate::sim::camera`]'s **folded** render camera —
-/// `sim/camera.rs:328-352` (`Sim::render_camera`) bakes
+/// `Sim::render_camera` bakes
 /// [`BobFrame::eye_transform`] into the camera's position/yaw/pitch via
 /// [`crate::camera_rig::bobbed_camera`], mirroring vanilla's own
-/// `GameRenderer.renderLevel:539`
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/GameRenderer.java`:
-/// `projectionMatrix.mul(bobStack.last().pose())`) — the bob folded into the
+/// `GameRenderer.renderLevel`'s
+/// `projectionMatrix.mul(bobStack.last().pose())` — the bob folded into the
 /// **world's** projection matrix.
 ///
 /// Vanilla's hand path (`GameRenderer.renderItemInHand`, same file, `:333-362`)
@@ -695,10 +686,15 @@ impl RenderState {
     /// *same* clip positions as this base pass — so the glint uniform must carry
     /// exactly this matrix, not a second copy of it.
     fn write_hand_camera(&self, queue: &wgpu::Queue, camera: &Camera) -> [[f32; 4]; 4] {
+        // Vanilla applies `bobHurt` to this pass a **second** time, independently
+        // of the world's copy, and it reaches the hand without any lossy fold:
+        // `hand_view_proj` multiplies the raw bob matrix straight into the hand's
+        // projection, so roll survives here where it cannot survive
+        // `bobbed_camera`.
         let view_proj = hand_view_proj(
             camera.aspect,
             self.hand_bob.value(),
-            HAND_HURT_TILT_STRENGTH,
+            self.damage_tilt_strength,
         );
         let camera_uniform = CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
@@ -1118,7 +1114,7 @@ mod tests {
     /// equality on an inert input, not a small-diff tolerance.
     #[test]
     fn a_zero_frame_is_bit_identical_to_the_bare_hand_projection() {
-        let bobbed = hand_view_proj(HAND_TEST_ASPECT, BobFrame::default(), HAND_HURT_TILT_STRENGTH);
+        let bobbed = hand_view_proj(HAND_TEST_ASPECT, BobFrame::default(), NO_DAMAGE_TILT);
         let bare = hand_projection(HAND_TEST_ASPECT);
         assert_eq!(
             bobbed.to_cols_array(),
@@ -1167,8 +1163,9 @@ mod tests {
             bob: 0.1,
             hurt: -1.0,
             hurt_dir_degrees: 0.0,
+            death_time: 0.0,
         };
-        let m = hand_view_proj(HAND_TEST_ASPECT, dip, HAND_HURT_TILT_STRENGTH);
+        let m = hand_view_proj(HAND_TEST_ASPECT, dip, NO_DAMAGE_TILT);
         let (x1, y1) = ndc(m, HAND_TEST_POINT);
         let dpixel_y = -(y1 - y0) * (HAND_TEST_H / 2.0);
         let dpixel_x = (x1 - x0) * (HAND_TEST_W / 2.0);
@@ -1227,8 +1224,9 @@ mod tests {
             bob: 0.1,
             hurt: -1.0,
             hurt_dir_degrees: 0.0,
+            death_time: 0.0,
         };
-        let m = hand_view_proj(HAND_TEST_ASPECT, sway, HAND_HURT_TILT_STRENGTH);
+        let m = hand_view_proj(HAND_TEST_ASPECT, sway, NO_DAMAGE_TILT);
         let (x1, y1) = ndc(m, HAND_TEST_POINT);
         let dpixel_x = (x1 - x0) * (HAND_TEST_W / 2.0);
         let dpixel_y = -(y1 - y0) * (HAND_TEST_H / 2.0);
@@ -1247,53 +1245,42 @@ mod tests {
         );
     }
 
-    /// **`bobHurt` is held at `0.0` in production** (`HAND_HURT_TILT_STRENGTH`'s
-    /// own doc has the reason: `Sim::bob_frame` zeroes `hurt` along with the
-    /// walk terms when View Bobbing is off, so enabling this constant today
-    /// would make the damage tilt disappear whenever a player turns that
-    /// option off — a real divergence from vanilla, not a rounding error).
+    /// The hand's `bobHurt` is **live** in production now, and this gate is what
+    /// the tilt's presence and its absence both look like.
     ///
-    /// This test proves the *other* half: the mechanism itself already
-    /// carries the tilt correctly, so landing it later is a one-line change to
-    /// this constant plus the `sim/camera.rs` fix named above — not new code
-    /// here.
+    /// It used to assert the opposite — that the production constant was `0.0` —
+    /// with a doc naming a blocker in `sim/camera.rs` that had already been fixed.
+    /// See [`NO_DAMAGE_TILT`] for that record.
     #[test]
-    fn hand_view_proj_can_carry_the_hurt_tilt_once_a_nonzero_strength_is_supplied() {
-        assert_eq!(
-            HAND_HURT_TILT_STRENGTH, 0.0,
-            "precondition: production deliberately holds this at zero; if this \
-             assertion is what failed, the doc above needs to move with it and \
-             the `sim/camera.rs` gating fix must have already landed"
-        );
+    fn hand_view_proj_carries_the_hurt_tilt_at_a_nonzero_strength() {
         let hurt = BobFrame {
             walk_phase: 0.0,
             bob: 0.0,
             hurt: 5.0,
             hurt_dir_degrees: 0.0,
+            death_time: 0.0,
         };
         assert!(
             hurt.hurt_roll_degrees(1.0).abs() > 1.0,
             "precondition: this frame has a real tilt to lose"
         );
 
-        // At production's actual constant, inert — matching the bare projection
-        // exactly, not just closely.
-        let off = hand_view_proj(HAND_TEST_ASPECT, hurt, HAND_HURT_TILT_STRENGTH);
+        // At the accessibility option's `0.0`, inert — matching the bare
+        // projection exactly, not just closely. This is the contract that makes
+        // the option a real off switch rather than a shrink.
+        let off = hand_view_proj(HAND_TEST_ASPECT, hurt, NO_DAMAGE_TILT);
         assert_eq!(
             off.to_cols_array(),
             hand_projection(HAND_TEST_ASPECT).to_cols_array(),
-            "at this file's actual (zero) constant the hurt tilt must be \
-             completely inert"
+            "a zero damage-tilt strength must be completely inert"
         );
 
-        // At vanilla's own accessibility default, live — proving the plumbing
-        // works, without this file actually shipping it yet.
+        // At vanilla's own accessibility default, live.
         let on = hand_view_proj(HAND_TEST_ASPECT, hurt, 1.0);
         assert_ne!(
             on.to_cols_array(),
             hand_projection(HAND_TEST_ASPECT).to_cols_array(),
-            "at a nonzero strength the hurt tilt must reach the matrix — this is \
-             what the day this constant flips to 1.0 will look like"
+            "at the default strength the hurt tilt must reach the matrix"
         );
     }
 }
