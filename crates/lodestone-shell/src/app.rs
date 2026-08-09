@@ -39,9 +39,12 @@ use std::time::Duration;
 // and panics when it runs — see `crate::platform`.
 use crate::platform::Instant;
 
-use lodestone_render::{
-    GpuContext, HeadlessTarget, RenderTarget, TargetError, fog::FogSettings, window::attach_window,
-};
+use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget, TargetError, fog::FogSettings};
+// Native-only: it blocks on adapter/device selection. The browser arm awaits
+// `attach_window_async` from `spawn_local` instead — see `app::lifecycle::resumed`,
+// which is split at exactly that seam.
+#[cfg(not(target_arch = "wasm32"))]
+use lodestone_render::window::attach_window;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};

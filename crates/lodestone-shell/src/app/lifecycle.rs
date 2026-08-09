@@ -9,9 +9,7 @@ impl ApplicationHandler for WindowApp {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
-            .with_title("Lodestone")
-            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
+        let attrs = window_attributes();
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -21,285 +19,51 @@ impl ApplicationHandler for WindowApp {
             }
         };
 
-        let (gpu, target) = match attach_window(window.clone()) {
-            Ok(pair) => pair,
-            Err(e) => {
-                eprintln!("failed to attach GPU to window: {e}");
-                event_loop.exit();
-                return;
-            }
-        };
+        // Native: adapter/device selection blocks, so the whole bring-up finishes
+        // inside this one callback exactly as it always did.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (gpu, target) = match attach_window(window.clone()) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    eprintln!("failed to attach GPU to window: {e}");
+                    event_loop.exit();
+                    return;
+                }
+            };
+            self.finish_bring_up(window, gpu, target);
+        }
 
-        let (w, h) = target.size();
-        let format = target.format();
-        let mut render = RenderState::new(
-            gpu.device(),
-            gpu.queue(),
-            format,
-            w,
-            h,
-            self.sim.vanilla_atlas(),
-        );
-        // Size the sky fog to our real render distance so terrain fades into the
-        // sky where chunks actually stop, not at the render crate's 8-chunk default.
-        render.set_fog(sky_fog(self.config.render_distance), self.config.render_distance);
-        // The F3 overlay's fixed adapter block (see `DebugStats::adapter`).
-        // Resolved **once**, here, because `Adapter::get_info` is the only place
-        // this is knowable and it never changes for the process — and because the
-        // field is otherwise an island: it was added with a draw and no producer,
-        // so the lines it exists to show reached zero pixels.
-        self.sim.stats.adapter = adapter_lines(&gpu);
-        // Upload the stitched particle sheet the emitter already resolves its
-        // flame/smoke/crit UVs against (issue #45). `load_particle_atlas` is
-        // memoised, so this is the **same** `ParticleAtlas` object `Sim` built
-        // its `(Sheet, frame) -> UV` table from — not a second stitch that
-        // happens to pack the same way. The bug being closed here is a UV table
-        // addressing a different image than the one bound, and every counter
-        // reads perfectly healthy while it is happening, so the identity is made
-        // structural rather than assumed.
-        if let Some(sheet) = crate::resources::load_particle_atlas() {
-            render.install_particle_sheet_atlas(gpu.device(), gpu.queue(), sheet.atlas());
-        }
-        let mut hud = HudRenderer::new(gpu.device(), format);
-        // Attach the vanilla GUI sprite atlas so the survival vitals draw from
-        // real textures; on a jar-less run this is `None` and the HUD keeps its
-        // procedural fallback.
-        if let Some(gui) = crate::resources::load_gui_atlas() {
-            hud.attach_gui(gpu.device(), gpu.queue(), format, gui);
-        }
-        // Load the real crafting-recipe corpus from `client.jar`, once. Feeds
-        // the container screen's ghost-preview draw and the debug-overlay
-        // counter; a jar-less run leaves this `None` and neither draws.
+        // Browser: `resumed` is a *synchronous* winit callback, and adapter/device
+        // selection is genuinely asynchronous — `pollster::block_on` on a browser main
+        // thread cannot finish, because there is no other thread to make the future
+        // progress. So the bring-up is split at exactly that seam: kick the attach off
+        // on the microtask queue and let a later `about_to_wait` finish it.
         //
-        // Issue #148: the corpus is *adopted into* `lodestone_ecs::RecipeRegistry`
-        // rather than assigned straight to the field, so every recipe a plugin
-        // registered during `Plugin::build` — which ran long before this point —
-        // is folded in before anything reads it. `self.recipe_book` is now a
-        // revision-gated cache of that resource; see `Self::sync_recipe_book`.
-        self.adopt_recipe_corpus(crate::resources::load_recipe_book());
-        // Attach the flat item-sprite atlas so hotbar/container slots draw real
-        // item icons; jar-less runs leave this `None` and slots stay empty wells.
-        // Loaded once and shared: the container screen needs the same atlas, and
-        // `ItemAtlas` is behind an `Arc` precisely so the second consumer is a
-        // refcount bump rather than a second stitch of the whole item corpus.
-        let item_atlas = crate::resources::load_item_atlas();
-        // The 2-D GUI glint sheet, shared by the hotbar and the container screen.
-        // Loaded once here rather than twice below; `None` on a jar-less run, in
-        // which case enchanted icons draw without their shimmer.
-        let glint_sheet = item_atlas
-            .as_ref()
-            .and_then(|_| crate::resources::load_glint_texture());
-        if let Some(items) = item_atlas.clone() {
-            hud.attach_items(gpu.device(), gpu.queue(), format, items);
-            if let Some(img) = &glint_sheet {
-                hud.attach_glint(gpu.device(), gpu.queue(), format, img);
-            }
-        }
-        // Attach the 3-D block-item pass, which borrows the world renderer's own
-        // block atlas, tint palette and animation slots rather than uploading a
-        // second copy of any of them. Present only on the live vanilla path (the
-        // demo world bakes no models), where block items would otherwise draw an
-        // empty well.
-        if let (Some(atlas_view), Some(atlas_sampler), Some(palette), Some(anim)) = (
-            render.model_atlas_view(),
-            render.model_atlas_sampler(),
-            render.model_palette_buffer(),
-            render.model_anim_buffer(),
-        ) {
-            hud.attach_item_models(
-                gpu.device(),
-                format,
-                atlas_view,
-                atlas_sampler,
-                palette,
-                anim,
-            );
-        }
-        let effects = EffectsRenderer::new(gpu.device(), format);
-
-        // The container screen draws real item icons through the *same* shared
-        // pass the hotbar uses (`hud::item_icon`), so both must be attached or
-        // slots fall back to hash-derived colour swatches. Without this the
-        // capability is complete, gated and reaches zero pixels — the island
-        // pattern this project has hit eleven times.
-        let mut container = ContainerRenderer::new(gpu.device(), format);
-        if let Some(items) = item_atlas {
-            container.attach_items(gpu.device(), gpu.queue(), format, items);
-            if let Some(img) = &glint_sheet {
-                container.attach_glint(gpu.device(), gpu.queue(), format, img);
-            }
-        }
-        if let (Some(atlas_view), Some(atlas_sampler), Some(palette), Some(anim)) = (
-            render.model_atlas_view(),
-            render.model_atlas_sampler(),
-            render.model_palette_buffer(),
-            render.model_anim_buffer(),
-        ) {
-            container.attach_item_models(
-                gpu.device(),
-                format,
-                atlas_view,
-                atlas_sampler,
-                palette,
-                anim,
-            );
-        }
-        // Vanilla's real `container/*.png` panel art (issue #51). A jar-less
-        // run leaves this `None` and the screen keeps its flat programmatic
-        // fill — the same "is a thing attached" degradation as the two calls
-        // above.
-        if let Some(background) = crate::resources::load_container_background() {
-            container.attach_background(gpu.device(), gpu.queue(), format, background);
-        }
-        // The inventory avatar — the player standing in the panel's recess with
-        // their head following the cursor (player report: "right now theres just a
-        // black box where the player should be"). This call is the whole
-        // difference between the capability existing and reaching zero pixels:
-        // `ContainerRenderer` starts with it detached and draws nothing.
-        // `false` on a jar-less run, where the recess stays empty.
-        if !container.attach_player_preview(gpu.device(), gpu.queue(), format) {
-            tracing::info!(
-                target: "assets",
-                "no player skin sheet: the inventory avatar will not draw"
-            );
-        }
-
-        // Upload whatever has already meshed; the rest streams in per frame.
-        for meshed in self.sim.drain_meshes() {
-            render.upload_section(gpu.device(), gpu.queue(), meshed.key, &meshed.mesh);
-        }
-
-        let menu = MenuRenderer::new(gpu.device(), format);
-
-        // Choose the session per config. A connection target on the command line
-        // dials it immediately (and shows a loading screen until login);
-        // otherwise the window opens on the **main menu**, which is now the GUI
-        // entry point. Singleplayer from the menu enters the local worldgen world
-        // — *not* the integrated server, which isn't wired yet (see
-        // `WindowApp::begin_singleplayer`).
-        if requested_a_connection(&self.config) {
-            self.ui.begin(SessionKind::Multiplayer);
-            self.sim.connect(
-                self.config.host.clone(),
-                self.config.port,
-                self.config.protocol,
-            );
-            let net = self
-                .sim
-                .net()
-                .expect("Sim::connect always leaves a client attached");
-            // Install the entity light sampler now, at connect time, not after
-            // login: `set_entity_light_source` wants a `'static` closure
-            // installed *once*, and the shared handle it needs is available
-            // immediately (it is an `Arc<OnceLock<_>>` the net thread resolves
-            // later — see `net::SharedHandle`). Waiting for `LoggedIn` would
-            // just delay the install for no benefit, since the closure already
-            // tolerates an unresolved handle (`entity_light_at` reads `None`
-            // and the sampler falls back to full-bright, exactly matching the
-            // "no world yet" state during connect). This has to happen before
-            // `attach_net` moves `net` into `self.sim` — `NetClient` itself
-            // isn't `Clone` and doesn't outlive this function, only the shared
-            // handle inside it does.
-            let entity_light_handle = net.shared_handle();
-            // See `connect_to`: same clock for terrain and mobs, installed here
-            // too because this is the second, independent connect path.
-            let clock = net.shared_handle();
-            // See `connect_to`: the sky pass's own clock, next to (but distinct
-            // from) `set_sky_darken_source`'s already-derived factor.
-            let sky_clock = net.shared_handle();
-            // See `connect_to`: extrapolates between the ~1/sec `SET_TIME`
-            // packets so the cloud scroll advances smoothly instead of
-            // stepping once a second.
-            let continuous_time_of_day = ContinuousTimeOfDay::new();
-            // See `install_session_render_sources` for why weather rides the
-            // `sky_darken` lane rather than getting its own uniform. Installed on
-            // this path too, or a `--connect` launch renders a storm at full
-            // daylight brightness while a menu-launched session does not: the
-            // duplicated-source hazard this whole function's doc warns about.
-            let weather = Arc::new(WeatherTracker::new(net.shared_weather()));
-            self.weather = Some(weather.clone());
-            render.set_sky_darken_source(move || {
-                let base = clock.get().map(|h| {
-                    lodestone_render::entity::sky_darken_for_time_of_day(h.world_time().1)
-                })?;
-                Some(lodestone_render::weather_sky_light_factor(
-                    base,
-                    &weather.state(),
-                ))
+        // The window is parked here, before the GPU exists, so this callback's own
+        // `self.window.is_some()` guard stops a second `resumed` creating a second
+        // window and a second attach. Every field the deferred half fills is already
+        // `Option` and every consumer already reads them as such — `redraw` starts with
+        // `self.gpu.as_ref()` — so "no GPU for a frame or two" is a state this app
+        // could already represent. That is what makes the split cheap rather than a
+        // rewrite.
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.window = Some(window.clone());
+            wasm_bindgen_futures::spawn_local(async move {
+                match lodestone_render::window::attach_window_async(window).await {
+                    Ok(pair) => PENDING_GPU.with_borrow_mut(|slot| *slot = Some(pair)),
+                    // Not `event_loop.exit()`: we are outside the callback and have no
+                    // `ActiveEventLoop`. Nothing else can draw, so say why loudly and
+                    // leave the page up — a blank canvas with an explanation beats a
+                    // silently dead tab.
+                    Err(e) => tracing::error!(
+                        target: "gpu",
+                        "failed to attach GPU to the canvas: {e}. This build needs WebGPU."
+                    ),
+                }
             });
-            // Same cell as `install_session_render_sources`, installed on this path
-            // too for the reason that function's doc gives about duplicated
-            // sources: a `--connect` launch that skipped it would black out mobs in
-            // open air while a menu-launched session did not.
-            let light_policy = net.shared_sky_default();
-            render.set_entity_light_source(move |feet| {
-                crate::net::entity_light_at(
-                    &entity_light_handle,
-                    feet.x.floor() as i32,
-                    feet.y.floor() as i32,
-                    feet.z.floor() as i32,
-                    // Read per call, not captured: a portal changes this mid-session.
-                    light_policy.get(),
-                )
-            });
-            render.set_time_of_day_source(move || {
-                sky_clock
-                    .get()
-                    .map(|h| continuous_time_of_day.advance(h.world_time().1))
-            });
-            // See `install_session_render_sources`: the sky pass itself, from the
-            // GPU handles this path already has locally (`self.gpu`/`self.target`
-            // are not set until the end of this function).
-            if !render.has_sky()
-                && let Some(sky) = crate::resources::load_sky(gpu.device(), gpu.queue(), format)
-            {
-                render.install_sky(sky);
-            }
-            // See `install_session_render_sources`: the overlay pass, from the
-            // same local GPU handles.
-            if !render.has_screen_effects()
-                && let Some(fx) =
-                    crate::resources::load_screen_effects(gpu.device(), gpu.queue(), format)
-            {
-                render.install_screen_effects(fx);
-            }
-            // See `install_session_render_sources`: the rain/snow pass, from the
-            // same local GPU handles.
-            if !render.has_weather()
-                && let Some(textures) = crate::resources::load_weather_textures()
-            {
-                render.install_weather(gpu.device(), gpu.queue(), format, &textures);
-            }
-            // See `install_session_render_sources`: the enchantment-glint pass, from
-            // the same local GPU handles. `install_glint` uploads the sheet as
-            // `Rgba8Unorm` — see `gpu/glint.rs`'s module doc for why that is the
-            // opposite of every diffuse loader and deliberate.
-            if !render.has_glint()
-                && let Some(img) = crate::resources::load_glint_texture()
-            {
-                render.install_glint(gpu.device(), gpu.queue(), format, &img);
-            }
         }
-        // No target requested: stay on `Screen::MainMenu`, which `UiState::new`
-        // already put us on. Nothing else to do.
-
-        self.window = Some(window);
-        self.gpu = Some(gpu);
-        self.target = Some(target);
-        self.render = Some(render);
-        // Now that `self.render` exists and `attach_net` has already run above,
-        // the outline source can be installed on this path too.
-        self.install_outline_source();
-        // Debug lines need no connection at all (see the method doc), so this
-        // is the one call that actually matters — the two above are just
-        // keeping the three connect paths uniform.
-        self.install_debug_lines_source();
-        self.hud = Some(hud);
-        self.effects = Some(effects);
-        self.container = Some(container);
-        self.menu = Some(menu);
-        // Grab only if the chosen screen wants it (menus and loading: no).
-        self.set_grab(self.ui.wants_cursor_grab());
     }
 
     fn window_event(
@@ -1077,6 +841,32 @@ impl ApplicationHandler for WindowApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Browser: collect the deferred GPU attach `resumed` kicked off, the first time
+        // it is ready. This is the other half of the split — see `resumed` — and this is
+        // the right place for it because it runs every loop turn and has `&mut self`,
+        // which the `async` block that produced the pair could not hold.
+        //
+        // Ordered *before* `request_redraw` deliberately: the frame this enables should
+        // be the one we then ask for, rather than the one after it.
+        #[cfg(target_arch = "wasm32")]
+        if self.gpu.is_none() {
+            let pending = PENDING_GPU.with_borrow_mut(Option::take);
+            if let Some((gpu, target)) = pending {
+                // `resumed` parked the window before spawning the attach, so it is
+                // present here. If it somehow is not, drop the pair rather than
+                // inventing a window: `finish_bring_up` needs the real one the surface
+                // was created from, and a second `resumed` will retry cleanly.
+                if let Some(window) = self.window.clone() {
+                    tracing::info!(target: "gpu", "GPU attached; finishing bring-up");
+                    self.finish_bring_up(window, gpu, target);
+                } else {
+                    tracing::warn!(
+                        target: "gpu",
+                        "GPU attach landed with no window parked; discarding it"
+                    );
+                }
+            }
+        }
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -1098,6 +888,291 @@ impl ApplicationHandler for WindowApp {
 /// Here that layer is the routing site: `handle_chat_key` is the text-entry and
 /// submit path, and these keys are handled before it sees them.
 impl WindowApp {
+    /// The synchronous half of window bring-up: everything after the GPU exists.
+    ///
+    /// Extracted from `resumed` when the browser arm landed. **One body, both
+    /// targets** — the native path calls it inline, the browser path calls it from
+    /// `about_to_wait` once the deferred attach lands. A forked copy would be ~270
+    /// lines of render-state construction drifting silently, and the symptom would be a
+    /// browser missing one atlas or one uniform rather than a build failure.
+    fn finish_bring_up(
+        &mut self,
+        window: Arc<Window>,
+        gpu: GpuContext,
+        target: lodestone_render::SurfaceTarget<'static>,
+    ) {
+        let (w, h) = target.size();
+        let format = target.format();
+        let mut render = RenderState::new(
+            gpu.device(),
+            gpu.queue(),
+            format,
+            w,
+            h,
+            self.sim.vanilla_atlas(),
+        );
+        // Size the sky fog to our real render distance so terrain fades into the
+        // sky where chunks actually stop, not at the render crate's 8-chunk default.
+        render.set_fog(sky_fog(self.config.render_distance), self.config.render_distance);
+        // The F3 overlay's fixed adapter block (see `DebugStats::adapter`).
+        // Resolved **once**, here, because `Adapter::get_info` is the only place
+        // this is knowable and it never changes for the process — and because the
+        // field is otherwise an island: it was added with a draw and no producer,
+        // so the lines it exists to show reached zero pixels.
+        self.sim.stats.adapter = adapter_lines(&gpu);
+        // Upload the stitched particle sheet the emitter already resolves its
+        // flame/smoke/crit UVs against (issue #45). `load_particle_atlas` is
+        // memoised, so this is the **same** `ParticleAtlas` object `Sim` built
+        // its `(Sheet, frame) -> UV` table from — not a second stitch that
+        // happens to pack the same way. The bug being closed here is a UV table
+        // addressing a different image than the one bound, and every counter
+        // reads perfectly healthy while it is happening, so the identity is made
+        // structural rather than assumed.
+        if let Some(sheet) = crate::resources::load_particle_atlas() {
+            render.install_particle_sheet_atlas(gpu.device(), gpu.queue(), sheet.atlas());
+        }
+        let mut hud = HudRenderer::new(gpu.device(), format);
+        // Attach the vanilla GUI sprite atlas so the survival vitals draw from
+        // real textures; on a jar-less run this is `None` and the HUD keeps its
+        // procedural fallback.
+        if let Some(gui) = crate::resources::load_gui_atlas() {
+            hud.attach_gui(gpu.device(), gpu.queue(), format, gui);
+        }
+        // Load the real crafting-recipe corpus from `client.jar`, once. Feeds
+        // the container screen's ghost-preview draw and the debug-overlay
+        // counter; a jar-less run leaves this `None` and neither draws.
+        //
+        // Issue #148: the corpus is *adopted into* `lodestone_ecs::RecipeRegistry`
+        // rather than assigned straight to the field, so every recipe a plugin
+        // registered during `Plugin::build` — which ran long before this point —
+        // is folded in before anything reads it. `self.recipe_book` is now a
+        // revision-gated cache of that resource; see `Self::sync_recipe_book`.
+        self.adopt_recipe_corpus(crate::resources::load_recipe_book());
+        // Attach the flat item-sprite atlas so hotbar/container slots draw real
+        // item icons; jar-less runs leave this `None` and slots stay empty wells.
+        // Loaded once and shared: the container screen needs the same atlas, and
+        // `ItemAtlas` is behind an `Arc` precisely so the second consumer is a
+        // refcount bump rather than a second stitch of the whole item corpus.
+        let item_atlas = crate::resources::load_item_atlas();
+        // The 2-D GUI glint sheet, shared by the hotbar and the container screen.
+        // Loaded once here rather than twice below; `None` on a jar-less run, in
+        // which case enchanted icons draw without their shimmer.
+        let glint_sheet = item_atlas
+            .as_ref()
+            .and_then(|_| crate::resources::load_glint_texture());
+        if let Some(items) = item_atlas.clone() {
+            hud.attach_items(gpu.device(), gpu.queue(), format, items);
+            if let Some(img) = &glint_sheet {
+                hud.attach_glint(gpu.device(), gpu.queue(), format, img);
+            }
+        }
+        // Attach the 3-D block-item pass, which borrows the world renderer's own
+        // block atlas, tint palette and animation slots rather than uploading a
+        // second copy of any of them. Present only on the live vanilla path (the
+        // demo world bakes no models), where block items would otherwise draw an
+        // empty well.
+        if let (Some(atlas_view), Some(atlas_sampler), Some(palette), Some(anim)) = (
+            render.model_atlas_view(),
+            render.model_atlas_sampler(),
+            render.model_palette_buffer(),
+            render.model_anim_buffer(),
+        ) {
+            hud.attach_item_models(
+                gpu.device(),
+                format,
+                atlas_view,
+                atlas_sampler,
+                palette,
+                anim,
+            );
+        }
+        let effects = EffectsRenderer::new(gpu.device(), format);
+
+        // The container screen draws real item icons through the *same* shared
+        // pass the hotbar uses (`hud::item_icon`), so both must be attached or
+        // slots fall back to hash-derived colour swatches. Without this the
+        // capability is complete, gated and reaches zero pixels — the island
+        // pattern this project has hit eleven times.
+        let mut container = ContainerRenderer::new(gpu.device(), format);
+        if let Some(items) = item_atlas {
+            container.attach_items(gpu.device(), gpu.queue(), format, items);
+            if let Some(img) = &glint_sheet {
+                container.attach_glint(gpu.device(), gpu.queue(), format, img);
+            }
+        }
+        if let (Some(atlas_view), Some(atlas_sampler), Some(palette), Some(anim)) = (
+            render.model_atlas_view(),
+            render.model_atlas_sampler(),
+            render.model_palette_buffer(),
+            render.model_anim_buffer(),
+        ) {
+            container.attach_item_models(
+                gpu.device(),
+                format,
+                atlas_view,
+                atlas_sampler,
+                palette,
+                anim,
+            );
+        }
+        // Vanilla's real `container/*.png` panel art (issue #51). A jar-less
+        // run leaves this `None` and the screen keeps its flat programmatic
+        // fill — the same "is a thing attached" degradation as the two calls
+        // above.
+        if let Some(background) = crate::resources::load_container_background() {
+            container.attach_background(gpu.device(), gpu.queue(), format, background);
+        }
+        // The inventory avatar — the player standing in the panel's recess with
+        // their head following the cursor (player report: "right now theres just a
+        // black box where the player should be"). This call is the whole
+        // difference between the capability existing and reaching zero pixels:
+        // `ContainerRenderer` starts with it detached and draws nothing.
+        // `false` on a jar-less run, where the recess stays empty.
+        if !container.attach_player_preview(gpu.device(), gpu.queue(), format) {
+            tracing::info!(
+                target: "assets",
+                "no player skin sheet: the inventory avatar will not draw"
+            );
+        }
+
+        // Upload whatever has already meshed; the rest streams in per frame.
+        for meshed in self.sim.drain_meshes() {
+            render.upload_section(gpu.device(), gpu.queue(), meshed.key, &meshed.mesh);
+        }
+
+        let menu = MenuRenderer::new(gpu.device(), format);
+
+        // Choose the session per config. A connection target on the command line
+        // dials it immediately (and shows a loading screen until login);
+        // otherwise the window opens on the **main menu**, which is now the GUI
+        // entry point. Singleplayer from the menu enters the local worldgen world
+        // — *not* the integrated server, which isn't wired yet (see
+        // `WindowApp::begin_singleplayer`).
+        if requested_a_connection(&self.config) {
+            self.ui.begin(SessionKind::Multiplayer);
+            self.sim.connect(
+                self.config.host.clone(),
+                self.config.port,
+                self.config.protocol,
+            );
+            let net = self
+                .sim
+                .net()
+                .expect("Sim::connect always leaves a client attached");
+            // Install the entity light sampler now, at connect time, not after
+            // login: `set_entity_light_source` wants a `'static` closure
+            // installed *once*, and the shared handle it needs is available
+            // immediately (it is an `Arc<OnceLock<_>>` the net thread resolves
+            // later — see `net::SharedHandle`). Waiting for `LoggedIn` would
+            // just delay the install for no benefit, since the closure already
+            // tolerates an unresolved handle (`entity_light_at` reads `None`
+            // and the sampler falls back to full-bright, exactly matching the
+            // "no world yet" state during connect). This has to happen before
+            // `attach_net` moves `net` into `self.sim` — `NetClient` itself
+            // isn't `Clone` and doesn't outlive this function, only the shared
+            // handle inside it does.
+            let entity_light_handle = net.shared_handle();
+            // See `connect_to`: same clock for terrain and mobs, installed here
+            // too because this is the second, independent connect path.
+            let clock = net.shared_handle();
+            // See `connect_to`: the sky pass's own clock, next to (but distinct
+            // from) `set_sky_darken_source`'s already-derived factor.
+            let sky_clock = net.shared_handle();
+            // See `connect_to`: extrapolates between the ~1/sec `SET_TIME`
+            // packets so the cloud scroll advances smoothly instead of
+            // stepping once a second.
+            let continuous_time_of_day = ContinuousTimeOfDay::new();
+            // See `install_session_render_sources` for why weather rides the
+            // `sky_darken` lane rather than getting its own uniform. Installed on
+            // this path too, or a `--connect` launch renders a storm at full
+            // daylight brightness while a menu-launched session does not: the
+            // duplicated-source hazard this whole function's doc warns about.
+            let weather = Arc::new(WeatherTracker::new(net.shared_weather()));
+            self.weather = Some(weather.clone());
+            render.set_sky_darken_source(move || {
+                let base = clock.get().map(|h| {
+                    lodestone_render::entity::sky_darken_for_time_of_day(h.world_time().1)
+                })?;
+                Some(lodestone_render::weather_sky_light_factor(
+                    base,
+                    &weather.state(),
+                ))
+            });
+            // Same cell as `install_session_render_sources`, installed on this path
+            // too for the reason that function's doc gives about duplicated
+            // sources: a `--connect` launch that skipped it would black out mobs in
+            // open air while a menu-launched session did not.
+            let light_policy = net.shared_sky_default();
+            render.set_entity_light_source(move |feet| {
+                crate::net::entity_light_at(
+                    &entity_light_handle,
+                    feet.x.floor() as i32,
+                    feet.y.floor() as i32,
+                    feet.z.floor() as i32,
+                    // Read per call, not captured: a portal changes this mid-session.
+                    light_policy.get(),
+                )
+            });
+            render.set_time_of_day_source(move || {
+                sky_clock
+                    .get()
+                    .map(|h| continuous_time_of_day.advance(h.world_time().1))
+            });
+            // See `install_session_render_sources`: the sky pass itself, from the
+            // GPU handles this path already has locally (`self.gpu`/`self.target`
+            // are not set until the end of this function).
+            if !render.has_sky()
+                && let Some(sky) = crate::resources::load_sky(gpu.device(), gpu.queue(), format)
+            {
+                render.install_sky(sky);
+            }
+            // See `install_session_render_sources`: the overlay pass, from the
+            // same local GPU handles.
+            if !render.has_screen_effects()
+                && let Some(fx) =
+                    crate::resources::load_screen_effects(gpu.device(), gpu.queue(), format)
+            {
+                render.install_screen_effects(fx);
+            }
+            // See `install_session_render_sources`: the rain/snow pass, from the
+            // same local GPU handles.
+            if !render.has_weather()
+                && let Some(textures) = crate::resources::load_weather_textures()
+            {
+                render.install_weather(gpu.device(), gpu.queue(), format, &textures);
+            }
+            // See `install_session_render_sources`: the enchantment-glint pass, from
+            // the same local GPU handles. `install_glint` uploads the sheet as
+            // `Rgba8Unorm` — see `gpu/glint.rs`'s module doc for why that is the
+            // opposite of every diffuse loader and deliberate.
+            if !render.has_glint()
+                && let Some(img) = crate::resources::load_glint_texture()
+            {
+                render.install_glint(gpu.device(), gpu.queue(), format, &img);
+            }
+        }
+        // No target requested: stay on `Screen::MainMenu`, which `UiState::new`
+        // already put us on. Nothing else to do.
+
+        self.window = Some(window);
+        self.gpu = Some(gpu);
+        self.target = Some(target);
+        self.render = Some(render);
+        // Now that `self.render` exists and `attach_net` has already run above,
+        // the outline source can be installed on this path too.
+        self.install_outline_source();
+        // Debug lines need no connection at all (see the method doc), so this
+        // is the one call that actually matters — the two above are just
+        // keeping the three connect paths uniform.
+        self.install_debug_lines_source();
+        self.hud = Some(hud);
+        self.effects = Some(effects);
+        self.container = Some(container);
+        self.menu = Some(menu);
+        // Grab only if the chosen screen wants it (menus and loading: no).
+        self.set_grab(self.ui.wants_cursor_grab());
+    }
+
     /// Returns `true` when the key was consumed, so the caller must **not** fall
     /// through to `handle_chat_key`.
     ///
@@ -1213,4 +1288,72 @@ impl WindowApp {
             self.recipe_book = (!book.is_empty()).then_some(book);
         }
     }
+}
+
+/// The window `resumed` asks winit for.
+///
+/// A free function so both targets build the identical attributes and only the
+/// browser-specific part is forked.
+fn window_attributes() -> winit::window::WindowAttributes {
+    let attrs = Window::default_attributes()
+        .with_title("Lodestone")
+        .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
+
+    // Browser: bind winit to the page's own `<canvas id="lodestone">` instead of
+    // letting it create one. Two reasons, and the second is the one that bites:
+    // winit does create a canvas when given none, but it does **not** insert it into
+    // the DOM, so the app runs, renders, reports success and is invisible — the island
+    // failure with a GPU attached. Taking the canvas from the page also lets
+    // `web/index.html` own layout and sizing, which is where they belong.
+    //
+    // A missing element falls through to winit's own canvas rather than panicking, so a
+    // page that forgot the element gets the "renders nowhere" behaviour and a warning,
+    // not a dead tab.
+    #[cfg(target_arch = "wasm32")]
+    {
+        use winit::platform::web::WindowAttributesExtWebSys;
+        match browser_canvas() {
+            Some(canvas) => attrs.with_canvas(Some(canvas)),
+            None => {
+                tracing::warn!(
+                    target: "gpu",
+                    "no <canvas id=\"{CANVAS_ID}\"> in the page: winit will create its own, \
+                     which is NOT inserted into the DOM, so nothing will be visible"
+                );
+                attrs
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    attrs
+}
+
+/// The id of the canvas element `web/index.html` provides.
+#[cfg(target_arch = "wasm32")]
+const CANVAS_ID: &str = "lodestone";
+
+/// The page's canvas, if it has one.
+#[cfg(target_arch = "wasm32")]
+fn browser_canvas() -> Option<web_sys::HtmlCanvasElement> {
+    use wasm_bindgen::JsCast;
+    web_sys::window()?
+        .document()?
+        .get_element_by_id(CANVAS_ID)?
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .ok()
+}
+
+thread_local! {
+    /// Where the deferred browser GPU attach parks its result for `about_to_wait` to
+    /// collect.
+    ///
+    /// A `thread_local` because there is no way to reach back into the `WindowApp`:
+    /// winit's wasm `spawn_app` takes ownership of it, and the `async` block cannot
+    /// hold `&mut self` across an `await` regardless. Single-threaded by construction,
+    /// so there is no race to lose — the browser event loop is one thread, which is the
+    /// same fact that made the mesher's pool removable.
+    #[cfg(target_arch = "wasm32")]
+    static PENDING_GPU: std::cell::RefCell<
+        Option<(GpuContext, lodestone_render::SurfaceTarget<'static>)>,
+    > = const { std::cell::RefCell::new(None) };
 }
