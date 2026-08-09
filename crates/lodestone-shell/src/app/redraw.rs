@@ -352,6 +352,16 @@ impl WindowApp {
             render.set_enchanting_table_source(f);
         }
 
+        // Moving pistons. A third destination again: not `prepare_block_entities`
+        // (no cuboid rig) and not the item path either, but the moving-block-model
+        // seam falling blocks share. The per-frame install is the strictest in this
+        // list — a whole push lasts two ticks, so a stale closure does not freeze
+        // the animation, it pins `progress` at 0 and buries the head inside the
+        // piston base.
+        if let Some(f) = self.sim.moving_piston_source() {
+            render.set_moving_piston_source(f);
+        }
+
         // `GameRenderer.bobHurt` — the damage tilt and the death roll, as an
         // eye-space matrix multiplied into every world view-projection.
         //

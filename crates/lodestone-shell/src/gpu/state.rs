@@ -41,8 +41,8 @@ use super::{
     BannerSource, BellSource, BlockEntityRenderer, BlockEntitySource, CampfireSource,
     DEFAULT_RENDER_DISTANCE_CHUNKS, EnchantingTableSource, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
-    HandSwingSource, LecternSource, MainHandSource, MapSource, NameTagRenderer, OutlineRenderer,
-    OutlineShapeSource,
+    HandSwingSource, LecternSource, MainHandSource, MapSource, MovingPistonSource,
+    NameTagRenderer, OutlineRenderer, OutlineShapeSource,
     RenderState, SKY_COLOR, SignSource, SignTextRenderer, SkullSource, SkyDarkenSource,
     ThirdPersonBodySource, ThirdPersonBodyState, TimeOfDaySource, transparent_placeholder_atlas,
 };
@@ -306,6 +306,8 @@ impl RenderState {
             lectern_source: LecternSource::default(),
             // Likewise `set_campfire_source`.
             campfire_source: CampfireSource::default(),
+            // Likewise `set_moving_piston_source`.
+            moving_piston_source: MovingPistonSource::default(),
             // Likewise `set_enchanting_table_source`.
             enchanting_table_source: EnchantingTableSource::default(),
             // Identity until `app::redraw` installs this frame's `bobHurt`; see
@@ -1110,6 +1112,27 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::CampfireItemSpawn> + Send + Sync + 'static,
     ) {
         self.campfire_source = CampfireSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's moving pistons — vanilla's
+    /// `PistonHeadRenderer`.
+    ///
+    /// **Must be re-installed every frame**, and the failure mode is worse than
+    /// any other source's here: a whole push lasts *two* ticks
+    /// (`PistonMovingBlockEntity.TICKS_TO_EXTEND`), and a stale closure pins
+    /// `progress` at 0, which draws the head one full cell back **inside** the
+    /// piston base rather than merely freezing it.
+    ///
+    /// Unlike [`set_campfire_source`](Self::set_campfire_source) — the other source
+    /// that bypasses `prepare_block_entities` — this one does not reach the item
+    /// path either. It feeds
+    /// [`prepare_moving_blocks`](Self::prepare_moving_blocks), sharing one vertex
+    /// buffer and one draw call with falling blocks.
+    pub fn set_moving_piston_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::MovingPistonSpawn> + Send + Sync + 'static,
+    ) {
+        self.moving_piston_source = MovingPistonSource(Some(Box::new(f)));
     }
 
     /// Install the source for this frame's enchanting-table books.

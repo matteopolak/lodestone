@@ -700,6 +700,15 @@ pub struct Sim {
     /// nothing on the wire would ever reveal that it had stopped — see
     /// `crate::block_entities::EnchantingTableBooks`.
     enchanting_table_books: crate::block_entities::EnchantingTableBooks,
+    /// Per-position moving-piston animation state (issue #23).
+    ///
+    /// The **fourth** block-entity clock and the shortest by far: a whole push is
+    /// two ticks. Like [`enchanting_table_books`](Self::enchanting_table_books) no
+    /// packet starts it — the trigger is a `moving_piston` block entity appearing in
+    /// the world — but unlike that one the wire does carry a *seed* (the NBT's
+    /// `progress`), which is why an untracked position draws from the NBT rather
+    /// than from zero. See `crate::block_entities::PistonMoves`.
+    moving_pistons: crate::block_entities::PistonMoves,
 
     /// This frame's item pickups (`take_item_entity`), awaiting the fly-to-collector
     /// animation — issue #365.

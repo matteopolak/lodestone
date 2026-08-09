@@ -432,6 +432,7 @@ impl Sim {
             chest_lids: crate::block_entities::ChestLids::new(),
             bell_shakes: crate::block_entities::BellShakes::new(),
             enchanting_table_books: crate::block_entities::EnchantingTableBooks::new(),
+            moving_pistons: crate::block_entities::PistonMoves::new(),
             // Vanilla's default, not `0.0` — see the field's doc.
             damage_tilt_strength: 1.0,
             // Vanilla's own `70`, so a `Sim` nobody pushes an FOV into builds the

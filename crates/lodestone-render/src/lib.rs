@@ -112,7 +112,7 @@ pub use block_entity::{
     CHEST_LEFT, CHEST_MATERIALS, CHEST_RIGHT,
     CHEST_SINGLE, CampfireItemSpawn, ChestHalf, ChestMaterial, ChestSpawn,
     ENCHANTING_TABLE_BOOK_TILT_DEG, EnchantingTableSpawn, LECTERN_BOOK_OPENNESS,
-    LECTERN_BOOK_PAGE_FLIP, LecternSpawn, SHULKER_BOX, SHULKER_COLOURS,
+    LECTERN_BOOK_PAGE_FLIP, LecternSpawn, MovingPistonSpawn, SHULKER_BOX, SHULKER_COLOURS,
     SHULKER_DEFAULT_TEXTURE_STEM, SKULL_HUMANOID, SKULL_MOB, SKULL_TYPES, ShulkerFacing,
     ShulkerSpawn, SkullOrientation, SkullSpawn, SkullType, banner_flag_x_rot,
     banner_ground_placement_matrix, banner_phase, banner_texture_stems,

@@ -2166,6 +2166,64 @@ pub struct CampfireItemSpawn {
     pub light: u8,
 }
 
+/// One `moving_piston` block entity for this frame — vanilla's
+/// `PistonHeadRenderer`.
+///
+/// **The second `*Spawn` here [`BlockEntityModelSet`] does not resolve**, and for
+/// the same reason [`CampfireItemSpawn`] is the first: `PistonHeadRenderer`'s
+/// constructor calls no `bakeLayer`, so it owns no cuboid rig. What it draws is
+/// whole *block models* posed somewhere other than their own cell, which is the
+/// moving-block seam (`gpu/moving_blocks.rs` in the shell) rather than either the
+/// entity or the item pipeline.
+///
+/// # Everything here is semantic, not a matrix
+///
+/// The offset is deliberately **not** precomputed into a `Mat4` by the gather.
+/// `getExtendedProgress` is the one piece of arithmetic in this renderer that a
+/// plausible reading gets backwards — it is `progress - 1.0` while extending and
+/// `1.0 - progress` while retracting, and the two agree at `progress == 0.5` — so
+/// it lives next to its sibling `falling_block_pose` where its wrong hypothesis is
+/// evaluated against it. Carrying `direction`/`progress`/`extending` keeps that
+/// possible.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MovingPistonSpawn {
+    /// The cell the `moving_piston` block entity itself occupies. Geometry draws
+    /// at this cell **plus** the offset derived from the three fields below; the
+    /// cell itself has no block model (`moving_piston` is
+    /// `RenderShape.INVISIBLE`), which is why an unset source leaves a hole.
+    pub pos: [i32; 3],
+    /// The global block-state id to draw offset — already resolved by the gather,
+    /// because two of `extractRenderState`'s three branches *synthesise* a state
+    /// rather than using the stored one (a `piston_head` with `short` set from the
+    /// progress, in particular).
+    pub state_id: u32,
+    /// The retracting **source** piston's own base, drawn at [`Self::pos`] with
+    /// no offset at all — `submit` pops the translated pose before submitting it.
+    /// `None` for every other case, which is the common one.
+    pub base_state_id: Option<u32>,
+    /// `PistonMovingBlockEntity.direction`'s unit step.
+    ///
+    /// **Not the movement direction.** `getMovementDirection()` is `extending ?
+    /// direction : direction.getOpposite()`, but `getXOff`/`getYOff`/`getZOff`
+    /// multiply the *raw* `direction` step by a signed progress that carries the
+    /// retraction's sign itself. Using the movement direction here and a positive
+    /// progress would double-negate the retracting case.
+    pub direction: [i32; 3],
+    /// `getProgress(partialTick)` — `lerp(a, progressO, progress)`, in `0..=1`.
+    pub progress: f32,
+    /// `PistonMovingBlockEntity.extending`.
+    pub extending: bool,
+    /// Packed sky/block light for the offset geometry. Vanilla samples it one cell
+    /// **back** along the movement direction
+    /// (`getBlockPos().relative(getMovementDirection().getOpposite())`), not at the
+    /// block entity's own cell — the cell being moved *into* is the one full of
+    /// `moving_piston`.
+    pub light: u8,
+    /// Packed sky/block light for [`Self::base_state_id`], sampled at
+    /// [`Self::pos`] itself. Ignored when there is no base.
+    pub base_light: u8,
+}
+
 /// One resolved block entity, ready to batch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockEntityInstance {

@@ -1882,6 +1882,477 @@ pub fn banner_spawns(
     out
 }
 
+/// `PistonMovingBlockEntity.tick`'s ramp: `progress += 0.5F` per tick, so with
+/// `TICKS_TO_EXTEND = 2` a whole push lasts **two ticks** — a tenth of a second.
+///
+/// The shortest animation in this module by a factor of five (a chest lid is ten
+/// ticks, a bell fifty), which is why a stale render source is so much more
+/// visible here: there is no window in which the frozen value looks like a
+/// mid-animation frame.
+const PISTON_PROGRESS_SPEED: f32 = 0.5;
+
+/// One moving piston's animation clock — `PistonMovingBlockEntity`'s `progress`
+/// and `progressO`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PistonMove {
+    progress: f32,
+    /// `progressO`: the value at the start of the current tick, for the
+    /// partial-tick lerp.
+    previous: f32,
+}
+
+/// Per-position moving-piston animation state — the piston sibling of
+/// [`ChestLids`] and [`BellShakes`], and the only one of the three that **no
+/// packet drives**.
+///
+/// # Why a client-side clock is needed at all
+///
+/// `PistonMovingBlockEntity.getUpdateTag` is `saveCustomOnly`, so the wire does
+/// carry a `progress` — but it is `progressO`, the value at the *start* of the tick
+/// the block entity was created on, and it is sent once. Vanilla's client then runs
+/// `PistonMovingBlockEntity.tick` locally, adding [`PISTON_PROGRESS_SPEED`] each
+/// tick. Without that local ramp every push would draw at its seed value for its
+/// whole two-tick life, and the seed is normally `0.0` — which
+/// [`piston_head_pose`](crate::gpu) turns into a displacement of one **whole** cell
+/// backwards, i.e. geometry buried inside the piston base. So the missing clock
+/// does not degrade to "no animation", it degrades to overlapping blocks.
+///
+/// # Removal is driven by the world, not by a counter
+///
+/// Vanilla drops the block entity itself once `progressO >= 1.0` (after five
+/// `deathTicks` on the client). Here the authority is simpler and more robust: a
+/// tracked entry is dropped as soon as its cell stops holding a `moving_piston`
+/// block entity, which is exactly when the server's own `finalTick` replaces the
+/// cell. A piston whose removal packet is lost therefore settles at `progress ==
+/// 1.0` — geometry exactly on its destination cell, indistinguishable from the
+/// finished block — rather than being stranded mid-travel.
+#[derive(Debug, Default, Clone)]
+pub struct PistonMoves {
+    moves: HashMap<[i32; 3], PistonMove>,
+}
+
+impl PistonMoves {
+    /// An empty set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Advances every tracked piston one client tick — `PistonMovingBlockEntity.tick`.
+    ///
+    /// `present` is every `moving_piston` block entity the world still holds,
+    /// paired with the `progress` its NBT carries — [`moving_piston_seeds`] builds
+    /// it. It does double duty: it is the **liveness set** (anything not in it is
+    /// dropped) and the **seed** for a position seen for the first time.
+    ///
+    /// # A newly-seen piston is seeded, not advanced, in the same call
+    ///
+    /// The insert happens *after* the advance, deliberately. Advancing on the
+    /// discovery tick would start every push at `progress == 0.5` and halve the
+    /// animation to a single tick — visible as a head that appears already
+    /// half-way out. Vanilla's ordering is the same shape for a different reason:
+    /// the block entity is constructed during chunk load and `tick` first runs on
+    /// the following tick.
+    pub fn tick(&mut self, present: &[([i32; 3], f32)]) {
+        self.moves.retain(|pos, m| {
+            if !present.iter().any(|(p, _)| p == pos) {
+                return false;
+            }
+            m.previous = m.progress;
+            m.progress = (m.progress + PISTON_PROGRESS_SPEED).min(1.0);
+            true
+        });
+        for &(pos, seed) in present {
+            self.moves.entry(pos).or_insert(PistonMove {
+                progress: seed.clamp(0.0, 1.0),
+                previous: seed.clamp(0.0, 1.0),
+            });
+        }
+    }
+
+    /// The interpolated progress at `pos` — `getProgress(a)`, i.e.
+    /// `lerp(a, progressO, progress)`.
+    ///
+    /// `None` for an untracked position. That is **not** the same "absent equals
+    /// at rest" shortcut [`ChestLids::openness`] can take: `0.0` is a real, and the
+    /// most displaced, progress value, so a caller must be able to tell "not
+    /// tracked yet" from "at the start of its travel". The gather uses the NBT's own
+    /// seed in that case, so a piston is never drawn from a value this map made up.
+    #[must_use]
+    pub fn progress(&self, pos: [i32; 3], partial_tick: f32) -> Option<f32> {
+        let m = self.moves.get(&pos)?;
+        let t = partial_tick.clamp(0.0, 1.0);
+        Some(m.previous + (m.progress - m.previous) * t)
+    }
+
+    /// Number of pistons currently moving (for stats and tests).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.moves.len()
+    }
+
+    /// Whether nothing is being tracked.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.moves.is_empty()
+    }
+}
+
+/// One `moving_piston` block entity's NBT, decoded — `PistonMovingBlockEntity`'s
+/// five `loadAdditional` fields.
+#[derive(Debug, Clone, PartialEq)]
+struct MovingPistonNbt {
+    /// `blockState`, resolved through [`lodestone_data::block_states::state_id`].
+    moved_state: u32,
+    /// `facing`, as a unit step. `Direction.LEGACY_ID_CODEC` is `Codec.BYTE` over
+    /// `get3DDataValue`, so this is an [`lodestone_core::Nbt::Byte`], **not** an
+    /// int — reading it as one silently defaults every piston to `DOWN`.
+    direction: [i32; 3],
+    /// `progress`, which vanilla writes as `progressO`. Seeds
+    /// [`PistonMoves::tick`]; it is not the value drawn.
+    progress: f32,
+    extending: bool,
+    /// `source`: whether this cell is the piston *base*'s own, rather than a cell
+    /// a pushed block is travelling through.
+    source: bool,
+}
+
+/// `Direction.from3DDataValue`'s unit step, for the byte
+/// `Direction.LEGACY_ID_CODEC` stores.
+///
+/// The order is `DOWN, UP, NORTH, SOUTH, WEST, EAST` — vanilla's own enum
+/// declaration order, which is *not* alphabetical and not the horizontal-facing
+/// order the sign and chest gathers use. `None` rather than a wrapping index for
+/// anything out of range: vanilla's `BY_ID` wraps, but a wrapped facing here would
+/// silently push a contraption sideways.
+#[must_use]
+fn direction_step_from_3d(id: i8) -> Option<[i32; 3]> {
+    Some(match id {
+        0 => [0, -1, 0],
+        1 => [0, 1, 0],
+        2 => [0, 0, -1],
+        3 => [0, 0, 1],
+        4 => [-1, 0, 0],
+        5 => [1, 0, 0],
+        _ => return None,
+    })
+}
+
+/// Renders a `BlockState.CODEC` NBT compound — `{Name: "...", Properties: {...}}`
+/// — as the canonical state string [`lodestone_data::block_states::state_id`]
+/// parses.
+///
+/// Going via the string rather than a direct table lookup is not a detour: that
+/// function's three-tier fallback (exact, default-plus-overrides, then the bare
+/// default) is exactly what a hand-rolled property match would have to
+/// reimplement, and it is the tier-2 arm that makes a *synthesised* state such as
+/// `piston_head[facing=up,short=true,type=normal]` resolve at all.
+///
+/// Properties are sorted, because tier 1 compares against the generated table's
+/// own sorted slice.
+#[must_use]
+fn nbt_block_state_string(nbt: &lodestone_core::Nbt) -> Option<String> {
+    use lodestone_core::Nbt;
+
+    let Nbt::Compound(fields) = nbt else {
+        return None;
+    };
+    let field = |key: &str| fields.iter().find(|(name, _)| name == key).map(|(_, v)| v);
+    let Some(Nbt::String(name)) = field("Name") else {
+        return None;
+    };
+    let mut props: Vec<(&str, &str)> = match field("Properties") {
+        Some(Nbt::Compound(pairs)) => pairs
+            .iter()
+            .filter_map(|(key, value)| match value {
+                Nbt::String(value) => Some((key.as_str(), value.as_str())),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    if props.is_empty() {
+        return Some(name.clone());
+    }
+    props.sort_unstable();
+    let rendered: Vec<String> = props
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    Some(format!("{name}[{}]", rendered.join(",")))
+}
+
+/// Decodes one moving piston's NBT, or `None` if any required field is missing or
+/// the wrong tag type.
+///
+/// A missing `blockState` is `AIR` in vanilla and `extractRenderState` then draws
+/// nothing (`!blockState.isAir()`), so this declines rather than defaulting: the
+/// caller has nothing to draw either way, and declining keeps the untracked/at-rest
+/// distinction [`PistonMoves::progress`] documents.
+#[must_use]
+fn moving_piston_nbt(nbt: &lodestone_core::Nbt) -> Option<MovingPistonNbt> {
+    use lodestone_core::Nbt;
+
+    let Nbt::Compound(fields) = nbt else {
+        return None;
+    };
+    let field = |key: &str| fields.iter().find(|(name, _)| name == key).map(|(_, v)| v);
+
+    let moved_state =
+        lodestone_data::block_states::state_id(&nbt_block_state_string(field("blockState")?)?)?;
+    if moved_state == lodestone_data::block_states::air_state_id() {
+        return None;
+    }
+    let Some(Nbt::Byte(facing)) = field("facing") else {
+        return None;
+    };
+    let direction = direction_step_from_3d(*facing)?;
+    // Vanilla's `getFloatOr("progress", 0.0F)`: a missing progress is the start of
+    // the travel, which is a real state rather than a decode failure.
+    let progress = match field("progress") {
+        Some(Nbt::Float(v)) => *v,
+        None => 0.0,
+        _ => return None,
+    };
+    // `getBooleanOr` — an `Nbt::Byte`, and absent means `false`.
+    let flag = |key: &str| match field(key) {
+        Some(Nbt::Byte(v)) => Some(*v != 0),
+        None => Some(false),
+        _ => None,
+    };
+    Some(MovingPistonNbt {
+        moved_state,
+        direction,
+        progress,
+        extending: flag("extending")?,
+        source: flag("source")?,
+    })
+}
+
+/// Whether a block state is `minecraft:moving_piston`.
+#[must_use]
+fn is_moving_piston(state_id: u32) -> bool {
+    lodestone_data::block_states::block_name(state_id) == Some("minecraft:moving_piston")
+}
+
+/// One block state's named property value, or `None`.
+#[must_use]
+fn state_property(state_id: u32, key: &str) -> Option<&'static str> {
+    lodestone_data::block_states::properties(state_id)?
+        .iter()
+        .find(|(name, _)| *name == key)
+        .map(|(_, value)| *value)
+}
+
+/// `PistonHeadRenderer.extractRenderState`'s three-way branch: which state to draw
+/// offset, and whether a *second*, unoffset state (the retracting source piston's
+/// own base) draws with it.
+///
+/// # The three arms, and why two of them synthesise a state
+///
+/// 1. **The moved state already is a `piston_head`** — the arm a plain extension
+///    takes, because `PistonBaseBlock` pushes a head state into the cell in front
+///    of it. Vanilla rewrites `short` from the progress. Its guard is `progress <=
+///    4.0F`, which is *always* true (progress is `0..=1`); it is not ported as a
+///    condition because a condition that cannot be false reads as one that can.
+/// 2. **A retracting source piston** (`isSourcePiston && !isExtending`) — a sticky
+///    piston pulling its head home. The stored state is the *base* block, so a head
+///    has to be built from scratch: `type` from whether the base is sticky, `facing`
+///    from the base's own `facing`, and `short` from the progress with the
+///    **opposite** comparison to arm 1 (`>= 0.5`, not `<= 0.5`, because the head is
+///    travelling the other way). Its base draws too, forced to `extended=true`.
+/// 3. **Anything else** — an ordinary pushed or pulled block, drawn as stored.
+///
+/// `short` is a genuine visual difference (a short head's arm is 4/16 deep instead
+/// of 12/16), and getting arm 2's comparison backwards produces a head that pops
+/// long at the wrong moment — plausible enough to survive a screenshot.
+#[must_use]
+fn moving_piston_states(nbt: &MovingPistonNbt, progress: f32) -> Option<(u32, Option<u32>)> {
+    use lodestone_data::block_states::{block_name, state_id};
+
+    let moved_name = block_name(nbt.moved_state)?;
+    if moved_name == "minecraft:piston_head" {
+        let facing = state_property(nbt.moved_state, "facing")?;
+        let head_type = state_property(nbt.moved_state, "type")?;
+        let short = progress <= 0.5;
+        return Some((
+            state_id(&format!(
+                "minecraft:piston_head[facing={facing},short={short},type={head_type}]"
+            ))?,
+            None,
+        ));
+    }
+    if nbt.source && !nbt.extending {
+        // `PistonType.DEFAULT`'s serialized name is `"normal"`, not `"default"`.
+        let head_type = if moved_name == "minecraft:sticky_piston" {
+            "sticky"
+        } else {
+            "normal"
+        };
+        let facing = state_property(nbt.moved_state, "facing")?;
+        let short = progress >= 0.5;
+        let head = state_id(&format!(
+            "minecraft:piston_head[facing={facing},short={short},type={head_type}]"
+        ))?;
+        let base = state_id(&format!("{moved_name}[extended=true,facing={facing}]"))?;
+        return Some((head, Some(base)));
+    }
+    Some((nbt.moved_state, None))
+}
+
+/// Every `moving_piston` block entity in the world, paired with the `progress` its
+/// NBT carries — [`PistonMoves::tick`]'s whole input.
+///
+/// **Unbounded by [`VIEW_DISTANCE`], unlike every gather in this module**, and the
+/// asymmetry is deliberate: this feeds the *clock*, not the draw. A push lasts two
+/// ticks, so a piston that a player walks toward mid-push would otherwise be seeded
+/// at the progress it had when it entered range rather than when it started, and
+/// would visibly restart. The list is short by construction — a `moving_piston`
+/// cell exists for two ticks — so the cost is a walk of the loaded block-entity
+/// records, not of blocks.
+#[must_use]
+pub fn moving_piston_seeds(handle: &SharedHandle) -> Vec<([i32; 3], f32)> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+    let world = store.read();
+    let mut out = Vec::new();
+    for pos in chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }) {
+        let Some(chunk) = world.get(pos) else {
+            continue;
+        };
+        for be in &chunk.block_entities {
+            let y = i32::from(be.y);
+            let state_id = chunk
+                .column
+                .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+            if !is_moving_piston(state_id) {
+                continue;
+            }
+            let Some(decoded) = moving_piston_nbt(&be.nbt) else {
+                continue;
+            };
+            out.push((
+                [
+                    pos.x * 16 + i32::from(be.rel_x),
+                    y,
+                    pos.z * 16 + i32::from(be.rel_z),
+                ],
+                decoded.progress,
+            ));
+        }
+    }
+    out
+}
+
+/// Every moving piston to draw this frame — vanilla's `PistonHeadRenderer`.
+///
+/// Feeds neither the entity pipeline (no `bakeLayer`, so no rig) nor the item path
+/// (not an item), but the **moving-block-model** seam falling blocks use: see
+/// `crate::gpu::MovingPistonSource`.
+///
+/// # Where each of the two light samples comes from
+///
+/// `extractRenderState` computes `pos = getBlockPos().relative(
+/// getMovementDirection().getOpposite())` and samples light there, one cell *back*
+/// along the push. That is not a detail: the block entity's own cell is full of
+/// `moving_piston`, and the cell behind it is the air (or the piston base) the
+/// geometry is actually travelling out of. The base's sample is taken at
+/// `pos.relative(getMovementDirection())`, which for the retracting case arm 2
+/// serves collapses back to the block entity's own cell.
+#[must_use]
+pub fn moving_piston_spawns(
+    handle: &SharedHandle,
+    moves: &PistonMoves,
+    eye: Vec3,
+    partial_tick: f32,
+) -> Vec<lodestone_render::MovingPistonSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+    let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
+
+    let candidates = {
+        let world = store.read();
+        let mut candidates = Vec::new();
+        for pos in chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }) {
+            let Some(chunk) = world.get(pos) else {
+                continue;
+            };
+            for be in &chunk.block_entities {
+                let x = pos.x * 16 + i32::from(be.rel_x);
+                let z = pos.z * 16 + i32::from(be.rel_z);
+                let y = i32::from(be.y);
+                let centre = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                if centre.distance_squared(eye) > cutoff {
+                    continue;
+                }
+                let state_id = chunk
+                    .column
+                    .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+                if !is_moving_piston(state_id) {
+                    continue;
+                }
+                let Some(decoded) = moving_piston_nbt(&be.nbt) else {
+                    continue;
+                };
+                candidates.push(([x, y, z], decoded));
+            }
+        }
+        candidates
+    };
+
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+
+    let mut out = Vec::new();
+    for (block, decoded) in candidates {
+        // The tracker's value when it has one, and the NBT's own seed otherwise —
+        // never a made-up `0.0`, which is the *most* displaced progress there is.
+        let progress = moves
+            .progress(block, partial_tick)
+            .unwrap_or(decoded.progress)
+            .clamp(0.0, 1.0);
+        let Some((state_id, base_state_id)) = moving_piston_states(&decoded, progress) else {
+            continue;
+        };
+        // `getMovementDirection()` is `extending ? direction : -direction`, so its
+        // opposite — the cell vanilla samples light at — is `-direction` while
+        // extending and `+direction` while retracting.
+        let back = if decoded.extending { -1 } else { 1 };
+        let light_cell = [
+            block[0] + decoded.direction[0] * back,
+            block[1] + decoded.direction[1] * back,
+            block[2] + decoded.direction[2] * back,
+        ];
+        let light = entity_light_at(handle, light_cell[0], light_cell[1], light_cell[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        let base_light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        out.push(lodestone_render::MovingPistonSpawn {
+            pos: block,
+            state_id,
+            base_state_id,
+            direction: decoded.direction,
+            progress,
+            extending: decoded.extending,
+            light,
+            base_light,
+        });
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2895,6 +3366,455 @@ mod shulker_tests {
         assert!(
             seen_low && seen_high,
             "nextInt(40) never reached an endpoint, so its range is wrong"
+        );
+    }
+}
+
+/// Moving-piston gates — `PistonHeadRenderer` and `PistonMovingBlockEntity`.
+///
+/// Its own module for the same reason `sign_tests` is: this file is shared, and a
+/// per-renderer module keeps the pathspec commit and the failure output honest
+/// about which unit broke.
+#[cfg(test)]
+mod piston_tests {
+    use super::*;
+
+    const PISTON_POS: [i32; 3] = [12, 71, -40];
+
+    /// `Direction.LEGACY_ID_CODEC`'s byte, resolved against vanilla's own enum
+    /// declaration order rather than an alphabetical or a horizontal-facing one.
+    ///
+    /// The wrong hypothesis worth excluding is the **2-D** order the sign and
+    /// banner gathers use (`SOUTH, WEST, NORTH, EAST`), which shares no value with
+    /// this table except by accident — so the assertion is the whole six-entry map,
+    /// and the two out-of-range probes prove it declines rather than wrapping the
+    /// way vanilla's `BY_ID` does.
+    #[test]
+    fn the_facing_byte_is_the_3d_data_value_not_the_2d_one() {
+        let mut wrong: Vec<String> = Vec::new();
+        for (id, expected) in [
+            (0_i8, [0, -1, 0]),
+            (1, [0, 1, 0]),
+            (2, [0, 0, -1]),
+            (3, [0, 0, 1]),
+            (4, [-1, 0, 0]),
+            (5, [1, 0, 0]),
+        ] {
+            match direction_step_from_3d(id) {
+                Some(step) if step == expected => {}
+                other => wrong.push(format!("{id} -> {other:?}, expected {expected:?}")),
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+        // Vanilla's `BY_ID` wraps out-of-range ids. Wrapping here would push a
+        // contraption along an axis nobody asked for, so this declines.
+        assert_eq!(direction_step_from_3d(6), None);
+        assert_eq!(direction_step_from_3d(-1), None);
+    }
+
+    /// `BlockState.CODEC`'s compound renders as the canonical state string, and the
+    /// rendered string resolves against the **real 26.2 table** — not a fixture.
+    ///
+    /// The expected id is derived from `lodestone_data`'s own table on the other
+    /// side of the string, so the two agree only if the property names, the sort
+    /// order and the bracket syntax are all right. A bare `Name` with no
+    /// `Properties` must resolve to that block's *default* state, which is the arm
+    /// where "lowest id sharing the name" used to be wrong for 661 blocks.
+    #[test]
+    fn a_codec_block_state_compound_renders_a_string_the_real_table_resolves() {
+        use lodestone_core::Nbt;
+
+        let compound = Nbt::Compound(vec![
+            ("Name".into(), Nbt::String("minecraft:piston_head".into())),
+            (
+                "Properties".into(),
+                Nbt::Compound(vec![
+                    // Deliberately out of sorted order on the wire.
+                    ("type".into(), Nbt::String("sticky".into())),
+                    ("facing".into(), Nbt::String("up".into())),
+                    ("short".into(), Nbt::String("true".into())),
+                ]),
+            ),
+        ]);
+        let rendered = nbt_block_state_string(&compound).expect("a renderable compound");
+        assert_eq!(
+            rendered, "minecraft:piston_head[facing=up,short=true,type=sticky]",
+            "properties must be sorted by key, which is what the generated table's \
+             own slice comparison assumes"
+        );
+        let id = lodestone_data::block_states::state_id(&rendered).expect("a real state");
+        assert_eq!(
+            lodestone_data::block_states::block_name(id),
+            Some("minecraft:piston_head")
+        );
+        let props = lodestone_data::block_states::properties(id).expect("properties");
+        assert!(props.contains(&("facing", "up")), "{props:?}");
+        assert!(props.contains(&("short", "true")), "{props:?}");
+        assert!(props.contains(&("type", "sticky")), "{props:?}");
+
+        // A bare name resolves to the default state, and the default is not
+        // necessarily the lowest id sharing the name.
+        let bare = Nbt::Compound(vec![(
+            "Name".into(),
+            Nbt::String("minecraft:sticky_piston".into()),
+        )]);
+        let bare_id = lodestone_data::block_states::state_id(
+            &nbt_block_state_string(&bare).expect("a renderable bare compound"),
+        )
+        .expect("a real state");
+        assert_eq!(
+            lodestone_data::block_states::properties(bare_id),
+            Some(&[("extended", "false"), ("facing", "north")][..]),
+            "`PistonBaseBlock`'s registered default is `facing=north, extended=false`"
+        );
+    }
+
+    /// `extractRenderState`'s branch 1: the moved state already *is* a piston head,
+    /// and `short` is rewritten from the progress with `<= 0.5`.
+    ///
+    /// The discriminating input is **not** `0.5` — that is the boundary, where the
+    /// inclusive and exclusive readings of the comparison coincide with each other
+    /// and where branch 2's `>= 0.5` also fires. `0.25` and `0.75` are on opposite
+    /// sides of it and both are checked, because asserting only one is satisfied by
+    /// a hardcoded `short`.
+    #[test]
+    fn a_moved_piston_head_takes_its_short_from_the_progress() {
+        let head = lodestone_data::block_states::state_id(
+            "minecraft:piston_head[facing=up,short=false,type=normal]",
+        )
+        .expect("a real head state");
+        let nbt = MovingPistonNbt {
+            moved_state: head,
+            direction: [0, 1, 0],
+            progress: 0.0,
+            extending: true,
+            source: false,
+        };
+
+        let mut wrong: Vec<String> = Vec::new();
+        for (progress, expected_short) in [(0.25_f32, "true"), (0.75, "false")] {
+            let (state, base) = moving_piston_states(&nbt, progress).expect("a resolvable state");
+            if base.is_some() {
+                wrong.push(format!("progress {progress}: an extension drew a base"));
+            }
+            let short = state_property(state, "short");
+            if short != Some(expected_short) {
+                wrong.push(format!(
+                    "progress {progress}: short={short:?}, expected {expected_short}"
+                ));
+            }
+            // Facing and type must survive the rewrite untouched.
+            if state_property(state, "facing") != Some("up")
+                || state_property(state, "type") != Some("normal")
+            {
+                wrong.push(format!("progress {progress}: facing/type were rewritten"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    /// `extractRenderState`'s branch 2: a retracting **source** piston synthesises a
+    /// head from its base block and draws its base as well.
+    ///
+    /// Three separate claims, each of which a plausible port gets wrong on its own:
+    ///
+    /// * the head's `type` is `sticky` for a sticky base and `normal` — **not**
+    ///   `default` — for a plain one, because `PistonType.DEFAULT`'s serialized name
+    ///   is `normal`;
+    /// * the head's `short` uses `>= 0.5`, the **opposite** comparison to branch 1,
+    ///   so at `0.25` it is `false` where branch 1 would say `true`;
+    /// * the base is forced to `extended=true` and keeps the base's own facing.
+    ///
+    /// `0.25` discriminates the second claim from branch 1's rule; `0.5` would not.
+    #[test]
+    fn a_retracting_source_piston_synthesises_a_head_and_draws_its_base() {
+        let mut wrong: Vec<String> = Vec::new();
+        for (base_block, expected_type) in [
+            ("minecraft:sticky_piston", "sticky"),
+            ("minecraft:piston", "normal"),
+        ] {
+            let base_state = lodestone_data::block_states::state_id(&format!(
+                "{base_block}[extended=false,facing=west]"
+            ))
+            .expect("a real base state");
+            let nbt = MovingPistonNbt {
+                moved_state: base_state,
+                direction: [-1, 0, 0],
+                progress: 0.0,
+                extending: false,
+                source: true,
+            };
+            let (head, base) = moving_piston_states(&nbt, 0.25).expect("a resolvable state");
+            if lodestone_data::block_states::block_name(head) != Some("minecraft:piston_head") {
+                wrong.push(format!("{base_block}: head is not a piston head"));
+            }
+            if state_property(head, "type") != Some(expected_type) {
+                wrong.push(format!(
+                    "{base_block}: head type is {:?}, expected {expected_type}",
+                    state_property(head, "type")
+                ));
+            }
+            if state_property(head, "facing") != Some("west") {
+                wrong.push(format!("{base_block}: head facing did not follow the base"));
+            }
+            // Branch 2's comparison is `>= 0.5`, so a quarter of the way through a
+            // retraction the head is still long.
+            if state_property(head, "short") != Some("false") {
+                wrong.push(format!(
+                    "{base_block}: short is {:?} at progress 0.25 — branch 1's \
+                     `<= 0.5` rule was used instead of branch 2's `>= 0.5`",
+                    state_property(head, "short")
+                ));
+            }
+            match base {
+                Some(base) => {
+                    if lodestone_data::block_states::block_name(base) != Some(base_block) {
+                        wrong.push(format!("{base_block}: base block changed identity"));
+                    }
+                    if state_property(base, "extended") != Some("true") {
+                        wrong.push(format!("{base_block}: base was not forced extended"));
+                    }
+                    if state_property(base, "facing") != Some("west") {
+                        wrong.push(format!("{base_block}: base facing changed"));
+                    }
+                }
+                None => wrong.push(format!("{base_block}: no base drew")),
+            }
+            // And at 0.75 the head has gone short — so `short` is a function of the
+            // progress here and not a constant that happened to read correctly.
+            let (late_head, _) = moving_piston_states(&nbt, 0.75).expect("a resolvable state");
+            if state_property(late_head, "short") != Some("true") {
+                wrong.push(format!("{base_block}: short did not flip by progress 0.75"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    /// `extractRenderState`'s branch 3: an ordinary pushed block is drawn exactly as
+    /// stored, with no base.
+    ///
+    /// The control for the two branch tests above: without it, a
+    /// `moving_piston_states` that returned its input unchanged in *every* case
+    /// would still have to fail them, but one that synthesised a head in every case
+    /// would not be caught anywhere.
+    #[test]
+    fn an_ordinary_pushed_block_is_drawn_as_stored() {
+        let stone = lodestone_data::block_states::state_id("minecraft:stone").expect("stone");
+        let nbt = MovingPistonNbt {
+            moved_state: stone,
+            direction: [0, 0, 1],
+            progress: 0.0,
+            extending: true,
+            source: false,
+        };
+        assert_eq!(moving_piston_states(&nbt, 0.25), Some((stone, None)));
+        // A pushed block belonging to a *source* piston that is extending is still
+        // branch 3 — `isSourcePiston` alone does not select branch 2.
+        let extending_source = MovingPistonNbt {
+            source: true,
+            ..nbt.clone()
+        };
+        assert_eq!(
+            moving_piston_states(&extending_source, 0.25),
+            Some((stone, None)),
+            "branch 2's guard is `isSourcePiston && !isExtending`, both halves"
+        );
+    }
+
+    /// The NBT decode reads each field at the tag type `saveAdditional` writes:
+    /// `facing` as a **byte**, `progress` as a **float**, `extending`/`source` as
+    /// bytes.
+    ///
+    /// Reading `facing` as an int is the shipped-bug shape — it would default every
+    /// piston to `DOWN` while the parse still looked clean — so the negative arm
+    /// hands it an `Nbt::Int` with the *right value* and requires the decode to
+    /// decline rather than to succeed by coincidence.
+    #[test]
+    fn the_nbt_decode_is_keyed_by_tag_type_not_only_by_field_name() {
+        use lodestone_core::Nbt;
+
+        let block_state = Nbt::Compound(vec![(
+            "Name".into(),
+            Nbt::String("minecraft:stone".into()),
+        )]);
+        let good = Nbt::Compound(vec![
+            ("blockState".into(), block_state.clone()),
+            ("facing".into(), Nbt::Byte(1)),
+            ("progress".into(), Nbt::Float(0.5)),
+            ("extending".into(), Nbt::Byte(1)),
+            ("source".into(), Nbt::Byte(0)),
+        ]);
+        let decoded = moving_piston_nbt(&good).expect("a decodable record");
+        assert_eq!(decoded.direction, [0, 1, 0]);
+        assert_eq!(decoded.progress, 0.5);
+        assert!(decoded.extending);
+        assert!(!decoded.source);
+
+        // `facing` at the wrong tag type, same value.
+        let wrong_tag = Nbt::Compound(vec![
+            ("blockState".into(), block_state.clone()),
+            ("facing".into(), Nbt::Int(1)),
+        ]);
+        assert_eq!(
+            moving_piston_nbt(&wrong_tag),
+            None,
+            "an int `facing` must be declined, not silently defaulted"
+        );
+
+        // Absent `extending`/`source`/`progress` are vanilla's `getBooleanOr`/
+        // `getFloatOr` defaults, which are real states rather than decode failures.
+        let sparse = Nbt::Compound(vec![
+            ("blockState".into(), block_state),
+            ("facing".into(), Nbt::Byte(0)),
+        ]);
+        let decoded = moving_piston_nbt(&sparse).expect("a sparse record still decodes");
+        assert_eq!(decoded.progress, 0.0);
+        assert!(!decoded.extending);
+        assert!(!decoded.source);
+
+        // An air moved state draws nothing — `!blockState.isAir()`.
+        let air = Nbt::Compound(vec![
+            (
+                "blockState".into(),
+                Nbt::Compound(vec![("Name".into(), Nbt::String("minecraft:air".into()))]),
+            ),
+            ("facing".into(), Nbt::Byte(0)),
+        ]);
+        assert_eq!(moving_piston_nbt(&air), None);
+    }
+
+    /// The clock ramps by exactly `0.5` per tick and reaches `1.0` in **two** ticks
+    /// — `TICKS_TO_EXTEND`, not the plausible ten a chest lid takes.
+    ///
+    /// The whole sequence is predicted, and the discovery tick is asserted to be a
+    /// *seed* rather than an advance: a tracker that advanced on discovery would read
+    /// `0.5` on the first observation and finish the push in one tick, halving an
+    /// animation that is only two ticks long to begin with.
+    #[test]
+    fn a_push_ramps_by_half_a_tick_and_completes_in_two() {
+        let present = [(PISTON_POS, 0.0_f32)];
+        let mut moves = PistonMoves::new();
+
+        moves.tick(&present);
+        assert_eq!(
+            moves.progress(PISTON_POS, 1.0),
+            Some(0.0),
+            "the discovery tick seeds and must not advance"
+        );
+
+        let mut wrong: Vec<String> = Vec::new();
+        for expected in [0.5_f32, 1.0, 1.0] {
+            moves.tick(&present);
+            let got = moves.progress(PISTON_POS, 1.0);
+            if got != Some(expected) {
+                wrong.push(format!("expected {expected}, got {got:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    /// The partial-tick lerp reads between the previous and the current tick's
+    /// progress, and out-of-range alphas clamp rather than extrapolating.
+    ///
+    /// Without the lerp a two-tick animation is two frames of a 60 fps second — a
+    /// snap, not a slide. The mid-tick value is predicted (`0.25`, half way through
+    /// the `0.0 -> 0.5` step) rather than merely required to lie between the ends,
+    /// which a stepped counter also satisfies at the endpoints.
+    #[test]
+    fn progress_interpolates_within_a_tick() {
+        let present = [(PISTON_POS, 0.0_f32)];
+        let mut moves = PistonMoves::new();
+        moves.tick(&present); // seed
+        moves.tick(&present); // previous 0.0 -> progress 0.5
+        assert_eq!(moves.progress(PISTON_POS, 0.0), Some(0.0));
+        assert_eq!(moves.progress(PISTON_POS, 0.5), Some(0.25));
+        assert_eq!(moves.progress(PISTON_POS, 1.0), Some(0.5));
+        assert_eq!(moves.progress(PISTON_POS, 4.0), Some(0.5), "clamped, not extrapolated");
+        assert_eq!(moves.progress(PISTON_POS, -1.0), Some(0.0));
+    }
+
+    /// An untracked position reports `None`, **not** `0.0`.
+    ///
+    /// This is the one place where the chest lid's "absent equals at rest" shortcut
+    /// would be actively harmful, and the difference is worth a gate of its own:
+    /// `0.0` is the *most displaced* progress a piston has, so a `0.0` here would
+    /// draw a head a full cell inside the piston base. Paired with the removal
+    /// half — a cell that stops holding a moving piston is forgotten, so the map
+    /// cannot grow as a player walks past contraptions.
+    #[test]
+    fn an_untracked_piston_is_none_rather_than_zero_and_a_finished_one_is_forgotten() {
+        let mut moves = PistonMoves::new();
+        assert_eq!(moves.progress(PISTON_POS, 1.0), None);
+        assert!(moves.is_empty());
+
+        moves.tick(&[(PISTON_POS, 0.0)]);
+        assert_eq!(moves.len(), 1);
+        // The cell no longer holds a moving piston: the server's `finalTick` has
+        // replaced it.
+        moves.tick(&[]);
+        assert!(moves.is_empty(), "{} entries retained", moves.len());
+        assert_eq!(moves.progress(PISTON_POS, 1.0), None);
+    }
+
+    /// A seed from the wire is honoured rather than overwritten with zero, and it is
+    /// clamped into `0..=1`.
+    ///
+    /// Vanilla writes `progressO` into the update tag, so a client that joins
+    /// mid-push is told where the push already is. Seeding at zero instead would
+    /// restart every in-flight contraption on chunk load — visible as a stutter that
+    /// looks like a network problem.
+    #[test]
+    fn the_wire_seed_is_honoured_and_clamped() {
+        let mut moves = PistonMoves::new();
+        moves.tick(&[(PISTON_POS, 0.5)]);
+        assert_eq!(moves.progress(PISTON_POS, 1.0), Some(0.5));
+        moves.tick(&[(PISTON_POS, 0.5)]);
+        assert_eq!(
+            moves.progress(PISTON_POS, 1.0),
+            Some(1.0),
+            "a push seeded half way finishes one tick later, not two"
+        );
+
+        let mut moves = PistonMoves::new();
+        moves.tick(&[([0, 0, 0], 9.0)]);
+        assert_eq!(moves.progress([0, 0, 0], 1.0), Some(1.0), "clamped");
+        let mut moves = PistonMoves::new();
+        moves.tick(&[([0, 0, 0], -3.0)]);
+        assert_eq!(moves.progress([0, 0, 0], 1.0), Some(0.0), "clamped");
+    }
+
+    /// `moving_piston` is a real block in the 26.2 table and every one of its states
+    /// is recognised — the gather's whole entry condition.
+    ///
+    /// The negative arm matters as much: a `piston`, a `sticky_piston` and a
+    /// `piston_head` must **not** be recognised, or the gather would draw a moving
+    /// copy of every static piston in the world on top of the terrain mesh.
+    #[test]
+    fn only_moving_piston_states_enter_the_gather() {
+        let mut moving = 0usize;
+        let mut wrong: Vec<String> = Vec::new();
+        for id in 0..lodestone_data::block_states::STATE_COUNT {
+            let name = lodestone_data::block_states::block_name(id);
+            match name {
+                Some("minecraft:moving_piston") => {
+                    moving += 1;
+                    if !is_moving_piston(id) {
+                        wrong.push(format!("{id} is a moving piston but was not recognised"));
+                    }
+                }
+                Some("minecraft:piston" | "minecraft:sticky_piston" | "minecraft:piston_head") => {
+                    if is_moving_piston(id) {
+                        wrong.push(format!("{id} ({name:?}) was recognised as a moving piston"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+        // `moving_piston` is `facing` (6) x `type` (2).
+        assert_eq!(
+            moving, 12,
+            "expected 12 `moving_piston` states (6 facings x 2 types)"
         );
     }
 }

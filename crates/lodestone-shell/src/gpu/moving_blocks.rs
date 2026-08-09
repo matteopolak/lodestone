@@ -8,7 +8,7 @@
 //! | vanilla renderer | what it moves | built here? |
 //! |---|---|---|
 //! | `FallingBlockRenderer` | the falling sand/gravel entity | **yes** |
-//! | `PistonHeadRenderer` | the piston head and the block it pushes | not yet — see below |
+//! | `PistonHeadRenderer` | the piston head and the block it pushes | **yes** |
 //!
 //! Both renderers have the same shape and it is not the shape the rest of the
 //! entity pass has: **no `bakeLayer` call in the constructor**, so they own no
@@ -16,6 +16,23 @@
 //! through [`EntityPipeline`](lodestone_render::EntityPipeline) however
 //! entity-shaped they look, and it is why the piston head was left unbuilt when the
 //! block-entity renderers landed — the machinery it needed is this file.
+//!
+//! # The two producers differ only in where their requests come from
+//!
+//! A falling block is an **entity**, so [`merge_falling_blocks`] filters the
+//! `&[EntityDraw]` slice `render` is already handed. A moving piston is a **block
+//! entity**, so [`merge_piston_heads`] reads a polled
+//! [`MovingPistonSource`](super::MovingPistonSource) exactly as every other
+//! block-entity type in `gpu/sources.rs` does. Neither touches a pipeline, a bind
+//! group or a draw call: both end at [`RenderState::merge_moving_block`], which is
+//! the whole seam.
+//!
+//! **Our own server never produces a `moving_piston` block entity**
+//! (`lodestone_server::piston` applies a push in one step and says so), so the
+//! piston producer draws against a real 26.2 server and not against singleplayer
+//! until that lands. That is a property of the server side, not of this file: the
+//! gather reads the same `World::block_entities` records the chunk packet fills in,
+//! whoever sent them.
 //!
 //! # What a producer supplies, and what it gets
 //!
@@ -94,6 +111,53 @@ fn falling_block_pose(feet: glam::Vec3) -> glam::Mat4 {
     glam::Mat4::from_translation(feet - glam::Vec3::new(0.5, 0.0, 0.5))
 }
 
+/// `PistonMovingBlockEntity.getExtendedProgress` — the **signed** fraction of a
+/// cell the moved geometry is displaced by, along the raw `direction` axis.
+///
+/// Vanilla: `extending ? progress - 1.0F : 1.0F - progress`. Both arms end at
+/// `0.0` when `progress` reaches `1.0`, which is what makes the moved block land
+/// exactly on its destination cell — but they start from opposite ends, and
+/// **they agree at `progress == 0.5`**, so that value cannot discriminate this
+/// from the plausible wrong reading (`progress` used raw, with the sign folded
+/// into the movement direction instead). The tests below use `0.25`.
+///
+/// Its own function, next to [`falling_block_pose`], because it is the one piece
+/// of `PistonHeadRenderer` a screenshot cannot check: a sign error puts the head
+/// one cell *past* its destination, which still looks like a piston extending.
+#[must_use]
+fn piston_extended_progress(progress: f32, extending: bool) -> f32 {
+    if extending {
+        progress - 1.0
+    } else {
+        1.0 - progress
+    }
+}
+
+/// `PistonHeadRenderer.submit`'s pose: the block entity's own cell corner plus
+/// `translate(xOff, yOff, zOff)`.
+///
+/// **No `-0.5` here, unlike [`falling_block_pose`], and that asymmetry is the
+/// whole difference between the two producers.** A block entity's pose stack is
+/// already at its cell *corner* (`BlockEntityRenderDispatcher` translates by
+/// `pos.getX() - camX`, not by the centre), while an entity's position is its
+/// centre in `x`/`z` — so the shift that is mandatory for a falling block would
+/// slide every piston head half a cell diagonally.
+///
+/// `direction` is the raw `PistonMovingBlockEntity.direction` step, **not** the
+/// movement direction: `getXOff` multiplies `direction.getStepX()` by
+/// [`piston_extended_progress`], whose sign already encodes retraction.
+#[must_use]
+fn piston_head_pose(cell: [i32; 3], direction: [i32; 3], progress: f32, extending: bool) -> glam::Mat4 {
+    let extended = piston_extended_progress(progress, extending);
+    let corner = glam::Vec3::new(cell[0] as f32, cell[1] as f32, cell[2] as f32);
+    let step = glam::Vec3::new(
+        direction[0] as f32,
+        direction[1] as f32,
+        direction[2] as f32,
+    );
+    glam::Mat4::from_translation(corner + step * extended)
+}
+
 /// One block-model draw request: which state, where, and how lit.
 ///
 /// The whole vocabulary of this seam. A producer that can fill this in gets block
@@ -140,9 +204,10 @@ impl RenderState {
         let frustum = camera.frustum();
         let mut combined = ModelMesh::default();
         self.merge_falling_blocks(model, entities, &frustum, &mut combined, stats);
-        // A second producer goes here: `merge_piston_heads(model, …, &mut combined)`,
-        // sharing this buffer for the same reason the campfire shares the item one —
-        // the placement is in the vertices, so there is nothing to batch on.
+        // The second producer, sharing this buffer for the same reason the campfire
+        // shares the item one — the placement is in the vertices, so there is
+        // nothing to batch on.
+        self.merge_piston_heads(model, camera.position, &frustum, &mut combined, stats);
         if combined.quad_count() == 0 {
             return None;
         }
@@ -235,6 +300,94 @@ impl RenderState {
                     state_id,
                     transform: falling_block_pose(draw.feet),
                     light,
+                },
+                combined,
+            ) {
+                stats.moving_blocks_drawn += 1;
+            }
+        }
+    }
+
+    /// Merge every moving piston in range — vanilla's `PistonHeadRenderer`.
+    ///
+    /// # Two requests per piston, and only one of them is offset
+    ///
+    /// `submit` translates the pose by `(xOff, yOff, zOff)`, submits
+    /// [`MovingPistonSpawn::state_id`](lodestone_render::MovingPistonSpawn::state_id),
+    /// then **pops the pose** before submitting the base. So a retracting source
+    /// piston draws its synthesised head pulled back toward the base *and* its own
+    /// base block sitting still at the block entity's own cell — the popped pose is
+    /// the reason the base does not slide with the head, and folding both into one
+    /// transform is the mistake that makes a retracting sticky piston look like it
+    /// is eating itself.
+    ///
+    /// The base is drawn only when there is a head to draw, matching `submit`'s
+    /// nested `if (state.base != null)` inside `if (state.block != null)` — an
+    /// ordering that cannot be flattened, because the spawn carries no base at all
+    /// unless the head branch produced one.
+    ///
+    /// # Which branch synthesised the state is not this layer's business
+    ///
+    /// `extractRenderState` has three arms and two of them build a state that is
+    /// nowhere in the world (a `piston_head` whose `short` follows the progress).
+    /// All of that is block-state arithmetic against
+    /// [`lodestone_data::block_states`], so it lives in the gather
+    /// (`crate::block_entities::moving_piston_spawns`) and arrives here already
+    /// resolved. This function is a transform and a frustum test.
+    ///
+    /// # Culling
+    ///
+    /// A two-cell box around the block entity's own cell rather than a one-cell
+    /// one: the offset moves geometry up to a full cell away from `pos` in either
+    /// direction along the push axis, so the falling-block producer's
+    /// `feet ± 1.0` slack would clip a head at the far end of its travel.
+    fn merge_piston_heads(
+        &self,
+        model: &ModelRenderer,
+        eye: glam::Vec3,
+        frustum: &Frustum,
+        combined: &mut ModelMesh,
+        stats: &mut RenderStats,
+    ) {
+        for spawn in self.moving_piston_source.pistons(eye) {
+            let cell = glam::Vec3::new(
+                spawn.pos[0] as f32,
+                spawn.pos[1] as f32,
+                spawn.pos[2] as f32,
+            );
+            if !frustum.intersects_aabb(cell - glam::Vec3::splat(2.0), cell + glam::Vec3::splat(2.0))
+            {
+                continue;
+            }
+            if self.merge_moving_block(
+                model,
+                MovingBlock {
+                    state_id: spawn.state_id,
+                    transform: piston_head_pose(
+                        spawn.pos,
+                        spawn.direction,
+                        spawn.progress,
+                        spawn.extending,
+                    ),
+                    light: spawn.light,
+                },
+                combined,
+            ) {
+                stats.moving_blocks_drawn += 1;
+            }
+            // The base, unoffset — `submit` pops the pose first. `from_translation`
+            // of the bare cell corner is `piston_head_pose` with a zero offset, and
+            // is written out rather than called with `progress = 1.0` so that a
+            // future change to the offset rule cannot silently start moving it.
+            let Some(base_state_id) = spawn.base_state_id else {
+                continue;
+            };
+            if self.merge_moving_block(
+                model,
+                MovingBlock {
+                    state_id: base_state_id,
+                    transform: glam::Mat4::from_translation(cell),
+                    light: spawn.base_light,
                 },
                 combined,
             ) {
@@ -361,6 +514,154 @@ mod tests {
         );
         assert_ne!(FALLING_BLOCK_HEIGHT, 1.0, "the plausible round number, excluded");
         assert_ne!(FALLING_BLOCK_HEIGHT, 0.0, "the feet, which is the wrong probe");
+    }
+
+    /// `getExtendedProgress`'s two arms, predicted exactly, at an input where the
+    /// plausible wrong reading **disagrees**.
+    ///
+    /// The wrong hypothesis is "the offset is `direction * progress`, with the
+    /// retraction handled by using the movement direction instead" — which is what
+    /// you get by reading `getXOff` as `step * getProgress(a)` and forgetting
+    /// `getExtendedProgress` entirely. Evaluated here rather than described:
+    ///
+    /// | progress | extending | correct | wrong hypothesis |
+    /// |---|---|---|---|
+    /// | 0.25 | yes | `-0.75` | `+0.25` |
+    /// | 0.25 | no | `+0.75` | `-0.25` (movement dir is `-direction`) |
+    /// | 0.5 | either | `∓0.5` | `±0.5` — **agrees in magnitude**, so useless |
+    ///
+    /// The last row is why `0.25` is the input and `0.5` is not: at half progress
+    /// the two hypotheses differ only in sign, and a sign flip on a symmetric
+    /// contraption is exactly the mistake a screenshot cannot catch.
+    #[test]
+    fn the_extended_progress_is_signed_and_disagrees_with_the_raw_progress_reading() {
+        let mut wrong: Vec<String> = Vec::new();
+        // Predicted values, from `extending ? progress - 1 : 1 - progress`.
+        for (progress, extending, expected) in [
+            (0.0_f32, true, -1.0_f32),
+            (0.25, true, -0.75),
+            (1.0, true, 0.0),
+            (0.0, false, 1.0),
+            (0.25, false, 0.75),
+            (1.0, false, 0.0),
+        ] {
+            let got = piston_extended_progress(progress, extending);
+            if (got - expected).abs() > 1e-6 {
+                wrong.push(format!(
+                    "progress {progress} extending {extending}: expected {expected}, got {got}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+
+        // Both arms land on exactly 0 at full progress — the property that puts the
+        // moved block on its destination cell rather than one short of it.
+        assert_eq!(piston_extended_progress(1.0, true), 0.0);
+        assert_eq!(piston_extended_progress(1.0, false), 0.0);
+    }
+
+    /// The control for the gate above: at `progress == 0.5` the wrong hypothesis is
+    /// indistinguishable from the truth by magnitude, so the chosen input must not
+    /// be `0.5`. Run, and required to hold, rather than asserted in prose.
+    #[test]
+    fn half_progress_cannot_discriminate_the_offset_rule() {
+        // The wrong reading: raw progress along the movement direction, which is
+        // `direction` while extending and `-direction` while retracting.
+        let wrong = |progress: f32, extending: bool| {
+            if extending { progress } else { -progress }
+        };
+        for extending in [true, false] {
+            let correct = piston_extended_progress(0.5, extending);
+            assert!(
+                (correct.abs() - wrong(0.5, extending).abs()).abs() < 1e-6,
+                "control failed: at progress 0.5 the two hypotheses already differ \
+                 in magnitude for extending={extending}, so the 0.25 input in the \
+                 gate above was not necessary and this control is measuring the \
+                 wrong thing"
+            );
+            // And at 0.25 they must differ, or the gate above proves nothing.
+            let correct_q = piston_extended_progress(0.25, extending);
+            assert!(
+                (correct_q - wrong(0.25, extending)).abs() > 0.4,
+                "control failed: at progress 0.25 the hypotheses agree for \
+                 extending={extending}"
+            );
+        }
+    }
+
+    /// A piston head at **full** progress sits exactly on the block entity's own
+    /// cell corner, and at a mid-progress it sits a predicted fraction of a cell
+    /// back along the push axis.
+    ///
+    /// Both halves are needed. The first is what makes the moved block line up with
+    /// the terrain grid the instant the server replaces the cell — a half-cell error
+    /// there reads as a model-origin quirk exactly as it does for a falling block.
+    /// The second is what proves the axis and the sign.
+    ///
+    /// The cell has three distinct coordinates and mixed signs so an axis swap or a
+    /// truncating cast cannot pass.
+    #[test]
+    fn the_piston_pose_lands_on_the_cell_at_full_progress_and_a_predicted_fraction_before_it() {
+        const CELL: [i32; 3] = [-13, 70, 4];
+        let corner = glam::Vec3::new(-13.0, 70.0, 4.0);
+        // `UP`'s step, i.e. `facing=up`.
+        const UP: [i32; 3] = [0, 1, 0];
+
+        let landed = piston_head_pose(CELL, UP, 1.0, true).transform_point3(glam::Vec3::ZERO);
+        assert!(
+            (landed - corner).length() < 1e-5,
+            "at full progress the head must sit on its own cell, got {landed}"
+        );
+
+        // Extending, quarter progress: 0.75 of a cell *below* the destination.
+        let mid = piston_head_pose(CELL, UP, 0.25, true).transform_point3(glam::Vec3::ZERO);
+        assert!(
+            (mid - (corner - glam::Vec3::new(0.0, 0.75, 0.0))).length() < 1e-5,
+            "expected 0.75 below the cell, got {mid}"
+        );
+
+        // Retracting, quarter progress: 0.75 of a cell *above* it — the same
+        // magnitude, the opposite side, which is the whole content of the sign rule.
+        let mid_back = piston_head_pose(CELL, UP, 0.25, false).transform_point3(glam::Vec3::ZERO);
+        assert!(
+            (mid_back - (corner + glam::Vec3::new(0.0, 0.75, 0.0))).length() < 1e-5,
+            "expected 0.75 above the cell, got {mid_back}"
+        );
+
+        // The scale is unit: the far corner is one cell away on every axis, so the
+        // pose is a translation and not a scaled one.
+        let far = piston_head_pose(CELL, UP, 1.0, true).transform_point3(glam::Vec3::ONE);
+        assert!((far - (corner + glam::Vec3::ONE)).length() < 1e-5, "{far}");
+    }
+
+    /// A block entity's pose is at its cell **corner**, so the falling block's
+    /// mandatory `-0.5` x/z shift must *not* appear here.
+    ///
+    /// The control that makes the gate above discriminating: applying
+    /// [`falling_block_pose`] to the same cell lands somewhere else entirely, and
+    /// half a cell diagonally is precisely the error that still looks like a piston.
+    #[test]
+    fn the_piston_pose_is_not_the_falling_block_pose() {
+        const CELL: [i32; 3] = [-13, 70, 4];
+        let corner = glam::Vec3::new(-13.0, 70.0, 4.0);
+        let piston = piston_head_pose(CELL, [0, 1, 0], 1.0, true).transform_point3(glam::Vec3::ZERO);
+        let falling = falling_block_pose(corner).transform_point3(glam::Vec3::ZERO);
+        let d = (piston - falling).length();
+        assert!(
+            d > 0.5,
+            "control failed: the two poses are {d} apart, so the corner-vs-centre \
+             distinction the gate above rests on is not being measured"
+        );
+    }
+
+    /// A zero direction step — which no real `facing` byte produces, but a decode
+    /// bug would — degrades to drawing on the block entity's own cell rather than
+    /// to a NaN or an off-world translation.
+    #[test]
+    fn a_zero_direction_draws_on_the_cell_itself() {
+        let p = piston_head_pose([2, 3, 4], [0, 0, 0], 0.25, true)
+            .transform_point3(glam::Vec3::ZERO);
+        assert_eq!(p, glam::Vec3::new(2.0, 3.0, 4.0));
     }
 
     /// The type path this pass filters on is the bare registry path

@@ -70,8 +70,8 @@ pub use screen_effects::ScreenEffects;
 pub use sources::{
     BannerSource, BellSource, BlockEntitySource, CampfireSource, EnchantingTableSource,
     EntityLightSource, HandSwingSource, LecternSource, MainHandSource, MapSource,
-    OutlineShapeSource, ShulkerSource, SignSource, SkullSource, SkyDarkenSource,
-    ThirdPersonBodySource, ThirdPersonBodyState,
+    MovingPistonSource, OutlineShapeSource, ShulkerSource, SignSource, SkullSource,
+    SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
 };
 pub use stats::RenderStats;
 
@@ -419,6 +419,14 @@ pub struct RenderState {
     /// mesh: the fire and the logs are block models the terrain pass already
     /// draws, so an unset source leaves a complete campfire cooking nothing.
     campfire_source: CampfireSource,
+    /// Where this frame's moving pistons come from (issue #23). Consumed by
+    /// [`Self::prepare_moving_blocks`] and the **model** pipeline, not by
+    /// `prepare_block_entities` and not by the item path — a third destination, and
+    /// the only source in this struct that shares a vertex buffer with falling
+    /// blocks. An unset source is a **hole** for the two ticks a push lasts, like
+    /// [`Self::shulker_source`] and unlike [`Self::campfire_source`]:
+    /// `moving_piston` has no block model at all.
+    moving_piston_source: MovingPistonSource,
     /// Where this frame's enchanting-table books come from. Same "unset means
     /// draw nothing" convention as [`Self::lectern_source`], whose mesh it shares,
     /// and the same mild degradation — an enchanting table's own block model is

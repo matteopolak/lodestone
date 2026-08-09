@@ -754,3 +754,51 @@ impl std::fmt::Debug for CampfireSource {
             .finish()
     }
 }
+
+/// Where this frame's moving pistons come from (issue #23) — vanilla's
+/// `PistonHeadRenderer`.
+///
+/// **The odd one out twice over.** Like [`CampfireSource`] it does not feed
+/// `prepare_block_entities`, because `PistonHeadRenderer`'s constructor calls no
+/// `bakeLayer` and so it owns no cuboid rig; and unlike `CampfireSource` it does
+/// not feed the item path either. It feeds
+/// [`RenderState::prepare_moving_blocks`](crate::gpu::RenderState), the
+/// moving-block-model seam falling blocks already use — whole *block* models posed
+/// somewhere other than their own cell.
+///
+/// **Must be re-installed every frame**, and for the sharpest reason in this file
+/// after [`EnchantingTableSource`]: the closure captures both a snapshot of the
+/// client-side progress tracker *and* the partial tick, and the entire animation
+/// lasts **two ticks** (`PistonMovingBlockEntity.TICKS_TO_EXTEND`, `progress +=
+/// 0.5` per tick). A stale closure does not merely freeze it — it freezes it at
+/// `progress` 0, which places the head one whole cell back *inside* the piston
+/// base, so the degradation is overlapping geometry rather than a still frame.
+///
+/// Unset — the offline demo, every headless test, and any session against a server
+/// that does not send `moving_piston` block entities — yields an empty vec. That
+/// leaves a **hole** for the duration of the push, not a missing decoration:
+/// `moving_piston` is `RenderShape.INVISIBLE` and has no block model for the
+/// terrain mesher to draw, exactly as chest and shulker box do not.
+#[derive(Default)]
+pub struct MovingPistonSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<
+        Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::MovingPistonSpawn> + Send + Sync>,
+    >,
+);
+
+impl MovingPistonSource {
+    /// This frame's moving pistons, or none when unset.
+    #[must_use]
+    pub(super) fn pistons(&self, eye: glam::Vec3) -> Vec<lodestone_render::MovingPistonSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for MovingPistonSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("MovingPistonSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
