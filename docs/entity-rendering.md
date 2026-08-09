@@ -274,9 +274,11 @@ Three controls were watched failing — the shipped one-light shader (12034/1203
 and 2314/2314 pixels on the rival prediction), the sign flip, and dropping the
 second light while keeping `max` (up face 113 where vanilla is 128).
 
-**World light is per instance.** Vanilla samples the lightmap once per entity at
-its block position (`LivingEntityRenderer` -> `Level::getLightColor`), so a mob
-is uniformly lit by the block it stands in. That is why light rides the
+**World light is per instance.** Vanilla samples the lightmap once per entity —
+`EntityRenderer.getPackedLightCoords`, whose result becomes
+`EntityRenderState.lightCoords` — so a mob is uniformly lit by *one* cell, and
+every layer of it (body, armour, wool, held item) draws with that same byte.
+That is why light rides the
 *instance* buffer (`EntityInstanceRaw::light`, shader location 8) and not the
 vertex buffer: the vertex buffer is shared by every instance of a model type and
 could only ever say one thing for all of them. The shader turns the packed byte
@@ -855,9 +857,51 @@ never varies any of those), is why it needs its own vertex entry point
   `Rgba8Unorm` target hides the colour-space half entirely, and a brightness
   threshold calibrated on one is meaningless on the other.
 * **Wiring real world light.** `RenderState::set_entity_light_source` takes
-  `Fn(Vec3) -> Option<u8>` returning packed `sky << 4 | block` at a mob's feet.
-  Until something installs one, every mob is `ENTITY_FULLBRIGHT`. The equivalent
-  world lookup already exists for particles in `Sim::extract_particles`.
+  `Fn(Vec3) -> Option<u8>` returning packed `sky << 4 | block` at **an arbitrary
+  world position** — the source is position-agnostic and the caller decides where
+  to probe (see "Which cell an entity samples" below). Until something installs
+  one, every mob is `ENTITY_FULLBRIGHT`. The equivalent world lookup already
+  exists for particles in `Sim::extract_particles`.
+
+### Which cell an entity samples, and what fire does to it
+
+`gpu/entity_passes.rs`'s `entity_light` is the single place any entity pass gets
+its light. Both of its rules were missing until a player-visible lighting pass
+went looking, and both are one line of vanilla:
+
+* **The probe is the entity's eye, not its feet.**
+  `EntityRenderer.getPackedLightCoords` is
+  `BlockPos.containing(entity.getLightProbePosition(t))`, and
+  `Entity.getLightProbePosition` returns `getEyePosition`. So a tall mob standing
+  in a dark cell with its head in a lit one is lit *by its head*. Every call site
+  passed `feet` before, and `EntityLightSource`'s own doc claimed that was
+  vanilla — it never was. `FirstPersonHand::hand_light` was always right, because
+  it samples at `camera.position`, which already is the eye.
+* **Fire forces the block half to 15, and only the block half.**
+  `EntityRenderer.getBlockLightLevel` is
+  `entity.isOnFire() ? 15 : level.getBrightness(BLOCK, pos)`;
+  `getSkyLightLevel` has no such branch. Forcing the whole byte would give a
+  burning mob in a pitch-dark cave a daytime sky as well. Here the block half is
+  the low nibble, so it is `| 0x0F` — vanilla spells it
+  `LightCoordsUtil.withBlock`.
+
+**Eye height is per type and is not `height * 0.85`.** That formula is only
+`EntityDimensions.defaultEyeHeight`, which 56 of 26.2's 158 registered types
+take; the other 102 name an explicit `EntityType.Builder.eyeHeight`, and
+`EYE_HEIGHTS` in `entity_passes.rs` carries those. The trap is that most
+overrides are small enough to floor into the *same* block cell as the default for
+an entity standing on integer `y`, so a wrong table looks right in a screenshot —
+`elder_guardian`, `ghast` and `happy_ghast` are the three that do not, and any
+entity at a non-integer `y` moves the boundary under all the rest. That is also
+why the gate in `entity_passes.rs` uses a ghast: it separates eye-probing from
+feet-probing *and* from the 0.85 formula, three different bytes on one input.
+
+Two things `EYE_HEIGHTS` deliberately cannot express, because `EntityDraw` has no
+input for them: **pose** (a crouching player's eye is `1.27`, a swimming one's
+`0.4`) and **a baby's own `BABY_DIMENSIONS`** (a baby zombie's eye is `0.775`,
+not the adult's `1.74` halved). The age-scale approximation lands in the right
+block cell for every baby checked, so the probe is right and the number is not.
+To fix either properly, `EntityDraw` needs to carry the pose.
 
 ### Sky light does not change at night — a fix that shipped and did nothing
 

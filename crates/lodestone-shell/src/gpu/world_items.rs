@@ -28,6 +28,7 @@ use lodestone_model::event::EquipmentSlot;
 
 use crate::entities::{EntityDraw, ITEM_ENTITY_TYPE_PATH};
 
+use super::entity_passes::entity_light;
 use super::terrain::ModelRenderer;
 use super::{RenderState, RenderStats};
 
@@ -163,7 +164,10 @@ impl RenderState {
                     draw.feet + offset,
                     draw.anim.age_ticks,
                     item_bob_offset(draw.id),
-                    self.entity_light.sample(draw.feet),
+                    // Every copy of the stack shares the drop's one sample:
+                    // `ItemEntityRenderer` reads `state.lightCoords` once and
+                    // `submitMultipleFromCount` reuses it for all five.
+                    entity_light(&self.entity_light, draw),
                 );
                 if draw.foil {
                     foil.merge(&mesh);
@@ -314,7 +318,7 @@ impl RenderState {
         let light = if thrown.full_bright {
             ENTITY_FULLBRIGHT
         } else {
-            self.entity_light.sample(draw.feet)
+            entity_light(&self.entity_light, draw)
         };
         // `display.ground`: `extractRenderState` resolves the item in
         // `ItemDisplayContext.GROUND`, the same context a drop uses — which is why
@@ -397,7 +401,11 @@ impl RenderState {
         // the only baby signal that reaches this layer — the same test
         // `entities.rs` already uses to pick `BABY_LIMB_SCALE`.
         let baby = draw.scale < 1.0;
-        let light = self.entity_light.sample(draw.feet);
+        // The *holder's* light, not the item's own position: vanilla's
+        // `ItemInHandLayer` is a layer of the holder's renderer and draws with the
+        // holder's `state.lightCoords`, so a sword follows the hand that carries
+        // it — eye-probed and fire-forced like every other layer.
+        let light = entity_light(&self.entity_light, draw);
 
         for (slot, id) in &draw.equipment {
             // Every `Mob` returns `HumanoidArm.RIGHT` from `getMainArm()` (only

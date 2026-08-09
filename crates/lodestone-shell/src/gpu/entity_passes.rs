@@ -59,6 +59,199 @@ fn flame_hitbox_width(type_path: &str, age_scale: f32) -> Option<f32> {
     (width > 0.0).then_some(width)
 }
 
+/// Every 26.2 entity type whose registration names an explicit eye height,
+/// `(type path, eye height in blocks above the feet)`, **sorted by key** for
+/// [`eye_probe_offset`]'s binary search.
+///
+/// # Where these come from
+///
+/// `EntityType.Builder.eyeHeight` calls in `EntityTypes`' registration block —
+/// 102 of the 158 registered types. The other 56 name none and take
+/// `EntityDimensions.defaultEyeHeight`, which is `height * 0.85F`; that is the
+/// fallback [`eye_probe_offset`] computes rather than a row here, so a type
+/// only appears below when vanilla actually disagrees with the default.
+///
+/// **`height * 0.85` alone is not a usable approximation and it was tempting.**
+/// A cow is `1.4` tall with an eye at `1.3`, not `1.19`; a player is `1.8` tall
+/// with an eye at `1.62`, not `1.53`. Most of those tweaks happen to floor into
+/// the same block cell as the default would for an entity standing on integer
+/// `y`, which is exactly why a wrong table here would look right in a
+/// screenshot — but three do not (`elder_guardian` `0.99875` vs `1.69788`, and
+/// `ghast`/`happy_ghast` `2.6` vs `3.4`), and any entity at a non-integer `y`
+/// moves the boundary under all the rest.
+///
+/// # What this table cannot express
+///
+/// Vanilla resolves the eye height of the entity's **current pose**
+/// (`Entity.getDimensions(pose).eyeHeight()`), and two things it varies by are
+/// not on this side of the wire as far as [`EntityDraw`] is concerned:
+///
+/// * **Pose.** A crouching player's eye is `1.27` and a swimming one's `0.4`,
+///   from `Avatar`'s `POSES` map. `EntityDraw` carries no pose, so a sneaking
+///   remote player is probed standing.
+/// * **A baby's own dimensions.** Vanilla gives most babies a hand-written
+///   `BABY_DIMENSIONS` with its own eye height rather than a scaled adult one —
+///   a baby zombie's is `0.775`, where the adult's `1.74` halved is `0.87`.
+///   `age_scale` below is the scaled-adult approximation; both land in the same
+///   block cell for every baby checked, so the probe cell is right and the
+///   number is not.
+const EYE_HEIGHTS: &[(&str, f32)] = &[
+    ("acacia_boat", 0.5625),
+    ("acacia_chest_boat", 0.5625),
+    ("allay", 0.36),
+    ("armadillo", 0.26),
+    ("armor_stand", 1.7775),
+    ("arrow", 0.13),
+    ("axolotl", 0.2751),
+    ("bamboo_chest_raft", 0.5625),
+    ("bamboo_raft", 0.5625),
+    ("bat", 0.45),
+    ("bee", 0.3),
+    ("birch_boat", 0.5625),
+    ("birch_chest_boat", 0.5625),
+    ("bogged", 1.74),
+    ("breeze", 1.3452),
+    ("breeze_wind_charge", 0.0),
+    ("camel", 2.275),
+    ("camel_husk", 2.275),
+    ("cat", 0.35),
+    ("cave_spider", 0.45),
+    ("cherry_boat", 0.5625),
+    ("cherry_chest_boat", 0.5625),
+    ("chicken", 0.644),
+    ("cod", 0.195),
+    ("copper_golem", 0.8125),
+    ("cow", 1.3),
+    ("creaking", 2.3),
+    ("dark_oak_boat", 0.5625),
+    ("dark_oak_chest_boat", 0.5625),
+    ("dolphin", 0.3),
+    ("donkey", 1.425),
+    ("drowned", 1.74),
+    ("elder_guardian", 0.99875),
+    ("enderman", 2.55),
+    ("endermite", 0.13),
+    ("fox", 0.4),
+    ("ghast", 2.6),
+    ("giant", 10.44),
+    ("glow_item_frame", 0.0),
+    ("glow_squid", 0.4),
+    ("guardian", 0.425),
+    ("happy_ghast", 2.6),
+    ("horse", 1.52),
+    ("husk", 1.74),
+    ("item", 0.2125),
+    ("item_frame", 0.0),
+    ("jungle_boat", 0.5625),
+    ("jungle_chest_boat", 0.5625),
+    ("leash_knot", 0.0625),
+    ("llama", 1.7765),
+    ("magma_cube", 0.325),
+    ("mangrove_boat", 0.5625),
+    ("mangrove_chest_boat", 0.5625),
+    ("mannequin", 1.62),
+    ("mooshroom", 1.3),
+    ("mule", 1.52),
+    ("nautilus", 0.2751),
+    ("oak_boat", 0.5625),
+    ("oak_chest_boat", 0.5625),
+    ("pale_oak_boat", 0.5625),
+    ("pale_oak_chest_boat", 0.5625),
+    ("parched", 1.74),
+    ("parrot", 0.54),
+    ("phantom", 0.175),
+    ("piglin", 1.79),
+    ("piglin_brute", 1.79),
+    ("player", 1.62),
+    ("pufferfish", 0.455),
+    ("rabbit", 0.59),
+    ("salmon", 0.26),
+    ("sheep", 1.235),
+    ("shulker", 0.5),
+    ("silverfish", 0.13),
+    ("skeleton", 1.74),
+    ("skeleton_horse", 1.52),
+    ("slime", 0.325),
+    ("sniffer", 1.05),
+    ("snow_golem", 1.7),
+    ("spectral_arrow", 0.13),
+    ("spider", 0.65),
+    ("spruce_boat", 0.5625),
+    ("spruce_chest_boat", 0.5625),
+    ("squid", 0.4),
+    ("stray", 1.74),
+    ("sulfur_cube", 0.175),
+    ("tadpole", 0.195_000_01),
+    ("tnt", 0.15),
+    ("trader_llama", 1.7765),
+    ("trident", 0.13),
+    ("tropical_fish", 0.26),
+    ("vex", 0.51875),
+    ("villager", 1.62),
+    ("wandering_trader", 1.62),
+    ("wind_charge", 0.0),
+    ("witch", 1.62),
+    ("wither_skeleton", 2.1),
+    ("wolf", 0.68),
+    ("zombie", 1.74),
+    ("zombie_horse", 1.52),
+    ("zombie_nautilus", 0.2751),
+    ("zombie_villager", 1.74),
+    ("zombified_piglin", 1.79),
+];
+
+/// How far above its feet this entity type's **light probe** sits, in blocks.
+///
+/// Vanilla's `Entity.getLightProbePosition` is `getEyePosition`, so the eye
+/// height *is* the probe offset. `age_scale` is [`EntityDraw::scale`] — vanilla
+/// scales the whole `EntityDimensions`, eye height included
+/// (`EntityDimensions.scale`), so a baby's probe is half an adult's.
+///
+/// An unknown type path returns `0.0` rather than a guess: a modded or
+/// future-version entity is then probed at its feet, which is where it was
+/// probed before this existed, instead of somewhere invented.
+fn eye_probe_offset(type_path: &str, age_scale: f32) -> f32 {
+    if let Ok(i) = EYE_HEIGHTS.binary_search_by(|(name, _)| (*name).cmp(type_path)) {
+        return EYE_HEIGHTS[i].1 * age_scale;
+    }
+    // `EntityDimensions.defaultEyeHeight`: `height * 0.85F`, off the same base
+    // dimensions table `flame_hitbox_width` reads.
+    lodestone_data::entity_types::entity_type_id_parts("minecraft", type_path)
+        .and_then(lodestone_data::entity_dimensions::base_dimensions)
+        .map_or(0.0, |dims| dims.height * 0.85 * age_scale)
+}
+
+/// The packed `sky << 4 | block` light one entity draws with — the whole of
+/// vanilla's `EntityRenderer.getPackedLightCoords`, and the single place any
+/// pass in this module or [`super::world_items`] should get an entity's light.
+///
+/// Two rules, both of which this file used to miss:
+///
+/// * **The probe is the entity's eye, not its feet.**
+///   `getPackedLightCoords` is `BlockPos.containing(entity.getLightProbePosition(t))`
+///   and `getLightProbePosition` returns `getEyePosition`, so a tall mob in a
+///   dark cell with a lit head is lit *by its head*. Every call site here passed
+///   `feet` before, and a comment on `EntityLightSource` claimed that was
+///   vanilla; it never was.
+/// * **Fire forces the block half to 15, and only the block half.**
+///   `EntityRenderer.getBlockLightLevel` is
+///   `entity.isOnFire() ? 15 : level.getBrightness(BLOCK, pos)`, while
+///   `getSkyLightLevel` has no such branch — so a burning mob in a pitch-dark
+///   cave lights itself without also acquiring a daytime sky, which is what
+///   forcing the whole byte would do. `LightCoordsUtil.withBlock` is the vanilla
+///   spelling; here the block half is the low nibble, so it is `| 0x0F`.
+///
+/// `BlockPos.containing` floors, and so does the sampler on the other side of
+/// [`EntityLightSource`] — the offset is added in world space and the truncation
+/// happens once, in the world lookup.
+pub(super) fn entity_light(source: &super::EntityLightSource, draw: &EntityDraw) -> u8 {
+    // `type_path`, not `model_type_path`: the eye height is a property of the
+    // entity *type*, and a slim-rigged player is still a `player`.
+    let offset = eye_probe_offset(&draw.type_path, draw.scale);
+    let packed = source.sample(draw.feet + glam::Vec3::new(0.0, offset, 0.0));
+    if draw.on_fire { packed | 0x0F } else { packed }
+}
+
 /// Fold one layer's instances into `accum`, finding-or-creating the
 /// `(slot, texture)` group and, within it, the per-part row.
 ///
@@ -236,7 +429,7 @@ impl RenderState {
                     e.scale,
                     &e.anim,
                 )
-                .map(|i| i.with_light(self.entity_light.sample(e.feet)))
+                .map(|i| i.with_light(entity_light(&self.entity_light, e)))
             else {
                 continue;
             };
@@ -387,7 +580,10 @@ impl RenderState {
             let Some(wearer) = self.entities.models.get(instance.model) else {
                 continue;
             };
-            let light = u32::from(self.entity_light.sample(draw.feet));
+            // The wearer's own light, eye-probed and fire-forced — armour is one
+            // of the wearer's model layers in vanilla, drawn from the *same*
+            // `state.lightCoords` its body is, so the two can never disagree.
+            let light = u32::from(entity_light(&self.entity_light, draw));
 
             // Walk the *slots* rather than the equipment list, so the draw order
             // is `HumanoidArmorLayer.submit`'s (chest, legs, feet, head)
@@ -673,7 +869,9 @@ impl RenderState {
             if attached.is_empty() {
                 continue;
             }
-            let light = u32::from(self.entity_light.sample(draw.feet));
+            // Same source as the body: the wool is one of the sheep's own model
+            // layers, so it takes the sheep's eye-probed, fire-forced light.
+            let light = u32::from(entity_light(&self.entity_light, draw));
             // Same reason armour carries it: the wool is one of the sheep's
             // model layers, so it reddens with the body.
             let tint = InstanceTint::rgb(sheep_wool_tint(wool.color)).with_hurt(draw.hurt);
@@ -961,5 +1159,211 @@ mod tests {
         // to a point rather than declining to draw one.
         assert!(flame_hitbox_width("zombie", 0.0).is_none());
         assert!(flame_hitbox_width("not_a_real_entity_type", 1.0).is_none());
+    }
+
+    /// The test column's packed light, `sky << 4 | block`, from two rules stated
+    /// once and evaluated by the assertions rather than restated as constants.
+    ///
+    /// * **Block light** floods cell `y = 60` at 15 from a lava pool and falls
+    ///   off 1 per block as you rise: `15 - (y - 60)`, clamped at 0.
+    /// * **Sky light** climbs 2 per block from a shaft mouth at `y = 62`:
+    ///   `2 * (y - 62)`, clamped into `0..=15`.
+    ///
+    /// The two gradients have different slopes *and* different origins on
+    /// purpose: a single shared gradient would make several wrong probe cells
+    /// produce the same byte, and a same-slope pair could not tell a swapped
+    /// nibble from a shifted cell.
+    fn column_light(y: i32) -> u8 {
+        let block = (15 - (y - 60)).clamp(0, 15);
+        let sky = (2 * (y - 62)).clamp(0, 15);
+        u8::try_from((sky << 4) | block).expect("both nibbles are 0..=15")
+    }
+
+    fn gradient_source() -> super::super::EntityLightSource {
+        super::super::EntityLightSource(Some(Box::new(|p: glam::Vec3| {
+            // `BlockPos.containing` floors; `f32::floor` then `as i32` is that.
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "test positions are small integers plus an eye height"
+            )]
+            Some(column_light(p.y.floor() as i32))
+        })))
+    }
+
+    fn subject(type_path: &str, feet_y: f32, scale: f32, on_fire: bool) -> EntityDraw {
+        EntityDraw {
+            id: 1,
+            type_path: type_path.to_owned(),
+            item: None,
+            equipment: Vec::new(),
+            equipment_dye: Vec::new(),
+            equipment_trim: Vec::new(),
+            wool: None,
+            count: 1,
+            foil: false,
+            feet: glam::Vec3::new(0.5, feet_y, 0.5),
+            yaw: 0.0,
+            head_yaw: 0.0,
+            pitch: 0.0,
+            scale,
+            anim: lodestone_render::AnimInput::REST,
+            name_tag: None,
+            hurt: false,
+            item_use: None,
+            creeper_swelling: 0.0,
+            on_fire,
+            player_skin: None,
+        }
+    }
+
+    /// The eye heights are the jar's, not a formula, and the table is searchable.
+    ///
+    /// Every value comes from an `EntityType.Builder.eyeHeight` call in 26.2's
+    /// `EntityTypes` — an outside record definition, read as a record — and the
+    /// spot checks below are the ones that would move if the table were
+    /// regenerated with the wrong column or shifted by a row.
+    #[test]
+    fn eye_heights_are_the_jars_own_and_the_default_is_the_only_fallback() {
+        // Sorted and unique, or `binary_search_by` silently misses rows.
+        for pair in EYE_HEIGHTS.windows(2) {
+            assert!(
+                pair[0].0 < pair[1].0,
+                "EYE_HEIGHTS must be strictly sorted by key: {:?} then {:?}",
+                pair[0].0,
+                pair[1].0
+            );
+        }
+        // Every key is a real 26.2 entity type, per the generated registry — a
+        // typo'd row would otherwise sit in the table forever, unreachable and
+        // silently defaulting.
+        for (name, _) in EYE_HEIGHTS {
+            assert!(
+                lodestone_data::entity_types::entity_type_id_parts("minecraft", name).is_some(),
+                "{name} is not a registered entity type"
+            );
+        }
+
+        // Overridden: the value is the jar's, and it is *not* `height * 0.85`.
+        assert!((eye_probe_offset("zombie", 1.0) - 1.74).abs() < 1e-6);
+        assert!((eye_probe_offset("player", 1.0) - 1.62).abs() < 1e-6);
+        assert!((eye_probe_offset("ghast", 1.0) - 2.6).abs() < 1e-6);
+        // A zombie is 1.95 tall and a ghast 4.0, so the default formula would
+        // give 1.6575 and 3.4. Assert the distance so a regression to the
+        // formula cannot pass by rounding.
+        assert!((eye_probe_offset("ghast", 1.0) - 4.0 * 0.85).abs() > 0.7);
+
+        // Not overridden: `EntityDimensions.defaultEyeHeight`, off the generated
+        // dimensions table. A creeper is 1.7 tall.
+        let creeper = eye_probe_offset("creeper", 1.0);
+        assert!(
+            (creeper - 1.7 * 0.85).abs() < 1e-6,
+            "creeper takes the 0.85 default, got {creeper}"
+        );
+
+        // Age scale reaches the offset, as `EntityDimensions.scale` does.
+        assert!((eye_probe_offset("zombie", 0.5) - 0.87).abs() < 1e-6);
+
+        // An unknown type probes at the feet rather than at an invented height.
+        assert_eq!(eye_probe_offset("not_a_real_entity_type", 1.0), 0.0);
+    }
+
+    /// **The probe is the eye cell, and fire forces only the block nibble.**
+    ///
+    /// Both halves of `EntityRenderer.getPackedLightCoords` at once, on inputs
+    /// chosen so the right answer and the two wrong ones are three different
+    /// bytes. Before this, every pass in this module and in
+    /// [`super::super::world_items`] sampled at `draw.feet`.
+    ///
+    /// The subject is **tall** deliberately. On flat, uniformly-lit ground — or
+    /// for a short entity whose eye shares its feet's cell — feet-probing and
+    /// eye-probing return the same byte, so such an input measures only that the
+    /// code runs. The last case below is exactly that coincidence, asserted as a
+    /// coincidence.
+    #[test]
+    fn an_entity_probes_its_eye_cell_and_fire_forces_only_the_block_nibble() {
+        let source = gradient_source();
+
+        // The column, so the assertions below can be read against it:
+        //   y=64 -> block 11, sky 4  -> 75
+        //   y=65 -> block 10, sky 6  -> 106
+        //   y=66 -> block  9, sky 8  -> 137
+        //   y=67 -> block  8, sky 10 -> 168
+        assert_eq!(
+            [
+                column_light(64),
+                column_light(65),
+                column_light(66),
+                column_light(67)
+            ],
+            [75, 106, 137, 168],
+            "the gradient itself moved; every prediction below is derived from it"
+        );
+
+        // A zombie standing on the block top at y=64. Eye 1.74 -> 65.74 -> cell
+        // 65. The feet hypothesis reads cell 64.
+        let zombie = entity_light(&source, &subject("zombie", 64.0, 1.0, false));
+        assert_eq!(
+            zombie,
+            column_light(65),
+            "a zombie at y=64 must read its eye cell 65 ({}), not its feet cell 64 ({})",
+            column_light(65),
+            column_light(64)
+        );
+
+        // A ghast, which separates all *three* hypotheses: real eye 2.6 -> cell
+        // 66, the `height * 0.85` default 3.4 -> cell 67, the feet -> cell 64.
+        let ghast = entity_light(&source, &subject("ghast", 64.0, 1.0, false));
+        assert_eq!(
+            ghast,
+            column_light(66),
+            "a ghast at y=64 must read cell 66 ({}); the 0.85 default would read \
+             cell 67 ({}) and feet-probing cell 64 ({})",
+            column_light(66),
+            column_light(67),
+            column_light(64)
+        );
+
+        // Fire: the block nibble becomes 15, the sky nibble does not move. Cell
+        // 65 is block 10, sky 6 — so 15 is a *change* here, which is what makes
+        // this input discriminating at all.
+        let burning = entity_light(&source, &subject("zombie", 64.0, 1.0, true));
+        assert_eq!(
+            burning & 0x0F,
+            15,
+            "fire forces block light to 15 (sampled cell has {})",
+            column_light(65) & 0x0F
+        );
+        assert_eq!(
+            burning >> 4,
+            column_light(65) >> 4,
+            "fire must not touch the sky nibble — `getSkyLightLevel` has no \
+             `isOnFire` branch"
+        );
+        // Spelled out as one byte too, so neither of the two nibble assertions
+        // can drift apart from the value the pass actually uploads. 111 is
+        // sky 6 << 4 | 15; forcing the whole byte would be 255, forcing sky
+        // alone 250, and fire-plus-feet-probing 79.
+        assert_eq!(burning, 111);
+
+        // **Not a discriminating input, and that is the point.** A baby zombie's
+        // eye is 0.87 and a dropped item's 0.2125, so both share their feet's
+        // cell: for these, feet-probing and eye-probing agree, and a gate built
+        // on either would have passed against the bug.
+        assert_eq!(
+            entity_light(&source, &subject("zombie", 64.0, 0.5, false)),
+            column_light(64)
+        );
+        assert_eq!(
+            entity_light(&source, &subject("item", 64.0, 1.0, false)),
+            column_light(64)
+        );
+
+        // A non-integer feet height moves the boundary, which is the case the
+        // three-cells-coincide reasoning in `EYE_HEIGHTS`' doc does not cover: a
+        // zombie on a slab at y=64.5 has its eye at 66.24, one cell higher.
+        assert_eq!(
+            entity_light(&source, &subject("zombie", 64.5, 1.0, false)),
+            column_light(66)
+        );
     }
 }
