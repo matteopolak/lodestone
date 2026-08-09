@@ -167,6 +167,7 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
 
     let subject = EntityDraw {
         hurt: false,
+        block_state: None,
         id: 1,
         type_path: "zombie".to_owned(),
         item: None,

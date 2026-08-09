@@ -42,6 +42,9 @@ mod first_person;
 mod frame;
 mod glint;
 mod maps;
+// The moving-block-model seam: block geometry drawn somewhere other than its own
+// cell. Falling blocks today; piston heads are the second intended producer.
+mod moving_blocks;
 mod nametag;
 mod occlusion;
 mod outline;

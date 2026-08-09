@@ -1155,6 +1155,35 @@ pub enum ClientEvent {
         /// The fields this packet updated.
         metadata: EntityMetadataUpdate,
     },
+    /// A falling block's imitated block state, from its spawn packet's
+    /// **Object Data** field.
+    ///
+    /// # Why this is its own event and not a field on [`EntitySpawned`]
+    ///
+    /// `ADD_ENTITY`'s trailing VarInt is vanilla's "Object Data": one field whose
+    /// meaning is decided entirely by the entity type, and which each type reads in
+    /// its own `recreateFromPacket` override. `FallingBlockEntity`'s is
+    /// `this.blockState = Block.stateById(packet.getData())`. Lowering it as a
+    /// per-type event rather than as an opaque integer on the shared spawn event
+    /// keeps the *interpretation* in the adapter that has the version's state table,
+    /// which is the same reason [`EntityMetadataUpdated`](Self::EntityMetadataUpdated)
+    /// carries resolved fields rather than raw indices.
+    ///
+    /// **This is the only channel by which the state travels.**
+    /// `FallingBlockEntity.defineSynchedData` registers `DATA_START_POS` and nothing
+    /// else, so the block state is never in a `SET_ENTITY_DATA` packet. A consumer
+    /// that ignores this draws every falling block as whatever state id `0` happens
+    /// to be, with nothing logged anywhere.
+    ///
+    /// Emitted immediately after the entity's own [`EntitySpawned`](Self::EntitySpawned),
+    /// so a consumer keyed on the entity id always has the entity first.
+    FallingBlockState {
+        /// Entity id.
+        entity_id: i32,
+        /// The global block-state id the entity is imitating, as
+        /// `Block.getId(BlockState)` numbers them for this protocol version.
+        block_state_id: u32,
+    },
     /// An entity's attributes were (re)published.
     ///
     /// Each snapshot fully replaces the named attribute's base value and modifier
@@ -2940,6 +2969,12 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::EntityAttributesUpdated { .. }
         | ClientEvent::EntityEquipmentUpdated { .. }
         | ClientEvent::EntityDamaged { .. }
+        // Per-entity, not a shell-stream fact: the block state becomes a component
+        // on the ingest entity and the render extract bridges it through
+        // `EntityIndex`, exactly as `HurtTime` and `ItemUse` are. Routing it to the
+        // shell instead would compile, test green, and never run — `apply` consults
+        // both switches and only forwards what each lists.
+        | ClientEvent::FallingBlockState { .. }
         | ClientEvent::EntityAnimation { .. } => INGEST,
         // Both halves, and neither supersedes the other: `ingest` turns this into
         // the per-entity `HurtTime` countdown and destructures with `..`,
@@ -3362,7 +3397,7 @@ mod route_tests {
         // Asserting the two counts agree turns it into evidence a reader can see,
         // and catches a variant named twice.
         assert_eq!(
-            total, 130,
+            total, 131,
             "the `ClientEvent` variant count changed. That is fine and expected — \
              update `docs/event-routing.md` and this number together, which is the \
              whole point of this gate firing."

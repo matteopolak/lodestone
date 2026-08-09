@@ -254,6 +254,7 @@ impl ThirdPersonBodyState {
             // `entities::sheep_wool`'s gate, and `count` is meaningless when
             // `item` is `None`.
             wool: None,
+            block_state: None,
             count: 1,
             foil: false,
             // The local third-person body does not draw its own nametag

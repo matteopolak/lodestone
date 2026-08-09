@@ -150,6 +150,30 @@ pub struct Health(pub f32);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HurtTime(pub u32);
 
+/// The block state a `minecraft:falling_block` entity is imitating —
+/// `FallingBlockEntity.blockState`, as a global block-state id.
+///
+/// Folded by [`crate::ingest::apply_falling_block_state`] from
+/// [`lodestone_model::ClientEvent::FallingBlockState`], which the version adapter
+/// emits from the spawn packet's Object Data field. **Absent** on every other
+/// entity, and absent on a falling block until its spawn packet is decoded — so
+/// absence is the switch a renderer keys on, exactly as
+/// `lodestone-shell`'s `ItemPhysics` does.
+///
+/// # Why the state id and not a resolved name
+///
+/// The id is what the wire carries and what the render side wants: the shell
+/// resolves geometry by state id (`CrackResolver`'s per-state quad table is
+/// indexed by it), so converting to a name here and back there would add two
+/// lookups and a place for the two tables to disagree. A *server* consumer that
+/// wants the name has `lodestone_data::block_states::block_name`.
+///
+/// Never updated after the spawn: vanilla has no packet that revises Object Data,
+/// and `FallingBlockEntity` synchs no block-state field. A falling block that
+/// changed which block it was would be a different entity.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FallingBlockState(pub u32);
+
 /// A **remote** entity's arm-swing progress — vanilla's `LivingEntity`
 /// `swingTime`/`swinging`/`attackAnim`/`oAttackAnim`, folded from
 /// `ClientboundAnimatePacket`'s `SWING_MAIN_HAND` action (id `0`) by

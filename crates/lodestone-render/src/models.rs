@@ -972,6 +972,78 @@ pub fn mesh_item_quads(quads: &[BakedQuad], pose: Mat4, gui_light: GuiLight) -> 
     mesh
 }
 
+/// Mesh one **block state's** baked geometry into a world-space [`ModelMesh`],
+/// posed by `pose` and lit by a single packed `light` byte — vanilla's
+/// `SubmitNodeCollector.submitMovingBlock`, the path a block model takes when it
+/// is drawn somewhere other than its own cell.
+///
+/// Two consumers, and the second is why this is a named seam rather than a
+/// falling-block special case:
+///
+/// * `FallingBlockRenderer.submit`, whose whole body is
+///   `poseStack.translate(-0.5, 0, -0.5)` then `submitMovingBlock`.
+/// * `PistonHeadRenderer`, which draws the head and the pushed block the same
+///   way. Like the campfire, it bakes no layer and owns no cuboid rig, so it
+///   needs this rather than [`EntityPipeline`](crate::EntityPipeline).
+///
+/// # How this differs from [`mesh_item_quads`], and from [`mesh_models`]
+///
+/// | | [`mesh_models`] (terrain) | [`mesh_item_quads`] (GUI) | this |
+/// |---|---|---|---|
+/// | `cullface` | honoured against neighbours | ignored | **ignored** |
+/// | positions | offset by cell | transformed by `pose` | transformed by `pose` |
+/// | shade | per-face + smooth AO | per-face, or flat for `gui_light: front` | **per-face, always** |
+/// | light | sampled per corner | fixed [`GUI_ITEM_LIGHT`] | **one supplied byte** |
+///
+/// `cullface` is ignored for [`mesh_item_quads`]'s reason: a moving block has no
+/// neighbours to cull against, and a quad dropped because "the block to the north
+/// occludes it" would leave a hole in mid-air. The pipeline's own back-face
+/// culling removes the far faces.
+///
+/// Shade is **always** the per-face directional constant, with no `GuiLight`
+/// branch: `submitMovingBlock` goes through the block renderer, which has no
+/// notion of a model's `gui_light`. Flattening it would make a falling sand block
+/// read as a uniformly-lit cube, which looks like a lighting bug rather than a
+/// pose bug.
+///
+/// `light` is one byte for the whole mesh because that is what vanilla does —
+/// `MovingBlockRenderState` carries a single `blockPos` and the light is sampled
+/// there once, not per corner. Sampling per corner would need neighbour data this
+/// path does not have.
+#[must_use]
+pub fn mesh_moving_block_quads(quads: &[BakedQuad], pose: Mat4, light: u8) -> ModelMesh {
+    let mut mesh = ModelMesh::default();
+    for quad in quads {
+        let base = mesh.vertices.len() as u32;
+        let shade = face_shade(quad);
+        let tint = quad.tint_index.map_or(255u8, |t| t as u8);
+        for i in 0..4 {
+            let p = pose.transform_point3(Vec3::from(quad.positions[i]));
+            mesh.vertices.push(ModelVertex {
+                position: p.into(),
+                uv: quad.uvs[i],
+                ao: shade,
+                light,
+                tint,
+                anim: quad.anim,
+                _pad: 0,
+                // No biome override: `MovingBlockRenderState` does carry a
+                // `biome`, but resolving it needs the position-keyed biome grid
+                // the terrain mesher owns and this path has no access to. The
+                // frame-shared palette at `quad.tint_index` is what a
+                // non-biome-tinted block (every state this draws today — sand,
+                // red sand, gravel are untinted) resolves to anyway, so the
+                // deviation is currently invisible. A moving *grass block* would
+                // show it as the default green rather than the local biome's.
+                tint_rgb_override: [0, 0, 0, 0],
+            });
+        }
+        mesh.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    mesh
+}
+
 /// The mesher's view of a section for the **fluid** path.
 ///
 /// Fluids are not baked per state (their shape depends on neighbours — see
@@ -2518,5 +2590,128 @@ mod tests {
             2,
             "no overlay sprite resolved (lava-like): back face must be restored"
         );
+    }
+    // -----------------------------------------------------------------------
+    // `mesh_moving_block_quads` — the moving-block-model seam's mesh primitive
+    // -----------------------------------------------------------------------
+
+    /// A downward-facing full-cell quad, so `face_shade` resolves to the `Down`
+    /// constant (`0.5`) rather than the `Up` one — chosen because `0.5` is the one
+    /// face constant that cannot be confused with the unshaded `1.0`.
+    fn down_quad() -> BakedQuad {
+        BakedQuad {
+            positions: [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+            ],
+            uvs: [[0.25, 0.5], [0.75, 0.5], [0.75, 0.9], [0.25, 0.9]],
+            direction: lodestone_assets::Direction::Down,
+            cullface: Some(lodestone_assets::Direction::Down),
+            tint_index: Some(3),
+            shade: true,
+            layer: 0,
+            anim: 5,
+        }
+    }
+
+    /// Positions are transformed by the pose, and every other per-quad property is
+    /// carried through untouched.
+    ///
+    /// The property assertions are the point rather than padding: this path exists
+    /// because the crack mesher — the *other* consumer of the same per-state quad
+    /// snapshot — deliberately **replaces** the UVs with a `destroy_stage` rect.
+    /// Reusing that mesher for a moving block would draw a block-shaped crack
+    /// overlay, so a gate that only checked positions would not have noticed.
+    #[test]
+    fn moving_block_quads_are_posed_and_keep_their_own_uvs_tint_and_anim() {
+        let pose = Mat4::from_translation(Vec3::new(10.0, -4.0, 2.5));
+        let mesh = mesh_moving_block_quads(&[down_quad()], pose, 0x2B);
+
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3], "two triangles per quad");
+
+        let expected_positions = [
+            [10.0, -4.0, 2.5],
+            [11.0, -4.0, 2.5],
+            [11.0, -4.0, 3.5],
+            [10.0, -4.0, 3.5],
+        ];
+        let mismatched: Vec<(usize, [f32; 3], [f32; 3])> = mesh
+            .vertices
+            .iter()
+            .enumerate()
+            .filter(|(i, v)| {
+                let want = expected_positions[*i];
+                (0..3).any(|a| (v.position[a] - want[a]).abs() > 1e-5)
+            })
+            .map(|(i, v)| (i, v.position, expected_positions[i]))
+            .collect();
+        assert!(
+            mismatched.is_empty(),
+            "posed positions wrong at (index, got, want): {mismatched:?}"
+        );
+
+        for (i, v) in mesh.vertices.iter().enumerate() {
+            assert_eq!(v.uv, down_quad().uvs[i], "vertex {i} lost its own UV");
+            assert_eq!(v.light, 0x2B, "vertex {i} did not take the supplied light");
+            assert_eq!(v.tint, 3, "vertex {i} lost its palette index");
+            assert_eq!(v.anim, 5, "vertex {i} lost its animation slot");
+            assert_eq!(
+                v.tint_rgb_override, [0, 0, 0, 0],
+                "this path has no biome override to carry"
+            );
+        }
+    }
+
+    /// The shade is the **per-face directional constant**, not the GUI path's
+    /// `gui_light: front` flattening to `1.0`.
+    ///
+    /// Both readings are evaluated: a `Down` face is `0.5`, and a `shade: false`
+    /// quad is `1.0`. A gate that only checked the first would pass under an
+    /// implementation that flattened everything, because `1.0` is also a legal
+    /// shade — so the discriminating claim is that the two inputs produce
+    /// *different* values.
+    #[test]
+    fn moving_block_shade_is_per_face_and_not_flattened() {
+        let shaded = mesh_moving_block_quads(&[down_quad()], Mat4::IDENTITY, 0xF0);
+        let mut unshaded_quad = down_quad();
+        unshaded_quad.shade = false;
+        let unshaded = mesh_moving_block_quads(&[unshaded_quad], Mat4::IDENTITY, 0xF0);
+
+        assert_eq!(shaded.vertices[0].ao, 0.5, "a Down face is vanilla's 0.5");
+        assert_eq!(unshaded.vertices[0].ao, 1.0, "`shade: false` is unshaded");
+        assert_ne!(
+            shaded.vertices[0].ao, unshaded.vertices[0].ao,
+            "control: if these coincide the shade term is being flattened and this \
+             gate measures nothing"
+        );
+    }
+
+    /// `cullface` is ignored, so a quad that would be culled against a neighbour is
+    /// still emitted.
+    ///
+    /// A moving block has no neighbours; a quad dropped because "the block to the
+    /// north occludes it" would leave a hole in mid-air. The fixture's quad carries
+    /// `cullface: Some(Down)` precisely so this is a real test rather than a
+    /// restatement.
+    #[test]
+    fn moving_block_quads_ignore_cullface() {
+        assert!(
+            down_quad().cullface.is_some(),
+            "control: the fixture must actually declare a cullface"
+        );
+        let mesh = mesh_moving_block_quads(&[down_quad()], Mat4::IDENTITY, 0xF0);
+        assert_eq!(mesh.quad_count(), 1, "a cullface must not drop the quad");
+    }
+
+    /// No quads means an empty mesh rather than a panic — the answer for air and for
+    /// every `RenderShape.INVISIBLE` block, which callers read as "draw nothing".
+    #[test]
+    fn moving_block_quads_of_nothing_is_an_empty_mesh() {
+        let mesh = mesh_moving_block_quads(&[], Mat4::IDENTITY, 0xF0);
+        assert_eq!(mesh.quad_count(), 0);
+        assert!(mesh.vertices.is_empty() && mesh.indices.is_empty());
     }
 }

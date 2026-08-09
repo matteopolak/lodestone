@@ -8583,3 +8583,78 @@ Three smaller things, all read off the decompile rather than inferred from the p
   `Stats.ITEM_PICKED_UP` with `orgCount`, while `collect_nearby_items` credits only what was banked. Ours is
   arguably better accounting and is a documented choice at that call site, but it is a real difference and
   the sort of thing that is invisible until someone reads the same twenty lines again.
+
+**12.168 Falling blocks: an ordering that cannot be tested as statements, a renderer guard that hides a
+transport race, and a hand-derived tick count that was wrong on the first run.**
+
+The owner's report was two bugs in one sentence: sand placed in mid-air did not fall until something was
+placed beside it, *and* when it did fall it teleported to the bottom with no animation. The first half was a
+missing `FallingBlock.onPlace` scheduled tick and closed earlier. This is the second half.
+
+**Tick one moves `0.04`, not `0.0392`, and the difference is the whole port.** `FallingBlockEntity.tick`
+runs `applyGravity()` → `move(SELF, delta)` → the landing decision → and *as the method's last statement*
+`delta *= getAirDrag()`. So `v_n = 0.98·v_(n-1) − 0.04` with the **displacement taken before the drag**. The
+natural-looking one-liner `(v − g) · drag` is the drag-first reading and gives `0.0392` on tick one — 2%
+apart, so no approximate assertion can separate them. The gate solves the recurrence by hand instead:
+`a_n = 2(0.98^n − 1)` from the fixed point `a* = −0.04/0.02 = −2`, cumulative `98(1 − 0.98^n) − 2n`, and
+requires the drag-first solution `1.96(0.98^n − 1)` to fail at every one of 80 ticks. Over a 60-block drop
+(66 ticks) the two land **1.2 blocks apart**; over one block they are indistinguishable, which is why the
+height is part of the gate rather than incidental.
+
+**The round number was wrong again, and the gate caught it on its first run.** A 6-block fall was predicted
+to land on tick 19 from arithmetic done by hand. The closed form says **18** (`−5.51` at 17, `−6.12` at 18,
+`−6.76` at 19). The drag-free `sqrt(2·6/0.04) ≈ 17.3` would round to 17, so 6 blocks does discriminate — but
+the prediction that failed was neither of those, it was a slip. §12.160's rule held: the assertion is now the
+re-derivation (`total_fall_after(17) > −6 > total_fall_after(18)`), so the prediction cannot drift from the
+closed form again.
+
+**Two orderings a player can see, neither of which is testable as statement order.** `FallingBlockEntity.fall`
+is `setBlock(pos, air, 3)` *then* `addFreshEntity`; the landing branch is `setBlock(pos, state, 3)` then the
+block-update broadcast *then* `discard()`. Reversing the first shows the block **and** its falling copy;
+reversing the second shows **neither** — the same shape `TAKE_ITEM_ENTITY` hit, where `take` had to precede
+`discard`. Two statements in a caller cannot be observed, so `MobSim` returns a `Vec<FallingBlockEffect>` and
+the caller applies it in order. Both reversals *and* both truncations are constructed explicitly in the gate
+and required to differ from what was produced, collected rather than asserted in a loop.
+
+**The transport does not preserve either ordering, and vanilla covers that in the renderer rather than the
+server.** `server.rs`'s connection loop drains the block feed on its `container_sync_tick` arm and runs the
+entity streaming pass on its `read_packet` arm — two different `select!` arms at ~50 ms each — so the wire
+order of a block update against an entity spawn or removal is unspecified within one tick.
+`FallingBlockRenderer.shouldRender` is the answer: it refuses to draw the entity when
+`entity.getBlockState() == level.getBlockState(entity.blockPosition())`, i.e. when the world block at the
+entity's own cell already *is* that block. That single line suppresses the duplicate at spawn and the hole at
+landing, from the client side, without the server ordering anything. It is **not ported** — the gpu layer has
+no polled world block-state source — and the cost is a ≤1-tick ghost or gap. Worth recording because the
+instinct was to fix the ordering in the server, and vanilla does not.
+
+**The one channel the block state travels on, and why it looks like a solved problem.** A falling block's
+imitated state is `ADD_ENTITY`'s trailing Object Data VarInt
+(`FallingBlockEntity.getAddEntityPacket` → `Block.getId(blockState)`) and **nothing else**:
+`defineSynchedData` registers `DATA_START_POS` alone, so no `SET_ENTITY_DATA` ever carries it. Our encoder
+hardcoded that field to `0` — correct for every entity kind that does not override `getAddEntityPacket`, and
+silently wrong for the one that does — and the decoder read it into `let _data`. State id `0` is a real
+state, so the failure mode is a falling block drawn as the wrong block with nothing logged: the `SET_TIME`
+shape (§12, #323) where every wire reads green and the value travelling it is wrong.
+
+Three smaller things:
+
+* **The neighbour route was a second fall path.** `random_tick`'s gravity arm settled *inline*, skipping the
+  2-tick delay and (once the entity existed) the entity. `FallingBlock.updateShape` is
+  `scheduleTick(pos, this, getDelayAfterPlace())` and nothing else — there is no `isFree(below)` test in it,
+  which is why the support control had to move to `settle_gravity_at`: asserting "a supported block schedules
+  nothing" would have been asserting a bug. Two gates that asserted the teleport were inverted, and the
+  inversion is stated in the source because reading them could not reveal it.
+* **`floor`, not `as i32`, recovers the origin cell.** The entity's `x` is `origin.x + 0.5`, so at `x = −8`
+  it sits at `−7.5`; `as i32` truncates toward zero and gives `−7`. A landing gate at positive coordinates
+  passes under both readings and measures nothing.
+* **`0.98` is `EntityTypes.FALLING_BLOCK`'s height and the light probe uses it.**
+  `FallingBlockRenderer.extractRenderState` reads light at `getBoundingBox().maxY`, not at the feet — which
+  matters exactly at landing, when the feet are inside the cell the block is about to occupy.
+
+**The seam, not the feature.** `PistonHeadRenderer` has the same shape as `FallingBlockRenderer` — **no
+`bakeLayer` call in the constructor**, so it owns no cuboid mesh and poses block *models* — and was left
+unbuilt for want of a moving-block-model path. That path is now
+`crates/lodestone-shell/src/gpu/moving_blocks.rs` plus `lodestone_render::mesh_moving_block_quads`, taking
+`(state id, transform, light)` and resolving geometry through the crack pass's existing per-state quad
+snapshot, so there is no per-block table to rot. The piston head's remaining work is a polled source telling
+the renderer which pistons are moving and how far; the geometry half is done.

@@ -67,6 +67,105 @@ fn add_entity_bytes(
     bytes
 }
 
+/// [`add_entity_bytes`] with a non-zero **Object Data** field — the trailing
+/// VarInt whose meaning is per-type, and which a falling block carries its block
+/// state id in.
+fn add_entity_bytes_with_data(
+    entity_id: i32,
+    uuid: Uuid,
+    type_id: i32,
+    pos: (f64, f64, f64),
+    data: i32,
+) -> Vec<u8> {
+    let mut bytes = add_entity_bytes(entity_id, uuid, type_id, pos, 0, 0, 0);
+    // Strip the zero data byte `add_entity_bytes` appended and write ours, so the
+    // two helpers cannot disagree about the rest of the layout.
+    bytes.truncate(bytes.len() - 1);
+    bytes.extend_from_slice(&var_i32(data));
+    bytes
+}
+
+/// The registry id of `minecraft:falling_block` for protocol 776, resolved
+/// through the adapter's own type table by scanning for the one id that names it.
+///
+/// Derived rather than hardcoded: a literal here would be a second copy of a
+/// generated table, and the one thing this test must not do is assume the id.
+fn falling_block_type_id() -> i32 {
+    (0..2000)
+        .find(|id| {
+            lodestone_data::entity_types::entity_type_name(*id)
+                == Some("minecraft:falling_block")
+        })
+        .expect("protocol 776 has a `minecraft:falling_block` entity type")
+}
+
+/// A falling block's `ADD_ENTITY` yields its imitated block state as a third
+/// directive, after the spawn and the head rotation.
+///
+/// **This is the only channel the state ever travels on.**
+/// `FallingBlockEntity.defineSynchedData` registers `DATA_START_POS` and nothing
+/// else, so no `set_entity_data` ever carries it: an adapter that discards the
+/// Object Data field leaves every falling block drawn as whatever state id `0`
+/// resolves to, with nothing logged anywhere.
+///
+/// The ordering is asserted, not incidental: a consumer keyed on the entity id
+/// needs `EntitySpawned` first, and `lodestone_ecs`'s
+/// `apply_falling_block_state` resolves the entity through `EntityIndex`, which
+/// `apply_entity_spawn` populates in the same batch.
+#[test]
+fn a_falling_blocks_add_entity_carries_its_block_state() {
+    let adapter = V770Adapter::new();
+    let uuid = Uuid::from_u128(9);
+    // An arbitrary non-zero, non-small state id, so neither `0` nor a one-byte
+    // VarInt could produce it by accident.
+    let state_id = 1234;
+    let payload = add_entity_bytes_with_data(
+        11,
+        uuid,
+        falling_block_type_id(),
+        (3.5, 70.0, -7.5),
+        state_id,
+    );
+    let directives = handle(&adapter, play::clientbound::ADD_ENTITY, &payload);
+    assert_eq!(
+        directives.last(),
+        Some(&Directive::Emit(ClientEvent::FallingBlockState {
+            entity_id: 11,
+            block_state_id: 1234,
+        })),
+        "the Object Data field must reach a consumer, and last so the entity exists"
+    );
+    assert!(
+        matches!(
+            directives.first(),
+            Some(Directive::Emit(ClientEvent::EntitySpawned { .. }))
+        ),
+        "the spawn must still come first"
+    );
+}
+
+/// Control: an ordinary mob's `ADD_ENTITY` emits **no** `FallingBlockState`, even
+/// with a non-zero Object Data field.
+///
+/// Without this the gate above is satisfied by an adapter that emits the event
+/// for every spawn — which would be wrong for every other type that reads the
+/// field (a display block, an item-frame rotation) and would claim "this is a
+/// block state" about values that are not.
+#[test]
+fn an_ordinary_mob_with_object_data_emits_no_falling_block_state() {
+    let adapter = V770Adapter::new();
+    let payload =
+        add_entity_bytes_with_data(12, Uuid::from_u128(1), 100, (0.0, 0.0, 0.0), 1234);
+    let directives = handle(&adapter, play::clientbound::ADD_ENTITY, &payload);
+    assert!(
+        !directives.iter().any(|d| matches!(
+            d,
+            Directive::Emit(ClientEvent::FallingBlockState { .. })
+        )),
+        "a pig is not a falling block: {directives:?}"
+    );
+}
+
 #[test]
 fn add_entity_emits_spawn_and_head_rotation() {
     let adapter = V770Adapter::new();

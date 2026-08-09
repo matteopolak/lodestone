@@ -367,6 +367,14 @@ impl RenderState {
         // like a mob's does, for free.
         let (item_mesh, item_glint_mesh) =
             self.prepare_item_geometry(device, camera, entities, &mut stats);
+        // Moving block models — falling sand/gravel today (`gpu/moving_blocks.rs`).
+        // Its **own** buffer rather than merged into `item_mesh`, even though both
+        // draw through the same model pipeline: an item model and a block model are
+        // different geometry sources with different pose and light rules, and the
+        // seam has a second intended producer (piston heads) that has nothing to do
+        // with items. Prepared here for the reason everything here is: buffers
+        // cannot be created mid-pass.
+        let moving_block_mesh = self.prepare_moving_blocks(device, camera, entities, &mut stats);
         // Maps in item frames (issue #184). Built here rather than inside the pass
         // for the reason above — it creates a texture and a bind group — and kept
         // separate from `item_mesh` because it draws with a different group 1.
@@ -847,6 +855,27 @@ impl RenderState {
                 // placed block is. Opaque and depth-writing, drawn alongside the
                 // mobs and before translucent water for the same reason they
                 // are (see the entity note above).
+                // Moving block models, immediately before the dropped items and
+                // through the same pipeline and the same four bind groups. A block
+                // model is not an item model, so this is a separate buffer and a
+                // separate draw call (see `prepare_moving_blocks`) — but it is the
+                // same *pipeline*: opaque, depth-writing, world-space positions,
+                // drawn before translucent water for the reason the mobs are.
+                //
+                // Positions are baked in world space, so this binds the shared
+                // arena's reserved zero slot exactly as the item draw below does.
+                if let Some(mesh) = &moving_block_mesh {
+                    pass.set_pipeline(&model.pipeline.pipeline);
+                    pass.set_bind_group(0, &model.cam_bind_group, &[model.origin_arena.zero_offset()]);
+                    pass.set_bind_group(1, &model.atlas_bind_group, &[]);
+                    pass.set_bind_group(2, &model.palette_bind_group, &[]);
+                    pass.set_bind_group(3, &model.anim_bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    stats.draw_calls += 1;
+                }
+
                 if let Some(mesh) = &item_mesh {
                     pass.set_pipeline(&model.pipeline.pipeline);
                     // Dropped-item geometry bakes world positions into its own

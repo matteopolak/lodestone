@@ -2863,7 +2863,12 @@ fn handle_add_entity(
     let pitch = reader.i8().map_err(dec_err)?;
     let yaw = reader.i8().map_err(dec_err)?;
     let head_yaw = reader.i8().map_err(dec_err)?;
-    let _data = reader.var_i32().map_err(dec_err)?;
+    // The **Object Data** field: one trailing VarInt whose meaning is decided
+    // entirely by the entity type, read in that type's own `recreateFromPacket`.
+    // Most types ignore it; `FallingBlockEntity`'s is
+    // `this.blockState = Block.stateById(packet.getData())`, resolved below once
+    // the type is known.
+    let data = reader.var_i32().map_err(dec_err)?;
     reader.ensure_empty().map_err(dec_err)?;
 
     let name = entity_type_name(type_id).ok_or_else(|| {
@@ -2967,8 +2972,34 @@ fn handle_add_entity(
         }));
     }
 
+    // `FallingBlockEntity.recreateFromPacket`: the Object Data field read above is
+    // `Block.getId(blockState)` and is the **only** place the imitated state
+    // appears on the wire — `defineSynchedData` registers `DATA_START_POS` alone,
+    // so no `set_entity_data` ever carries it. A consumer that never learns it
+    // draws whatever state id `0` happens to be, with nothing logged.
+    //
+    // Emitted after `EntitySpawned` so a consumer keyed on the entity id always
+    // sees the entity first. Guarded on the type rather than emitted for every
+    // spawn: the field means something different for every type that reads it
+    // (a display block, an item-frame rotation), and one event that claimed to
+    // carry "a block state" for all of them would be wrong for most.
+    if name == FALLING_BLOCK_TYPE {
+        directives.push(Directive::Emit(ClientEvent::FallingBlockState {
+            entity_id,
+            // `max(0)` then a cast: the wire field is a signed VarInt and a
+            // negative value is not a state id. Clamping to `0` (air, which bakes
+            // no quads and therefore draws nothing) is the one reading that cannot
+            // panic or wrap into a plausible-looking wrong block.
+            block_state_id: data.max(0) as u32,
+        }));
+    }
+
     Ok(directives)
 }
+
+/// `EntityTypes.FALLING_BLOCK`'s registry key — the one entity type whose
+/// `ADD_ENTITY` Object Data field this adapter interprets.
+const FALLING_BLOCK_TYPE: &str = "minecraft:falling_block";
 
 /// Decodes `remove_entities` (a VarInt-length list of VarInt ids) into a removal
 /// event.
