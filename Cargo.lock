@@ -3207,7 +3207,9 @@ name = "lodestone-world"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "lodestone-anvil",
  "lodestone-core",
+ "lodestone-data",
  "lodestone-testsupport",
  "lodestone-worldgen",
  "memory-stats",
