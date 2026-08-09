@@ -1149,7 +1149,14 @@ fn fire_state_in_column(
 /// A no-op (empty `Vec`) for anything that is not an unsupported gravity
 /// block. Draws no RNG (`FallingBlock.tick` itself draws none — see that
 /// module's doc comment), so this needs no `&mut self`.
-fn settle_gravity_at(
+///
+/// `pub(crate)` for `crate::tick`'s scheduled-tick drain, which dispatches
+/// `gravity_tick::TICK_GRAVITY` **straight here** rather than through
+/// [`propagate_and_react`]. That is not a shortcut: `propagate` notifies an
+/// origin's six neighbours and not the origin, while vanilla's `onPlace` tick
+/// fires on the placed block itself, so the propagate route would settle the
+/// wrong cells. See `crate::gravity_tick`'s module doc.
+pub(crate) fn settle_gravity_at(
     column: &mut crate::chunk::ChunkColumn,
     min_x: i32,
     min_z: i32,
