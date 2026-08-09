@@ -51,6 +51,39 @@ recipe and CLAUDE.md's raw command is a property you can check yourself**:
 stdout on some `just` builds, stderr on others — capture both, `2>&1`, when
 diffing programmatically).
 
+### Launching the game: two surfaces, two recipes
+
+`run` is the native client; `run-wasm` is the browser one. They are separate
+recipes rather than `run --surface native|wasm` for a reason that is structural,
+not stylistic:
+
+| | `just run` | `just run-wasm` |
+|---|---|---|
+| driver | cargo | **trunk** (which drives cargo itself) |
+| workspace | the root one | **`web/`, its own root with its own `Cargo.lock`** |
+| `--target-dir {{tdir}}` | yes | **no** — trunk has no such flag (its knob is `--dist`), and `web/target/` never contends for the shared `target/` lock that `tdir` exists to avoid |
+| `{{jflag}}` | yes | **no** — trunk exposes no `-j` |
+| why `--release` | a debug build is unplayable | a debug build makes single-threaded worldgen ~10x slower, which blows the singleplayer probe's own **30 s deadline** and so *presents as a failure* rather than as slowness |
+
+There is no shared invocation to parameterise, so a `--surface` flag would have
+had to *branch inside the Justfile* — argument parsing, which is the one thing
+this file forbids. `run:wasm` is not available either: `:` is `just`'s
+module-path separator and cannot appear in a recipe name.
+
+`run-relay` is the third of the group: `lodestone-relay` is a WebSocket→TCP
+bridge, needed because **a browser cannot open a raw TCP socket**. Render and
+in-memory singleplayer work without it (the page reports `relay UNREACHABLE` on
+its net HUD line); joining any real server does not. Its `*args` carries the
+`web/README.md` defaults so the bare recipe is useful, which is why it is the
+only recipe here with a default argument.
+
+Both new recipes carry a `[doc("…")]` attribute. Without one, `just --list`
+shows the **last comment line** before a recipe, which for anything carrying real
+rationale is a mid-sentence fragment — `wasm-check` listed as `original).` and
+`wasm-size` as `is slow enough that folding it in…` for exactly this reason, both
+now fixed the same way. Prefer the attribute over reordering the prose to put the
+summary last: the comment block should read top-to-bottom for someone in the file.
+
 ### The target-dir design
 
 Every cargo-invoking recipe passes `--target-dir {{tdir}}`, where:
@@ -172,11 +205,18 @@ correct it.
   to the root would put an `--all-features`-adjacent foot-gun (the crate has a
   deliberate `compile_error!` when more than one allocator feature is on) one
   tab-completion away from every agent working anywhere else in the repo.
-- **The oracle scripts** (`scripts/live-oracles/*.sh`, `scripts/live-oracles/
-  rcon-op.py`, `scripts/worldgen-oracle/run.sh`) — untouched. This is a
-  Docker→Apple-`container` migration in flight; adding a recipe that wraps a
-  script mid-rewrite would either point at the wrong runtime or need
-  rewriting again the moment that migration lands. Revisit once it soaks.
+- **`scripts/live-oracles/rcon-op.py`** — still no recipe: it is a tool with its
+  own arguments, invoked against a *running* oracle, not a task.
+
+  The three oracle **launchers** used to be listed here too, on the grounds that
+  the Docker→Apple-`container` migration was in flight and a recipe would point
+  at the wrong runtime. That migration has since landed, so
+  `oracle-creative`/`oracle-terrain`/`oracle-survival` are now plain delegations,
+  and `oracle-snow-support`/`oracle-blast-fire`/`oracle-top-layer` are `container
+  run` invocations that live here directly. **This entry was stale for as long as
+  those recipes existed** — a deliberate-exclusion list is exactly the kind of
+  claim that reads as considered rather than out of date, so re-check it against
+  the Justfile rather than trusting it.
 - **CI** (`.github/workflows/ci.yml`) — not converted to call `just` yet, on
   purpose: this file needs to soak locally first. `docs/ci.md`'s
   "How to reproduce" section names both forms side by side in the meantime.

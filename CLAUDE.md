@@ -36,10 +36,18 @@ just check-all    # cargo check --workspace --all-features --all-targets --exclu
 just check-seam   # cargo check -p lodestone-shell --no-default-features   -- the version seam still holds
 just test         # cargo test --workspace --no-fail-fast
 just health       # all four of the above, in order
-cargo run --release                       # launch the game -- no recipe; nothing to canonicalise
+just run          # cargo run --release -p lodestone-shell --bin lodestone   -- launch the game
+just run-wasm     # cd web && trunk serve --release   -- launch the BROWSER build on :8080
 ```
 
-All four are required, and each catches a class the others structurally cannot:
+`just run-wasm` is the browser surface, not a flag on `just run`: `web/` is its own workspace with its
+own `Cargo.lock`, and trunk -- not cargo -- drives the build, so the two share no invocation to
+parameterise. `--release` is mandatory there for a reason unlike the native one's: a debug wasm build
+makes single-threaded worldgen ~10x slower, which **blows the singleplayer probe's own 30 s deadline and
+so presents as a failure rather than as slowness**. Joining a real server additionally needs
+`just run-relay` up, because a browser cannot open a raw TCP socket.
+
+All four *checks* are required, and each catches a class the others structurally cannot:
 
 - **`cargo build` is NOT a health check.** It skips test targets, so a crate whose lib compiles and
   whose lib-test does not reports green. Always `--all-targets`.
