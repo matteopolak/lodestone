@@ -1,9 +1,14 @@
-# Isolated feasibility-spike crate for the browser build.
+# The browser build of Lodestone.
 #
 # This is its OWN workspace (note the empty `[workspace]` table below) and lives
 # *outside* the parent `crates/lodestone-*` glob, so it never affects any other
-# agent's `cargo build --workspace`. It exists purely to prove the wasm render
-# path end to end. Delete it (or promote it deliberately) once the spike is done.
+# agent's `cargo build --workspace`. **Keep it that way** — that isolation is
+# deliberate, and `just wasm-check` is what covers this crate instead.
+#
+# It used to be a feasibility spike with its own application: its own `main`, its
+# own camera and HUD, a committed chunk fixture, and no `lodestone-shell`
+# dependency at all. It is now a thin launcher for the real shell — see
+# `src/main.rs` and `docs/browser-shell-port.md`.
 [package]
 name = "lodestone-web"
 version = "0.1.0"
@@ -15,70 +20,23 @@ publish = false
 [workspace]
 
 [dependencies]
-# Path deps into the parent workspace. `workspace = true` inheritance inside
-# these crates still resolves against the parent workspace, which is exactly
-# what we want.
-lodestone-render = { path = "../crates/lodestone-render" }
-# Assets: proves the sync, byte-based `ResourceSource`/`ZipSource::from_bytes`
-# pipeline runs unchanged in the browser once bytes are fetched.
-lodestone-assets = { path = "../crates/lodestone-assets" }
-# Net: the browser `WsWebTransport` (a `web_sys::WebSocket` behind
-# `AsyncRead`/`AsyncWrite`) used for the live relay ping.
-lodestone-net = { path = "../crates/lodestone-net", default-features = false, features = [
-  "ws-web",
-] }
-# World + v770: decode real `level_chunk_with_light` bytes (captured from the
-# live server) straight in the browser — no `lodestone-client`, no tokio runtime,
-# so this path sidesteps the client wall entirely. Both are pure compute and
-# already pass `wasm-check.sh`.
-lodestone-world = { path = "../crates/lodestone-world" }
-lodestone-v770 = { path = "../crates/protocol/v770" }
-# The block-state census (`block_states::block_name`/`properties`) moved out of
-# lodestone-v770 into this data-only crate (issue #361).
-lodestone-data = { path = "../crates/lodestone-data" }
-lodestone-core = { path = "../crates/lodestone-core" }
-# The shared, wasm-safe player controller (held-key model, vanilla mouse-look
-# curve, forward-gated sprint, and the `move_action` wire lowering). Consuming it
-# here is what keeps browser and native movement ONE implementation instead of a
-# fork. It pulls `lodestone-client` transitively (for `ClientAction`), which is
-# wasm-lean (its tokio/net deps are `cfg(not(wasm32))`-gated); the bundle cost is
-# measured in the W-next report.
-lodestone-controller = { path = "../crates/lodestone-controller" }
+# **The whole game.** The same crate the native `lodestone` binary is built from:
+# the menu, `Sim`, the renderer, physics, the integrated server. Everything on
+# screen comes from here, and this crate adds no gameplay, no rendering and no
+# protocol of its own.
+#
+# Its default `live` feature compiles the vanilla-26.2 (protocol 776) family into
+# the registry, exactly as a native build gets it, so the browser can join and host
+# the same version. Every other Lodestone crate arrives transitively — listing them
+# here as well would let this manifest drift from the shell's own graph, which is
+# the thing that made `web/` a separate application in the first place.
+lodestone-shell = { path = "../crates/lodestone-shell" }
 
-# Browser singleplayer probe (W-next item 1): the REAL integrated server and the
-# REAL client, connected in-process over an in-memory `DuplexStream` — no socket,
-# no port, no relay, no Docker. This is the first time `lodestone-client` +
-# `lodestone-server` + `lodestone-worldgen` run inside a browser at all, and it
-# converts the "spawn_local drives the client/server with no tokio runtime"
-# claim from *believed* to *reproduced*. `lodestone-model` is needed directly for
-# `AdapterError` (not re-exported by the client); `lodestone-worldgen` for the
-# density router; `serde_json`/`uuid` for the stand-in wire + login profile. All
-# five compile to wasm32 (verified by `wasm-check.sh`); tokio/net stay
-# `cfg(not(wasm32))`-gated, and the server's task spawner is the `spawn_local`
-# seam. `gloo-timers` gives a wasm-safe async sleep for the poll loop (the native
-# test uses `tokio::time::sleep`, which panics with no runtime).
-lodestone-client = { path = "../crates/lodestone-client" }
-lodestone-server = { path = "../crates/lodestone-server" }
-lodestone-worldgen = { path = "../crates/lodestone-worldgen" }
-lodestone-model = { path = "../crates/lodestone-model" }
-serde_json = "1"
-uuid = { version = "1" }
-gloo-timers = { version = "0.3", features = ["futures"] }
-
-# WebGPU-only — no `webgl` feature. Measured (W-next): the WebGL2 fallback added
-# 537 KB brotli (786 KB → 249 KB) AND never rendered a frame: our terrain pipeline
-# uses a vertex-stage storage buffer (`VERTEX_STORAGE` downlevel flag) that WebGL2
-# categorically lacks, so `Device::create_bind_group_layout('lodestone-atlas-bgl')`
-# panics before frame 0 (verified in Chrome: WebGPU renders, forced-GL panics). The
-# feature was pure cost. Re-adding it requires a downlevel-compatible render path in
-# lodestone-render (avoid vertex-stage storage), not just this flag.
-wgpu = { version = "30" }
-glam = "0.33"
-
-# `io-util` gives the `AsyncReadExt`/`AsyncWriteExt` helpers for the SLP framing;
-# it is one of the wasm-safe tokio features (no `net`, no `rt-multi-thread`).
-tokio = { version = "1", default-features = false, features = ["io-util"] }
-
+# --- The three things a browser needs that a native `main` does not ---
+# `spawn_local` for the boot task (fetch the assets, then start the shell), and the
+# `fetch`/`Response`/`Uint8Array` trio behind it. This is the only asynchronous step
+# in the asset path; everything downstream is the shell's existing synchronous
+# parsers. See `src/main.rs`.
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
@@ -87,31 +45,24 @@ web-sys = { version = "0.3", features = [
   "Document",
   "Element",
   "HtmlElement",
-  "HtmlCanvasElement",
-  "Node",
-  "Performance",
   "Response",
-  "EventTarget",
-  "KeyboardEvent",
-  "MouseEvent",
-  # The multiplayer join form: text inputs for the relay/host/port/name, plus the
-  # query string (`?relay=…&join=1`) so a harness can drive a join with no clicks.
-  "HtmlInputElement",
-  "Location",
-  "UrlSearchParams",
 ] }
+# `console_log` replaces the native `tracing-subscriber` (there is no stderr), and
+# the panic hook makes a Rust panic name its own location instead of surfacing as a
+# bare wasm `unreachable`. With `panic = "abort"` below, that hook is the difference
+# between a diagnosable failure and a dead tab.
 console_error_panic_hook = "0.1"
 log = "0.4"
 console_log = "1"
 
 # **Not used by any code here — this edge exists only to turn a feature on.**
 # `getrandom` 0.2 has a hard `compile_error!` on `wasm*-unknown-unknown` unless
-# its `js` feature is enabled, and it reaches this graph three levels down:
-# `lodestone-v770` -> `rand` 0.8 -> `rand_core` 0.6 -> `getrandom` 0.2. None of
+# its `js` feature is enabled, and it reaches this graph several levels down
+# (`lodestone-v770` -> `rand` 0.8 -> `rand_core` 0.6 -> `getrandom` 0.2). None of
 # those can enable it (the parent workspace builds natively, where `js` would be
 # wrong), so under Cargo's feature unification the only crate that can is this
 # one. Symptom without it: `cargo build --target wasm32-unknown-unknown` fails in
-# `getrandom/src/lib.rs:346` with no mention of Lodestone at all, which is why
+# `getrandom`'s own `lib.rs` with no mention of Lodestone at all, which is why
 # `just wasm-size` was unrunnable and the 1.6 MB gzip ceiling therefore
 # **unenforced** for as long as it stood broken.
 #
@@ -125,8 +76,16 @@ getrandom = { version = "0.2", features = ["js"] }
 # and a single codegen unit let the linker drop cross-crate dead code (most of
 # wgpu's native backends), `panic = "abort"` removes unwinding tables, and
 # `strip` drops debuginfo/symbol names. `opt-level = "z"` measured smallest
-# over-the-wire in the W4 report (1.21 MiB gzip, vs "s" 1.34 / 3 1.62); at ~250
-# quads the frame budget is nowhere near limiting, so size beats speed here.
+# over-the-wire in the W4 report (vs "s" and 3).
+#
+# **`panic = "abort"` is why a trapping call is fatal rather than recoverable**, and
+# therefore why `crate::platform`'s clock seam and the mesher's thread-free arm
+# exist at all. Do not turn it off to make a trap survivable — fix the trap.
+#
+# `opt-level = "z"` is worth re-measuring now that the whole shell is linked in:
+# the frame budget mattered nothing at the spike's ~250 quads and matters a great
+# deal for real terrain. Measure before changing it, and report the gzip number —
+# `just wasm-size` enforces a 1,600,000 B ceiling.
 [profile.release]
 opt-level = "z"
 lto = "fat"
