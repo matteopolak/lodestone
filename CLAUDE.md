@@ -100,6 +100,18 @@ All four *checks* are required, and each catches a class the others structurally
   execution: `thread::spawn`/`sleep` trap, but **`Builder::spawn` and `available_parallelism` return `Err`** —
   so those two are degradation-class, and two of the four sites previously assumed fatal never were.
 
+  **But classify the *call site*, not the API — an `.expect()` makes a degrading call exactly as fatal as a
+  trapping one.** `net.rs` spawned an OS thread and unwrapped it, so `Builder::spawn`'s graceful `Err` killed
+  the tab anyway, and it never appeared in a census that had (correctly) filed that call as degradation-class.
+  A hazard census keyed on the function is blind to how the result is handled; read the handling.
+
+  **And a rule written in prose is not a rule.** `lodestone-server` already carried this exact one in a doc
+  comment — *"this crate must not call `std::time::Instant::now()` anywhere … because the crate links into a
+  wasm32 bundle where that compiles and then panics at runtime"* — and **four sites violated it**. The rule was
+  right, and it was unenforced text. `wasm-check.sh` now bans the clock paths mechanically in five crates (17
+  confinement rules, all passing). Whenever the type system cannot express a constraint, make it *checkable*
+  and check it; a comment stating an invariant is documentation of intent, not a guard.
+
 Smaller facts, each of which has cost someone an hour:
 
 - **The binary is `lodestone`, not `lodestone-shell`** — the `[[bin]]` name differs from the crate.
@@ -338,6 +350,14 @@ collector — swap them and the round-trip through our own encode/decode is *byt
 lerps the **player toward the item**. So for any packet, assert against a byte string the *other* side already
 decodes, and choose **pairwise-distinct** field values (`11, 1, 4`, never `1, 1, 4`) so a transposition cannot
 survive. A field's value being distinct from its neighbours' is part of the fixture's job.
+
+**And the transposition can come from the record itself: a packet's declaration order is not its wire order.**
+`ClientboundSetExperiencePacket` is constructed at its `doTick` call site as `(progress, total, level)` and
+declares its fields in that same order — but its `write` emits progress, **level**, total. Transcribing the
+constructor, or the field list, silently swaps two adjacent VarInts: wire-legal, survives every round trip,
+and puts the wrong number on the XP bar. **Port from `write`/`read`, never from the constructor or the field
+declaration** — for a record whose fields are all the same type, those are three different orders that all
+look authoritative.
 
 **Assertions of an absence need a control proving the detector works.** "No corrective teleport", "no
 trailing bytes", "zero unresolved" are only as good as the evidence the mechanism *would* have fired.
