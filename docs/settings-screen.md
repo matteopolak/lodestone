@@ -672,6 +672,57 @@ predicate still governs *activation*: Enter on an inactive row does nothing, and
 `WidgetSprites::get(false, true)` keeps it drawing `widget/button_disabled` under
 the cursor exactly as vanilla does.
 
+## Hover tooltips
+
+Vanilla attaches an `OptionInstance` tooltip to 34 of its options via
+`cachedConstantTooltip`, plus two `withTooltip` call sites on
+`OnlineOptionsScreen`; **33 of those land on rows this tree carries**, and
+`OPTION_TOOLTIPS` in `options.rs` holds their `en_us.json` text keyed by
+`OptionSpec::accessor`.
+
+Three things about the shape are load-bearing:
+
+- **Keyed by accessor, not a field on `OptionSpec`.** The tooltip belongs to the
+  `OptionInstance`, and three options are placed on two pages each, so a per-row
+  field could drift between placements. The accessor is a safe key here — unlike the
+  NBT field-name hazard `CLAUDE.md` records — because these are `Options.java`'s own
+  field names, unique within that class.
+- **Independent of `is_live`.** Vanilla's `setTooltip` is not gated on `active`, and
+  an inactive row is exactly where a player most wants to know what the option would
+  have done. This tree is the inactive majority by design.
+- **Hover only, not keyboard focus, and that is a departure.** Vanilla's
+  `refreshTooltipForNextRenderPass` takes `isHovered || isFocused`, but this shell's
+  `frame.selected` is *always* on some row — there is nowhere else for the cursor to
+  be — so honouring focus would leave a tooltip permanently on screen. Vanilla's
+  focus is opt-in (nothing is focused until you tab), so matching the flag would not
+  match the behaviour.
+
+The path: `settings_frame` stamps `MenuRow::tooltip` from `Cell::tooltip()` on
+**every** row uniformly, so which rows have text is the table's answer and never the
+frame builder's — a renderer wired for only some rows is the failure mode this line
+prevents. `render::draw` then resolves the row under the cursor with
+`render::menu_row_under` and wraps the text to `Tooltip.MAX_WIDTH` (170 px) with
+`wrap_measured`, which also splits the explicit `\n`s several of the strings carry.
+The box itself is the existing `draw_tooltip`, drawn last of all so it sits over the
+footer.
+
+`menu_row_under` is the same call `app`'s `menu_row_at_in` makes for hover and
+clicks — it was extracted from there rather than copied, so a tooltip can only ever
+appear on a row that is also clickable. Its band guard is what stops a hint hanging
+over the footer for a list row scrolled out of view.
+
+Two vanilla tooltips are deliberately absent, and neither is an oversight:
+`japaneseGlyphVariants` (no row in our Video table) and `telemetryOptInExtra` (it
+belongs to `TelemetryInfoScreen`, which is `telemetry.rs`'s frame). `narratorHotkey`
+uses the **non-Mac** text; vanilla forks on `InputQuirks.REPLACE_CTRL_KEY_WITH_CMD_KEY`
+between "Ctrl + B" and "Cmd + B" and this client has no such quirk table.
+
+Vanilla also sets tooltips on a few *buttons* in this tree — `OptionsScreen`'s
+telemetry button, `AccessibilityOptionsScreen`'s high-contrast error — but all of them
+are conditional "this is disabled because …" text, and reproducing them would mean
+fabricating the condition that triggers them. `Cell::tooltip` returns `None` for every
+`Nav` and `Act`.
+
 ## How to change it
 
 - **Adding a control is a table edit.** `static VIDEO`, `static CHAT`, … in
@@ -689,6 +740,12 @@ the cursor exactly as vanilla does.
   test that holds the line is
   `an_inactive_option_shows_its_caption_and_a_live_one_shows_its_value`, which
   asserts both directions.
+- **Adding a tooltip is a `OPTION_TOOLTIPS` entry, and the key must match a real
+  accessor.** A typo'd key is a tooltip that silently never shows, and no assertion
+  derived from the rows can see it — the reachable set is simply one smaller and still
+  self-consistent. `hovering_a_settings_row_shows_its_option_tooltip_and_only_then`
+  asserts the census in **both** directions for exactly that reason, through
+  `options::tooltip_accessors()`.
 - **A page's control order is one index space**, shared by the keyboard cursor,
   the mouse hover, `app.rs`'s hit-test and `SettingsNav::activate` — exactly as
   `MAIN_BUTTONS`' order is on the title screen. If you add a widget that is drawn

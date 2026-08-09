@@ -223,58 +223,22 @@ impl WindowApp {
         let (w, h) = crate::menu::render::logical_canvas(frame.gui_scale, fb_w, fb_h);
         let scale = crate::config::calculate_gui_scale(frame.gui_scale, fb_w, fb_h).max(1) as f32;
         let (lx, ly) = (x / scale, y / scale);
-        // Record the logical position as well as the row (#396). The multiplayer
-        // list needs the position itself — which quadrant of a row's favicon the
-        // cursor is in decides whether a click joins or reorders — and this is the
-        // one place that has already converted physical pixels to the canvas the
-        // draw uses, so recording it here covers hover *and* click with no new
-        // plumbing at either site. Recorded before the hit-test, so a cursor over
-        // the backdrop still updates it.
+        // Record the logical position as well as the row. The multiplayer list needs
+        // the position itself — which quadrant of a row's favicon the cursor is in
+        // decides whether a click joins or reorders — and this is the one place that
+        // has already converted physical pixels to the canvas the draw uses, so
+        // recording it here covers hover *and* click with no new plumbing at either
+        // site. Recorded before the hit-test, so a cursor over the backdrop still
+        // updates it.
         self.nav.set_menu_cursor(lx, ly, w, h);
-        // The active list's band, if this screen has one. **A scrolling-list row
-        // outside it is not hit-testable**, which is the other half of the clip
-        // `MenuRow::is_scrolling_list_row` gives the *draw*.
-        //
-        // Vanilla's `AbstractSelectionList.getEntryAtPosition` tests the cursor
-        // against the list's own box before it ever walks the entries, so an entry
-        // scrolled past the bottom cannot be clicked even where it would have
-        // painted. Here the rows and the footer share **one flat index space** and
-        // the first rect containing the cursor wins, with the footer last — so a row
-        // that overhangs the band steals the footer button's clicks along exactly
-        // the strip it overhangs, and steals its *hover* too, because this one
-        // function answers both.
-        //
-        // Two reports, one mechanism. The first was "Done is only partly clickable"
-        // on the settings screen; the second was the multiplayer screen's *Join
-        // Server* neither highlighting nor firing whenever a server row had scrolled
-        // under it. The settings fix tested `rows[i].slot`'s origin, and a
-        // multiplayer row carries **no slot at all** — its column is
-        // `getRowLeft()`'s two separate integer divisions, which a `Slot` cannot
-        // express — so the guard silently did not apply to the three
-        // `AbstractSelectionList` screens at all.
-        //
-        // Both halves of the question are now derived rather than restated: the band
-        // comes from `frame.list` through `ListSpec::model`, the same two calls
-        // `render::draw` makes for its clip, and membership comes from
-        // `MenuRow::is_scrolling_list_row`, the same call `render::draw` makes to
-        // decide *whether* to clip. Neither pair can disagree.
-        let band = frame
-            .list
-            .as_ref()
-            .and_then(|spec| spec.model(h))
-            .map(|list| (list.top(), list.bottom()));
-        (0..frame.rows.len()).find(|&i| {
-            if let Some((top, bottom)) = band
-                && frame.rows[i].is_scrolling_list_row()
-                && (ly < top || ly > bottom)
-            {
-                return false;
-            }
-            crate::menu::render::row_rect(&frame.rows, i, w, h)
-                .is_some_and(|(rx, ry, rw, rh)| {
-                    lx >= rx && lx <= rx + rw && ly >= ry && ly <= ry + rh
-                })
-        })
+        // **The hit-test itself is `render::menu_row_under`, not a copy of it here.**
+        // Everything this function still owns is the physical-to-logical conversion
+        // above; which row a logical point is over — including the band guard that
+        // stops a scrolled-out list row stealing the footer button's clicks and hover
+        // — belongs to the renderer, because `render::draw` needs the same answer to
+        // decide whose tooltip to show. Two copies would have disagreed at exactly
+        // that case: a tooltip on a row nothing can click.
+        crate::menu::render::menu_row_under(&frame, (lx, ly), w, h)
     }
 
     /// The slider track fraction for `row` at physical cursor `(x, y)`.

@@ -105,7 +105,9 @@ pub use frame::{
     MenuRow, PROGRESS_BAR_BG, PROGRESS_BAR_FG, PROGRESS_BAR_H, PROGRESS_BAR_W, PackEntryView,
     ServerEntryView, WorldEntryView, notice_rect, owns_frame,
 };
-pub use measure::{EDIT_BOX_H, field_rect, field_row_rects, logical_canvas, row_rect, text_px};
+pub use measure::{
+    EDIT_BOX_H, field_rect, field_row_rects, logical_canvas, menu_row_under, row_rect, text_px,
+};
 pub use origin::{Origin, Slot};
 pub use renderer::MenuRenderer;
 pub use screens::{

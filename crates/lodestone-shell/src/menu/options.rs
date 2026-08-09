@@ -691,6 +691,28 @@ impl Cell {
         }
     }
 
+    /// This control's hover tooltip, or `None` — `AbstractWidget.setTooltip`.
+    ///
+    /// Only an option carries one on this tree, and only 33 of them do; see
+    /// [`OPTION_TOOLTIPS`] for the census and for the two vanilla tooltips that land
+    /// on rows this tree does not have. A nav or action button gets none, which is
+    /// vanilla's shape too — the tooltips vanilla sets on *buttons* in this tree are
+    /// all conditional "this is disabled because …" text (`OptionsScreen`'s telemetry
+    /// button, `AccessibilityOptionsScreen`'s high-contrast error), and reproducing
+    /// them would mean fabricating the condition that triggers them.
+    ///
+    /// **Independent of [`Self::is_live`] on purpose.** Vanilla's `setTooltip` is not
+    /// gated on `active`, and an inactive row is exactly where a player most wants to
+    /// know what the option would have done — this tree is the inactive majority by
+    /// design.
+    #[must_use]
+    pub fn tooltip(self) -> Option<&'static str> {
+        match self {
+            Cell::Option(spec) => option_tooltip(spec.accessor),
+            Cell::Nav { .. } | Cell::Act { .. } => None,
+        }
+    }
+
     /// Whether this control can be activated, i.e. `AbstractWidget.active`.
     ///
     /// An option is live only if it drives something in
@@ -802,6 +824,97 @@ impl Cell {
 /// Exhaustive over `grep -n "UnitDouble.INSTANCE" Options.java` — every
 /// accessor that string touches is listed, so a slider added later that is
 /// *not* here is provably not one of these, rather than merely uncounted.
+/// Every `OptionInstance` on this tree that carries a tooltip, keyed by
+/// [`OptionSpec::accessor`], with the text verbatim from
+/// `assets/minecraft/lang/en_us.json`.
+///
+/// ## Why a side table and not a field on `OptionSpec`
+///
+/// Because the tooltip belongs to the **option**, not to the row, and three options
+/// are placed on two pages each (`textBackgroundOpacity`, `chatOpacity`,
+/// `chatLineSpacing`). A field would have to be repeated per placement and could
+/// drift between them; keying by accessor makes "one `OptionInstance`, one tooltip"
+/// structural, which is vanilla's own shape. It also keeps 143 table rows untouched,
+/// exactly as [`UNIT_DOUBLE_DEFAULTS`] and [`INT_RANGE_SLIDERS`] already do.
+///
+/// The accessor is a safe key here in a way a field *name* would not be — see
+/// `CLAUDE.md` on NBT's `Age` — because these are `Options.java`'s own field names
+/// and are unique within that class by construction.
+///
+/// ## What is in it, and what is deliberately not
+///
+/// Derived from `grep -n cachedConstantTooltip Options.java` (34 sites) plus
+/// `OnlineOptionsScreen`'s two `withTooltip` call sites, resolved through the
+/// declaring field name and then through `en_us.json`. Of those, **33 land on rows
+/// this tree has**; two do not and are not omissions:
+///
+/// - `japaneseGlyphVariants` — the row itself is absent from our Video table.
+/// - `telemetryOptInExtra` — it lives on `TelemetryInfoScreen`, which is
+///   [`super::telemetry`]'s frame, not an `OptionsList` page.
+///
+/// `narratorHotkey`'s text is the **non-Mac** variant. Vanilla forks on
+/// `InputQuirks.REPLACE_CTRL_KEY_WITH_CMD_KEY` between
+/// `options.accessibility.narrator_hotkey.tooltip` ("Ctrl + B") and its `.mac`
+/// sibling ("Cmd + B"); this client has no such quirk table, and the row is inactive
+/// anyway, so naming the platform fork here is more honest than guessing the host.
+const OPTION_TOOLTIPS: &[(&str, &str)] = &[
+    ("allowCursorChanges", "Allows the mouse cursor to change shape when over certain UI elements."),
+    ("allowFriendRequests", "Allow other players to send you friend requests"),
+    ("allowServerListing", "Servers may list online players as part of their public status.\nWith this option off, your name will not show up in such lists."),
+    ("chunkSectionFadeInTime", "How long in seconds chunks should fade in when they're first rendered, if at all."),
+    ("cutoutLeaves", "Allows you to see through gaps in leaves. Disabling improves performance."),
+    ("damageTiltStrength", "The amount of camera shake caused by being hurt."),
+    ("darkMojangStudiosBackground", "Changes the Mojang Studios loading screen background color to black."),
+    ("darknessEffectScale", "Controls how much the Darkness effect pulses when a Warden or Sculk Shrieker gives it to you."),
+    ("fovEffectScale", "Controls how much the field of view can change with gameplay effects."),
+    ("glintSpeed", "Controls how fast the visual glint shimmers across enchanted items."),
+    ("glintStrength", "Controls how transparent the visual glint is on enchanted items."),
+    ("graphicsPreset", "Sets \"Quality & Performance\" settings to reasonable defaults corresponding to the desired quality."),
+    ("hideLightningFlash", "Prevents Lightning Bolts or other environmental effects from making the sky flash. The sources of flashes themselves will still be visible."),
+    ("hideMatchedNames", "3rd-party Servers may send chat messages in non-standard formats.\nWith this option on, hidden players will be matched based on chat sender names."),
+    ("hideSplashTexts", "Hides the yellow splash text in the main menu."),
+    ("highContrast", "Enhances the contrast of UI elements."),
+    ("highContrastBlockOutline", "Enhances the block outline contrast of the targeted block."),
+    ("improvedTransparency", "An experimental approach that uses screen shaders for drawing weather, clouds, and particles behind translucent blocks and water.\nThis will impact GPU performance."),
+    ("inGameNotification", "Show Friend notifications in-game"),
+    ("maxAnisotropyBit", "Each level significantly improves how smooth textures look, but impacts performance and significantly impacts video memory usage. Requires Texture Filtering to be set to Anisotropic."),
+    ("menuBackgroundBlurriness", "Changes the blurriness of menu backgrounds."),
+    ("musicFrequency", "Changes how frequently music plays while in a game world."),
+    ("narratorHotkey", "Allows the Narrator to be toggled on and off with 'Ctrl + B'."),
+    ("notificationDisplayTime", "Affects the length of time that all notifications stay visible on the screen."),
+    ("onlyShowSecureChat", "Only display messages from other players that can be verified to have been sent by that player, and have not been modified."),
+    ("realmsNotifications", "Fetches Realms news and invites in the title screen and displays their respective icon on the Realms button."),
+    ("rotateWithMinecart", "Whether the player's view should rotate with a turning Minecart. Only available in worlds with the 'Minecart Improvements' experimental setting turned on."),
+    ("saveChatDrafts", "Unsent messages will be saved and can be sent the next time chat is opened."),
+    ("screenEffectScale", "Strength of Nausea and Nether Portal screen distortion effects.\nAt lower values, the Nausea effect is replaced with a green overlay."),
+    ("showSubtitles", "Enables captions for sounds played in the game."),
+    ("sprintWindow", "Time window in ticks where double-tapping the forward key activates sprint."),
+    ("vignette", "This is a subtle texture over the game screen used for reducing brightness towards the edges of the screen and warning about the world border."),
+    ("weatherRadius", "Radius of the area where rain and snow effects are visible. Very low performance impact."),
+];
+
+/// `Tooltip.MAX_WIDTH`: the pixel width `Tooltip.splitTooltip` wraps to.
+pub const TOOLTIP_MAX_WIDTH: f32 = 170.0;
+
+/// Every accessor [`OPTION_TOOLTIPS`] holds text for.
+///
+/// Exists for the census's *other* direction: a key here with no row on any page is
+/// a tooltip that can never show, and no assertion derived from the rows can see it —
+/// the reachable set would simply be one smaller and still self-consistent.
+#[must_use]
+pub fn tooltip_accessors() -> Vec<&'static str> {
+    OPTION_TOOLTIPS.iter().map(|&(key, _)| key).collect()
+}
+
+/// The tooltip text for `accessor`, or `None` — see [`OPTION_TOOLTIPS`].
+#[must_use]
+pub fn option_tooltip(accessor: &str) -> Option<&'static str> {
+    OPTION_TOOLTIPS
+        .iter()
+        .find(|(key, _)| *key == accessor)
+        .map(|&(_, text)| text)
+}
+
 const UNIT_DOUBLE_DEFAULTS: &[(&str, f32)] = &[
     // `Options.java:1318`, `createSoundSliderOptionInstance`'s fifth
     // argument — shared by all eleven `SoundSource` categories.
@@ -3400,6 +3513,12 @@ pub fn settings_frame(
             slider: control.cell.is_slider(),
             slider_value: control.cell.slider_fraction(options),
             slot: Some(control.slot()),
+            // `AbstractWidget.setTooltip`, from the option's own
+            // `TooltipSupplier` — see `Cell::tooltip`. Stamped on every row
+            // uniformly, so which rows have text is the table's answer and not the
+            // frame builder's: a renderer wired for only some rows is the failure
+            // mode worth naming, and this is the line that prevents it.
+            tooltip: control.cell.tooltip().map(str::to_string),
             ..Default::default()
         })
         .collect();
