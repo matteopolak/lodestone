@@ -7929,3 +7929,97 @@ through. `type_path` is also what `gpu/nametag.rs` hands to `entity_dimensions::
 `"player_slim"` is not an entity-type registry path — it misses, falls back to a default height, and
 puts every slim player's nametag in the wrong place. A field read by five consumers cannot be
 repurposed for one of them; `EntityDraw::model_type_path()` is an accessor for that reason.
+
+**12.160 Vitals and survival: four predictions that were wrong, and all four were the round number.**
+Wave 1 unit A — food and hunger (#258), XP (#256), status effects (#259), burning (#269), advancement
+grant sites (#338), the respawn reads (#329), the `EXPLOSION_RADIUS` loot parameter, plus three brokered
+tick/`server.rs` arms. Nine commits, `2be972a`..`b25b510`. Workspace check clean; `lodestone-server` and
+`lodestone-v770` measured **85 test binaries, 1396 passed, 0 failed, 43 ignored** mid-unit and 41 binaries
+/ 1008 passed for the server crate after the last wiring.
+
+The generalisable finding is not any one number: **every gate that failed on first run failed because the
+prediction I wrote down was the plausible round figure, and the code was already right.** Four instances in
+one unit, which is a rate worth recording, and all four corrections came from re-deriving the arithmetic in
+a separate script rather than from reading the measured value back.
+
+| predicted | measured | why |
+|---|---|---|
+| 200 blocks of sprinting empties the 5.0 saturation buffer | **1.0 left; 241 blocks** to move the food bar | `exhaustion > 4.0` is **strict**, so exhaustion must reach 4.1 and the *k*-th drop lands on block `40k + 1` |
+| slow regeneration heals every 80 ticks indefinitely | **one heal**, from food 18 | the 6.0 charge costs a food point, dropping the bar below `HEAL_LEVEL` and switching regeneration off |
+| regeneration fills the health bar | **15.5 health**, food 17 | same mechanism at scale: 5.0 saturation plus the drop to the threshold buys exactly 5.5 health |
+| an effect expires the tick *after* its duration hits zero | **the tick it hits zero** | `tickServer` returns `hasRemainingDuration()` *after* `tickDownDuration` |
+
+Each of those has a control that makes it a measurement rather than a fitted constant: walking 1000 blocks
+costs literally nothing (vanilla's walk term is a literal `0.0F` multiply, not a missing branch), and a
+continuously-fed player *does* reach the health cap without overshooting — without that second arm, `15.5`
+is equally consistent with regeneration simply being broken.
+
+**A boundary where the two hypotheses coincide is not a test.** The XP curve's regimes switch at level 15
+and 30 *inclusively*, and at level 15 the inclusive and exclusive formulas give **the same number**
+(`7 + 15*2` and `37 + 0*5` are both 37). Testing 15 proves nothing. The discriminating levels are 16 (42
+vs 39) and 31 (121 vs 117). Before writing a boundary gate, evaluate both hypotheses *at* the boundary and
+pick a point where they differ.
+
+**Reading the record definition changed which hook to write, not just how.** #338's brief said to grant a
+block-break criterion first as the cheapest end-to-end proof. `story/mine_stone`'s criterion is
+`minecraft:inventory_changed` on `#minecraft:stone_tool_materials`, and that tag is **cobblestone,
+blackstone and cobbled deepslate — not `minecraft:stone`**. A break hook would have granted it for a dig
+whose drop went nowhere, never granted it for a chest or a command, and most likely been keyed on the one
+item that never fires. Moving the hook to the inventory seam made one call reach **five of seven** builtin
+advancements instead of one. The negative control uses `minecraft:stone` deliberately, as the item a
+careless implementation would have chosen.
+
+**Three guards whose *absence* fails in the safe-looking direction**, all found by reading rather than by a
+failing test:
+
+- `loot.rs` had no `EXPLOSION_RADIUS`, so `survives_explosion` returned `true` **with no draw**. Rolling
+  loot for a blast would have dropped **every** destroyed block at full rate. Measured: 30,000 rolls give
+  exactly 30,000 survivors with the parameter absent (no randomness at all) against 10,000 at radius 3.0.
+  The block-behaviour agent was right to drop nothing rather than guess.
+- `baseTick`'s burn damage carries `&& !this.isInLava()`. Without it an entity in lava takes `4.0 + 1.0`.
+  Measured on the wire as `[16.0, 12.0, 8.0, 4.0, 0.0]` — five ticks — with 15.0 named as the
+  missing-guard value and 19.0 as the missing-contact-damage value.
+- `PoisonMobEffect.applyEffectTick` is wrapped in `if (mob.getHealth() > 1.0F)` and `WitherMobEffect`'s is
+  not. Poison cannot kill and wither can, and the asymmetry is that one `if`. Gated at the exact boundary
+  in both directions, because the comparison is strict so `1.0` is already safe.
+
+**A shift that reaches zero means *every tick*, not never.** Every periodic effect is
+`interval > 0 ? tickCount % interval == 0 : true` where `interval = base >> amplifier`. Poison bottoms out
+at amplifier 5. Dropping the ternary either divides by zero or — the plausible version — returns `false`
+and makes **Poison VI harmless**, which reads as a sensible clamp. Also: the modulo input is the
+**remaining duration**, so it counts *down*; a 210-tick poison first fires on tick 11, and counting up
+fires on tick 1.
+
+**"Ignored or replaced" was a false dichotomy.** #259 asks whether a lower-amplifier effect application is
+ignored or replaces. `MobEffectInstance.update` does neither: it **remembers**. Strength II then Strength I
+leaves II active and I queued, and the queued instance's own clock runs while it waits, so it surfaces at
+300 ticks rather than 400. A registry keeping only the strongest loses the tail; one keeping only the
+newest loses the strength. Five rows, five gates.
+
+**Two greedy-ladder shapes that look like division and are not.** `ExperienceOrb`'s denominations are
+`[2477, 1237, 617, 307, 149, 73, 37, 17, 7, 3, 1]` — irregular ratios, so ungeneratable — and
+`awardWithDirection` is greedy change-making over them. 100 becomes `[73, 17, 7, 3]`: **four** orbs, and
+the tail is `3` because `3` is a denomination rather than `1+1+1`. Orb count is player-visible. The gate
+that would catch a single mistranscribed entry is the conservation sweep over `1..=3000`, not any single
+example.
+
+**Both halves of #329 were missing *reads*, not missing code**, and the important arm was the `None` one:
+`resolve_bed_respawn` re-reads the block at the stored position **at death time**, so a broken bed falls
+back to the world spawn instead of returning the player inside whatever replaced it. The gate for that
+uses the *identical* position as the passing case and changes only the block, which is what makes it a test
+of the re-read rather than of the coordinates. The other half — `level.dat`'s persisted spawn — had a trap
+worth keeping: `LevelDat::for_new_world` must write *some* `spawn` compound and has no terrain to consult,
+so loading its placeholder back would suppress the spiral search **forever**. `integrated.rs` clears it
+when `created()`.
+
+**Adding a subsystem breaks tests whose premise was only true in its absence.** `serve_play.rs`'s drowning
+cadence gate read "the next `SetHealth` after the first hit is the second hit". Once hunger landed, a hurt
+well-fed player regenerates and the next packet is a *heal*. The fix is to turn
+`natural_health_regeneration` off in that gate rather than to encode the race into it — but the general
+point is that the failure looked like a hunger bug and was a stale premise. **When a new system lands, the
+tests that break first are the ones that were silently assuming it did not exist.**
+
+Two smaller ones. `min(0, x)` is not `0`: `Entity.clearFire` preserves a negative grace period, and
+zeroing it lets a fire-immune entity re-ignite a tick early. And `on_fire.json`'s `message_id` is
+**`onFire`** — camelCase in a snake_case directory, the third instance of the trap §12's `outsideBorder`
+note already records, and the existing jar-comparison gate caught it for free.
