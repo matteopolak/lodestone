@@ -49,6 +49,57 @@ pub(crate) const HUD_TEXT_SCALE: f32 = 2.0;
 /// Padding between a HUD panel's edge and its content.
 pub(crate) const HUD_MARGIN: f32 = 6.0;
 
+/// The gap between the hotbar's bottom edge and the bottom of the screen.
+///
+/// **Zero, because vanilla's hotbar is flush.** `Hud.extractItemHotbar` blits it
+/// at `(guiWidth/2 - 91, guiHeight - 22, 182, 22)` and the selection at
+/// `(…, guiHeight - 23, 24, 23)`; there is no bottom margin anywhere in that
+/// method. This was [`HUD_MARGIN`] (6), which floated the whole cluster 6 px up.
+///
+/// **Not [`HUD_MARGIN`], and not a shared constant with it.** They answer
+/// different questions — that one is the chat/debug text inset, this one is a
+/// vanilla blit coordinate — and folding them together is what made correcting
+/// one look like it would move the other. A named zero rather than a deleted
+/// term so the next reader can see the decision was made rather than forgotten.
+///
+/// `pub` because the two hotbar item-icon pixel gates derive their read-back
+/// rects from it. Each of them restated a `6.0` of its own and both went red the
+/// moment this changed — which is the argument for one name rather than three.
+pub const HOTBAR_MARGIN: f32 = 0.0;
+
+/// `Hud.extractPlayerHealth`'s `yLineBase`, as a distance up from the bottom of
+/// the screen: `int yLineBase = graphics.guiHeight() - 39`.
+///
+/// This is the hearts row's top *and* the hunger row's top (`extractFood` is
+/// passed `yLineBase` unchanged), and every other row in the cluster is derived
+/// from it — see [`vitals_line_base`].
+///
+/// **It is unconditional in vanilla.** It does not move for the XP bar, the game
+/// mode, or anything else. This used to be computed by stacking upward from a
+/// `cluster_top` that *did* move with the XP bar, which put the hearts 3 px too
+/// high with an XP bar and 4 px too low without one — two different wrong
+/// answers, neither of them 39.
+const VITALS_LINE_BASE_FROM_BOTTOM: f32 = 39.0;
+
+/// The vitals cluster's baseline row (hearts and hunger) for a canvas `canvas_h`
+/// logical pixels tall — `Hud.extractPlayerHealth`'s `yLineBase`.
+///
+/// Public because the air-row pixel gate derives its screen rect from it. That
+/// gate's own history is why: it hardcoded `lh - 39.0` once, which silently
+/// assumed a stack shape the fixture did not have, and reported 0 px for a row
+/// that was drawing perfectly. One expression, both callers.
+#[must_use]
+pub fn vitals_line_base(canvas_h: f32) -> f32 {
+    canvas_h - VITALS_LINE_BASE_FROM_BOTTOM
+}
+
+/// The vertical pitch between two rows of the vitals cluster — the `10` in
+/// vanilla's `yLineArmor = yLineBase - … - 10` and `yLineAir = yLineBase - 10`.
+///
+/// Written as the 9 px icon plus a 1 px gap, which is what it is, so the icon
+/// size and the pitch cannot drift apart.
+const VITALS_ROW_PITCH: f32 = 10.0;
+
 /// Padding above and below the chat input's text inside its background strip,
 /// in unscaled logical pixels.
 ///
@@ -1957,7 +2008,7 @@ impl HudGeometry {
                 let cell = 22.0;
                 let hw = 9.0 * cell;
                 let hx = cx - hw * 0.5;
-                let hy = b.h - margin - cell;
+                let hy = b.h - HOTBAR_MARGIN - cell;
                 b.rect_px(
                     hx - 2.0,
                     hy - 2.0,
@@ -1985,7 +2036,7 @@ impl HudGeometry {
                 b.rect_px(sx + cell + 1.0 - bw, hy - 1.0, bw, cell + 2.0, col);
                 hy
             } else {
-                b.h - margin
+                b.h - HOTBAR_MARGIN
             };
 
             // XP bar: a full-hotbar-width green progress bar just above the hotbar,
@@ -1993,12 +2044,15 @@ impl HudGeometry {
             // once the server has sent experience (`frame.xp`); off a live server
             // this is `None` and nothing draws, keeping the gauge honest.
             // The same two gates the sprite path applies, for the same reasons — see
-            // [`HudFrame::can_hurt_player`]. Kept in both branches rather than in the
-            // caller: `bars_y` is a layout anchor the rest of the HUD reads, and the
-            // two branches compute it differently.
-            let vitals_base = if let Some((level, progress)) =
-                frame.xp.filter(|_| frame.can_hurt_player)
-            {
+            // [`HudFrame::can_hurt_player`].
+            //
+            // This used to yield a `vitals_base` the pip rows stacked off, so an XP
+            // bar and its level number pushed the hearts up. Both branches now
+            // agree with [`sprite_vitals`] and take [`vitals_line_base`] instead —
+            // vanilla's `yLineBase` does not move for the XP bar, and having the
+            // two paths disagree about that was the reason the air-row gate could
+            // not derive one rect for both.
+            if let Some((level, progress)) = frame.xp.filter(|_| frame.can_hurt_player) {
                 let bar_w = 9.0 * 22.0;
                 let bx = cx - bar_w * 0.5;
                 let bar_h = 4.0;
@@ -2008,7 +2062,7 @@ impl HudGeometry {
                 if fill > 0.0 {
                     b.rect_px(bx, by, fill, bar_h, [0.47, 0.82, 0.16, 1.0]);
                 }
-                let level_gap = if level > 0 {
+                if level > 0 {
                     let s = level.to_string();
                     let tw = b.text_width(&s, scale);
                     b.text(
@@ -2018,20 +2072,14 @@ impl HudGeometry {
                         scale,
                         [0.44, 0.92, 0.20, 1.0],
                     );
-                    line_h
-                } else {
-                    0.0
-                };
-                by - level_gap
-            } else {
-                hotbar_top
-            };
+                }
+            }
 
-            // Health / food pip rows, sitting just above the hotbar (or the XP bar
-            // when one is drawn). Each row is 10 pips of 2 units; a pip lights the
+            // Health / food pip rows, on vanilla's own `yLineBase` — see
+            // [`vitals_line_base`]. Each row is 10 pips of 2 units; a pip lights the
             // moment any of its two units is present (a deliberate simplification —
             // no half-pip art yet).
-            let bars_y = vitals_base - pip - 4.0;
+            let bars_y = vitals_line_base(b.h);
             // The armour row, one row above the hearts and on the same left anchor,
             // mirroring [`sprite_vitals`]'s placement so the jar-less fallback and
             // the real thing agree about which side and which line it is on. `pips`
@@ -2084,19 +2132,30 @@ impl HudGeometry {
         // frame (real atlas or procedural) was emitted above.
         draw_hotbar_items(&mut b, frame, &anim);
 
-        // Action bar: a single centred line just above the vitals/XP cluster,
-        // fading with the server-driven alpha. Legacy `§` colour codes render.
-        // Unscaled: `extractOverlayMessage` (`Hud.java:327-355`) makes **no**
-        // `pose().scale()` call at all, like the held-item name below. This used
-        // `scale`, which is 2.0 — and since `logical_canvas` has already divided
-        // by the GUI scale, that was a flat 2x on top of vanilla's own factor.
-        // See `docs/hud-text-scale.md`.
+        // Action bar: a single centred line above the vitals cluster, fading with
+        // the server-driven alpha. Legacy `§` colour codes render.
+        //
+        // Unscaled: `extractOverlayMessage` makes **no** `pose().scale()` call at
+        // all, like the held-item name below. This used `scale`, which is 2.0 —
+        // and since `logical_canvas` has already divided by the GUI scale, that
+        // was a flat 2x on top of vanilla's own factor. See
+        // `docs/hud-text-scale.md`.
+        //
+        // `guiHeight - 72`, absolute, the way the held-item name below already
+        // reads its own `guiHeight - 59`: `extractOverlayMessage` translates the
+        // pose to `(guiWidth / 2, guiHeight - 68)` and then draws at `y = -4`, and
+        // it takes no game-mode or vitals-row branch of any kind. This used to
+        // hang off `bars_y`, which meant it moved with the vitals cluster — so
+        // correcting `yLineBase` above would otherwise have dragged it a further
+        // 3 px away from vanilla rather than leaving it alone.
+        //
+        // Not ported: `textWithBackdrop`'s translucent panel behind the glyphs.
         if let Some((msg, alpha)) = frame.action_bar.as_ref().filter(|(_, a)| *a > 0.0) {
             let tw = b.legacy_width(msg, 1.0);
             b.text_legacy(
                 msg,
                 cx - tw * 0.5,
-                bars_y - line_h - 6.0,
+                b.h - 72.0,
                 1.0,
                 [1.0, 1.0, 1.0],
                 *alpha,
@@ -2527,7 +2586,6 @@ fn draw_hotbar_items(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) {
         return;
     };
     let cx = b.w * 0.5;
-    let margin = 6.0;
     // (first icon origin x, icon origin y, cell pitch, icon size) for the active
     // hotbar layout. Vanilla insets the 16px icon 3px into each 20px native slot.
     let (icon0_x, icon_y, pitch, size) = if b.gui.is_some() {
@@ -2538,13 +2596,13 @@ fn draw_hotbar_items(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) {
         let hw = 182.0;
         let hh = 22.0;
         let hx = cx - hw * 0.5;
-        let hy = b.h - hh - margin;
+        let hy = b.h - hh - HOTBAR_MARGIN;
         (hx + 3.0, hy + 3.0, 20.0, 16.0)
     } else {
         let cell = 22.0;
         let hw = 9.0 * cell;
         let hx = cx - hw * 0.5;
-        let hy = b.h - margin - cell;
+        let hy = b.h - HOTBAR_MARGIN - cell;
         (hx + 3.0, hy + 3.0, cell, 16.0)
     };
     for (i, slot) in slots.iter().enumerate().take(9) {
@@ -2622,15 +2680,13 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     // on-screen pixels equal jar pixels — which the GPU gate checks.
     let white = [1.0, 1.0, 1.0, 1.0];
     let cx = b.w * 0.5;
-    let margin = 6.0;
 
     // Hotbar (182x22 native), centred at the bottom, with the 24x23 selection
     // sprite over the chosen slot.
     let hw = 182.0;
     let hh = 22.0;
     let hx = cx - hw * 0.5;
-    let hy = b.h - hh - margin;
-    let mut cluster_top = b.h - margin;
+    let hy = b.h - hh - HOTBAR_MARGIN;
     if let Some(sel) = frame.hotbar {
         b.sprite("hud/hotbar", hx, hy, hw, hh, white);
         // Vanilla draws the selection at native offset (slot*20 - 1, -1) from the
@@ -2650,17 +2706,16 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
         // rect can be blamed for it. The relationship below (`sh = 23.0` at
         // `hy - 1.0` over an `hh = 22.0` bar at `hy`) is the same one.
         //
-        // Note `margin` above is a *separate* real divergence: vanilla's hotbar is
-        // flush with the bottom of the screen (`guiHeight - 22`) and ours floats
-        // 6 px up. Correcting it moves the whole cluster, since `cluster_top` is
-        // derived from it — it is not this asymmetry and should not be folded in.
+        // The bottom margin that used to float this 6 px up is now
+        // [`HOTBAR_MARGIN`] — zero, matching the blits quoted above. That is a
+        // separate fix from this asymmetry and the two should not be conflated:
+        // the asymmetry is vanilla's and stays.
         let sel = sel.min(8) as f32;
         let sw = 24.0;
         let sh = 23.0;
         let sx = hx + sel * 20.0 - 1.0;
         let sy = hy - 1.0;
         b.sprite("hud/hotbar_selection", sx, sy, sw, sh, white);
-        cluster_top = hy;
     }
 
     // XP bar (182x5), just above the hotbar: full background, then the progress
@@ -2678,16 +2733,16 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     // follows too.
     let bar_w = 182.0;
     let bar_h = 5.0;
-    // The bar's own top, resolved before the draw gate: `cluster_top` moves up for
-    // the XP bar whether or not that bar is actually *drawn*. `cluster_top` is what
-    // the action bar hangs off here, and vanilla's action bar sits at a constant
-    // `guiHeight - 68` in every game mode (`extractOverlayMessage` takes no game-mode
-    // branch at all), so letting the creative gate below move it would introduce a
-    // divergence rather than remove one.
+    // With [`HOTBAR_MARGIN`] at vanilla's zero this resolves to
+    // `guiHeight - 22 - 5 - 2 == guiHeight - 29`, which is exactly
+    // `ContextualBar.top`'s `guiScaledHeight - 24 - 5`. It was 6 px off before,
+    // for the single reason that `hy` was.
+    //
+    // The bar no longer feeds anything else's placement. It used to raise a
+    // `cluster_top` that the hearts row stacked off, which made the hearts move
+    // depending on whether the player had XP — vanilla's `yLineBase` is a
+    // constant (see [`VITALS_LINE_BASE_FROM_BOTTOM`]) and takes no such branch.
     let xp_top = frame.xp.map(|_| hy - bar_h - 2.0);
-    if let Some(by) = xp_top {
-        cluster_top = by;
-    }
     // `nextContextualInfoState` reaches `ContextualInfo.EXPERIENCE` only when
     // `gameMode.hasExperience()`, so creative and spectator draw neither the bar nor
     // the level number — see [`HudFrame::can_hurt_player`].
@@ -2772,7 +2827,12 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     // [`HudFrame::can_hurt_player`].
     let icon = 9.0;
     let step = 8.0;
-    let row_y = cluster_top - icon - 4.0;
+    // `yLineBase`, from vanilla's own expression rather than by stacking upward
+    // from the hotbar. See [`vitals_line_base`]: this used to be
+    // `cluster_top - icon - 4.0`, and `cluster_top` moved with the XP bar, so the
+    // hearts landed on two different rows depending on the player's game mode and
+    // on neither of vanilla's.
+    let row_y = vitals_line_base(b.h);
 
     // The armour row, one 10px line **above** the hearts and sharing their left
     // anchor — `extractArmor`'s `xo = xLeft + i * 8` against the hearts' own
@@ -2786,8 +2846,8 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     // which narrows the same way), so this is a documented narrowing rather than a
     // silent one: a player with a raised max health would get a second heart row in
     // vanilla and push their armour row further up, and ours will not until those
-    // two fields exist. `- icon - 1.0` is that 10, written the way the air row
-    // below already writes it so the two cannot drift apart.
+    // two fields exist. [`VITALS_ROW_PITCH`] is that 10, shared with the air row
+    // below so the two cannot drift apart.
     //
     // Drawn *before* the hearts because vanilla's `extractArmor` call precedes
     // `extractHearts`, and left as a separate `if` rather than folded into the
@@ -2797,7 +2857,7 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
         && let Some(armour) = frame.armour
         && armour > 0
     {
-        let armour_row_y = row_y - icon - 1.0;
+        let armour_row_y = row_y - VITALS_ROW_PITCH;
         for i in 0..10 {
             let x = hx + i as f32 * step;
             b.sprite(
@@ -2878,13 +2938,40 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
         }
     }
 
-    // Air bubbles, one row above hearts/hunger — vanilla's `yLineAir =
-    // yLineBase - 10` (`Hud.java:791,806`): the row sits `AIR_BUBBLE_SIZE` (9)
-    // plus a 1px gap above the health/hunger line, not on top of it. Anchored
-    // at the same right edge (`hx + hw`) the hunger row uses, matching
-    // vanilla's shared `xRight`.
+    // Air bubbles, one row above hearts/hunger, on the same right edge
+    // (`hx + hw`) the hunger row uses — vanilla's shared `xRight`.
+    //
+    // # `yLineBase - 10` is the whole answer, and reading only
+    // # `extractPlayerHealth` says otherwise
+    //
+    // Three terms, and the third cancels the second. Hand-expanded from the
+    // 26.2 source for a player with no mounted vehicle, `H == guiHeight`:
+    //
+    // | step | in | out |
+    // |---|---|---|
+    // | `extractPlayerHealth`: `yLineAir = yLineBase - 10` | `H-39` | `H-49` |
+    // | `if (vehicleHearts == 0) { extractFood(…); yLineAir -= 10; }` | `H-49` | `H-59` |
+    // | `extractAirBubbles` → `getAirBubbleYLine(0, H-59)` | `H-59` | **`H-49`** |
+    //
+    // The last row is the one that is easy to miss: `getAirBubbleYLine` computes
+    // `rowOffset = getVisibleVehicleHeartRows(hearts) - 1`, and
+    // `getVisibleVehicleHeartRows(0)` is `ceil(0 / 10.0) == 0`, so `rowOffset` is
+    // **-1** and `yLineAir - rowOffset * 10` *adds* the ten straight back. The
+    // second subtraction is real but unobservable without a vehicle; its purpose
+    // is the mounted case, where no food row draws (`vehicleHearts != 0`) and a
+    // 20-heart mount gives `rowOffset == 1`, moving the bubbles up to `H-59` to
+    // clear the vehicle-health row that replaced the food.
+    //
+    // So the bubbles share a line with the armour row — armour on the left
+    // (`xLeft`), bubbles on the right (`xRight`) — which is what vanilla looks
+    // like. A "correction" to `yLineBase - 20` reads as obviously right from
+    // `extractPlayerHealth` alone and is wrong; this table is here so the next
+    // person re-derives it rather than re-deciding it.
+    //
+    // Mounted vehicles are not modelled (`HudFrame` carries no vehicle), so the
+    // `rowOffset >= 1` branch has nothing to drive it — a documented narrowing.
     if frame.can_hurt_player && let Some((air, max_air, eye_in_water)) = frame.air {
-        let air_row_y = row_y - icon - 1.0;
+        let air_row_y = row_y - VITALS_ROW_PITCH;
         // `wobble` is vanilla's `tickCount % 2 == 0` (a 0/1px jitter vanilla
         // applies to a fully-empty row's last bubble) — no per-frame tick
         // parity is piped into `HudFrame` yet, so this always reads `false`.
@@ -6343,11 +6430,30 @@ mod tests {
             found.then_some((min_x, max_x, min_y, max_y))
         };
 
-        // Fill alone: no digit (`level: 0`), full bar (`progress: 1.0`).
-        let bar = render_bbox(Some((0, 1.0))).expect("a full XP bar must paint green pixels");
+        // **The order of these two renders is load-bearing, and it was wrong.**
+        //
+        // This gate used to render the bar (`level: 0`) first and the digit
+        // (`level: 5`) second, and it was red for a reason nothing in it could
+        // reveal: `XpFlash::tick` sees `0 → 5` across those two frames as a
+        // **level-up**, and a flash at full strength runs the digit's green
+        // through `flash_toward_white(…, 1.0)`, i.e. paints it pure white. The
+        // digit reached pixels perfectly — 947 painted texels against the bar's
+        // 906, its own bounding box six rows higher — and not one of them was
+        // green-dominant, so the `expect` below fired.
+        //
+        // A *world*-species failure in CLAUDE.md's table: the flash landed after
+        // this gate, and the gate's premise had been "no such subsystem exists".
+        // Reading the test could not show it, because the flaw was in the input.
+        //
+        // Rendering the digit **first** fixes it without weakening anything:
+        // `XpFlash` only triggers when it is already `primed` by a previous
+        // frame, so the first render of a fresh `HudRenderer` never flashes, and
+        // the following `5 → 0` is a decrease, which never flashes either.
         // Digit alone: no fill (`progress: 0.0`), a single glyph (`level: 5`).
         let digit =
             render_bbox(Some((5, 0.0))).expect("the level digit must paint green pixels");
+        // Fill alone: no digit (`level: 0`), full bar (`progress: 1.0`).
+        let bar = render_bbox(Some((0, 1.0))).expect("a full XP bar must paint green pixels");
         // Negative control: neither renders without server experience.
         let none = render_bbox(None);
 
@@ -6572,9 +6678,16 @@ mod tests {
         // logical canvas `HudGeometry::build_inner` lays `sprite_vitals` into
         // is identical to this physical target and no scale multiplication
         // enters the picture here at all. `sprite_vitals` draws hearts at their
-        // native 9×9 size (no more hardcoded ×2 — see its own doc comment); with
-        // the cluster anchored at the bottom, the first heart is at
-        // `(cx - 91, h - 19)` and spans 9×9 px.
+        // native 9×9 size (no more hardcoded ×2 — see its own doc comment), the
+        // first at `xLeft == guiWidth/2 - 91` on vanilla's own `yLineBase`.
+        //
+        // **`y0` was the hardcoded `h - 19`, and that was correct for the wrong
+        // reason.** The hearts used to be stacked upward from a `cluster_top`
+        // that moved with the hotbar and the XP bar, and this fixture supplies
+        // neither, so `h - 6 - 9 - 4` happened to be `h - 19`. Vanilla's
+        // `yLineBase` is `guiHeight - 39` and takes no such branch, so correcting
+        // the draw moved the row 20 px and this gate failed — correctly. Derived
+        // through [`vitals_line_base`] now, the same call the draw makes.
         let hud_frame = HudFrame {
             show_debug: false,
             crosshair: false,
@@ -6587,7 +6700,7 @@ mod tests {
         let s = 1u32;
         let cx = w / 2;
         let x0 = cx - 91;
-        let y0 = h - 19;
+        let y0 = vitals_line_base(h as f32) as u32;
 
         // Render one frame with `hud`, read it back, and score how many *opaque*
         // heart texels match the jar sprite within tolerance after the 2× Nearest

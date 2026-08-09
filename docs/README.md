@@ -626,6 +626,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   (vanilla's "overlay message") — and why all three currently draw at exactly **2×
   vanilla**. It also records the answer to a recurring design question: vanilla
   exposes **no** size option for any of them, and we should not invent one.
+- [HUD vertical layout](./hud-vertical-layout.md) — Where every row of the
+  bottom-centre HUD cluster sits — hotbar, XP bar and level number, hearts, hunger,
+  armour, air bubbles, action bar — and which vanilla expression each `y` is
+  transcribed from. One page because these rows are all derived from two anchors, and
+  getting either wrong moves everything above it.
 - [Hunger](./hunger.md) — Server-authoritative food: exhaustion accumulation from
   actions, the hidden saturation buffer, the visible food level, natural health
   regeneration and starvation damage. `crates/lodestone-server/src/food.rs` holds the
