@@ -11,10 +11,20 @@ use lodestone_model::event::EquipmentSlot;
 
 use crate::entities::EntityDraw;
 
-/// Samples the world's packed sky/block light (`sky << 4 | block`) at an
-/// entity's feet, so a mob is lit by the block it stands in exactly as vanilla
-/// lights it (`LivingEntityRenderer` → `Level::getLightColor`, one sample per
-/// entity).
+/// Samples the world's packed sky/block light (`sky << 4 | block`) at **an
+/// arbitrary world position** — one sample per entity, and the caller decides
+/// where.
+///
+/// This is deliberately position-agnostic. It used to document itself as
+/// sampling "an entity's feet … exactly as vanilla lights it", and that was
+/// wrong on both halves: vanilla probes at the entity's **eye**
+/// (`EntityRenderer.getPackedLightCoords` → `Entity.getLightProbePosition` →
+/// `getEyePosition`), and it forces the block half to 15 for a burning entity
+/// (`EntityRenderer.getBlockLightLevel`). Both of those belong to the caller,
+/// because both depend on the entity rather than on the world — see
+/// `super::entity_passes::entity_light`, which is where every entity pass gets
+/// its light and the only place either rule is applied. The first-person arm
+/// samples at `camera.position`, which already *is* the eye, and needs neither.
 ///
 /// Only the shell's `Sim` owns a world to sample, and `RenderState` is handed
 /// pre-interpolated `EntityDraw`s with no light on them, so this is the seam
@@ -28,15 +38,19 @@ use crate::entities::EntityDraw;
 pub struct EntityLightSource(pub(super) Option<Box<dyn Fn(Vec3) -> Option<u8> + Send + Sync>>);
 
 impl EntityLightSource {
-    /// Packed light at `feet`, or [`ENTITY_FULLBRIGHT`] when there is no sampler
+    /// Packed light at `probe`, or [`ENTITY_FULLBRIGHT`] when there is no sampler
     /// or the position is outside loaded chunks. A `None` here is deliberately
     /// **not** darkness: an unloaded neighbour should not black out a mob, the
     /// same call the particle path makes (`Sim::extract_particles`).
+    ///
+    /// `probe` is a world position and the sampler floors it into a block cell,
+    /// which is vanilla's `BlockPos.containing` — so an eye-height offset is
+    /// added *before* this call and truncated once, here.
     #[must_use]
-    pub(super) fn sample(&self, feet: Vec3) -> u8 {
+    pub(super) fn sample(&self, probe: Vec3) -> u8 {
         self.0
             .as_ref()
-            .and_then(|f| f(feet))
+            .and_then(|f| f(probe))
             .unwrap_or(ENTITY_FULLBRIGHT)
     }
 }
