@@ -667,6 +667,11 @@ mod tests {
     const GLASS: u32 = 2; // transparent but present (dampening 0)
     const TORCH: u32 = 3; // emits 14, transparent
     const WATER: u32 = 4; // dampening 1
+    // Vanilla's leaves are `lightDampening = 1` (`lodestone_data::light_props`'s
+    // own stated scale: air and glass 0, water/ice/leaves 1, a full solid 15), so
+    // this is `WATER`'s dampening under a name that reads as a tree canopy where
+    // one is what the scene means.
+    const LEAVES: u32 = 5;
 
     struct FakeProps {
         opacity: HashMap<u32, u8>,
@@ -678,6 +683,7 @@ mod tests {
             let mut opacity = HashMap::new();
             opacity.insert(STONE, 15);
             opacity.insert(WATER, 1);
+            opacity.insert(LEAVES, 1);
             // AIR, GLASS, TORCH default to 0.
             let mut emission = HashMap::new();
             emission.insert(TORCH, 14);
@@ -853,6 +859,219 @@ mod tests {
                 "no residual block light after the source is gone (d={d})"
             );
         }
+    }
+
+    /// A column with solid ground filling `y = -64..=-40`, so `y = -40` is the
+    /// surface block ("the dirt") and everything above it is open air.
+    fn ground_column() -> ChunkColumn {
+        let mut c = column();
+        for z in 0..16 {
+            for x in 0..16 {
+                for y in -64..=-40 {
+                    c.set_block(x, y, z, STONE);
+                }
+            }
+        }
+        c
+    }
+
+    /// Breaking one surface block lets sky light straight back down to the bottom
+    /// of the hole at **full** strength.
+    ///
+    /// The exact value is the whole point. Sky light is not a vertical rule with a
+    /// per-step cost — every cell whose column is unobstructed all the way up is
+    /// *itself* a 15 source (`ChunkSkyLightSources`), so the newly exposed cell is
+    /// `15`, not `14`. Those are the two hypotheses and they differ here by exactly
+    /// one level, which is why this asserts the number instead of `> 0`: a
+    /// propagate-downward-with-attenuation engine passes any "it got brighter"
+    /// check and fails this one.
+    #[test]
+    fn breaking_a_surface_block_admits_full_strength_sky_to_the_bottom_of_the_hole() {
+        let props = FakeProps::new();
+        let mut col = ground_column();
+        assert_eq!(
+            sky_at(&compute_column_light(&col, &props), -64, 8, -40, 8),
+            0,
+            "the surface block is opaque, so it is dark before the break"
+        );
+
+        col.set_block(8, -40, 8, AIR);
+        let light = compute_column_light(&col, &props);
+        assert_eq!(
+            sky_at(&light, -64, 8, -40, 8),
+            15,
+            "the opened cell is itself a full-strength sky source; 14 would mean \
+             sky light is being propagated down with a per-step cost instead"
+        );
+        assert_eq!(
+            sky_at(&light, -64, 8, -41, 8),
+            0,
+            "and the still-solid block below it stays dark — no light invented past \
+             the floor of the hole"
+        );
+    }
+
+    /// **The reported bug, as a scene.** Break the bottom block of a tree trunk and
+    /// the dirt under it, and the two-deep hole must not be pitch black.
+    ///
+    /// Neither opened cell can see the sky: the rest of the trunk is directly above
+    /// them. Their light arrives *sideways*, from the open columns beside the trunk,
+    /// which is why a propagator that only patches up a cell's immediate
+    /// neighbourhood gets the first cell right and the second one wrong. Predicted
+    /// levels, re-derived from vanilla's rule outside this file rather than read off
+    /// the engine:
+    ///
+    /// | cell | route | level |
+    /// |---|---|---|
+    /// | `(7, -39, 8)` open column beside the trunk | own column is clear | `15` |
+    /// | `(8, -39, 8)` where the trunk block was | one step sideways | `14` |
+    /// | `(8, -40, 8)` where the dirt was | one more step down | `13` |
+    ///
+    /// The `13` is the load-bearing assertion. Under the "checks a few adjacent
+    /// blocks" hypothesis it is `0`, because nothing lit is adjacent to it at the
+    /// moment the edit happens — the cell above it is *also* newly opened and also
+    /// dark. Under a real flood it is `13`. Both hypotheses agree on the `14`, so
+    /// asserting only that cell would be a test that measures that the code runs.
+    #[test]
+    fn breaking_a_tree_trunk_and_the_dirt_under_it_is_not_pitch_black() {
+        let props = FakeProps::new();
+        let mut col = ground_column();
+        // A five-block trunk standing on the surface at (8, 8).
+        for y in -39..=-35 {
+            col.set_block(8, y, 8, STONE);
+        }
+
+        // Before: both cells are solid, so both are dark. This is the state the
+        // player is looking at, and it is also the state the client kept showing
+        // after the break for as long as nothing re-sent the light.
+        let before = compute_column_light(&col, &props);
+        assert_eq!(sky_at(&before, -64, 8, -39, 8), 0, "trunk cell dark before");
+        assert_eq!(sky_at(&before, -64, 8, -40, 8), 0, "dirt cell dark before");
+
+        col.set_block(8, -39, 8, AIR); // the trunk block
+        col.set_block(8, -40, 8, AIR); // the dirt under it
+        let after = compute_column_light(&col, &props);
+
+        assert_eq!(
+            sky_at(&after, -64, 7, -39, 8),
+            15,
+            "the open column beside the trunk is the source this light comes from"
+        );
+        assert_eq!(
+            sky_at(&after, -64, 8, -39, 8),
+            14,
+            "one step in from the open column — both hypotheses agree here, which is \
+             why this cell alone proves nothing"
+        );
+        assert_eq!(
+            sky_at(&after, -64, 8, -40, 8),
+            13,
+            "two steps from the nearest lit cell: 13 under a real flood fill, 0 under \
+             a propagator that only relaxes a source's immediate neighbours"
+        );
+    }
+
+    /// The same edit taken deeper, so the distance the flood has to travel is the
+    /// variable and the predicted value moves with it one level per block.
+    ///
+    /// A bounded-radius patch-up is not one hypothesis but a family of them — radius
+    /// 1, 2, 3 — and each is refuted by a different row of this table. Nothing short
+    /// of a queue that keeps going until it runs out of level reaches `9` at the
+    /// bottom.
+    #[test]
+    fn sky_light_reaches_the_bottom_of_a_freshly_dug_shaft() {
+        let props = FakeProps::new();
+        let mut col = ground_column();
+        for y in -39..=-35 {
+            col.set_block(8, y, 8, STONE);
+        }
+        // Break the bottom trunk block and dig six deep: y = -39 down to -44.
+        for y in -44..=-39 {
+            col.set_block(8, y, 8, AIR);
+        }
+        let light = compute_column_light(&col, &props);
+
+        // Derived outside this file from `level(n) = l - max(1, dampening(n))` with
+        // air's dampening `0`, starting from the 15 in the open column beside the
+        // shaft. One level per block, all the way down.
+        for (y, expected) in [
+            (-39, 14),
+            (-40, 13),
+            (-41, 12),
+            (-42, 11),
+            (-43, 10),
+            (-44, 9),
+        ] {
+            assert_eq!(
+                sky_at(&light, -64, 8, y, 8),
+                expected,
+                "sky at y={y} must be {expected}; a radius-limited propagator returns \
+                 0 from the first row it cannot reach"
+            );
+        }
+        assert_eq!(
+            sky_at(&light, -64, 8, -45, 8),
+            0,
+            "the unbroken floor below the shaft stays dark — the control that shows \
+             this gate can report a zero at all"
+        );
+    }
+
+    /// The same scene under a tree canopy, which is what the player actually had
+    /// over their head.
+    ///
+    /// Two things change and both are worth pinning. The canopy is `dampening = 1`,
+    /// so it costs a level to cross rather than sealing the column — the open ground
+    /// beside the trunk sits at `8`, not `15`. And the hole therefore comes back at
+    /// `7` and `6`.
+    ///
+    /// Those are the numbers, and they are exactly why this file re-derives instead
+    /// of guessing: the plausible round answers here are "full daylight" or "one
+    /// less than the neighbour", and both are wrong. `6` in particular is *below*
+    /// the `8` of the open ground two blocks away, because the light has to go
+    /// sideways and then down.
+    #[test]
+    fn a_canopy_dims_the_opened_hole_without_sealing_it() {
+        let props = FakeProps::new();
+        let mut col = ground_column();
+        for y in -39..=-35 {
+            col.set_block(8, y, 8, STONE);
+        }
+        // A two-thick canopy over the whole footprint, well clear of the trunk.
+        for z in 0..16 {
+            for x in 0..16 {
+                col.set_block(x, -34, z, LEAVES);
+                col.set_block(x, -33, z, LEAVES);
+            }
+        }
+
+        let before = compute_column_light(&col, &props);
+        assert_eq!(sky_at(&before, -64, 8, -39, 8), 0);
+        assert_eq!(sky_at(&before, -64, 8, -40, 8), 0);
+
+        col.set_block(8, -39, 8, AIR);
+        col.set_block(8, -40, 8, AIR);
+        let after = compute_column_light(&col, &props);
+
+        // The canopy's own two levels of attenuation, then air down to the ground.
+        assert_eq!(sky_at(&after, -64, 2, -33, 2), 14, "first canopy layer");
+        assert_eq!(sky_at(&after, -64, 2, -34, 2), 13, "second canopy layer");
+        assert_eq!(
+            sky_at(&after, -64, 2, -39, 2),
+            8,
+            "open ground under the canopy: five more blocks of air below it"
+        );
+        assert_eq!(
+            sky_at(&after, -64, 8, -39, 8),
+            7,
+            "the opened trunk cell, one step in from that 8"
+        );
+        assert_eq!(
+            sky_at(&after, -64, 8, -40, 8),
+            6,
+            "and the opened dirt cell one step below that — dimmer than the ground \
+             beside it, which is the shape a guess gets wrong"
+        );
     }
 
     #[test]
