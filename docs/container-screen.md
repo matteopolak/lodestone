@@ -394,9 +394,72 @@ that wants the carried stack to actually appear must chain
 `.with_cursor(Some([x, y]))`. See "Wiring it into the live app" below for the
 one line `app.rs` needs.
 
-There is no tooltip yet, so "below the tooltip" (vanilla's actual third layer)
-is currently moot — the carried stack is simply the topmost thing this screen
-draws.
+The hovered-slot tooltip now exists and rides the **tail of the same carried
+range** — `emit_tooltip` appends after the carried stack, past `slot_vertex_count`,
+so it is drawn by `container-carried-pass` and lands above everything. That makes
+the carried stratum "carried stack **plus** tooltip", which matters for the next
+section.
+
+### An overlay goes *between* the strata, not after the whole call
+
+Reported from play: *"the recipe book seems to be drawn on top of everything —
+including items in my cursor when i move them and item tooltips."* It was drawn as
+a trailing pass after `render_with_icons_scaled` returned, so it covered the whole
+carried stratum — and measurably so: rendering both orderings in one run put the
+carried stack at **0 px of 100** under the trailing order, because the panel's slot
+wells are opaque. Not dimmed. Gone.
+
+The record is `AbstractRecipeBookScreen.extractRenderState`, which is explicit:
+
+```text
+extractContents            panel art, labels, slots, both slot highlights
+nextStratum()
+recipeBookComponent        <- the overlay
+nextStratum()
+extractCarriedItem         the stack on the cursor
+extractTooltip             the hovered slot's tooltip
+recipeBookComponent.extractTooltip
+```
+
+Note the book is added with `addWidget`, **not** `addRenderableWidget`, so it is
+not in `Screen.renderables` and this explicit sequence is the only thing ordering
+it. (The 20×18 recipe *button* is the `addRenderableWidget` one, and it does draw
+with the renderables at the top of `extractContents`.)
+
+So the overlay is a **parameter of the render call**, not a call the caller
+sequences afterwards: `ContainerRenderer::render_with_icons_scaled_between_strata`
+(and `render_geometry_scaled_between_strata`) flush the slot stratum, invoke a
+`between_strata` closure, then open a fresh encoder for the carried stratum. wgpu
+executes submissions in order, so two encoders either side of the hook is what buys
+the layering — a single encoder finished at the end could not, because the overlay's
+own submit would already have landed.
+
+**This shape is the point.** The carried range is unreachable to a caller, so the
+next overlay someone adds cannot be appended over the cursor stack by accident; the
+only place to put it is the hook. The hook also fires on the empty-geometry early
+return, so an overlay never silently vanishes on a frame where the container drew
+nothing.
+
+One residual divergence, recorded rather than fixed: vanilla's tooltips are
+deferred (`setTooltipForNextFrame`) and composited above *everything*, so
+`recipeBookComponent.extractTooltip` outranks the carried stack there. Ours rides
+the tail of one recipe-panel geometry blob with no tooltip split marker, so a player
+**carrying** a stack while hovering a recipe button sees the stack over that
+tooltip. The two *slot* tooltips cannot conflict — `ContainerFrame::hover_blocked`
+makes them mutually exclusive — so this is the only reachable case. Closing it means
+giving `RecipeBookPanelGeometry` a tooltip range the way `chrome_vertex_count`
+already splits its chrome.
+
+Gate: the second, **jar-less** arm of `tests/container_cursor_pixels.rs`
+(`the_recipe_book_draws_under_the_carried_stack`). It renders both hypotheses in one
+run at the discriminating input — the cursor at the **centre of the open panel**,
+since a cursor outside the panel rect passes under either ordering — and reports
+`d_stack` (the stack's own contrast with no panel in frame, an independent
+measurement rather than a constant), `d_hook` and `d_trailing`. Measured 165.03 /
+117.25 / 0.00. `d_hook` is 71% rather than 100% because the jar-less swatch is
+`a = 0.95` and composites over a different background; per `CLAUDE.md` an exact
+composited byte through `ALPHA_BLENDING` is not predictable on this backend, so the
+gate brackets with a ratio and both arms are asserted.
 
 ### The drag preview, and the one number that must not be re-derived (issue #378 part 2)
 
