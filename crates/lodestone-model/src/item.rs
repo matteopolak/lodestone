@@ -161,6 +161,22 @@ pub struct ItemComponents {
     /// into `Chest` makes wolf armour and horse armour placeable in a player's
     /// chestplate slot.
     pub equippable: Option<EquipmentSlot>,
+    /// `minecraft:custom_data`: the plugin/datapack NBT blob, kept **opaque** as
+    /// the raw network-NBT bytes (root tag id then payload, exactly as
+    /// `FriendlyByteBuf.writeNbt` wrote them).
+    ///
+    /// Nothing in this client interprets it, and nothing should: it is arbitrary
+    /// server-defined data. It is carried rather than discarded only so a
+    /// consumer that wants to inspect or re-emit it can, and it is decoded at all
+    /// for a much sharper reason — the clientbound component patch cannot skip an
+    /// unknown component, so this was a **decode cliff on the most-stamped
+    /// component in the game**. Every Bukkit/Paper plugin that marks a GUI item
+    /// sets it, so a lobby hotbar truncated the rest of whatever packet carried
+    /// it. `None` means the patch did not mention it.
+    ///
+    /// Stored as bytes rather than a parsed `Nbt` so [`ItemComponents`] keeps its
+    /// `Eq`: NBT carries floats, which are not `Eq`.
+    pub custom_data: Option<Vec<u8>>,
     /// True when the stack's patch carried at least one component this build
     /// does not model, so decoding stopped early and the modeled fields above
     /// may be incomplete. The modeled fields that were decoded remain valid.

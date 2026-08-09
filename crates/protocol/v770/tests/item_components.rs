@@ -39,6 +39,56 @@ fn component_id(name: &str) -> i32 {
         .expect("known component type")
 }
 
+/// A component this build deliberately does **not** decode, for every gate that
+/// needs to exercise the unmodeled-component path.
+///
+/// Every such gate used to name `minecraft:custom_data`, and when that got
+/// modeled all six of them went green while asserting the opposite of what they
+/// were written for — the *world* species of vacuous test: the source was
+/// exemplary and the input stopped containing the structure under test.
+/// [`the_unmodeled_stand_in_is_still_unmodeled`] is the control that fails
+/// loudly, naming this constant, if this one is ever modeled too.
+///
+/// `minecraft:profile` is a good choice on purpose: `ResolvableProfile.STREAM_CODEC`
+/// is `either(GAME_PROFILE, Partial)` composed with `PlayerSkin.Patch.STREAM_CODEC`
+/// — an either-dispatch over a full game profile or an optional-name /
+/// optional-uuid / property-map triple, plus a skin patch. That is genuinely
+/// expensive, so it is unlikely to be modeled on a whim and quietly void these
+/// gates again.
+const UNMODELED_COMPONENT: &str = "minecraft:profile";
+
+/// One added component, unmodeled, with an arbitrary payload behind it.
+///
+/// The payload bytes are never interpreted — decoding stops at the type id — so
+/// their shape is irrelevant; what matters is that bytes follow, so a decoder
+/// that wrongly consumed them would land somewhere plausible.
+fn unmodeled_patch() -> Vec<u8> {
+    let mut patch = Writer::default();
+    patch.var_i32(1); // one added component
+    patch.var_i32(0); // none removed
+    patch.var_i32(component_id(UNMODELED_COMPONENT));
+    write_network_nbt(
+        &mut patch,
+        &Nbt::Compound(vec![("x".to_owned(), Nbt::Int(1))]),
+    )
+    .unwrap();
+    patch.into_vec()
+}
+
+/// The detector control for [`UNMODELED_COMPONENT`]: the stand-in must really be
+/// unmodeled, or every gate built on it proves nothing.
+#[test]
+fn the_unmodeled_stand_in_is_still_unmodeled() {
+    let payload = set_slot_with_patch("minecraft:stone", 1, &unmodeled_patch());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+    assert!(
+        item.components.has_unmodeled,
+        "{UNMODELED_COMPONENT} is now decoded, so every gate using it as the \
+         unmodeled stand-in has gone vacuous. Pick another one for \
+         UNMODELED_COMPONENT — not a component you just modeled."
+    );
+}
+
 fn handle(id: i32, payload: &[u8]) -> Vec<Directive> {
     V770Adapter::new()
         .handle_packet(&mut World::new(), ConnectionState::Play, id, payload)
@@ -111,18 +161,7 @@ fn decodes_modeled_components() {
 /// carrying unmodeled components rather than raising a fatal decode error.
 #[test]
 fn tolerates_an_unmodeled_component() {
-    // `minecraft:custom_data` (id 0) is an NBT blob this build does not model.
-    let mut patch = Writer::default();
-    patch.var_i32(1); // one added component
-    patch.var_i32(0); // none removed
-    patch.var_i32(component_id("minecraft:custom_data"));
-    write_network_nbt(
-        &mut patch,
-        &Nbt::Compound(vec![("x".to_owned(), Nbt::Int(1))]),
-    )
-    .unwrap();
-
-    let payload = set_slot_with_patch("minecraft:stone", 5, patch.as_slice());
+    let payload = set_slot_with_patch("minecraft:stone", 5, &unmodeled_patch());
     // Must not error out the whole packet handling.
     let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
 
@@ -534,17 +573,7 @@ fn an_advancement_icon_may_be_a_decorated_pot() {
 /// than a decoder that stopped caring.
 #[test]
 fn an_advancement_icon_with_an_unmodeled_component_still_fails() {
-    let mut patch = Writer::default();
-    patch.var_i32(1);
-    patch.var_i32(0);
-    patch.var_i32(component_id("minecraft:custom_data"));
-    write_network_nbt(
-        &mut patch,
-        &Nbt::Compound(vec![("x".to_owned(), Nbt::Int(1))]),
-    )
-    .unwrap();
-
-    let payload = advancement_with_icon_patch(patch.as_slice());
+    let payload = advancement_with_icon_patch(&unmodeled_patch());
     let error = V770Adapter::new()
         .handle_packet(
             &mut World::new(),
@@ -631,7 +660,7 @@ fn retains_modeled_components_before_an_unmodeled_one() {
     patch.var_i32(component_id("minecraft:damage"));
     patch.var_i32(42);
     // ...then an unmodeled one.
-    patch.var_i32(component_id("minecraft:custom_data"));
+    patch.var_i32(component_id(UNMODELED_COMPONENT));
     write_network_nbt(&mut patch, &Nbt::Compound(Vec::new())).unwrap();
 
     let payload = set_slot_with_patch("minecraft:diamond_pickaxe", 1, patch.as_slice());
@@ -639,4 +668,276 @@ fn retains_modeled_components_before_an_unmodeled_one() {
 
     assert_eq!(item.components.damage, Some(42));
     assert!(item.components.has_unmodeled);
+}
+
+// ---------------------------------------------------------------------------
+// `minecraft:custom_data`, and the multi-item lists that made it fatal
+// ---------------------------------------------------------------------------
+
+/// The lobby hotbar. `minecraft:custom_data` is what every Bukkit/Paper plugin
+/// stamps on a GUI item, so this is the shape a plugin server actually sends —
+/// and while the component was unmodeled it ended the packet at the first slot.
+///
+/// The value is kept **verbatim** as the network-NBT bytes rather than parsed,
+/// and the expected bytes are written out by hand here rather than taken from
+/// our own writer: root tag id `0x0a`, then a `TAG_Int` field named `"id"`, then
+/// `TAG_End`. The nameless root is the property worth pinning — the derived
+/// stream codec is `FriendlyByteBuf.writeNbt`, which writes no root name, so a
+/// reader expecting the *named* form would consume the `0x00 0x02` length of the
+/// first field's name as a root name and misalign everything after it.
+#[test]
+fn custom_data_decodes_completely_and_is_kept_opaque() {
+    let mut patch = Writer::default();
+    patch.var_i32(1);
+    patch.var_i32(0);
+    patch.var_i32(component_id("minecraft:custom_data"));
+    write_network_nbt(
+        &mut patch,
+        &Nbt::Compound(vec![("id".to_owned(), Nbt::Int(4_919))]),
+    )
+    .unwrap();
+
+    let payload = set_slot_with_patch("minecraft:compass", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert!(
+        !item.components.has_unmodeled,
+        "minecraft:custom_data is modeled now, so nothing may be flagged partial"
+    );
+    assert_eq!(
+        item.components.custom_data.as_deref(),
+        Some(
+            &[
+                0x0a, // root tag: TAG_Compound, and NO root name follows
+                0x03, // field tag: TAG_Int
+                0x00, 0x02, b'i', b'd', // field name "id"
+                0x00, 0x00, 0x13, 0x37, // 4919
+                0x00, // TAG_End closing the compound
+            ][..]
+        ),
+        "the blob is carried byte-for-byte in its network (nameless-root) form"
+    );
+}
+
+/// Builds a `container_set_content` payload: window 7, state 3, then `patches`
+/// one per slot in order, then an empty carried item.
+fn set_content(items: &[(&str, i32, Vec<u8>)]) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(7); // window id
+    w.var_i32(3); // state id
+    w.var_i32(i32::try_from(items.len()).expect("slot count"));
+    for (item, count, patch) in items {
+        w.var_i32(*count);
+        w.var_i32(item_id(item).expect("known item"));
+        w.bytes(patch);
+    }
+    w.var_i32(0); // carried item: empty
+    w.into_vec()
+}
+
+fn empty_patch() -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(0);
+    w.var_i32(0);
+    w.into_vec()
+}
+
+/// The owner's actual hotbar, as one `container_set_content`: compass, lime dye,
+/// diamond sword, every one carrying `minecraft:custom_data`.
+///
+/// This is the case every existing fixture in this file missed, because they all
+/// use a **single**-item packet — the coincidence that let a list caller ignoring
+/// the completeness flag survive. The three items are pairwise distinct and their
+/// counts are pairwise distinct too (1/5/3), so neither a transposition nor a
+/// dropped entry can pass.
+#[test]
+fn a_three_item_hotbar_all_carrying_custom_data_decodes_whole() {
+    let blob = |n: i32| {
+        let mut patch = Writer::default();
+        patch.var_i32(1);
+        patch.var_i32(0);
+        patch.var_i32(component_id("minecraft:custom_data"));
+        write_network_nbt(&mut patch, &Nbt::Compound(vec![("slot".to_owned(), Nbt::Int(n))]))
+            .unwrap();
+        patch.into_vec()
+    };
+    let payload = set_content(&[
+        ("minecraft:compass", 1, blob(11)),
+        ("minecraft:lime_dye", 5, blob(1)),
+        ("minecraft:diamond_sword", 3, blob(4)),
+    ]);
+
+    let directives = handle(play::clientbound::CONTAINER_SET_CONTENT, &payload);
+    let ClientEvent::ContainerContent { items, .. } = expect_single_emit(&directives) else {
+        panic!("wrong event");
+    };
+    let names: Vec<_> = items
+        .iter()
+        .map(|slot| {
+            let stack = slot.as_ref().expect("every slot is occupied");
+            (stack.item.to_string(), stack.count)
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            ("minecraft:compass".to_owned(), 1),
+            ("minecraft:lime_dye".to_owned(), 5),
+            ("minecraft:diamond_sword".to_owned(), 3),
+        ],
+        "all three slots must survive: before custom_data was modeled the list \
+         ended at the first one"
+    );
+}
+
+/// The list-truncation contract, on a **multi-item** packet: an unmodeled
+/// component on the *second* of three slots delivers the first two and stops,
+/// and the session survives.
+///
+/// The first slot proves the loop really runs (so an empty result cannot pass as
+/// success) and the third proves it really stops.
+#[test]
+fn a_list_stops_at_the_first_unmodeled_component_and_survives() {
+    let payload = set_content(&[
+        ("minecraft:compass", 1, empty_patch()),
+        ("minecraft:lime_dye", 5, unmodeled_patch()),
+        ("minecraft:diamond_sword", 3, empty_patch()),
+    ]);
+
+    let directives = handle(play::clientbound::CONTAINER_SET_CONTENT, &payload);
+    let ClientEvent::ContainerContent { items, .. } = expect_single_emit(&directives) else {
+        panic!("wrong event");
+    };
+    assert_eq!(
+        items.len(),
+        2,
+        "the partial slot is delivered and the list ends there"
+    );
+    assert_eq!(items[0].as_ref().expect("slot 0").count, 1);
+    let partial = items[1].as_ref().expect("slot 1");
+    assert_eq!(partial.item.to_string(), "minecraft:lime_dye");
+    assert_eq!(partial.count, 5);
+    assert!(partial.components.has_unmodeled);
+}
+
+/// `merchant_offers` was the caller that dropped the completeness flag: it read
+/// the offer result's stack, discarded the verdict, and went on to read this
+/// offer's remaining eight fields — and then the next offer — out of the
+/// interior of a component it could not decode.
+///
+/// The two arms share one fixture generator and differ only in the result stack's
+/// patch, which is what makes the second arm's empty verdict attributable to the
+/// unmodeled component rather than to a malformed fixture:
+///
+/// * modeled `custom_data` on all three results → all three offers decode, and
+///   the trailing scalars *past* the list are reached, which is only possible if
+///   every offer parsed exactly;
+/// * an unmodeled component on the second result → the packet is abandoned with
+///   no error and no event.
+#[test]
+fn merchant_offers_abandons_the_packet_instead_of_reading_past_a_partial_result() {
+    /// Three offers whose results are pairwise-distinct items with pairwise
+    /// distinct counts; `patch_for` supplies each result's component patch.
+    fn offers(patch_for: impl Fn(usize) -> Vec<u8>) -> Vec<u8> {
+        let results = [
+            ("minecraft:compass", 1),
+            ("minecraft:lime_dye", 5),
+            ("minecraft:diamond_sword", 3),
+        ];
+        let mut w = Writer::default();
+        w.var_i32(9); // window id
+        w.var_i32(3); // three offers
+        for (index, (item, count)) in results.iter().enumerate() {
+            // cost_a: item id, count, empty DataComponentExactPredicate.
+            w.var_i32(2 + i32::try_from(index).unwrap());
+            w.var_i32(1);
+            w.var_i32(0);
+            // result
+            w.var_i32(*count);
+            w.var_i32(item_id(item).expect("known item"));
+            w.bytes(&patch_for(index));
+            w.bool(false); // no cost_b
+            w.bool(false); // out_of_stock
+            w.i32(4); // uses         -- five plain writeInts, not VarInts
+            w.i32(12); // max_uses
+            w.i32(2); // xp
+            w.i32(-1); // special_price_diff
+            w.f32(0.05); // price_multiplier
+            w.i32(7); // demand
+        }
+        w.var_i32(2); // villager_level -- past the list
+        w.var_i32(70); // villager_xp
+        w.bool(true); // show_progress
+        w.bool(false); // can_restock
+        w.into_vec()
+    }
+
+    // Arm 1, the premise control: every result carries `custom_data`, which is
+    // modeled, so the whole packet — including the scalars behind the list —
+    // must decode.
+    let modeled = offers(|slot| {
+        let mut patch = Writer::default();
+        patch.var_i32(1);
+        patch.var_i32(0);
+        patch.var_i32(component_id("minecraft:custom_data"));
+        write_network_nbt(
+            &mut patch,
+            &Nbt::Compound(vec![("slot".to_owned(), Nbt::Int(i32::try_from(slot).unwrap()))]),
+        )
+        .unwrap();
+        patch.into_vec()
+    });
+    let modeled_directives = handle(play::clientbound::MERCHANT_OFFERS, &modeled);
+    let ClientEvent::MerchantOffersReceived {
+        offers: decoded,
+        villager_level,
+        villager_xp,
+        show_progress,
+        can_restock,
+        ..
+    } = expect_single_emit(&modeled_directives)
+    else {
+        panic!("wrong event");
+    };
+    assert_eq!(decoded.len(), 3);
+    assert_eq!(
+        decoded
+            .iter()
+            .map(|offer| offer.result.as_ref().expect("a result stack").count)
+            .collect::<Vec<_>>(),
+        vec![1, 5, 3],
+        "pairwise-distinct counts, so a transposed or repeated offer cannot pass"
+    );
+    // Only reachable if all three offers consumed exactly.
+    assert_eq!(*villager_level, 2);
+    assert_eq!(*villager_xp, 70);
+    assert!(*show_progress);
+    assert!(!*can_restock);
+
+    // Arm 2: the second result carries a component this build cannot skip. The
+    // packet is dropped, cleanly.
+    let unmodeled = offers(|slot| {
+        if slot == 1 {
+            unmodeled_patch()
+        } else {
+            empty_patch()
+        }
+    });
+    let directives = V770Adapter::new()
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::MERCHANT_OFFERS,
+            &unmodeled,
+        )
+        .expect(
+            "an unmodeled component must never be a fatal decode: that turns a \
+             dropped packet into a dropped session",
+        );
+    assert!(
+        directives.is_empty(),
+        "the offer list has no per-entry length prefix and its trailing scalars \
+         sit past it, so there is nothing to resynchronise to — the packet is \
+         abandoned rather than half-reported: {directives:?}"
+    );
 }

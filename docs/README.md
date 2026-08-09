@@ -659,6 +659,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   [#143](https://github.com/matteopolak/lodestone/issues/143)) — custom name,
   damage, dye, enchantments, tool patch — plus the game → model lowering that lets
   a mutated stack reach a consumer keyed on the other stack type.
+- [Item data-component decoding, and the partial-stack contract](./item-data-component-decode.md) —
+  How protocol 776 clientbound item stacks have their `DataComponentPatch` decoded,
+  which of 26.2's 111 data-component types this build consumes, and the type-level
+  contract a caller must honour when a component it does not model ends a packet
+  early. All of it lives in `read_component_patch` / `read_item_stack` in
+  `crates/protocol/v770/src/adapter.rs`.
 - [Item GUI geometry (3-D block items in a slot)](./item-gui-geometry.md) — The
   **geometry half** of drawing a block item as an isometric mini-block in a
   hotbar/inventory slot. It bakes every item whose inventory icon is a 3-D model into
@@ -959,6 +965,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   or suppresses a `ClientAction` that another plugin queued, after `GameTick` has
   finished and before it reaches the socket. ProtocolLib's outbound side, at the one
   layer where it is version-free. Issue #157.
+- [Packet framing, and the empty frame that ended sessions](./packet-framing.md) —
+  How `lodestone-net` turns a byte stream into packets — the length prefix, the
+  compression header, and the one shape of frame that carries no packet at all.
+  `Codec` in `crates/lodestone-net/src/codec.rs` does the framing and
+  `Connection::read_packet` in `connection.rs` splits a frame body into `(packet_id,
+  fields)`.
 - [The particle catalogue: what's wired, what isn't, and why](./particle-catalogue.md) —
   `lodestone-particle`'s `Sheet` enum names a physical texture sheet under
   `textures/particle/*.png`; `Behaviour` names a per-type tick/quad-size/layer
