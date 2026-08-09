@@ -77,8 +77,14 @@ Four shapes, and only the first was guessed correctly before the tables were rea
 |---|---|---|
 | `alternatives` child (`wheat`, `beetroots`) | crops | the seed, never the crop |
 | extra pool (`carrots`, `potatoes`) | crops | one carrot, never the second |
-| `set_count` condition (all 68 slabs, all 17 candles, `snow`, `sea_pickle`, `glow_lichen`) | counts | always 1 — **a double slab dropped one** |
-| whole-pool or whole-entry gate (`*_door`, `*_bed`, `cave_vines`, `sweet_berry_bush`) | drops | **nothing at all** |
+| `set_count` condition (all 68 slabs, all 17 candles, `sea_pickle`) | counts | always 1 — **a double slab dropped one** |
+| whole-pool or whole-entry gate (all 21 doors, all 16 beds, `cave_vines`, `sweet_berry_bush`) | drops | **nothing at all** |
+
+`snow` and `glow_lichen`/`sculk_vein` are the same `set_count` shape but their
+enclosing pool or entry is gated on something else — `entity_properties` for snow,
+a shears/silk-touch `match_tool` for the two lichens — so the block state alone
+does not decide what they drop. Snow is still wrong; the lichens are correct once
+the right tool is in hand.
 
 That last row is the one worth remembering: a `part=head` gate on every bed and a
 `half=lower` gate on every door meant **beds and doors dropped no item whatsoever**.
