@@ -55,18 +55,44 @@ fn resolve_client_id_from(value: Option<&std::ffi::OsStr>) -> Result<String> {
 }
 
 /// The result of trying the locally-cached credential.
+///
+/// The two non-`Ready` variants used to be one (`NoCachedToken`), and merging
+/// them cost a join: a player who *had* signed in and whose token had merely
+/// expired got the same message as a player who had never signed in at all —
+/// "no Microsoft session was configured", which reads as a build/configuration
+/// fault rather than "sign in again". They are different situations with
+/// different remedies (sign in vs. re-authorise a known account), so they are
+/// different values. A caller that genuinely does not care can match both arms.
 #[derive(Debug)]
 pub enum CachedSessionOutcome {
     /// A cached refresh token was silently refreshed into a usable session.
     /// The rotated refresh token has already been written back to `secrets`.
     Ready(Session),
-    /// No usable cached token exists: either no account is selected, no
-    /// refresh token is stored for it, or the stored token was rejected
-    /// outright ([`AuthError::RefreshTokenInvalid`]). The caller should start
-    /// an interactive device-code login (e.g.
-    /// [`crate::flow::PendingLogin::begin`]) and, once it completes, call
-    /// [`finish_interactive`].
-    NoCachedToken,
+    /// [`AccountsMetadata::selected`] is `None` — there is no account to try,
+    /// and **no network call was made**. The remedy is a first interactive
+    /// sign-in (e.g. [`crate::flow::PendingLogin::begin`] then
+    /// [`finish_interactive`]).
+    NoAccountSelected,
+    /// An account *is* selected, but it cannot currently be turned into a
+    /// session: either no refresh token is stored for it (keychain cleared,
+    /// or the profile was signed in on another machine), or the stored token
+    /// was rejected outright ([`AuthError::RefreshTokenInvalid`] — revoked,
+    /// past its renewal window, or the password changed).
+    ///
+    /// The remedy is the same interactive sign-in, but the *message* is not:
+    /// the account is known and can be named, so a UI should say whose session
+    /// expired rather than implying nothing was ever configured.
+    SessionExpired {
+        /// The selected profile's UUID — the keychain key, and the identity a
+        /// caller re-authorises.
+        profile_id: uuid::Uuid,
+        /// That profile's last-known username, when
+        /// [`AccountsMetadata::profiles`] still carries an entry for it. `None`
+        /// when `selected` points at a profile with no metadata row, which
+        /// `AccountsMetadata::from_json`'s entry-by-entry degradation can
+        /// produce from a partly-corrupt `profiles.json`.
+        username: Option<String>,
+    },
 }
 
 /// Tries the selected account's cached refresh token.
@@ -79,11 +105,11 @@ pub enum CachedSessionOutcome {
 ///
 /// A transport/parse failure while refreshing ([`AuthError::Http`]/
 /// [`AuthError::Json`]) is propagated rather than folded into
-/// [`CachedSessionOutcome::NoCachedToken`]: if Microsoft is unreachable, a
+/// [`CachedSessionOutcome::SessionExpired`]: if Microsoft is unreachable, a
 /// fresh device-code flow will not fare any better, and silently steering the
 /// user toward a prompt that also cannot complete would hide the real cause.
 /// Only [`AuthError::RefreshTokenInvalid`] — the token itself is dead, not the
-/// network — becomes `NoCachedToken`.
+/// network — becomes `SessionExpired`.
 ///
 /// # Errors
 /// Propagates any refresh/profile-fetch failure other than
@@ -95,10 +121,22 @@ pub async fn try_cached_session(
     metadata: &AccountsMetadata,
 ) -> Result<CachedSessionOutcome> {
     let Some(profile_id) = metadata.selected else {
-        return Ok(CachedSessionOutcome::NoCachedToken);
+        return Ok(CachedSessionOutcome::NoAccountSelected);
     };
+    // Resolved once, up front, so both `SessionExpired` returns below name the
+    // account the same way — and so the name survives a `load_refresh_token`
+    // failure, which is exactly when a caller most wants to say *whose*
+    // credential is missing.
+    let username = metadata
+        .profiles
+        .iter()
+        .find(|p| p.profile_id == profile_id)
+        .map(|p| p.username.clone());
     let Some(refresh) = secrets.load_refresh_token(profile_id)? else {
-        return Ok(CachedSessionOutcome::NoCachedToken);
+        return Ok(CachedSessionOutcome::SessionExpired {
+            profile_id,
+            username,
+        });
     };
 
     match flow::refresh_token(client, client_id, &refresh).await {
@@ -109,8 +147,121 @@ pub async fn try_cached_session(
             secrets.save_refresh_token(session.profile.id, &ms_token.refresh_token)?;
             Ok(CachedSessionOutcome::Ready(session))
         }
-        Err(AuthError::RefreshTokenInvalid) => Ok(CachedSessionOutcome::NoCachedToken),
+        Err(AuthError::RefreshTokenInvalid) => Ok(CachedSessionOutcome::SessionExpired {
+            profile_id,
+            username,
+        }),
         Err(other) => Err(other),
+    }
+}
+
+/// What a join should present to the server, resolved from whatever the
+/// account switcher has selected.
+///
+/// This is [`CachedSessionOutcome`] turned into a *join* decision rather than a
+/// *cache* report: it folds the client-id lookup and every transport failure in
+/// too, because from a join's point of view "Microsoft is unreachable" and "the
+/// token is dead" have the same consequence (we cannot authenticate) and
+/// differ only in the sentence shown to the player, which
+/// [`SelectedAccount::Unavailable`] carries.
+#[derive(Debug)]
+pub enum SelectedAccount {
+    /// A live session. The join is an online-mode one under this account, and
+    /// the profile's real name/UUID replace any offline identity.
+    Online(Session),
+    /// No account is selected. Join offline — that is what the player asked
+    /// for, and it is the only outcome reachable with **no network call at
+    /// all**, so a player who never signs in pays nothing for this path.
+    Offline,
+    /// An account *is* selected and could not be turned into a session.
+    ///
+    /// **This is not a reason to abort the join.** An offline-mode server never
+    /// asks for authentication (vanilla only sends the encryption request
+    /// inside `ServerLoginPacketListenerImpl.handleHello`'s
+    /// `usesAuthentication() && !isMemoryConnection()` arm), so refusing to
+    /// dial would break joins that would have worked. The caller should join
+    /// with its offline identity and keep this text to explain the failure
+    /// *if* the server turns out to demand online mode.
+    Unavailable {
+        /// The account's last-known username, or its UUID when
+        /// `profiles.json` has no row for the selected id — something to name
+        /// in the message either way, never an empty string.
+        account: String,
+        /// One sentence, already user-facing, about why this account could not
+        /// be used. Never a raw token or any part of one.
+        detail: String,
+    },
+}
+
+/// [`resolve_selected_account_with`] against the real on-disk
+/// [`AccountsMetadata`] and the real OS keychain.
+///
+/// This is the function a join calls. It is deliberately infallible: no failure
+/// to resolve an account may prevent dialing a server that might not need one.
+pub async fn resolve_selected_account(client: &reqwest::Client) -> SelectedAccount {
+    // `AccountsMetadata::load()` reads `paths::profiles_path()`, which is the
+    // same file `menu::accounts` writes — so "the account the switcher shows as
+    // selected" and "the account a join uses" cannot disagree. A test hands in
+    // its own pair instead of touching either.
+    resolve_selected_account_with(
+        client,
+        &crate::store::AccountSecrets::open(),
+        &AccountsMetadata::load(),
+    )
+    .await
+}
+
+/// The decision behind [`resolve_selected_account`], with the metadata and
+/// secret store injected — same reasoning as [`resolve_client_id_from`]: the
+/// real ones are a developer's actual profile file and actual login keychain,
+/// which no test may touch.
+pub async fn resolve_selected_account_with(
+    client: &reqwest::Client,
+    secrets: &dyn SecretStore,
+    metadata: &AccountsMetadata,
+) -> SelectedAccount {
+    // Checked here rather than left to `try_cached_session` so the no-selection
+    // path does not even resolve a client id: a build with no
+    // `LODESTONE_MS_CLIENT_ID` must still join offline servers silently, which
+    // it would not if a missing id became an `Unavailable` for every player.
+    let Some(profile_id) = metadata.selected else {
+        return SelectedAccount::Offline;
+    };
+    let account = metadata
+        .profiles
+        .iter()
+        .find(|p| p.profile_id == profile_id)
+        .map_or_else(|| profile_id.to_string(), |p| p.username.clone());
+
+    let client_id = match resolve_client_id() {
+        Ok(id) => id,
+        Err(e) => {
+            return SelectedAccount::Unavailable {
+                account,
+                detail: e.to_string(),
+            };
+        }
+    };
+
+    match try_cached_session(client, &client_id, secrets, metadata).await {
+        Ok(CachedSessionOutcome::Ready(session)) => SelectedAccount::Online(session),
+        // Reachable only if the selection was cleared between the check above
+        // and the call — a different thread saving `profiles.json`. Joining
+        // offline is the right answer to "nothing is selected" whenever we
+        // observe it, so this is the same arm as the early return.
+        Ok(CachedSessionOutcome::NoAccountSelected) => SelectedAccount::Offline,
+        Ok(CachedSessionOutcome::SessionExpired { .. }) => SelectedAccount::Unavailable {
+            account,
+            detail: "the saved Microsoft session has expired; sign in to this account again"
+                .to_owned(),
+        },
+        // A live transport/parse/keychain failure. Distinguished from the
+        // expired-token case in the *text*, because the remedy differs: a
+        // player whose network is down should not be told to sign in again.
+        Err(e) => SelectedAccount::Unavailable {
+            account,
+            detail: format!("could not renew the Microsoft session: {e}"),
+        },
     }
 }
 
@@ -195,7 +346,7 @@ mod tests {
         let outcome = try_cached_session(&client, "test-client-id", &secrets, &metadata)
             .await
             .unwrap();
-        assert!(matches!(outcome, CachedSessionOutcome::NoCachedToken));
+        assert!(matches!(outcome, CachedSessionOutcome::NoAccountSelected));
     }
 
     #[tokio::test]
@@ -216,7 +367,94 @@ mod tests {
         let outcome = try_cached_session(&client, "test-client-id", &secrets, &metadata)
             .await
             .unwrap();
-        assert!(matches!(outcome, CachedSessionOutcome::NoCachedToken));
+        // The whole point of splitting the old `NoCachedToken`: this account is
+        // *known*, so the outcome names it and a UI can say whose session
+        // expired. Asserted on the payload, not just the discriminant — a
+        // variant that carried `None` here would be the old message with extra
+        // steps.
+        let CachedSessionOutcome::SessionExpired {
+            profile_id,
+            username,
+        } = outcome
+        else {
+            panic!("a selected account with no stored token must be SessionExpired, got {outcome:?}");
+        };
+        assert_eq!(profile_id, id);
+        assert_eq!(username.as_deref(), Some("Alice"));
+    }
+
+    /// The island assertion for the *auth* half: nothing selected means
+    /// `Offline`, and it must reach that answer with **no** client id
+    /// configured. This process almost certainly has no
+    /// `LODESTONE_MS_CLIENT_ID` set, so if the client-id lookup moved above the
+    /// selection check this would come back `Unavailable` and every offline
+    /// join in a default build would carry an auth complaint.
+    #[tokio::test]
+    async fn no_selection_resolves_to_offline_without_needing_a_client_id() {
+        crate::install_crypto_provider();
+        let client = reqwest::Client::new();
+        let secrets = MemoryStore::new();
+        let metadata = AccountsMetadata::default();
+
+        let resolved = resolve_selected_account_with(&client, &secrets, &metadata).await;
+        assert!(
+            matches!(resolved, SelectedAccount::Offline),
+            "no selection must be a plain offline join, got {resolved:?}"
+        );
+    }
+
+    /// The three join-relevant outcomes are three distinct values, and the two
+    /// failing ones name the account. `Unavailable`'s `detail` must also differ
+    /// between "token expired" and "could not reach Microsoft", because the
+    /// remedies differ — telling someone whose network is down to sign in again
+    /// is the wrong instruction.
+    #[tokio::test]
+    async fn a_selected_account_with_no_credential_is_unavailable_and_names_itself() {
+        crate::install_crypto_provider();
+        let client = reqwest::Client::new();
+        let secrets = MemoryStore::new();
+        let mut metadata = AccountsMetadata::default();
+        let id = uuid::Uuid::new_v4();
+        metadata.upsert(AccountProfile {
+            profile_id: id,
+            username: "Alice".to_owned(),
+            skin_url: None,
+            last_used: 0,
+        });
+        metadata.selected = Some(id);
+
+        // No client id in this process, so this stops at the client-id step —
+        // still `Unavailable`, still naming Alice, and *not* silently offline.
+        let resolved = resolve_selected_account_with(&client, &secrets, &metadata).await;
+        let SelectedAccount::Unavailable { account, detail } = resolved else {
+            panic!("a selected account that cannot be resolved must be Unavailable, got {resolved:?}");
+        };
+        assert_eq!(account, "Alice", "the failure must name the account");
+        assert!(
+            !detail.is_empty(),
+            "an Unavailable with no explanation is the vague message this split exists to remove"
+        );
+    }
+
+    /// A selection pointing at a profile with no `profiles.json` row still gets
+    /// *something* to name — the UUID — rather than an empty string in the
+    /// middle of a sentence. `AccountsMetadata::from_json` can produce exactly
+    /// this shape from a partly-corrupt file, since it skips bad entries but
+    /// keeps `selected`.
+    #[tokio::test]
+    async fn a_selection_with_no_metadata_row_names_the_uuid() {
+        crate::install_crypto_provider();
+        let client = reqwest::Client::new();
+        let secrets = MemoryStore::new();
+        let mut metadata = AccountsMetadata::default();
+        let id = uuid::Uuid::new_v4();
+        metadata.selected = Some(id);
+
+        let resolved = resolve_selected_account_with(&client, &secrets, &metadata).await;
+        let SelectedAccount::Unavailable { account, .. } = resolved else {
+            panic!("expected Unavailable, got {resolved:?}");
+        };
+        assert_eq!(account, id.to_string());
     }
 
     /// The remainder — a stored token actually being refreshed, and
@@ -224,6 +462,10 @@ mod tests {
     /// is, like the rest of `flow.rs`, exercised only by the live gate in
     /// `tests/device_code_live.rs`. Present so the gap shows up in `cargo
     /// test` output rather than silently.
+    ///
+    /// `resolve_selected_account`'s `Online` arm is in that same set: producing
+    /// it requires a real refresh token for a real Microsoft account that owns
+    /// Minecraft, so no hermetic test in this crate can reach it.
     #[test]
     fn the_refresh_and_interactive_completion_paths_are_unverified_without_live_credentials() {}
 }

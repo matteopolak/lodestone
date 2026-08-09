@@ -970,16 +970,69 @@ type OnlineSession = lodestone_client::Session;
 #[cfg(target_arch = "wasm32")]
 type OnlineSession = std::convert::Infallible;
 
+/// What identity a remote join should present — a *request*, resolved on the net
+/// thread rather than at the call site.
+///
+/// This replaced a plain `Option<OnlineSession>`, and the reason is the bug it
+/// fixes. Resolving an account needs an `await` (a refresh-token round trip to
+/// Microsoft), and every caller of [`NetClient::connect`] is synchronous UI code
+/// on the render thread; so with an `Option` the only thing an ordinary join
+/// could pass was `None`. That is precisely what happened: `connect_online` —
+/// the one constructor that could pass `Some` — had **zero callers**, so the
+/// account switcher could hold a signed-in, working Microsoft account that no
+/// join ever used, and an online-mode server produced "no Microsoft session was
+/// configured" while the switcher displayed the player's real username.
+///
+/// Naming the *intent* here moves the resolution to the one place that already
+/// has a runtime ([`run_async`], inside the net thread's `block_on`), so the
+/// synchronous constructors stay synchronous and still get a real session.
+enum RemoteAuth {
+    /// Never authenticate; present the caller's [`OfflineIdentity`] verbatim.
+    ///
+    /// This is [`NetClient::connect_as`] (live gates, which need a fresh name
+    /// per run and must not be diverted onto whatever account the developer
+    /// happens to have selected) and every browser join.
+    Offline,
+    /// Use whichever account [`lodestone_auth::AccountsMetadata::selected`]
+    /// names, resolving it on the net thread; fall back to the offline identity
+    /// when nothing is selected.
+    ///
+    /// Native-only because resolution needs the `lodestone-auth` chain, which
+    /// is itself `cfg(not(wasm32))`.
+    #[cfg(not(target_arch = "wasm32"))]
+    SelectedAccount,
+    /// A session the caller already resolved — [`NetClient::connect_online`],
+    /// for a caller that did its own sign-in and has a live one in hand.
+    Session(OnlineSession),
+}
+
+impl RemoteAuth {
+    /// What a **production** multiplayer join requests.
+    ///
+    /// A named function rather than a literal at the one call site, because the
+    /// literal is exactly what was wrong before: `connect` said `auth: None` and
+    /// nothing in the tree disagreed with it. Naming the decision gives a gate a
+    /// subject, so a future edit that quietly puts the join back on the offline
+    /// path fails a test instead of silently un-signing everyone in.
+    fn for_production_join() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        return RemoteAuth::SelectedAccount;
+        // Browser: `lodestone-auth` is native-only, so there is nothing to
+        // resolve and a browser join presents the offline identity.
+        #[cfg(target_arch = "wasm32")]
+        return RemoteAuth::Offline;
+    }
+}
+
 enum Origin {
-    /// Dial a real server over TCP. `auth` is `Some` for an online-mode join.
+    /// Dial a real server over TCP. `auth` says which identity to present.
     Remote {
         /// Host to dial.
         host: String,
         /// Port to dial.
         port: u16,
-        /// An authenticated Microsoft/Minecraft session, for online mode.
-        /// Always `None` in a browser — see [`OnlineSession`].
-        auth: Option<OnlineSession>,
+        /// Which identity to join under, resolved in [`run_async`].
+        auth: RemoteAuth,
     },
     /// Host `lodestone-server`'s integrated server in **this thread's runtime**
     /// and speak to it over an in-memory duplex — singleplayer (issue #287).
@@ -1031,7 +1084,20 @@ impl std::fmt::Debug for Origin {
                 .debug_struct("Remote")
                 .field("host", host)
                 .field("port", port)
-                .field("online", &auth.is_some())
+                // The *request*, not a resolved session: a `SelectedAccount`
+                // join that finds nothing selected still ends up offline, so
+                // this is what was asked for, not what happened. Still no
+                // token in the output — `RemoteAuth::Session`'s payload is
+                // never printed.
+                .field(
+                    "auth",
+                    &match auth {
+                        RemoteAuth::Offline => "offline",
+                        #[cfg(not(target_arch = "wasm32"))]
+                        RemoteAuth::SelectedAccount => "selected-account",
+                        RemoteAuth::Session(_) => "session",
+                    },
+                )
                 .finish(),
             Origin::Integrated {
                 seed, view_radius, ..
@@ -1124,12 +1190,28 @@ impl NetClient {
     ///
     /// # Identity
     ///
-    /// Joins as the **persisted "Play offline" identity**
-    /// ([`OfflineIdentity::load`]) — the same name and the same derived UUID
-    /// every launch, which is the whole point (see
-    /// [`crate::offline_identity`]). A **live gate must not use this**: a shared
-    /// offline name is a shared player file, and a dead player is held on the
-    /// death screen, which sends no chunks. Use [`Self::connect_as`] with
+    /// **The signed-in Microsoft account when there is one, and the persisted
+    /// "Play offline" identity otherwise.** This is the production join, so it
+    /// is the one path that consults
+    /// [`lodestone_auth::AccountsMetadata::selected`]; the resolution happens on
+    /// the net thread ([`RemoteAuth::SelectedAccount`]) because it needs an
+    /// `await` and every caller here is synchronous UI code.
+    ///
+    /// A selected account whose saved session cannot be renewed does **not**
+    /// abort the join: an offline-mode server never asks for authentication, so
+    /// the connection proceeds under the offline identity carrying the reason,
+    /// and only an online-mode server spends it (as
+    /// `lodestone_client::ClientError::OnlineModeSessionUnavailable`).
+    ///
+    /// With nothing selected this is exactly what it always was:
+    /// [`OfflineIdentity::load`] — the same name and the same derived UUID every
+    /// launch, which is the whole point (see [`crate::offline_identity`]), and
+    /// **no network call is made looking for an account**.
+    ///
+    /// A **live gate must not use this**: a shared offline name is a shared
+    /// player file, and a dead player is held on the death screen, which sends
+    /// no chunks — and a gate must not silently join as the developer's real
+    /// premium account either. Use [`Self::connect_as`] with
     /// `lodestone-testsupport`'s `unique_username()`.
     #[must_use]
     pub fn connect(
@@ -1139,15 +1221,63 @@ impl NetClient {
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
     ) -> Self {
         Self::connect_impl(
-            Origin::Remote {
-                host,
-                port,
-                auth: None,
-            },
+            Self::production_origin(host, port),
             protocol,
             session,
             OfflineIdentity::load(),
         )
+    }
+
+    /// The [`Origin`] a production multiplayer join dials — extracted from
+    /// [`Self::connect`] so a test can assert **which identity a real join asks
+    /// for** without spawning a net thread and dialing a server.
+    ///
+    /// It exists because the thing that broke here was not a wrong value but a
+    /// missing one, and a missing value has no natural subject to point a test
+    /// at: `connect` hardcoded `auth: None`, which is indistinguishable from
+    /// correct until you compare it against `connect_online`, three constructors
+    /// away. Naming the choice gives the gate something to read that is *the same
+    /// expression production evaluates* — a test that rebuilt the `Origin` itself
+    /// would only assert its own opinion.
+    /// # Why this forks on `#[cfg(test)]`
+    ///
+    /// Resolving a selected account opens the OS keychain, POSTs the refresh
+    /// token to Microsoft, and — because the refresh token *rotates on every
+    /// use* — writes a new one back. A `cargo test` that did that would reach
+    /// the network from a unit test and could invalidate the token the owner's
+    /// real client is holding: a side effect with a user-visible symptom that no
+    /// health check here can see, because the suite still passes. This crate has
+    /// had that exact defect once already (a unit test opening `login.live.com`
+    /// in the owner's browser on every run), and the lesson recorded from it was
+    /// to fork on `#[cfg(test)]` rather than early-return on `cfg!(test)`, so the
+    /// interception is *assertable* instead of a silent skip —
+    /// [`unit_tests_never_resolve_a_real_microsoft_account`] is that assertion,
+    /// and [`a_production_join_requests_the_selected_microsoft_account`] pins the
+    /// production decision separately so the fork cannot hide a regression in it.
+    ///
+    /// [`unit_tests_never_resolve_a_real_microsoft_account`]: tests::unit_tests_never_resolve_a_real_microsoft_account
+    /// [`a_production_join_requests_the_selected_microsoft_account`]: tests::a_production_join_requests_the_selected_microsoft_account
+    fn production_origin(host: String, port: u16) -> Origin {
+        Origin::Remote {
+            host,
+            port,
+            #[cfg(not(test))]
+            auth: RemoteAuth::for_production_join(),
+            #[cfg(test)]
+            auth: RemoteAuth::Offline,
+        }
+    }
+
+    /// The [`Origin`] a join that must **never** consult the account switcher
+    /// dials — [`Self::connect_as`]'s, i.e. every live gate's. Paired with
+    /// [`Self::production_origin`] so the two sit next to each other and a gate
+    /// can assert they differ.
+    fn offline_origin(host: String, port: u16) -> Origin {
+        Origin::Remote {
+            host,
+            port,
+            auth: RemoteAuth::Offline,
+        }
     }
 
     /// As [`Self::connect`], but joining under `username` instead of the
@@ -1169,6 +1299,14 @@ impl NetClient {
     /// what a gate driving one wants to see;
     /// [`crate::offline_identity::validate_username`] is the check that belongs
     /// in front of *storing* a name.
+    ///
+    /// **Stays offline unconditionally**, and that is load-bearing now that
+    /// [`Self::connect`] consults the account switcher: a gate asks for an exact
+    /// username, so resolving a signed-in account here would silently join under
+    /// a *different* name than the one requested — on a developer's machine
+    /// only, where an account happens to be selected. Every live gate would then
+    /// share one premium player file, which is the eviction/blackout hazard this
+    /// constructor exists to avoid, wearing a new hat.
     #[must_use]
     pub fn connect_as(
         host: String,
@@ -1178,11 +1316,7 @@ impl NetClient {
         username: String,
     ) -> Self {
         Self::connect_impl(
-            Origin::Remote {
-                host,
-                port,
-                auth: None,
-            },
+            Self::offline_origin(host, port),
             protocol,
             session,
             OfflineIdentity::from_username_unchecked(username),
@@ -1197,18 +1331,32 @@ impl NetClient {
     /// and the real profile identity (`auth.profile.name`/`.id`) replaces the
     /// [`crate::offline_identity`] name path for the login-start packet.
     ///
-    /// This is purely additive: [`Self::connect`] is completely unchanged and
-    /// remains the offline-mode default every existing caller uses.
+    /// **Prefer [`Self::connect`]**, which now resolves the selected account by
+    /// itself. This constructor is for a caller that has *already* driven a
+    /// sign-in and holds a live session it does not want re-resolved — a
+    /// "sign in and connect straight away" action, or a test supplying a session
+    /// without a keychain or a `profiles.json` anywhere.
     ///
-    /// **Still zero callers in the shell** — an island in the "nothing produces
-    /// this" direction, verified by grep rather than assumed: `connect_online`
-    /// appears only here and in `docs/accounts.md`, and
-    /// `lodestone_auth::login::try_cached_session` is called from nowhere in
-    /// `crates/lodestone-shell/src/`. So the `Some(session)` arm of `run`'s
-    /// profile match is unreachable from production, and **every** join this
-    /// shell makes is an offline one. Wiring a real "sign in and connect" action
-    /// to it is issue #66's remaining half; until then the account switcher can
-    /// hold a signed-in Microsoft account that no join ever uses.
+    /// # This used to be an island, and the doc comment said so
+    ///
+    /// It carried, correctly and for a long time, *"still zero callers in the
+    /// shell … every join this shell makes is an offline one … the account
+    /// switcher can hold a signed-in Microsoft account that no join ever uses"*.
+    /// That was the whole bug, and the shape is worth keeping: the constructor
+    /// existed, the session type existed, `lodestone_auth::try_cached_session`
+    /// existed, `ClientBuilder::online_session` existed, the driver's
+    /// `begin_encryption` consumed it — every piece was built and tested, and
+    /// **nothing called the first one**, so a player with a working premium
+    /// account was told no session was configured.
+    ///
+    /// The fix was not to find callers for this function. It was to notice
+    /// *why* it had none: it demands an already-resolved `Session`, resolving
+    /// one needs an `await`, and every join call site is synchronous UI code. So
+    /// [`Self::connect`] now passes [`RemoteAuth::SelectedAccount`] and the
+    /// resolution happens where a runtime already exists. **When a constructor
+    /// has no callers, check whether its signature is the reason** before
+    /// wiring a caller to it.
+    ///
     /// Native-only: it takes a real [`lodestone_client::Session`], which only the
     /// native `lodestone-auth` chain can produce. A browser join is offline-identity
     /// only, and goes through the relay rather than this path.
@@ -1225,13 +1373,13 @@ impl NetClient {
             Origin::Remote {
                 host,
                 port,
-                auth: Some(auth),
+                auth: RemoteAuth::Session(auth),
             },
             protocol,
             session,
-            // Unused on this path (the `Some(auth)` arm wins), but the parameter
-            // is not optional: an online session that failed to produce a
-            // profile has no business silently falling back to a *different*
+            // Unused on this path (the session's own profile wins), but the
+            // parameter is not optional: an online session that failed to produce
+            // a profile has no business silently falling back to a *different*
             // identity, so the value here is the same one `connect` would use.
             OfflineIdentity::load(),
         )
@@ -2186,18 +2334,105 @@ async fn run_async(
                                 host: host.to_string(),
                                 port,
                             },
-                            None,
+                            // Never authenticated, and this matches vanilla
+                            // rather than merely being convenient:
+                            // `handleHello` skips the encryption request for
+                            // `isMemoryConnection()`, so a singleplayer host
+                            // has nothing to prove and no session to spend.
+                            RemoteAuth::Offline,
                             Some(io),
                         )
                     }
                     // Open to LAN: there is a real socket, so the host dials it
-                    // over loopback exactly as a remote join would.
-                    (None, Some(address)) => (address, None, None),
+                    // over loopback exactly as a remote join would — but our own
+                    // integrated server answers `online_mode(false)` in its
+                    // status/login, so this stays offline too.
+                    (None, Some(address)) => (address, RemoteAuth::Offline, None),
                     // Unreachable by construction — `open_lan_world` returns an
                     // address on success and this arm returns early on failure.
                     (None, None) => unreachable!("an integrated server with no transport"),
                 }
             }
+        };
+
+        // Turn the [`RemoteAuth`] *request* into either a live session or a
+        // reason there isn't one. This is the step whose absence was the whole
+        // bug: `ClientBuilder::online_session` had exactly one shell caller
+        // (`connect_online`) and that constructor had none, so no join ever
+        // carried a session and an online-mode server always answered "no
+        // Microsoft session was configured" — while the account switcher, three
+        // screens away, displayed the player's real premium username.
+        //
+        // It happens here rather than at the call site because it `await`s: the
+        // refresh token is exchanged with Microsoft over HTTPS. `run_async` is
+        // inside the net thread's `block_on`, so a runtime exists; every
+        // `NetClient::connect` caller is synchronous render-thread UI code and
+        // could never have done this itself. `NetUpdate::Connecting` has already
+        // been sent, so the loading screen is up for the duration.
+        //
+        // **A failure here does not abort the join.** An offline-mode server
+        // never sends an encryption request at all — vanilla's
+        // `ServerLoginPacketListenerImpl.handleHello` gates it on
+        // `usesAuthentication() && !isMemoryConnection()` — so a stale token has
+        // no bearing on joining one, and refusing to dial would break joins that
+        // work. The reason is handed to the builder instead and only spent if the
+        // server turns out to demand online mode.
+        #[cfg(not(target_arch = "wasm32"))]
+        let (auth, auth_unavailable) = match auth {
+            RemoteAuth::Offline => (None, None),
+            RemoteAuth::Session(session) => (Some(session), None),
+            RemoteAuth::SelectedAccount => {
+                // `reqwest::Client::new()` panics with no rustls provider
+                // installed, and that is a runtime panic no `cargo check` sees —
+                // so the install sits next to the construction, as it does in
+                // `lodestone_client`'s driver. Idempotent.
+                lodestone_auth::install_crypto_provider();
+                let http = reqwest::Client::new();
+                match lodestone_auth::resolve_selected_account(&http).await {
+                    lodestone_auth::SelectedAccount::Online(session) => {
+                        // Logged at info, and it names the account: this line is
+                        // how the *next* online-join report is attributable
+                        // without a debugger. A join that authenticates and one
+                        // that silently fell back to offline used to look
+                        // identical from the outside.
+                        tracing::info!(
+                            target: "auth",
+                            account = %session.profile.name,
+                            "joining with the selected Microsoft account"
+                        );
+                        (Some(session), None)
+                    }
+                    lodestone_auth::SelectedAccount::Offline => {
+                        tracing::info!(
+                            target: "auth",
+                            "no Microsoft account selected; joining with the offline identity"
+                        );
+                        (None, None)
+                    }
+                    lodestone_auth::SelectedAccount::Unavailable { account, detail } => {
+                        // `warn`, not `error`: against an offline-mode server
+                        // this is genuinely harmless and the session that
+                        // follows is fine.
+                        tracing::warn!(
+                            target: "auth",
+                            %account,
+                            %detail,
+                            "could not use the selected Microsoft account; \
+                             joining offline (an online-mode server will refuse this)"
+                        );
+                        (None, Some((account, detail)))
+                    }
+                }
+            }
+        };
+        // Browser: `RemoteAuth::SelectedAccount` does not exist and
+        // `RemoteAuth::Session`'s payload is uninhabited, so this is statically
+        // always `None` — `match session {}` says so to the compiler rather than
+        // inventing a stand-in.
+        #[cfg(target_arch = "wasm32")]
+        let auth: Option<OnlineSession> = match auth {
+            RemoteAuth::Offline => None,
+            RemoteAuth::Session(session) => match session {},
         };
 
         // Online mode (issue #65) supplies the account's real identity; offline
@@ -2259,6 +2494,14 @@ async fn run_async(
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(session) = auth {
             builder = builder.online_session(session);
+        }
+        // Mutually exclusive with the arm above by construction — the resolution
+        // yields a session or a reason, never both — but wired as an independent
+        // `if` so that stays true by the builder's own contract (a real session
+        // wins) rather than by this function's control flow.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((account, detail)) = auth_unavailable {
+            builder = builder.online_session_unavailable(account, detail);
         }
         // `OnlineSession` is uninhabited here, so this branch cannot be entered and
         // `match session {}` says so to the compiler rather than to a reader.
@@ -2970,6 +3213,70 @@ mod tests {
     // `crate::offline_identity`'s module docs and
     // `tests/no_production_source_names_testsupport.rs`.
     use lodestone_testsupport::unique_username;
+
+    /// The island assertion for the signed-in-account wiring, and the reason it
+    /// is worth having at all: every piece of online-mode support existed and was
+    /// individually tested — the `Session` type, `try_cached_session`,
+    /// `ClientBuilder::online_session`, the driver's `begin_encryption`, the
+    /// RSA/AES primitives — while the *first* link, a join that asks for the
+    /// account, did not. So the tree was green, every subsystem's own suite
+    /// passed, and a player with a working premium account was told no session
+    /// was configured.
+    ///
+    /// This is a pin rather than a discovery, and that is the point: the
+    /// regression it guards against is a one-token edit back to `Offline`, which
+    /// no other test in this repo would notice, because joining offline is what
+    /// every hermetic and live gate here deliberately does.
+    #[test]
+    fn a_production_join_requests_the_selected_microsoft_account() {
+        assert!(
+            matches!(RemoteAuth::for_production_join(), RemoteAuth::SelectedAccount),
+            "a production multiplayer join must consult the account switcher; \
+             requesting Offline here is the island that made a signed-in account unusable"
+        );
+    }
+
+    /// The other half, and it is not symmetric decoration: a live gate asks for
+    /// an exact username, so if `connect_as` resolved the selected account it
+    /// would join under a *different* name — on a developer's machine only,
+    /// where an account happens to be selected — and every gate would share one
+    /// premium player file. That is the shared-offline-name eviction hazard
+    /// `connect_as` exists to avoid, so the two origins must differ.
+    #[test]
+    fn a_gate_join_never_consults_the_account_switcher() {
+        let origin = NetClient::offline_origin("example.invalid".into(), 25565);
+        let Origin::Remote { auth, .. } = origin else {
+            panic!("offline_origin must build a Remote origin");
+        };
+        assert!(
+            matches!(auth, RemoteAuth::Offline),
+            "connect_as must stay offline regardless of what is selected"
+        );
+    }
+
+    /// The `#[cfg(test)]` fork in [`NetClient::production_origin`], asserted
+    /// rather than assumed.
+    ///
+    /// Resolving an account opens the OS keychain, POSTs to Microsoft, and
+    /// rotates the stored refresh token — so a unit test that reached it could
+    /// invalidate the credential the owner's real client is holding, while the
+    /// suite reported green. The interception is deliberate; this test is what
+    /// makes it *visible*, so nobody removes it as dead code and nobody is
+    /// surprised that `NetClient::connect` behaves differently under `cargo
+    /// test`. `a_production_join_requests_the_selected_microsoft_account` covers
+    /// the production decision the fork bypasses, so the pair cannot both be
+    /// satisfied by simply never resolving anything.
+    #[test]
+    fn unit_tests_never_resolve_a_real_microsoft_account() {
+        let origin = NetClient::production_origin("example.invalid".into(), 25565);
+        let Origin::Remote { auth, .. } = origin else {
+            panic!("production_origin must build a Remote origin");
+        };
+        assert!(
+            matches!(auth, RemoteAuth::Offline),
+            "a unit-test build must not reach the keychain or Microsoft"
+        );
+    }
 
     /// `usernames_are_unique_per_call` used to live here, asserting a property
     /// of `lodestone_testsupport::unique_username` — which this crate re-exported

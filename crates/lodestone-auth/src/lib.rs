@@ -101,7 +101,10 @@ pub use flow::{
     request_device_code, session_from_ms_token,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use login::{CachedSessionOutcome, finish_interactive, resolve_client_id, try_cached_session};
+pub use login::{
+    CachedSessionOutcome, SelectedAccount, finish_interactive, resolve_client_id,
+    resolve_selected_account, resolve_selected_account_with, try_cached_session,
+};
 pub use metadata::{AccountProfile, AccountsMetadata};
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::{AccountSecrets, KeychainStore, MemoryStore, SecretStore, StorageMode};
