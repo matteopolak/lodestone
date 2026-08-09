@@ -662,6 +662,34 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
             template: BaseTemplate::Monster,
             overrides: &[("movement_speed", 0.25)],
         },
+        // `Witch.createAttributes()` (`monster/Witch.java:106-108`): the monster
+        // base plus `MAX_HEALTH 26.0` and `MOVEMENT_SPEED 0.25`. **26, not 20** —
+        // the witch is one of the few monsters that is not on the generic health,
+        // and inheriting the base here would have made it a third easier to kill
+        // than vanilla's.
+        "witch" => TypeSpec {
+            template: BaseTemplate::Monster,
+            overrides: &[("max_health", 26.0), ("movement_speed", 0.25)],
+        },
+        // `Pillager.createAttributes()` (`monster/illager/Pillager.java:84-90`):
+        // `MOVEMENT_SPEED 0.35`, `MAX_HEALTH 24.0`, `ATTACK_DAMAGE 5.0`,
+        // `FOLLOW_RANGE 32.0`.
+        //
+        // The `follow_range` is the one worth naming: `Mob.createMobAttributes`
+        // overrides the registry's 32.0 down to 16.0 for *every* mob, and the
+        // pillager puts it back to 32.0 — so this is a real override that happens to
+        // equal the registry default, and dropping it as redundant would halve the
+        // pillager's acquisition range. The `attack_damage` of 5.0 is its melee
+        // value; the crossbow bolt's damage comes from the projectile, not this.
+        "pillager" => TypeSpec {
+            template: BaseTemplate::Monster,
+            overrides: &[
+                ("movement_speed", 0.35),
+                ("max_health", 24.0),
+                ("attack_damage", 5.0),
+                ("follow_range", 32.0),
+            ],
+        },
         // `ZombifiedPiglin.createAttributes()` is `Zombie`'s with
         // `SPAWN_REINFORCEMENTS_CHANCE` re-added as 0.0 (already 0.0 in
         // `ZOMBIE`, so a no-op), `MOVEMENT_SPEED` re-added as 0.23 (also a
