@@ -760,6 +760,33 @@ impl Sim {
         20.0 / (speed.max(f64::from(f32::EPSILON)) as f32)
     }
 
+    /// Armour points to draw, `None` before the local player has a server-fed
+    /// attribute snapshot.
+    ///
+    /// Vanilla's `LivingEntity.getArmorValue` is
+    /// `Mth.floor(getAttributeValue(Attributes.ARMOR))`, so this is the folded
+    /// `minecraft:armor` attribute and **not** a per-item table — equipment
+    /// contributes through the modifiers the server pushes on
+    /// `LivingEntity.setItemSlot`, exactly as [`Self::attack_strength_delay`]
+    /// above documents for `attack_speed`. `Some(0)` is a real state (a live
+    /// player wearing nothing) and draws no row, matching vanilla's
+    /// `if (armor > 0)`; `None` is "no snapshot yet" and also draws nothing, so
+    /// the two agree on screen and differ only in what they claim to know.
+    ///
+    /// Public where [`Self::attack_strength_delay`] is private because this one
+    /// has an out-of-file caller — the HUD frame assembler — which is the same
+    /// reason [`Self::health`] and [`Self::food`] are public over a private
+    /// `vitals`.
+    #[must_use]
+    pub fn armour_value(&self) -> Option<i32> {
+        let key = lodestone_model::Identifier::new("minecraft", "armor")
+            .expect("valid built-in identifier");
+        self.read(|w| {
+            w.get::<Attributes>(self.local)
+                .map(|attrs| attribute_value(&attrs.0, &key).floor() as i32)
+        })
+    }
+
     /// The attack-cooldown fraction the crosshair indicator fills to,
     /// `0.0..=1.0` — vanilla's `getAttackStrengthScale(0.0F)`
     /// (`Player.java:1826-1828`), the exact call `Hud.extractCrosshair` makes
