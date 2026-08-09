@@ -903,10 +903,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Which settings actually do something, and what the rest are waiting on](./options-consumption-census.md) —
   A consumption audit of the settings tree: for every option
   `crates/lodestone-shell/src/menu/options.rs` puts on screen, whether the value
-  reaches anything. The tree carries **143 controls**; **40 rows work** and the rest
-  are present and greyed. This doc records *why* each greyed group is greyed — i.e.
-  which subsystem it is waiting on — so the next person wiring an option can tell a
-  five-minute threading job from a new renderer feature.
+  reaches anything. The tree carries **143 controls**; most rows are present and
+  greyed. This doc records *why* each greyed group is greyed — i.e. which subsystem
+  it is waiting on — so the next person wiring an option can tell a five-minute
+  threading job from a new renderer feature.
 - [Oracle runtimes: Apple `container`](./oracle-runtimes.md) — All six JVM-oracle
   scripts under `scripts/live-oracles/` and `scripts/worldgen-oracle/`, plus the three
   Rust test files that used to shell out to `docker` directly, now run their real

@@ -4,10 +4,17 @@
 
 A consumption audit of the settings tree: for every option
 `crates/lodestone-shell/src/menu/options.rs` puts on screen, whether the value
-reaches anything. The tree carries **143 controls**; **40 rows work** and the
-rest are present and greyed. This doc records *why* each greyed group is greyed —
-i.e. which subsystem it is waiting on — so the next person wiring an option can
-tell a five-minute threading job from a new renderer feature.
+reaches anything. The tree carries **143 controls**; most rows are present and
+greyed. This doc records *why* each greyed group is greyed — i.e. which subsystem
+it is waiting on — so the next person wiring an option can tell a five-minute
+threading job from a new renderer feature.
+
+**Re-measured end to end on 2026-08-08, and the greyed groups are not one tier.**
+The single most important correction is that **"blocked on a missing subsystem" is
+now the minority case**: for most greyed rows the consumer already exists and is
+already correct, and what is missing is one push from `config::Options` to it. See
+[Three kinds of greyed row](#three-kinds-of-greyed-row-measured-2026-08-08), which
+is the table to read before believing any "blocked on" cell further down.
 
 [`settings-screen.md`](./settings-screen.md) covers the tree's layout and
 arithmetic; this doc is only about the producer→consumer chain behind each row.
@@ -53,7 +60,16 @@ non-`keybinds` field of `config::Options` has a row that reaches it.
 
 ## The census
 
-### Wired (43 rows outside a world / 42 inside, 18 distinct options)
+### Wired (29 option rows, 25 distinct options)
+
+Counts, because three different ones get conflated here: **51 live *cells*** outside
+a world (50 inside — the root's Online button is the one that changes), of which
+**29 are option rows**, 9 are Done buttons and 13 are working nav buttons; those 29
+rows carry **25 distinct options**, because four are placed on two pages each. All
+three numbers are asserted by `the_disabled_majority_is_the_point_and_it_is_measured`
+and `the_root_online_button_is_the_one_row_that_changes_with_in_world`, so they
+cannot drift here without a build failure — quote them from a test run, not from
+this paragraph.
 
 | option | page(s) | type | vanilla default | consumer |
 |---|---|---|---|---|
@@ -73,30 +89,133 @@ non-`keybinds` field of `config::Options` has a row that reaches it.
 | `textBackgroundOpacity` | Chat, **Accessibility** | slider `UnitDouble` | `0.5` | row background alpha |
 | `sensitivity` | Mouse | slider `UnitDouble` | `0.5` (label reads **100%** — `2.0 * value`) | `sim/step.rs`'s `apply_mouse`, **via `Config::resolve_persisted`** (#443) |
 | `renderDistance` | Video | slider `IntRange(2, 32)` | `12` in vanilla, **`8` here** — see `config::DEFAULT_RENDER_DISTANCE` | `sim/build.rs` world radius + `sim/camera.rs` fog, via `resolve_persisted` (#443) |
+| `damageTiltStrength` | Accessibility | slider `UnitDouble`, label `percentValueOrOffLabel` | `1.0` | `camera_rig::BobFrame::hurt_roll_degrees`, via `app/redraw.rs` → `RenderState::set_damage_tilt_strength` |
+| `panoramaSpeed` | Accessibility | slider `UnitDouble`, label `percentValueLabel` | `1.0` | `menu::panorama::PanoramaRenderer::set_speed`, via `MenuFrame::panorama_speed` |
 
-Three options appear on **two pages each** — that is vanilla's own shape, one
-`OptionInstance` placed on both `ChatOptionsScreen` and
-`AccessibilityOptionsScreen`, so editing either row moves the other's label too.
-This is why `LiveOption` is keyed by the option and not by the row, and why the
-live *row* count (43 outside a world, 42 inside) exceeds the distinct-option
-count (18). Both numbers are asserted by
-`the_disabled_majority_is_the_point_and_it_is_measured`, so they cannot drift
-here without a build failure.
+**Four** options appear on **two pages each** — that is vanilla's own shape, one
+`OptionInstance` placed on two screens, so editing either row moves the other's label
+too. `chatOpacity`, `chatLineSpacing` and `textBackgroundOpacity` are on
+`ChatOptionsScreen` *and* `AccessibilityOptionsScreen`; `showSubtitles` is on
+`SoundOptionsScreen` *and* `AccessibilityOptionsScreen`. This is why `LiveOption` is
+keyed by the option and not by the row, and why the row count exceeds the
+distinct-option count by exactly four.
+
+### Three kinds of greyed row (measured 2026-08-08)
+
+The old table below sorts greyed rows by *subsystem*. That grouping hid the thing
+that actually decides how much work each row is, so this is the axis to read
+first — **which of the five links is missing**, measured by grepping for each
+consumer rather than inferred from the group it sits in:
+
+| kind | what is already true | what is missing | examples |
+|---|---|---|---|
+| **A — consumer live, no push** | the subsystem exists, is correct, and is called every frame with a **hardcoded constant** | links 1–4, plus swapping the constant for the field | all 11 `soundSource.*`, `fov`, `glintSpeed`, `glintStrength`, `cloudStatus` |
+| **B — consumer is itself an island** | the code exists in `lodestone-render`, unit-tested, with **zero shell callers** | a consumer that runs, *then* the option | `screenEffectScale`, `fovEffectScale`, `darknessEffectScale` (they scale `confusion_overlay_triangles` / `portal_overlay_alpha`, which nothing draws) |
+| **C — no subsystem** | nothing | the feature | `gamma`, `narrator`, `highContrast`, `entityShadows`, `entityDistanceScaling`, `biomeBlendRadius`, `simulationDistance`, `mipmapLevels`, `rawMouseInput`, `allowCursorChanges` |
+
+Kind A is the important row and it is where the previous version of this doc was
+most wrong. Three specific corrections, each measured:
+
+- **There is an audio subsystem, and it has a per-category volume seam.** The old
+  table said *"there is no audio subsystem at all — nothing plays sound yet"*. That
+  was true when written and is now false in every part: `lodestone-audio` and
+  `lodestone-sound` are real crates, `crate::audio::ShellAudio` wraps a device-backed
+  `AudioEngine`, and music, ambience and sound subtitles all play. More to the point,
+  `lodestone_audio::CategoryVolumes::set_user(category, volume)` is **exactly** the
+  eleven sliders' consumer, reachable through
+  `AudioEngine::with_mixer` → `Mixer::volumes_mut`, and `SoundCategory::ALL` is
+  vanilla's own eleven in order. The eleven sound sliders are kind **A**, not
+  "blocked on a subsystem". This is the staleness class `CLAUDE.md` describes: the
+  claim was correct and evidenced, and nothing about it looked out of date.
+- **`fov` has a consumer.** `Camera::fov_y_degrees` feeds the projection matrix and
+  `camera_rig::build_camera` sets it to the module constant `FOV_Y_DEGREES` (70,
+  vanilla's default) on every frame. The old table's *"no consumer at all"* is only
+  true of the literal string `options.fov`; the effect is fully implemented and
+  pinned to one value. Kind **A**.
+- **`glintSpeed`/`glintStrength` and `cloudStatus` are the same shape.**
+  `lodestone_render::glint::glint_clock(millis, speed)` and
+  `GlintUniform::new(…, speed, strength)` take both as parameters, and the two shell
+  call sites (`gpu/glint.rs`, `hud/item_icon.rs`) pass `DEFAULT_SPEED`/
+  `DEFAULT_STRENGTH`. `SkyFrame::with_cloud_status` really does switch between the
+  flat quad and extruded per-cell geometry, and has **zero** production callers, so
+  the shell always draws `CloudStatus::default()` (Fancy).
+
+Two traps found while measuring, both of the "grep hit is not a consumer" kind:
+
+- **`main_hand` in `lodestone-shell` is not vanilla's `mainHand` option.** It is the
+  *held item* (`RenderState::set_main_hand_source`, a closure yielding the stack
+  first person draws). Vanilla's left/right handedness option has no consumer here at
+  all — kind C. Grepping the option's name finds 33 files and none of them are it.
+- **`mipmapLevels` has no consumer either**, despite `lodestone-render`'s
+  `texture::mip_level_count`: that is `log2(max(w,h)) + 1` derived from the atlas
+  size, not a user-selectable cap.
 
 ### Present and greyed, by what they are waiting on
 
+**The "blocked on" column below predates the kind A/B/C measurement above and is
+superseded by it where the two disagree.** It is kept because the per-group
+groupings are still the right map of *which* subsystem each row belongs to.
+
 | group | options | blocked on |
 |---|---|---|
-| **Audio** | all 11 `soundSource.*`, `soundDevice`, `directionalAudio`, `musicFrequency`, `musicToast` | there is no audio subsystem at all — nothing plays sound yet |
+| **Audio** | all 11 `soundSource.*`, `soundDevice`, `directionalAudio`, `musicFrequency`, `musicToast` | **superseded — see kind A above.** The eleven volume sliders need only a push into `CategoryVolumes::set_user`; `soundDevice` (device enumeration) and `musicFrequency`/`musicToast` are separate and smaller |
 | **Window / display** | `fullscreen`, `exclusiveFullscreen`, `fullscreenResolution`, `enableVsync`, `framerateLimit`, `inactivityFpsLimit`, `preferredGraphicsBackend` | runtime window and surface reconfiguration |
 | **Renderer quality** | `graphicsPreset`, `gamma`, `mipmapLevels`, `ambientOcclusion`, `biomeBlendRadius`, `particles`, `cloudStatus`, `cloudRange`, `entityShadows`, `entityDistanceScaling`, `improvedTransparency`, `textureFiltering`, `maxAnisotropyBit`, `weatherRadius`, `chunkSectionFadeInTime`, `vignette` | each needs its own renderer knob; several are whole features |
-| **Post-process / screen effects** | `screenEffectScale`, `fovEffectScale`, `darknessEffectScale`, `damageTiltStrength`, `glintSpeed`, `glintStrength` | the effects exist in varying degrees; the scale factors are not plumbed |
-| **Distances** | ~~`renderDistance`~~, `simulationDistance`, `fov`, ~~`sensitivity`~~ | `renderDistance` and `sensitivity` are **live since #443**; the other two have no consumer at all — see the gotcha below |
+| **Post-process / screen effects** | `screenEffectScale`, `fovEffectScale`, `darknessEffectScale`, ~~`damageTiltStrength`~~, `glintSpeed`, `glintStrength` | `damageTiltStrength` is **live now** — its consumer had been honoured all along; the three `*EffectScale` rows are kind **B** (the effect they scale is itself an island); the two glint rows are kind **A** |
+| **Distances** | ~~`renderDistance`~~, `simulationDistance`, `fov`, ~~`sensitivity`~~ | `renderDistance` and `sensitivity` are live; `fov` is kind **A** (`camera_rig::build_camera` pins `Camera::fov_y_degrees` to the constant `FOV_Y_DEGREES`); `simulationDistance` is kind **C** |
 | **Chat behaviour** | `chatVisibility`, `chatLinks`, `chatLinksPrompt`, `chatDelay`, `autoSuggestions`, `hideMatchedNames`, `onlyShowSecureChat`, `saveChatDrafts`, `reducedDebugInfo` | chat *behaviour* rather than chat *appearance*; the appearance half is now wired |
 | **Narrator / high contrast** | `narrator`, `narratorHotkey`, `highContrast`, `highContrastBlockOutline` | no narrator, and high contrast is a resource pack swap |
 | **Skin & model parts** | all 7 `modelPart.*`, `mainHand` | needs the parts to reach the entity renderer *and* the serverbound client-settings packet |
-| **Menu chrome** | `menuBackgroundBlurriness`, `panoramaSpeed`, `notificationDisplayTime`, `hideSplashTexts`, `darkMojangStudiosBackground`, `hideLightningFlashes`, `backgroundForChatOnly`, `rotateWithMinecart`, `inGameNotification`, `sharePresence` | assorted; mostly small but each needs its own consumer |
+| **Menu chrome** | `menuBackgroundBlurriness`, ~~`panoramaSpeed`~~, `notificationDisplayTime`, `hideSplashTexts`, `darkMojangStudiosBackground`, `hideLightningFlashes`, `backgroundForChatOnly`, `rotateWithMinecart`, `inGameNotification`, `sharePresence` | `panoramaSpeed` is **live now** — `PanoramaRenderer::set_speed` was an island with zero callers; the rest each need their own consumer, and `hideSplashTexts`/`darkMojangStudiosBackground` have no splash text and no Mojang screen to hide |
 | **Input** | `toggleAttack`, `toggleUse`, `autoJump`, `sprintWindow`, `rawMouseInput`, ~~`discreteMouseScroll`~~, `allowCursorChanges`, `operatorItemsTab` | see the breakdown below — this group is **not** one tier |
+
+### The two rows wired on 2026-08-08, and why they were the two
+
+Both were **kind A with the push entirely inside `lodestone-shell/src/menu/**`**,
+which is why they could land without a brokered file. They are also each other's
+mirror image, which is worth keeping as the pair of shapes to look for:
+
+- **`damageTiltStrength`** had links **1 and 5** and was missing **2–4**. The field
+  was persisted with real serde, and `app/redraw.rs` already read
+  `MenuNav::damage_tilt_strength` into `RenderState::set_damage_tilt_strength` every
+  frame — so the whole camera-tilt consumer was live and honoured, and the *only* way
+  to reach it was to hand-edit `options.json`, because the row fell through to
+  `UNIT_DOUBLE_DEFAULTS`' frozen `1.0`. Exactly the chat batch's failure, one row
+  wide.
+- **`panoramaSpeed`** had **none of the five** and its *consumer* was the island:
+  `PanoramaRenderer::set_speed` existed, was unit-tested, and had **zero callers**,
+  so the title screen span at `DEFAULT_SPIN_SPEED` whatever anyone set. The value now
+  rides `MenuFrame::panorama_speed`, stamped by `frame_for` beside `gui_scale`.
+
+Two gotchas the pair produced:
+
+- **`MenuFrame::panorama_speed` is an `Option<f32>`, and that is load-bearing.**
+  `MenuFrame` derives `Default`, and `0.0` is a *legitimate* value here — a
+  deliberately stationary panorama is the whole point of the option. A bare `f32`
+  would make any hand-built frame freeze the sky, which is indistinguishable from
+  the option working. `None` means "nothing stamped this" and the renderer keeps its
+  own speed; the same reason `MenuFrame::cursor` is an `Option` rather than `(0, 0)`.
+- **The two labels are different stringifiers and differ only at zero.**
+  `damageTiltStrength` is vanilla's `percentValueOrOffLabel` (`0.0` → `OFF`);
+  `panoramaSpeed` is the plain `percentValueLabel` (`0.0` → `0%`). Transcribing one
+  for the other agrees at every value except the one a player is most likely to pick,
+  so the gates pin zero on both.
+- **`step_chat_option` is now `step_unit_double_option`.** The rename is not tidying:
+  it carries these two Accessibility rows now, and a name claiming otherwise is how
+  the next reader concludes there is no generic stepper and writes a second one.
+
+### The brokered patches, for the kind A rows that need a file outside `menu/**`
+
+Each of these is a *push*, not a feature: the consumer exists, runs every frame, and
+is currently handed a hardcoded constant. Listed with the exact seam so whoever owns
+the file can do it without re-deriving anything.
+
+| option(s) | file | patch |
+|---|---|---|
+| 11 × `soundSource.*` | `sim/audio.rs` (+ `config.rs` fields) | add `Sim::set_sound_volumes(&Options)` calling `audio_mut(\|a\| …)` → `AudioEngine::with_mixer(\|m\| m.volumes_mut().set_user(cat, v))` for each `SoundCategory::ALL`; call it from `app/redraw.rs` beside `set_view_bobbing`. The `Sim::audio_mut` accessor is private today, which is the only reason this cannot be done from the menu side |
+| `fov` | `camera_rig.rs` + `sim/camera.rs` | give `build_camera` an `fov_y_degrees` parameter (or a `Sim::set_fov` seam mirroring `set_view_bobbing`) instead of the module constant `FOV_Y_DEGREES`. Note vanilla's `fov` is an `IntRange(30, 110)`, so it also needs an `INT_RANGE_SLIDERS` entry — not a `UnitDouble` |
+| `glintSpeed`, `glintStrength` | `gpu/glint.rs`, `hud/item_icon.rs` | replace `DEFAULT_SPEED`/`DEFAULT_STRENGTH` at the two call sites with the option values. Both are already parameters of `glint_clock` and `GlintUniform::new` |
+| `cloudStatus` | wherever `SkyFrame` is built in `gpu/**` | call `SkyFrame::with_cloud_status`, which has zero production callers. Vanilla's option has three states and our `CloudStatus` has two (no `Off`), so the third needs a skip in the sky pass |
 
 ## How to change it
 

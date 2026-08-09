@@ -343,6 +343,33 @@ pub enum LiveOption {
     /// from the stored value directly — [`LiveOption::unit_double`] answers
     /// `None` for it on purpose.
     RenderDistance,
+    /// `options.damageTiltStrength` →
+    /// [`crate::config::Options::damage_tilt_strength`]. A `UnitDouble`
+    /// defaulting to `1.0`, labelled with `Options::percentValueOrOffLabel`
+    /// (`Options.java`'s `damageTiltStrength` field) — so a stored `0.0` prints
+    /// **OFF**, not `0%`, unlike every other percent slider here.
+    ///
+    /// This was the exact inverse of the chat batch above, and worse: the field
+    /// was persisted **and** `app/redraw.rs` already fed
+    /// `MenuNav::damage_tilt_strength` to `RenderState::set_damage_tilt_strength`
+    /// every frame, so the whole camera-tilt consumer was live and honoured — and
+    /// the only way to reach it was to hand-edit `options.json`, because the row
+    /// drew from [`UNIT_DOUBLE_DEFAULTS`]' frozen `1.0`. Links 1 and 5 present,
+    /// links 2–4 missing.
+    DamageTiltStrength,
+    /// `options.accessibility.panorama_speed` →
+    /// [`crate::config::Options::panorama_speed`]. A `UnitDouble` defaulting to
+    /// `1.0` with the plain `Options::percentValueLabel` (so `0.0` prints `0%`,
+    /// **not** OFF — a stationary panorama is a legitimate value, not an
+    /// off state).
+    ///
+    /// Its consumer was an island in the other direction:
+    /// `panorama::PanoramaRenderer::set_speed` existed, was unit-tested, and had
+    /// **zero callers**, so the title screen always span at vanilla's default
+    /// rate. The value now rides [`super::render::MenuFrame::panorama_speed`]
+    /// beside `gui_scale`, for the same reason that one does — a screen must not
+    /// have to remember to tell the draw.
+    PanoramaSpeed,
 }
 
 impl LiveOption {
@@ -366,6 +393,8 @@ impl LiveOption {
             LiveOption::ChatOpacity => Some(options.chat_opacity),
             LiveOption::TextBackgroundOpacity => Some(options.chat_background_opacity),
             LiveOption::Sensitivity => Some(options.sensitivity),
+            LiveOption::DamageTiltStrength => Some(options.damage_tilt_strength),
+            LiveOption::PanoramaSpeed => Some(options.panorama_speed),
             // `RenderDistance` is an `IntRange`, **not** a `UnitDouble`: its
             // stored value is a chunk count, so returning it here would put the
             // handle at `min(8, 1) = 1.0`, pinned to the far end of the track for
@@ -411,6 +440,8 @@ impl LiveOption {
             LiveOption::ChatOpacity => Some(&mut options.chat_opacity),
             LiveOption::TextBackgroundOpacity => Some(&mut options.chat_background_opacity),
             LiveOption::Sensitivity => Some(&mut options.sensitivity),
+            LiveOption::DamageTiltStrength => Some(&mut options.damage_tilt_strength),
+            LiveOption::PanoramaSpeed => Some(&mut options.panorama_speed),
             LiveOption::RenderDistance
             | LiveOption::GuiScale
             | LiveOption::ViewBobbing
@@ -1207,6 +1238,29 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         // **capital** C, which is the sort of thing that only a look at the
         // language file gets right.
         LiveOption::RenderDistance => format!("{} Chunks", options.render_distance),
+        // `Options::percentValueOrOffLabel`: `value == 0.0 ?
+        // genericValueLabel(caption, OPTION_OFF) : percentValueLabel(caption,
+        // value)`. So this is **not** the plain percent transcription its
+        // neighbours use — a stored `0.0` prints "OFF", and only `0.0` does,
+        // because `percentValueLabel`'s `(int)(value * 100.0)` would print `0%`
+        // for anything in `[0, 0.01)` and vanilla tests the double for exact
+        // equality before it gets there. `<= 0.0` rather than `== 0.0` for
+        // `LiveOption::Sensitivity`'s reason: identical on the domain
+        // `Options::from_json` clamps to, and it keeps a hand-edited negative out
+        // of the percentage branch.
+        LiveOption::DamageTiltStrength => {
+            if options.damage_tilt_strength <= 0.0 {
+                "OFF".to_string()
+            } else {
+                percent_value(options.damage_tilt_strength)
+            }
+        }
+        // The plain `Options::percentValueLabel`, **not** the OrOff variant its
+        // Accessibility-page neighbours use — vanilla's `panoramaSpeed` field
+        // names `Options::percentValueLabel` directly, so a stationary panorama
+        // reads `0%`. That is right rather than an oversight: zero speed is a
+        // legitimate position on this slider, not the option being off.
+        LiveOption::PanoramaSpeed => percent_value(options.panorama_speed),
     }
 }
 
@@ -1626,7 +1680,11 @@ static ACCESSIBILITY: &[Entry] = &[
     ),
     pair(
         slider("darknessEffectScale", "Darkness Pulsing"),
-        slider("damageTiltStrength", "Damage Tilt"),
+        live_slider(
+            "damageTiltStrength",
+            "Damage Tilt",
+            LiveOption::DamageTiltStrength,
+        ),
     ),
     pair(
         slider("glintSpeed", "Glint Speed"),
@@ -1637,7 +1695,11 @@ static ACCESSIBILITY: &[Entry] = &[
         cycle("darkMojangStudiosBackground", "Monochrome Logo"),
     ),
     pair(
-        slider("panoramaSpeed", "Panorama Scroll Speed"),
+        live_slider(
+            "panoramaSpeed",
+            "Panorama Scroll Speed",
+            LiveOption::PanoramaSpeed,
+        ),
         cycle("hideSplashTexts", "Hide Splash Texts"),
     ),
     pair(
@@ -3352,14 +3414,20 @@ mod tests {
                 LiveOption::ChatOpacity,
                 LiveOption::ChatLineSpacing,
                 LiveOption::ViewBobbing,
+                // Also Accessibility, further down the page: the camera tilt whose
+                // consumer `app/redraw.rs` had honoured all along while the row
+                // drew from the frozen `UNIT_DOUBLE_DEFAULTS`, and the title-screen
+                // spin rate whose consumer (`PanoramaRenderer::set_speed`) had no
+                // caller at all. See both variants' docs.
+                LiveOption::DamageTiltStrength,
+                LiveOption::PanoramaSpeed,
             ],
-            "GUI Scale and Render Distance on Video (the latter from #443); \
-             the four toggle rows and Auto-Jump/Sprint Window on Controls \
-             (#202/#444); look sensitivity (#443), scroll sensitivity and both \
-             inverts on Mouse (#203); Closed Captions on Sound (#198); the eight \
-             chat options on Chat with three of them repeated on Accessibility; \
-             Closed Captions again and View Bobbing on Accessibility \
-             — and nothing else"
+            "GUI Scale and Render Distance on Video; the four toggle rows and \
+             Auto-Jump/Sprint Window on Controls; look sensitivity, scroll \
+             sensitivity and both inverts on Mouse; Closed Captions on Sound; the \
+             eight chat options on Chat with three of them repeated on \
+             Accessibility; Closed Captions again, View Bobbing, Damage Tilt and \
+             Panorama Scroll Speed on Accessibility — and nothing else"
         );
         // The control: an option we do not persist must report itself inactive,
         // and the detector must be able to tell the difference.
@@ -3393,16 +3461,17 @@ mod tests {
             render_distance.is_live(),
             "renderDistance is a persisted `Options` field since #443"
         );
-        // The count itself, not just the ratio's ingredients: 27 live option
-        // *rows* (23 distinct options, four of them placed twice — see above)
+        // The count itself, not just the ratio's ingredients: 29 live option
+        // *rows* (25 distinct options, four of them placed twice — the three
+        // Chat/Accessibility ones plus `showSubtitles` on Sound and
+        // Accessibility, so 29 - 4 == 25)
         // + 9 Done buttons (one per page, always live) + 13 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
-        // **Telemetry**/**Resource Packs** from the root grid — issue #415
-        // completes the grid — Accessibility -> Controls, Controls -> Mouse,
-        // Controls -> Key Binds, and the root's own Online button, live
-        // outside a world).
+        // **Telemetry**/**Resource Packs** from the root grid,
+        // Accessibility -> Controls, Controls -> Mouse, Controls -> Key Binds,
+        // and the root's own Online button, live outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 49, "outside a world: {live:?}");
+        assert_eq!(live.len(), 51, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -3424,10 +3493,11 @@ mod tests {
             .flat_map(|&p| all_controls(p, true))
             .filter(|c| c.is_live())
             .collect();
-        // 49, not 47: issue #198 made `showSubtitles` live on **both** the pages
-        // vanilla places it on (Sound and Accessibility).
-        assert_eq!(outside.len(), 49);
-        assert_eq!(inside.len(), 48, "one fewer: the root's Online button");
+        // 51, not 49: `showSubtitles` is live on **both** the pages vanilla places
+        // it on (Sound and Accessibility), and the Accessibility page gained Damage
+        // Tilt and Panorama Scroll Speed.
+        assert_eq!(outside.len(), 51);
+        assert_eq!(inside.len(), 50, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -4047,6 +4117,12 @@ mod tests {
         LiveOption::DiscreteMouseScroll,
         LiveOption::AutoJump,
         LiveOption::SprintWindow,
+        // The two Accessibility sliders whose consumers were already live and
+        // whose rows were not: the camera tilt `app/redraw.rs` already honoured,
+        // and the title-screen spin rate `PanoramaRenderer::set_speed` already
+        // implemented with no caller. See the variants' own docs.
+        LiveOption::DamageTiltStrength,
+        LiveOption::PanoramaSpeed,
     ];
 
     /// Every [`LiveOption`] must be placed on some page — the island check in
@@ -4103,10 +4179,12 @@ mod tests {
                 | LiveOption::RenderDistance
                 | LiveOption::DiscreteMouseScroll
                 | LiveOption::AutoJump
-                | LiveOption::SprintWindow => {}
+                | LiveOption::SprintWindow
+                | LiveOption::DamageTiltStrength
+                | LiveOption::PanoramaSpeed => {}
             }
         }
-        assert_eq!(ALL.len(), 23, "twenty-three distinct live options");
+        assert_eq!(ALL.len(), 25, "twenty-five distinct live options");
     }
 
     /// [`crate::config::step_unit_double`]'s wrap, including the two places it

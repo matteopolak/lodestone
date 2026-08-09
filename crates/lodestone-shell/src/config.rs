@@ -241,6 +241,21 @@ pub struct Options {
     /// Clamped on load: a mangled file must not be able to produce a tilt larger
     /// than vanilla can, and a negative value would tilt the camera the wrong way.
     pub damage_tilt_strength: f32,
+    /// Vanilla's **Panorama Scroll Speed** accessibility option
+    /// (`Options::panoramaSpeed`, a `0.0..=1.0` unit double defaulting to `1.0`
+    /// with the plain `percentValueLabel`), which scales the title screen's
+    /// cubemap yaw rate.
+    ///
+    /// `0.0` is a *stationary* panorama, which is the point of the option — the
+    /// spin is what makes the title screen unusable for some players — so unlike
+    /// [`Self::damage_tilt_strength`] zero is not an "off" state and the label
+    /// reads `0%`.
+    ///
+    /// Consumed by `crate::menu::panorama::PanoramaRenderer::set_speed`, reached
+    /// through `crate::menu::render::MenuFrame::panorama_speed`. Clamped on load
+    /// for `damage_tilt_strength`'s reason: vanilla cannot produce a rate outside
+    /// this range, and a negative one would spin the sky backwards.
+    pub panorama_speed: f32,
     /// Vanilla's `key.sneak` toggle option (`Options::toggleCrouch`,
     /// `Options.java:603-610`, issue #202): sneak is hold-to-activate when
     /// `false` (vanilla's own default) and press-to-toggle when `true`. Fed to
@@ -386,6 +401,7 @@ impl Default for Options {
             keybinds: Keybinds::new(),
             view_bobbing: true,
             damage_tilt_strength: 1.0,
+            panorama_speed: 1.0,
             toggle_sneak: false,
             toggle_sprint: false,
             toggle_attack: false,
@@ -459,6 +475,16 @@ impl Options {
         // therefore falls back too.
         let damage_tilt_strength = obj
             .get("damage_tilt_strength")
+            .and_then(serde_json::Value::as_f64)
+            .map(|v| v as f32)
+            .filter(|v| (0.0..=1.0).contains(v))
+            .unwrap_or(1.0);
+        // Same shape and same clamp as `damage_tilt_strength` above. NaN fails
+        // `contains` and falls back, which matters more here than it looks: a NaN
+        // speed would poison `PanoramaRenderer`'s accumulated spin permanently,
+        // and a NaN yaw builds a NaN view matrix rather than a wrong one.
+        let panorama_speed = obj
+            .get("panorama_speed")
             .and_then(serde_json::Value::as_f64)
             .map(|v| v as f32)
             .filter(|v| (0.0..=1.0).contains(v))
@@ -568,6 +594,7 @@ impl Options {
             keybinds,
             view_bobbing,
             damage_tilt_strength,
+            panorama_speed,
             toggle_sneak,
             toggle_sprint,
             toggle_attack,
@@ -631,6 +658,12 @@ impl Options {
             obj.insert(
                 "damage_tilt_strength".into(),
                 f64::from(self.damage_tilt_strength).into(),
+            );
+        }
+        if self.panorama_speed != 1.0 {
+            obj.insert(
+                "panorama_speed".into(),
+                f64::from(self.panorama_speed).into(),
             );
         }
         if self.toggle_sneak {
