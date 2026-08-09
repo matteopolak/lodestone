@@ -807,6 +807,76 @@ fn missing_box(cs: &mut ColourStream<'_>, x: f32, y: f32, scale: f32, c: [f32; 4
     cs.rect(x + w - scale, y, scale, h, c);
 }
 
+/// Does the **shell's own** font manager resolve unihex glyphs?
+///
+/// `lodestone-assets` proves the rasteriser; nothing there proves that
+/// [`jar_manager`] — the function the shipped client actually calls — stacks the
+/// asset-object store above the jar. Without that push a fully correct rasteriser
+/// draws squares, with a healthy log line, which is precisely the island shape
+/// this repo keeps paying for. So this gate goes through the real discovery path
+/// and nothing else.
+///
+/// ```text
+/// cargo test -p lodestone-shell --lib -- --ignored --nocapture unihex_wiring
+/// ```
+#[cfg(test)]
+mod unihex_wiring {
+    use super::*;
+
+    /// The shell's own manager must supply unihex glyphs, and specifically must
+    /// beat the jar's empty `font/include/unifont.json` stub.
+    ///
+    /// The two counts are the discriminating pair: a jar-only manager reports
+    /// `unihex = 0` and `codepoints = 2414`, and both numbers come from the files
+    /// rather than from us — 2,414 is the bitmap sheets plus the `space`
+    /// provider, 114,432 is `unifont.zip`'s own entry count.
+    #[test]
+    #[ignore = "needs client.jar plus the unifont.json/unifont.zip asset objects"]
+    fn the_shells_own_font_manager_resolves_unihex_glyphs() {
+        let manager = jar_manager().expect(
+            "no vanilla pack found; set LODESTONE_ASSETS or populate .cache/mc/<ver>/ \
+             — do NOT skip, a silent pass here asserts nothing",
+        );
+        let id: ResourceLocation = "minecraft:default".parse().expect("valid id");
+        let font = FontLoader::new(&manager)
+            .load(&id, &FontOptions::none())
+            .expect("minecraft:default loads");
+        eprintln!(
+            "  shell font: codepoints={} unihex={}",
+            font.codepoint_count(),
+            font.unihex_count()
+        );
+        assert!(
+            font.unihex_count() > 0,
+            "the shell's font manager resolved NO unihex glyphs. Either the \
+             asset-object store did not open, or font/unifont.zip is not on disk. \
+             Fetch it with: cargo run -p xtask -- fetch-assets --version 26.2"
+        );
+        // Exact, not just non-zero: `unifont.zip` holds 114,432 entries and is a
+        // superset of the 2,414 the sheets and the space provider supply.
+        assert_eq!(font.codepoint_count(), 114_432);
+        assert_eq!(font.unihex_count(), 114_432 - 2_414);
+
+        // The codepoint from the report, and the one that discriminates: U+2713
+        // is unihex-only, U+2714 is in nonlatin_european.png and must keep the
+        // sheet's advance of 7.0 rather than unihex's 8.5.
+        let raster = FontLoader::new(&manager)
+            .load_raster(&id, &FontOptions::none())
+            .expect("the font rasters");
+        let cjk = raster
+            .raster(0x4E2D)
+            .expect("中 must have drawable pixels, not a missing-glyph box");
+        assert!((cjk.advance() - 9.0).abs() < 1e-6, "got {}", cjk.advance());
+        assert!((cjk.texel_size() - 0.5).abs() < 1e-6);
+        assert_eq!(raster.advance(0x2713), Some(4.5));
+        assert_eq!(
+            raster.advance(0x2714),
+            Some(7.0),
+            "the bitmap sheet must still win a codepoint both providers supply"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
