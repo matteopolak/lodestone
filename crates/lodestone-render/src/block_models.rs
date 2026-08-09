@@ -686,6 +686,41 @@ pub struct ItemVariants {
     /// whose own resolution reaches nothing bakeable. `None` when the GUI form is
     /// a code-driven `special` renderer.
     gui: Option<ResourceLocation>,
+    /// Every `minecraft:special` form this item's tree can reach, keyed by the
+    /// **`base` model ref** the special node names.
+    ///
+    /// Kept beside [`Self::by_model`] rather than inside it because these forms have
+    /// no geometry to bake at all: their triangles come from a block-entity rig, so
+    /// what a caller needs is the `kind` plus the `base` model's `display` map. It is
+    /// keyed by `base` and not by `kind` so a `select` that reaches two different
+    /// special nodes (a trident in hand versus thrown, a shield blocking versus not)
+    /// stays two entries — the same reason [`Self::by_model`] is not keyed by item.
+    specials: HashMap<ResourceLocation, SpecialItemForm>,
+}
+
+/// One `minecraft:special` form of one item: which code-driven renderer draws it,
+/// and where the `base` model says to put it in each of vanilla's nine display
+/// contexts.
+///
+/// # Why there is no geometry here
+///
+/// A special item has none. `base` is a real item model, but **every one of the ten
+/// special `base` models in 26.2 has no `elements` and no `layer0`** — only a
+/// `particle` texture, which is a *block* texture and is not in the item atlas. So
+/// the "fall back to the base sprite" reading of `IconPart::Special` draws exactly
+/// zero pixels, and the geometry has to come from the block-entity rig
+/// [`crate::special_item_rig`] names.
+///
+/// What `base` really carries, and the only reason it is resolved at all, is the
+/// `display` map: a chest's `gui` pose is `[30, 45, 0]` at scale `0.625`, authored
+/// on `item/template_chest`, and its `firstperson_righthand` pose likewise.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpecialItemForm {
+    /// The special-renderer id — `minecraft:chest`, `minecraft:shulker_box`. Feed
+    /// it to [`crate::special_item_rig`] with the item's own path.
+    pub kind: String,
+    /// The `base` model's own `display` map, all nine slots.
+    pub display: DisplayTransforms,
 }
 
 impl ItemVariants {
@@ -744,6 +779,40 @@ impl ItemVariants {
                 ItemModelOutput::Special { .. } => None,
             })
             .or_else(|| self.gui())
+    }
+
+    /// The **special-renderer** form `ctx` resolves to, if any — the answer
+    /// [`Self::resolve`] structurally cannot give.
+    ///
+    /// A caller that draws item geometry must ask *both*: `resolve` for baked quads
+    /// and this for a block-entity rig, in that order. Getting only the first is the
+    /// bug this method exists to fix — a held chest resolved to a `Special` output,
+    /// `resolve` returned `None` from that arm, fell through to `gui()`, and `gui`
+    /// is `None` too for a special item, so the hand drew nothing at all while the
+    /// inventory slot drew a real chest.
+    ///
+    /// **No `gui()`-style fallback here, deliberately.** `resolve`'s fallback is
+    /// right for its own question (a context that reaches nothing bakeable should
+    /// draw the inventory form rather than vanish), but a *special* fallback would
+    /// mean drawing a chest rig for a context that resolved to something else
+    /// entirely. `None` means "this context is not a special form", and a caller
+    /// must be able to tell that from "it is one".
+    #[must_use]
+    pub fn resolve_special(&self, ctx: &impl ItemPropertyContext) -> Option<&SpecialItemForm> {
+        self.definition
+            .resolve(ctx)
+            .into_iter()
+            .find_map(|output| match output {
+                ItemModelOutput::Special { base, .. } => self.specials.get(base),
+                ItemModelOutput::Model { .. } => None,
+            })
+    }
+
+    /// Every special form this item's tree can reach, as `(base ref, form)` — the
+    /// enumeration half of [`Self::resolve_special`], for a gate that wants to
+    /// assert the *set* rather than one context's choice.
+    pub fn special_forms(&self) -> impl Iterator<Item = (&ResourceLocation, &SpecialItemForm)> {
+        self.specials.iter()
     }
 
     /// Which model ref `ctx` resolves to, whether or not it baked — the diagnostic
@@ -808,6 +877,10 @@ struct ItemVariantParts {
     models: Vec<ItemModelPart>,
     /// Every `(item, model)` variant whose model is a flat sprite stack.
     sprites: Vec<ItemSpritePart>,
+    /// Every `(item, base ref, form)` a `minecraft:special` node reaches — no
+    /// geometry, only the `kind` and the `base` model's `display` map. See
+    /// [`SpecialItemForm`].
+    specials: Vec<(ResourceLocation, ResourceLocation, SpecialItemForm)>,
     /// Notes for [`BlockModels::item_bake_misses`].
     notes: Vec<String>,
 }
@@ -866,18 +939,47 @@ fn collect_item_variants(manager: &ResourceManager) -> ItemVariantParts {
         plans: Vec::new(),
         models: Vec::new(),
         sprites: Vec::new(),
+        specials: Vec::new(),
         notes: Vec::new(),
     };
     for id in item_ids(manager) {
         let Ok(definition) = builder.definition(&id) else {
             continue;
         };
-        // Every model the tree can reach, deduplicated. `Special` outputs are
-        // skipped: their geometry is a block-entity renderer, not a bakeable
-        // model, and their `base` sprite reaches this path as the GUI form of the
-        // same item anyway.
+        // Every model the tree can reach, deduplicated.
+        //
+        // **`Special` outputs are collected, not skipped**, and the note that used
+        // to be here explaining why they were skipped was wrong in its second half:
+        // it said "their `base` sprite reaches this path as the GUI form of the same
+        // item anyway". It does not. Every special `base` model in 26.2 has no
+        // `elements` and no `layer0`, so `part_for_model` classifies it as
+        // undrawable and nothing at all reached `by_model` — which is why a held
+        // chest drew zero pixels while the inventory slot drew a real one. What the
+        // `base` does carry is the `display` map, and that is what `specials` keeps;
+        // the geometry comes from the block-entity rig `special_item_rig` names.
         let mut seen = BTreeSet::new();
+        // Deduplicated per **item**, not globally: `template_skull` is the `base` of
+        // all six `minecraft:head` items, and a global set would give five of them no
+        // display map at all.
+        let mut seen_specials = BTreeSet::new();
         for output in definition.outputs() {
+            if let ItemModelOutput::Special { base, kind } = output {
+                // `part_for` (not `part_for_model`) is the entry point that resolves
+                // a special node's `base` for its `display` map.
+                if seen_specials.insert(base.clone())
+                    && let Ok((_, Some(display))) = builder.part_for(output)
+                {
+                    out.specials.push((
+                        id.clone(),
+                        base.clone(),
+                        SpecialItemForm {
+                            kind: kind.to_string(),
+                            display,
+                        },
+                    ));
+                }
+                continue;
+            }
             let ItemModelOutput::Model { model, tints } = output else {
                 continue;
             };
@@ -1493,6 +1595,7 @@ impl BlockModels {
             plans: item_plans,
             models: item_parts,
             sprites: sprite_parts,
+            specials: item_specials,
             notes: mut item_bake_misses,
         } = collect_item_variants(manager);
         let atlas = build_complete_atlas(manager, &resolver, &item_parts, &sprite_parts)?;
@@ -1695,27 +1798,42 @@ impl BlockModels {
         // is O(items x variants) *and* clones every geometry, so two copies of all
         // ~1,700 baked quad sets are live at once.
         //
-        // An item with no bakeable variant at all (a chest: its definition is one
-        // `special` node) is absent, which is exactly what `BlockModels::item`
-        // returned for it before the variant axis existed — `hotbar_special_item_
-        // pixels` asserts that absence.
+        // An item with **neither** a bakeable variant nor a special form is absent.
+        //
+        // That condition used to be "no bakeable variant", full stop, and it is why
+        // a held chest drew nothing: a chest's definition is one `special` node, so
+        // it baked no geometry and was dropped here — `items.get("minecraft:chest")`
+        // was `None`, and no amount of resolving downstream could recover it. An item
+        // with only special forms now gets an entry with an **empty** `by_model`,
+        // which leaves every geometry accessor answering exactly as before
+        // (`gui()` is `None` because `plan.gui` is `None` for a special item, so
+        // `BlockModels::item` still returns `None` and the GUI stream is untouched)
+        // while `resolve_special` becomes reachable.
         let mut grouped: HashMap<ResourceLocation, HashMap<ResourceLocation, ItemGeometry>> =
             HashMap::with_capacity(item_plans.len());
         for ((item, model), geometry) in baked {
             grouped.entry(item).or_default().insert(model, geometry);
         }
+        let mut special_forms: HashMap<ResourceLocation, HashMap<ResourceLocation, SpecialItemForm>> =
+            HashMap::new();
+        for (item, base, form) in item_specials {
+            special_forms.entry(item).or_default().insert(base, form);
+        }
         let mut items: HashMap<ResourceLocation, ItemVariants> =
             HashMap::with_capacity(grouped.len());
         for plan in item_plans {
-            let Some(by_model) = grouped.remove(&plan.item) else {
+            let by_model = grouped.remove(&plan.item).unwrap_or_default();
+            let specials = special_forms.remove(&plan.item).unwrap_or_default();
+            if by_model.is_empty() && specials.is_empty() {
                 continue;
-            };
+            }
             items.insert(
                 plan.item,
                 ItemVariants {
                     definition: plan.definition,
                     by_model,
                     gui: plan.gui,
+                    specials,
                 },
             );
         }
@@ -2517,5 +2635,156 @@ mod tests {
         assert!(classify_fluid("wheat", &props(&[("age", "4")])).is_none());
         assert!(classify_fluid("tall_grass", &props(&[("half", "lower")])).is_none());
         assert!(classify_fluid("sugar_cane", &props(&[("age", "4")])).is_none());
+    }
+}
+
+/// The `minecraft:special` item form plumbing — [`ItemVariants::resolve_special`]
+/// and the fact that [`ItemVariants::resolve`] structurally cannot answer for it.
+///
+/// Hermetic: the definition tree is built from a literal copy of 26.2's own
+/// `items/chest.json` shape rather than from the jar, so these run in `cargo test`
+/// with no pack. The jar-backed half — that the real chest definition really is one
+/// `special` node reaching `item/chest` — is
+/// `lodestone-shell/tests/hotbar_special_item_pixels.rs`' business, which already
+/// asserts the `kind`.
+#[cfg(test)]
+mod special_form_tests {
+    use super::*;
+    use lodestone_assets::GuiItemContext;
+
+    /// 26.2's `items/chest.json`, shape for shape: a `minecraft:select` on the date
+    /// whose non-default case is a Christmas texture, wrapping a `minecraft:special`
+    /// whose `base` is `minecraft:item/chest`.
+    ///
+    /// The `select` layer is real and is reproduced rather than simplified away,
+    /// because it is what makes the **fallback** arm the one every ordinary frame
+    /// takes: nothing in this codebase supplies a `minecraft:local_time` property, so
+    /// `ItemPropertyContext::select` returns `None` and `resolve_node` takes
+    /// `fallback` — which is the plain chest. That is the correct default behaviour
+    /// and the reason a chest is never drawn with the seasonal texture here.
+    fn chest_definition() -> ItemModel {
+        ItemModel::parse(
+            br#"{
+              "model": {
+                "type": "minecraft:select",
+                "property": "minecraft:local_time",
+                "pattern": "MM-dd",
+                "cases": [
+                  {
+                    "when": ["12-24", "12-25", "12-26"],
+                    "model": {
+                      "type": "minecraft:special",
+                      "base": "minecraft:item/chest",
+                      "model": { "type": "minecraft:chest", "texture": "minecraft:christmas" }
+                    }
+                  }
+                ],
+                "fallback": {
+                  "type": "minecraft:special",
+                  "base": "minecraft:item/chest",
+                  "model": { "type": "minecraft:chest", "texture": "minecraft:normal" }
+                }
+              }
+            }"#,
+        )
+        .expect("a parseable definition")
+    }
+
+    fn chest_variants() -> ItemVariants {
+        let base: ResourceLocation = "minecraft:item/chest".parse().expect("a valid ref");
+        let mut specials = HashMap::new();
+        specials.insert(
+            base,
+            SpecialItemForm {
+                kind: "minecraft:chest".to_string(),
+                display: DisplayTransforms::NONE,
+            },
+        );
+        ItemVariants {
+            definition: chest_definition(),
+            // **Empty on purpose**: a chest bakes no geometry at all. This is the
+            // state the whole fix turns on — before it, an item in this state was
+            // dropped from `BlockModels::items` entirely.
+            by_model: HashMap::new(),
+            gui: None,
+            specials,
+        }
+    }
+
+    /// The baked path answers `None` for a special-only item, at **every** accessor —
+    /// and that is not a gap to be papered over, it is why a second accessor had to
+    /// exist.
+    ///
+    /// **This is the control, and it is the arm that was failing before the fix.**
+    /// The old held-item path was exactly `items.get(item).and_then(|v|
+    /// v.resolve(&ctx))`, and every link in it yields nothing here: `resolve`'s
+    /// `Special` arm is `None`, its `or_else(gui)` fallback is `None` because `gui` is
+    /// `None` for a special item, and `by_model` is empty so there is nothing for
+    /// either to have found. Zero geometry, three independent ways.
+    #[test]
+    fn the_baked_geometry_path_yields_nothing_for_a_special_only_item() {
+        let variants = chest_variants();
+        assert_eq!(variants.variant_count(), 0, "a chest bakes no model");
+        assert!(variants.gui().is_none(), "and no inventory form");
+        assert!(
+            variants.resolve(&GuiItemContext).is_none(),
+            "so `resolve` cannot answer, in the GUI context or any other — this is \
+             the arm that drew an empty hand"
+        );
+        assert!(
+            variants.variants().next().is_none(),
+            "nothing baked means nothing to enumerate either"
+        );
+    }
+
+    /// And the fix: the same item, the same context, through the new accessor —
+    /// a `kind` a rig resolver can act on.
+    ///
+    /// The assertion is the `kind` string rather than "it is `Some`", because the
+    /// `kind` is the load-bearing output: [`crate::special_item_rig`] is keyed on it,
+    /// and a form carrying the wrong one resolves to a plausible wrong rig.
+    #[test]
+    fn the_special_accessor_answers_where_the_baked_one_cannot() {
+        let variants = chest_variants();
+        let form = variants
+            .resolve_special(&GuiItemContext)
+            .expect("a chest resolves to a special form");
+        assert_eq!(form.kind, "minecraft:chest");
+        // And the rig resolver accepts it, so the two halves really do join up.
+        assert!(
+            crate::special_item_rig(&form.kind, "chest").is_some(),
+            "the kind this carries must be one `special_item_rig` recognises, or the \
+             join is broken in the middle and both halves still look fine"
+        );
+    }
+
+    /// The **seasonal** case: with no `minecraft:local_time` property supplied, the
+    /// `select` takes its `fallback` — the plain chest — and the Christmas case is
+    /// never reached.
+    ///
+    /// Asserted rather than left implicit, because "we silently dropped the seasonal
+    /// texture" and "we correctly take the documented default" look identical from a
+    /// screenshot in July. `outputs()` walks the whole tree, so both special nodes
+    /// are discovered and both carry `kind == minecraft:chest`; only the *texture*
+    /// differs, and that texture is not something this path reads at all — the sheet
+    /// comes from the item path via `special_item_rig`. So the seasonal chest is a
+    /// known, bounded shortfall: a chest on 25 December draws the ordinary sheet.
+    #[test]
+    fn with_no_date_property_the_select_takes_its_plain_fallback() {
+        let definition = chest_definition();
+        let resolved = definition.resolve(&GuiItemContext);
+        assert_eq!(
+            resolved.len(),
+            1,
+            "a `select` resolves to exactly one branch, never both"
+        );
+        // The whole tree still holds two special nodes — so the count below is what
+        // proves resolution chose, rather than that there was only ever one choice.
+        let all = definition.outputs().len();
+        assert_eq!(
+            all, 2,
+            "the tree has both the seasonal and the plain special node; if this is 1 \
+             the fallback test above proves nothing"
+        );
     }
 }

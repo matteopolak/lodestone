@@ -123,14 +123,15 @@ pub use block_entity::{
     enchanting_table_book_hover, enchanting_table_book_openness,
     enchanting_table_book_placement_matrix, enchanting_table_page_flips,
     horizontal_facing_clockwise_yaw, horizontal_facing_yaw, lectern_book_placement_matrix,
-    plan_block_entities, shulker_lid_pose, shulker_placement_matrix, shulker_texture_stem,
+    plan_block_entities, shulker_lid_pose, shulker_placement_matrix, special_item_rig,
+    shulker_texture_stem,
     shulker_texture_stems, skull_ground_placement_matrix, skull_texture_stem,
     skull_texture_stems, skull_wall_placement_matrix,
 };
 pub use block_models::{
     BlockModels, BlockModelsError, CRACK_STAGE_COUNT, DRY_FOLIAGE_TINT_SLOT, FOLIAGE_TINT_SLOT,
-    FluidCell, FluidKind, FluidSprites, GRASS_TINT_SLOT, ItemGeometry, ItemVariants, StateModel,
-    WATER_TINT_SLOT, biome_tint_kind_for_slot, biome_tint_slot,
+    FluidCell, FluidKind, FluidSprites, GRASS_TINT_SLOT, ItemGeometry, ItemVariants,
+    SpecialItemForm, StateModel, WATER_TINT_SLOT, biome_tint_kind_for_slot, biome_tint_slot,
 };
 pub use block_resolver::{BlockAtlas, BlockAtlasError, MAX_SPRITES};
 pub use blocks_json::{BlocksJsonError, BlocksJsonRegistry};

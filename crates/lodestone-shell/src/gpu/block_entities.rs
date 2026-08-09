@@ -72,6 +72,22 @@ pub(super) struct BlockEntityRenderer {
     pub(super) textures: HashMap<&'static str, wgpu::BindGroup>,
     pub(super) cam_buffer: wgpu::Buffer,
     pub(super) cam_bind_group: wgpu::BindGroup,
+    /// The **first-person hand**'s group 0 — `hand_projection` alone, because a
+    /// held rig's pose is already camera-space.
+    ///
+    /// A second buffer over this pass's own camera layout, exactly as
+    /// `EntityRenderer::hand_cam_buffer` is over the entity pass's, and for the
+    /// same reason: the world buffer carries `P · bobHurt · V`, and binding it here
+    /// would leave a held chest sitting at the world origin.
+    ///
+    /// It is **not** `EntityRenderer::hand_cam_bind_group` reused, even though the
+    /// two layouts are structurally identical and the matrix written into them is
+    /// the same. A bind group belongs to the layout object it was created from, and
+    /// this pass owns its own `EntityPipeline` (see the module doc) — so borrowing
+    /// the entity pass's group here would be a validation error on some backends and
+    /// silently fine on others, which is the worst of the two.
+    pub(super) hand_cam_buffer: wgpu::Buffer,
+    pub(super) hand_cam_bind_group: wgpu::BindGroup,
     /// The banner **pattern-layer** pass (issue #23/#174):
     /// [`EntityPipeline::banner_layer_pipeline`] — alpha-blended, depth-test
     /// `LessEqual`, depth-**write off**, and `fs_main_no_cutout` so a mask's
@@ -150,6 +166,21 @@ impl BlockEntityRenderer {
         );
         let cam_bind_group = pipeline.camera_bind_group(device, &cam_buffer);
 
+        // The hand's own group 0. Seeded with the identity and a disabled fog like
+        // the world one above; `RenderState::write_hand_camera` rewrites it every
+        // frame, and a frame that draws no held special item simply never binds it.
+        let hand_cam_buffer = entity_camera_buffer(
+            device,
+            EntityCameraUniform {
+                camera: CameraUniform {
+                    view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                    section_origin: [0.0, 0.0, 0.0, 0.0],
+                },
+                fog: FogUniform::disabled(),
+            },
+        );
+        let hand_cam_bind_group = pipeline.camera_bind_group(device, &hand_cam_buffer);
+
         // The banner masks (issue #23). `BannerPatternAtlas` reads
         // `atlases/banner_patterns.json` and decodes one image per pattern; this
         // turns each into a bind group over the same texture layout every sheet
@@ -185,6 +216,8 @@ impl BlockEntityRenderer {
             textures,
             cam_buffer,
             cam_bind_group,
+            hand_cam_buffer,
+            hand_cam_bind_group,
             banner_layer_pipeline,
             banner_patterns,
         }
