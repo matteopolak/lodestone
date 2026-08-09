@@ -57,7 +57,8 @@ So the honest count is: **3 of 26 registrations landed** (chest/ender chest/trap
 `ChestRenderer`), **5 more landed and wired end to end** (skull; sign text for **both** sign
 registrations — `SIGN` and `HANGING_SIGN` — geometry excepted since a sign's board is a real block
 model; the bell body/rim; and the shulker box — see [Shulker box](#shulker-box)), plus the banner and
-the lectern, so **10 of 26**. The rest are still absent. Picking the next few should read this list,
+the lectern, so **10 of 26** — wall banners share the `BANNER` registration with standing ones. The
+rest are still absent. Picking the next few should read this list,
 not the original issue body.
 
 **The registration list had two entries this document's "what is not built" section never mentioned
@@ -860,6 +861,54 @@ All six steps of the checklist below are done, including the one bell needed a s
 shulker box declares no block model of its own, so an unset source leaves a hole in the world exactly
 where every box is, the chest failure mode.
 
+## Wall banners
+
+`BannerModel.createBodyLayer(false)` and `BannerFlagModel.createFlagLayer(false)`. The pattern
+compositing, the sway, the ordered translucent mask pass and the gather were all already live for
+standing banners; this is the second mesh pair plus the fork that selects it.
+
+### It is two meshes and one placement, not the reverse
+
+The instinct is backwards. `BannerRenderer.createWallTransformation` is
+`modelTransformation(direction.toYRot())` — the **same** function
+`createGroundTransformation` calls, with a different angle — so `MODEL_TRANSLATION` `(0.5, 0, 0.5)`
+and the `(2/3, -2/3, -2/3)` `MODEL_SCALE` are shared, and there is **no** extra push away from the
+wall. `skull_wall_placement_matrix`'s `0.25` offset has no counterpart here; adding one "because wall
+placements offset" floats the banner a quarter block off the face. The offset a wall banner needs is
+baked into its own mesh's `z` origins instead.
+
+What genuinely differs is the geometry, in two places:
+
+- **No `pole`.** `createBodyLayer` adds it only under `if (standing)`. A wall banner drawn on the
+  standing rig hangs a 42-texel post in mid-air off the block face, which is why the gather declined
+  wall banners outright until this mesh existed.
+- **Both the bar's `y` *and* `z` origins move** (`-20.5, 9.5` against `-44, -1`), and the flag's rest
+  pose moves with them (`offset(0, -20.5, 10.5)` against `(0, -44, 0)`). The flag's **cube is
+  byte-identical** between the two, so the pose is the only thing separating them — a copy that reused
+  the standing pose buries a wall banner two blocks into the floor while every geometry assertion
+  still passes.
+
+It is a second mesh rather than one mesh with a static pose override for the reason
+`banner_flag_model`'s doc gives: the flag's `x_rot` sway is *itself* an override, and stacking a
+second one on the same part is how the two start fighting over one field.
+
+### Two angle conventions that are not interchangeable
+
+`BannerAttachment` is an enum carrying each form's own angle, the shape `SkullOrientation` already
+uses, because the two blocks have **different properties**: a standing banner has `rotation`
+(`RotationSegment`, `0..16`, `22.5°` a step) and a wall banner has `facing` (four horizontals, `90°` a
+step). Neither has the other's, so `banner_attachment` forks on which block it is rather than trying
+both. A shared `angle: f32` field would let a caller hand a wall banner a segment and get a plausible
+eighth-turn error.
+
+### The suffix-order trap
+
+`banner_colour` must try `_wall_banner` **before** `_banner`. `"red_wall_banner"` ends in `_banner`
+too, so the other order strips it to `"red_wall"` — not a dye name — and **every wall banner in the
+world silently draws nothing**. One read returns both the dye and which form it is, so the colour and
+the attachment cannot disagree. The gate drives all sixteen dyes through both families (256 standing
+states, 64 wall states) with the wrong-order parse asserted to fail in the same run.
+
 ## Lectern
 
 The open book lying on a lectern — `LecternRenderer` plus `BookModel`. The cheapest type in this
@@ -1248,14 +1297,13 @@ Against the real 26-entry registration list (see above), not the issue's origina
 - **Shulker box — landed** (see [Shulker box](#shulker-box) above), including the live per-frame
   install. Still open within shulker scope: the lid open/close animation, which needs the
   `BLOCK_EVENT` fold `ChestLids` already has a shape for.
-- **Banner — landed**, including the live per-frame install: the block-name base colour and NBT
-  pattern gather (`block_entities::banner_spawns`), the pole/bar/flag rig with vanilla's sway, and
-  the **ordered translucent mask pass** that composites the pattern layers through
-  `EntityPipeline::banner_layer_pipeline`. See `docs/banner-shield-patterns.md`. Still open within
-  banner scope: **wall banners** (`createBodyLayer(false)`, a second body mesh the corpus does not
-  build — `standing_banner_colour` returns `None` for them so nothing is drawn wrong), and the
-  **shield** form of the same compositing function (`shield_pattern_layers` still has no consumer —
-  a shield is an item model in the hand, not a block entity, so it is a different pass).
+- **Banner — landed, both attachments**, including the live per-frame install: the block-name base
+  colour and NBT pattern gather (`block_entities::banner_spawns`), the pole/bar/flag rig with
+  vanilla's sway, the pole-less wall rig, and the **ordered translucent mask pass** that composites
+  the pattern layers through `EntityPipeline::banner_layer_pipeline`. See
+  `docs/banner-shield-patterns.md` and [Wall banners](#wall-banners) below. Still open within banner
+  scope: the **shield** form of the same compositing function (`shield_pattern_layers` still has no
+  consumer — a shield is an item model in the hand, not a block entity, so it is a different pass).
 - The enchanting-table book (a full animation state machine —
   `open`/`flip`/`rot`/`time`, all client-simulated, none of it on the wire, closer in scope to the
   chest lid than to a static model; **the mesh it needs is already built and baked** — `book_model`,

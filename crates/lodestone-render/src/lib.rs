@@ -104,15 +104,17 @@ pub use banner_pattern::{
 };
 pub use block::{BlockPipeline, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuMesh};
 pub use block_entity::{
-    BANNER_BASE_TEXTURE_STEM, BANNER_BODY, BANNER_FLAG, BELL, BELL_TEXTURE_STEM, BOOK,
-    BOOK_TEXTURE_STEM, BannerInstances, BannerLayerDraw, BannerSpawn, BellShakeDirection,
+    BANNER_BASE_TEXTURE_STEM, BANNER_BODY, BANNER_FLAG, BANNER_WALL_BODY, BANNER_WALL_FLAG, BELL,
+    BELL_TEXTURE_STEM, BOOK, BOOK_TEXTURE_STEM, BannerAttachment, BannerInstances,
+    BannerLayerDraw, BannerSpawn, BellShakeDirection,
     BellSpawn, BlockEntityBatch, BlockEntityCullStats, BlockEntityFrame, BlockEntityInstance,
     BlockEntityMesh, BlockEntityModelSet, CHEST_LEFT, CHEST_MATERIALS, CHEST_RIGHT,
     CHEST_SINGLE, ChestHalf, ChestMaterial, ChestSpawn, LECTERN_BOOK_OPENNESS,
     LECTERN_BOOK_PAGE_FLIP, LecternSpawn, SHULKER_BOX, SHULKER_COLOURS,
     SHULKER_DEFAULT_TEXTURE_STEM, SKULL_HUMANOID, SKULL_MOB, SKULL_TYPES, ShulkerFacing,
     ShulkerSpawn, SkullOrientation, SkullSpawn, SkullType, banner_flag_x_rot,
-    banner_ground_placement_matrix, banner_phase, banner_texture_stems, bell_shake_angle,
+    banner_ground_placement_matrix, banner_phase, banner_texture_stems,
+    banner_wall_placement_matrix, bell_shake_angle,
     bell_texture_stems, block_entity_placement_matrix, block_entity_texture_stems,
     book_part_poses, book_texture_stems, chest_lid_openness, chest_lid_x_rot,
     chest_material_with_season, chest_texture_stem, chest_texture_stems,

@@ -535,20 +535,43 @@ pub fn skull_wall_placement_matrix(pos: [i32; 3], facing_yaw_deg: f32) -> Mat4 {
 /// mirror geometry on two axes; see
 /// [`banner_ground_placement_preserves_orientation`] for the measurement.
 ///
-/// Only ground/standing is ported — this issue's own scope
-/// (`docs/banner-shield-patterns.md`'s "Steps D–F" section). A wall banner is
-/// `createWallTransformation`, the same `MODEL_TRANSLATION`/`MODEL_SCALE`
-/// with `direction.toYRot()` in place of the rotation-segment angle and *no*
-/// extra offset (unlike [`skull_wall_placement_matrix`]'s `0.25` push away
-/// from the wall) — a natural second entry with this same shape, not built
-/// here.
+/// The wall form is [`banner_wall_placement_matrix`], which is this **same**
+/// `T · R · S` with `direction.toYRot()` in place of the rotation-segment angle
+/// and no extra offset — the geometry, not the placement, is what differs
+/// between the two.
 #[must_use]
 pub fn banner_ground_placement_matrix(pos: [i32; 3], rotation_segment: u8) -> Mat4 {
-    let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
     let segment_deg = f32::from(rotation_segment) * (360.0 / 16.0);
+    banner_placement_matrix(pos, segment_deg)
+}
+
+/// The world placement transform for a **wall** banner —
+/// `BannerRenderer.createWallTransformation`, which is
+/// `modelTransformation(direction.toYRot())`.
+///
+/// Byte-for-byte [`banner_ground_placement_matrix`] with a different angle: both
+/// go through `modelTransformation`, so the `MODEL_TRANSLATION` `(0.5, 0, 0.5)`
+/// and the `(2/3, -2/3, -2/3)` `MODEL_SCALE` are shared and there is **no** extra
+/// push away from the wall — unlike [`skull_wall_placement_matrix`], which has a
+/// `0.25` offset. Adding one here on the assumption that "wall placements offset"
+/// would float the banner a quarter block off the block face; the offset a wall
+/// banner needs is already baked into its own mesh's `z` origins
+/// (`lodestone_assets::block_entity_models::banner_wall_body_model`), which is
+/// why the wall geometry is a second mesh rather than the standing one moved.
+#[must_use]
+pub fn banner_wall_placement_matrix(pos: [i32; 3], facing_yaw_deg: f32) -> Mat4 {
+    banner_placement_matrix(pos, facing_yaw_deg)
+}
+
+/// `BannerRenderer.modelTransformation(angle)`, shared by both attachments:
+/// `Transformation(MODEL_TRANSLATION, Axis.YP.rotationDegrees(-angle), MODEL_SCALE, null)`,
+/// composed as `T · R · S` — see [`banner_ground_placement_matrix`]'s doc for why
+/// this is `T · R · S` and not the pivot sandwich chest and skull use.
+fn banner_placement_matrix(pos: [i32; 3], angle_deg: f32) -> Mat4 {
+    let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
     Mat4::from_translation(origin)
         * Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
-        * Mat4::from_rotation_y(-segment_deg.to_radians())
+        * Mat4::from_rotation_y(-angle_deg.to_radians())
         * Mat4::from_scale(Vec3::new(2.0 / 3.0, -2.0 / 3.0, -2.0 / 3.0))
 }
 
@@ -817,6 +840,40 @@ pub fn bell_shake_angle(direction: Option<BellShakeDirection>, ticks: f32) -> (f
 pub const BANNER_BODY: &str = "banner_body";
 /// Model name of a standing banner's flag.
 pub const BANNER_FLAG: &str = "banner_flag";
+/// Model name of a **wall** banner's bar — `createBodyLayer(false)`, which has no
+/// pole at all.
+pub const BANNER_WALL_BODY: &str = "banner_wall_body";
+/// Model name of a **wall** banner's flag — the same cube as [`BANNER_FLAG`]'s at
+/// a different rest pose.
+pub const BANNER_WALL_FLAG: &str = "banner_wall_flag";
+
+/// How a banner is attached to the world, and therefore which pair of meshes and
+/// which placement angle it uses.
+///
+/// The same shape as [`SkullOrientation`], and for the same reason: the two forms
+/// carry *different data* (a 16-way rotation segment against a four-way facing),
+/// so a shared `angle: f32` field would let a caller hand a wall banner a segment
+/// and get a plausible eighth-turn error. Unlike a skull, both forms here also
+/// select a different **mesh**, since `createBodyLayer(false)` drops the pole.
+///
+/// No `Eq`/`Hash`, unlike [`SkullOrientation`]: the wall arm carries a yaw as an
+/// `f32`, matching every other placement input in this module rather than
+/// re-encoding four directions as an enum only this type would use.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BannerAttachment {
+    /// A standing banner: `BannerBlock`, with the `ROTATION` property.
+    Ground {
+        /// The `ROTATION` block-state property, `0..16` — vanilla's
+        /// `RotationSegment`, segment `0` being north.
+        rotation_segment: u8,
+    },
+    /// A wall banner: `WallBannerBlock`, with `FACING`.
+    Wall {
+        /// `Direction.toYRot()` of `WallBannerBlock.FACING` (south `0`, west `90`,
+        /// north `180`, east `270`) — [`horizontal_facing_yaw`]'s convention.
+        facing_yaw_deg: f32,
+    },
+}
 
 /// The jar sheet a banner's *body* (pole/bar) and *flag* both draw with for
 /// their opaque pass — `Sheets.BANNER_BASE` (`Sheets.java:52`), i.e.
@@ -828,7 +885,9 @@ pub const BANNER_FLAG: &str = "banner_flag";
 pub const BANNER_BASE_TEXTURE_STEM: &str = "entity/banner/banner_base";
 
 /// The one banner sheet stem, for [`block_entity_texture_stems`] — mirrors
-/// [`bell_texture_stems`]'s shape: one stem shared by both banner models.
+/// [`bell_texture_stems`]'s shape: one stem shared by all four banner models
+/// (standing and wall, body and flag), because `submitBanner` passes the same
+/// `Sheets.BANNER_BASE` to every one of them.
 #[must_use]
 pub fn banner_texture_stems() -> Vec<&'static str> {
     vec![BANNER_BASE_TEXTURE_STEM]
@@ -1417,15 +1476,29 @@ impl BlockEntityModelSet {
     /// by all `1 + patterns.len().min(MAX_PATTERN_LAYERS)` layers.
     #[must_use]
     pub fn resolve_banner(&self, spawn: &BannerSpawn) -> Option<BannerInstances> {
-        let body_mesh = self.get(BANNER_BODY)?;
-        let flag_mesh = self.get(BANNER_FLAG)?;
-        let placement = banner_ground_placement_matrix(spawn.pos, spawn.rotation_segment);
+        // Both the mesh pair and the placement angle come from the attachment, in
+        // one match, so a wall banner can never be drawn on the standing rig (a
+        // 42-texel pole hanging in mid-air) or at the wrong angle.
+        let (body_model, flag_model, placement) = match spawn.attachment {
+            BannerAttachment::Ground { rotation_segment } => (
+                BANNER_BODY,
+                BANNER_FLAG,
+                banner_ground_placement_matrix(spawn.pos, rotation_segment),
+            ),
+            BannerAttachment::Wall { facing_yaw_deg } => (
+                BANNER_WALL_BODY,
+                BANNER_WALL_FLAG,
+                banner_wall_placement_matrix(spawn.pos, facing_yaw_deg),
+            ),
+        };
+        let body_mesh = self.get(body_model)?;
+        let flag_mesh = self.get(flag_model)?;
 
         let body_transforms = body_mesh.part_transforms(placement, &[]);
         let (body_min, body_max) =
             transformed_aabb(&placement, body_mesh.local_min, body_mesh.local_max);
         let body = BlockEntityInstance {
-            model: BANNER_BODY,
+            model: body_model,
             texture: BANNER_BASE_TEXTURE_STEM,
             transform: placement,
             part_transforms: body_transforms,
@@ -1446,7 +1519,7 @@ impl BlockEntityModelSet {
             transformed_aabb(&placement, flag_mesh.local_min, flag_mesh.local_max);
         let flag_world = flag_transforms[flag_index];
         let flag = BlockEntityInstance {
-            model: BANNER_FLAG,
+            model: flag_model,
             texture: BANNER_BASE_TEXTURE_STEM,
             transform: placement,
             part_transforms: flag_transforms,
@@ -1728,12 +1801,12 @@ impl ShulkerSpawn {
     }
 }
 
-/// The version-free description of one ground/standing banner to draw this
-/// frame.
+/// The version-free description of one banner — standing **or** wall — to draw
+/// this frame.
 ///
 /// The caller owns every field, the same contract as [`ChestSpawn`]: the
-/// `ROTATION` block-state property → `rotation_segment`; the banner
-/// **block's own** colour (`AbstractBannerBlock.getColor()` — one banner
+/// `ROTATION` property or `FACING`, whichever the block has → `attachment`; the
+/// banner **block's own** colour (`AbstractBannerBlock.getColor()` — one banner
 /// block per dye colour, there is no `type`-style state property, so this is
 /// not read off block state the way [`ChestSpawn::material`] is) →
 /// `base_color`; the block entity's own NBT `"patterns"` key
@@ -1742,18 +1815,17 @@ impl ShulkerSpawn {
 /// `patterns`; the world clock → `phase` (see [`banner_phase`]); world light
 /// → `light`.
 ///
-/// Only ground/standing — see [`banner_ground_placement_matrix`]'s doc for
-/// why a wall banner is a natural, separate second entry rather than a
-/// variant of this one.
+/// Everything past `attachment` is shared by both forms, including the sway and
+/// the whole pattern-layer stack — `BannerRenderer` picks two meshes and an angle
+/// off the attachment type and then runs one `submitBanner` for either.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BannerSpawn {
     /// Block position.
     pub pos: [i32; 3],
-    /// The `ROTATION` block-state property, `0..16` — vanilla's
-    /// `RotationSegment` (segment `0` is north; see
-    /// [`banner_ground_placement_matrix`]'s doc for why this is not
-    /// [`horizontal_facing_yaw`]'s four-direction convention).
-    pub rotation_segment: u8,
+    /// Standing or wall, carrying that form's own angle — see
+    /// [`BannerAttachment`], and [`banner_ground_placement_matrix`] for why a
+    /// rotation segment is not [`horizontal_facing_yaw`]'s convention.
+    pub attachment: BannerAttachment,
     /// The banner block's own dye colour.
     pub base_color: DyeColor,
     /// The block entity's stored pattern layers, in stack order.
@@ -1766,17 +1838,27 @@ pub struct BannerSpawn {
 }
 
 impl BannerSpawn {
-    /// A resting (`phase = 0`), full-bright, segment-`0`, pattern-less white
-    /// banner at `pos` — the minimum a hermetic gate needs.
+    /// A resting (`phase = 0`), full-bright, segment-`0` **standing**,
+    /// pattern-less white banner at `pos` — the minimum a hermetic gate needs.
     #[must_use]
     pub fn at(pos: [i32; 3]) -> Self {
         BannerSpawn {
             pos,
-            rotation_segment: 0,
+            attachment: BannerAttachment::Ground { rotation_segment: 0 },
             base_color: DyeColor::White,
             patterns: Vec::new(),
             phase: 0.0,
             light: ENTITY_FULLBRIGHT,
+        }
+    }
+
+    /// The wall sibling of [`Self::at`]: a resting, full-bright, pattern-less
+    /// white banner on a wall facing `facing_yaw_deg`.
+    #[must_use]
+    pub fn on_wall(pos: [i32; 3], facing_yaw_deg: f32) -> Self {
+        BannerSpawn {
+            attachment: BannerAttachment::Wall { facing_yaw_deg },
+            ..BannerSpawn::at(pos)
         }
     }
 }
@@ -1990,9 +2072,9 @@ mod tests {
         let set = set();
         assert_eq!(
             set.len(),
-            10,
-            "3 chest layers + 2 skull canvases + bell + 2 banner parts (body, flag) \
-             + shulker box + book"
+            12,
+            "3 chest layers + 2 skull canvases + bell + 4 banner parts (standing \
+             and wall, body and flag) + shulker box + book"
         );
         for (name, mesh) in set.iter() {
             assert!(mesh.quad_count() > 0, "{name} baked no quads");
@@ -3002,6 +3084,108 @@ mod tests {
             3,
             "chest, banner body and banner flag must all batch independently \
              (different model *and* different model between body/flag)"
+        );
+    }
+
+    /// **A wall banner draws the pole-less rig, at the wall's own height.**
+    ///
+    /// Three assertions, each catching a different way this goes wrong while still
+    /// drawing a recognisable banner:
+    ///
+    /// * the models are the *wall* pair, so the standing rig's 42-texel pole
+    ///   cannot end up hanging in mid-air off a block face;
+    /// * the wall body really has no `pole` part and the standing one does — an
+    ///   `if (standing)` in `createBodyLayer` that was transcribed as
+    ///   unconditional would give both a pole and pass any "two banner meshes
+    ///   exist" check;
+    /// * the two flags sit at **different heights**, which is the whole content of
+    ///   the `standing ? -44 : -20.5` pose ternary. Their *cubes* are
+    ///   byte-identical, so a copy that reused the standing pose produces a wall
+    ///   banner buried two blocks into the floor and no assertion about geometry
+    ///   would notice.
+    #[test]
+    fn a_wall_banner_uses_the_poleless_rig_and_hangs_at_its_own_height() {
+        let set = set();
+        let wall = set
+            .resolve_banner(&BannerSpawn::on_wall([0, 0, 0], 180.0))
+            .expect("both wall banner models must be in the corpus");
+        assert_eq!(wall.body.model, BANNER_WALL_BODY);
+        assert_eq!(wall.flag.model, BANNER_WALL_FLAG);
+        assert_eq!(wall.body.texture, BANNER_BASE_TEXTURE_STEM, "one shared sheet");
+        assert_eq!(wall.flag.texture, BANNER_BASE_TEXTURE_STEM);
+
+        let standing_body = set.get(BANNER_BODY).unwrap();
+        let wall_body = set.get(BANNER_WALL_BODY).unwrap();
+        assert!(
+            standing_body.index_of("pole").is_some(),
+            "the standing body must have a pole"
+        );
+        assert!(
+            wall_body.index_of("pole").is_none(),
+            "createBodyLayer(false) adds no pole"
+        );
+        assert!(wall_body.index_of("bar").is_some());
+
+        // The pose ternary, measured through the same `part_transforms` the draw
+        // uses rather than by restating -44 and -20.5.
+        let standing_flag = set.get(BANNER_FLAG).unwrap();
+        let wall_flag = set.get(BANNER_WALL_FLAG).unwrap();
+        let flag_y = |mesh: &BlockEntityMesh| {
+            let i = mesh.index_of("flag").unwrap();
+            mesh.part_transforms(Mat4::IDENTITY, &[])[i]
+                .transform_point3(Vec3::ZERO)
+                .y
+        };
+        let (standing_y, wall_y) = (flag_y(standing_flag), flag_y(wall_flag));
+        assert!(
+            (standing_y - -44.0 / 16.0).abs() < 1e-5,
+            "standing flag pivot {standing_y}"
+        );
+        assert!(
+            (wall_y - -20.5 / 16.0).abs() < 1e-5,
+            "wall flag pivot {wall_y}"
+        );
+        assert!(
+            wall_y > standing_y,
+            "a wall banner hangs higher in model space than a standing one's \
+             cloth: {wall_y} vs {standing_y}"
+        );
+
+        // The cubes are identical, which is exactly why the pose above is the
+        // only thing separating them.
+        assert_eq!(standing_flag.quad_count(), wall_flag.quad_count());
+    }
+
+    /// The two placements are one function with two angles — but the *angle
+    /// conventions* are not interchangeable, and this is what stops a caller
+    /// handing a wall banner a rotation segment.
+    ///
+    /// A segment is `22.5°` per step and a facing is `90°`, so segment `4` and
+    /// facing `west` are the same `90°` rotation while segment `4` read as a
+    /// *facing* would be nothing at all. The gate pins the shared shape and the
+    /// distinct convention together: equal matrices at equal *angles*, and a
+    /// deliberately unequal pair at the same numeric input.
+    #[test]
+    fn the_two_banner_placements_share_one_transform_and_two_angle_conventions() {
+        let pos = [3, 70, -5];
+        // Segment 4 is 4 * 22.5 = 90 degrees, which is also `west`'s toYRot.
+        assert_eq!(
+            banner_ground_placement_matrix(pos, 4),
+            banner_wall_placement_matrix(pos, horizontal_facing_yaw("west").unwrap()),
+            "one modelTransformation, two callers"
+        );
+        // The same *number* means different things to the two.
+        assert_ne!(
+            banner_ground_placement_matrix(pos, 4),
+            banner_wall_placement_matrix(pos, 4.0),
+            "a segment is 22.5 degrees per step; a facing yaw is degrees"
+        );
+        // And neither has skull's push away from the wall: the block's own
+        // corner-plus-half is the whole translation.
+        let at_origin = banner_wall_placement_matrix([0, 0, 0], 0.0).transform_point3(Vec3::ZERO);
+        assert!(
+            (at_origin - Vec3::new(0.5, 0.0, 0.5)).length() < 1e-6,
+            "no extra offset away from the wall, got {at_origin}"
         );
     }
 
