@@ -7,9 +7,32 @@ use super::*;
 pub(super) fn run_windowed(config: Config) -> anyhow::Result<()> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = WindowApp::new(config);
-    event_loop.run_app(&mut app)?;
-    Ok(())
+    let app = WindowApp::new(config);
+
+    // Native: `run_app` takes over this thread and returns when the loop exits.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut app = app;
+        event_loop.run_app(&mut app)?;
+        Ok(())
+    }
+
+    // Browser: `spawn_app` instead, and the difference is not cosmetic. `run_app`
+    // never returns — on wasm winit implements that by throwing a JS exception to
+    // unwind out of Rust, which works but shows up in the console as an uncaught
+    // error and runs no destructors. `spawn_app` takes ownership of the app, hands
+    // the loop to the browser's own event loop, and **returns immediately**, so the
+    // caller (`web/`) keeps running normally.
+    //
+    // That is why this function still returns `Ok(())` here rather than blocking:
+    // the game is now live and driven by `requestAnimationFrame`, and nothing after
+    // this point may assume the session has ended.
+    #[cfg(target_arch = "wasm32")]
+    {
+        use winit::platform::web::EventLoopExtWebSys;
+        event_loop.spawn_app(app);
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
