@@ -55,6 +55,50 @@ fn row_height(row: &MenuRow) -> f32 {
     }
 }
 
+/// Which row of `frame` a logical-pixel cursor is over, or `None`.
+///
+/// **The one definition of "the row under the pointer",** called by `app`'s
+/// `menu_row_at_in` for hover and clicks and by [`super::draw`] to decide whose
+/// tooltip to show. It used to live only in `app`, which meant the draw could only
+/// have got a *second* copy — and the two would then disagree about exactly the case
+/// below, where a tooltip would appear for a row that cannot be clicked.
+///
+/// Rows and the footer share **one flat index space** and the first rect containing
+/// the cursor wins, with the footer last, so a scrolling-list row that overhangs the
+/// band would steal the footer button's clicks *and* its hover along the strip it
+/// overhangs. The guard is vanilla's: `AbstractSelectionList.getEntryAtPosition`
+/// tests the cursor against the list's own box before it walks the entries, so an
+/// entry scrolled past the bottom cannot be hit where it would have painted.
+///
+/// Both halves are derived rather than restated — the band from `frame.list` through
+/// `ListSpec::model`, the same two calls the draw's clip makes, and membership from
+/// `MenuRow::is_scrolling_list_row`, the same call the draw makes to decide *whether*
+/// to clip.
+#[must_use]
+pub fn menu_row_under(
+    frame: &MenuFrame<'_>,
+    cursor: (f32, f32),
+    width: f32,
+    height: f32,
+) -> Option<usize> {
+    let (lx, ly) = cursor;
+    let band = frame
+        .list
+        .as_ref()
+        .and_then(|spec| spec.model(height))
+        .map(|list| (list.top(), list.bottom()));
+    (0..frame.rows.len()).find(|&i| {
+        if let Some((top, bottom)) = band
+            && frame.rows[i].is_scrolling_list_row()
+            && (ly < top || ly > bottom)
+        {
+            return false;
+        }
+        row_rect(&frame.rows, i, width, height)
+            .is_some_and(|(rx, ry, rw, rh)| lx >= rx && lx <= rx + rw && ly >= ry && ly <= ry + rh)
+    })
+}
+
 /// The pixel rect of row `i`, given the viewport. Public so the renderer, the
 /// mouse hover and the click hit-test share one definition of where a row
 /// actually is — `app.rs`'s `menu_row_at` calls exactly this.

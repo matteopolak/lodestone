@@ -96,16 +96,16 @@ const TOOLTIP_FRAME_BOTTOM: [f32; 4] = [40.0 / 255.0, 0.0, 127.0 / 255.0, 80.0 /
 /// `TooltipRenderUtil.PADDING` (`TooltipRenderUtil.java:14`) — the text's inset
 /// from the tooltip's fill edges: 3 px each side, so a `w×h` content box carries
 /// a `(w+6)×(h+6)` fill.
-const TOOLTIP_PAD: f32 = 3.0;
+pub(super) const TOOLTIP_PAD: f32 = 3.0;
 /// `TooltipRenderUtil.MOUSE_OFFSET` (`TooltipRenderUtil.java:11`) — the content
 /// box's top-left starts this far right of, and this far above, the cursor.
-const TOOLTIP_MOUSE_OFFSET: f32 = 12.0;
+pub(super) const TOOLTIP_MOUSE_OFFSET: f32 = 12.0;
 /// `ClientTextTooltip`'s line box: vanilla's 9 px `Font.lineHeight` plus a 1 px
 /// drop-shadow overhang (`ClientTextTooltip.java:20-22`), and the +2 interline
 /// gap vanilla adds after the first line brings that second line's offset back to
 /// the same 12 as [`TOOLTIP_MOUSE_OFFSET`]. The first line starts at `y`; a
 /// 1-line tooltip is 8 px tall, an `n`-line one `10n`.
-const TOOLTIP_LINE_H: f32 = 10.0;
+pub(super) const TOOLTIP_LINE_H: f32 = 10.0;
 
 /// Both vertex streams one menu frame produces.
 ///
@@ -630,11 +630,40 @@ pub fn build(
         }
     }
 
-    // The "who's online" tooltip, drawn last so it sits over every row and the
-    // footer. Vanilla shows one on hover regardless of the row's own hover state
-    // (its trigger is geometric — over the status text), so the only gates here
-    // are "there are lines" and "the cursor is somewhere"; which row the cursor is
-    // over was already decided by `draw_server_entry`.
+    // A widget's own `AbstractWidget.setTooltip` text — the settings tree's
+    // per-option hints. Resolved here rather than inside the row loop because it
+    // needs the *one* row under the cursor and the loop visits all of them.
+    //
+    // `render::menu_row_under` is the same call `app`'s `menu_row_at_in` makes for
+    // hover and clicks, so a tooltip can only ever appear on a row that is also
+    // clickable — in particular its band guard means a list row scrolled out of the
+    // band shows nothing, which is what stops a hint hanging over the footer.
+    //
+    // Wrapped to `Tooltip.MAX_WIDTH` in the font this pass draws with, which is
+    // `Tooltip.splitTooltip`'s job in vanilla; `wrap_measured` also splits the
+    // explicit `\n`s several of the strings carry.
+    //
+    // **Hover only, not keyboard focus, and that is a named departure.** Vanilla's
+    // `refreshTooltipForNextRenderPass` takes `isHovered || isFocused`, but this
+    // shell's `frame.selected` is *always* on some row — there is nowhere else for
+    // the cursor to be — so honouring focus would leave a tooltip permanently on
+    // screen for any page whose first rows have one. Vanilla's focus is opt-in
+    // (nothing is focused until you tab), so matching the flag would not match the
+    // behaviour.
+    if pending_tooltip.is_none()
+        && let Some(at) = frame.cursor
+        && let Some(i) = menu_row_under(frame, at, width, height)
+        && let Some(text) = frame.rows[i].tooltip.as_ref()
+    {
+        pending_tooltip = Some(wrap_measured(&b, text, options::TOOLTIP_MAX_WIDTH, usize::MAX));
+    }
+
+    // The tooltip, drawn last so it sits over every row and the footer — vanilla
+    // renders tooltips after `renderables` too. Two producers reach here: the
+    // multiplayer list's "who's online" hover, whose trigger is geometric (over the
+    // status text) and which `draw_server_entry` reports from inside the row loop,
+    // and the widget tooltip resolved just above. The only gates are "there are
+    // lines" and "the cursor is somewhere".
     if let Some(lines) = pending_tooltip
         && let Some(at) = frame.cursor
     {

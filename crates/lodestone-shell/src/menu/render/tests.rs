@@ -9,7 +9,10 @@
 
 use super::*;
 use super::account_screen::{ACCOUNTS_BUTTON_W, ACCOUNTS_FOOTER_SPACING, ACCOUNTS_HEAD_ICON, AccountsBlock, accounts_block, accounts_button_slot, accounts_failed_frame, accounts_idle_frame};
-use super::draw::{Quads, TOOLTIP_BG, wrap_bounded, wrap_measured};
+use super::draw::{
+    Quads, TOOLTIP_BG, TOOLTIP_LINE_H, TOOLTIP_MOUSE_OFFSET, TOOLTIP_PAD, wrap_bounded,
+    wrap_measured,
+};
 use super::renderer::{FLOATS_PER_VERTEX, SPRITE_FLOATS_PER_VERTEX};
 use super::screens::credits_frame;
 use super::server_list::{SERVER_ENTRY_SPACING, SERVER_ICON_DARKEN, SERVER_JOIN_SPRITES, SERVER_LIST_REF_CANVAS, SERVER_LIST_ROW_W, SERVER_MOVE_DOWN_SPRITES, SERVER_MOVE_UP_SPRITES, ServerListBlock};
@@ -5069,6 +5072,245 @@ fn the_settings_band_carries_vanillas_separators_and_its_tint() {
     assert_eq!(
         bare_tint, 0.0,
         "a frame with no ListSpec still tinted {bare_tint} of the band"
+    );
+}
+
+/// **Hover tooltips on the settings tree** — the fourth item of the 2026-08-09
+/// report: *"some inputs/buttons have tooltips when i hover"*.
+///
+/// Four claims, each measured by location and by the tooltip fill's own colour, and
+/// the last two are the controls:
+///
+/// 1. hovering a row that carries an `OptionInstance` tooltip paints a `TOOLTIP_BG`
+///    box, and it lands **at the cursor** rather than somewhere plausible;
+/// 2. its content is really wrapped — a multi-line string produces a box taller than
+///    a one-line one, so `Tooltip.MAX_WIDTH` is being applied rather than ignored;
+/// 3. hovering a row with **no** tooltip in the table paints no box (so the box is
+///    not unconditional);
+/// 4. hovering where a row *used to be* before the list scrolled paints no box (so
+///    the band guard in `menu_row_under` reaches this path too — a hint must not
+///    hang over the footer for a row nothing can click).
+///
+/// The expected values originate outside this crate: which accessors have tooltips
+/// and what their text is came out of `Options.java`'s `cachedConstantTooltip` sites
+/// resolved through `en_us.json`, and the box geometry is
+/// `TooltipRenderUtil`'s own padding and mouse offset. The cursor is set through
+/// `MenuNav::set_menu_cursor`, the same call `app`'s mouse-move path makes.
+#[test]
+fn hovering_a_settings_row_shows_its_option_tooltip_and_only_then() {
+    use crate::menu::options::{self, SettingsPage};
+
+    const W: f32 = 854.0;
+    const H: f32 = 480.0;
+    let statuses = crate::menu::status::StatusCache::with_probe(
+        crate::menu::status::unavailable_probe(),
+    );
+
+    // Accessibility carries the most tooltipped rows of any page.
+    let (mut nav, ui) = settings_nav_on(SettingsPage::Accessibility);
+
+    // The two subject rows, found by asking the same `Cell::tooltip` the frame
+    // stamps — one with a tooltip and one without.
+    let visible = nav.settings().visible();
+    let tipped = visible
+        .iter()
+        .position(|c| c.cell.tooltip().is_some())
+        .expect("premise: some Accessibility row has a tooltip");
+    let without = visible
+        .iter()
+        .position(|c| c.cell.tooltip().is_none())
+        .expect("premise: some Accessibility row has no tooltip");
+
+    // Put the cursor in the middle of the row's own rect — from `row_rect`, the
+    // function the hit-test and the draw both place rows by — through
+    // `set_menu_cursor`, the call `app`'s mouse-move path makes. Returns the
+    // `TOOLTIP_BG` fill's own bounding box, which is one quad, so `colour_bounds`
+    // gives it exactly rather than by sampling.
+    let hover_box = |nav: &mut MenuNav,
+                     ui: &crate::menu::UiState,
+                     row: usize|
+     -> (Option<(f32, f32, f32, f32)>, (f32, f32)) {
+        let probe = frame_for(ui, nav, &statuses, &mut FaviconCache::new()).expect("a frame");
+        let (rx, ry, rw, rh) = row_rect(&probe.rows, row, W, H).expect("the row has a rect");
+        nav.set_menu_cursor(rx + rw * 0.5, ry + rh * 0.5, W, H);
+        let f = frame_for(ui, nav, &statuses, &mut FaviconCache::new()).expect("a frame");
+        let at = f.cursor.expect("the cursor is stamped on the frame");
+        (
+            colour_bounds(&geometry(&f, W, H), W, H, TOOLTIP_BG),
+            at,
+        )
+    };
+
+    let (tip_box, at) = hover_box(&mut nav, &ui, tipped);
+    let (bx, by, _, bh) =
+        tip_box.expect("hovering a row with a tooltip painted no TOOLTIP_BG box at all");
+    // (1) It is **at the cursor**, not somewhere plausible. `TooltipRenderUtil`'s
+    // content box starts `MOUSE_OFFSET` right of and above the cursor and the fill is
+    // `PAD` larger on every side, so both edges are exact — this canvas is wide and
+    // tall enough that `draw_tooltip`'s off-screen nudge cannot fire.
+    //
+    // The tolerance is the pixel -> NDC -> pixel round trip inside `colour_bounds`,
+    // which costs ~4e-6 at this canvas. It is not slack in the prediction.
+    let want = (
+        at.0 + TOOLTIP_MOUSE_OFFSET - TOOLTIP_PAD,
+        at.1 - TOOLTIP_MOUSE_OFFSET - TOOLTIP_PAD,
+    );
+    assert!(
+        (bx - want.0).abs() < 0.001 && (by - want.1).abs() < 0.001,
+        "the tooltip's fill is at ({bx}, {by}), not the {want:?} the cursor {at:?} \
+         implies"
+    );
+
+    // (2) The box's height is **predicted**, and the two hypotheses differ at this
+    // input. `ClientTextTooltip.getHeight` is 8 px for one line and
+    // `TOOLTIP_LINE_H * n` for n, and the fill adds `2 * PAD`, so:
+    //
+    // - wrapped at `Tooltip.MAX_WIDTH`: `10n + 6`
+    // - not wrapped at all, the whole string on one line: `8 + 6` = 14
+    //
+    // The line count comes from `wrap_measured` at `TOOLTIP_MAX_WIDTH` — the same call
+    // the draw makes, in the same font this `geometry` measures with — so the two
+    // cannot disagree about the *split*; what is predicted from outside is vanilla's
+    // height formula and its 170 px maximum. The `n > 1` assertion is what stops this
+    // being an input where both hypotheses coincide, which is the trap that makes a
+    // magnitude gate vacuous.
+    let text = nav.settings().visible()[tipped]
+        .cell
+        .tooltip()
+        .expect("premise: the row still has its tooltip");
+    let lines =
+        wrap_measured(&Quads::new(W, H), text, options::TOOLTIP_MAX_WIDTH, usize::MAX).len();
+    assert!(
+        lines > 1,
+        "premise: {text:?} fits on one line in this font, so the wrapped and \
+         unwrapped hypotheses agree and the height below measures nothing"
+    );
+    let wrapped = TOOLTIP_LINE_H * lines as f32 + 2.0 * TOOLTIP_PAD;
+    let unwrapped = 8.0 + 2.0 * TOOLTIP_PAD;
+    assert!(
+        (bh - wrapped).abs() < 0.001,
+        "the tooltip box is {bh} px, not the {wrapped} that {lines} wrapped lines \
+         imply (an unsplit one would be {unwrapped})"
+    );
+
+    // (3) The control: a row with no tooltip in the table shows none. Without this,
+    // (1) would pass on a box painted unconditionally.
+    let (none_box, _) = hover_box(&mut nav, &ui, without);
+    assert_eq!(
+        none_box, None,
+        "a row with no tooltip still painted a box at {none_box:?}"
+    );
+
+    // (4) The control that matters most: scroll the list, then put the cursor back
+    // where the tooltipped row used to be. `menu_row_under`'s band guard means
+    // nothing there is hoverable, so no box. Video is the page with room to scroll
+    // at this canvas.
+    let (mut vnav, vui) = settings_nav_on(SettingsPage::Video);
+    let mut vfav = FaviconCache::new();
+    let vframe = frame_for(&vui, &vnav, &statuses, &mut vfav).expect("a frame");
+    let band_bottom = vframe
+        .list
+        .as_ref()
+        .and_then(|s| s.model(H))
+        .map(|l| l.bottom())
+        .expect("premise: Video has a band");
+    // A row whose centre is below the band at scroll 0 — it exists, because Video
+    // overflows a 480 px canvas.
+    let hidden = (0..vframe.rows.len())
+        .find(|&i| {
+            vframe.rows[i].is_scrolling_list_row()
+                && vframe.rows[i].tooltip.is_some()
+                && row_rect(&vframe.rows, i, W, H)
+                    .is_some_and(|(_, ry, _, rh)| ry + rh * 0.5 > band_bottom)
+        })
+        .expect("premise: a tooltipped Video row sits below the band at scroll 0");
+    let (hx, hy, hw, hh) = row_rect(&vframe.rows, hidden, W, H).expect("rect");
+    vnav.set_menu_cursor(hx + hw * 0.5, hy + hh * 0.5, W, H);
+    let f = frame_for(&vui, &vnav, &statuses, &mut vfav).expect("a frame");
+    let outside = colour_bounds(&geometry(&f, W, H), W, H, TOOLTIP_BG);
+    assert_eq!(
+        outside, None,
+        "a tooltip appeared at {outside:?} for row {hidden}, which sits below the \
+         band at {band_bottom} and cannot be clicked"
+    );
+    // The premise for (4): the very same row, brought *into* the band, does show one.
+    // Without it, the `None` above could mean the row simply has no tooltip text.
+    let notches = ((hy + hh * 0.5) - band_bottom + hh) / (options::DEFAULT_ITEM_HEIGHT / 2.0).floor();
+    vnav.scroll_active_list(&vui, -notches.ceil(), H);
+    let scrolled = frame_for(&vui, &vnav, &statuses, &mut vfav).expect("a frame");
+    let (nx, ny, nw, nh) = row_rect(&scrolled.rows, hidden, W, H).expect("rect");
+    assert!(
+        ny + nh * 0.5 < band_bottom,
+        "premise: scrolling did not bring row {hidden} into the band (centre \
+         {} vs band bottom {band_bottom})",
+        ny + nh * 0.5
+    );
+    vnav.set_menu_cursor(nx + nw * 0.5, ny + nh * 0.5, W, H);
+    let f = frame_for(&vui, &vnav, &statuses, &mut vfav).expect("a frame");
+    let inside = colour_bounds(&geometry(&f, W, H), W, H, TOOLTIP_BG);
+    assert!(
+        inside.is_some(),
+        "row {hidden} shows no tooltip even inside the band, so the None above \
+         measured the absence of text rather than the band guard"
+    );
+
+    // -- the census, both directions -----------------------------------------
+    //
+    // The expected value comes from outside this crate: `Options.java` has 34
+    // `cachedConstantTooltip` sites and `OnlineOptionsScreen` two `withTooltip` ones,
+    // and of those exactly **33** resolve to an accessor this tree carries a row for
+    // (`japaneseGlyphVariants` has no row here; `telemetryOptInExtra` belongs to the
+    // Telemetry screen). Asserted in both directions, because either alone is
+    // satisfiable by a broken table: a count of *reached* accessors catches a dropped
+    // row, and "no table key is unreached" catches a typo'd key — which would
+    // otherwise be a tooltip that silently never shows.
+    let all: Vec<crate::menu::options::Cell> = [
+        SettingsPage::Root,
+        SettingsPage::Video,
+        SettingsPage::Controls,
+        SettingsPage::Mouse,
+        SettingsPage::Sound,
+        SettingsPage::Chat,
+        SettingsPage::Accessibility,
+        SettingsPage::Skin,
+        SettingsPage::Online,
+    ]
+    .into_iter()
+    .flat_map(|p| options::all_controls(p, false))
+    .collect();
+    let mut reached: Vec<&'static str> = all
+        .iter()
+        .filter_map(|c| match c {
+            crate::menu::options::Cell::Option(spec) if c.tooltip().is_some() => {
+                Some(spec.accessor)
+            }
+            _ => None,
+        })
+        .collect();
+    reached.sort_unstable();
+    reached.dedup();
+    assert_eq!(
+        reached.len(),
+        33,
+        "the tooltip table reaches {} distinct accessors, not the 33 the jar resolves \
+         onto rows this tree has: {reached:?}",
+        reached.len()
+    );
+    let accessors: Vec<&'static str> = all
+        .iter()
+        .filter_map(|c| match c {
+            crate::menu::options::Cell::Option(spec) => Some(spec.accessor),
+            _ => None,
+        })
+        .collect();
+    let stranded: Vec<&'static str> = options::tooltip_accessors()
+        .into_iter()
+        .filter(|key| !accessors.contains(key))
+        .collect();
+    assert!(
+        stranded.is_empty(),
+        "these tooltip-table keys match no row on any page, so their text can never \
+         show and the count above cannot see it: {stranded:?}"
     );
 }
 

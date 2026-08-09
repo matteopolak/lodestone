@@ -191,6 +191,22 @@ pub struct MenuRow {
     /// is upper-case 5×7 with no arrow glyph, and is why these buttons were
     /// lettered `"U"`/`"D"` before this existed.
     pub arrow: Option<Arrow>,
+    /// Vanilla's `AbstractWidget.setTooltip` text for this row, as one string —
+    /// `\n` separated where the source component has explicit breaks, wrapped to
+    /// vanilla's own 170 px by the draw.
+    ///
+    /// **Held here rather than resolved in the draw** because it is a property of the
+    /// control, and only the screen's own table knows it: on the settings tree it
+    /// comes from the `OptionInstance`'s `TooltipSupplier`, keyed by the option, and
+    /// 33 of 143 controls have one. That ratio is vanilla's — most options carry no
+    /// tooltip at all — so a `None` here is faithful rather than unfinished.
+    ///
+    /// The multiplayer list's "who's online" tooltip does **not** travel through this
+    /// field, and the difference is not an inconsistency: that one is a property of
+    /// the *cursor's position inside* the row (it fires only over the status column,
+    /// and its lines are the player sample), so `draw_server_entry` reports it from
+    /// the geometry it already has. This field is the whole-widget kind.
+    pub tooltip: Option<String>,
 }
 
 impl MenuRow {
