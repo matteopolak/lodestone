@@ -115,6 +115,22 @@ Other things worth knowing:
   the pitch over the tick counter instead.
 * Adding a fourth effect kind is a variant plus an arm in
   `encode_world_effect` plus one encoder — never a change at the drain site.
+* **Every new encoder needs a forwarding arm in `impl ServerProtocol for Box<P>`,
+  and the compiler will not tell you.** All three of the encoders here shipped
+  without one, so **every singleplayer session emitted no sounds, no level events
+  and no particles at all** — singleplayer is the only path that boxes the
+  protocol, and an unforwarded defaulted method answers `ServerDirective::None`,
+  which is indistinguishable from "nothing happened". Eleven arms were missing in
+  total. The impl's own doc comment had asked for this in prose since it was
+  written, which is the lesson: a rule in a comment is documentation of intent,
+  not a guard.
+  `protocol::tests::every_server_protocol_method_is_forwarded_by_the_box_impl`
+  now enumerates the trait and the impl out of the file's own source and requires
+  the sets to match, with a measured floor so a drifted anchor fails loudly rather
+  than comparing two empty sets. The older
+  `a_boxed_protocol_answers_exactly_as_the_concrete_one_does` compares two
+  hand-written lists and structurally cannot see a method nobody added to the
+  list.
 
 ## Configuration
 
