@@ -76,6 +76,56 @@ made for the anvil/enchanting-table costs.
   fails the whole decode rather than guessing a skip length for bytes this
   decoder has no byte-accurate layout for.
 
+### The join snapshot: `crate::server::join_inventory_snapshot`
+
+**The one send on this path that no client packet asks for.** Everything else in
+this document is a reply — a menu was opened, a slot was clicked, a recipe was
+placed. A joining player has sent nothing, and until this existed they were told
+nothing: the client kept its fresh-`Menu` default (an empty grid) while the server
+held the fully restored inventory, and the first click produced a disagreement whose
+corrective `container_set_content` flushed all 46 slots at once. The reported
+symptom was exactly that — *"my inventory is empty, but if I shift-click something
+then all the items pop in"*. Nothing was lost at any point;
+`PlayerData::to_inventory` had already restored it.
+
+Sent from the top of both `serve_play` variants (native and `wasm32`), which is
+vanilla's own position: `PlayerList.placeNewPlayer` calls
+`ServerPlayer::initInventoryMenu` **last** — after the abilities/held-slot/recipe
+packets, after `sendPlayerPermissionLevel`, after the placement teleport, after the
+player-info adds and after `sendLevelInfo`. By the time `serve_play` is entered
+`serve_connection_inner` has done all of those, and the deferred chunk stream this
+loop drains corresponds to vanilla's `PlayerChunkSender` feeding columns over
+*subsequent* ticks.
+
+Two things worth knowing before changing it:
+
+- **It is `container_set_content`, not `set_player_inventory`.** Both exist in 26.2
+  and our client decodes both, so the choice is not arbitrary.
+  `AbstractContainerMenu::sendAllDataToRemote` hands the slot list to
+  `ContainerSynchronizer::sendInitialData`, whose `ServerPlayer` implementation
+  constructs `ClientboundContainerSetContentPacket`; the client's
+  `handleContainerContent` routes `containerId == 0` to `player.inventoryMenu`, which
+  is why the window id is `0`. `ClientboundSetPlayerInventoryPacket` is a
+  **single-slot** record, `(int slot, ItemStack contents)`, whose only vanilla
+  producer is `Inventory.createInventoryUpdatePacket` acknowledging one pickup — it
+  carries neither a slot list nor the cursor, so it cannot express a snapshot.
+- **The state id is `1`, and the constant `0` used by the other window-`0` sends in
+  `server.rs` is inert.** `sendInitialData` passes `container.incrementStateId()`,
+  which is `(stateId + 1) & 32767` from a `0` start, so a real client's first content
+  packet carries `1`. The obvious worry — that a wrong state id makes the client
+  reject the *next* update — is **backwards, and was checked rather than assumed**:
+  no client validates the field. `handleContainerContent` calls
+  `menu.initializeContents(packet.stateId(), …)` unconditionally and
+  `initializeContents` simply assigns it, and our own client's
+  `lodestone_game::reconcile` adopts whatever arrives. The only consumer anywhere is
+  a **server** checking a click's *echoed* id
+  (`ServerGamePacketListenerImpl.handleContainerClick` taking its
+  `broadcastFullState()` branch), which is the other direction of travel and
+  something this crate does not do at all — the `ServerBound::ContainerClicked` arm
+  binds `state_id: _`. So window-`0` ids that move backwards cost nothing observable,
+  which is why the snapshot is faithful to the record without threading a real
+  counter through `dispatch_play_packet`'s parameter list for a field nothing reads.
+
 ### The consumer: `crate::server::dispatch_play_packet`
 
 `crates/lodestone-server/src/server.rs`. `apply_carried_item_changed` writes

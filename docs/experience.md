@@ -63,11 +63,41 @@ first colon only** — splitting anywhere else yields a table name no lookup kno
 the function silently returns zero for every entry, which looks like "no XP yet"
 rather than a failure.
 
+### Who sends the packet, and why the join send is separate
+
+Two producers, and for a while there was only one — which is why **the XP bar never
+appeared at all**, in survival as much as creative:
+
+| producer | when |
+|---|---|
+| `crate::server::join_experience` | once, at the top of both `serve_play` variants |
+| the `ServerBound::ContainerClosed` arm of `dispatch_play_packet` | after a furnace pays out banked smelting XP |
+
+The furnace arm was the only one for a while. The encoder existed in both the
+`ServerProtocol` trait and `V770ServerProtocol`, the client decoded `SET_EXPERIENCE`
+into `ClientEvent::ExperienceChanged`, and the HUD drew the bar from it — but a
+player who had never closed a furnace was sent the packet **zero times**, so the bar
+had no values to draw from. Creative was a red herring in the report: vanilla does
+hide the bar in creative, but it does so *client-side* via `Player.hasExperience` and
+its server still sends the packet, so a server-side game-mode gate would be a
+divergence.
+
+**Vanilla does not send this from `placeNewPlayer`**, which is why "on join" needs
+stating rather than being obvious. `ServerPlayer.doTick` sends whenever
+`this.totalExperience != this.lastSentExp`, and `lastSentExp` is initialised to
+`-99999999` — so the comparison is true on the first tick after *any* join, even at
+zero experience, and the packet goes out unconditionally. Every mutator
+(`setExperiencePoints`, `setExperienceLevels`, `giveExperienceLevels`,
+`onEnchantmentPerformed`) additionally forces `lastSentExp = -1`, which is how a
+change to **progress or level alone** — leaving `totalExperience` untouched — still
+resends. The equivalent here is: send once at join, and send after every mutation.
+
 ## How to change it
 
 * **A new XP source** (breeding, fishing, ore-breaking, mob death): call
   `PlayerExperience::give_points` and send `encode_set_experience`. **Do not add a
-  second curve.**
+  second curve.** The send is not optional bookkeeping — a mutation with no send is
+  the shape that made the bar invisible in the first place.
 * **Spending XP** (enchanting): `PlayerExperience::take_levels`, which zeroes progress
   and total on underflow — clamping only the level leaves a full bar at level 0.
 * **Persistence**: `XpLevel` / `XpP` / `XpTotal`, vanilla's own names, via
@@ -78,7 +108,15 @@ rather than a failure.
 
 * `SET_EXPERIENCE`'s wire order is **progress, level, total** — not declaration order
   and not alphabetical. The client-side decoder already carried that warning before
-  anything encoded the packet.
+  anything encoded the packet. Read `ClientboundSetExperiencePacket`'s own `write`
+  method to confirm it (`writeFloat(progress)`, `writeVarInt(level)`,
+  `writeVarInt(total)`) and **not** the call site in `doTick`: the record's fields and
+  its public constructor are both declared `(progress, total, level)`, so `doTick`
+  passes `(experienceProgress, totalExperience, experienceLevel)` and transcribing
+  *that* order transposes the two integers. They are adjacent VarInts, so the swap is
+  wire-legal, survives any round trip through our own symmetric code, and shows the
+  wrong number on the bar. This is the "read the record definition, not a summary of
+  the call site" rule with a live example.
 * `restored` clamps progress strictly **below** 1.0. Exactly 1.0 is the state the
   carry loop exists to resolve, so keeping it would level the player up on their next
   award of nothing.
