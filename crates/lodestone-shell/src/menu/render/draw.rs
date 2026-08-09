@@ -301,13 +301,31 @@ pub fn build(
     // everything (vanilla's `render` draws tooltips after `renderables`, too).
     let mut pending_tooltip: Option<Vec<String>> = None;
     for (i, row) in frame.rows.iter().enumerate() {
-        // A multiplayer-list entry (#396) is neither a button nor a field: it is
+        // **The clip band for this row, or `None` for a row that is not a list
+        // row.** Hoisted out of the four branches below so that the whole draw asks
+        // `MenuRow::is_scrolling_list_row` exactly once, in one place — which is the
+        // same call `app`'s hit-test makes. That shared call is the property: the
+        // band was already derived from `frame.list` in both, and row *membership*
+        // was not, so the two could and did disagree (a multiplayer row stayed
+        // hit-testable below the band while the draw clipped it away). Only the
+        // vertical extent is common; each branch adds its own horizontal one,
+        // because the three `AbstractSelectionList` screens have narrower columns
+        // than the canvas and a two-column settings row straddles the centre.
+        let clip_band = row
+            .is_scrolling_list_row()
+            .then(|| {
+                active_list
+                    .as_ref()
+                    .map(|(list, _)| (list.top(), list.height()))
+            })
+            .flatten();
+        // A multiplayer-list entry is neither a button nor a field: it is
         // an `ObjectSelectionList` row with a favicon, two text columns, a status
         // sprite and a quadrant hover overlay. Tested before `slot` because it
         // carries none — `row_rect` places it from `entry.index`.
         if row.entry.is_some() {
             // Clipped to the list's band — vanilla's `enableScissor` around
-            // `extractListItems` (`AbstractSelectionList.java:212-214`, `:242-249`).
+            // `AbstractSelectionList.extractListItems`.
             //
             // **This is what makes the clip real.** `Quads::with_clip` landed with
             // no caller, and an unexercised clip is worse than none: it reads as
@@ -324,10 +342,9 @@ pub fn build(
             // is over *this* row's status text — which escapes the clip the same
             // way the row did: a tooltip near the bottom of the list must not be
             // scissored to the band, or it would vanish mid-screen.
-            match active_list.as_ref() {
-                Some((list, _)) => {
+            match clip_band {
+                Some((by, bh)) => {
                     let (bx, bw) = (server_row_left(width), SERVER_LIST_ROW_W);
-                    let (by, bh) = (list.top(), list.height());
                     let mut tooltip = None;
                     b.with_clip(bx, by, bw, bh, |b| {
                         tooltip = draw_server_entry(b, &frame.rows, i, width, height, frame.cursor);
@@ -358,15 +375,14 @@ pub fn build(
             // intermediate offset, and without the clip it would paint over the four
             // footer buttons. The rect is the band the spec derived, not a restated
             // one, so the clip and the row placement cannot disagree.
-            match active_list.as_ref() {
-                Some((list, row_right)) => {
+            match (clip_band, active_list.as_ref()) {
+                (Some((by, bh)), Some((_, row_right))) => {
                     let bw = ACCOUNTS_ROW_W;
-                    let (by, bh) = (list.top(), list.height());
                     b.with_clip(row_right - bw, by, bw, bh, |b| {
                         draw_account_entry(b, &frame.rows, i, width, height);
                     });
                 }
-                None => draw_account_entry(&mut b, &frame.rows, i, width, height),
+                _ => draw_account_entry(&mut b, &frame.rows, i, width, height),
             }
             continue;
         }
@@ -388,10 +404,9 @@ pub fn build(
         // The rect is the band the spec derived, not a restated one, so the clip
         // and the row placement cannot disagree.
         if row.world.is_some() {
-            match active_list.as_ref() {
-                Some((list, _)) => {
+            match clip_band {
+                Some((by, bh)) => {
                     let (bx, bw) = (world_list_row_left(width), WORLD_LIST_ROW_W);
-                    let (by, bh) = (list.top(), list.height());
                     b.with_clip(bx, by, bw, bh, |b| {
                         draw_world_entry(b, &frame.rows, i, width, height);
                     });
@@ -400,28 +415,23 @@ pub fn build(
             }
             continue;
         }
-        if let Some(slot) = row.slot {
-            // **A slotted row that is a list entry is clipped to the band too.**
-            // The three list screens above are clipped because their rows are
-            // `MenuRow::entry`/`account`/`world`; every settings-tree list draws
-            // its rows as *slotted widgets* instead, so they fell through to the
-            // unclipped path below and a row scrolled past the band's bottom
-            // painted over the footer. That is the overlap a player reported on the
-            // settings screen — see `Origin::is_scrolling_list_row`, which is the
-            // predicate that decides, and which deliberately excludes the footer,
-            // the title and `OptionsScreen`'s own grid (clipping *those* to the
-            // band would erase them).
+        if row.slot.is_some() {
+            // **A slotted row that is a list entry is clipped to the band too**, and
+            // `clip_band` above is already `Some` for it. The three list screens handled
+            // above are clipped because their rows are
+            // `MenuRow::entry`/`account`/`world`; every settings-tree list draws its
+            // rows as *slotted widgets* instead, so they used to fall through to the
+            // unclipped path below and a row scrolled past the band's bottom painted
+            // over the footer. That is the overlap a player reported on the settings
+            // screen — `MenuRow::is_scrolling_list_row` is the predicate that
+            // decides, and it deliberately excludes the footer, the title and
+            // `OptionsScreen`'s own grid (clipping *those* to the band would erase
+            // them).
             //
-            // The band is the same `ListSpec::model` the scrollbar is drawn from,
-            // so the clip and the rows cannot disagree; horizontal extent is the
-            // full canvas for `list_labels`' reason — a two-column settings row
-            // straddles the centre and cropping to `row_w` would cut the value
-            // column.
-            let clip = slot
-                .origin
-                .is_scrolling_list_row()
-                .then(|| active_list.as_ref().map(|(list, _)| (list.top(), list.height())))
-                .flatten();
+            // Horizontal extent is the full canvas here for `list_labels`' reason —
+            // a two-column settings row straddles the centre and cropping to `row_w`
+            // would cut the value column.
+            //
             // A vanilla-positioned row can be a **text field** rather than a
             // button: `Screen::WorldSelect`'s search box is placed by the header
             // layout's arithmetic like every other widget on that screen, and
@@ -431,7 +441,7 @@ pub fn build(
             // `draw_edit_box`).
             if let Some(edit) = row.edit.as_ref() {
                 if let Some((x, y, w, h)) = row_rect(&frame.rows, i, width, height) {
-                    match clip {
+                    match clip_band {
                         Some((top, band_h)) => b.with_clip(0.0, top, width, band_h, |b| {
                             draw_edit_box(b, edit, x, y, w, h);
                         }),
@@ -452,7 +462,7 @@ pub fn build(
             // icon and description computed by `packs::frame` and then discarded.
             if row.pack.is_some() {
                 let cursor = frame.cursor;
-                match clip {
+                match clip_band {
                     Some((top, band_h)) => b.with_clip(0.0, top, width, band_h, |b| {
                         draw_pack_entry(b, &frame.rows, i, width, height, selected, cursor);
                     }),
@@ -462,7 +472,7 @@ pub fn build(
                 }
                 continue;
             }
-            match clip {
+            match clip_band {
                 Some((top, band_h)) => b.with_clip(0.0, top, width, band_h, |b| {
                     draw_widget(b, &frame.rows, i, width, height, selected, hovered);
                 }),

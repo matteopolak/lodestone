@@ -200,37 +200,108 @@ impl Origin {
     /// Note the module doc of `super::options` said the opposite — "this menu
     /// pipeline has no scissor, so a row that overran the band would paint over
     /// the footer" was written as the *reason* the window had to be conservative,
-    /// and it stayed true only until #445 gave the pipeline `with_clip`. That is
+    /// and it stayed true only until the pipeline gained `with_clip`. That is
     /// `CLAUDE.md`'s staleness class: the claim was measured and correct when
     /// written, and nothing about it looked out of date.
     ///
     /// ## What is in the set, and what is not
     ///
-    /// Exactly the list-row variants of the five data-carrying origins whose
-    /// screens declare a [`widget::ListSpec`]. A footer button, a title, a search
-    /// field and `OptionsScreen`'s own arranged grid are **not** list rows: they
-    /// live outside the band by construction, and clipping them to it would erase
-    /// them. That asymmetry is why this is a predicate on the placement rather than
-    /// "clip every slotted row on a screen that has a list".
+    /// Exactly the list-row variants of the data-carrying origins whose screens
+    /// declare a [`widget::ListSpec`]. A footer button, a title, a search field and
+    /// `OptionsScreen`'s own arranged grid are **not** list rows: they live outside
+    /// the band by construction, and clipping them to it would erase them. That
+    /// asymmetry is why this is a predicate on the placement rather than "clip every
+    /// slotted row on a screen that has a list".
     ///
-    /// [`Origin::Telemetry`] is absent because that screen returns no spec from
-    /// `MenuNav::active_list` — it does not scroll at all, so there is no band
-    /// to clip to. Adding one is the point at which its row variant joins this
-    /// list, which is exactly what happened to [`Origin::Packs`] when issue
-    /// #415's real two-column screen replaced its non-scrolling stub: both its
+    /// [`Origin::Telemetry`] and [`Origin::Confirm`] answer `false` for every
+    /// placement because neither screen returns a spec from
+    /// `MenuNav::active_list` — they do not scroll at all, so there is no band to
+    /// clip to. Adding one is the point at which their row variants join this
+    /// set, which is exactly what happened to [`Origin::Packs`] when the real
+    /// two-column resource-pack screen replaced its non-scrolling stub: both its
     /// row variants are here, because a `MoveButton` rides on its row and must
     /// be clipped with it or it outlives the row it belongs to.
+    ///
+    /// ## Why there is no `_ =>` arm, at any depth
+    ///
+    /// Because there was, and it made a brand-new scrolling list **born broken**:
+    /// an origin nobody had classified fell through to `false`, i.e. "hit-testable
+    /// and paintable everywhere", which is the defect rather than a neutral
+    /// default. Every nested placement enum is spelled out too, so *adding* a
+    /// variant — a scrolling list on the telemetry screen, a fifth confirm leaf —
+    /// is a compile error here until someone says which side of the clip it is on.
+    /// The `CLAUDE.md` rule about a terminal `_ =>` arm in an event router being an
+    /// island factory is the same shape; this one manufactured a hit-test bug.
+    ///
+    /// **Callers should ask [`MenuRow::is_scrolling_list_row`] instead**, which is
+    /// the whole question — a slot's origin is only one of the four ways a row can
+    /// belong to a list. This is its slot arm.
     #[must_use]
     pub fn is_scrolling_list_row(self) -> bool {
+        use super::confirm::ConfirmPlacement;
+        use super::key_binds::KeyPlacement;
+        use super::language::LanguagePlacement;
         use super::options::Placement;
         use super::packs::PacksPlacement;
+        use super::social::SocialPlacement;
+        use super::telemetry::TelemetryPlacement;
         match self {
-            Origin::Settings(Placement::ListCell { .. } | Placement::ListHeader { .. }) => true,
-            Origin::KeyBinds(_) => true,
-            Origin::Language(super::language::LanguagePlacement::Row { .. }) => true,
-            Origin::Packs(PacksPlacement::Row { .. } | PacksPlacement::MoveButton { .. }) => true,
-            Origin::Social(_) => true,
-            _ => false,
+            // -- rows of a real band --------------------------------------
+            //
+            // `OptionsList`'s two shapes; every `KeyBindsList` and
+            // `SocialInteractions` placement (both enums are *only* rows); the
+            // language list's entries; and a pack row plus the move button that
+            // rides on it.
+            Origin::Settings(Placement::ListCell { .. } | Placement::ListHeader { .. })
+            | Origin::KeyBinds(
+                KeyPlacement::Bind { .. }
+                | KeyPlacement::Reset { .. }
+                | KeyPlacement::Name { .. }
+                | KeyPlacement::Category { .. },
+            )
+            | Origin::Social(
+                SocialPlacement::Name { .. }
+                | SocialPlacement::Hide { .. }
+                | SocialPlacement::Report { .. },
+            )
+            | Origin::Language(LanguagePlacement::Row { .. })
+            | Origin::Packs(PacksPlacement::Row { .. } | PacksPlacement::MoveButton { .. }) => true,
+            // -- outside the band by construction -------------------------
+            //
+            // Titles, search fields, warnings, column headers, footer bands and
+            // `OptionsScreen`'s arranged grid. Clipping any of these to the band
+            // would erase them.
+            Origin::Settings(Placement::Root(_) | Placement::Footer { .. })
+            | Origin::Language(
+                LanguagePlacement::Title
+                | LanguagePlacement::Search
+                | LanguagePlacement::Warning
+                | LanguagePlacement::Footer { .. },
+            )
+            | Origin::Packs(PacksPlacement::Title | PacksPlacement::ListHeader(_))
+            // Two screens with no `ListSpec` at all — see this doc's second
+            // paragraph. Spelled out rather than `Telemetry(_) | Confirm(_)` so a
+            // future scrolling list on either one has to be classified here.
+            | Origin::Telemetry(
+                TelemetryPlacement::Title
+                | TelemetryPlacement::DescriptionLine(_)
+                | TelemetryPlacement::HeaderButton(_),
+            )
+            | Origin::Confirm(
+                ConfirmPlacement::Title | ConfirmPlacement::Message | ConfirmPlacement::Button(_),
+            )
+            // The canvas-anchored origins: no list has ever been placed from one.
+            | Origin::ScreenTop
+            | Origin::TitleTop
+            | Origin::PauseGrid
+            | Origin::BottomLeft
+            | Origin::BottomRight
+            | Origin::TopRight
+            | Origin::ScreenBottom
+            | Origin::Centre
+            | Origin::DeathTitle
+            | Origin::CommandBlockFooter
+            | Origin::CommandBlockSuggestion { .. } => false,
         }
     }
 
